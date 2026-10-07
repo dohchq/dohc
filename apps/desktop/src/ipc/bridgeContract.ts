@@ -1404,6 +1404,15 @@ export const SyncStatusResult = z.union([
 ]);
 export type SyncStatusResult = z.infer<typeof SyncStatusResult>;
 
+export const CaptureRecoveryStatusResult = z.object({
+  captureRecoveries: z.array(z.object({
+    momentId: z.string(), versionId: z.string(), objectId: z.string(), path: z.string(), captureMomentId: z.string(),
+  })),
+});
+export type CaptureRecoveryStatusResult = z.infer<typeof CaptureRecoveryStatusResult>;
+export const ClearCaptureRecoveryPayload = WorkspaceIdPayload.extend({ momentId: z.string() });
+export type ClearCaptureRecoveryPayload = z.infer<typeof ClearCaptureRecoveryPayload>;
+
 export const ENGINE_STORE_BACKUP_DIR = ".dohc/engine/pre-v2-backup";
 
 export function engineStoreRefusalSentence(cause: EngineStoreRefusal): string {
@@ -1510,7 +1519,7 @@ export const EngineMomentRecord = z.object({
   path: PATH_STRING,
   recordedAtMs: z.number(),
   operation: z.enum(["write", "rename", "delete"]),
-  origin: z.enum(["api", "local-file", "restore", "sync", "unknown", "ydoc"]),
+  origin: z.enum(["api", "local-file", "restore", "sync", "unknown", "ydoc", "capture-recovery", "capture-recovery-cleared"]),
   authors: z.array(EngineMomentAuthor).min(1).optional(),
   // Present only when a dohc-tracked agent run authored the moment; main
   // resolves the configured agent name for local runs.
@@ -6643,6 +6652,8 @@ export interface DohcDesktopBridge
   presencePoll(payload: PresencePollPayload): Promise<PresenceResult>;
   presenceCancel(payload: PresenceCancelPayload): Promise<void>;
   getSyncStatus(payload: WorkspaceIdPayload): Promise<SyncStatusResult>;
+  getCaptureRecoveryStatus(payload: WorkspaceIdPayload): Promise<CaptureRecoveryStatusResult>;
+  clearCaptureRecovery(payload: ClearCaptureRecoveryPayload): Promise<void>;
   retryOwnerLiveDelivery(payload: WorkspaceIdPayload): Promise<void>;
   retryFileRecovery(payload: WorkspaceIdPayload): Promise<void>;
   // Runs a cloud sync pass now and answers with the status after it.

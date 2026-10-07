@@ -148,6 +148,12 @@ pub fn journal_moment_append_in_tx(
     workspace_id: &str,
     moment_id: &str,
 ) -> Result<(), SyncError> {
+    let recovery: bool = tx.query_row(
+        "SELECT metadata_origin IN ('capture-recovery','capture-recovery-cleared') FROM moments WHERE workspace_id=?1 AND moment_id=?2",
+        params![workspace_id,moment_id], |row| row.get(0)).map_err(SyncError::corrupt)?;
+    if recovery {
+        return Ok(());
+    }
     let (payload, recorded_at_ms) = moment_payload_in_tx(tx, workspace_id, moment_id, None)?;
     journal_local_op_in_tx(tx, workspace_id, "moment.append", &payload, recorded_at_ms).map(|_| ())
 }
@@ -242,6 +248,11 @@ fn moment_payload_in_tx(
             },
         )
         .map_err(SyncError::corrupt)?;
+    if dohc_engine_domain::is_capture_recovery_origin(&row.metadata_origin) {
+        return Err(SyncError::InvalidInput {
+            reason: "capture recovery cannot enter the file journal",
+        });
+    }
     let authors = row
         .author_json
         .as_deref()

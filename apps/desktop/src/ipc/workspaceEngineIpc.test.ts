@@ -115,7 +115,8 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string) {
   });
   const adapter = {
     reconcileCapture: vi.fn<VersionedLiveAdapter["reconcileCapture"]>(async () => ({ settled: true, running: true, degraded: false })),
-    watcherStatus: vi.fn<VersionedLiveAdapter["watcherStatus"]>(async () => ({ running: true, degraded: false, terminal: false, phase: "ready", noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [] })),
+    watcherStatus: vi.fn<VersionedLiveAdapter["watcherStatus"]>(async () => ({ running: true, degraded: false, terminal: false, phase: "ready", noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [] })),
+    clearCaptureRecovery: vi.fn<VersionedLiveAdapter["clearCaptureRecovery"]>(async () => undefined),
     listCollections: vi.fn<VersionedLiveAdapter["listCollections"]>(async () => ({ collections: [] })),
     getCollection: vi.fn<VersionedLiveAdapter["getCollection"]>(async () => { throw new Error("get boundary"); }),
     queryCollectionRecords: vi.fn<VersionedLiveAdapter["queryCollectionRecords"]>(async () => ({
@@ -235,7 +236,8 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string) {
 const channels = [
   CHANNELS.listCollections, CHANNELS.getCollection, CHANNELS.queryCollectionRecords, CHANNELS.getCollectionRecordHistory,
   CHANNELS.locateRecordHistoryRun, CHANNELS.listEngineMoments, CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
-  CHANNELS.getSyncStatus, CHANNELS.retryFileRecovery, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
+  CHANNELS.getSyncStatus, CHANNELS.getCaptureRecoveryStatus, CHANNELS.clearCaptureRecovery,
+  CHANNELS.retryFileRecovery, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
   CHANNELS.rebuildEngineStore,
   CHANNELS.engineYDocOpen, CHANNELS.engineYDocReadArtifactAsset, CHANNELS.engineYDocApplyUpdate,
   CHANNELS.engineYDocAcknowledgeLineageReplacement, CHANNELS.engineYDocClose,
@@ -243,6 +245,18 @@ const channels = [
 ];
 
 describe("workspace engine IPC registrations", () => {
+  it("reads and persistently dismisses capture recovery only for this renderer's workspace", async () => {
+    const h = await harness();
+    const recovery = { momentId: "recovery", versionId: "main", objectId: "object", path: "notes/a.md", captureMomentId: "capture" };
+    h.adapter.watcherStatus.mockResolvedValue({ running: true, degraded: false, terminal: false, phase: "ready", noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [recovery] });
+    expect(await h.invoke(CHANNELS.getCaptureRecoveryStatus)).toEqual({ captureRecoveries: [recovery] });
+    await h.invoke(CHANNELS.clearCaptureRecovery, {workspaceId: "workspace", momentId: "recovery"});
+    expect(h.adapter.clearCaptureRecovery).toHaveBeenCalledWith("recovery");
+    await expect(h.invoke(CHANNELS.clearCaptureRecovery, {workspaceId: "other", momentId: "recovery"})).rejects.toThrow();
+    expect(h.adapter.clearCaptureRecovery).toHaveBeenCalledTimes(1);
+    h.setMissingAdapter();
+    await expect(h.invoke(CHANNELS.getCaptureRecoveryStatus)).rejects.toThrow("not running");
+  });
   it("retries recovery only for the writable workspace this renderer shows", async () => {
     const h = await harness();
     await h.invoke(CHANNELS.retryFileRecovery);
@@ -255,7 +269,7 @@ describe("workspace engine IPC registrations", () => {
   });
   it("keeps recovery unavailable when reconciliation or the recovery scan still fails", async () => {
     const h = await harness();
-    h.adapter.watcherStatus.mockResolvedValue({ running: true, degraded: false, terminal: false, phase: "ready", noAtomicPlacement: false, recoveryUnavailable: true, keptFiles: [] });
+    h.adapter.watcherStatus.mockResolvedValue({ running: true, degraded: false, terminal: false, phase: "ready", noAtomicPlacement: false, recoveryUnavailable: true, keptFiles: [], captureRecoveries: [] });
     await expect(h.invoke(CHANNELS.retryFileRecovery)).rejects.toThrow("still cannot read");
     h.adapter.reconcileCapture.mockRejectedValue(new Error("denied"));
     await expect(h.invoke(CHANNELS.retryFileRecovery)).rejects.toThrow("denied");

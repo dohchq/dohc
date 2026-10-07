@@ -13,6 +13,7 @@
 //! caller's transaction. Callers own rollback when those entry points fail.
 
 mod binary_write;
+mod capture_recovery;
 mod capture_write;
 mod delete_rename;
 mod request_ledger;
@@ -25,6 +26,11 @@ pub use source_capture::{
 };
 
 pub use binary_write::{write_binary_in_tx, write_published_binary_in_tx};
+pub use capture_recovery::{
+    CAPTURE_RECOVERY_ORIGIN, CLEARED_CAPTURE_RECOVERY_ORIGIN, CaptureRecovery,
+    capture_recoveries_in, clear_capture_recovery_in, is_capture_recovery_origin,
+    record_capture_recovery_in_tx,
+};
 pub use capture_write::{
     CAPTURE_ORIGIN, CaptureIngestBatchContext, CaptureManifestSeedEntry,
     MAX_CAPTURE_BINARY_FILE_BYTES, ProjectedWriteText, SECRET_SEED_SENTINEL_SHA, YDOC_ORIGIN,
@@ -1231,6 +1237,11 @@ enum ForkPrep {
 
 /// The shared reservation check for the capture-owned metadata origin.
 fn reject_reserved_capture_origin(metadata_origin: &str) -> Result<(), DomainError> {
+    if is_capture_recovery_origin(metadata_origin) {
+        return Err(DomainError::InvalidInput {
+            reason: "capture recovery origin is reserved for autonomous capture",
+        });
+    }
     if metadata_origin == CAPTURE_ORIGIN {
         return Err(DomainError::InvalidInput {
             reason: "metadata origin 'capture' is reserved for autonomous capture",
@@ -1701,6 +1712,7 @@ fn latest_materialized_moment_id(
         "SELECT moment_id FROM moments \
          WHERE workspace_id = ?1 AND version_id = ?2 \
            AND (sync_record_only IS NULL OR sync_record_only = 0) \
+           AND metadata_origin NOT IN ('capture-recovery','capture-recovery-cleared') \
          ORDER BY moment_order DESC LIMIT 1",
         params![workspace_id, version_id],
         |row| row.get(0),

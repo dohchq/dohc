@@ -1,6 +1,7 @@
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { EngineWorkspace, EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import {
+  CaptureRecoveryStatusResult, ClearCaptureRecoveryPayload,
   ListCollectionsPayload, ListCollectionsResult, GetCollectionPayload, GetCollectionResult,
   QueryCollectionRecordsPayload, QueryCollectionRecordsResult, ListEngineMomentsPayload,
   ReadEngineMomentPayload, ReadEngineMomentResult, HistoryPolicyUnreadableResult, RestoreEngineMomentFilePayload,
@@ -47,7 +48,7 @@ export function createWorkspaceEngineIpc<
   receivedShareEngine: Pick<ReturnType<typeof createReceivedShareEngineAccess>, "workspaceFor" | "workspaceForRegistered" | "storeFor">;
   withEngineAdapter<Result>(
     workspace: EngineWorkspace,
-    work: (adapter: Pick<VersionedLiveAdapter, "listCollections" | "getCollection" | "queryCollectionRecords" | "reconcileCapture" | "watcherStatus" | "getCollectionRecord">) => Promise<Result>,
+    work: (adapter: Pick<VersionedLiveAdapter, "listCollections" | "getCollection" | "queryCollectionRecords" | "reconcileCapture" | "watcherStatus" | "getCollectionRecord" | "clearCaptureRecovery">) => Promise<Result>,
   ): Promise<Result | null>;
   requireEngineCapture(workspaceId: string, feature: "Engine history"): Promise<{
     capture: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment" | "restoreFileToBeforeMoment">;
@@ -349,6 +350,26 @@ export function createWorkspaceEngineIpc<
           activity.getStatus(input.workspaceId),
         ),
       );
+    });
+    registerHandler(CHANNELS.getCaptureRecoveryStatus, async (event, payload) => {
+      assertTrustedSender(event);
+      const input = WorkspaceIdPayload.parse(payload);
+      return withRendererWorkspaceOperation(event.sender, input.workspaceId, "This workspace is no longer active.", async operation => {
+        const result = await withEngineAdapter(operation.workspace, async adapter => ({ captureRecoveries: (await adapter.watcherStatus()).captureRecoveries }));
+        if (result === null) throw new Error("The workspace engine is not running.");
+        return CaptureRecoveryStatusResult.parse(result);
+      });
+    });
+    registerHandler(CHANNELS.clearCaptureRecovery, async (event, payload) => {
+      assertTrustedSender(event);
+      const input = ClearCaptureRecoveryPayload.parse(payload);
+      return withRendererWorkspaceOperation(event.sender, input.workspaceId, "This workspace is no longer active.", async operation => {
+        const result = await withEngineAdapter(operation.workspace, async adapter => {
+          await adapter.clearCaptureRecovery(input.momentId);
+          return true;
+        });
+        if (result === null) throw new Error("The workspace engine is not running.");
+      });
     });
     registerHandler(CHANNELS.retryFileRecovery, async (event, payload) => {
       assertTrustedSender(event);

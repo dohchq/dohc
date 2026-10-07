@@ -492,6 +492,10 @@ impl EngineService {
                     .await?
             }
             "watcher.status" => self.watcher_status(request.workspace).await?,
+            "capture.clearRecovery" => {
+                self.capture_clear_recovery(request.workspace, request.params)
+                    .await?
+            }
             "keptCopies.list" => self.kept_copies_list(&ctx, request.workspace).await?,
             "keptCopies.save" => {
                 self.kept_copies_save(request.workspace, request.params)
@@ -1277,6 +1281,7 @@ mod tests {
             "capture.release",
             "capture.renew",
             "capture.setAuthor",
+            "capture.clearRecovery",
             "chats.agentReadState.listUnreadThreads",
             "chats.agentReadState.markThreadRead",
             "chats.attachments.listFileMentions",

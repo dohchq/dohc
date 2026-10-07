@@ -537,6 +537,12 @@ describe("stop and restore in main", () => {
     expect(f.capture.restoreFileToBeforeMoment).not.toHaveBeenCalled();
   });
 
+  it.each(["capture-recovery", "capture-recovery-cleared"] as const)("excludes %s from the Stop and restore ledger lookup", async origin => {
+    const f = fixture({moment: {...schemaMoment, metadata: {origin}}});
+    await f.call(CHANNELS.stopAndRestore, {target: {kind: "person", userId: "user_ana"}});
+    expect(f.capture.restoreFileToBeforeMoment).not.toHaveBeenCalled();
+  });
+
   it("refuses a ledger path that leaves the workspace, and a person with no share here", async () => {
     const f = fixture({ ledger: { "grant-edit": [{ writes: [{ committedAtMs: 1, files: [{ path: "../outside", objectId: "o", momentId: "m", created: true }] }], nextAfterOriginSeq: null }] } });
     // Access already stopped, so the answer says what is still to finish.

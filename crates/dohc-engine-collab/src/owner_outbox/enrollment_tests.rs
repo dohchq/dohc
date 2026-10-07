@@ -502,4 +502,11 @@ fn enrollment_folds_unsettled_authors_before_removing_native_update_rows() {
         "removed update authors remain available for settlement"
     );
     assert_eq!(attempt, None);
+    let recovered = store
+        .read_with(|conn| crate::author_coverage::recovery_in(conn, &key))
+        .unwrap();
+    assert!(
+        recovered.json().contains("writer"),
+        "History recovery includes the enrollment's folded authors"
+    );
 }

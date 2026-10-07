@@ -2059,6 +2059,7 @@ fn walk_object_moments(
                     before_present, payload_before_path \
              FROM moments \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
+               AND metadata_origin NOT IN ('capture-recovery','capture-recovery-cleared') \
              ORDER BY moment_order DESC",
         )
         .map_err(DomainError::sql_corrupt)?;

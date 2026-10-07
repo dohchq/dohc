@@ -1,0 +1,11 @@
+{
+  "reason": "Expose owner-local capture recovery status and persisted dismissal for PR 2.",
+  "guard": "trusted-sender",
+  "scope": "workspace",
+  "handlerCheck": "withRendererWorkspaceOperation",
+  "nameAdditions": [
+    "desktop:get-capture-recovery-status",
+    "desktop:clear-capture-recovery"
+  ],
+  "channelKeyAdditions": ["getCaptureRecoveryStatus", "clearCaptureRecovery"]
+}

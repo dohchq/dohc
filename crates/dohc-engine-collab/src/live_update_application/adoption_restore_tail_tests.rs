@@ -1,3 +1,25 @@
+#[test]
+fn history_recovery_keeps_compacted_adopted_private_tail_authors() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    native_tail_edit(&mut f, "# Private typing\n", 11);
+    f.store
+        .write_with(&NoFaults, |tx| {
+            crate::author_coverage::advance_accepted_prefix_in(tx, &f.key, false)
+        })
+        .unwrap();
+    durable::maybe_compact(&mut f.store, &f.key, 0, &NoFaults, 30).unwrap();
+    assert_eq!(f.store.table_row_count("ydoc_updates").unwrap(), 0);
+    let accepted = f.store
+        .read_with(|conn| crate::author_coverage::interval_in(conn, &f.key, i64::MAX))
+        .unwrap();
+    assert_eq!(accepted.len(), 0, "private typing is not accepted coverage");
+    let recovered = f.store
+        .read_with(|conn| crate::author_coverage::recovery_in(conn, &f.key))
+        .unwrap();
+    assert!(recovered.json().contains("native-agent"));
+}
+
 fn native_tail_edit(f: &mut Fixture, source: &str, now: i64) -> owner_outbox::OwnerOutboxEntry {
     let update = f
         .doc

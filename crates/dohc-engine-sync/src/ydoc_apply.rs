@@ -1702,6 +1702,7 @@ pub(crate) fn ydoc_lineage_blocks_absent_delete_in_tx(
                          AND later.object_id=m.object_id
                          AND later.moment_order > m.moment_order
                          AND COALESCE(later.sync_record_only,0)=0
+                         AND later.metadata_origin NOT IN ('capture-recovery','capture-recovery-cleared')
                   )
              )",
             params![key.workspace_id, key.version_id, key.object_id],
@@ -3348,6 +3349,7 @@ fn retired_scene_asset_byte_length(
              WHERE newer.workspace_id=deleted.workspace_id \
                AND newer.version_id=deleted.version_id AND newer.path=deleted.path \
                AND COALESCE(newer.sync_record_only,0)=0 \
+               AND newer.metadata_origin NOT IN ('capture-recovery','capture-recovery-cleared') \
                AND newer.moment_order>deleted.moment_order) \
          ORDER BY deleted.moment_order DESC LIMIT 1",
         params![key.workspace_id, key.version_id, path, sha256],
