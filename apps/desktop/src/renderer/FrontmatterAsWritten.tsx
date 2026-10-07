@@ -1,8 +1,9 @@
 import type { SaveState } from "@dohc/workspace-contracts/save-state";
-import { frontmatterAsWritten, leadingFrontmatter, loadMarkdownFrontmatter } from "@dohc/ydoc-projection/frontmatter";
+import { leadingFrontmatter, loadMarkdownFrontmatter } from "@dohc/ydoc-projection/frontmatter";
 import { ChevronRight } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type * as Y from "yjs";
+import { bridge } from "./bridge";
 import { displayFrontmatterValue } from "./markdown/frontmatter";
 
 // A leading block's text, found cheaply so the block parses again only when
@@ -11,56 +12,90 @@ const LEADING_BLOCK = /^---[ \t]*\r?\n(?:[\s\S]*?\r?\n)?---[ \t]*(?:\r?\n|$)/;
 // Keys the properties hide; PageIdentity shows `title` and `icon`.
 const HIDDEN_KEYS = new Set(["id", "title", "icon"]);
 
+/**
+ * A live document's file text, read from disk and never from the document,
+ * whose edits reach the file only when the engine saves. It starts from the
+ * inspector's read and takes each later one. It reads the file again when
+ * workspace activity names the file, when the engine reports the file
+ * changed on disk, and when it reports every edit saved here after the
+ * document's frontmatter changed. A save to the host or a pending or failed
+ * save keeps the text read last.
+ */
+export function useFileText(input: {
+  workspaceId: string;
+  path: string;
+  body: string;
+  ydoc: Y.Doc | null;
+  saveState: SaveState;
+}): string {
+  const { workspaceId, path, body, ydoc } = input;
+  const key = `${workspaceId}\n${path}`;
+  const [read, setRead] = useState({ key, body, text: body });
+  let current = read;
+  if (read.key !== key || read.body !== body) {
+    current = { key, body, text: body };
+    setRead(current);
+  }
+
+  // A body edit cannot change the block, so its save needs no read.
+  const frontmatterChanged = useRef(true);
+  useEffect(() => {
+    if (!ydoc) return;
+    frontmatterChanged.current = true;
+    const mark = () => {
+      frontmatterChanged.current = true;
+    };
+    const maps = [ydoc.getMap("frontmatter"), ydoc.getMap("meta")];
+    for (const map of maps) map.observeDeep(mark);
+    return () => {
+      for (const map of maps) map.unobserveDeep(mark);
+    };
+  }, [ydoc]);
+
+  // Only the newest read lands, and only on the document that asked for it.
+  const latest = useRef(0);
+  const readFile = useCallback(() => {
+    const id = ++latest.current;
+    void Promise.resolve()
+      .then(() => bridge().readWorkspaceText({ workspaceId, relativePath: path }))
+      .then(
+        (result) => {
+          if (latest.current !== id) return;
+          setRead((last) => (last.key === key ? { ...last, text: result.text } : last));
+        },
+        // The text read last stays. The inspector reports a file it cannot read.
+        () => undefined,
+      );
+  }, [key, workspaceId, path]);
+
+  const kind = input.saveState.kind;
+  useEffect(() => {
+    if (kind !== "changed-on-disk" && !(kind === "saved-here" && frontmatterChanged.current)) return;
+    frontmatterChanged.current = false;
+    readFile();
+  }, [readFile, kind]);
+
+  // A write from outside dohc reaches an open document's file without a save.
+  useEffect(
+    () =>
+      bridge().onWorkspaceActivity((event) => {
+        if (event.workspaceId !== undefined && event.workspaceId !== workspaceId) return;
+        if (event.paths === undefined || event.paths.includes(path)) readFile();
+      }),
+    [readFile, workspaceId, path],
+  );
+  return current.text;
+}
+
 // The document's frontmatter exactly as the file holds it, never rendered as
 // Markdown. The body leaves the block out, and an agent reading the file
 // receives all of it, so a person sees all of it here. It opens when the
 // properties do not show every line as written: a comment, an anchor, a hidden
-// key, a block that does not read, or anything else.
-//
-// A live document's file changes only when the engine saves, while its kept
-// text can change first: a renamed property moves there at once. So the block
-// shown is the one a save writes, read when the document opens and each time
-// the engine reports every edit saved. While a save is pending or has failed,
-// it stays the block read last.
-export function FrontmatterAsWritten(
-  props: (
-    | { markdown: string; ydoc?: never; saveState?: never }
-    | { ydoc: Y.Doc; saveState: SaveState; markdown?: never }
-  ) & {
-    propertiesShown: boolean;
-  },
-) {
-  const ydoc = props.ydoc ?? null;
-  const saved = props.saveState?.kind === "saved-here" || props.saveState?.kind === "saved-to-host";
-  const [revision, setRevision] = useState(0);
-
-  useEffect(() => {
-    if (!ydoc) return;
-    const update = () => setRevision((value) => value + 1);
-    const maps = [ydoc.getMap("frontmatter"), ydoc.getMap("meta")];
-    for (const map of maps) map.observe(update);
-    return () => {
-      for (const map of maps) map.unobserve(update);
-    };
-  }, [ydoc]);
-
-  const leading = ydoc ? null : (LEADING_BLOCK.exec(props.markdown ?? "")?.[0] ?? "");
-  const current = useMemo(() => {
-    if (ydoc) return frontmatterAsWritten(ydoc, true);
-    if (!leading) return "";
-    return leadingFrontmatter(leading)?.text ?? "";
-    // revision re-reads the observed maps after a shared write.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [leading, ydoc, revision]);
-  // The block is read again only on open and when a save lands, never on an
-  // edit, so an edit that renders before its save state cannot pass as saved.
-  const [read, setRead] = useState({ ydoc, saved, block: current });
-  let held = read;
-  if (read.ydoc !== ydoc || read.saved !== saved) {
-    held = { ydoc, saved, block: read.ydoc === ydoc && !saved ? read.block : current };
-    setRead(held);
-  }
-  const block = !ydoc || saved ? current : held.block;
+// key, a block that does not read, or anything else. `markdown` is file text:
+// a live document passes `useFileText`.
+export function FrontmatterAsWritten(props: { markdown: string; propertiesShown: boolean }) {
+  const leading = LEADING_BLOCK.exec(props.markdown)?.[0] ?? "";
+  const block = useMemo(() => (leading ? (leadingFrontmatter(leading)?.text ?? "") : ""), [leading]);
   const text = block.replace(/\r\n/g, "\n").replace(/\n+$/, "");
   const open = useMemo(() => !props.propertiesShown || !everyLineShown(text), [props.propertiesShown, text]);
   if (!text) return null;

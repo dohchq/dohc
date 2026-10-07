@@ -1,17 +1,26 @@
 // @vitest-environment jsdom
-import { PENDING_SHARE, SAVED_HERE, SAVED_TO_HOST, SAVING, UNKNOWN_SAVE_STATE, saveProblem } from "@dohc/workspace-contracts/save-state";
+import { SAVED_HERE, SAVED_TO_HOST, SAVING, UNKNOWN_SAVE_STATE, saveProblem, type SaveState } from "@dohc/workspace-contracts/save-state";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
-import { patchFrontmatter, recordFrontmatterSourceItems, setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter";
+import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter";
 import { act, cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
-import type * as Y from "yjs";
-import { FrontmatterAsWritten } from "./FrontmatterAsWritten";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as Y from "yjs";
+import { FrontmatterAsWritten, useFileText } from "./FrontmatterAsWritten";
 
-const TRIP = "---\n# Monthly\nbudget: 100 # euros\n---\n\nBody";
+const bridgeMock = vi.hoisted(() => ({
+  readWorkspaceText: vi.fn(),
+  activity: new Set<(event: { workspaceId?: string; paths?: string[] }) => void>(),
+  onWorkspaceActivity(listener: (event: { workspaceId?: string; paths?: string[] }) => void) {
+    bridgeMock.activity.add(listener);
+    return () => bridgeMock.activity.delete(listener);
+  },
+}));
+vi.mock("./bridge", () => ({ bridge: () => bridgeMock }));
 
-function renameBudget(doc: Y.Doc): void {
-  patchFrontmatter(doc, new Map([["cost", 100]]), ["budget"], new Map([["budget", "cost"]]));
-}
+const BUDGET_FILE = "---\n# Monthly\nbudget: 100 # euros\n---\n\nBody";
+const BUDGET = "---\n# Monthly\nbudget: 100 # euros\n---";
+const COST_FILE = "---\n# Monthly\ncost: 100 # euros\n---\n\nBody";
+const COST = "---\n# Monthly\ncost: 100 # euros\n---";
 
 function shown(): string | null {
   return screen.queryByTestId("frontmatter-as-written")?.querySelector("pre")?.textContent ?? null;
@@ -19,6 +28,31 @@ function shown(): string | null {
 
 function opened(): boolean | undefined {
   return screen.queryByTestId("frontmatter-as-written")?.querySelector("details")?.open;
+}
+
+function fileRead(text: string) {
+  return { text, truncated: false, contentHash: "hash" };
+}
+
+function renameBudget(doc: Y.Doc): void {
+  patchFrontmatter(doc, new Map([["cost", 100]]), ["budget"], new Map([["budget", "cost"]]));
+}
+
+// Every text the section rendered, so a render of the document's own text fails.
+let rendered: string[] = [];
+
+function Live(props: { path?: string; body: string; ydoc: Y.Doc | null; saveState: SaveState }) {
+  const text = useFileText({ workspaceId: "ws", path: props.path ?? "trip.md", body: props.body, ydoc: props.ydoc, saveState: props.saveState });
+  rendered.push(text);
+  return <FrontmatterAsWritten markdown={text} propertiesShown />;
+}
+
+// Let a mocked file read answer and its result render.
+async function settle(): Promise<void> {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
 }
 
 describe("FrontmatterAsWritten", () => {
@@ -86,80 +120,131 @@ describe("FrontmatterAsWritten", () => {
     expect(opened()).toBe(true);
     expect(screen.getByTestId("frontmatter-as-written").querySelector("a")).toBeNull();
   });
+});
 
-  it("shows a live document's block as its file holds it, from open through a save", () => {
-    const doc = markdownToYDoc("---\ntitle: Plan\nstatus: draft # delete drafts\n---\n\nBody");
-    const view = render(<FrontmatterAsWritten ydoc={doc} saveState={UNKNOWN_SAVE_STATE} propertiesShown />);
-    expect(shown()).toBe("---\ntitle: Plan\nstatus: draft # delete drafts\n---");
-    expect(opened()).toBe(true);
-    view.rerender(<FrontmatterAsWritten ydoc={doc} saveState={SAVED_HERE} propertiesShown />);
-    expect(shown()).toBe("---\ntitle: Plan\nstatus: draft # delete drafts\n---");
+describe("useFileText", () => {
+  beforeEach(() => {
+    rendered = [];
+    bridgeMock.readWorkspaceText.mockReset();
+  });
+  afterEach(() => {
+    cleanup();
   });
 
-  it("keeps the file's block while a rename is saving, then shows what the save wrote", () => {
-    const doc = markdownToYDoc(TRIP);
-    const view = render(<FrontmatterAsWritten ydoc={doc} saveState={SAVED_HERE} propertiesShown />);
-    // The edit can render before its save state does.
+  it("shows the file's block from open through a save", async () => {
+    const doc = markdownToYDoc(BUDGET_FILE);
+    bridgeMock.readWorkspaceText.mockResolvedValue(fileRead(BUDGET_FILE));
+    const view = render(<Live body={BUDGET_FILE} ydoc={doc} saveState={UNKNOWN_SAVE_STATE} />);
+    expect(shown()).toBe(BUDGET);
+    view.rerender(<Live body={BUDGET_FILE} ydoc={doc} saveState={SAVED_HERE} />);
+    await settle();
+    expect(shown()).toBe(BUDGET);
+    expect(bridgeMock.readWorkspaceText).toHaveBeenCalledWith({ workspaceId: "ws", relativePath: "trip.md" });
+  });
+
+  it("keeps the file's block while a rename is saving, then reads what the save wrote", async () => {
+    const doc = markdownToYDoc(BUDGET_FILE);
+    bridgeMock.readWorkspaceText.mockResolvedValue(fileRead(BUDGET_FILE));
+    const view = render(<Live body={BUDGET_FILE} ydoc={doc} saveState={SAVED_HERE} />);
+    await settle();
+    // The edit renders before its save state does.
     act(() => renameBudget(doc));
-    view.rerender(<FrontmatterAsWritten ydoc={doc} saveState={SAVING} propertiesShown />);
-    expect(shown()).toBe("---\n# Monthly\nbudget: 100 # euros\n---");
+    expect(shown()).toBe(BUDGET);
+    view.rerender(<Live body={BUDGET_FILE} ydoc={doc} saveState={SAVING} />);
+    expect(shown()).toBe(BUDGET);
+    expect(rendered.some((text) => text.includes("cost"))).toBe(false);
 
-    view.rerender(<FrontmatterAsWritten ydoc={doc} saveState={SAVED_HERE} propertiesShown />);
-    expect(shown()).toBe("---\n# Monthly\ncost: 100 # euros\n---");
+    bridgeMock.readWorkspaceText.mockResolvedValue(fileRead(COST_FILE));
+    view.rerender(<Live body={BUDGET_FILE} ydoc={doc} saveState={SAVED_HERE} />);
+    await settle();
+    expect(shown()).toBe(COST);
   });
 
-  it("keeps the file's block when the save fails", () => {
-    const doc = markdownToYDoc(TRIP);
-    const view = render(<FrontmatterAsWritten ydoc={doc} saveState={SAVED_HERE} propertiesShown />);
+  it("keeps the file's block when the save fails", async () => {
+    const doc = markdownToYDoc(BUDGET_FILE);
+    const view = render(<Live body={BUDGET_FILE} ydoc={doc} saveState={UNKNOWN_SAVE_STATE} />);
     act(() => renameBudget(doc));
-    view.rerender(<FrontmatterAsWritten ydoc={doc} saveState={SAVING} propertiesShown />);
-    view.rerender(<FrontmatterAsWritten ydoc={doc} saveState={saveProblem("error", "dohc could not save the file.")} propertiesShown />);
-    act(() => setFrontmatterValue(doc, "cost", 200));
-    expect(shown()).toBe("---\n# Monthly\nbudget: 100 # euros\n---");
+    view.rerender(<Live body={BUDGET_FILE} ydoc={doc} saveState={SAVING} />);
+    view.rerender(<Live body={BUDGET_FILE} ydoc={doc} saveState={saveProblem("error", "dohc could not save the file.")} />);
+    await settle();
+    expect(shown()).toBe(BUDGET);
+    expect(rendered.some((text) => text.includes("cost"))).toBe(false);
+    expect(bridgeMock.readWorkspaceText).not.toHaveBeenCalled();
   });
 
-  it("shows a save to the host as in the file", () => {
-    const doc = markdownToYDoc(TRIP);
-    const view = render(<FrontmatterAsWritten ydoc={doc} saveState={PENDING_SHARE} propertiesShown />);
+  it("shows the file's block when the section mounts again after a failed save", () => {
+    const doc = markdownToYDoc(BUDGET_FILE);
+    renameBudget(doc);
+    // A tab switch mounts a new inspector, which reads the file again.
+    render(<Live body={BUDGET_FILE} ydoc={doc} saveState={saveProblem("error", "dohc could not save the file.")} />);
+    expect(shown()).toBe(BUDGET);
+  });
+
+  it("keeps the text read last after a save to the host", async () => {
+    const doc = markdownToYDoc(BUDGET_FILE);
+    const view = render(<Live body={BUDGET_FILE} ydoc={doc} saveState={SAVING} />);
     act(() => renameBudget(doc));
-    expect(shown()).toBe("---\n# Monthly\nbudget: 100 # euros\n---");
-    view.rerender(<FrontmatterAsWritten ydoc={doc} saveState={SAVED_TO_HOST} propertiesShown />);
-    expect(shown()).toBe("---\n# Monthly\ncost: 100 # euros\n---");
+    view.rerender(<Live body={BUDGET_FILE} ydoc={doc} saveState={SAVED_TO_HOST} />);
+    await settle();
+    expect(shown()).toBe(BUDGET);
+    expect(bridgeMock.readWorkspaceText).not.toHaveBeenCalled();
   });
 
-  it("shows text recorded from a live document's file once the engine reports it saved", () => {
-    const doc = markdownToYDoc("---\nstatus: draft # delete drafts\n---\n\nBody");
-    const view = render(<FrontmatterAsWritten ydoc={doc} saveState={UNKNOWN_SAVE_STATE} propertiesShown />);
-    // As the engine records a file it read: the values, their text, and its items.
-    act(() =>
-      doc.transact(() => {
-        doc.getMap("frontmatter").set("status", "ready");
-        doc.getMap("meta").set("dohcFrontmatterSource", "---\nstatus: ready # delete drafts\n---\n\n");
-        recordFrontmatterSourceItems(doc.getMap("frontmatter"), doc.getMap("meta"));
-      }),
-    );
-    view.rerender(<FrontmatterAsWritten ydoc={doc} saveState={SAVING} propertiesShown />);
-    expect(shown()).toBe("---\nstatus: draft # delete drafts\n---");
-    view.rerender(<FrontmatterAsWritten ydoc={doc} saveState={SAVED_HERE} propertiesShown />);
-    expect(shown()).toBe("---\nstatus: ready # delete drafts\n---");
+  it("reads the file again when it changes on disk, and takes the inspector's later read", async () => {
+    const doc = markdownToYDoc(BUDGET_FILE);
+    const outside = "---\n# Set by an agent\nbudget: 120\n---\n\nBody";
+    bridgeMock.readWorkspaceText.mockResolvedValue(fileRead(outside));
+    const view = render(<Live body={BUDGET_FILE} ydoc={doc} saveState={SAVED_HERE} />);
+    view.rerender(<Live body={BUDGET_FILE} ydoc={doc} saveState={saveProblem("changed-on-disk", "The file changed on disk.")} />);
+    await settle();
+    expect(shown()).toBe("---\n# Set by an agent\nbudget: 120\n---");
+
+    view.rerender(<Live body={COST_FILE} ydoc={doc} saveState={SAVED_HERE} />);
+    expect(shown()).toBe(COST);
   });
 
-  it("writes a live document's values canonically when no text was recorded from its file", () => {
-    const doc = markdownToYDoc("---\nstatus: draft\n---\n\nBody");
-    const view = render(<FrontmatterAsWritten ydoc={doc} saveState={SAVED_HERE} propertiesShown />);
-    expect(shown()).toBe("---\nstatus: draft\n---");
-    expect(opened()).toBe(false);
-    act(() => setFrontmatterValue(doc, "status", "ready"));
-    view.rerender(<FrontmatterAsWritten ydoc={doc} saveState={SAVING} propertiesShown />);
-    expect(shown()).toBe("---\nstatus: draft\n---");
-    view.rerender(<FrontmatterAsWritten ydoc={doc} saveState={SAVED_HERE} propertiesShown />);
-    expect(shown()).toBe("---\nstatus: ready\n---");
+  it("reads the file again when a write from outside dohc reaches it", async () => {
+    const doc = markdownToYDoc(COST_FILE);
+    bridgeMock.readWorkspaceText.mockResolvedValue(fileRead(COST_FILE));
+    const view = render(<Live body={COST_FILE} ydoc={doc} saveState={SAVED_HERE} />);
+    await settle();
+    bridgeMock.readWorkspaceText.mockReset();
+    bridgeMock.readWorkspaceText.mockResolvedValue(fileRead("---\n# Set by an agent\nbudget: 120\n---\n\nBody"));
+    act(() => bridgeMock.activity.forEach((listener) => listener({ workspaceId: "ws", paths: ["other.md"] })));
+    await settle();
+    expect(bridgeMock.readWorkspaceText).not.toHaveBeenCalled();
+    act(() => bridgeMock.activity.forEach((listener) => listener({ workspaceId: "ws", paths: ["trip.md"] })));
+    await settle();
+    expect(shown()).toBe("---\n# Set by an agent\nbudget: 120\n---");
+    view.unmount();
+    expect(bridgeMock.activity.size).toBe(0);
   });
 
-  it("shows a live document's unreadable block, which its body leaves out", () => {
-    const doc = markdownToYDoc("---\ntitle: [unclosed\n# note\n---\n\nBody");
-    render(<FrontmatterAsWritten ydoc={doc} saveState={UNKNOWN_SAVE_STATE} propertiesShown />);
-    expect(shown()).toBe("---\ntitle: [unclosed\n# note\n---");
-    expect(opened()).toBe(true);
+  it("does not read the file for a save that left the frontmatter alone", async () => {
+    const doc = markdownToYDoc(BUDGET_FILE);
+    bridgeMock.readWorkspaceText.mockResolvedValue(fileRead(BUDGET_FILE));
+    const view = render(<Live body={BUDGET_FILE} ydoc={doc} saveState={SAVED_HERE} />);
+    await settle();
+    expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(1);
+    act(() => doc.getXmlFragment("body").insert(0, [new Y.XmlText("typed")]));
+    view.rerender(<Live body={BUDGET_FILE} ydoc={doc} saveState={SAVING} />);
+    view.rerender(<Live body={BUDGET_FILE} ydoc={doc} saveState={SAVED_HERE} />);
+    await settle();
+    expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(1);
+  });
+
+  it("never shows a slow read on another document, or an older read over a newer one", async () => {
+    const doc = markdownToYDoc(BUDGET_FILE);
+    let answerTrip: (text: string) => void = () => undefined;
+    bridgeMock.readWorkspaceText.mockReturnValueOnce(new Promise((resolve) => {
+      answerTrip = (text) => resolve(fileRead(text));
+    }));
+    const view = render(<Live body={BUDGET_FILE} ydoc={doc} saveState={SAVED_HERE} />);
+    await settle();
+    const plan = "---\nstatus: draft # plan\n---\n\nBody";
+    view.rerender(<Live path="plan.md" body={plan} ydoc={markdownToYDoc(plan)} saveState={UNKNOWN_SAVE_STATE} />);
+    answerTrip(COST_FILE);
+    await settle();
+    expect(shown()).toBe("---\nstatus: draft # plan\n---");
   });
 });
