@@ -38,7 +38,7 @@ it("advances only from captured native positions and checks exact receipts", asy
     return "retry";
   });
   await runNativeOwnerDeliveryPass({client: client as unknown as EngineClient, workspaceHandle: "handle", config, document: config.documents[0]!,
-    signal: new AbortController().signal, bearer: "credential", assertCurrent() {}});
+    signal: new AbortController().signal, bearer: "credential", accountId: undefined, assertCurrent() {}});
   expect(client.ownerYDocApplyInitialSync.mock.calls[0]).toEqual([expect.objectContaining({workspace: "handle"}), expect.objectContaining({expectedRevision: 2, expectedNativeHeadSequence: 4, previousAcceptedCursor: 3}), expect.any(AbortSignal)]);
   expect(client.ownerYDocApplyAcceptedFrame.mock.calls[0]).toEqual([expect.anything(), expect.objectContaining({expectedRevision: 5, expectedNativeHeadSequence: 7, previousAcceptedCursor: 6}), expect.any(AbortSignal)]);
   expect(client.ownerYDocIsReceiptApplied.mock.calls[0]).toEqual([expect.anything(), expect.objectContaining({receipt, relayDatabaseNamespace: "namespace"}), expect.any(AbortSignal)]);
@@ -57,7 +57,7 @@ it("awaits an interrupted native read before releasing the pass", async () => {
   const client = {ownerYDocPrepareEnrollment: vi.fn(async () => ({status:"observed", draft:{outboxId:"outbox"}})), ownerYDocReadState: vi.fn((_request, _target, signal) => {nativeSignal = signal; return native;})};
   let stopped = false;
   const pass = runNativeOwnerDeliveryPass({client: client as unknown as EngineClient, workspaceHandle: "handle", config,
-    document: config.documents[0]!, signal: new AbortController().signal, bearer: "credential", assertCurrent() {}}).then(() => {stopped = true;});
+    document: config.documents[0]!, signal: new AbortController().signal, bearer: "credential", accountId: undefined, assertCurrent() {}}).then(() => {stopped = true;});
   await vi.waitFor(() => expect(nativeSignal).toBeDefined());
   expect(nativeSignal.aborted).toBe(true);
   expect(stopped).toBe(false);
@@ -80,7 +80,7 @@ it("requests a complete host checkpoint before discovering the enrolled outbox",
     return {kind:"authority",authority:{value:{},hostEpoch:parseHostEpoch(1)}};
   });
   mock.drain.mockResolvedValue("acknowledged");
-  expect(await runNativeOwnerDeliveryPass({client:client as unknown as EngineClient,workspaceHandle:"handle",config,document:config.documents[0]!,signal:new AbortController().signal,bearer:"credential",assertCurrent(){}})).toBe("acknowledged");
+  expect(await runNativeOwnerDeliveryPass({client:client as unknown as EngineClient,workspaceHandle:"handle",config,document:config.documents[0]!,signal:new AbortController().signal,bearer:"credential",accountId:undefined,assertCurrent(){}})).toBe("acknowledged");
   expect(client.ownerYDocEnroll).toHaveBeenCalledWith(expect.anything(),expect.objectContaining({captured,journalCursor:7,hostVector:Uint8Array.of(1),checkpoint:Uint8Array.of(2,3)}),expect.any(AbortSignal));
   expect(client.ownerYDocPrepareEnrollment).toHaveBeenCalledTimes(2);
 });
@@ -90,7 +90,7 @@ it("pulls accepted state when an enrolled owner has no pending edits", async () 
   mock.drain.mockResolvedValue("empty");
   mock.authority.mockResolvedValue({kind: "authority", authority: {}});
   expect(await runNativeOwnerDeliveryPass({client: client as unknown as EngineClient, workspaceHandle: "handle", config,
-    document: config.documents[0]!, signal: new AbortController().signal, bearer: "credential", assertCurrent() {}})).toBe("empty");
+    document: config.documents[0]!, signal: new AbortController().signal, bearer: "credential", accountId: undefined, assertCurrent() {}})).toBe("empty");
   expect(mock.authority).toHaveBeenCalledWith(binding);
 });
 
@@ -100,7 +100,7 @@ it("persists a fenced idle outbox instead of requesting it again indefinitely", 
   mock.drain.mockResolvedValue("empty");
   mock.authority.mockResolvedValue({kind: "quarantine", reason: "binding changed", observedBinding: binding});
   expect(await runNativeOwnerDeliveryPass({client: client as unknown as EngineClient, workspaceHandle: "handle", config,
-    document: config.documents[0]!, signal: new AbortController().signal, bearer: "credential", assertCurrent() {}})).toBe("frozen");
+    document: config.documents[0]!, signal: new AbortController().signal, bearer: "credential", accountId: undefined, assertCurrent() {}})).toBe("frozen");
   expect(sendRequest).toHaveBeenCalledWith(expect.objectContaining({method: "ydoc.ownerOutbox.quarantine", workspace: "handle",
     params: {outboxId: "outbox", reason: "binding changed", observedBinding: binding}}), expect.any(AbortSignal));
 });

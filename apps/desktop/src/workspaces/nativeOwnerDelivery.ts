@@ -13,6 +13,7 @@ export async function runNativeOwnerDeliveryPass(options: {
   config: DesktopOwnerDeliveryConfig;
   signal: AbortSignal;
   bearer: string;
+  accountId: string | undefined;
   assertCurrent(): void;
 }) {
   const {client, document, config, signal} = options;
@@ -75,7 +76,8 @@ export async function runNativeOwnerDeliveryPass(options: {
   const outbox = new OwnerYDocOutbox({sendRequest: request => guarded(() => client.sendRequest(request, signal))}, options.workspaceHandle);
   const delivery = new OwnerYDocFrameDelivery({relayUrl: config.relayUrl, shareId: document.shareId,
     frames: config.frames, attemptTimeoutMs: config.attemptTimeoutMs, signal, acceptedState,
-    freshBearer: async () => {check(); return options.bearer;}});
+    freshBearer: async () => {check(); return options.bearer;},
+    authenticatedAccountId: async () => {check(); return options.accountId;}});
   let drainer: OwnerYDocOutboxDrainer | undefined;
   try {
     let synchronized = false;
