@@ -14,6 +14,7 @@ import {
   type WikilinkPickerState,
 } from "./WikilinkPicker";
 import type { WikilinkFile } from "./wikilinkPlugin";
+import { inListView, mockListLayout } from "../ui/listLayout.testSupport";
 
 // Same ResizeObserver / Range stubs MarkdownEditor.test.ts uses — needed
 // because the picker calls `view.coordsAtPos`, which under real
@@ -27,9 +28,6 @@ beforeEach(() => {
       disconnect() {}
     },
   );
-  // jsdom doesn't implement scrollIntoView; the picker calls it when the
-  // active item changes.
-  Element.prototype.scrollIntoView = vi.fn();
   Object.defineProperty(Range.prototype, "getClientRects", {
     configurable: true,
     value: () => [],
@@ -158,6 +156,52 @@ describe("WikilinkPicker — dismiss leaves the literal text intact", () => {
       target: "notes/roadmap",
       label: "Roadmap",
     });
+    editor.destroy();
+  });
+});
+
+// Twelve matches fill more than the picker's height. The editor keeps focus
+// and the typed keys, so only the arrows move the active option.
+describe("WikilinkPicker on the Menu part's recipe", () => {
+  it("keeps the active option in the list's view as the arrows move it, scrolling only the list", () => {
+    const restore = mockListLayout(200);
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    const editor = makeEditor("[[");
+    try {
+      const many = Array.from({ length: 12 }, (_, index) => ({ path: `notes/page-${index + 1}.md` }));
+      render(createElement(WikilinkPicker, { state: { open: true, from: 1, query: "" }, files: many, view: editor.view, onDismiss: vi.fn() }));
+      const list = screen.getByRole("listbox", { name: "page links" });
+      const options = screen.getAllByRole("option");
+      expect(options).toHaveLength(12);
+
+      fireEvent.keyDown(window, { key: "ArrowUp" });
+      const last = options.at(-1)!;
+      expect(list.getAttribute("aria-activedescendant")).toBe(last.id);
+      expect(last.hasAttribute("data-active")).toBe(true);
+      expect(inListView(list, last)).toBe(true);
+      fireEvent.keyDown(window, { key: "ArrowDown" });
+      expect(inListView(list, options[0]!)).toBe(true);
+      // Home and End stay with the editor's query.
+      fireEvent.keyDown(window, { key: "End" });
+      expect(list.getAttribute("aria-activedescendant")).toBe(options[0]!.id);
+      expect(scrollIntoView).not.toHaveBeenCalled();
+    } finally {
+      restore();
+      editor.destroy();
+    }
+  });
+
+  it("takes the active option only from a pointer that moves", () => {
+    const editor = makeEditor("[[");
+    const two = [{ path: "notes/one.md" }, { path: "notes/two.md" }];
+    render(createElement(WikilinkPicker, { state: { open: true, from: 1, query: "" }, files: two, view: editor.view, onDismiss: vi.fn() }));
+    const list = screen.getByRole("listbox", { name: "page links" });
+    const second = screen.getAllByRole("option")[1]!;
+    fireEvent.mouseMove(second, { movementX: 0, movementY: 0 });
+    expect(list.getAttribute("aria-activedescendant")).not.toBe(second.id);
+    fireEvent.mouseMove(second, { movementX: 2, movementY: 0 });
+    expect(list.getAttribute("aria-activedescendant")).toBe(second.id);
     editor.destroy();
   });
 });

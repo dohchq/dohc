@@ -5,7 +5,11 @@ import type { ReactNode } from "react";
 import type { HistoryPolicyUnreadableResult } from "../../ipc/bridgeContract";
 import { readError, withErrorWords } from "../../ipc/errorWords";
 import { DocumentMenu } from "../DocumentMenu";
+import type { EditorView } from "@tiptap/pm/view";
 import { BlockMenu } from "../editor/blockControls";
+import { EmojiPicker } from "../editor/EmojiPicker";
+import { SlashCommandMenu, type SlashCommandState } from "../editor/slashCommands";
+import { WikilinkPicker } from "../editor/WikilinkPicker";
 import { buildTableMenu, type TableMenuRow } from "../editor/tableControls";
 import { OverlayFrame } from "../Overlay";
 import { ColorControl, HueControl, SwitchControl, TextControl } from "../settings/SettingRow";
@@ -446,6 +450,32 @@ const BLOCK_MENU_OPEN = {
   placement: "below",
   trigger: null,
 } as const;
+
+const SLASH_MENU_OPEN: SlashCommandState = {
+  open: true,
+  from: 1,
+  to: 1,
+  query: "",
+  selected: 2,
+  x: 0,
+  y: 0,
+  bottom: null,
+  maxHeight: 260,
+  placement: "below",
+};
+
+// The pickers place themselves from the caret's coordinates and need nothing
+// else of the editor until a pick, which a specimen never makes.
+const PICKER_VIEW = {
+  coordsAtPos: () => ({ left: 0, right: 0, top: 0, bottom: 0 }),
+} as Pick<EditorView, "coordsAtPos"> as EditorView;
+
+const PICKER_FILES = [
+  { path: "plans/roadmap.md", title: "Roadmap" },
+  { path: "plans/q3-budget.md" },
+  { path: "notes/standup.md", title: "Standup notes" },
+  { path: "research/interviews/round-two-with-a-long-folder-name.md" },
+];
 
 const TABLE_MENU_ROWS: readonly TableMenuRow[] = [
   { label: "Insert column left" },
@@ -912,6 +942,33 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="restore refused">
           <div className={SHADOW_ROOM}>
             <WorkspaceErrorToast error={REFUSED_RESTORE_TOAST} onRetry={noop} onHide={noop} />
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* The editor's listboxes, after History so no part above them moves.
+          The editor keeps focus, and the option Enter acts on draws the
+          outline. */}
+      <Section part="slash-menu" title="Slash menu">
+        <Specimen label="third option active; the list scrolls">
+          <div className={`${EDITOR_MENU_BOX} h-[272px] w-[330px]`}>
+            <SlashCommandMenu state={SLASH_MENU_OPEN} onSelect={noop} onHover={noop} />
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="wikilink-picker" title="Page link picker">
+        <Specimen label="first option active; titles and paths">
+          <div className={`${EDITOR_MENU_BOX} h-[136px] w-[370px]`}>
+            <WikilinkPicker state={{ open: true, from: 1, query: "" }} files={PICKER_FILES} view={PICKER_VIEW} onDismiss={noop} />
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="emoji-picker" title="Emoji picker">
+        <Specimen label="first option active">
+          <div className={`${EDITOR_MENU_BOX} h-[256px] w-[230px]`}>
+            <EmojiPicker state={{ open: true, from: 1, query: "heart" }} view={PICKER_VIEW} onDismiss={noop} />
           </div>
         </Specimen>
       </Section>

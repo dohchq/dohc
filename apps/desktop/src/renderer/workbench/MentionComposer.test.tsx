@@ -6,6 +6,7 @@ import { MentionComposer } from "./MentionComposer";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import type { WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
 import { useState } from "react";
+import { inListView, mockListLayout } from "../ui/listLayout.testSupport";
 
 const candidates: MentionCandidate[] = [
   { id: "agent:default", kind: "agent", handle: "agent", label: "Your agent", description: "your agent" },
@@ -15,6 +16,7 @@ const candidates: MentionCandidate[] = [
 // A tiny controlled harness so the composer behaves like it does in ChatsView
 // (parent owns the value).
 function Harness(props: {
+  fileCandidates?: { path: string; label: string }[];
   onSend?: () => void;
   onEscape?: () => void;
   loadFileHeadings?: (path: string) => Promise<readonly WorkspaceHeadingRecord[]>;
@@ -31,7 +33,7 @@ function Harness(props: {
       placeholder="Write a message…"
       sendLabel="Send message"
       candidates={candidates}
-      fileCandidates={[{ path: "docs/plan.md", label: "Plan" }]}
+      fileCandidates={props.fileCandidates ?? [{ path: "docs/plan.md", label: "Plan" }]}
       {...(props.loadFileHeadings
         ? { loadFileHeadings: props.loadFileHeadings }
         : {})}
@@ -272,5 +274,41 @@ describe("MentionComposer autocomplete", () => {
     expect(pill.getAttribute("aria-label")).toBe("Write a post");
     await userEvent.click(pill);
     expect(document.activeElement).toBe(screen.getByTestId("chats-composer"));
+  });
+});
+
+// Two people and six files fill more than the menu's height. The textarea
+// keeps focus while the arrows move the active option.
+describe("MentionComposer menu on the Menu part's recipe", () => {
+  const files = Array.from({ length: 6 }, (_, index) => ({ path: `docs/file-${index + 1}.md`, label: `File ${index + 1}` }));
+
+  it("keeps the active option in the list's view as the arrows move it", async () => {
+    const restore = mockListLayout(120);
+    try {
+      render(<Harness fileCandidates={files} />);
+      await userEvent.type(screen.getByTestId("chats-composer"), "@");
+      const menu = await screen.findByTestId("chats-mention-menu");
+      const options = [...menu.querySelectorAll<HTMLElement>('[role="option"]')];
+      expect(options).toHaveLength(8);
+      await userEvent.keyboard("{ArrowUp}");
+      const last = options.at(-1)!;
+      expect(last.hasAttribute("data-active")).toBe(true);
+      expect(inListView(menu, last)).toBe(true);
+      await userEvent.keyboard("{ArrowDown}");
+      expect(inListView(menu, options[0]!)).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it("takes the active option only from a pointer that moves", async () => {
+    render(<Harness />);
+    await userEvent.type(screen.getByTestId("chats-composer"), "@");
+    const menu = await screen.findByTestId("chats-mention-menu");
+    const second = menu.querySelectorAll<HTMLElement>('[role="option"]')[1]!;
+    fireEvent.mouseMove(second, { movementX: 0, movementY: 0 });
+    expect(second.hasAttribute("data-active")).toBe(false);
+    fireEvent.mouseMove(second, { movementX: 0, movementY: 2 });
+    expect(second.hasAttribute("data-active")).toBe(true);
   });
 });

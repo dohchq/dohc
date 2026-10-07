@@ -91,6 +91,23 @@ export const MENU_ACTIVE_OPTION =
 /** The leading icon column; a destructive row keeps its own color here. */
 export const MENU_ICON = "grid size-3.5 shrink-0 place-items-center";
 export const MENU_LABEL = "min-w-0 flex-1 truncate";
+/** A row's label when a detail follows it on the same line, such as a path or a hint. */
+export const MENU_TITLE = "max-w-[65%] shrink-0 truncate";
+/** The detail after a row's title, in the rest of the row. */
+export const MENU_DETAIL = "min-w-0 flex-1 truncate text-[12px] text-subtle";
+/** A path as a row's detail, in the metadata voice. */
+export const MENU_PATH = "min-w-0 flex-1 truncate font-mono text-[11px] text-subtle";
+/** The line a list shows when nothing matches. */
+export const MENU_EMPTY = "px-2 py-1.5 text-[12px] text-subtle";
+
+/**
+ * Whether a mousemove came from a pointer that moved. A row that opens or
+ * scrolls under a still pointer gets mouse events too, and must not take the
+ * active row from the keyboard.
+ */
+export function movedPointer(event: { movementX: number; movementY: number }): boolean {
+  return event.movementX !== 0 || event.movementY !== 0;
+}
 /** A row's shortcut, after its label. Hidden from the row's name; the row says it with aria-keyshortcuts. */
 export const MENU_SHORTCUT = "shrink-0 rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle";
 
@@ -333,7 +350,7 @@ export function Menu(props: {
             if (!(event.target instanceof HTMLInputElement)) event.preventDefault();
           }}
           onMouseMove={(event) => {
-            if (!pointerMoved && (event.movementX || event.movementY)) setPointerMoved(true);
+            if (!pointerMoved && movedPointer(event)) setPointerMoved(true);
           }}
           style={{
             width,
@@ -414,7 +431,7 @@ export function Menu(props: {
                 // still pointer leaves focus on the first row, and a field
                 // keeps focus while the pointer crosses the rows.
                 onMouseMove={(event) => {
-                  if ((event.movementX || event.movementY) && !typing() && document.activeElement !== event.currentTarget) {
+                  if (movedPointer(event) && !typing() && document.activeElement !== event.currentTarget) {
                     event.currentTarget.focus();
                   }
                 }}
