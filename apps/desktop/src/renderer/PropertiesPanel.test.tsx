@@ -6,7 +6,7 @@ import { useState } from "react";
 import * as Y from "yjs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
-import { setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter";
+import { patchFrontmatter, setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter";
 import { PropertiesPanel } from "./PropertiesPanel";
 
 function ControlledPropertiesPanel(props: { initialBody: string }) {
@@ -348,7 +348,7 @@ describe("PropertiesPanel", () => {
       },
       {
         name: "a quoted key",
-        markdown: '---\nstatus: draft\n"owner": ice # lead\n---\n\nBody', from: "owner", to: "lead", rows: ["lead", "status"],
+        markdown: '---\nstatus: draft\n"owner": ice # lead\n---\n\nBody', from: "owner", to: "lead", rows: ["status", "lead"],
         expected: "---\nstatus: draft\nlead: ice # lead\n---\n\nBody",
       },
       {
@@ -361,6 +361,16 @@ describe("PropertiesPanel", () => {
         markdown: "---\ntags:   # labels\n  - a   # first\n  - b\nwifi: x\n---\n\nBody", from: "tags", to: "labels",
         rows: ["labels", "wifi"],
         expected: "---\nlabels:   # labels\n  - a   # first\n  - b\nwifi: x\n---\n\nBody",
+      },
+      {
+        name: "a value that keeps its text",
+        markdown: "---\nbudget: .nan # unknown\nwifi: x\n---\n\nBody", from: "budget", to: "cost", rows: ["cost", "wifi"],
+        expected: "---\ncost: .nan # unknown\nwifi: x\n---\n\nBody",
+      },
+      {
+        name: "canonical frontmatter",
+        markdown: "---\nbudget: 100\nwifi: hunter2\n---\n\nBody", from: "budget", to: "yearly", rows: ["yearly", "wifi"],
+        expected: "---\nyearly: 100\nwifi: hunter2\n---\n\nBody",
       },
     ])("keeps $name in place while a person types the name", async ({ markdown, from, to, rows, expected }) => {
       const user = userEvent.setup();
@@ -424,6 +434,27 @@ describe("PropertiesPanel", () => {
         await user.type(screen.getByLabelText("Property cost value"), "100");
         expect(yDocToMarkdown(recreated)).toBe("---\ncost: '100'\n# Wi-Fi password\nwifi: hunter2\n---\n\nBody");
       } finally { onto.destroy(); recreated.destroy(); }
+    });
+
+    it("shows the properties in the order the file holds them", () => {
+      const doc = markdownToYDoc("---\nwifi: hunter2\nbudget: 100\n---\n\nBody");
+      try {
+        render(<PropertiesPanel ydoc={doc} />);
+        expect(names()).toEqual(["wifi", "budget"]);
+      } finally { doc.destroy(); }
+    });
+
+    it("shows a property another device renames in its row", () => {
+      const doc = markdownToYDoc(budget);
+      const peer = new Y.Doc();
+      try {
+        Y.applyUpdate(peer, Y.encodeStateAsUpdate(doc));
+        render(<PropertiesPanel ydoc={doc} />);
+        expect(names()).toEqual(["budget", "wifi"]);
+        patchFrontmatter(peer, new Map([["cost", 100]]), ["budget"], new Map([["budget", "cost"]]));
+        act(() => Y.applyUpdate(doc, Y.encodeStateAsUpdate(peer)));
+        expect(names()).toEqual(["cost", "wifi"]);
+      } finally { doc.destroy(); peer.destroy(); }
     });
 
     it("keeps edits another device makes to other properties during the rename", async () => {

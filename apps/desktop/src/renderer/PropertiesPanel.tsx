@@ -1,5 +1,7 @@
 import {
+  FRONTMATTER_SOURCE_META_KEY,
   frontmatterEditsRefused,
+  loadMarkdownFrontmatter,
   markdownFrontmatterEditsRefused,
   patchFrontmatter,
 } from "@dohc/ydoc-projection/frontmatter";
@@ -144,16 +146,19 @@ function renamedKeys(
 }
 
 // A live document's map adds a renamed key last. Rows keep the order they
-// show, so the row being renamed stays under the person typing; new keys follow.
+// show, so the row being renamed stays under the person typing. A key renamed
+// on another device takes the row its old key left; other new keys follow.
 function inShownOrder(entries: FrontmatterEntry[], shown: FrontmatterEntry[]): FrontmatterEntry[] {
-  const row = (entry: FrontmatterEntry): number => {
+  const rows = entries.map((entry) => {
     const held = shown.findIndex((candidate) => candidate.sourceKey === entry.key);
-    const index = held === -1 ? shown.findIndex((candidate) => propertyKey(candidate) === entry.key) : held;
-    return index === -1 ? shown.length : index;
-  };
+    return held === -1 ? shown.findIndex((candidate) => propertyKey(candidate) === entry.key) : held;
+  });
+  const left = shown.flatMap((_, row) => (rows.includes(row) ? [] : [row]));
+  const added = rows.flatMap((row, index) => (row === -1 ? [index] : []));
+  if (left.length === 1 && added.length === 1) rows[added[0]!] = left[0]!;
   return entries
-    .map((entry) => ({ entry, row: row(entry) }))
-    .sort((left, right) => left.row - right.row)
+    .map((entry, index) => ({ entry, row: rows[index] === -1 ? shown.length : rows[index]! }))
+    .sort((first, second) => first.row - second.row)
     .map(({ entry }) => entry);
 }
 
@@ -175,8 +180,16 @@ function applySharedFrontmatterPatch(
   patchFrontmatter(doc, values, remove, renamedKeys(previousEntries, nextEntries));
 }
 
+// The map has no order of its own, so rows follow the kept text, as the file
+// does. Keys the text does not hold follow in map order.
 function liveEntries(doc: Y.Doc): FrontmatterEntry[] {
-  return frontmatterEntriesFromMeta(mapToObject(doc.getMap(FRONTMATTER_FIELD)));
+  const source = doc.getMap("meta").get(FRONTMATTER_SOURCE_META_KEY);
+  const order = typeof source === "string" ? Object.keys(loadMarkdownFrontmatter(source)?.meta ?? {}) : [];
+  const place = (key: string): number => (order.includes(key) ? order.indexOf(key) : order.length);
+  return frontmatterEntriesFromMeta(mapToObject(doc.getMap(FRONTMATTER_FIELD)))
+    .map((entry) => ({ entry, place: place(entry.key) }))
+    .sort((first, second) => first.place - second.place)
+    .map(({ entry }) => entry);
 }
 
 export function PropertiesPanel(props: PropertiesPanelProps) {

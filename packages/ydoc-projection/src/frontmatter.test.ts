@@ -86,7 +86,27 @@ describe('live property renames', () => {
       markdown: budget.replaceAll('\n', '\r\n'), from: 'wifi', to: 'network',
       expected: '---\n# Monthly\nbudget: 100 # euros\n# Wi-Fi password\nnetwork: hunter2\n---\n\nBody'.replaceAll('\n', '\r\n'),
     },
-  ])('renames $name in place in one transaction', ({ markdown, from, to, expected }) => {
+    {
+      name: 'a value that keeps its text',
+      markdown: '---\nbudget: .nan # unknown\nwifi: x\n---\n\nBody', from: 'budget', to: 'cost',
+      expected: '---\ncost: .nan # unknown\nwifi: x\n---\n\nBody',
+    },
+    {
+      name: 'a value with its own tag',
+      markdown: '---\nbudget: !label x\nwifi: y\n---\n\nBody', from: 'budget', to: 'cost',
+      expected: '---\ncost: !label x\nwifi: y\n---\n\nBody',
+    },
+    {
+      name: 'canonical frontmatter',
+      markdown: '---\nbudget: 100\nwifi: hunter2\n---\n\nBody', from: 'budget', to: 'yearly',
+      expected: '---\nyearly: 100\nwifi: hunter2\n---\n\nBody',
+    },
+    {
+      name: 'canonical frontmatter with CRLF line endings',
+      markdown: '---\r\nbudget: 100\r\nwifi: hunter2\r\n---\r\n\r\nBody', from: 'budget', to: 'yearly',
+      expected: '---\r\nyearly: 100\r\nwifi: hunter2\r\n---\r\n\r\nBody',
+    },
+  ])('renames $name in place in one transaction, through a reopen', ({ markdown, from, to, expected }) => {
     const doc = markdownToYDoc(markdown)
     try {
       const value = doc.getMap('frontmatter').get(from)
@@ -98,7 +118,19 @@ describe('live property renames', () => {
       expect(doc.getMap('frontmatter').get(to)).toEqual(value)
       expect(yDocToMarkdown(doc)).toBe(expected)
       expect(frontmatterAsWritten(doc, true)).toBe(expected.slice(0, -'Body'.length))
+      const reopened = markdownToYDoc(expected)
+      try {
+        expect(yDocToMarkdown(reopened)).toBe(expected)
+      } finally { reopened.destroy() }
     } finally { doc.destroy() }
+  })
+
+  it.each([
+    ['---\nbudget: .nan # unknown\nwifi: x\n---\n\nBody', '---\ncost: .nan # unknown\nwifi: x\n---\n\nBody'],
+    ['---\nbudget: !label x\nwifi: y\n---\n\nBody', '---\ncost: !label x\nwifi: y\n---\n\nBody'],
+  ])('renames a value that keeps its text in a local file: %j', (markdown, expected) => {
+    const { budget: value, ...others } = loadMarkdownFrontmatter(markdown)!.meta
+    expect(writeMarkdownFrontmatter(markdown, { cost: value, ...others }, new Map([['budget', 'cost']]))).toBe(expected)
   })
 
   it('renames with a new value in place, and the comments above stay with later edits', () => {
@@ -159,6 +191,28 @@ describe('live property renames', () => {
       const expected = '---\n# Monthly\ncost: 100 # euros\n# Wi-Fi password\nwifi: new\nowner: sam\n---\n\nBody'
       expect(yDocToMarkdown(a)).toBe(expected)
       expect(yDocToMarkdown(b)).toBe(expected)
+    } finally { base.destroy(); a.destroy(); b.destroy() }
+  })
+
+  // The kept text is one string, so one device's text wins. That device's
+  // rename keeps its place and comments; the other's key goes after the
+  // others without them. Every value survives on both devices.
+  it('keeps every value when two devices rename different properties at the same time', () => {
+    const base = markdownToYDoc(budget)
+    const [a, b] = [new Y.Doc(), new Y.Doc()]
+    try {
+      for (const device of [a, b]) Y.applyUpdate(device, Y.encodeStateAsUpdate(base))
+      rename(a, 'budget', 'cost')
+      rename(b, 'wifi', 'network')
+      Y.applyUpdate(a, Y.encodeStateAsUpdate(b))
+      Y.applyUpdate(b, Y.encodeStateAsUpdate(a))
+      const settled = yDocToMarkdown(a)
+      expect(yDocToMarkdown(b)).toBe(settled)
+      expect(loadMarkdownFrontmatter(settled)!.meta).toEqual({ cost: 100, network: 'hunter2' })
+      expect([
+        '---\n# Monthly\ncost: 100 # euros\nnetwork: hunter2\n---\n\nBody',
+        '---\n# Wi-Fi password\nnetwork: hunter2\ncost: 100\n---\n\nBody',
+      ]).toContain(settled)
     } finally { base.destroy(); a.destroy(); b.destroy() }
   })
 })

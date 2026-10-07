@@ -286,36 +286,53 @@ test("kept typing survives capture before the renderer reopens after restart", a
 });
 
 test("renaming a property of a live document keeps its place and comments through save and reopen", async () => {
-  test.setTimeout(120_000);
+  test.setTimeout(180_000);
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
-  const path = "trip.md";
-  const written = '---\n# Monthly\nbudget:  100 # euros\n# Wi-Fi password\n"wifi": hunter2\n---\n\n# Trip\n\nBase paragraph.';
-  const renamed = written.replace("budget:", "cost:");
-  const fileText = () => readFile(join(temp.rootPath, path), "utf8");
+  // One file with comments and quoting, and one in canonical form.
+  const files = [
+    {
+      path: "trip.md", to: "cost",
+      written: '---\n# Monthly\nbudget:  100 # euros\n# Wi-Fi password\n"wifi": hunter2\n---\n\n# Trip\n\nBase paragraph.',
+      renamed: '---\n# Monthly\ncost:  100 # euros\n# Wi-Fi password\n"wifi": hunter2\n---\n\n# Trip\n\nBase paragraph.',
+    },
+    {
+      path: "plan.md", to: "yearly",
+      written: "---\nbudget: 100\nwifi: hunter2\n---\n\n# Plan\n\nBase paragraph.",
+      renamed: "---\nyearly: 100\nwifi: hunter2\n---\n\n# Plan\n\nBase paragraph.",
+    },
+  ];
+  const fileText = (path: string) => readFile(join(temp.rootPath, path), "utf8");
+  // An open document stays mounted while hidden, so read the visible panel.
+  const panel = (page: import("@playwright/test").Page) => page.locator('[data-testid="properties-panel"]:visible');
   const names = (page: import("@playwright/test").Page) =>
-    page.getByTestId("property-key").evaluateAll(inputs => inputs.map(input => (input as HTMLInputElement).value));
+    panel(page).getByTestId("property-key").evaluateAll(inputs => inputs.map(input => (input as HTMLInputElement).value));
   try {
-    await writeWorkspaceFiles(temp, [{path, contents: written}]);
+    await writeWorkspaceFiles(temp, files.map(({path, written}) => ({path, contents: written})));
     desktop = await launchDesktopApp({workspace: temp});
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
-    await waitForWorkspaceFile(desktop.page, workspace.workspaceId, path);
-    await openEngineDoc(desktop.page, path);
-    const name = desktop.page.getByLabel("Property 1 name");
-    await expect(name).toHaveValue("budget");
-    await name.fill("");
-    // One key at a time, as a person types: each letter renames the property.
-    await name.pressSequentially("cost");
-    await expect.poll(fileText, {timeout: 20_000}).toBe(renamed);
-    expect(await names(desktop.page)).toEqual(["cost", "wifi"]);
+    for (const {path, to, renamed} of files) {
+      await waitForWorkspaceFile(desktop.page, workspace.workspaceId, path);
+      await openEngineDoc(desktop.page, path);
+      const name = panel(desktop.page).getByLabel("Property 1 name");
+      await expect(name).toHaveValue("budget");
+      await name.fill("");
+      // One key at a time, as a person types: each letter renames the property.
+      await name.pressSequentially(to);
+      await expect.poll(() => fileText(path), {timeout: 20_000}).toBe(renamed);
+      expect(await names(desktop.page)).toEqual([to, "wifi"]);
+    }
     await quitDesktop(desktop);
 
     desktop = await launchDesktopApp({workspace: temp});
     await openWorkspaceFromFirstRun(desktop.page, temp);
-    await waitForWorkspaceFile(desktop.page, workspace.workspaceId, path);
-    await expect(desktop.page.getByLabel("Property cost value")).toHaveValue("100");
-    expect(await names(desktop.page)).toEqual(["cost", "wifi"]);
-    expect(await fileText()).toBe(renamed);
+    for (const {path, to, renamed} of files) {
+      await waitForWorkspaceFile(desktop.page, workspace.workspaceId, path);
+      await openEngineDoc(desktop.page, path);
+      await expect(panel(desktop.page).getByLabel(`Property ${to} value`)).toHaveValue("100");
+      expect(await names(desktop.page)).toEqual([to, "wifi"]);
+      expect(await fileText(path)).toBe(renamed);
+    }
     await quitDesktop(desktop);
   } finally {await cleanupDesktopWorkspace(desktop, temp);}
 });

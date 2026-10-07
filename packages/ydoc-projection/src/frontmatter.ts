@@ -565,6 +565,8 @@ function preservesYamlValues(before: FrontmatterBlock, after: FrontmatterBlock, 
 
 /** The Y.Doc meta key that holds the frontmatter text a document keeps. */
 export const FRONTMATTER_SOURCE_META_KEY = 'dohcFrontmatterSource'
+/** The Y.Doc meta key that is true when the document's file ends lines with CRLF. */
+export const MARKDOWN_CRLF_META_KEY = 'dohcMarkdownCrlf'
 /**
  * The prefix of the Y.Doc meta keys that hold the item a frontmatter key held
  * when its text was kept, as `client:clock`. One entry per key, so edits to
@@ -641,13 +643,18 @@ export function patchFrontmatter(
       throw new Error(FRONTMATTER_EDIT_REFUSED_MESSAGE)
     }
   }
-  for (const key of remove) delete current[key]
-  for (const [key, value] of values) current[key] = value
   const source = meta.get(FRONTMATTER_SOURCE_META_KEY)
+  // Canonical frontmatter keeps no text and settles in sorted order. A rename
+  // starts from the canonical text, so the renamed key keeps its place.
+  let kept = typeof source === 'string' || renamed.size === 0
+    ? source
+    : frontmatterBlockFor(current, undefined, '', meta.get(MARKDOWN_CRLF_META_KEY) === true ? '\r\n' : '\n')
   const written = writtenFrontmatterKeys(frontmatter, meta)
   // Each entry the kept text renames, and whether its key held that text.
   const moved: [from: string, to: string, held: boolean][] = []
-  let kept = source
+  // Moved keys whose value did not change. Their text reads as the value but
+  // need not be the canonical YAML the requested-value check compares.
+  const asWritten = new Set<string>()
   for (const [from, to] of renamed) {
     const text = typeof kept === 'string' ? keptTextRenamed(kept, from, to) : undefined
     if (text === undefined) continue
@@ -656,9 +663,16 @@ export function patchFrontmatter(
     if (held) written.add(to)
     else written.delete(to)
     moved.push([from, to, held])
+    if (sameFrontmatterValue(values.get(to), current[from])) asWritten.add(to)
   }
+  if (moved.length === 0) kept = source
+  for (const key of remove) delete current[key]
+  for (const [key, value] of values) current[key] = value
   const candidate = frontmatterBlockFor(current, kept, '', '\n', written)
-  assertRequestedValues(candidate, Object.fromEntries(values))
+  // The candidate's own reread already checks that moved values read as before.
+  const requested = Object.fromEntries(values)
+  for (const key of asWritten) delete requested[key]
+  assertRequestedValues(candidate, requested)
   doc.transact(() => {
     if (kept !== source) meta.set(FRONTMATTER_SOURCE_META_KEY, kept)
     for (const key of remove) frontmatter.delete(key)
@@ -922,10 +936,15 @@ export function writeMarkdownFrontmatter(
   const original = readFrontmatterBlock(written)
   const requested = nullPrototypeRecord()
   const unchanged: string[] = []
+  const renamedFrom = new Map([...renamed].map(([from, to]) => [to, from]))
   for (const key of Object.keys(frontmatter)) {
-    if (original && Object.hasOwn(original.value, key)
-      && frontmatterYaml({ [key]: original.value[key] }) === frontmatterYaml({ [key]: frontmatter[key] })
-      && ![...renamed.values()].includes(key)) unchanged.push(key)
+    const from = renamedFrom.get(key)
+    if (from !== undefined) {
+      // A renamed entry keeps its value text, which the candidate's reread checks.
+      if (!original || !Object.hasOwn(original.value, from)
+        || !sameFrontmatterValue(original.value[from], frontmatter[key])) requested[key] = frontmatter[key]
+    } else if (original && Object.hasOwn(original.value, key)
+      && frontmatterYaml({ [key]: original.value[key] }) === frontmatterYaml({ [key]: frontmatter[key] })) unchanged.push(key)
     else requested[key] = frontmatter[key]
   }
   assertRequestedValues(candidate, requested)
