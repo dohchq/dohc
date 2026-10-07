@@ -229,7 +229,7 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
   },
 ];
 
-const slashCommandKey = new PluginKey<number | null>("dohc-slash-command");
+const slashCommandKey = new PluginKey<SlashTrigger | null>("dohc-slash-command");
 
 export function filterSlashCommands(query: string): SlashCommandItem[] {
   const normalized = query.trim().toLowerCase();
@@ -250,14 +250,23 @@ export function findSlashCommandMatch(
   return { slashOffset, query: match[1]?.toLowerCase() ?? "" };
 }
 
-// The trigger the caret is in: its "/" position and the query typed after it.
-function findSlashTrigger(state: EditorState): { from: number; query: string } | null {
+type SlashTrigger = { from: number; query: string; text: string };
+
+// The trigger the caret is in: its "/" position, the query typed after it,
+// and its text from the "/" to the caret as typed.
+function findSlashTrigger(state: EditorState): SlashTrigger | null {
   const selection = state.selection;
   if (!selection.empty) return null;
   const $from = selection.$from;
   if (!$from.parent.isTextblock) return null;
-  const match = findSlashCommandMatch($from.parent.textBetween(0, $from.parentOffset));
-  return match ? { from: $from.start() + match.slashOffset, query: match.query } : null;
+  const textBeforeCursor = $from.parent.textBetween(0, $from.parentOffset);
+  const match = findSlashCommandMatch(textBeforeCursor);
+  if (!match) return null;
+  return {
+    from: $from.start() + match.slashOffset,
+    query: match.query,
+    text: textBeforeCursor.slice(match.slashOffset),
+  };
 }
 
 function readSlashCommandState(
@@ -269,7 +278,7 @@ function readSlashCommandState(
   }
 
   const trigger = findSlashTrigger(view.state);
-  if (!trigger || slashCommandKey.getState(view.state) === trigger.from) {
+  if (!trigger || slashCommandKey.getState(view.state)?.from === trigger.from) {
     return CLOSED_SLASH_COMMAND_STATE;
   }
 
@@ -331,24 +340,25 @@ export function makeSlashCommandPlugin({
     publish(next);
   };
 
-  return new Plugin<number | null>({
+  return new Plugin<SlashTrigger | null>({
     key: slashCommandKey,
-    // The "/" whose menu Escape closed. It stays closed while the caret is in
-    // that trigger; leaving it and coming back, or a new "/", opens the menu.
+    // The trigger whose menu Escape closed. It stays closed while the caret is
+    // in that trigger; leaving it and coming back, or a new "/", opens the menu.
     state: {
       init: () => null,
-      apply(tr, dismissed, oldState, state) {
-        let from: number | null = tr.getMeta(slashCommandKey) ?? null;
-        if (from === null && dismissed !== null) {
-          // Y.js applies a remote edit by replacing the whole document, which
-          // maps the "/" away. It restores the caret, so the "/" keeps its
-          // distance before the caret.
-          const mapped = tr.mapping.mapResult(dismissed);
-          from = mapped.deleted
-            ? state.selection.from - (oldState.selection.from - dismissed)
-            : mapped.pos;
-        }
-        return from !== null && findSlashTrigger(state)?.from === from ? from : null;
+      apply(tr, dismissed, _oldState, state) {
+        if (tr.getMeta(slashCommandKey)) return findSlashTrigger(state);
+        if (!dismissed) return null;
+        const trigger = findSlashTrigger(state);
+        if (!trigger) return null;
+        const mapped = tr.mapping.mapResult(dismissed.from);
+        // Y.js applies a remote edit by replacing the whole document, which
+        // maps the "/" away. Then only the same text before the caret is the
+        // same trigger.
+        const same = mapped.deleted
+          ? trigger.text === dismissed.text
+          : trigger.from === mapped.pos;
+        return same ? trigger : null;
       },
     },
     view(view) {
@@ -398,7 +408,7 @@ export function makeSlashCommandPlugin({
 
         if (event.key === "Escape") {
           event.preventDefault();
-          view.dispatch(view.state.tr.setMeta(slashCommandKey, slashState.from));
+          view.dispatch(view.state.tr.setMeta(slashCommandKey, true));
           view.focus();
           return true;
         }

@@ -234,32 +234,53 @@ describe("Escape on the slash menu", () => {
     editor.destroy();
   });
 
-  it("stays closed through a collaborator's edit above it", () => {
+  it("stays closed through a remote edit elsewhere in the document", () => {
     const { editor, stateRef, press } = makeSlashEditor();
     editor.commands.setContent("<p>Intro</p><p>/he</p>");
     editor.commands.setTextSelection(11);
     expect(stateRef.current).toMatchObject({ open: true, from: 8 });
     press("Escape");
 
-    // As y-tiptap applies a remote edit: replace the whole document, then
-    // restore the caret from its relative position.
-    const { state } = editor.view;
-    const next = state.schema.nodeFromJSON({
-      type: "doc",
-      content: [
-        { type: "paragraph", content: [{ type: "text", text: "Intro, edited" }] },
-        { type: "paragraph", content: [{ type: "text", text: "/he" }] },
-      ],
-    });
-    const tr = state.tr.replace(0, state.doc.content.size, new Slice(next.content, 0, 0));
-    editor.view.dispatch(tr.setSelection(TextSelection.create(tr.doc, 19)));
+    applyRemoteEdit(editor, ["Intro, edited", "/he"], 19);
     expect(stateRef.current.open).toBe(false);
 
     editor.commands.insertContent("a");
     expect(stateRef.current.open).toBe(false);
     editor.destroy();
   });
+
+  it("opens for a different trigger a remote edit puts in its place", () => {
+    const { editor, stateRef, press } = makeSlashEditor();
+    editor.commands.insertContent("/he");
+    press("Escape");
+
+    applyRemoteEdit(editor, ["/xx"], 4);
+    expect(stateRef.current).toMatchObject({ open: true, from: 1, query: "xx" });
+    editor.destroy();
+  });
+
+  it("opens when a remote edit changes the dismissed query", () => {
+    const { editor, stateRef, press } = makeSlashEditor();
+    editor.commands.insertContent("/he");
+    press("Escape");
+
+    applyRemoteEdit(editor, ["/hea"], 5);
+    expect(stateRef.current).toMatchObject({ open: true, from: 1, query: "hea" });
+    editor.destroy();
+  });
 });
+
+// As y-tiptap applies a remote edit: replace the whole document with these
+// paragraphs, then restore the caret from its relative position.
+function applyRemoteEdit(editor: Editor, paragraphs: string[], caret: number): void {
+  const { state } = editor.view;
+  const next = state.schema.nodeFromJSON({
+    type: "doc",
+    content: paragraphs.map((text) => ({ type: "paragraph", content: [{ type: "text", text }] })),
+  });
+  const tr = state.tr.replace(0, state.doc.content.size, new Slice(next.content, 0, 0));
+  editor.view.dispatch(tr.setSelection(TextSelection.create(tr.doc, caret)));
+}
 
 describe("SlashCommandMenu placement anchoring", () => {
   it("top-anchors below-placement menus at the cursor", () => {
