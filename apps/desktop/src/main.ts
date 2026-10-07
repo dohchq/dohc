@@ -5069,7 +5069,12 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       // Start retention even when Off. Never wait for measurement on startup.
       usageLoad = setImmediate(() => {
         usageLoad = undefined;
-        usageStore = createUsageStore({ stateDir, appVersion: app.getVersion(), coverage: RENDERER_USAGE_COVERAGE });
+        try {
+          usageStore = createUsageStore({ stateDir, appVersion: app.getVersion(), coverage: RENDERER_USAGE_COVERAGE });
+        } catch {
+          usageStore = undefined;
+          return;
+        }
         void usageStore.load().catch(() => {});
       });
     },
