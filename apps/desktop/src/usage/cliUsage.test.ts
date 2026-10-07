@@ -22,9 +22,30 @@ describe("socket usage coverage", () => {
       if (pair.door === "cli") expect(pair.status === "covered").toBe(CLI_USAGE_ACTION_IDS.includes(pair.capabilityId as (typeof CLI_USAGE_ACTION_IDS)[number]));
       if (pair.door === "mcp") expect(pair.status === "covered").toBe(
         CLI_USAGE_ACTION_IDS.includes(pair.capabilityId as (typeof CLI_USAGE_ACTION_IDS)[number])
+        && pair.capabilityId !== "file.write"
         && Object.values(CAPABILITIES[pair.capabilityId].mcp).some(value => Array.isArray(value) && value.length > 0));
       if (pair.door === "automation") expect(pair.status).toBe("uncovered");
     }
+  });
+
+  it("counts CLI file writes but leaves multiplexed MCP file writes unmeasured", () => {
+    const args = { requestId: "r", files: [{ path: "a.txt", contentBase64: "eA==" }] };
+    const result = { ok: true as const, written: ["a.txt"] };
+    expect(cliUsageInvocation(request("fileWrite", args, "mcp"), result)).toBeNull();
+    for (const door of ["cli", undefined] as const) {
+      expect(cliUsageInvocation(request("fileWrite", args, door), result))
+        .toEqual({ capabilityId: "file.write", door: "cli" });
+    }
+    const rows = queryUsage({ version: 1, enabled: true, cleanExit: true, counts: [],
+      days: [{ day: "2026-10-08", appVersions: ["0.1.0"], complete: true }],
+      coverage: [{ appVersion: "0.1.0", pairs: DESKTOP_USAGE_COVERAGE }] },
+    { from: "2026-10-08", through: "2026-10-08", pairs: [
+      { capabilityId: "file.write", door: "cli" }, { capabilityId: "file.write", door: "mcp" },
+    ] });
+    expect(rows).toEqual([
+      expect.objectContaining({ door: "cli", total: 0, usedDays: 0, coveredDays: 1 }),
+      expect.objectContaining({ door: "mcp", total: null, usedDays: null, coveredDays: 0 }),
+    ]);
   });
 
   it("keeps direct-disk MCP tools, reads, missing MCP commands and automation unknown", () => {

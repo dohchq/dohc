@@ -14,9 +14,12 @@ const reads = new Set<CapabilityId>(["chat.show", "chat.search", "dataset.operat
 export const CLI_USAGE_ACTION_IDS = USAGE_ACTION_IDS.filter(id =>
   !reads.has(id) && Object.values(CLI_CAPABILITIES).some(ids => (ids as readonly CapabilityId[]).includes(id)));
 const covered = new Set<CapabilityId>(CLI_USAGE_ACTION_IDS);
+// MCP also uses fileWrite for app.create and data.import, so its file.write
+// count cannot distinguish those capabilities.
+const mcpCovered = new Set<CapabilityId>(CLI_USAGE_ACTION_IDS.filter(id => id !== "file.write"));
 export const DESKTOP_USAGE_COVERAGE = RENDERER_USAGE_COVERAGE.map(pair => ({ ...pair,
   status: (pair.door === "cli" && covered.has(pair.capabilityId)
-    || pair.door === "mcp" && covered.has(pair.capabilityId)
+    || pair.door === "mcp" && mcpCovered.has(pair.capabilityId)
       && Object.values(CAPABILITIES[pair.capabilityId].mcp).some(tools => Array.isArray(tools) && tools.length > 0))
     ? "covered" as const : pair.status,
 }));
@@ -29,6 +32,7 @@ export function cliUsageInvocation(request: CliRequest, result: CliResultByVerb[
     : request.verb === "ownerAppResponses" ? APP_RESPONSE_CAPABILITIES[request.args.request.action]
     : CLI_CAPABILITIES[request.verb][0];
   if (!covered.has(id)) return null;
+  if (request.door === "mcp" && !mcpCovered.has(id)) return null;
   if ("ok" in result && !result.ok) return null;
   if ("replayed" in result && result.replayed) return null;
   if ("kind" in result && (result.kind === "refused" || result.kind === "partial")) return null;

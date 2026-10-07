@@ -501,6 +501,7 @@ describe("CLI socket server", () => {
     const results = [];
     for (const door of ["cli", "mcp"] as const) {
       results.push(await rawRequest({ ...request, door }));
+      expect(recordSuccess).toHaveBeenCalledTimes(1);
       expect(await rawRequest({ ...request, door, token: "0".repeat(64) })).toMatchObject({ ok: false, error: "dohc: CLI authentication failed" });
       registryWorkspace.readOnly = true;
       expect(await rawRequest({ ...request, door })).toMatchObject({ ok: false, error: "dohc: This workspace is read-only. Write in the owning workspace." });
@@ -512,7 +513,7 @@ describe("CLI socket server", () => {
     expect(writeFiles).toHaveBeenCalledTimes(2);
     expect(writeFiles.mock.calls[0]).toEqual(writeFiles.mock.calls[1]);
     expect(recordSuccess.mock.calls).toEqual([
-      [{ capabilityId: "file.write", door: "cli" }], [{ capabilityId: "file.write", door: "mcp" }],
+      [{ capabilityId: "file.write", door: "cli" }],
     ]);
   });
 
