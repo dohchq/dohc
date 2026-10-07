@@ -74,12 +74,12 @@ const budgetState=new BigInt64Array(new SharedArrayBuffer(BUDGET_STATE_SLOTS*8))
 const [APP_CODE,DATASET_CHECK]=[1n,2n];
 const budgetWatchSource=`
 const {workerData}=require("node:worker_threads");
-const {openSync,closeSync}=require("node:fs");
+const {writeFile}=require("node:fs/promises");
 const {join}=require("node:path");
 const CPU_BUDGET_MARKER_PREFIX=${JSON.stringify(CPU_BUDGET_MARKER_PREFIX)};
 const budgetMarkerName=(${budgetMarkerName.toString()});
 (${watchBudget.toString()})(new BigInt64Array(workerData.state),()=>{const used=process.cpuUsage();return BigInt(used.user+used.system);},
-  (kind,budgetMs)=>{closeSync(openSync(join(workerData.directory,budgetMarkerName(kind,budgetMs)),"wx"));return Promise.resolve();},()=>process.kill(process.pid,"SIGKILL"),50,250);`;
+  (kind,budgetMs)=>writeFile(join(workerData.directory,budgetMarkerName(kind,budgetMs)),"",{flag:"wx"}),()=>process.kill(process.pid,"SIGKILL"),50,250);`;
 let budgetWatch:Worker|undefined;
 let exiting=false;
 process.on("exit",()=>{exiting=true;});

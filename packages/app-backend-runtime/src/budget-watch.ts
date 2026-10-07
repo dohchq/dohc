@@ -17,6 +17,7 @@ export function budgetMarkerName(kind:CpuBudgetKind, budgetMs:number):string {
 export function parseBudgetMarkerName(name:string):{kind:CpuBudgetKind;budgetMs?:number}|undefined {
   if(!name.startsWith(CPU_BUDGET_MARKER_PREFIX)) return undefined;
   const suffix=name.slice(CPU_BUDGET_MARKER_PREFIX.length), separator=suffix.indexOf("-");
+  if(separator===-1) return undefined;
   const kind=suffix.slice(0,separator);
   if(kind!=="app" && kind!=="checks") return undefined;
   const budgetMs=Number(suffix.slice(separator+1));
@@ -36,9 +37,9 @@ export function disarmBudget(state:BigInt64Array, section:bigint, cpuMicros:bigi
 
 /**
  * Runs on the watch thread, which keeps running while SQLite blocks the main
- * thread. It condemns a step over its budget, then ends the worker. The writer
- * creates the marker synchronously before returning a promise. The kill waits
- * for that promise at most `graceMs`. This function is
+ * thread. It condemns a step over its budget, then ends the worker. Marker
+ * creation is asynchronous and best effort: the kill waits at most `graceMs`,
+ * so a stalled disk cannot keep app code running. This function is
  * sent to the thread as source text, so it uses only its parameters and globals.
  */
 export function watchBudget(state:BigInt64Array, cpuMicros:()=>bigint, writeMarker:(kind:CpuBudgetKind,budgetMs:number)=>Promise<unknown>,
@@ -52,12 +53,10 @@ export function watchBudget(state:BigInt64Array, cpuMicros:()=>bigint, writeMark
     // section is unchanged the values read above are this step's.
     if(Atomics.compareExchange(state,0,section,-1n)!==section) return;
     clearInterval(timer);
-    let marker:Promise<unknown>;
-    try {marker=writeMarker(kind===1n ? "app" : "checks",Number(budget/1000n));}
-    catch {kill();return;}
     const end=setTimeout(kill,graceMs);
     const finish=()=>{clearTimeout(end);kill();};
-    marker.then(finish,finish);
+    try {writeMarker(kind===1n ? "app" : "checks",Number(budget/1000n)).then(finish,finish);}
+    catch {finish();}
   },pollMs);
   return ()=>clearInterval(timer);
 }
