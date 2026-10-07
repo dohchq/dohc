@@ -76,7 +76,7 @@ const budgetWatchSource=`
 const {workerData}=require("node:worker_threads");
 const {writeFile}=require("node:fs/promises");
 (${watchBudget.toString()})(new BigInt64Array(workerData.state),()=>{const used=process.cpuUsage();return BigInt(used.user+used.system);},
-  reason=>writeFile(workerData.marker,reason),()=>process.kill(process.pid,"SIGKILL"),50,250);`;
+  reason=>writeFile(workerData.marker+"-"+reason.replace(" ","-"),"",{flag:"wx"}),()=>process.kill(process.pid,"SIGKILL"),50,250);`;
 let budgetWatch:Worker|undefined;
 let exiting=false;
 process.on("exit",()=>{exiting=true;});

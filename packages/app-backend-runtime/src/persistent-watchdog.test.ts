@@ -114,7 +114,7 @@ it("says the app's code ran too long when the CPU budget watch ended the worker"
   const worker = await open((command, send) => {
     send({ id: command.id, progress: "running the Collection action" });
     // The worker's budget watch leaves its marker, then the process ends.
-    setTimeout(() => void writeFile(join(roots.at(-1)!, "cpu-budget-exceeded"), "app 5000").then(end), 10);
+    void writeFile(join(roots.at(-1)!, "cpu-budget-exceeded-app-5000"), "").then(end);
   }, { silenceMs: 60_000, commandCapMs: 60_000 }, (exit) => { end = exit; });
   await expect(
     worker.prepare({
@@ -130,4 +130,25 @@ it("says the app's code ran too long when the CPU budget watch ended the worker"
     code: "worker_budget",
     message: "The app's code ran too long: it used more than 5 s of CPU time while running the Collection action. Try again.",
   });
+});
+
+it.each([
+  {marker:"cpu-budget-exceeded",step:"running the Collection action",message:"The app's code ran too long while running the Collection action. Try again."},
+  {marker:"cpu-budget-exceeded-app-1000",step:"running the Collection action",message:"The app's code ran too long: it used more than 1 s of CPU time while running the Collection action. Try again."},
+  {marker:"cpu-budget-exceeded-checks-9000",step:"checking the tables",message:"dohc's checks of this Collection ran too long: they used more than 9 s of CPU time while checking the tables. Try again."},
+  {marker:"cpu-budget-exceeded-app-NaN",step:"running the Collection action",message:"The app's code ran too long while running the Collection action. Try again."},
+  {marker:"cpu-budget-exceeded-app-Infinity",step:"running the Collection action",message:"The app's code ran too long while running the Collection action. Try again."},
+  {marker:"cpu-budget-exceeded-app-1e309",step:"running the Collection action",message:"The app's code ran too long while running the Collection action. Try again."},
+  {marker:"cpu-budget-exceeded-checks-NaN",step:"checking the tables",message:"dohc's checks of this Collection ran too long while checking the tables. Try again."},
+])("reads an empty budget marker without showing a non-finite duration: $marker", async ({marker,step,message}) => {
+  let end!: () => void;
+  const worker = await open((command, send) => {
+    send({ id: command.id, progress: step });
+    void writeFile(join(roots.at(-1)!, marker), "").then(end);
+  }, { silenceMs: 60_000, commandCapMs: 60_000 }, exit => { end = exit; });
+  await expect(worker.discard("proposal")).rejects.toMatchObject({
+    code: "worker_budget",
+    message,
+  });
+  await worker.close();
 });
