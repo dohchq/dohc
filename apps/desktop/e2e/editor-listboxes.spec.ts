@@ -160,7 +160,7 @@ test("the page-link and emoji pickers leave keys to the IME while it composes", 
     await editor.locator("p").first().click();
     await page.keyboard.press("End");
     await page.keyboard.press("Enter");
-    const line = editor.locator("p").last();
+    const line = editor.locator("p").nth(1);
 
     const cdp = await page.context().newCDPSession(page);
     const compose = (text: string) =>
