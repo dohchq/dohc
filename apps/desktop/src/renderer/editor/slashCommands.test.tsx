@@ -4,8 +4,9 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Editor, Extension } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
-import { Slice } from "@tiptap/pm/model";
-import { TextSelection } from "@tiptap/pm/state";
+import { Collaboration } from "@tiptap/extension-collaboration";
+import * as yTiptap from "@tiptap/y-tiptap";
+import * as Y from "yjs";
 import {
   CLOSED_SLASH_COMMAND_STATE,
   makeSlashCommandPlugin,
@@ -156,13 +157,15 @@ describe("slash menu render stability", () => {
   });
 });
 
-// The plugin alone, on a plain ref, as blockExit.test wires it.
-function makeSlashEditor() {
+// The plugin alone, on a plain ref, as blockExit.test wires it. With a Y.Doc,
+// the editor is bound to it as MarkdownEditor binds a shared document.
+function makeSlashEditor(ydoc?: Y.Doc) {
   const stateRef: { current: SlashCommandState } = { current: CLOSED_SLASH_COMMAND_STATE };
   const editor = new Editor({
     element: document.createElement("div"),
     extensions: [
-      StarterKit.configure({ trailingNode: false }),
+      StarterKit.configure({ trailingNode: false, undoRedo: false }),
+      ...(ydoc ? [Collaboration.configure({ document: ydoc })] : []),
       Extension.create({
         name: "dohcTestSlash",
         addProseMirrorPlugins() {
@@ -173,12 +176,13 @@ function makeSlashEditor() {
                 stateRef.current = typeof next === "function" ? next(stateRef.current) : next;
               },
               runCommandRef: { current: () => {} },
+              yTiptap: ydoc ? yTiptap : null,
             }),
           ];
         },
       }),
     ],
-    content: "<p></p>",
+    ...(ydoc ? {} : { content: "<p></p>" }),
   });
   const press = (key: string): KeyboardEvent => {
     const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
@@ -234,14 +238,42 @@ describe("Escape on the slash menu", () => {
     editor.destroy();
   });
 
-  it("stays closed through a remote edit elsewhere in the document", () => {
-    const { editor, stateRef, press } = makeSlashEditor();
+});
+
+// A collaborator's edits arrive through Y.js, which replaces the whole
+// document in the editor and restores the caret.
+describe("Escape on the slash menu in a shared document", () => {
+  const docs: Y.Doc[] = [];
+  afterEach(() => {
+    for (const doc of docs.splice(0)) doc.destroy();
+  });
+
+  // The editor on one Y.Doc, and a collaborator's Y.Doc synced both ways.
+  function makeSharedSlashEditor() {
+    const ydoc = new Y.Doc();
+    const peer = new Y.Doc();
+    docs.push(ydoc, peer);
+    const relay = (from: Y.Doc, to: Y.Doc) =>
+      from.on("update", (update: Uint8Array, origin: unknown) => {
+        if (origin !== "relay") Y.applyUpdate(to, update, "relay");
+      });
+    relay(ydoc, peer);
+    relay(peer, ydoc);
+    const peerText = (paragraph: number) =>
+      (peer.getXmlFragment("default").get(paragraph) as Y.XmlElement).get(0) as Y.XmlText;
+    return { ...makeSlashEditor(ydoc), peerText };
+  }
+
+  it("stays closed through a collaborator's edit elsewhere", () => {
+    const { editor, stateRef, press, peerText } = makeSharedSlashEditor();
     editor.commands.setContent("<p>Intro</p><p>/he</p>");
     editor.commands.setTextSelection(11);
     expect(stateRef.current).toMatchObject({ open: true, from: 8 });
     press("Escape");
 
-    applyRemoteEdit(editor, ["Intro, edited", "/he"], 19);
+    peerText(0).insert(5, ", edited");
+    expect(editor.state.doc.textContent).toBe("Intro, edited/he");
+    expect(editor.state.selection.from).toBe(19);
     expect(stateRef.current.open).toBe(false);
 
     editor.commands.insertContent("a");
@@ -249,38 +281,45 @@ describe("Escape on the slash menu", () => {
     editor.destroy();
   });
 
-  it("opens for a different trigger a remote edit puts in its place", () => {
-    const { editor, stateRef, press } = makeSlashEditor();
+  it("stays closed when a collaborator edits the dismissed query", () => {
+    const { editor, stateRef, press, peerText } = makeSharedSlashEditor();
     editor.commands.insertContent("/he");
     press("Escape");
 
-    applyRemoteEdit(editor, ["/xx"], 4);
+    peerText(0).insert(2, "x");
+    expect(editor.state.doc.textContent).toBe("/hxe");
+    expect(editor.state.selection.from).toBe(5);
+    expect(stateRef.current.open).toBe(false);
+    editor.destroy();
+  });
+
+  it("opens for a different trigger a collaborator puts in its place", () => {
+    const { editor, stateRef, press, peerText } = makeSharedSlashEditor();
+    editor.commands.insertContent("/he");
+    press("Escape");
+
+    const text = peerText(0);
+    text.doc!.transact(() => {
+      text.delete(0, 3);
+      text.insert(0, "/xx");
+    });
+    expect(editor.state.doc.textContent).toBe("/xx");
     expect(stateRef.current).toMatchObject({ open: true, from: 1, query: "xx" });
     editor.destroy();
   });
 
-  it("opens when a remote edit changes the dismissed query", () => {
-    const { editor, stateRef, press } = makeSlashEditor();
-    editor.commands.insertContent("/he");
+  it("opens for an identical trigger when a collaborator deletes the dismissed one", () => {
+    const { editor, stateRef, press, peerText } = makeSharedSlashEditor();
+    editor.commands.insertContent("/he /he");
+    expect(stateRef.current).toMatchObject({ open: true, from: 5 });
     press("Escape");
 
-    applyRemoteEdit(editor, ["/hea"], 5);
-    expect(stateRef.current).toMatchObject({ open: true, from: 1, query: "hea" });
+    peerText(0).delete(3, 4);
+    expect(editor.state.doc.textContent).toBe("/he");
+    expect(stateRef.current).toMatchObject({ open: true, from: 1, query: "he" });
     editor.destroy();
   });
 });
-
-// As y-tiptap applies a remote edit: replace the whole document with these
-// paragraphs, then restore the caret from its relative position.
-function applyRemoteEdit(editor: Editor, paragraphs: string[], caret: number): void {
-  const { state } = editor.view;
-  const next = state.schema.nodeFromJSON({
-    type: "doc",
-    content: paragraphs.map((text) => ({ type: "paragraph", content: [{ type: "text", text }] })),
-  });
-  const tr = state.tr.replace(0, state.doc.content.size, new Slice(next.content, 0, 0));
-  editor.view.dispatch(tr.setSelection(TextSelection.create(tr.doc, caret)));
-}
 
 describe("SlashCommandMenu placement anchoring", () => {
   it("top-anchors below-placement menus at the cursor", () => {
