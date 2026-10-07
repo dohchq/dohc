@@ -1806,17 +1806,17 @@ fn imported_activation_publication(foreign_baseline: bool, preserve_baseline: bo
         .origin_seq
         + 1;
     let (scratch, path, mut store) = open_store();
-    let (binary, text): (Vec<Vec<u8>>, Vec<(String, i64, String)>) = source
+    let (binary, text) = source
         .store
         .read_with(|conn| {
-            let binary = conn
+            let binary: Vec<Vec<u8>> = conn
                 .prepare("SELECT bytes FROM binary_blobs")
                 .unwrap()
                 .query_map([], |r| r.get(0))
                 .unwrap()
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap();
-            let text = conn
+            let text: Vec<(String, i64, String)> = conn
                 .prepare("SELECT sha256,byte_length,text FROM blobs")
                 .unwrap()
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))

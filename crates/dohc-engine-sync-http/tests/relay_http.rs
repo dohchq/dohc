@@ -1195,6 +1195,7 @@ fn expected_relay_error(code: &str) -> RelayError {
         "presence_capacity" => RelayError::PresenceCapacity,
         "quota_exceeded" => RelayError::QuotaExceeded,
         "self_share" => RelayError::SelfShare,
+        "settlement_proof_budget" => RelayError::SettlementProofBudget,
         "share_op_rejected" => RelayError::ShareOperationRejected,
         "share_read_only" => RelayError::ShareReadOnly,
         "stream_identity_mismatch" => RelayError::StreamIdentityMismatch,
