@@ -557,6 +557,64 @@ mod tests {
     }
 
     #[test]
+    fn singleton_budget_refusal_pushes_the_unavailable_fallback_and_later_operations() {
+        let (_scratch, _path, mut store) = open_store();
+        let original = source(&mut store);
+        let mut proof = proved(original.clone());
+        proof.relay_seq = None;
+        proof.settlement_admission = None;
+        proof.admitted_author_snapshot = None;
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE replication_log SET payload_json=?1 WHERE workspace_id='ws' AND origin_id=?2 AND origin_seq=?3",
+                params![proof.payload.to_string(),proof.origin_id,proof.origin_seq]).map_err(SyncError::persist)?;
+            crate::journal_local_op_in_tx(tx, "ws", "probe", &json!({"later":true}), 11)?;
+            Ok::<_,SyncError>(())
+        }).unwrap();
+        let client =
+            crate::RelaySyncClient::new(crate::tests::FakeRelay::refusing_oversized_proofs());
+        assert!(matches!(
+            client.push_workspace(&mut store, "ws", &NoFaults, &NoLiveLeases, 20, 0),
+            Ok(crate::SyncPassOutcome::Complete { .. })
+        ));
+        assert_eq!(
+            read_pushed_seq(&store, "ws", &original.origin_id).unwrap(),
+            original.origin_seq + 2
+        );
+        let requests = client.transport().pushed_requests();
+        let served: Vec<_> = requests
+            .iter()
+            .filter(|request| {
+                request.ops.len() == 1
+                    || !request
+                        .ops
+                        .iter()
+                        .any(|op| op.payload.get("settlementReference").is_some())
+            })
+            .flat_map(|request| &request.ops)
+            .collect();
+        assert!(
+            served
+                .iter()
+                .any(|op| op.op_kind == "probe" && op.payload["later"] == true)
+        );
+        let fallback = served
+            .iter()
+            .find(|op| op.payload.get("attributionUnavailable").is_some())
+            .unwrap();
+        assert_eq!(
+            fallback.payload["attributionUnavailable"]["settlementId"],
+            "settlement"
+        );
+        assert_eq!(
+            fallback.payload["metadata"]["summary"],
+            "Attribution unavailable"
+        );
+        assert!(fallback.payload.get("authors").is_none());
+        assert!(fallback.payload.get("settlementReference").is_none());
+        assert_eq!(crate::list_refusal_notices(&store, "ws").unwrap().len(), 1);
+    }
+
+    #[test]
     fn acknowledged_refusal_journals_one_marked_fallback_and_does_not_wedge_the_origin() {
         let (_scratch, _path, mut store) = open_store();
         let original = source(&mut store);

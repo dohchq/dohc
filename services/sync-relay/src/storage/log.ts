@@ -58,7 +58,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
          WHERE workspace_id = ? AND origin_id = ?`,
       );
       const existingStmt = storage.db.prepare(
-        `SELECT op_kind, payload_json, recorded_at_ms
+        `SELECT op_kind, payload_json, recorded_at_ms, settlement_admission_json
          FROM sync_relay_log
          WHERE workspace_id = ? AND origin_id = ? AND origin_seq = ?`,
       );
@@ -79,6 +79,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
             existing &&
             existing.op_kind === op.opKind &&
             existing.payload_json === op.payloadJson &&
+            existing.settlement_admission_json === (op.settlementAdmission === undefined ? null : JSON.stringify(op.settlementAdmission)) &&
             Number(existing.recorded_at_ms) === op.recordedAtMs
           ) {
             skipped += 1;
@@ -300,3 +301,16 @@ export function fetchLogCoordinate(storage: StorageContext, input: {
       .get(input.workspaceId, input.originId, input.originSeq);
     return row ? rowToLogRow(row) : null;
   }
+
+export function hasRefusedSettlement(storage: StorageContext, input: {
+  workspaceId: string; originId: string; originSeq: number;
+  settlementId: string; momentId: string; reason: string;
+}): boolean {
+  return storage.db.prepare(`SELECT 1 FROM sync_relay_log
+    WHERE workspace_id=? AND origin_id=? AND origin_seq<? AND op_kind='moment.append'
+      AND json_extract(settlement_admission_json,'$.status')='refused'
+      AND json_extract(settlement_admission_json,'$.settlementId')=?
+      AND json_extract(settlement_admission_json,'$.reason')=?
+      AND json_extract(payload_json,'$.momentId')=? LIMIT 1`)
+    .get(input.workspaceId,input.originId,input.originSeq,input.settlementId,input.reason,input.momentId) !== undefined;
+}

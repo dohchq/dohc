@@ -1293,6 +1293,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return logStorage.fetchLogPage(this, input);
   }
 
+  hasRefusedSettlement(input: Parameters<SyncRelayStorage["hasRefusedSettlement"]>[0]): boolean {
+    return logStorage.hasRefusedSettlement(this, input);
+  }
+
   readCurrentFileState(input: {
     workspaceId: string;
     versionId: string;

@@ -45,6 +45,7 @@ export function createShareReadQueries(
     | "objectCurrentPath"
     | "objectIdAtPath"
     | "fetchLogPage"
+    | "hasRefusedSettlement"
     | "fetchLogPageDescending"
     | "listObjectMomentLogRowsByBlob"
     | "listVersionCreateLogRowsByBlob"
@@ -256,7 +257,9 @@ export function createShareReadQueries(
           if (mark && typeof mark === "object" && !Array.isArray(mark)) {
             const unavailable = mark as Record<string, unknown>;
             if (typeof unavailable.settlementId === "string" && unavailable.settlementId.length > 0 && unavailable.settlementId.length <= 512 &&
-              typeof unavailable.reason === "string" && unavailable.reason.length > 0 && unavailable.reason.length <= 4096) {
+              typeof unavailable.reason === "string" && unavailable.reason.length > 0 && unavailable.reason.length <= 4096 &&
+              typeof original.momentId === "string" && storage.hasRefusedSettlement({workspaceId,originId:row.originId,
+                originSeq:row.originSeq,momentId:original.momentId,settlementId:unavailable.settlementId,reason:unavailable.reason})) {
               (payload as Record<string, unknown>).metadata = { origin: "sync", summary: "Attribution unavailable" };
             }
           }

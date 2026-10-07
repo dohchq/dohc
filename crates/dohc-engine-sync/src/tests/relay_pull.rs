@@ -1375,6 +1375,7 @@ fn relay_pull_recovers_only_a_diverged_local_origin() {
                 .expect("seed imported coordinate");
         }
         let client = RelaySyncClient::new(FakeRelay {
+            refuse_oversized_proofs: false,
             push_budget_limit: None,
             pushes: Mutex::new(Vec::new()),
             pull: Mutex::new(Some(PullResponse {
@@ -1527,6 +1528,7 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
         json!({"reactionId":"r","messageId":"m","threadId":"t","emoji":"👍","authorId":"u","authorKind":"human","authorDisplayName":"U","atMs":10,"state":"added"}),
     );
     let fake = FakeRelay {
+        refuse_oversized_proofs: false,
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
@@ -1721,6 +1723,7 @@ fn retained_scene_lineage_does_not_wedge_a_later_peer_delete() {
     );
     let later = envelope("scene-delete-peer", 1, "workspace.init", json!({}));
     let client = RelaySyncClient::new(FakeRelay {
+        refuse_oversized_proofs: false,
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
@@ -1974,6 +1977,7 @@ fn pull_rejects_op_for_foreign_workspace() {
         relay_seq: Some(0),
     };
     let fake = FakeRelay {
+        refuse_oversized_proofs: false,
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
@@ -2862,6 +2866,7 @@ fn pull_first_enrollment_does_not_echo_the_imported_moment_on_the_next_push() {
         })
         .expect("hydrate the incoming blob");
     let client = RelaySyncClient::new(FakeRelay {
+        refuse_oversized_proofs: false,
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
@@ -3551,6 +3556,7 @@ fn relay_pull_reports_conflicts_opened_by_a_divergent_moment_append() {
         }),
     );
     let client = RelaySyncClient::new(FakeRelay {
+        refuse_oversized_proofs: false,
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
@@ -3670,6 +3676,7 @@ fn relay_retry_surfaces_refusal_acked_before_later_error() {
         })
         .expect("install later apply failure");
     let client = RelaySyncClient::new(FakeRelay {
+        refuse_oversized_proofs: false,
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
@@ -3763,6 +3770,7 @@ fn pull_keeps_a_genuine_origin_gap_hard() {
         version_create_with_shipped_snapshots("gapped-peer", "must-not-apply", Vec::new());
     gap.origin_seq = 1;
     let client = RelaySyncClient::new(FakeRelay {
+        refuse_oversized_proofs: false,
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
@@ -3868,6 +3876,7 @@ fn pull_reaches_later_cross_origin_work_before_retrying_a_deferred_origin() {
         version_create_with_shipped_snapshots("later-peer", "later-version", Vec::new());
     later.recorded_at_ms = 24;
     let client = RelaySyncClient::new(FakeRelay {
+        refuse_oversized_proofs: false,
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
@@ -3988,6 +3997,7 @@ fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
         })
         .expect("install later apply failure");
     let client = RelaySyncClient::new(FakeRelay {
+        refuse_oversized_proofs: false,
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
@@ -4062,6 +4072,7 @@ fn committed_pull_cursor_retains_persisted_refusals() {
     let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     let client = RelaySyncClient::new(FakeRelay {
+        refuse_oversized_proofs: false,
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
@@ -4170,6 +4181,7 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
     ));
 
     let first_client = RelaySyncClient::new(FakeRelay {
+        refuse_oversized_proofs: false,
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
@@ -4278,6 +4290,7 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
     );
 
     let second_client = RelaySyncClient::new(FakeRelay {
+        refuse_oversized_proofs: false,
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
@@ -4637,6 +4650,7 @@ fn relay_pull_surfaces_refusal_reason_to_the_caller() {
     let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     let client = RelaySyncClient::new(FakeRelay {
+        refuse_oversized_proofs: false,
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
@@ -4718,6 +4732,7 @@ fn coordinate_divergence_still_stops_a_pass_after_an_acked_refusal() {
     let mut divergent = first.clone();
     divergent.payload = json!({"tampered": true});
     let client = RelaySyncClient::new(FakeRelay {
+        refuse_oversized_proofs: false,
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {

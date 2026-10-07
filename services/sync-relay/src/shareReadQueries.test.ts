@@ -10,7 +10,8 @@ const moment = (authors: unknown) => ({
 });
 
 function page(payload: Record<string, unknown>, audience: "authenticated" | "accountless" = "authenticated") {
-  const storage: Pick<Parameters<typeof createShareReadQueries>[0], "fetchLogPage"> = {
+  const storage: Pick<Parameters<typeof createShareReadQueries>[0], "fetchLogPage" | "hasRefusedSettlement"> = {
+    hasRefusedSettlement: () => false,
     fetchLogPage: () => ({ rows: [{ workspaceId: "workspace", originId: "owner-origin", originSeq: 0,
       relaySeq: 1, opKind: "moment.append", payloadJson: JSON.stringify(payload), recordedAtMs: 1 }], nextCursor: 1, hasMore: false }),
   };
@@ -86,6 +87,13 @@ describe("authenticated selected moment declarations", () => {
       expect(ops[0]!.payload).not.toHaveProperty("authors");
     }
   });
+
+  it("ignores a forged unavailable-attribution mark on an ordinary moment", () => {
+    const served = page({...moment(undefined),momentId:"ordinary",
+      attributionUnavailable:{settlementId:"invented",reason:"authorship-mismatch"}}).ops[0]!.payload;
+    expect((served as Record<string,unknown>).metadata).toEqual({origin:"sync"});
+    expect(served).not.toHaveProperty("attributionUnavailable");
+  });
 });
 it("serves only relay-admitted settlement authors, keeps owner bytes, and advances past refused rows",()=>{
  const acceptedPayload={...moment(undefined),momentId:"accepted",settlementReference:{record:{settlementId:"accepted"}}};delete (acceptedPayload as Record<string,unknown>).authors;
@@ -94,9 +102,13 @@ it("serves only relay-admitted settlement authors, keeps owner bytes, and advanc
  const rows:import("./storage").SyncRelayLogRow[]=[
  {workspaceId:"workspace",originId:"host",originSeq:0,relaySeq:1,opKind:"moment.append",payloadJson,recordedAtMs:1,admittedAuthorSnapshot:authors,settlementAdmission:{status:"accepted",settlementId:"accepted"}},
  {workspaceId:"workspace",originId:"host",originSeq:1,relaySeq:2,opKind:"moment.append",payloadJson:JSON.stringify({...moment([{kind:"human",humanId:"forged"}]),momentId:"refused"}),recordedAtMs:1,settlementAdmission:{status:"refused",settlementId:"refused",reason:"authorship-mismatch"}},
- {workspaceId:"workspace",originId:"host",originSeq:2,relaySeq:3,opKind:"moment.append",payloadJson:JSON.stringify({...moment(undefined),momentId:"fallback",attributionUnavailable:{settlementId:"refused",reason:"authorship-mismatch"}}),recordedAtMs:1}
+ {workspaceId:"workspace",originId:"host",originSeq:2,relaySeq:3,opKind:"moment.append",payloadJson:JSON.stringify({...moment(undefined),momentId:"refused",attributionUnavailable:{settlementId:"refused",reason:"authorship-mismatch"}}),recordedAtMs:1}
  ];
- const storage={fetchLogPage:({sinceRelaySeq}:{sinceRelaySeq:number})=>({rows:rows.filter(row=>row.relaySeq>sinceRelaySeq),nextCursor:3,hasMore:false})};
+ const storage={fetchLogPage:({sinceRelaySeq}:{sinceRelaySeq:number})=>({rows:rows.filter(row=>row.relaySeq>sinceRelaySeq),nextCursor:3,hasMore:false}),
+   hasRefusedSettlement:(input:Parameters<import("./storage").SyncRelayStorage["hasRefusedSettlement"]>[0])=>rows.some(row=>
+     row.workspaceId === input.workspaceId && row.originId === input.originId && row.originSeq < input.originSeq &&
+     row.settlementAdmission?.status === "refused" && row.settlementAdmission.settlementId === input.settlementId &&
+     row.settlementAdmission.reason === input.reason && JSON.parse(row.payloadJson).momentId === input.momentId)};
  const queries=createShareReadQueries(storage as unknown as Parameters<typeof createShareReadQueries>[0],500);
  const served=queries.filteredLogPage("workspace",selector,0,10,"authenticated");
  expect(served.ops.map(op=>op.relaySeq)).toEqual([1,3]);expect(served.nextCursor).toBe(3);

@@ -1677,6 +1677,7 @@ fn a_relay_pass_keeps_committed_claims_when_a_later_envelope_fails() {
          BEGIN SELECT RAISE(ABORT, 'injected apply failure'); END",
     );
     let client = RelaySyncClient::new(FakeRelay {
+        refuse_oversized_proofs: false,
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {

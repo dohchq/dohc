@@ -71,6 +71,7 @@ import { stableJsonStringify } from "../canonicalJson.js";
 import { initialAcceptedHistoryDigest } from "../liveAcceptedHistory.js";
 import { RestoreHistoryBudget } from "./liveAcceptedHistory.js";
 import { liveValidation } from "../liveValidation.js";
+import { createShareReadQueries } from "../shareReadQueries.js";
 const hash = (value: Uint8Array | string) =>
   createHash("sha256").update(value).digest("hex");
 const policy = {
@@ -301,6 +302,19 @@ it("authenticates full accepted state and publishes exact journal contributors t
     f.close();
   }
 });
+it("refuses a changed retry of an accepted proof after stripping its client authors", async () => {
+  const f = registered({deployment:true});
+  try {
+    const first = publication(f,"accepted-retry");
+    await prepare(f,[first.op]);
+    append(f,[first.op]);
+    const changed = {...first.op,payloadJson:stableJsonStringify({...first.payload,authors:[]})};
+    await prepare(f,[changed]);
+    expect(()=>append(f,[changed])).toThrow(/already exists with different content/);
+    expect(f.storage.fetchLogCoordinate({workspaceId:"workspace",originId:"proof",originSeq:0})?.settlementAdmission)
+      .toEqual({status:"accepted",settlementId:first.record.settlementId});
+  } finally {f.close();}
+});
 it.each([
   "before",
   "state",
@@ -412,7 +426,7 @@ it("exhausts the shared per-push budget retryably without consuming a coordinate
   try {
     const first = publication(f, "first");
     await expect(
-      prepare(f, [first.op], new RestoreHistoryBudget(1, 100)),
+      prepare(f, [first.op, {originSeq:1,opKind:"opaque",payloadJson:"{}",recordedAtMs:1}], new RestoreHistoryBudget(1, 100)),
     ).rejects.toMatchObject({ code: "settlement_proof_budget" });
     expect(f.storage.maxOriginSeq("workspace", "proof")).toBe(-1);
   } finally {
@@ -522,6 +536,58 @@ it("rejects altered full content with the same CRDT clocks", async () => {
   } finally {
     f.close();
   }
+});
+
+it.each(["bytes", "events"])("acknowledges a singleton over the %s budget and publishes its unavailable fallback and later work", async limit => {
+  const f = registered({deployment:true});
+  try {
+    const first = publication(f, "oversized");
+    const budget = new RestoreHistoryBudget(limit === "bytes" ? 0 : 64_000_000, limit === "events" ? 0 : 65_536);
+    await prepare(f, [first.op], budget);
+    expect(append(f, [first.op])).toMatchObject({currentMaxOriginSeq:0,
+      settlementRefusals:[{originSeq:0, momentId:"oversized", settlementId:first.record.settlementId}]});
+    const fallback = {...first.payload, attributionUnavailable:{settlementId:first.record.settlementId,reason:"authorship-mismatch"}};
+    delete (fallback as Record<string,unknown>).settlementReference;
+    const ops = [{originSeq:1,opKind:"moment.append",payloadJson:stableJsonStringify(fallback),recordedAtMs:1},
+      {originSeq:2,opKind:"opaque",payloadJson:"{}",recordedAtMs:1}];
+    await prepare(f, ops);
+    expect(append(f, ops)).toMatchObject({inserted:2,currentMaxOriginSeq:2});
+    const served = f.storage.fetchLogPage({workspaceId:"workspace",sinceRelaySeq:0,limit:100}).rows
+      .find(row=>row.originId === "proof" && row.originSeq === 1)!;
+    expect(JSON.parse(served.payloadJson)).toMatchObject({attributionUnavailable:{settlementId:first.record.settlementId}});
+    expect(JSON.parse(served.payloadJson)).not.toHaveProperty("authors");
+    expect(f.raw.prepare("SELECT moment_id FROM sync_relay_object_moments WHERE moment_id='oversized'").get())
+      .toEqual({moment_id:"oversized"});
+    const marker = {workspaceId:"workspace",originId:"proof",originSeq:1,settlementId:first.record.settlementId,momentId:"oversized",reason:"authorship-mismatch"};
+    expect(f.storage.hasRefusedSettlement(marker)).toBe(true);
+    for (const changed of [{originId:"other"},{originSeq:0},{settlementId:"other"},{momentId:"other"},{workspaceId:"other"},{reason:"other"}])
+      expect(f.storage.hasRefusedSettlement({...marker,...changed})).toBe(false);
+    const shared = createShareReadQueries(f.storage,500).filteredLogPage("workspace",
+      {paths:[first.record.binding.currentPath],versionId:null,access:"view"},0,100,"authenticated");
+    expect(shared.ops.find(op=>op.originId === "proof")?.payload)
+      .toMatchObject({metadata:{origin:"sync",summary:"Attribution unavailable"}});
+  } finally { f.close(); }
+});
+
+it("refuses a different full CRDT state even when its Markdown projection is unchanged", async () => {
+  const f = registered({deployment:true});
+  try {
+    const first = publication(f, "hidden-state");
+    f.doc.getMap("frontmatter").set("temporary", "changed");
+    f.doc.getMap("frontmatter").delete("temporary");
+    const bytes = encodeStateAsUpdate(f.doc);
+    const state = normalize({document:f.input.evidence.document,currentPath:first.record.binding.currentPath,checkpoint:bytes});
+    expect(state.kind).toBe("accepted");
+    if (state.kind !== "accepted") throw new Error("Invalid fixture state.");
+    expect(state.evidence.projectedMarkdownSha256).toBe(first.markdownSha);
+    const sha = hash(bytes);
+    f.storage.putBlob({workspaceId:"workspace",sha256:sha,content:bytes,createdAtMs:1});
+    first.record.acceptedStateBlobSha256 = sha;
+    first.payload.settlementReference.recordDigest = hash(stableJsonStringify(first.record));
+    first.op.payloadJson = stableJsonStringify(first.payload);
+    await prepare(f, [first.op]);
+    expect(append(f, [first.op]).settlementRefusals).toHaveLength(1);
+  } finally { f.close(); }
 });
 
 it("publishes admitted automation declaration without inferring its presser as a human", async () => {

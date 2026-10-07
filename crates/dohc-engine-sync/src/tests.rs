@@ -226,14 +226,48 @@ fn decision_payload(state: &str, at_ms: i64, resolver: Option<&str>) -> serde_js
 
 #[derive(Default)]
 pub(crate) struct FakeRelay {
+    refuse_oversized_proofs: bool,
     push_budget_limit: Option<usize>,
     pushes: Mutex<Vec<PushRequest>>,
     pub(crate) pull: Mutex<Option<PullResponse>>,
 }
 
+impl FakeRelay {
+    pub(crate) fn refusing_oversized_proofs() -> Self {
+        Self {
+            refuse_oversized_proofs: true,
+            ..Default::default()
+        }
+    }
+    pub(crate) fn pushed_requests(&self) -> Vec<PushRequest> {
+        self.pushes.lock().unwrap().clone()
+    }
+}
+
 impl RelayTransport for FakeRelay {
     fn push(&self, req: PushRequest) -> Result<PushResponse, RelayError> {
         self.pushes.lock().expect("push lock").push(req.clone());
+        let mut settlement_refusals = Vec::new();
+        if self.refuse_oversized_proofs
+            && let Some(op) = req
+                .ops
+                .iter()
+                .find(|op| op.payload.get("settlementReference").is_some())
+        {
+            if req.ops.len() > 1 {
+                return Err(RelayError::SettlementProofBudget);
+            }
+            settlement_refusals.push(SettlementPublicationRefusal {
+                origin_id: req.origin_id.clone(),
+                origin_seq: op.origin_seq,
+                moment_id: op.payload["momentId"].as_str().unwrap().into(),
+                settlement_id: op.payload["settlementReference"]["record"]["settlementId"]
+                    .as_str()
+                    .unwrap()
+                    .into(),
+                reason: "authorship-mismatch".into(),
+            });
+        }
         if self
             .push_budget_limit
             .is_some_and(|limit| req.ops.len() > limit)
@@ -243,7 +277,7 @@ impl RelayTransport for FakeRelay {
         let accepted = req.ops.len();
         let current_max_origin_seq = req.ops.last().map_or(req.after_seq, |op| op.origin_seq);
         Ok(PushResponse {
-            settlement_refusals: Vec::new(),
+            settlement_refusals,
             accepted,
             inserted: accepted,
             skipped: 0,
@@ -974,7 +1008,7 @@ mod ydoc_drain;
 mod ydoc_restore;
 
 #[test]
-fn publication_budget_retries_smaller_batches_and_leaves_single_operation_retryable() {
+fn publication_budget_splits_batches_and_keeps_non_settlement_errors_retryable() {
     for budget in [0, 2] {
         let (_scratch, _path, mut store) = open_store();
         VersionedTextStore::new(&mut store)

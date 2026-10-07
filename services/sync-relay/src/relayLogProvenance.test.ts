@@ -17,6 +17,20 @@ const RELAY_AUTHORS = [
 ];
 
 describe("client log provenance", () => {
+  it("does not acknowledge an altered retry as a refusal of an accepted moment", async () => {
+    const storage = await testStorage();
+    const handler = testHandler(storage);
+    await claimWorkspace(handler, "owner", "workspace");
+    const op = {originSeq:0,opKind:"moment.append",recordedAtMs:1,payload:{momentId:"ordinary"}};
+    const upload = (payload: Record<string,unknown>) => handler(request("owner", "/sync/workspace/log",
+      jsonBody({originId:"device",ops:[{...op,payload}]})));
+    expect((await upload(op.payload)).status).toBe(200);
+    const changed = await upload({...op.payload,authors:[RELAY_AUTHORS[0]]});
+    expect(changed.status).toBe(409);
+    expect(await changed.json()).toMatchObject({code:"conflict"});
+    expect(storage.fetchLogCoordinate({workspaceId:"workspace",originId:"device",originSeq:0})?.settlementAdmission)
+      .toBeUndefined();
+  });
   it("keeps member origin tuple boundaries unambiguous", () => {
     const origins = [
       namedShareOrigin("share:a", "b", "c"),
@@ -65,5 +79,17 @@ describe("client log provenance", () => {
     const page=storage.fetchLogPage({workspaceId:"workspace",sinceRelaySeq:0,limit:100});
     expect(page.rows).toHaveLength(RELAY_AUTHORS.length);
     expect(page.rows.every(row=>row.settlementAdmission?.status === "refused")).toBe(true);
+    expect(page.rows.every(row=>!Object.hasOwn(JSON.parse(row.payloadJson), "authors"))).toBe(true);
+    const served = await handler(request("owner", "/sync/workspace/log?since=0&limit=100"));
+    expect(served.status).toBe(200);
+    const body = await served.json() as {ops: {payload: Record<string, unknown>}[]};
+    expect(body.ops).toHaveLength(RELAY_AUTHORS.length);
+    expect(body.ops.every(op=>!Object.hasOwn(op.payload, "authors"))).toBe(true);
+    const retry = await handler(request("owner", "/sync/workspace/log", jsonBody({
+      originId: "device-0", ops: [{originSeq: 0, opKind: "moment.append", recordedAtMs: 1,
+        payload: {authors: [RELAY_AUTHORS[0]]}}],
+    })));
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toMatchObject({inserted:0, skipped:1, currentMaxOriginSeq:0});
   });
 });

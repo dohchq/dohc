@@ -810,6 +810,10 @@ export interface SyncRelayStorage {
     originId: string;
     originSeq: number;
   }): SyncRelayLogRow | null;
+  hasRefusedSettlement(input: {
+    workspaceId: string; originId: string; originSeq: number;
+    settlementId: string; momentId: string; reason: string;
+  }): boolean;
   readCurrentFileState(input: {
     workspaceId: string;
     versionId: string;

@@ -3620,6 +3620,7 @@ fn scene_base_and_asset_moment_converge_in_both_arrival_orders() {
     let (scratch_a, path_a, mut asset_first) = open_store();
     let (asset_a, scene_a, asset_ref_a, _) = make_ops(&mut asset_first);
     let asset_first_pull = RelaySyncClient::new(FakeRelay {
+        refuse_oversized_proofs: false,
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
@@ -3650,6 +3651,7 @@ fn scene_base_and_asset_moment_converge_in_both_arrival_orders() {
     let (scratch_b, path_b, mut scene_first) = open_store();
     let (asset_b, scene_b, asset_ref_b, portable) = make_ops(&mut scene_first);
     let scene_first_pull = RelaySyncClient::new(FakeRelay {
+        refuse_oversized_proofs: false,
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {

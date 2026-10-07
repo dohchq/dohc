@@ -108,6 +108,18 @@ type Prepared = {
   before: string;
 };
 const prepared = new WeakMap<SyncRelayLogInput, Prepared>();
+function withoutClientAuthors(payloadJson: string): string {
+  const payload = bag(JSON.parse(payloadJson));
+  if (!Object.hasOwn(payload, "authors")) return payloadJson;
+  delete payload.authors;
+  return stableJsonStringify(payload);
+}
+function refuseSettlement(op: SyncRelayLogInput, settlementId: string) {
+  prepared.delete(op);
+  op.payloadJson = withoutClientAuthors(op.payloadJson);
+  op.admittedAuthorSnapshot = undefined;
+  op.settlementAdmission = {status:"refused",settlementId,reason:"authorship-mismatch"};
+}
 function endpoint(
   storage: StorageContext,
   document: LiveDocumentKey,
@@ -300,11 +312,7 @@ export async function prepareHostedSettlements(
     const payload = bag(JSON.parse(op.payloadJson));
     if (!Object.hasOwn(payload, "settlementReference")) {
       if (clientMomentAuthorsRefused(payload.authors))
-        op.settlementAdmission = {
-          status: "refused",
-          settlementId: "unavailable",
-          reason: "authorship-mismatch",
-        };
+        refuseSettlement(op, "unavailable");
       continue;
     }
     const existing = storage.fetchLogCoordinate({
@@ -314,10 +322,12 @@ export async function prepareHostedSettlements(
     });
     if (
       existing &&
-      existing.payloadJson === op.payloadJson &&
+      existing.payloadJson === (existing.settlementAdmission?.status === "refused"
+        ? withoutClientAuthors(op.payloadJson) : op.payloadJson) &&
       existing.opKind === op.opKind &&
       existing.recordedAtMs === op.recordedAtMs
     ) {
+      op.payloadJson = existing.payloadJson;
       op.admittedAuthorSnapshot = existing.admittedAuthorSnapshot;
       op.settlementAdmission = existing.settlementAdmission;
       continue;
@@ -426,12 +436,11 @@ export async function prepareHostedSettlements(
         },
         signal,
       );
-      if (
-        normalized.kind === "retry" ||
-        (normalized.kind === "refused" &&
-          normalized.reason === "capacity-refused")
-      )
-        throw relayError("settlement_proof_budget");
+      if (normalized.kind === "retry") throw relayError("settlement_proof_budget");
+      if (normalized.kind === "refused" && normalized.reason === "capacity-refused") {
+        if (input.ops.length > 1) throw relayError("settlement_proof_budget");
+        throw new SettlementProofRefusal();
+      }
       require(
         normalized.kind === "accepted" &&
           normalized.evidence.stateUpdateSha256 === cut.state_sha256 &&
@@ -497,21 +506,17 @@ export async function prepareHostedSettlements(
       provisional.set(key, p);
     } catch (error) {
       if (signal?.aborted) throw error;
-      if (error instanceof RestoreHistoryBudgetExceeded)
+      if (error instanceof RestoreHistoryBudgetExceeded && input.ops.length > 1)
         throw relayError("settlement_proof_budget");
       if (
         !(error instanceof SettlementProofRefusal) &&
+        !(error instanceof RestoreHistoryBudgetExceeded) &&
         !(error instanceof Error && [
           "Accepted journal history is damaged.",
           "Retained restore evidence is damaged.",
         ].includes(error.message))
       ) throw error;
-      op.admittedAuthorSnapshot = undefined;
-      op.settlementAdmission = {
-        status: "refused",
-        settlementId,
-        reason: "authorship-mismatch",
-      };
+      refuseSettlement(op, settlementId);
     }
   }
 }
@@ -642,11 +647,7 @@ export function commitHostedSettlement(
     commitPreparedHostedSettlement(storage, op, workspaceId, originId);
   } catch (error) {
     if (!(error instanceof SettlementProofRefusal)) throw error;
-    op.admittedAuthorSnapshot = undefined;
-    op.settlementAdmission = {
-      status: "refused",
-      settlementId: op.settlementAdmission?.settlementId ?? "unavailable",
-      reason: "authorship-mismatch",
-    };
+    refuseSettlement(op, op.settlementAdmission?.settlementId ?? "unavailable");
   }
+  if (op.settlementAdmission?.status === "refused") op.payloadJson = withoutClientAuthors(op.payloadJson);
 }
