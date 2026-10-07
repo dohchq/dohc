@@ -6,7 +6,7 @@ import * as Y from "yjs";
 import type { EngineYdocProviderSessionOptions } from "@dohc/workspace-engine-client";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
-import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
+import { createWorkspaceEngineCapture, isYDocPathNotInVersionError, YDocUncapturedArtifactError } from "./workspaceEngineCapture";
 import { engineSaveState } from "./engineYDocSaveState";
 import { createTestScratch } from "./testTemp";
 
@@ -58,6 +58,55 @@ it.each(["clean", "outside", "unchecked"])("publishes only checked save states o
     expect(settle).toHaveBeenCalledTimes(1);
   } finally {
     await session.close({ settle: false });
+    await capture.stop();
+  }
+});
+
+
+it.each(["empty", "nonempty", "missing", "update"])("checks a fresh absent-head document before reporting Saved (%s)", async mode => {
+  const rootPath = await createTestScratch("dohc-new-file-save-state-");
+  const workspaceId = "new-file-save-state-test";
+  if (mode !== "missing") await writeFile(join(rootPath, "new.md"), mode === "nonempty" ? "not captured yet" : "");
+  const settle = vi.fn();
+  const capture = createWorkspaceEngineCapture({
+    rootPath, workspaceId, attachmentId: Symbol("new-file-save-state"),
+    rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
+    openRustYDocProviderSession: async options => {
+      const doc = new Y.Doc();
+      if (mode === "update") {
+        doc.getText("content").insert(0, "peer update");
+        options.onRemoteUpdate(Y.encodeStateAsUpdate(doc));
+      }
+      return {
+        doc, initialUpdate: Y.encodeStateAsUpdate(doc), path: options.path,
+        contentKind: "plaintext", head: "absent", lineage: "absent", unsettled: mode === "update",
+        applyLocalUpdate: async () => undefined, evict: async () => undefined,
+        close: async () => undefined,
+        settleNow: async () => {
+          settle();
+          return { sha256: createHash("sha256").update("").digest("hex"), content: "", materialized: true,
+            momentId: "settle", path: options.path,
+            projection: { contentKind: "plaintext" as const, sourceStateVectorSha256: "a".repeat(64), destructive: false } };
+        },
+      };
+    },
+  });
+  const states: string[] = [];
+  try {
+    const opening = capture.openYDocSession({ path: "new.md", onRemoteUpdate: () => undefined,
+      onSaveState: state => states.push(state) });
+    if (mode === "nonempty") {
+      await expect(opening).rejects.toBeInstanceOf(YDocUncapturedArtifactError);
+    } else if (mode === "missing") {
+      await expect(opening).rejects.toSatisfy(isYDocPathNotInVersionError);
+    } else {
+      const session = await opening;
+      expect(states).toEqual(mode === "empty" ? ["saved"] : []);
+      await session.close({ settle: false });
+    }
+    expect(states).toEqual(mode === "empty" ? ["saved"] : []);
+    expect(settle).not.toHaveBeenCalled();
+  } finally {
     await capture.stop();
   }
 });

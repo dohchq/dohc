@@ -5333,6 +5333,8 @@ export function createWorkspaceEngineCapture(
           } else {
             reportSaveState("error", 0, "status");
           }
+        } else if (absentHeadDisk === "empty" && updatesSeen === 0) {
+          reportSaveState("saved", 0, "status");
         }
         const publicSession: WorkspaceEngineYDocProviderSession = {
           get nativeOwner() { return session.nativeOwner; },
