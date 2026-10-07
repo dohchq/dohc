@@ -24,6 +24,10 @@ struct Fixture {
 }
 
 fn fixture(replicates: bool) -> Fixture {
+    fixture_with_markdown(replicates, None)
+}
+
+fn fixture_with_markdown(replicates: bool, source: Option<&str>) -> Fixture {
     let (scratch, path, mut store) = open_store();
     VersionedTextStore::new(&mut store)
         .ensure_main_version("ws", "main", 0, &NoFaults)
@@ -51,8 +55,17 @@ fn fixture(replicates: bool) -> Fixture {
         .iter()
         .find(|vector| vector["registrationAccepted"] == true)
         .unwrap();
-    let bytes: Vec<u8> = serde_json::from_value(vector["bytes"].clone()).unwrap();
-    let markdown = vector["markdown"].as_str().unwrap();
+    let markdown = source.unwrap_or(vector["markdown"].as_str().unwrap());
+    let bytes: Vec<u8> = if source.is_some() {
+        let doc = dohc_engine_collab::Ydoc::wire();
+        let seed: Vec<u8> = serde_json::from_value(vector["bytes"].clone()).unwrap();
+        doc.apply(&seed).unwrap();
+        doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, markdown)
+            .unwrap();
+        doc.encode_full_state()
+    } else {
+        serde_json::from_value(vector["bytes"].clone()).unwrap()
+    };
     let binding = LiveObjectBinding {
         workspace_id: "ws".into(),
         main_version_id: "main".into(),
@@ -1699,19 +1712,25 @@ fn settle_bootstrap_publication(
 
 #[test]
 fn first_imported_activation_settlement_starts_at_native_event_zero() {
-    imported_activation_publication(false);
+    imported_activation_publication(false, false);
 }
 
 #[test]
 fn first_imported_activation_settlement_rejects_another_objects_baseline() {
-    imported_activation_publication(true);
+    imported_activation_publication(true, false);
 }
 
-fn imported_activation_publication(foreign_baseline: bool) {
+#[test]
+fn imported_activation_publication_admits_the_preserved_event_zero_source() {
+    imported_activation_publication(false, true);
+}
+
+fn imported_activation_publication(foreign_baseline: bool, preserve_baseline: bool) {
     use dohc_engine_collab::live_update_application::{
         OwnerAdoptionCut, adopt_owner_committed, capture_imported_owner_activation,
     };
-    let mut source = fixture(true);
+    let mut source =
+        fixture_with_markdown(true, preserve_baseline.then_some("Original source.\n\n"));
     bootstrap_committed::<Box<dyn std::error::Error>>(
         &mut source.store,
         &mut WriterDocCache::new(),
@@ -1731,6 +1750,25 @@ fn imported_activation_publication(foreign_baseline: bool) {
     let key = DocKey::new("ws", "main", "object").unwrap();
     let doc = dohc_engine_collab::Ydoc::wire();
     doc.apply(&baseline_bytes).unwrap();
+    if preserve_baseline {
+        assert_ne!(
+            hex_sha256(
+                doc.project(ContentKind::Richdoc)
+                    .unwrap()
+                    .content
+                    .as_bytes()
+            ),
+            baseline
+        );
+        assert_eq!(
+            hex_sha256(
+                doc.preserved_markdown_source(&doc.project(ContentKind::Richdoc).unwrap().content)
+                    .unwrap()
+                    .as_bytes()
+            ),
+            baseline
+        );
+    }
     doc.rewrite_content_to_markdown_preserving_source(
         ContentKind::Richdoc,
         "Pre-live ordinary edits.",
@@ -1978,6 +2016,37 @@ fn imported_activation_publication(foreign_baseline: bool) {
     );
     let local_before: String = f.store.read_with(|conn| conn.query_row("SELECT payload_before_blob_sha256 FROM moments WHERE workspace_id='ws' AND moment_id='service-first-settlement'", [], |r| r.get(0)).map_err(SyncError::corrupt)).unwrap();
     assert_eq!(local_before, activation.source.source_digest);
+    if preserve_baseline {
+        let queued =
+            crate::list_replication_ops(&f.store, "ws", "service-origin", -1, 500).unwrap();
+        let prefix = crate::owner_publication_prefix(&f.store, "ws", &queued, 1_000_000).unwrap();
+        assert_eq!(
+            prefix.allowed_ops,
+            queued.len(),
+            "preserved baseline must pass the same prefix that selects uploadable blobs: {prefix:?}"
+        );
+        assert!(prefix.pending.is_none());
+        let mut private = first.clone();
+        private.payload["payloadBeforeBlobSha256"] = json!(hex_sha256(b"Unaccepted private file."));
+        assert_eq!(
+            crate::owner_publication_prefix(&f.store, "ws", &[private], 1_000_000)
+                .unwrap()
+                .allowed_ops,
+            0
+        );
+        let mut foreign_path = first.clone();
+        foreign_path.payload["payloadBeforePath"] = json!("foreign.md");
+        assert_eq!(
+            crate::owner_publication_prefix(&f.store, "ws", &[foreign_path], 1_000_000)
+                .unwrap()
+                .allowed_ops,
+            0
+        );
+        assert!(
+            crate::owner_publication_prefix(&f.store, "ws", std::slice::from_ref(&first), 0)
+                .is_err()
+        );
+    }
     let next = dohc_engine_collab::Ydoc::wire();
     next.apply(&f.bytes).unwrap();
     next.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "Next accepted edit.")
