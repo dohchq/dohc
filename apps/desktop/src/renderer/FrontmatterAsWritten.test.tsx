@@ -413,6 +413,26 @@ describe("useFileText", () => {
     expect(shown()).toBeNull();
   });
 
+  it("keeps its first openness when the inspector later finds a block, and reads that block", async () => {
+    const plain = "# Plan\n\nBody";
+    const canonical = "---\nstatus: draft\n---\n\n# Plan\n\nBody";
+    const doc = markdownToYDoc(plain);
+    const view = render(<Live body={plain} ydoc={doc} saveState={UNKNOWN_SAVE_STATE} />);
+    expect(shown()).toBeNull();
+    // A file with no block reads nothing for activity.
+    activity(["trip.md"]);
+    activity(["trip.md"]);
+    await settle();
+    expect(bridgeMock.readWorkspaceText).not.toHaveBeenCalled();
+
+    bridgeMock.readWorkspaceText.mockResolvedValue(fileRead(canonical));
+    view.rerender(<Live body={canonical} ydoc={doc} saveState={UNKNOWN_SAVE_STATE} />);
+    await settle();
+    expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(1);
+    expect(shown()).toBe("---\nstatus: draft\n---");
+    expect(opened()).toBe(true);
+  });
+
   it("never shows a slow read on another document, or an older read over a newer one", async () => {
     const doc = markdownToYDoc(BUDGET_FILE);
     let answerTrip: (text: string) => void = () => undefined;

@@ -31,9 +31,10 @@ function opensByDefault(text: string, propertiesShown: boolean): boolean {
  * the section's own reads of this document change it. While `open`, it
  * reads the file again when workspace activity names the file, when the
  * engine reports the file changed on disk, and when it reports every edit
- * saved here after the document's frontmatter changed. Closed, it reads
- * nothing. Opening hides the text until a read started after opening
- * succeeds. A save to the host or a pending or failed save keeps the text
+ * saved here after the document's frontmatter changed. Activity reads
+ * nothing while the text has no block; a later inspector read with a block
+ * asks for one read instead. Closed, it reads nothing. Opening hides the
+ * text until a read started after opening succeeds. A save to the host or a pending or failed save keeps the text
  * read last.
  */
 function useFileText(input: {
@@ -63,10 +64,13 @@ function useFileText(input: {
     };
   }, [ydoc]);
 
-  const live = useRef({ open, mounted: true });
+  // `present`: the text read last has a block, so the section shows.
+  const present = blockOf(file.text) !== "";
+  const live = useRef({ open, mounted: true, present });
   useLayoutEffect(() => {
     live.current.open = open;
-  }, [open]);
+    live.current.present = present;
+  }, [open, present]);
   useEffect(() => {
     live.current.mounted = true;
     return () => {
@@ -133,14 +137,23 @@ function useFileText(input: {
   }, [readFile, kind]);
 
   // A write from outside dohc reaches an open document's file without a save.
+  // A file with no block shows nothing, so its saves read nothing.
   useEffect(
     () =>
       bridge().onWorkspaceActivity((event) => {
+        if (!live.current.present) return;
         if (event.workspaceId !== undefined && event.workspaceId !== workspaceId) return;
         if (event.paths === undefined || event.paths.includes(path)) readFile();
       }),
     [readFile, workspaceId, path],
   );
+
+  // The inspector's later reads give no text. When one finds a block the
+  // section lacks, the section reads the file itself.
+  const hinted = blockOf(input.body) !== "";
+  useEffect(() => {
+    if (hinted && !live.current.present) readFile();
+  }, [hinted, readFile]);
   return file;
 }
 
@@ -170,10 +183,8 @@ function LiveSection(props: {
   saveState: SaveState;
   propertiesShown: boolean;
 }) {
-  const opens = useMemo(
-    () => opensByDefault(blockOf(props.body), props.propertiesShown),
-    [props.body, props.propertiesShown],
-  );
+  // Whether it starts open is read once, from the inspector's first read.
+  const [opens] = useState(() => opensByDefault(blockOf(props.body), props.propertiesShown));
   const [toggled, setToggled] = useState<boolean | null>(null);
   const open = toggled ?? opens;
   const file = useFileText({ ...props, open });
