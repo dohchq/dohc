@@ -108,7 +108,7 @@ export function TransactionalCollectionViews(props: Props) {
     void readView(abort.signal).then(next => {
       if (request===current.current&&!abort.signal.aborted) { setLoaded(next); latest.current.onLoaded(); }
     }).catch(error => {
-      if(request===current.current&&!abort.signal.aborted) onError("Could not open this Collection view.",error,()=>{if(request===current.current)setAttempt(value=>value+1);});
+      if(request===current.current&&!abort.signal.aborted) onError("dohc could not open this view.",error,()=>{if(request===current.current)setAttempt(value=>value+1);});
     }).finally(()=>{if(request===current.current&&!abort.signal.aborted){reading.current=false;setBusy(false);onBusy(false);}});
     return ()=>{abort.abort(); current.current++; onBusy(false);};
   },[queryKey]);

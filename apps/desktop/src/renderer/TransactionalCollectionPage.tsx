@@ -202,8 +202,13 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   }
   async function load(next: Query, history = previous): Promise<void> {
     if (!read || !alive.current) return;
-    if (visual) { setDetails(null); setQuery(next); setVisualRefresh(value => value + 1); return; }
     readActive.current?.abort();
+    if (visual) {
+      // A table read still in flight is stale now: it must not settle, or end a load, on the view's behalf.
+      readActive.current = null; sequence.current++; openRecordRead.current?.abort();
+      if (!mutation.current) { locked.current = false; setBusy(false); }
+      setDetails(null); setQuery(next); setVisualRefresh(value => value + 1); return;
+    }
     const abort = new AbortController(); readActive.current = abort;
     const mine = ++sequence.current;
     locked.current = true; setBusy(true);
@@ -408,10 +413,10 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
           <MoreHorizontal size={16} strokeWidth={1.9} aria-hidden />
         </summary>
         <div className="dohc-popover absolute right-0 top-9 z-20 flex min-w-48 flex-col gap-1 rounded-lg border border-line bg-panel p-1">
-          {props.onReviewSchema ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={disabled || editor !== null} onClick={props.onReviewSchema}><LayoutList size={14} strokeWidth={1.9} aria-hidden />Fields and names</SecondaryButton> : null}
+          {props.onReviewSchema ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={writeDisabled || editor !== null} onClick={props.onReviewSchema}><LayoutList size={14} strokeWidth={1.9} aria-hidden />Fields and names</SecondaryButton> : null}
           {props.onManageAccess ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={disabled || editor !== null} onClick={props.onManageAccess}><Shield size={14} strokeWidth={1.9} aria-hidden />Manage access</SecondaryButton> : null}
           {props.onExportRecovery ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={disabled || editor !== null} onClick={props.onExportRecovery}><Download size={14} strokeWidth={1.9} aria-hidden />Export recovery</SecondaryButton> : null}
-          {props.onTransferCsv ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={disabled || editor !== null} onClick={props.onTransferCsv}><FileSpreadsheet size={14} strokeWidth={1.9} aria-hidden />Import or export CSV</SecondaryButton> : null}
+          {props.onTransferCsv ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={writeDisabled || editor !== null} onClick={props.onTransferCsv}><FileSpreadsheet size={14} strokeWidth={1.9} aria-hidden />Import or export CSV</SecondaryButton> : null}
           {props.onHistory ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={disabled || editor !== null} onClick={props.onHistory}><History size={14} strokeWidth={1.9} aria-hidden />History</SecondaryButton> : null}
           {props.onPendingResponses ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={disabled || editor !== null} onClick={props.onPendingResponses}><Inbox size={14} strokeWidth={1.9} aria-hidden />Pending responses</SecondaryButton> : null}
           {props.onCustomize ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={disabled || editor !== null} onClick={props.onCustomize}><SlidersHorizontal size={14} strokeWidth={1.9} aria-hidden />Customize…</SecondaryButton> : null}
