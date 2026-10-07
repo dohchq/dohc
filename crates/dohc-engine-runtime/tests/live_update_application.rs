@@ -706,11 +706,11 @@ struct HoldCommit {
 }
 impl FaultInjector for HoldCommit {
     fn poll(&self, point: FaultPoint) -> FaultAction {
-        if point == FaultPoint::StorageAfterCommitBeforeAck {
-            if let Some(entered) = self.entered.lock().unwrap().take() {
-                entered.send(()).unwrap();
-                self.release.lock().unwrap().recv().unwrap();
-            }
+        if point == FaultPoint::StorageAfterCommitBeforeAck
+            && let Some(entered) = self.entered.lock().unwrap().take()
+        {
+            entered.send(()).unwrap();
+            self.release.lock().unwrap().recv().unwrap();
         }
         FaultAction::Continue
     }

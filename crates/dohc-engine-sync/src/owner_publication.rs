@@ -101,18 +101,18 @@ fn references(op: &ReplicationEnvelope) -> Result<Vec<Content>, SyncError> {
             }
         }
         "version.create" => {
-            if let Some(rows) = p.get("forkSnapshots").and_then(Value::as_array) {
-                if !rows.is_empty() {
-                    let version = required(p, "forkVersionId")?;
-                    for row in rows {
-                        result.push(content(
-                            version,
-                            required(row, "objectId")?,
-                            required(row, "path")?,
-                            required(row, "blobSha256")?,
-                            PublicationContentKind::Projection,
-                        ));
-                    }
+            if let Some(rows) = p.get("forkSnapshots").and_then(Value::as_array)
+                && !rows.is_empty()
+            {
+                let version = required(p, "forkVersionId")?;
+                for row in rows {
+                    result.push(content(
+                        version,
+                        required(row, "objectId")?,
+                        required(row, "path")?,
+                        required(row, "blobSha256")?,
+                        PublicationContentKind::Projection,
+                    ));
                 }
             }
         }
@@ -170,20 +170,19 @@ fn references(op: &ReplicationEnvelope) -> Result<Vec<Content>, SyncError> {
                 .lineage_transition
                 .as_ref()
                 .and_then(|transition| transition.successor.as_ref())
+                && let Some(result_head) = p.result.present()
             {
-                if let Some(result_head) = p.result.present() {
-                    for digest in [
-                        &successor.update_blob_sha256,
-                        &successor.state_vector_blob_sha256,
-                    ] {
-                        result.push(content(
-                            &p.target_version_id,
-                            &result_head.object_id,
-                            &p.paths[result_head.path_ref],
-                            digest,
-                            PublicationContentKind::Ydoc,
-                        ));
-                    }
+                for digest in [
+                    &successor.update_blob_sha256,
+                    &successor.state_vector_blob_sha256,
+                ] {
+                    result.push(content(
+                        &p.target_version_id,
+                        &result_head.object_id,
+                        &p.paths[result_head.path_ref],
+                        digest,
+                        PublicationContentKind::Ydoc,
+                    ));
                 }
             }
         }

@@ -478,11 +478,11 @@ async fn restore_settlement_retains_queued_proof_after_caller_drop_and_replays_a
     }
     impl FaultInjector for Hold {
         fn poll(&self, point: FaultPoint) -> FaultAction {
-            if point == FaultPoint::StorageBeforePersist {
-                if let Some(entered) = self.entered.lock().unwrap().take() {
-                    let _ = entered.send(());
-                    self.release.lock().unwrap().recv().unwrap();
-                }
+            if point == FaultPoint::StorageBeforePersist
+                && let Some(entered) = self.entered.lock().unwrap().take()
+            {
+                let _ = entered.send(());
+                self.release.lock().unwrap().recv().unwrap();
             }
             FaultAction::Continue
         }
@@ -1701,11 +1701,11 @@ async fn restore_fence_serializes_queued_writes_and_preserves_other_documents() 
     }
     impl FaultInjector for Block {
         fn poll(&self, point: FaultPoint) -> FaultAction {
-            if point == FaultPoint::StorageBeforePersist {
-                if let Some(entered) = self.entered.lock().unwrap().take() {
-                    entered.send(()).unwrap();
-                    self.release.lock().unwrap().recv().unwrap();
-                }
+            if point == FaultPoint::StorageBeforePersist
+                && let Some(entered) = self.entered.lock().unwrap().take()
+            {
+                entered.send(()).unwrap();
+                self.release.lock().unwrap().recv().unwrap();
             }
             FaultAction::Continue
         }
@@ -2671,11 +2671,11 @@ async fn restore_application_keeps_queued_memory_and_replays_after_cancelled_or_
     }
     impl FaultInjector for Hold {
         fn poll(&self, point: FaultPoint) -> FaultAction {
-            if point == FaultPoint::StorageBeforePersist {
-                if let Some(entered) = self.entered.lock().unwrap().take() {
-                    let _ = entered.send(());
-                    self.release.lock().unwrap().recv().unwrap();
-                }
+            if point == FaultPoint::StorageBeforePersist
+                && let Some(entered) = self.entered.lock().unwrap().take()
+            {
+                let _ = entered.send(());
+                self.release.lock().unwrap().recv().unwrap();
             }
             FaultAction::Continue
         }
@@ -3194,7 +3194,7 @@ impl Fixture {
         let mut terminal = None;
         for (index, update) in updates.iter().enumerate() {
             let cursor = after + index + 1;
-            let authority = if cursor % 8 == 0 {
+            let authority = if cursor.is_multiple_of(8) {
                 ServerDerivedLiveUpdateAuthority::Link {
                     principal_id: "link-principal".into(),
                     grant_id: "link-grant".into(),

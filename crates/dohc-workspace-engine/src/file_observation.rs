@@ -16,6 +16,18 @@ type DrainRequest = (
     tokio::sync::oneshot::Sender<Result<(), FilesError>>,
 );
 
+fn watch_dirty_signal(
+    dirty: Arc<AtomicBool>,
+    capture: Arc<Mutex<Option<(u64, FilesHandle)>>>,
+) -> Arc<dyn Fn() + Send + Sync> {
+    Arc::new(move || {
+        dirty.store(true, Ordering::Release);
+        if let Some((_, files)) = lock(&capture).as_ref() {
+            files.notify_overflow();
+        }
+    })
+}
+
 #[derive(Clone)]
 pub(crate) struct ObservationHandle {
     requests: std::sync::mpsc::SyncSender<DrainRequest>,
@@ -117,16 +129,9 @@ impl FileObservation {
                 let mut failures: u32 = 0;
                 while !cancel.is_cancelled() {
                     let dirty = Arc::new(AtomicBool::new(true));
-                    let watch_dirty = Arc::clone(&dirty);
-                    let capture = Arc::clone(&capture);
                     let started = runtime.block_on(NativeWatcher::start_metadata(
                         root.clone(),
-                        Arc::new(move || {
-                            watch_dirty.store(true, Ordering::Release);
-                            if let Some((_, files)) = lock(&capture).as_ref() {
-                                files.notify_overflow();
-                            }
-                        }),
+                        watch_dirty_signal(Arc::clone(&dirty), Arc::clone(&capture)),
                     ));
                     if started.is_err() {
                         startup_finished.send_replace(true);
@@ -308,6 +313,69 @@ impl Drop for FileObservation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn pathless_rescan_reconciles_metadata_and_capture() {
+        use dohc_engine_files::{CaptureOp, ReconcileRun};
+
+        let root = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let token = CancellationToken::new();
+        let actor = dohc_engine_files::FilesActor::spawn_async(
+            root.path().to_owned(),
+            ScanBounds::default(),
+        )
+        .await
+        .unwrap();
+        let handle = actor.handle();
+        let ReconcileRun::Completed(initial) = handle.reconcile(token.clone()).await.unwrap()
+        else {
+            panic!("initial reconcile did not complete");
+        };
+        assert!(initial.ops.is_empty());
+        let receipt = dohc_engine_files::CaptureApplyResult {
+            applied_paths: vec![],
+            captured: vec![],
+            not_owned_paths: vec![],
+            failed_applies: vec![],
+            deferred_paths: vec![],
+            crashed_after_durable_boundary: None,
+            degraded: false,
+        };
+        handle.acknowledge_capture(initial, receipt).await.unwrap();
+        assert!(!handle.stats().await.unwrap().dirty);
+
+        let feed = ObservationFeed::new();
+        let walker = ObservationWalker::new(ScanBounds::default(), feed.clone());
+        assert!(walker.observe(root.path(), &token).unwrap());
+        let cursor = feed.changes_since(None).cursor;
+        let dirty = Arc::new(AtomicBool::new(false));
+        let capture = Arc::new(Mutex::new(Some((0, handle.clone()))));
+        std::fs::write(root.path().join("missed.md"), "lost event details").unwrap();
+        assert!(!dirty.load(Ordering::Acquire));
+        assert!(!handle.stats().await.unwrap().dirty);
+        assert!(feed.changes_since(Some(&cursor)).facts.is_empty());
+
+        dohc_engine_files::watch::notify_settled_rescan_for_harness(
+            root.path().to_owned(),
+            watch_dirty_signal(Arc::clone(&dirty), capture),
+        );
+        assert!(dirty.swap(false, Ordering::AcqRel));
+        assert!(handle.stats().await.unwrap().dirty);
+        assert!(walker.observe(root.path(), &token).unwrap());
+        let changes = feed.changes_since(Some(&cursor));
+        assert_eq!(changes.facts.len(), 1);
+        assert_eq!(changes.facts[0].path, "missed.md");
+        let ReconcileRun::Completed(plan) = handle.reconcile_if_dirty(token).await.unwrap() else {
+            panic!("rescan did not cause capture reconcile");
+        };
+        assert!(
+            matches!(plan.ops.as_slice(), [CaptureOp::Ingest { path, .. }] if path == "missed.md")
+        );
+        tokio::task::spawn_blocking(move || drop(actor))
+            .await
+            .unwrap();
+    }
+
     async fn wait_until_ready(binding: &FileObservation) {
         let mut attached = binding.files.subscribe();
         let mut wake = binding.feed.subscribe();

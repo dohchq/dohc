@@ -426,13 +426,13 @@ impl<'a> LinkedChatStore<'a> {
             .as_deref()
             .map(normalize_reaction_author_id)
             .transpose()?;
-        if let Some(replication_author_id) = &replication_author_id {
-            if replication_author_id != &author_id {
-                return Err(DomainError::chat(
-                    "invalid-sender",
-                    "Replication reaction author must match the local reaction author.",
-                ));
-            }
+        if let Some(replication_author_id) = &replication_author_id
+            && replication_author_id != &author_id
+        {
+            return Err(DomainError::chat(
+                "invalid-sender",
+                "Replication reaction author must match the local reaction author.",
+            ));
         }
         let author_display_name = normalize_display_name(&input.author_display_name)?;
         if input.now_ms < 0 {

@@ -134,13 +134,13 @@ fn encode_moment_page(page: &MomentPage) -> Result<EncodedMomentPage, WireError>
     // A first row may legitimately exceed the page budget. Degrade that row
     // to metadata so the cursor still makes progress, exactly as moments.list
     // did before the history aggregate existed.
-    if let Some(first) = rows.first_mut() {
-        if serde_json::to_string(first).map_or(0, |s| s.len()) > MOMENTS_PAGE_BYTE_BUDGET {
-            first["afterText"] = Value::Null;
-            first["beforeText"] = Value::Null;
-            first["afterInbandLimitBytes"] = json!(MAX_INBAND_CONTENT_BYTES);
-            first["beforeInbandLimitBytes"] = json!(MAX_INBAND_CONTENT_BYTES);
-        }
+    if let Some(first) = rows.first_mut()
+        && serde_json::to_string(first).map_or(0, |s| s.len()) > MOMENTS_PAGE_BYTE_BUDGET
+    {
+        first["afterText"] = Value::Null;
+        first["beforeText"] = Value::Null;
+        first["afterInbandLimitBytes"] = json!(MAX_INBAND_CONTENT_BYTES);
+        first["beforeInbandLimitBytes"] = json!(MAX_INBAND_CONTENT_BYTES);
     }
     let included = byte_budget_cut_serialized(&rows, MOMENTS_PAGE_BYTE_BUDGET);
     if included == 0 && !rows.is_empty() {

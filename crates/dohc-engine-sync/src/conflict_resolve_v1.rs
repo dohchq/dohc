@@ -1418,14 +1418,14 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
     } else {
         false
     };
-    if disposition != ImportedHeadDisposition::Diverged {
-        if let Err(error) = preflight_imported_lineage(tx, payload, key.as_ref(), disposition) {
-            match error {
-                SyncError::RetryableState { .. } => {
-                    disposition = ImportedHeadDisposition::Diverged;
-                }
-                error => return Err(error),
+    if disposition != ImportedHeadDisposition::Diverged
+        && let Err(error) = preflight_imported_lineage(tx, payload, key.as_ref(), disposition)
+    {
+        match error {
+            SyncError::RetryableState { .. } => {
+                disposition = ImportedHeadDisposition::Diverged;
             }
+            error => return Err(error),
         }
     }
 

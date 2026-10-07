@@ -168,6 +168,20 @@ struct Debounce {
 }
 
 impl Debounce {
+    fn receive(&mut self, now: Instant, dirty: &dyn Fn(), state: &WatchState) {
+        if self.event(now) {
+            dirty();
+            state.record_flush(FlushReason::HardDeadline);
+        }
+    }
+
+    fn settle(&mut self, now: Instant, dirty: &dyn Fn(), state: &WatchState) {
+        if let Some(reason) = self.timeout(now) {
+            dirty();
+            state.record_flush(reason);
+        }
+    }
+
     fn next_deadline(&self) -> Option<Instant> {
         self.burst
             .map(|(first, settle)| settle.min(first + WATCH_HARD_DEADLINE))
@@ -533,7 +547,7 @@ fn event_callback(
     tx: SyncSender<ThreadMessage>,
     state: Arc<WatchState>,
     backend_error: Arc<AtomicBool>,
-) -> impl FnMut(Result<notify::Event, notify::Error>) + Send {
+) -> impl FnMut(Result<notify::Event, notify::Error>) + Send + 'static {
     move |event| {
         if event
             .as_ref()
@@ -579,6 +593,31 @@ pub fn notify_settled_change_for_harness(root: PathBuf, path: PathBuf, handle: &
     if debounce.timeout(now + WATCH_SETTLE).is_some() {
         dirty();
     }
+}
+
+/// Deterministic delivery through the native callback and debounce, without an OS watch.
+#[cfg(feature = "fault-injection")]
+#[doc(hidden)]
+pub fn notify_settled_rescan_for_harness(root: PathBuf, dirty: Arc<dyn Fn() + Send + Sync>) {
+    let state = Arc::new(WatchState::default());
+    let (tx, rx) = mpsc::sync_channel(WATCH_EVENT_QUEUE_CAPACITY);
+    let mut callback = event_callback(
+        root,
+        Arc::clone(&dirty),
+        tx,
+        Arc::clone(&state),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let event = notify::Event::new(notify::EventKind::Other).set_flag(notify::event::Flag::Rescan);
+    assert!(event.paths.is_empty());
+    assert!(event.need_rescan());
+    callback(Ok(event));
+    assert!(matches!(rx.try_recv(), Ok(ThreadMessage::Event)));
+    let now = Instant::now();
+    let mut debounce = Debounce::default();
+    debounce.receive(now, dirty.as_ref(), &state);
+    debounce.settle(now + WATCH_SETTLE, dirty.as_ref(), &state);
+    assert_eq!(state.settle_flushes.load(Ordering::Relaxed), 1);
 }
 
 fn watcher_thread(
@@ -651,10 +690,7 @@ fn watcher_thread(
             Some(next) => match rx.recv_timeout(next.saturating_duration_since(Instant::now())) {
                 Ok(message) => Some(message),
                 Err(RecvTimeoutError::Timeout) => {
-                    if let Some(reason) = debounce.timeout(Instant::now()) {
-                        dirty();
-                        state.record_flush(reason);
-                    }
+                    debounce.settle(Instant::now(), dirty.as_ref(), &state);
                     None
                 }
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -685,12 +721,7 @@ fn watcher_thread(
         };
         match message {
             Some(ThreadMessage::Event) => {
-                if debounce.event(Instant::now()) {
-                    // A ready queued event must not postpone the hard bound:
-                    // publish the whole burst even when the queue never drains.
-                    dirty();
-                    state.record_flush(FlushReason::HardDeadline);
-                }
+                debounce.receive(Instant::now(), dirty.as_ref(), &state);
             }
             Some(ThreadMessage::Stop) => {
                 // Final-flush parity: pending evidence is published before the
