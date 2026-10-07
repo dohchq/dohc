@@ -387,6 +387,42 @@ describe("transactional Collection page", () => {
     expect(screen.queryByText("Change not confirmed")).toBeNull();
   });
 
+  it("shows a reopen wait in the page, says when it ends, and loads the records from its Try again", async () => {
+    const waiting = new Error("Error invoking remote method 'desktop:dataset': DatasetReopenWaitError [dataset_reopen_wait]: This Collection is waiting to reopen. Try again in 5 seconds.");
+    const loaded = deferred<{ result: AppBackendJson }>();
+    const invoke = vi.fn<(request: TransactionalInvoke) => Promise<{ result: AppBackendJson }>>()
+      .mockRejectedValueOnce(waiting).mockReturnValueOnce(loaded.promise).mockResolvedValue({ result: page() });
+    const onSettled = vi.fn();
+    const identity = `collection-load:${id(1)}:${id(2)}`;
+    // Only the page's timers are fake; Testing Library's async helpers need real ones, so this test uses act alone.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let retryFromToast: () => void;
+    try {
+      const { onError } = setup({ invoke, onSettled });
+      await act(async () => {});
+      const region = screen.getByRole("region", { name: "People" });
+      expect(within(region).getByText("This Collection is waiting to reopen. Try again in 5 seconds.")).toBeTruthy();
+      expect(onError).toHaveBeenCalledWith("dohc could not load People.", waiting, expect.any(Function), identity);
+      retryFromToast = onError.mock.calls[0]![2]!;
+      await act(() => vi.advanceTimersByTimeAsync(4999));
+      expect(within(region).getByText("This Collection is waiting to reopen. Try again in 5 seconds.")).toBeTruthy();
+      await act(() => vi.advanceTimersByTimeAsync(1));
+      expect(within(region).getByText("This Collection can reopen now.")).toBeTruthy();
+      fireEvent.click(within(region).getByRole("button", { name: "Try again" }));
+      expect(within(region).queryByText("This Collection can reopen now.")).toBeNull();
+      expect(within(region).getByText("Loading records…")).toBeTruthy();
+      expect(onSettled).not.toHaveBeenCalled();
+      await act(async () => loaded.resolve({ result: page() }));
+      expect(within(region).getByText("Alice")).toBeTruthy();
+      expect(within(region).queryByRole("button", { name: "Try again" })).toBeNull();
+      expect(onSettled).toHaveBeenCalledWith(identity);
+    } finally { vi.useRealTimers(); }
+    // The toast's Try again is the same load.
+    expect(invoke).toHaveBeenCalledTimes(2);
+    act(() => retryFromToast());
+    await waitFor(() => expect(invoke).toHaveBeenCalledTimes(3));
+  });
+
   it("reports malformed pages through Notices without rendering unapproved data", async () => {
     const { onError } = setup({ invoke: async () => ({ result: { rows: [{ id: 1, version: "bad", values: { [secret]: "Hidden" } }], nextCursor: null } }) });
     await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));

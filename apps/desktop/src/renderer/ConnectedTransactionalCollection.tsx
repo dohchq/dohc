@@ -36,7 +36,9 @@ export interface ConnectedTransactionalCollectionProps {
   workspaceId: string;
   datasetPath: string;
   tableId: string;
-  onError(fallback: string, error: unknown, retry?: (() => void) | null): void;
+  onError(fallback: string, error: unknown, retry?: (() => void) | null, identity?: string): void;
+  /** Removes the row in Notices a report with this identity left. */
+  onSettled?(identity: string): void;
   onFormCreated(appRoot: string): void;
   /** Opens a workspace file in a tab, such as automations.yaml or an operation source. */
   onOpenFile(path: string): void;
@@ -49,7 +51,7 @@ export interface ConnectedTransactionalCollectionProps {
 export function ConnectedTransactionalCollection(props: ConnectedTransactionalCollectionProps) {
   return <ScopedCollection key={`${props.workspaceId}:${props.datasetPath}:${props.tableId}`} {...props} />;
 }
-function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onFormCreated, onLifecycleChanged, onNotice, onOpenFile, onOpenScheduleSettings, owner = true }: ConnectedTransactionalCollectionProps) {
+function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onSettled, onFormCreated, onLifecycleChanged, onNotice, onOpenFile, onOpenScheduleSettings, owner = true }: ConnectedTransactionalCollectionProps) {
   const [dataset, setDataset] = useState<DatasetDescription | null>(null);
   const datasetId = dataset?.datasetId ?? "";
   const addressInput = <T extends { datasetId: string },>(input: T) => {
@@ -203,7 +205,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onFormCr
       return result;
     }} />}</>;
   // The ⚡ panel docks at the right of the table.
-  return <><div className="flex h-full min-h-0 min-w-0 flex-1"><div className="flex min-h-0 min-w-0 flex-1 flex-col"><button type="button" className="truncate px-3 py-1 text-left font-mono text-[12px] text-muted hover:text-ink" title={datasetPath} onClick={() => onOpenFile(datasetPath)}>{datasetPath}</button><TransactionalCollectionPage recordsVersion={recordsVersion} recordsChanged={recordsChanged} workspaceId={workspaceId} dataset={columns} tableId={tableId} onError={onError} onNotice={onNotice}
+  return <><div className="flex h-full min-h-0 min-w-0 flex-1"><div className="flex min-h-0 min-w-0 flex-1 flex-col"><button type="button" className="truncate px-3 py-1 text-left font-mono text-[12px] text-muted hover:text-ink" title={datasetPath} onClick={() => onOpenFile(datasetPath)}>{datasetPath}</button><TransactionalCollectionPage recordsVersion={recordsVersion} recordsChanged={recordsChanged} workspaceId={workspaceId} dataset={columns} tableId={tableId} onError={onError} onSettled={onSettled} onNotice={onNotice}
     buttons={buttonColumns}
     automationsButton={automations.button}
     fieldMarks={automations.fieldMarks}

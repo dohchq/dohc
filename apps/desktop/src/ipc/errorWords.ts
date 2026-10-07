@@ -242,6 +242,17 @@ export function withErrorWords(sentence: string, error: unknown): string {
     : words || sentence;
 }
 
+/**
+ * A Collection that waits before it reopens, because reopening it kept failing:
+ * the supervisor's words and the wait they state. The words round the wait up,
+ * so it has ended once `waitMs` passes.
+ */
+export function readCollectionReopenWait(error: unknown): { words: string; waitMs: number } | null {
+  const { name, message } = parse(error);
+  const wait = name === "DatasetReopenWaitError" ? /Try again in (\d+) (second|minute)s?\.$/.exec(message) : null;
+  return wait ? { words: message, waitMs: Number(wait[1]) * (wait[2] === "minute" ? 60_000 : 1000) } : null;
+}
+
 /** A refusal only a newer dohc can get past, so Try again would do nothing. */
 export function needsNewerDohc(error: unknown): boolean {
   return readError(error).words === NEWER_DOHC;
