@@ -52,7 +52,7 @@ describe("readReceivedShareListing", () => {
       received: [{ shareId: "a" }, { shareId: 7 }, null],
       removed: [{ shareId: "b", removedAtMs: 5, message: "The owner removed your access." }, { shareId: "c" }],
     })).toEqual({ received: new Set(["a"]), removed: [{ shareId: "b", removedAtMs: 5 }] });
-    expect(readReceivedShareListing({})).toEqual({ received: new Set(), removed: [] });
+    expect(readReceivedShareListing({})).toBeNull();
     expect(readReceivedShareListing({ received: "a" })).toBeNull();
     expect(readReceivedShareListing({ removed: {} })).toBeNull();
     expect(readReceivedShareListing(null)).toBeNull();
@@ -209,14 +209,14 @@ describe("reconcileRecipientSharesAfterLookup", () => {
     for (let attempt = 0; attempt < 2; attempt++) {
       const damaged = readReceivedShareListing({ received: [
         { shareId: "share", damaged: true, selector: null, access: "unknown" },
-      ] })!;
+      ], removed: [] })!;
       expect(await h.run(damaged)).toBe(false);
       expect(h.current()).toEqual(before);
     }
     expect(h.lookupShare).not.toHaveBeenCalled();
 
     h.lookupShare.mockResolvedValue(exactShare("share"));
-    const repaired = readReceivedShareListing({ received: [exactShare("share")] })!;
+    const repaired = readReceivedShareListing({ received: [exactShare("share")], removed: [] })!;
     expect(await h.run(repaired)).toBe(true);
     expect(h.lookupShare).toHaveBeenCalledExactlyOnceWith("share");
     expect(hasEnded(h.current(), kind)).toBeUndefined();
@@ -369,4 +369,13 @@ describe("exactReceivedShareIsActive", () => {
     expect(exactReceivedShareIsActive({ ...exactShare("share"),
       selector: { paths: [], versionId: null } }, "share")).toBe(false);
   });
+});
+
+it("rejects unfinished, failed and incomplete live account listings before reconciliation", () => {
+  for (const body of [
+    { received: [{ shareId: "active" }], removed: [], nextCursor: "next" },
+    { received: [{ shareId: "active" }], removed: [], ok: false },
+    { received: [{ shareId: "active" }] },
+    { removed: [{ shareId: "removed", removedAtMs: 100 }] },
+  ]) expect(readReceivedShareListing(body)).toBeNull();
 });

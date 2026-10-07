@@ -194,7 +194,7 @@ describe("roster from the relay's listings", () => {
     const { automationsGeneration: _left, ...older } = link();
     expect(await listed({ granted: [] }, [older])).toEqual({ grants: null, problem: { kind: "outdated-server" } });
     const entry: RegistryEntry = { workspaceId: WORKSPACE, rootPath: "/trip", kind: "personal", mode: "local-first", remote };
-    const stored = { version: 1, grants: null, problem: { kind: "outdated-server" } } as const;
+    const stored = { version: 1, listedAtMs: 0, grants: null, problem: { kind: "outdated-server" } } as const;
     expect(reachRosterFor({ entry: { ...entry, shareRoster: stored }, localUserId: null, localPersonId: null, history: null, latest: null, next: "" }))
       .toEqual({ kind: "unknown", problem: { kind: "outdated-server" } });
   });
@@ -236,7 +236,7 @@ describe("roster from the relay's listings", () => {
     const entry: RegistryEntry = { workspaceId: WORKSPACE, rootPath: "/trip", kind: "personal", mode: "local-first", remote };
     const chat = { ...ana, selector: { kind: "chat" as const, channelWireId: "wire" }, access: "read-write" as const };
     expect(reachRosterFor({
-      entry: { ...entry, shareRoster: { version: 1, grants: [], links: [], formerGrants: [{ grant: chat, automationsGeneration: 1 }], endedGrants: [] } },
+      entry: { ...entry, shareRoster: { version: 1, listedAtMs: 0, grants: [], links: [], formerGrants: [{ grant: chat, automationsGeneration: 1 }], endedGrants: [] } },
       localUserId: null, localPersonId: null, history: null, latest: null, next: "",
     })).toEqual({ kind: "unknown", problem: { kind: "unchecked", next: "" } });
   });
@@ -295,7 +295,7 @@ describe("the roster the reach check reads", () => {
     expect(reachRosterFor({ entry, localUserId: null, localPersonId: "install-here", history: "never-synced", latest: null, next: "" }))
       .toEqual({ kind: "owner", ownerUserId: null, localPersonId: "install-here", grants: [] });
     expect(reachRosterFor({
-      entry: { ...entry, remote, shareRoster: { version: 1, grants: [], links: [], formerGrants: [], endedGrants: [] } }, localUserId: null, localPersonId: "install-here", history: null, latest: null, next: "",
+      entry: { ...entry, remote, shareRoster: { version: 1, listedAtMs: 0, grants: [], links: [], formerGrants: [], endedGrants: [] } }, localUserId: null, localPersonId: "install-here", history: null, latest: null, next: "",
     })).toEqual({ kind: "owner", ownerUserId: "u-owner", grants: [], formerEditors: [] });
   });
 
@@ -324,8 +324,8 @@ describe("the roster the reach check reads", () => {
     const read = (shareRoster: unknown) =>
       reachRosterFor({ entry: { ...entry, remote, shareRoster: shareRoster as RegistryEntry["shareRoster"] }, localUserId: null, localPersonId: null, history: null, latest: null, next });
     expect(reachRosterFor({ entry: { ...entry, remote }, localUserId: null, localPersonId: null, history: null, latest: null, next })).toEqual(unchecked);
-    expect(read({ version: 2, grants: [ana], links: [], formerGrants: [], endedGrants: [] })).toEqual({ kind: "owner", ownerUserId: "u-owner", grants: [anaOnRoster], formerEditors: [] });
-    expect(read({ version: 2, grants: null, problem: { kind: "damaged-link" } }))
+    expect(read({ version: 2, listedAtMs: 0, grants: [ana], links: [], formerGrants: [], endedGrants: [] })).toEqual({ kind: "owner", ownerUserId: "u-owner", grants: [anaOnRoster], formerEditors: [] });
+    expect(read({ version: 2, listedAtMs: 0, grants: null, problem: { kind: "damaged-link" } }))
       .toEqual({ kind: "unknown", problem: { kind: "damaged-link" } });
     for (const damaged of [
       { ...ana, selector: { paths: [], versionId: null } },
@@ -334,14 +334,14 @@ describe("the roster the reach check reads", () => {
       { ...ana, selector: { kind: "group", channelWireId: "wire", paths: [], versionId: null }, access: "read-write" },
       { ...ana, recipientUserId: null, recipientEmail: null },
     ]) {
-      expect(read({ version: 2, grants: [damaged], links: [], formerGrants: [], endedGrants: [] }), JSON.stringify(damaged)).toEqual(unchecked);
+      expect(read({ version: 2, listedAtMs: 0, grants: [damaged], links: [], formerGrants: [], endedGrants: [] }), JSON.stringify(damaged)).toEqual(unchecked);
     }
-    expect(read({ version: 2, grants: null })).toEqual(unchecked);
+    expect(read({ version: 2, listedAtMs: 0, grants: null })).toEqual(unchecked);
   });
 
   it("makes each active link an editor of its own, and keeps a link that wrote automations directly and stopped editing", () => {
     const read = (links: unknown[]) => reachRosterFor({
-      entry: { ...entry, remote, shareRoster: { version: 2, grants: [ana], links, formerGrants: [], endedGrants: [] } as RegistryEntry["shareRoster"] },
+      entry: { ...entry, remote, shareRoster: { version: 2, listedAtMs: 0, grants: [ana], links, formerGrants: [], endedGrants: [] } as RegistryEntry["shareRoster"] },
       localUserId: null, localPersonId: null, history: null, latest: null, next: "",
     });
     const onRoster = (grantId: string, access = "edit") =>
@@ -366,15 +366,15 @@ describe("the roster the reach check reads", () => {
     const unchecked = { kind: "unknown", problem: { kind: "unchecked", next: "" } };
     const read = (shareRoster: unknown) =>
       reachRosterFor({ entry: { ...entry, remote, shareRoster: shareRoster as RegistryEntry["shareRoster"] }, localUserId: null, localPersonId: null, history: null, latest: null, next: "" });
-    expect(read({ version: 2, grants: [ana] })).toEqual(unchecked);
-    expect(read({ version: 2, grants: [], formerGrants: [], endedGrants: [], links: [linkGrant("g-a", { grant: { ...linkGrant("g-a").grant, recipientUserId: "u-ana" } })] }))
+    expect(read({ version: 2, listedAtMs: 0, grants: [ana] })).toEqual(unchecked);
+    expect(read({ version: 2, listedAtMs: 0, grants: [], formerGrants: [], endedGrants: [], links: [linkGrant("g-a", { grant: { ...linkGrant("g-a").grant, recipientUserId: "u-ana" } })] }))
       .toEqual(unchecked);
-    expect(read({ version: 2, grants: [], formerGrants: [], endedGrants: [], links: [{ ...linkGrant("g-a"), ended: undefined }] })).toEqual(unchecked);
+    expect(read({ version: 2, listedAtMs: 0, grants: [], formerGrants: [], endedGrants: [], links: [{ ...linkGrant("g-a"), ended: undefined }] })).toEqual(unchecked);
   });
 
   it("prefers a listing it learned but could not save", () => {
     expect(reachRosterFor({
-      entry: { ...entry, remote, shareRoster: { version: 1, grants: [ana], links: [], formerGrants: [], endedGrants: [] } }, localUserId: null, localPersonId: null, history: null, next: "",
+      entry: { ...entry, remote, shareRoster: { version: 1, listedAtMs: 0, grants: [ana], links: [], formerGrants: [], endedGrants: [] } }, localUserId: null, localPersonId: null, history: null, next: "",
       latest: { grants: null, problem: { kind: "unusable-listing" } },
     })).toEqual({ kind: "unknown", problem: { kind: "unusable-listing" } });
   });
@@ -436,6 +436,7 @@ describe("keeping the roster current", () => {
     await r.forRun(WORKSPACE);
     expect(store.find(WORKSPACE)?.shareRoster).toMatchObject({ version: 1, grants: [ana], links: [], formerGrants: [], endedGrants: [] });
 
+    now += SHARE_ROSTER_REFRESH_MS;
     vi.advanceTimersByTime(SHARE_ROSTER_REFRESH_MS);
     expect(list).toHaveBeenCalledTimes(2);
     r.close(WORKSPACE);
@@ -738,6 +739,11 @@ describe("keeping the roster current", () => {
     list.mockImplementation(async () => answered({ grants: [ana], links: [], formerGrants: [], endedGrants: [] }));
     first.resolve(answered({ grants: [], links: [], formerGrants: [], endedGrants: [] }));
     await r.forRun(WORKSPACE);
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(r.observation(WORKSPACE).freshness).toBe("stale");
+    now += SHARE_ROSTER_FRESH_MS;
+    await vi.advanceTimersByTimeAsync(SHARE_ROSTER_FRESH_MS);
+    await r.requestRefresh(WORKSPACE);
     expect(list).toHaveBeenCalledTimes(2);
     expect(store.find(WORKSPACE)?.shareRoster).toMatchObject({ version: 2, grants: [ana], links: [], formerGrants: [], endedGrants: [] });
   });
@@ -747,6 +753,8 @@ describe("keeping the roster current", () => {
     r.open(WORKSPACE);
     await r.forRun(WORKSPACE);
     r.sharesChanged(null);
+    now += SHARE_ROSTER_FRESH_MS;
+    await vi.advanceTimersByTimeAsync(SHARE_ROSTER_FRESH_MS);
     await r.forRun(WORKSPACE);
     expect(list.mock.calls.map(([workspace]) => workspace.workspaceId)).toEqual([WORKSPACE, WORKSPACE]);
   });
@@ -824,7 +832,7 @@ describe("a direct write's author in History", () => {
 
   const grant = (grantId: string, recipientUserId: string | null, recipientEmail: string | null, access: "view" | "edit") =>
     ({ grantId, recipientUserId, recipientEmail, selector: { paths: ["trip"], versionId: null }, access }) as ListedGrant;
-  const roster = { version: 1, grants: [grant("g-1", "ana", "ana@example.com", "edit"), grant("g-2", "ben", "ben@example.com", "view")], links: [], formerGrants: [], endedGrants: [] };
+  const roster = { version: 1, listedAtMs: 0, grants: [grant("g-1", "ana", "ana@example.com", "edit"), grant("g-2", "ben", "ben@example.com", "view")], links: [], formerGrants: [], endedGrants: [] };
 
   it("names a Button presser by active, former, then ended grants, with no opaque-id fallback", () => {
     const listing = { ...roster,
@@ -860,10 +868,10 @@ describe("a direct write's author in History", () => {
     // Ana wrote records, never automations.yaml, and the owner stopped her.
     const listing = await listed({ granted: [row({ revokedAtMs: 9 })] });
     expect(listing.grants).toEqual([]);
-    expect(labelFrom({ ...listing, version: 1 }, { userId: "u-ana", grantId: "g-1" })).toBe("ana@dohc.test");
+    expect(labelFrom({ ...listing, version: 1, listedAtMs: 0 }, { userId: "u-ana", grantId: "g-1" })).toBe("ana@dohc.test");
     // An invite nobody claimed names no person, so it cannot name a writer.
     const unclaimed = await listed({ granted: [row({ revokedAtMs: 9, principalKind: "email", recipientUserId: null })] });
-    expect(labelFrom({ ...unclaimed, version: 1 }, { userId: "u-ana", grantId: "g-1" })).toBe("Someone you shared with");
+    expect(labelFrom({ ...unclaimed, version: 1, listedAtMs: 0 }, { userId: "u-ana", grantId: "g-1" })).toBe("Someone you shared with");
   });
 
   it("keeps History loading on a saved roster this build cannot read, and names nobody from it", async () => {
@@ -886,7 +894,7 @@ describe("a direct write's author in History", () => {
     expect(labelFrom(roster, { userId: "cy", grantId: "revoked" })).toBe("Someone you shared with");
     expect(labelFrom(roster, { userId: "cy", grantId: "g-1" })).toBe("Someone you shared with");
     expect(labelFrom(undefined, { userId: "ana", grantId: "g-1" })).toBe("Someone you shared with");
-    expect(labelFrom({ version: 1, grants: null, problem: { kind: "unusable-listing" } }, { userId: "ana", grantId: "g-1" }))
+    expect(labelFrom({ version: 1, listedAtMs: 0, grants: null, problem: { kind: "unusable-listing" } }, { userId: "ana", grantId: "g-1" }))
       .toBe("Someone you shared with");
   });
 });

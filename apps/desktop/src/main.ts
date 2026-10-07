@@ -204,7 +204,7 @@ import {
   listWorkspaces,
   markWorkspaceOpened,
   registerWorkspace,
-  removeWorkspace,
+  removeWorkspace as removeRegisteredWorkspace,
   setWorkspaceRemote,
   acknowledgeWorkspaceShareSkips,
   endWorkspaceShareView,
@@ -222,6 +222,7 @@ import {
   readReceivedShareListing,
   reconcileRecipientSharesAfterLookup,
 } from "./workspaces/recipientShareReconciliation";
+import { createReceivedShareAcquisition, createReceivedShareStore } from "./workspaces/receivedShareStore";
 import { createShareRosters, rosterAuthorLabel, rosterPersonLabel } from "./automations/shareRoster";
 import { listRosterGrants, readStoredRoster } from "@dohc/automation-executor/roster-listing";
 import {
@@ -1305,11 +1306,11 @@ async function relayShareJson<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 // Live account listings record removals; an exact-share read confirms resumptions.
-async function reconcileReceivedShares(listing: unknown): Promise<void> {
+async function reconcileReceivedShares(listing: unknown, acquisitionIsCurrent: () => boolean = () => true): Promise<void> {
   const parsed = readReceivedShareListing(listing);
   const credentials = cachedCredentials;
   const generation = credentialCacheGeneration;
-  if (!parsed || !credentials?.relayUrl) return;
+  if (!parsed || !credentials?.relayUrl || !acquisitionIsCurrent()) return;
   for (const entry of listWorkspaces()) {
     try {
       const changed = await reconcileRecipientSharesAfterLookup({
@@ -1317,7 +1318,7 @@ async function reconcileReceivedShares(listing: unknown): Promise<void> {
         credentials,
         currentEntry: () => findWorkspace(entry.workspaceId),
         updateEntry: (reconcile) => reconcileWorkspaceRecipientShares(entry.workspaceId, reconcile),
-        isCurrent: () => generation === credentialCacheGeneration,
+        isCurrent: () => generation === credentialCacheGeneration && acquisitionIsCurrent(),
         lookupShare: (shareId) => relayShareJsonWithCredentials<unknown>(
           credentials, `/sync/shares/${encodeURIComponent(shareId)}`,
         ),
@@ -1331,38 +1332,57 @@ async function reconcileReceivedShares(listing: unknown): Promise<void> {
   }
 }
 
+// Account-wide observations belong to stateDir and never authorize workspace operations.
+const receivedShareStore = createReceivedShareStore(join(stateDir(), "received-shares"));
+const receivedShareAcquisition = createReceivedShareAcquisition({
+  store: receivedShareStore,
+  scope: () => cachedCredentials?.relayUrl ? {
+    userId: cachedCredentials.userId, relayUrl: cachedCredentials.relayUrl, generation: credentialCacheGeneration,
+  } : null,
+  list: async scope => {
+    const credentials = cachedCredentials;
+    if (!credentials || scope.generation !== credentialCacheGeneration) throw new Error("Server session changed.");
+    return relayShareJsonWithCredentials<unknown>(credentials, "/sync/shares");
+  },
+  onLive: (inventory, _scope, isCurrent) => reconcileReceivedShares(inventory, isCurrent),
+  logError: error => console.warn("[desktop] received share observation:", error),
+});
+
+// The account file remains while another registered workspace can use it.
+function removeWorkspace(workspaceId: string): void {
+  removeRegisteredWorkspace(workspaceId);
+  if (listWorkspaces().length !== 0) return;
+  receivedShareAcquisition.retire();
+  if (cachedCredentials?.relayUrl) receivedShareStore.remove({
+    userId: cachedCredentials.userId, relayUrl: cachedCredentials.relayUrl, generation: credentialCacheGeneration,
+  });
+}
+
 // A restored share must resume even if this device was offline during Undo.
-let removalRecheck: { generation: number; startedAt: number; pending: Promise<void> } | null = null;
 async function recheckRemovedShares(workspaceId: string): Promise<void> {
   const entry = findWorkspace(workspaceId);
   if (!entry || !recipientShareNeedsRecheck(entry)) return;
   await warmCredentialCache();
-  const credentials = cachedCredentials;
-  if (!credentials?.relayUrl) return;
-  const generation = credentialCacheGeneration;
-  if (removalRecheck?.generation === generation && Date.now() - removalRecheck.startedAt < 30_000) {
-    return removalRecheck.pending;
+  await receivedShareAcquisition.refresh();
+}
+
+const rosterContexts = new Map<string, { generation: number; binding: unknown }>();
+function rosterContext(workspaceId: string): unknown {
+  let binding: unknown = null;
+  try { binding = workspaceAuthorities.currentBinding(workspaceId); } catch { /* The attachment retired. */ }
+  let context = rosterContexts.get(workspaceId);
+  if (!context || context.generation !== credentialCacheGeneration || context.binding !== binding) {
+    context = { generation: credentialCacheGeneration, binding };
+    rosterContexts.set(workspaceId, context);
   }
-  const pending = (async () => {
-    try {
-      const listing = await awaitCredentialGeneration({
-        capturedGeneration: generation,
-        currentGeneration: () => credentialCacheGeneration,
-        run: () => relayShareJsonWithCredentials<unknown>(credentials, "/sync/shares"),
-      });
-      await reconcileReceivedShares(listing);
-    } catch (error) {
-      console.warn(`[desktop] share removal recheck for ${workspaceId}:`, error);
-    }
-  })();
-  removalRecheck = { generation, startedAt: Date.now(), pending };
-  await pending;
+  return context;
 }
 
 // Each open workspace's copy of the grants its owner gave, for the automation
 // reach check.
 const shareRosters = createShareRosters({
   findWorkspace,
+  context: rosterContext,
   saveRoster: setWorkspaceShareRoster,
   markRosterPulled: markWorkspaceShareRosterPulled,
   listRoster: async (workspace) => {
@@ -1377,6 +1397,9 @@ const shareRosters = createShareRosters({
     if (!credentials.relayUrl) {
       return { kind: "unanswered", next: "Reconnect your sharing server, then try again.", partial: false };
     }
+    // The owner pages and the account observation share this refresh attempt.
+    // Received storage and resumptions consume the same complete live response.
+    void receivedShareAcquisition.refresh();
     return listRosterGrants(workspace.workspaceId, async (path) => {
       const response = await relayShareResponseWithCredentials(credentials, path, { method: "GET" });
       return { status: response.status, body: await response.json().catch(() => undefined) };
@@ -1578,6 +1601,7 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
     const relayCloseTargets =
       relayCloseTargetsForPhysicalWorkspace(physicalWorkspace);
     shareRosters.close(binding.workspaceId);
+    rosterContexts.delete(binding.workspaceId);
     automationScheduler.remove(binding.workspaceId);
     automationHosts.close(binding.workspaceId);
     pressWindows.forget(binding.workspaceId);
@@ -3271,6 +3295,7 @@ async function openWorkspaceActivityForOperation(
   });
   queueChatBookmarkProjection(canonicalWorkspace.workspaceId);
   shareRosters.open(canonicalWorkspace.workspaceId);
+  void receivedShareAcquisition.refresh();
   // Automations run where changes are captured: never in a shared view.
   if (activity.engineCaptureFor(canonicalWorkspace.workspaceId)) {
     automationHosts.open(canonicalWorkspace.workspaceId);
@@ -5581,7 +5606,7 @@ function registerIpcHandlers(): void {
     relayShareJsonWithCredentials,
     relayShareErrorCopy,
     relayShareDiscussionActivityPolls,
-    sharesChanged: shareRosters.sharesChanged,
+    sharesChanged: (workspaceId) => { receivedShareAcquisition.invalidate(); shareRosters.sharesChanged(workspaceId); },
     reconcileReceivedShares,
   });
 
@@ -5879,7 +5904,7 @@ function registerIpcHandlers(): void {
         ...(labelHint.length > 0 ? { labelHint } : {}),
         assertCurrent,
       }),
-    sharesChanged: shareRosters.sharesChanged,
+    sharesChanged: (workspaceId) => { receivedShareAcquisition.invalidate(); shareRosters.sharesChanged(workspaceId); },
     reconcileReceivedShares,
   });
 
@@ -6001,7 +6026,7 @@ function registerIpcHandlers(): void {
       (await relayShareJsonWithCredentials<unknown>(credentials, path, init, { retainDependentSetConflict: true })).kind === "success"
         ? "ended"
         : "dependents-changed",
-    sharesChanged: shareRosters.sharesChanged,
+    sharesChanged: (workspaceId) => { receivedShareAcquisition.invalidate(); shareRosters.sharesChanged(workspaceId); },
     requireEngineCapture: (workspaceId) => requireEngineCapture(workspaceId, "Engine history"),
     localPerson,
     queuePull: (workspaceId) => activity.queueCloudPull(workspaceId),

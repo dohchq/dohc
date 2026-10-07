@@ -2,6 +2,7 @@ import type { RegistryEntry } from "../workspaces/registryStore";
 import type { SyncHistory } from "../workspaces/syncHistory";
 import type { ReachRoster } from "@dohc/automation-executor/automation-reach";
 import {
+  readStoredRoster,
   ownerRoster,
   UNUSABLE_ROSTER,
   type ListedGrant,
@@ -12,7 +13,7 @@ import {
 // The share roster: the grants the owner gave on one workspace, as the relay
 // last listed them. Grants live only on the relay, and the reach check
 // (automationReach.ts) must answer without a network round trip, so the
-// owner's computer keeps this copy in the workspace registry.
+// owner's computer keeps this copy under stateDir.
 //
 // The copy is never broader than the relay's last answer. A relay that
 // answers nothing leaves the copy in place, and it stands in until this
@@ -27,13 +28,15 @@ export const SHARE_ROSTER_FRESH_MS = 60_000;
 const SYNC_AGAIN = "Sync this workspace in Settings → Sync and sharing, then try again.";
 
 /**
- * The registry's copy. `version` rises when the listing changes.
+ * The stored copy. `version` rises when the listing changes.
  * `pulledAfter` records that this computer started a pull from the relay
  * after this listing started, so the pull may have brought changes the
  * listing did not see. It is written before the pull request is sent, and
  * only the next listing replaces it.
  */
-export type ShareRoster = RosterListing & { version: number; pulledAfter?: true };
+export type RosterObservation = { listing: RosterListing | null; checkedAtMs: number | null; freshness: "fresh" | "stale" | "unknown" };
+
+export type ShareRoster = RosterListing & { version: number; listedAtMs: number; pulledAfter?: true };
 
 /**
  * What the reach check knows on this computer.
@@ -90,9 +93,17 @@ interface RosterState {
   // `partial` is true when the relay answered part of one of them.
   noAnswer: { next: string; partial: boolean } | null;
   // A listing the registry has not saved yet.
-  unsaved: { listing: RosterListing; pulledAfter: boolean } | null;
+  unsaved: { listing: RosterListing; pulledAfter: boolean; listedAtMs: number; context: unknown } | null;
   running: Promise<void> | null;
   again: boolean;
+  retry: ReturnType<typeof setTimeout> | null;
+  changeGeneration: number;
+  checkedAtMs: number | null;
+  checkedContext: unknown;
+  invalidated: boolean;
+  retired: boolean;
+  parsedSource: unknown;
+  parsed: RosterListing | null;
 }
 
 /**
@@ -111,7 +122,7 @@ interface RosterState {
  */
 export function createShareRosters(dependencies: {
   findWorkspace(workspaceId: string): RegistryEntry | null;
-  saveRoster(workspaceId: string, listing: RosterListing, pulledAfter: boolean): void;
+  saveRoster(workspaceId: string, listing: RosterListing, pulledAfter: boolean, listedAtMs: number): void;
   // Records that a pull started after the stored listing.
   markRosterPulled(workspaceId: string): void;
   listRoster(workspace: RegistryEntry): Promise<RosterAnswer>;
@@ -125,16 +136,22 @@ export function createShareRosters(dependencies: {
   onListed?(workspaceId: string): void;
   // A clock that never steps backwards, for pacing listings.
   nowMs?: () => number;
+  wallNowMs?: () => number;
+  /** Account session and physical attachment identity, compared before publication. */
+  context?(workspaceId: string): unknown;
 }) {
+  const wallNowMs = dependencies.wallNowMs ?? Date.now;
+  const context = dependencies.context ?? (() => null);
   const nowMs = dependencies.nowMs ?? (() => performance.now());
   const states = new Map<string, RosterState>();
 
   function stateFor(workspaceId: string): RosterState {
     let state = states.get(workspaceId);
-    if (!state) {
+    if (!state || state.retired) {
       state = {
         timer: null, lastAttemptMs: null, pullStarts: 0, pullsRunning: 0, markFailed: false,
-        noAnswer: null, unsaved: null, running: null, again: false,
+        noAnswer: null, unsaved: null, running: null, again: false, retry: null,
+        changeGeneration: 0, checkedAtMs: null, checkedContext: null, invalidated: false, retired: false, parsedSource: undefined, parsed: null,
       };
       states.set(workspaceId, state);
     }
@@ -143,8 +160,9 @@ export function createShareRosters(dependencies: {
 
   function save(workspaceId: string, state: RosterState): void {
     if (!state.unsaved) return;
+    if (state.retired || state.unsaved.context !== context(workspaceId)) { state.unsaved = null; return; }
     try {
-      dependencies.saveRoster(workspaceId, state.unsaved.listing, state.unsaved.pulledAfter);
+      dependencies.saveRoster(workspaceId, state.unsaved.listing, state.unsaved.pulledAfter, state.unsaved.listedAtMs);
       state.unsaved = null;
       state.markFailed = false;
     } catch (error) {
@@ -155,9 +173,10 @@ export function createShareRosters(dependencies: {
   // Record, before its request is sent, that a pull follows the latest
   // listing. Throws when the registry cannot be written.
   function markPulled(workspaceId: string, state: RosterState): void {
+    if (state.unsaved && state.unsaved.context !== context(workspaceId)) state.unsaved = null;
     if (state.unsaved) {
       state.unsaved.pulledAfter = true;
-      dependencies.saveRoster(workspaceId, state.unsaved.listing, true);
+      dependencies.saveRoster(workspaceId, state.unsaved.listing, true, state.unsaved.listedAtMs);
       state.unsaved = null;
     } else {
       const stored = dependencies.findWorkspace(workspaceId)?.shareRoster;
@@ -185,6 +204,9 @@ export function createShareRosters(dependencies: {
     const workspace = dependencies.findWorkspace(workspaceId);
     if (!workspace?.remote || workspace.shareView) return;
     state.lastAttemptMs = nowMs();
+    const listedAtMs = wallNowMs();
+    const capturedContext = context(workspaceId);
+    const capturedChange = state.changeGeneration;
     // A pull that runs at any time after this listing starts may bring
     // changes the listing does not see.
     const pullStartsBefore = state.pullStarts;
@@ -196,31 +218,47 @@ export function createShareRosters(dependencies: {
       dependencies.logError(workspaceId, error);
       answer = UNUSABLE_ROSTER;
     }
+    const current = dependencies.findWorkspace(workspaceId);
+    if (state.retired || context(workspaceId) !== capturedContext || !current ||
+        current.rootPath !== workspace.rootPath || current.remote?.ownerUserId !== workspace.remote.ownerUserId ||
+        current.remote?.serverUrl !== workspace.remote.serverUrl) return;
     if (answer.kind === "unanswered") {
+      state.invalidated = true;
       state.noAnswer = { next: answer.next, partial: (state.noAnswer?.partial ?? false) || answer.partial };
       return;
     }
     state.noAnswer = null;
-    state.unsaved = { listing: answer.listing, pulledAfter: pullRunning || state.pullStarts !== pullStartsBefore };
+    state.checkedAtMs = listedAtMs;
+    state.checkedContext = capturedContext;
+    state.invalidated = capturedChange !== state.changeGeneration || answer.listing.grants === null;
+    state.unsaved = { listing: answer.listing, listedAtMs, context: capturedContext, pulledAfter: pullRunning || state.pullStarts !== pullStartsBefore };
     save(workspaceId, state);
     dependencies.onListed?.(workspaceId);
   }
 
-  // A request made while a listing runs gets one more listing after it, so a
-  // share changed mid-listing is never missed.
+  // Pacing for background and surface requests. Automation reach retains its
+  // immediate re-list after an overlapping pull, before allowing a run.
+  function pacedRefresh(workspaceId: string): Promise<void> {
+    const state = stateFor(workspaceId);
+    if (state.running) return state.running;
+    if (due(state)) return refresh(workspaceId);
+    if (!state.retry) {
+      state.retry = setTimeout(() => {
+        state.retry = null;
+        void refresh(workspaceId);
+      }, Math.max(0, SHARE_ROSTER_FRESH_MS - (nowMs() - state.lastAttemptMs!)));
+      state.retry.unref?.();
+    }
+    return Promise.resolve();
+  }
+
   function refresh(workspaceId: string): Promise<void> {
     const state = stateFor(workspaceId);
-    if (state.running) {
-      state.again = true;
-      return state.running;
-    }
-    const running = (async () => {
-      do {
-        state.again = false;
-        await listOnce(workspaceId, state);
-      } while (state.again);
-    })().finally(() => {
+    if (state.running) return state.running;
+    if (state.retry) { clearTimeout(state.retry); state.retry = null; }
+    const running = listOnce(workspaceId, state).finally(() => {
       state.running = null;
+      if (state.again) { state.again = false; void pacedRefresh(workspaceId); }
     });
     state.running = running;
     return running;
@@ -251,6 +289,7 @@ export function createShareRosters(dependencies: {
   // What this computer knows now, with no listing.
   async function known(workspaceId: string, state: RosterState, overlapped: boolean): Promise<ReachRoster> {
     const entry = dependencies.findWorkspace(workspaceId);
+    if (state.unsaved && state.unsaved.context !== context(workspaceId)) state.unsaved = null;
     if (!entry) return { kind: "unknown", problem: { kind: "unchecked", next: "Open this workspace, then try again." } };
     const noAnswer = state.noAnswer;
     if (entry.remote && !entry.shareView && (overlapped || stale(workspaceId, state))) {
@@ -273,25 +312,36 @@ export function createShareRosters(dependencies: {
     open(workspaceId: string): void {
       const state = stateFor(workspaceId);
       if (state.timer) return;
-      state.timer = setInterval(() => void refresh(workspaceId), SHARE_ROSTER_REFRESH_MS);
+      state.timer = setInterval(() => void pacedRefresh(workspaceId), SHARE_ROSTER_REFRESH_MS);
       state.timer.unref?.();
-      void refresh(workspaceId);
+      void pacedRefresh(workspaceId);
     },
 
     close(workspaceId: string): void {
       const state = states.get(workspaceId);
-      if (!state?.timer) return;
-      clearInterval(state.timer);
+      if (!state) return;
+      if (state.timer) clearInterval(state.timer);
+      if (state.retry) clearTimeout(state.retry);
       state.timer = null;
+      state.retry = null;
+      state.changeGeneration += 1;
+      state.invalidated = true;
+      state.again = false;
+      state.retired = true;
+      state.unsaved = null;
     },
 
     /** This computer created, ended, or changed a share. Null names no workspace, so every open one refreshes. */
     sharesChanged(workspaceId: string | null): void {
-      if (workspaceId !== null) {
-        void refresh(workspaceId);
-        return;
-      }
-      for (const [id, state] of states) if (state.timer) void refresh(id);
+      const invalidate = (id: string) => {
+        const state = stateFor(id);
+        state.changeGeneration += 1;
+        state.invalidated = true;
+        state.again = state.running !== null;
+        void pacedRefresh(id);
+      };
+      if (workspaceId !== null) invalidate(workspaceId);
+      else for (const [id, state] of states) if (state.timer) invalidate(id);
     },
 
     /**
@@ -302,7 +352,7 @@ export function createShareRosters(dependencies: {
      */
     pulled(workspaceId: string, recovered: boolean): Promise<void> {
       const state = stateFor(workspaceId);
-      return (recovered || state.noAnswer !== null) && due(state) ? refresh(workspaceId) : Promise.resolve();
+      return (recovered || state.noAnswer !== null) && due(state) ? pacedRefresh(workspaceId) : Promise.resolve();
     },
 
     /**
@@ -330,6 +380,22 @@ export function createShareRosters(dependencies: {
         ended = true;
         state.pullsRunning -= 1;
       };
+    },
+
+    /** Called only when Sharing opens or Access expands. The query caller arrives in PR 3. */
+    requestRefresh(workspaceId: string): Promise<void> { return pacedRefresh(workspaceId); },
+
+    observation(workspaceId: string): RosterObservation {
+      const state = stateFor(workspaceId);
+      if (state.unsaved && state.unsaved.context !== context(workspaceId)) state.unsaved = null;
+      const raw = state.unsaved?.listing ?? dependencies.findWorkspace(workspaceId)?.shareRoster;
+      if (state.parsedSource !== raw) { state.parsedSource = raw; state.parsed = readStoredRoster(raw); }
+      const listing = state.parsed;
+      const checkedAtMs = state.checkedAtMs ?? dependencies.findWorkspace(workspaceId)?.shareRoster?.listedAtMs ?? null;
+      const freshness = !listing || listing.grants === null ? "unknown" :
+        state.checkedAtMs === null || state.invalidated || state.checkedContext !== context(workspaceId) ||
+        wallNowMs() - state.checkedAtMs < 0 || wallNowMs() - state.checkedAtMs >= SHARE_ROSTER_REFRESH_MS ? "stale" : "fresh";
+      return { listing, checkedAtMs, freshness };
     },
 
     forRun,
