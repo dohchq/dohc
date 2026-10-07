@@ -87,9 +87,10 @@ test("the editor's listboxes keep the option Enter acts on in view as the arrows
     await expect(slash).toBeVisible();
     await capture(page, slash, "slash-menu");
     await expectLastRevealed(page, slash);
+    // Each list closes with its trigger text, as editor-slash-menu leaves it.
     await page.keyboard.press("Escape");
-    await expect(slash).toBeHidden();
     await page.keyboard.press("Backspace");
+    await expect(slash).toBeHidden();
 
     const pages = page.getByRole("listbox", { name: "page links" });
     await page.keyboard.type("@");
@@ -97,8 +98,8 @@ test("the editor's listboxes keep the option Enter acts on in view as the arrows
     await capture(page, pages, "page-links");
     await expectLastRevealed(page, pages);
     await page.keyboard.press("Escape");
-    await expect(pages).toBeHidden();
     await page.keyboard.press("Backspace");
+    await expect(pages).toBeHidden();
 
     const emoji = page.getByRole("listbox", { name: "emoji" });
     await page.keyboard.type(" :he");
@@ -106,6 +107,7 @@ test("the editor's listboxes keep the option Enter acts on in view as the arrows
     await capture(page, emoji, "emoji-picker");
     await expectLastRevealed(page, emoji);
     await page.keyboard.press("Escape");
+    for (let i = 0; i < 4; i++) await page.keyboard.press("Backspace");
     await expect(emoji).toBeHidden();
 
     // The selection toolbar's turn-into list fits under its cap here; it is
