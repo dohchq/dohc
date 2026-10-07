@@ -8,18 +8,21 @@ export function runOwnerCancellationFixture(root, sourceRoot, kind, signal, clea
   const put = (path, text) => { mkdirSync(dirname(join(root, path)), { recursive: true }); writeFileSync(join(root, path), text); };
   const copy = (path) => put(path, readFileSync(join(sourceRoot, path)));
   put("package.json", '{"type":"module"}');
-  for (const file of ["build.mjs", "verify.mjs", "js-tests.mjs", "selection.mjs", "cancellation.mjs", "timing.mjs"]) {
+  for (const file of ["build.mjs", "verify.mjs", "js-tests.mjs", "selection.mjs", "renderer-selection.mjs", "cancellation.mjs", "timing.mjs"]) {
     const path = `scripts/verification/${file}`;
     if (existsSync(join(sourceRoot, path))) copy(path);
   }
   put("apps/desktop/package.json", "{}");
+  put("scripts/verification/rust-reuse.mjs", "export const rustIdentity=()=>({});export const finishRustEvidence=()=>({kind:'fixture'});export const refreshRustReuse=()=>{throw Error('unexpected reuse');};");
   put("pnpm-workspace.yaml", "fixture workspace");
   put("packages/workspace-auth/package.json", '{"name":"@dohc/workspace-auth","scripts":{"test":"vitest run"}}');
   put(".github/workflows/pr-checks.yml", "fixture workflow");
   put("node_modules/js-yaml/index.js", "exports.load=s=>s==='fixture workspace'?{packages:['packages/*']}:s==='fixture workflow'?{jobs:{changes:{steps:[{with:{filters:'fixture filters'}}]}}}:{rust:[],js:['**']};");
-  put("tools/rust-engine-program/build-slot.mjs", "export const resolveBuildBudget=()=>null;export const freeDiskGb=()=>100;export const acquireBuildSlot=()=>{throw Error('unexpected slot acquisition')};export const acquireVerificationSlot=()=>null;");
+  put("tools/rust-engine-program/build-slot-real.mjs", readFileSync(join(sourceRoot, "tools/rust-engine-program/build-slot.mjs")));
+  put("tools/rust-engine-program/build-slot.mjs", "export {acquireExclusiveSlot} from './build-slot-real.mjs';export const capBuildParallelism=source=>({...source});export const resolveBuildBudget=()=>null;export const freeDiskGb=()=>100;export const acquireBuildSlot=()=>{throw Error('unexpected slot acquisition')};export const acquireVerificationSlot=()=>null;");
   put("apps/desktop/scripts/require-e2e-engine.mjs", "export const requireE2eEngine=()=>{};");
   put("scripts/verification/doctor.mjs", "export const doctor=()=>({checks:[]});");
+  put("scripts/verification/admission.mjs", "export const admissionPreflight=()=>{};export const installedDependenciesMatch=()=>false;export const verificationAdmission=()=>({lightweight:false,reason:'fixture full lane'});");
   put("tools/rust-engine-program/tree-provenance.mjs", "export const readTreeState=()=>({head:'fixture'});export const classifyTreeProvenance=()=>({status:'PASS'});");
   put("tools/rust-engine-program/git-read.mjs", readFileSync(join(sourceRoot, "tools/rust-engine-program/git-read.mjs")));
   if (kind === "verify") put("scripts/verification/build.mjs", `
@@ -35,6 +38,7 @@ export function runOwnerCancellationFixture(root, sourceRoot, kind, signal, clea
     export function sourceFingerprint(){if(existsSync('typecheck-complete'))interruptDuringSync();return 'fixture';}
   `);
   put("scripts/verification/process.mjs", `
+    import assert from 'node:assert/strict';
     import {execFileSync} from 'node:child_process';
     import {appendFileSync,existsSync,readFileSync,rmSync,writeFileSync} from 'node:fs';
     import {resolve} from 'node:path';
@@ -62,7 +66,14 @@ export function runOwnerCancellationFixture(root, sourceRoot, kind, signal, clea
           rmSync('container');return {stdout:'removed'};
         }
       }
-      if(args.includes('typecheck'))writeFileSync('typecheck-complete','yes');
+      if(args.includes('typecheck')) {
+        const commands=readFileSync('commands.jsonl','utf8');
+        const {verify}=await import('./verify.mjs');
+        await assert.rejects(verify(['pr','--base','fixture','--job','rust']), /Another run owns.*pid.*PR verification.*js/);
+        assert.equal(readFileSync('commands.jsonl','utf8'),commands,'Second selection started a command before obtaining checkout ownership');
+        writeFileSync('second-selection-blocked','yes');
+        writeFileSync('typecheck-complete','yes');
+      }
       return {stdout:''};
     }
   `);
@@ -87,6 +98,13 @@ export function runOwnerCancellationFixture(root, sourceRoot, kind, signal, clea
       const result=await owner.${kind}(${kind === "prepare" ? "{engineOnly:true}" : "['pr','--base','fixture','--job','js']"});
       outcome={resolved:true,verdict:result.verdict};
     }catch(error){outcome={error:error.message,cleanupError:error.cleanupError};}
+    if(${kind === "verify"}) {
+      const {join}=await import('node:path');
+      const {acquireExclusiveSlot}=await import('./tools/rust-engine-program/build-slot.mjs');
+      const recovered=acquireExclusiveSlot({root:join(process.cwd(),'.dohc-dev/verification'),kind:'verification-checkout'});
+      recovered.release();
+      outcome.checkoutReleased=true;
+    }
     writeFileSync('outcome.json',JSON.stringify({...outcome,listeners:[process.listenerCount('SIGINT'),process.listenerCount('SIGTERM')]}));
   `], { cwd: root, encoding: "utf8", timeout: 20_000 });
   const json = (path) => existsSync(join(root, path)) ? JSON.parse(readFileSync(join(root, path), "utf8")) : null;

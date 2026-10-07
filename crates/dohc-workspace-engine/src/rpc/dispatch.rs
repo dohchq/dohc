@@ -161,6 +161,9 @@ impl EngineService {
         if request.method == "ydoc.ownerDelivery.prepareEnrollment" {
             return self.owner_delivery_prepare_enrollment(ctx, request).await;
         }
+        if request.method == "ydoc.ownerDelivery.refuseEntry" {
+            return self.owner_delivery_refuse_entry(ctx, request).await;
+        }
         if request.method == "ydoc.ownerDelivery.listDrafts" {
             return self.owner_delivery_list_drafts(ctx, request).await;
         }

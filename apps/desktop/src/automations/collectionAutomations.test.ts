@@ -10,6 +10,7 @@ import type { CollectionQueryFilter, CollectionRecord } from "@dohc/workspace-co
 import type { AutomationClaim, AutomationClaimMessage, AutomationGroupHandover, AutomationGroupRelayRecord, ChangeAttributionWire } from "@dohc/workspace-engine-client";
 import type { RelayAutomationHost, RelayButtonAuthority } from "@dohc/workspace-contracts/relay";
 import { derivedRecordId } from "@dohc/automation-executor/record-ids";
+import { AutomationRunWait } from "@dohc/automation-executor/button-presser";
 import { AUTOMATION_SWITCHED_OFF_BODY } from "@dohc/automation-executor/automation-failed-notice";
 import { parseReachHandover } from "@dohc/automation-executor/reach-verdicts";
 import { collectionRecordWrites } from "@dohc/automation-executor/collection-record-edits";
@@ -2251,6 +2252,42 @@ describe("Collection automations", () => {
     w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
     await w.until(() => w.automationsChanged() > reads);
     expect(w.switchedOff).toEqual([]);
+  });
+
+  it("retries a capacity-released recipient press without other workspace activity", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let preparations = 0;
+    const w = await world({
+      automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid by: '=person.id'}}]\n" },
+      withRecordWrites: async () => {
+        if (++preparations === 1) throw new AutomationRunWait("The shared file is busy. Try again.", "busy");
+      },
+    });
+    try {
+      const invoice = w.addRecord("Tasks", "invoice", {});
+      await w.executor.open();
+      const definitionHash = await hashOf(w.executor, "Tasks", "paid");
+      const relayed = await w.relayPress(w.executor, {
+        automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash,
+        recordId: invoice.id, pressId: "capacity-press", pressedBy: "user-ana", confirmed: [],
+      }, () => undefined);
+      if (relayed.pressed.busy) throw Error("Expected a claim");
+      const claim = w.claims.get(relayed.pressed.claimId)!;
+      await w.until(() => w.events.includes(`released ${claim.claimId}`));
+      expect(claim.state).toBe("pending");
+      expect(w.fieldsOf(invoice)).toEqual({});
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(preparations).toBe(1);
+      expect(claim.state).toBe("pending");
+      await vi.advanceTimersByTimeAsync(1);
+      await w.settledClaim(claim);
+      expect(claim.state).toBe("done");
+      expect(preparations).toBe(2);
+      expect(w.fieldsOf(invoice)).toEqual({ "Paid by": "user-ana" });
+    } finally {
+      await w.executor.dispose();
+      vi.useRealTimers();
+    }
   });
 
   it("leaves a claim for the next drain when the evaluator is busy", async () => {

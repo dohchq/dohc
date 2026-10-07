@@ -56,15 +56,15 @@ pub(super) fn classify(
     let operation = &input.fence.operation;
     let b = &operation.old_binding;
     let parent_length: Option<i64> = conn.query_row(
-        "SELECT length(CAST(outbox_id AS BLOB))+length(CAST(current_path AS BLOB))+length(CAST(selector_paths_json AS BLOB))+length(CAST(base_update_digest AS BLOB))+length(CAST(base_blob_digest AS BLOB))+length(CAST(state AS BLOB))+coalesce(length(CAST(quarantine_reason AS BLOB)),0)+coalesce(length(CAST(observed_binding_json AS BLOB)),0) FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5",
-        params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.restore_fence_generation],|row|row.get(0),
+        "SELECT length(CAST(outbox_id AS BLOB))+length(CAST(current_path AS BLOB))+length(CAST(selector_paths_json AS BLOB))+length(CAST(base_update_digest AS BLOB))+length(CAST(base_blob_digest AS BLOB))+length(CAST(state AS BLOB))+coalesce(length(CAST(quarantine_reason AS BLOB)),0)+coalesce(length(CAST(observed_binding_json AS BLOB)),0) FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5 AND current_path=?6 AND selector_paths_json=?7",
+        params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.restore_fence_generation,b.current_path,serde_json::to_string(&b.selector_paths).map_err(|_| ApplicationError::Corrupt)?],|row|row.get(0),
     ).optional().map_err(read_sql)?;
     if let Some(length) = parent_length {
         budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
     }
     let parent: Option<Parent> = conn.query_row(
-        "SELECT outbox_id,current_path,selector_paths_json,restore_fence_generation,base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,oldest_entry_at_ms,next_sequence,quarantine_reason,observed_binding_json FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5",
-        params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.restore_fence_generation],|row|Ok(Parent {outbox:row.get(0)?,path:row.get(1)?,selectors:row.get(2)?,fence:row.get(3)?,base:row.get(4)?,blob:row.get(5)?,base_length:row.get(6)?,state:row.get(7)?,pending:row.get(8)?,oldest:row.get(9)?,next:row.get(10)?,reason:row.get(11)?,observed:row.get(12)?}),
+        "SELECT outbox_id,current_path,selector_paths_json,restore_fence_generation,base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,oldest_entry_at_ms,next_sequence,quarantine_reason,observed_binding_json FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5 AND current_path=?6 AND selector_paths_json=?7",
+        params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.restore_fence_generation,b.current_path,serde_json::to_string(&b.selector_paths).map_err(|_| ApplicationError::Corrupt)?],|row|Ok(Parent {outbox:row.get(0)?,path:row.get(1)?,selectors:row.get(2)?,fence:row.get(3)?,base:row.get(4)?,blob:row.get(5)?,base_length:row.get(6)?,state:row.get(7)?,pending:row.get(8)?,oldest:row.get(9)?,next:row.get(10)?,reason:row.get(11)?,observed:row.get(12)?}),
     ).optional().map_err(read_sql)?;
     let mut sources = Vec::new();
     let mut bytes = Vec::new();
@@ -163,7 +163,7 @@ pub(super) fn classify(
                     .then_some(revision)
             }
         };
-        let mut query=conn.prepare("SELECT sequence,append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,length(CAST(native_source_json AS BLOB)),length(CAST(append_key AS BLOB))+length(CAST(delivery_id AS BLOB))+length(CAST(update_digest AS BLOB))+length(CAST(update_blob_digest AS BLOB)),length(CAST(agent_declaration_json AS BLOB)),draft_binding_revision FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 ORDER BY sequence LIMIT ?2").map_err(read_sql)?;
+        let mut query=conn.prepare("SELECT sequence,append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,length(CAST(native_source_json AS BLOB)),length(CAST(append_key AS BLOB))+length(CAST(delivery_id AS BLOB))+length(CAST(update_digest AS BLOB))+length(CAST(update_blob_digest AS BLOB)),length(CAST(agent_declaration_json AS BLOB)),draft_binding_revision,length(CAST(automation_declaration_json AS BLOB)) FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 ORDER BY sequence LIMIT ?2").map_err(read_sql)?;
         let mut rows = query
             .query(params![outbox, max_events as i64 + 1])
             .map_err(read_sql)?;
@@ -203,6 +203,7 @@ pub(super) fn classify(
             let source_length: Option<i64> = row.get(7).map_err(read_sql)?;
             let declaration_length: Option<i64> = row.get(9).map_err(read_sql)?;
             let draft_revision: Option<i64> = row.get(10).map_err(read_sql)?;
+            let automation_length: Option<i64> = row.get(11).map_err(read_sql)?;
             if created < 0
                 || sequence < 1
                 || sequence >= next
@@ -234,6 +235,19 @@ pub(super) fn classify(
                         .map_err(|_| ApplicationError::Corrupt)?
                 }
             };
+            let automation = match automation_length {
+                None => None,
+                Some(length) => {
+                    budget
+                        .charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
+                    let json = conn.query_row("SELECT automation_declaration_json FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND sequence=?2", params![outbox,sequence], |row| row.get(0)).map_err(read_sql)?;
+                    crate::owner_outbox::stored_automation_declaration(Some(json))
+                        .map_err(|_| ApplicationError::Corrupt)?
+                }
+            };
+            if automation.is_some() && (declaration.is_some() || source_length.is_some()) {
+                return Err(ApplicationError::Corrupt);
+            }
             let source = if let Some(source_length) = source_length {
                 budget.charge(
                     usize::try_from(source_length).map_err(|_| ApplicationError::Corrupt)?,
@@ -283,6 +297,7 @@ pub(super) fn classify(
                     update_digest: update_digest.clone(),
                     origin: OwnerOutboxDraftOrigin::OwnerDraft {
                         agent_declaration: declaration.clone(),
+                        automation_declaration: automation.clone(),
                     },
                 })
             };
@@ -299,6 +314,7 @@ pub(super) fn classify(
                 // binding, owner authority, and declaration.
                 if metadata.accepted.receipt.update_digest != update_digest
                     || !metadata.matches_draft_declaration(declaration.as_ref())
+                    || !metadata.matches_automation_declaration(automation.as_ref())
                     || metadata.accepted.binding != *b
                     || metadata.accepted.receipt.journal_cursor
                         > operation.terminal.as_ref().map_or(0, |r| r.journal_cursor)

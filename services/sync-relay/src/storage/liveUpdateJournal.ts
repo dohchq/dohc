@@ -1,4 +1,6 @@
 import {SETTLEMENT_CUTS} from "./hostedSettlementSchema";
+import {parseAutomationDeclaration} from "@dohc/live-session-contract/live-authorship";
+import {automationPressAdmissionAllowed, automationGrantAdmissionAllowed} from "./automationPresses";
 import {readRestoreAdmission,verifyRestoreCheckpoint} from "./liveRestoreCheckpoint";
 import { liveJournalHistoryNamespace, requireLiveJournalHistory } from "./liveJournalHistory";
 import { liveJournalCheckpointDue } from "./liveJournalCheckpoint";
@@ -546,8 +548,17 @@ export function appendValidatedLiveJournal(storage: StorageContext, input: {
 
 export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpdateJournalCommitInput, activation?: ServiceActivationAccess): RelayLiveUpdateJournalResult {
     requireLiveJournalHistory(storage);
-    const outer = journalRecord(input, ["host", "actor", "expectedAuthority", "metadata", "cutToken", "validation", "updateBytes", "receivedAtMs"], ["trustedAccount"]);
+    const outer = journalRecord(input, ["host", "actor", "expectedAuthority", "metadata", "cutToken", "validation", "updateBytes", "receivedAtMs"], ["trustedAccount", "trustedAutomation", "trustedAutomationPress", "trustedAutomationGrant"]);
     const trustedAccount = outer.trustedAccount === undefined ? undefined : baselineRecord(outer.trustedAccount, ["accountId", "name"]) as {accountId:string;name:string};
+    const trustedAutomation = outer.trustedAutomation === undefined ? undefined : parseAutomationDeclaration(outer.trustedAutomation);
+    const trustedAutomationPress = outer.trustedAutomationPress === undefined ? undefined : {
+      hostPressId: parseLiveUpdateIdentifier(baselineRecord(outer.trustedAutomationPress, ["hostPressId", "automationId"]).hostPressId),
+      automationId: parseLiveUpdateIdentifier(baselineRecord(outer.trustedAutomationPress, ["hostPressId", "automationId"]).automationId),
+    };
+    const trustedAutomationGrant = outer.trustedAutomationGrant === undefined ? undefined : (() => {
+      const grant = baselineRecord(outer.trustedAutomationGrant, ["grantId", "grantGeneration"]);
+      return {grantId: parseLiveUpdateIdentifier(grant.grantId), grantGeneration: authorityInteger(grant.grantGeneration, 1)};
+    })();
     const host = snapshotHostCoordinate(outer.host);
     const rawMetadata = journalRecord(outer.metadata, ["deliveryId", "updateDigest", "binding"], ["authorContext"]);
     const metadata = parseLiveUpdateSubmissionMetadata({ ...rawMetadata, binding: journalBinding(rawMetadata.binding) });
@@ -558,6 +569,9 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
     const actorKind = baselineRecord(outer.actor, ["kind"], true).kind;
     if (actorKind !== "owner" && actorKind !== "named" && actorKind !== "link") return { result: { kind: "refused", reason: "authority-refused" }, admitted: null };
     const request = snapshotCurrentBindingRequest({ document, actor: outer.actor as CurrentLiveBindingRequest["actor"] });
+    if (trustedAutomation && actorKind !== "owner") return {result: {kind: "refused", reason: "authority-refused"}, admitted: null};
+    if (trustedAutomationPress && (!trustedAutomation || actorKind !== "owner")) return {result: {kind: "refused", reason: "authority-refused"}, admitted: null};
+    if (trustedAutomationGrant && (!trustedAutomation || actorKind !== "owner" || trustedAutomationPress)) return {result: {kind: "refused", reason: "authority-refused"}, admitted: null};
     const { token, issued } = captureJournalCut(storage, outer.cutToken);
     const updateBytes = journalBytes(outer.updateBytes), receivedAtMs = authorityInteger(outer.receivedAtMs);
     if (createHash("sha256").update(updateBytes).digest("hex") !== metadata.updateDigest) return { result: { kind: "refused", reason: "invalid-update" }, admitted: null };
@@ -600,10 +614,24 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
           const previous = row.admitted.metadata.accepted;
           if (previous.receipt.updateDigest !== metadata.updateDigest || !isDeepStrictEqual(previous.binding, current.binding) ||
             !isDeepStrictEqual(previous.authority, current.authority) ||
+            (trustedAutomation ? !isDeepStrictEqual(row.admitted.metadata.authorSnapshot, [{kind: "automation", ...trustedAutomation}]) : row.admitted.metadata.authorSnapshot?.some(author => author.kind === "automation")) ||
             replayRaw.author_context_json !== (metadata.authorContext === undefined ? null : JSON.stringify(metadata.authorContext))) return refused({ kind: "refused", reason: "delivery-conflict" });
           liveJournalCoverage(storage, document, stored.ranges);
           return { reply: { result: { kind: "accepted" as const, receipt: { ...previous.receipt }, replayed: true }, admitted: row.admitted }, row, history };
         }
+        if (trustedAutomationPress && (request.actor.kind !== "owner" || !automationPressAdmissionAllowed(storage, {
+          workspaceId: document.workspaceId, ownerUserId: request.actor.userId,
+          currentPath: current.binding.currentPath,
+          hostPressId: trustedAutomationPress.hostPressId, automationId: trustedAutomationPress.automationId, declaration: trustedAutomation!,
+        }))) return refused({kind: "refused", reason: "authority-refused"});
+        if (trustedAutomation?.attribution.onBehalfOf !== undefined && request.actor.kind === "owner" &&
+          trustedAutomation.attribution.onBehalfOf !== request.actor.userId && !trustedAutomationPress && !trustedAutomationGrant) {
+          return refused({kind: "refused", reason: "authority-refused"});
+        }
+        if (trustedAutomationGrant && (request.actor.kind !== "owner" || !automationGrantAdmissionAllowed(storage, {
+          workspaceId: document.workspaceId, ownerUserId: request.actor.userId, currentPath: current.binding.currentPath,
+          ...trustedAutomationGrant, declaration: trustedAutomation!,
+        }))) return refused({kind: "refused", reason: "authority-refused"});
         // BEGIN IMMEDIATE excludes competing writers after this revision check.
         const read = issued?.current() && isDeepStrictEqual(token.document, document) ? { kind: "cut" as const, cut: token, coverage: issued.coverage }
           : readJournalCut(storage, document, token);
@@ -620,7 +648,7 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
         if (!isDeepStrictEqual(subtractJournalRanges(allFirstSeen, read.coverage), allFirstSeen)) {
           return refused({kind:"refused",reason:"provenance-refused"});
         }
-        let authorSnapshot = deriveLiveAuthorSnapshot(storage, current.authority, metadata.authorContext, trustedAccount);
+        let authorSnapshot: LiveAuthorSnapshot = trustedAutomation ? [{kind: "automation", ...trustedAutomation}] : deriveLiveAuthorSnapshot(storage, current.authority, metadata.authorContext, trustedAccount);
         journalIntegrity(isDeepStrictEqual(seedSource,liveJournalSeedSource(storage,document)));
         const seedFirstSeen = allFirstSeen.filter(range => range.clientId === seedId);
         const firstSeen = allFirstSeen.filter(range => range.clientId !== seedId);

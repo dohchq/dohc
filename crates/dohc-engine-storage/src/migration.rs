@@ -2743,6 +2743,83 @@ BEGIN
 END;
 ";
 
+const V2_OWNER_BINDING_REBIND_DDL: &str = "\
+CREATE TEMP TABLE owner_rebind_parents AS SELECT * FROM owner_ydoc_outboxes;
+CREATE TEMP TABLE owner_rebind_entries AS SELECT * FROM owner_ydoc_outbox_entries;
+DROP TABLE owner_ydoc_outbox_entries;
+DROP TABLE owner_ydoc_outboxes;
+CREATE TABLE owner_ydoc_outboxes (
+    outbox_id                 TEXT NOT NULL PRIMARY KEY,
+    workspace_id              TEXT NOT NULL,
+    main_version_id           TEXT NOT NULL,
+    object_id                 TEXT NOT NULL,
+    lineage_claim_id          TEXT NOT NULL,
+    current_path              TEXT NOT NULL,
+    selector_paths_json       TEXT NOT NULL CHECK (json_valid(selector_paths_json)),
+    restore_fence_generation  INTEGER NOT NULL CHECK (restore_fence_generation >= 0),
+    base_update_digest        TEXT NOT NULL,
+    base_blob_digest          TEXT NOT NULL,
+    base_byte_length          INTEGER NOT NULL CHECK (base_byte_length > 0),
+    state                     TEXT NOT NULL CHECK (state IN ('active', 'sealed', 'quarantined')),
+    pending_bytes             INTEGER NOT NULL CHECK (pending_bytes >= 0),
+    oldest_entry_at_ms        INTEGER CHECK (oldest_entry_at_ms IS NULL OR oldest_entry_at_ms >= 0),
+    next_sequence             INTEGER NOT NULL CHECK (next_sequence >= 1),
+    quarantine_reason         TEXT,
+    observed_binding_json     TEXT CHECK (
+      observed_binding_json IS NULL OR json_valid(observed_binding_json)
+    ),
+    created_at_ms             INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    CHECK (
+      (state = 'quarantined' AND quarantine_reason IS NOT NULL) OR
+      (state != 'quarantined' AND quarantine_reason IS NULL AND observed_binding_json IS NULL)
+    ),
+    CHECK (
+      (pending_bytes = 0 AND oldest_entry_at_ms IS NULL) OR
+      (pending_bytes > 0 AND oldest_entry_at_ms IS NOT NULL)
+    ),
+    UNIQUE (workspace_id, main_version_id, object_id, lineage_claim_id, restore_fence_generation, current_path, selector_paths_json),
+    FOREIGN KEY (base_blob_digest)
+      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
+) STRICT;
+
+INSERT INTO owner_ydoc_outboxes SELECT * FROM owner_rebind_parents;
+CREATE TABLE owner_ydoc_outbox_entries (
+    outbox_id                TEXT NOT NULL,
+    sequence                 INTEGER NOT NULL CHECK (sequence >= 1),
+    append_key               TEXT NOT NULL UNIQUE,
+    delivery_id              TEXT NOT NULL UNIQUE,
+    update_digest            TEXT NOT NULL,
+    native_source_json       TEXT CHECK (native_source_json IS NULL OR json_valid(native_source_json)),
+    accepted_receipt_json    TEXT CHECK (accepted_receipt_json IS NULL OR json_valid(accepted_receipt_json)),
+    update_blob_digest       TEXT,
+    byte_length              INTEGER NOT NULL CHECK (byte_length > 0),
+    created_at_ms            INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    pending                  INTEGER NOT NULL CHECK (pending IN (0, 1)),
+    result_pending_bytes     INTEGER NOT NULL CHECK (result_pending_bytes > 0),
+    result_oldest_entry_at_ms INTEGER NOT NULL CHECK (result_oldest_entry_at_ms >= 0),
+    result_state             TEXT NOT NULL CHECK (result_state IN ('active', 'sealed')),
+    draft_binding_revision INTEGER CHECK (draft_binding_revision IS NULL OR (native_source_json IS NULL AND draft_binding_revision BETWEEN 1 AND 9007199254740991)),
+    agent_declaration_json TEXT CHECK (agent_declaration_json IS NULL OR json_valid(agent_declaration_json)),
+    automation_declaration_json TEXT CHECK (automation_declaration_json IS NULL OR json_valid(automation_declaration_json)),
+    terminal_blob_digest TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    terminal_reason TEXT CHECK (terminal_reason IS NULL OR (length(terminal_reason) BETWEEN 1 AND 256 AND pending=0 AND accepted_receipt_json IS NULL)),
+    CHECK (
+      (pending = 1 AND update_blob_digest IS NOT NULL) OR
+      (pending = 0 AND update_blob_digest IS NULL)
+    ),
+    PRIMARY KEY (outbox_id, sequence),
+    FOREIGN KEY (outbox_id)
+      REFERENCES owner_ydoc_outboxes(outbox_id) ON DELETE RESTRICT,
+    FOREIGN KEY (update_blob_digest)
+      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
+) STRICT;
+INSERT INTO owner_ydoc_outbox_entries (outbox_id,sequence,append_key,delivery_id,update_digest,native_source_json,accepted_receipt_json,update_blob_digest,byte_length,created_at_ms,pending,result_pending_bytes,result_oldest_entry_at_ms,result_state,draft_binding_revision,agent_declaration_json,automation_declaration_json,terminal_blob_digest,terminal_reason) SELECT outbox_id,sequence,append_key,delivery_id,update_digest,native_source_json,accepted_receipt_json,update_blob_digest,byte_length,created_at_ms,pending,result_pending_bytes,result_oldest_entry_at_ms,result_state,draft_binding_revision,agent_declaration_json,automation_declaration_json,terminal_blob_digest,terminal_reason FROM owner_rebind_entries;
+DROP TABLE owner_rebind_entries;
+DROP TABLE owner_rebind_parents;
+CREATE INDEX owner_ydoc_outbox_entries_pending ON owner_ydoc_outbox_entries(outbox_id,sequence) WHERE pending=1;
+CREATE INDEX owner_ydoc_outbox_entries_by_digest ON owner_ydoc_outbox_entries(update_digest);
+";
+
 const V2_LIVE_SETTLEMENT_PUBLICATION_DDL: &str = "
 CREATE TABLE live_settlement_publication_states (
     settlement_id TEXT NOT NULL PRIMARY KEY
@@ -2973,6 +3050,30 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     },
     Migration {
         ordinal: 32,
+        id: "v2-owner-draft-automation-declarations",
+        sql: "ALTER TABLE owner_ydoc_outbox_entries ADD COLUMN automation_declaration_json TEXT CHECK (automation_declaration_json IS NULL OR json_valid(automation_declaration_json));",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 33,
+        id: "v2-owner-draft-terminal-refusal",
+        sql: "ALTER TABLE owner_ydoc_outbox_entries ADD COLUMN terminal_blob_digest TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT; ALTER TABLE owner_ydoc_outbox_entries ADD COLUMN terminal_reason TEXT CHECK (terminal_reason IS NULL OR (length(terminal_reason) BETWEEN 1 AND 256 AND pending=0 AND accepted_receipt_json IS NULL));",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 34,
+        id: "v2-owner-draft-rebound-coordinates",
+        sql: V2_OWNER_BINDING_REBIND_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 35,
+        id: "v2-automation-claim-parent",
+        sql: "ALTER TABLE automation_claims ADD COLUMN parent_claim_id TEXT;",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 36,
         id: "v2-live-settlement-publication",
         sql: V2_LIVE_SETTLEMENT_PUBLICATION_DDL,
         sets_user_version: None,
@@ -3426,6 +3527,22 @@ mod tests {
             (
                 "v2-ydoc-sharing-declined",
                 "8a42bb97818cd2b4456555336bc1d2819b96e68b66280cf4366d2021bded0c02",
+            ),
+            (
+                "v2-owner-draft-automation-declarations",
+                "81dcb94e818f3455ac41f94852312d1b707c36694286732743ce0ba96377a23b",
+            ),
+            (
+                "v2-owner-draft-terminal-refusal",
+                "c6c1ffbba30e745b1ba3ab8903f3f99cebece197004a5bd220074a626f83d06f",
+            ),
+            (
+                "v2-owner-draft-rebound-coordinates",
+                "f8a202bc0daef9617dd578e89cd74b1939888ea7e5c1baa001e7a6c1f8aadb67",
+            ),
+            (
+                "v2-automation-claim-parent",
+                "40ce1151cb687e0cd5a4f3ccca776ab3a1fbae59ff5f143b79d149c5b3e36c29",
             ),
             (
                 "v2-live-settlement-publication",

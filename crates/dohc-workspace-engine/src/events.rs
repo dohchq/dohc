@@ -358,6 +358,7 @@ mod tests {
         let mut rx = events.subscribe();
         let claims = vec![
             dohc_engine_domain::AutomationClaim {
+                parent_claim_id: None,
                 claim_id: "atc_one".to_owned(),
                 automation_id: "collection:tasks#triage".to_owned(),
                 trigger: dohc_engine_domain::AutomationTrigger::Coordinate {
@@ -383,6 +384,7 @@ mod tests {
                 updated_at_ms: 1_100,
             },
             dohc_engine_domain::AutomationClaim {
+                parent_claim_id: None,
                 claim_id: "atc_two".to_owned(),
                 automation_id: "collection:tasks#janitor".to_owned(),
                 trigger: dohc_engine_domain::AutomationTrigger::History { history_id: 7 },

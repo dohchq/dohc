@@ -58,6 +58,7 @@ export type YdocRecordUpdateParams = JsonObject & {
   updateBase64: string;
   actorOriginId?: string;
   attribution?: ChangeAttributionWire;
+  trustedAutomationDraft?: boolean;
   // Declares this update as the SEED: a faithful import of the seedContent
   // the open returned, built before any user input could reach the session.
   // Only the adapter's applySeedUpdate path sends it — never a replay of

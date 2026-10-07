@@ -1,5 +1,5 @@
 import {createHash, randomBytes} from "node:crypto";
-import {mkdir, readdir, rm} from "node:fs/promises";
+import {mkdir, readdir, rm, writeFile} from "node:fs/promises";
 import {join} from "node:path";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
@@ -19,6 +19,7 @@ import {
 import {deriveAutomationReplicaBearer} from "./automationReplicaCredential";
 import {observeRelayWrites} from "./relayWriteChanges";
 import {ServiceOrdinaryReplication} from "./serviceOrdinaryReplication";
+import {selfHostedLiveProfile} from "./selfHostLiveProfile";
 
 /** One workspace this server keeps a replica of, open in its engine. */
 export interface AutomationReplica {
@@ -41,6 +42,8 @@ export interface AutomationReplica {
   nextRequestId(): number;
   /** Pushes the replica's own writes to the relay, then pulls what the relay has. */
   sync(signal?: AbortSignal): Promise<void>;
+  /** Serializes record draft preparation and delivery without delaying ordinary sync. */
+  withRecordWork<T>(work: () => Promise<T>): Promise<T>;
 }
 
 const REQUEST_DEADLINE_MS = 30_000;
@@ -80,6 +83,8 @@ export async function startAutomationReplicas(options: {
   onEngineEvent?(event: Event): void;
   /** A pull wrote these paths into a replica. */
   onPulled?(workspaceId: string, paths: readonly string[]): void;
+  /** Refresh accepted live records before their ordinary artifacts are pulled. */
+  onBeforeSync?(workspaceId: string): Promise<void>;
   /** A pass ran to its end. A workspace that failed in it is in failedSyncs. */
   onReconciled?(): void;
   /** A pass failed, or one workspace in it did (`workspaceId` names it). */
@@ -123,6 +128,8 @@ export async function startAutomationReplicas(options: {
       const exited = new AbortController();
       const started = await createEngineClient({
         command: options.engineExecutable, authToken: randomBytes(32).toString("base64url"),
+        env: {DOHC_ENGINE_OWNER_HOST_CONFIG: configPath},
+        privateLiveApplication: selfHostedLiveProfile.nativeClient,
         protocolVersion: 2, capabilities: ["blobs"], connectTimeoutMs: REQUEST_DEADLINE_MS, signal,
         onExit: () => {
           exited.abort();
@@ -184,14 +191,24 @@ export async function startAutomationReplicas(options: {
       nextRequestId, deadlineMs: REQUEST_DEADLINE_MS, signal: replicaSignal, assertCurrent: current},
       {relay: {baseUrl: relay.origin, bearerToken}, identity: {kind: "join", replicationEpoch: row.replicationEpoch,
         streamIdentity: row.streamIdentity}, maxPagesPerPull: 8});
-    let chain: Promise<unknown> = Promise.resolve();
+    let recordChain: Promise<unknown> = Promise.resolve();
+    let syncChain: Promise<unknown> = Promise.resolve();
+    const withRecordWork = <T>(work: () => Promise<T>): Promise<T> => {
+      const run = recordChain.then(() => {replicaSignal.throwIfAborted(); current(); return work();});
+      recordChain = run.catch(() => undefined);
+      return run;
+    };
     let closing: Promise<void> | undefined;
     // Pushes, then pulls, each for at most `rounds`, so a copy that always
     // has more to push still pulls. Answers whether it caught up.
     let running = 0;
     const syncRounds = (rounds: number, callerSignal?: AbortSignal): Promise<boolean> => {
       running += 1;
-      const run = chain.then(async () => {
+      const run = syncChain.then(async () => {
+        replicaSignal.throwIfAborted(); current();
+        // Live record refresh has its own retry lane; failure never skips sync.
+        try {await options.onBeforeSync?.(row.workspaceId);}
+        catch (error) {observe(() => options.onError?.(error, row.workspaceId));}
         const head = logHead(row.workspaceId);
         let pushMore = true, pullMore = true;
         for (let round = 0; pushMore && round < rounds; round++) pushMore = (await replication.push(callerSignal)).hasMore;
@@ -211,7 +228,7 @@ export async function startAutomationReplicas(options: {
         running -= 1;
         if (running === 0 && !closed.signal.aborted && logHead(row.workspaceId) > replica.pulledHead) schedule();
       }, () => { running -= 1; });
-      chain = run.catch((error: unknown) => {
+      syncChain = run.catch((error: unknown) => {
         if (!replicaSignal.aborted) {
           failedSyncs.set(row.workspaceId, error);
           schedule(RETRY_FIRST_MS);
@@ -222,6 +239,7 @@ export async function startAutomationReplicas(options: {
     const replica = {
       workspaceId: row.workspaceId, ownerUserId: row.ownerUserId, incarnation: row.incarnation, startedAtMs: row.startedAtMs,
       root, metadataDir, client: engineClient, workspace: handle, signal: replicaSignal, nextRequestId, pulledHead: 0,
+      withRecordWork,
       sync(callerSignal?: AbortSignal): Promise<void> {
         return syncRounds(Number.POSITIVE_INFINITY, callerSignal).then(() => undefined);
       },
@@ -238,7 +256,7 @@ export async function startAutomationReplicas(options: {
           replicas.delete(row.workspaceId);
           failedSyncs.delete(row.workspaceId);
           closed.abort();
-          await chain;
+          await Promise.all([recordChain, syncChain]);
           await release();
           options.onChanged?.(row.workspaceId);
         })();
@@ -335,9 +353,11 @@ export async function startAutomationReplicas(options: {
       const folders = new Set(rows.map((row) => folderOf(row.workspaceId)));
       let swept_ = true;
       for (const entry of await readdir(options.root)) {
-        if (folders.has(join(options.root, entry))) continue;
+        const path = join(options.root, entry);
+        // The daemon needs this configuration again after an engine exit.
+        if (path === configPath || folders.has(path)) continue;
         try {
-          await rm(join(options.root, entry), {recursive: true, force: true});
+          await rm(path, {recursive: true, force: true});
         } catch (error) {
           // A folder no row names is no one workspace's: the pass fails as a whole, after the others had their turn.
           if (signal.aborted) throw error;
@@ -448,6 +468,8 @@ export async function startAutomationReplicas(options: {
   });
 
   await mkdir(options.root, {recursive: true, mode: 0o700});
+  const configPath = join(options.root, `owner-ingress-${randomBytes(8).toString("hex")}.json`);
+  await writeFile(configPath, JSON.stringify(selfHostedLiveProfile.nativeIngress), {flag: "wx", mode: 0o600});
   const stopWatching = observeRelayWrites(storage, () => schedule());
   schedule(0);
   const worker = Effect.runFork(passes.pipe(Effect.tapCause((cause) => Effect.sync(() => {
@@ -473,6 +495,7 @@ export async function startAutomationReplicas(options: {
         client.engine.close();
         await client.engine.waitForExit();
       })),
+      Effect.ensuring(Effect.promise(() => rm(configPath, {force: true}))),
     )));
     storage.unavailable.removeEventListener("abort", closeUnavailable);
     lifetime.abort();
