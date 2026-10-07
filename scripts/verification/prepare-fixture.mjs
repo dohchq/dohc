@@ -54,7 +54,7 @@ export function createPrepareFixture(root, buildSource, { commit = true } = {}) 
         put(join(repoRoot,path,'built.txt'),readFileSync(join(repoRoot,'node_modules/installed.txt')));
       for(const name of ['dohc','dohc-mcp']) {
         const launcher=join(repoRoot,'apps/desktop/resources/cli-bin',name);
-        put(launcher,'fixture launcher'); chmodSync(launcher,0o755);
+        put(launcher,'#!/bin/sh\\nexit 0\\n'); chmodSync(launcher,0o755);
       }
       return {};
     }

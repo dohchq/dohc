@@ -381,7 +381,6 @@ test("vendored native edits invalidate preparation and rebuild the engine", () =
       assert.equal(result.status, 0, result.stderr);
       return JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1));
     };
-    // This fixture has no POSIX CLI launchers.
     const options = { platform: "win32" };
     assert.equal(run(options).enginePrepared, true);
     const original = JSON.parse(readFileSync(join(root, ".dohc-dev/verification/build.json"), "utf8")).engine.source;
