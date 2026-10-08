@@ -31,6 +31,7 @@ import {
   lazy,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -622,20 +623,25 @@ export function MarkdownView(props: {
   if (engine.doc) lastLiveDoc.current = { key: props.documentKey, doc: engine.doc };
   const showEndedCopy = !engine.doc && !opening &&
     engine.readOnlyCause === "access-ended" && orphanedDrafts.length === 0;
-  let readOnlyCopy = showEndedCopy && endedCopy?.key === props.documentKey ? endedCopy.doc : null;
-  if (showEndedCopy && !readOnlyCopy && lastLiveDoc.current?.key === props.documentKey) {
-    // A display snapshot keeps the live content after the lease closes. It
-    // has no provider and cannot send edits back to the shared document.
-    readOnlyCopy = new Y.Doc();
-    Y.applyUpdate(readOnlyCopy, Y.encodeStateAsUpdate(lastLiveDoc.current.doc));
-    setEndedCopy({ key: props.documentKey, doc: readOnlyCopy });
-  } else if (!showEndedCopy && endedCopy !== null) {
-    setEndedCopy(null);
-  }
-  useEffect(() => {
-    if (endedCopy) lastLiveDoc.current = null;
-    return () => { endedCopy?.doc.destroy(); };
-  }, [endedCopy]);
+  const endedSnapshot = useMemo(() => {
+    const live = lastLiveDoc.current;
+    return showEndedCopy && live?.key === props.documentKey
+      ? { key: live.key, update: Y.encodeStateAsUpdate(live.doc) }
+      : null;
+  }, [showEndedCopy, props.documentKey, engine.doc]);
+  useLayoutEffect(() => {
+    if (!endedSnapshot) {
+      setEndedCopy(null);
+      return;
+    }
+    // Commit owns the display copy. Discarded renders keep only bytes.
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, endedSnapshot.update);
+    lastLiveDoc.current = null;
+    setEndedCopy({ key: endedSnapshot.key, doc });
+    return () => doc.destroy();
+  }, [endedSnapshot]);
+  const readOnlyCopy = showEndedCopy && endedCopy?.key === props.documentKey ? endedCopy.doc : null;
   const displayDoc = engine.doc ?? readOnlyCopy;
 
   const openingRef = useRef(opening);

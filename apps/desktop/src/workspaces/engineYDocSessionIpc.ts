@@ -137,6 +137,7 @@ interface LineageReplacement {
 }
 
 interface EngineYDocIpcOwnedSession {
+  readonly readOnlyCause: ReadOnlyTransitionCause;
   ownerHandoff?: { ready(): void; fail(error: unknown): void; done: Promise<void>; finish(): void };
   workspace: EngineYDocWorkspace;
   provider: EngineYDocSessionProvider;
@@ -636,10 +637,12 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       openSession: async (signals) => {
         const saveSeq = createEngineYDocSaveSeqState();
         let lastEvent: SessionEvent | null = null;
+        let currentReadOnlyCause: ReadOnlyTransitionCause = "reconnecting";
         const emit = (event: SessionEvent): void => {
           if (lastEvent?.state === event.state &&
             (event.state === "settling" || lastEvent.seq === event.seq) &&
             lastEvent.authorCapacity === event.authorCapacity &&
+            lastEvent.readOnlyCause === event.readOnlyCause &&
             lastEvent.editRefusal?.requestId === event.editRefusal?.requestId &&
             lastEvent.editRefusal?.message === event.editRefusal?.message) return;
           signals.emit(event);
@@ -668,6 +671,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
               }));
             },
             onSaveState: (state, token, event, authorCapacity, readOnlyCause) => {
+              if (state === "read-only") currentReadOnlyCause = readOnlyCause ?? "reconnecting";
               const seq =
                 event === "start"
                   ? noteSettleStart(saveSeq, token)
@@ -700,6 +704,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         }
 
         const owned: EngineYDocIpcOwnedSession = {
+          get readOnlyCause() { return currentReadOnlyCause; },
           workspace,
           provider,
           saveSeq,
@@ -843,7 +848,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           return { accepted: false, reason: "deleted" };
         }
         if (this.#isSharedView(owned.workspace) && !owned.provider.liveWritable?.()) {
-          owned.emit({ state: "read-only", seq: input.seq });
+          owned.emit({ state: "read-only", seq: input.seq, readOnlyCause: owned.readOnlyCause });
           return { accepted: false, reason: "read-only" };
         }
         // A renderer editor update is this computer's person typing: agent

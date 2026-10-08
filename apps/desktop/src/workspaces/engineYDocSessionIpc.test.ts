@@ -384,6 +384,23 @@ describe("engine Y.Doc IPC adapter", () => {
     await h.ipc.shutdown();
   });
 
+  it.each(["access-ended", "reconnecting"] as const)("preserves the refused apply cause %s", async (cause) => {
+    const shared = Object.assign(providerSession(), {liveWritable: () => false});
+    const open = vi.fn<EngineYDocSessionCapture["openYDocSession"]>(async () => shared);
+    const h = harness(providerSession(), {sharedCaptureFor: async () => ({openYDocSession: open})});
+    h.setReadOnly(true);
+    const sender = new FakeSender(7);
+    await h.ipc.open(sender, openPayload);
+    open.mock.calls[0]![0].onSaveState?.("read-only", 0, "status", undefined, "reconnecting");
+    open.mock.calls[0]![0].onSaveState?.("read-only", 0, "status", undefined, cause);
+    expect(sender.sent.at(-1)?.payload).toMatchObject({readOnlyCause: cause});
+    expect(h.ipc.applyUpdate(sender, {sessionId: openPayload.sessionId, update: new Uint8Array([0, 0]),
+      seq: 1, lineageGeneration: 1, requestId: "11111111-1111-4111-8111-111111111111"})).toEqual({accepted: false, reason: "read-only"});
+    expect(sender.sent.at(-1)?.payload).toMatchObject({access: "read-only", seq: 1, readOnlyCause: cause});
+    expect(shared.applyLocalUpdate).not.toHaveBeenCalled();
+    await h.ipc.shutdown();
+  });
+
   it("keeps an unavailable named host read-only without opening a local proposal editor", async () => {
     const h = harness(providerSession(), {sharedCaptureFor: async () => ({openYDocSession: async () => {throw new Error("offline");}})});
     h.setReadOnly(true);
@@ -1179,6 +1196,7 @@ describe("engine Y.Doc IPC adapter", () => {
       sessionId: openPayload.sessionId,
       ...engineSaveState("read-only"),
       seq: 5,
+      readOnlyCause: "reconnecting",
     });
 
     h.setReadOnly(false);

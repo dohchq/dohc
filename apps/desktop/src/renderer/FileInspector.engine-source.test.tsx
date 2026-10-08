@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@t
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
+import { StrictMode, Suspense } from "react";
 import { markdownToYDoc as projectMarkdownToYDoc } from "@dohc/ydoc-projection";
 import { markdownToYDoc, replaceYDocWithMarkdown } from "./editor/import-export";
 import { FileInspector } from "./FileInspector";
@@ -37,6 +38,17 @@ import {
   TEST_CONTENT_HASH,
 } from "./FileInspector.draft-fixture";
 import { type DraftFlush } from "./useAutosavedTextDraft";
+
+const snapshotDocs = vi.hoisted(() => ({ track: false, created: [] as import("yjs").Doc[] }));
+vi.mock("yjs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("yjs")>();
+  return { ...actual, Doc: class extends actual.Doc {
+    constructor(...args: ConstructorParameters<typeof actual.Doc>) {
+      super(...args);
+      if (snapshotDocs.track) snapshotDocs.created.push(this);
+    }
+  } };
+});
 
 setupFileInspectorTests();
 
@@ -354,6 +366,56 @@ describe("engine markdown source view", () => {
     expect(screen.getByTestId("view-markdown-source").textContent).not.toContain("make changes");
     expect(bridgeMock.applyEngineYDocUpdate).not.toHaveBeenCalled();
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  it.each(["replace", "unmount", "discarded-render"] as const)("owns the ended snapshot in StrictMode (%s)", async (finish) => {
+    const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    let blocked = false;
+    const pending = new Promise<void>(() => undefined);
+    function CommitGate() { if (blocked) throw pending; return null; }
+    const surface = (readOnly = false, workspaceId = "ws-1", path = "a.md") => (
+      <StrictMode><Suspense fallback={<span data-testid="snapshot-pending" />}>
+        <FileInspector workspaceId={workspaceId} path={path} readOnly={readOnly} accessEnded={readOnly} />
+        <CommitGate />
+      </Suspense></StrictMode>
+    );
+    const view = render(surface());
+    await screen.findByTestId("markdown-editor");
+    snapshotDocs.created = [];
+    snapshotDocs.track = true;
+    const created = snapshotDocs.created;
+    try {
+      act(() => pushSaveState("read-only", 0));
+      if (finish === "discarded-render") {
+        blocked = true;
+        view.rerender(surface(true));
+        await screen.findByTestId("snapshot-pending");
+        expect(created).toHaveLength(0);
+        blocked = false;
+      }
+      view.rerender(surface(true));
+      await waitFor(() => expect(screen.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("false"));
+      if (finish !== "discarded-render") expect(created).toHaveLength(1);
+      const liveCopies = created.filter(doc => !doc.isDestroyed);
+      expect(liveCopies).toHaveLength(1);
+      const destroy = vi.spyOn(liveCopies[0]!, "destroy");
+      const createdCount = created.length;
+      view.rerender(surface(true));
+      expect(created).toHaveLength(createdCount);
+      expect(destroy).not.toHaveBeenCalled();
+      if (finish === "replace") {
+        view.rerender(surface(true, "ws-2", "b.md"));
+      } else view.unmount();
+      expect(destroy).toHaveBeenCalledOnce();
+      view.unmount();
+      expect(destroy).toHaveBeenCalledOnce();
+      expect(created.every(doc => doc.isDestroyed)).toBe(true);
+    } finally {
+      view.unmount();
+      snapshotDocs.track = false;
+      for (const doc of created) if (!doc.isDestroyed) doc.destroy();
+    }
   });
 
   it("keeps the marker hidden for a View share opened read-only", async () => {
