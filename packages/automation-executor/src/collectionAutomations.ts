@@ -2763,7 +2763,7 @@ export class CollectionAutomations {
     const remembered = this.presses.get(input.pressId) ?? await this.pressInEngine(input);
     let automationId: string;
     if (remembered) {
-      if (parseCollectionAutomationId(remembered.automationId)?.collectionId !== this.collectionIdOf(input.collectionPath) || remembered.field !== input.field ||
+      if (parseCollectionAutomationId(remembered.automationId)?.collectionId !== collectionId || remembered.field !== input.field ||
         remembered.recordId !== input.recordId || remembered.pressedBy !== input.pressedBy) {
         throw new Error("This press id already names another press.");
       }
@@ -3182,7 +3182,6 @@ export class CollectionAutomations {
       let inventory: AutomationInventory;
       try { inventory = this.inventory(id.collectionPath, automation); }
       catch (error) {
-        if (moved()) return denied("collection-moved", SHARED_BUTTON_MOVED);
         if (error instanceof AutomationRunWait) throw error;
         if (this.datasetStoreFailed) throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED);
         return denied(`inventory-unavailable: ${errorText(error)}`, SHARED_BUTTON_DENIED);
@@ -3308,7 +3307,7 @@ export class CollectionAutomations {
     const movedReason = () => {
       const current = this.locate(input.automationId);
       return parsed !== null && current !== null && current.collectionPath !== parsed.collectionPath
-        ? "The automation's Collection moved." : null;
+        ? "This Collection moved. Open it where it is now. Undo this run there." : null;
     };
     // Held from before the first read to the end, like Try again's.
     if (this.changing.has(input.claimId)) return { status: "refused", reason: BUSY_CLAIM_REFUSAL };
@@ -4862,7 +4861,7 @@ export class CollectionAutomations {
       if (bound !== null && current !== null && bound.place !== placeHash(current.collectionPath)) {
         return { kind: "settle", input: { state: "failed", error: MOVED_SINCE_PRESSED }, outcome: "failed", settled: () => this.afterSettle() };
       }
-      if (current === null && id !== null) return { kind: "settle", input: { state: "done" }, outcome: "skipped", settled: () => this.afterSettle() };
+      if (current === null && id !== null) return release;
       return current?.collectionPath !== id?.collectionPath ? release : null;
     };
     // A due time or a Group message names only its Collection, of either kind.
@@ -4973,12 +4972,12 @@ export class CollectionAutomations {
       : runDatasetAutomation({ ...this.runDependencies({ automationId: claim.automationId, collectionPath: collection.path, automation }), withHost: (work) => this.withLiveHost(work), cachedRoster: () => this.options.cachedRoster() },
         { held: runner.held, automation, collection, roster, signal, stopped: stop }), hostHold);
     if (outcome === null) return null;
-    if (outcome.kind === "failed" || outcome.kind === "wait") {
-      if (this.locate(claim.automationId) !== null) {
+    if (outcome.kind === "failed" || outcome.kind === "wait" || outcome.kind === "skipped") {
+      if (outcome.kind === "skipped" || this.locate(claim.automationId) !== null) {
         moved = locationChanged();
         if (moved !== null) return moved;
       } else if (!await this.hasSavedPlan(claim)) {
-        return { kind: "settle", input: { state: "done" }, outcome: "skipped", settled: () => this.afterSettle() };
+        return release;
       }
     }
     // A pause or close stopped the run; its progress is saved, and the next

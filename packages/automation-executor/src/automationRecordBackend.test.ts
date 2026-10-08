@@ -1371,8 +1371,46 @@ it("waits for a moved source when target validation finishes mid-run", async () 
 });
 
 
-it("retains the missing-Collection error when the source did not move", async () => {
-  const f = await fixture(false, false);
-  f.targets.delete("Source");
-  await expect(f.run(automation('      - set: {Status: Closed}\n'))).resolves.toMatchObject({ kind: "failed", error: "Missing" });
+it.each(["roster", "host", "verdicts"] as const)("does not save a stale source refusal after the %s await", async boundary => {
+  const f = await fixture(boundary === "host", false);
+  const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+  let paused = false;
+  const pause = async () => { if (!paused) { paused = true; reached.resolve(); await resume.promise; } };
+  if (boundary === "roster") f.dependencies.cachedRoster = async () => {
+    if ((await f.runs()).length > 0) {
+      await pause();
+      return { kind: "owner", ownerUserId: "owner", grants: [{ grantId: "editor", recipientUserId: "person",
+        recipientEmail: "person@example.com", files: { paths: ["Source/automations.yaml"], access: "edit", versionId: null }, channel: null }] };
+    }
+    return roster;
+  };
+  if (boundary === "host") {
+    const withHost = f.dependencies.withHost!;
+    let savedHostReads = 0;
+    f.dependencies.withHost = async work => {
+      // The first host read after planning refreshes step permissions.
+      if ((await f.runs()).length > 0 && ++savedHostReads === 1) await pause();
+      return withHost(work);
+    };
+  }
+  if (boundary === "verdicts") f.dependencies.checkReach = async () => {
+    if ((await f.runs()).length === 0) return false;
+    await pause(); return true;
+  };
+  const running = f.run(automation((boundary === "verdicts" ? '      - set: {Status: First}\n' : '') + '      - set: {Status: Closed}\n' + (boundary === "host" ? '        operation: rows.edit\n' : '')));
+  try {
+    await reached.promise;
+    f.move("Source", "Shared/Source");
+    if (boundary === "host") {
+      const target = f.targets.get("Shared/Source")!;
+      if (target.kind !== "dataset") throw new Error("Expected a dataset");
+      f.targets.set("Shared/Source", { ...target, approved: { ...target.approved, revisionSha256: "b".repeat(64) } });
+    }
+    resume.resolve();
+    await expect(running).resolves.toEqual({ kind: "wait", reason: "moved" });
+    const runs = await f.runs();
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.outcome).toBeNull();
+    expect(runs.flatMap(run => run.applied)).toHaveLength(boundary === "verdicts" ? 1 : 0);
+  } finally { resume.resolve(); await running; }
 });

@@ -6269,15 +6269,136 @@ describe("Collection automations that a Group message starts", () => {
       resume.resolve();
       const answer = await answered;
       const moved = "This Collection moved after the button was pressed. Press it again.";
-      if ("error" in answer) expect(answer.error).toEqual(new Error(moved));
-      else {
+      if (boundary === "new press" || boundary === "inspection" || boundary === "admission") {
+        expect(answer).toEqual({ error: new Error(moved) });
+      } else {
+        if ("error" in answer) throw answer.error;
         if (answer.value.pressed.busy) throw new Error("Expected a claim");
         const claim = await w.settledClaim(w.claims.get(answer.value.pressed.claimId)!);
-        if (deleted) expect(claim.state).toBe("done");
+        if (deleted) {
+          expect(claim.state).toBe("done");
+          await expect(executor.relayedClaim({ automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: hash, pressId: "boundary" }))
+            .resolves.toMatchObject({ settled: { outcome: "ended", error: null } });
+        }
         else expect(claim).toMatchObject({ state: "failed", error: moved });
       }
       expect(w.fieldsOf(invoice)).toEqual({});
       expect(w.journaled).toEqual([]);
+    });
+
+
+    it("releases a relayed press while a move temporarily removes its index entry", async () => {
+      const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: yes}}]\n" } });
+      const invoice = w.addRecord("Tasks", "invoice", {});
+      const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+      const indexReached = Promise.withResolvers<void>(), indexResume = Promise.withResolvers<void>();
+      let paused = false, indexing = false;
+      const executor = w.makeExecutor({
+        store: { ...w.baseStore, runsOf: async (...args) => {
+          if (!paused && [...w.claims.values()].some(c => c.state === "running")) {
+            paused = true; reached.resolve(); await resume.promise;
+          }
+          return w.baseStore.runsOf(...args);
+        } },
+        pathExists: async path => {
+          if (indexing && path === "Tasks/dataset.json") { indexReached.resolve(); await indexResume.promise; }
+          return stat(join(w.root, path)).then(() => true, () => false);
+        },
+      });
+      onTestFinished(async () => { resume.resolve(); indexResume.resolve(); await executor.dispose(); });
+      await executor.open();
+      const hash = await hashOf(executor, "Tasks", "paid");
+      const receipt = await w.relayPress(executor, { automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: hash,
+        recordId: invoice.id, pressId: "transient-index", pressedBy: "user-ana", confirmed: [] }, () => undefined);
+      if (receipt.pressed.busy) throw new Error("Expected a claim");
+      const claim = w.claims.get(receipt.pressed.claimId)!;
+      await reached.promise;
+      await w.renameCollection("Tasks", "Shared/Tasks", false);
+      indexing = true;
+      executor.handleWatcherEvents(["collection.yaml", "automations.yaml"].flatMap(name => [
+        { operation: "delete" as const, path: `Tasks/${name}` }, { operation: "update" as const, path: `Shared/Tasks/${name}` },
+      ]));
+      await indexReached.promise;
+      expect(executor.locate(claim.automationId)).toBeNull();
+      resume.resolve();
+      await expect.poll(() => w.events.includes(`released ${claim.claimId}`) || claim.state === "done").toBe(true);
+      expect(claim.state).toBe("pending");
+      expect(w.events).toContain(`released ${claim.claimId}`);
+      indexResume.resolve();
+      await w.settledClaim(claim);
+      expect(claim).toMatchObject({ state: "failed", error: "This Collection moved after the button was pressed. Press it again." });
+      expect(w.journaled).toEqual([]);
+    });
+
+    it.each(["move", "delete"] as const)("classifies a skipped trigger read after a Collection %s", async change => {
+      const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: yes}}]\n" } });
+      const invoice = w.addRecord("Tasks", "invoice", {});
+      const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+      const read = w.engine.getCollectionRecord;
+      let paused = false;
+      w.engine.getCollectionRecord = async input => {
+        if (!paused && [...w.claims.values()].some(c => c.state === "running")) {
+          paused = true; reached.resolve(); await resume.promise;
+        }
+        return read(input);
+      };
+      const executor = w.makeExecutor();
+      onTestFinished(async () => { resume.resolve(); await executor.dispose(); });
+      await executor.open();
+      const hash = await hashOf(executor, "Tasks", "paid");
+      const receipt = await w.relayPress(executor, { automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: hash,
+        recordId: invoice.id, pressId: "trigger-read", pressedBy: "user-ana", confirmed: [] }, () => undefined);
+      if (receipt.pressed.busy) throw new Error("Expected a claim");
+      await reached.promise;
+      if (change === "move") await w.renameCollection("Tasks", "Shared/Tasks", false);
+      else await w.removeCollection("Tasks");
+      executor.handleWatcherEvents(["collection.yaml", "automations.yaml"].flatMap(name => [
+        { operation: "delete" as const, path: `Tasks/${name}` },
+        ...(change === "move" ? [{ operation: "update" as const, path: `Shared/Tasks/${name}` }] : []),
+      ]));
+      await executor.automationsIn(change === "move" ? "Shared/Tasks" : "Tasks");
+      resume.resolve();
+      const claim = await w.settledClaim(w.claims.get(receipt.pressed.claimId)!);
+      expect(claim).toMatchObject(change === "move"
+        ? { state: "failed", error: "This Collection moved after the button was pressed. Press it again." }
+        : { state: "done" });
+      await expect(executor.relayedClaim({ automationId: "collection:Tasks#paid", collectionPath: "Tasks",
+        definitionHash: hash, pressId: "trigger-read" }))
+        .resolves.toMatchObject({ settled: { outcome: change === "move" ? "failed" : "ended" } });
+      expect(w.journaled).toEqual([]);
+    });
+
+    it("reports a move during remembered press lookup without changing the press identity", async () => {
+      const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: yes}}]\n" } });
+      const invoice = w.addRecord("Tasks", "invoice", {});
+      await w.executor.open();
+      const input = { collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "remembered",
+        pressedBy: "user-ana", by: { kind: "human" as const }, confirmed: [] };
+      const receipt = await w.executor.press(input, () => undefined);
+      if (receipt.busy) throw new Error("Expected a claim");
+      await w.settledClaim(w.claims.get(receipt.claimId)!);
+      const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+      const executor = w.makeExecutor();
+      onTestFinished(async () => { resume.resolve(); await executor.dispose(); });
+      await executor.open();
+      const lookup = w.engine.getAutomationClaim;
+      let paused = false;
+      w.engine.getAutomationClaim = async input => {
+        const result = await lookup(input);
+        if (!paused && "key" in input && input.key === "press:remembered") { paused = true; reached.resolve(); await resume.promise; }
+        return result;
+      };
+      const pressing = executor.press(input, () => undefined);
+      const answered = pressing.then(value => ({ value }), error => ({ error }));
+      await reached.promise;
+      await w.renameCollection("Tasks", "Shared/Tasks", false);
+      executor.handleWatcherEvents(["collection.yaml", "automations.yaml"].flatMap(name => [
+        { operation: "delete" as const, path: `Tasks/${name}` }, { operation: "update" as const, path: `Shared/Tasks/${name}` },
+      ]));
+      await executor.automationsIn("Shared/Tasks");
+      resume.resolve();
+      expect(await answered).toEqual({ error: new Error("This Collection moved after the button was pressed. Press it again.") });
+      expect(w.claims.size).toBe(1);
     });
 
     it.each([false, true])("refuses undo when its source Collection moves during the saved-run read, lost destination=%s", async lostDestination => {
@@ -6307,11 +6428,15 @@ describe("Collection automations that a Group message starts", () => {
       await executor.automationsIn("Shared/Tasks");
       const writes = w.journaled.length;
       resume.resolve();
-      await expect(undoing).resolves.toEqual({ status: "refused", reason: "The automation's Collection moved." });
+      await expect(undoing).resolves.toEqual({ status: "refused", reason: "This Collection moved. Open it where it is now. Undo this run there." });
       expect(w.journaled).toHaveLength(writes);
       expect(w.fieldsOf(invoice)).toEqual({ Paid: "yes" });
+      if (!lostDestination) {
+        await expect(executor.undo({ automationId: "collection:Tasks#paid", claimId: pressed.claimId, deletes: null }, async () => undefined))
+          .resolves.toMatchObject({ status: "undone", reverted: 1 });
+        expect(w.fieldsOf(invoice)).toEqual({ Paid: null });
+      }
     });
-
 
     it.each(["move", "delete"] as const)("settles a local claim correctly after a %s during admission", async change => {
       const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: record-added\n    do: [{set: {Paid: yes}}]\n" } });
@@ -6336,7 +6461,7 @@ describe("Collection automations that a Group message starts", () => {
       resume.resolve();
       await w.settledClaim(claim);
       expect(claim.state).toBe("done");
-      expect(w.events.includes(`released ${claim.claimId}`)).toBe(change === "move");
+      expect(w.events).toContain(`released ${claim.claimId}`);
       expect(w.journaled.map(write => write.path)).toEqual(change === "move" ? ["Shared/Tasks/invoice.md"] : []);
     });
 

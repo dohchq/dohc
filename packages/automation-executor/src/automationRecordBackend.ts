@@ -136,7 +136,7 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
   }
   let inventory: AutomationInventory;
   try { inventory = await resolveAutomationInventory(located, collection.path, deps.targets, chat); }
-  catch (error) { checkSourceMoved(); if (error instanceof AutomationRunWait) throw error; return { outcome: failed(error instanceof Error ? error.message : String(error)) }; }
+  catch (error) { if (error instanceof AutomationRunWait) throw error; return { outcome: failed(error instanceof Error ? error.message : String(error)) }; }
   const origin = inventory.targets.get(collection.path)!;
   if (origin.kind !== source.kind) return { outcome: failed(RULES_CHANGED_ERROR) };
   const sourceRules = origin.kind === "dataset" ? { datasetId: origin.approved.datasetId, revision: origin.approved.revision, revisionSha256: origin.approved.revisionSha256 } : null;
@@ -377,32 +377,35 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
   };
   // Refresh grants and descriptor associations before reads and effects. Metadata stays local to this attempt.
   const checkNow = async (recordVerdicts = false) => {
-    await deps.checkPresser?.();
-    checkLocations();
-    const currentRoster = (await deps.cachedRoster?.()) ?? roster;
-    if (currentRoster.kind === "unknown") throw new AutomationRunWait("The workspace roster is unavailable.", "roster");
-    const allReach = [...inventory.reach, ...[...codeReach.values()].map(({ reach }) => reach)];
-    const steps = inventory.datasets.size === 0 ? allReach : await deps.withHost?.((host) => {
-      const grants = new Map<string, ReturnType<typeof host.dataGrants>>();
-      for (const [path, target] of inventory.targets) {
-        if (target.kind !== "dataset") continue;
-        if (!host.resolves(association(path).rules!)) throw new Error(RULES_CHANGED_ERROR);
-        grants.set(target.approved.datasetId, host.dataGrants(target.approved.datasetId));
+    try {
+      await deps.checkPresser?.();
+      checkLocations();
+      const currentRoster = (await deps.cachedRoster?.()) ?? roster;
+      if (currentRoster.kind === "unknown") throw new AutomationRunWait("The workspace roster is unavailable.", "roster");
+      const allReach = [...inventory.reach, ...[...codeReach.values()].map(({ reach }) => reach)];
+      const steps = inventory.datasets.size === 0 ? allReach : await deps.withHost?.((host) => {
+        const grants = new Map<string, ReturnType<typeof host.dataGrants>>();
+        for (const [path, target] of inventory.targets) {
+          if (target.kind !== "dataset") continue;
+          if (!host.resolves(association(path).rules!)) throw new Error(RULES_CHANGED_ERROR);
+          grants.set(target.approved.datasetId, host.dataGrants(target.approved.datasetId));
+        }
+        return allReach.map((step): ReachStep => step.kind === "dataset-operation" || step.kind === "dataset-field"
+          ? { ...step, grants: grants.get(step.datasetId)! } : step);
+      });
+      if (steps == null && inventory.datasets.size > 0) throw new AutomationRunWait("The dataset host is unavailable.");
+      const fresh = { reach: steps ?? allReach };
+      const checks = checkAutomationReach(currentRoster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path), steps: fresh.reach });
+      if (recordVerdicts && await deps.checkReach?.(fresh.reach.slice(0, inventory.reach.length), currentRoster)) throw new AutomationRunWait("The automation is waiting for an editor.", "held");
+      for (const [index, verdict] of checks.entries()) {
+        const step = fresh.reach[index]!;
+        if (!verdict.allowed && (step.kind !== "dataset-field" || visible.has(datasetFieldKey(step.datasetId, step.tableId, step.field.fieldId)))) {
+          throw new Error(index >= inventory.reach.length ? "This automation cannot use the requested Collection or fields." : verdict.reason);
+        }
       }
-      return allReach.map((step): ReachStep => step.kind === "dataset-operation" || step.kind === "dataset-field"
-        ? { ...step, grants: grants.get(step.datasetId)! } : step);
-    });
-    if (steps == null && inventory.datasets.size > 0) throw new AutomationRunWait("The dataset host is unavailable.");
-    const fresh = { reach: steps ?? allReach };
-    const checks = checkAutomationReach(currentRoster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path), steps: fresh.reach });
-    if (recordVerdicts && await deps.checkReach?.(fresh.reach.slice(0, inventory.reach.length), currentRoster)) throw new AutomationRunWait("The automation is waiting for an editor.", "held");
-    for (const [index, verdict] of checks.entries()) {
-      const step = fresh.reach[index]!;
-      if (!verdict.allowed && (step.kind !== "dataset-field" || visible.has(datasetFieldKey(step.datasetId, step.tableId, step.field.fieldId)))) {
-        throw new Error(index >= inventory.reach.length ? "This automation cannot use the requested Collection or fields." : verdict.reason);
-      }
-    }
-    return currentRoster;
+      checkLocations();
+      return currentRoster;
+    } catch (error) { checkSourceMoved(); throw error; }
   };
   const verifyTarget = async (path: string) => {
     const before = inventory.targets.get(path);
