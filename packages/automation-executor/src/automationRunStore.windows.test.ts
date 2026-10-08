@@ -7,10 +7,10 @@ import { createTestScratch, testMetadataDir } from "./testScratch";
 
 const io = vi.hoisted(() => ({
   rename: vi.fn<typeof disk.rename>(), delay: vi.fn<typeof timers.setTimeout>(),
-  readFile: vi.fn<typeof disk.readFile>(), open: vi.fn<typeof disk.open>(),
+  readFile: vi.fn<typeof disk.readFile>(), open: vi.fn<typeof disk.open>(), lstat: vi.fn<typeof disk.lstat>(),
 }));
 vi.mock("node:fs/promises", async (original) => ({
-  ...await original<typeof disk>(), rename: io.rename, readFile: io.readFile, open: io.open,
+  ...await original<typeof disk>(), rename: io.rename, readFile: io.readFile, open: io.open, lstat: io.lstat,
 }));
 vi.mock("node:timers/promises", async (original) => ({
   ...await original<typeof timers>(), setTimeout: io.delay,
@@ -23,13 +23,15 @@ beforeEach(() => {
   io.delay.mockImplementation(clock.setTimeout);
   io.readFile.mockImplementation(actual.readFile);
   io.open.mockImplementation(actual.open);
+  io.lstat.mockImplementation(actual.lstat);
 });
+
 afterEach(() => {
   vi.resetAllMocks();
   vi.unstubAllGlobals();
 });
 
-async function savedRun() {
+async function savedRun(withWake = false) {
   const root = await createTestScratch("dohc-run-store-windows-");
   const store = createAutomationRunStore(root, testMetadataDir);
   const run: StoredRun = {
@@ -40,82 +42,46 @@ async function savedRun() {
     collections: [], rules: null, superseded: false, undo: null, undoKept: [],
     settled: false, outcome: { state: "done" },
   };
+  if (withWake) {
+    run.steps = [{ ordinal: 0, effects: [{ kind: "set", target: { recordId: "a", collectionPath: "Tasks", path: "Tasks/a.md" }, fields: [] }] }];
+    run.applied = [{ ordinal: 0, writes: [{ kind: "notice", noticeId: "wake", name: "Ice" }] }];
+  }
   await store.save(run);
   const runs = join(root, ".dohc", "automations", "runs");
   const folder = join(runs, (await actual.readdir(runs))[0]!);
   const path = join(folder, (await actual.readdir(folder)).find(name => name.endsWith(".json"))!);
   io.rename.mockClear();
-  const progressPath = join(folder, (await actual.readdir(folder)).find(name => name.endsWith(".progress.jsonl"))!);
+  const progressPath = path;
   return { root, store, run, folder, path, progressPath };
 }
 
 describe.skipIf(process.platform !== "win32")("Windows run-store replacement", () => {
-  it.each(["save", "updateState"])("queues %s replacement behind an in-process history read", async (operation) => {
+  it.each(["save", "updateState"])("queues %s behind an in-process history read", async (operation) => {
     const { root, store, run, path } = await savedRun();
-    const destination = path;
     const reading = Promise.withResolvers<void>();
-    const releaseRead = Promise.withResolvers<void>();
-    const staged = Promise.withResolvers<void>();
-    const releaseStage = Promise.withResolvers<void>();
-    const closed = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
     let held = false;
-    let holdRead = false;
     io.readFile.mockImplementation((async (file, options) => {
-      if (file !== destination || held || !holdRead) return actual.readFile(file, options);
-      held = true;
-      const reader = await actual.open(destination, "r");
-      try {
+      if (file === path && !held) {
+        held = true;
         reading.resolve();
-        await releaseRead.promise;
-        return await reader.readFile(options);
-      } finally {
-        await reader.close();
+        await release.promise;
       }
+      return actual.readFile(file, options);
     }) as typeof disk.readFile);
-    io.open.mockImplementation(async (file, flags, mode) => {
-      const handle = await actual.open(file, flags, mode);
-      if (String(file).startsWith(`${destination}.tmp-`)) {
-        const sync = handle.sync.bind(handle);
-        const close = handle.close.bind(handle);
-        handle.sync = async () => {
-          await sync();
-          staged.resolve();
-          await releaseStage.promise;
-        };
-        handle.close = async () => {
-          await close();
-          closed.resolve();
-        };
-      }
-      return handle;
-    });
-    const readerStore = createAutomationRunStore(root, testMetadataDir);
-    let history: Promise<unknown> | undefined;
-    let write: Promise<void> | undefined;
+    const history = createAutomationRunStore(root, testMetadataDir).runsOf(run.automationId, run.claimId);
+    await reading.promise;
+    const write = operation === "save" ? store.save({ ...run, settled: true }) : store.updateState(run, { settled: true });
     try {
-      write = operation === "save" ? store.save({ ...run, settled: true }) : store.updateState(run, { settled: true });
-      await staged.promise;
-      holdRead = true;
-      history = readerStore.runsOf(run.automationId, run.claimId);
-      await reading.promise;
-      const settledWrite = write.catch(error => error);
-      await staged.promise;
-      releaseStage.resolve();
-      await closed.promise;
-      // Run after the close's microtasks have queued the replacement.
       await new Promise<void>(resolve => setImmediate(resolve));
-      expect(io.rename.mock.calls.filter(([, to]) => to === destination)).toHaveLength(0);
-      releaseRead.resolve();
-      await expect(settledWrite).resolves.toBeUndefined();
-      await history;
-      expect(io.rename.mock.calls.filter(([, to]) => to === destination)).toHaveLength(1);
-      expect(io.rename).toHaveBeenCalledTimes(operation === "save" ? 2 : 1);
-      expect(io.delay).not.toHaveBeenCalled();
+      expect(io.rename).not.toHaveBeenCalled();
     } finally {
-      releaseStage.resolve();
-      releaseRead.resolve();
-      await Promise.allSettled([write, history]);
+      release.resolve();
+      await Promise.all([history, write]);
     }
+    expect(await history).toEqual({ runs: [run], unreadable: false });
+    expect(io.rename).toHaveBeenCalledTimes(1);
+    expect(io.delay).not.toHaveBeenCalled();
   });
 
   it.each(["state", "save"])("saves %s after an open snapshot reader releases the destination", async (part) => {
@@ -207,146 +173,144 @@ describe.skipIf(process.platform !== "win32")("Windows run-store replacement", (
     expect(await store.runsOf(run.automationId, run.claimId)).toEqual({ runs: [run], unreadable: false });
   });
 });
-
-describe("whole run saves", () => {
-  it("exposes only the previous pair while the new header is waiting to commit", async () => {
-    const { root, store, run, path } = await savedRun();
-    const staged = Promise.withResolvers<void>();
-    const release = Promise.withResolvers<void>();
-    io.open.mockImplementation(async (file, flags, mode) => {
-      const handle = await actual.open(file, flags, mode);
-      if (String(file).startsWith(`${path}.tmp-`)) {
-        const sync = handle.sync.bind(handle);
-        handle.sync = async () => {
-          await sync();
-          staged.resolve();
-          await release.promise;
-        };
-      }
-      return handle;
-    });
-    const next = { ...run, settled: true, steps: [{ ordinal: 0, effects: [] }] };
-    const write = store.save(next);
-    try {
-      await staged.promise;
-      const reader = createAutomationRunStore(root, testMetadataDir);
-      expect(await reader.runsOf(run.automationId, run.claimId)).toEqual({ runs: [run], unreadable: false });
-    } finally {
-      release.resolve();
-      await write;
-    }
-    expect(await store.runsOf(run.automationId, run.claimId)).toEqual({ runs: [next], unreadable: false });
-  });
-
-  it("keeps an old header's progress available when a save commits during its read", async () => {
-    const { root, store, run, progressPath } = await savedRun();
-    const reading = Promise.withResolvers<void>();
-    const release = Promise.withResolvers<void>();
-    io.readFile.mockImplementation((async (file, options) => {
-      if (file === progressPath) {
-        reading.resolve();
-        await release.promise;
-      }
-      return actual.readFile(file, options);
-    }) as typeof disk.readFile);
-    const reader = createAutomationRunStore(root, testMetadataDir);
-    const history = reader.runsOf(run.automationId, run.claimId);
-    const next = { ...run, settled: true, steps: [{ ordinal: 0, effects: [] }] };
-    try {
-      await reading.promise;
-      await store.save(next);
-    } finally {
-      release.resolve();
-    }
-    expect(await history).toEqual({ runs: [run], unreadable: false });
-    expect(await reader.runsOf(run.automationId, run.claimId)).toEqual({ runs: [next], unreadable: false });
-  });
-
-  it("keeps published progress when the header's directory sync fails", async () => {
-    const { root, store, run, folder } = await savedRun();
-    const error = Object.assign(new Error("directory sync failed"), { code: "EIO" });
-    // Exercise POSIX's post-rename durability step on either host.
-    vi.stubGlobal("process", { ...process, platform: "linux" });
-    let syncs = 0;
-    io.open.mockImplementation(async (file, flags, mode) => {
-      if (file === folder && flags === "r") return {
-        sync: async () => { if (++syncs === 2) throw error; },
-        close: async () => undefined,
-      } as Awaited<ReturnType<typeof disk.open>>;
-      return actual.open(file, flags, mode);
-    });
-    const next = { ...run, settled: true, steps: [{ ordinal: 0, effects: [] }] };
-    await expect(store.save(next)).rejects.toBe(error);
-    expect(await store.runsOf(run.automationId, run.claimId)).toEqual({ runs: [next], unreadable: false });
-    const reopened = createAutomationRunStore(root, testMetadataDir);
-    expect(await reopened.runsOf(run.automationId, run.claimId)).toEqual({ runs: [next], unreadable: false });
-  });
-
-  it("keeps the previous complete run when the second replacement fails, including after reopening", async () => {
+describe("single-file run saves", () => {
+  it("keeps the previous complete run when publication fails, including after reopening", async () => {
     const { root, store, run, path, folder } = await savedRun();
     const before = await actual.readFile(path, "utf8");
     const files = await actual.readdir(folder);
-    const error = Object.assign(new Error("header replacement failed"), { code: "EIO" });
+    const error = Object.assign(new Error("run replacement failed"), { code: "EIO" });
     io.rename.mockImplementation(async (from, to) => {
       if (to === path) throw error;
       return actual.rename(from, to);
     });
     const next = { ...run, settled: true, steps: [{ ordinal: 0, effects: [] }] };
     await expect(store.save(next)).rejects.toBe(error);
-    expect(io.rename).toHaveBeenCalledTimes(2);
     expect(await actual.readFile(path, "utf8")).toBe(before);
-    expect(await store.runsOf(run.automationId, run.claimId)).toEqual({ runs: [run], unreadable: false });
-    const reopened = createAutomationRunStore(root, testMetadataDir);
-    expect(await reopened.runsOf(run.automationId, run.claimId)).toEqual({ runs: [run], unreadable: false });
+    for (const reader of [store, createAutomationRunStore(root, testMetadataDir)]) {
+      expect(await reader.runsOf(run.automationId, run.claimId)).toEqual({ runs: [run], unreadable: false });
+    }
     expect(await actual.readdir(folder)).toEqual(files);
+  });
+
+  it.each(["open", "write", "sync", "close", "rename", "directory-sync"])("reopens a consistent run after failure at %s", async (point) => {
+    const { root, store, run, path, folder } = await savedRun();
+    const error = Object.assign(new Error(point), { code: "EIO" });
+    if (point === "directory-sync") vi.stubGlobal("process", { ...process, platform: "linux" });
+    io.open.mockImplementation(async (file, flags, mode) => {
+      if (file === folder && flags === "r") {
+        const handle = await actual.open(path, "r");
+        handle.sync = async () => { throw error; };
+        return handle;
+      }
+      const temporary = String(file).includes(".tmp-");
+      if (temporary && point === "open") throw error;
+      const handle = await actual.open(file, flags, mode);
+      if (temporary && point === "write") handle.writeFile = async () => { throw error; };
+      if (temporary && point === "sync") handle.sync = async () => { throw error; };
+      if (temporary && point === "close") {
+        const close = handle.close.bind(handle);
+        handle.close = async () => { await close(); throw error; };
+      }
+      return handle;
+    });
+    if (point === "rename") io.rename.mockRejectedValue(error);
+    const next = { ...run, settled: true, steps: [{ ordinal: 0, effects: [] }] };
+    await expect(store.save(next)).rejects.toBe(error);
+    const expected = point === "directory-sync" ? next : run;
+    expect(await createAutomationRunStore(root, testMetadataDir).runsOf(run.automationId, run.claimId)).toEqual({ runs: [expected], unreadable: false });
+    expect((await actual.readdir(folder)).some(file => file.includes(".tmp-"))).toBe(false);
+    expect(await actual.readFile(path, "utf8")).toContain(expected.settled ? '"settled":true' : '"settled":false');
+  });
+
+  it("keeps one file after repeated whole saves and state rewrites", async () => {
+    const { root, store, run, folder } = await savedRun();
+    for (let i = 0; i < 8; i += 1) {
+      await store.save(run);
+      await store.updateState(run, { settled: true });
+    }
+    expect(await actual.readdir(folder)).toHaveLength(1);
+    expect(await createAutomationRunStore(root, testMetadataDir).runsOf(run.automationId, run.claimId)).toEqual({ runs: [{ ...run, settled: true }], unreadable: false });
+  });
+
+  it("appends a complete line without reading or replacing the header", async () => {
+    const { store, run } = await savedRun();
+    io.readFile.mockClear();
     const step = { ordinal: 0, effects: [] };
-    await reopened.appendStep(run, step);
+    await store.appendStep(run, step);
+    expect(io.readFile).not.toHaveBeenCalled();
+    expect(io.rename).not.toHaveBeenCalled();
     expect(await store.runsOf(run.automationId, run.claimId)).toEqual({ runs: [{ ...run, steps: [step] }], unreadable: false });
   });
 
-  it("reads, updates, appends, and saves the existing fixed-name layout without a migration", async () => {
-    const { root, store, run, path, progressPath } = await savedRun();
-    const header = JSON.parse(await actual.readFile(path, "utf8"));
-    delete header.progressId;
-    const fixedProgress = path.slice(0, -".json".length) + ".progress.jsonl";
-    await actual.rename(progressPath, fixedProgress);
-    await actual.writeFile(path, JSON.stringify(header) + "\n");
-    const reopened = createAutomationRunStore(root, testMetadataDir);
-    expect(await reopened.runsOf(run.automationId, run.claimId)).toEqual({ runs: [run], unreadable: false });
-    await reopened.updateState(run, { settled: true });
-    const step = { ordinal: 0, effects: [] };
-    await reopened.appendStep(run, step);
-    const saved = { ...run, settled: true, steps: [step] };
-    expect(await store.runsOf(run.automationId, run.claimId)).toEqual({ runs: [saved], unreadable: false });
-    const error = Object.assign(new Error("header replacement failed"), { code: "EIO" });
-    io.rename.mockImplementation(async (from, to) => {
-      if (to === path) throw error;
-      return actual.rename(from, to);
+  it.each(["win32", "linux"].flatMap(platform => ["state", "wake", "end"].map(operation => ({ platform, operation }))))("orders appends around a $operation rewrite across stores on $platform", async ({ platform, operation }) => {
+    const { root, store, run, path, folder } = await savedRun(true);
+    if (operation === "end") {
+      run.finishedAtMs = null;
+      run.outcome = null;
+      await store.save(run);
+    }
+    vi.stubGlobal("process", { ...process, platform });
+    const writer = createAutomationRunStore(root, testMetadataDir);
+    const before = { ordinal: 1, effects: [] };
+    await writer.appendStep(run, before);
+    const staged = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    io.open.mockImplementation(async (file, flags, mode) => {
+      // Node cannot open directories on Windows. Emulate only POSIX fsync.
+      if (flags === "r" && (await actual.lstat(file)).isDirectory()) {
+        const handle = await actual.open(path, "r");
+        handle.sync = async () => undefined;
+        return handle;
+      }
+      const handle = await actual.open(file, flags, mode);
+      if (String(file).startsWith(`${path}.tmp-`)) {
+        const sync = handle.sync.bind(handle);
+        handle.sync = async () => { await sync(); staged.resolve(); await release.promise; };
+      }
+      return handle;
     });
-    await expect(reopened.save({ ...saved, settled: false, steps: [] })).rejects.toBe(error);
-    expect(await store.runsOf(run.automationId, run.claimId)).toEqual({ runs: [saved], unreadable: false });
-    io.rename.mockImplementation(actual.rename);
-    await reopened.save(saved);
-    const currentHeader = JSON.parse(await actual.readFile(path, "utf8"));
-    expect(currentHeader.progressId).toEqual(expect.any(String));
-    await store.appendStep(run, { ordinal: 1, effects: [] });
-    expect(await actual.readFile(fixedProgress, "utf8")).toBe(JSON.stringify({ kind: "step", ...step }) + "\n");
-    expect((await reopened.runsOf(run.automationId, run.claimId)).runs[0]?.steps).toEqual([step, { ordinal: 1, effects: [] }]);
-    await store.updateState(run, { settled: false });
-    expect(JSON.parse(await actual.readFile(path, "utf8")).progressId).toBe(currentHeader.progressId);
+    const rewrite = operation === "state" ? store.updateState(run, { settled: true })
+      : operation === "wake" ? store.supersedeWake(run.automationId, run.claimId, run.keySeed, "wake", "later")
+      : store.expire(1000, async () => "settled", null);
+    await staged.promise;
+    io.open.mockClear();
+    const entered = Promise.withResolvers<void>();
+    io.lstat.mockImplementation((async (file, options) => {
+      const stats = await actual.lstat(file, options);
+      if (file === folder) entered.resolve();
+      return stats;
+    }) as typeof disk.lstat);
+    const after = { ordinal: 2, effects: [] };
+    const append = writer.appendStep(run, after);
+    try {
+      await entered.promise;
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(io.open.mock.calls.some(([, flags]) => flags === "a")).toBe(false);
+    } finally {
+      release.resolve();
+      await Promise.all([rewrite, append]);
+    }
+    const expected = { ...run, steps: [...run.steps, before, after] };
+    if (operation === "state") expected.settled = true;
+    if (operation === "end") expected.finishedAtMs = 1000;
+    if (operation === "wake") expected.applied = [{ ordinal: 0, writes: [{ kind: "notice", noticeId: "wake", name: "Ice; agent wake superseded by a later run", supersededBy: "later" }] }];
+    expect(await createAutomationRunStore(root, testMetadataDir).runsOf(run.automationId, run.claimId)).toEqual({ runs: [expected], unreadable: false });
   });
 
-  it("retains the selected generation when expiry ends a run and removes every generation on expiry", async () => {
-    const { store, run, path, folder } = await savedRun();
-    await store.save({ ...run, finishedAtMs: null, outcome: null });
-    const progressId = JSON.parse(await actual.readFile(path, "utf8")).progressId;
-    expect((await actual.readdir(folder)).filter(name => name.endsWith(".progress.jsonl"))).toHaveLength(2);
-    const ended = 1000;
-    await store.expire(ended, async () => "settled", null);
-    expect(JSON.parse(await actual.readFile(path, "utf8")).progressId).toBe(progressId);
-    expect((await store.runsOf(run.automationId, run.claimId)).runs[0]?.finishedAtMs).toBe(ended);
-    await store.expire(ended + 30 * 24 * 60 * 60 * 1000, async () => "gone", null);
-    expect(await store.runsOf(run.automationId, run.claimId)).toEqual({ runs: [], unreadable: false });
+  it("ignores crash-left staging files and removes them even before a run's first publication", async () => {
+    const { root, store, run, path, folder } = await savedRun();
+    const text = await actual.readFile(path, "utf8");
+    const leftovers = ["", "{", text.slice(0, text.indexOf("\n") + 1), text];
+    for (let i = 0; i < leftovers.length; i += 1) await actual.writeFile(`${path}.tmp-999-${i}`, leftovers[i]!);
+    expect(await createAutomationRunStore(root, testMetadataDir).runsOf(run.automationId, run.claimId)).toEqual({ runs: [run], unreadable: false });
+    await actual.rm(path);
+    const reopened = createAutomationRunStore(root, testMetadataDir);
+    expect(await reopened.runsOf(run.automationId, run.claimId)).toEqual({ runs: [], unreadable: false });
+    await reopened.expire(1000, async () => "gone", null);
+    await expect(actual.readdir(folder)).rejects.toMatchObject({ code: "ENOENT" });
+    await store.save(run);
+    await actual.writeFile(`${path}.tmp-999-published`, text);
+    await createAutomationRunStore(root, testMetadataDir).expire(30 * 24 * 60 * 60 * 1000 + 1000, async () => "gone", null);
     await expect(actual.readdir(folder)).rejects.toMatchObject({ code: "ENOENT" });
   });
 });

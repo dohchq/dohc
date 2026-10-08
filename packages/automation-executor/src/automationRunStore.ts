@@ -323,23 +323,8 @@ const StoredRunSchema = z.object({
   ]).nullable(),
 });
 
-// A saved run's plan file: everything but its progress.
-const HeaderSchema = StoredRunSchema.omit({ steps: true, applied: true, created: true, replans: true, undoRequests: true, undoCalls: true, undoCovers: true }).extend({ progressId: z.uuid().optional() });
-// What run history's expiry reads of a run.
-const RunEndSchema = StoredRunSchema.pick({
-  version: true, claimId: true, automationId: true, keySeed: true, rules: true, finishedAtMs: true, undo: true,
-});
-// A plan file in an earlier format that still names its claim. Expiry
-// counts its 30 days from when the file last changed.
-const OlderRunSchema = z.object({
-  claimId: z.string().min(1),
-  automationId: z.string().min(1),
-  keySeed: z.string().min(1),
-  datasetId: z.string().min(1).nullable().optional(),
-  // Version 5 kept its dataset in the rules it started under.
-  rules: z.object({ datasetId: z.string().min(1) }).nullable().optional(),
-  undo: z.enum(["started", "done"]).nullable().optional(),
-});
+// The first JSONL line names the format and holds everything but progress.
+const HeaderSchema = StoredRunSchema.omit({ steps: true, applied: true, created: true, replans: true, undoRequests: true, undoCalls: true, undoCovers: true }).extend({ kind: z.literal("header") });
 // When each folder of saved runs next holds a claim past its 30 days, and
 // the claims in it that expiry asks about on every pass.
 const ExpirySchema = z.object({
@@ -574,10 +559,7 @@ export type StoredSubscription =
   | { automationId: string; path: string; kinds: AutomationChangeKind[]; fields?: string[] }
   | { automationId: string; groupId: string; startsWith?: string };
 
-const HEADER_SUFFIX = ".json";
-const PROGRESS_SUFFIX = ".progress.jsonl";
-const progressPath = (folder: string, name: string, header: z.infer<typeof HeaderSchema>) =>
-  join(folder, `${name}${header.progressId ? `.${header.progressId}` : ""}${PROGRESS_SUFFIX}`);
+const RUN_SUFFIX = ".json";
 
 function hashName(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 32);
@@ -621,12 +603,12 @@ async function existingFolder(path: string): Promise<string | null | "unusable">
   return stats.isSymbolicLink() || !stats.isDirectory() ? "unusable" : path;
 }
 
-// A snapshot read closes before this process replaces the same file. Share
-// the queue across store instances, and release it when the last caller leaves.
+// Share ordering across store instances on every platform. A run rewrite
+// holds this queue from its read through rename, so no append can be lost.
 const fileQueues = new Map<string, Promise<unknown>>();
 function withFile<T>(path: string, work: () => Promise<T>): Promise<T> {
-  if (process.platform !== "win32") return work();
-  const key = resolve(path).toLowerCase();
+  const absolute = resolve(path);
+  const key = process.platform === "win32" ? absolute.toLowerCase() : absolute;
   const next = (fileQueues.get(key) ?? Promise.resolve()).then(work, work);
   const tail = next.then(() => undefined, () => undefined);
   fileQueues.set(key, tail);
@@ -648,7 +630,11 @@ async function retryFileAccess<T>(work: () => Promise<T>): Promise<T> {
   }
 }
 
-async function writeDurably(path: string, text: string, renamed?: () => void): Promise<void> {
+function writeDurably(path: string, text: string): Promise<void> {
+  return withFile(path, () => writeDurablyUnlocked(path, text));
+}
+
+async function writeDurablyUnlocked(path: string, text: string): Promise<void> {
   const temp = `${path}.tmp-${process.pid}-${randomUUID()}`;
   try {
     const file = await open(temp, "w");
@@ -660,8 +646,7 @@ async function writeDurably(path: string, text: string, renamed?: () => void): P
     }
     // Windows MoveFileEx cannot replace an open destination, even when the
     // reader shares deletion. Keep the flushed snapshot while brief reads finish.
-    await withFile(path, () => retryFileAccess(() => rename(temp, path)));
-    renamed?.();
+    await retryFileAccess(() => rename(temp, path));
     await syncFolder(dirname(path));
   } finally {
     await rm(temp, { force: true }).catch(() => undefined);
@@ -671,16 +656,61 @@ async function writeDurably(path: string, text: string, renamed?: () => void): P
 // A file's text, undefined when it does not exist, or null when it is not a
 // plain file within the size bound.
 function readBounded(path: string): Promise<string | undefined | null> {
-  return withFile(path, async () => {
-    const stats = await lstat(path).catch(() => undefined);
-    if (stats === undefined) return undefined;
-    if (stats.isSymbolicLink() || !stats.isFile() || stats.size > MAX_RUN_FILE_BYTES) return null;
-    try {
-      return await readFile(path, "utf8");
-    } catch {
-      return null;
+  return withFile(path, () => readBoundedUnlocked(path));
+}
+
+async function readBoundedUnlocked(path: string): Promise<string | undefined | null> {
+  const stats = await lstat(path).catch(() => undefined);
+  if (stats === undefined) return undefined;
+  if (stats.isSymbolicLink() || !stats.isFile() || stats.size > MAX_RUN_FILE_BYTES) return null;
+  try {
+    return await readFile(path, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+const firstLine = (text: string | null | undefined): string | null | undefined => {
+  if (typeof text !== "string") return text;
+  const end = text.indexOf("\n");
+  return end < 0 ? null : text.slice(0, end);
+};
+
+function parseHeader(text: string | null | undefined): z.infer<typeof HeaderSchema> | null {
+  if (typeof text !== "string") return null;
+  try {
+    return HeaderSchema.parse(JSON.parse(text));
+  } catch {
+    return null;
+  }
+}
+
+// Expiry weighs the header without loading the run's progress into memory.
+function readHeaderLine(path: string): Promise<string | null | undefined> {
+  return withFile(path, () => readHeaderLineUnlocked(path));
+}
+
+async function readHeaderLineUnlocked(path: string): Promise<string | null | undefined> {
+  const stats = await lstat(path).catch(() => undefined);
+  if (stats === undefined) return undefined;
+  if (stats.isSymbolicLink() || !stats.isFile() || stats.size > MAX_RUN_FILE_BYTES) return null;
+  const file = await retryFileAccess(() => open(path, "r"));
+  try {
+    const chunks: Buffer[] = [];
+    for (let position = 0; position < stats.size;) {
+      const chunk = Buffer.alloc(Math.min(4096, stats.size - position));
+      const { bytesRead } = await file.read(chunk, 0, chunk.length, position);
+      if (bytesRead === 0) return null;
+      const bytes = chunk.subarray(0, bytesRead);
+      const end = bytes.indexOf(0x0a);
+      chunks.push(end < 0 ? bytes : bytes.subarray(0, end));
+      if (end >= 0) return Buffer.concat(chunks).toString("utf8");
+      position += bytesRead;
     }
-  });
+    return null;
+  } finally {
+    await file.close();
+  }
 }
 
 // A file's JSON, undefined when it does not exist, or null when it cannot be
@@ -713,8 +743,8 @@ export interface AutomationRunStore {
   /** Records one planned step after the run's saved progress, before its first effect. */
   appendStep(run: StoredRun, step: StoredStep): Promise<void>;
   /**
-   * Changes a run's settled or Undo state as it is saved now, rewriting only
-   * its header, so the settle and an Undo never overwrite each other's state
+   * Changes a run's settled or Undo state as it is saved now, rewriting
+   * its file, so the settle and an Undo never overwrite each other's state
    * with a copy read before it. Throws when the saved run cannot be read.
    */
   updateState(run: StoredRun, state: Partial<Pick<StoredRun, "settled" | "undo" | "undoKept" | "sharedSettlements" | "undoWrites">>): Promise<void>;
@@ -740,10 +770,10 @@ export interface AutomationRunStore {
    * of a claim, once each ended 30 days before `now`, none has an
    * unfinished Undo, and no ledger holds the claim. A run that has not
    * ended stays while its claim is open; once it is not, it ended `now`.
-   * Reads only plan files, never progress, and skips a folder until it
-   * holds a claim that can go. It asks `standing` and reads each plan
-   * file outside the write queue, then removes or ends a claim inside it
-   * only when its plan files are as it read them. `from` is what the
+   * Reads run headers without parsing progress, and skips a folder until it
+   * holds a claim that can go. It asks `standing` and reads each header
+   * outside the store write queue, then removes or ends a claim inside it
+   * only when its headers are as it read them. `from` is what the
    * batch before answered; the answer is null after the last batch.
    */
   expire(now: number, standing: (claim: ExpiringClaim) => Promise<ClaimStanding>, from: string | null): Promise<string | null>;
@@ -863,17 +893,15 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     await writeDurably(await undosFile(), `${JSON.stringify({ version: 1, runs: [...next.values()] })}\n`);
     undos = next;
   };
-  const readHeader = async (folder: string, name: string, automationId: string) => {
-    const header = HeaderSchema.safeParse(await readJson(join(folder, `${name}${HEADER_SUFFIX}`)));
-    if (!header.success || header.data.automationId !== automationId) return null;
-    return runName(header.data.claimId, header.data.keySeed) === name ? header.data : null;
-  };
-  const readProgress = async (folder: string, name: string, header: z.infer<typeof HeaderSchema>): Promise<StoredRun | null> => {
-    const { progressId: _progressId, ...state } = header;
+  const parseRun = (text: string | null | undefined, name: string, automationId: string): StoredRun | null => {
+    if (typeof text !== "string") return null;
+    const newline = text.indexOf("\n");
+    if (newline < 0) return null;
+    const header = parseHeader(text.slice(0, newline));
+    if (header === null || header.automationId !== automationId || runName(header.claimId, header.keySeed) !== name) return null;
+    const { kind: _kind, ...state } = header;
     const run: StoredRun = { ...state, steps: [], applied: [], created: [], replans: [], undoRequests: [], undoCalls: [], undoCovers: [] };
-    // Existing headers without a generation select their fixed-name progress.
-    const progress = await readBounded(progressPath(folder, name, header));
-    if (progress === null || progress === undefined) return null;
+    const progress = text.slice(newline + 1);
     // A line cut short by a crash is an effect that may have landed and was
     // not recorded; the run resumes it as one.
     const lines = progress.split("\n").slice(0, -1);
@@ -919,22 +947,24 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     if (run.applied.length > planned || run.replans.some((replan) => replan.effect >= planned)) return null;
     return run;
   };
-  const readRun = async (folder: string, name: string, automationId: string) => {
-    const header = await readHeader(folder, name, automationId);
-    return header === null ? null : readProgress(folder, name, header);
+  const readRun = async (folder: string, name: string, automationId: string) =>
+    parseRun(await readBounded(join(folder, `${name}${RUN_SUFFIX}`)), name, automationId);
+  const runText = (run: StoredRun) => {
+    const text = `${JSON.stringify({ ...header(run), kind: "header" })}\n${progressText(run)}`;
+    if (Buffer.byteLength(text) > MAX_RUN_FILE_BYTES) throw tooLarge();
+    return text;
   };
   // Appends one line durably. A torn line a crash left at the end goes first,
   // so the new line starts on a line of its own.
   const appendLine = async (run: StoredRun, line: ProgressLine) => {
     const folder = await runsFolder(run.automationId);
     const name = runName(run.claimId, run.keySeed);
-    const header = await readHeader(folder, name, run.automationId);
-    if (header === null) throw new Error("dohc could not read this run's saved changes in .dohc/automations.");
-    const path = progressPath(folder, name, header);
+    const path = join(folder, `${name}${RUN_SUFFIX}`);
     return withFile(path, async () => {
       const text = `${JSON.stringify(line)}\n`;
       const existing = await lstat(path).catch(() => null);
-      if (existing !== null) {
+      if (existing === null || existing.isSymbolicLink() || !existing.isFile()) throw new Error("dohc could not read this run's saved changes in .dohc/automations.");
+      {
         if (existing.size + Buffer.byteLength(text) > MAX_RUN_FILE_BYTES) throw tooLarge();
         const file = await open(path, "r+");
         try {
@@ -959,13 +989,23 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     });
   };
   const removeRun = async (folder: string, name: string) => {
+    const fileName = `${name}${RUN_SUFFIX}`;
     for (const file of await readdir(folder)) {
-      if (file === `${name}${PROGRESS_SUFFIX}` ||
-        (file.startsWith(`${name}.`) && file.endsWith(PROGRESS_SUFFIX) && z.uuid().safeParse(file.slice(name.length + 1, -PROGRESS_SUFFIX.length)).success)) {
-        await rm(join(folder, file), { force: true });
-      }
+      if (file === fileName || file.startsWith(`${fileName}.tmp-`)) await rm(join(folder, file), { force: true });
     }
-    await rm(join(folder, `${name}${HEADER_SUFFIX}`), { force: true });
+  };
+  // A crash before the first rename leaves no published run. The file queue
+  // excludes active writers before expiry discards that run's temporary files.
+  const discardUnpublished = async (folder: string) => {
+    for (const file of await readdir(folder)) {
+      const split = file.indexOf(`${RUN_SUFFIX}.tmp-`);
+      if (split < 0) continue;
+      const name = file.slice(0, split);
+      const path = join(folder, `${name}${RUN_SUFFIX}`);
+      await withFile(path, async () => {
+        if (await lstat(path).catch(() => null) === null) await removeRun(folder, name);
+      });
+    }
   };
   // When each folder next holds a claim past its 30 days, and the claims in
   // it asked about on every pass: read from expiry.json when a pass starts,
@@ -984,7 +1024,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     recheck: string[];
   } | null = null;
   const claimOf = (run: string) => run.slice(0, run.indexOf("-"));
-  // What to do with one claim's runs, from their plan files as read now.
+  // What to do with one claim's runs, from their headers as read now.
   type Weighed =
     | { kind: "keep"; until?: number; recheck?: true }
     | { kind: "remove" | "end"; texts: Map<string, string | null | undefined> };
@@ -992,28 +1032,18 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     const texts = new Map<string, string | null | undefined>();
     const runs: Array<{ claimId: string; automationId: string; datasetId: string | null; undo: StoredRun["undo"]; finishedAtMs: number | null }> = [];
     for (const name of names) {
-      const path = join(folder, `${name}${HEADER_SUFFIX}`);
-      const text = await readBounded(path);
+      const path = join(folder, `${name}${RUN_SUFFIX}`);
+      const text = await readHeaderLine(path);
       texts.set(name, text);
       // Removed since the folder was listed.
       if (text === undefined) continue;
-      let json: unknown = null;
-      try {
-        json = text === null ? null : JSON.parse(text);
-      } catch {
-        json = null;
-      }
-      const current = RunEndSchema.safeParse(json);
-      if (current.success && runName(current.data.claimId, current.data.keySeed) === name) {
-        const { rules, ...end } = current.data;
+      const current = parseHeader(text);
+      if (current !== null && runName(current.claimId, current.keySeed) === name) {
+        const { rules, ...end } = current;
         runs.push({ ...end, datasetId: rules?.datasetId ?? null });
         continue;
       }
-      const older = OlderRunSchema.safeParse(json);
-      const stats = await lstat(path).catch(() => null);
-      // A file that names no claim stays; the folder's next full pass reads it again.
-      if (!older.success || runName(older.data.claimId, older.data.keySeed) !== name || stats === null) return { kind: "keep" };
-      runs.push({ ...older.data, datasetId: older.data.datasetId ?? older.data.rules?.datasetId ?? null, undo: older.data.undo ?? null, finishedAtMs: stats.mtimeMs });
+      return { kind: "keep" };
     }
     const [first] = runs;
     if (first === undefined || runs.some((run) => run.claimId !== first.claimId || run.automationId !== first.automationId)) return { kind: "keep" };
@@ -1028,22 +1058,30 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     return (await standing(claim)) === "gone" ? { kind: "remove", texts } : { kind: "keep", recheck: true };
   };
   // Removes a claim's runs, or records that its unended runs ended `now`,
-  // only while its plan files are as expiry read them and no run joined it.
+  // only while its headers are as expiry read them and no run joined it.
   const apply = (folder: string, names: readonly string[], weighed: Extract<Weighed, { texts: unknown }>, now: number) => serial(async () => {
-    for (const name of names) {
-      if (await readBounded(join(folder, `${name}${HEADER_SUFFIX}`)) !== weighed.texts.get(name)) return false;
-    }
     if (names.length !== weighed.texts.size) return false;
     for (const name of names) {
-      if (weighed.kind === "remove") {
-        await removeRun(folder, name);
-        continue;
-      }
-      const text = weighed.texts.get(name);
-      const header = typeof text === "string" ? HeaderSchema.safeParse(JSON.parse(text)) : null;
-      if (header?.success && header.data.finishedAtMs === null) {
-        await writeDurably(join(folder, `${name}${HEADER_SUFFIX}`), `${JSON.stringify({ ...header.data, finishedAtMs: now })}\n`);
-      }
+      if (await readHeaderLine(join(folder, `${name}${RUN_SUFFIX}`)) !== weighed.texts.get(name)) return false;
+    }
+    for (const name of names) {
+      const path = join(folder, `${name}${RUN_SUFFIX}`);
+      const applied = await withFile(path, async () => {
+        const text = weighed.kind === "end" ? await readBoundedUnlocked(path) : await readHeaderLineUnlocked(path);
+        if ((weighed.kind === "end" ? firstLine(text) : text) !== weighed.texts.get(name)) return false;
+        if (weighed.kind === "remove") await removeRun(folder, name);
+        else if (typeof text === "string") {
+          const newline = text.indexOf("\n");
+          const header = parseHeader(text.slice(0, newline));
+          if (header !== null && header.finishedAtMs === null) {
+            const next = `${JSON.stringify({ ...header, finishedAtMs: now })}\n${text.slice(newline + 1)}`;
+            if (Buffer.byteLength(next) > MAX_RUN_FILE_BYTES) throw tooLarge();
+            await writeDurablyUnlocked(path, next);
+          }
+        }
+        return true;
+      });
+      if (!applied) return false;
     }
     return true;
   });
@@ -1071,8 +1109,8 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
       const found: StoredRun[] = [];
       let unreadable = false;
       for (const file of await readdir(folder)) {
-        if (!file.startsWith(prefix) || !file.endsWith(HEADER_SUFFIX) || file.endsWith(PROGRESS_SUFFIX)) continue;
-        const run = await readRun(folder, file.slice(0, -HEADER_SUFFIX.length), automationId);
+        if (!file.startsWith(prefix) || !file.endsWith(RUN_SUFFIX)) continue;
+        const run = await readRun(folder, file.slice(0, -RUN_SUFFIX.length), automationId);
         if (run?.claimId === claimId) found.push(run);
         else unreadable = true;
       }
@@ -1082,37 +1120,26 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
       return serial(async () => {
         const folder = await runsFolder(run.automationId);
         const name = runName(run.claimId, run.keySeed);
-        const previous = HeaderSchema.safeParse(await readJson(join(folder, `${name}${HEADER_SUFFIX}`)));
-        const terminal = new Map([...(run.sharedSettlements ?? []), ...(previous.success ? previous.data.sharedSettlements ?? [] : [])]
-          .map(status => [sharedFileUpdateKey(status.draft), status]));
-        const saved = terminal.size > 0 ? { ...run, sharedSettlements: [...terminal.values()] } : run;
-        const progressId = randomUUID();
-        const plan = `${JSON.stringify({ ...header(saved), progressId })}\n`;
-        const progress = progressText(run);
-        if (Buffer.byteLength(plan) > MAX_RUN_FILE_BYTES || Buffer.byteLength(progress) > MAX_RUN_FILE_BYTES) throw tooLarge();
-        if (expiring?.folder === hashName(run.automationId)) {
-          const group = expiring.groups.get(hashName(run.claimId));
-          if (group === undefined) {
-            const added = [name];
-            expiring.groups.set(hashName(run.claimId), added);
-            expiring.claims.push(added);
-          } else if (!group.includes(name)) group.push(name);
-        }
-        // Saved first, so a run saved with its Undo started is always listed.
-        if (run.undo === "started") await noteUndo(run, name);
-        // Publish the new pair only when its header selects the flushed progress.
-        // Prior generations stay until expiry so readers of an old header can finish.
-        const staged = progressPath(folder, name, { ...header(saved), progressId });
-        let published = false;
-        try {
-          await writeDurably(staged, progress);
-          await writeDurably(join(folder, `${name}${HEADER_SUFFIX}`), plan, () => { published = true; });
-        } catch (error) {
-          // A failed folder sync after publication must keep the selected progress.
-          if (!published) await rm(staged, { force: true }).catch(() => undefined);
-          throw error;
-        }
-        if (run.undo !== "started") await noteUndo(run, name);
+        const path = join(folder, `${name}${RUN_SUFFIX}`);
+        return withFile(path, async () => {
+          const previous = parseHeader(await readHeaderLineUnlocked(path));
+          const terminal = new Map([...(run.sharedSettlements ?? []), ...(previous?.sharedSettlements ?? [])]
+            .map(status => [sharedFileUpdateKey(status.draft), status]));
+          const saved = terminal.size > 0 ? { ...run, sharedSettlements: [...terminal.values()] } : run;
+          const text = runText(saved);
+          if (expiring?.folder === hashName(run.automationId)) {
+            const group = expiring.groups.get(hashName(run.claimId));
+            if (group === undefined) {
+              const added = [name];
+              expiring.groups.set(hashName(run.claimId), added);
+              expiring.claims.push(added);
+            } else if (!group.includes(name)) group.push(name);
+          }
+          // Saved first, so a run saved with its Undo started is always listed.
+          if (run.undo === "started") await noteUndo(run, name);
+          await writeDurablyUnlocked(path, text);
+          if (run.undo !== "started") await noteUndo(run, name);
+        });
       });
     },
     unfinishedUndos() {
@@ -1128,38 +1155,39 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
       return serial(async () => {
         const folder = await runsFolder(run.automationId);
         const name = runName(run.claimId, run.keySeed);
-        const currentHeader = await readHeader(folder, name, run.automationId);
-        const saved = currentHeader === null ? null : await readProgress(folder, name, currentHeader);
-        if (saved === null) throw new Error("dohc could not read this run's saved changes in .dohc/automations.");
-        const next = { ...saved, ...state };
-        if (state.sharedSettlements) next.sharedSettlements = [...new Map([
-          ...state.sharedSettlements, ...(saved.sharedSettlements ?? []),
-        ].map(status => [sharedFileUpdateKey(status.draft), status])).values()];
-        // As a save does: an Undo that starts is listed before its run says so, and leaves the list after.
-        if (next.undo === "started") await noteUndo(next, name);
-        await writeDurably(join(folder, `${name}${HEADER_SUFFIX}`), `${JSON.stringify({ ...header(next), progressId: currentHeader!.progressId })}\n`);
-        if (next.undo !== "started") await noteUndo(next, name);
+        const path = join(folder, `${name}${RUN_SUFFIX}`);
+        return withFile(path, async () => {
+          const saved = parseRun(await readBoundedUnlocked(path), name, run.automationId);
+          if (saved === null) throw new Error("dohc could not read this run's saved changes in .dohc/automations.");
+          const next = { ...saved, ...state };
+          if (state.sharedSettlements) next.sharedSettlements = [...new Map([
+            ...state.sharedSettlements, ...(saved.sharedSettlements ?? []),
+          ].map(status => [sharedFileUpdateKey(status.draft), status])).values()];
+          // As a save does: an Undo that starts is listed before its run says so, and leaves the list after.
+          if (next.undo === "started") await noteUndo(next, name);
+          await writeDurablyUnlocked(path, runText(next));
+          if (next.undo !== "started") await noteUndo(next, name);
+        });
       });
     },
     supersedeWake(automationId, claimId, keySeed, noticeId, supersededBy) {
       return serial(async () => {
         const folder = await runsFolder(automationId);
         const name = runName(claimId, keySeed);
-        if (await readBounded(join(folder, `${name}${HEADER_SUFFIX}`)) === undefined) return;
-        const currentHeader = await readHeader(folder, name, automationId);
-        const saved = currentHeader === null ? null : await readProgress(folder, name, currentHeader);
-        if (saved === null) throw new Error("This server could not record the superseded agent wake.");
-        let changed = false;
-        const applied = saved.applied.map((step) => ({ ...step, writes: step.writes.map((write) => {
-          if (write.kind !== "notice" || write.noticeId !== noticeId || write.supersededBy) return write;
-          changed = true;
-          return { ...write, supersededBy, name: write.name + "; agent wake superseded by a later run" };
-        }) }));
-        if (changed) {
-          const progress = progressText({ ...saved, applied });
-          if (Buffer.byteLength(progress) > MAX_RUN_FILE_BYTES) throw tooLarge();
-          await writeDurably(progressPath(folder, name, currentHeader!), progress);
-        }
+        const path = join(folder, `${name}${RUN_SUFFIX}`);
+        return withFile(path, async () => {
+          const text = await readBoundedUnlocked(path);
+          if (text === undefined) return;
+          const saved = parseRun(text, name, automationId);
+          if (saved === null) throw new Error("This server could not record the superseded agent wake.");
+          let changed = false;
+          const applied = saved.applied.map((step) => ({ ...step, writes: step.writes.map((write) => {
+            if (write.kind !== "notice" || write.noticeId !== noticeId || write.supersededBy) return write;
+            changed = true;
+            return { ...write, supersededBy, name: write.name + "; agent wake superseded by a later run" };
+          }) }));
+          if (changed) await writeDurablyUnlocked(path, runText({ ...saved, applied }));
+        });
       });
     },
     appendEffect(run, applied) {
@@ -1216,10 +1244,11 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
           const listed = await serial(async () => {
             const path = await existingFolder(join(runs, name));
             if (path === null || path === "unusable") return null;
+            await discardUnpublished(path);
             const groups = new Map<string, string[]>();
             for (const file of await readdir(path)) {
-              if (!file.endsWith(HEADER_SUFFIX) || file.endsWith(PROGRESS_SUFFIX)) continue;
-              const run = file.slice(0, -HEADER_SUFFIX.length);
+              if (!file.endsWith(RUN_SUFFIX)) continue;
+              const run = file.slice(0, -RUN_SUFFIX.length);
               if (!whole && !recheck.has(claimOf(run))) continue;
               groups.set(claimOf(run), [...(groups.get(claimOf(run)) ?? []), run]);
             }
