@@ -85,7 +85,7 @@ it("keeps the Collection address available during, after, and between field revi
 });
 
 it("keeps schema edits beside revisions at the workspace root", () => {
-  const rootDefinition = { ...definition, schemaPath: "revisions/2-original/schema.sql", operationsPath: "revisions/2-original/operations.js" };
+  const rootDefinition = { ...definition, schemaPath: `revisions/2-${id(99)}/schema.sql`, operationsPath: `revisions/2-${id(99)}/operations.js` };
   const generated = generateDatasetSources(rootDefinition);
   const schemaSql = generated.files[rootDefinition.schemaPath]!, operationSource = generated.files[rootDefinition.operationsPath]!;
   const revision = describeDatasetRevision({ definition: rootDefinition, revision: 2, schemaSql, operationSource });

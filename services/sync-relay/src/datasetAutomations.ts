@@ -1,4 +1,4 @@
-import { datasetBaseFolder, parseDatasetRevision } from "@dohc/security-contract/dataset";
+import { datasetBaseFolder } from "@dohc/security-contract/dataset";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
@@ -78,14 +78,13 @@ export function createDatasetAutomations(input: {
       current();
       const workspaces = new Set<string>();
       for (const row of storage.db.prepare(
-        `SELECT c.workspace_id,c.revision_json,f.path FROM sync_relay_current_files f
+        `SELECT c.workspace_id,json_extract(c.revision_json,'$.definition.schemaPath') AS schemaPath,f.path FROM sync_relay_current_files f
          CROSS JOIN dohc_dataset_catalog c ON c.workspace_id=f.workspace_id
            AND substr(json_extract(c.revision_json,'$.definition.schemaPath'),1,length(f.path)-length('automations.yaml')) = substr(f.path,1,length(f.path)-length('automations.yaml'))
          JOIN dohc_dataset_journals j ON j.workspace_id=c.workspace_id AND j.dataset_id=c.dataset_id
          WHERE (f.path='automations.yaml' OR f.path GLOB '*/automations.yaml') AND j.active=1`
       ).all()) {
-        const definition = parseDatasetRevision(JSON.parse(String(row.revision_json))).definition;
-        if (posix.join(datasetBaseFolder(definition), "automations.yaml") === row.path) workspaces.add(String(row.workspace_id));
+        if (posix.join(datasetBaseFolder({ schemaPath: String(row.schemaPath) }), "automations.yaml") === row.path) workspaces.add(String(row.workspace_id));
       }
       return [...workspaces].sort();
     },

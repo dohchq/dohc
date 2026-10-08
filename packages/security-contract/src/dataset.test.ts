@@ -547,8 +547,9 @@ it("does not grant an automation the app's approved link reads", () => {
 
 it.each([
   ["schema.sql", "."],
-  ["revisions/2-original/schema.sql", "."],
-  ["Budget/revisions/3-reviewed/schema.sql", "Budget"],
+  ["revisions/2-original/schema.sql", "revisions/2-original"],
+  ["revisions/2-paris/schema.sql", "revisions/2-paris"],
+  ["Budget/revisions/3-reviewed/schema.sql", "Budget/revisions/3-reviewed"],
   ["Budget/schema.sql", "Budget"],
   ["trip/Budget/schema.sql", "trip/Budget"],
   ["trip/Budget/revisions/2-00000000-0000-4000-8000-000000000099/schema.sql", "trip/Budget"],

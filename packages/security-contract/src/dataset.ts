@@ -93,7 +93,8 @@ export interface DatasetDefinition {
 export function datasetBaseFolder({ schemaPath }: Pick<DatasetDefinition, "schemaPath">): string {
   const slash = schemaPath.lastIndexOf("/");
   const folder = slash === -1 ? "" : schemaPath.slice(0, slash);
-  return folder.replace(/(?:^|\/)revisions\/[1-9][0-9]*-[^/]+$/, "") || ".";
+  const revision = /(?:^|\/)revisions\/[1-9][0-9]*-([^/]+)$/.exec(folder);
+  return (revision && ids.test(revision[1]!) ? folder.slice(0, revision.index) : folder) || ".";
 }
 
 /** The host verifies the digests and owner approval before using this revision. */

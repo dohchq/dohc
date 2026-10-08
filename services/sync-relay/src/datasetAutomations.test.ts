@@ -712,3 +712,14 @@ it.each([2, 3])("enrolls base-folder schedules after revision %s", async number 
   });
   expect(f.host.automations.wantedWorkspaces()).toEqual(["w"]);
 });
+
+it.each(["schema.sql", "People/schema.sql"])("matches root automations to the schema base for %s", async schemaPath => {
+  const f = await fixture();
+  f.storage.tx(() => {
+    const approved = describeDatasetRevision({ definition: { ...definition, schemaPath }, revision: 1, schemaSql, operationSource });
+    f.storage.db.prepare("UPDATE dohc_dataset_catalog SET revision_json=? WHERE workspace_id='w'").run(JSON.stringify(approved));
+    f.storage.db.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_seq) VALUES('w','test',1,'test','{}',1,1)").run();
+    f.storage.db.prepare("INSERT INTO sync_relay_current_files(workspace_id,version_id,path,blob_sha256,content_kind,state_relay_seq) VALUES('w','main','automations.yaml',?,'text',1)").run("a".repeat(64));
+  });
+  expect(f.host.automations.wantedWorkspaces()).toEqual(schemaPath === "schema.sql" ? ["w"] : []);
+});
