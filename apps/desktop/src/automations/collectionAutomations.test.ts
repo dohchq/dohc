@@ -6131,6 +6131,90 @@ describe("Collection automations that a Group message starts", () => {
       expect(gone.w.authored).toEqual([]);
     });
 
+    it.each(["saved plans", "roster", "host"] as const)("reports a moved relayed press while reading %s", async (reading) => {
+      const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid by: '=person.id'}}]\n" } });
+      const invoice = w.addRecord("Tasks", "invoice", {});
+      const reached = Promise.withResolvers<void>();
+      const resume = Promise.withResolvers<void>();
+      let heldRead = false;
+      let paused = false;
+      const pause = async (at: typeof reading) => {
+        if (at !== reading || !heldRead || paused) return;
+        paused = true;
+        reached.resolve();
+        await resume.promise;
+      };
+      const executor = w.makeExecutor({
+        store: { ...w.baseStore, runsOf: async (...args) => {
+          if ([...w.claims.values()].some(claim => claim.state === "running")) heldRead = true;
+          await pause("saved plans");
+          return w.baseStore.runsOf(...args);
+        } },
+        roster: async () => { await pause("roster"); return OWNER; },
+        groupHost: async () => { await pause("host"); return 0; },
+      });
+      onTestFinished(async () => { resume.resolve(); await executor.dispose(); });
+      await executor.open();
+      const paid = await hashOf(executor, "Tasks", "paid");
+      const relayed = await w.relayPress(executor,
+        { automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: paid, recordId: invoice.id, pressId: "relay-read", pressedBy: "user-ana", confirmed: [] }, () => undefined);
+      if (relayed.pressed.busy) throw new Error("Expected a claim");
+      await reached.promise;
+      await w.renameCollection("Tasks", "Shared/Tasks", false);
+      executor.handleWatcherEvents(["collection.yaml", "automations.yaml"].flatMap(name => [
+        { operation: "delete" as const, path: `Tasks/${name}` },
+        { operation: "update" as const, path: `Shared/Tasks/${name}` },
+      ]));
+      await executor.automationsIn("Shared/Tasks");
+      expect(await executor.whereIs("collection:Tasks#paid")).toBe("Shared/Tasks");
+      resume.resolve();
+      const claim = await w.settledClaim(w.claims.get(relayed.pressed.claimId)!);
+      expect(claim).toMatchObject({ state: "failed", error: "This Collection moved after the button was pressed. Press it again." });
+      expect(w.fieldsOf(invoice)).toEqual({});
+      expect(w.journaled).toEqual([]);
+    });
+
+    it.each(["schema", "roster"] as const)("reports a moved shared Button while inspecting its %s", async (reading) => {
+      const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid by: '=person.id'}}]\n" } });
+      const reached = Promise.withResolvers<void>();
+      const resume = Promise.withResolvers<void>();
+      let armed = false;
+      let paused = false;
+      let hash = "";
+      const pause = async (at: typeof reading) => {
+        if (at !== reading || !armed || paused) return;
+        paused = true;
+        reached.resolve();
+        await resume.promise;
+      };
+      const executor = w.makeExecutor({
+        resolveButtonInspection: async () => ({ workspaceId: "workspace", userId: "user-ana", grantId: "g-ana", grantGeneration: 1, hostGeneration: 1,
+          principals: [], confirmed: [], automationId: "paid", collectionPath: "Tasks", definitionHash: hash, recordId: "invoice" }),
+        readText: async path => {
+          const text = await readFile(join(w.root, path), "utf8");
+          if (path === "Tasks/collection.yaml") await pause("schema");
+          return { text, truncated: false, contentHash: sha256(text) };
+        },
+        roster: async () => { await pause("roster"); return OWNER; },
+      });
+      onTestFinished(async () => { resume.resolve(); await executor.dispose(); });
+      await executor.open();
+      hash = await hashOf(executor, "Tasks", "paid");
+      armed = true;
+      const inspected = executor.inspectRelayed("inspection");
+      await reached.promise;
+      await w.renameCollection("Tasks", "Shared/Tasks", false);
+      executor.handleWatcherEvents(["collection.yaml", "automations.yaml"].flatMap(name => [
+        { operation: "delete" as const, path: `Tasks/${name}` },
+        { operation: "update" as const, path: `Shared/Tasks/${name}` },
+      ]));
+      await executor.automationsIn("Shared/Tasks");
+      expect(await executor.whereIs("collection:Tasks#paid")).toBe("Shared/Tasks");
+      resume.resolve();
+      await expect(inspected).resolves.toEqual({ kind: "denied", reason: "This Collection moved. Its files will update here soon." });
+      expect(w.journaled).toEqual([]);
+    });
+
     it("runs a relayed press that waited only while its Collection is where the relay allowed it", async () => {
       const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid by: '=person.id'}}]\n" } });
       const invoice = w.addRecord("Tasks", "invoice", {});
