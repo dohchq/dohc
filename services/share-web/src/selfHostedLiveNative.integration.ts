@@ -24,6 +24,8 @@ import {createServiceHostEnrollmentRoutes} from "../../sync-relay/src/serviceHos
 import {selfHostLiveProfile} from "../../sync-relay/src/selfHostLiveProfile.js";
 import { createSyncRelayHandler } from "../../sync-relay/src/server.js";
 import { createNamedLiveRoutes, createOwnerLiveRoutes } from "../../sync-relay/src/namedLiveRoutes.js";
+import { captureOwnerLiveFrameHost } from "../../sync-relay/src/namedLiveFrameHost.js";
+import type { LiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
 import {runNativeOwnerDeliveryPass} from "../../../apps/desktop/src/workspaces/nativeOwnerDelivery.js";
 import {readyOwnerDeliveryDocuments} from "../../../apps/desktop/src/workspaces/serverOwnerDelivery.js";
 import { createLiveTickets } from "../../sync-relay/src/liveTickets.js";
@@ -164,6 +166,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
   let supervisor: Awaited<ReturnType<typeof startSelfHostedLiveHost>> | undefined;
   let enrollment: ReturnType<typeof createServiceHostEnrollmentRoutes> | undefined;
   let owner: Awaited<ReturnType<typeof createEngineClient>> | undefined;
+  let peer: Awaited<ReturnType<typeof createEngineClient>> | undefined;
   let deployment: ReturnType<typeof openRelayDeployment> | undefined;
   const closes: (() => Promise<void>)[] = [], sockets: WebSocket[] = [], providers: Provider[] = [], upgrades: Promise<void>[] = [];
   const ownerDoc = markdownToYDoc("Hello"), results: Record<string, unknown> = {};
@@ -302,12 +305,15 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     const cookieName = getCookies({baseURL: audience}).sessionToken.name, cookieLine = signedIn.headers.getSetCookie().find(value => value.startsWith(`${cookieName}=`))!;
     expect(parseSetCookieHeader(cookieLine).get(cookieName)).toMatchObject({secure: true, httponly: true, samesite: "lax"});
     const cookie = cookieLine.split(";", 1)[0]!;
-    const manager = createNamedLiveBrowserTransport({publicOrigin: audience,
+    const browserTransport = (recordingContext?: () => LiveAuthorContext) => createNamedLiveBrowserTransport({publicOrigin: audience,
+      ...(recordingContext ? {recordingContext} : {}),
       limits: profile.editor,
       fetch: (input, init) => {const url = new URL(input instanceof Request ? input.url : input.toString()); expect(url.origin).toBe(audience); return browserRequest(port, url.pathname + url.search, init, cookie);},
       openSocket: (input, protocols) => {const url = new URL(input); expect(url.origin).toBe(audience.replace("https:", "wss:"));
         const socket = new WebSocket(`ws://127.0.0.1:${port}${url.pathname}${url.search}`, protocols, {headers: {host: new URL(audience).host, origin: audience, cookie}, perMessageDeflate: false});
         sockets.push(socket); socket.on("error", () => undefined); socket.once("unexpected-response", (_request, response) => {response.resume(); socket.terminate();}); return socket as unknown as BrowserSocket;}});
+    // The baseline named client sends no recording context.
+    const manager = browserTransport();
     const provider = manager.select({accountId: namedUser.id, workspaceId: "workspace", grantId: "grant", objectId}); providers.push(provider);
     await provider.reconnect(); await stateWhen(provider, state => state.status === "live");
     expect(yDocToMarkdown(provider.doc)).toBe(yDocToMarkdown(ownerDoc));
@@ -371,11 +377,14 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
       expect(record).toBeDefined();
       return record.momentId as string;
     }, {timeout: 30000});
-    // The relay keeps the named recipient off the moment the host published.
+    // None of these edits sent recording context, so the interval keeps the
+    // unattributed gap beside the relay's grant authority for the recipient.
+    // The host omits that private grant authority from the moment it publishes.
+    const baselineAuthors = [{kind: "named", userId: namedUser.id, grantId: "grant", grantGeneration: 1}, {kind: "unattributed"}];
     const published = relayRead.prepare("SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='moment.append'").all("workspace")
       .map(row => JSON.parse(String(row.payload_json))).find(payload => payload.momentId === settledMomentId);
     expect(published).toBeDefined();
-    expect((published.authors ?? []).every((author: {kind: string}) => author.kind === "agent" || author.kind === "automation")).toBe(true);
+    expect(published.authors).toEqual([{kind: "unattributed"}]);
     for (let page = 0; page < 8; page++) {
       const pulled = await rpc("sync.pull", {workspaceId: "workspace"}); expect(pulled.refusals ?? []).toEqual([]);
       if (pulled.pendingCursor) {
@@ -396,7 +405,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     const ownerAuthors = await ownerHistoryAuthors();
     results.ownerSettledAuthors = {settledMomentId, published: published.authors ?? null, owner: ownerAuthors};
     writeFileSync(join(root, "owner-settled-authors.json"), JSON.stringify(results.ownerSettledAuthors, null, 2));
-    expect(ownerAuthors ?? []).toContainEqual({kind: "named", userId: namedUser.id, grantId: "grant", grantGeneration: expect.any(Number)});
+    expect(ownerAuthors).toEqual(baselineAuthors);
     owner!.close(); await owner!.waitForExit();
     owner = await createEngineClient({command: executable, authToken: randomUUID(), protocolVersion: 2, capabilities: ["core", "blobs"], connectTimeoutMs: 30000,
       onStderr: value => appendFileSync(join(root, "owner-stderr.log"), value),
@@ -406,22 +415,149 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
       relay: {baseUrl: relayUrl, bearerToken: bearer, allowInsecureLoopbackForTests: true}}, deadlineMs: 30000})).result as {workspace: string}).workspace;
     expect(await ownerHistoryAuthors()).toEqual(ownerAuthors);
     provider.close(); provider.doc.destroy(); providers.length = 0;
+
+    // Declared work: one isolated interval per case, each settled and
+    // published by the service under its own derived credential.
+    const human = {kind: "human", humanId: namedUser.id, humanName: "Unnamed"};
+    const named = {kind: "named", userId: namedUser.id, grantId: "grant", grantGeneration: 1};
+    const agent = {kind: "agent", agentId: "proof-agent", agentName: "Proof agent", onBehalfOf: namedUser.id, depth: 2};
+    const automation = {kind: "automation", automationId: "proof-automation", onBehalfOf: ownerUser.id, depth: 1};
+    const admittedSnapshot = (deliveryId: string) => JSON.parse(String((relayRead.prepare(
+      "SELECT author_snapshot_json FROM sync_relay_live_update_journal WHERE delivery_id=?").get(deliveryId) as {author_snapshot_json: unknown} | undefined)?.author_snapshot_json ?? "null"));
+    // The audit settlement whose interval holds exactly this receipt.
+    const settlementOf = (receipt: {journalCursor: number}, previousCursor: number, markdown: string) => vi.waitFor(() => {
+      const rows = relayRead.prepare("SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='live.audit.settlement' ORDER BY relay_seq DESC").all("workspace");
+      const record = rows.map(row => JSON.parse(String(row.payload_json)).record).find(record =>
+        record?.binding?.workspaceId === document.workspaceId && record?.binding?.mainVersionId === mainVersionId &&
+          record?.binding?.objectId === objectId && record?.binding?.lineageClaimId === lineageClaimId &&
+          record?.previousCursor < receipt.journalCursor && receipt.journalCursor <= record?.terminalCursor);
+      expect(record).toBeDefined();
+      expect(record.previousCursor).toBe(previousCursor);
+      expect(record.terminalCursor).toBe(receipt.journalCursor);
+      expect(record.markdownDigest).toBe(hash(Buffer.from(markdown)));
+      return record as {momentId: string; previousCursor: number; terminalCursor: number};
+    }, {timeout: 30000});
+    const publishedAuthors = (momentId: string) => vi.waitFor(() => {
+      const payload = relayRead.prepare("SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='moment.append'").all("workspace")
+        .map(row => JSON.parse(String(row.payload_json))).find(payload => payload.momentId === momentId);
+      expect(payload).toBeDefined();
+      return payload.authors as unknown;
+    }, {timeout: 30000});
+
+    // A named recipient's agent, declared through the real browser transport.
+    const agentProvider = browserTransport(() => ({kind: "account", accountId: namedUser.id,
+      agent: {agentId: agent.agentId, agentName: agent.agentName, onBehalfOf: agent.onBehalfOf, depth: agent.depth}}))
+      .select({accountId: namedUser.id, workspaceId: "workspace", grantId: "grant", objectId});
+    providers.push(agentProvider);
+    await agentProvider.reconnect(); await stateWhen(agentProvider, state => state.status === "live");
+    const beforeAgentCursor = agentProvider.state().lastApplied?.journalCursor ?? 0;
+    expect(agentProvider.edit(() => agentProvider.doc.getMap("frontmatter").set("agentProof", "declared"))).toBe(true);
+    const agentAck = (await stateWhen(agentProvider, state => (state.lastApplied?.journalCursor ?? 0) > beforeAgentCursor && state.pendingUpdates === 0)).lastApplied!;
+    expect(admittedSnapshot(agentAck.deliveryId)).toEqual([human, {kind: "agent", agentId: agent.agentId, agentName: agent.agentName, onBehalfOf: agent.onBehalfOf, depth: agent.depth}]);
+    expect(await capture.client.readLiveApplicationAck({id: capture.nextRequestId(), workspace: capture.workspace, registrationId: capture.registrationId, deadlineMs: capture.deadlineMs},
+      {deliveryId: agentAck.deliveryId, updateDigest: agentAck.updateDigest})).toEqual(agentAck);
+    const agentMarkdown = yDocToMarkdown(agentProvider.doc);
+    agentProvider.close(); agentProvider.doc.destroy(); providers.length = 0;
+    await active!.settle(document);
+    expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe(agentMarkdown);
+    const agentSettlement = await settlementOf(agentAck, finalAck.journalCursor, agentMarkdown);
+    // The snapshot's agent and account holder travel; the grant authority stays private.
+    expect(await publishedAuthors(agentSettlement.momentId)).toEqual([agent, human]);
+
+    // A trusted automation the owner runs, through the production owner capture.
+    const automationHost = captureOwnerLiveFrameHost({authenticatedUserId: ownerUser.id, shareId: "share", storage,
+      native: await active!.captureNative(binding.binding), bounds: profile.namedLive.host, validate});
+    const {automationAck, automationMarkdown} = await (async () => {
+      const automationDoc = new Y.Doc();
+      try {
+        const sync = await automationHost.openSync(Y.encodeStateVector(automationDoc), AbortSignal.timeout(30_000));
+        try {Y.applyUpdate(automationDoc, sync.missingStateUpdate);} finally {sync.close();}
+        const beforeAutomation = Y.encodeStateVector(automationDoc);
+        automationDoc.getMap("frontmatter").set("automationProof", "trusted");
+        const updateBytes = Y.encodeStateAsUpdate(automationDoc, beforeAutomation);
+        const submitted = await automationHost.submit({deliveryId: "self-host-proof-automation", updateDigest: hash(updateBytes), updateBytes,
+          trustedAutomation: {automationId: automation.automationId, attribution: {actorKind: "automation", onBehalfOf: ownerUser.id, depth: 1}}}, AbortSignal.timeout(30_000));
+        if (submitted.result !== "success") throw new Error(`Trusted automation edit was not admitted: ${JSON.stringify(submitted)}`);
+        return {automationAck: submitted.ack, automationMarkdown: yDocToMarkdown(automationDoc)};
+      } finally {automationHost.close(); automationDoc.destroy();}
+    })();
+    // Admission keeps the nested declaration; the settled moment names the flat author.
+    expect(admittedSnapshot(automationAck.deliveryId)).toEqual([{kind: "automation", automationId: automation.automationId,
+      attribution: {actorKind: "automation", onBehalfOf: ownerUser.id, depth: 1}}]);
+    expect(automationAck.journalCursor).toBeGreaterThan(agentAck.journalCursor);
+    await active!.settle(document);
+    expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe(automationMarkdown);
+    const automationSettlement = await settlementOf(automationAck, agentAck.journalCursor, automationMarkdown);
+    expect(await publishedAuthors(automationSettlement.momentId)).toEqual([automation]);
+
+    const declaredCredit = [[agentSettlement.momentId, [agent, human, named]], [automationSettlement.momentId, [automation]]] as const;
+    const momentAuthors = async (call: typeof rpc, momentId: string) =>
+      ((await call("moments.list", {versionId: mainVersionId})).moments as {momentId: string; authors?: unknown[] | null}[])
+        .find(moment => moment.momentId === momentId)?.authors ?? null;
+    const pullAll = async (call: typeof rpc) => {
+      for (let page = 0; page < 8; page++) {
+        const pulled = await call("sync.pull", {workspaceId: "workspace"}); expect(pulled.refusals ?? []).toEqual([]);
+        if (pulled.pendingCursor) {
+          const cursor = {workspaceId: "workspace", pendingCursor: pulled.pendingCursor};
+          expect((await call("sync.materializePendingCursor", cursor)).materialized).toBe(true);
+          expect((await call("sync.commitCursor", cursor)).committed).toBe(true);
+        }
+        if (!pulled.hasMore) return;
+      }
+      throw new Error("Pull exceeded its eight-page bound.");
+    };
+    // The owner reconstructs the private grant authority from verified audit.
+    await pullAll(rpc);
+    expect((await rpc("versionedText.read", {versionId: mainVersionId, path: "docs/a.md"})).text).toBe(automationMarkdown);
+    for (const [momentId, authors] of declaredCredit) expect(await momentAuthors(rpc, momentId)).toEqual(authors);
+
+    // A fresh ordinary peer imports the same credit without any live feed.
+    const peerRoot = join(root, "peer"); mkdirSync(peerRoot);
+    peer = await createEngineClient({command: executable, authToken: randomUUID(), protocolVersion: 2, capabilities: ["core", "blobs"], connectTimeoutMs: 30000,
+      onStderr: value => appendFileSync(join(root, "peer-stderr.log"), value),
+      privateLiveApplication: profile.nativeClient,
+      env: {...process.env, DOHC_ENGINE_LIVE_HOST_CONFIG: undefined, DOHC_ENGINE_OWNER_HOST_CONFIG: undefined}});
+    const peerHandle = ((await peer.sendRequest({id: requestId++, method: "workspace.open", params: {rootDir: peerRoot, workspaceId: "workspace", captureMode: "none",
+      relay: {baseUrl: relayUrl, bearerToken: bearer, allowInsecureLoopbackForTests: true}}, deadlineMs: 30000})).result as {workspace: string}).workspace;
+    const peerRpc = async (method: string, params: Record<string, any>) => {
+      try {return (await peer!.sendRequest({id: requestId++, workspace: peerHandle, method, params, deadlineMs: 30000})).result as Record<string, any>;}
+      catch (cause) {throw new Error(`Service proof peer RPC failed: ${method}`, {cause});}
+    };
+    await vi.waitFor(() => peerRpc("versions.ensureMain", {}), {timeout: 30000});
+    expect((await peerRpc("sync.adoptJoinIdentity", {workspaceId: "workspace", replicationEpoch: identity.replicationEpoch,
+      streamIdentity: identity.streamIdentity})).adopted).toBe(true);
+    await pullAll(peerRpc);
+    expect((await peerRpc("versionedText.read", {versionId: mainVersionId, path: "docs/a.md"})).text).toBe(automationMarkdown);
+    expect(readFileSync(join(peerRoot, "docs/a.md"), "utf8")).toBe(automationMarkdown);
+    for (const [momentId, authors] of declaredCredit) expect(await momentAuthors(peerRpc, momentId)).toEqual(authors);
+    expect(await momentAuthors(peerRpc, settledMomentId)).toEqual(baselineAuthors);
+    peer.close(); await peer.waitForExit(); peer = undefined;
+    results.declaredAuthors = {
+      agent: {receipt: agentAck, settlement: agentSettlement, published: [agent, human], credited: [agent, human, named]},
+      automation: {receipt: automationAck, settlement: automationSettlement, published: [automation], credited: [automation]},
+    };
     await supervisor!.close(); supervisor = undefined; active = undefined;
     const engine = new DatabaseSync(join(workspace, ".dohc/engine/engine.db"), {readOnly: true});
     try {results.persistedApplications = engine.prepare("SELECT delivery_id,update_digest FROM live_device_update_applications ORDER BY journal_cursor").all();
       expect(results.persistedApplications).toEqual(expect.arrayContaining([{delivery_id: ack.deliveryId, update_digest: ack.updateDigest}]));
       // The owner holds exactly the authors the host credited.
-      const authorJson = (database: DatabaseSync) => (database.prepare("SELECT author_json FROM moments WHERE moment_id=?").get(settledMomentId) as {author_json: string | null} | undefined)?.author_json;
+      const authorJson = (database: DatabaseSync, momentId = settledMomentId) => (database.prepare("SELECT author_json FROM moments WHERE moment_id=?").get(momentId) as {author_json: string | null} | undefined)?.author_json;
       const ownerEngine = new DatabaseSync(join(ownerRoot, ".dohc/engine/engine.db"), {readOnly: true});
+      const peerEngine = new DatabaseSync(join(root, "peer", ".dohc/engine/engine.db"), {readOnly: true});
       try {
         const host = authorJson(engine), owned = authorJson(ownerEngine);
         Object.assign(results.ownerSettledAuthors as object, {hostRaw: host, ownerRaw: owned});
         expect(JSON.parse(owned ?? "null")).toEqual(JSON.parse(host ?? "null"));
-      } finally {ownerEngine.close();}
+        expect(JSON.parse(host ?? "null")).toEqual(baselineAuthors);
+        // Raw history on the service, the owner and the fresh peer keeps each declared author.
+        for (const [momentId, authors] of declaredCredit) {
+          for (const database of [engine, ownerEngine, peerEngine]) expect(JSON.parse(authorJson(database, momentId) ?? "null")).toEqual(authors);
+        }
+      } finally {ownerEngine.close(); peerEngine.close();}
     } finally {engine.close();}
     expect(hash(readFileSync(executable))).toBe(expectedHash);
     writeFileSync(join(root, "result.json"), JSON.stringify({verdict: "PASS", executable, sha256: expectedHash,
-      scope: "Default self-host profile, scoped replication credentials, automatic discovery, native cold import and adoption-reply-loss recovery, service restart, owner draft restart, concurrent named and owner edits, idle owner receive, native acknowledgements, settlement and ordinary publication.",
+      scope: "Default self-host profile, scoped replication credentials, automatic discovery, native cold import and adoption-reply-loss recovery, service restart, owner draft restart, concurrent named and owner edits, idle owner receive, native acknowledgements, settlement and ordinary publication, declared agent and trusted automation credit through service publication, owner and fresh peer import.",
       omitted: ["TLS transport", "browser UI", "restore cutover"], harness: {transforms: harness.transforms, captures: harness.captures}, results}, null, 2));
   } finally {
     for (const provider of providers) {provider.close(); provider.doc.destroy();}
@@ -429,6 +565,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     const errors: unknown[] = [];
     try {await supervisor?.close();} catch (error) {errors.push(error);}
     if (owner) {owner.close(); try {await owner.waitForExit();} catch (error) {errors.push(error);}}
+    if (peer) {peer.close(); try {await peer.waitForExit();} catch (error) {errors.push(error);}}
     for (const close of closes.reverse()) try {await close();} catch (error) {errors.push(error);}
     await Promise.allSettled(upgrades);
     deployment?.storage.close(); ownerDoc.destroy();

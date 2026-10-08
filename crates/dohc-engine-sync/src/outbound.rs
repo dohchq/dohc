@@ -6,12 +6,50 @@ use rusqlite::{Transaction, params};
 
 use crate::{SyncError, journal_local_op_in_tx};
 
-/// The relay derives person attribution and mints the authors it accepted a
-/// shared change under, so a client's moment carries only its own agents and
-/// automations. People, links and public authors, including a relay-admitted
-/// live author snapshot's, stay in this computer's history and never reach the
-/// wire. Any other author is left for validation to judge.
-pub(crate) fn omit_relay_attributed_authors(payload: &mut serde_json::Value) -> bool {
+/// The relay derives person attribution; installation identities stay local.
+pub(crate) fn omit_local_person_authors(payload: &mut serde_json::Value) -> bool {
+    omit_authors(payload, |author| {
+        author.get("kind").and_then(serde_json::Value::as_str) != Some("human")
+            || snapshot_person(author)
+    })
+}
+
+/// A journaled moment keeps only authors some publishing route can carry:
+/// agents, automations, the exact marker, and a relay-admitted live author
+/// snapshot's account holder or link holder. This computer's people and the
+/// grant authority the relay accepted a shared change under (named, direct
+/// link and public) stay in this computer's history. Any other author is left
+/// for validation to judge.
+pub(crate) fn omit_private_authors(payload: &mut serde_json::Value) -> bool {
+    omit_authors(payload, |author| {
+        match author.get("kind").and_then(serde_json::Value::as_str) {
+            Some("human") => snapshot_person(author),
+            Some("link") => {
+                author.get("publicPrincipalId").is_some() && author.get("grantId").is_none()
+            }
+            Some("named" | "public") => false,
+            _ => true,
+        }
+    })
+}
+
+/// A relay-admitted live author snapshot names a relay account with the name
+/// the relay stored for it.
+fn snapshot_person(author: &serde_json::Value) -> bool {
+    author
+        .get("humanName")
+        .and_then(serde_json::Value::as_str)
+        .is_some()
+        && author
+            .get("humanId")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| relay_person_id(id).is_some())
+}
+
+fn omit_authors(
+    payload: &mut serde_json::Value,
+    keep: impl Fn(&serde_json::Value) -> bool,
+) -> bool {
     let Some(authors) = payload
         .get_mut("authors")
         .and_then(serde_json::Value::as_array_mut)
@@ -19,12 +57,7 @@ pub(crate) fn omit_relay_attributed_authors(payload: &mut serde_json::Value) -> 
         return false;
     };
     let original_len = authors.len();
-    authors.retain(|author| {
-        !matches!(
-            author.get("kind").and_then(serde_json::Value::as_str),
-            Some("human" | "link" | "named" | "public")
-        )
-    });
+    authors.retain(keep);
     if authors.len() == original_len {
         return false;
     }
@@ -37,6 +70,62 @@ pub(crate) fn omit_relay_attributed_authors(payload: &mut serde_json::Value) -> 
     true
 }
 
+/// Authors as the publishing route carries them. The relay takes a live
+/// settlement's public snapshot authors only from the native service
+/// credential, and only for a live settlement moment. Every other moment, on
+/// every credential, follows the client rule.
+pub(crate) fn omit_unpublishable_authors(
+    payload: &mut serde_json::Value,
+    native_settlements: bool,
+) -> bool {
+    if native_settlements && live_settlement_moment(payload) {
+        omit_private_authors(payload)
+    } else {
+        omit_client_identity_authors(payload)
+    }
+}
+
+/// The relay's native settlement moment ID: `moment-ydoc-` and 64 lowercase
+/// hex digits.
+fn live_settlement_moment(payload: &serde_json::Value) -> bool {
+    payload
+        .get("momentId")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|id| id.strip_prefix("moment-ydoc-"))
+        .is_some_and(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
+}
+
+/// Client log routes cannot attest relay identities. Keep local coverage intact.
+pub(crate) fn omit_client_identity_authors(payload: &mut serde_json::Value) -> bool {
+    let before = payload.get("authors").cloned();
+    omit_local_person_authors(payload);
+    if let Some(authors) = payload
+        .get_mut("authors")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        let mut marker = false;
+        authors.retain_mut(|author| {
+            if matches!(
+                author.get("kind").and_then(serde_json::Value::as_str),
+                Some("human" | "public" | "named" | "link" | "unattributed")
+            ) {
+                if marker {
+                    return false;
+                }
+                *author = serde_json::json!({"kind": "unattributed"});
+                marker = true;
+            }
+            true
+        });
+    }
+    payload.get("authors") != before.as_ref()
+}
+
 pub(crate) fn relay_person_id(id: &str) -> Option<&str> {
     (!id.starts_with("local:")).then_some(id)
 }
@@ -46,6 +135,7 @@ pub(crate) fn repair_queued_moment_authors(
     store: &mut dohc_engine_storage::EngineStore,
     ops: &mut [crate::ReplicationEnvelope],
     faults: &dyn dohc_engine_storage::FaultInjector,
+    native_settlements: bool,
 ) -> Result<dohc_engine_storage::TxnOutcome<()>, SyncError> {
     use dohc_engine_storage::TxnOutcome;
     let repairs: Vec<_> = ops
@@ -56,7 +146,7 @@ pub(crate) fn repair_queued_moment_authors(
                 return None;
             }
             let mut payload = op.payload.clone();
-            omit_relay_attributed_authors(&mut payload).then_some((index, payload))
+            omit_unpublishable_authors(&mut payload, native_settlements).then_some((index, payload))
         })
         .collect();
     if repairs.is_empty() {
@@ -317,7 +407,7 @@ fn moment_payload_in_tx(
             object.insert(field.clone(), value.clone());
         }
     }
-    omit_relay_attributed_authors(&mut payload);
+    omit_private_authors(&mut payload);
     if let Some(authors) = payload
         .get_mut("authors")
         .and_then(serde_json::Value::as_array_mut)

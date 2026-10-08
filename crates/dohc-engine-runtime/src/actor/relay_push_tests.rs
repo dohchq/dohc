@@ -45,7 +45,10 @@ fn fixture_with_files(files: usize) -> (ScratchDir, std::path::PathBuf, EngineSt
 }
 
 fn append_file(store: &mut EngineStore, index: usize) {
-    let moment_id = format!("moment-{index}");
+    append_file_as(store, index, &format!("moment-{index}"));
+}
+
+fn append_file_as(store: &mut EngineStore, index: usize, moment_id: &str) {
     VersionedTextStore::new(store)
         .write_binary(
             &WriteBinary {
@@ -54,7 +57,7 @@ fn append_file(store: &mut EngineStore, index: usize) {
                 object_id: format!("object-{index}"),
                 path: format!("files/{index}.bin"),
                 bytes: format!("binary content {index}").into_bytes(),
-                moment_id: moment_id.clone(),
+                moment_id: moment_id.to_owned(),
                 metadata_origin: "api".to_owned(),
                 metadata_summary: None,
                 metadata_correlation_id: None,
@@ -67,7 +70,7 @@ fn append_file(store: &mut EngineStore, index: usize) {
         .expect("write content-bearing moment");
     store
         .write_with(&NoFaults, |tx| {
-            journal_moment_append_in_tx(tx, WORKSPACE, &moment_id)
+            journal_moment_append_in_tx(tx, WORKSPACE, moment_id)
         })
         .expect("journal moment");
 }
@@ -324,6 +327,7 @@ async fn cancellation_during_deferred_upload_preserves_acknowledged_prefix() {
     let io_cancelled_upload = Arc::clone(&cancelled_upload);
     let outcome = actor
         .relay_with_io(
+            false,
             push_operation(),
             LeaseRegistry::default(),
             token.clone(),
@@ -361,6 +365,60 @@ async fn cancellation_during_deferred_upload_preserves_acknowledged_prefix() {
     assert!(!relay.blobs.contains(&cancelled_upload));
     finish(&mut store, &mut relay);
     assert_eq!(relay.skipped, 0);
+}
+
+#[tokio::test]
+async fn deferred_push_keeps_authors_only_on_the_native_settlement_lane() {
+    let authors =
+        serde_json::json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"}]);
+    let marker = serde_json::json!([{"kind":"unattributed"}]);
+    let settlement = format!("moment-ydoc-{}", "a".repeat(64));
+    // The relay takes public authors only for a live settlement moment, so any
+    // other moment follows the client rule on the native lane too.
+    for (moment_id, native_settlements, expected) in [
+        (settlement.as_str(), false, &marker),
+        (settlement.as_str(), true, &authors),
+        ("moment-0", true, &marker),
+    ] {
+        let (_scratch, path, mut store) = fixture_with_files(0);
+        append_file_as(&mut store, 0, moment_id);
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE replication_log SET payload_json=json_set(payload_json,'$.authors',json(?1)) WHERE op_kind='moment.append'", [authors.to_string()]).map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        }).unwrap();
+        drop(store);
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&path, 2_100).unwrap().actor;
+        let relay = Arc::new(Mutex::new(Relay::default()));
+        let io_relay = Arc::clone(&relay);
+        actor
+            .relay_with_io(
+                native_settlements,
+                push_operation(),
+                LeaseRegistry::default(),
+                CancellationToken::new(),
+                None,
+                move |request, _token| {
+                    let relay = Arc::clone(&io_relay);
+                    async move { Ok(relay.lock().unwrap().answer(&request)) }
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            &relay
+                .lock()
+                .unwrap()
+                .ops
+                .values()
+                .find(|op| op.op_kind == "moment.append")
+                .unwrap()
+                .payload["authors"],
+            expected,
+            "{moment_id} {native_settlements}"
+        );
+        supervisor.close(&path).unwrap();
+    }
 }
 
 #[test]

@@ -1,5 +1,6 @@
 import { sha256Hex } from "@dohc/workspace-core/hash";
-import { MAX_LIVE_AUTHOR_BYTES, MAX_LIVE_AUTHOR_IDENTITIES, parseLiveAuthorContext, parseLiveAuthorSnapshot, type LiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
+import { MAX_LIVE_AUTHOR_BYTES, MAX_LIVE_AUTHOR_ENTRY_BYTES, MAX_LIVE_AUTHOR_IDENTITIES, parseLiveAuthorContext, parseLiveAuthorSnapshot, type LiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
+import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import { stableJsonStringify } from "./canonicalJson";
 import { badRequest, relayError } from "./errors";
 import { parseString } from "./requestInputs";
@@ -74,12 +75,30 @@ export function assertServiceReplicaLogProvenance(originId: string, rawOps: unkn
       for (const author of authors) {
         if (author && typeof author === "object" && !Array.isArray(author)
           && author.kind === "unattributed" && Object.keys(author).length === 1) continue;
+        if (author && typeof author === "object" && !Array.isArray(author) && author.kind === "automation") {
+          assertMomentAutomationAuthor(author);
+          continue;
+        }
         parseLiveAuthorSnapshot([author]);
       }
     } catch {
       throw relayError("authorship_mismatch");
     }
   }
+}
+
+// A settled moment names an automation as the engine's flat moment author.
+// The nested declaration belongs to the accepted live update, not the moment.
+const MOMENT_AUTOMATION_FIELDS: ReadonlySet<string> = new Set(["kind", "automationId", "onBehalfOf", "depth"]);
+const MAX_AUTOMATION_DEPTH = 64;
+
+function assertMomentAutomationAuthor(author: Record<string, unknown>): void {
+  if (Object.keys(author).some(key => !MOMENT_AUTOMATION_FIELDS.has(key))) throw new TypeError("Invalid automation author fields.");
+  parseLiveUpdateIdentifier(author.automationId);
+  if (Object.hasOwn(author, "onBehalfOf")) parseLiveUpdateIdentifier(author.onBehalfOf);
+  if (!Number.isSafeInteger(author.depth) || (author.depth as number) < 0 || (author.depth as number) > MAX_AUTOMATION_DEPTH)
+    throw new TypeError("Invalid automation depth.");
+  if (Buffer.byteLength(JSON.stringify(author), "utf8") > MAX_LIVE_AUTHOR_ENTRY_BYTES) throw new TypeError("Automation author is too large.");
 }
 
 export function parseLogOp(value: unknown): SyncRelayLogInput {

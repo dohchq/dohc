@@ -1970,9 +1970,17 @@ fn imported_settlement_credits_every_relay_accepted_author_of_its_interval() {
         .iter()
         .find(|op| op.op_kind == "moment.append" && op.payload["momentId"] == "moment-mixed")
         .unwrap();
+    // The journal keeps the relay-admitted snapshot person for the publishing
+    // route to judge, never the recipient's grant authority.
+    assert_eq!(
+        kinds(&moment.payload["authors"]),
+        ["agent", "human", "unattributed"]
+    );
     // The relay refuses a client-minted person, so only the agent and the
-    // exact unattributed marker travel.
-    assert_eq!(kinds(&moment.payload["authors"]), ["agent", "unattributed"]);
+    // exact unattributed marker travel on an ordinary credential.
+    let mut ordinary = moment.payload.clone();
+    crate::outbound::omit_unpublishable_authors(&mut ordinary, false);
+    assert_eq!(kinds(&ordinary["authors"]), ["agent", "unattributed"]);
 
     let (_scratch, path, mut receiver) = receiver_with_blobs(&f);
     for (kind, applied) in import_all(&mut receiver, &ops) {
@@ -1997,7 +2005,7 @@ fn imported_settlement_credits_every_relay_accepted_author_of_its_interval() {
 
     // A settlement that claims another interval is refused, so the moment
     // keeps only the authors it carried.
-    let wire = moment.payload["authors"].clone();
+    let carried = moment.payload["authors"].clone();
     let forged: Vec<_> = ops
         .iter()
         .map(|op| {
@@ -2015,5 +2023,5 @@ fn imported_settlement_credits_every_relay_accepted_author_of_its_interval() {
             .iter()
             .any(|(kind, applied)| kind == settlement_record::SETTLEMENT_OP && !applied)
     );
-    assert_eq!(moment_authors(&receiver, "moment-mixed"), Some(wire));
+    assert_eq!(moment_authors(&receiver, "moment-mixed"), Some(carried));
 }

@@ -63,6 +63,50 @@ describe("native service settlement provenance", () => {
       expect(() => assertServiceReplicaLogProvenance("native", moment(authors))).toThrow();
     }
   });
+  it("takes a settlement's automation only in the engine's flat moment shape", () => {
+    const flat = {kind: "automation", automationId: "collection:Tasks#stamp", onBehalfOf: "owner", depth: 1};
+    for (const author of [
+      flat,
+      {kind: "automation", automationId: "stamp", depth: 0},
+      {kind: "automation", automationId: "a".repeat(512), onBehalfOf: "b".repeat(512), depth: 64},
+    ]) {
+      expect(() => assertServiceReplicaLogProvenance("native", moment([author]))).not.toThrow();
+      expect(() => assertServiceReplicaLogProvenance("native", moment([...publicLiveAuthors, author]))).not.toThrow();
+    }
+    for (const author of [
+      // The admitted declaration's nested attribution is live metadata, not a moment author.
+      {kind: "automation", automationId: "stamp", attribution: {actorKind: "automation", depth: 1}},
+      {kind: "automation", automationId: "stamp", depth: 1, attribution: {actorKind: "automation", depth: 1}},
+      {kind: "automation", automationId: "stamp", depth: 1, run: {claimId: "claim", automationName: "Stamp"}},
+      {kind: "automation", automationId: "stamp", depth: 1, grantId: "private"},
+      {kind: "automation", automationId: "stamp", depth: 1, agentName: "Stamp"},
+      {kind: "automation", depth: 1},
+      {kind: "automation", automationId: "stamp"},
+      {kind: "automation", automationId: "stamp", depth: 65},
+      {kind: "automation", automationId: "stamp", depth: -1},
+      {kind: "automation", automationId: "stamp", depth: 1.5},
+      {kind: "automation", automationId: "stamp", depth: "1"},
+      {kind: "automation", automationId: "", depth: 1},
+      {kind: "automation", automationId: 7, depth: 1},
+      {kind: "automation", automationId: "stamp\n", depth: 1},
+      {kind: "automation", automationId: "a".repeat(513), depth: 1},
+      {kind: "automation", automationId: "stamp", onBehalfOf: "", depth: 1},
+      {kind: "automation", automationId: "stamp", onBehalfOf: null, depth: 1},
+      {kind: "automation", automationId: "stamp", onBehalfOf: "b".repeat(513), depth: 1},
+    ]) {
+      expect(() => assertServiceReplicaLogProvenance("native", moment([author])), JSON.stringify(author)).toThrow();
+      expect(() => assertServiceReplicaLogProvenance("native", moment([flat, author])), JSON.stringify(author)).toThrow();
+    }
+    // The list bounds apply to automations too.
+    expect(() => assertServiceReplicaLogProvenance("native", moment(Array(1025).fill(flat)))).toThrow();
+    expect(() => assertServiceReplicaLogProvenance("native", moment(Array.from({length: 1024}, (_, i) =>
+      ({kind: "automation", automationId: `${i}-${"a".repeat(200)}`, depth: 1}))))).toThrow();
+    // Public authors beside it still need the native settlement route.
+    expect(() => assertServiceReplicaLogProvenance("native", moment([flat, publicLiveAuthors[0]], "moment-local-write"))).toThrow();
+    expect(() => assertClientLogProvenance("device", moment([flat, publicLiveAuthors[0]]))).toThrow();
+    // A client may still publish its own flat automation author.
+    expect(() => assertClientLogProvenance("device", moment([flat]))).not.toThrow();
+  });
   it("retains origin reservations and ordinary agent and automation writes", () => {
     for (const prefix of RELAY_ORIGIN_PREFIXES) {
       expect(() => assertServiceReplicaLogProvenance(`${prefix}grant`, [])).toThrow();

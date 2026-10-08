@@ -550,6 +550,10 @@ pub struct ShareViewPullOutcome {
 /// Runtime-owned relay seam. The core crate contains no HTTP or async runtime
 /// dependency; production adapters live in separate crates.
 pub trait RelayTransport {
+    /// The credential selects the relay's native settlement route, which attests authors.
+    fn publishes_native_settlements(&self) -> bool {
+        false
+    }
     fn push(&self, req: PushRequest) -> Result<PushResponse, RelayError>;
     fn pull(&self, req: PullRequest) -> Result<PullResponse, RelayError>;
     fn lookup_log_coordinate(
@@ -1215,8 +1219,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     if ops.is_empty() {
                         break;
                     }
-                    match crate::outbound::repair_queued_moment_authors(store, &mut ops, faults)
-                        .map_err(local)?
+                    match crate::outbound::repair_queued_moment_authors(
+                        store,
+                        &mut ops,
+                        faults,
+                        self.transport.publishes_native_settlements(),
+                    )
+                    .map_err(local)?
                     {
                         TxnOutcome::Committed(()) => {}
                         TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
