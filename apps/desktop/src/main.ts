@@ -859,6 +859,7 @@ function sendRendererActivity(scope?: WorkspaceActivityScope): void {
         && mountStoreWorkspaceIdFor(workspace.workspaceId, mount.shareId) === scope?.workspaceId);
       if (mount) {
         scope = { workspaceId: workspace.workspaceId,
+          ...(scope.summaryChanged ? { summaryChanged: true } : {}),
           ...(scope.pathSetChanged !== undefined ? { pathSetChanged: scope.pathSetChanged } : {}),
           ...(scope.paths ? { paths: scope.paths.map(path => `shared-with-me/${mount.label}/${path}`) } : {}) };
         break;
@@ -4826,6 +4827,7 @@ function createShareViewFilesForOperation(
       const view = currentWorkspace().shareView;
       if (target.kind !== "standalone" || !view) throw new Error("This shared view is no longer registered.");
       setWorkspaceShareView(target.workspaceId, { ...view, unsavedPaths: paths });
+      notifyRenderer({ workspaceId: target.workspaceId, summaryChanged: true });
     },
     markEnded: async (target, unsavedPaths, unconfirmedChanges) => {
       assertCurrent();
@@ -4835,6 +4837,7 @@ function createShareViewFilesForOperation(
         setWorkspaceShareView(target.workspaceId, { ...view, ended: true,
           ...(unsavedPaths !== undefined ? { unsavedPaths } : {}),
           ...(unconfirmedChanges !== undefined ? { unconfirmedChanges } : {}) });
+        notifyRenderer({ workspaceId: target.workspaceId, summaryChanged: true });
         return;
       }
       const mounts = storedShareMounts(currentWorkspace());

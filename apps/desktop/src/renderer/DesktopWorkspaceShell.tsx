@@ -1461,17 +1461,18 @@ export function DesktopWorkspaceShell(props: {
     workspaceIsReady,
     !!shareView,
     shareViewReadsCollections,
+    shareViewEnded,
   );
   useEffect(() => {
-    if (!workspaceIsReady) return;
+    if (!workspaceIsReady || shareViewEnded) return;
     const refresh = () => {
-      if (workspaceAdmission.superseded) return;
+      if (workspaceAdmission.superseded || shareViewEndedRef.current) return;
       void refreshDatasets().catch(error => {
-        if (!workspaceAdmission.superseded) reportShellError("Could not read Collections.", error, refresh);
+        if (!workspaceAdmission.superseded && !shareViewEndedRef.current) reportShellError("Could not read Collections.", error, refresh);
       });
     };
     refresh();
-  }, [workspaceIsReady, workspaceAdmission, refreshDatasets, reportShellError]);
+  }, [workspaceIsReady, workspaceAdmission, shareViewEnded, refreshDatasets, reportShellError]);
   // One issue counter for every engine read the shell orders: the history
   // page, the status lanes, the workspace open, the agent observation, and
   // the version callbacks. Bumped on unmount, so a slow response for one
@@ -1528,6 +1529,9 @@ export function DesktopWorkspaceShell(props: {
       if (result.status === "needs-reopen") setNeedsReopenFor(shareView);
       else if (result.status === "ended") setEndedFor(shareView);
       else if (result.access && result.access !== shareAccess) setAccessFor({ view: shareView, access: result.access });
+      if (result.status === "ended" || result.access && result.access !== shareAccess) {
+        void props.refreshWorkspaceRegistry().catch(() => undefined);
+      }
     },
   });
   useEffect(() => {
