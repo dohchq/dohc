@@ -16,6 +16,7 @@ setupFileInspectorTests();
 describe("read-only reason on the text and CSV chips", () => {
   const bridgeMock = {
     platform: "linux" as const,
+    onWorkspaceActivity: vi.fn(() => () => undefined),
     readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(),
     writeWorkspaceText: vi.fn<DohcDesktopBridge["writeWorkspaceText"]>(
       async () => ({ status: "written", contentHash: TEST_CONTENT_HASH }),

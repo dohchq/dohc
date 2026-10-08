@@ -78,6 +78,7 @@ const writeText = vi.fn(async () => {});
 
 describe("engine-mode DocumentMenu exports the live editor body, not stale props.body", () => {
   const bridgeMock = {
+    onWorkspaceActivity: vi.fn(() => () => undefined),
     readWorkspaceText: vi.fn(async () => ({
       text: "# Stale disk body\n",
       truncated: false,

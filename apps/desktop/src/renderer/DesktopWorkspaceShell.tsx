@@ -2294,14 +2294,17 @@ export function DesktopWorkspaceShell(props: {
   const collectionReports = useMemo(() => {
     const owner = workspaceId;
     return {
-      onError: (fallback: string, error: unknown, retry?: (() => void) | null) => {
-        if (workspaceIdRef.current === owner) reportShellError(fallback, error, retry ?? null);
+      onError: (fallback: string, error: unknown, retry?: (() => void) | null, identity?: string) => {
+        if (workspaceIdRef.current === owner) reportShellError(fallback, error, retry ?? null, undefined, identity);
+      },
+      onSettled: (identity: string) => {
+        if (workspaceIdRef.current === owner) clearIdentity(identity);
       },
       onNotice: (message: string, undo?: () => void) => {
         if (workspaceIdRef.current === owner) showSuccessNotice(message, undo);
       },
     };
-  }, [workspaceId, reportShellError, showSuccessNotice]);
+  }, [workspaceId, reportShellError, clearIdentity, showSuccessNotice]);
   const openDataCollection = useCallback(
     (datasetPath: string, tableId: string) => {
       openVirtualTab(transactionalCollectionTabPath(datasetPath, tableId));
@@ -5289,6 +5292,7 @@ export function DesktopWorkspaceShell(props: {
                   owner={!shareView}
                   onLifecycleChanged={() => { void refreshDatasets().catch(error => reportShellError("Could not refresh Collections.", error)); }}
                   onError={collectionReports.onError}
+                  onSettled={collectionReports.onSettled}
                   onNotice={collectionReports.onNotice}
                   onFormCreated={appRoot => {
                     void refreshFiles().catch(error => reportShellError("Could not refresh workspace files.", error));
