@@ -3,10 +3,11 @@ import { APP_BACKEND_OPERATION_FILES } from "@dohc/security-contract/app-backend
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { readFileSync, rmSync } from "node:fs";
+import { readdirSync, rmSync } from "node:fs";
 import { AppBackendRuntimeError, approvedTables, boundedText } from "./protocol.js";
 import type { AppRuntimeChild, AppRuntimeLauncher } from "./protocol.js";
-import { CPU_BUDGET_MARKER, checkCursor, checkDigest, digest, openRequest, PersistentRuntimeError, reject, trustedPath, REPLAY_BATCH_BYTES, REPLAY_BATCH_EVENTS } from "./persistent-protocol.js";
+import { checkCursor, checkDigest, digest, openRequest, PersistentRuntimeError, reject, trustedPath, REPLAY_BATCH_BYTES, REPLAY_BATCH_EVENTS } from "./persistent-protocol.js";
+import { parseBudgetMarkerName } from "./budget-watch.js";
 import type { CommittedChangeset, DatasetCursor, FinalizeOperation, MigrateCheckpointInput, MigratedCheckpoint, PersistentCommand, PersistentOpenInput, PersistentPrepareInput, PersistentProgress, PersistentReply, PersistentResult, PreparedOperation } from "./persistent-protocol.js";
 export type { CommittedChangeset, DatasetCursor, DatasetScope, FinalizeOperation, MigrateCheckpointInput, PersistentOpenInput, PersistentPrepareInput, PreparedOperation } from "./persistent-protocol.js";
 export type { WorkerOwnership } from "./worker-ownership.js";
@@ -87,15 +88,23 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
       });
     },limitMs);
   }
-  const budgetMarker=()=>join(config.directory,CPU_BUDGET_MARKER);
+  function budgetMarkers():string[] {
+    try {return readdirSync(config.directory).filter(name=>parseBudgetMarkerName(name)!==undefined);}
+    catch {return [];}
+  }
   // The worker's CPU budget watch leaves this marker as it ends the worker.
   function exceededBudget():string|undefined {
-    let marker:string;
-    try {marker=readFileSync(budgetMarker(),"utf8");} catch {return undefined;}
+    const marker=budgetMarkers()[0];
+    const budget=marker===undefined ? undefined : parseBudgetMarkerName(marker);
+    if(marker===undefined || budget===undefined) return undefined;
     // An antivirus scan can hold the file; the reason is already known.
-    try {rmSync(budgetMarker(),{force:true});} catch {/* removed before the next launch */}
-    const [kind,budgetMs]=marker.split(" ");
-    const used=`more than ${duration(Number(budgetMs))} of CPU time${during(active)}`;
+    try {rmSync(join(config.directory,marker),{force:true});} catch {/* removed before the next launch */}
+    const {kind,budgetMs}=budget;
+    if(budgetMs===undefined) {
+      const code=kind==="checks" ? "dohc's checks of this Collection" : "The app's code";
+      return `${code} ran too long${during(active)}.`;
+    }
+    const used=`more than ${duration(budgetMs)} of CPU time${during(active)}`;
     return kind==="checks" ? `dohc's checks of this Collection ran too long: they used ${used}.` : `The app's code ran too long: it used ${used}.`;
   }
   function fail(error:Error):void {
@@ -133,7 +142,7 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
       queue.push(entry);pump();
     });
   }
-  rmSync(budgetMarker(),{force:true});
+  for(const marker of budgetMarkers()) rmSync(join(config.directory,marker),{force:true});
   const cancel=()=>{const reason:unknown=input.signal?.reason;fail(reason instanceof Error ? reason : new PersistentRuntimeError("worker_aborted","dohc stopped this Collection's work before it finished."));};
   input.signal?.addEventListener("abort",cancel,{once:true});
   try {
