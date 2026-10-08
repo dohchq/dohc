@@ -1,3 +1,4 @@
+import { liveDraftRecoveryOperations } from "./ipc/bridgeContract";
 import { SharedDocumentWaitingError } from "./ipc/sharedDocumentOpenState";
 import { net } from "electron";
 import { writeWorkspaceFilesAs } from "./workspaces/workspaceFileWrites";
@@ -7,7 +8,7 @@ import {ownerShareLabels, refreshOwnerShareLabels, createOwnerShareLabelRefresh}
 import { describeAutomationDataset } from "./workspaces/automationDatasetDescription";
 import { invalidateDatasetAddresses } from "./workspaces/datasetAddress";
 import { createChatDispatchNotices } from "./agents/chatDispatchNotices";
-import { preserveLiveDraft, preserveUnsentLiveDraft, removeWorkspaceLiveDrafts } from "./workspaces/liveDraftRecovery";
+import { hasRetainedLiveDraft, removeLiveDraftCopies, preserveLiveDraft, preserveUnsentLiveDraft, removeWorkspaceLiveDrafts } from "./workspaces/liveDraftRecovery";
 import { createPhysicalWorkspaceRemoval, createWorkspaceForget } from "./workspaces/physicalWorkspaceRemoval";
 import { createNamedDesktopLiveCapture } from "./workspaces/namedDesktopLive";
 import {
@@ -2155,6 +2156,9 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
         ...testCaptureSeams(),
         preserveUnsentState: draft => preserveUnsentLiveDraft(
           join(stateDir(), "live-draft-recovery"), workspace.workspaceId, draft,
+        ),
+        hasRetainedLiveDraft: (path, objectId) => hasRetainedLiveDraft(
+          join(stateDir(), "live-draft-recovery"), workspace.workspaceId, path, objectId,
         ),
       },
     ),
@@ -6156,6 +6160,14 @@ function registerIpcHandlers(): void {
   clearButtonInspections = buttonsIpc.clearInspections;
   inspectNamedForCli = buttonsIpc.inspectNamed;
 
+  registerOperations(operationBoundary, liveDraftRecoveryOperations, {
+    discardLiveDraftRecovery: async (input, {event, operation}) => {
+      operation.assertCurrent();
+      if (desktopWindows.workspaceWindows.allLive().some(window => window.webContents !== event.sender && rendererWorkspaceSessions.current(window.webContents)?.workspaceId === input.workspaceId)) throw new Error("Close the other window for this workspace, then dismiss this draft again.");
+      await removeLiveDraftCopies(join(stateDir(), "live-draft-recovery"), operation.workspace.workspaceId, input.objectId, input.snapshotSha256, Math.min(input.discardedAtMs, Date.now()));
+    },
+  });
+
   registerStopAndRestoreIpc<
     WebContents,
     IpcMainInvokeEvent,
@@ -6163,6 +6175,7 @@ function registerIpcHandlers(): void {
     DesktopRendererWorkspaceOperation,
     CloudSessionCredentials
   >({
+    hasOtherWorkspaceWindow: (sender, workspaceId) => desktopWindows.workspaceWindows.allLive().some(window => window.webContents !== sender && rendererWorkspaceSessions.current(window.webContents)?.workspaceId === workspaceId),
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     assertTrustedSender, withRendererWorkspaceOperation, remoteForWorkspace,
     currentCredentialGeneration: () => credentialCacheGeneration,

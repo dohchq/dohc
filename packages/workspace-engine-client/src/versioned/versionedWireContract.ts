@@ -148,6 +148,7 @@ type VersionedTextDeleteParams = MutationMetadata & {
   path: string;
   expectedObjectId?: string;
   onlyIfAbsentOnDisk?: boolean;
+  expectedSha256?: string;
   captureHoldId?: string;
 };
 

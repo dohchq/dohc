@@ -8,6 +8,7 @@ import {
   LiveDocumentMutationError,
   RestoreFolderInUseError,
   RestoreHeadChangedError,
+  RestoreLocalChangesError,
   RestorePolicyRefusalError,
   type WorkspaceEngineCapture,
 } from "../workspaces/workspaceEngineCapture";
@@ -104,6 +105,7 @@ export function registerStopAndRestoreIpc<
 >(dependencies: {
   registerHandler(channel: string, handler: (event: Event, payload: unknown) => unknown): void;
   assertTrustedSender(event: Event): void;
+  hasOtherWorkspaceWindow?(sender: Sender, workspaceId: string): boolean;
   withRendererWorkspaceOperation<Result>(
     sender: Sender, workspaceId: string, inactiveMessage: string,
     work: (operation: Operation) => Promise<Result>,
@@ -319,6 +321,9 @@ export function registerStopAndRestoreIpc<
         const { capture } = await dependencies.requireEngineCapture(workspaceId);
         const root = operation.workspace.rootPath;
         const outcome = await restoreDirectWrites({
+          reviewPath: path => dependencies.hasOtherWorkspaceWindow?.(event.sender, workspaceId)
+            ? "Open in another window. Close that window and try again."
+            : input.reviewPaths?.includes(path) ? "Changed on this device since the last saved version" : null,
           moment: async (momentId) => {
             const detail = await capture.readMoment(momentId);
             return detail?.protected ? "protected" : detail?.moment ?? null;
@@ -334,6 +339,7 @@ export function registerStopAndRestoreIpc<
               return { kind: "restored", receipt: { path, restoredMomentId } };
             } catch (error) {
               if (error instanceof RestoreHeadChangedError) return { kind: "changed" };
+              if (error instanceof RestoreLocalChangesError) return { kind: "refused", detail: error.message };
               if (error instanceof RestoreFolderInUseError) return { kind: "folder-in-use" };
               if (error instanceof RestorePolicyRefusalError && error.reason === "policy-unreadable") {
                 return { kind: "rules-unreadable", unreadable: [...error.unreadable] };
@@ -371,11 +377,15 @@ export function registerStopAndRestoreIpc<
           for (const momentId of [...input.restoredMomentIds].reverse()) {
             operation.assertCurrent();
             try {
-              const receipt = await capture.restoreFileToBeforeMoment(momentId, person);
+              const detail = await capture.readMoment(momentId);
+              const path = detail?.moment.path;
+              if (dependencies.hasOtherWorkspaceWindow?.(event.sender, operation.workspace.workspaceId)) throw new RestoreLocalChangesError(path ?? "", "Open in another window. Close that window and try again.");
+              if (path && input.reviewPaths?.includes(path)) throw new RestoreLocalChangesError(path);
+              const receipt = await capture.restoreFileToBeforeMoment(momentId, person, {expectedHeadMomentId: momentId});
               files.push({ momentId, kind: "restored", receipt: { path: receipt.path, restoredMomentId: receipt.restoredMomentId } });
             } catch (error) {
               if (!(error instanceof RestorePolicyRefusalError || error instanceof LiveDocumentMutationError ||
-                error instanceof RestoreHeadChangedError || error instanceof RestoreFolderInUseError)) throw error;
+                error instanceof RestoreHeadChangedError || error instanceof RestoreLocalChangesError || error instanceof RestoreFolderInUseError)) throw error;
               files.push(error instanceof RestorePolicyRefusalError && error.reason === "policy-unreadable"
                 ? { momentId, kind: "rules-unreadable", unreadable: [...error.unreadable] }
                 : { momentId, kind: "refused", detail: refusalDetail(error).slice(0, 500) });
