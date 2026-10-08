@@ -324,7 +324,7 @@ const StoredRunSchema = z.object({
 });
 
 // A saved run's plan file: everything but its progress.
-const HeaderSchema = StoredRunSchema.omit({ steps: true, applied: true, created: true, replans: true, undoRequests: true, undoCalls: true, undoCovers: true });
+const HeaderSchema = StoredRunSchema.omit({ steps: true, applied: true, created: true, replans: true, undoRequests: true, undoCalls: true, undoCovers: true }).extend({ progressId: z.uuid().optional() });
 // What run history's expiry reads of a run.
 const RunEndSchema = StoredRunSchema.pick({
   version: true, claimId: true, automationId: true, keySeed: true, rules: true, finishedAtMs: true, undo: true,
@@ -576,6 +576,8 @@ export type StoredSubscription =
 
 const HEADER_SUFFIX = ".json";
 const PROGRESS_SUFFIX = ".progress.jsonl";
+const progressPath = (folder: string, name: string, header: z.infer<typeof HeaderSchema>) =>
+  join(folder, `${name}${header.progressId ? `.${header.progressId}` : ""}${PROGRESS_SUFFIX}`);
 
 function hashName(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 32);
@@ -646,7 +648,7 @@ async function retryFileAccess<T>(work: () => Promise<T>): Promise<T> {
   }
 }
 
-async function writeDurably(path: string, text: string): Promise<void> {
+async function writeDurably(path: string, text: string, renamed?: () => void): Promise<void> {
   const temp = `${path}.tmp-${process.pid}-${randomUUID()}`;
   try {
     const file = await open(temp, "w");
@@ -659,6 +661,7 @@ async function writeDurably(path: string, text: string): Promise<void> {
     // Windows MoveFileEx cannot replace an open destination, even when the
     // reader shares deletion. Keep the flushed snapshot while brief reads finish.
     await withFile(path, () => retryFileAccess(() => rename(temp, path)));
+    renamed?.();
     await syncFolder(dirname(path));
   } finally {
     await rm(temp, { force: true }).catch(() => undefined);
@@ -860,15 +863,16 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     await writeDurably(await undosFile(), `${JSON.stringify({ version: 1, runs: [...next.values()] })}\n`);
     undos = next;
   };
-  // Every run keeps its state in one file, written whole, and its progress
-  // in a second, one line per planned step and per landed effect.
-  const readRun = async (folder: string, name: string, automationId: string): Promise<StoredRun | null> => {
+  const readHeader = async (folder: string, name: string, automationId: string) => {
     const header = HeaderSchema.safeParse(await readJson(join(folder, `${name}${HEADER_SUFFIX}`)));
     if (!header.success || header.data.automationId !== automationId) return null;
-    if (runName(header.data.claimId, header.data.keySeed) !== name) return null;
-    const run: StoredRun = { ...header.data, steps: [], applied: [], created: [], replans: [], undoRequests: [], undoCalls: [], undoCovers: [] };
-    // Every saved run has its progress file, empty or not.
-    const progress = await readBounded(join(folder, `${name}${PROGRESS_SUFFIX}`));
+    return runName(header.data.claimId, header.data.keySeed) === name ? header.data : null;
+  };
+  const readProgress = async (folder: string, name: string, header: z.infer<typeof HeaderSchema>): Promise<StoredRun | null> => {
+    const { progressId: _progressId, ...state } = header;
+    const run: StoredRun = { ...state, steps: [], applied: [], created: [], replans: [], undoRequests: [], undoCalls: [], undoCovers: [] };
+    // Existing headers without a generation select their fixed-name progress.
+    const progress = await readBounded(progressPath(folder, name, header));
     if (progress === null || progress === undefined) return null;
     // A line cut short by a crash is an effect that may have landed and was
     // not recorded; the run resumes it as one.
@@ -915,11 +919,18 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     if (run.applied.length > planned || run.replans.some((replan) => replan.effect >= planned)) return null;
     return run;
   };
+  const readRun = async (folder: string, name: string, automationId: string) => {
+    const header = await readHeader(folder, name, automationId);
+    return header === null ? null : readProgress(folder, name, header);
+  };
   // Appends one line durably. A torn line a crash left at the end goes first,
   // so the new line starts on a line of its own.
   const appendLine = async (run: StoredRun, line: ProgressLine) => {
     const folder = await runsFolder(run.automationId);
-    const path = join(folder, `${runName(run.claimId, run.keySeed)}${PROGRESS_SUFFIX}`);
+    const name = runName(run.claimId, run.keySeed);
+    const header = await readHeader(folder, name, run.automationId);
+    if (header === null) throw new Error("dohc could not read this run's saved changes in .dohc/automations.");
+    const path = progressPath(folder, name, header);
     return withFile(path, async () => {
       const text = `${JSON.stringify(line)}\n`;
       const existing = await lstat(path).catch(() => null);
@@ -948,7 +959,12 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     });
   };
   const removeRun = async (folder: string, name: string) => {
-    await rm(join(folder, `${name}${PROGRESS_SUFFIX}`), { force: true });
+    for (const file of await readdir(folder)) {
+      if (file === `${name}${PROGRESS_SUFFIX}` ||
+        (file.startsWith(`${name}.`) && file.endsWith(PROGRESS_SUFFIX) && z.uuid().safeParse(file.slice(name.length + 1, -PROGRESS_SUFFIX.length)).success)) {
+        await rm(join(folder, file), { force: true });
+      }
+    }
     await rm(join(folder, `${name}${HEADER_SUFFIX}`), { force: true });
   };
   // When each folder next holds a claim past its 30 days, and the claims in
@@ -1070,7 +1086,8 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
         const terminal = new Map([...(run.sharedSettlements ?? []), ...(previous.success ? previous.data.sharedSettlements ?? [] : [])]
           .map(status => [sharedFileUpdateKey(status.draft), status]));
         const saved = terminal.size > 0 ? { ...run, sharedSettlements: [...terminal.values()] } : run;
-        const plan = `${JSON.stringify(header(saved))}\n`;
+        const progressId = randomUUID();
+        const plan = `${JSON.stringify({ ...header(saved), progressId })}\n`;
         const progress = progressText(run);
         if (Buffer.byteLength(plan) > MAX_RUN_FILE_BYTES || Buffer.byteLength(progress) > MAX_RUN_FILE_BYTES) throw tooLarge();
         if (expiring?.folder === hashName(run.automationId)) {
@@ -1083,8 +1100,18 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
         }
         // Saved first, so a run saved with its Undo started is always listed.
         if (run.undo === "started") await noteUndo(run, name);
-        await writeDurably(join(folder, `${name}${PROGRESS_SUFFIX}`), progress);
-        await writeDurably(join(folder, `${name}${HEADER_SUFFIX}`), plan);
+        // Publish the new pair only when its header selects the flushed progress.
+        // Prior generations stay until expiry so readers of an old header can finish.
+        const staged = progressPath(folder, name, { ...header(saved), progressId });
+        let published = false;
+        try {
+          await writeDurably(staged, progress);
+          await writeDurably(join(folder, `${name}${HEADER_SUFFIX}`), plan, () => { published = true; });
+        } catch (error) {
+          // A failed folder sync after publication must keep the selected progress.
+          if (!published) await rm(staged, { force: true }).catch(() => undefined);
+          throw error;
+        }
         if (run.undo !== "started") await noteUndo(run, name);
       });
     },
@@ -1101,7 +1128,8 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
       return serial(async () => {
         const folder = await runsFolder(run.automationId);
         const name = runName(run.claimId, run.keySeed);
-        const saved = await readRun(folder, name, run.automationId);
+        const currentHeader = await readHeader(folder, name, run.automationId);
+        const saved = currentHeader === null ? null : await readProgress(folder, name, currentHeader);
         if (saved === null) throw new Error("dohc could not read this run's saved changes in .dohc/automations.");
         const next = { ...saved, ...state };
         if (state.sharedSettlements) next.sharedSettlements = [...new Map([
@@ -1109,7 +1137,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
         ].map(status => [sharedFileUpdateKey(status.draft), status])).values()];
         // As a save does: an Undo that starts is listed before its run says so, and leaves the list after.
         if (next.undo === "started") await noteUndo(next, name);
-        await writeDurably(join(folder, `${name}${HEADER_SUFFIX}`), `${JSON.stringify(header(next))}\n`);
+        await writeDurably(join(folder, `${name}${HEADER_SUFFIX}`), `${JSON.stringify({ ...header(next), progressId: currentHeader!.progressId })}\n`);
         if (next.undo !== "started") await noteUndo(next, name);
       });
     },
@@ -1118,7 +1146,8 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
         const folder = await runsFolder(automationId);
         const name = runName(claimId, keySeed);
         if (await readBounded(join(folder, `${name}${HEADER_SUFFIX}`)) === undefined) return;
-        const saved = await readRun(folder, name, automationId);
+        const currentHeader = await readHeader(folder, name, automationId);
+        const saved = currentHeader === null ? null : await readProgress(folder, name, currentHeader);
         if (saved === null) throw new Error("This server could not record the superseded agent wake.");
         let changed = false;
         const applied = saved.applied.map((step) => ({ ...step, writes: step.writes.map((write) => {
@@ -1129,7 +1158,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
         if (changed) {
           const progress = progressText({ ...saved, applied });
           if (Buffer.byteLength(progress) > MAX_RUN_FILE_BYTES) throw tooLarge();
-          await writeDurably(join(folder, `${name}${PROGRESS_SUFFIX}`), progress);
+          await writeDurably(progressPath(folder, name, currentHeader!), progress);
         }
       });
     },

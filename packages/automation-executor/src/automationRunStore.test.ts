@@ -221,7 +221,7 @@ describe("the automation run store", () => {
     await store.save(run("atc_one", null, 1));
     const folder = join(root, ".dohc", "automations", "runs");
     const [automationFolder] = await readdir(folder);
-    const [file] = await readdir(join(folder, automationFolder!));
+    const file = (await readdir(join(folder, automationFolder!))).find(name => name.endsWith(".json"));
     await writeFile(join(folder, automationFolder!, file!), "{ torn");
     await expect(store.runsOf(AUTOMATION, "atc_one")).resolves.toEqual({ runs: [], unreadable: true });
   });
