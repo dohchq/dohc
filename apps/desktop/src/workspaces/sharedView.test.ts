@@ -54,7 +54,7 @@ import {
   type PullShareViewResult,
   type ShareViewRefusal,
 } from "@dohc/workspace-contracts/relay";
-import { denyRead, restoreRead } from "@dohc/workspace-fs/testing";
+import { deniedReadCode, denyRead, restoreRead } from "@dohc/workspace-fs/testing";
 import { createTestScratch } from "./testTemp";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 
@@ -6065,8 +6065,8 @@ describe("shared view refresh", () => {
     }
   });
 
-  itNonRoot(
-    "preserves a leftover repair before pending path resolution finds an unreadable directory",
+  it(
+    "preserves a leftover repair when pending path resolution fails",
     async () => {
       const rootDir = await createTestScratch("dohc-shared-view-desktop-");
       const relay = new FakeShareRelay();
@@ -6099,7 +6099,14 @@ describe("shared view refresh", () => {
           deniedPath,
         ]);
         await rm(join(rootDir, repairedPath));
-        await denyRead(parent, "dir");
+        realpathOverride = (path) => {
+          if (path === parent) {
+            throw Object.assign(new Error("Pending parent is unreadable."), {
+              code: deniedReadCode,
+            });
+          }
+          return null;
+        };
         try {
           await expect(
             reconcileStandaloneForTest({
@@ -6120,8 +6127,11 @@ describe("shared view refresh", () => {
             path: deniedPath,
             reason: "unreadable",
           });
+          await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(
+            new Set([deniedPath]),
+          );
         } finally {
-          await restoreRead(parent, 0o755);
+          realpathOverride = null;
         }
       } finally {
         await store.close();
