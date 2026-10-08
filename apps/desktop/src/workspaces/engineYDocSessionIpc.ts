@@ -866,11 +866,10 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     let settle: Promise<unknown>;
     try {
       authority.assertCurrent();
-      const held = this.#owner.documentSession(authority.workspace.attachmentId, input.path);
-      if (
-        !held || held.session.deleted ||
-        held.caller.sender !== sender || held.caller.generation !== renderer.generation
-      ) return "closed";
+      const held = this.#owner.documentSession(
+        authority.workspace.attachmentId, input.path, { sender, generation: renderer.generation },
+      );
+      if (!held || held.session.deleted) return "closed";
       if (!held.session.provider.settleNow) throw new Error("dohc could not start a save for this document.");
       settle = held.session.provider.settleNow();
     } finally {

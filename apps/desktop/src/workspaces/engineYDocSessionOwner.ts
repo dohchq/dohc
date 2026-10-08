@@ -385,8 +385,10 @@ export class EngineYDocSessionOwner<
     );
   }
 
-  documentSession(authorityId: symbol, path: string) {
-    const record = [...this.#records].find(row => row.authorityId === authorityId && row.path === path && row.state === "open" && row.session !== null && row.handoff === null);
+  // `of` narrows the lookup to the session one window opened.
+  documentSession(authorityId: symbol, path: string, of?: { sender: TSender; generation: number }) {
+    const record = [...this.#records].find(row => row.authorityId === authorityId && row.path === path && row.state === "open" && row.session !== null && row.handoff === null &&
+      (!of || (row.sender === of.sender && row.generation === of.generation)));
     if (!record) return undefined;
     const caller = { sender: record.sender, generation: record.generation, sessionId: record.sessionId, lineageGeneration: record.lineageGeneration };
     return { caller, session: record.session!, assertCurrent: () => {

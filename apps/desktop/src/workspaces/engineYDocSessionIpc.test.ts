@@ -642,6 +642,29 @@ describe("engine Y.Doc IPC adapter", () => {
     await h.ipc.shutdown();
   });
 
+  it("lets each window's Try again save only that window's session for the document", async () => {
+    const settleNow = vi.fn(async () => ({
+      momentId: "moment-1", path: "notes/a.md", content: null, sha256: "a".repeat(64), materialized: true,
+      projection: { contentKind: "richdoc" as const, sourceStateVectorSha256: "b".repeat(64), destructive: false },
+    }));
+    const h = harness(providerSession({ settleNow }));
+    const first = new FakeSender(7);
+    const second = new FakeSender(8);
+    const retry = { workspaceId: "workspace-1", path: "notes/a.md" };
+
+    await h.ipc.open(first, openPayload);
+    await expect(h.ipc.retrySave(first, retry)).resolves.toBe("settled");
+    await expect(h.ipc.retrySave(second, retry)).resolves.toBe("closed");
+    expect(settleNow).toHaveBeenCalledTimes(1);
+
+    await h.ipc.close(first, { sessionId: openPayload.sessionId });
+    await h.ipc.open(second, { ...openPayload, sessionId: "renderer-session-2" });
+    await expect(h.ipc.retrySave(second, retry)).resolves.toBe("settled");
+    await expect(h.ipc.retrySave(first, retry)).resolves.toBe("closed");
+    expect(settleNow).toHaveBeenCalledTimes(2);
+    await h.ipc.shutdown();
+  });
+
   it("rejects Try again when the settle fails or cannot start", async () => {
     const refusal = new Error("workspace operation failed");
     const failing = harness(providerSession({ settleNow: vi.fn(async () => { throw refusal; }) }));
