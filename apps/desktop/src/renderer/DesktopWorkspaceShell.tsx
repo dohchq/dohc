@@ -2087,7 +2087,7 @@ export function DesktopWorkspaceShell(props: {
     },
     [openFile],
   );
-  useDocumentSaveNotices({ workspaceId, report: reportShellFailure, clear: clearIdentity, open: openPathWithHeading });
+  const failedSaves = useDocumentSaveNotices({ workspaceId, report: reportShellFailure, clear: clearIdentity, open: openPathWithHeading });
   // A document too large for live editing. The folder holds only the active
   // version's files, so it opens only when the refusal names that version;
   // otherwise the notice names the version to switch to. The path comes from
@@ -4750,6 +4750,7 @@ export function DesktopWorkspaceShell(props: {
         setOpenShare={setOpenShare}
         setQuickOpenOpen={setQuickOpenOpen}
         syncStatus={syncStatus}
+        failedSaves={failedSaves}
         showWorkbenchMenu={showWorkbenchMenu}
         agentActive={agentActive}
         wb={wb}

@@ -53,6 +53,7 @@ const PARTS = [
   "slash-menu",
   "editor-group-focus",
   "frontmatter-as-written",
+  "title-bar-status",
   "capture-recovery",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an

@@ -2,7 +2,7 @@ import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contrac
 import { AlertTriangle, Bot, CheckCircle2, Globe2, MoreHorizontal, SearchX } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import type { EngineMomentRecord, HistoryPolicyUnreadableResult } from "../../ipc/bridgeContract";
+import type { EngineMomentRecord, HistoryPolicyUnreadableResult, SyncStatusResult } from "../../ipc/bridgeContract";
 import { readError, withErrorWords } from "../../ipc/errorWords";
 import { DocumentMenu } from "../DocumentMenu";
 import { FrontmatterAsWritten } from "../FrontmatterAsWritten";
@@ -32,6 +32,7 @@ import { TreeRow, type VisibleRow } from "../workbench/Explorer";
 import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
 import { MomentRow } from "../workbench/EngineHistory";
 import { CAPTURE_RECOVERY_TITLE, captureRecoveryMessage } from "../shell/useCaptureRecoveryNotices";
+import { WorkspaceSyncStatus } from "../workbench/WorkspaceSyncStatus";
 import { closeStatesPage } from "./statesRoute";
 
 // Every shared part in every state, light beside dark, on one development
@@ -1128,6 +1129,17 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
+      {/* After the others, so they keep their places. On the title bar's
+          own fill. */}
+      <Section part="title-bar-status" title="Title bar status">
+        {TITLE_BAR_STATUSES.map(({ label, syncStatus, failedSaves }) => (
+          <Specimen key={label} label={label}>
+            <span className="flex h-8 items-center rounded-md border border-line bg-panel px-3">
+              <WorkspaceSyncStatus syncStatus={syncStatus} failedSaves={failedSaves} />
+            </span>
+          </Specimen>
+        ))}
+      </Section>
       {/* Last, so the parts above keep their places. */}
       <Section part="capture-recovery" title="Typing kept in History">
         <Specimen label="toast">
@@ -1154,6 +1166,21 @@ function Pane(props: { theme: "light" | "dark" }) {
     </section>
   );
 }
+
+const SYNCED_STATUS: SyncStatusResult = {
+  state: "synced",
+  pendingChangeCount: 0,
+  lastSyncedAtMs: null,
+  liveSessionsGeneration: 0,
+  historyRecordingUnavailable: false,
+  historyShareView: false,
+};
+
+const TITLE_BAR_STATUSES: { label: string; syncStatus: SyncStatusResult; failedSaves: number }[] = [
+  { label: "saved", syncStatus: SYNCED_STATUS, failedSaves: 0 },
+  { label: "a file couldn't save", syncStatus: SYNCED_STATUS, failedSaves: 1 },
+  { label: "files couldn't save, during a sync pass", syncStatus: { ...SYNCED_STATUS, state: "syncing" }, failedSaves: 2 },
+];
 
 export function StatesPage() {
   // The light pane has no rule of its own: it reads the document's light

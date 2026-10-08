@@ -12,6 +12,7 @@ import type { WorkspacePolicyPath } from "./bridgeContract";
 import {
   ERROR_WORDS,
   ipcWireError,
+  isShareReadOnlyRefusal,
   isSharedLiveFileRefusal,
   isWorkspaceUpdatingError,
   needsNewerDohc,
@@ -67,6 +68,15 @@ describe("error words", () => {
     refusal("CONFLICT", "The record changed."),
   ])("does not recheck share access for %s", error => {
     expect(shouldRecheckShareAccess(acrossIpc(error))).toBe(false);
+  });
+
+  it.each([
+    [new SharedFileReadOnlyError(), true],
+    [refusal("SHARE_READ_ONLY", "The share is read-only."), true],
+    [Object.assign(new Error("EPERM: operation not permitted, rename 'a' -> 'b'"), { code: "EPERM" }), false],
+    [refusal("FORBIDDEN", "The request was rejected."), false],
+  ] as const)("reads %s as a share's write refusal across IPC: %s", (error, refused) => {
+    expect(isShareReadOnlyRefusal(acrossIpc(error, "desktop:write-workspace-text"))).toBe(refused);
   });
 
   it.each(["link", "shares", "notices"])("keeps the reserved-ID refusal title and body across IPC for %s", (workspaceId) => {
