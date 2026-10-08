@@ -92,6 +92,7 @@ describe("FileInspector renders markdown through the shared component map", () =
   const bridgeMock = {
     // A document over the WYSIWYG threshold opens in read mode, which is where
     // the rendered document — rather than the editor — is what this test reads.
+    onWorkspaceActivity: vi.fn(() => () => undefined),
     readWorkspaceText: vi.fn(async () => ({
       text: TABLE_DOCUMENT,
       truncated: false,

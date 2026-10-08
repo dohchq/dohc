@@ -63,7 +63,7 @@ import { blockTargetForLine } from "./editor/intraBlock";
 import type { HeadingNavigationTarget } from "./editor/OutlinePanel";
 import type { PropertiesPanelProps } from "./PropertiesPanel";
 import { PageIdentity } from "./PageIdentity";
-import { FrontmatterAsWritten } from "./FrontmatterAsWritten";
+import { FrontmatterAsWritten, LiveFrontmatterAsWritten } from "./FrontmatterAsWritten";
 import { captureOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
 import { BacklinksPanel } from "./BacklinksPanel";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
@@ -2038,7 +2038,15 @@ export function MarkdownView(props: {
                 <LazyPropertiesPanel ydoc={displayDoc} fieldMarks={fieldMarks} />
               </Suspense>
             )}
-            <FrontmatterAsWritten ydoc={displayDoc} saved={engine.saveState.kind === "saved-here"} propertiesShown={!readOnly} />
+            <LiveFrontmatterAsWritten
+              workspaceId={props.workspaceId}
+              path={props.path}
+              // Null until the inspector has read the file.
+              body={props.contentRequestId > 0 ? props.body : null}
+              ydoc={displayDoc}
+              saveState={engine.saveState}
+              propertiesShown={!readOnly}
+            />
           </div>
           <EditorErrorBoundary
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:engine`}

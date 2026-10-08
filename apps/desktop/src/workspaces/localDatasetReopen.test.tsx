@@ -5,7 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { performance as nodePerformance } from "node:perf_hooks";
 import { join } from "node:path";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { AppRuntimeLauncher } from "@dohc/app-backend-runtime";
 import { DEFAULT_LIMITS } from "../../../../packages/app-backend-runtime/src/protocol";
@@ -16,6 +16,7 @@ import { TransactionalCollectionPage } from "../renderer/TransactionalCollection
 import { transactionalDescription } from "../renderer/transactionalCollectionModel";
 import { useShellError } from "../renderer/shell/useShellError";
 import { WorkspaceErrorToast } from "../renderer/workbench/NoticeCenter";
+import { ipcWireError } from "../ipc/errorWords";
 import { createLocalDatasetHost } from "./localDatasetHost";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -129,36 +130,70 @@ it("uses growing supervisor waits after repeated desktop replay worker kills", a
     f.state.clock++;
   }
 });
+// The Collection page as the shell shows it: its errors as toasts, and one list item per row in Notices.
+function ShellPage({ f }: { f: Awaited<ReturnType<typeof fixture>> }) {
+  const description = transactionalDescription(f.host.describe(id(1)));
+  const { shellErrors, reportShellError, retryShellError, clearIdentity } = useShellError("w");
+  return <>
+    <TransactionalCollectionPage workspaceId="w" dataset={description} tableId={id(2)} onSettled={clearIdentity}
+      onError={(fallback, error, retry, identity) => reportShellError(fallback, error, retry, undefined, identity)}
+      invoke={async (request, signal) => {
+        try { return await f.host.query({ ...request, signal }); }
+        catch (error) { throw new Error(`Error invoking remote method 'dohc:dataset': ${String(ipcWireError(error))}`); }
+      }} />
+    {shellErrors.map(error => <WorkspaceErrorToast key={error.id} error={{ ...error, details: error.message, canRetry: error.retry !== null }} onRetry={retryShellError} />)}
+    <ul aria-label="Notices">{shellErrors.map(error => <li key={error.id}>{error.message}</li>)}</ul>
+  </>;
+}
+const toastRetry = () => within(screen.getByRole("alert")).getByRole("button", { name: "Try again" });
+const pageRetry = () => within(screen.getByRole("region", { name: "Items" })).getByRole("button", { name: "Try again" });
+const noticeRows = () => within(screen.getByRole("list", { name: "Notices" })).queryAllByRole("listitem").map(row => row.textContent);
 it("shows the desktop reopen wait through the existing shell Try again toast and ends loading", async () => {
   const f = await fixture();
   // Establish the failure without requiring backoff, so this test independently fails on main's visible state.
   await expect(f.host.query(f.call())).rejects.toMatchObject({ code: "worker_stopped" });
   f.state.killReplay = false;
   const launches = f.launch.mock.calls.length;
-  const description = transactionalDescription(f.host.describe(id(1)));
-  function Page() {
-    const { shellErrors, reportShellError, retryShellError } = useShellError("w");
-    return <>
-      <TransactionalCollectionPage workspaceId="w" dataset={description} tableId={id(2)} onError={reportShellError}
-        invoke={async (request, signal) => {
-          try { return await f.host.query({ ...request, signal }); }
-          catch (error) { throw new Error(`Error invoking remote method 'dohc:dataset': ${String(error)}`); }
-        }} />
-      {shellErrors.map(error => <WorkspaceErrorToast key={error.id} error={{ ...error, details: error.message, canRetry: error.retry !== null }} onRetry={retryShellError} />)}
-    </>;
-  }
-  render(<Page />);
+  render(<ShellPage f={f} />);
   const message = "This Collection is waiting to reopen. Try again in 5 seconds.";
   await waitFor(() => expect(screen.getByRole("alert").textContent).toContain(message), workerWait);
   expect(screen.queryByText("Loading records…")).toBeNull();
   expect(f.launch).toHaveBeenCalledTimes(launches);
-  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+  fireEvent.click(toastRetry());
   await waitFor(() => expect(screen.getByRole("alert").textContent).toContain(message), workerWait);
   expect(f.launch).toHaveBeenCalledTimes(launches);
   f.state.clock += 5000;
-  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+  fireEvent.click(toastRetry());
   await screen.findByText("Preserved", {}, workerWait);
   expect(screen.queryByRole("alert")).toBeNull();
+});
+it("keeps one current Notices row and the wait in the page until the records load", async () => {
+  const f = await fixture();
+  await expect(f.host.query(f.call())).rejects.toMatchObject({ code: "worker_stopped", retryAfterMs: 5000 });
+  render(<ShellPage f={f} />);
+  const page = screen.getByRole("region", { name: "Items" });
+  const wait = (seconds: number) => `This Collection is waiting to reopen. Try again in ${seconds} seconds.`;
+  await within(page).findByText(wait(5), {}, workerWait);
+  expect(noticeRows()).toEqual([`dohc could not load Items. ${wait(5)}`]);
+  // The wait ends; trying again from the page replays, and the replay stops the worker again.
+  f.state.clock += 5000;
+  fireEvent.click(pageRetry());
+  await waitFor(() => expect(noticeRows()).toEqual(["dohc could not load Items. It stopped before it finished. Try again."]), workerWait);
+  expect(within(page).queryByText(wait(5))).toBeNull();
+  // The page says the load failed, and offers the toast's Try again.
+  expect(within(page).getByText("dohc could not load Items.")).toBeTruthy();
+  expect(pageRetry()).toBeTruthy();
+  // The next wait is longer, and its row replaces the last one.
+  fireEvent.click(toastRetry());
+  await within(page).findByText(wait(10), {}, workerWait);
+  expect(noticeRows()).toEqual([`dohc could not load Items. ${wait(10)}`]);
+  f.state.killReplay = false;
+  f.state.clock += 10_000;
+  fireEvent.click(pageRetry());
+  expect(within(page).getByText("Loading records…")).toBeTruthy();
+  await within(page).findByText("Preserved", {}, workerWait);
+  expect(within(page).queryByText(wait(10))).toBeNull();
+  expect(noticeRows()).toEqual([]);
 });
 it("recovers desktop records and the saved receipt after the reopen wait expires", async () => {
   const f = await fixture();

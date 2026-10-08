@@ -901,10 +901,10 @@ export function frontmatterBlockFor(
 }
 
 /**
- * A live document's frontmatter block as its file holds it. Once a settle has
- * written every edit (`settled`), that is the block the settle wrote. Until
- * then, it is the text recorded from the file, or the canonical block of the
- * values when no text was recorded.
+ * A live document's frontmatter block. Once a settle has written every edit
+ * (`settled`), that is the block the settle wrote. Otherwise it is the kept
+ * text, which holds a rename before the file does, or the canonical block of
+ * the values when no text was kept.
  */
 export function frontmatterAsWritten(doc: Y.Doc, settled: boolean): string {
   const frontmatter = doc.getMap<unknown>('frontmatter')

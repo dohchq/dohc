@@ -112,6 +112,7 @@ describe("engine markdown source view", () => {
     let sessionId = "";
     const bridgeMock = {
       platform: "linux" as const,
+      onWorkspaceActivity: vi.fn(() => () => undefined),
       readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(
         async () => ({
           text: markdown,
@@ -308,6 +309,12 @@ describe("engine markdown source view", () => {
     // Until the engine saves, the file still holds the comment.
     expect(asWritten()).toBe("---\ntitle: Plan\nstatus: draft # delete drafts\n---");
 
+    // The engine writes the file, then reports the save.
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: "---\ntitle: Plan\nstatus: ready\n---\n\n# Plan\n",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
     act(() => pushSaveState("saved", 999));
     await waitFor(() => expect(asWritten()).toBe("---\ntitle: Plan\nstatus: ready\n---"));
   });
@@ -343,6 +350,10 @@ describe("engine markdown source view", () => {
     vi.stubGlobal("dohcDesktop", bridgeMock);
     const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
     await screen.findByTestId("markdown-editor");
+    const asWritten = () => screen.getByTestId("frontmatter-as-written").querySelector("pre")?.textContent;
+    const fileBlock = "---\ntitle: Plan\nstatus: draft\n---";
+    await waitFor(() => expect(asWritten()).toBe(fileBlock));
+    const fileReads = bridgeMock.readWorkspaceText.mock.calls.length;
     const latest = "---\ntitle: Latest live title\nstatus: ready\n---\n\n# Latest live document\n\nThe recipient keeps this paragraph.\n";
     act(() => pushRemoteMarkdown(latest));
     await waitFor(() => expect(screen.getByTestId("markdown-editor").textContent).toContain("The recipient keeps this paragraph."));
@@ -359,6 +370,9 @@ describe("engine markdown source view", () => {
     expect((screen.getByTestId("page-title") as HTMLTextAreaElement).value).toBe("Latest live title");
     expect(screen.getByTestId("markdown-save-state").dataset.state).toBe("read-only");
     expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
+    expect(screen.getAllByTestId("frontmatter-as-written")).toHaveLength(1);
+    expect(asWritten()).toBe(fileBlock);
+    expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(fileReads);
     fireEvent.click(screen.getByTestId("markdown-source-toggle"));
     const source = codeEditorTestHost(await screen.findByTestId("markdown-source-view"));
     await waitFor(() => expect(codeEditorText(source)).toContain("The recipient keeps this paragraph."));
@@ -870,6 +884,7 @@ describe("engine markdown source view", () => {
     let opens = 0;
     vi.stubGlobal("dohcDesktop", {
       ...bridgeMock,
+      onWorkspaceActivity: vi.fn(() => () => undefined),
       readWorkspaceText: vi.fn(async () => {
         throw new Error("read failed");
       }),
@@ -945,6 +960,7 @@ describe("engine markdown source view", () => {
     let opens = 0;
     vi.stubGlobal("dohcDesktop", {
       ...bridgeMock,
+      onWorkspaceActivity: vi.fn(() => () => undefined),
       readWorkspaceText: vi.fn(async () => {
         throw new Error("read failed");
       }),
@@ -984,6 +1000,7 @@ describe("engine markdown source view", () => {
     const onScrollConsumed = vi.fn();
     vi.stubGlobal("dohcDesktop", {
       ...bridgeMock,
+      onWorkspaceActivity: vi.fn(() => () => undefined),
       readWorkspaceText: vi.fn(async () => {
         throw new Error("read failed");
       }),
@@ -1170,6 +1187,7 @@ describe("engine markdown source view", () => {
     let reads = 0;
     vi.stubGlobal("dohcDesktop", {
       ...bridgeMock,
+      onWorkspaceActivity: vi.fn(() => () => undefined),
       readWorkspaceText: vi.fn(async () => {
         reads += 1;
         return {
@@ -3048,6 +3066,7 @@ describe("engine markdown source view", () => {
     let reads = 0;
     vi.stubGlobal("dohcDesktop", {
       ...bridgeMock,
+      onWorkspaceActivity: vi.fn(() => () => undefined),
       readWorkspaceText: vi.fn(async () => {
         reads += 1;
         return {
@@ -3100,6 +3119,7 @@ describe("engine markdown source view", () => {
     const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
     vi.stubGlobal("dohcDesktop", {
       ...bridgeMock,
+      onWorkspaceActivity: vi.fn(() => () => undefined),
       readWorkspaceText: vi.fn(async () => {
         throw new Error("read failed");
       }),
@@ -3138,6 +3158,7 @@ describe("engine markdown source view", () => {
       let opens = 0;
       vi.stubGlobal("dohcDesktop", {
         ...bridgeMock,
+        onWorkspaceActivity: vi.fn(() => () => undefined),
         readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(
           async (payload) => {
             reads += 1;
@@ -3204,6 +3225,7 @@ describe("engine markdown source view", () => {
       let opens = 0;
       vi.stubGlobal("dohcDesktop", {
         ...bridgeMock,
+        onWorkspaceActivity: vi.fn(() => () => undefined),
         readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(
           async (payload) => {
             reads += 1;
