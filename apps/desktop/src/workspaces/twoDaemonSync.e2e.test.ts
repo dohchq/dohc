@@ -470,7 +470,7 @@ it.skipIf(engine.missing).each([
     const document = (await discovery())[0]!;
     const config = {...profile.owner, nativeConfigPath, nativeClient: profile.nativeClient, relayUrl: proxy.origin, documents: [document]};
     const pass = (signal: AbortSignal) => source.sessions.run(source.workspace, async ({client, workspace}) =>
-      runNativeOwnerDeliveryPass({client: source.nativeClient(), workspaceHandle: workspace, document, config, signal, bearer: relayConnection.token, assertCurrent() {}}));
+      runNativeOwnerDeliveryPass({client: source.nativeClient(), workspaceHandle: workspace, document, config, signal, bearer: relayConnection.token, accountId: undefined, assertCurrent() {}}));
     expect(["empty", "acknowledged"]).toContain(await pass(AbortSignal.timeout(60_000)));
     const session = await capture.openYDocSession({path, contentKind: "richdoc", onRemoteUpdate: () => undefined});
     const beforeAdoption = await readFile(join(rootA, path), "utf8");
