@@ -1,6 +1,8 @@
 import { SharedDocumentWaitingError } from "../ipc/sharedDocumentOpenState";
 import { engineSaveState } from "./engineYDocSaveState";
 import { createHash } from "node:crypto";
+import { accessSync, constants as fsConstants } from "node:fs";
+import { join } from "node:path";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import {
@@ -38,6 +40,7 @@ import {
   type ReadEngineYDocArtifactAssetPayload as ReadArtifactPayload,
   type ReadEngineYDocArtifactAssetResult as ReadArtifactResult,
   type RetryEngineYDocSavePayload as RetrySavePayload,
+  type RetryEngineYDocSaveResult as RetrySaveResult,
 } from "../ipc/bridgeContract";
 import { CHANNELS, type EngineYDocSaveStateName } from "../ipc/channels";
 import {
@@ -127,8 +130,21 @@ interface EngineYDocSessionIpcOptions {
   localPersonId: () => string;
 }
 
+// Whether the file refuses writes. A missing file, or one that cannot be
+// checked, is not read-only.
+function fileIsReadOnly(absolutePath: string): boolean {
+  try {
+    accessSync(absolutePath, fsConstants.W_OK);
+    return false;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "EACCES" || code === "EPERM";
+  }
+}
+
 interface SessionEvent {
   authorCapacity?: boolean;
+  saveFailure?: { readOnly: boolean };
   editRefusal?: import("../ipc/bridgeContract").EngineYDocSaveStateEvent["editRefusal"];
   state: EngineYDocSaveStateName;
   seq: number;
@@ -645,6 +661,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         const emit = (event: SessionEvent): void => {
           if (lastEvent?.state === event.state &&
             (event.state === "settling" || lastEvent.seq === event.seq) &&
+            lastEvent.saveFailure?.readOnly === event.saveFailure?.readOnly &&
             lastEvent.authorCapacity === event.authorCapacity &&
             lastEvent.editRefusal?.requestId === event.editRefusal?.requestId &&
             lastEvent.editRefusal?.message === event.editRefusal?.message) return;
@@ -680,7 +697,12 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
                   : event === "outcome"
                     ? noteSettleOutcome(saveSeq, token)
                     : 0;
-              publish(() => emit({ state, seq, ...(authorCapacity ? { authorCapacity: true } : {}) }));
+              // A settle that could not write the file. The read-only check is
+              // one stat, made only on a failure, so the notice can name it.
+              const saveFailure = state === "error" && event === "outcome" && !authorCapacity
+                ? { readOnly: fileIsReadOnly(join(workspace.rootPath, canonicalPath)) }
+                : undefined;
+              publish(() => emit({ state, seq, ...(authorCapacity ? { authorCapacity: true } : {}), ...(saveFailure ? { saveFailure } : {}) }));
             },
             onRemoteUpdate: (update) => {
               publish(() => signals.remoteUpdate(update));
@@ -831,20 +853,24 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   }
 
   // Try again on a document that couldn't save: settle it now. The settle
-  // reports its start and outcome as save states, which is how the editor
-  // and the Notices row learn the answer, so this reply carries none.
-  async retrySave(sender: EngineYDocIpcSender, payload: RetrySavePayload): Promise<void> {
+  // reports its outcome as a save state. A settle that cannot start, or that
+  // fails, rejects here, so the caller can say so instead of waiting.
+  async retrySave(sender: EngineYDocIpcSender, payload: RetrySavePayload): Promise<RetrySaveResult> {
     const input = RetryEngineYDocSavePayload.parse(payload);
-    const access = this.#owner.accessSession(
+    const access = this.#owner.accessOpenSession(
       this.#caller(sender, input.sessionId),
-      (owned) => owned.workspace.workspaceId === input.workspaceId && !owned.deleted
-        ? owned.provider.settleNow?.()
-        : null,
+      (owned) => {
+        if (owned.workspace.workspaceId !== input.workspaceId) {
+          throw new Error("This document belongs to another workspace.");
+        }
+        if (owned.deleted) return null;
+        if (!owned.provider.settleNow) throw new Error("dohc could not start a save for this document.");
+        return owned.provider.settleNow();
+      },
     );
-    if (access.kind === "refused" || access.value === null) {
-      throw new Error("The live document session is no longer available. Open the file again.");
-    }
-    await access.value?.catch(() => undefined);
+    if (access.kind === "refused" || access.value === null) return "closed";
+    await access.value;
+    return "settled";
   }
 
   applyUpdate(
@@ -1278,6 +1304,8 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           CHANNELS.engineYDocSaveState,
           EngineYDocSaveStateEvent.parse({
             sessionId: outbound.sessionId,
+            workspaceId: outbound.workspaceId,
+            path: outbound.path,
             ...message.event,
             ...engineSaveState(message.event.state, message.event.editRefusal),
           }),

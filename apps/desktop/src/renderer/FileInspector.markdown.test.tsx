@@ -66,7 +66,6 @@ const engineDocState: UseEngineDoc = {
     throw new Error("no artifact asset");
   },
   flushPendingLocalUpdates: async () => undefined,
-  retrySave: async () => undefined,
 };
 
 vi.mock("./collab/useEngineDoc", () => ({

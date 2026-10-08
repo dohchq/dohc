@@ -125,9 +125,6 @@ export type UseEngineDoc = {
   // Push every accepted renderer edit to main and wait for acknowledgement.
   // Explorer mutations await this before main settles the old-path session.
   flushPendingLocalUpdates: EngineYDocBinding["flushPendingLocalUpdates"];
-  // Try again on a document that couldn't save. The answer arrives as the
-  // next saveState.
-  retrySave: () => Promise<void>;
 };
 
 export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
@@ -254,8 +251,6 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     outcome?.kind === "bound"
       ? outcome.flushPendingLocalUpdates
       : () => Promise.resolve();
-  const retrySave =
-    outcome?.kind === "bound" ? outcome.retrySave : () => Promise.resolve();
   const removalInProgress =
     outcome?.kind === "removal-in-progress" ? outcome.removal : null;
   const deletedWhileEditing =
@@ -307,6 +302,5 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     artifactAssets,
     readArtifactAsset,
     flushPendingLocalUpdates,
-    retrySave,
   };
 }

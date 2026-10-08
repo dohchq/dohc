@@ -88,6 +88,7 @@ import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useKeptCopyNotices } from "./shell/useKeptCopyNotices";
 import { ShellErrorReporter, useShellError } from "./shell/useShellError";
+import { useDocumentSaveNotices } from "./shell/useDocumentSaveNotices";
 import { useReportsNotice } from "./shell/useReportsNotice";
 import { useShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { useChatDispatchNotices } from "./shell/useChatDispatchNotices";
@@ -119,7 +120,6 @@ import { ExternalLinkConfirm } from "./ExternalLinkConfirm";
 import { CommandPalette, type Command } from "./CommandPalette";
 import { QuickOpenPalette } from "./QuickOpenPalette";
 import { FileInspector } from "./FileInspector";
-import type { DocumentSaveNotices } from "./collab/useSaveFailureNotice";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import type { HeadingTarget, ScrollTarget } from "./MarkdownView";
 import { preloadMarkdownEditor } from "./editor/LazyMarkdownEditor";
@@ -827,29 +827,6 @@ export function DesktopWorkspaceShell(props: {
     (message: string, cause?: unknown) => reportShellFailure({ message, cause }),
     [reportShellFailure],
   );
-  useEffect(() => {
-    const owner = workspaceId;
-    return bridge().onEngineYDocSaveState((event) => {
-      const refusal = event.editRefusal;
-      if (!refusal || refusal.workspaceId !== owner || workspaceIdRef.current !== owner) return;
-      reportShellFailure({
-        message: refusal.message,
-        cause: new Error(refusal.message),
-        kind: "live-edit-refused",
-      });
-    });
-  }, [workspaceId, reportShellFailure]);
-  const documentSaveNotices = useMemo<DocumentSaveNotices>(() => {
-    const owner = workspaceId;
-    return {
-      report: (failure) => {
-        if (workspaceIdRef.current === owner) reportShellFailure(failure);
-      },
-      clear: (identity) => {
-        if (workspaceIdRef.current === owner) clearIdentity(identity);
-      },
-    };
-  }, [workspaceId, reportShellFailure, clearIdentity]);
   // The workspace's Button runs report through this shell's toasts, so they go with it.
   useEffect(() => () => disposeAutomationButtons(workspaceId), [workspaceId]);
   const onWorkspaceSettingsRead = useSettingsFileNotices({
@@ -2103,6 +2080,7 @@ export function DesktopWorkspaceShell(props: {
     },
     [openFile],
   );
+  useDocumentSaveNotices({ workspaceId, report: reportShellFailure, clear: clearIdentity, open: openPathWithHeading });
   // A document too large for live editing. The folder holds only the active
   // version's files, so it opens only when the refusal names that version;
   // otherwise the notice names the version to switch to. The path comes from
@@ -5408,7 +5386,6 @@ export function DesktopWorkspaceShell(props: {
                 knownMarkdownFiles={markdownWikilinkFiles}
                 onButtonError={reportShellError}
                 onButtonNotice={showSuccessNotice}
-                saveNotices={documentSaveNotices}
                 onOpenRecordHistory={recordHistory.open}
                 readOnly={
                   (!!shareView && !shareViewWritable) ||

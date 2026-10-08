@@ -247,6 +247,7 @@ export function useShellError(workspaceId: string) {
   // thing, such as one folder.
   const reportShellFailure = useCallback(
     (failure: {
+      title?: string;
       message: string;
       cause?: unknown;
       details?: ReadonlyArray<ErrorDetailField>;
@@ -262,6 +263,7 @@ export function useShellError(workspaceId: string) {
         ...(cause ? [["Cause", cause] as const] : []),
       ];
       push({
+        ...(failure.title ? { title: failure.title } : {}),
         message: shown.words ?? UNKNOWN_ERROR_WORDS,
         retry: failure.retry ?? null,
         ...(details.length ? { details } : {}),

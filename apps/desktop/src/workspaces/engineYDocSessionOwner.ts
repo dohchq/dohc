@@ -363,6 +363,21 @@ export class EngineYDocSessionOwner<
     };
   }
 
+  // Like applyUpdate, only a session that is open: not one still opening
+  // or already closing.
+  accessOpenSession<TValue>(
+    input: EngineYDocSessionCaller<TSender>,
+    access: (session: TSession) => TValue,
+  ):
+    | { kind: "available"; value: TValue }
+    | { kind: "refused"; reason: "session-unavailable" } {
+    const record = this.#current(input);
+    if (!record || record.state !== "open" || record.session === null) {
+      return { kind: "refused", reason: "session-unavailable" };
+    }
+    return { kind: "available", value: access(record.session) };
+  }
+
   accessSession<TValue>(
     input: EngineYDocSessionCaller<TSender>,
     access: (session: TSession) => TValue,
@@ -540,8 +555,11 @@ export class EngineYDocSessionOwner<
     record: SessionRecord<TSender, TSession, TUpdate, TReplacement>,
   ): EngineYDocSessionSignals<TEvent, TUpdate, TReplacement> {
     return {
+      // Save states keep arriving while the session closes: its closing
+      // settle can fail after the editor has gone, and the shell still owes
+      // that failure a notice.
       emit: (event) => {
-        this.#send(record, { kind: "session-event", event });
+        this.#send(record, { kind: "session-event", event }, true);
       },
       remoteUpdate: (update) => {
         if (!this.#maySend(record)) return;
@@ -595,8 +613,9 @@ export class EngineYDocSessionOwner<
   #send(
     record: SessionRecord<TSender, TSession, TUpdate, TReplacement>,
     message: EngineYDocSessionOutboundMessage<TEvent, TUpdate, TReplacement>,
+    whileClosing = false,
   ): boolean {
-    if (!this.#maySend(record)) return false;
+    if (!(this.#maySend(record) || (whileClosing && record.state === "releasing" && this.#ownsActiveGeneration(record)))) return false;
     try {
       this.#onOutbound({
         sender: record.sender,
