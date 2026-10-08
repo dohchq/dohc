@@ -15,8 +15,8 @@ export interface DocumentSaveNotices {
 }
 
 // True of every failed save: a read-only file, a full disk, and a file
-// changed outside dohc all reach the editor as the same "error". The edits
-// are journaled in the engine before any settle, so they survive a restart.
+// changed outside dohc all reach the editor as the same "error". The engine
+// journals the edits before any settle tries to write the file.
 export function saveFailureMessage(path: string): string {
   return `dohc couldn't save your edits to ${path}. They are kept in dohc.`;
 }
