@@ -321,6 +321,8 @@ describe("share grants", () => {
       {
         subjectName: null, sharerName: null,
         shareId: "share-0",
+        granterUserId: GRANTER,
+        granterEmail: `${GRANTER}@dohc.test`,
         workspaceId: WORKSPACE,
         recipientUserId: RECIPIENT,
         recipientEmail: `${RECIPIENT}@dohc.test`,
@@ -330,6 +332,7 @@ describe("share grants", () => {
         principalKind: "user",
         generation: 1,
         automationsGeneration: null,
+        status: "active",
         createdAtMs: 5555,
         revokedAtMs: null,
       },

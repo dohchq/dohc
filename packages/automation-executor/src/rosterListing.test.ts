@@ -4,9 +4,12 @@ import { listRosterGrants, ownerRoster, readStoredRoster } from "./rosterListing
 
 const WORKSPACE = "ws-trip";
 
+const facts = { shareId: "s-1", generation: 1, status: "active" as const, granterUserId: "u-owner",
+  granterEmail: null, subjectName: null, sharerName: null };
+
 function row(overrides: Record<string, unknown> = {}) {
   return {
-    shareId: "s-1", workspaceId: WORKSPACE, grantId: "g-1", principalKind: "user", generation: 1,
+    ...facts, status: overrides.revokedAtMs ? "revoked" : "active", shareId: "s-1", workspaceId: WORKSPACE, grantId: "g-1", principalKind: "user", generation: 1,
     recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", createdAtMs: 1, revokedAtMs: null,
     selector: { paths: ["Trip"], versionId: null }, access: "edit", automationsGeneration: null, ...overrides,
   };
@@ -14,7 +17,7 @@ function row(overrides: Record<string, unknown> = {}) {
 
 function link(overrides: Record<string, unknown> = {}) {
   return {
-    grantId: "g-link", access: "edit", automationsGeneration: null, status: "active", selector: { paths: ["Trip"], versionId: null },
+    ...facts, grantId: "g-link", access: "edit", automationsGeneration: null, status: "active", selector: { paths: ["Trip"], versionId: null },
     dependents: [{ grantId: "g-dep", recipientUserId: "u-ben", recipientEmail: "ben@dohc.test", access: "edit", generation: 1, createdAtMs: 1 }],
     ...overrides,
   };
@@ -216,7 +219,7 @@ it("keeps reach verdicts unchanged with View and Comment links in the stored ros
   ];
   const automation = {id: "a", collection: trip, codeFiles: [], steps};
   const additions = ["view", "comment"].map(access => ({
-    grant: {grantId: `g-${access}`, recipientUserId: null, recipientEmail: null,
+    grant: {...facts, grantId: `g-${access}`, recipientUserId: null, recipientEmail: null,
       selector: {paths: ["Trip"], versionId: null}, access},
     ended: false, automationsGeneration: null,
   }));

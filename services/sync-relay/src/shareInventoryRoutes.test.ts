@@ -1,7 +1,7 @@
 import {afterEach, describe, expect, it} from "vitest";
 import {listRosterGrants, ownerRoster} from "@dohc/automation-executor/roster-listing";
 import type {SyncRelayStorage} from "./storage";
-import {closeTestStorages, interceptStorage, request, testHandler, testStorage} from "./testing";
+import {closeTestStorages, inspectDatabase, interceptStorage, request, storagePath, testHandler, testStorage} from "./testing";
 
 afterEach(closeTestStorages);
 interface InventoryBody {
@@ -100,5 +100,65 @@ describe("Group file scope observations", () => {
     });
     const listing = await inventory(await h(request(OWNER, `/sync/shares?workspaceId=${WORKSPACE}`)));
     expect(listing.granted[0].fileScope).toBe("not-served");
+  });
+});
+
+describe("account received pages", () => {
+  it("pages by share above 1,000 and leaves the Settings and Chats account lane unchanged", async () => {
+    const storage = await testStorage(); claim(storage);
+    for (let i = 0; i < 1001; i++) seed(storage, `share-${String(i).padStart(4, "0")}`);
+    const db = inspectDatabase(storagePath(storage));
+    try {
+      db.prepare("UPDATE sync_relay_share_grants SET access = 'view' WHERE share_id = 'share-0999'").run();
+      const insert = db.prepare(`INSERT INTO sync_relay_share_grants
+        (grant_id, share_id, principal_kind, principal_user_id, principal_email, access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id)
+        VALUES (?, 'share-0999', 'user', ?, NULL, ?, 1, 'active', 1, NULL, NULL)`);
+      insert.run("extra-own", "recipient", "comment");
+      insert.run("another-person", "other", "edit");
+    } finally {
+      db.close();
+    }
+    storage.revokeShare("share-0000", 2);
+    const h = testHandler(storage);
+    const first = await (await h(request("recipient", "/sync/shares?received=true"))).json();
+    expect(first.granted).toBeUndefined();
+    expect(first.received).toHaveLength(999);
+    expect(first.received.filter((row: {shareId: string}) => row.shareId === "share-0999"))
+      .toMatchObject([{ grantId: "extra-own", access: "comment" }]);
+    expect(first.removed).toMatchObject([{ shareId: "share-0000", removedAtMs: 2 }]);
+    expect(first.nextCursor).toBeTypeOf("string");
+    const last = await (await h(request("recipient", `/sync/shares?received=true&cursor=${encodeURIComponent(first.nextCursor)}`))).json();
+    expect(last.received.map((row: {shareId: string}) => row.shareId)).toEqual(["share-1000"]);
+    expect(last.nextCursor).toBeUndefined();
+    const legacy = await (await h(request("recipient", "/sync/shares"))).json();
+    expect(legacy.granted).toEqual([]);
+    expect(legacy.received).toHaveLength(1000);
+    expect(legacy.nextCursor).toBeUndefined();
+  });
+
+  it("binds cursors to the authenticated recipient and rejects ambiguous coordinates", async () => {
+    const storage = await testStorage(); claim(storage);
+    for (let i = 0; i < 1001; i++) seed(storage, `share-${String(i).padStart(4, "0")}`);
+    const h = testHandler(storage);
+    const first = await (await h(request("recipient", "/sync/shares?received=true"))).json();
+    expect((await h(request("other", `/sync/shares?received=true&cursor=${encodeURIComponent(first.nextCursor)}`))).status).toBe(400);
+    for (const query of ["received=true&received=true", "received=false", "received=true&workspaceId=workspace-a",
+      "received=true&cursor=nope", "received=true&cursor=a&cursor=b"]) {
+      expect((await h(request("recipient", `/sync/shares?${query}`))).status, query).toBe(400);
+    }
+    expect((await (await h(request("other", "/sync/shares?received=true"))).json()).received).toEqual([]);
+  });
+
+  it("uses immutable share keys when shares change between pages", async () => {
+    const storage = await testStorage(); claim(storage);
+    for (let i = 0; i < 1001; i++) seed(storage, `share-${String(i).padStart(4, "0")}`);
+    const h = testHandler(storage);
+    const first = await (await h(request("recipient", "/sync/shares?received=true"))).json();
+    storage.revokeShare("share-0100", 2);
+    seed(storage, "share-0000-new");
+    seed(storage, "share-1001-new");
+    const last = await (await h(request("recipient", `/sync/shares?received=true&cursor=${encodeURIComponent(first.nextCursor)}`))).json();
+    expect(last.received.map((row: {shareId: string}) => row.shareId)).toEqual(["share-1000", "share-1001-new"]);
+    expect(last.removed).toEqual([]);
   });
 });

@@ -11,6 +11,7 @@ import {
   type ShareAccess,
   isShareAccessValue,
   isValidShareVersionId,
+  visibleSharePath,
 } from "@dohc/security-contract/share-selector";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { asRecord } from "@dohc/workspace-core";
@@ -38,6 +39,7 @@ import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 // payload shape it does not positively recognize is EXCLUDED.
 
 export { MAX_SHARE_PATHS, MAX_SHARE_PATH_CHARS };
+export { visibleSharePath } from "@dohc/security-contract/share-selector";
 
 export const MAX_CHANNEL_WIRE_ID_CHARS = 256;
 
@@ -554,25 +556,6 @@ export function pathVisibleThroughShare(selector: ShareSelector, path: string): 
 function isCanonicalSharePath(path: string): boolean {
   const validated = validateUserWritePath(path);
   return validated.ok && validated.normalized === path;
-}
-
-// The same gate, answering with the NORMALIZED path it proved. A caller that
-// serves or stores a path must serve this one: the check normalizes before
-// deciding, so serving the caller's own spelling would persist a string this
-// relay never validated — and one the granter may be unable to resolve.
-export function visibleSharePath(selector: ShareSelector, path: string): string | null {
-  const validated = validateUserWritePath(path);
-  if (!validated.ok) return null;
-  if (classifyEngineFilePath(validated.normalized).kind !== "tracked") return null;
-  const selected =
-    selector.paths.length === 0
-      ? selector.versionId !== null
-      : selector.paths.some(
-          (granted) =>
-            validated.normalized === granted ||
-            validated.normalized.startsWith(`${granted}/`),
-        );
-  return selected ? validated.normalized : null;
 }
 
 // The one version a path/version share exposes, and the rule both sides

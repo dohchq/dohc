@@ -11,6 +11,8 @@ import {
   type SyncRelayGrantedShareRow,
   type SyncRelayGrantedInventoryCursor,
   type SyncRelayGrantedInventoryPage,
+  type SyncRelayReceivedInventoryCursor,
+  type SyncRelayReceivedInventoryPage,
   type SyncRelayLinkInventoryCursor,
   type SyncRelayLinkInventoryPage,
   type SyncRelayLinkInventoryRow,
@@ -29,7 +31,7 @@ import {
 } from "./rows";
 import { shareAccessRank } from "@dohc/security-contract/share-selector";
 import { LINK_SESSION_RENEWAL_GRACE_MS } from "../linkSecurity";
-import { RETIRED_LINK_CREDENTIAL_HISTORY_LIMIT, GRANTED_INVENTORY_PAGE_SIZE, LINK_INVENTORY_PAGE_SIZE, LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT } from "./limits";
+import { RETIRED_LINK_CREDENTIAL_HISTORY_LIMIT, GRANTED_INVENTORY_PAGE_SIZE, RECEIVED_INVENTORY_PAGE_SIZE, LINK_INVENTORY_PAGE_SIZE, LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT } from "./limits";
 
 function dependentGrantIdsMatch(
   dependents: readonly SyncRelayShareGrantRow[],
@@ -986,6 +988,20 @@ export function listActiveIndependentShareGrants(storage: StorageContext, input:
           : null,
     };
   }
+
+/** Pages share identities, so multiple grants cannot split one received share across pages. */
+export function listReceivedShareIdsPage(storage: StorageContext, recipientUserId: string,
+  cursor?: SyncRelayReceivedInventoryCursor): SyncRelayReceivedInventoryPage {
+  const rows = storage.db.prepare(`SELECT DISTINCT g.share_id
+    FROM sync_relay_share_grants g JOIN sync_relay_shares s ON s.share_id = g.share_id
+    JOIN sync_relay_workspaces w ON w.workspace_id = s.workspace_id AND w.owner_user_id = s.granter_user_id
+    WHERE g.principal_kind = 'user' AND g.principal_user_id = ? AND g.status IN ('active', 'revoked')
+      ${cursor ? "AND g.share_id > ?" : ""}
+    ORDER BY g.share_id LIMIT ${RECEIVED_INVENTORY_PAGE_SIZE + 1}`)
+    .all(recipientUserId, ...(cursor ? [cursor.shareId] : [])) as { share_id: string }[];
+  const shareIds = rows.slice(0, RECEIVED_INVENTORY_PAGE_SIZE).map(row => row.share_id);
+  return { shareIds, nextCursor: rows.length > RECEIVED_INVENTORY_PAGE_SIZE ? { shareId: shareIds.at(-1)! } : null };
+}
 
 export function listSharesReceivedBy(storage: StorageContext, recipientUserId: string): SyncRelayShareWithGrantRow[] {
     return storage.db
