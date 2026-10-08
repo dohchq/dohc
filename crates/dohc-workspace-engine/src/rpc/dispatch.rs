@@ -472,14 +472,14 @@ impl EngineService {
                     .await?
             }
             "conflicts.resolve" => {
-                self.conflicts_resolve(
+                Box::pin(self.conflicts_resolve(
                     &ctx,
                     request.id,
                     request.deadline_ms,
                     request.workspace,
                     request.params,
                     request.idempotency_key,
-                )
+                ))
                 .await?
             }
             "search.queryPage" => {
@@ -503,6 +503,10 @@ impl EngineService {
                     .await?
             }
             "watcher.status" => self.watcher_status(request.workspace).await?,
+            "capture.clearRecovery" => {
+                self.capture_clear_recovery(request.workspace, request.params)
+                    .await?
+            }
             "keptCopies.list" => self.kept_copies_list(&ctx, request.workspace).await?,
             "keptCopies.save" => {
                 self.kept_copies_save(request.workspace, request.params)
@@ -1067,6 +1071,34 @@ mod tests {
     use super::*;
     use dohc_engine_protocol::transport::EngineService as _;
 
+    #[test]
+    fn dispatch_future_stays_within_stack_budget() {
+        fn future_size<F: std::future::Future>(_: impl FnOnce() -> F) -> usize {
+            std::mem::size_of::<F>()
+        }
+        let service = EngineService::new();
+        let request = || Request {
+            id: 1,
+            method: "engine.ping".into(),
+            workspace: None,
+            deadline_ms: None,
+            idempotency_key: None,
+            progress: false,
+            params: json!({}),
+        };
+        let bytes = future_size(|| service.dispatch(RequestContext::unbounded(), request()));
+        let input_bytes =
+            future_size(|| service.call_with_input(RequestContext::unbounded(), request(), None));
+        // InProcessTransport test callers carry dispatch state on the default thread stack.
+        // The supervisor spawns request futures on the heap; growth still costs memory per request.
+        println!("dispatch: {bytes} bytes; call_with_input: {input_bytes} bytes");
+        assert!(bytes <= 5 * 1024, "dispatch future uses {bytes} bytes");
+        assert!(
+            input_bytes <= 6 * 1024,
+            "call_with_input future uses {input_bytes} bytes"
+        );
+    }
+
     #[tokio::test]
     async fn configured_ordinary_methods_require_attached_handle_and_current_connection() {
         use dohc_engine_protocol::transport::ConnectionOwner;
@@ -1288,6 +1320,7 @@ mod tests {
             "capture.release",
             "capture.renew",
             "capture.setAuthor",
+            "capture.clearRecovery",
             "chats.agentReadState.listUnreadThreads",
             "chats.agentReadState.markThreadRead",
             "chats.attachments.listFileMentions",

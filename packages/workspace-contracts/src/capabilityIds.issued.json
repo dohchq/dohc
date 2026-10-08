@@ -125,5 +125,7 @@
   "reports.error.send",
   "document.draft.discard",
   "share.capture.notice.dismiss",
-  "document.save.retry"
+  "document.save.retry",
+  "capture.recovery.read",
+  "capture.recovery.clear"
 ]

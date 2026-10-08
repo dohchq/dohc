@@ -205,7 +205,7 @@ fn refuse_in_tx(
     let refusal = publication_refusal(envelope);
     tx.execute("INSERT INTO replication_pending_refusals(workspace_id,origin_id,origin_seq,op_kind,reason_code,reason_message) VALUES (?1,?2,?3,'moment.append','invalid-input',?4) ON CONFLICT(workspace_id,origin_id,origin_seq) DO NOTHING",params![envelope.workspace_id,envelope.origin_id,envelope.origin_seq,refusal.reason.message()]).map_err(SyncError::persist)?;
     let local: Option<bool> = tx.query_row("SELECT imported=0 FROM replication_log WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",params![envelope.workspace_id,envelope.origin_id,envelope.origin_seq],|r|r.get(0)).optional().map_err(SyncError::corrupt)?;
-    let native:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM moments WHERE workspace_id=?1 AND moment_id=?2 AND version_id=?3 AND object_id=?4 AND payload_after_blob_sha256=?5)",params![envelope.workspace_id,moment,envelope.payload["versionId"].as_str(),envelope.payload["objectId"].as_str(),envelope.payload["payloadAfterBlobSha256"].as_str()],|r|r.get(0)).map_err(SyncError::corrupt)?;
+    let native:bool=tx.query_row(concat!("SELECT EXISTS(SELECT 1 FROM moments WHERE ", dohc_engine_domain::exclude_capture_recovery_sql!(), " AND workspace_id=?1 AND moment_id=?2 AND version_id=?3 AND object_id=?4 AND payload_after_blob_sha256=?5)"),params![envelope.workspace_id,moment,envelope.payload["versionId"].as_str(),envelope.payload["objectId"].as_str(),envelope.payload["payloadAfterBlobSha256"].as_str()],|r|r.get(0)).map_err(SyncError::corrupt)?;
     let structurally_valid = serde_json::from_value::<crate::moment_apply::MomentAppendPayload>(
         envelope.payload.clone(),
     )

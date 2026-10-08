@@ -29,7 +29,7 @@ export const ready: WatcherStatusResult = {
   terminal: false,
   running: true,
   degraded: false,
-  noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [],
+  noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [],
 };
 
 export async function createSharedViewsIpcHarness() {

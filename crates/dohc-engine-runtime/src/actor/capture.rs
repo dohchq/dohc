@@ -24,7 +24,7 @@ use dohc_engine_domain::{
     ensure_main_version_in_tx,
 };
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError, TxnOutcome};
-use rusqlite::{Connection, Transaction};
+use rusqlite::{Connection, Transaction, params};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -68,6 +68,33 @@ enum CaptureIndexing {
 }
 
 impl ActorHandle {
+    pub async fn capture_recoveries(
+        &self,
+        workspace_id: String,
+    ) -> Result<Vec<dohc_engine_domain::CaptureRecovery>, RuntimeError> {
+        self.run(move |store, _| {
+            store
+                .read_with(|conn| dohc_engine_domain::capture_recoveries_in(conn, &workspace_id))
+                .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
+    pub async fn clear_capture_recovery(
+        &self,
+        workspace_id: String,
+        moment_id: String,
+    ) -> Result<(), RuntimeError> {
+        self.run(move |store, _| {
+            match store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+                dohc_engine_domain::clear_capture_recovery_in(tx, &workspace_id, &moment_id)
+            })? {
+                TxnOutcome::Committed(()) => Ok(()),
+                TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+            }
+        })
+        .await
+    }
     // --- Synchronous API (must be used outside a runtime) ---
 
     /// Capture a text file on the actor's writer, blocking the calling thread.
@@ -427,6 +454,65 @@ struct CaptureBatchSharedContext {
     journals_file_moments: Option<bool>,
 }
 
+struct PreparedCaptureRecovery {
+    lineage: dohc_engine_sync::PreparedLocalYdocLineage,
+    preserve: bool,
+    authors: Option<String>,
+}
+
+fn prepare_capture_recovery_in(
+    tx: &Transaction<'_>,
+    input: &CaptureIngest,
+    object_id: &str,
+) -> Result<PreparedCaptureRecovery, RuntimeError> {
+    let key = DocKey::new(&input.workspace_id, &input.version_id, object_id)?;
+    let mut prepared = PreparedCaptureRecovery {
+        lineage: dohc_engine_sync::prepare_local_ydoc_lineage_in_tx(tx, &key)?,
+        preserve: false,
+        authors: None,
+    };
+    let Some(projection) = prepared.lineage.projection() else {
+        return Ok(prepared);
+    };
+    if projection.content == input.text {
+        return Ok(prepared);
+    }
+    let sha = dohc_engine_storage::hex_sha256(projection.content.as_bytes());
+    // Committed moments cover typing even when their file write is pending or
+    // cancelled. Capture supersedes that write in this transaction. Only a
+    // pristine seed needs the absence of a pending job to prove coverage.
+    let covered: bool = tx.query_row(
+        "SELECT (
+          EXISTS(SELECT 1 FROM ydoc_docs d JOIN snapshots s ON s.workspace_id=d.workspace_id
+            AND s.version_id=d.version_id AND s.object_id=d.object_id
+            JOIN moments m ON m.workspace_id=s.workspace_id AND m.version_id=s.version_id
+            AND m.object_id=s.object_id AND m.moment_id=s.latest_moment_id
+            WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3
+            AND d.settled_update_seq=d.head_update_seq AND m.after_blob_sha256=?5 AND s.blob_sha256=?5
+            AND d.last_settled_sha=?5) OR
+          EXISTS(SELECT 1 FROM live_device_settlements a JOIN moments m
+            ON m.workspace_id=a.workspace_id AND m.moment_id=a.moment_id
+            JOIN ydoc_docs d ON d.workspace_id=a.workspace_id AND d.version_id=a.main_version_id AND d.object_id=a.object_id
+            WHERE a.workspace_id=?1 AND a.main_version_id=?2 AND a.object_id=?3
+            AND a.lineage_claim_id=d.lineage_claim_id AND a.source_state_vector_digest=?6
+            AND a.markdown_digest=?5 AND m.after_blob_sha256=?5) OR
+          (NOT EXISTS(SELECT 1 FROM materialization_jobs WHERE workspace_id IN (?1,'') AND target_path=?4 AND status='pending') AND
+          EXISTS(SELECT 1 FROM ydoc_docs d WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3
+            AND d.last_settled_sha IS NULL AND d.head_update_seq=1 AND d.head_snapshot_seq IN (0,1)
+            AND (SELECT COUNT(*) FROM ydoc_updates u WHERE u.workspace_id=?1 AND u.version_id=?2 AND u.object_id=?3)=1-d.head_snapshot_seq
+            AND EXISTS(SELECT 1 FROM ydoc_snapshots s WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.up_to_seq=d.head_snapshot_seq)
+            AND NOT EXISTS(SELECT 1 FROM ydoc_snapshots s WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.up_to_seq NOT IN (0,1))
+            AND EXISTS(SELECT 1 FROM moments m WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.after_blob_sha256=d.seed_source_sha256))))",
+        params![input.workspace_id,input.version_id,object_id,input.path,sha,projection.source_state_vector_sha256], |row| row.get(0),
+    ).map_err(StorageError::corrupt_public)?;
+    if covered {
+        return Ok(prepared);
+    }
+    prepared.authors = dohc_engine_collab::author_coverage::recovery_in(tx, &key)?.moment_json();
+    prepared.preserve = true;
+    Ok(prepared)
+}
+
 fn capture_ingest_in_tx(
     tx: &Transaction<'_>,
     input: &CaptureIngest,
@@ -437,6 +523,10 @@ fn capture_ingest_in_tx(
     let (actor_origin_id, attribution) =
         dohc_engine_domain::moment_author_attribution(input.author_json.as_deref());
     let mut admitted = false;
+    let mut recovery = None;
+    let may_have_ydoc_state = batch
+        .as_ref()
+        .is_none_or(|batch| batch.has_ydoc_state != Some(false));
     let mut result = match batch.as_deref_mut() {
         Some(batch) => capture_ingest_in_batch_with_admission_in_tx(
             tx,
@@ -444,6 +534,9 @@ fn capture_ingest_in_tx(
             &mut batch.capture,
             |workspace_id, version_id, object_id| {
                 ensure_capture_target_not_leased(tx, leases, workspace_id, version_id, object_id)?;
+                if may_have_ydoc_state {
+                    recovery = Some(prepare_capture_recovery_in(tx, input, object_id)?);
+                }
                 admitted = true;
                 Ok::<_, RuntimeError>(())
             },
@@ -453,11 +546,36 @@ fn capture_ingest_in_tx(
             input,
             |workspace_id, version_id, object_id| {
                 ensure_capture_target_not_leased(tx, leases, workspace_id, version_id, object_id)?;
+                if may_have_ydoc_state {
+                    recovery = Some(prepare_capture_recovery_in(tx, input, object_id)?);
+                }
                 admitted = true;
                 Ok::<_, RuntimeError>(())
             },
         )?,
     };
+    if let Some(batch) = batch.as_deref_mut() {
+        batch.capture.commit_result(&result)?;
+    }
+    if let Some(prepared) = recovery.as_ref().filter(|prepared| prepared.preserve) {
+        let projection = prepared
+            .lineage
+            .projection()
+            .expect("recovery has a projection");
+        if let Some(order) = dohc_engine_domain::record_capture_recovery_in_tx(
+            tx,
+            &input.workspace_id,
+            &result.snapshot,
+            &projection.content,
+            &projection.source_state_vector_sha256,
+            prepared.authors.as_deref(),
+            input.now_ms,
+        )? {
+            if let Some(batch) = batch.as_deref_mut() {
+                batch.capture.commit_recovery_order(order)?;
+            }
+        }
+    }
     if admitted {
         let has_ydoc_state = match batch.as_deref_mut() {
             Some(batch) => match batch.has_ydoc_state {
@@ -475,19 +593,30 @@ fn capture_ingest_in_tx(
             None => true,
         };
         let changed = if has_ydoc_state {
-            dohc_engine_sync::reconcile_local_resulting_head_in_tx(
-                tx,
-                &input.workspace_id,
-                &input.version_id,
-                &result.snapshot.object_id,
-                dohc_engine_sync::ResultingHead::Text {
-                    path: &result.snapshot.path,
-                    text: &result.snapshot.text,
-                },
-                actor_origin_id.as_deref(),
-                attribution.as_ref(),
-                input.now_ms,
-            )?
+            let resulting = dohc_engine_sync::ResultingHead::Text {
+                path: &result.snapshot.path,
+                text: &result.snapshot.text,
+            };
+            match recovery {
+                Some(prepared) => dohc_engine_sync::reconcile_prepared_local_resulting_head_in_tx(
+                    tx,
+                    prepared.lineage,
+                    resulting,
+                    actor_origin_id.as_deref(),
+                    attribution.as_ref(),
+                    input.now_ms,
+                )?,
+                None => dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                    tx,
+                    &input.workspace_id,
+                    &input.version_id,
+                    &result.snapshot.object_id,
+                    resulting,
+                    actor_origin_id.as_deref(),
+                    attribution.as_ref(),
+                    input.now_ms,
+                )?,
+            }
         } else {
             // No Y.Doc lineage exists in this version, so the file alone
             // carries the write.
@@ -662,7 +791,6 @@ fn capture_ingest_batch_all_or_none_in_tx(
     };
     for input in inputs {
         let result = capture_ingest_in_tx(tx, input, indexing, leases, Some(&mut batch))?;
-        batch.capture.commit_result(&result)?;
         results.push(result);
     }
     Ok(results)
@@ -684,13 +812,13 @@ fn capture_ingest_batch_with_item_savepoints_in_tx(
         journals_file_moments: None,
     };
     for input in inputs {
+        let prior_capture = batch.capture.clone();
         tx.execute_batch("SAVEPOINT dohc_capture_batch_item")
             .map_err(StorageError::persist_public)?;
         match capture_ingest_in_tx(tx, input, indexing, leases, Some(&mut batch)) {
             Ok(result) => {
                 tx.execute_batch("RELEASE dohc_capture_batch_item")
                     .map_err(StorageError::persist_public)?;
-                batch.capture.commit_result(&result)?;
                 results.push(Ok(result));
             }
             Err(error) => {
@@ -699,6 +827,7 @@ fn capture_ingest_batch_with_item_savepoints_in_tx(
                      RELEASE dohc_capture_batch_item",
                 )
                 .map_err(StorageError::persist_public)?;
+                batch.capture = prior_capture;
                 results.push(Err(error));
             }
         }

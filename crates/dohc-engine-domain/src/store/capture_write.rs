@@ -156,8 +156,9 @@ struct ResolvedCaptureObject {
 ///
 /// The caller owns SQLite savepoints and the transaction. An all-or-none batch
 /// advances each successful item inside its outer savepoint and discards the
-/// context if that scope rolls back. A partial-success batch releases each
-/// successful item savepoint before advancing. Failed items do not advance.
+/// context if that scope rolls back. A partial-success batch restores the
+/// prior context when an item savepoint fails. Failed items do not advance.
+#[derive(Clone)]
 pub struct CaptureIngestBatchContext {
     workspace_id: String,
     version_id: String,
@@ -226,6 +227,20 @@ impl CaptureIngestBatchContext {
         }
         self.moment_order_cursor = match next_moment_order.checked_add(1) {
             Some(next_moment_order) => CaptureMomentOrderCursor::Ready(next_moment_order),
+            None => CaptureMomentOrderCursor::Exhausted,
+        };
+        Ok(())
+    }
+
+    pub fn commit_recovery_order(&mut self, order: i64) -> Result<(), DomainError> {
+        if !matches!(self.moment_order_cursor, CaptureMomentOrderCursor::Ready(next) if next == order)
+        {
+            return Err(DomainError::StateCorrupt {
+                reason: "capture recovery order diverged from batch cursor",
+            });
+        }
+        self.moment_order_cursor = match order.checked_add(1) {
+            Some(next) => CaptureMomentOrderCursor::Ready(next),
             None => CaptureMomentOrderCursor::Exhausted,
         };
         Ok(())
@@ -1382,7 +1397,10 @@ pub fn write_published_history_text_in_tx(
     }
     let mut normalized = normalized;
     normalized.object_id = &source.object_id;
-    write_normalized_text_in_tx(tx, normalized, false, Some(&source), None, conditions)
+    let result =
+        write_normalized_text_in_tx(tx, normalized, false, Some(&source), None, conditions)?;
+    super::clear_capture_recovery_in(tx, &input.workspace_id, restore_before_moment_id)?;
+    Ok(result)
 }
 
 /// Persist a text projection inside the caller's transaction.

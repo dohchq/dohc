@@ -1,4 +1,5 @@
 import { rmdir } from "node:fs/promises";
+import { isCaptureRecoveryOrigin } from "@dohc/workspace-contracts/engine";
 import { join } from "node:path";
 import { z } from "zod";
 import { isNormalizedRelativePath } from "@dohc/workspace-contracts/collection-values";
@@ -326,6 +327,7 @@ export function registerStopAndRestoreIpc<
             : input.reviewPaths?.includes(path) ? "Changed on this device since the last saved version" : null,
           moment: async (momentId) => {
             const detail = await capture.readMoment(momentId);
+            if (detail && !detail.protected && isCaptureRecoveryOrigin(detail.moment.metadata.origin)) return null;
             return detail?.protected ? "protected" : detail?.moment ?? null;
           },
           momentsAfter: (objectId, momentId) => capture.listObjectMomentsAfter(objectId, momentId),

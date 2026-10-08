@@ -1054,8 +1054,14 @@ it.skipIf(engine.missing)(
       // the queued disk edit without letting the failed Y.Doc close overwrite
       // it.
       await sessions.closeWorkspace(workspace);
-      const capturedMoments = await waitForPathMoments(capture, "note.md", 3);
-      expect(capturedMoments).toHaveLength(3);
+      const capturedMoments = await waitForPathMoments(capture, "note.md", 4);
+      expect(capturedMoments).toHaveLength(4);
+      const recovery = capturedMoments.find(moment => moment.metadata.origin === "capture-recovery");
+      expect(recovery).toBeDefined();
+      const detail = await capture.readMoment(recovery!.id);
+      if (!detail || detail.protected) throw new Error("recovery must have a readable History payload");
+      expect(detail.moment.payload.before?.text).toBe("never settled\ntyped in dohc\nbase\n");
+      expect(detail.moment.payload.after?.text).toBe(outside);
       expect(await readFile(join(root, "note.md"), "utf8")).toBe(outside);
     } finally {
       await capture.stop().catch(() => undefined);

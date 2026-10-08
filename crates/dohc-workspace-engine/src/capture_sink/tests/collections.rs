@@ -2169,6 +2169,22 @@ fn a_frontmatter_only_capture_keeps_a_nested_list_in_history_and_the_index() {
     sink.reconcile_collections()
         .expect("adopt nested-list record");
     assert_eq!(adopted_record_id(&db, path), RECORD_ID);
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    let key = dohc_engine_collab::DocKey::new(
+        WORKSPACE_ID,
+        VERSION_ID,
+        snapshot(&db, path).unwrap().object_id,
+    )
+    .unwrap();
+    let retained = dohc_engine_sync::project_ydoc_with_store(
+        &connection,
+        &key,
+        &dohc_engine_collab::load_doc_in(&connection, &key).unwrap(),
+        ContentKind::Richdoc,
+    )
+    .unwrap()
+    .content;
+    drop(connection);
     let before = moment_count(&db, path);
     let chosen = original.replace("status: open", "status: done");
     write_file(scratch.path(), path, chosen.as_bytes());
@@ -2178,12 +2194,23 @@ fn a_frontmatter_only_capture_keeps_a_nested_list_in_history_and_the_index() {
         std::fs::read_to_string(scratch.path().join(path)).unwrap(),
         chosen
     );
-    assert_eq!(moment_count(&db, path), before + 1);
+    assert_eq!(moment_count(&db, path), before + 2);
     assert_eq!(
         indexed_collection_field(&db, path, "status").unwrap().0,
         "\"done\""
     );
     let connection = rusqlite::Connection::open(&db).unwrap();
+    let recovery: (String, String, Option<String>) = connection
+        .query_row(
+            "SELECT before.text,after.text,m.before_latest_moment_id FROM moments m
+             JOIN blobs before ON before.sha256=m.before_blob_sha256
+             JOIN blobs after ON after.sha256=m.after_blob_sha256
+             WHERE m.workspace_id=?1 AND m.path=?2 AND m.metadata_origin='capture-recovery'",
+            [WORKSPACE_ID, path],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(recovery, (retained, chosen.clone(), None));
     let key = dohc_engine_collab::DocKey::new(
         WORKSPACE_ID,
         VERSION_ID,
