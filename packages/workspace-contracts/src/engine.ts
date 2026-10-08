@@ -600,6 +600,7 @@ export interface VersionedTextStore {
     versionId: VersionId;
     path: string;
     expectedObjectId?: WorkspaceObjectId;
+    expectedSha256?: string;
     // Delete only if the path is still missing on disk when the engine applies
     // the delete. A caller that saw the file missing sets it: a replace can
     // empty the name for a moment.

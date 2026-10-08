@@ -2584,6 +2584,28 @@ mod tests {
             "native rename must roll back every mutation"
         );
 
+        let bytes = std::fs::read(root.join("notes/owner.md")).unwrap();
+        let request = serde_json::from_value(json!({"id":92,"method":"versionedText.delete","workspace":handle,
+            "params":{"versionId":"main","path":"notes/owner.md","origin":"restore","expectedSha256":dohc_engine_storage::hex_sha256(&bytes)}})).unwrap();
+        assert_eq!(
+            service
+                .versioned_text_delete(
+                    &RequestContext::unbounded(),
+                    &request,
+                    request.params.clone()
+                )
+                .await
+                .unwrap_err()
+                .message,
+            "live-document-binding-active"
+        );
+        assert_eq!(
+            std::fs::read(root.join("notes/owner.md")).unwrap(),
+            bytes,
+            "closing the owner's session must not let checked deletion unlink its adopted object"
+        );
+        assert_eq!(snapshot(), before);
+
         std::fs::rename(root.join("notes/owner.md"), root.join("moved.md")).unwrap();
         let actor = service.open(Some(handle)).unwrap().actor.clone();
         let retire = actor

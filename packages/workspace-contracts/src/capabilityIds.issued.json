@@ -122,5 +122,6 @@
   "diagnostics.save",
   "reports.notice.read",
   "reports.notice.acknowledge",
-  "reports.error.send"
+  "reports.error.send",
+  "document.draft.discard"
 ]

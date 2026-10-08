@@ -24,6 +24,7 @@ import {
   enqueueCollectionFieldWrite,
   FILE_LOCKED_REPORT_MS,
   hasPendingCollectionFieldWrites,
+  retainedCollectionFieldWritePaths,
   resetCollectionFieldWritesForTests,
   remapCollectionFieldWritePaths,
   retryCollectionFieldWrite,
@@ -85,6 +86,16 @@ function enqueue(change: Parameters<typeof enqueueCollectionFieldWrite>[2] = CHA
   });
   return accepted;
 }
+
+it("reports queued and failed paths only for their workspace before Stop and restore", () => {
+  enqueue();
+  enqueue({...CHANGE, recordPath: "tasks/Second.md", recordId: "rec-2"});
+  expect(retainedCollectionFieldWritePaths("ws-1")).toEqual(["tasks/Plan.md", "tasks/Second.md"]);
+  expect(retainedCollectionFieldWritePaths("other")).toEqual([]);
+  act(() => setCollectionFieldWriteAccess("ws-1", "No connection"));
+  expect(collectionWriteFailures()).toHaveLength(2);
+  expect(retainedCollectionFieldWritePaths("ws-1")).toEqual(["tasks/Plan.md", "tasks/Second.md"]);
+});
 
 /** Walks the mounted head writer through saving → saved so it settles. */
 function settleHead(host: ReturnType<typeof render>, doc: Y.Doc) {

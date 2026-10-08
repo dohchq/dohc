@@ -4901,8 +4901,20 @@ export type StopAndRestoreTarget = z.infer<typeof StopAndRestoreTarget>;
 export const StopAndRestorePayload = z.object({
   workspaceId: WORKSPACE_ID,
   target: StopAndRestoreTarget,
+  reviewPaths: z.array(PATH_STRING.refine(isNormalizedRelativePath)).max(4096).optional(),
 }).strict();
 export type StopAndRestorePayload = z.infer<typeof StopAndRestorePayload>;
+export const DiscardLiveDraftRecoveryPayload = z.object({workspaceId: WORKSPACE_ID, path: PATH_STRING.refine(isNormalizedRelativePath), objectId: z.string().min(1).max(512), snapshotSha256: z.string().regex(/^[a-f0-9]{64}$/), discardedAtMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)}).strict();
+export const liveDraftRecoveryOperations = {
+  discardLiveDraftRecovery: {
+    capabilityId: "document.draft.discard",
+    channel: "desktop:discard-live-draft-recovery",
+    payload: DiscardLiveDraftRecoveryPayload,
+    guard: "active-workspace",
+    scope: "workspace",
+    inactiveMessage: "This window changed workspaces.",
+  },
+} satisfies OperationTable;
 export const KeptAutomationFieldShape = z.object({
   id: z.string().regex(/^[a-f0-9]{32}$/),
   path: PATH_STRING.refine(isNormalizedRelativePath).nullable(),
@@ -4948,6 +4960,7 @@ export type StopAndRestoreResult = z.infer<typeof StopAndRestoreResult>;
 export const UndoStopAndRestorePayload = z.object({
   workspaceId: WORKSPACE_ID,
   restoredMomentIds: z.array(OPAQUE_ID).min(1).max(20_000),
+  reviewPaths: z.array(PATH_STRING.refine(isNormalizedRelativePath)).max(4096).optional(),
 }).strict();
 export type UndoStopAndRestorePayload = z.infer<typeof UndoStopAndRestorePayload>;
 export const UndoStopAndRestoreResult = z.object({
@@ -6398,7 +6411,8 @@ export interface DohcDesktopBridge
     OperationBridge<typeof scheduleHostOperations>,
     OperationBridge<typeof chatDispatchNoticeOperations>,
     OperationBridge<typeof sharedViewAccessOperations>,
-    OperationBridge<typeof engineYDocAdmissionOperations> {
+    OperationBridge<typeof engineYDocAdmissionOperations>,
+    OperationBridge<typeof liveDraftRecoveryOperations> {
   listOwnerLiveDocuments(payload: ListOwnerLiveDocumentsPayload): Promise<OwnerLiveDocumentsResult>;
   listOwnerLiveRefusals(payload: ListOwnerLiveRefusalsPayload): Promise<OwnerLiveRefusalsResult>;
   retryOwnerLiveShare(payload: RetryOwnerLiveSharePayload): Promise<void>;

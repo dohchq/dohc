@@ -634,6 +634,10 @@ export function discardCollectionFieldWrite(id: number): void {
 }
 
 /** True while an accepted cell edit has not reached its record's document. */
+export function retainedCollectionFieldWritePaths(workspaceId: string): string[] {
+  return [...new Set([...queue, ...failures].filter(write => write.workspaceId === workspaceId).map(write => write.change.recordPath))];
+}
+
 export function hasPendingCollectionFieldWrites(): boolean {
   return queue.length > 0 || schemaMutations.size > 0;
 }

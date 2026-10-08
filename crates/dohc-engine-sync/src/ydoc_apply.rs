@@ -1592,6 +1592,68 @@ pub fn retire_ydoc_lineage_in_tx(
     retire_complete_ydoc_lineage_in_tx(tx, &complete)
 }
 
+/// A destructive History restore must account for canonical live state, not
+/// only the file snapshot. Drafts can hold edits with no later History moment.
+pub fn current_ydoc_content_matches_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    expected_sha256: &str,
+) -> Result<bool, SyncError> {
+    ensure_adopted_owner_binding_unchanged(tx, key, None)?;
+    require_unfenced_lineage(tx, key).map_err(|error| match error {
+        SyncError::InvalidInput {
+            reason: "live document is stopped",
+        } => SyncError::LiveDocumentBindingActive,
+        other => other,
+    })?;
+    let complete = match ydoc_lineage_completeness_in_tx(tx, key)? {
+        YdocLineageCompleteness::Complete(state) => state,
+        YdocLineageCompleteness::DeferredUpdates | YdocLineageCompleteness::PendingDependencies => {
+            return Ok(false);
+        }
+    };
+    // A retained outbox can outlive its adopted binding. The descriptor only
+    // sees the current binding, so also inspect the durable recovery rows.
+    let (has_outbox, unsettled_outbox): (bool, bool) = tx.query_row(
+        "SELECT count(*)>0, COALESCE(max(pending_bytes>0 OR state!='active' OR current_path!=?4),0) \
+         FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3",
+        params![key.workspace_id, key.version_id, key.object_id, path],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(SyncError::corrupt)?;
+    if unsettled_outbox {
+        return Ok(false);
+    }
+    let draft = dohc_engine_collab::owner_outbox::draft::descriptor_for_key_in(tx, key)
+        .map_err(SyncError::corrupt)?;
+    if let Some(draft) = draft.as_ref()
+        && (draft.pending_bytes > 0
+            || draft.binding.current_path != path
+            || draft
+                .state
+                .as_deref()
+                .is_some_and(|state| state != "active"))
+    {
+        return Ok(false);
+    }
+    let Some((marker, doc)) = complete else {
+        return Ok(draft.is_none() && !has_outbox);
+    };
+    let settled: bool = tx
+        .query_row(
+            "SELECT settled_update_seq IS head_update_seq AND settle_prior_update_seq IS NULL FROM ydoc_docs \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if !settled || marker.path.as_deref() != Some(path) {
+        return Ok(false);
+    }
+    let projection = project_ydoc_with_store(tx, key, &doc, marker.content_kind)?;
+    Ok(dohc_engine_storage::hex_sha256(projection.content.as_bytes()) == expected_sha256)
+}
+
 pub(crate) struct CompleteYdocLineage {
     key: DocKey,
     state: Option<(dohc_engine_collab::Marker, dohc_engine_collab::Ydoc)>,
