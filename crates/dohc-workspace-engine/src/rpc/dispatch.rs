@@ -472,14 +472,14 @@ impl EngineService {
                     .await?
             }
             "conflicts.resolve" => {
-                self.conflicts_resolve(
+                Box::pin(self.conflicts_resolve(
                     &ctx,
                     request.id,
                     request.deadline_ms,
                     request.workspace,
                     request.params,
                     request.idempotency_key,
-                )
+                ))
                 .await?
             }
             "search.queryPage" => {
@@ -1070,6 +1070,30 @@ impl EngineService {
 mod tests {
     use super::*;
     use dohc_engine_protocol::transport::EngineService as _;
+
+    #[test]
+    fn dispatch_future_stays_within_stack_budget() {
+        fn future_size<F: std::future::Future>(_: impl FnOnce() -> F) -> usize {
+            std::mem::size_of::<F>()
+        }
+        let service = EngineService::new();
+        let bytes = future_size(|| {
+            service.dispatch(
+                RequestContext::unbounded(),
+                Request {
+                    id: 1,
+                    method: "engine.ping".into(),
+                    workspace: None,
+                    deadline_ms: None,
+                    idempotency_key: None,
+                    progress: false,
+                    params: json!({}),
+                },
+            )
+        });
+        // Transport and caller futures also carry this state on the default thread stack.
+        assert!(bytes <= 5 * 1024, "dispatch future uses {bytes} bytes");
+    }
 
     #[tokio::test]
     async fn configured_ordinary_methods_require_attached_handle_and_current_connection() {
