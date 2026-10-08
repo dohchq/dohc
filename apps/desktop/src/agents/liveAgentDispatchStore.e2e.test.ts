@@ -16,7 +16,7 @@ const engine = requireEngineBinaryOrSkip();
 
 describe("live agent dispatch store real daemon", () => {
   it.skipIf(engine.missing)(
-    "real_daemon_dispatch_flow_claims_completes_and_requeues",
+    "real_daemon_dispatch_flow_claims_completes_requeues_and_ignores_replayed_triggers",
     async () => {
       const root = await createTestScratch("dohc-live-dispatch-e2e-");
       const workspaceId = `workspace-live-e2e-${process.pid}`;
@@ -137,6 +137,32 @@ describe("live agent dispatch store real daemon", () => {
             attemptCount: 1,
           },
         ]);
+
+        // A wake replayed after restart records its trigger again. That
+        // never queues a handled trigger or a second entry, even after the
+        // workspace closes and opens again, and the pending one runs once.
+        const replay = async (dispatch: typeof store, triggerMessageId: string) =>
+          await dispatch.recordTrigger({ workspaceId, triggerMessageId, threadId: started.thread.id });
+        await expect(replay(store, started.message.id)).resolves.toBe(false);
+        await expect(replay(store, secondTrigger.id)).resolves.toBe(false);
+        await handle.close();
+        let replayRuns = 0;
+        const reopened = createLiveAgentDispatchStore(
+          { workspaceId, rootPath: root },
+          sessions,
+          { createRunId: () => `run-e2e-replayed-${(replayRuns += 1)}` },
+        );
+        await expect(replay(reopened.store, started.message.id)).resolves.toBe(false);
+        await expect(replay(reopened.store, secondTrigger.id)).resolves.toBe(false);
+        await expect(reopened.store.listPending(workspaceId)).resolves.toMatchObject([
+          { triggerMessageId: secondTrigger.id, state: "pending", attemptCount: 1 },
+        ]);
+        const replayedClaim = await reopened.store.claimNextPending(workspaceId, { command: "codex exec" });
+        expect(replayedClaim?.run).toMatchObject({ runId: "run-e2e-replayed-1", triggerMessageId: secondTrigger.id });
+        await reopened.store.completeRun({ runId: "run-e2e-replayed-1", exitCode: 0 });
+        await expect(replay(reopened.store, secondTrigger.id)).resolves.toBe(false);
+        await expect(reopened.store.listPending(workspaceId)).resolves.toEqual([]);
+        await expect(reopened.store.claimNextPending(workspaceId, { command: "codex exec" })).resolves.toBeNull();
       } finally {
         await sessions?.closeAll();
         await lifecycle.stop();

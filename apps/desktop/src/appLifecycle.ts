@@ -126,6 +126,8 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     beginEngineShutdown(): void;
     // Stops new refusal Notice work at once; settles when accepted work is done.
     stopNoticeRefusals(): Promise<void>;
+    // Admits no new agent wake at once; settles when the admitted one finishes or parks.
+    stopAutomationWakes(): Promise<void>;
     stopSearch(): Promise<void>;
     stopSitePreviews(): Promise<void>;
     settleYDocs(): Promise<void>;
@@ -155,8 +157,10 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     // Every ordinary quit reaches here, including Update and Restart's.
     launch.finished();
     event.preventDefault();
-    // Refusal Notices read workspaces, so they stop before any producer drains.
+    // Refusal Notices and agent wakes read workspaces, so they stop before any
+    // producer drains.
     const noticeRefusalStop = shutdown.stopNoticeRefusals();
+    const automationWakeStop = shutdown.stopAutomationWakes();
     // Release opening-document backoff before producers drain. Accepted Y.Doc
     // writes keep retrying until settlement or the overall shutdown budget.
     shutdown.beginEngineShutdown();
@@ -175,6 +179,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     // Starting close early would let a live producer settle onto a closed store.
     const workspaceAuthorityStop = Promise.allSettled([
       noticeRefusalStop,
+      automationWakeStop,
       engineYDocStop,
       chatDispatchStop,
       cliServerStop,

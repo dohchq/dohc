@@ -64,7 +64,11 @@ export function automationWakeMessage(intent: PendingAutomationWake): Automation
   };
 }
 
-/** One drain per computer. Saved winners resume without dismissing the notice again. */
+/**
+ * One drain per computer. Saved winners resume without dismissing the notice again.
+ * stop() admits no further pass or intent. An intent already admitted finishes
+ * or parks on its usual path, and the returned drain settles after it.
+ */
 export function createAutomationWakeConsumer(deps: {
   intents: ReturnType<typeof createAutomationWakeIntents>;
   pending(): Promise<PendingAutomationWake[]>;
@@ -78,20 +82,27 @@ export function createAutomationWakeConsumer(deps: {
 }) {
   let running: Promise<void> | null = null;
   let again = false;
+  // The drain once stop() is called; from then on nothing new starts.
+  let stopped: Promise<void> | null = null;
   return {
     resume(): Promise<void> {
+      if (stopped) return stopped;
       again = true;
       running ??= (async () => {
         const attempted = new Set<string>();
-        do {
+        while (again && !stopped) {
           again = false;
           const saved = await deps.intents.list();
+          if (stopped) break;
           const pending = await deps.pending();
+          if (stopped) break;
           const savedKeys = new Set(saved.map((row) => JSON.stringify([row.account, row.noticeId])));
           const intents = [...saved, ...pending.filter((row) =>
             !savedKeys.has(JSON.stringify([row.account, row.noticeId])))
             .map((row) => ({ ...row, claimed: false }))];
           for (const intent of intents) {
+            // Admission: past this check the intent runs its whole path.
+            if (stopped) break;
             const key = JSON.stringify([intent.account, intent.noticeId]);
             if (attempted.has(key)) continue;
             attempted.add(key);
@@ -116,9 +127,13 @@ export function createAutomationWakeConsumer(deps: {
               await deps.intents.remove(intent);
             } catch (error) { deps.onError(error); }
           }
-        } while (again);
+        }
       })().catch(deps.onError).finally(() => { running = null; });
       return running;
+    },
+    stop(): Promise<void> {
+      again = false;
+      return stopped ??= running ?? Promise.resolve();
     },
   };
 }

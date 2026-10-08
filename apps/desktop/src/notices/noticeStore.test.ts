@@ -253,6 +253,8 @@ interface Computer {
   onReach?: () => void;
   // Runs when the store reads which account a session belongs to.
   onAccountRead?: () => void;
+  // Runs after each change the store publishes, as main's listeners do.
+  onChanged?: () => void;
 }
 
 function switchTo(computer: Computer, signedIn: NoticeAccount | null): void {
@@ -291,7 +293,7 @@ async function computer(
       };
     },
     installId: () => options.installId ?? "install-a",
-    onChanged: () => { state.changes += 1; },
+    onChanged: () => { state.changes += 1; state.onChanged?.(); },
     nowMs: () => clock,
     refusalNotices: options.refusalNotices,
     dismissRefusal: options.dismissRefusal,
@@ -2135,5 +2137,116 @@ describe("the relay hands an agent wake to one owner computer", () => {
     server.online = false;
     await laptop.store.mark([{ store: "account", noticeId: id }], "dismissed", laptop.signedIn!.key);
     expect(await laptop.store.pendingAutomationWakes()).toEqual([]);
+  });
+
+  describe("when a computer quits", () => {
+    const wakesOn = (c: Computer, ran: string[], errors: unknown[], overrides: Partial<Parameters<typeof createAutomationWakeConsumer>[0]> = {}) =>
+      createAutomationWakeConsumer({
+        intents: createAutomationWakeIntents(join(c.directory, "wakes.json")),
+        pending: () => c.store.pendingAutomationWakes(),
+        ready: async (intent) => c.signedIn?.key === intent.account,
+        enabled: async () => true,
+        enabledIfOpen: async () => true,
+        dismiss: (intent) => c.store.dismissFirst({ store: "account", noticeId: intent.noticeId }, intent.account),
+        wake: async () => { ran.push(c.directory); },
+        onError: (error) => errors.push(error),
+        ...overrides,
+      });
+
+    it("leaves a wake it has not claimed for another computer", async () => {
+      const server = await relay();
+      const id = postWake(server);
+      const laptop = await computer(account(server, "owner"), { installId: "laptop" });
+      const desktop = await computer(account(server, "owner"), { installId: "desktop" });
+      await Promise.all([laptop.store.sync(), desktop.store.sync()]);
+      const ran: string[] = [];
+      const errors: unknown[] = [];
+      const listed = deferred();
+      const quit = deferred();
+      const quitting = wakesOn(laptop, ran, errors, {
+        pending: async () => {
+          const rows = await laptop.store.pendingAutomationWakes();
+          listed.resolve();
+          await quit.promise;
+          return rows;
+        },
+      });
+      void quitting.resume();
+      await listed.promise;
+      const drain = quitting.stop();
+      quit.resolve();
+      await drain;
+      expect(await createAutomationWakeIntents(join(laptop.directory, "wakes.json")).list()).toEqual([]);
+      expect(await laptop.store.pendingAutomationWakes()).toEqual([expect.objectContaining({ noticeId: id })]);
+
+      await wakesOn(desktop, ran, errors).resume();
+      expect(ran).toEqual([desktop.directory]);
+      await laptop.store.sync();
+      await wakesOn(laptop, ran, errors).resume();
+      expect(ran).toEqual([desktop.directory]);
+      expect(errors).toEqual([]);
+    });
+
+    it("settles a claim it admitted, and after restart wakes the saved winner without dismissing again", async () => {
+      const server = await relay();
+      postWake(server);
+      const laptop = await computer(account(server, "owner"), { installId: "laptop" });
+      const desktop = await computer(account(server, "owner"), { installId: "desktop" });
+      await Promise.all([laptop.store.sync(), desktop.store.sync()]);
+      const ran: string[] = [];
+      const errors: unknown[] = [];
+      const dismiss = vi.fn((intent: { account: string; noticeId: string }) =>
+        laptop.store.dismissFirst({ store: "account", noticeId: intent.noticeId }, intent.account));
+      const answered = deferred();
+      const reply = deferred();
+      const quitting = wakesOn(laptop, ran, errors, {
+        // The relay has named this computer first; its saved intent is not claimed yet.
+        dismiss: async (intent) => {
+          const result = await dismiss(intent);
+          answered.resolve();
+          await reply.promise;
+          return result;
+        },
+        // The wake fails at quit, so the claimed winner parks.
+        wake: async () => { throw new Error("dohc is quitting"); },
+      });
+      void quitting.resume();
+      await answered.promise;
+      const drain = quitting.stop();
+      reply.resolve();
+      await drain;
+      const journal = createAutomationWakeIntents(join(laptop.directory, "wakes.json"));
+      expect(await journal.list()).toEqual([expect.objectContaining({ claimed: true })]);
+      expect(errors).toHaveLength(1);
+
+      await desktop.store.sync();
+      await wakesOn(desktop, ran, errors).resume();
+      await wakesOn(laptop, ran, errors, { dismiss }).resume();
+      expect(ran).toEqual([laptop.directory]);
+      expect(dismiss).toHaveBeenCalledOnce();
+      expect(await journal.list()).toEqual([]);
+      expect(errors).toHaveLength(1);
+    });
+
+    it("keeps syncing Notices after its wakes stop, and a Notice change starts no wake work", async () => {
+      const server = await relay();
+      const laptop = await computer(account(server, "owner"));
+      const ready = vi.fn(async () => true);
+      const ran: string[] = [];
+      const errors: unknown[] = [];
+      const wakes = wakesOn(laptop, ran, errors, { ready });
+      laptop.onChanged = () => { void wakes.resume(); };
+      await wakes.stop();
+      const id = postWake(server);
+      const changes = laptop.changes;
+      await laptop.store.sync();
+      expect(laptop.changes).toBeGreaterThan(changes);
+      expect((await file(laptop, "account")).rows).toContainEqual(expect.objectContaining({ noticeId: id }));
+      expect(await laptop.store.pendingAutomationWakes()).toEqual([expect.objectContaining({ noticeId: id })]);
+      expect(ready).not.toHaveBeenCalled();
+      expect(ran).toEqual([]);
+      expect(errors).toEqual([]);
+      expect(await createAutomationWakeIntents(join(laptop.directory, "wakes.json")).list()).toEqual([]);
+    });
   });
 });
