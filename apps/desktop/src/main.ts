@@ -4467,6 +4467,7 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
       selector: value?.grantedSelector, ended: value?.ended === true});
     const pinned = identity(marker);
     return createNamedDesktopLiveCapture({ shareId: marker.shareId, selector: marker.grantedSelector,
+      accessEnded: () => findWorkspace(workspace.workspaceId)?.shareView?.ended === true,
       isOnline: () => net.isOnline(),
       recordDelivery: path => requireEngineSessions().run(workspace, async binding => {
         const statuses = await shareRecordStatuses(new WorkspaceDaemonRequester(binding.client), {

@@ -36,6 +36,7 @@ import {
   type OpenEngineYDocSessionResult as OpenResult,
   type ReadEngineYDocArtifactAssetPayload as ReadArtifactPayload,
   type ReadEngineYDocArtifactAssetResult as ReadArtifactResult,
+  type ReadOnlyTransitionCause,
 } from "../ipc/bridgeContract";
 import { CHANNELS, type EngineYDocSaveStateName } from "../ipc/channels";
 import {
@@ -84,7 +85,7 @@ export type EngineYDocSessionProvider = Omit<WorkspaceEngineYDocProviderSession,
 };
 export interface EngineYDocSessionCapture {
   waitForAdmission?(path: string, signal: AbortSignal): Promise<boolean>;
-  openYDocSession(input: Omit<Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], "onSaveState"> & {onSaveState?: (state: EngineYDocSaveStateName, token: number, event: EngineYDocSaveEvent, authorCapacity?: boolean) => void}): Promise<EngineYDocSessionProvider>;
+  openYDocSession(input: Omit<Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], "onSaveState"> & {onSaveState?: (state: EngineYDocSaveStateName, token: number, event: EngineYDocSaveEvent, authorCapacity?: boolean, readOnlyCause?: ReadOnlyTransitionCause) => void}): Promise<EngineYDocSessionProvider>;
 }
 
 type SharedAdmissionWait = {cancel: AbortController; authorityId: symbol; generation: number};
@@ -126,6 +127,7 @@ interface EngineYDocSessionIpcOptions {
 }
 
 interface SessionEvent {
+  readOnlyCause?: ReadOnlyTransitionCause;
   authorCapacity?: boolean;
   editRefusal?: import("../ipc/bridgeContract").EngineYDocSaveStateEvent["editRefusal"];
   state: EngineYDocSaveStateName;
@@ -139,6 +141,7 @@ interface LineageReplacement {
 }
 
 interface EngineYDocIpcOwnedSession {
+  readonly readOnlyCause: ReadOnlyTransitionCause;
   ownerHandoff?: { ready(): void; fail(error: unknown): void; done: Promise<void>; finish(): void };
   workspace: EngineYDocWorkspace;
   provider: EngineYDocSessionProvider;
@@ -640,10 +643,12 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       openSession: async (signals) => {
         const saveSeq = createEngineYDocSaveSeqState();
         let lastEvent: SessionEvent | null = null;
+        let currentReadOnlyCause: ReadOnlyTransitionCause = "reconnecting";
         const emit = (event: SessionEvent): void => {
           if (lastEvent?.state === event.state &&
             (event.state === "settling" || lastEvent.seq === event.seq) &&
             lastEvent.authorCapacity === event.authorCapacity &&
+            lastEvent.readOnlyCause === event.readOnlyCause &&
             lastEvent.editRefusal?.requestId === event.editRefusal?.requestId &&
             lastEvent.editRefusal?.message === event.editRefusal?.message) return;
           signals.emit(event);
@@ -671,14 +676,15 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
                 editRefusal: { workspaceId: workspace.workspaceId, path: canonicalPath, requestId, message },
               }));
             },
-            onSaveState: (state, token, event, authorCapacity) => {
+            onSaveState: (state, token, event, authorCapacity, readOnlyCause) => {
+              if (state === "read-only") currentReadOnlyCause = readOnlyCause ?? "reconnecting";
               const seq =
                 event === "start"
                   ? noteSettleStart(saveSeq, token)
                   : event === "outcome"
                     ? noteSettleOutcome(saveSeq, token)
                     : 0;
-              publish(() => emit({ state, seq, ...(authorCapacity ? { authorCapacity: true } : {}) }));
+              publish(() => emit({ state, seq, ...(authorCapacity ? { authorCapacity: true } : {}), ...(readOnlyCause ? { readOnlyCause } : {}) }));
             },
             onRemoteUpdate: (update) => {
               publish(() => signals.remoteUpdate(update));
@@ -704,6 +710,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         }
 
         const owned: EngineYDocIpcOwnedSession = {
+          get readOnlyCause() { return currentReadOnlyCause; },
           workspace,
           provider,
           saveSeq,
@@ -848,7 +855,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           return { accepted: false, reason: "deleted" };
         }
         if (this.#isSharedView(owned.workspace) && !owned.provider.liveWritable?.()) {
-          owned.emit({ state: "read-only", seq: input.seq });
+          owned.emit({ state: "read-only", seq: input.seq, readOnlyCause: owned.readOnlyCause });
           return { accepted: false, reason: "read-only" };
         }
         // A renderer editor update is this computer's person typing: agent
