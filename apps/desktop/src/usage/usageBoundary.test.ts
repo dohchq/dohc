@@ -1,16 +1,17 @@
-import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { parse } from "@babel/parser";
 import { describe, expect, it } from "vitest";
 
 const root = resolve(import.meta.dirname, "../../../..");
 const store = realpathSync(join(root, "apps/desktop/src/usage/usageStore.ts"));
+// Tracked sources only: other suites create and delete build output and
+// temporary folders under these directories while this test walks them.
 function sources(directory: string): string[] {
-  return readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
-    if (["node_modules", "dist", ".git", ".agent-artifacts", ".dohc-dev"].includes(entry.name)) return [];
-    const path = join(directory, entry.name);
-    return entry.isDirectory() ? sources(path) : /\.[cm]?[jt]sx?$/.test(path) ? [path] : [];
-  });
+  return execFileSync("git", ["ls-files", "-z", "--", relative(root, directory)], { cwd: root, encoding: "utf8" })
+    .split("\0").filter(path => /\.[cm]?[jt]sx?$/.test(path)).map(path => join(root, path))
+    .filter(path => existsSync(path));
 }
 function resolveImport(value: string, path: string): string | undefined {
   let base: string;
