@@ -1384,28 +1384,30 @@ export class CollectionAutomations {
       .catch((error: unknown) => this.options.onError("reload dataset automations", error));
   }
 
-  private async indexDatasets(open: boolean): Promise<void> {
-    this.targetRevision += 1;
-    const folders = await this.datasetFolders(open);
-    if (folders === null) return;
-    for (const path of this.datasets.keys()) {
-      if (folders.has(path)) continue;
-      this.datasets.delete(path);
-      this.files.delete(path);
-    }
-    for (const [path, dataset] of folders) {
-      if (this.collections.has(path)) continue;
-      this.datasets.set(path, dataset);
-      await this.readFile(path);
-    }
-    this.targetRevision += 1;
-    await this.noteSwitches();
-    // A schedule found now counts from now, as one switched on does.
-    this.noteEnabledSchedules(false);
-    await this.reconcile(false);
-    this.publishHolds();
-    this.options.onSchedulesChanged?.();
-    this.wakeDatasetWaits();
+  private indexDatasets(open: boolean): Promise<void> {
+    return this.readingIndex(async () => {
+      this.targetRevision += 1;
+      const folders = await this.datasetFolders(open);
+      if (folders === null) return;
+      for (const path of this.datasets.keys()) {
+        if (folders.has(path)) continue;
+        this.datasets.delete(path);
+        this.files.delete(path);
+      }
+      for (const [path, dataset] of folders) {
+        if (this.collections.has(path)) continue;
+        this.datasets.set(path, dataset);
+        await this.readFile(path);
+      }
+      this.targetRevision += 1;
+      await this.noteSwitches();
+      // A schedule found now counts from now, as one switched on does.
+      this.noteEnabledSchedules(false);
+      await this.reconcile(false);
+      this.publishHolds();
+      this.options.onSchedulesChanged?.();
+      this.wakeDatasetWaits();
+    });
   }
 
   /**
@@ -3756,7 +3758,7 @@ export class CollectionAutomations {
 
   private async readingIndex(work: () => Promise<void>): Promise<void> {
     this.indexReads += 1;
-    try { await work(); } finally { this.indexReads -= 1; }
+    try { await work(); } finally { if (--this.indexReads === 0) this.notifyClaimed(); }
   }
 
   private loadIndex(): Promise<void> {
@@ -5279,6 +5281,7 @@ export class CollectionAutomations {
       withRecordWrites: this.options.withRecordWrites,
       collectionIdOf: (path) => this.collections.get(path) ?? null,
       collectionPathOf: (collectionId) => this.collectionPathOf(collectionId),
+      isIndexReading: () => this.indexReads > 0,
       readCode: async (path) => {
         const read = await this.options.readText(path);
         return read === null ? null : { text: read.text, truncated: read.truncated };

@@ -122,7 +122,7 @@ export interface DatasetRunHost {
 export interface DatasetAutomationRunDependencies extends Pick<
   CollectionAutomationRunDependencies,
   "targets" | "evaluator" | "store" | "nowMs" | "personName" | "chat" | "postNotice" | "recipientVerdicts" | "readMessageBody" | "readCode"
->, Partial<Pick<CollectionAutomationRunDependencies, "withReads" | "withRecordWrites" | "collectionIdOf" | "collectionPathOf" | "checkReach">> {
+>, Partial<Pick<CollectionAutomationRunDependencies, "withReads" | "withRecordWrites" | "collectionIdOf" | "collectionPathOf" | "isIndexReading" | "checkReach">> {
   /** The dataset host; resolves null when it is not open. */
   withHost<T>(work: (host: DatasetRunHost) => T | Promise<T>): Promise<T | null>;
   /** Who can edit the workspace's Collections now, as last read, for the check before each record effect. */

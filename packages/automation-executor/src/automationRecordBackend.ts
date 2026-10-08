@@ -70,7 +70,7 @@ import type { AutomationTarget } from "./automationTargets";
 export type RecordRunDependencies = Pick<CollectionAutomationRunDependencies,
   "targets" | "evaluator" | "store" | "nowMs" | "personName" | "chat" | "postNotice" | "recipientVerdicts" | "readMessageBody" | "readCode"
 > & Partial<Pick<CollectionAutomationRunDependencies,
-  "withReads" | "withRecordWrites" | "collectionIdOf" | "collectionPathOf" | "checkReach" | "localPersonId" | "checkPresser" | "authorizeDataset"
+  "withReads" | "withRecordWrites" | "collectionIdOf" | "collectionPathOf" | "isIndexReading" | "checkReach" | "localPersonId" | "checkPresser" | "authorizeDataset"
 >> & Partial<Pick<DatasetAutomationRunDependencies, "withHost" | "cachedRoster">>;
 export type RecordRunInput = Omit<CollectionAutomationRunInput, "claim"> & {
   claim: Pick<AutomationClaim, "automationId" | "claimId" | "run" | "depth" | "createdAtMs">;
@@ -371,6 +371,7 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
   if (moved) await deps.store.save(state);
   const checkLocations = () => {
     const path = sourcePath();
+    if (path === null && deps.isIndexReading?.()) throw new AutomationRunWait("The automation's Collection moved.", "moved");
     if (source.kind === "document" && path === null) throw new Error("This automation's Collection is gone.");
     if (path !== collection.path) throw new AutomationRunWait("The automation's Collection moved.", "moved");
     for (const target of state.collections) if ((deps.collectionPathOf?.(target.collectionId) ?? (target.collectionId === source.datasetId ? collection.path : null)) !== target.path) throw new AutomationRunWait("A Collection moved while this run was active.", "moved");

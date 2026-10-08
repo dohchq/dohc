@@ -1440,3 +1440,58 @@ it("does not save a stale destination refusal after the roster await", async () 
     expect(f.docs.get("Target/same")!.status).toBe("Open");
   } finally { resume.resolve(); await running; }
 });
+
+it.each(["success", "roster wait", "held wait"] as const)("keeps a missing source retryable during an index read after %s", async boundary => {
+  const f = await fixture(false, false);
+  const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+  let missing = false, paused = false;
+  const lookup = f.dependencies.collectionPathOf;
+  f.dependencies.collectionPathOf = id => missing && id === "Source" ? null : lookup(id);
+  f.dependencies.isIndexReading = () => missing;
+  const pause = async () => { if (!paused) { paused = true; reached.resolve(); await resume.promise; } };
+  if (boundary === "held wait") f.dependencies.checkReach = async () => {
+    if ((await f.runs()).length === 0) return false;
+    await pause(); return true;
+  };
+  else f.dependencies.cachedRoster = async () => {
+    if ((await f.runs()).length > 0) {
+      await pause();
+      if (boundary === "roster wait") return { kind: "unknown", problem: { kind: "unchecked", next: "Try again." } };
+    }
+    return roster;
+  };
+  const running = f.run(automation((boundary === "held wait" ? '      - set: {Status: First}\n' : '') + '      - set: {Status: Closed}\n'));
+  try {
+    await reached.promise;
+    missing = true;
+    resume.resolve();
+    await expect(running).resolves.toEqual({ kind: "wait", reason: "moved" });
+    const runs = await f.runs();
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.outcome).toBeNull();
+    expect(runs[0]!.applied).toHaveLength(boundary === "held wait" ? 1 : 0);
+  } finally { resume.resolve(); await running; }
+});
+
+it("still saves a gone source failure when no index read is active", async () => {
+  const f = await fixture(false, false);
+  const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+  let missing = false, paused = false;
+  const lookup = f.dependencies.collectionPathOf;
+  f.dependencies.collectionPathOf = id => missing && id === "Source" ? null : lookup(id);
+  f.dependencies.isIndexReading = () => false;
+  f.dependencies.cachedRoster = async () => {
+    if (!paused && (await f.runs()).length > 0) { paused = true; reached.resolve(); await resume.promise; }
+    return roster;
+  };
+  const running = f.run(automation('      - set: {Status: Closed}\n'));
+  try {
+    await reached.promise;
+    missing = true;
+    resume.resolve();
+    await expect(running).resolves.toMatchObject({ kind: "failed", error: "This automation's Collection is gone." });
+    const runs = await f.runs();
+    expect(runs[0]!.outcome).toMatchObject({ state: "failed", error: "This automation's Collection is gone." });
+    expect(runs[0]!.applied).toEqual([]);
+  } finally { resume.resolve(); await running; }
+});

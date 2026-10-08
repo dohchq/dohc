@@ -8,7 +8,7 @@ import {
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
@@ -38,6 +38,7 @@ import {
   CollectionAutomations,
   type AutomationFailureReport,
   type CollectionAutomationEngine,
+  type CollectionAutomationsOptions,
   type PressSettled,
   type PressWaitReason,
 } from "@dohc/automation-executor/collection-automations";
@@ -568,7 +569,7 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
       return { text, truncated: false as const, contentHash: sha256(text) };
     } catch { return null; }
   });
-  const makeExecutor = () => executor = new CollectionAutomations({
+  const makeExecutor = (extra: Partial<CollectionAutomationsOptions> = {}) => executor = new CollectionAutomations({
     resolveRelayedPress: resolveAuthority,
     resolveButtonInspection: async (id) => {
       const authority = await resolveAuthority(id);
@@ -654,6 +655,7 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
       wake();
       return result;
     },
+    ...extra,
   });
   makeExecutor();
   return {
@@ -701,6 +703,72 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
 }
 
 describe("Collection automations on a dataset", () => {
+  it.each(["failed reload", "dataset move"] as const)("retries a dataset press after a %s index read", async change => {
+    const f = await world();
+    await f.writeAutomations(closePaid().replace("field-changed: Paid", "button: Mark paid"));
+    const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+    const indexReached = Promise.withResolvers<void>(), indexResume = Promise.withResolvers<void>();
+    let paused = false, indexing = false, releases = 0;
+    const auxiliary = { ...definition, datasetId: id(300), schemaPath: "Aux/schema.sql", operationsPath: "Aux/operations.js" };
+    const relocated = { ...definition, schemaPath: "Shared/Budget/schema.sql", operationsPath: "Shared/Budget/operations.js" };
+    let definitions = [definition];
+    await mkdir(join(f.root, "Aux"));
+    await writeFile(join(f.root, "Aux/dataset.json"), JSON.stringify({ datasetId: auxiliary.datasetId }));
+    const base = createAutomationRunStore(f.root, resolveWorkspaceMetadataDir);
+    const executor = f.makeExecutor({
+      store: { ...base, runsOf: async (...args) => {
+        if (!paused && f.claims().some(c => c.state === "running")) { paused = true; reached.resolve(); await resume.promise; }
+        return base.runsOf(...args);
+      } },
+      withDatasetHost: async work => work({ ...f.host.automations,
+        release: claim => { f.host.automations.release(claim); releases += 1; },
+        datasets: () => ({ definitions, failures: [] }),
+        revision: datasetId => ({ ...f.approved, definition: definitions.find(d => d.datasetId === datasetId)! }),
+        generated: () => true,
+        dataGrants: datasetId => datasetId === auxiliary.datasetId ? { workspaceId: "workspace", grants: [] } : f.host.automations.dataGrants(datasetId),
+      }),
+      readText: async path => {
+        if (indexing && path === "Aux/automations.yaml") { indexReached.resolve(); await indexResume.promise; }
+        if (indexing && change === "failed reload" && path === "Budget/collection.yaml") {
+          indexing = false;
+          throw new Error("Schema read failed.");
+        }
+        return f.readText(path);
+      },
+    });
+    onTestFinished(async () => { resume.resolve(); indexResume.resolve(); await executor.dispose(); });
+    await executor.open();
+    await executor.idle();
+    const { id: invoice } = await f.create({ [PAID]: false, [STATUS]: "Open" });
+    const pressed = await executor.pressDataset({ datasetId: BUDGET, table: "Invoices", field: "Mark paid", recordId: JSON.stringify(invoice),
+      pressId: id(301), pressedBy: "user-owner", by: { kind: "human" }, confirmed: [] }, async datasetId => f.host.describe(datasetId), () => undefined);
+    expect(pressed.busy).toBe(false);
+    await reached.promise;
+    if (change === "dataset move") {
+      await mkdir(join(f.root, "Shared"));
+      await rename(join(f.root, "Budget"), join(f.root, "Shared/Budget"));
+    }
+    definitions = [auxiliary, change === "dataset move" ? relocated : definition];
+    indexing = true;
+    const reload = change === "failed reload"
+      ? executor.resyncFileObservation().then(() => null, error => error)
+      : (executor.datasetsChanged(), executor.automationsIn("Shared/Budget"));
+    await indexReached.promise;
+    expect(executor.locate(AUTOMATION)).toBeNull();
+    resume.resolve();
+    await expect.poll(() => f.claims()[0]?.state).toBe("pending");
+    // Another claim notification must not settle the temporarily missing source.
+    executor.notifyClaimed();
+    await expect.poll(() => releases).toBeGreaterThanOrEqual(2);
+    expect(f.claims()[0]?.state).toBe("pending");
+    expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
+    indexResume.resolve();
+    await reload;
+    if (change === "failed reload") expect(f.errors).toContainEqual({ context: "reload Collection automations", error: new Error("Schema read failed.") });
+    await expect.poll(() => f.claims()[0]?.state).toBe("done");
+    expect((await f.record(invoice))?.values[STATUS]).toBe("Closed");
+  });
+
   it("reports a missing trigger field instead of showing an automation that cannot subscribe as runnable", async () => {
     const f = await world();
     await f.writeAutomations(closePaid().replace("field-changed: Paid", "field-changed: Missing"));
@@ -2459,9 +2527,10 @@ ${steps}`;
     f.engineClaims.push(engineClaim("atc_budget", "pending", due, SWEEP));
     f.executor.notifyClaimed();
     await f.until(() => f.engineClaims[0]!.attempts === 0 && f.served() >= 1);
-    // The index it asked for has run, and nothing wakes the claim again.
+    // Wait for the requested index read without inspecting the missing folder, which starts another read.
     const settle = async () => {
-      await f.executor.automationsIn("Budget");
+      await f.executor.idle();
+      await (f.executor as unknown as { chain: Promise<void> }).chain;
       await f.executor.idle();
     };
     await settle();
