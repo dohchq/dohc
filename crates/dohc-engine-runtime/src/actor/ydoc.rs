@@ -2202,6 +2202,7 @@ fn record_file_holds_head(
     live_audit: Option<&dohc_engine_collab::live_update_application::LiveSettlementAudit>,
     current: &dohc_engine_domain::TextSnapshot,
     source_state_vector_sha256: &str,
+    publication_state_bytes: Option<&[u8]>,
     now_ms: i64,
 ) -> Result<bool, RuntimeError> {
     let (head, settled, pending_empty, last_sha): (i64, Option<i64>, bool, Option<String>) = store.read_with(|conn| {
@@ -2254,6 +2255,14 @@ fn record_file_holds_head(
             .map_err(StorageError::persist_public)?;
         }
         if let Some(audit) = live_audit {
+            let capture = audit.prepare_publication_state_in_tx(tx)?;
+            let state = match &capture {
+                dohc_engine_collab::live_update_application::LiveSettlementPublicationState::New => Some(
+                    publication_state_bytes.ok_or(StorageError::StateCorrupt { source: None })?,
+                ),
+                dohc_engine_collab::live_update_application::LiveSettlementPublicationState::Retained(bytes) => Some(bytes.as_slice()),
+                dohc_engine_collab::live_update_application::LiveSettlementPublicationState::Unavailable => None,
+            };
             let id = audit.record_in_tx(
                 tx,
                 &current.latest_moment_id,
@@ -2261,6 +2270,9 @@ fn record_file_holds_head(
                 source_state_vector_sha256,
                 now_ms,
             )?;
+            if let Some(state) = state {
+            audit.record_publication_state_in_tx(tx, &id, state)?;
+            }
             dohc_engine_sync::journal_live_settlement_in_tx(
                 tx,
                 &audit.binding().workspace_id,
@@ -2594,6 +2606,7 @@ pub(super) fn ydoc_settle_on_store(
     if doc.has_pending_dependencies() {
         return Err(dohc_engine_collab::CollabError::MissingDependencies.into());
     }
+    let publication_state_bytes = live_audit.map(|_| doc.encode_full_state());
     let projection = project_ydoc_on_store(store, key, doc, content_kind)?;
     // The in-band cap bounds only what the RESPONSE can carry as one wire
     // string — it must never gate the settle itself. Materialization writes
@@ -2810,6 +2823,7 @@ pub(super) fn ydoc_settle_on_store(
             live_audit,
             &current,
             &projection.source_state_vector_sha256,
+            publication_state_bytes.as_deref(),
             now_ms,
         )?;
         return Ok(YdocSettleOutcome::Settled(Box::new(YdocSettlement {
@@ -2855,6 +2869,7 @@ pub(super) fn ydoc_settle_on_store(
             None,
             &current,
             &projection.source_state_vector_sha256,
+            publication_state_bytes.as_deref(),
             now_ms,
         )?;
         return Ok(YdocSettleOutcome::Settled(Box::new(YdocSettlement {
@@ -3000,6 +3015,14 @@ pub(super) fn ydoc_settle_on_store(
             dohc_engine_domain::DomainError::Storage(StorageError::persist_public(error))
         })?;
         if let Some(audit) = live_audit {
+            let capture = audit.prepare_publication_state_in_tx(tx)?;
+            let state = match &capture {
+                dohc_engine_collab::live_update_application::LiveSettlementPublicationState::New => Some(
+                    publication_state_bytes.as_deref().ok_or(StorageError::StateCorrupt { source: None })?,
+                ),
+                dohc_engine_collab::live_update_application::LiveSettlementPublicationState::Retained(bytes) => Some(bytes.as_slice()),
+                dohc_engine_collab::live_update_application::LiveSettlementPublicationState::Unavailable => None,
+            };
             let id = audit.record_in_tx(
                 tx,
                 &result.moment.moment_id,
@@ -3007,6 +3030,9 @@ pub(super) fn ydoc_settle_on_store(
                 &source_state_vector_sha256,
                 now_ms,
             )?;
+            if let Some(state) = state {
+            audit.record_publication_state_in_tx(tx, &id, state)?;
+            }
             dohc_engine_sync::journal_live_settlement_in_tx(
                 tx,
                 &audit.binding().workspace_id,

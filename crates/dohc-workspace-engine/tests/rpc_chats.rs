@@ -1075,6 +1075,8 @@ async fn synced_negative_agent_read_cursor_round_trips_over_the_wire() {
         })
         .expect("seed local thread");
     let operation = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: "rpc-negative-agent-read".to_owned(),
         origin_id: "peer".to_owned(),
         origin_seq: 0,

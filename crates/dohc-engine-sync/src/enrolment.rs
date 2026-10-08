@@ -933,6 +933,8 @@ mod tests {
             10,
         );
         let refused = crate::ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "ws".to_owned(),
             origin_id: "peer".to_owned(),
             origin_seq: 0,
@@ -978,6 +980,8 @@ mod tests {
             10,
         );
         let refused = crate::ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "ws".to_owned(),
             origin_id: "peer".to_owned(),
             origin_seq: 0,
@@ -1301,6 +1305,8 @@ mod tests {
             )
             .expect("named version");
         let refused = crate::ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "ws".to_owned(),
             origin_id: "peer".to_owned(),
             origin_seq: 0,
@@ -1404,6 +1410,8 @@ mod tests {
             &mut peer,
             &mut dohc_engine_collab::WriterDocCache::new(),
             &crate::ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: "ws".to_owned(),
                 origin_id: "peer".to_owned(),
                 origin_seq: 0,
@@ -1541,6 +1549,8 @@ mod tests {
             &mut local,
             &mut dohc_engine_collab::WriterDocCache::new(),
             &crate::ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: "ws".to_owned(),
                 origin_id: "peer".to_owned(),
                 origin_seq: 0,
@@ -2091,6 +2101,66 @@ mod tests {
             crate::read_replication_acked_seq(&peer, "ws", "local").expect("ack"),
             1
         );
+    }
+
+    #[test]
+    fn saved_file_and_covered_head_exports_mark_unproven_hosted_authors_across_epochs() {
+        for retained in [false, true] {
+            let (_scratch, _, mut store) = open_store();
+            seed_main(&mut store);
+            if retained {
+                seed_retained_artifact(&mut store);
+            } else {
+                write_text(
+                    &mut store,
+                    "main",
+                    "seed-object",
+                    "seed-moment",
+                    "saved text",
+                    "capture",
+                    10,
+                );
+            }
+            let authors=serde_json::json!([{"kind":"human","humanId":"hosted-reader","humanName":"Reader"},{"kind":"agent","agentId":"agent","onBehalfOf":"hosted-reader"}]).to_string();
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "UPDATE moments SET author_json=?1 WHERE moment_id='seed-moment'",
+                        [&authors],
+                    )
+                    .map_err(SyncError::persist)?;
+                    Ok::<_, SyncError>(())
+                })
+                .unwrap();
+            enroll(&mut store).unwrap();
+            let assert_marked = |store: &EngineStore| {
+                let moments: Vec<_> = local_ops(store)
+                    .into_iter()
+                    .filter(|(kind, _)| kind == "moment.append")
+                    .collect();
+                assert!(!moments.is_empty());
+                for (_, payload) in moments {
+                    assert!(payload.get("authors").is_none());
+                    assert!(payload.get("settlementReference").is_none());
+                    assert_eq!(payload["metadata"]["summary"], "Attribution unavailable");
+                    assert_eq!(
+                        payload["attributionUnavailable"]["settlementId"],
+                        "unavailable"
+                    );
+                }
+                assert!(!crate::list_refusal_notices(store, "ws").unwrap().is_empty());
+            };
+            assert_marked(&store);
+            store.write_with(&NoFaults,|tx| {
+                tx.execute("DELETE FROM sync_relay_cursors WHERE workspace_id='ws'",[]).map_err(SyncError::persist)?;
+                tx.execute("DELETE FROM sync_relay_push_state WHERE workspace_id='ws'",[]).map_err(SyncError::persist)?;
+                tx.execute("UPDATE sync_identity SET replication_epoch='next-epoch',stream_identity='next-stream' WHERE workspace_id='ws'",[]).map_err(SyncError::persist)?;
+                tx.execute("UPDATE moments SET author_json=?1 WHERE moment_id='seed-moment'",[&authors]).map_err(SyncError::persist)?;
+                Ok::<_,SyncError>(())
+            }).unwrap();
+            enroll(&mut store).unwrap();
+            assert_marked(&store);
+        }
     }
 
     #[test]
@@ -3070,6 +3140,8 @@ mod tests {
                 peer,
                 &mut dohc_engine_collab::WriterDocCache::new(),
                 &crate::ReplicationEnvelope {
+                    settlement_admission: None,
+                    admitted_author_snapshot: None,
                     workspace_id: "ws".to_owned(),
                     origin_id: "source".to_owned(),
                     origin_seq: origin_seq as i64,
@@ -3358,6 +3430,8 @@ mod tests {
         crate::apply_version_envelope(
             &mut peer,
             &crate::ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: "ws".to_owned(),
                 origin_id: "peer".to_owned(),
                 origin_seq: 0,
@@ -3373,6 +3447,8 @@ mod tests {
             &mut peer,
             &mut dohc_engine_collab::WriterDocCache::new(),
             &crate::ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: "ws".to_owned(),
                 origin_id: "peer".to_owned(),
                 origin_seq: 1,
@@ -3660,6 +3736,8 @@ mod tests {
         let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         let imported = crate::ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "ws".to_owned(),
             origin_id: "peer".to_owned(),
             origin_seq: 0,

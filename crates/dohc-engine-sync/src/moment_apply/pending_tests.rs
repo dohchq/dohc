@@ -43,6 +43,8 @@ fn seed_applied(
             for (seq, change) in changes.iter().enumerate() {
                 let seq = seq as i64;
                 let envelope = ReplicationEnvelope {
+                    settlement_admission: None,
+                    admitted_author_snapshot: None,
                     workspace_id: "ws".into(),
                     origin_id: "peer".into(),
                     origin_seq: seq,

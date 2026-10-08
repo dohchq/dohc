@@ -25,6 +25,7 @@ export function createWorkspaceReplicationRoutes(
     | "getWorkspaceBootstrap"
     | "rotateWorkspaceIdentity"
     | "appendLogBatch"
+    | "prepareHostedSettlements"
     | "fetchLogPage"
     | "fetchLogCoordinate"
     | "getWorkspaceIdentity"
@@ -126,9 +127,10 @@ export function createWorkspaceReplicationRoutes(
       // parseLogOp and appendLogBatch, so the relay rejects the full batch
       // before it writes any operation.
       assertChatAuthorship(input.ops, actor.userId);
-      if (logProvenance === "native-settlements") assertServiceReplicaLogProvenance(originId, input.ops);
-      else assertClientLogProvenance(originId, input.ops);
+      if (logProvenance === "native-settlements") assertServiceReplicaLogProvenance(originId, input.ops, true);
+      else assertClientLogProvenance(originId, input.ops, true);
       const ops = await parseAuthenticatedLogOps(input.ops, actor.userId, lookupUserDisplayName);
+      await storage.prepareHostedSettlements({workspaceId:route.workspaceId,originId,ops},request.signal);
       const result = storage.appendLogBatch({
         workspaceId: route.workspaceId,
         originId,
@@ -155,6 +157,7 @@ export function createWorkspaceReplicationRoutes(
         inserted: result.inserted,
         skipped: result.skipped,
         currentMaxOriginSeq: result.currentMaxOriginSeq,
+        ...(result.settlementRefusals ? {settlementRefusals:result.settlementRefusals} : {}),
       });
     }
 
@@ -198,6 +201,7 @@ export function createWorkspaceReplicationRoutes(
           payload: JSON.parse(row.payloadJson) as unknown,
           recordedAtMs: row.recordedAtMs,
           ...(row.admittedAuthorSnapshot === undefined ? {} : {admittedAuthorSnapshot: row.admittedAuthorSnapshot}),
+          ...(row.settlementAdmission === undefined ? {} : {settlementAdmission:row.settlementAdmission}),
         })),
         // A hidden epoch floor is a read filter, not a served log row. An
         // empty response therefore cannot advance the caller's cursor: the
@@ -231,6 +235,7 @@ export function createWorkspaceReplicationRoutes(
         payload: JSON.parse(row.payloadJson) as unknown,
         recordedAtMs: row.recordedAtMs,
         ...(row.admittedAuthorSnapshot === undefined ? {} : {admittedAuthorSnapshot: row.admittedAuthorSnapshot}),
+          ...(row.settlementAdmission === undefined ? {} : {settlementAdmission:row.settlementAdmission}),
       };
       if (row.relaySeq <= epochLogFloor) {
         return jsonResponse({

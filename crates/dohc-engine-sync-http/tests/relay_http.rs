@@ -911,6 +911,8 @@ fn direct_transport_rejects_an_oversized_outbound_payload_before_io() {
             origin_id: "local".to_owned(),
             after_seq: -1,
             ops: vec![ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: "ws".to_owned(),
                 origin_id: "local".to_owned(),
                 origin_seq: 0,
@@ -1193,6 +1195,7 @@ fn expected_relay_error(code: &str) -> RelayError {
         "presence_capacity" => RelayError::PresenceCapacity,
         "quota_exceeded" => RelayError::QuotaExceeded,
         "self_share" => RelayError::SelfShare,
+        "settlement_proof_budget" => RelayError::SettlementProofBudget,
         "share_access_rate_limited" => RelayError::ShareAccessRateLimited,
         "share_op_rejected" => RelayError::ShareOperationRejected,
         "share_read_only" => RelayError::ShareReadOnly,
@@ -1307,6 +1310,8 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
             origin_id: "local".to_owned(),
             after_seq: -1,
             ops: vec![ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: "ws".to_owned(),
                 origin_id: "local".to_owned(),
                 origin_seq: 0,
