@@ -48,7 +48,7 @@ export function harnessBridge(initialUpdate?: Uint8Array) {
   ): void {
     if (openedSessionId === null) throw new Error("session not open yet");
     for (const listener of [...saveStateListeners]) {
-      listener({ sessionId: openedSessionId, ...engineSaveState(state), seq });
+      listener({ sessionId: openedSessionId, workspaceId: "ws-1", path: "notes/a.md", ...engineSaveState(state), seq });
     }
   }
 

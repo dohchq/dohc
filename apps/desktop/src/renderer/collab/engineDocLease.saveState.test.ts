@@ -715,11 +715,11 @@ it("keeps generic reasons out of saveError and gives refusal text precedence ove
   await retainBound();
   const listener = subscribe.mock.calls[0]![0];
   const sessionId = harness.sessionId()!;
-  act(() => listener({ sessionId, state: { kind: "error", reason: "generic reason", issueId: null }, seq: 0 }));
+  act(() => listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "error", reason: "generic reason", issueId: null }, seq: 0 }));
   expect(retained.snapshot.saveError).toBeNull();
-  act(() => listener({ sessionId, state: { kind: "changed-on-disk", reason: "The file changed on disk.", issueId: null }, seq: 0 }));
+  act(() => listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "changed-on-disk", reason: "The file changed on disk.", issueId: null }, seq: 0 }));
   expect(retained.snapshot.saveError).toBeNull();
-  act(() => listener({ sessionId, state: { kind: "error", reason: "generic reason", issueId: "refusal" }, seq: 0,
+  act(() => listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "error", reason: "generic reason", issueId: "refusal" }, seq: 0,
     authorCapacity: true, editRefusal: { workspaceId: "ws-1", path: "notes/big.md", requestId: "refusal", message: "refusal message" } }));
   expect(retained.snapshot.saveError).toBe("refusal message");
 });

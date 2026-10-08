@@ -85,7 +85,7 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
       openedSessionId = payload.sessionId;
       if (emitDeletedDuringOpen) {
         for (const listener of [...saveStateListeners]) {
-          listener({ sessionId: payload.sessionId, ...engineSaveState("deleted"), seq: 0 });
+          listener({ sessionId: payload.sessionId, workspaceId: "ws-1", path: "notes/a.md", ...engineSaveState("deleted"), seq: 0 });
         }
       }
       if (removalInProgress) {
@@ -242,7 +242,7 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
   ): void {
     const target = sessionId ?? openedSessionId;
     if (target === null) throw new Error("session not open yet");
-    const event = { sessionId: target, ...engineSaveState(state), seq, authorCapacity };
+    const event = { sessionId: target, workspaceId: "ws-1", path: "notes/a.md", ...engineSaveState(state), seq, authorCapacity };
     act(() => {
       for (const listener of [...saveStateListeners]) listener(event);
     });
@@ -263,7 +263,7 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
   ): void {
     if (openedSessionId === null) throw new Error("session not open yet");
     for (const listener of [...saveStateListeners]) {
-      listener({ sessionId: openedSessionId, ...engineSaveState(state), seq });
+      listener({ sessionId: openedSessionId, workspaceId: "ws-1", path: "notes/a.md", ...engineSaveState(state), seq });
     }
   }
 
