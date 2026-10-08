@@ -15,7 +15,7 @@ const reader = {principalKind: "named" as const, principalId: "reader", grantId:
 const receipt = (cursor: number) => ({deliveryId: `event-${cursor}`, updateDigest: digest, journalCursor: cursor, acceptingHostEpoch: parseHostEpoch(1)});
 function reviewFixture() {
   return OwnerRestoreReview.parse({operationId: "restore", workspaceId: "workspace", binding, proposalDigest, candidateDigest: digest,
-    recordedAtMs: 9, selectedPointReceivedAtMs: null, point: {journalCursor: 0, receiptDigest: digest, markdownDigest: digest}, frozenTerminal: receipt(3),
+    recordedAtMs: 9, selectedPointReceivedAtMs: null, selectedPointAuthority: null, point: {journalCursor: 0, receiptDigest: digest, markdownDigest: digest}, frozenTerminal: receipt(3),
     selectedEventCount: 0, acceptedEventCount: 3, selectedHistoryDigest: digest, acceptedHistoryDigest: digest, nativeSourceManifestDigest: digest,
     content: {frozenMarkdown: "Current text", restoredMarkdown: "Earlier text", frozenMarkdownDigest: digest, restoredMarkdownDigest: digest,
       frozenMarkdownByteLength: 12, restoredMarkdownByteLength: 12},
@@ -232,8 +232,9 @@ it("identifies the accepted restore point in the review", async () => {
   const f = fixture(7), original = f.call.getMockImplementation()!;
   f.call.mockImplementation(async input => {
     if (input.action !== "review") return original(input);
-    const review = reviewFixture(); review.point.journalCursor = 7; review.selectedPointReceivedAtMs = 1788922800000;
-    return {status: f.status(), result: OwnerRestoreReview.parse(review)};
+    const review = reviewFixture();
+    return {status: f.status(), result: OwnerRestoreReview.parse({...review, point: {...review.point, journalCursor: 7},
+      selectedPointReceivedAtMs: 1788922800000, selectedPointAuthority: owner})};
   });
   render(<OwnerRestoreDialog {...f.props} />); await openStop("7");
   fireEvent.click(screen.getByRole("button", {name: "Stop access"})); await screen.findByRole("button", {name: "Restore file"});
@@ -243,12 +244,44 @@ it("identifies the accepted restore point in the review", async () => {
   expect(document.querySelector("time")?.dateTime).toBe(new Date(1788922800000).toISOString());
 });
 
+// A reopened restore has no choice made in this dialog. The review names the
+// author the relay read for its exact restore point.
+it("names the accepted restore point's author when a stopped restore reopens", async () => {
+  const f = fixture(7), original = f.call.getMockImplementation()!, at = 1788922800000;
+  f.call.mockImplementation(async input => {
+    // The choices on this page name another author at the same cursor; the review does not read them.
+    if (input.action === "options") return {...f.options,
+      points: [{cursor: 7, receivedAtMs: at - 60_000, kind: "accepted", receiptDigest: digest, authority: owner}],
+      authors: [{grantId: "grant", principalKind: "user", userId: "reader", email: "reader@example.test"}],
+      pendingOperation: {operationId: "restore", phase: "native-fenced", proposalDigest: null}};
+    if (input.action !== "review") return original(input);
+    const review = reviewFixture();
+    return {status: f.status(), result: OwnerRestoreReview.parse({...review, point: {...review.point, journalCursor: 7},
+      selectedPointReceivedAtMs: at, selectedPointAuthority: reader})};
+  });
+  render(<OwnerRestoreDialog {...f.props} />);
+  await screen.findByText("Access stopped. Continue reviewing or finishing this restore.");
+  fireEvent.click(screen.getByRole("button", {name: "Retry"})); await screen.findByRole("button", {name: "Restore file"});
+  expect(screen.getByText(/^Restore point:/).textContent).toBe(`Restore point: ${new Date(at).toLocaleString()} · reader@example.test`);
+  expect(f.call.mock.calls.some(([input]) => input.action === "plan" || input.action === "begin")).toBe(false);
+});
+
 it("rejects a missing accepted time, a fabricated baseline time, and dates the review cannot render", () => {
   const baseline = reviewFixture();
   expect(OwnerRestoreReview.safeParse({...baseline, selectedPointReceivedAtMs: 30}).success).toBe(false);
-  const accepted = {...baseline, point: {...baseline.point, journalCursor: 1}};
+  const accepted = {...baseline, point: {...baseline.point, journalCursor: 1}, selectedPointAuthority: owner};
   for (const selectedPointReceivedAtMs of [null, undefined, Number.MAX_SAFE_INTEGER]) {
     expect(OwnerRestoreReview.safeParse({...accepted, selectedPointReceivedAtMs}).success).toBe(false);
+  }
+  expect(OwnerRestoreReview.safeParse({...accepted, selectedPointReceivedAtMs: 30}).success).toBe(true);
+});
+
+it("rejects a restore point author that does not match the point", () => {
+  const baseline = reviewFixture();
+  expect(OwnerRestoreReview.safeParse({...baseline, selectedPointAuthority: owner}).success).toBe(false);
+  const accepted = {...baseline, point: {...baseline.point, journalCursor: 1}, selectedPointReceivedAtMs: 30};
+  for (const selectedPointAuthority of [null, undefined, {...reader, grantId: null}]) {
+    expect(OwnerRestoreReview.safeParse({...accepted, selectedPointAuthority}).success).toBe(false);
   }
 });
 

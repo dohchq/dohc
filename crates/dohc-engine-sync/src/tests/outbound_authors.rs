@@ -255,6 +255,221 @@ fn queue_legacy_moment_as(
     legacy
 }
 
+/// Writes a moment and journals it as the current build does, which leaves
+/// the private grant authority out of the payload.
+fn queue_fresh_moment_as(engine: &mut EngineStore, moment_id: &str, authors: &serde_json::Value) {
+    seed_identity(engine);
+    VersionedTextStore::new(engine)
+        .ensure_main_version("ws", "main", 1000, &NoFaults)
+        .unwrap();
+    VersionedTextStore::new(engine)
+        .write_text(
+            &WriteText {
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                object_id: "record".into(),
+                path: "tasks/record.md".into(),
+                text: "hand-made record".into(),
+                moment_id: moment_id.into(),
+                metadata_origin: "local-file".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: Some(authors.to_string()),
+                now_ms: 2000,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    engine
+        .write_with(&NoFaults, |tx| {
+            crate::journal_moment_append_in_tx(tx, "ws", moment_id)
+        })
+        .unwrap();
+}
+
+const PRIVATE_AUTHOR_FIELDS: [&str; 5] = [
+    r#""named""#,
+    r#""public""#,
+    "grantId",
+    "userId",
+    "principalId",
+];
+
+/// A fresh journal leaves out the grant authority the relay credited a shared
+/// change under. An ordinary credential still publishes the exact marker in
+/// its place. The native settlement route and this computer's History keep
+/// their own authors, and no private field reaches the wire.
+#[test]
+fn a_fresh_journal_publishes_the_ordinary_marker_for_omitted_shared_credit() {
+    let agent = json!({"kind":"agent","agentId":"writer","onBehalfOf":"owner","depth":0});
+    let named = json!({"kind":"named","userId":"ana","grantId":"grant","grantGeneration":1});
+    let link = json!({"kind":"link","grantId":"grant","grantGeneration":1,"principalId":"holder"});
+    let public = json!({"kind":"public","principalId":"holder","grantId":"grant"});
+    let person = json!({"kind":"human","humanId":"recipient","humanName":"Recipient"});
+    let marker = json!({"kind":"unattributed"});
+    let settlement = format!("moment-ydoc-{}", "a".repeat(64));
+    for (moment_id, authors, native, ordinary) in [
+        (
+            settlement.as_str(),
+            json!([agent, named]),
+            Some(json!([agent])),
+            Some(json!([agent, marker])),
+        ),
+        // Any other moment follows the client rule on the native credential too.
+        (
+            "record-moment",
+            json!([agent, link]),
+            Some(json!([agent, marker])),
+            Some(json!([agent, marker])),
+        ),
+        (
+            settlement.as_str(),
+            json!([public]),
+            None,
+            Some(json!([marker])),
+        ),
+        // A snapshot person already stands as the one marker.
+        (
+            settlement.as_str(),
+            json!([person, agent, named]),
+            Some(json!([person, agent])),
+            Some(json!([marker, agent])),
+        ),
+        // Without shared credit, nothing is marked.
+        (
+            settlement.as_str(),
+            json!([agent]),
+            Some(json!([agent])),
+            Some(json!([agent])),
+        ),
+    ] {
+        for native_settlements in [true, false] {
+            let (_scratch, _path, mut engine) = open_store();
+            queue_fresh_moment_as(&mut engine, moment_id, &authors);
+            let mut ops = list_replication_ops(&engine, "ws", "local", -1, 10).unwrap();
+            assert_eq!(ops[1].op_kind, "moment.append");
+            let journaled = ops[1].payload.to_string();
+            assert!(
+                !PRIVATE_AUTHOR_FIELDS
+                    .iter()
+                    .any(|field| journaled.contains(field))
+            );
+
+            crate::outbound::repair_queued_moment_authors(
+                &mut engine,
+                &mut ops,
+                &NoFaults,
+                native_settlements,
+            )
+            .unwrap();
+            let expected = if native_settlements {
+                &native
+            } else {
+                &ordinary
+            };
+            assert_eq!(
+                ops[1].payload.get("authors"),
+                expected.as_ref(),
+                "{moment_id} {native_settlements}"
+            );
+            // The wire payload is durable before sending, so an echo matches.
+            assert_eq!(
+                list_replication_ops(&engine, "ws", "local", -1, 10).unwrap(),
+                ops
+            );
+            let repaired = ops.clone();
+            crate::outbound::repair_queued_moment_authors(
+                &mut engine,
+                &mut ops,
+                &NoFaults,
+                native_settlements,
+            )
+            .unwrap();
+            assert_eq!(ops, repaired);
+            let wire = ops[1].payload.to_string();
+            for field in PRIVATE_AUTHOR_FIELDS {
+                assert!(!wire.contains(field), "{field} in {wire}");
+            }
+            let history = VersionedTextStore::new(&mut engine)
+                .get_moment("ws", moment_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(history.author_json.as_deref().unwrap())
+                    .unwrap(),
+                authors
+            );
+        }
+    }
+}
+
+/// The marker for a fresh journal's omitted credit is what the relay first
+/// received, so a retry after a lost acknowledgement and the relay's echo
+/// both match it exactly.
+#[test]
+fn a_fresh_ordinary_marker_pushes_retries_and_echoes_exactly() {
+    let authors = json!([
+        {"kind":"agent","agentId":"writer","onBehalfOf":"owner","depth":0},
+        {"kind":"named","userId":"ana","grantId":"grant","grantGeneration":1}
+    ]);
+    let (_scratch, path, mut engine) = open_store();
+    queue_fresh_moment_as(&mut engine, "record-moment", &authors);
+    let client = RelaySyncClient::new(FakeRelay::default());
+    let faults = ScriptedFaults::crash_at(FaultPoint::SyncAfterPushBeforeCursorPersist);
+    assert_eq!(
+        client
+            .push_workspace(&mut engine, "ws", faults.as_ref(), &NoLiveLeases, 2001, 0)
+            .unwrap(),
+        SyncPassOutcome::CrashedAfterRemoteCommit
+    );
+    let first = client.transport().pushes.lock().unwrap()[0].ops.clone();
+    assert_eq!(
+        first[1].payload["authors"],
+        json!([
+            {"kind":"agent","agentId":"writer","onBehalfOf":"owner","depth":0},
+            {"kind":"unattributed"}
+        ])
+    );
+    let wire = first[1].payload.to_string();
+    for field in PRIVATE_AUTHOR_FIELDS {
+        assert!(!wire.contains(field), "{field} in {wire}");
+    }
+    drop(engine);
+    let mut engine = EngineStore::open(&path, 2002).unwrap();
+    assert_eq!(
+        list_replication_ops(&engine, "ws", "local", 0, 10).unwrap()[0].payload,
+        first[1].payload
+    );
+    client
+        .push_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 2003, 0)
+        .unwrap();
+    assert_eq!(client.transport().pushes.lock().unwrap()[1].ops, first);
+    *client.transport().pull.lock().unwrap() = Some(PullResponse {
+        ops: first,
+        next_cursor: 2,
+        has_more: false,
+    });
+    client
+        .pull_chat_workspace(
+            &mut engine,
+            &mut WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            2004,
+        )
+        .expect("exact own echo must not diverge");
+    let history = VersionedTextStore::new(&mut engine)
+        .get_moment("ws", "record-moment")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(history.author_json.as_deref().unwrap()).unwrap(),
+        authors
+    );
+}
+
 #[test]
 fn queued_human_and_shared_authors_are_durably_repaired_before_push_and_echo() {
     for authors in [

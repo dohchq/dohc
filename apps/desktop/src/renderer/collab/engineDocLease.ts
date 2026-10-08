@@ -789,9 +789,8 @@ function createEngineDocSession(
       recoverEdits && documentKind === "scene" && binding
         ? prepareSceneRecovery(bytes, binding)
         : null;
-    // Persist the waiting document synchronously before the session closes.
     if (recoverEdits) {
-      // Persist the rejected document synchronously before the session closes.
+      // Persist the waiting document synchronously before the session closes.
       recovery.draftId = captureOrphanedDraft(
         workspaceId,
         path,
@@ -830,11 +829,23 @@ function createEngineDocSession(
         recoveryIdentity(bytes),
       );
     } else {
-      recovery.draftId = captureOrphanedDraft(
+      const draftId = captureOrphanedDraft(
         workspaceId,
         path,
         sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc, bytes),
       );
+      recovery.draftId = draftId;
+      // An edit after a read-only status that set nothing aside. Name its
+      // draft now: the projection below can fail, and disposal stops publishing.
+      if (recovery.transition === "read-only") {
+        publish((current) => ({
+          ...current,
+          readOnlyTransition: current.readOnlyTransition && {
+            ...current.readOnlyTransition,
+            draftId,
+          },
+        }));
+      }
     }
     enqueueRecoverySnapshot(
       bytes,
@@ -901,7 +912,7 @@ function createEngineDocSession(
       error instanceof EngineYDocDeliveryRefusedError &&
       error.reason === "read-only"
     ) {
-      captureReadOnlyTransition(source, true);
+      captureReadOnlyTransition(source);
       releaseBinding();
       return;
     }

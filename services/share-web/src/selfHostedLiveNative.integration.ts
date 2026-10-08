@@ -398,14 +398,15 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     expect((await rpc("versionedText.read", {versionId: mainVersionId, path: "docs/a.md"})).text).toBe(expected);
     expect(readFileSync(join(ownerRoot, "docs/a.md"), "utf8")).toBe(expected);
     results.settledAndPublished = {settled, markdownDigest: hash(Buffer.from(expected)), ordinaryOwnerReadMatched: true};
-    // The owner's History credits the named recipient, who sent no recording
-    // context, from the imported settlement evidence, and keeps it across restart.
+    // The owner imports the moment as published: the exact marker stands for
+    // the recipient's private grant credit, and retained audit evidence adds
+    // none. It keeps that credit across restart.
     const ownerHistoryAuthors = async () => ((await rpc("moments.list", {versionId: mainVersionId})).moments as {momentId: string; authors?: unknown[] | null}[])
       .find(moment => moment.momentId === settledMomentId)?.authors ?? null;
     const ownerAuthors = await ownerHistoryAuthors();
     results.ownerSettledAuthors = {settledMomentId, published: published.authors ?? null, owner: ownerAuthors};
     writeFileSync(join(root, "owner-settled-authors.json"), JSON.stringify(results.ownerSettledAuthors, null, 2));
-    expect(ownerAuthors).toEqual(baselineAuthors);
+    expect(ownerAuthors).toEqual(published.authors);
     owner!.close(); await owner!.waitForExit();
     owner = await createEngineClient({command: executable, authToken: randomUUID(), protocolVersion: 2, capabilities: ["core", "blobs"], connectTimeoutMs: 30000,
       onStderr: value => appendFileSync(join(root, "owner-stderr.log"), value),
@@ -490,7 +491,17 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     const automationSettlement = await settlementOf(automationAck, agentAck.journalCursor, automationMarkdown);
     expect(await publishedAuthors(automationSettlement.momentId)).toEqual([automation]);
 
-    const declaredCredit = [[agentSettlement.momentId, [agent, human, named]], [automationSettlement.momentId, [automation]]] as const;
+    // The service credits each interval in its own History. Owner devices
+    // import what it published: the snapshot person and the declared agent,
+    // never the grant authority.
+    const declaredCredit = [
+      {momentId: agentSettlement.momentId, host: [agent, human, named], published: [agent, human]},
+      {momentId: automationSettlement.momentId, host: [automation], published: [automation]},
+    ] as const;
+    const expectAuthors = (actual: unknown, expected: readonly unknown[]) => {
+      expect(actual).toHaveLength(expected.length);
+      expect(actual).toEqual(expect.arrayContaining([...expected]));
+    };
     const momentAuthors = async (call: typeof rpc, momentId: string) =>
       ((await call("moments.list", {versionId: mainVersionId})).moments as {momentId: string; authors?: unknown[] | null}[])
         .find(moment => moment.momentId === momentId)?.authors ?? null;
@@ -510,10 +521,10 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     // authenticated native delivery, as after the baseline's idle edit.
     expect(await runOwnerPass()).toBe("empty");
     expect((await owner!.ownerYDocReadState(nativeRequest(), target)).acceptedCursor).toBeGreaterThanOrEqual(automationAck.journalCursor);
-    // The owner reconstructs the private grant authority from verified audit.
+    // Imported audit evidence adds no credit to the published moments.
     await pullAll(rpc);
     expect((await rpc("versionedText.read", {versionId: mainVersionId, path: "docs/a.md"})).text).toBe(automationMarkdown);
-    for (const [momentId, authors] of declaredCredit) expect(await momentAuthors(rpc, momentId)).toEqual(authors);
+    for (const {momentId, published} of declaredCredit) expectAuthors(await momentAuthors(rpc, momentId), published);
 
     // A fresh ordinary peer imports the same credit without any live feed.
     const peerRoot = join(root, "peer"); mkdirSync(peerRoot);
@@ -533,29 +544,30 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     await pullAll(peerRpc);
     expect((await peerRpc("versionedText.read", {versionId: mainVersionId, path: "docs/a.md"})).text).toBe(automationMarkdown);
     expect(readFileSync(join(peerRoot, "docs/a.md"), "utf8")).toBe(automationMarkdown);
-    for (const [momentId, authors] of declaredCredit) expect(await momentAuthors(peerRpc, momentId)).toEqual(authors);
-    expect(await momentAuthors(peerRpc, settledMomentId)).toEqual(baselineAuthors);
+    for (const {momentId, published} of declaredCredit) expectAuthors(await momentAuthors(peerRpc, momentId), published);
+    expect(await momentAuthors(peerRpc, settledMomentId)).toEqual(published.authors);
     peer.close(); await peer.waitForExit(); peer = undefined;
     results.declaredAuthors = {
-      agent: {receipt: agentAck, settlement: agentSettlement, published: [agent, human], credited: [agent, human, named]},
-      automation: {receipt: automationAck, settlement: automationSettlement, published: [automation], credited: [automation]},
+      agent: {receipt: agentAck, settlement: agentSettlement, published: [agent, human], hostCredited: [agent, human, named]},
+      automation: {receipt: automationAck, settlement: automationSettlement, published: [automation], hostCredited: [automation]},
     };
     await supervisor!.close(); supervisor = undefined; active = undefined;
     const engine = new DatabaseSync(join(workspace, ".dohc/engine/engine.db"), {readOnly: true});
     try {results.persistedApplications = engine.prepare("SELECT delivery_id,update_digest FROM live_device_update_applications ORDER BY journal_cursor").all();
       expect(results.persistedApplications).toEqual(expect.arrayContaining([{delivery_id: ack.deliveryId, update_digest: ack.updateDigest}]));
-      // The owner holds exactly the authors the host credited.
+      // The service's raw History keeps the grant authority it credited. The
+      // owner and the fresh peer hold exactly the authors it published.
       const authorJson = (database: DatabaseSync, momentId = settledMomentId) => (database.prepare("SELECT author_json FROM moments WHERE moment_id=?").get(momentId) as {author_json: string | null} | undefined)?.author_json;
       const ownerEngine = new DatabaseSync(join(ownerRoot, ".dohc/engine/engine.db"), {readOnly: true});
       const peerEngine = new DatabaseSync(join(root, "peer", ".dohc/engine/engine.db"), {readOnly: true});
       try {
         const host = authorJson(engine), owned = authorJson(ownerEngine);
         Object.assign(results.ownerSettledAuthors as object, {hostRaw: host, ownerRaw: owned});
-        expect(JSON.parse(owned ?? "null")).toEqual(JSON.parse(host ?? "null"));
         expect(JSON.parse(host ?? "null")).toEqual(baselineAuthors);
-        // Raw history on the service, the owner and the fresh peer keeps each declared author.
-        for (const [momentId, authors] of declaredCredit) {
-          for (const database of [engine, ownerEngine, peerEngine]) expect(JSON.parse(authorJson(database, momentId) ?? "null")).toEqual(authors);
+        for (const database of [ownerEngine, peerEngine]) expect(JSON.parse(authorJson(database) ?? "null")).toEqual(published.authors);
+        for (const {momentId, host: credited, published: carried} of declaredCredit) {
+          expect(JSON.parse(authorJson(engine, momentId) ?? "null")).toEqual(credited);
+          for (const database of [ownerEngine, peerEngine]) expectAuthors(JSON.parse(authorJson(database, momentId) ?? "null"), carried);
         }
       } finally {ownerEngine.close(); peerEngine.close();}
     } finally {engine.close();}

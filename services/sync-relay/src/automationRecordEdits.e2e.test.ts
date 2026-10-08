@@ -911,16 +911,15 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
     identity: {kind: "join", replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity}});
   await peer.sync();
   const imported = (await peer.request("moments.list", {limit: 100}, peer.workspace)).moments as unknown as Array<{momentId: string; authors?: unknown}>;
-  // The peer keeps the carried marker beside the credit its verified audit reconstructs.
-  const peerAuthors = [...expectedAuthors, {kind: "unattributed"}];
-  const importedAuthors = imported.find(moment => moment.momentId === recipientMoment.momentId)?.authors;
-  expect(importedAuthors).toEqual(expect.arrayContaining(peerAuthors));
-  expect(importedAuthors).toHaveLength(peerAuthors.length);
+  // An ordinary owner device publishes one exact marker in place of the
+  // people and grant authority, and the peer's retained audit evidence adds
+  // no credit to the moment it imports.
+  const peerAuthors = [{kind: "unattributed"}];
+  expect(imported.find(moment => moment.momentId === recipientMoment.momentId)?.authors).toEqual(peerAuthors);
   const peerHistory = new VersionedLiveAdapter(peer.client, peer.workspace, {workspaceId: WORKSPACE});
   const peerMoment = await peerHistory.getMoment({workspaceId: WORKSPACE, momentId: recipientMoment.momentId});
   expect(peerMoment).toMatchObject({syncRecordOnly: true});
-  expect(peerMoment?.authors).toEqual(expect.arrayContaining(peerAuthors));
-  expect(peerMoment?.authors).toHaveLength(peerAuthors.length);
+  expect(peerMoment?.authors).toEqual(peerAuthors);
   expect((await moments()).find(moment => moment.momentId === recipientMoment.momentId)?.authors)
     .toEqual(recipientMoment.authors);
   expect(await readFile(join(peer.root, "Tasks/one.md"), "utf8")).toContain("RecipientNote: Keep this text");

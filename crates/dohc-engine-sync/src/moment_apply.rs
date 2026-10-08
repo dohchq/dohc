@@ -2335,17 +2335,6 @@ fn insert_moment(
         .map_err(|_| SyncError::InvalidInput {
             reason: "moment.append authors are invalid",
         })?;
-    let author_json = crate::live_audit::credit_settled_moment_in(
-        tx,
-        workspace_id,
-        (
-            &payload.moment_id,
-            &payload.version_id,
-            &payload.object_id,
-            &payload.payload_after_blob_sha256,
-        ),
-        author_json,
-    )?;
     let payload_before_kind = payload
         .payload_before_path
         .as_ref()

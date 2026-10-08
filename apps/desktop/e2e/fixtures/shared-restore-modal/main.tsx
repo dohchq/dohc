@@ -19,7 +19,7 @@ const receipt = (cursor: number) => ({ deliveryId: `change-${cursor}`, updateDig
 const text = (label: string) => Array.from({ length: 6 }, (_, index) => `${label} ${index + 1}`).join("\n");
 const review = {
   operationId: "restore", workspaceId: "workspace", binding, proposalDigest, candidateDigest: digest, recordedAtMs: 9,
-  point: { journalCursor: 0, receiptDigest: digest, markdownDigest: digest }, selectedPointReceivedAtMs: null,
+  point: { journalCursor: 0, receiptDigest: digest, markdownDigest: digest }, selectedPointReceivedAtMs: null, selectedPointAuthority: null,
   frozenTerminal: receipt(20), selectedEventCount: 0, acceptedEventCount: 20,
   selectedHistoryDigest: digest, acceptedHistoryDigest: digest, nativeSourceManifestDigest: digest,
   content: { frozenMarkdown: text("Shared edit"), restoredMarkdown: text("Launch step"), frozenMarkdownDigest: digest,

@@ -22,6 +22,18 @@ import { useAuthorCapacityNotice } from "./useAuthorCapacityNotice";
 import { harnessBridge, IMAGE_DESCRIPTOR } from "./engineDocSaveStateTestHarness";
 import { parseExcalidrawDocument } from "../excalidrawDocument";
 
+let projectionFails = false;
+vi.mock("@dohc/ydoc-projection", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@dohc/ydoc-projection")>();
+  return {
+    ...actual,
+    yDocToMarkdown: (doc: Y.Doc) => {
+      if (projectionFails) throw new Error("projection failed");
+      return actual.yDocToMarkdown(doc);
+    },
+  };
+});
+
 let lastBoundDoc: Y.Doc | null = null;
 
 function Harness(props: {
@@ -172,6 +184,7 @@ beforeEach(() => {
   vi.stubGlobal("dohcDesktop", harness.api);
   resetOrphanedDrafts();
   lastBoundDoc = null;
+  projectionFails = false;
 });
 
 afterEach(async () => {
@@ -1115,6 +1128,51 @@ it("host acknowledgement recovery sets nothing aside when the delivery response 
   expect(hook.result.current.saveState.kind).toBe("unknown");
   await waitFor(() => expect(harness.closed).toHaveLength(1));
   expect(drafts.result.current).toEqual([]);
+});
+
+// A keystroke after a clean read-only status writes its draft at once. The
+// transition names that draft whether or not the later projection succeeds.
+it.each([
+  ["completes", false],
+  ["fails", true],
+])("names a keystroke's draft after a clean read-only status when projection %s", async (_, fails) => {
+  const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const { hook, drafts, typeAndDeliver } = await mountHostAcknowledgedDocument();
+  await typeAndDeliver(1);
+  act(() => harness.emitNow("saved", harness.applied.at(-1)!.seq));
+  expect(hook.result.current.saveState.kind).toBe("saved-here");
+  const doc = hook.result.current.doc!;
+  projectionFails = fails;
+
+  act(() => {
+    harness.emitNow("read-only", 0);
+    const text = doc.getText("plainText");
+    text.insert(text.length, "!");
+  });
+
+  const draftId = hook.result.current.readOnlyDraftId;
+  expect(hook.result.current.readOnlyWhileEditing).toBe(true);
+  expect(draftId).not.toBeNull();
+  await waitFor(() =>
+    expect(drafts.result.current.map(({ id, text }) => ({ id, text }))).toEqual([
+      { id: draftId, text: "seed!!" },
+    ]),
+  );
+  await waitFor(() => expect(harness.closed).toHaveLength(1));
+  const refineFailure = [
+    expect.stringContaining("could not refine the recovery draft"),
+    expect.any(Error),
+  ];
+  if (fails) {
+    await waitFor(() => expect(consoleError).toHaveBeenCalledWith(...refineFailure));
+  } else {
+    expect(consoleError).not.toHaveBeenCalledWith(...refineFailure);
+  }
+  expect(hook.result.current.readOnlyDraftId).toBe(draftId);
+  expect(drafts.result.current.map(({ id, text }) => ({ id, text }))).toEqual([
+    { id: draftId, text: "seed!!" },
+  ]);
+  consoleError.mockRestore();
 });
 
 it("replaces the same deletion's draft when a keystroke lands before read-only commits", async () => {

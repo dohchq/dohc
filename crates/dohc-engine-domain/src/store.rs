@@ -73,13 +73,18 @@ pub const MAX_TEXT_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_METADATA_FIELD_BYTES: usize = 16 * 1024;
 pub const MAX_AUTHOR_FIELD_BYTES: usize = MAX_IDENTIFIER_BYTES;
 // Without control characters, quotes and backslashes take at most 2 bytes.
-// The largest live entry is the larger skeleton, a 66-byte automation or an
-// 80-byte Edit link at the largest grant generation, + 2 * 2 * 512 bytes of
-// identity fields = 2,128 bytes.
+// The largest live entry is a declared agent: a 71-byte skeleton + 3 * 2 * 512
+// bytes for its id, name and principal = 3,143 bytes. The largest two-field
+// entries, an 80-byte Edit link at the largest grant generation and a 66-byte
+// automation, take 2,128 and 2,114 bytes.
 pub const MAX_AUTHOR_ENTRY_BYTES: usize = larger(
-    r#"{"automationId":"","depth":64,"kind":"automation","onBehalfOf":""}"#.len(),
-    r#"{"grantGeneration":9007199254740991,"grantId":"","kind":"link","principalId":""}"#.len(),
-) + 2 * 2 * MAX_AUTHOR_FIELD_BYTES;
+    r#"{"agentId":"","agentName":"","depth":64,"kind":"agent","onBehalfOf":""}"#.len()
+        + 3 * 2 * MAX_AUTHOR_FIELD_BYTES,
+    larger(
+        r#"{"automationId":"","depth":64,"kind":"automation","onBehalfOf":""}"#.len(),
+        r#"{"grantGeneration":9007199254740991,"grantId":"","kind":"link","principalId":""}"#.len(),
+    ) + 2 * 2 * MAX_AUTHOR_FIELD_BYTES,
+);
 const fn larger(left: usize, right: usize) -> usize {
     if left > right { left } else { right }
 }

@@ -2,7 +2,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use dohc_engine_domain::{SecretMomentRecord, VersionRecord};
 use dohc_engine_storage::{StorageError, hex_sha256};
-use rusqlite::{Transaction, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::{SyncError, journal_local_op_in_tx};
 
@@ -21,16 +21,18 @@ pub(crate) fn omit_local_person_authors(payload: &mut serde_json::Value) -> bool
 /// link and public) stay in this computer's history. Any other author is left
 /// for validation to judge.
 pub(crate) fn omit_private_authors(payload: &mut serde_json::Value) -> bool {
-    omit_authors(payload, |author| {
-        match author.get("kind").and_then(serde_json::Value::as_str) {
-            Some("human") => snapshot_person(author),
-            Some("link") => {
-                author.get("publicPrincipalId").is_some() && author.get("grantId").is_none()
-            }
-            Some("named" | "public") => false,
-            _ => true,
+    omit_authors(payload, journaled_author)
+}
+
+fn journaled_author(author: &serde_json::Value) -> bool {
+    match author.get("kind").and_then(serde_json::Value::as_str) {
+        Some("human") => snapshot_person(author),
+        Some("link") => {
+            author.get("publicPrincipalId").is_some() && author.get("grantId").is_none()
         }
-    })
+        Some("named" | "public") => false,
+        _ => true,
+    }
 }
 
 /// A relay-admitted live author snapshot names a relay account with the name
@@ -126,6 +128,70 @@ pub(crate) fn omit_client_identity_authors(payload: &mut serde_json::Value) -> b
     payload.get("authors") != before.as_ref()
 }
 
+/// The journal leaves out the grant authority the relay credited a shared
+/// change under, and the client rule names omitted relay credit with the exact
+/// marker. Only this moment's durable authors still show that omission, so
+/// they are read here and never copied into the payload.
+fn mark_omitted_shared_credit(
+    conn: &rusqlite::Connection,
+    workspace_id: &str,
+    payload: &mut serde_json::Value,
+) -> Result<bool, SyncError> {
+    let marked = payload
+        .get("authors")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|authors| {
+            authors.iter().any(|author| {
+                author.get("kind").and_then(serde_json::Value::as_str) == Some("unattributed")
+            })
+        });
+    let moment_id = match payload.get("momentId").and_then(serde_json::Value::as_str) {
+        Some(moment_id) if !marked => moment_id,
+        _ => return Ok(false),
+    };
+    let stored: Option<Option<String>> = conn
+        .prepare_cached("SELECT author_json FROM moments WHERE workspace_id=?1 AND moment_id=?2")
+        .and_then(|mut statement| {
+            statement
+                .query_row(params![workspace_id, moment_id], |row| row.get(0))
+                .optional()
+        })
+        .map_err(SyncError::corrupt)?;
+    let Some(Some(stored)) = stored else {
+        return Ok(false);
+    };
+    let stored = serde_json::from_str::<serde_json::Value>(&stored).map_err(|_| {
+        SyncError::InvalidInput {
+            reason: "stored moment author is malformed",
+        }
+    })?;
+    let omitted = stored.as_array().is_some_and(|authors| {
+        authors.iter().any(|author| {
+            matches!(
+                author.get("kind").and_then(serde_json::Value::as_str),
+                Some("named" | "public" | "link")
+            ) && !journaled_author(author)
+        })
+    });
+    if !omitted {
+        return Ok(false);
+    }
+    let marker = serde_json::json!({"kind": "unattributed"});
+    let object = payload
+        .as_object_mut()
+        .expect("moment payload is an object");
+    match object
+        .get_mut("authors")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        Some(authors) => authors.push(marker),
+        None => {
+            object.insert("authors".to_owned(), serde_json::json!([marker]));
+        }
+    }
+    Ok(true)
+}
+
 pub(crate) fn relay_person_id(id: &str) -> Option<&str> {
     (!id.starts_with("local:")).then_some(id)
 }
@@ -138,17 +204,23 @@ pub(crate) fn repair_queued_moment_authors(
     native_settlements: bool,
 ) -> Result<dohc_engine_storage::TxnOutcome<()>, SyncError> {
     use dohc_engine_storage::TxnOutcome;
-    let repairs: Vec<_> = ops
-        .iter()
-        .enumerate()
-        .filter_map(|(index, op)| {
+    let repairs = store.read_with(|conn| {
+        let mut repairs = Vec::new();
+        for (index, op) in ops.iter().enumerate() {
             if op.op_kind != "moment.append" {
-                return None;
+                continue;
             }
             let mut payload = op.payload.clone();
-            omit_unpublishable_authors(&mut payload, native_settlements).then_some((index, payload))
-        })
-        .collect();
+            let mut repaired = omit_unpublishable_authors(&mut payload, native_settlements);
+            if !(native_settlements && live_settlement_moment(&payload)) {
+                repaired |= mark_omitted_shared_credit(conn, &op.workspace_id, &mut payload)?;
+            }
+            if repaired {
+                repairs.push((index, payload));
+            }
+        }
+        Ok::<_, SyncError>(repairs)
+    })?;
     if repairs.is_empty() {
         return Ok(TxnOutcome::Committed(()));
     }
