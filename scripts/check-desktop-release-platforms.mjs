@@ -29,7 +29,7 @@ export function checkDesktopReleasePlatforms({ channel, platforms, releases }) {
   const missing = [...previous].filter((platform) => !selected.has(platform)).sort();
   if (missing.length) {
     throw new Error(
-      `The ${channel} channel already publishes ${missing.join(", ")} update manifests. Select platforms=all before publishing, or use dry_run=true for a Windows-only testing build.`,
+      `The ${channel} channel already publishes ${missing.join(", ")} update manifests. Select platforms=all before publishing, or use dry_run=true to test only the selected platforms.`,
     );
   }
 }
@@ -45,7 +45,7 @@ async function main() {
     options[name.slice(2)] = value;
   }
   if (!options.channel || !options.platforms || !options.releases) {
-    throw new Error("Usage: check-desktop-release-platforms.mjs --channel latest|nightly --platforms windows|all --releases <GitHub release history JSONL>");
+    throw new Error("Usage: check-desktop-release-platforms.mjs --channel latest|nightly --platforms windows|linux|windows-linux|all --releases <GitHub release history JSONL>");
   }
   const releases = (await readFile(options.releases, "utf8")).split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
   checkDesktopReleasePlatforms({ ...options, releases });

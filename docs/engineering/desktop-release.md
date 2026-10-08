@@ -37,21 +37,63 @@ Every release job runs on a self-hosted runner. Cloud runners stay off.
 
 | Jobs | Runner labels |
 | --- | --- |
-| Preflight, version check, Publish, and Windows x64 package | `self-hosted`, `windows`, `x64` |
+| Preflight, version check, and Publish for `linux` | `self-hosted`, `linux`, `x64` |
+| Preflight, version check, and Publish for other selections | `self-hosted`, `windows`, `x64` |
+| Windows x64 package | `self-hosted`, `windows`, `x64` |
 | Linux x64 package | `self-hosted`, `linux`, `x64` |
 | macOS x64 and arm64 packages | `self-hosted`, `macos`, `arm64` |
 
 A job waits in the queue until a runner with its labels is online.
 Each runner needs Git with bash, rustup, and the platform's native build tools.
-The Windows runner also needs the GitHub CLI, `gh`, for the version check and publishing.
-Run it in a signed-in desktop session for the packaged app check.
+The coordinator runner also needs the GitHub CLI, `gh`, for the version check and publishing.
+Run the Windows runner in a signed-in desktop session for the packaged app check.
 The Linux runner also needs `xvfb-run` for the fuse smoke.
+After packaging, that check verifies the actual executable's fuse values and starts it with an isolated profile.
+Local packages outside `apps/desktop/release/linux-unpacked` need `DOHC_SMOKE_PACKAGE_DIRECTORY` set to their unpacked directory.
 The package and publish jobs receive the environment's secrets.
 Register only runners that the release owner controls.
 On a shared Windows runner, set `DOHC_BUILD_SLOT_ROOT=C:\w\_locks` in the runner's `.env` file.
 This keeps release engine builds within the local disk, slot, and compiler budget, even when Actions sets `CI=true`.
 Start the runner's `run.cmd` when building a release.
 The runner can stay offline between releases.
+
+### Use WSL2 for Linux builds
+
+Ubuntu on WSL2 can build the Linux x64 AppImage on a Windows PC.
+Register a separate Linux runner inside the distribution with the `self-hosted`, `linux`, and `x64` labels.
+Keep its checkout and dependencies in the Linux filesystem, such as under `/home/<user>/`, rather than `/mnt/c`.
+Use Linux Node 24.14 or newer, pnpm 11.20.0, rustup, and native compiler tools.
+Do not reuse Windows `node_modules` or a Windows pnpm executable.
+Install Electron's Linux runtime libraries, `xvfb-run`, and AppImage's FUSE library.
+Confirm these tools are on the runner's noninteractive `PATH` before starting its `run.sh`.
+
+WSL shares the PC's CPU, memory, and physical disk with Windows.
+Check host disk space and build admission before a release.
+Coordinate WSL builds with other work on the PC and cap Cargo parallelism to the host's build budget.
+Do not share Windows slot records with Linux processes because their PID namespaces differ.
+The `windows-linux` selection packages its two targets sequentially.
+The `all` selection can package Windows and WSL Linux concurrently.
+Before selecting `all`, confirm that the PC has enough resources for both builds.
+
+WSLg can display the packaged app, and Xvfb supports automated startup checks.
+These checks do not prove Linux desktop installation, protocol registration, or real AppImage upgrades.
+Use a normal Linux desktop or desktop VM for those release rehearsals.
+
+## Contributor access to releases
+
+The committed `dohc-release` skill is a public procedure. It contains no credentials and grants no GitHub permissions.
+Contributors can use it to build local packages or operate workflows in their own forks.
+They need repository write access to dispatch this repository's workflow.
+Trusted collaborators with write access can also request publication through `dry_run=false`.
+
+The publish job receives a short-lived token scoped to this repository, with `contents: write`.
+A fork's token does not grant access to this repository's releases or signing secrets.
+Protect changes to `main` and restrict the `desktop-release` environment to reviewed code.
+If publication must require the owner's approval, configure required reviewers on that environment where the repository plan supports them.
+A branch restriction alone does not require an owner's approval.
+
+Keep self-hosted runners restricted to trusted code when the repository becomes public.
+Do not enable fork pull-request execution on the owner's PC.
 
 ## Choose versions
 
@@ -79,14 +121,28 @@ For publication, dispatch again with `dry_run=false`.
 The new dispatch generates a new nightly version.
 The published prerelease records the source commit and includes generated release notes.
 
+## Build a Linux nightly
+
+Dispatch `Desktop Release` from `main` with `channel=nightly`, `platforms=linux`, and `dry_run=true`.
+The Linux runner performs every job for this selection. A Windows runner is not required.
+Download the run's `desktop-Linux-x64` artifact after every job passes.
+It contains the AppImage and the nightly Linux update manifest.
+Verify the files with `--platform linux`, `--arch x64`, the generated version, and `--channel nightly`.
+The Linux package job checks artifact hashes and runs the packaged fuse smoke before uploading.
+
+Use `platforms=windows-linux` to prepare both packages from one commit and generated version.
+Both runners must be available. The Windows runner performs the coordinator jobs.
+Download both platform artifacts from the same run.
+
 Use `platforms=all` when Windows, macOS, and Linux runners are available.
 Only the selected platforms receive installers and update packages.
 Choose `all` when the release must update existing installations on every supported platform.
-If previous releases on this channel included macOS or Linux, continue selecting `all`.
-Their updaters cannot find a platform manifest in a Windows-only release.
+Continue including every platform that previously shipped on the selected channel.
+For example, Windows and Linux history permits `windows-linux`; macOS history requires `all`.
+An updater cannot find its platform manifest in a release that omits it.
 Before packaging a published release, the workflow checks every previous published release on that channel.
 It rejects a selection that omits an existing platform manifest.
-Windows-only dry runs remain available because they publish no update feed.
+Partial-platform dry runs remain available because they publish no update feed.
 
 Private repository downloads require repository access.
 The packaged updater also needs an authenticated private feed or a public download host.
@@ -213,8 +269,9 @@ following:
 - The expected installer files exist for the target architecture.
 - Artifact paths stay inside the release directory.
 
-The Linux job also runs the packaged fuse smoke. It boots an asar assembled
-from the built desktop files and verifies that the packaged window can start.
+The Linux job also runs the packaged fuse smoke.
+It verifies the packaged executable's fuse values against `electron-builder.yml`.
+It then boots that package with an isolated profile and checks that the window can start.
 Windows-only selections skip that Linux check.
 The Windows job runs the packaged executable with an isolated profile and test workspace.
 It checks startup, editing, disk persistence, and restart before uploading artifacts.
