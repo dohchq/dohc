@@ -82,7 +82,7 @@ async function restoreRestartTyping(desktop: Awaited<ReturnType<typeof launchDes
     await page.locator(`[data-testid="engine-moment-open"][data-moment-id="${recoveryId}"]`).click();
   }
   await expect(page.getByTestId("engine-diff-lines")).toContainText(human);
-  // A shared live file's way back: the change copies the typing whole.
+  // A shared live file's way back: Copy your version copies the kept file whole.
   await page.getByTestId("engine-diff-copy-typing").click();
   // Windows hands clipboard text back with CRLF line endings.
   await expect.poll(async () => (await app.evaluate(({clipboard}) => clipboard.readText())).replace(/\r\n/g, "\n")).toBe(detail.moment?.beforeText);

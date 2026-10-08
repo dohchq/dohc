@@ -84,8 +84,8 @@ describe("typing kept in History", () => {
     expect(screen.getByTestId("engine-diff-source").textContent).toBe("Typing kept");
     expect(screen.getByTestId("engine-diff-lines").textContent).toContain("Typing kept here.");
 
-    // The change gives the typing back whole, beside the diff it shows.
-    await user.click(screen.getByRole("button", { name: "Copy your typing" }));
+    // The change gives the kept file back whole, beside the diff it shows.
+    await user.click(screen.getByRole("button", { name: "Copy your version" }));
     expect(await navigator.clipboard.readText()).toBe("Typing kept here.\n");
   });
 
@@ -141,9 +141,9 @@ describe("typing kept in History", () => {
 
   // A shared live document's lineage is replicated, so History Restore
   // refuses it. Restore shared file returns only accepted changes, and kept
-  // typing is in none of them, so the notice says to copy the typing back in,
-  // and a shared restore leaves the recovery where it is.
-  it("tells a replicated lineage's owner to copy the typing back, and a shared restore keeps it", async () => {
+  // typing is in none of them, so the notice says to replace the file's text
+  // with the kept version, and a shared restore leaves the recovery.
+  it("tells a replicated lineage's owner to put the kept version in, on every refusal, and a shared restore keeps it", async () => {
     const { bridge } = recoveryBridge();
     const documentKey = { workspaceId: WORKSPACE.workspaceId, mainVersionId: "main", objectId: RECOVERY.objectId, lineageClaimId: "lineage" };
     const digest = "a".repeat(64), proposalDigest = "b".repeat(64);
@@ -178,7 +178,7 @@ describe("typing kept in History", () => {
     const toast = await screen.findByTestId(NOTICE_TOAST);
     expect(toast.textContent).toContain(CAPTURE_RECOVERY_TITLE);
     expect(toast.textContent).toContain(
-      'The file "notes/plan.md" changed outside dohc. Your typing is in History. The file is shared live, so open the recovery change and copy your typing back into the file.',
+      'The file "notes/plan.md" changed outside dohc. Your typing is in History. The file is shared live, so replace its text with your version from the recovery change.',
     );
     expect(toast.textContent).toContain(captureRecoveryMessage(PATH, true));
     expect(toast.textContent).not.toContain("Restore shared file");
@@ -189,17 +189,19 @@ describe("typing kept in History", () => {
     expect(rows[0]!.textContent).not.toContain("Continue editing at the current location");
     await user.click(screen.getByTestId("notice-center-toggle"));
 
-    // The route the notice names works: the typing comes back whole.
-    await user.click(screen.getByRole("button", { name: "Copy your typing" }));
+    // The route the notice names works: the kept version comes back whole.
+    await user.click(screen.getByRole("button", { name: "Copy your version" }));
     expect(await navigator.clipboard.readText()).toBe("Typing kept here.\n");
 
-    // A second refusal says nothing new, so it raises no toast.
+    // A second refusal is answered too, from the same one row.
     await user.click(within(screen.getByTestId(NOTICE_TOAST)).getByRole("button", { name: "Dismiss workspace notice" }));
+    expect(screen.queryByTestId(NOTICE_TOAST)).toBeNull();
     await refuse();
     await waitFor(() => expect(restoreEngineMomentFile).toHaveBeenCalledTimes(2));
-    await act(async () => {});
-    expect(screen.queryByTestId(NOTICE_TOAST)).toBeNull();
+    expect((await screen.findByTestId(NOTICE_TOAST)).textContent).toContain(captureRecoveryMessage(PATH, true));
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(await noticeRows(user)).toHaveLength(1);
+    await user.click(screen.getByTestId("notice-center-toggle"));
 
     // A finished Restore shared file leaves the kept typing and its notice.
     await user.click(screen.getByTestId("engine-diff-shared-restore"));

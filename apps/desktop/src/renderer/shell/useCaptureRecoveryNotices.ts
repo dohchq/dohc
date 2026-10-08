@@ -11,10 +11,11 @@ export const CAPTURE_RECOVERY_TITLE = "Typing kept in History";
 
 // History Restore refuses a shared live file. Restore shared file returns
 // only changes the host accepted, and kept typing is in none of them, so the
-// way back for a shared file is to copy the typing in.
+// way back for a shared file is to put the kept version in by hand, as
+// History Restore would. The outside change stays in History either way.
 export function captureRecoveryMessage(path: string, shared: boolean): string {
   return shared
-    ? `The file "${path}" changed outside dohc. Your typing is in History. The file is shared live, so open the recovery change and copy your typing back into the file.`
+    ? `The file "${path}" changed outside dohc. Your typing is in History. The file is shared live, so replace its text with your version from the recovery change.`
     : `The file "${path}" changed outside dohc. Your typing is in History. Open the recovery change and choose Restore.`;
 }
 
@@ -25,7 +26,7 @@ export function captureRecoveryMessage(path: string, shared: boolean): string {
  * when the workspace opens, and again from the returned refresh, which the
  * shell runs after workspace activity and after a restore. Only a History
  * Restore the engine refused shows that a file is shared live; its row then
- * says to copy the typing back in.
+ * says to put the kept version in by hand.
  */
 export function useCaptureRecoveryNotices(input: {
   workspaceId: string;
@@ -44,21 +45,20 @@ export function useCaptureRecoveryNotices(input: {
   const notices = useMemo(() => {
     const here = () => latest.current.workspaceId === workspaceId;
     let listed: readonly CaptureRecovery[] = [];
-    // The files History Restore refused as shared live.
+    // The files with listed kept typing that History Restore refused as
+    // shared live. It chooses the words only.
     const shared = new Set<string>();
 
-    const publish = () => latest.current.show(listed.map((recovery) => {
-      const isShared = shared.has(recovery.path);
-      return {
-        momentId: recovery.momentId,
-        path: recovery.path,
-        title: CAPTURE_RECOVERY_TITLE,
-        message: captureRecoveryMessage(recovery.path, isShared),
-        key: isShared ? "shared" : "history",
-        open: () => latest.current.openRecovery(recovery.momentId, recovery.path),
-        dismiss: () => clear(recovery),
-      };
-    }));
+    // `raised` is the file whose rows answer what the person just did.
+    const publish = (raised?: string) => latest.current.show(listed.map((recovery) => ({
+      momentId: recovery.momentId,
+      path: recovery.path,
+      title: CAPTURE_RECOVERY_TITLE,
+      message: captureRecoveryMessage(recovery.path, shared.has(recovery.path)),
+      raise: recovery.path === raised,
+      open: () => latest.current.openRecovery(recovery.momentId, recovery.path),
+      dismiss: () => clear(recovery),
+    })));
 
     const refresh = async (): Promise<void> => {
       const request = reads.next();
@@ -66,6 +66,11 @@ export function useCaptureRecoveryNotices(input: {
         const status = await bridge().getCaptureRecoveryStatus({ workspaceId });
         if (!reads.isCurrent(request) || !here()) return;
         listed = status.captureRecoveries;
+        // A refusal says nothing about kept typing recorded after its own
+        // was dismissed or restored: that file may no longer be shared.
+        for (const path of shared) {
+          if (!listed.some((recovery) => recovery.path === path)) shared.delete(path);
+        }
         publish();
       } catch (error) {
         if (!reads.isCurrent(request) || !here()) return;
@@ -100,15 +105,13 @@ export function useCaptureRecoveryNotices(input: {
     return {
       refresh,
       // A History Restore the engine refused because the file is shared live.
-      // The kept typing's row takes the refusal. The first one changes its
-      // words and raises its toast again; a later one changes nothing. True
-      // when a row took it.
+      // The kept typing's row takes the refusal: every refusal raises its
+      // toast again, in the shared words, through the same row. True when a
+      // row took it.
       restoreRefused(path: string, error: unknown): boolean {
         if (!isSharedLiveFileRefusal(error) || !listed.some((recovery) => recovery.path === path)) return false;
-        if (!shared.has(path)) {
-          shared.add(path);
-          publish();
-        }
+        shared.add(path);
+        publish(path);
         return true;
       },
     };

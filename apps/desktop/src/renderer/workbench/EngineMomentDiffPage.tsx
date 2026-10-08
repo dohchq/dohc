@@ -532,9 +532,10 @@ export function EngineMomentDiffPage({
               </span>
             ) : null}
             {/* Kept typing's way back into a file History Restore refuses:
-                the file as it was with the typing, whole. */}
+                the whole file as it was with the typing, to replace the
+                file's text with. */}
             {keptTyping !== undefined ? (
-              <CopyButton label="Copy your typing" testId="engine-diff-copy-typing" getText={() => keptTyping} />
+              <CopyButton label="Copy your version" testId="engine-diff-copy-typing" getText={() => keptTyping} />
             ) : null}
           </div>
           {isProtected ? (

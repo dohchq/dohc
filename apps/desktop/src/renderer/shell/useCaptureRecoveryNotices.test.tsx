@@ -137,7 +137,7 @@ describe("useCaptureRecoveryNotices", () => {
     expect(h.bridge.clearCaptureRecovery).not.toHaveBeenCalled();
   });
 
-  it("tells a shared live file's owner to copy the typing back in, once, and keeps the recovery", async () => {
+  it("answers every shared live refusal on the kept typing's one row, and keeps the recovery", async () => {
     const other: Recovery = { ...RECOVERY, momentId: "moment-capture-recovery-b", path: "notes/other.md" };
     const h = harness([RECOVERY, other]);
     await waitFor(() => expect(recoveryRows(h)).toHaveLength(2));
@@ -154,7 +154,7 @@ describe("useCaptureRecoveryNotices", () => {
     expect(took).toBe(true);
     const shared = recoveryRows(h).find((row) => row.identity === "capture-recovery:moment-capture-recovery-a")!;
     expect(shared.message).toBe(
-      'The file "notes/rich.md" changed outside dohc. Your typing is in History. The file is shared live, so open the recovery change and copy your typing back into the file.',
+      'The file "notes/rich.md" changed outside dohc. Your typing is in History. The file is shared live, so replace its text with your version from the recovery change.',
     );
     expect(shared.message).not.toContain("Restore shared file");
     expect(shared.title).toBe(CAPTURE_RECOVERY_TITLE);
@@ -165,16 +165,40 @@ describe("useCaptureRecoveryNotices", () => {
     expect(recoveryRows(h).find((row) => row.identity === "capture-recovery:moment-capture-recovery-b")!.message)
       .toBe(captureRecoveryMessage("notes/other.md", false));
 
-    // A later refusal takes the refusal again, keeps the row, and raises no toast.
+    // A later refusal is answered too: the toast again, from the same one row.
     act(() => h.result.current.hideShellError(shared.id));
     act(() => { took = h.result.current.notices.restoreRefused("notes/rich.md", SHARED_REFUSAL); });
     expect(took).toBe(true);
-    expect(recoveryRows(h).find((row) => row.identity === "capture-recovery:moment-capture-recovery-a")).toEqual({ ...shared, seen: true });
+    expect(recoveryRows(h)).toHaveLength(2);
+    const again = recoveryRows(h).find((row) => row.identity === "capture-recovery:moment-capture-recovery-a")!;
+    expect(again.seen).toBe(false);
+    expect(again.message).toBe(shared.message);
+    // A read in between raises nothing on its own.
+    act(() => h.result.current.hideShellError(again.id));
+    await act(() => h.result.current.notices.refresh());
+    expect(recoveryRows(h).find((row) => row.identity === "capture-recovery:moment-capture-recovery-a")).toEqual({ ...again, seen: true });
 
     // Only a dismissal or a History Restore of the change clears it.
     await act(() => h.result.current.notices.refresh());
     expect(recoveryRows(h)).toHaveLength(2);
     expect(h.bridge.clearCaptureRecovery).not.toHaveBeenCalled();
+  });
+
+  it("words later kept typing at a file afresh once its refused recovery is gone", async () => {
+    const h = harness([RECOVERY]);
+    await waitFor(() => expect(recoveryRows(h)).toHaveLength(1));
+    act(() => { h.result.current.notices.restoreRefused("notes/rich.md", SHARED_REFUSAL); });
+    expect(recoveryRows(h)[0]!.message).toBe(captureRecoveryMessage("notes/rich.md", true));
+
+    // Dismissed, then a later restart keeps new typing at the same file.
+    act(() => h.result.current.dismissShellError(recoveryRows(h)[0]!.id));
+    await waitFor(() => expect(h.bridge.clearCaptureRecovery).toHaveBeenCalledOnce());
+    await waitFor(() => expect(h.bridge.getCaptureRecoveryStatus).toHaveBeenCalledTimes(2));
+    h.list([{ ...RECOVERY, momentId: "moment-capture-recovery-later" }]);
+    await act(() => h.result.current.notices.refresh());
+    expect(recoveryRows(h).map((row) => [row.identity, row.message])).toEqual([
+      ["capture-recovery:moment-capture-recovery-later", captureRecoveryMessage("notes/rich.md", false)],
+    ]);
   });
 
   it("raises nothing for a status that answers after the workspace changed", async () => {
