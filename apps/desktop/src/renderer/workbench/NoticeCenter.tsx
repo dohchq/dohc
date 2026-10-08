@@ -56,7 +56,8 @@ export type Notice = {
 // Notices remains.
 export interface WorkspaceErrorNotice {
   copyLabel?: string;
-  tone?: "success";
+  // Omitted for a failure. A warning needs the person, though nothing failed.
+  tone?: "success" | "warning";
   // A success toast that stays until it is closed, rather than fading.
   stays?: boolean;
   id: string;
@@ -307,13 +308,17 @@ export function WorkspaceErrorToast(props: {
   onHide?: (id: string) => void;
 }) {
   const { error } = props;
+  // A success or a warning is a notice: nothing failed.
+  const notice = error.tone !== undefined;
   return (
     <div
-      data-testid={error.tone === "success" ? "workspace-shell-notice" : "workspace-shell-error"}
-      role={error.tone === "success" ? "status" : "alert"}
+      data-testid={notice ? "workspace-shell-notice" : "workspace-shell-error"}
+      role={notice ? "status" : "alert"}
       className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
     >
-      {error.tone === "success" ? <CheckCircle2 size={14} aria-hidden className="mt-0.5 shrink-0 text-success" /> : <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-danger" />}
+      {error.tone === "success"
+        ? <CheckCircle2 size={14} aria-hidden className="mt-0.5 shrink-0 text-success" />
+        : <AlertTriangle size={14} aria-hidden className={`mt-0.5 shrink-0 ${error.tone === "warning" ? "text-warning" : "text-danger"}`} />}
       <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
         {error.title ? <span className="block font-medium">{error.title}</span> : null}
         <span className={error.title ? "block mt-0.5 text-muted" : undefined}>{error.message}</span>
@@ -342,14 +347,14 @@ export function WorkspaceErrorToast(props: {
         key={error.id}
         iconOnly
         pinName
-        label={error.copyLabel ?? (error.tone === "success" ? "Copy notice details" : "Copy error details")}
+        label={error.copyLabel ?? (notice ? "Copy notice details" : "Copy error details")}
         testId="workspace-shell-error-copy"
         getText={() => error.details}
       /> : null}
       {props.onHide ? (
         <button
           type="button"
-          aria-label={error.tone === "success" ? "Dismiss workspace notice" : "Dismiss workspace error"}
+          aria-label={notice ? "Dismiss workspace notice" : "Dismiss workspace error"}
           onClick={() => props.onHide?.(error.id)}
           className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
         >
@@ -910,7 +915,7 @@ export function NoticeCenter(props: {
           : {}),
         timeMs: error.atMs,
         copyText: error.filePaths?.length === 0 ? undefined : error.details,
-        copyLabel: error.copyLabel,
+        copyLabel: error.copyLabel ?? (error.tone === "warning" ? "Copy notice details" : undefined),
         filePaths: error.filePaths,
         Icon: error.tone === "success" ? CheckCircle2 : AlertTriangle,
       });

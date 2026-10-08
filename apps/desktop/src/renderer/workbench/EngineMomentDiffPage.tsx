@@ -1,5 +1,6 @@
 import { ExternalLink, FileArchive, FileText, Lock, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { isCaptureRecoveryOrigin } from "@dohc/workspace-contracts/engine";
 import type { EngineMomentDetailRecord, HistoryPolicyUnreadableResult } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { HistoryHiddenState, HistoryUntrackedState } from "./HistoryPolicyStates";
@@ -8,6 +9,7 @@ import { ConfirmDialog } from "../ui/ConfirmDialog";
 import {OwnerRestoreDialog} from "../OwnerRestoreDialog";
 import type { StopTarget } from "../StopAndRestoreDialog";
 import { SectionLabel } from "../ui/controls";
+import { CopyButton } from "../ui/CopyButton";
 import {
   UnifiedDiffLines,
   buildUnifiedDiffLines,
@@ -76,9 +78,7 @@ export function EngineMomentDiffPage({
   // hide the change.
   onPathResolved: (momentId: string, path: string | null) => void;
   registerActiveUndo: (handler: ActiveUndoHandler | null) => void;
-  // A restore of the change's file finished, from History or through
-  // Restore shared file.
-  onRestored: (restored: { path: string; shared: boolean }) => void;
+  onRestored: () => void;
   // Opens the shell's Stop and restore for a person the owner shared with,
   // or for the Edit share link that wrote this change.
   onStopAndRestore: (target: StopTarget) => void;
@@ -228,7 +228,7 @@ export function EngineMomentDiffPage({
     try {
       releaseOperation = await onBeforeRestore();
       const result = await bridge().restoreEngineMomentFile({ workspaceId, momentId: target });
-      onRestored({ path, shared: false });
+      onRestored();
       onSettled(identity);
       if (!live()) return;
       setRestoreState({
@@ -395,6 +395,8 @@ export function EngineMomentDiffPage({
       : moment.operation !== "delete" ||
         (restoreState.status === "restored" && restoreState.restored === "text");
   const diffLines: UnifiedDiffLine[] = prepared.lines;
+  // A recovery change's before side is the typing capture kept.
+  const keptTyping = isCaptureRecoveryOrigin(moment.origin) ? prepared.sides.before : undefined;
 
   const restoreFile = async () => {
     if (!canRestore || restoreBusy) return;
@@ -529,6 +531,11 @@ export function EngineMomentDiffPage({
                 +{counts.added} -{counts.removed}
               </span>
             ) : null}
+            {/* Kept typing's way back into a file History Restore refuses:
+                the file as it was with the typing, whole. */}
+            {keptTyping !== undefined ? (
+              <CopyButton label="Copy your typing" testId="engine-diff-copy-typing" getText={() => keptTyping} />
+            ) : null}
           </div>
           {isProtected ? (
             <div
@@ -572,8 +579,7 @@ export function EngineMomentDiffPage({
         </section>
       </div>
       {sharedRestoreOpen && <OwnerRestoreDialog key={`${workspaceId}:${moment.path}`} workspaceId={workspaceId} path={moment.path}
-        onClose={() => setSharedRestoreOpen(false)} onBeforeRestore={onBeforeRestore}
-        onRestored={() => onRestored({ path: moment.path, shared: true })} />}
+        onClose={() => setSharedRestoreOpen(false)} onBeforeRestore={onBeforeRestore} onRestored={onRestored} />}
       {confirmRestoreOpen ? (
         <ConfirmDialog
           title="Restore this file?"

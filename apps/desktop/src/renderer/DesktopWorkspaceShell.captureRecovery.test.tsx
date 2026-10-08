@@ -42,8 +42,11 @@ function recoveryBridge() {
   return { bridge, clear: () => { listed = []; } };
 }
 
+// Nothing failed, so the kept typing's toast is a notice, in the warning tone.
+const NOTICE_TOAST = "workspace-shell-notice";
+
 async function openRecoveryFromToast(user: ReturnType<typeof userEvent.setup>) {
-  const toast = await screen.findByTestId("workspace-shell-error");
+  const toast = await screen.findByTestId(NOTICE_TOAST);
   const action = within(toast).getByTestId("workspace-shell-error-action");
   expect(action.textContent).toBe("Open History");
   await user.click(action);
@@ -64,12 +67,14 @@ describe("typing kept in History", () => {
     const { bridge } = recoveryBridge();
     const user = userEvent.setup();
     renderShell(bridge);
-    const toast = await screen.findByTestId("workspace-shell-error");
+    const toast = await screen.findByTestId(NOTICE_TOAST);
+    expect(toast.getAttribute("role")).toBe("status");
+    expect(toast.querySelector("svg.text-warning")).toBeTruthy();
     expect(toast.textContent).toContain(CAPTURE_RECOVERY_TITLE);
     expect(toast.textContent).toContain(
       'The file "notes/plan.md" changed outside dohc. Your typing is in History. Open the recovery change and choose Restore.',
     );
-    expect(within(toast).getByTestId("workspace-shell-error-copy")).toBeTruthy();
+    expect(within(toast).getByRole("button", { name: "Copy notice details" })).toBeTruthy();
     expect(within(toast).queryByTestId("workspace-shell-error-retry")).toBeNull();
     expect(bridge.getCaptureRecoveryStatus).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId });
 
@@ -78,6 +83,10 @@ describe("typing kept in History", () => {
     expect(screen.getByTestId(`tab-dohc://moment-diff/${RECOVERY.momentId}`)).toBeTruthy();
     expect(screen.getByTestId("engine-diff-source").textContent).toBe("Typing kept");
     expect(screen.getByTestId("engine-diff-lines").textContent).toContain("Typing kept here.");
+
+    // The change gives the typing back whole, beside the diff it shows.
+    await user.click(screen.getByRole("button", { name: "Copy your typing" }));
+    expect(await navigator.clipboard.readText()).toBe("Typing kept here.\n");
   });
 
   it("drops the notice once its Restore clears the recovery in the engine", async () => {
@@ -96,7 +105,7 @@ describe("typing kept in History", () => {
     expect((await screen.findByTestId("engine-diff-restore-status")).textContent).toBe(
       "Restored the earlier state. Undo restore is available here.",
     );
-    await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId(NOTICE_TOAST)).toBeNull());
     expect(await noticeRows(user)).toEqual([]);
     expect(bridge.clearCaptureRecovery).not.toHaveBeenCalled();
   });
@@ -105,9 +114,10 @@ describe("typing kept in History", () => {
     const { bridge } = recoveryBridge();
     const user = userEvent.setup();
     const view = renderShell(bridge);
-    await screen.findByTestId("workspace-shell-error");
+    await screen.findByTestId(NOTICE_TOAST);
     const [row] = await noticeRows(user);
     expect(row!.textContent).toContain(CAPTURE_RECOVERY_TITLE);
+    expect(within(row!).getByRole("button", { name: "Copy notice details" })).toBeTruthy();
     await user.click(within(row!).getByRole("button", { name: "Dismiss notice" }));
     await waitFor(() => expect(bridge.clearCaptureRecovery).toHaveBeenCalledExactlyOnceWith({
       workspaceId: WORKSPACE.workspaceId, momentId: RECOVERY.momentId,
@@ -117,7 +127,7 @@ describe("typing kept in History", () => {
     act(() => bridge.emitWorkspaceActivity());
     await waitFor(() => expect(bridge.getCaptureRecoveryStatus.mock.calls.length).toBeGreaterThan(reads));
     await act(async () => {});
-    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.queryByTestId(NOTICE_TOAST)).toBeNull();
     expect(shownRows()).toEqual([]);
 
     view.unmount();
@@ -125,14 +135,15 @@ describe("typing kept in History", () => {
     renderShell(bridge);
     await waitFor(() => expect(bridge.getCaptureRecoveryStatus.mock.calls.length).toBeGreaterThan(relaunchReads));
     await act(async () => {});
-    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.queryByTestId(NOTICE_TOAST)).toBeNull();
     expect(await noticeRows(user)).toEqual([]);
   });
 
   // A shared live document's lineage is replicated, so History Restore
-  // refuses it. The notice routes to Restore shared file, whose restore
-  // clears the recovery the engine kept.
-  it("routes a replicated lineage's kept typing to Restore shared file, which clears it", async () => {
+  // refuses it. Restore shared file returns only accepted changes, and kept
+  // typing is in none of them, so the notice says to copy the typing back in,
+  // and a shared restore leaves the recovery where it is.
+  it("tells a replicated lineage's owner to copy the typing back, and a shared restore keeps it", async () => {
     const { bridge } = recoveryBridge();
     const documentKey = { workspaceId: WORKSPACE.workspaceId, mainVersionId: "main", objectId: RECOVERY.objectId, lineageClaimId: "lineage" };
     const digest = "a".repeat(64), proposalDigest = "b".repeat(64);
@@ -157,16 +168,20 @@ describe("typing kept in History", () => {
     const user = userEvent.setup();
     renderShell(bridge);
     await openRecoveryFromToast(user);
-    await user.click(screen.getByRole("button", { name: "Dismiss workspace error" }));
+    await user.click(screen.getByRole("button", { name: "Dismiss workspace notice" }));
 
-    await user.click(screen.getByTestId("engine-diff-restore-file"));
-    await user.click(await screen.findByTestId("engine-diff-confirm-restore"));
-    const toast = await screen.findByTestId("workspace-shell-error");
+    const refuse = async () => {
+      await user.click(screen.getByTestId("engine-diff-restore-file"));
+      await user.click(await screen.findByTestId("engine-diff-confirm-restore"));
+    };
+    await refuse();
+    const toast = await screen.findByTestId(NOTICE_TOAST);
     expect(toast.textContent).toContain(CAPTURE_RECOVERY_TITLE);
     expect(toast.textContent).toContain(
-      'The file "notes/plan.md" changed outside dohc. Your typing is in History. The file is shared live, so open the recovery change and choose Restore shared file.',
+      'The file "notes/plan.md" changed outside dohc. Your typing is in History. The file is shared live, so open the recovery change and copy your typing back into the file.',
     );
     expect(toast.textContent).toContain(captureRecoveryMessage(PATH, true));
+    expect(toast.textContent).not.toContain("Restore shared file");
     expect(restoreEngineMomentFile).toHaveBeenCalledOnce();
     // The refusal is this notice's, not a second row about the same restore.
     const rows = await noticeRows(user);
@@ -174,17 +189,33 @@ describe("typing kept in History", () => {
     expect(rows[0]!.textContent).not.toContain("Continue editing at the current location");
     await user.click(screen.getByTestId("notice-center-toggle"));
 
+    // The route the notice names works: the typing comes back whole.
+    await user.click(screen.getByRole("button", { name: "Copy your typing" }));
+    expect(await navigator.clipboard.readText()).toBe("Typing kept here.\n");
+
+    // A second refusal says nothing new, so it raises no toast.
+    await user.click(within(screen.getByTestId(NOTICE_TOAST)).getByRole("button", { name: "Dismiss workspace notice" }));
+    await refuse();
+    await waitFor(() => expect(restoreEngineMomentFile).toHaveBeenCalledTimes(2));
+    await act(async () => {});
+    expect(screen.queryByTestId(NOTICE_TOAST)).toBeNull();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+
+    // A finished Restore shared file leaves the kept typing and its notice.
     await user.click(screen.getByTestId("engine-diff-shared-restore"));
     const dialog = await screen.findByTestId("owner-restore-dialog");
     expect(ownerRestore).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId, action: "options", path: PATH });
     await user.click(await within(dialog).findByRole("button", { name: "Retry" }));
     expect(await within(dialog).findByText("File restored")).toBeTruthy();
-    await waitFor(() => expect(bridge.clearCaptureRecovery).toHaveBeenCalledExactlyOnceWith({
-      workspaceId: WORKSPACE.workspaceId, momentId: RECOVERY.momentId,
-    }));
     await user.click(within(dialog).getByRole("button", { name: "Close" }));
-    await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
-    expect(await noticeRows(user)).toEqual([]);
+    const reads = bridge.getCaptureRecoveryStatus.mock.calls.length;
+    act(() => bridge.emitWorkspaceActivity());
+    await waitFor(() => expect(bridge.getCaptureRecoveryStatus.mock.calls.length).toBeGreaterThan(reads));
+    await act(async () => {});
+    expect(bridge.clearCaptureRecovery).not.toHaveBeenCalled();
+    const kept = await noticeRows(user);
+    expect(kept).toHaveLength(1);
+    expect(kept[0]!.textContent).toContain(captureRecoveryMessage(PATH, true));
   });
 
   it("raises nothing for a status that answers after the window changed workspaces", async () => {
@@ -213,6 +244,6 @@ describe("typing kept in History", () => {
     await act(async () => answers[0]!.resolve({ captureRecoveries: [RECOVERY] }));
     expect(screen.queryByText(CAPTURE_RECOVERY_TITLE)).toBeNull();
     await act(async () => answers[1]!.resolve({ captureRecoveries: [] }));
-    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.queryByTestId(NOTICE_TOAST)).toBeNull();
   });
 });

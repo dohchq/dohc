@@ -302,9 +302,10 @@ const REFUSED_RESTORE_TOAST = {
 // rows the shell builds for it, and its change in History. The time is
 // local, so the row reads the same in every time zone.
 const RECOVERY_PATH = "trip/plan.md";
-const RECOVERY_DETAILS = `Error: ${captureRecoveryMessage(RECOVERY_PATH, false)}\nTitle: ${CAPTURE_RECOVERY_TITLE}\nFile: ${RECOVERY_PATH}`;
+const RECOVERY_DETAILS = `Notice: ${captureRecoveryMessage(RECOVERY_PATH, false)}\nTitle: ${CAPTURE_RECOVERY_TITLE}\nFile: ${RECOVERY_PATH}`;
 const RECOVERY_TOAST = {
   id: "capture-recovery",
+  tone: "warning" as const,
   title: CAPTURE_RECOVERY_TITLE,
   message: captureRecoveryMessage(RECOVERY_PATH, false),
   details: RECOVERY_DETAILS,
@@ -316,12 +317,13 @@ const RECOVERY_TOAST = {
 function recoveryNotice(id: string, shared: boolean) {
   return {
     id,
-    tone: "danger" as const,
+    tone: "warning" as const,
     title: CAPTURE_RECOVERY_TITLE,
     body: captureRecoveryMessage(RECOVERY_PATH, shared),
     Icon: AlertTriangle,
     actions: [{ label: "Open History", onClick: noop }],
     copyText: RECOVERY_DETAILS,
+    copyLabel: "Copy notice details",
     onDismiss: noop,
   };
 }

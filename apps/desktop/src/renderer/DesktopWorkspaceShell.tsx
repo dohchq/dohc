@@ -2528,19 +2528,15 @@ export function DesktopWorkspaceShell(props: {
     reportShellError,
     openRecovery: openCaptureRecovery,
   });
-  // History Restore clears the kept typing it restored in the engine, so the
-  // next read drops its row. Restore shared file clears it from here.
-  const onHistoryRestored = useCallback(
-    (restored: { path: string; shared: boolean }) => {
-      refreshAfterHistoryRestore();
-      if (restored.shared) captureRecoveries.sharedRestored(restored.path);
-      else void captureRecoveries.refresh();
-    },
-    [captureRecoveries, refreshAfterHistoryRestore],
-  );
+  // A History Restore of kept typing clears it in the engine, so the next
+  // read drops its row.
+  const onHistoryRestored = useCallback(() => {
+    refreshAfterHistoryRestore();
+    void captureRecoveries.refresh();
+  }, [captureRecoveries, refreshAfterHistoryRestore]);
   // One row per file in Notices: a newer failure for the file replaces it. A
   // shared live file's refusal goes to its kept typing's row instead, which
-  // then names Restore shared file.
+  // then says to copy the typing back in.
   const reportRestoreError = useCallback(
     (fallback: string, error: unknown, retry: () => void, identity: string, path: string) => {
       if (captureRecoveries.restoreRefused(path, error)) return;
@@ -4546,7 +4542,7 @@ export function DesktopWorkspaceShell(props: {
         ...(error.title ? { title: error.title } : {}),
         ...(error.kind === "share-capture" ? { filePaths: error.details?.map(detail => String(detail[1])) ?? [], copyLabel: "Copy file paths" } : {}),
         details: error.kind === "share-capture" ? (error.details ?? []).map(detail => String(detail[1])).join("\n") : errorDetails([
-          [error.tone === "success" ? "Notice" : "Error", error.message],
+          [error.tone ? "Notice" : "Error", error.message],
           ...(error.title ? [["Title", error.title] as const] : []),
           ...(error.details ?? []),
           ...reportFacts(),

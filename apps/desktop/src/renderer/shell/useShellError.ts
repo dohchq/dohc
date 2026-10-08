@@ -65,7 +65,8 @@ const shareCaptureNotices = new Map<string, { key: string; dismissed: boolean }>
 // value the user can see owes them a way to ask again (AGENTS.md), so a
 // retry rides with it; errors that are already over carry none.
 export interface ShellError {
-  tone?: "success";
+  // Omitted for a failure. A warning needs the person, though nothing failed.
+  tone?: "success" | "warning";
   // A success toast that stays until it is closed, rather than fading.
   stays?: boolean;
   id: string;
@@ -543,6 +544,7 @@ export function useShellError(workspaceId: string) {
         id: `shell-error-${nextId.current}`,
         identity: identityOf(recovery.momentId),
         kind: "capture-recovery",
+        tone: "warning",
         title: recovery.title,
         message: recovery.message,
         details: [["File", recovery.path, recovery.path.length], ["Change id", recovery.momentId]],
