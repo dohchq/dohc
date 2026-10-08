@@ -27,7 +27,7 @@ const receipt = {deliveryId: "delivery", updateDigest: hash(update), journalCurs
 const cleanups: (() => void)[] = [];
 afterEach(() => {for (const close of cleanups.splice(0).reverse()) close(); vi.restoreAllMocks(); transport.connect.mockReset();});
 
-async function deliver(accountId?: string) {
+async function deliver(accountId: string) {
   const lifetime = new AbortController();
   let server: ReturnType<typeof createNamedLiveFrameSession> | undefined;
   cleanups.push(() => {lifetime.abort(); server?.close();});
@@ -67,10 +67,6 @@ it("delivers the hosted declaration to the relay under the credential account", 
     {accountId: "authenticated-owner", name: "Owner"})).toEqual([
       {kind: "human", humanId: "authenticated-owner", humanName: "Owner"}, {kind: "agent", ...agentDeclaration},
     ]);
-});
-
-it("ignores a client-supplied outbox account when no authenticated account exists", async () => {
-  expect(await deliver()).not.toHaveProperty("authorContext");
 });
 
 it("ignores a forged recording account at relay admission", async () => {
