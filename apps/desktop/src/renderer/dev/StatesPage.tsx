@@ -1140,6 +1140,7 @@ function Pane(props: { theme: "light" | "dark" }) {
           </Specimen>
         ))}
       </Section>
+
       {/* Last, so the parts above keep their places. */}
       <Section part="capture-recovery" title="Typing kept in History">
         <Specimen label="toast">
