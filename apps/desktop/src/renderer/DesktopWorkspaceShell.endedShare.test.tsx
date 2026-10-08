@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { ObserverStub } from "./DesktopWorkspaceShell.testSupport";
 import "./CollectionPage";
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
+import { useShellError } from "./shell/useShellError";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Profiler, useMemo, useRef, useState } from "react";
 import type { Workspace } from "./DesktopWorkspaceShell";
@@ -107,39 +108,81 @@ describe("ended Edit Collection shares", () => {
     }
   });
 
-  it("reports unsaved files in one Notice with Copy after access ends", async () => {
+  it("keeps the capture Notice available after a dismissal fails and gives a next step", async () => {
+    const bridge = collectionBridge();
+    vi.stubGlobal("dohcDesktop", bridge);
+    bridge.dismissShareCaptureNotice.mockRejectedValue(new Error("registry unavailable"));
+    const workspace = { ...ENDED_SHARE, workspaceId: `${ENDED_SHARE.workspaceId}-dismiss-failed`,
+      shareView: { ...ENDED_SHARE.shareView!, unsavedPaths: [],
+        unconfirmedChanges: { paths: ["tasks/local.yaml"], unchecked: false, checked: 1 } } };
+    render(shell(bridge, workspace));
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    fireEvent.click(within(notices).getByRole("button", { name: "Dismiss notice" }));
+    await waitFor(() => expect(notices.textContent).toContain("dohc couldn't dismiss this Notice. Try dismissing it again in Notices."));
+    expect(within(notices).getByText("Changes kept on this computer")).toBeTruthy();
+    expect(bridge.dismissShareCaptureNotice).toHaveBeenCalledOnce();
+  });
+
+  it.each(["end", "narrow"] as const)("reports unconfirmed changes in one bounded Notice with path-only Copy after %s", async restriction => {
     const bridge = collectionBridge();
     vi.stubGlobal("dohcDesktop", bridge);
     const writeText = vi.fn(async (_text: string) => undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
-    const paths = ["tasks/locked.md", "tasks/another.md"];
-    const workspace = { ...ENDED_SHARE, shareView: { ...ENDED_SHARE.shareView!, unsavedPaths: paths } };
+    const paths = ["tasks/automations.yaml", "tasks/draft.md", "tasks/e.yaml", "tasks/f.yaml", "tasks/g.yaml", "tasks/h.yaml", "tasks/i.yaml"];
+    const workspace = { ...ENDED_SHARE, workspaceId: `${ENDED_SHARE.workspaceId}-notice-${restriction}`, shareView: { ...ENDED_SHARE.shareView!,
+      ended: restriction === "end", access: "view" as const, unsavedPaths: [], unconfirmedChanges: { paths, unchecked: false, checked: 0 } } };
     const rendered = render(shell(bridge, workspace));
     await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
-    const message = "Your changes weren't sent and remain on this computer. Copy these files to another workspace.";
-    expect(screen.getByTestId("workspace-shell-error").textContent).not.toContain(paths[0]);
-    expect(screen.getByTestId("workspace-shell-error").textContent).not.toContain("could not save");
+    const message = restriction === "end"
+      ? "dohc couldn't confirm these changes reached the share. They are kept on this computer. Copy these files to another workspace."
+      : "dohc couldn't confirm these changes reached the share. A later change from the owner can replace these files. Your saved changes stay in History. Copy these files to another workspace now.";
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).not.toContain(paths[0]);
+    expect(toast.textContent).not.toContain("could not save");
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
     const notices = await screen.findByTestId("notice-center");
     expect(within(notices).getAllByText(message)).toHaveLength(1);
-    const copies = within(notices).getAllByRole("button", { name: "Copy error details" });
+    expect(within(notices).getByText(restriction === "end" ? "Changes kept on this computer" : "Changes to copy now")).toBeTruthy();
+    expect(within(notices).getByText(message).className).not.toMatch(/truncate|line-clamp/);
+    expect(notices.textContent).toContain(paths[0]);
+    expect(notices.textContent).toContain(paths[1]);
+    expect(notices.textContent).not.toContain(paths[5]);
+    expect(within(notices).getByText("2 more")).toBeTruthy();
+    expect(notices.textContent).not.toContain("tasks/accepted.md");
+    const copies = within(notices).getAllByRole("button", { name: "Copy file paths" });
     expect(copies).toHaveLength(1);
     fireEvent.click(copies[0]!);
     await waitFor(() => expect(writeText).toHaveBeenCalledOnce());
-    expect(writeText.mock.calls[0]![0]).toContain("File: tasks/another.md\nFile: tasks/locked.md");
-    const samePaths = { ...workspace, shareView: { ...workspace.shareView, unsavedPaths: [...paths].reverse() } };
+    expect(writeText.mock.calls[0]![0]).toBe(paths.join("\n"));
+    const samePaths = { ...workspace, shareView: { ...workspace.shareView, unconfirmedChanges: { paths: [...paths].reverse(), unchecked: false, checked: 0 } } };
     rendered.rerender(shell(bridge, samePaths));
     expect(within(notices).getAllByText(message)).toHaveLength(1);
+    let saved = JSON.parse(JSON.stringify(samePaths)) as Workspace;
+    bridge.dismissShareCaptureNotice.mockImplementation(async ({ key }) => {
+      saved = { ...saved, shareView: { ...saved.shareView!, unconfirmedChanges: { ...saved.shareView!.unconfirmedChanges!, dismissedKey: key } } };
+    });
     fireEvent.click(within(notices).getByRole("button", { name: "Dismiss notice" }));
-    rendered.rerender(shell(bridge, { ...workspace, shareView: { ...workspace.shareView, unsavedPaths: [...paths] } }));
-    expect(within(notices).queryByText(message)).toBeNull();
+    await waitFor(() => expect(within(notices).queryByText(message)).toBeNull());
+    expect(bridge.dismissShareCaptureNotice).toHaveBeenCalledOnce();
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
-    rendered.rerender(shell(bridge, { ...workspace, shareView: { ...workspace.shareView, unsavedPaths: [paths[0]!] } }));
-    expect(within(notices).getAllByText(message)).toHaveLength(1);
-    expect(within(notices).queryByRole("button", { name: "Try again" })).toBeNull();
-    expect(bridge.checkSharedViewAccess).not.toHaveBeenCalled();
-    expect(bridge.refreshSharedView).not.toHaveBeenCalled();
     rendered.unmount();
+    // Forget renderer memory; the reopened shell must use the saved registry.
+    const memory = renderHook(() => useShellError(workspace.workspaceId));
+    act(() => memory.result.current.reportShareCapture(workspace.shareView.shareId!, []));
+    memory.unmount();
+    bridge.getWorkspaceRegistry.mockResolvedValue({ workspaces: [JSON.parse(JSON.stringify(saved))] });
+    const loaded = (await bridge.getWorkspaceRegistry()).workspaces[0] as Workspace;
+    const reopened = render(shell(bridge, loaded));
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(within(screen.getByTestId("notice-center")).queryByText(message)).toBeNull();
+    bridge.getWorkspaceRegistry.mockResolvedValue({ workspaces: [] });
+    reopened.rerender(shell(bridge, { ...workspace, shareView: { ...workspace.shareView, unconfirmedChanges: { paths: [paths[0]!], unchecked: false, checked: 0 } } }));
+    expect(within(screen.getByTestId("notice-center")).getAllByText(message)).toHaveLength(1);
+    expect(within(screen.getByTestId("notice-center")).queryByRole("button", { name: "Try again" })).toBeNull();
+    reopened.unmount();
   });
 
   it("explains reopening a received share with a damaged recipient pin", async () => {

@@ -33,6 +33,7 @@ function capability(description: string, exposure: {
 
 export const CAPABILITIES = {
   "share.access.read": capability("Check the current user's received share access.", {ipc: ["checkSharedViewAccess"]}),
+  "share.capture.notice.dismiss": capability("Dismiss a received share's capture Notice.", {ipc: ["dismissShareCaptureNotice"]}),
   "version.list": capability("List workspace versions.", {ipc: ["listWorkspaceVersions"]}),
   "version.create": capability("Create a workspace version.", {ipc: ["createWorkspaceVersion"]}),
   "version.switch": capability("Switch workspace versions.", {ipc: ["switchWorkspaceVersion"]}),
