@@ -3,6 +3,7 @@ import { registerPendingEditorDraft } from "./pendingEditorDrafts";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { bridge } from "./bridge";
 import { captureOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
+import { reportTextSave } from "./shell/useDocumentSaveNotices";
 import type { SharedLocalDocument } from "./sharedLocalDocument";
 
 export const AUTOSAVE_DEBOUNCE_MS = 800;
@@ -137,6 +138,18 @@ export function useAutosavedTextDraft(props: {
     disabledRef.current === true ||
     props.switchUnresyncedRef.current === true ||
     staleBaseline.current;
+  // What a write did, for the shell's save notices. Their Try again saves
+  // the newest draft while this editor is open and can write the file.
+  const saveNowRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  const reportSave = (failure: { cause?: unknown } | null) =>
+    reportTextSave(props.workspaceId, props.path, failure && {
+      ...failure,
+      retry: () => {
+        if (unmounted.current || writesBlocked()) return false;
+        void saveNowRef.current();
+        return true;
+      },
+    });
 
   useEffect(() => {
     if (
@@ -479,6 +492,7 @@ export function useAutosavedTextDraft(props: {
         }
         const text = result.body;
         latestDraft.current = props.localBuffer.getSnapshot().body;
+        reportSave(result.status === "no-baseline" ? {} : null);
         if (result.status === "skipped") {
           if (!unmounted.current) setSaveState(SAVED_HERE);
           return;
@@ -548,6 +562,7 @@ export function useAutosavedTextDraft(props: {
         if (options.captureOnFailure && options.textSnapshot !== undefined) {
           captureLatestConflictDraft(options.textSnapshot);
         }
+        reportSave({ cause: error });
         if (!unmounted.current) setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
         if (options.rejectOnError) throw error;
       }
@@ -570,6 +585,7 @@ export function useAutosavedTextDraft(props: {
   async function saveNow(): Promise<void> {
     await writeDraftNow();
   }
+  saveNowRef.current = saveNow;
 
   function scheduleSave(next: string) {
     // A busy renderer can deliver an edit before the effect above accepts the

@@ -24,6 +24,7 @@ import {
   type DraftFlush,
 } from "./useAutosavedTextDraft";
 import { resolveWikilinkNavigation, resolveWorkspaceLinkNavigation } from "./wikilinkNavigation";
+import { reportTextSave } from "./shell/useDocumentSaveNotices";
 import { CopyButton } from "./ui/CopyButton";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import {
@@ -905,6 +906,18 @@ export function MarkdownView(props: {
   const { writesRefusedRef } = props;
   const writesBlocked = () =>
     readOnlyRef.current || writesRefusedRef.current || staleBaseline.current;
+  // What a plain write did, for the shell's save notices. Their Try again
+  // saves the newest draft while this view is open and can write the file.
+  const saveNowRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  const reportSave = (failure: { cause?: unknown } | null) =>
+    reportTextSave(props.workspaceId, props.path, failure && {
+      ...failure,
+      retry: () => {
+        if (unmounted.current || writesBlocked() || openingRef.current) return false;
+        void saveNowRef.current();
+        return true;
+      },
+    });
   const engineMode = displayDoc !== null;
   const engineModeRef = useRef(engineMode);
   engineModeRef.current = engineMode;
@@ -1447,6 +1460,7 @@ export function MarkdownView(props: {
         }
         const text = result.body;
         latestDraft.current = props.localBuffer.getSnapshot().body;
+        reportSave(result.status === "no-baseline" ? {} : null);
         if (result.status === "skipped") {
           baseContentHash.current = result.contentHash;
           if (!unmounted.current) setSaveState(SAVED_HERE);
@@ -1523,6 +1537,7 @@ export function MarkdownView(props: {
         if (options.captureOnFailure && options.textSnapshot !== undefined) {
           captureLatestConflictDraft(options.textSnapshot);
         }
+        reportSave({ cause: error });
         if (!unmounted.current) setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
         if (options.rejectOnError) throw error;
       }
@@ -1550,6 +1565,7 @@ export function MarkdownView(props: {
   async function saveNow(): Promise<void> {
     await writeDraftNow();
   }
+  saveNowRef.current = saveNow;
 
   function onDraft(next: string) {
     if (readOnly) return;
