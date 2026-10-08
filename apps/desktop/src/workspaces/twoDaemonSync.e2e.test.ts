@@ -516,6 +516,11 @@ it.skipIf(engine.missing).each([
     }, {timeout: 120_000})
       .toEqual({pending: 0, settled: true, errors: []});
     await capture.flush();
+    // Adoption can finish before the owner's field edit is accepted and materialized.
+    if (hasId) await expect.poll(async () => {
+      await adapter.flushCapture();
+      return readFile(join(rootA, path), "utf8");
+    }, {timeout: 120_000}).toContain("Name: Manual");
     const markdown = await readFile(join(rootA, path), "utf8");
     if (hasId) expect(markdown).toContain("Name: Manual");
     expect(markdown).toContain(`id: ${pending.recordId}`);
