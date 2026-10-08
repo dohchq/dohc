@@ -1,3 +1,4 @@
+import { datasetBaseFolder } from "@dohc/security-contract/dataset";
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -3962,7 +3963,7 @@ export class CollectionAutomations {
     const folders = new Map<string, IndexedDataset>();
     const unplaced = new Set<string>();
     for (const definition of listed.definitions) {
-      const folder = posix.dirname(definition.schemaPath);
+      const folder = datasetBaseFolder(definition);
       if (folder === "." || (await this.describedDatasetId(folder)) !== definition.datasetId) {
         unplaced.add(definition.datasetId);
         continue;
@@ -5197,7 +5198,7 @@ export class CollectionAutomations {
               if (!described.operations.some(operation => operation.operationId === targetOperationId)) throw new Error(SHARED_BUTTON_DENIED);
               const revision = host.revision(targetId), operation = revision.definition.operations.find(value => value.operationId === targetOperationId);
               if (!operation || !owned) throw new Error(SHARED_BUTTON_DENIED);
-              const target: ReachStep = { kind: "dataset-operation", collection: collectionNamed(posix.dirname(revision.definition.schemaPath)), datasetId: targetId,
+              const target: ReachStep = { kind: "dataset-operation", collection: collectionNamed(datasetBaseFolder(revision.definition)), datasetId: targetId,
                 operations: revision.definition.operations, grants: host.dataGrants(targetId), operation };
               if (checkAutomationReach(roster, { id: owned.automation.id, collection: collectionNamed(owned.collectionPath), codeFiles: codeFilesOf(owned.automation, owned.collectionPath), steps: [target] }).some(verdict => !verdict.allowed)) throw new Error(SHARED_BUTTON_DENIED);
             };

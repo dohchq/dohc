@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { posix } from "node:path";
-import { DATASET_METADATA_MAX_BYTES, datasetDefinitionDigestContent, parseDatasetDefinition, parseDatasetRevision } from "@dohc/security-contract/dataset";
+import { datasetBaseFolder, DATASET_METADATA_MAX_BYTES, parseDatasetDefinition, parseDatasetRevision } from "@dohc/security-contract/dataset";
 import {
   MAX_AUTOMATIONS_FILE_BYTES,
   parseAutomationsFile,
@@ -470,7 +469,6 @@ type CachedDatasetDescriptor = {
   blobSha256: string;
   expiresAtMs: number;
   datasetId: string;
-  definitionSha256: string;
   approval?: { revisionSha256: string; canSwitch: boolean };
 };
 const datasetDescriptors = new WeakMap<StorageContext, Map<string, CachedDatasetDescriptor>>();
@@ -498,7 +496,6 @@ function datasetDescriptor(storage: StorageContext, workspaceId: string, folder:
     blobSha256: descriptor.blobSha256,
     expiresAtMs: now + DATASET_PREFLIGHT_CACHE_MS,
     datasetId: definition.datasetId,
-    definitionSha256: createHash("sha256").update(datasetDefinitionDigestContent(definition)).digest("hex"),
   };
   cache.delete(key);
   if (cache.size >= DATASET_PREFLIGHT_CACHE_ENTRIES) {
@@ -519,8 +516,7 @@ function approvedDatasetFolder(storage: StorageContext, workspaceId: string, fol
     const revisionSha256 = createHash("sha256").update(revisionJson).digest("hex");
     if (descriptor.approval?.revisionSha256 === revisionSha256) return descriptor.approval.canSwitch;
     const approved = parseDatasetRevision(JSON.parse(revisionJson));
-    const canSwitch = approved.datasetId === descriptor.datasetId && posix.dirname(approved.definition.schemaPath) === folder
-      && descriptor.definitionSha256 === approved.definitionSha256;
+    const canSwitch = approved.datasetId === descriptor.datasetId && datasetBaseFolder(approved.definition) === folder;
     descriptor.approval = { revisionSha256, canSwitch };
     return canSwitch;
   } catch { return false; }
