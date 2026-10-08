@@ -27,7 +27,7 @@ describe("share capture Notice dismissal", () => {
     const saved = JSON.parse(JSON.stringify(h.registry.get(h.workspace.workspaceId))) as typeof h.workspace;
     expect(saved.shareView?.unconfirmedChanges?.dismissedKey).toBe(payload.key);
     expect(saved.shareView?.unsavedPaths).toEqual(["docs/locked.md"]);
-    expect(h.notify).toHaveBeenCalledWith({ workspaceId: h.workspace.workspaceId });
+    expect(h.notify).toHaveBeenCalledWith({ workspaceId: h.workspace.workspaceId, summaryChanged: true });
     expect(h.storeFor).not.toHaveBeenCalled();
   });
   it("rejects an untrusted or inactive sender", async () => {
@@ -96,7 +96,7 @@ describe("metadata-only access checks", () => {
         if (change === "timeout") await vi.advanceTimersByTimeAsync(4_000);
       });
       await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, { workspaceId: "existing" });
-      expect(h.notify).toHaveBeenCalledWith({ workspaceId: "existing" });
+      expect(h.notify).toHaveBeenCalledWith({ workspaceId: "existing", summaryChanged: true });
       expect(h.surfaces).toHaveBeenCalledOnce();
       expect(h.closed.size).toBe(0);
       expect(vi.getTimerCount()).toBe(0);
@@ -115,7 +115,8 @@ describe("metadata-only access checks", () => {
     await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, { workspaceId: "existing" });
     expect(h.narrow).toHaveBeenCalledOnce();
     expect(h.reconcile).not.toHaveBeenCalled();
-    expect(h.notify).toHaveBeenCalledWith({ workspaceId: "existing" });
+    expect(h.notify).toHaveBeenCalledExactlyOnceWith({ workspaceId: "existing", summaryChanged: true });
+    expect(h.steps.indexOf("pin")).toBeLessThan(h.steps.indexOf("notify"));
   });
 
   const payload = { workspaceId: "existing" };
@@ -140,7 +141,7 @@ describe("metadata-only access checks", () => {
     expect(await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload)).toEqual({ status: "ended" });
     expect(h.end).toHaveBeenCalledTimes(1);
     expect(h.workspace.shareView!.ended).toBe(true);
-    expect(h.notify).toHaveBeenCalledWith({ workspaceId: "existing" });
+    expect(h.notify).toHaveBeenCalledWith({ workspaceId: "existing", summaryChanged: true });
     expect(h.reconcile).not.toHaveBeenCalled();
   });
   it("narrows Edit to View without expanding the pinned paths or version", async () => {
