@@ -761,6 +761,7 @@ export interface WorkspaceEngineCaptureOptions {
   openSettleGate?: () => Promise<void>;
   onError?: (context: string, error: unknown) => void;
   preserveUnsentState?: (input: { path: string; objectId: string; contentKind: YdocContentKind; doc: Y.Doc }) => Promise<void>;
+  hasRetainedLiveDraft?: (path: string, objectId: string) => Promise<boolean>;
   // Outcome of each background HISTORY-CAPTURE task (batch capture and
   // reconciliation passes). With the engine as the workspace's sole
   // recorder, a persistently failing store means history capture fails
@@ -1140,6 +1141,13 @@ export class RestoreHeadChangedError extends Error {
   constructor(readonly path: string) {
     super(`${path} changed since dohc checked it.`);
     this.name = "RestoreHeadChangedError";
+  }
+}
+
+export class RestoreLocalChangesError extends Error {
+  constructor(readonly path: string, detail = "Changed on this device since the last saved version") {
+    super(detail);
+    this.name = "RestoreLocalChangesError";
   }
 }
 
@@ -6326,7 +6334,7 @@ export function createWorkspaceEngineCapture(
       }
     },
 
-    restoreFileToBeforeMoment(momentId, person, options = {}) {
+    restoreFileToBeforeMoment(momentId, person, restoreOptions = {}) {
       // The person as submitted, before the restore waits for its turn.
       const author = structuredClone(person);
       return enqueueResult("restore file", async () => {
@@ -6347,7 +6355,7 @@ export function createWorkspaceEngineCapture(
           if (!secretMoment) {
             throw new Error("This history moment is no longer available.");
           }
-          if (options.expectedHeadMomentId !== undefined) throw new RestoreHeadChangedError(secretMoment.path);
+          if (restoreOptions.expectedHeadMomentId !== undefined) throw new RestoreHeadChangedError(secretMoment.path);
           if (secretMoment.versionId !== activeVersionId) {
             throw new Error(
               "This moment belongs to a different version. Switch to that version to restore it.",
@@ -6446,6 +6454,37 @@ export function createWorkspaceEngineCapture(
         }
         const path = moment.path;
         try {
+          let expectedSha256: string | undefined;
+          let expectedAbsent = false;
+          if (restoreOptions.expectedHeadMomentId !== undefined) {
+            const expected = await engine.getMoment({ workspaceId, momentId: restoreOptions.expectedHeadMomentId });
+            if (!expected || expected.objectId !== moment.objectId) {
+              throw new RestoreHeadChangedError(path);
+            }
+            const head = await engine.listMoments({workspaceId, versionId: activeVersionId, objectId: moment.objectId, limit: 1});
+            if (head.moments[0]?.id !== restoreOptions.expectedHeadMomentId) throw new RestoreHeadChangedError(path);
+            expectedAbsent = expected.operation === "delete";
+            if (!expectedAbsent) expectedSha256 = expected.payload.after.sha256 ?? createHash("sha256").update(expected.payload.after.text).digest("hex");
+            const live = liveYDocSessions.get(path);
+            if (live) {
+              // Keep the canonical session and its queued edits intact. Closing it
+              // explicitly lets a later attempt prove that it has settled.
+              throw new RestoreLocalChangesError(path, "Open for live editing. Close this file and try again.");
+            }
+            let retainedDraft: boolean | undefined;
+            try {
+              retainedDraft = await options.hasRetainedLiveDraft?.(path, moment.objectId);
+            } catch {
+              throw new RestoreLocalChangesError(path, "Could not check saved drafts on this device. Try again.");
+            }
+            if (detachedLockedDebts.has(path) || retainedDraft) {
+              throw new RestoreLocalChangesError(path);
+            }
+            const disk = await readDiskTextState(rootPath, path);
+            if (expectedAbsent ? disk.kind !== "absent" : ((disk.kind !== "text" && disk.kind !== "binary") || disk.sha256 !== expectedSha256)) {
+              throw new RestoreLocalChangesError(path);
+            }
+          }
           const correlationId = `restore-${createId()}`;
           // Capture the file's latest disk state first so a restore can never
           // destroy an edit the engine has not recorded yet — the pre-restore
@@ -6490,14 +6529,14 @@ export function createWorkspaceEngineCapture(
             versionId: activeVersionId,
             path,
           });
-          if (options.expectedHeadMomentId !== undefined) {
+          if (restoreOptions.expectedHeadMomentId !== undefined) {
             const history = await engine.listMoments({
               workspaceId,
               versionId: activeVersionId,
               objectId: moment.objectId,
               limit: 1,
             });
-            if (current?.objectId !== moment.objectId || history.moments[0]?.id !== options.expectedHeadMomentId) {
+            if ((expectedAbsent ? current !== null : current?.objectId !== moment.objectId) || history.moments[0]?.id !== restoreOptions.expectedHeadMomentId) {
               throw new RestoreHeadChangedError(path);
             }
           }
@@ -6529,6 +6568,8 @@ export function createWorkspaceEngineCapture(
                       versionId: activeVersionId,
                       path,
                       bytes,
+                      ...(expectedSha256 ? { expectedSha256 } : {}),
+                      ...(expectedAbsent ? {createOnly: true} : {}),
                       metadata,
                       author,
                     });
@@ -6540,6 +6581,8 @@ export function createWorkspaceEngineCapture(
                     text: target.text,
                     publish: true,
                     restoreBeforeMomentId: momentId,
+                    ...(expectedSha256 ? { expectedSha256 } : {}),
+                      ...(expectedAbsent ? {createOnly: true} : {}),
                     metadata,
                     author,
                   });
@@ -6554,7 +6597,7 @@ export function createWorkspaceEngineCapture(
           if (!current) {
             return { restored: "deleted" as const, restoredMomentId: momentId, path };
           }
-          if (options.aloneInFolder) {
+          if (restoreOptions.aloneInFolder) {
             // Checked here, in the queue, so nothing queued before it can add
             // a file between the check and the delete.
             const siblings = await folderEntriesOrNone(join(rootPath, dirname(path)));
@@ -6564,16 +6607,22 @@ export function createWorkspaceEngineCapture(
             workspaceId,
             versionId: activeVersionId,
             path,
+            ...(expectedSha256 ? { expectedSha256, expectedObjectId: moment.objectId } : {}),
             metadata,
             author,
           });
-          await materialize([{ kind: "delete", path }], policy);
+          // Conditional deletes publish inside the engine through a checked preimage.
+          if (!expectedSha256) await materialize([{ kind: "delete", path }], policy);
           return {
             restored: "deleted" as const,
             restoredMomentId: result.moment.id,
             path,
           };
         } catch (error) {
+          if (restoreOptions.expectedHeadMomentId !== undefined) {
+            if (error instanceof AuthoredTextChangedError || (error instanceof VersionedTextStoreError && ["write-precondition-failed", "target-path-exists"].includes(error.code))) throw new RestoreLocalChangesError(path);
+            if (error instanceof VersionedTextStoreError && (error.code.startsWith("materialize-") || (error.code === "invalid-input" && error.message.includes("could not remove")))) throw new RestoreLocalChangesError(path, "dohc could not remove this file. It may be open in another app.");
+          }
           throw liveDocumentMutationRefusal(error, path, "restore") ?? error;
         }
       });

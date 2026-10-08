@@ -1,4 +1,5 @@
 import { errorMessage } from "./workspaceError";
+import type { ShareUnconfirmedChanges } from "./shareViewInfo";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import {
@@ -59,6 +60,7 @@ export type ShareViewFilesTarget =
 export interface ResolvedShareViewFilesTarget {
   recipientUserId?: string;
   unsavedPaths?: string[] | null;
+  unconfirmedChanges?: ShareUnconfirmedChanges;
   kind: ShareViewFilesTarget["kind"];
   /** The registry workspace that owns this received share or mount row. */
   workspaceId: string;
@@ -173,7 +175,7 @@ export type ShareViewReconcileOutcome =
 
 export interface ShareViewFiles {
   end(lease: WorkspaceOperationLease, target: ShareViewFilesTarget, assertCurrent: () => void): Promise<void>;
-  narrow(lease: WorkspaceOperationLease, target: ShareViewFilesTarget, assertCurrent: () => void, commit: (unsavedPaths: string[] | null) => void): Promise<void>;
+  narrow(lease: WorkspaceOperationLease, target: ShareViewFilesTarget, assertCurrent: () => void, commit: (unsavedPaths: string[] | null, unconfirmedChanges: ShareUnconfirmedChanges) => void): Promise<void>;
   mount(
     lease: WorkspaceOperationLease,
     target: PreparedShareViewFilesMount,
@@ -231,7 +233,7 @@ export interface ShareViewFilesDependencies {
     target: ActiveShareViewFilesTarget,
     refusals: readonly ShareViewRefusal[],
   ): Promise<void>;
-  markEnded(target: ActiveShareViewFilesTarget, unsavedPaths?: string[] | null): Promise<void>;
+  markEnded(target: ActiveShareViewFilesTarget, unsavedPaths?: string[] | null, unconfirmedChanges?: ShareUnconfirmedChanges): Promise<void>;
   updateUnsavedPaths(target: ActiveShareViewFilesTarget, paths: string[]): Promise<void>;
   retireTarget(target: ActiveShareViewFilesTarget): Promise<void>;
   assertProjectionRoot(target: ResolvedShareViewFilesTarget): Promise<void>;
@@ -985,14 +987,23 @@ export function createShareViewFiles(
   }
 
   async function recordRecoveredPaths(target: ActiveShareViewFilesTarget, captured: CaptureSharedViewLocalDivergenceOutcome): Promise<void> {
-    const paths = captured.remainingPreservedPaths;
-    if (target.kind !== "standalone" || target.unsavedPaths === undefined || paths === undefined) return;
+    const remaining = captured.remainingPreservedPaths;
+    if (target.kind !== "standalone" || target.unsavedPaths === undefined || remaining === undefined) return;
+    const paths = remaining;
     if (target.unsavedPaths !== null && JSON.stringify(target.unsavedPaths) === JSON.stringify(paths)) return;
     await dependencies.updateUnsavedPaths(target, paths);
     target.unsavedPaths = paths;
   }
 
-  async function captureBeforeRestriction(lease: WorkspaceOperationLease, target: ActiveShareViewFilesTarget): Promise<string[] | null> {
+  async function unconfirmedChanges(target: ActiveShareViewFilesTarget): Promise<ShareUnconfirmedChanges> {
+    const grant = recordedShareSelector(target.grantedSelector);
+    if (!grant || !target.shareId) throw new SharePinInvalidError(target.shareId ?? "");
+    return dependencies.openStore(target).listUnconfirmedSharePaths({
+      workspaceId: target.storeWorkspaceId, shareId: target.shareId, grantedSelector: grant,
+    });
+  }
+
+  async function captureUnsavedPaths(lease: WorkspaceOperationLease, target: ActiveShareViewFilesTarget): Promise<string[] | null> {
     if (target.kind !== "standalone") return target.unsavedPaths === null ? null : target.unsavedPaths ?? [];
     try {
       return await withOwnerCapability(lease, target, async owner => {
@@ -1022,6 +1033,24 @@ export function createShareViewFiles(
     }
   }
 
+  async function captureBeforeRestriction(lease: WorkspaceOperationLease, target: ActiveShareViewFilesTarget) {
+    const unsavedPaths = await captureUnsavedPaths(lease, target);
+    let snapshot: ShareUnconfirmedChanges = { paths: [], unchecked: false, checked: 0 };
+    if (target.kind === "standalone") {
+      try {
+        snapshot = await unconfirmedChanges(target);
+      } catch {
+        snapshot = { paths: [], unchecked: true, checked: 0 };
+      }
+    }
+    return { unsavedPaths, unconfirmedChanges: {
+      paths: [...new Set([...snapshot.paths, ...(unsavedPaths ?? []),
+        ...(snapshot.unchecked ? target.unconfirmedChanges?.paths ?? [] : [])])],
+      unchecked: snapshot.unchecked || unsavedPaths === null,
+      checked: snapshot.checked,
+    } };
+  }
+
   return {
     async end(lease, requested, assertCurrent) {
       assertLease(lease);
@@ -1029,9 +1058,9 @@ export function createShareViewFiles(
         assertLease(lease, target);
         assertActiveTarget(target);
         assertCurrent();
-        const unsavedPaths = await captureBeforeRestriction(lease, target);
+        const captured = await captureBeforeRestriction(lease, target);
         assertCurrent();
-        await dependencies.markEnded(target, unsavedPaths);
+        await dependencies.markEnded(target, captured.unsavedPaths, captured.unconfirmedChanges);
         await dependencies.retireTarget(target);
       });
     },
@@ -1041,9 +1070,9 @@ export function createShareViewFiles(
         assertLease(lease, target);
         assertActiveTarget(target);
         assertCurrent();
-        const unsavedPaths = await captureBeforeRestriction(lease, target);
+        const captured = await captureBeforeRestriction(lease, target);
         assertCurrent();
-        commit(unsavedPaths);
+        commit(captured.unsavedPaths, captured.unconfirmedChanges);
       });
     },
     async mount(lease, prepared) {

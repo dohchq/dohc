@@ -36,7 +36,10 @@ pub use capture_write::{
     write_published_history_text_in_tx, write_published_text_in_tx, write_text_in_tx,
 };
 
-pub use delete_rename::{delete_text_in_tx, delete_text_in_tx_checked, validate_delete_input};
+pub use delete_rename::{
+    delete_text_in_tx, delete_text_in_tx_checked, finish_checked_delete_in_tx,
+    prepare_checked_delete_in_tx, validate_delete_input,
+};
 
 pub use rollback::{
     binary_rollback_job_identity, decode_binary_rollback_job_identity,
@@ -697,7 +700,8 @@ impl<'a> VersionedTextStore<'a> {
                  FROM moments m \
                  LEFT JOIN binary_blobs after_binary ON after_binary.sha256 = m.after_binary_sha256 \
                  LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \n             LEFT JOIN blobs after_text_blob ON after_text_blob.sha256 = m.after_blob_sha256 \n             LEFT JOIN blobs before_text_blob ON before_text_blob.sha256 = m.before_blob_sha256 \
-                 WHERE workspace_id = ?1",
+                 WHERE workspace_id = ?1 AND NOT EXISTS (SELECT 1 FROM materialization_jobs j \
+                 WHERE j.workspace_id=m.workspace_id AND j.job_id='restore-delete-mat_'||m.moment_id)",
             );
             let mut binds: Vec<Box<dyn rusqlite::ToSql>> =
                 vec![Box::new(query.workspace_id.clone())];
@@ -909,8 +913,21 @@ impl<'a> VersionedTextStore<'a> {
         workspace_id: &str,
         moment_id: &str,
     ) -> Result<Option<MomentRecord>, DomainError> {
-        self.store
-            .read_with(|conn| get_moment(conn, workspace_id, moment_id))
+        self.store.read_with(|conn| {
+            let staged: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM materialization_jobs \
+                     WHERE workspace_id=?1 AND job_id='restore-delete-mat_'||?2)",
+                    params![workspace_id, moment_id],
+                    |row| row.get(0),
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            if staged {
+                Ok(None)
+            } else {
+                get_moment(conn, workspace_id, moment_id)
+            }
+        })
     }
 
     /// The workspace's active version, resolving a missing `active_versions` row
@@ -1672,7 +1689,9 @@ fn latest_moment_order(
     conn: &Connection,
     query: &ListMomentsQuery,
 ) -> Result<Option<i64>, DomainError> {
-    let mut sql = String::from("SELECT MAX(moment_order) FROM moments WHERE workspace_id = ?1");
+    let mut sql = String::from(
+        "SELECT MAX(moment_order) FROM moments m WHERE workspace_id = ?1 AND NOT EXISTS (SELECT 1 FROM materialization_jobs j WHERE j.workspace_id=m.workspace_id AND j.job_id='restore-delete-mat_'||m.moment_id)",
+    );
     let mut binds: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(query.workspace_id.clone())];
     if let Some(version_id) = &query.version_id {
         sql.push_str(" AND version_id = ?");

@@ -334,8 +334,8 @@ impl EngineStore {
 
     // ---- R04: materialization jobs --------------------------------------
 
-    /// Every pending materialization job, oldest first — the set the filesystem
-    /// pipeline replays at startup and executes on enqueue.
+    /// Generic pending jobs, oldest first. Checked deletes are owned by the
+    /// runtime publication state machine and must never enter generic replay.
     pub fn list_pending_materialization_jobs(
         &self,
     ) -> Result<Vec<MaterializationJob>, StorageError> {

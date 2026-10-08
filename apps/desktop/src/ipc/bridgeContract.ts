@@ -269,6 +269,9 @@ export const ShareSkippedOpsSummary = z.object({
   inexact: z.boolean().optional(),
 });
 export type ShareSkippedOpsSummary = z.infer<typeof ShareSkippedOpsSummary>;
+export const ShareUnconfirmedChangesSchema = z.object({
+  paths: z.array(z.string()), unchecked: z.boolean(), checked: z.number().int().nonnegative(), dismissedKey: z.string().optional(),
+});
 
 export const WorkspaceSummary = z.object({
   workspaceId: WORKSPACE_ID,
@@ -304,6 +307,7 @@ export const WorkspaceSummary = z.object({
       // refresh it has no grant to pull with, and says so in the banner.
       damaged: z.literal(true).optional(),
       unsavedPaths: z.array(z.string()).nullable().optional(),
+      unconfirmedChanges: ShareUnconfirmedChangesSchema.optional(),
       ended: z.boolean().optional(),
       skippedOps: ShareSkippedOpsSummary.optional(),
     })
@@ -4927,8 +4931,20 @@ export type StopAndRestoreTarget = z.infer<typeof StopAndRestoreTarget>;
 export const StopAndRestorePayload = z.object({
   workspaceId: WORKSPACE_ID,
   target: StopAndRestoreTarget,
+  reviewPaths: z.array(PATH_STRING.refine(isNormalizedRelativePath)).max(4096).optional(),
 }).strict();
 export type StopAndRestorePayload = z.infer<typeof StopAndRestorePayload>;
+export const DiscardLiveDraftRecoveryPayload = z.object({workspaceId: WORKSPACE_ID, path: PATH_STRING.refine(isNormalizedRelativePath), objectId: z.string().min(1).max(512), snapshotSha256: z.string().regex(/^[a-f0-9]{64}$/), discardedAtMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)}).strict();
+export const liveDraftRecoveryOperations = {
+  discardLiveDraftRecovery: {
+    capabilityId: "document.draft.discard",
+    channel: "desktop:discard-live-draft-recovery",
+    payload: DiscardLiveDraftRecoveryPayload,
+    guard: "active-workspace",
+    scope: "workspace",
+    inactiveMessage: "This window changed workspaces.",
+  },
+} satisfies OperationTable;
 export const KeptAutomationFieldShape = z.object({
   id: z.string().regex(/^[a-f0-9]{32}$/),
   path: PATH_STRING.refine(isNormalizedRelativePath).nullable(),
@@ -4974,6 +4990,7 @@ export type StopAndRestoreResult = z.infer<typeof StopAndRestoreResult>;
 export const UndoStopAndRestorePayload = z.object({
   workspaceId: WORKSPACE_ID,
   restoredMomentIds: z.array(OPAQUE_ID).min(1).max(20_000),
+  reviewPaths: z.array(PATH_STRING.refine(isNormalizedRelativePath)).max(4096).optional(),
 }).strict();
 export type UndoStopAndRestorePayload = z.infer<typeof UndoStopAndRestorePayload>;
 export const UndoStopAndRestoreResult = z.object({
@@ -5219,6 +5236,14 @@ export type CheckSharedViewAccessResult = z.infer<typeof CheckSharedViewAccessRe
 
 // The handler owns its workspace operation so a stale check replies unverified.
 export const sharedViewAccessOperations = {
+  dismissShareCaptureNotice: {
+    capabilityId: "share.capture.notice.dismiss",
+    scope: "workspace",
+    channel: "desktop:dismiss-share-capture-notice",
+    payload: z.object({ workspaceId: WORKSPACE_ID, shareId: OPAQUE_ID, key: z.string() }),
+    guard: "active-workspace",
+    inactiveMessage: "This share's Notice is no longer open in this window.",
+  },
   checkSharedViewAccess: {
     capabilityId: "share.access.read",
     scope: "workspace",
@@ -6424,7 +6449,8 @@ export interface DohcDesktopBridge
     OperationBridge<typeof scheduleHostOperations>,
     OperationBridge<typeof chatDispatchNoticeOperations>,
     OperationBridge<typeof sharedViewAccessOperations>,
-    OperationBridge<typeof engineYDocAdmissionOperations> {
+    OperationBridge<typeof engineYDocAdmissionOperations>,
+    OperationBridge<typeof liveDraftRecoveryOperations> {
   listOwnerLiveDocuments(payload: ListOwnerLiveDocumentsPayload): Promise<OwnerLiveDocumentsResult>;
   listOwnerLiveRefusals(payload: ListOwnerLiveRefusalsPayload): Promise<OwnerLiveRefusalsResult>;
   retryOwnerLiveShare(payload: RetryOwnerLiveSharePayload): Promise<void>;

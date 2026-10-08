@@ -97,6 +97,7 @@ import { useKeptFilesNotice } from "./shell/useKeptFilesNotice";
 import { useDriveLimitNotice } from "./shell/useDriveLimitNotice";
 import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
 import { errorDetails } from "./shell/copyDetails";
+import { shareCaptureNoticeState } from "../workspaces/shareCaptureNotice";
 import { CopyButton } from "./ui/CopyButton";
 import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
 import { useTabTitles } from "./shell/useTabTitles";
@@ -1541,8 +1542,8 @@ export function DesktopWorkspaceShell(props: {
     },
   });
   useEffect(() => {
-    if (shareView) reportShareCapture(shareView.shareId ?? "damaged", shareView.unsavedPaths);
-  }, [shareView?.shareId, shareView?.unsavedPaths, reportShareCapture]);
+    if (shareView) reportShareCapture(shareView.shareId ?? "damaged", shareView.unsavedPaths, shareView.unconfirmedChanges, shareView.ended === true);
+  }, [shareView?.shareId, shareView?.unsavedPaths, shareView?.unconfirmedChanges, shareView?.ended, reportShareCapture]);
   const liveSessionsGenerationRef = useRef<{
     workspaceId: string;
     generation: number | null;
@@ -4517,7 +4518,8 @@ export function DesktopWorkspaceShell(props: {
         ...(error.stays ? { stays: true } : {}),
         message: error.message,
         ...(error.title ? { title: error.title } : {}),
-        details: errorDetails([
+        ...(error.kind === "share-capture" ? { filePaths: error.details?.map(detail => String(detail[1])) ?? [], copyLabel: "Copy file paths" } : {}),
+        details: error.kind === "share-capture" ? (error.details ?? []).map(detail => String(detail[1])).join("\n") : errorDetails([
           [error.tone === "success" ? "Notice" : "Error", error.message],
           ...(error.title ? [["Title", error.title] as const] : []),
           ...(error.details ?? []),
@@ -4682,6 +4684,16 @@ export function DesktopWorkspaceShell(props: {
       if (kind === "cloud-sync") syncFailureNotice.noteDismissed();
       if (kind === "drive-no-atomic-placement") driveLimitNotice.noteDismissed();
       if (kind === "kept-files") keptFilesNotice.noteDismissed();
+      if (kind === "share-capture" && shareView?.shareId) {
+        const askedFor = workspaceId;
+        const state = shareCaptureNoticeState(shareView.unsavedPaths, shareView.unconfirmedChanges, shareView.ended === true);
+        void bridge().dismissShareCaptureNotice({ workspaceId: askedFor, shareId: shareView.shareId, key: state.key }).then(() => {
+          if (workspaceIdRef.current === askedFor) dismissShellError(id);
+        }).catch(error => {
+          if (workspaceIdRef.current === askedFor) reportShellError("dohc couldn't dismiss this Notice. Try dismissing it again in Notices.", error);
+        });
+        return;
+      }
       const refusal = props.sentNotices?.notices.find(notice => notice.noticeId === id && notice.kind === "sync-refusal");
       if (refusal) {
         const askedFor = workspaceId;
@@ -4690,7 +4702,7 @@ export function DesktopWorkspaceShell(props: {
         });
       } else dismissShellError(id);
     },
-    [dismissShellError, driveLimitNotice, keptFilesNotice, shellErrors, syncFailureNotice, props.sentNotices, workspaceId, reportShellError],
+    [dismissShellError, driveLimitNotice, keptFilesNotice, shellErrors, shareView, syncFailureNotice, props.sentNotices, workspaceId, reportShellError],
   );
   return (
     <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>

@@ -23,6 +23,16 @@ function mount(label: string, shareId = "share-target-test"): ShareMountRecord {
 }
 
 describe("resolveRegisteredShareViewFilesTarget", () => {
+  it("reads prior display paths without letting damaged display data affect protection", () => {
+    for (const snapshot of [{ paths: ["docs/local.yaml"], unchecked: true, checked: 1 }, { paths: null }]) {
+      const resolved = resolveRegisteredShareViewFilesTarget({ workspaceId, rootPath,
+        shareView: { shareId: "share", granterEmail: null, ended: false,
+          grantedSelector: { access: "view", paths: ["docs"], versionId: null },
+          unsavedPaths: ["docs/locked.md"], unconfirmedChanges: snapshot } }, { kind: "standalone", workspaceId });
+      expect(resolved?.unsavedPaths).toEqual(["docs/locked.md"]);
+      expect(resolved?.unconfirmedChanges).toEqual(snapshot.paths === null ? undefined : snapshot);
+    }
+  });
   it("distinguishes a damaged mount registry from a local-only workspace", () => {
     expect(shareMountRegistryIsPresent({})).toBe(false);
     expect(shareMountRegistryIsPresent({ shareMounts: [] })).toBe(true);

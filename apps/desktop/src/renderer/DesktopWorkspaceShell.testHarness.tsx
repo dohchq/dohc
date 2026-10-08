@@ -613,6 +613,7 @@ function makeBaseBridge(
       }),
     ),
     checkSharedViewAccess: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["checkSharedViewAccess"]>(async () => ({ status: "unverified" })),
+    dismissShareCaptureNotice: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["dismissShareCaptureNotice"]>(async () => undefined),
     onWorkspaceActivity: vi.fn(
       (callback: (event: WorkspaceActivityEvent) => void) => {
         activityCallbacks.add(callback);

@@ -54,6 +54,7 @@ export interface StopAndRestoreDependencies {
   moment(momentId: string): Promise<VersionedTextMoment | "protected" | null>;
   /** Throws when the window that asked has left the workspace. */
   assertCurrent(): void;
+  reviewPath?(path: string): string | null;
   /** The ids of a file's moments after `momentId`, newest first. */
   momentsAfter(objectId: string, momentId: string): Promise<string[]>;
   /**
@@ -210,6 +211,12 @@ export async function restoreDirectWrites(
   };
   const written: Written[] = [];
   for (const entry of objects.values()) {
+    const retained = dependencies.reviewPath?.(entry.last.path);
+    if (retained) {
+      review.set(entry.last.path, {path: entry.last.path, reason: "restore-refused", detail: posix.basename(entry.last.path) === AUTOMATIONS_FILE ? `${retained.replace(/\.$/, "")}. Runs from this file's automations were kept.` : retained});
+      protectedAutomations ||= posix.basename(entry.last.path) === AUTOMATIONS_FILE;
+      continue;
+    }
     let readable = true;
     for (const file of entry.all) {
       const moment = await dependencies.moment(file.momentId);

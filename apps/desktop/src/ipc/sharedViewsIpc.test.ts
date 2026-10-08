@@ -4,6 +4,7 @@ import { RelayUnauthorizedError, ShareUnavailableError } from "@dohc/workspace-c
 import { claimWorkspace, closeTestStorages, createShare, inspectDatabase, storagePath, testHandler, testStorage, request } from "@dohc/sync-relay/testing";
 import { CHANNELS } from "./channels";
 import { sharedViewAccessOperations } from "./bridgeContract";
+import { shareCaptureNoticeState } from "../workspaces/shareCaptureNotice";
 import { fetchShareViewAccess, ShareSelectorInvalidError, type ShareViewInfo } from "../workspaces/shareViewInfo";
 import { SharePinInvalidError } from "../workspaces/shareViewRecords";
 import { buildShareCode } from "../workspaces/syncCode";
@@ -11,6 +12,33 @@ import { deferred } from "../testing/deferred";
 import { createSharedViewsIpcHarness as harness, credentials, info, outcome, ready } from "../testing/sharedViewsIpcHarness";
 
 afterEach(() => vi.restoreAllMocks());
+
+describe("share capture Notice dismissal", () => {
+  it("persists dismissal without changing protection or accepting a stale Notice", async () => {
+    const h = await harness();
+    const view = h.workspace.shareView!;
+    view.unsavedPaths = ["docs/locked.md"];
+    view.unconfirmedChanges = { paths: ["docs/local.yaml"], unchecked: false, checked: 1 };
+    const payload = { workspaceId: h.workspace.workspaceId, shareId: view.shareId,
+      key: shareCaptureNoticeState(view.unsavedPaths, view.unconfirmedChanges, false).key };
+    await h.invoke(sharedViewAccessOperations.dismissShareCaptureNotice.channel, { ...payload, key: "old" });
+    expect(h.setView).not.toHaveBeenCalled();
+    await h.invoke(sharedViewAccessOperations.dismissShareCaptureNotice.channel, payload);
+    const saved = JSON.parse(JSON.stringify(h.registry.get(h.workspace.workspaceId))) as typeof h.workspace;
+    expect(saved.shareView?.unconfirmedChanges?.dismissedKey).toBe(payload.key);
+    expect(saved.shareView?.unsavedPaths).toEqual(["docs/locked.md"]);
+    expect(h.notify).toHaveBeenCalledWith({ workspaceId: h.workspace.workspaceId });
+    expect(h.storeFor).not.toHaveBeenCalled();
+  });
+  it("rejects an untrusted or inactive sender", async () => {
+    const h = await harness();
+    const payload = { workspaceId: h.workspace.workspaceId, shareId: h.workspace.shareView!.shareId, key: "old" };
+    await expect(h.invoke(sharedViewAccessOperations.dismissShareCaptureNotice.channel, payload, false)).rejects.toThrow();
+    h.retireRenderer();
+    await expect(h.invoke(sharedViewAccessOperations.dismissShareCaptureNotice.channel, payload)).rejects.toThrow();
+    expect(h.setView).not.toHaveBeenCalled();
+  });
+});
 
 describe("metadata-only access checks", () => {
   it("discovers a real relay's Edit-to-View downgrade and revocation", async () => {
@@ -78,10 +106,11 @@ describe("metadata-only access checks", () => {
     const h = await harness();
     h.fetchAccess.mockResolvedValue("view");
     h.narrow.mockImplementationOnce(async (_lease, _target, assertCurrent, commit) => {
-      assertCurrent(); commit(["docs/locked.md"]);
+      assertCurrent(); commit(["docs/locked.md"], { paths: ["docs/automations.yaml"], unchecked: false, checked: 0 });
     });
     expect(await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, { workspaceId: "existing" })).toEqual({ status: "current", access: "view" });
-    expect(h.workspace.shareView).toMatchObject({ grantedSelector: { access: "view" }, unsavedPaths: ["docs/locked.md"] });
+    expect(h.workspace.shareView).toMatchObject({ grantedSelector: { access: "view" }, unsavedPaths: ["docs/locked.md"],
+      unconfirmedChanges: { paths: ["docs/automations.yaml"], unchecked: false, checked: 0 } });
     await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, { workspaceId: "existing" });
     await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, { workspaceId: "existing" });
     expect(h.narrow).toHaveBeenCalledOnce();
@@ -199,7 +228,8 @@ describe("registered received-view handlers", () => {
 
   it("registers open before refresh and rejects untrusted or malformed inputs before work", async () => {
     const h = await harness();
-    expect([...h.handlers.keys()]).toEqual([CHANNELS.openSharedView, CHANNELS.refreshSharedView, sharedViewAccessOperations.checkSharedViewAccess.channel]);
+    expect([...h.handlers.keys()]).toEqual([CHANNELS.openSharedView, CHANNELS.refreshSharedView,
+      sharedViewAccessOperations.dismissShareCaptureNotice.channel, sharedViewAccessOperations.checkSharedViewAccess.channel]);
     for (const channel of h.handlers.keys()) await expect(h.invoke(channel, null, false)).rejects.toThrow("untrusted");
     await expect(h.invoke(CHANNELS.openSharedView, { rootPath: "", shareCode: "x" })).rejects.toThrow();
     await expect(h.invoke(CHANNELS.refreshSharedView, { workspaceId: "" })).rejects.toThrow();

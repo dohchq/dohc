@@ -1833,6 +1833,70 @@ describe("createCaptureLiveStores", () => {
     ]);
   });
 
+  it("lists pending and refused heads without ignored local edits making the check incomplete", async () => {
+    const requests: Request[] = [];
+    const paths = ["tasks/automations.yaml", "tasks/draft.md", "tasks/refused.md", "tasks/accepted.md", "tasks/owner.md", "private.md", "tasks/node_modules/local.md"];
+    const client = clientFor(async request => {
+      requests.push(request);
+      if (request.method === VERSIONED_METHOD.textList) return { id: request.id, result: {
+        files: paths.map(path => ({ path, objectId: path, contentKind: "text", sha256: "a".repeat(64),
+          byteLength: 5, binarySha256: null, updatedAtMs: 2, hasYdocMarker: false,
+          latestMomentId: path === "tasks/owner.md" ? "moment-share-owner" : "moment-local",
+          metadataOrigin: path === "tasks/owner.md" ? "sync" : "local-file",
+          metadataSummary: null, metadataCorrelationId: null })), nextAfterPath: null,
+      } };
+      expect(request.method).toBe("share.direct.statuses");
+      expect(request.workspace).toBe(WORKSPACE_HANDLE);
+      const params = request.params as { paths: string[] };
+      if (params.paths.includes("tasks/node_modules/local.md")) throw new Error("ignored path refused by engine");
+      return { id: request.id, result: Object.fromEntries(params.paths.map(path => [path, {
+        state: path === "tasks/accepted.md" ? "accepted" : path === "tasks/refused.md" ? "refused" : "pending",
+      }])) };
+    });
+    const { store } = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: "C:/workspace", shareMount: true }, sessionsFor(client));
+    await expect(store.listUnconfirmedSharePaths({ workspaceId: WORKSPACE_ID, shareId: "share-a",
+      grantedSelector: { paths: ["tasks"], versionId: null, access: "edit" } })).resolves.toEqual({ paths: paths.slice(0, 3), unchecked: false, checked: 4 });
+    expect(requests.filter(request => request.method === "share.direct.statuses")).toHaveLength(1);
+    expect(requests.filter(request => request.method === VERSIONED_METHOD.textList)).toHaveLength(1);
+    expect(requests.at(-1)?.params).toEqual({ workspaceId: WORKSPACE_ID, shareId: "share-a", paths: paths.slice(0, 4),
+      grantedSelector: { paths: ["tasks"], versionId: null, access: "edit" } });
+    expect(requests.filter(request => request.method === "share.direct.statuses").every(request =>
+      request.deadlineMs != null && request.deadlineMs <= 1_000)).toBe(true);
+    await expect(store.listUnconfirmedSharePaths({ workspaceId: WORKSPACE_ID, shareId: "share-a",
+      grantedSelector: { paths: [], versionId: null, access: "edit" } })).resolves.toEqual({ paths: [], unchecked: false, checked: 0 });
+    expect(requests.filter(request => request.method === "share.direct.statuses")).toHaveLength(1);
+  });
+
+  it.each(["limit", "failure", "delivered"])("keeps an honest display snapshot after a status %s", async stop => {
+    const requests: Request[] = [];
+    const paths = Array.from({ length: stop === "delivered" ? 1_000 : 8_193 }, (_, index) => `tasks/local-${index}.yaml`);
+    const clock = vi.spyOn(Date, "now").mockReturnValue(0);
+    const client = clientFor(async request => {
+      requests.push(request);
+      if (request.method === VERSIONED_METHOD.textList) return { id: request.id, result: {
+        files: paths.map(path => ({ path, objectId: path, contentKind: "text", sha256: "a".repeat(64),
+          byteLength: 5, binarySha256: null, updatedAtMs: 2, hasYdocMarker: false,
+          latestMomentId: "moment-local", metadataOrigin: "local-file",
+          metadataSummary: null, metadataCorrelationId: null })), nextAfterPath: null,
+      } };
+      expect(request.method).toBe("share.direct.statuses");
+      if (stop === "failure" && requests.filter(row => row.method === "share.direct.statuses").length === 2) throw new Error("status unavailable");
+      const batch = (request.params as { paths: string[] }).paths;
+      expect(batch.length).toBeLessThanOrEqual(256);
+      return { id: request.id, result: Object.fromEntries(batch.map(path => [path, {
+        state: stop === "delivered" && path !== paths.at(-1) ? "accepted" : "pending",
+      }])) };
+    });
+    const { store } = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: "C:/workspace", shareMount: true }, sessionsFor(client));
+    try { await expect(store.listUnconfirmedSharePaths({ workspaceId: WORKSPACE_ID, shareId: "share-a",
+      grantedSelector: { paths: ["tasks"], versionId: null, access: "edit" } })).resolves.toEqual({
+        paths: stop === "delivered" ? [paths.at(-1)] : paths.slice(0, stop === "failure" ? 256 : 8_192),
+        unchecked: stop !== "delivered", checked: stop === "delivered" ? 1_000 : stop === "failure" ? 256 : 8_192,
+      });
+    expect(requests.filter(row => row.method === "share.direct.statuses")).toHaveLength(stop === "delivered" ? 4 : stop === "failure" ? 2 : 32);
+    } finally { clock.mockRestore(); }
+  });
+
   it("maps one aggregate history request and omits nullable protected metadata", async () => {
     const requests: Request[] = [];
     const client = clientFor(async (request) => {
