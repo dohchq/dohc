@@ -1307,6 +1307,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
             workspaceId: outbound.workspaceId,
             path: outbound.path,
             ...message.event,
+            ...(message.closing ? { closing: true } : {}),
             ...engineSaveState(message.event.state, message.event.editRefusal),
           }),
         );

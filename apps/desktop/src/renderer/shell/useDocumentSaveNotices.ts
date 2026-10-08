@@ -50,6 +50,9 @@ export function useDocumentSaveNotices(input: {
     const owner = workspaceId;
     const current = () => latest.current.workspaceId === owner;
     const documents = new Map<string, { sessionId: string; reported: boolean }>();
+    // The newest session for each path. A session that closes after a newer
+    // one opened has been replaced: its late states describe nothing open.
+    const sessions = new Map<string, { sessionId: string; closing: boolean }>();
     const file = (
       identity: string,
       path: string,
@@ -90,8 +93,20 @@ export function useDocumentSaveNotices(input: {
         return;
       }
       if (event.workspaceId !== owner) return;
+      const newest = sessions.get(event.path);
+      if (event.closing && newest && newest.sessionId !== event.sessionId && !newest.closing) return;
+      sessions.set(event.path, { sessionId: event.sessionId, closing: event.closing === true });
       const identity = `document-save:${owner}:${event.path}`;
       const known = documents.get(identity);
+      // An author-capacity refusal has its own notice, including one a Try
+      // again ran into, so this document's save notice gives way to it.
+      if (event.authorCapacity) {
+        if (known) {
+          documents.delete(identity);
+          latest.current.clear(identity);
+        }
+        return;
+      }
       if (event.saveFailure) {
         const document = known ?? { sessionId: event.sessionId, reported: false };
         document.sessionId = event.sessionId;

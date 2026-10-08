@@ -612,7 +612,7 @@ describe("EngineYDocSessionOwner", () => {
 
     expect(outbound.map(({ message }) => message)).toEqual([
       { kind: "session-event", event: "before-release" },
-      { kind: "session-event", event: "save-state-during-release" },
+      { kind: "session-event", event: "save-state-during-release", closing: true },
     ]);
     expect(
       owner.applyUpdate(
@@ -628,6 +628,9 @@ describe("EngineYDocSessionOwner", () => {
 
     closeGate.resolve();
     await expect(release).resolves.toEqual({ kind: "released" });
+    // A completed release forgets the session: nothing it emits later is sent.
+    signals.emit("after-release");
+    expect(outbound).toHaveLength(2);
   });
 
   it("keeps valid empty lineage acknowledgements distinct from refusals", async () => {
@@ -999,8 +1002,8 @@ describe("EngineYDocSessionOwner", () => {
     signals.emit("after failed close");
     signals.remoteUpdate("remote update after failed close");
     expect(outbound.map(({ message }) => message)).toEqual([
-      { kind: "session-event", event: "during close" },
-      { kind: "session-event", event: "after failed close" },
+      { kind: "session-event", event: "during close", closing: true },
+      { kind: "session-event", event: "after failed close", closing: true },
     ]);
 
     const duplicateEngineOpen = vi.fn();

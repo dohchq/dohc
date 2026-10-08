@@ -150,6 +150,32 @@ describe("document save notices", () => {
     expect(await rows(user)).toHaveLength(1);
   });
 
+  it("leaves a Try again that meets an author-capacity refusal to that refusal's notice", async () => {
+    const user = userEvent.setup();
+    retryEngineYDocSave.mockImplementation(async () => {
+      // Main sends the settle's save state before the retry's answer.
+      emit({ state: { kind: "error", reason: "too large", issueId: null }, authorCapacity: true });
+      throw new Error("The document is too large to save.");
+    });
+    render(<Shell />);
+    emit(failed());
+    await user.click(within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(retryEngineYDocSave).toHaveBeenCalledOnce());
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByTestId("connection-notices")).toBeNull();
+  });
+
+  it("ignores a late failure from a session a newer one replaced, and retries the newer one", async () => {
+    const user = userEvent.setup();
+    render(<Shell />);
+    emit({ sessionId: "session-1", state: { kind: "saved-here" } });
+    emit({ ...failed(), sessionId: "session-2" });
+    emit({ ...failed(false), sessionId: "session-1", closing: true });
+    expect(screen.getByTestId("workspace-shell-error").textContent).toContain("read-only");
+    await user.click(within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }));
+    expect(retryEngineYDocSave).toHaveBeenCalledWith({ workspaceId: "ws-1", sessionId: "session-2" });
+  });
+
   it("opens the document when its session has closed", async () => {
     const user = userEvent.setup();
     retryEngineYDocSave.mockResolvedValue("closed");

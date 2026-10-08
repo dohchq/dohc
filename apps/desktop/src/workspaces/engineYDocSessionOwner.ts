@@ -31,7 +31,8 @@ export interface EngineYDocSessionSignals<TEvent, TUpdate, TReplacement> {
 }
 
 export type EngineYDocSessionOutboundMessage<TEvent, TUpdate, TReplacement> =
-  | { kind: "session-event"; event: TEvent }
+  // `closing`: sent while the session releases, after its editor has gone.
+  | { kind: "session-event"; event: TEvent; closing?: true }
   | {
       kind: "remote-update";
       update: TUpdate;
@@ -559,7 +560,9 @@ export class EngineYDocSessionOwner<
       // settle can fail after the editor has gone, and the shell still owes
       // that failure a notice.
       emit: (event) => {
-        this.#send(record, { kind: "session-event", event }, true);
+        this.#send(record, {
+          kind: "session-event", event, ...(record.state === "releasing" ? { closing: true as const } : {}),
+        }, true);
       },
       remoteUpdate: (update) => {
         if (!this.#maySend(record)) return;
@@ -615,7 +618,8 @@ export class EngineYDocSessionOwner<
     message: EngineYDocSessionOutboundMessage<TEvent, TUpdate, TReplacement>,
     whileClosing = false,
   ): boolean {
-    if (!(this.#maySend(record) || (whileClosing && record.state === "releasing" && this.#ownsActiveGeneration(record)))) return false;
+    const closing = whileClosing && record.state === "releasing" && this.#records.has(record) && this.#ownsActiveGeneration(record);
+    if (!(this.#maySend(record) || closing)) return false;
     try {
       this.#onOutbound({
         sender: record.sender,

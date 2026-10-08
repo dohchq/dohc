@@ -6388,6 +6388,8 @@ export const EngineYDocSaveStateEvent = z.object({
   // A settle failed to write the file. Absent for an edit refusal, an
   // author-capacity refusal, and an error no settle reported.
   saveFailure: z.object({ readOnly: z.boolean() }).optional(),
+  // Sent while the session closes, after its editor has gone.
+  closing: z.literal(true).optional(),
   seq: z.number().int().nonnegative(),
 });
 export type EngineYDocSaveStateEvent = z.infer<typeof EngineYDocSaveStateEvent>;
