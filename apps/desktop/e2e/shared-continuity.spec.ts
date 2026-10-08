@@ -379,22 +379,26 @@ async function expectDeclaredMoment(page: Page, workspaceId: string, text: strin
 }
 
 /**
- * The History label of each moment author that is this named recipient. A
- * moment with one author labels it in `namedAuthor`; a moment with several
- * labels each author at its own position in `authorLabels`.
+ * The earliest moment of the document whose change wrote `text`, with the
+ * authors its list row and its detail report, and the History label of the
+ * person `humanId` among them. A moment with one author labels it in
+ * `liveAuthorName`; a moment with several labels each author at its own
+ * position in `authorLabels`. Null until history records the moment.
  */
-async function recipientCredit(page: Page, workspaceId: string, userId: string) {
-  return page.evaluate(async ({ workspaceId, path, userId }) => {
-    const history = await (window as unknown as { dohcDesktop: Api }).dohcDesktop.listEngineMoments({ workspaceId, limit: 100 });
-    if (!("moments" in history)) return { historyReady: false, labels: [] as (string | null)[], rows: [] };
-    const rows = history.moments.filter(moment => moment.path === path);
-    const labels = rows.flatMap(moment => (moment.authors ?? []).flatMap((author, index) =>
-      author.kind === "named" && author.userId === userId
-        ? [(moment.authors!.length === 1 ? moment.namedAuthor?.label : moment.authorLabels?.[index]) ?? null]
-        : []));
-    return { historyReady: true, labels,
-      rows: rows.map(({ id, momentOrder, authors, authorLabels, namedAuthor }) => ({ id, momentOrder, authors, authorLabels, namedAuthor })) };
-  }, { workspaceId, path: PATH, userId });
+async function recipientCredit(page: Page, workspaceId: string, text: string, humanId: string) {
+  return page.evaluate(async ({ workspaceId, path, text, humanId }) => {
+    const bridge = (window as unknown as { dohcDesktop: Api }).dohcDesktop;
+    const history = await bridge.listEngineMoments({ workspaceId, limit: 100 });
+    if (!("moments" in history)) return null;
+    for (const row of history.moments.filter(moment => moment.path === path).sort((a, b) => a.momentOrder - b.momentOrder)) {
+      const { moment } = await bridge.readEngineMoment({ workspaceId, momentId: row.id });
+      if (!moment?.afterText?.includes(text) || moment.beforeText?.includes(text)) continue;
+      const index = (row.authors ?? []).findIndex(author => author.kind === "human" && author.humanId === humanId);
+      const label = index < 0 ? null : (row.authors!.length === 1 ? row.liveAuthorName : row.authorLabels?.[index]) ?? null;
+      return { id: row.id, momentOrder: row.momentOrder, listed: row.authors, authors: moment.authors, label };
+    }
+    return null;
+  }, { workspaceId, path: PATH, text, humanId });
 }
 
 test("@shared-continuity a live document keeps its person's and agent's work through restart, a recipient continues it, the owner restores it, and the work continues with a new recipient", async ({ browser }, testInfo) => {
@@ -649,23 +653,26 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
     await test.step("the idle owner's editor and the agent see the recipient's edit", async () => {
       await expect(editor(owner!.page)).toContainText(R1, { timeout: 60_000 });
       await expect.poll(() => ownerSettled(ownerTemp, [H1, A1, HA, R1]), { timeout: 60_000 }).toBe(true);
-      // The owner's History names the recipient's change by the relay's
-      // authority for it, shown as their account email.
+      // The owner's History credits the recipient's change to the account and
+      // name the server admitted for their desktop's edit.
       const page = owner!.page;
       const recipientUserId = await accountId(recipientAccount.email);
+      const admitted = { kind: "human", humanId: recipientUserId, humanName: recipientAccount.name };
       let credit: Awaited<ReturnType<typeof recipientCredit>> | undefined;
       try {
-        await expect.poll(async () => (credit = await recipientCredit(page, workspace.workspaceId, recipientUserId)).labels, { timeout: 60_000 })
-          .toContainEqual(expect.stringContaining(recipientAccount.email));
+        await expect.poll(async () => (credit = await recipientCredit(page, workspace.workspaceId, R1, recipientUserId))?.authors ?? [],
+          { timeout: 60_000, intervals: [1_000] }).toContainEqual(admitted);
       } finally {
         await testInfo.attach("owner History recipient credit", { contentType: "application/json",
-          body: JSON.stringify({ recipientUserId, email: recipientAccount.email, credit }, null, 2) }).catch(() => undefined);
+          body: JSON.stringify({ admitted, credit }, null, 2) }).catch(() => undefined);
       }
+      expect(credit!.listed).toEqual(credit!.authors);
+      expect(credit!.label).toBe(recipientAccount.name);
       // The recipient's credit leaves the hosted agent's credit in place.
       expect(await expectDeclaredMoment(page, workspace.workspaceId, HA, admittedAgent(hosted!.change.authorSnapshot))).toEqual(provenance.hostedOwner);
       await openHistoryView(page);
-      await expect(page.locator(`[data-testid="engine-moment-open"][data-moment-path="${PATH}"]`, { hasText: recipientAccount.email }).first())
-        .toBeVisible({ timeout: 60_000 });
+      await expect(page.locator(`[data-testid="engine-moment-open"][data-moment-id="${credit!.id}"]`))
+        .toContainText(recipientAccount.name, { timeout: 60_000 });
       await attachScreen(testInfo, page, "owner History names the recipient");
     });
 

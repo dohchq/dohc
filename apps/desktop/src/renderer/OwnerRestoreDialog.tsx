@@ -65,11 +65,11 @@ function SourceList({label, sources}: {label: string; sources: OwnerRestoreRevie
     {sources.length > 50 && <div className="flex gap-2"><SecondaryButton disabled={page === 0} onClick={() => setPage(page - 1)}>Previous records</SecondaryButton><SecondaryButton disabled={start + 50 >= sources.length} onClick={() => setPage(page + 1)}>More records</SecondaryButton></div>}
   </details>;
 }
-function Review({review, selected, emails}: {review: OwnerRestoreReview; selected: Authority | null; emails: Emails}) {
+function Review({review, emails}: {review: OwnerRestoreReview; emails: Emails}) {
   const outcomes = useMemo(() => ownerRestoreOutcomes(review), [review]);
   return <>
     <p className="text-[12px] text-muted" data-journal-cursor={review.point.journalCursor}>Restore point: {review.point.journalCursor === 0 ? "Before accepted edits" :
-      <><time dateTime={new Date(review.selectedPointReceivedAtMs!).toISOString()}>{time(review.selectedPointReceivedAtMs!)}</time>{selected ? ` · ${author(selected, emails)}` : null}</>}</p>
+      <><time dateTime={new Date(review.selectedPointReceivedAtMs!).toISOString()}>{time(review.selectedPointReceivedAtMs!)}</time> · {author(review.selectedPointAuthority!, emails)}</>}</p>
     <p className="text-[13px] text-muted">Restoring removes the changes listed below from this file.</p>
     <div className="grid gap-3 sm:grid-cols-2">
       <label className="text-[12px] text-muted">Current file<textarea aria-label="Current file before restore" readOnly value={review.content.frozenMarkdown} className="mt-1 h-56 w-full rounded-md border border-line bg-bg p-2 font-mono text-[12px] text-ink" /></label>
@@ -90,7 +90,7 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
   const [state, setState] = useState<State>({kind: "loading"}), [busy, setBusy] = useState(false);
   const [grantId, setGrantId] = useState(""), [point, setPoint] = useState("");
   // Kept across pages and steps, so the review names the people the choices named.
-  const [emails, setEmails] = useState<Emails>(() => new Map()), [selectedAuthor, setSelectedAuthor] = useState<Authority | null>(null);
+  const [emails, setEmails] = useState<Emails>(() => new Map());
   const request = useRequestSequence([workspaceId, path]), running = useRef(false), operation = useRef<OwnerRestoreStatus | null>(null);
   const current = (token: number) => request.isCurrent(token);
   async function perform(work: (token: number) => Promise<void>) {
@@ -124,7 +124,7 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
   }
   useEffect(() => {
     const token = request.next();
-    operation.current = null; setGrantId(""); setPoint(""); setEmails(new Map()); setSelectedAuthor(null); running.current = true; setBusy(true); setState({kind: "loading"});
+    operation.current = null; setGrantId(""); setPoint(""); setEmails(new Map()); running.current = true; setBusy(true); setState({kind: "loading"});
     void load(token).catch(error => {if (current(token)) setState({kind: "error", message: ipcErrorMessage(error)});})
       .finally(() => {if (current(token)) {running.current = false; setBusy(false);}});
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -189,8 +189,7 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
       <ul className="space-y-1 pl-5 text-[13px] text-muted">{state.plan.recipients.map(row => <li key={row.grantId}>{recipient(row, emails)}</li>)}</ul>
       <p className="text-[13px] text-muted">Next, review the changes to remove before restoring the file.</p>
     </>}
-    {state.kind === "review" && <Review key={state.review.proposalDigest} review={state.review} emails={emails}
-      selected={state.review.point.journalCursor === operation.current?.intent.restorePointCursor ? selectedAuthor : null} />}
+    {state.kind === "review" && <Review key={state.review.proposalDigest} review={state.review} emails={emails} />}
     {state.kind === "pending" || state.kind === "error" ? <p role="alert" className="text-[13px] text-muted">{state.message}</p> : null}
     {operation.current && state.kind !== "complete" && <p className="text-[12px] text-muted">Access has stopped. Closing this review does not restore the old access.</p>}
     {state.kind === "complete" && <p className="text-[13px] text-muted">The file has been restored. Share again when you want to give access.</p>}
@@ -200,7 +199,7 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
         const selected = state.options.points.find(p => String(p.cursor) === point)!, grant = state.options.grants.find(g => g.grantId === grantId)!;
         const plan = await bridge().ownerRestore({workspaceId, action: "plan", document: state.options.document, shareId: grant.shareId, grantId,
           restorePointCursor: selected.cursor, restorePointReceiptDigest: selected.receiptDigest});
-        if (current(token)) {setSelectedAuthor(selected.authority); setState({kind: "stop", plan});}
+        if (current(token)) setState({kind: "stop", plan});
       })}>Review affected access</PrimaryButton>}
       {state.kind === "stop" && <DangerButton disabled={busy} onClick={() => void perform(async token => {
         const stopped = await bridge().ownerRestore({workspaceId, action: "begin", intent: state.plan.intent});

@@ -105,30 +105,32 @@ impl Authors {
     // generation's, largest encoding so a known author remains admissible even
     // at capacity, without truncation.
     fn admission_bytes(&self) -> usize {
-        self.journal_bytes()
-            + self
-                .0
-                .values()
-                .map(|author| {
-                    let kind = author.get("kind").and_then(Value::as_str);
-                    let depth = author.get("depth").map(Value::to_string);
-                    let generation = author.get("grantGeneration").map(Value::to_string);
-                    match (kind, depth, generation) {
-                        (Some("agent"), None, _) => r#","depth":64"#.len(),
-                        (Some("agent" | "automation"), Some(depth), _) => 2 - depth.len().min(2),
-                        (Some("named" | "link"), _, Some(generation)) => {
-                            MAX_GRANT_GENERATION_DIGITS
-                                - generation.len().min(MAX_GRANT_GENERATION_DIGITS)
-                        }
-                        _ => 0,
-                    }
-                })
-                .sum::<usize>()
+        self.journal_bytes() + self.0.values().map(reserved_bytes).sum::<usize>()
     }
 
     pub fn moment_json(&self) -> Option<String> {
         (!self.is_empty()).then(|| self.json())
     }
+}
+
+fn reserved_bytes(author: &Value) -> usize {
+    let kind = author.get("kind").and_then(Value::as_str);
+    let depth = author.get("depth").map(Value::to_string);
+    let generation = author.get("grantGeneration").map(Value::to_string);
+    match (kind, depth, generation) {
+        (Some("agent"), None, _) => r#","depth":64"#.len(),
+        (Some("agent" | "automation"), Some(depth), _) => 2 - depth.len().min(2),
+        (Some("named" | "link"), _, Some(generation)) => {
+            MAX_GRANT_GENERATION_DIGITS - generation.len().min(MAX_GRANT_GENERATION_DIGITS)
+        }
+        _ => 0,
+    }
+}
+
+/// One author's share of the admission bytes. Depth and generation growth
+/// leave it unchanged.
+fn entry_admission_bytes(author: &Value) -> usize {
+    author.to_string().len() + reserved_bytes(author)
 }
 
 /// Whether this lineage belongs to an adopted owner. Its native log also holds
@@ -287,10 +289,15 @@ fn admit(covered: &mut Authors, json: &str) -> Result<usize, CollabError> {
         .keys()
         .next()
         .ok_or_else(|| corrupt("attribution has no identity"))?;
-    let known = covered.0.contains_key(identity);
+    let prior = covered.0.get(identity).map(entry_admission_bytes);
     covered.union_json(json)?;
     let bytes = covered.admission_bytes();
-    if !known && (covered.len() > MAX_INTERVAL_AUTHORS || bytes > MAX_INTERVAL_AUTHOR_BYTES) {
+    // A later snapshot can still lengthen a known author's name or label.
+    let grown =
+        prior.is_none_or(|prior| covered.0.get(identity).map(entry_admission_bytes) > Some(prior));
+    if (prior.is_none() && covered.len() > MAX_INTERVAL_AUTHORS)
+        || (grown && bytes > MAX_INTERVAL_AUTHOR_BYTES)
+    {
         return Err(CollabError::AuthorCapacity);
     }
     Ok(bytes)
@@ -683,7 +690,8 @@ mod tests {
             admit(&mut covered, &link(generation)).expect("a known link applies");
         }
         assert_eq!(covered.len(), 1);
-        assert_eq!(covered.json().len() - "[]".len(), MAX_AUTHOR_ENTRY_BYTES);
+        // An 80-byte skeleton and two escaped 512-byte identifiers.
+        assert_eq!(covered.json().len() - "[]".len(), 2_128);
     }
 
     /// An admitted snapshot names a link by its public principal, the relay's

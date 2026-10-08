@@ -23,9 +23,7 @@ pub(crate) use application_record::{
 };
 pub use enrollment::journal_live_event_or_defer_in_tx;
 pub use settlement_record::journal_live_settlement_in_tx;
-pub(crate) use settlement_record::{
-    credit_settled_moment_in, owner_settlement_cursor_in, restore_successor_settlement_in,
-};
+pub(crate) use settlement_record::{owner_settlement_cursor_in, restore_successor_settlement_in};
 
 pub(crate) fn apply_audit_envelope(
     store: &mut EngineStore,

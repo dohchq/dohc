@@ -1913,45 +1913,17 @@ fn import_all(receiver: &mut EngineStore, ops: &[ReplicationEnvelope]) -> Vec<(S
         .collect()
 }
 
+/// An ordinary owner device can publish live audit evidence its own engine
+/// wrote for claims no relay accepted: an Edit link, another person's
+/// snapshot under a named grant, and the owner's agent. The real journal
+/// recomputes every record, chunk, evidence chain and settlement digest, so
+/// the evidence is valid and self-consistent. A peer retains it as history,
+/// but credits the imported moment only with the authors the moment carries.
 #[test]
-fn imported_settlement_credits_every_relay_accepted_author_of_its_interval() {
+fn ordinary_audit_evidence_cannot_credit_an_imported_moment() {
     use dohc_engine_collab::live_update_application::{
         LiveAuthorEntry, ServerDerivedLiveUpdateAuthority,
     };
-    let mut f = fixture(true);
-    bootstrap(&mut f, false).unwrap();
-    // A named recipient whose client sent no recording context.
-    accept_authored(
-        &mut f,
-        1,
-        ServerDerivedLiveUpdateAuthority::Named {
-            principal_id: "recipient-user".into(),
-            grant_id: "grant".into(),
-            grant_generation: 1,
-        },
-        None,
-    );
-    // The owner and the agent working for them, in one admitted snapshot.
-    accept_authored(
-        &mut f,
-        2,
-        ServerDerivedLiveUpdateAuthority::Owner {
-            principal_id: "owner".into(),
-        },
-        Some(vec![
-            LiveAuthorEntry::Human {
-                human_id: "owner".into(),
-                human_name: "Owner".into(),
-            },
-            LiveAuthorEntry::Agent {
-                agent_id: "trip-agent".into(),
-                agent_name: Some("Trip agent".into()),
-                on_behalf_of: Some("owner".into()),
-                depth: Some(1),
-            },
-        ]),
-    );
-    let host = settle_interval(&mut f, 2, "moment-mixed");
     let kinds = |authors: &serde_json::Value| {
         let mut kinds: Vec<String> = authors
             .as_array()
@@ -1962,66 +1934,138 @@ fn imported_settlement_credits_every_relay_accepted_author_of_its_interval() {
         kinds.sort();
         kinds
     };
-    // The recipient's delivery without recording context keeps its gap
-    // beside the relay's credit for the recipient.
-    assert_eq!(kinds(&host), ["agent", "human", "named", "unattributed"]);
-    let ops = operations(&f.store);
-    let moment = ops
-        .iter()
-        .find(|op| op.op_kind == "moment.append" && op.payload["momentId"] == "moment-mixed")
+    let moment_id = format!("moment-ydoc-{}", "d".repeat(64));
+    for native_settlements in [false, true] {
+        let mut f = fixture(true);
+        bootstrap(&mut f, false).unwrap();
+        // A claimed Edit link holder whose client sent no recording context.
+        accept_authored(
+            &mut f,
+            1,
+            ServerDerivedLiveUpdateAuthority::Link {
+                principal_id: "claimed-holder".into(),
+                grant_id: "claimed-link".into(),
+                grant_generation: 1,
+            },
+            None,
+        );
+        // Another person, claimed under a named grant.
+        accept_authored(
+            &mut f,
+            2,
+            ServerDerivedLiveUpdateAuthority::Named {
+                principal_id: "claimed-user".into(),
+                grant_id: "claimed-grant".into(),
+                grant_generation: 1,
+            },
+            Some(vec![LiveAuthorEntry::Human {
+                human_id: "claimed-person".into(),
+                human_name: "Claimed person".into(),
+            }]),
+        );
+        // The owner and the agent working for them.
+        accept_authored(
+            &mut f,
+            3,
+            ServerDerivedLiveUpdateAuthority::Owner {
+                principal_id: "owner".into(),
+            },
+            Some(vec![
+                LiveAuthorEntry::Human {
+                    human_id: "owner".into(),
+                    human_name: "Owner".into(),
+                },
+                LiveAuthorEntry::Agent {
+                    agent_id: "trip-agent".into(),
+                    agent_name: Some("Trip agent".into()),
+                    on_behalf_of: Some("owner".into()),
+                    depth: Some(1),
+                },
+            ]),
+        );
+        let host = settle_interval(&mut f, 3, &moment_id);
+        // This device's raw History keeps every claim it admitted.
+        assert_eq!(
+            kinds(&host),
+            ["agent", "human", "human", "link", "named", "unattributed"]
+        );
+        let mut ops = operations(&f.store);
+        crate::outbound::repair_queued_moment_authors(
+            &mut f.store,
+            &mut ops,
+            &NoFaults,
+            native_settlements,
+        )
         .unwrap();
-    // The journal keeps the relay-admitted snapshot person for the publishing
-    // route to judge, never the recipient's grant authority.
-    assert_eq!(
-        kinds(&moment.payload["authors"]),
-        ["agent", "human", "unattributed"]
-    );
-    // The relay refuses a client-minted person, so only the agent and the
-    // exact unattributed marker travel on an ordinary credential.
-    let mut ordinary = moment.payload.clone();
-    crate::outbound::omit_unpublishable_authors(&mut ordinary, false);
-    assert_eq!(kinds(&ordinary["authors"]), ["agent", "unattributed"]);
-
-    let (_scratch, path, mut receiver) = receiver_with_blobs(&f);
-    for (kind, applied) in import_all(&mut receiver, &ops) {
-        assert!(applied, "{kind}");
-    }
-    assert_eq!(
-        moment_authors(&receiver, "moment-mixed").as_ref(),
-        Some(&host)
-    );
-    // A replayed pull changes nothing.
-    import_all(&mut receiver, &ops);
-    assert_eq!(
-        moment_authors(&receiver, "moment-mixed").as_ref(),
-        Some(&host)
-    );
-    drop(receiver);
-    let receiver = EngineStore::open(&path, 400).unwrap();
-    assert_eq!(
-        moment_authors(&receiver, "moment-mixed").as_ref(),
-        Some(&host)
-    );
-
-    // A settlement that claims another interval is refused, so the moment
-    // keeps only the authors it carried.
-    let carried = moment.payload["authors"].clone();
-    let forged: Vec<_> = ops
-        .iter()
-        .map(|op| {
-            let mut op = op.clone();
-            if op.op_kind == settlement_record::SETTLEMENT_OP {
-                op.payload["record"]["previousCursor"] = json!(1);
-            }
-            op
-        })
-        .collect();
-    let (_scratch, _path, mut receiver) = receiver_with_blobs(&f);
-    let applied = import_all(&mut receiver, &forged);
-    assert!(
-        applied
+        assert_eq!(
+            (
+                ops.iter()
+                    .filter(|op| op.op_kind == application_record::EVENT_OP)
+                    .count(),
+                ops.iter()
+                    .filter(|op| op.op_kind == settlement_record::SETTLEMENT_OP)
+                    .count(),
+            ),
+            (3, 1)
+        );
+        let moment = ops
             .iter()
-            .any(|(kind, applied)| kind == settlement_record::SETTLEMENT_OP && !applied)
-    );
-    assert_eq!(moment_authors(&receiver, "moment-mixed"), Some(carried));
+            .find(|op| {
+                op.op_kind == "moment.append" && op.payload["momentId"] == moment_id.as_str()
+            })
+            .unwrap();
+        let carried = moment.payload["authors"].clone();
+        // The native service route carries the snapshot persons; an ordinary
+        // credential carries one exact marker in their place.
+        let expected: &[&str] = if native_settlements {
+            &["agent", "human", "human", "unattributed"]
+        } else {
+            &["agent", "unattributed"]
+        };
+        assert_eq!(kinds(&carried), expected);
+        let wire = moment.payload.to_string();
+        for private in [r#""named""#, "grantId", "userId", "principalId"] {
+            assert!(!wire.contains(private), "{private} in {wire}");
+        }
+
+        let (_scratch, path, mut receiver) = receiver_with_blobs(&f);
+        for (kind, applied) in import_all(&mut receiver, &ops) {
+            assert!(applied, "{kind}");
+        }
+        // The peer retains the evidence, which adds no credit.
+        assert_eq!(count(&receiver, "live_audit_events"), 3);
+        assert_eq!(count(&receiver, "live_audit_settlements"), 1);
+        assert_eq!(moment_authors(&receiver, &moment_id), Some(carried.clone()));
+        // A replayed pull changes nothing.
+        import_all(&mut receiver, &ops);
+        assert_eq!(moment_authors(&receiver, &moment_id), Some(carried.clone()));
+        drop(receiver);
+        let receiver = EngineStore::open(&path, 400).unwrap();
+        assert_eq!(moment_authors(&receiver, &moment_id), Some(carried.clone()));
+        assert_eq!(count(&receiver, "live_audit_events"), 3);
+        // Publication leaves raw History unchanged.
+        assert_eq!(moment_authors(&f.store, &moment_id), Some(host));
+
+        if !native_settlements {
+            // A settlement that claims another interval is still refused.
+            let forged: Vec<_> = ops
+                .iter()
+                .map(|op| {
+                    let mut op = op.clone();
+                    if op.op_kind == settlement_record::SETTLEMENT_OP {
+                        op.payload["record"]["previousCursor"] = json!(1);
+                    }
+                    op
+                })
+                .collect();
+            let (_scratch, _path, mut receiver) = receiver_with_blobs(&f);
+            let applied = import_all(&mut receiver, &forged);
+            assert!(
+                applied
+                    .iter()
+                    .any(|(kind, applied)| kind == settlement_record::SETTLEMENT_OP && !applied)
+            );
+            assert_eq!(moment_authors(&receiver, &moment_id), Some(carried));
+        }
+    }
 }
