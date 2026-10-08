@@ -20,6 +20,7 @@ import {
   type CliRegistryWorkspace,
   type CliRunMessageLink,
   type CliServerHandle,
+  type CliServerOptions,
   type CliWorkspaceContext,
   type startCliServer as startCliServerImplementation,
 } from "./cliServer";
@@ -59,6 +60,7 @@ async function settledMarkdown(rootPath: string, path: string): Promise<string> 
 }
 
 interface DesktopCliServerDependencies<State> {
+  recordSuccess?: CliServerOptions["recordSuccess"];
   dataset?(request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null): Promise<import("@dohc/cli/dataset").DatasetResult>;
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
   ownerAppPublication?(request: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null): Promise<OwnerAppPublicationResult>;
@@ -429,6 +431,7 @@ export function createDesktopCliServer<State>(
 
   async function startDesktopCliServer(): Promise<CliServerHandle> {
     return startCliServer({
+      recordSuccess: dependencies.recordSuccess,
       stateDir: stateDir(),
       listWorkspaces: () =>
         listWorkspaces()
