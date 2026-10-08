@@ -15,7 +15,7 @@
     "smoke:package": "node scripts/package-smoke.mjs",
     "smoke:app-backend": "node scripts/smoke-app-backend-runtime.mjs",
     "smoke:settings": "node ../../scripts/verification/verify.mjs e2e --grep @settings-smoke",
-    "smoke:fuses": "node scripts/ensure-electron-installed.mjs && node scripts/fuse-smoke.mjs",
+    "smoke:fuses": "node scripts/fuse-smoke.mjs",
     "test": "pnpm test:unit && pnpm test:scripts",
     "test:e2e": "node ../../scripts/verification/verify.mjs e2e",
     "capture:ui-audit": "node scripts/capture-ui-audit.mjs",
@@ -23,7 +23,7 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.trip-poll.json && tsc --noEmit -p tsconfig.fundraiser.json && tsc --noEmit -p tsconfig.stock-orders.json",
     "test:unit": "vitest run",
     "test:scripts": "pnpm run test:scripts:isolated && pnpm run test:scripts:runtime",
-    "test:scripts:isolated": "node --experimental-transform-types --test ../../examples/fundraiser/recovery.test.ts && node --test --test-concurrency=1 scripts/dev.test.mjs scripts/build-cli-bin.test.mjs scripts/validate-ui-audit.test.mjs scripts/compiler-process.test.mjs scripts/stage-trip-poll.test.mjs scripts/stage-app-compiler.test.mjs",
+    "test:scripts:isolated": "node --experimental-transform-types --test ../../examples/fundraiser/recovery.test.ts && node --test --test-concurrency=1 scripts/dev.test.mjs scripts/build-cli-bin.test.mjs scripts/validate-ui-audit.test.mjs scripts/compiler-process.test.mjs scripts/stage-trip-poll.test.mjs scripts/stage-app-compiler.test.mjs scripts/fuse-smoke.test.mjs",
     "test:scripts:runtime": "node --test scripts/stage-app-backend-runtime.test.mjs"
   },
   "devDependencies": {
