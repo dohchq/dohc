@@ -1,5 +1,5 @@
+import { datasetBaseFolder } from "@dohc/security-contract/dataset";
 import { createHash } from "node:crypto";
-import { posix } from "node:path";
 import type { JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { DatasetAutomationClaim } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import type { DatasetDefinition, DatasetOperation, DatasetTable } from "@dohc/security-contract/dataset";
@@ -174,7 +174,7 @@ function resolve(
   // A schedule or a Group message has no trigger record, so its steps take
   // their tables from their operations.
   let table: DatasetTable | null = null;
-  const destination = posix.dirname(definition.schemaPath);
+  const destination = datasetBaseFolder(definition);
   const ownsTrigger = sourceCollection === undefined || sourceCollection === destination;
   const destinations = recordStepDestinations(automation, sourceCollection ?? destination);
   if (ownsTrigger && "table" in trigger) {
@@ -206,7 +206,7 @@ function resolve(
   const pinned = new Map<number, string>();
   // One step's operation, or why it has none. A step no operation fits keeps what it names.
   const resolveStep = (ordinal: number, step: RecordStep): string | null => {
-    if (step.kind !== "set" && step.collection !== null && step.collection !== posix.dirname(definition.schemaPath)) {
+    if (step.kind !== "set" && step.collection !== null && step.collection !== datasetBaseFolder(definition)) {
       return `Automations on ${definition.name} can use only its own records for now.`;
     }
     const kind = KIND_OF[step.kind];
@@ -368,7 +368,7 @@ export function recordStepDestinations(automation: Automation, source: string): 
 }
 
 function isOwnCollection({ definition, sourceCollection }: DatasetRules): boolean {
-  return sourceCollection === undefined || sourceCollection === posix.dirname(definition.schemaPath);
+  return sourceCollection === undefined || sourceCollection === datasetBaseFolder(definition);
 }
 
 // Each operation a run can call, once each: the trigger record's read, each

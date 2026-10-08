@@ -77,7 +77,7 @@ async function datasetFolder(r: Relay, descriptorChange: "matching" | "different
     db.exec("CREATE TABLE IF NOT EXISTS dohc_dataset_catalog(workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,revision_json TEXT NOT NULL,artifacts_json TEXT NOT NULL,PRIMARY KEY(workspace_id,dataset_id))");
     if (descriptorChange !== "unapproved") db.prepare("INSERT INTO dohc_dataset_catalog VALUES(?,?,?,?)").run(WORKSPACE, definition.datasetId, JSON.stringify(revision), "{}");
   } finally { db.close(); }
-  const text = descriptorChange === "malformed" ? "{" : JSON.stringify(descriptorChange === "different" ? { ...definition, name: "Changed" } : definition);
+  const text = descriptorChange === "malformed" ? "{" : JSON.stringify(descriptorChange === "different" ? { ...definition, datasetId: id(99) } : definition);
   await r.owner.write("dataset-descriptor", `${folder}/dataset.json`, text);
   return folder;
 }
@@ -1764,4 +1764,20 @@ describe("direct writes through an Edit share link", () => {
   it("streams its body instead of the adapter buffering it", () => {
     expect(streamsRequestBody(new URL("http://relay.test/sync/link/collection-writes"), "POST")).toBe(true);
   });
+});
+
+it.each([2, 3])("switches base-folder automations after revision %s with an unchanged address", async number => {
+  const r = await relay(), folder = await datasetFolder(r);
+  const db = inspectDatabase(storagePath(r.storage));
+  try {
+    const previous = JSON.parse(String(db.prepare("SELECT revision_json FROM dohc_dataset_catalog WHERE workspace_id=?").get(WORKSPACE)?.revision_json));
+    const definition: DatasetDefinition = { ...previous.definition, name: "Current People", schemaPath: `${folder}/revisions/${number}-00000000-0000-4000-8000-000000000099/schema.sql` };
+    const approved = describeDatasetRevision({ definition, revision: number, schemaSql: "SCHEMA", operationSource: "OPERATIONS" });
+    db.prepare("UPDATE dohc_dataset_catalog SET revision_json=? WHERE workspace_id=?").run(JSON.stringify(approved), WORKSPACE);
+  } finally { db.close(); }
+  const preflight = await r.h(request(RECIPIENT, `/sync/shares/${r.shareId}/collection-writes?${new URLSearchParams({ collectionPath: folder })}`));
+  expect(await json(preflight)).toEqual({ ok: true, canSwitch: true });
+  const one = automations(STAMP);
+  await upload(r, one);
+  expect((await write(r, [create(`${folder}/automations.yaml`, one)])).status).toBe(200);
 });

@@ -89,6 +89,13 @@ export interface DatasetDefinition {
   tables: DatasetTable[];
   operations: DatasetOperation[];
 }
+/** The approved schema locates the Collection; a generated revision directory does not move it. */
+export function datasetBaseFolder({ schemaPath }: Pick<DatasetDefinition, "schemaPath">): string {
+  const slash = schemaPath.lastIndexOf("/");
+  const folder = slash === -1 ? "" : schemaPath.slice(0, slash);
+  return folder.replace(/(?:^|\/)revisions\/[1-9][0-9]*-[^/]+$/, "") || ".";
+}
+
 /** The host verifies the digests and owner approval before using this revision. */
 export interface DatasetRevision {
   datasetId: string;

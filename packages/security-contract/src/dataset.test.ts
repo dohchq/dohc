@@ -1,7 +1,7 @@
 import { generateDatasetOperations } from "./datasetOperations";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { datasetRevisionsPreserveAccess, DATASET_METADATA_MAX_BYTES, datasetDefinitionDigestContent, datasetRevisionDigestContent, parseDatasetDefinition, parseDatasetDescription, parseDatasetRevision, parseDatasetBindingReference, parseAppDatasetCapability, datasetColumnFields, describeApprovedDataset, type AppDatasetBinding, type DatasetColumnField, type DatasetDefinition, type DatasetField, type DatasetRevision } from "./dataset";
+import { datasetBaseFolder, datasetRevisionsPreserveAccess, DATASET_METADATA_MAX_BYTES, datasetDefinitionDigestContent, datasetRevisionDigestContent, parseDatasetDefinition, parseDatasetDescription, parseDatasetRevision, parseDatasetBindingReference, parseAppDatasetCapability, datasetColumnFields, describeApprovedDataset, type AppDatasetBinding, type DatasetColumnField, type DatasetDefinition, type DatasetField, type DatasetRevision } from "./dataset";
 import { effectiveDatasetOperations, hasGeneratedDatasetRevision, parseDatasetBinding, resolveAppDatasetCapability, verifyAppDatasetCapability } from "./datasetAuthorization";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -543,4 +543,19 @@ it("does not grant an automation the app's approved link reads", () => {
   approved.revisionSha256 = hash(datasetRevisionDigestContent(approved));
   const request = { ...binding(approved), linkReads: [{ operationId: id(6), fieldIds: [id(3), id(4)] }] };
   expect(effectiveDatasetOperations(request, approved, { kind: "automation", automationId: "collection:people#notify" }).map(operation => operation.name)).toEqual(["submit"]);
+});
+
+it.each([
+  ["schema.sql", "."],
+  ["revisions/2-original/schema.sql", "."],
+  ["Budget/revisions/3-reviewed/schema.sql", "Budget"],
+  ["Budget/schema.sql", "Budget"],
+  ["trip/Budget/schema.sql", "trip/Budget"],
+  ["trip/Budget/revisions/2-00000000-0000-4000-8000-000000000099/schema.sql", "trip/Budget"],
+  ["trip/Budget/revisions/3-00000000-0000-4000-8000-000000000098/schema.sql", "trip/Budget"],
+  ["revisions/Budget/schema.sql", "revisions/Budget"],
+  ["trip/revisions/Budget/revisions/3-00000000-0000-4000-8000-000000000098/schema.sql", "trip/revisions/Budget"],
+  ["revisions/2-00000000-0000-4000-8000-000000000099/schema.sql", "."],
+])("locates the base folder of %s", (schemaPath, folder) => {
+  expect(datasetBaseFolder({ schemaPath })).toBe(folder);
 });
