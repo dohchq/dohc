@@ -104,7 +104,7 @@ export function createShareInventoryRoutes(
         const granterEmail = lookupUserEmail ? await lookupUserEmail(actor.userId) : null;
         const granted = await Promise.all(page.granted.map(row => grantedShareSummary(row, { granterEmail })));
         if (!storage.workspaceIsOwnedBy(workspaceId, actor.userId)) throw notFound();
-        return jsonResponse({ok: true, granted,
+        return jsonResponse({ok: true, granterUserId: actor.userId, granterEmail, granted,
           ...(page.nextCursor ? {nextCursor: grantedInventoryCursor.encode(page.nextCursor)} : {}),
         });
       }
@@ -191,11 +191,10 @@ export function createShareInventoryRoutes(
         ? { cursor: independentGrantCursor }
         : {}),
     });
-    const granterEmail = !independentGrantCursor && lookupUserEmail ? await lookupUserEmail(actor.userId) : null;
     const [links, independentGrants] = await Promise.all([
       independentGrantCursor
         ? []
-        : Promise.all(page.links.map(row => linkInventorySummary(row, granterEmail))),
+        : Promise.all(page.links.map(linkInventorySummary)),
       Promise.all(
         independentGrantPage.grants.map(independentGrantSummary),
       ),

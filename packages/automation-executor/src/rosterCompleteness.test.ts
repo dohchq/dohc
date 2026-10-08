@@ -1,18 +1,36 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { checkAutomationReach, type ReachStep } from "./automationReach";
 import { listRosterGrants, ownerRoster, readStoredRoster } from "./rosterListing";
 
 const facts = { shareId: "share", generation: 2, status: "active", granterUserId: "owner",
   granterEmail: "owner@example.test", subjectName: "Trip", sharerName: "Owner" };
+const { granterUserId, granterEmail, ...linkFacts } = facts;
 const selector = { paths: ["Trip"], versionId: null };
 const named = { ...facts, workspaceId: "workspace", grantId: "named", principalKind: "user",
   recipientUserId: "recipient", recipientEmail: "recipient@example.test", revokedAtMs: null,
   selector, access: "edit", automationsGeneration: null };
-const link = (access: string, dependents: unknown[] = []) => ({ ...facts, grantId: `link-${access}`,
+const link = (access: string, dependents: unknown[] = []) => ({ ...linkFacts, grantId: `link-${access}`,
   selector, access, automationsGeneration: null, dependents });
 const acquire = (links: unknown[], granted: unknown[] = []) => listRosterGrants("workspace", async path => ({
-  status: 200, body: path.startsWith("/sync/shares?") ? { granted } : { links },
+  status: 200, body: path.startsWith("/sync/shares?") ? { granterUserId, granterEmail, granted } : { links },
 }));
+
+it("takes link and dependent owner facts only from the granted-page context, even with no named grants", async () => {
+  const answer = await acquire([{ ...link("edit", [{ grantId: "dependent", recipientUserId: "recipient",
+    recipientEmail: "recipient@example.test", generation: 1, access: "edit", granterUserId: "wrong", granterEmail: "wrong@example.test" }]),
+    granterUserId: "wrong", granterEmail: "wrong@example.test" }]);
+  if (answer.kind !== "answered" || answer.listing.grants === null) throw new Error("unusable listing");
+  expect(answer.listing.links[0].grant).toMatchObject({ granterUserId, granterEmail });
+  expect(answer.listing.grants[0]).toMatchObject({ granterUserId, granterEmail });
+});
+
+it.each([{ granted: [] }, { granterUserId: "", granterEmail: null, granted: [] },
+  { granterUserId, granterEmail: 123, granted: [] }])("rejects a missing or damaged granted-page owner context: %j", async body => {
+  const get = vi.fn(async (path: string) => ({ status: 200, body: path.startsWith("/sync/shares?") ? body : { links: [link("edit")] } }));
+  const answer = await listRosterGrants("workspace", get);
+  expect(answer).toMatchObject({ kind: "answered", listing: { grants: null, problem: { kind: "unusable-listing" } } });
+  expect(get).toHaveBeenCalledTimes(1);
+});
 
 it.each(["view", "comment"])("retains an active %s link for Access without automation writes or dependents", async access => {
   const answer = await acquire([link(access)]);
@@ -68,7 +86,7 @@ it("reads old-shape and damaged grant facts as unknown", () => {
 it("retains more than 1,000 active View links across pages", async () => {
   const links = Array.from({ length: 1001 }, (_, index) => ({ ...link("view"), grantId: `link-${String(index).padStart(4, "0")}` }));
   const answer = await listRosterGrants("workspace", async path => ({ status: 200,
-    body: path.startsWith("/sync/shares?") ? { granted: [] }
+    body: path.startsWith("/sync/shares?") ? { granterUserId, granterEmail, granted: [] }
       : path.includes("cursor=") ? { links: links.slice(1000) } : { links: links.slice(0, 1000), nextCursor: "page2" },
   }));
   if (answer.kind !== "answered" || answer.listing.grants === null) throw new Error("unusable listing");

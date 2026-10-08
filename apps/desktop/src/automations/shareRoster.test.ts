@@ -29,6 +29,7 @@ const remote = { serverUrl: "https://server.dohc.test", ownerUserId: "u-owner" }
 
 const facts = { shareId: "s-1", generation: 1, status: "active" as const, granterUserId: "u-owner",
   granterEmail: null, subjectName: null, sharerName: null };
+const { granterUserId, granterEmail, ...linkFacts } = facts;
 
 function row(overrides: Record<string, unknown> = {}) {
   return {
@@ -40,7 +41,7 @@ function row(overrides: Record<string, unknown> = {}) {
 
 function link(overrides: Record<string, unknown> = {}) {
   return {
-    ...facts, grantId: "g-link", status: "active", selector: { paths: ["Trip"], versionId: null }, access: "edit", automationsGeneration: null,
+    ...linkFacts, grantId: "g-link", status: "active", selector: { paths: ["Trip"], versionId: null }, access: "edit", automationsGeneration: null,
     dependents: [{ grantId: "g-dep", recipientUserId: "u-ben", recipientEmail: "ben@dohc.test", access: "edit", generation: 1, createdAtMs: 1 }],
     ...overrides,
   };
@@ -71,7 +72,8 @@ function relay(pages: Record<string, Page>) {
     const page = pages[path];
     if (page === undefined) throw new Error(`unexpected ${path}`);
     if (page instanceof Error) throw page;
-    return page;
+    return page.body !== null && typeof page.body === "object" && "granted" in page.body
+      ? { ...page, body: { granterUserId, granterEmail, ...page.body } } : page;
   });
 }
 

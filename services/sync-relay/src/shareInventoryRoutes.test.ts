@@ -63,30 +63,49 @@ describe("workspace granted pages", () => {
     expect(lookupUserEmail).toHaveBeenCalledExactlyOnceWith("recipient");
   });
 
-  it.each(["granted", "links"])("looks up the owner once for a 1,000-row %s page and fails acquisition on error", async lane => {
+  it("looks up the owner once for a 1,000-row granted page and fails acquisition on error", async () => {
     const storage = await testStorage(); claim(storage);
     seedInventory(storage, 1000);
-    if (lane === "links") {
-      const db = inspectDatabase(storagePath(storage));
-      try { db.prepare("UPDATE sync_relay_share_grants SET principal_kind = 'link', principal_user_id = NULL").run(); }
-      finally { db.close(); }
-    }
     let unavailable = false;
     const lookupUserEmail = vi.fn((id: string) => {
       if (id === OWNER && unavailable) throw new Error("owner directory unavailable");
       return `${id}@dohc.test`;
     });
     const h = testHandler(storage, { lookupUserEmail });
-    const path = lane === "granted" ? `/sync/shares?workspaceId=${WORKSPACE}` : `/sync/${WORKSPACE}/shares/links`;
+    const path = `/sync/shares?workspaceId=${WORKSPACE}`;
     const response = await h(request(OWNER, path));
     expect(response.status).toBe(200);
     const body = await response.json();
-    expect(body[lane]).toHaveLength(1000);
-    expect(body[lane][0]).toMatchObject({ granterUserId: OWNER, granterEmail: "owner@dohc.test", status: "active" });
+    expect(body.granted).toHaveLength(1000);
+    expect(body.granted[0]).toMatchObject({ granterUserId: OWNER, granterEmail: "owner@dohc.test", status: "active" });
     expect(lookupUserEmail.mock.calls.filter(([id]) => id === OWNER)).toHaveLength(1);
     unavailable = true;
     expect((await h(request(OWNER, path))).status).toBe(500);
     expect(await listRosterGrants(WORKSPACE, h.readOwnerShares.bind(h, OWNER))).toMatchObject({ kind: "unanswered" });
+  });
+
+  it("answers link inventory without owner lookups when the directory is unavailable", async () => {
+    const storage = await testStorage(); claim(storage); seedInventory(storage, 1000);
+    const db = inspectDatabase(storagePath(storage));
+    try { db.prepare("UPDATE sync_relay_share_grants SET principal_kind = 'link', principal_user_id = NULL").run(); }
+    finally { db.close(); }
+    const lookupUserEmail = vi.fn(() => { throw new Error("directory unavailable"); });
+    const h = testHandler(storage, { lookupUserEmail });
+    const response = await h(request(OWNER, `/sync/${WORKSPACE}/shares/links`));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.links).toHaveLength(1000);
+    expect(lookupUserEmail).not.toHaveBeenCalled();
+    for (const link of body.links) {
+      expect(link).not.toHaveProperty("granterUserId");
+      expect(link).not.toHaveProperty("granterEmail");
+    }
+    const healthy = testHandler(storage);
+    const answer = await listRosterGrants(WORKSPACE, healthy.readOwnerShares.bind(healthy, OWNER));
+    expect(answer.kind).toBe("answered");
+    if (answer.kind !== "answered" || answer.listing.grants === null) throw new Error("unusable listing");
+    expect(answer.listing.links).toHaveLength(1000);
+    expect(answer.listing.links[0].grant).toMatchObject({ granterUserId: OWNER, granterEmail: "owner@dohc.test" });
   });
 
   it("filters before paging, uses immutable ascending keys, and keeps revoked grants", async () => {

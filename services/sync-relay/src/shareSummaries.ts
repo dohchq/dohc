@@ -217,7 +217,7 @@ export function createShareSummaries(
     };
   };
 
-  const linkInventorySummary = async (row: SyncRelayLinkInventoryRow, granterEmail: string | null) => {
+  const linkInventorySummary = async (row: SyncRelayLinkInventoryRow) => {
     const { share, grant } = row;
     const storedSelector = parseStoredAnyShareSelectorJson(share.selectorJson);
     const selector =
@@ -229,8 +229,6 @@ export function createShareSummaries(
         : null;
     return {
       shareId: share.shareId,
-      granterUserId: share.granterUserId,
-      granterEmail,
       grantId: grant.grantId,
       ...labels(share.shareId),
       sharerName: null,

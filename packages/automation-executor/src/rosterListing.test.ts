@@ -6,6 +6,7 @@ const WORKSPACE = "ws-trip";
 
 const facts = { shareId: "s-1", generation: 1, status: "active" as const, granterUserId: "u-owner",
   granterEmail: null, subjectName: null, sharerName: null };
+const { granterUserId, granterEmail, ...linkFacts } = facts;
 
 function row(overrides: Record<string, unknown> = {}) {
   return {
@@ -17,7 +18,7 @@ function row(overrides: Record<string, unknown> = {}) {
 
 function link(overrides: Record<string, unknown> = {}) {
   return {
-    ...facts, grantId: "g-link", access: "edit", automationsGeneration: null, status: "active", selector: { paths: ["Trip"], versionId: null },
+    ...linkFacts, grantId: "g-link", access: "edit", automationsGeneration: null, status: "active", selector: { paths: ["Trip"], versionId: null },
     dependents: [{ grantId: "g-dep", recipientUserId: "u-ben", recipientEmail: "ben@dohc.test", access: "edit", generation: 1, createdAtMs: 1 }],
     ...overrides,
   };
@@ -30,7 +31,8 @@ function relay(pages: Record<string, Page>) {
     const page = pages[path];
     if (page === undefined) throw new Error(`unexpected ${path}`);
     if (page instanceof Error) throw page;
-    return page;
+    return page.body !== null && typeof page.body === "object" && "granted" in page.body
+      ? { ...page, body: { granterUserId, granterEmail, ...page.body } } : page;
   });
 }
 
@@ -77,7 +79,7 @@ describe("listing from the relay", () => {
       "/sync/shares?workspaceId=ws-trip": {status: 200, body: {granted: [], nextCursor: null}},
     }))).toEqual(unusable);
     let page = 0;
-    const get = vi.fn(async () => ({status: 200, body: {granted: [], nextCursor: `c-${++page}`}}));
+    const get = vi.fn(async () => ({status: 200, body: {granterUserId, granterEmail, granted: [], nextCursor: `c-${++page}`}}));
     expect(await listRosterGrants(WORKSPACE, get)).toEqual(unusable);
     expect(get).toHaveBeenCalledTimes(50);
   });
@@ -141,11 +143,11 @@ describe("listing from the relay", () => {
     expect(await listRosterGrants(WORKSPACE, relay({ ...shares, "/sync/ws-trip/shares/links": { status: 200, body: { links: "all" } } })))
       .toEqual(unusable);
     const looping = vi.fn(async (path: string) =>
-      ({ status: 200, body: path === "/sync/shares?workspaceId=ws-trip" ? { granted: [] } : { links: [], nextCursor: "same" } }));
+      ({ status: 200, body: path === "/sync/shares?workspaceId=ws-trip" ? { granterUserId, granterEmail, granted: [] } : { links: [], nextCursor: "same" } }));
     expect(await listRosterGrants(WORKSPACE, looping)).toEqual(unusable);
     let page = 0;
     const endless = vi.fn(async (path: string) =>
-      ({ status: 200, body: path === "/sync/shares?workspaceId=ws-trip" ? { granted: [] } : { links: [], nextCursor: `c-${(page += 1)}` } }));
+      ({ status: 200, body: path === "/sync/shares?workspaceId=ws-trip" ? { granterUserId, granterEmail, granted: [] } : { links: [], nextCursor: `c-${(page += 1)}` } }));
     expect(await listRosterGrants(WORKSPACE, endless)).toEqual(unusable);
     expect(endless).toHaveBeenCalledTimes(51);
   });
