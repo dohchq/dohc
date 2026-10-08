@@ -1414,3 +1414,29 @@ it.each(["roster", "host", "verdicts"] as const)("does not save a stale source r
     expect(runs.flatMap(run => run.applied)).toHaveLength(boundary === "verdicts" ? 1 : 0);
   } finally { resume.resolve(); await running; }
 });
+
+it("does not save a stale destination refusal after the roster await", async () => {
+  const f = await fixture(false, false);
+  const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+  let paused = false;
+  f.dependencies.cachedRoster = async () => {
+    if (!paused && (await f.runs()).length > 0) {
+      paused = true; reached.resolve(); await resume.promise;
+      return { kind: "owner", ownerUserId: "owner", grants: [{ grantId: "editor", recipientUserId: "person",
+        recipientEmail: "person@example.com", files: { paths: ["Source"], access: "edit", versionId: null }, channel: null }] };
+    }
+    return roster;
+  };
+  const running = f.run(automation(find("Target", false) + set(false, "found")));
+  try {
+    await reached.promise;
+    f.move("Target", "Shared/Target");
+    resume.resolve();
+    await expect(running).resolves.toEqual({ kind: "wait", reason: "moved" });
+    const runs = await f.runs();
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.outcome).toBeNull();
+    expect(runs[0]!.applied).toEqual([]);
+    expect(f.docs.get("Target/same")!.status).toBe("Open");
+  } finally { resume.resolve(); await running; }
+});

@@ -1169,6 +1169,8 @@ export class CollectionAutomations {
   private readonly groupSkipsTold: Record<GroupMessagesSkipped, number> = { ahead: 0, late: 0 };
   /** Serializes index loads and subscription reconciles. */
   private chain: Promise<void> = Promise.resolve();
+  /** Missing identities are inconclusive until queued index reads finish. */
+  private indexReads = 0;
   /** Serializes reach verdict updates. */
   private verdictChain: Promise<unknown> = Promise.resolve();
   /** Verdict changes remain unsaved until the store confirms the save. */
@@ -1314,7 +1316,7 @@ export class CollectionAutomations {
     }
     if (folders.size === 0 || this.opened === null) return;
     this.targetRevision += 1;
-    return this.enqueue(async () => {
+    return this.readingIndex(() => this.enqueue(async () => {
       let datasets: Promise<Map<string, IndexedDataset> | null> | undefined;
       let listed: Promise<Map<string, string>> | undefined;
       for (const folder of folders) {
@@ -1353,7 +1355,7 @@ export class CollectionAutomations {
       this.publishHolds();
       // A descriptor fixed or removed: its waiting due times and messages look again.
       this.wakeDatasetWaits();
-    })
+    }))
       // A new or changed step gets its verdict now, while the people who
       // could have written it can still edit the Collection.
       .then(() => {
@@ -3752,24 +3754,31 @@ export class CollectionAutomations {
     return new Map(listed.collections.map((collection) => [collection.path, collection.objectId]));
   }
 
-  private async loadIndex(): Promise<void> {
-    this.targetRevision += 1;
-    this.collections = await this.listedCollections();
-    this.files.clear();
-    this.schemaFields.clear();
-    for (const path of this.collections.keys()) await this.readFile(path);
-    // A dataset's schedules run with the host closed, so the index opens it
-    // whenever this workspace has a dataset store. It does so before the
-    // schedules are noted, so one seen now is not taken as switched on now.
-    const datasets = await this.datasetFolders(true);
-    if (datasets !== null) this.datasets.clear();
-    for (const [path, definition] of datasets ?? this.datasets) {
-      if (this.collections.has(path)) continue;
-      this.datasets.set(path, definition);
-      await this.readFile(path);
-    }
-    await this.readNamedSchemas();
-    this.targetRevision += 1;
+  private async readingIndex(work: () => Promise<void>): Promise<void> {
+    this.indexReads += 1;
+    try { await work(); } finally { this.indexReads -= 1; }
+  }
+
+  private loadIndex(): Promise<void> {
+    return this.readingIndex(async () => {
+      this.targetRevision += 1;
+      this.collections = await this.listedCollections();
+      this.files.clear();
+      this.schemaFields.clear();
+      for (const path of this.collections.keys()) await this.readFile(path);
+      // A dataset's schedules run with the host closed, so the index opens it
+      // whenever this workspace has a dataset store. It does so before the
+      // schedules are noted, so one seen now is not taken as switched on now.
+      const datasets = await this.datasetFolders(true);
+      if (datasets !== null) this.datasets.clear();
+      for (const [path, definition] of datasets ?? this.datasets) {
+        if (this.collections.has(path)) continue;
+        this.datasets.set(path, definition);
+        await this.readFile(path);
+      }
+      await this.readNamedSchemas();
+      this.targetRevision += 1;
+    });
   }
 
   /** Reads the field names of every Collection an automation names that the index lacks. */
@@ -4851,6 +4860,7 @@ export class CollectionAutomations {
     // Found by its Collection id, so a claim made before its Collection
     // moved runs where the Collection is now.
     const id = this.locate(claim.automationId);
+    if (id === null && this.indexReads > 0) return release;
     // The definition is read before the roster: a pull that lands while the
     // roster lists cannot bring a step from an editor the roster lacks.
     const automation = this.definitionFor(claim.automationId);

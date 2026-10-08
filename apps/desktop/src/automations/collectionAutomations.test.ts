@@ -89,6 +89,8 @@ async function world(options: {
   evaluator?: AutomationFormulaEvaluator;
   deadline?: (abort: () => void) => () => void;
   withRecordWrites?: (signal: AbortSignal, events: string[]) => Promise<void>;
+  /** A controlled wake when testing a released claim. The engine RPC itself emits none. */
+  onClaimReleased?: (claim: AutomationClaim) => void;
   /** The engine gives no answer to settles until this is set false. */
   unanswered?: { settle: boolean };
   /** The engine refuses the next settle this many times: its recovery took the claim back. */
@@ -418,6 +420,7 @@ async function world(options: {
       pending.push(claim);
       events.push(`released ${claimId}`);
       wake();
+      options.onClaimReleased?.(claim);
       return claim;
     },
   };
@@ -6175,11 +6178,12 @@ describe("Collection automations that a Group message starts", () => {
       expect(w.journaled).toEqual([]);
     });
 
-    it.each(["schema", "roster", "verdicts"] as const)("reports a moved shared Button while inspecting its %s", async (reading) => {
+    it.each(["schema", "roster", "verdicts", "failed store"] as const)("reports a moved shared Button while inspecting its %s", async (reading) => {
       const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid by: '=person.id'}}]\n" } });
       const reached = Promise.withResolvers<void>();
       const resume = Promise.withResolvers<void>();
       let armed = false;
+      let storeFailed = false;
       let paused = false;
       let hash = "";
       const pause = async (at: typeof reading) => {
@@ -6196,7 +6200,8 @@ describe("Collection automations that a Group message starts", () => {
           if (path === "Tasks/collection.yaml") await pause("schema");
           return { text, truncated: false, contentHash: sha256(text) };
         },
-        roster: async () => { await pause("roster"); return OWNER; },
+        roster: async () => { await pause(reading === "failed store" ? "failed store" : "roster"); return OWNER; },
+        withDatasetHost: async () => { if (storeFailed) throw new Error("Store failed"); return null; },
       });
       onTestFinished(async () => { resume.resolve(); await executor.dispose(); });
       await executor.open();
@@ -6214,11 +6219,13 @@ describe("Collection automations that a Group message starts", () => {
       const inspected = executor.inspectRelayed("inspection");
       await reached.promise;
       await w.renameCollection("Tasks", "Shared/Tasks", false);
+      storeFailed = reading === "failed store";
       executor.handleWatcherEvents(["collection.yaml", "automations.yaml"].flatMap(name => [
         { operation: "delete" as const, path: `Tasks/${name}` },
         { operation: "update" as const, path: `Shared/Tasks/${name}` },
       ]));
       await expect.poll(() => executor.locate("collection:Tasks#paid")?.collectionPath).toBe("Shared/Tasks");
+      if (storeFailed) expect((executor as unknown as { datasetStoreFailed: boolean }).datasetStoreFailed).toBe(true);
       resume.resolve();
       await expect(inspected).resolves.toEqual({ kind: "denied", reason: "This Collection moved. Its files will update here soon." });
       expect(w.journaled).toEqual([]);
@@ -6287,9 +6294,11 @@ describe("Collection automations that a Group message starts", () => {
     });
 
 
-    it("releases a relayed press while a move temporarily removes its index entry", async () => {
-      const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: yes}}]\n" } });
+    it.each(["release wake", "second press", "delete"] as const)("releases a relayed press during a transient index gap with %s", async wakeBy => {
+      let wakeRelease = () => {};
+      const w = await world({ collections: ["Tasks", "Other"], onClaimReleased: () => wakeRelease(), automations: { Other: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: yes}}]\n", Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: yes}}]\n" } });
       const invoice = w.addRecord("Tasks", "invoice", {});
+      const other = w.addRecord("Other", "other", {});
       const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
       const indexReached = Promise.withResolvers<void>(), indexResume = Promise.withResolvers<void>();
       let paused = false, indexing = false;
@@ -6313,21 +6322,33 @@ describe("Collection automations that a Group message starts", () => {
       if (receipt.pressed.busy) throw new Error("Expected a claim");
       const claim = w.claims.get(receipt.pressed.claimId)!;
       await reached.promise;
-      await w.renameCollection("Tasks", "Shared/Tasks", false);
+      if (wakeBy === "delete") await w.removeCollection("Tasks");
+      else await w.renameCollection("Tasks", "Shared/Tasks", false);
       indexing = true;
       executor.handleWatcherEvents(["collection.yaml", "automations.yaml"].flatMap(name => [
-        { operation: "delete" as const, path: `Tasks/${name}` }, { operation: "update" as const, path: `Shared/Tasks/${name}` },
+        { operation: "delete" as const, path: `Tasks/${name}` },
+        ...(wakeBy === "delete" ? [] : [{ operation: "update" as const, path: `Shared/Tasks/${name}` }]),
       ]));
       await indexReached.promise;
       expect(executor.locate(claim.automationId)).toBeNull();
+      if (wakeBy === "release wake") wakeRelease = () => { wakeRelease = () => {}; executor.notifyClaimed(); };
       resume.resolve();
       await expect.poll(() => w.events.includes(`released ${claim.claimId}`) || claim.state === "done").toBe(true);
       expect(claim.state).toBe("pending");
       expect(w.events).toContain(`released ${claim.claimId}`);
+      if (wakeBy !== "release wake") {
+        const pressed = await executor.press({ collectionPath: "Other", field: "Mark paid", recordId: other.id, pressId: "mid-reread",
+          pressedBy: "user-ice", confirmed: [], by: { kind: "human" } }, () => undefined);
+        if (pressed.busy) throw new Error("Expected a second claim");
+        await w.settledClaim(w.claims.get(pressed.claimId)!);
+      }
+      await expect.poll(() => w.events.filter(event => event === `released ${claim.claimId}`).length >= 2 || claim.state === "done").toBe(true);
+      expect(claim.state).toBe("pending");
       indexResume.resolve();
       await w.settledClaim(claim);
-      expect(claim).toMatchObject({ state: "failed", error: "This Collection moved after the button was pressed. Press it again." });
-      expect(w.journaled).toEqual([]);
+      if (wakeBy === "delete") expect(claim).toMatchObject({ state: "done" });
+      else expect(claim).toMatchObject({ state: "failed", error: "This Collection moved after the button was pressed. Press it again." });
+      expect(w.fieldsOf(invoice)).toEqual({});
     });
 
     it.each(["move", "delete"] as const)("classifies a skipped trigger read after a Collection %s", async change => {

@@ -405,7 +405,7 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
       }
       checkLocations();
       return currentRoster;
-    } catch (error) { checkSourceMoved(); throw error; }
+    } catch (error) { checkLocations(); throw error; }
   };
   const verifyTarget = async (path: string) => {
     const before = inventory.targets.get(path);
