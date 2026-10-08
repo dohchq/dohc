@@ -524,15 +524,42 @@ it.skipIf(engine.missing).each([
     await capture.flush();
     expect((await adapter.listPendingCollectionAdoptions()).adoptions).toEqual([]);
     const ownerSettlement = (await capture.listMoments({limit: 100})).moments.find(moment => moment.path === path);
-    expect(ownerSettlement?.authors).toEqual([{kind: "unattributed"}]);
+    expect(ownerSettlement).toBeDefined();
+    expect(ownerSettlement!.authors).toBeUndefined();
+    const publicationDb = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH), {readOnly: true});
+    try {
+      expect(publicationDb.prepare("SELECT admission_json,authors_json FROM live_settlement_publication_admissions WHERE workspace_id=? AND moment_id=?")
+        .get(workspaceId, ownerSettlement!.id)).toMatchObject({
+          admission_json: expect.stringContaining('"status":"accepted"'), authors_json: "[]",
+        });
+    } finally {publicationDb.close();}
     // Publish owner operations before the peer imports settlement coverage.
     await pushUntilDrained(relay);
+    const refusedDb = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH), {readOnly: true});
+    const seedRefusals: Array<{originId: string; originSeq: number}> = [];
+    try {
+      const refused = refusedDb.prepare("SELECT p.origin_id,p.origin_seq,p.authors_json,r.payload_json FROM live_settlement_publication_admissions p JOIN replication_log r USING(workspace_id,origin_id,origin_seq) WHERE p.workspace_id=? AND json_extract(p.admission_json,'$.status')='refused'").all(workspaceId);
+      expect(refused).toHaveLength(hasId ? 0 : 1);
+      for (const row of refused) {
+        const payload = JSON.parse(String(row.payload_json));
+        // The unchanged seed has no journal interval. The later adoption does.
+        expect(payload.settlementReference.record).toMatchObject({previousCursor: 0, terminalCursor: 0, applicationCount: 0});
+        expect(payload.payloadBeforeBlobSha256).toBe(payload.payloadAfterBlobSha256);
+        expect(payload.authors).toBeUndefined();
+        expect(row.authors_json).toBeNull();
+        seedRefusals.push({originId: String(row.origin_id), originSeq: Number(row.origin_seq)});
+      }
+    } finally {refusedDb.close();}
     expect(await source.sessions.run(source.workspace, async ({client, workspace}) =>
-      new WorkspaceDaemonRequester(client).request("sync.refusalNotices", {workspaceId}, {workspace}))).toEqual({notices: []});
+      new WorkspaceDaemonRequester(client).request("sync.refusalNotices", {workspaceId}, {workspace}))).toEqual({
+        notices: seedRefusals.map(coordinate => expect.objectContaining({...coordinate,
+          document: expect.objectContaining({path}), refusalCoordinates: [coordinate]})),
+      });
     peer = await openJoinedDaemonCapture({workspaceId, rootPath: rootB, relay: relayConnection});
     await pullAndExpect(peer, rootB, path, markdown);
     const imported = (await peer.capture.listMoments({limit: 100})).moments.find(moment => moment.id === ownerSettlement?.id);
-    expect(imported?.authors).toEqual([{kind: "unattributed"}]);
+    expect(imported).toBeDefined();
+    expect(imported!.authors).toBeUndefined();
     if (hasId) {
       await delivery.stop();
       delivery = undefined;

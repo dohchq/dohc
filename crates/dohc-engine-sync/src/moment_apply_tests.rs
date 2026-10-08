@@ -63,7 +63,19 @@ fn imported_live_moment_preserves_public_author_snapshots() {
             absent_text_payload("live-settlement", "record", "record.md", "record fields"),
             author.clone(),
         );
-        let op = envelope("native-service", 0, "ws", payload);
+        let mut op = envelope("native-service", 0, "ws", payload);
+        if author["kind"] != "unattributed" {
+            op.payload.as_object_mut().unwrap().remove("authors");
+            op.payload["settlementReference"] = json!({"record": {
+                "settlementId": "settlement", "momentId": "live-settlement",
+                "binding": {"workspaceId": "ws"}
+            }});
+            op.relay_seq = Some(1);
+            op.settlement_admission = Some(crate::SettlementAdmission::Accepted {
+                settlement_id: "settlement".into(),
+            });
+            op.admitted_author_snapshot = Some(json!([author]));
+        }
         assert!(matches!(
             apply_moment_envelope(&mut store, &op, &NoFaults)
                 .unwrap()

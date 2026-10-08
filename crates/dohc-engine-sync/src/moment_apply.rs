@@ -362,6 +362,21 @@ pub fn apply_moment_envelope_detailed(
         }
         validate_payload_bounds(&payload)?;
         validate_payload(&payload)?;
+        if payload.authors.iter().flatten().any(|author| {
+            matches!(
+                author,
+                MomentAuthor::Human {
+                    human_name: Some(_),
+                    ..
+                } | MomentAuthor::Link {
+                    identity: LinkMomentAuthor::Live { .. }
+                }
+            )
+        }) {
+            return Err(SyncError::InvalidInput {
+                reason: "hosted moment authors require relay settlement admission",
+            });
+        }
         if payload
             .authors
             .iter()

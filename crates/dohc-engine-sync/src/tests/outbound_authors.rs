@@ -114,6 +114,7 @@ fn queued_human_authors_are_durably_repaired_before_push_and_echo() {
     for authors in [
         json!([{"kind":"human","humanId":"person"}]),
         json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"}]),
+        json!([{"kind":"link","publicPrincipalId":"recipient","label":"Edit link"}]),
         json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"},{"kind":"unattributed"}]),
         json!([{"kind":"link","linkId":"link"},{"kind":"named","userId":"recipient"}]),
         json!([{"kind":"human","humanId":"person"},{"kind":"agent","agentId":"agent","onBehalfOf":"owner"}]),
@@ -142,11 +143,19 @@ fn queued_human_authors_are_durably_repaired_before_push_and_echo() {
             .get_moment("ws", "record-moment")
             .unwrap()
             .unwrap();
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(history.author_json.as_deref().unwrap())
-                .unwrap(),
-            original_authors
-        );
+        if expected.get("attributionUnavailable").is_some() {
+            assert_eq!(history.author_json, None);
+            assert_eq!(
+                history.metadata_summary.as_deref(),
+                Some("Attribution unavailable")
+            );
+        } else {
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(history.author_json.as_deref().unwrap())
+                    .unwrap(),
+                original_authors
+            );
+        }
         client
             .push_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 2003, 0)
             .unwrap();
@@ -305,7 +314,7 @@ fn service_host_author_repair_refuses_unproved_relay_identities() {
 }
 
 #[test]
-fn nameless_account_owner_is_omitted_on_both_lanes_without_changing_history() {
+fn both_lanes_keep_nameless_local_history_and_remove_unproved_hosted_history() {
     let owner = json!({"kind":"human","humanId":"8b183289-9c6e-46e9-bc2d-2e08dc144ea2"});
     let recipient = json!({"kind":"human","humanId":"recipient","humanName":"Recipient"});
     for native_settlements in [false, true] {
@@ -343,11 +352,21 @@ fn nameless_account_owner_is_omitted_on_both_lanes_without_changing_history() {
                 .get_moment("ws", "record-moment")
                 .unwrap()
                 .unwrap();
-            assert_eq!(
-                serde_json::from_str::<serde_json::Value>(moment.author_json.as_deref().unwrap())
+            if authors.as_array().unwrap().len() > 1 {
+                assert_eq!(moment.author_json, None);
+                assert_eq!(
+                    moment.metadata_summary.as_deref(),
+                    Some("Attribution unavailable")
+                );
+            } else {
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(
+                        moment.author_json.as_deref().unwrap()
+                    )
                     .unwrap(),
-                authors
-            );
+                    authors
+                );
+            }
         }
     }
 }

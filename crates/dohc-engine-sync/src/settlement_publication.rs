@@ -443,6 +443,8 @@ mod tests {
         assert_eq!(serde_json::from_str::<Value>(&retained).unwrap(), snapshot);
         for claimed in [
             snapshot,
+            json!([{"kind":"human","humanId":"reader","humanName":"Reader"}]),
+            json!([{"kind":"link","publicPrincipalId":"edit-link","label":"Edit link"}]),
             json!([{"kind":"link","grantId":"forged","grantGeneration":1,"principalId":"forged"}]),
         ] {
             let (_ordinary, _path, mut ordinary) = open_store();
