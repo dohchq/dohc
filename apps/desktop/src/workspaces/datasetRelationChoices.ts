@@ -22,7 +22,7 @@ export function generateDatasetRelationChoices(input: { revision: DatasetRevisio
   const parsed = parseDatasetDefinition(definition);
   const quote = (value: string) => `"${value}"`;
   const operationSource = input.operationSource + `\n;(() => {\nconst settings = ${JSON.stringify({ name, table: quote(target.sqlName), key: quote(key.sqlColumn), label: quote(label.sqlColumn), keyFieldId: key.fieldId, labelFieldId: label.fieldId, numeric: key.type === "number" })};\n${READ_SOURCE}\n})();\n`;
-  const descriptorPath = posix.join(directory, "dataset.json"), migrationPath = posix.join(directory, "migration.sql"), migrationSql = "SELECT 1;";
+  const descriptorPath = posix.join(directory, "revision.json"), migrationPath = posix.join(directory, "migration.sql"), migrationSql = "SELECT 1;";
   return { definition: parsed, schemaSql: input.schemaSql, operationSource, descriptorPath, migrationPath, migrationSql,
     summary: `Allow apps to request ${key.name} and ${label.name} from ${target.name}`,
     files: { [descriptorPath]: JSON.stringify(parsed, null, 2) + "\n", [parsed.schemaPath]: input.schemaSql, [parsed.operationsPath]: operationSource, [migrationPath]: migrationSql } };

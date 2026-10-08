@@ -6371,7 +6371,11 @@ export type EngineYDocLineageReplacementEvent = z.infer<
 // STARTED. The renderer clears to "saved" only once this covers its latest
 // local edit — otherwise an in-flight settle's success would claim edits it
 // never carried.
+export const ReadOnlyTransitionCause = z.enum(["access-ended", "reconnecting", "lineage-failure"]);
+export type ReadOnlyTransitionCause = z.infer<typeof ReadOnlyTransitionCause>;
+
 export const EngineYDocSaveStateEvent = z.object({
+  readOnlyCause: ReadOnlyTransitionCause.optional(),
   authorCapacity: z.boolean().optional(),
   editRefusal: z.object({
     workspaceId: WORKSPACE_ID,
