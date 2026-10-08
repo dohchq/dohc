@@ -198,7 +198,7 @@ describe("a History diff the rules hide", () => {
     fireEvent.click(screen.getByTestId("engine-diff-restore-file"));
     await act(async () => { fireEvent.click(screen.getByTestId("engine-diff-confirm-restore")); });
     expect(page.onError).toHaveBeenCalledWith(
-      "dohc could not restore notes/plan.md.", refused, expect.any(Function), "history-restore:notes/plan.md",
+      "dohc could not restore notes/plan.md.", refused, expect.any(Function), "history-restore:notes/plan.md", "notes/plan.md",
     );
     expect(screen.queryByTestId("engine-diff-restore-status")).toBeNull();
     expect(screen.getByTestId("engine-moment-diff-page").textContent).not.toContain("TOML parse error");
@@ -354,7 +354,7 @@ describe("a History diff the rules hide", () => {
     await act(async () => { fireEvent.click(screen.getByTestId("engine-diff-confirm-restore")); });
     await act(async () => { fireEvent.click(screen.getByTestId("engine-diff-undo-restore")); });
     expect(page.onError).toHaveBeenCalledWith(
-      "dohc could not undo the restore of notes/plan.md.", expect.any(Error), expect.any(Function), "history-restore:notes/plan.md",
+      "dohc could not undo the restore of notes/plan.md.", expect.any(Error), expect.any(Function), "history-restore:notes/plan.md", "notes/plan.md",
     );
     await act(async () => { (page.onError.mock.calls[0]![2] as () => void)(); });
     expect(restore).toHaveBeenCalledTimes(3);

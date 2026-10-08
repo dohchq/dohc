@@ -275,6 +275,11 @@ export function isWorkspaceUpdatingError(error: unknown): boolean {
     ERROR_WORDS.DaemonRefusalError?.[message] === UPDATING;
 }
 
+/** The engine refuses to move, delete or restore a shared live file this way. */
+export function isSharedLiveFileRefusal(error: unknown): boolean {
+  return parse(error).name === "LiveDocumentMutationError";
+}
+
 /** Access and connection failures can hide a changed grant behind an IPC error. */
 export function shouldRecheckShareAccess(error: unknown): boolean {
   const { name, code, message } = parse(error);

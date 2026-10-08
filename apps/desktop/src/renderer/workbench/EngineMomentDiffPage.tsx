@@ -76,13 +76,15 @@ export function EngineMomentDiffPage({
   // hide the change.
   onPathResolved: (momentId: string, path: string | null) => void;
   registerActiveUndo: (handler: ActiveUndoHandler | null) => void;
-  onRestored: () => void;
+  // A restore of the change's file finished, from History or through
+  // Restore shared file.
+  onRestored: (restored: { path: string; shared: boolean }) => void;
   // Opens the shell's Stop and restore for a person the owner shared with,
   // or for the Edit share link that wrote this change.
   onStopAndRestore: (target: StopTarget) => void;
   // A failed restore or undo goes to the shell's toast and Notices row. A
   // later success clears that row.
-  onError: (fallback: string, error: unknown, retry: () => void, identity: string) => void;
+  onError: (fallback: string, error: unknown, retry: () => void, identity: string, path: string) => void;
   onSettled: (identity: string) => void;
   // The shell's latest History answer. Each new one reads this change again,
   // because the rules that decide whether History shows it may have changed.
@@ -226,7 +228,7 @@ export function EngineMomentDiffPage({
     try {
       releaseOperation = await onBeforeRestore();
       const result = await bridge().restoreEngineMomentFile({ workspaceId, momentId: target });
-      onRestored();
+      onRestored({ path, shared: false });
       onSettled(identity);
       if (!live()) return;
       setRestoreState({
@@ -250,6 +252,7 @@ export function EngineMomentDiffPage({
         // before the restore, so it runs again as it is.
         kind === "undo" ? () => void runRestore(kind, target, path, token) : () => onReopenRestore(target, path),
         identity,
+        path,
       );
       if (live()) setRestoreState({ status: "idle" });
     } finally {
@@ -402,6 +405,7 @@ export function EngineMomentDiffPage({
     <section
       ref={pageRef}
       data-testid="engine-moment-diff-page"
+      data-moment-id={moment.id}
       className="flex min-h-0 flex-1 flex-col overflow-hidden bg-bg"
     >
       <header className="flex shrink-0 items-start gap-3 border-b border-line bg-panel px-4 py-3">
@@ -568,7 +572,8 @@ export function EngineMomentDiffPage({
         </section>
       </div>
       {sharedRestoreOpen && <OwnerRestoreDialog key={`${workspaceId}:${moment.path}`} workspaceId={workspaceId} path={moment.path}
-        onClose={() => setSharedRestoreOpen(false)} onBeforeRestore={onBeforeRestore} onRestored={onRestored} />}
+        onClose={() => setSharedRestoreOpen(false)} onBeforeRestore={onBeforeRestore}
+        onRestored={() => onRestored({ path: moment.path, shared: true })} />}
       {confirmRestoreOpen ? (
         <ConfirmDialog
           title="Restore this file?"

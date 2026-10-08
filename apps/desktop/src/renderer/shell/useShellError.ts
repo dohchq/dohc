@@ -17,8 +17,21 @@ export interface KeptCopyNotice {
   save: () => void;
 }
 
+// Typing capture kept in History when its file changed outside dohc, as its
+// Notices row reads. A new `key` raises the row's toast again.
+export interface CaptureRecoveryNotice {
+  momentId: string;
+  path: string;
+  title: string;
+  message: string;
+  key: string;
+  open: () => void;
+  dismiss: () => void;
+}
+
 export type SettingsFileKind = "user-settings-file" | "workspace-settings-file";
 export type ShellErrorKind =
+  | "capture-recovery"
   | "live-edit-refused"
   | "chat-no-runner"
   | "chat-budget-paused"
@@ -101,6 +114,8 @@ export function useShellError(workspaceId: string) {
   // stays dismissed until the workspace opens again.
   const shownKeptCopies = useRef(new Set<number>());
   const shownKeptCopiesMore = useRef(false);
+  // The key each listed kept typing was last shown with.
+  const shownCaptureRecoveries = useRef(new Map<string, string>());
 
   // A new error replaces an older one that says the same thing, or one of
   // the same kind, so a read that keeps failing is one row, not a pile.
@@ -215,6 +230,7 @@ export function useShellError(workspaceId: string) {
     setShellErrors([]);
     shownKeptCopies.current = new Set();
     shownKeptCopiesMore.current = false;
+    shownCaptureRecoveries.current = new Map();
     filedShareCapture.current = null;
   }, [workspaceId]);
 
@@ -509,6 +525,41 @@ export function useShellError(workspaceId: string) {
         : [...stays, ...added];
     });
   }, []);
+  // One row per kept typing the engine lists. One listed for the first time,
+  // or with a new key, arrives as a toast. Otherwise its row stays as it is,
+  // or stays dismissed, and one no longer listed goes.
+  const showCaptureRecoveries = useCallback((recoveries: readonly CaptureRecoveryNotice[]) => {
+    const identityOf = (momentId: string) => `capture-recovery:${momentId}`;
+    const listed = new Set(recoveries.map((recovery) => identityOf(recovery.momentId)));
+    for (const momentId of shownCaptureRecoveries.current.keys()) {
+      if (!listed.has(identityOf(momentId))) shownCaptureRecoveries.current.delete(momentId);
+    }
+    const atMs = Date.now();
+    const fresh = recoveries.flatMap((recovery): ShellError[] => {
+      if (shownCaptureRecoveries.current.get(recovery.momentId) === recovery.key) return [];
+      shownCaptureRecoveries.current.set(recovery.momentId, recovery.key);
+      nextId.current += 1;
+      return [{
+        id: `shell-error-${nextId.current}`,
+        identity: identityOf(recovery.momentId),
+        kind: "capture-recovery",
+        title: recovery.title,
+        message: recovery.message,
+        details: [["File", recovery.path, recovery.path.length], ["Change id", recovery.momentId]],
+        retry: null,
+        action: { label: "Open History", run: recovery.open },
+        onDismiss: recovery.dismiss,
+        atMs,
+        seen: false,
+      }];
+    });
+    const replaced = new Set(fresh.map((error) => error.identity));
+    setShellErrors((current) => {
+      const stays = current.filter((error) => error.kind !== "capture-recovery" ||
+        (listed.has(error.identity ?? "") && !replaced.has(error.identity)));
+      return fresh.length === 0 && stays.length === current.length ? current : [...stays, ...fresh];
+    });
+  }, []);
   // What a Save copy did: a saved copy's row opens the copy, and a copy
   // that was already gone says so.
   const showKeptCopySaved = useCallback(
@@ -569,6 +620,7 @@ export function useShellError(workspaceId: string) {
     showReportsNotice,
     showKeptCopies,
     showKeptCopySaved,
+    showCaptureRecoveries,
     hideShellError,
     dismissShellError,
     retryShellError,
