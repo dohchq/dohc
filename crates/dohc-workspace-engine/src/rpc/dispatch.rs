@@ -1077,22 +1077,26 @@ mod tests {
             std::mem::size_of::<F>()
         }
         let service = EngineService::new();
-        let bytes = future_size(|| {
-            service.dispatch(
-                RequestContext::unbounded(),
-                Request {
-                    id: 1,
-                    method: "engine.ping".into(),
-                    workspace: None,
-                    deadline_ms: None,
-                    idempotency_key: None,
-                    progress: false,
-                    params: json!({}),
-                },
-            )
-        });
-        // Transport and caller futures also carry this state on the default thread stack.
+        let request = || Request {
+            id: 1,
+            method: "engine.ping".into(),
+            workspace: None,
+            deadline_ms: None,
+            idempotency_key: None,
+            progress: false,
+            params: json!({}),
+        };
+        let bytes = future_size(|| service.dispatch(RequestContext::unbounded(), request()));
+        let input_bytes =
+            future_size(|| service.call_with_input(RequestContext::unbounded(), request(), None));
+        // InProcessTransport test callers carry dispatch state on the default thread stack.
+        // The supervisor spawns request futures on the heap; growth still costs memory per request.
+        println!("dispatch: {bytes} bytes; call_with_input: {input_bytes} bytes");
         assert!(bytes <= 5 * 1024, "dispatch future uses {bytes} bytes");
+        assert!(
+            input_bytes <= 6 * 1024,
+            "call_with_input future uses {input_bytes} bytes"
+        );
     }
 
     #[tokio::test]
