@@ -656,7 +656,7 @@ export function DesktopWorkspaceShell(props: {
   // `openWorkspace` installs main's exact renderer session before it waits
   // for watcher readiness. Its response is the renderer's existing proof that
   // both happened; there is no separate admission IPC. Exact-session bootstrap
-  // reads that lose the admission race retry after that proof. The local
+  // reads wait for that proof before they reach main. The local
   // generation also keeps an A -> B -> A prop sequence from reusing A's earlier
   // proof (DesktopRoot normally gives each workspace a fresh keyed shell).
   const workspaceSelection = useRef({ workspaceId, generation: 0 });
@@ -1175,13 +1175,11 @@ export function DesktopWorkspaceShell(props: {
 
   useAsyncResponseEffect(
     async () => {
-      try {
-        return await bridge().getWorkspaceUiState({ workspaceId });
-      } catch (error) {
-        await workspaceAdmission.promise;
-        if (workspaceAdmission.superseded) throw error;
-        return bridge().getWorkspaceUiState({ workspaceId });
+      await workspaceAdmission.promise;
+      if (workspaceAdmission.superseded) {
+        throw new DOMException("The workspace selection changed.", "AbortError");
       }
+      return bridge().getWorkspaceUiState({ workspaceId });
     },
     {
       onSuccess: (stored) => {

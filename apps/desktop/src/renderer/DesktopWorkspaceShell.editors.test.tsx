@@ -1330,17 +1330,22 @@ describe("ui-state merge-on-load", () => {
     bridge.getWorkspaceUiState
       .mockImplementationOnce(() => first.promise)
       .mockResolvedValueOnce(storedStateWithTabs(["b.md"], "b.md"));
-    const workspaces = [WORKSPACE, OTHER_WORKSPACE];
-    const view = renderShell(bridge, WORKSPACE, workspaces);
-
-    view.rerender(
+    // One mounted shell changes workspace, so A's answer can only be dropped
+    // by the response guard, not by an unmount.
+    const shell = (workspace: Workspace) => (
       <DesktopWorkspaceShell
-        workspace={OTHER_WORKSPACE}
-        workspaces={workspaces}
+        workspace={workspace}
+        workspaces={[WORKSPACE, OTHER_WORKSPACE]}
         {...shellBootstrapProps(bridge)}
         onSwitchWorkspace={() => {}}
-      />,
+      />
     );
+    vi.stubGlobal("dohcDesktop", bridge);
+    const view = render(shell(WORKSPACE));
+    // A's read must be in flight, or the switch only cancels it before it starts.
+    await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledExactlyOnceWith({ workspaceId: WORKSPACE.workspaceId }));
+
+    view.rerender(shell(OTHER_WORKSPACE));
     expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
 
     await act(async () => {
@@ -1356,6 +1361,7 @@ describe("ui-state merge-on-load", () => {
     const stored = deferred<WorkspaceUiState | null>();
     const bridge = makeBridge(stored.promise);
     renderShell(bridge);
+    await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledOnce());
 
     fireEvent.pointerDown(
       await screen.findByRole("region", { name: "Editor group 1" }),
@@ -1373,6 +1379,7 @@ describe("ui-state merge-on-load", () => {
     const bridge = makeBridge(stored.promise);
     renderShell(bridge);
     const row = await screen.findByText("a.md");
+    await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledOnce());
 
     await act(async () => {
       // Resolve the load first (queues its.then as a microtask), then click

@@ -1409,27 +1409,6 @@ describe("shared view chats surface", () => {
       }),
     );
   });
-
-  // The ordering interaction #626 found, on this surface. A shared view's
-  // status also says no recorder, so once one lands the status clause alone
-  // would produce the same result and the share clause would survive
-  // deletion. Holding the status pending is what isolates it: `isShareView`
-  // is a synchronous registry fact, and it is the only thing that can answer
-  // in this window.
-  it("states the shared-view fact for a persisted Chats tab before any status arrives", async () => {
-    const status = deferred<typeof SHARE_STATUS>();
-    const bridge = makeShareBridge(
-      Promise.resolve(storedStateWithTabs([CHATS_TAB_PATH], CHATS_TAB_PATH)),
-    );
-    bridge.openWorkspace = vi.fn(() => status.promise);
-    bridge.getSyncStatus = vi.fn(() => status.promise);
-    renderShell(bridge, SHARE_VIEW);
-
-    const placeholder = await screen.findByTestId("chats-page-share-view");
-    expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
-    expect(placeholder.textContent).toContain("A shared view lists no chats.");
-    expect(bridge.listChatChannels).not.toHaveBeenCalled();
-  });
 });
 
 // The same class as #620, one surface over. On a workspace that is not
@@ -1545,12 +1524,13 @@ describe("chats surface after a failed capture build", () => {
     bridge.getSyncStatus = vi.fn(async () => (decided ? FAILED_STATUS : SYNC_STATUS));
     renderShell(bridge);
 
-    await screen.findByTestId("titlebar-chats-sidebar");
+    // Saved state waits for the decision, so the person opens the sidebar.
+    fireEvent.click(await screen.findByTestId("titlebar-chats-sidebar"));
     expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
     expect(bridge.listChatChannels).not.toHaveBeenCalled();
     // The panel is mounted and states nothing: neither read the shell has
     // done proves anything about what main decided.
-    expect(screen.getByTestId("chats-panel")).toBeTruthy();
+    expect(await screen.findByTestId("chats-panel")).toBeTruthy();
     expect(screen.queryByTestId("chats-panel-off")).toBeNull();
 
     await act(async () => {
