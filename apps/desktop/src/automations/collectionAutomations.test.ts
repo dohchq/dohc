@@ -6131,7 +6131,7 @@ describe("Collection automations that a Group message starts", () => {
       expect(gone.w.authored).toEqual([]);
     });
 
-    it.each(["saved plans", "roster", "host"] as const)("reports a moved relayed press while reading %s", async (reading) => {
+    it.each(["saved plans", "roster", "host", "verdicts"] as const)("reports a moved relayed press while reading %s", async (reading) => {
       const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid by: '=person.id'}}]\n" } });
       const invoice = w.addRecord("Tasks", "invoice", {});
       const reached = Promise.withResolvers<void>();
@@ -6151,7 +6151,8 @@ describe("Collection automations that a Group message starts", () => {
           return w.baseStore.runsOf(...args);
         } },
         roster: async () => { await pause("roster"); return OWNER; },
-        groupHost: async () => { await pause("host"); return 0; },
+        groupHost: async () => { await pause("host"); return heldRead && reading === "verdicts" ? 1 : 0; },
+        reachRelayRecord: async generation => { await pause("verdicts"); return { generation: generation!, reach: null, everShared: false }; },
       });
       onTestFinished(async () => { resume.resolve(); await executor.dispose(); });
       await executor.open();
@@ -6174,7 +6175,7 @@ describe("Collection automations that a Group message starts", () => {
       expect(w.journaled).toEqual([]);
     });
 
-    it.each(["schema", "roster"] as const)("reports a moved shared Button while inspecting its %s", async (reading) => {
+    it.each(["schema", "roster", "verdicts"] as const)("reports a moved shared Button while inspecting its %s", async (reading) => {
       const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid by: '=person.id'}}]\n" } });
       const reached = Promise.withResolvers<void>();
       const resume = Promise.withResolvers<void>();
@@ -6200,6 +6201,15 @@ describe("Collection automations that a Group message starts", () => {
       onTestFinished(async () => { resume.resolve(); await executor.dispose(); });
       await executor.open();
       hash = await hashOf(executor, "Tasks", "paid");
+      if (reading === "verdicts") {
+        const runnable = executor as unknown as { runnableButtonState: (...args: unknown[]) => Promise<unknown> };
+        const run = runnable.runnableButtonState.bind(executor);
+        vi.spyOn(runnable, "runnableButtonState").mockImplementation(async (...args) => {
+          const state = await run(...args);
+          await pause("verdicts");
+          return state;
+        });
+      }
       armed = true;
       const inspected = executor.inspectRelayed("inspection");
       await reached.promise;
@@ -6208,11 +6218,124 @@ describe("Collection automations that a Group message starts", () => {
         { operation: "delete" as const, path: `Tasks/${name}` },
         { operation: "update" as const, path: `Shared/Tasks/${name}` },
       ]));
-      await executor.automationsIn("Shared/Tasks");
-      expect(await executor.whereIs("collection:Tasks#paid")).toBe("Shared/Tasks");
+      await expect.poll(() => executor.locate("collection:Tasks#paid")?.collectionPath).toBe("Shared/Tasks");
       resume.resolve();
       await expect(inspected).resolves.toEqual({ kind: "denied", reason: "This Collection moved. Its files will update here soon." });
       expect(w.journaled).toEqual([]);
+    });
+
+
+    it.each(["presser", "presser delete", "write", "new press", "inspection", "admission"] as const)("reports a moved Collection at the %s boundary", async boundary => {
+      const reached = Promise.withResolvers<void>();
+      const resume = Promise.withResolvers<void>();
+      let armed = false, paused = false;
+      const pause = async () => {
+        if (!armed || paused) return;
+        paused = true; reached.resolve(); await resume.promise;
+      };
+      const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid by: '=person.id'}}]\n" },
+        withRecordWrites: boundary === "write" ? pause : undefined });
+      const invoice = w.addRecord("Tasks", "invoice", {});
+      let hash = "";
+      const authority = () => ({ workspaceId: "workspace", userId: "user-ana", grantId: "g-ana", grantGeneration: 1, hostGeneration: 1,
+        principals: [], confirmed: [], automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: hash, recordId: invoice.id });
+      let relayReads = 0;
+      const executor = w.makeExecutor({
+        resolveRelayedPress: async () => {
+          relayReads++;
+          if (boundary === "new press" && relayReads === 2 || boundary.startsWith("presser") && [...w.claims.values()].some(c => c.state === "running")) await pause();
+          return authority();
+        },
+        roster: async () => { if (boundary === "inspection") await pause(); return OWNER; },
+        groupHost: async () => { if (boundary === "admission") await pause(); return 0; },
+      });
+      onTestFinished(async () => { resume.resolve(); await executor.dispose(); });
+      await executor.open();
+      hash = await hashOf(executor, "Tasks", "paid");
+      armed = true;
+      const pressing = executor.pressRelayed({ automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: hash,
+        recordId: invoice.id, pressId: "boundary", pressedBy: "user-ana", confirmed: [] }, () => undefined);
+      // Admission failures are observed immediately, including before the barrier resumes.
+      const answered = pressing.then(value => ({ value }), error => ({ error }));
+      await reached.promise;
+      const deleted = boundary === "presser delete";
+      if (deleted) await w.removeCollection("Tasks");
+      else await w.renameCollection("Tasks", "Shared/Tasks", false);
+      executor.handleWatcherEvents(["collection.yaml", "automations.yaml"].flatMap(name => [
+        { operation: "delete" as const, path: `Tasks/${name}` },
+        ...(deleted ? [] : [{ operation: "update" as const, path: `Shared/Tasks/${name}` }]),
+      ]));
+      await executor.automationsIn(deleted ? "Tasks" : "Shared/Tasks");
+      resume.resolve();
+      const answer = await answered;
+      const moved = "This Collection moved after the button was pressed. Press it again.";
+      if ("error" in answer) expect(answer.error).toEqual(new Error(moved));
+      else {
+        if (answer.value.pressed.busy) throw new Error("Expected a claim");
+        const claim = await w.settledClaim(w.claims.get(answer.value.pressed.claimId)!);
+        if (deleted) expect(claim.state).toBe("done");
+        else expect(claim).toMatchObject({ state: "failed", error: moved });
+      }
+      expect(w.fieldsOf(invoice)).toEqual({});
+      expect(w.journaled).toEqual([]);
+    });
+
+    it("refuses undo when its source Collection moves during the saved-run read", async () => {
+      const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: yes}}]\n" } });
+      const invoice = w.addRecord("Tasks", "invoice", {});
+      const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+      let armed = false, paused = false;
+      const executor = w.makeExecutor({ store: { ...w.baseStore, runsOf: async (...args) => {
+        if (armed && !paused) { paused = true; reached.resolve(); await resume.promise; }
+        return w.baseStore.runsOf(...args);
+      } } });
+      onTestFinished(async () => { resume.resolve(); await executor.dispose(); });
+      await executor.open();
+      const pressed = await executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "undo-move",
+        pressedBy: "user-ana", by: { kind: "human" }, confirmed: [] }, () => undefined);
+      if (pressed.busy) throw new Error("Expected a claim");
+      await w.settledClaim(w.claims.get(pressed.claimId)!);
+      armed = true;
+      const undoing = executor.undo({ automationId: "collection:Tasks#paid", claimId: pressed.claimId, deletes: null }, async () => undefined);
+      await reached.promise;
+      await w.renameCollection("Tasks", "Shared/Tasks", false);
+      executor.handleWatcherEvents(["collection.yaml", "automations.yaml"].flatMap(name => [
+        { operation: "delete" as const, path: `Tasks/${name}` }, { operation: "update" as const, path: `Shared/Tasks/${name}` },
+      ]));
+      await executor.automationsIn("Shared/Tasks");
+      const writes = w.journaled.length;
+      resume.resolve();
+      await expect(undoing).resolves.toEqual({ status: "refused", reason: "The automation's Collection moved." });
+      expect(w.journaled).toHaveLength(writes);
+      expect(w.fieldsOf(invoice)).toEqual({ Paid: "yes" });
+    });
+
+
+    it.each(["move", "delete"] as const)("settles a local claim correctly after a %s during admission", async change => {
+      const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: record-added\n    do: [{set: {Paid: yes}}]\n" } });
+      const invoice = w.addRecord("Tasks", "invoice", {});
+      const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+      let paused = false;
+      const executor = w.makeExecutor({ store: { ...w.baseStore, runsOf: async (...args) => {
+        if (!paused && [...w.claims.values()].some(c => c.state === "running")) { paused = true; reached.resolve(); await resume.promise; }
+        return w.baseStore.runsOf(...args);
+      } } });
+      onTestFinished(async () => { resume.resolve(); await executor.dispose(); });
+      const claim = w.claim("collection:Tasks#paid", invoice, { kind: "added", fields: [] });
+      await executor.open();
+      await reached.promise;
+      if (change === "move") await w.renameCollection("Tasks", "Shared/Tasks", false);
+      else await w.removeCollection("Tasks");
+      executor.handleWatcherEvents(["collection.yaml", "automations.yaml"].flatMap(name => [
+        { operation: "delete" as const, path: `Tasks/${name}` },
+        ...(change === "move" ? [{ operation: "update" as const, path: `Shared/Tasks/${name}` }] : []),
+      ]));
+      await executor.automationsIn(change === "move" ? "Shared/Tasks" : "Tasks");
+      resume.resolve();
+      await w.settledClaim(claim);
+      expect(claim.state).toBe("done");
+      expect(w.events.includes(`released ${claim.claimId}`)).toBe(change === "move");
+      expect(w.journaled.map(write => write.path)).toEqual(change === "move" ? ["Shared/Tasks/invoice.md"] : []);
     });
 
     it("runs a relayed press that waited only while its Collection is where the relay allowed it", async () => {

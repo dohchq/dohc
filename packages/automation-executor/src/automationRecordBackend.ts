@@ -96,6 +96,14 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
   { backend: StepBackend; ctx: RunContext; state: StoredRun; resuming: boolean }
 > {
   const { automation, collection, claim, signal, roster } = input;
+  const sourcePath = () => {
+    const id = parseCollectionAutomationId(claim.automationId)?.collectionId ?? null;
+    return id === null ? null : deps.collectionPathOf?.(id) ?? (id === source.datasetId ? collection.path : null);
+  };
+  const checkSourceMoved = () => {
+    const path = sourcePath();
+    if (path !== null && path !== collection.path) throw new AutomationRunWait("The automation's Collection moved.", "moved");
+  };
   try { await deps.checkPresser?.(); }
   catch (error) {
     if (error instanceof AutomationRunWait) throw error;
@@ -128,7 +136,7 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
   }
   let inventory: AutomationInventory;
   try { inventory = await resolveAutomationInventory(located, collection.path, deps.targets, chat); }
-  catch (error) { if (error instanceof AutomationRunWait) throw error; return { outcome: failed(error instanceof Error ? error.message : String(error)) }; }
+  catch (error) { checkSourceMoved(); if (error instanceof AutomationRunWait) throw error; return { outcome: failed(error instanceof Error ? error.message : String(error)) }; }
   const origin = inventory.targets.get(collection.path)!;
   if (origin.kind !== source.kind) return { outcome: failed(RULES_CHANGED_ERROR) };
   const sourceRules = origin.kind === "dataset" ? { datasetId: origin.approved.datasetId, revision: origin.approved.revision, revisionSha256: origin.approved.revisionSha256 } : null;
@@ -362,10 +370,9 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
   }
   if (moved) await deps.store.save(state);
   const checkLocations = () => {
-    const sourceId = parseCollectionAutomationId(claim.automationId)?.collectionId ?? null;
-    const sourcePath = sourceId === null ? null : deps.collectionPathOf?.(sourceId) ?? (sourceId === source.datasetId ? collection.path : null);
-    if (source.kind === "document" && sourcePath === null) throw new Error("This automation's Collection is gone.");
-    if (sourcePath !== collection.path) throw new AutomationRunWait("The automation's Collection moved.", "moved");
+    const path = sourcePath();
+    if (source.kind === "document" && path === null) throw new Error("This automation's Collection is gone.");
+    if (path !== collection.path) throw new AutomationRunWait("The automation's Collection moved.", "moved");
     for (const target of state.collections) if ((deps.collectionPathOf?.(target.collectionId) ?? (target.collectionId === source.datasetId ? collection.path : null)) !== target.path) throw new AutomationRunWait("A Collection moved while this run was active.", "moved");
   };
   // Refresh grants and descriptor associations before reads and effects. Metadata stays local to this attempt.
@@ -400,13 +407,18 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
   const verifyTarget = async (path: string) => {
     const before = inventory.targets.get(path);
     if (before === undefined) throw new Error(RULES_CHANGED_ERROR);
-    const fresh = await (deps.targets.validate ? deps.targets.validate(before) : deps.targets.resolve(path));
-    if (fresh.kind === "problem") {
-      if (fresh.code === "host-unavailable") throw new AutomationRunWait(fresh.problem);
-      throw new Error(fresh.problem);
+    try {
+      const fresh = await (deps.targets.validate ? deps.targets.validate(before) : deps.targets.resolve(path));
+      if (fresh.kind === "problem") {
+        if (fresh.code === "host-unavailable") throw new AutomationRunWait(fresh.problem);
+        throw new Error(fresh.problem);
+      }
+      if (fresh.kind !== before.kind || (fresh.kind === "dataset" && before.kind === "dataset" &&
+        (fresh.approved.datasetId !== before.approved.datasetId || !await resolves(before.approved)))) throw new Error(RULES_CHANGED_ERROR);
+    } catch (error) {
+      if (path === collection.path) checkSourceMoved();
+      throw error;
     }
-    if (fresh.kind !== before.kind || (fresh.kind === "dataset" && before.kind === "dataset" &&
-      (fresh.approved.datasetId !== before.approved.datasetId || !await resolves(before.approved)))) throw new Error(RULES_CHANGED_ERROR);
   };
   const backend: StepBackend = {
     async step(work) {

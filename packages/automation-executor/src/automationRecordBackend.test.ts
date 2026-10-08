@@ -1349,3 +1349,30 @@ it.each([false, true])("retains pre-upgrade verdict keys and accounted links acr
     }
   }
 });
+
+
+it("waits for a moved source when target validation finishes mid-run", async () => {
+  const f = await fixture(false, false);
+  const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+  let validations = 0;
+  f.dependencies.targets.validate = async target => {
+    if (++validations === 2) { reached.resolve(); await resume.promise; }
+    return f.targets.get(target.collection.path) ?? { kind: "problem", code: "missing", problem: "dohc cannot find the Collection Source." };
+  };
+  const running = f.run(automation('      - set: {Status: Closed}\n'));
+  try {
+    await reached.promise;
+    f.move("Source", "Shared/Source");
+    resume.resolve();
+    await expect(running).resolves.toEqual({ kind: "wait", reason: "moved" });
+    expect(f.docs.get("Source/same")!.status).toBe("Open");
+    expect((await f.runs()).flatMap(run => run.applied)).toEqual([]);
+  } finally { resume.resolve(); await running; }
+});
+
+
+it("retains the missing-Collection error when the source did not move", async () => {
+  const f = await fixture(false, false);
+  f.targets.delete("Source");
+  await expect(f.run(automation('      - set: {Status: Closed}\n'))).resolves.toMatchObject({ kind: "failed", error: "Missing" });
+});

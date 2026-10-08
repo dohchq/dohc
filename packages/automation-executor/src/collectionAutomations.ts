@@ -2755,6 +2755,11 @@ export class CollectionAutomations {
     describe?: (datasetId: string) => Promise<DatasetDescription>,
   ): Promise<CollectionAutomationPress> {
     await this.ready();
+    const collectionId = this.collectionIdOf(input.collectionPath);
+    const checkMoved = () => {
+      const current = collectionId === null ? null : this.collectionPathOf(collectionId);
+      if (current !== null && current !== input.collectionPath) throw new Error(MOVED_SINCE_PRESSED);
+    };
     const remembered = this.presses.get(input.pressId) ?? await this.pressInEngine(input);
     let automationId: string;
     if (remembered) {
@@ -2764,8 +2769,13 @@ export class CollectionAutomations {
       }
       automationId = remembered.automationId;
     } else {
-      await checkNew();
-      const state = await this.buttonState(input.collectionPath, input.field, await this.options.cachedRoster(), describe);
+      let state: AutomationButtonState;
+      try {
+        await checkNew();
+        state = await this.buttonState(input.collectionPath, input.field, await this.options.cachedRoster(), describe);
+      } catch (error) { checkMoved(); throw error; }
+      // Admission must still name this Collection before the engine receives a press.
+      checkMoved();
       if (state.kind !== "ready") throw new Error(describe ? SHARED_BUTTON_DENIED : state.reason);
       if ((state.irreversible ?? []).some((action) => !input.confirmed.includes(action.name))) throw new Error(changedSincePressed(input.field));
       automationId = state.automationId;
@@ -2781,8 +2791,9 @@ export class CollectionAutomations {
           throw error;
         }
       }
+      checkMoved();
       return engine.pressAutomation({ pressId: input.pressId, automationId, recordId: input.recordId, pressedBy: input.pressedBy, by: input.by });
-    });
+    }).catch(error => { checkMoved(); throw error; });
     if (pressed === null) throw new Error("The workspace engine is not running.");
     if (pressed.busy) return { busy: true };
     const { claim } = pressed;
@@ -3139,7 +3150,12 @@ export class CollectionAutomations {
   }
 
   private async inspectAuthority(authority: RelayButtonAuthority, schemas = new Map<string, Promise<ReturnType<typeof parseCollectionSchema> | null>>()): Promise<RelayButtonInspection> {
+    const moved = () => {
+      const current = this.locate(authority.automationId);
+      return current !== null && current.collectionPath !== authority.collectionPath;
+    };
     const denied = (cause: string, reason: string): RelayButtonInspection => {
+      if (moved()) reason = SHARED_BUTTON_MOVED;
       this.options.onError(`inspect shared Button "${authority.automationId}": ${cause}`, new Error(reason));
       return {kind: "denied", reason: [SHARED_BUTTON_MOVED, SHARED_BUTTON_FIELD_CHANGED, SHARED_BUTTON_HELD].includes(reason) ? reason : SHARED_BUTTON_DENIED};
     };
@@ -3156,19 +3172,17 @@ export class CollectionAutomations {
           !read || read.truncated ? null : parseCollectionSchema(read.text));
         schemas.set(id.collectionPath, schemaRead);
       }
-      const moved = () => this.locate(authority.automationId)?.collectionPath !== authority.collectionPath;
       const schema = await schemaRead;
-      if (moved()) return denied("collection-moved", SHARED_BUTTON_MOVED);
       const buttonField = automation.when.field;
       if (!schema?.schema.fields.some(field => field.name === buttonField && field.type === "button")) {
-        return { kind: "denied", reason: SHARED_BUTTON_FIELD_CHANGED };
+        return denied("field-changed", SHARED_BUTTON_FIELD_CHANGED);
       }
       const roster = await this.options.roster();
-      if (moved()) return denied("collection-moved", SHARED_BUTTON_MOVED);
       if (roster.kind === "unknown") throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED);
       let inventory: AutomationInventory;
       try { inventory = this.inventory(id.collectionPath, automation); }
       catch (error) {
+        if (moved()) return denied("collection-moved", SHARED_BUTTON_MOVED);
         if (error instanceof AutomationRunWait) throw error;
         if (this.datasetStoreFailed) throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED);
         return denied(`inventory-unavailable: ${errorText(error)}`, SHARED_BUTTON_DENIED);
@@ -3178,19 +3192,16 @@ export class CollectionAutomations {
       const descriptions = new Map<string, DatasetDescription>();
       for (const step of inventory.reach) if (step.kind === "dataset-operation" && !descriptions.has(step.datasetId)) {
         descriptions.set(step.datasetId, await this.presserDescription(authority, step.datasetId));
-        if (moved()) return denied("collection-moved", SHARED_BUTTON_MOVED);
       }
       const canPress = await canPressInventory(inventory, async datasetId => descriptions.get(datasetId)!);
-      if (moved()) return denied("collection-moved", SHARED_BUTTON_MOVED);
       if (!canPress) return denied("presser-access", SHARED_BUTTON_DENIED);
       const state = await this.runnableButtonState(id.collectionPath, automation, roster, inventory.reach);
-      if (moved()) return denied("collection-moved", SHARED_BUTTON_MOVED);
       if (state.kind !== "ready") {
-        const result = denied(state.denialCause ?? "reach-restricted", state.reason);
-        return state.denialCause === "held-step" ? { kind: "denied", reason: SHARED_BUTTON_HELD } : result;
+        return denied(state.denialCause ?? "reach-restricted", state.denialCause === "held-step" ? SHARED_BUTTON_HELD : state.reason);
       }
+      if (moved()) return denied("collection-moved", SHARED_BUTTON_MOVED);
       return { kind: "ready", automationId: authority.automationId, definitionHash: authority.definitionHash, irreversible: irreversibleActionsOf(automation, id.collectionPath, inventory) };
-    } catch (error) { return buttonInspectionFailure(error); }
+    } catch (error) { return moved() ? denied("collection-moved", SHARED_BUTTON_MOVED) : buttonInspectionFailure(error); }
   }
 
   /**
@@ -3294,6 +3305,11 @@ export class CollectionAutomations {
   ): Promise<CollectionAutomationUndo> {
     await this.ready();
     const parsed = this.locate(input.automationId);
+    const movedReason = () => {
+      const current = this.locate(input.automationId);
+      return parsed !== null && current !== null && current.collectionPath !== parsed.collectionPath
+        ? "The automation's Collection moved." : null;
+    };
     // Held from before the first read to the end, like Try again's.
     if (this.changing.has(input.claimId)) return { status: "refused", reason: BUSY_CLAIM_REFUSAL };
     this.changing.add(input.claimId);
@@ -3339,7 +3355,9 @@ export class CollectionAutomations {
         if (checked === null) throw new Error("The dataset host is unavailable. Reopen the workspace, then try again.");
         reverseReach = checked;
       }
-      catch (error) { return { status: "refused", reason: errorText(error) }; }
+      catch (error) { return { status: "refused", reason: movedReason() ?? errorText(error) }; }
+      const moved = movedReason();
+      if (moved !== null) return { status: "refused", reason: moved };
       const denied = source && checkAutomationReach(source.roster, {
         id: parsed.id, collection: collectionNamed(parsed.collectionPath), codeFiles, steps: reverseReach,
       }).find((verdict) => !verdict.allowed);
@@ -3390,6 +3408,8 @@ export class CollectionAutomations {
         },
       }, host, collectionNamed(parsed.collectionPath), async () => {
         const roster = await this.options.cachedRoster();
+        const moved = movedReason();
+        if (moved !== null) throw new Error(moved);
         if (roster.kind === "unknown") throw new Error(rosterProblem(roster, collectionNamed(parsed.collectionPath)));
         return roster;
       }, input.claimId, runs, async (request) => {
@@ -4842,6 +4862,7 @@ export class CollectionAutomations {
       if (bound !== null && current !== null && bound.place !== placeHash(current.collectionPath)) {
         return { kind: "settle", input: { state: "failed", error: MOVED_SINCE_PRESSED }, outcome: "failed", settled: () => this.afterSettle() };
       }
+      if (current === null && id !== null) return { kind: "settle", input: { state: "done" }, outcome: "skipped", settled: () => this.afterSettle() };
       return current?.collectionPath !== id?.collectionPath ? release : null;
     };
     // A due time or a Group message names only its Collection, of either kind.
@@ -4886,8 +4907,6 @@ export class CollectionAutomations {
       return { kind: "release", waitsFor: "dataset" };
     }
     const resuming = await this.hasSavedPlan(claim);
-    moved = locationChanged();
-    if (moved !== null) return moved;
     if (!resuming) {
       try { this.inventory(id.collectionPath, automation); }
       catch (error) {
@@ -4898,16 +4917,18 @@ export class CollectionAutomations {
       }
       const unsupported = this.cannotRun(id.collectionPath, automation);
       if (unsupported !== null) {
+        moved = locationChanged();
+        if (moved !== null) return moved;
         return { kind: "settle", input: { state: "failed", error: unsupported }, outcome: "failed", settled: () => this.afterSettle() };
       }
     }
     // Every step needs the roster, even one inside the Collection: someone
     // with Edit on the file alone is an editor who cannot edit its records.
     const roster = await this.options.roster();
-    moved = locationChanged();
-    if (moved !== null) return moved;
     if (stop.aborted) return release;
     if (roster.kind === "unknown") {
+      moved = locationChanged();
+      if (moved !== null) return moved;
       // A step that acts as you needs to know who you are now; waiting could
       // mean waiting for a sign-in, so it fails with the reason instead.
       if (wakesAgent(automation)) {
@@ -4922,8 +4943,6 @@ export class CollectionAutomations {
     }
     // The host runs nothing until it took the last host's verdicts.
     const host = await this.options.groupHost();
-    moved = locationChanged();
-    if (moved !== null) return moved;
     const takenVerdicts = await this.takeHostVerdicts(host);
     moved = locationChanged();
     if (moved !== null) return moved;
@@ -4954,6 +4973,14 @@ export class CollectionAutomations {
       : runDatasetAutomation({ ...this.runDependencies({ automationId: claim.automationId, collectionPath: collection.path, automation }), withHost: (work) => this.withLiveHost(work), cachedRoster: () => this.options.cachedRoster() },
         { held: runner.held, automation, collection, roster, signal, stopped: stop }), hostHold);
     if (outcome === null) return null;
+    if (outcome.kind === "failed" || outcome.kind === "wait") {
+      if (this.locate(claim.automationId) !== null) {
+        moved = locationChanged();
+        if (moved !== null) return moved;
+      } else if (!await this.hasSavedPlan(claim)) {
+        return { kind: "settle", input: { state: "done" }, outcome: "skipped", settled: () => this.afterSettle() };
+      }
+    }
     // A pause or close stopped the run; its progress is saved, and the next
     // drain resumes it.
     if (stop.aborted) return release;
