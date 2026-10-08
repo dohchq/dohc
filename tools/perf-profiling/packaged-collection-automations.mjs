@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { classifyProcess, recordId } from './packaged-surfaces.mjs';
@@ -299,6 +299,18 @@ export async function dismissToasts(page) {
   while (await dismiss.count()) await dismiss.first().click();
 }
 
+async function readRunFile(path) {
+  const text = await readFile(path, 'utf8').catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+  if (text === null) return null;
+  const newline = text.indexOf('\n');
+  if (newline < 0) return null;
+  const headerText = text.slice(0, newline + 1);
+  let header;
+  try { header = JSON.parse(headerText); } catch { return null; }
+  if (header?.kind !== 'header') return null;
+  return { header, headerText, progressText: text.slice(newline + 1) };
+}
+
 /**
  * The folder and engine id of an automation's saved runs, or null before its first run saves. The engine names
  * a Collection by an object id the harness cannot know in advance, so this matches a saved header by the
@@ -311,8 +323,7 @@ async function runFolder(workspaceRoot, automation) {
   for (const folder of folders) {
     const headers = (await readdir(join(root, folder)).catch(() => [])).filter(file => file.endsWith('.json'));
     for (const file of headers) {
-      // A header being rewritten reads as unparseable for a moment; the next sample sees it.
-      const header = await readFile(join(root, folder, file), 'utf8').then(text => JSON.parse(text)).catch(() => null);
+      const header = (await readRunFile(join(root, folder, file)))?.header;
       const collection = header?.collections?.find(entry => entry.path === automation.collectionPath);
       if (collection && header.automationId === `collection:${collection.collectionId}#${automation.name}`) return { folder: join(root, folder), automationId: header.automationId };
     }
@@ -320,7 +331,7 @@ async function runFolder(workspaceRoot, automation) {
   return null;
 }
 
-/** The byte sizes of a case's saved runs now: headers and progress files. Cheap enough to sample while a run works. */
+/** The byte sizes of a case's saved runs now: first-line headers and the progress that follows them. */
 export async function journalBytes(workspaceRoot, automation) {
   const found = await runFolder(workspaceRoot, automation);
   const sizes = { headerBytes: 0, progressBytes: 0 };
@@ -329,9 +340,11 @@ export async function journalBytes(workspaceRoot, automation) {
   let files;
   try { files = await readdir(folder); } catch (error) { if (error.code === 'ENOENT') return sizes; throw error; }
   for (const file of files) {
-    const size = await stat(join(folder, file)).then(entry => entry.size, error => { if (error.code === 'ENOENT') return 0; throw error; });
-    if (file.endsWith('.progress.jsonl')) sizes.progressBytes += size;
-    else if (file.endsWith('.json')) sizes.headerBytes += size;
+    if (!file.endsWith('.json')) continue;
+    const saved = await readRunFile(join(folder, file));
+    if (saved === null || saved.header.automationId !== found.automationId) continue;
+    sizes.headerBytes += Buffer.byteLength(saved.headerText);
+    sizes.progressBytes += Buffer.byteLength(saved.progressText);
   }
   return sizes;
 }
@@ -349,11 +362,11 @@ export async function readRunJournal(workspaceRoot, automation) {
   try { files = await readdir(folder); } catch (error) { if (error.code === 'ENOENT') return []; throw error; }
   const runs = [];
   for (const file of files.filter(name => name.endsWith('.json'))) {
-    const headerText = await readFile(join(folder, file), 'utf8');
-    const header = JSON.parse(headerText);
+    const saved = await readRunFile(join(folder, file));
+    if (saved === null) continue;
+    const { header, headerText, progressText } = saved;
     if (header.automationId !== automationId) continue;
-    const progressText = await readFile(join(folder, `${file.slice(0, -'.json'.length)}.progress.jsonl`), 'utf8').catch(error => { if (error.code === 'ENOENT') return ''; throw error; });
-    const lines = progressText.split('\n').filter(Boolean).map(line => JSON.parse(line));
+    const lines = progressText.split('\n').slice(0, -1).filter(Boolean).map(line => JSON.parse(line));
     const steps = lines.filter(line => line.kind === 'step');
     const effects = lines.filter(line => line.kind === 'effect');
     const writes = effects.flatMap(line => line.writes);

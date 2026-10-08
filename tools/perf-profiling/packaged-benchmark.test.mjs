@@ -845,9 +845,9 @@ test('a press uses its own saved run', async t => {
   const folder = join(root, '.dohc', 'automations', 'runs', 'f1');
   await mkdir(folder, { recursive: true });
   const save = (claimId, startedAtMs) => writeFile(join(folder, `run-${claimId}.json`), JSON.stringify({
-    claimId, startedAtMs, automationId: `collection:object-a#${automation.name}`,
+    kind: 'header', version: 9, claimId, startedAtMs, automationId: `collection:object-a#${automation.name}`,
     collections: [{ collectionId: 'object-a', path: automation.collectionPath }], outcome: { state: 'failed' },
-  }));
+  }) + '\n');
   await save('old', 1000);
   const previousRuns = await readRunJournal(root, automation);
   const missing = runForPress(await readRunJournal(root, automation), previousRuns);
@@ -931,20 +931,19 @@ test('run journal reads saved headers and progress, and a refused run leaves non
   const runs = join(root, '.dohc', 'automations', 'runs');
   const elsewhere = join(runs, 'f0');
   await mkdir(elsewhere, { recursive: true });
-  await writeFile(join(elsewhere, 'run-x.json'), JSON.stringify({ automationId: 'collection:object-b#bench-baseline', collections: [{ collectionId: 'object-b', path: 'automation-data' }] }));
-  // A header caught mid-rewrite reads as partial JSON; the lookup skips it instead of stopping the run.
+  await writeFile(join(elsewhere, 'run-x.json'), JSON.stringify({ kind: 'header', version: 9, automationId: 'collection:object-b#bench-baseline', collections: [{ collectionId: 'object-b', path: 'automation-data' }] }) + '\n');
+  // An unreadable run is skipped instead of stopping the lookup.
   await writeFile(join(elsewhere, 'run-partial.json'), '{"automationId": "collection:obj');
   assert.deepEqual(await journalBytes(root, automation), { headerBytes: 0, progressBytes: 0 });
   const folder = join(runs, 'f1');
   await mkdir(folder, { recursive: true });
   const automationId = 'collection:object-a#bench-baseline';
-  const header = JSON.stringify({ version: 2, claimId: 'c1', automationId, collections: [{ collectionId: 'object-a', path: 'automation-bench' }], startedAtMs: 1000, finishedAtMs: 1600, plan: null, outcome: { state: 'done' } });
+  const header = JSON.stringify({ kind: 'header', version: 9, claimId: 'c1', automationId, collections: [{ collectionId: 'object-a', path: 'automation-bench' }], startedAtMs: 1000, finishedAtMs: 1600, outcome: { state: 'done' } }) + '\n';
   const progress = [{ kind: 'created', ordinal: 0, recordId: 'r', path: 'p' },
     { kind: 'effect', ordinal: 1, writes: [{ kind: 'field', field: 'A' }, { kind: 'field', field: 'B' }, { kind: 'created', recordId: 'r', path: 'p' }] },
     { kind: 'effect', ordinal: 2, writes: [{ kind: 'dataset-edit', fields: [{}, {}, {}] }, { kind: 'dataset-created' }] }].map(line => `${JSON.stringify(line)}\n`).join('');
-  await writeFile(join(folder, 'run-c1.json'), header);
-  await writeFile(join(folder, 'run-c1.progress.jsonl'), progress);
-  await writeFile(join(folder, 'other.json'), JSON.stringify({ automationId: 'collection:elsewhere#x', startedAtMs: 0 }));
+  await writeFile(join(folder, 'run-c1.json'), header + progress);
+  await writeFile(join(folder, 'other.json'), JSON.stringify({ kind: 'header', version: 9, automationId: 'collection:elsewhere#x', startedAtMs: 0 }) + '\n');
   const [run, ...others] = await readRunJournal(root, automation);
   assert.deepEqual(others, []);
   assert.deepEqual(run, { claimId: 'c1', startedAtMs: 1000, finishedAtMs: 1600, outcome: { state: 'done' }, headerBytes: Buffer.byteLength(header),
@@ -953,7 +952,7 @@ test('run journal reads saved headers and progress, and a refused run leaves non
     progressBytes: Buffer.byteLength(progress), progressLines: 3, fieldWrites: 5, created: 2, createdPaths: ['p'] });
   const bytes = await journalBytes(root, automation);
   assert.equal(bytes.progressBytes, Buffer.byteLength(progress));
-  assert.ok(bytes.headerBytes > Buffer.byteLength(header));
+  assert.equal(bytes.headerBytes, Buffer.byteLength(header));
   const measured = [
     { kind: 'step', ordinal: 0, effects: [], findMs: 12, planMs: 3, appendMs: 0, appendCount: 0 },
     { kind: 'step', ordinal: 1, effects: [{}, {}], findMs: 8, planMs: 7, appendMs: 31, appendCount: 2 },
@@ -961,7 +960,7 @@ test('run journal reads saved headers and progress, and a refused run leaves non
     { kind: 'effect', ordinal: 1, writes: [], writeMs: 0, writeCount: 1 },
   ];
   const timing = async lines => {
-    await writeFile(join(folder, 'run-c1.progress.jsonl'), lines.map(line => `${JSON.stringify(line)}\n`).join(''));
+    await writeFile(join(folder, 'run-c1.json'), header + lines.map(line => `${JSON.stringify(line)}\n`).join(''));
     const [saved] = await readRunJournal(root, automation);
     return { findMs: saved.findMs, planMs: saved.planMs, writeMs: saved.writeMs, writes: saved.writes };
   };
