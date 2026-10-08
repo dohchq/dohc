@@ -20,7 +20,7 @@ use dohc_engine_protocol::{
 use dohc_engine_runtime::{RuntimeError, WorkspaceSupervisor};
 #[cfg(test)]
 use dohc_workspace_engine::EngineEventNotice;
-use dohc_workspace_engine::live_application_ingress::LiveApplicationIngress;
+use dohc_workspace_engine::live_application_ingress::{LiveApplicationIngress, UploadCompletion};
 use dohc_workspace_engine::{ConfiguredLiveHostConfig, EngineService, LiveApplicationInput};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
@@ -339,7 +339,7 @@ where
                         .expect("configured ingress")
                         .chunk(stream_id, fin, &bytes)
                     {
-                        Ok(Some((request, input))) => {
+                        Ok(Some(UploadCompletion::Admitted(request, input))) => {
                             lock(&active_requests).remove(&request.id);
                             if !dispatch_authenticated(
                                 Envelope::Request(request),
@@ -356,6 +356,22 @@ where
                                 Some(input),
                             )
                             .await
+                            {
+                                keep_running = false;
+                            }
+                        }
+                        Ok(Some(UploadCompletion::Refused(id, error))) => {
+                            lock(&active_requests).remove(&id);
+                            if output_tx
+                                .send(
+                                    Envelope::Error(ErrorEnvelope {
+                                        id: Some(id),
+                                        error,
+                                    })
+                                    .into(),
+                                )
+                                .await
+                                .is_err()
                             {
                                 keep_running = false;
                             }
