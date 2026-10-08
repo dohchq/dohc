@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readdir, readFile, rename, rm, rmdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import type { JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { AutomationChangeKind } from "@dohc/workspace-engine-client";
@@ -628,7 +629,19 @@ async function writeDurably(path: string, text: string): Promise<void> {
     } finally {
       await file.close();
     }
-    await rename(temp, path);
+    // Windows MoveFileEx cannot replace an open destination, even when the
+    // reader shares deletion. Keep the flushed snapshot while brief reads finish.
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await rename(temp, path);
+        break;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (process.platform !== "win32" || attempt >= 99 || !["EPERM", "EACCES", "EBUSY"].includes(code ?? "")) throw error;
+        // At most 100 attempts and 2,381 ms of backoff, then the real error.
+        await delay(Math.min(2 ** attempt, 25));
+      }
+    }
     await syncFolder(dirname(path));
   } finally {
     await rm(temp, { force: true }).catch(() => undefined);
