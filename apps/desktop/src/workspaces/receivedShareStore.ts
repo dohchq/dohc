@@ -54,7 +54,7 @@ export function parseReceivedInventory(body: unknown): ReceivedInventory | null 
 /** Publish only a complete account acquisition. Page cursors describe an interval, not a snapshot. */
 export async function listReceivedInventory(get: (path: string) => Promise<unknown>, assertCurrent: () => void): Promise<ReceivedInventory> {
   const received: ReceivedInventory["received"] = [], removed: ReceivedInventory["removed"] = [];
-  const cursors = new Set<string>(), shares = new Set<string>();
+  const cursors = new Set<string>();
   let cursor: string | undefined;
   let lastShareId = "";
   for (let pageNumber = 0; pageNumber < 50; pageNumber++) {
@@ -63,8 +63,8 @@ export async function listReceivedInventory(get: (path: string) => Promise<unkno
     assertCurrent();
     const ids = [...page.received, ...page.removed].map(row => row.shareId).sort();
     for (const id of ids) {
-      if (shares.has(id) || id <= lastShareId) throw new Error("Received share pages are inconsistent.");
-      shares.add(id); lastShareId = id;
+      if (id <= lastShareId) throw new Error("Received share pages are inconsistent.");
+      lastShareId = id;
     }
     received.push(...page.received); removed.push(...page.removed);
     if (received.length + removed.length > 50_000) throw new Error("Received share inventory exceeds its limit.");

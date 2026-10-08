@@ -39,7 +39,6 @@ import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 // payload shape it does not positively recognize is EXCLUDED.
 
 export { MAX_SHARE_PATHS, MAX_SHARE_PATH_CHARS };
-export { visibleSharePath } from "@dohc/security-contract/share-selector";
 
 export const MAX_CHANNEL_WIRE_ID_CHARS = 256;
 

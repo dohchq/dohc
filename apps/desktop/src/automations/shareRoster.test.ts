@@ -1,8 +1,8 @@
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { deferred } from "../testing/deferred";
 import { createRegistryStore, type RegistryEntry } from "../workspaces/registryStore";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { checkAutomationReach, type ReachStep } from "@dohc/automation-executor/automation-reach";
 import { readSyncHistory, recordNeverSynced, recordSynced } from "../workspaces/syncHistory";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -497,6 +497,20 @@ describe("keeping the roster current", () => {
     now += SHARE_ROSTER_FRESH_MS * 5;
     expect(await r.forRun(WORKSPACE)).toEqual(cached);
     expect(list, "a run waited on a relay that already failed").toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the roster version and file bytes when the owner-email acquisition fails", async () => {
+    seed();
+    const before = store.find(WORKSPACE)?.shareRoster;
+    const directory = join(dirname(store.registryFile), "share-rosters");
+    const files = await readdir(directory);
+    const bytes = await Promise.all(files.map(file => readFile(join(directory, file), "utf8")));
+    const get = relay({ "/sync/shares?workspaceId=ws-trip": { status: 500, body: { ok: false } } });
+    const { rosters: r, saveRoster } = rosters(() => listRosterGrants(WORKSPACE, get));
+    expect(await r.forRun(WORKSPACE)).toEqual(cached);
+    expect(saveRoster).not.toHaveBeenCalled();
+    expect(store.find(WORKSPACE)?.shareRoster).toEqual(before);
+    expect(await Promise.all(files.map(file => readFile(join(directory, file), "utf8")))).toEqual(bytes);
   });
 
   it("keeps the cache while this computer sends no pull", async () => {

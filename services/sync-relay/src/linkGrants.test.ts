@@ -2490,6 +2490,7 @@ describe("owner link inventory and impact preconditions", () => {
     const storage = await newStorage();
     const h = handler(storage, {
       lookupUserEmail: async (userId) => {
+        if (userId === OWNER) return null;
         if (userId === "resolved-user") return "resolved@example.test";
         throw new Error("directory unavailable");
       },

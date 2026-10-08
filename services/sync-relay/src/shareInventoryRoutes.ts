@@ -81,7 +81,6 @@ export function createShareInventoryRoutes(
       if (url.searchParams.has("received")) {
         if (url.searchParams.get("received") !== "true" || url.searchParams.has("workspaceId")) throw badRequest("received inventory coordinates are invalid");
         const cursor = receivedInventoryCursor.decode(url.searchParams.get("cursor"));
-        if (cursor && cursor.recipientUserId !== actor.userId) throw badRequest("received cursor belongs to another account");
         await claimPendingShares(actor.userId);
         const page = storage.listReceivedShareIdsPage(actor.userId, cursor);
         const active = page.shareIds.flatMap(shareId => {
@@ -91,9 +90,10 @@ export function createShareInventoryRoutes(
         });
         const received = await receivedSummaries(active, actor.userId);
         // Re-read removals after asynchronous serialization; a grant can end during a page.
-        const removed = page.shareIds.flatMap(shareId => storage.listRemovedSharesForRecipient(actor.userId, shareId));
+        const pageIds = new Set(page.shareIds);
+        const removed = storage.listRemovedSharesForRecipient(actor.userId).filter(row => pageIds.has(row.shareId));
         return jsonResponse({ ok: true, received, removed,
-          ...(page.nextCursor ? { nextCursor: receivedInventoryCursor.encode({ ...page.nextCursor, recipientUserId: actor.userId }) } : {}),
+          ...(page.nextCursor ? { nextCursor: receivedInventoryCursor.encode(page.nextCursor) } : {}),
         });
       }
       if (url.searchParams.has("workspaceId")) {
@@ -101,7 +101,8 @@ export function createShareInventoryRoutes(
         if (!storage.workspaceIsOwnedBy(workspaceId, actor.userId)) throw notFound();
         const cursor = grantedInventoryCursor.decode(url.searchParams.get("cursor"));
         const page = storage.listSharesGrantedPage(actor.userId, workspaceId, cursor);
-        const granted = await Promise.all(page.granted.map(grantedShareSummary));
+        const granterEmail = lookupUserEmail ? await lookupUserEmail(actor.userId) : null;
+        const granted = await Promise.all(page.granted.map(row => grantedShareSummary(row, { granterEmail })));
         if (!storage.workspaceIsOwnedBy(workspaceId, actor.userId)) throw notFound();
         return jsonResponse({ok: true, granted,
           ...(page.nextCursor ? {nextCursor: grantedInventoryCursor.encode(page.nextCursor)} : {}),
@@ -190,10 +191,11 @@ export function createShareInventoryRoutes(
         ? { cursor: independentGrantCursor }
         : {}),
     });
+    const granterEmail = !independentGrantCursor && lookupUserEmail ? await lookupUserEmail(actor.userId) : null;
     const [links, independentGrants] = await Promise.all([
       independentGrantCursor
         ? []
-        : Promise.all(page.links.map(linkInventorySummary)),
+        : Promise.all(page.links.map(row => linkInventorySummary(row, granterEmail))),
       Promise.all(
         independentGrantPage.grants.map(independentGrantSummary),
       ),
@@ -232,4 +234,4 @@ const independentGrantInventoryCursor = cursorCodec<SyncRelayIndependentGrantInv
 
 const grantedInventoryCursor = cursorCodec<SyncRelayGrantedInventoryCursor>({grantId: "id"}, "cursor");
 
-const receivedInventoryCursor = cursorCodec<SyncRelayReceivedInventoryCursor & { recipientUserId: string }>({ shareId: "id", recipientUserId: "messageId" }, "cursor");
+const receivedInventoryCursor = cursorCodec<SyncRelayReceivedInventoryCursor>({ shareId: "id" }, "cursor");

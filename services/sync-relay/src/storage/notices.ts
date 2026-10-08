@@ -1,3 +1,4 @@
+import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import {shareAccessLabel, shareSubjectFallback} from "@dohc/security-contract/share-labels";
 import { automationFailureBodyForPermission, isSwitchedOffBody } from "@dohc/automation-executor/automation-failed-notice";
 import { createHash } from "node:crypto";
@@ -28,7 +29,6 @@ import { authorizeShareGrantAction } from "../shareAuthorization";
 import {
   fileSideOf,
   parseStoredAnyShareSelectorJson,
-  visibleSharePath,
   type ShareSelector,
 } from "../shareFilter";
 import type { StorageContext } from "./context";

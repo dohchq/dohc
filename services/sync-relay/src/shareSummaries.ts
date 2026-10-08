@@ -35,13 +35,6 @@ export function createShareSummaries(
   lookupUserEmail?: (userId: string) => Promise<string | null> | string | null,
   namedBrowserOrigin?: string,
 ) {
-  const granterDisplayEmail = async (userId: string): Promise<string | null> => {
-    try {
-      return await lookupUserEmail?.(userId) ?? null;
-    } catch {
-      return null;
-    }
-  };
   const namedBrowserInvitation = (grantId: string, selector: StoredAnyShareSelector, access: string) => {
     const effective = effectiveShareSelector(selector, access);
     return namedBrowserOrigin && effective && isLiveEditShareSelector(effective)
@@ -73,7 +66,6 @@ export function createShareSummaries(
         : null;
     return {
       shareId: share.shareId,
-      granterUserId: share.granterUserId,
       ...labels(share.shareId),
       sharerName: null,
       // An unreadable row says so. It does not get a stand-in scope: empty
@@ -88,7 +80,6 @@ export function createShareSummaries(
       grantId: grant.grantId,
       principalKind: grant.principalKind,
       generation: grant.generation,
-      status: grant.status,
       // The KIND survives the damage when it can be read at all. It is what
       // routes a row to the right manager, and losing it made a damaged
       // chat grant surface in the path/version lists as an unreadable
@@ -102,6 +93,7 @@ export function createShareSummaries(
 
   const grantedShareSummary = async (
     row: SyncRelayGrantedShareRow,
+    roster?: { granterEmail: string | null },
   ): Promise<Record<string, unknown>> => {
     const { share, grant } = row;
     // A pending invite has no recipient user id yet; surface the addressed
@@ -112,11 +104,10 @@ export function createShareSummaries(
         ? await lookupUserEmail(grant.principalUserId)
         : null
       : grant.principalEmail;
-    const granterEmail = await granterDisplayEmail(share.granterUserId);
     const selector = parseStoredAnyShareSelectorJson(share.selectorJson);
     return {
       ...shareSummaryBase(row, selector),
-      granterEmail,
+      ...(roster ? { granterUserId: share.granterUserId, granterEmail: roster.granterEmail, status: grant.status } : {}),
       workspaceId: share.workspaceId,
       recipientUserId: grant.principalUserId,
       recipientEmail,
@@ -226,7 +217,7 @@ export function createShareSummaries(
     };
   };
 
-  const linkInventorySummary = async (row: SyncRelayLinkInventoryRow) => {
+  const linkInventorySummary = async (row: SyncRelayLinkInventoryRow, granterEmail: string | null) => {
     const { share, grant } = row;
     const storedSelector = parseStoredAnyShareSelectorJson(share.selectorJson);
     const selector =
@@ -239,7 +230,7 @@ export function createShareSummaries(
     return {
       shareId: share.shareId,
       granterUserId: share.granterUserId,
-      granterEmail: await granterDisplayEmail(share.granterUserId),
+      granterEmail,
       grantId: grant.grantId,
       ...labels(share.shareId),
       sharerName: null,
