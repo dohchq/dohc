@@ -147,6 +147,7 @@ type EngineDocOpenOutcome =
       artifactAssets: readonly ArtifactAssetDescriptor[];
       readArtifactAsset: EngineYDocBinding["readArtifactAsset"];
       flushPendingLocalUpdates: EngineYDocBinding["flushPendingLocalUpdates"];
+      retrySave: () => Promise<void>;
     }
   | { kind: "unavailable" }
   // Their own kinds, not flags on "unavailable": only the unqualified outcome
@@ -480,6 +481,11 @@ function createEngineDocSession(
     artifactAssets,
     readArtifactAsset: (descriptor) => bound.readArtifactAsset(descriptor),
     flushPendingLocalUpdates: () => bound.flushPendingLocalUpdates(),
+    // Every accepted edit reaches main first, so the settle covers them all.
+    retrySave: async () => {
+      await bound.flushPendingLocalUpdates();
+      await bridge().retryEngineYDocSave({ workspaceId, sessionId });
+    },
   });
 
   const reportSaveState = (

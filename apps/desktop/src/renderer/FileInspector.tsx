@@ -36,6 +36,7 @@ import type { ChatFileMentionRecord } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { useEngineDoc } from "./collab/useEngineDoc";
 import { useAuthorCapacityNotice } from "./collab/useAuthorCapacityNotice";
+import { useSaveFailureNotice, type DocumentSaveNotices } from "./collab/useSaveFailureNotice";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { Layers, TriangleAlert } from "lucide-react";
 import { EmptyState, SecondaryButton } from "./ui/controls";
@@ -272,6 +273,9 @@ type FileInspectorProps = {
   // and the shell opens the record's History.
   onButtonError?: ReportButtonError;
   onButtonNotice?: (message: string) => void;
+  // A live document that couldn't save says so through the shell's toasts
+  // and Notices.
+  saveNotices?: DocumentSaveNotices;
   onOpenRecordHistory?: (record: RecordHistoryTarget) => void;
   fileOpenStartMark?: string;
   refreshKey?: number;
@@ -476,6 +480,11 @@ export const FileInspector = memo(function FileInspector(
     workspaceId: props.workspaceId, path: props.path,
     authorCapacity: engine.authorCapacity, saveState: engine.saveState,
     reportError: props.onButtonError, retry: retryEngineOpen,
+  });
+  useSaveFailureNotice({
+    workspaceId: props.workspaceId, path: props.path,
+    saveState: engine.saveState, notices: props.saveNotices, retry: engine.retrySave,
+    open: props.onOpenPath,
   });
   // Derived, never stored. #565 keys the hook's outcome to the request that
   // asked for it, so a refusal for the version the user just left cannot repaint

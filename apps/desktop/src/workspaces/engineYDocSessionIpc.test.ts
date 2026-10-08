@@ -609,6 +609,23 @@ describe("engine Y.Doc IPC adapter", () => {
     ]);
   });
 
+  it("settles only the caller's own session on Try again, and leaves its failure to the save state", async () => {
+    const settleNow = vi.fn(async () => { throw new Error("PermissionDenied"); });
+    const h = harness(providerSession({ settleNow }));
+    const sender = new FakeSender(7);
+    await h.ipc.open(sender, openPayload);
+
+    await expect(h.ipc.retrySave(sender, { workspaceId: "workspace-1", sessionId: openPayload.sessionId })).resolves.toBeUndefined();
+    expect(settleNow).toHaveBeenCalledOnce();
+
+    const refused = "The live document session is no longer available. Open the file again.";
+    await expect(h.ipc.retrySave(sender, { workspaceId: "workspace-2", sessionId: openPayload.sessionId })).rejects.toThrow(refused);
+    await expect(h.ipc.retrySave(new FakeSender(8), { workspaceId: "workspace-1", sessionId: openPayload.sessionId })).rejects.toThrow(refused);
+    await expect(h.ipc.retrySave(sender, { workspaceId: "workspace-1", sessionId: "renderer-session-2" })).rejects.toThrow(refused);
+    expect(settleNow).toHaveBeenCalledOnce();
+    await h.ipc.shutdown();
+  });
+
   it("retires a busy outcome while keeping its original edit sequence", async () => {
     const sender = new FakeSender(7);
     const h = harness();

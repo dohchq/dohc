@@ -119,6 +119,7 @@ import { ExternalLinkConfirm } from "./ExternalLinkConfirm";
 import { CommandPalette, type Command } from "./CommandPalette";
 import { QuickOpenPalette } from "./QuickOpenPalette";
 import { FileInspector } from "./FileInspector";
+import type { DocumentSaveNotices } from "./collab/useSaveFailureNotice";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import type { HeadingTarget, ScrollTarget } from "./MarkdownView";
 import { preloadMarkdownEditor } from "./editor/LazyMarkdownEditor";
@@ -838,6 +839,17 @@ export function DesktopWorkspaceShell(props: {
       });
     });
   }, [workspaceId, reportShellFailure]);
+  const documentSaveNotices = useMemo<DocumentSaveNotices>(() => {
+    const owner = workspaceId;
+    return {
+      report: (failure) => {
+        if (workspaceIdRef.current === owner) reportShellFailure(failure);
+      },
+      clear: (identity) => {
+        if (workspaceIdRef.current === owner) clearIdentity(identity);
+      },
+    };
+  }, [workspaceId, reportShellFailure, clearIdentity]);
   // The workspace's Button runs report through this shell's toasts, so they go with it.
   useEffect(() => () => disposeAutomationButtons(workspaceId), [workspaceId]);
   const onWorkspaceSettingsRead = useSettingsFileNotices({
@@ -5396,6 +5408,7 @@ export function DesktopWorkspaceShell(props: {
                 knownMarkdownFiles={markdownWikilinkFiles}
                 onButtonError={reportShellError}
                 onButtonNotice={showSuccessNotice}
+                saveNotices={documentSaveNotices}
                 onOpenRecordHistory={recordHistory.open}
                 readOnly={
                   (!!shareView && !shareViewWritable) ||

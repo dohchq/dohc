@@ -11,6 +11,7 @@ import {
   GetCollectionRecordHistoryPayload, GetCollectionRecordHistoryResult, RECORD_HISTORY_PAGE,
   LocateRecordHistoryRunPayload, LocateRecordHistoryRunResult,
   engineYDocAdmissionOperations,
+  engineYDocSaveOperations,
 } from "./bridgeContract";
 import { registerOperations } from "./operationTable";
 import { CHANNELS } from "./channels";
@@ -99,7 +100,7 @@ export function createWorkspaceEngineIpc<
   moveEngineStoreAside: typeof moveEngineStoreAside;
   openWorkspaceActivityUnderEngineStoreLock(workspace: Workspace, options: { afterReopenRecoverySettled: () => void }): Promise<SyncStatusResult>;
   engineYDocSessionIpc: Pick<ReturnType<typeof createEngineYDocSessionIpc>,
-    "open" | "waitForAdmission" | "readArtifactAsset" | "applyUpdate" | "acknowledgeLineageReplacement" | "prepareOwnerHandoff" | "close">;
+    "open" | "waitForAdmission" | "retrySave" | "readArtifactAsset" | "applyUpdate" | "acknowledgeLineageReplacement" | "prepareOwnerHandoff" | "close">;
 }) {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
@@ -506,6 +507,15 @@ export function createWorkspaceEngineIpc<
     }, engineYDocAdmissionOperations, {
       waitForEngineYDocAdmission: (payload, { event }) =>
         engineYDocSessionIpc.waitForAdmission(event.sender, payload),
+    });
+    registerOperations<typeof engineYDocSaveOperations, Event, Operation>({
+      handle: registerHandler,
+      assertTrustedSender,
+      withActiveWorkspace: (event, workspaceId, inactiveMessage, work) =>
+        withRendererWorkspaceOperation(event.sender, workspaceId, inactiveMessage, work),
+    }, engineYDocSaveOperations, {
+      retryEngineYDocSave: (payload, { event }) =>
+        engineYDocSessionIpc.retrySave(event.sender, payload),
     });
     registerHandler(CHANNELS.engineYDocOpen, async (event, payload) => {
       assertTrustedSender(event);

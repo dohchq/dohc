@@ -58,6 +58,7 @@ function engineState(doc: Y.Doc): UseEngineDoc {
       throw new Error("no artifact asset");
     },
     flushPendingLocalUpdates: async () => undefined,
+    retrySave: async () => undefined,
   };
 }
 

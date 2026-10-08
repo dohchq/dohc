@@ -6189,6 +6189,28 @@ export const engineYDocAdmissionOperations = {
   },
 } satisfies OperationTable;
 
+export const RetryEngineYDocSavePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  sessionId: ENGINE_YDOC_SESSION_ID,
+});
+export type RetryEngineYDocSavePayload = z.infer<typeof RetryEngineYDocSavePayload>;
+
+// Try again on a document that couldn't save. The answer arrives as the
+// session's next save state, not as this reply.
+export const engineYDocSaveOperations = {
+  retryEngineYDocSave: {
+    capabilityId: "document.save.retry",
+    scope: "workspace",
+    handlerCheck: {
+      check: "engineYDocSessionIpc.retrySave",
+      reason: "Settles only a session this window opened, and only when the payload names that session's workspace.",
+    },
+    channel: "desktop:engine-ydoc-retry-save",
+    payload: RetryEngineYDocSavePayload,
+    guard: "trusted-sender",
+  },
+} satisfies OperationTable;
+
 export const OpenEngineYDocSessionResult = z.object({
   available: z.boolean(),
   initialUpdate: ENGINE_YDOC_INITIAL_UPDATE.optional(),
@@ -6394,7 +6416,8 @@ export interface DohcDesktopBridge
     OperationBridge<typeof scheduleHostOperations>,
     OperationBridge<typeof chatDispatchNoticeOperations>,
     OperationBridge<typeof sharedViewAccessOperations>,
-    OperationBridge<typeof engineYDocAdmissionOperations> {
+    OperationBridge<typeof engineYDocAdmissionOperations>,
+    OperationBridge<typeof engineYDocSaveOperations> {
   listOwnerLiveDocuments(payload: ListOwnerLiveDocumentsPayload): Promise<OwnerLiveDocumentsResult>;
   listOwnerLiveRefusals(payload: ListOwnerLiveRefusalsPayload): Promise<OwnerLiveRefusalsResult>;
   retryOwnerLiveShare(payload: RetryOwnerLiveSharePayload): Promise<void>;

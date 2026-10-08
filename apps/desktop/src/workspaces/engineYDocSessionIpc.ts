@@ -27,6 +27,7 @@ import {
   OpenEngineYDocSessionResult,
   ReadEngineYDocArtifactAssetPayload,
   ReadEngineYDocArtifactAssetResult,
+  RetryEngineYDocSavePayload,
   type AcknowledgeEngineYDocLineageReplacementPayload as AcknowledgePayload,
   type AcknowledgeEngineYDocLineageReplacementResult as AcknowledgeResult,
   type ApplyEngineYDocUpdatePayload as ApplyUpdatePayload,
@@ -36,6 +37,7 @@ import {
   type OpenEngineYDocSessionResult as OpenResult,
   type ReadEngineYDocArtifactAssetPayload as ReadArtifactPayload,
   type ReadEngineYDocArtifactAssetResult as ReadArtifactResult,
+  type RetryEngineYDocSavePayload as RetrySavePayload,
 } from "../ipc/bridgeContract";
 import { CHANNELS, type EngineYDocSaveStateName } from "../ipc/channels";
 import {
@@ -826,6 +828,23 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       );
     }
     return ReadEngineYDocArtifactAssetResult.parse(await access.value);
+  }
+
+  // Try again on a document that couldn't save: settle it now. The settle
+  // reports its start and outcome as save states, which is how the editor
+  // and the Notices row learn the answer, so this reply carries none.
+  async retrySave(sender: EngineYDocIpcSender, payload: RetrySavePayload): Promise<void> {
+    const input = RetryEngineYDocSavePayload.parse(payload);
+    const access = this.#owner.accessSession(
+      this.#caller(sender, input.sessionId),
+      (owned) => owned.workspace.workspaceId === input.workspaceId && !owned.deleted
+        ? owned.provider.settleNow?.()
+        : null,
+    );
+    if (access.kind === "refused" || access.value === null) {
+      throw new Error("The live document session is no longer available. Open the file again.");
+    }
+    await access.value?.catch(() => undefined);
   }
 
   applyUpdate(
