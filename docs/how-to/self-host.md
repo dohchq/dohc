@@ -30,7 +30,7 @@ The release includes the isolated app runtime. The release build checks its comp
 
 ## Prepare the host
 
-Install Docker Engine with Linux container support, Docker Compose 2.24.4 or newer, and Node.js 24.14 or newer.
+Install Docker Engine with Linux container support, Docker Compose 2.24.4 or newer, and Node.js 24.16 or newer.
 Have an SMTP service ready for verification and password reset emails.
 The SMTP service must support TLS.
 
