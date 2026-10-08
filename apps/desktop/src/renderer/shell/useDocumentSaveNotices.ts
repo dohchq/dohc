@@ -53,26 +53,34 @@ export function reportTextSave(workspaceId: string, path: string, failure: TextS
   for (const listener of [...textSaveListeners]) listener({ workspaceId, path, failure: failed });
 }
 
-// A file whose save failed. `reported` says a toast and a row stand for it,
-// and `retry` is the newest way to save it again.
-interface FailedSave {
-  path: string;
-  reported: boolean;
+// The engine settles a live document; the plain editor writes every other
+// file, and a live document's path when main cannot open its session.
+type Writer = "engine" | "text";
+
+// One writer's failed save: whether the file is read-only, and the newest
+// way to try that writer again.
+interface WriterFailure {
   readOnly: boolean;
-  retry: (failure: FailedSave) => void;
+  retry: (failure: WriterFailure) => void;
+}
+
+// A file whose save failed, with a failure for each writer that still has
+// one. `reported` says a toast and a row stand for it.
+interface FailedFile {
+  reported: boolean;
+  writers: Map<Writer, WriterFailure>;
 }
 
 // Every save in the workspace reports here, whether or not an editor still
 // shows its file: a closing settle or an unmount write can fail after its
 // tab has gone. A failed save files one toast and one Notices row per file;
-// later failures keep that row, and a save removes it. Dismissing the row
-// keeps the failure, so the next one files a row again. An edit refusal gets
-// its own notice. Returns how many files have a failed save, from the same
-// records, for the title bar.
-//
-// A live document's path can also open in the plain editor, when main
-// cannot open its session, so each writer's failure is its own record: a
-// plain save never clears what the engine has not settled, nor the reverse.
+// later failures keep that row. Each writer's failure is its own record, so
+// a plain save never clears what the engine has not settled, nor the
+// reverse: the row goes once no writer for the file still fails, and its Try
+// again retries every writer that does. Dismissing the row keeps the
+// failures, so the next one files a row again. An edit refusal gets its own
+// notice. Returns how many files have a failed save, from the same records,
+// for the title bar.
 export function useDocumentSaveNotices(input: {
   workspaceId: string;
   report: (failure: DocumentSaveFailure) => void;
@@ -89,62 +97,66 @@ export function useDocumentSaveNotices(input: {
   useEffect(() => {
     const owner = workspaceId;
     const current = () => latest.current.workspaceId === owner;
-    const failures = new Map<string, FailedSave>();
-    const counted = () => setFailedSaves({
-      workspaceId: owner,
-      count: new Set([...failures.values()].map((failure) => failure.path)).size,
-    });
+    // By path.
+    const files = new Map<string, FailedFile>();
+    const counted = () => setFailedSaves({ workspaceId: owner, count: files.size });
+    const identity = (path: string) => `document-save:${owner}:${path}`;
     // The newest session for each path. A session that closes after a newer
     // one opened has been replaced: its late states describe nothing open.
     const sessions = new Map<string, { sessionId: string; closing: boolean }>();
-    const file = (identity: string, path: string, failure: FailedSave, cause?: unknown): void => {
-      failure.reported = true;
+    const fileNotice = (path: string, failed: FailedFile, cause?: unknown): void => {
+      failed.reported = true;
       latest.current.report({
-        ...saveFailureNotice(path, failure.readOnly),
+        ...saveFailureNotice(path, [...failed.writers.values()].some((failure) => failure.readOnly)),
         ...(cause === undefined ? {} : { cause }),
-        identity,
+        identity: identity(path),
         retry: () => {
-          // Try again removes the row. The failure of the save it starts
+          // Try again removes the row. The failure of a save it starts
           // files the row again.
-          failure.reported = false;
-          failure.retry(failure);
+          failed.reported = false;
+          for (const failure of [...failed.writers.values()]) failure.retry(failure);
         },
         onDismiss: () => {
-          failure.reported = false;
+          failed.reported = false;
         },
       });
     };
-    const fail = (identity: string, path: string, readOnly: boolean, retry: FailedSave["retry"], cause?: unknown): void => {
-      const known = failures.get(identity);
-      const failure = known ?? { path, reported: false, readOnly, retry };
-      failure.readOnly = readOnly;
-      failure.retry = retry;
-      if (!known) {
-        failures.set(identity, failure);
+    const fail = (path: string, writer: Writer, readOnly: boolean, retry: WriterFailure["retry"], cause?: unknown): void => {
+      let failed = files.get(path);
+      if (!failed) {
+        failed = { reported: false, writers: new Map() };
+        files.set(path, failed);
         counted();
       }
-      if (!failure.reported) file(identity, path, failure, cause);
+      const failure = failed.writers.get(writer) ?? { readOnly, retry };
+      failure.readOnly = readOnly;
+      failure.retry = retry;
+      failed.writers.set(writer, failure);
+      if (!failed.reported) fileNotice(path, failed, cause);
     };
-    const forget = (identity: string): void => {
-      if (!failures.delete(identity)) return;
-      latest.current.clear(identity);
+    const forget = (path: string, writer: Writer): void => {
+      const failed = files.get(path);
+      if (!failed?.writers.delete(writer) || failed.writers.size > 0) return;
+      files.delete(path);
+      latest.current.clear(identity(path));
       counted();
     };
-    const reopen = (identity: string, path: string, failure: FailedSave): void => {
-      if (!current() || failures.get(identity) !== failure) return;
-      forget(identity);
+    const reopen = (path: string, writer: Writer, failure: WriterFailure): void => {
+      if (!current() || files.get(path)?.writers.get(writer) !== failure) return;
+      forget(path, writer);
       latest.current.open(path);
     };
     // Main settles whichever session is open for the document when Try
     // again is clicked. A settle that could not start files the row again.
-    const retryDocument = (identity: string, path: string) => (failure: FailedSave) => {
+    const retryDocument = (path: string) => (failure: WriterFailure) => {
       void bridge().retryEngineYDocSave({ workspaceId: owner, path }).then(
         (outcome) => {
-          if (outcome === "closed") reopen(identity, path, failure);
+          if (outcome === "closed") reopen(path, "engine", failure);
         },
         (error: unknown) => {
-          if (current() && failures.get(identity) === failure && !failure.reported) {
-            file(identity, path, failure, error);
+          const failed = files.get(path);
+          if (current() && failed?.writers.get("engine") === failure && !failed.reported) {
+            fileNotice(path, failed, error);
           }
         },
       );
@@ -161,23 +173,21 @@ export function useDocumentSaveNotices(input: {
       const newest = sessions.get(event.path);
       if (event.closing && newest && newest.sessionId !== event.sessionId && !newest.closing) return;
       sessions.set(event.path, { sessionId: event.sessionId, closing: event.closing === true });
-      const identity = `document-save:${owner}:${event.path}`;
       // An author-capacity refusal has its own notice, including one a Try
       // again ran into, so this document's save notice gives way to it.
-      if (event.authorCapacity) forget(identity);
-      else if (event.saveFailure) fail(identity, event.path, event.saveFailure.readOnly, retryDocument(identity, event.path));
-      else if (event.access || REPLACES_FAILURE.has(event.state.kind)) forget(identity);
+      if (event.authorCapacity) forget(event.path, "engine");
+      else if (event.saveFailure) fail(event.path, "engine", event.saveFailure.readOnly, retryDocument(event.path));
+      else if (event.access || REPLACES_FAILURE.has(event.state.kind)) forget(event.path, "engine");
     });
     const textSave = (save: TextSave): void => {
       if (!current() || save.workspaceId !== owner) return;
-      const identity = `text-save:${owner}:${save.path}`;
       const failed = save.failure;
       if (!failed) {
-        forget(identity);
+        forget(save.path, "text");
         return;
       }
-      fail(identity, save.path, false, (failure) => {
-        if (!failed.retry()) reopen(identity, save.path, failure);
+      fail(save.path, "text", false, (failure) => {
+        if (!failed.retry()) reopen(save.path, "text", failure);
       }, failed.cause);
     };
     textSaveListeners.add(textSave);

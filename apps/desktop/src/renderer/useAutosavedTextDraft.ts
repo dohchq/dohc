@@ -556,8 +556,8 @@ export function useAutosavedTextDraft(props: {
           setSaveState(SAVED_HERE);
         }
       } catch (error) {
-        // After the write answered, the throw is a conflict's or a missing
-        // baseline's, and the answer has been reported.
+        // A write that rejected is a failed save. A throw after the write
+        // answered comes from handling that answer, which is reported above.
         if (!answered) reportSave({ cause: error });
         if (activeLocalBuffer.current !== props.localBuffer) {
           if (issuedText !== null) {
