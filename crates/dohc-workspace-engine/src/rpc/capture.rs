@@ -986,7 +986,15 @@ impl EngineService {
             )
             .await
             .map_err(map_runtime)?;
-        Ok(match outcome {
+        for facts in &outcome.record_facts {
+            crate::events::emit_record_events(&self.events, &open.workspace_id, facts);
+        }
+        crate::events::emit_automation_claimed(
+            &self.events,
+            &open.workspace_id,
+            &outcome.automation_claims,
+        );
+        Ok(match outcome.outcome {
             RecoveryImportOutcome::Imported { moment_id } => {
                 json!({"committed":true,"outcome":"imported","momentId":moment_id})
             }

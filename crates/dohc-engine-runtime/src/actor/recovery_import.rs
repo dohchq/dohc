@@ -31,6 +31,12 @@ pub enum RecoveryImportOutcome {
     Covered,
 }
 
+pub struct RecoveryImportResult {
+    pub outcome: RecoveryImportOutcome,
+    pub record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+    pub automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
+}
+
 fn refused(reason: &'static str) -> RuntimeError {
     RuntimeError::RecoveryImportRefused { reason }
 }
@@ -43,7 +49,7 @@ impl ActorHandle {
         input: RecoveryImport,
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
-    ) -> Result<RecoveryImportOutcome, RuntimeError> {
+    ) -> Result<RecoveryImportResult, RuntimeError> {
         self.run(move |store, cache| {
             let key = &input.key;
             let digest = hex_sha256(serde_json::json!([
@@ -53,6 +59,8 @@ impl ActorHandle {
             ]).to_string().as_bytes());
             let moment_id = format!("moment-import-recovery-{digest}");
             let receipt_id = format!("import-recovery-{digest}");
+            let mut record_facts = Vec::new();
+            let mut automation_claims = Vec::new();
             let result = store.write_with(faults.as_ref(), |tx| -> Result<_, RuntimeError> {
                 dohc_engine_domain::validate_addressable_plaintext_path(&input.path)?;
                 if input.updates.len() > 4096 || input.text.len() > 16 * 1024 * 1024 ||
@@ -133,6 +141,11 @@ impl ActorHandle {
                         super::ydoc::journal_recovery_append_in_tx(tx, key, &snapshot.path,
                             marker.content_kind, &update.update, update.actor_origin_id.as_deref(),
                             update.attribution.as_ref(), &mut append, now_ms)?;
+                        if !append.deduped && let Some(facts) = append.record_facts.take() {
+                            automation_claims.extend(dohc_engine_domain::claim_automation_triggers_in_tx(tx, &key.workspace_id, &facts, now_ms)
+                                .map_err(|_| refused("automation-claim-failed"))?);
+                            record_facts.push(facts);
+                        }
                     }
                     // Retirement requires the entire checkpoint text to be durable.
                     let actual = dohc_engine_sync::prepare_local_ydoc_lineage_in_tx(tx, key)?;
@@ -155,7 +168,7 @@ impl ActorHandle {
             })?;
             cache.remove(key);
             match result {
-                TxnOutcome::Committed(outcome) => Ok(outcome),
+                TxnOutcome::Committed(outcome) => Ok(RecoveryImportResult {outcome, record_facts, automation_claims}),
                 TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
             }
         }).await

@@ -177,6 +177,7 @@ async fn import(
     actor
         .capture_import_recovery(root.to_path_buf(), input, 20, Arc::new(NoFaults))
         .await
+        .map(|result| result.outcome)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
