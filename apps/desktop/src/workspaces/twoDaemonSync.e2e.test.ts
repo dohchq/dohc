@@ -433,7 +433,7 @@ it.skipIf(engine.missing).each([
     const adapter = await source.sessions.run(source.workspace, async ({client, workspace}) => new VersionedLiveAdapter(client, workspace, {workspaceId}));
     await adapter.ensureMainVersion({workspaceId});
     await adapter.writeTextFile({workspaceId, versionId: "main", path, text: hasId ? `---\nid: ${recordId}\n---\n\n${body}` : body,
-      publish: true, metadata: {origin: "api"}, author: {kind: "human", humanId: "local-person"}});
+      publish: true, metadata: {origin: "api"}, author: {kind: "human", humanId: "local:person"}});
     capture = createWorkspaceEngineCapture({...source.workspace, rustEngineSessions: source.sessions, settleDebounceMs: 60_000,
       onError: (context, error) => errors.push(`${context}: ${String(error)}`)});
     const seeded = await capture.openYDocSession({path, contentKind: "richdoc", onRemoteUpdate: () => undefined});
@@ -445,7 +445,7 @@ it.skipIf(engine.missing).each([
         patchFrontmatter(scratch, new Map([["beforeActivation", "ordinary-owner"]]));
         return Y.encodeStateAsUpdate(scratch, before);
       } finally { scratch.destroy(); }
-    }, undefined, { actorOriginId: "local-person", attribution: { actorKind: "human" }, idempotencyKey: "native-baseline" });
+    }, undefined, { actorOriginId: "local:person", attribution: { actorKind: "human" }, idempotencyKey: "native-baseline" });
     await seeded.settleNow();
     await pushUntilDrained(relay);
     await seeded.close();
@@ -491,7 +491,7 @@ it.skipIf(engine.missing).each([
         try {Y.applyUpdate(scratch, Y.encodeStateAsUpdate(doc)); const before = Y.encodeStateVector(scratch);
           patchFrontmatter(scratch, new Map([["Name", "Manual"]])); return Y.encodeStateAsUpdate(scratch, before);
         } finally {scratch.destroy();}
-      }, undefined, {actorOriginId: "local-person", attribution: {actorKind: "human"}, idempotencyKey: "native-name"});
+      }, undefined, {actorOriginId: "local:person", attribution: {actorKind: "human"}, idempotencyKey: "native-name"});
     } else {
       await expect(capture.flush()).rejects.toThrow("did not settle");
       expect(session.doc.getMap("frontmatter").get("id")).toBe(pending.recordId);
@@ -578,12 +578,12 @@ it.skipIf(engine.missing).each([
           claimId: "atc_pending", automationId: `collection:${collectionId}#finish`, trigger: { key: "pending-button" },
           recordId, collectionPath: "tasks", depth: 0, state: "running", attempts: 1, run: 1,
           createdAtMs: Date.now(), updatedAtMs: Date.now(),
-          change: { kind: "button", authorOriginId: null, actorKind: "human", onBehalfOf: "local-person", sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0 },
+          change: { kind: "button", authorOriginId: null, actorKind: "human", onBehalfOf: "local:person", sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0 },
         };
         const store = createAutomationRunStore(rootA, resolveWorkspaceMetadataDir);
         const signal = new AbortController().signal;
         const edits = (signal: AbortSignal) => collectionRecordWrites(desktopRecordEditContext({
-          capture: capture!, workspaceRoot: rootA, person: {kind: "human", humanId: "local-person"},
+          capture: capture!, workspaceRoot: rootA, person: {kind: "human", humanId: "local:person"},
           withAdapter: work => work(adapter), signal,
           onCaptureSettled: () => () => undefined,
         }));
@@ -598,7 +598,7 @@ it.skipIf(engine.missing).each([
           postNotice: async () => { throw new Error("No notices in this test"); }, readMessageBody: async () => null, recipientVerdicts: async () => [],
         };
         await expect(runCollectionAutomation(dependencies, { claim, automation, collection: {path: "tasks", name: "Tasks"},
-          roster: {kind: "owner", ownerUserId: "local-person", grants: []}, signal, stopped: signal })).resolves.toMatchObject({kind: "done"});
+          roster: {kind: "owner", ownerUserId: "local:person", grants: []}, signal, stopped: signal })).resolves.toMatchObject({kind: "done"});
         const runs = (await store.runsOf(claim.automationId, claim.claimId)).runs;
         expect(runs[0]!.applied.flatMap(entry => entry.writes)).toMatchObject([
           {kind: "field", recordId, path, field: "Name", before: "Manual", after: "Automation", sharedFileUpdate: {appendKey: expect.any(String)}},
@@ -662,7 +662,7 @@ it.skipIf(engine.missing).each([true, false])(
     const relayRoot = await createTestScratch("dohc-open-adoption-relay-");
     const relayServer = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
     const relayConnection = { baseUrl: relayServer.baseUrl, token: `test:${workspaceId}` };
-    const person = { kind: "human", humanId: "local-person" } as const;
+    const person = { kind: "human", humanId: "local:person" } as const;
     const path = "tasks/pending.md";
     let owner: Awaited<ReturnType<typeof openLiveDaemonWorkspace>> | undefined;
     let capture: WorkspaceEngineCapture | undefined;
@@ -703,7 +703,7 @@ it.skipIf(engine.missing).each([true, false])(
           patchFrontmatter(scratch, new Map([["Name", "Manual"]]));
           return Y.encodeStateAsUpdate(scratch, before);
         } finally { scratch.destroy(); }
-      }, undefined, { actorOriginId: "local-person", attribution: { actorKind: "human" }, idempotencyKey: "owner-name" });
+      }, undefined, { actorOriginId: "local:person", attribution: { actorKind: "human" }, idempotencyKey: "owner-name" });
       if (!hasId) await session.settleNow();
       // The editor keeps its lease throughout adoption and capture settlement.
       await capture.flush();
@@ -721,7 +721,7 @@ it.skipIf(engine.missing).each([true, false])(
       const recordId = session.doc.getMap("frontmatter").get("id");
       if (typeof recordId !== "string") throw new Error("Adoption did not install the record id.");
       const record = await adapter.getCollectionRecord({ collectionPath: "tasks", recordId, historyLimit: 100 });
-      expect(record.history.find(change => change.field === "Name")).toMatchObject({ authorOriginId: "local-person" });
+      expect(record.history.find(change => change.field === "Name")).toMatchObject({ authorOriginId: "local:person" });
       const head = await adapter.readTextFile({ workspaceId, versionId: "main", path });
       const moments = (await capture.listMoments({ limit: 100 })).moments;
       expect(moments.find(moment => moment.id === head?.latestMomentId)?.authors).toContainEqual(person);
@@ -764,11 +764,11 @@ it.skipIf(engine.missing).each(["new", "legacy", "accepted"] as const)(
       await relay.claim();
       await source.chats.ensureGeneralChannel({ workspaceId });
       await pushUntilDrained(relay);
-      await capture.writeAuthoredFile(join(rootA, "tasks/collection.yaml"), "fields: {}\n", { kind: "human", humanId: "local-person" });
+      await capture.writeAuthoredFile(join(rootA, "tasks/collection.yaml"), "fields: {}\n", { kind: "human", humanId: "local:person" });
       const captureClient = await source.sessions.run(source.workspace, async ({ client }) => client);
       if (!captureClient.onEvent) throw new Error("The real daemon has no capture event source.");
       const onEvent = captureClient.onEvent.bind(captureClient);
-      const person = { kind: "human", humanId: "local-person" } as const;
+      const person = { kind: "human", humanId: "local:person" } as const;
       const context = desktopRecordEditContext({
         capture, workspaceRoot: rootA, person, signal: new AbortController().signal,
         withAdapter: work => source.sessions.run(source.workspace, ({ client, workspace }) =>
@@ -842,6 +842,7 @@ it.skipIf(engine.missing).each(["new", "legacy", "accepted"] as const)(
         expect(rows.length).toBeGreaterThan(0);
         for (const row of rows) {
           const payload = JSON.parse(row.payload_json);
+          expect(payload.attributionUnavailable).toBeUndefined();
           expect(payload.authors).toEqual(queueStyle !== "new" && payload.path === record.path
             ? [{ kind: "agent", agentId: "signed-out-agent", onBehalfOf: "local:123" }, { kind: "automation", automationId: "signed-out-rule", onBehalfOf: "local:456", depth: 1 }]
             : undefined);
@@ -884,7 +885,7 @@ it.skipIf(engine.missing)(
     const relayRoot = await createTestScratch("dohc-person-restore-relay-");
     const relayServer = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
     const relayConnection = { baseUrl: relayServer.baseUrl, token: "test:" + workspaceId };
-    const person = { kind: "human", humanId: "local-person" } as const;
+    const person = { kind: "human", humanId: "local:person" } as const;
     let owner: Awaited<ReturnType<typeof openLiveDaemonWorkspace>> | undefined;
     let capture: WorkspaceEngineCapture | undefined;
     const restoreMoment = async (momentId: string) =>
@@ -910,6 +911,7 @@ it.skipIf(engine.missing)(
         ).get(workspaceId, restoredMomentId) as { payload_json: string } | undefined;
         expect(JSON.parse(sent!.payload_json)).toMatchObject({ metadata: { origin: "restore" } });
         expect(JSON.parse(sent!.payload_json).authors).toBeUndefined();
+        expect(JSON.parse(sent!.payload_json).attributionUnavailable).toBeUndefined();
         expect(sent!.payload_json).not.toContain(person.humanId);
       } finally {
         relayDb.close();
