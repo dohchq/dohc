@@ -123,6 +123,8 @@ fn arbitrary_envelope() -> impl Strategy<Value = ReplicationEnvelope> {
         .prop_map(
             |(workspace_id, origin_id, origin_seq, relay_seq, op_kind, payload, recorded_at_ms)| {
                 ReplicationEnvelope {
+                    settlement_admission: None,
+                    admitted_author_snapshot: None,
                     workspace_id,
                     origin_id,
                     origin_seq,
@@ -189,6 +191,8 @@ fn arbitrary_secret_envelope() -> impl Strategy<Value = ReplicationEnvelope> {
         .prop_map(
             |(workspace_id, origin_id, origin_seq, relay_seq, op_kind, payload, recorded_at_ms)| {
                 ReplicationEnvelope {
+                    settlement_admission: None,
+                    admitted_author_snapshot: None,
                     workspace_id,
                     origin_id,
                     origin_seq,
@@ -282,6 +286,8 @@ fn copied_stores_apply_independently_and_keep_commits_after_reopen() {
     let (_first_scratch, mut first) = copied_empty_store();
     let (_second_scratch, mut second) = copied_empty_store();
     let envelope = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: "ws".to_owned(),
         origin_id: "peer-a".to_owned(),
         origin_seq: 0,
@@ -313,6 +319,8 @@ fn copied_stores_apply_independently_and_keep_commits_after_reopen() {
 fn seed_valid_envelope_applies() {
     let (_scratch, mut engine) = store();
     let envelope = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: "ws".to_owned(),
         origin_id: "peer-a".to_owned(),
         origin_seq: 0,
@@ -333,6 +341,8 @@ fn seed_valid_envelope_applies() {
 fn seed_non_secret_op_kind_is_rejected_by_secret_applier() {
     let (_scratch, mut engine) = store();
     let envelope = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: "ws".to_owned(),
         origin_id: "peer-a".to_owned(),
         origin_seq: 1,
@@ -351,6 +361,8 @@ fn seed_non_secret_op_kind_is_rejected_by_secret_applier() {
 fn seed_empty_workspace_id_is_refused_before_mutation() {
     let (_scratch, mut engine) = store();
     let envelope = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: String::new(),
         origin_id: "peer-a".to_owned(),
         origin_seq: 0,

@@ -112,6 +112,8 @@ fn envelope(
     recorded_at_ms: i64,
 ) -> ReplicationEnvelope {
     ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: WS.to_owned(),
         origin_id: origin_id.to_owned(),
         origin_seq,

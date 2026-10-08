@@ -218,6 +218,9 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
                 "relay-api-version-too-new",
             );
         }
+        RuntimeError::Relay(RelayError::SettlementProofBudget) => {
+            return WireError::new(ErrorCode::Overloaded, "settlement-proof-budget");
+        }
         RuntimeError::Relay(RelayError::OriginDiverged) => {
             return WireError::new(ErrorCode::InvalidParams, "relay-origin-diverged");
         }
@@ -333,7 +336,8 @@ fn map_relay_code(error: RelayError) -> ErrorCode {
         // QuotaExceeded, which reads as a persistent ceiling.
         RelayError::DiscussionRateLimited
         | RelayError::LinkReadRateLimited
-        | RelayError::ShareAccessRateLimited => ErrorCode::Overloaded,
+        | RelayError::ShareAccessRateLimited
+        | RelayError::SettlementProofBudget => ErrorCode::Overloaded,
         RelayError::NoProgress => ErrorCode::RelayNoProgress,
         RelayError::BlobMissing => ErrorCode::BlobMissing,
         RelayError::BlobReferenceMissing => ErrorCode::BlobReferenceMissing,
@@ -548,6 +552,19 @@ mod tests {
             error.retry,
             dohc_engine_protocol::Retryability::AfterBackoff
         );
+    }
+
+    #[test]
+    fn settlement_proof_budget_has_a_retryable_rpc_error() {
+        let error = super::map_runtime(dohc_engine_runtime::RuntimeError::Relay(
+            dohc_engine_sync::RelayError::SettlementProofBudget,
+        ));
+        assert_eq!(error.code, dohc_engine_protocol::ErrorCode::Overloaded);
+        assert_eq!(
+            error.retry,
+            dohc_engine_protocol::Retryability::AfterBackoff
+        );
+        assert_eq!(error.message, "settlement-proof-budget");
     }
 
     #[test]

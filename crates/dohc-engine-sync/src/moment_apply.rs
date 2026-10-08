@@ -365,12 +365,40 @@ pub fn apply_moment_envelope_detailed(
     envelope.validate()?;
     let search_policy = search_policy_for_store(store);
     apply_envelope_with(store, envelope, faults, |tx, envelope| {
-        let payload: MomentAppendPayload =
-            Deserialize::deserialize(&envelope.payload).map_err(|_| SyncError::InvalidInput {
+        let mut payload: MomentAppendPayload = Deserialize::deserialize(&envelope.payload)
+            .map_err(|_| SyncError::InvalidInput {
                 reason: "moment.append payload is malformed",
             })?;
+        if matches!(
+            envelope.settlement_admission,
+            Some(crate::SettlementAdmission::Accepted { .. })
+        ) {
+            // The authenticated snapshot is stored by admission refresh.
+            // Ordinary client author shapes grant no authority to that snapshot.
+            crate::settlement_publication::admitted_moment_authors(envelope)?.ok_or(
+                SyncError::InvalidInput {
+                    reason: "accepted settlement has no authors",
+                },
+            )?;
+            payload.authors = None;
+        }
         validate_payload_bounds(&payload)?;
         validate_payload(&payload)?;
+        if payload.authors.iter().flatten().any(|author| {
+            matches!(
+                author,
+                MomentAuthor::Human {
+                    human_name: Some(_),
+                    ..
+                } | MomentAuthor::Link {
+                    identity: LinkMomentAuthor::Live { .. }
+                }
+            )
+        }) {
+            return Err(SyncError::InvalidInput {
+                reason: "hosted moment authors require relay settlement admission",
+            });
+        }
         if payload
             .authors
             .iter()

@@ -141,3 +141,11 @@ it("rejects discovery errors and bounds response bytes before parsing", async ()
     await expect(session!.documents(new AbortController().signal)).rejects.toThrow();
   }
 });
+
+it("keeps the credential account when discovery contains a client-selected account", async () => {
+  const f = fixture();
+  f.fetch.mockResolvedValue(new Response(JSON.stringify({ok: true, accountId: "forged-account", documents: []})));
+  const session = (await f.connection.connect(f.workspace, new AbortController().signal))!;
+  await session.documents(new AbortController().signal);
+  expect(session).toMatchObject({bearer: "secret", accountId: "owner"});
+});

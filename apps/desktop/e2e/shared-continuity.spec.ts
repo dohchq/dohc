@@ -645,7 +645,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
           (window as unknown as { dohcDesktop: Api }).dohcDesktop.readEngineMoment(payload), { workspaceId: recipientWorkspaceId, momentId })).toEqual({ moment: null });
       }
       await typeAfter(page, H1, ` ${R1}`);
-      // A shared session reports saved once the server's host accepted the edit.
+      // The recipient session reports host acceptance without a local artifact.
       await expect(saveState(page)).toHaveAttribute("data-state", "saved-to-host", { timeout: 60_000 });
       await expectNoCollectionNotice(page);
     });

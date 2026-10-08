@@ -2,56 +2,13 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use dohc_engine_domain::{SecretMomentRecord, VersionRecord};
 use dohc_engine_storage::{StorageError, hex_sha256};
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::OptionalExtension;
+use rusqlite::{Transaction, params};
 
 use crate::{SyncError, journal_local_op_in_tx};
 
 /// The relay derives person attribution; installation identities stay local.
 pub(crate) fn omit_local_person_authors(payload: &mut serde_json::Value) -> bool {
-    omit_authors(payload, |author| {
-        author.get("kind").and_then(serde_json::Value::as_str) != Some("human")
-            || snapshot_person(author)
-    })
-}
-
-/// A journaled moment keeps only authors some publishing route can carry:
-/// agents, automations, the exact marker, and a relay-admitted live author
-/// snapshot's account holder or link holder. This computer's people and the
-/// grant authority the relay accepted a shared change under (named, direct
-/// link and public) stay in this computer's history. Any other author is left
-/// for validation to judge.
-pub(crate) fn omit_private_authors(payload: &mut serde_json::Value) -> bool {
-    omit_authors(payload, journaled_author)
-}
-
-fn journaled_author(author: &serde_json::Value) -> bool {
-    match author.get("kind").and_then(serde_json::Value::as_str) {
-        Some("human") => snapshot_person(author),
-        Some("link") => {
-            author.get("publicPrincipalId").is_some() && author.get("grantId").is_none()
-        }
-        Some("named" | "public") => false,
-        _ => true,
-    }
-}
-
-/// A relay-admitted live author snapshot names a relay account with the name
-/// the relay stored for it.
-fn snapshot_person(author: &serde_json::Value) -> bool {
-    author
-        .get("humanName")
-        .and_then(serde_json::Value::as_str)
-        .is_some()
-        && author
-            .get("humanId")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|id| relay_person_id(id).is_some())
-}
-
-fn omit_authors(
-    payload: &mut serde_json::Value,
-    keep: impl Fn(&serde_json::Value) -> bool,
-) -> bool {
     let Some(authors) = payload
         .get_mut("authors")
         .and_then(serde_json::Value::as_array_mut)
@@ -59,7 +16,17 @@ fn omit_authors(
         return false;
     };
     let original_len = authors.len();
-    authors.retain(keep);
+    authors.retain(|author| {
+        author.get("kind").and_then(serde_json::Value::as_str) != Some("human")
+            || (author
+                .get("humanName")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+                && author
+                    .get("humanId")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|id| relay_person_id(id).is_some()))
+    });
     if authors.len() == original_len {
         return false;
     }
@@ -72,34 +39,38 @@ fn omit_authors(
     true
 }
 
-/// Authors as the publishing route carries them. The relay takes a live
-/// settlement's public snapshot authors only from the native service
-/// credential, and only for a live settlement moment. Every other moment, on
-/// every credential, follows the client rule.
-pub(crate) fn omit_unpublishable_authors(
-    payload: &mut serde_json::Value,
-    native_settlements: bool,
-) -> bool {
-    if native_settlements && live_settlement_moment(payload) {
-        omit_private_authors(payload)
-    } else {
-        omit_client_identity_authors(payload)
+pub(crate) fn mark_unproven_hosted_authors(payload: &mut serde_json::Value) -> bool {
+    if payload.get("settlementReference").is_some() {
+        return false;
     }
-}
-
-/// The relay's native settlement moment ID: `moment-ydoc-` and 64 lowercase
-/// hex digits.
-fn live_settlement_moment(payload: &serde_json::Value) -> bool {
+    let hosted = payload
+        .get("authors")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|authors| {
+            authors.iter().any(|author| {
+                match author.get("kind").and_then(serde_json::Value::as_str) {
+                    Some("human") => {
+                        author["humanName"].as_str().is_some()
+                            && author["humanId"]
+                                .as_str()
+                                .is_some_and(|id| relay_person_id(id).is_some())
+                    }
+                    Some("public" | "named" | "link") => true,
+                    _ => false,
+                }
+            })
+        });
+    if !hosted {
+        return false;
+    }
     payload
-        .get("momentId")
-        .and_then(serde_json::Value::as_str)
-        .and_then(|id| id.strip_prefix("moment-ydoc-"))
-        .is_some_and(|digest| {
-            digest.len() == 64
-                && digest
-                    .bytes()
-                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-        })
+        .as_object_mut()
+        .expect("moment payload is an object")
+        .remove("authors");
+    payload["attributionUnavailable"] =
+        serde_json::json!({"settlementId":"unavailable","reason":"unproven-hosted-authors"});
+    payload["metadata"]["summary"] = serde_json::Value::String("Attribution unavailable".into());
+    true
 }
 
 /// Client log routes cannot attest relay identities. Keep local coverage intact.
@@ -128,70 +99,6 @@ pub(crate) fn omit_client_identity_authors(payload: &mut serde_json::Value) -> b
     payload.get("authors") != before.as_ref()
 }
 
-/// The journal leaves out the grant authority the relay credited a shared
-/// change under, and the client rule names omitted relay credit with the exact
-/// marker. Only this moment's durable authors still show that omission, so
-/// they are read here and never copied into the payload.
-fn mark_omitted_shared_credit(
-    conn: &rusqlite::Connection,
-    workspace_id: &str,
-    payload: &mut serde_json::Value,
-) -> Result<bool, SyncError> {
-    let marked = payload
-        .get("authors")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|authors| {
-            authors.iter().any(|author| {
-                author.get("kind").and_then(serde_json::Value::as_str) == Some("unattributed")
-            })
-        });
-    let moment_id = match payload.get("momentId").and_then(serde_json::Value::as_str) {
-        Some(moment_id) if !marked => moment_id,
-        _ => return Ok(false),
-    };
-    let stored: Option<Option<String>> = conn
-        .prepare_cached("SELECT author_json FROM moments WHERE workspace_id=?1 AND moment_id=?2")
-        .and_then(|mut statement| {
-            statement
-                .query_row(params![workspace_id, moment_id], |row| row.get(0))
-                .optional()
-        })
-        .map_err(SyncError::corrupt)?;
-    let Some(Some(stored)) = stored else {
-        return Ok(false);
-    };
-    let stored = serde_json::from_str::<serde_json::Value>(&stored).map_err(|_| {
-        SyncError::InvalidInput {
-            reason: "stored moment author is malformed",
-        }
-    })?;
-    let omitted = stored.as_array().is_some_and(|authors| {
-        authors.iter().any(|author| {
-            matches!(
-                author.get("kind").and_then(serde_json::Value::as_str),
-                Some("named" | "public" | "link")
-            ) && !journaled_author(author)
-        })
-    });
-    if !omitted {
-        return Ok(false);
-    }
-    let marker = serde_json::json!({"kind": "unattributed"});
-    let object = payload
-        .as_object_mut()
-        .expect("moment payload is an object");
-    match object
-        .get_mut("authors")
-        .and_then(serde_json::Value::as_array_mut)
-    {
-        Some(authors) => authors.push(marker),
-        None => {
-            object.insert("authors".to_owned(), serde_json::json!([marker]));
-        }
-    }
-    Ok(true)
-}
-
 pub(crate) fn relay_person_id(id: &str) -> Option<&str> {
     (!id.starts_with("local:")).then_some(id)
 }
@@ -204,23 +111,23 @@ pub(crate) fn repair_queued_moment_authors(
     native_settlements: bool,
 ) -> Result<dohc_engine_storage::TxnOutcome<()>, SyncError> {
     use dohc_engine_storage::TxnOutcome;
-    let repairs = store.read_with(|conn| {
-        let mut repairs = Vec::new();
-        for (index, op) in ops.iter().enumerate() {
+    let repairs: Vec<_> = ops
+        .iter()
+        .enumerate()
+        .filter_map(|(index, op)| {
             if op.op_kind != "moment.append" {
-                continue;
+                return None;
             }
             let mut payload = op.payload.clone();
-            let mut repaired = omit_unpublishable_authors(&mut payload, native_settlements);
-            if !(native_settlements && live_settlement_moment(&payload)) {
-                repaired |= mark_omitted_shared_credit(conn, &op.workspace_id, &mut payload)?;
-            }
-            if repaired {
-                repairs.push((index, payload));
-            }
-        }
-        Ok::<_, SyncError>(repairs)
-    })?;
+            let marked = mark_unproven_hosted_authors(&mut payload);
+            let omitted = if native_settlements {
+                omit_local_person_authors(&mut payload)
+            } else {
+                omit_client_identity_authors(&mut payload)
+            };
+            (marked || omitted).then_some((index, payload))
+        })
+        .collect();
     if repairs.is_empty() {
         return Ok(TxnOutcome::Committed(()));
     }
@@ -238,6 +145,9 @@ pub(crate) fn repair_queued_moment_authors(
                 )
                 .map_err(SyncError::persist)?;
             if updated == 1 {
+                let mut marked = op.clone();
+                marked.payload = payload.clone();
+                crate::settlement_publication::refresh_in_tx(tx, &marked)?;
                 repaired.push((index, payload));
             }
         }
@@ -310,7 +220,9 @@ pub fn journal_moment_append_in_tx(
     moment_id: &str,
 ) -> Result<(), SyncError> {
     let (payload, recorded_at_ms) = moment_payload_in_tx(tx, workspace_id, moment_id, None)?;
-    journal_local_op_in_tx(tx, workspace_id, "moment.append", &payload, recorded_at_ms).map(|_| ())
+    let sequence =
+        journal_local_op_in_tx(tx, workspace_id, "moment.append", &payload, recorded_at_ms)?;
+    mark_export_in_tx(tx, workspace_id, sequence, payload, recorded_at_ms)
 }
 
 /// [`journal_moment_append_in_tx`] with `before` as the whole public before group.
@@ -322,7 +234,26 @@ pub(crate) fn journal_moment_append_from_in_tx(
 ) -> Result<(), SyncError> {
     let (payload, recorded_at_ms) =
         moment_payload_in_tx(tx, workspace_id, moment_id, Some(before))?;
-    journal_local_op_in_tx(tx, workspace_id, "moment.append", &payload, recorded_at_ms).map(|_| ())
+    let sequence =
+        journal_local_op_in_tx(tx, workspace_id, "moment.append", &payload, recorded_at_ms)?;
+    mark_export_in_tx(tx, workspace_id, sequence, payload, recorded_at_ms)
+}
+
+pub(crate) fn journal_saved_settlement_moment_in_tx(
+    tx: &Transaction<'_>,
+    workspace: &str,
+    moment: &str,
+    before: Option<&PortableBefore>,
+) -> Result<i64, SyncError> {
+    use rusqlite::OptionalExtension;
+    let prior:Option<i64>=tx.query_row("SELECT origin_seq FROM replication_log WHERE workspace_id=?1 AND op_kind='moment.append' AND imported=0 AND json_extract(payload_json,'$.momentId')=?2 LIMIT 1",params![workspace,moment],|r|r.get(0)).optional().map_err(SyncError::corrupt)?;
+    if let Some(sequence) = prior {
+        return Ok(sequence);
+    }
+    let (payload, recorded) = moment_payload_in_tx(tx, workspace, moment, before)?;
+    let sequence = journal_local_op_in_tx(tx, workspace, "moment.append", &payload, recorded)?;
+    mark_export_in_tx(tx, workspace, sequence, payload, recorded)?;
+    Ok(sequence)
 }
 
 pub(crate) fn moment_append_payload_in_tx(
@@ -331,6 +262,38 @@ pub(crate) fn moment_append_payload_in_tx(
     moment_id: &str,
 ) -> Result<(serde_json::Value, i64), SyncError> {
     moment_payload_in_tx(tx, workspace_id, moment_id, None)
+}
+
+fn mark_export_in_tx(
+    tx: &Transaction<'_>,
+    workspace: &str,
+    sequence: i64,
+    payload: serde_json::Value,
+    recorded: i64,
+) -> Result<(), SyncError> {
+    if payload.get("attributionUnavailable").is_none() {
+        return Ok(());
+    }
+    let origin: String = tx
+        .query_row(
+            "SELECT origin_id FROM sync_identity WHERE workspace_id=?1",
+            [workspace],
+            |r| r.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    let envelope = crate::ReplicationEnvelope {
+        workspace_id: workspace.into(),
+        origin_id: origin,
+        origin_seq: sequence,
+        relay_seq: None,
+        op_kind: "moment.append".into(),
+        payload,
+        recorded_at_ms: recorded,
+        settlement_admission: None,
+        admitted_author_snapshot: None,
+    };
+    crate::settlement_publication::refresh_in_tx(tx, &envelope)?;
+    Ok(())
 }
 
 fn moment_payload_in_tx(
@@ -479,7 +442,21 @@ fn moment_payload_in_tx(
             object.insert(field.clone(), value.clone());
         }
     }
-    omit_private_authors(&mut payload);
+    let unavailable: Option<(String,String)> = tx.query_row("SELECT settlement_id,reason FROM live_settlement_attribution_unavailable WHERE workspace_id=?1 AND moment_id=?2",params![workspace_id,row.moment_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(SyncError::corrupt)?;
+    if let Some((id, reason)) = unavailable {
+        payload
+            .as_object_mut()
+            .expect("moment payload is an object")
+            .remove("authors");
+        payload["attributionUnavailable"] = serde_json::json!({"settlementId":id,"reason":reason});
+        payload["metadata"]["summary"] =
+            serde_json::Value::String("Attribution unavailable".into());
+    }
+    let proof_ready: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM live_device_settlements s JOIN live_settlement_publication_states p USING(settlement_id) WHERE s.workspace_id=?1 AND s.moment_id=?2)",params![workspace_id,row.moment_id],|r|r.get(0)).map_err(SyncError::corrupt)?;
+    if !proof_ready {
+        mark_unproven_hosted_authors(&mut payload);
+    }
+    omit_local_person_authors(&mut payload);
     if let Some(authors) = payload
         .get_mut("authors")
         .and_then(serde_json::Value::as_array_mut)

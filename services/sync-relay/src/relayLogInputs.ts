@@ -23,20 +23,15 @@ export function namedShareOrigin(shareId: string, userId: string, originId: stri
 // alone mints human, public, named, and link attribution.
 const CLIENT_MOMENT_AUTHOR_KINDS: ReadonlySet<unknown> = new Set(["agent", "automation"]);
 
-export function assertClientLogProvenance(originId: string, rawOps: unknown[]): void {
+export function assertClientLogProvenance(originId: string, rawOps: unknown[], deferMomentRefusal = false): void {
   assertUnreservedLogOrigin(originId);
   for (const raw of rawOps) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
     const op = raw as Record<string, unknown>;
     if (op.opKind !== "moment.append") continue;
     const payload = op.payload as Record<string, unknown> | null;
-    const authors = payload?.authors;
-    if (authors == null) continue;
-    if (!Array.isArray(authors) || authors.length === 0 || authors.some((author: unknown) =>
-      !author || typeof author !== "object" || Array.isArray(author) ||
-      (!CLIENT_MOMENT_AUTHOR_KINDS.has((author as Record<string, unknown>).kind) &&
-        !((author as Record<string, unknown>).kind === "unattributed" && Object.keys(author).length === 1))
-    )) throw relayError("authorship_mismatch");
+    if (deferMomentRefusal && payload && Object.hasOwn(payload, "settlementReference")) continue;
+    if (clientMomentAuthorsRefused(payload?.authors) && !deferMomentRefusal) throw relayError("authorship_mismatch");
   }
 }
 
@@ -54,15 +49,16 @@ function assertUnreservedLogOrigin(originId: string): void {
 
 // A credential derived for the native service can publish the public authors
 // already recorded in its live settlements. Other moments keep client rules.
-export function assertServiceReplicaLogProvenance(originId: string, rawOps: unknown[]): void {
+export function assertServiceReplicaLogProvenance(originId: string, rawOps: unknown[], deferMomentRefusal = false): void {
   assertUnreservedLogOrigin(originId);
   for (const raw of rawOps) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
     const op = raw as Record<string, unknown>;
     if (op.opKind !== "moment.append") continue;
     const payload = op.payload as Record<string, unknown> | null;
+    if (deferMomentRefusal && payload && Object.hasOwn(payload, "settlementReference")) continue;
     if (typeof payload?.momentId !== "string" || !/^moment-ydoc-[0-9a-f]{64}$/.test(payload.momentId)) {
-      assertClientLogProvenance(originId, [raw]);
+      assertClientLogProvenance(originId, [raw], deferMomentRefusal);
       continue;
     }
     const authors = payload.authors;
@@ -99,6 +95,13 @@ function assertMomentAutomationAuthor(author: Record<string, unknown>): void {
   if (!Number.isSafeInteger(author.depth) || (author.depth as number) < 0 || (author.depth as number) > MAX_AUTOMATION_DEPTH)
     throw new TypeError("Invalid automation depth.");
   if (Buffer.byteLength(JSON.stringify(author), "utf8") > MAX_LIVE_AUTHOR_ENTRY_BYTES) throw new TypeError("Automation author is too large.");
+}
+
+export function clientMomentAuthorsRefused(authors:unknown):boolean {
+  return authors != null && (!Array.isArray(authors) || authors.length === 0 || authors.some((author: unknown) =>
+    !author || typeof author !== "object" || Array.isArray(author) ||
+    (!CLIENT_MOMENT_AUTHOR_KINDS.has((author as Record<string, unknown>).kind) &&
+      !((author as Record<string, unknown>).kind === "unattributed" && Object.keys(author).length === 1))));
 }
 
 export function parseLogOp(value: unknown): SyncRelayLogInput {

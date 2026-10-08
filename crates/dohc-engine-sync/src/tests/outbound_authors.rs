@@ -70,144 +70,6 @@ fn client_author_repair_preserves_work_authors_and_one_exact_marker() {
     }
 }
 
-#[test]
-fn journaled_payload_keeps_public_snapshot_authors_and_omits_private_ones() {
-    let human = json!({"kind":"human","humanId":"person","onBehalfOf":"owner"});
-    // The relay mints these from the grant it accepted a change under, and
-    // this computer keeps them in its own history only.
-    let named = json!({"kind":"named","userId":"ana","grantId":"grant","grantGeneration":2});
-    let link = json!({"kind":"link","grantId":"grant","grantGeneration":2,"principalId":"holder"});
-    let public = json!({"kind":"public","principalId":"holder","grantId":"grant"});
-    // A relay-admitted live author snapshot names these. The publishing
-    // route decides whether they travel.
-    let snapshot_human = json!({"kind":"human","humanId":"person","humanName":"Person"});
-    let snapshot_link = json!({"kind":"link","publicPrincipalId":"public_1","label":"Anonymous"});
-    let declared = json!({"kind":"agent","agentId":"writer","agentName":"Writer","onBehalfOf":"person","depth":0});
-    let agent =
-        json!({"kind":"agent","agentId":"agent","onBehalfOf":"owner","agentRunId":"run","depth":3});
-    let automation =
-        json!({"kind":"automation","automationId":"rule","onBehalfOf":"owner","depth":4});
-    let local_agent = json!({"kind":"agent","agentId":"agent","onBehalfOf":"local:123","agentRunId":"run","depth":3});
-    let local_automation =
-        json!({"kind":"automation","automationId":"rule","onBehalfOf":"local:456","depth":4});
-    let unattributed = json!({"kind":"unattributed"});
-    let recipient = json!({"kind":"human","humanId":"recipient","humanName":"Recipient"});
-    for (authors, expected) in [
-        (json!([unattributed]), Some(json!([unattributed]))),
-        (json!([human, unattributed]), Some(json!([unattributed]))),
-        (
-            json!([unattributed, agent]),
-            Some(json!([unattributed, agent])),
-        ),
-        (
-            json!([recipient, unattributed]),
-            Some(json!([recipient, unattributed])),
-        ),
-        (json!([human]), None),
-        (json!([named]), None),
-        (json!([human, named, link, public]), None),
-        (json!([human, agent]), Some(json!([agent]))),
-        (json!([agent, named, link]), Some(json!([agent]))),
-        (
-            json!([snapshot_human, named, snapshot_link, link]),
-            Some(json!([snapshot_human, snapshot_link])),
-        ),
-        (
-            json!([snapshot_human, declared]),
-            Some(json!([snapshot_human, declared])),
-        ),
-        (
-            json!([snapshot_link, declared]),
-            Some(json!([snapshot_link, declared])),
-        ),
-        // An unknown kind is not this repair's to judge; validation refuses it.
-        (
-            json!([named, {"kind":"other"}]),
-            Some(json!([{"kind":"other"}])),
-        ),
-        (json!([agent, automation]), Some(json!([agent, automation]))),
-        (json!([local_agent]), Some(json!([local_agent]))),
-        (json!([local_automation]), Some(json!([local_automation]))),
-        (
-            json!([human, local_agent, local_automation, agent, automation]),
-            Some(json!([local_agent, local_automation, agent, automation])),
-        ),
-    ] {
-        let mut payload = json!({"authors": authors, "momentId":"moment"});
-        crate::outbound::omit_private_authors(&mut payload);
-        assert_eq!(payload.get("authors"), expected.as_ref());
-        assert_eq!(payload["momentId"], "moment");
-        let repaired = payload.clone();
-        assert!(!crate::outbound::omit_private_authors(&mut payload));
-        assert_eq!(payload, repaired);
-    }
-}
-
-#[test]
-fn publishing_route_carries_public_authors_only_for_a_native_live_settlement() {
-    let snapshot_human = json!({"kind":"human","humanId":"recipient","humanName":"Recipient"});
-    let snapshot_link = json!({"kind":"link","publicPrincipalId":"public_1","label":"Anonymous"});
-    let declared = json!({"kind":"agent","agentId":"writer","agentName":"Writer","onBehalfOf":"recipient","depth":1});
-    let unattributed = json!({"kind":"unattributed"});
-    let named = json!({"kind":"named","userId":"recipient","grantId":"grant","grantGeneration":1});
-    let link = json!({"kind":"link","grantId":"grant","grantGeneration":1,"principalId":"holder"});
-    let public = json!({"kind":"public","principalId":"holder","grantId":"grant"});
-    let authors = json!([snapshot_human, snapshot_link, declared, unattributed]);
-    let client = json!([unattributed, declared]);
-    let settlement = format!("moment-ydoc-{}", "a".repeat(64));
-    for (moment_id, native_settlements, authors, expected) in [
-        (settlement.clone(), true, authors.clone(), authors.clone()),
-        // Grant authority never travels, not even from the native service.
-        (
-            settlement.clone(),
-            true,
-            json!([snapshot_human, named, link, public, declared]),
-            json!([snapshot_human, declared]),
-        ),
-        // An ordinary credential publishes the client rule.
-        (settlement.clone(), false, authors.clone(), client.clone()),
-        // The relay checks the native settlement ID, so any other moment
-        // follows the client rule on the native credential too.
-        (
-            "record-moment".to_owned(),
-            true,
-            authors.clone(),
-            client.clone(),
-        ),
-        (
-            format!("moment-ydoc-{}", "A".repeat(64)),
-            true,
-            authors.clone(),
-            client.clone(),
-        ),
-        (
-            format!("moment-ydoc-{}", "a".repeat(63)),
-            true,
-            authors.clone(),
-            client.clone(),
-        ),
-        (
-            format!("{settlement}x"),
-            true,
-            authors.clone(),
-            client.clone(),
-        ),
-    ] {
-        let mut payload = json!({"authors": authors, "momentId": moment_id});
-        crate::outbound::omit_unpublishable_authors(&mut payload, native_settlements);
-        assert_eq!(
-            payload["authors"], expected,
-            "{moment_id} {native_settlements}"
-        );
-        let repaired = payload.clone();
-        assert!(!crate::outbound::omit_unpublishable_authors(
-            &mut payload,
-            native_settlements
-        ));
-        assert_eq!(payload, repaired);
-    }
-}
-
 fn queue_legacy_moment(engine: &mut EngineStore, authors: serde_json::Value) -> serde_json::Value {
     queue_legacy_moment_as(engine, "record-moment", authors)
 }
@@ -247,6 +109,11 @@ fn queue_legacy_moment_as(
                 crate::outbound::moment_append_payload_in_tx(tx, "ws", moment_id)?;
             // Restore the affected build's already-serialized author list.
             payload["authors"] = authors;
+            payload
+                .as_object_mut()
+                .unwrap()
+                .remove("attributionUnavailable");
+            payload["metadata"]["summary"] = serde_json::Value::Null;
             journal_local_op_in_tx(tx, "ws", "moment.append", &payload, recorded_at_ms)?;
             legacy = payload;
             Ok::<_, SyncError>(())
@@ -255,8 +122,7 @@ fn queue_legacy_moment_as(
     legacy
 }
 
-/// Writes a moment and journals it as the current build does, which leaves
-/// the private grant authority out of the payload.
+/// Writes a moment and journals it as the current build does.
 fn queue_fresh_moment_as(engine: &mut EngineStore, moment_id: &str, authors: &serde_json::Value) {
     seed_identity(engine);
     VersionedTextStore::new(engine)
@@ -296,53 +162,26 @@ const PRIVATE_AUTHOR_FIELDS: [&str; 5] = [
     "principalId",
 ];
 
-/// A fresh journal leaves out the grant authority the relay credited a shared
-/// change under. An ordinary credential still publishes the exact marker in
-/// its place. The native settlement route and this computer's History keep
-/// their own authors, and no private field reaches the wire.
+/// A fresh journal never publishes the grant authority the relay credited a
+/// shared change under. Without a settlement proof, both credentials publish
+/// the moment as attribution unavailable, and no private field reaches the
+/// wire. A live settlement's moment ID earns no exception. A moment without
+/// relay credit keeps its authors.
 #[test]
-fn a_fresh_journal_publishes_the_ordinary_marker_for_omitted_shared_credit() {
+fn a_fresh_journal_publishes_unproved_shared_credit_as_unavailable() {
     let agent = json!({"kind":"agent","agentId":"writer","onBehalfOf":"owner","depth":0});
     let named = json!({"kind":"named","userId":"ana","grantId":"grant","grantGeneration":1});
     let link = json!({"kind":"link","grantId":"grant","grantGeneration":1,"principalId":"holder"});
     let public = json!({"kind":"public","principalId":"holder","grantId":"grant"});
     let person = json!({"kind":"human","humanId":"recipient","humanName":"Recipient"});
-    let marker = json!({"kind":"unattributed"});
     let settlement = format!("moment-ydoc-{}", "a".repeat(64));
-    for (moment_id, authors, native, ordinary) in [
-        (
-            settlement.as_str(),
-            json!([agent, named]),
-            Some(json!([agent])),
-            Some(json!([agent, marker])),
-        ),
-        // Any other moment follows the client rule on the native credential too.
-        (
-            "record-moment",
-            json!([agent, link]),
-            Some(json!([agent, marker])),
-            Some(json!([agent, marker])),
-        ),
-        (
-            settlement.as_str(),
-            json!([public]),
-            None,
-            Some(json!([marker])),
-        ),
-        // A snapshot person already stands as the one marker.
-        (
-            settlement.as_str(),
-            json!([person, agent, named]),
-            Some(json!([person, agent])),
-            Some(json!([marker, agent])),
-        ),
-        // Without shared credit, nothing is marked.
-        (
-            settlement.as_str(),
-            json!([agent]),
-            Some(json!([agent])),
-            Some(json!([agent])),
-        ),
+    for (moment_id, authors, published) in [
+        (settlement.as_str(), json!([agent, named]), None),
+        ("record-moment", json!([agent, link]), None),
+        (settlement.as_str(), json!([public]), None),
+        (settlement.as_str(), json!([person, agent, named]), None),
+        // Without relay credit, the authors travel.
+        (settlement.as_str(), json!([agent]), Some(json!([agent]))),
     ] {
         for native_settlements in [true, false] {
             let (_scratch, _path, mut engine) = open_store();
@@ -363,14 +202,14 @@ fn a_fresh_journal_publishes_the_ordinary_marker_for_omitted_shared_credit() {
                 native_settlements,
             )
             .unwrap();
-            let expected = if native_settlements {
-                &native
-            } else {
-                &ordinary
-            };
             assert_eq!(
                 ops[1].payload.get("authors"),
-                expected.as_ref(),
+                published.as_ref(),
+                "{moment_id} {native_settlements}"
+            );
+            assert_eq!(
+                ops[1].payload.get("attributionUnavailable").is_some(),
+                published.is_none(),
                 "{moment_id} {native_settlements}"
             );
             // The wire payload is durable before sending, so an echo matches.
@@ -395,20 +234,30 @@ fn a_fresh_journal_publishes_the_ordinary_marker_for_omitted_shared_credit() {
                 .get_moment("ws", moment_id)
                 .unwrap()
                 .unwrap();
-            assert_eq!(
-                serde_json::from_str::<serde_json::Value>(history.author_json.as_deref().unwrap())
+            if published.is_some() {
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(
+                        history.author_json.as_deref().unwrap()
+                    )
                     .unwrap(),
-                authors
-            );
+                    authors
+                );
+            } else {
+                assert_eq!(history.author_json, None);
+                assert_eq!(
+                    history.metadata_summary.as_deref(),
+                    Some("Attribution unavailable")
+                );
+            }
         }
     }
 }
 
-/// The marker for a fresh journal's omitted credit is what the relay first
-/// received, so a retry after a lost acknowledgement and the relay's echo
-/// both match it exactly.
+/// The unavailable mark a fresh journal gives unproved shared credit is what
+/// the relay first received, so a retry after a lost acknowledgement and the
+/// relay's echo both match it exactly.
 #[test]
-fn a_fresh_ordinary_marker_pushes_retries_and_echoes_exactly() {
+fn a_fresh_unavailable_mark_pushes_retries_and_echoes_exactly() {
     let authors = json!([
         {"kind":"agent","agentId":"writer","onBehalfOf":"owner","depth":0},
         {"kind":"named","userId":"ana","grantId":"grant","grantGeneration":1}
@@ -424,12 +273,10 @@ fn a_fresh_ordinary_marker_pushes_retries_and_echoes_exactly() {
         SyncPassOutcome::CrashedAfterRemoteCommit
     );
     let first = client.transport().pushes.lock().unwrap()[0].ops.clone();
+    assert!(first[1].payload.get("authors").is_none());
     assert_eq!(
-        first[1].payload["authors"],
-        json!([
-            {"kind":"agent","agentId":"writer","onBehalfOf":"owner","depth":0},
-            {"kind":"unattributed"}
-        ])
+        first[1].payload["attributionUnavailable"]["reason"],
+        "unproven-hosted-authors"
     );
     let wire = first[1].payload.to_string();
     for field in PRIVATE_AUTHOR_FIELDS {
@@ -464,9 +311,10 @@ fn a_fresh_ordinary_marker_pushes_retries_and_echoes_exactly() {
         .get_moment("ws", "record-moment")
         .unwrap()
         .unwrap();
+    assert_eq!(history.author_json, None);
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(history.author_json.as_deref().unwrap()).unwrap(),
-        authors
+        history.metadata_summary.as_deref(),
+        Some("Attribution unavailable")
     );
 }
 
@@ -475,21 +323,21 @@ fn queued_human_and_shared_authors_are_durably_repaired_before_push_and_echo() {
     for authors in [
         json!([{"kind":"human","humanId":"person"}]),
         json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"}]),
+        json!([{"kind":"link","publicPrincipalId":"recipient","label":"Edit link"}]),
         json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"},{"kind":"unattributed"}]),
         json!([{"kind":"link","linkId":"link"},{"kind":"named","userId":"recipient"}]),
         json!([{"kind":"human","humanId":"person"},{"kind":"agent","agentId":"agent","onBehalfOf":"owner"}]),
-        // A live settlement names the collaborator the relay accepted the
-        // edit from. This computer keeps it; the wire carries only the marker.
+        // Without a settlement proof, the grant authority a shared change was
+        // accepted under, and a relay-admitted snapshot, mark the moment unavailable.
         json!([{"kind":"named","userId":"ana","grantId":"grant","grantGeneration":1}]),
         json!([{"kind":"agent","agentId":"agent","onBehalfOf":"owner"},{"kind":"link","grantId":"grant","grantGeneration":1,"principalId":"holder"}]),
-        // An enrolled owner's hosted agent edit settles with the relay-admitted
-        // account holder beside the declared agent.
         json!([{"kind":"human","humanId":"owner","humanName":"Owner"},{"kind":"agent","agentId":"writer","onBehalfOf":"owner","depth":0}]),
         json!([{"kind":"link","publicPrincipalId":"public_1","label":"Anonymous"},{"kind":"agent","agentId":"writer","agentName":"Writer"}]),
     ] {
         let (_scratch, path, mut engine) = open_store();
         let original_authors = authors.clone();
         let mut expected = queue_legacy_moment(&mut engine, authors);
+        crate::outbound::mark_unproven_hosted_authors(&mut expected);
         crate::outbound::omit_client_identity_authors(&mut expected);
         let client = RelaySyncClient::new(FakeRelay::default());
         let faults = ScriptedFaults::crash_at(FaultPoint::SyncAfterPushBeforeCursorPersist);
@@ -521,11 +369,19 @@ fn queued_human_and_shared_authors_are_durably_repaired_before_push_and_echo() {
             .get_moment("ws", "record-moment")
             .unwrap()
             .unwrap();
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(history.author_json.as_deref().unwrap())
-                .unwrap(),
-            original_authors
-        );
+        if expected.get("attributionUnavailable").is_some() {
+            assert_eq!(history.author_json, None);
+            assert_eq!(
+                history.metadata_summary.as_deref(),
+                Some("Attribution unavailable")
+            );
+        } else {
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(history.author_json.as_deref().unwrap())
+                    .unwrap(),
+                original_authors
+            );
+        }
         client
             .push_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 2003, 0)
             .unwrap();
@@ -642,12 +498,17 @@ fn a_crashed_queued_author_repair_sends_nothing_and_recovers_on_retry() {
         .unwrap();
     assert_eq!(
         client.transport().pushes.lock().unwrap()[0].ops[1].payload["authors"],
-        json!([{"kind":"unattributed"}])
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        client.transport().pushes.lock().unwrap()[0].ops[1].payload["attributionUnavailable"]["reason"],
+        "unproven-hosted-authors"
     );
 }
 
 #[test]
-fn service_host_author_repair_keeps_a_live_settlement_public_snapshot() {
+fn service_host_author_repair_refuses_unproved_relay_identities() {
+    // Even a native live settlement carries relay identities only with a proof.
     let settlement = format!("moment-ydoc-{}", "a".repeat(64));
     let (_scratch, _path, mut engine) = open_store();
     let public = json!([
@@ -656,7 +517,7 @@ fn service_host_author_repair_keeps_a_live_settlement_public_snapshot() {
         {"kind":"agent","agentId":"writer","agentName":"Writer","onBehalfOf":"recipient","depth":1},
         {"kind":"unattributed"}
     ]);
-    // The grant authority this computer credited stays in its own history.
+    // The grant authority this computer credited beside the public snapshot.
     let mut authors = public.clone();
     authors.as_array_mut().unwrap().extend([
         json!({"kind":"named","userId":"recipient","grantId":"grant","grantGeneration":1}),
@@ -667,14 +528,20 @@ fn service_host_author_repair_keeps_a_live_settlement_public_snapshot() {
     engine
         .write_with(&NoFaults, |tx| {
             let (payload, _) = crate::outbound::moment_append_payload_in_tx(tx, "ws", &settlement)?;
-            assert_eq!(payload["authors"], public);
+            assert!(payload.get("authors").is_none());
+            assert_eq!(
+                payload["attributionUnavailable"]["reason"],
+                "unproven-hosted-authors"
+            );
             Ok::<_, SyncError>(())
         })
         .unwrap();
     let mut ops = list_replication_ops(&engine, "ws", "local", -1, 10).unwrap();
     assert_eq!(ops[1].payload, legacy);
     crate::outbound::repair_queued_moment_authors(&mut engine, &mut ops, &NoFaults, true).unwrap();
-    assert_eq!(ops[1].payload["authors"], public);
+    let mut expected = legacy;
+    crate::outbound::mark_unproven_hosted_authors(&mut expected);
+    assert_eq!(ops[1].payload, expected);
     assert_eq!(
         list_replication_ops(&engine, "ws", "local", -1, 10).unwrap(),
         ops
@@ -683,17 +550,166 @@ fn service_host_author_repair_keeps_a_live_settlement_public_snapshot() {
         .get_moment("ws", &settlement)
         .unwrap()
         .unwrap();
+    assert_eq!(moment.author_json, None);
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(moment.author_json.as_deref().unwrap()).unwrap(),
-        authors
+        moment.metadata_summary.as_deref(),
+        Some("Attribution unavailable")
     );
 }
 
+fn assert_unproven_authors_marked_before_first_push(authors: serde_json::Value) {
+    for native_settlements in [false, true] {
+        let (_scratch, path, mut engine) = open_store();
+        queue_legacy_moment(&mut engine, authors.clone());
+        engine
+            .write_with(&NoFaults, |tx| {
+                let (payload, _) =
+                    crate::outbound::moment_append_payload_in_tx(tx, "ws", "record-moment")?;
+                assert!(payload.get("authors").is_none());
+                assert_eq!(
+                    payload["attributionUnavailable"]["reason"],
+                    "unproven-hosted-authors"
+                );
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        let mut ops = list_replication_ops(&engine, "ws", "local", -1, 10).unwrap();
+        crate::outbound::repair_queued_moment_authors(
+            &mut engine,
+            &mut ops,
+            &NoFaults,
+            native_settlements,
+        )
+        .unwrap();
+        assert!(ops[1].payload.get("authors").is_none());
+        assert_eq!(
+            ops[1].payload["attributionUnavailable"]["reason"],
+            "unproven-hosted-authors"
+        );
+        drop(engine);
+        let mut engine = EngineStore::open(&path, 2001).unwrap();
+        assert_eq!(
+            list_replication_ops(&engine, "ws", "local", -1, 10).unwrap(),
+            ops
+        );
+        let moment = VersionedTextStore::new(&mut engine)
+            .get_moment("ws", "record-moment")
+            .unwrap()
+            .unwrap();
+        assert_eq!(moment.author_json, None);
+        assert_eq!(
+            moment.metadata_summary.as_deref(),
+            Some("Attribution unavailable")
+        );
+        let client = RelaySyncClient::new(FakeRelay::default());
+        client
+            .push_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 2002, 0)
+            .unwrap();
+        let pushed = client.transport().pushes.lock().unwrap()[0].ops.clone();
+        assert_eq!(pushed, ops);
+        *client.transport().pull.lock().unwrap() = Some(PullResponse {
+            ops: pushed,
+            next_cursor: 2,
+            has_more: false,
+        });
+        client
+            .pull_chat_workspace(
+                &mut engine,
+                &mut WriterDocCache::new(),
+                "ws",
+                &NoFaults,
+                &NoLiveLeases,
+                2003,
+            )
+            .expect("the first repaired push must have an exact own echo");
+    }
+}
+
 #[test]
-fn nameless_account_owner_is_omitted_on_both_lanes_without_changing_history() {
-    let owner = json!({"kind":"human","humanId":"8b183289-9c6e-46e9-bc2d-2e08dc144ea2"});
+fn nameless_account_human_keeps_agent_coauthors_for_relay_stamping() {
+    let account = "8b183289-9c6e-46e9-bc2d-2e08dc144ea2";
+    let agent = json!({"kind":"agent","agentId":"agent","onBehalfOf":account,"agentRunId":"run"});
+    let authors = json!([{"kind":"human","humanId":account}, agent]);
+    let mut payload = json!({"authors":authors,"metadata":{"origin":"api","summary":"Edited"}});
+    let original = payload.clone();
+    assert!(!crate::outbound::mark_unproven_hosted_authors(&mut payload));
+    assert_eq!(payload, original);
+    assert!(crate::outbound::omit_local_person_authors(&mut payload));
+    assert_eq!(payload["authors"], json!([agent]));
+    assert!(payload.get("attributionUnavailable").is_none());
+    assert_eq!(payload["metadata"]["summary"], "Edited");
+
+    for native_settlements in [false, true] {
+        let (_scratch, _path, mut engine) = open_store();
+        queue_legacy_moment(&mut engine, authors.clone());
+        engine
+            .write_with(&NoFaults, |tx| {
+                let (payload, _) =
+                    crate::outbound::moment_append_payload_in_tx(tx, "ws", "record-moment")?;
+                assert_eq!(payload["authors"], json!([agent]));
+                assert!(payload.get("attributionUnavailable").is_none());
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        let mut ops = list_replication_ops(&engine, "ws", "local", -1, 10).unwrap();
+        crate::outbound::repair_queued_moment_authors(
+            &mut engine,
+            &mut ops,
+            &NoFaults,
+            native_settlements,
+        )
+        .unwrap();
+        assert_eq!(ops[1].payload["authors"], json!([agent]));
+        assert!(ops[1].payload.get("attributionUnavailable").is_none());
+        assert_eq!(
+            list_replication_ops(&engine, "ws", "local", -1, 10).unwrap(),
+            ops
+        );
+        let moment = VersionedTextStore::new(&mut engine)
+            .get_moment("ws", "record-moment")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(moment.author_json.as_deref().unwrap())
+                .unwrap(),
+            authors
+        );
+        assert_eq!(moment.metadata_summary, None);
+    }
+}
+
+#[test]
+fn recipient_with_empty_relay_name_is_marked_before_first_push() {
+    assert_unproven_authors_marked_before_first_push(json!([
+        {"kind":"human","humanId":"8b183289-9c6e-46e9-bc2d-2e08dc144ea2","humanName":""}
+    ]));
+}
+
+#[test]
+fn unlabelled_link_is_marked_before_first_push() {
+    for author in [
+        json!({"kind":"link","publicPrincipalId":"recipient"}),
+        json!({"kind":"link","grantId":"grant","grantGeneration":2,"principalId":"holder"}),
+    ] {
+        assert_unproven_authors_marked_before_first_push(json!([author]));
+    }
+}
+
+#[test]
+fn public_and_named_authors_are_marked_before_first_push() {
+    for author in [
+        json!({"kind":"public","principalId":"holder","grantId":"grant"}),
+        json!({"kind":"named","userId":"recipient","grantId":"grant","grantGeneration":1}),
+    ] {
+        assert_unproven_authors_marked_before_first_push(json!([author]));
+    }
+}
+
+#[test]
+fn both_lanes_keep_nameless_local_history_and_remove_unproved_hosted_history() {
+    let owner = json!({"kind":"human","humanId":"local:8b183289-9c6e-46e9-bc2d-2e08dc144ea2"});
     let recipient = json!({"kind":"human","humanId":"recipient","humanName":"Recipient"});
-    // The native lane carries public authors only for a live settlement.
+    // Even a native live settlement carries relay identities only with a proof.
     let settlement = format!("moment-ydoc-{}", "a".repeat(64));
     for native_settlements in [false, true] {
         for authors in [json!([owner]), json!([owner, recipient])] {
@@ -703,9 +719,7 @@ fn nameless_account_owner_is_omitted_on_both_lanes_without_changing_history() {
                 .write_with(&NoFaults, |tx| {
                     let (payload, _) =
                         crate::outbound::moment_append_payload_in_tx(tx, "ws", &settlement)?;
-                    let expected =
-                        (authors.as_array().unwrap().len() > 1).then(|| json!([recipient]));
-                    assert_eq!(payload.get("authors"), expected.as_ref());
+                    assert!(payload.get("authors").is_none());
                     Ok::<_, SyncError>(())
                 })
                 .unwrap();
@@ -717,14 +731,13 @@ fn nameless_account_owner_is_omitted_on_both_lanes_without_changing_history() {
                 native_settlements,
             )
             .unwrap();
-            let expected = (authors.as_array().unwrap().len() > 1).then(|| {
-                if native_settlements {
-                    json!([recipient])
-                } else {
-                    json!([{"kind":"unattributed"}])
-                }
-            });
-            assert_eq!(ops[1].payload.get("authors"), expected.as_ref());
+            assert!(ops[1].payload.get("authors").is_none());
+            if authors.as_array().unwrap().len() > 1 {
+                assert_eq!(
+                    ops[1].payload["attributionUnavailable"]["reason"],
+                    "unproven-hosted-authors"
+                );
+            }
             assert_eq!(
                 list_replication_ops(&engine, "ws", "local", -1, 10).unwrap(),
                 ops
@@ -733,11 +746,21 @@ fn nameless_account_owner_is_omitted_on_both_lanes_without_changing_history() {
                 .get_moment("ws", &settlement)
                 .unwrap()
                 .unwrap();
-            assert_eq!(
-                serde_json::from_str::<serde_json::Value>(moment.author_json.as_deref().unwrap())
+            if authors.as_array().unwrap().len() > 1 {
+                assert_eq!(moment.author_json, None);
+                assert_eq!(
+                    moment.metadata_summary.as_deref(),
+                    Some("Attribution unavailable")
+                );
+            } else {
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(
+                        moment.author_json.as_deref().unwrap()
+                    )
                     .unwrap(),
-                authors
-            );
+                    authors
+                );
+            }
         }
     }
 }
@@ -747,8 +770,6 @@ fn new_moment_payload_omits_installation_delegation_without_changing_history() {
     let (_scratch, _path, mut engine) = open_store();
     let authors = json!([
         {"kind":"human","humanId":"local:123"},
-        {"kind":"human","humanId":"owner","humanName":"Owner"},
-        {"kind":"link","publicPrincipalId":"public_1","label":"Anonymous"},
         {"kind":"agent","agentId":"agent","onBehalfOf":"local:123","depth":2},
         {"kind":"automation","automationId":"rule","onBehalfOf":"local:123","depth":3},
         {"kind":"agent","agentId":"account-agent","onBehalfOf":"account"}
@@ -758,13 +779,9 @@ fn new_moment_payload_omits_installation_delegation_without_changing_history() {
         .write_with(&NoFaults, |tx| {
             let (payload, _) =
                 crate::outbound::moment_append_payload_in_tx(tx, "ws", "record-moment")?;
-            // The relay-admitted snapshot authors wait for the publishing
-            // route; this computer's person does not.
             assert_eq!(
                 payload["authors"],
                 json!([
-                    {"kind":"human","humanId":"owner","humanName":"Owner"},
-                    {"kind":"link","publicPrincipalId":"public_1","label":"Anonymous"},
                     {"kind":"agent","agentId":"agent","depth":2},
                     {"kind":"automation","automationId":"rule","depth":3},
                     {"kind":"agent","agentId":"account-agent","onBehalfOf":"account"}

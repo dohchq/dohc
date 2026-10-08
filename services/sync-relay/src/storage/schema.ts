@@ -1,3 +1,4 @@
+import {initializeHostedSettlementSchema} from "./hostedSettlementSchema";
 import { initializeLiveAuthorshipSchema, originalLiveJournalSql, liveAuthorSchemaMarked, assertLiveAuthorColumns } from "./liveAuthorshipSchema";
 import { initializeAppPublicationSchema } from "./publicationSchema";
 import { initializeAppCollectionSchema } from "./appCollectionSchema";
@@ -1233,6 +1234,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeLinkCreationSchema(db);
     initializeAppCollectionSchema(db);
     initializeLiveAuthorshipSchema(db);
+    initializeHostedSettlementSchema(db);
     initializeNoticeSchema(db);
     initializeShareNoticeDeliverySchema(db);
     initializeAutomationHostSchema(db);

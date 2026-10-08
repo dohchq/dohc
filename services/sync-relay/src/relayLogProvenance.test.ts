@@ -117,6 +117,20 @@ describe("native service settlement provenance", () => {
 });
 
 describe("client log provenance", () => {
+  it("does not acknowledge an altered retry as a refusal of an accepted moment", async () => {
+    const storage = await testStorage();
+    const handler = testHandler(storage);
+    await claimWorkspace(handler, "owner", "workspace");
+    const op = {originSeq:0,opKind:"moment.append",recordedAtMs:1,payload:{momentId:"ordinary"}};
+    const upload = (payload: Record<string,unknown>) => handler(request("owner", "/sync/workspace/log",
+      jsonBody({originId:"device",ops:[{...op,payload}]})));
+    expect((await upload(op.payload)).status).toBe(200);
+    const changed = await upload({...op.payload,authors:[RELAY_AUTHORS[0]]});
+    expect(changed.status).toBe(409);
+    expect(await changed.json()).toMatchObject({code:"conflict"});
+    expect(storage.fetchLogCoordinate({workspaceId:"workspace",originId:"device",originSeq:0})?.settlementAdmission)
+      .toBeUndefined();
+  });
   it("keeps member origin tuple boundaries unambiguous", () => {
     const origins = [
       namedShareOrigin("share:a", "b", "c"),
@@ -151,18 +165,37 @@ describe("client log provenance", () => {
     const share = await createShare(handler, "owner", "workspace", {recipientUserId: "recipient", paths: ["poll"], access: "edit"});
     const refusals = [
       ...RELAY_ORIGIN_PREFIXES.map(prefix => [{originId: `${prefix}grant`, ops: []}, 400, "bad_request"] as const),
-      ...RELAY_AUTHORS.map(author => [{originId: "device", ops: [{originSeq: 0, opKind: "moment.append", recordedAtMs: 1, payload: {authors: [author]}}]}, 403, "authorship_mismatch"] as const),
-      ...publicLiveAuthors.filter(author => author.kind !== "agent" && author.kind !== "unattributed").map(author => [{originId: "device", ops: [{originSeq: 0, opKind: "moment.append", recordedAtMs: 1,
+      ...RELAY_AUTHORS.map((author,index) => [{originId: `device-${index}`, ops: [{originSeq: 0, opKind: "moment.append", recordedAtMs: 1, payload: {authors: [author]}}]}, 403, "authorship_mismatch"] as const),
+      ...publicLiveAuthors.filter(author => author.kind !== "agent" && author.kind !== "unattributed").map((author,index) => [{originId: `native-device-${index}`, ops: [{originSeq: 0, opKind: "moment.append", recordedAtMs: 1,
         payload: {momentId: nativeMomentId, authors: [author]}}]}, 403, "authorship_mismatch"] as const),
     ];
     for (const [user, url] of [["owner", "/sync/workspace/log"], ["recipient", `/sync/shares/${share}/log`]]) {
       for (const [body, status, code] of refusals) {
         const response = await handler(request(user!, url!, jsonBody(body)));
-        expect(response.status).toBe(status);
-        expect(await response.json()).toMatchObject({code});
+        if(user === "owner" && code === "authorship_mismatch"){
+          expect(response.status).toBe(200);
+          expect(await response.json()).toMatchObject({currentMaxOriginSeq:0,settlementRefusals:[{originSeq:0,reason:"authorship-mismatch"}]});
+        }else{
+          expect(response.status).toBe(status);
+          expect(await response.json()).toMatchObject({code});
+        }
       }
     }
-    expect(storage.fetchLogPage({workspaceId: "workspace", sinceRelaySeq: 0, limit: 100})).toEqual({rows: [], nextCursor: 0, hasMore: false});
+    const page=storage.fetchLogPage({workspaceId:"workspace",sinceRelaySeq:0,limit:100});
+    expect(page.rows).toHaveLength(RELAY_AUTHORS.length + publicLiveAuthors.filter(author => author.kind !== "agent" && author.kind !== "unattributed").length);
+    expect(page.rows.every(row=>row.settlementAdmission?.status === "refused")).toBe(true);
+    expect(page.rows.every(row=>!Object.hasOwn(JSON.parse(row.payloadJson), "authors"))).toBe(true);
+    const served = await handler(request("owner", "/sync/workspace/log?since=0&limit=100"));
+    expect(served.status).toBe(200);
+    const body = await served.json() as {ops: {payload: Record<string, unknown>}[]};
+    expect(body.ops).toHaveLength(RELAY_AUTHORS.length + publicLiveAuthors.filter(author => author.kind !== "agent" && author.kind !== "unattributed").length);
+    expect(body.ops.every(op=>!Object.hasOwn(op.payload, "authors"))).toBe(true);
+    const retry = await handler(request("owner", "/sync/workspace/log", jsonBody({
+      originId: "device-0", ops: [{originSeq: 0, opKind: "moment.append", recordedAtMs: 1,
+        payload: {authors: [RELAY_AUTHORS[0]]}}],
+    })));
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toMatchObject({inserted:0, skipped:1, currentMaxOriginSeq:0});
   });
   it("stores an owner's hosted agent settlement once its people are left out", async () => {
     const storage = await testStorage();
