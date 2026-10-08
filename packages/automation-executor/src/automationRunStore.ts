@@ -633,35 +633,36 @@ function withFile<T>(path: string, work: () => Promise<T>): Promise<T> {
   });
 }
 
-function writeDurably(path: string, text: string): Promise<void> {
-  return withFile(path, async () => {
-    const temp = `${path}.tmp-${process.pid}-${randomUUID()}`;
+async function retryFileAccess<T>(work: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
     try {
-      const file = await open(temp, "w");
-      try {
-        await file.writeFile(text);
-        await file.sync();
-      } finally {
-        await file.close();
-      }
-      // Windows MoveFileEx cannot replace an open destination, even when the
-      // reader shares deletion. Keep the flushed snapshot while brief reads finish.
-      for (let attempt = 0; ; attempt += 1) {
-        try {
-          await rename(temp, path);
-          break;
-        } catch (error) {
-          const code = (error as NodeJS.ErrnoException).code;
-          if (process.platform !== "win32" || attempt >= 99 || !["EPERM", "EACCES", "EBUSY"].includes(code ?? "")) throw error;
-          // At most 100 attempts and 2,381 ms of backoff, then the real error.
-          await delay(Math.min(2 ** attempt, 25));
-        }
-      }
-      await syncFolder(dirname(path));
-    } finally {
-      await rm(temp, { force: true }).catch(() => undefined);
+      return await work();
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (process.platform !== "win32" || attempt >= 99 || !["EPERM", "EACCES", "EBUSY"].includes(code ?? "")) throw error;
+      // At most 100 attempts and 2,381 ms of backoff, then the real error.
+      await delay(Math.min(2 ** attempt, 25));
     }
-  });
+  }
+}
+
+async function writeDurably(path: string, text: string): Promise<void> {
+  const temp = `${path}.tmp-${process.pid}-${randomUUID()}`;
+  try {
+    const file = await open(temp, "w");
+    try {
+      await file.writeFile(text);
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+    // Windows MoveFileEx cannot replace an open destination, even when the
+    // reader shares deletion. Keep the flushed snapshot while brief reads finish.
+    await withFile(path, () => retryFileAccess(() => rename(temp, path)));
+    await syncFolder(dirname(path));
+  } finally {
+    await rm(temp, { force: true }).catch(() => undefined);
+  }
 }
 
 // A file's text, undefined when it does not exist, or null when it is not a
@@ -936,7 +937,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
           await file.close();
         }
       }
-      const file = await open(path, "a");
+      const file = await retryFileAccess(() => open(path, "a"));
       try {
         await file.appendFile(text);
         await file.sync();
