@@ -193,14 +193,13 @@ export function DesktopRoot() {
     };
   }, [acceptUserSettings, refreshUserSettings]);
 
-  useEffect(
-    () =>
-      bridge().onWorkspaceActivity((event) => {
-        if (event.workspaceId !== undefined) return;
-        void refreshWorkspaceRegistry().catch(() => undefined);
-      }),
-    [refreshWorkspaceRegistry],
-  );
+  const activeWorkspaceId = workspace?.workspaceId;
+  useEffect(() => {
+    return bridge().onWorkspaceActivity((event) => {
+      if (event.workspaceId !== undefined && (!event.summaryChanged || event.workspaceId !== activeWorkspaceId)) return;
+      void refreshWorkspaceRegistry().catch(() => undefined);
+    });
+  }, [activeWorkspaceId, refreshWorkspaceRegistry]);
 
   useEffect(() => {
     return bridge().onWorkspaceActivated((next) => {

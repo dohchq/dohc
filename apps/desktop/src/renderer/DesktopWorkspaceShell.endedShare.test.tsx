@@ -108,6 +108,126 @@ describe("ended Edit Collection shares", () => {
     }
   });
 
+  it("updates the capture Notice after narrowing and ending without remounting", async () => {
+    const bridge = collectionBridge();
+    const edit = { ...EDIT_SHARE, workspaceId: "live-capture-notice" };
+    vi.stubGlobal("dohcDesktop", bridge);
+    const mounted = vi.fn();
+    const renderShell = (workspace: Workspace) => <Profiler id="live-share" onRender={(_id, phase) => {
+      if (phase === "mount") mounted();
+    }}>{shell(bridge, workspace)}</Profiler>;
+    const view = render(renderShell(edit));
+    await screen.findByRole("button", { name: "Retained task" });
+    const narrowed: Workspace = { ...edit, shareView: { ...edit.shareView!, access: "view", unsavedPaths: ["tasks/locked.md"],
+      unconfirmedChanges: { paths: ["tasks/automations.yaml"], unchecked: false, checked: 1 } } };
+    view.rerender(renderShell(narrowed));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("A later change from the owner can replace these files.");
+    expect(screen.queryByTestId("collection-new-record")).toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notices = screen.getByTestId("notice-center");
+    expect(within(notices).getAllByText("Changes to copy now")).toHaveLength(1);
+    expect(notices.textContent).toContain("tasks/automations.yaml");
+    expect(notices.textContent).toContain("tasks/locked.md");
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const ended = { ...narrowed, shareView: { ...narrowed.shareView!, ended: true } };
+    view.rerender(renderShell(ended));
+    await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain("They are kept on this computer."));
+    expect(screen.getByTestId("shared-view-banner").textContent).toContain(ENDED_SENTENCE);
+    expect(screen.getAllByTestId("workspace-shell-error")).toHaveLength(1);
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const endedNotices = screen.getByTestId("notice-center");
+    expect(within(endedNotices).getAllByText("Changes kept on this computer")).toHaveLength(1);
+    expect(within(endedNotices).queryByText("Changes to copy now")).toBeNull();
+    view.rerender(renderShell({ ...ended, shareView: { ...ended.shareView! } }));
+    expect(within(endedNotices).getAllByText("Changes kept on this computer")).toHaveLength(1);
+    expect(mounted).toHaveBeenCalledOnce();
+  });
+
+  it("skips automatic remote dataset loading for a retained ended share", async () => {
+    const bridge = collectionBridge();
+    bridge.dataset.mockRejectedValue(new Error("This shared workspace is unavailable. Open its current share again."));
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(shell(bridge, ENDED_SHARE));
+    await screen.findByText("Retained task");
+    expect(bridge.dataset).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(document.body.textContent).not.toContain("unavailable");
+  });
+
+  it("removes remote Collections listed before access ends", async () => {
+    const bridge = collectionBridge();
+    bridge.dataset.mockResolvedValue({ kind: "list", datasets: [{
+      datasetId: "00000000-0000-4000-8000-000000000001", datasetPath: "remote/dataset.json", name: "Remote", revision: 1,
+      revisionSha256: "a".repeat(64), operations: [], tables: [{ tableId: "00000000-0000-4000-8000-000000000002", name: "Remote table", fields: [] }],
+    }], nextCursor: null });
+    vi.stubGlobal("dohcDesktop", bridge);
+    const view = render(shell(bridge, EDIT_SHARE));
+    await screen.findByText("Remote table");
+    view.rerender(shell(bridge, ENDED_SHARE));
+    await waitFor(() => expect(screen.queryByText("Remote table")).toBeNull());
+    expect(screen.getByText("Retained task")).toBeTruthy();
+    expect(bridge.dataset).toHaveBeenCalledOnce();
+  });
+
+  it.each(["end", "narrow"] as const)("finds the %s capture Notice on returning to a cached workspace", async restriction => {
+    const bridge = collectionBridge();
+    const cached = { ...EDIT_SHARE, workspaceId: `return-notice-${restriction}` };
+    const other = { ...EDIT_SHARE, workspaceId: "other-workspace" };
+    const committed: Workspace = { ...cached, shareView: { ...cached.shareView!, access: "view", ended: restriction === "end",
+      unsavedPaths: ["tasks/locked.md"], unconfirmedChanges: { paths: ["tasks/automations.yaml"], unchecked: false, checked: 1 } } };
+    const selected = (workspace: Workspace) => <div key={workspace.workspaceId}>{shell(bridge, workspace)}</div>;
+    vi.stubGlobal("dohcDesktop", bridge);
+    const view = render(selected(cached));
+    await screen.findByRole("button", { name: "Retained task" });
+    view.rerender(selected(other));
+    await screen.findByRole("button", { name: "Retained task" });
+    const check = deferred<Awaited<ReturnType<typeof bridge.checkSharedViewAccess>>>();
+    bridge.checkSharedViewAccess.mockImplementation(async ({ workspaceId }) => workspaceId === cached.workspaceId
+      ? check.promise : { status: "current", access: "edit" });
+    view.rerender(selected(cached));
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    await act(async () => undefined);
+    const reads = bridge.getWorkspaceRegistry.mock.calls.length;
+    bridge.getWorkspaceRegistry.mockResolvedValue({ workspaces: [committed, other] });
+    await act(async () => check.resolve(restriction === "end" ? { status: "ended" } : { status: "current", access: "view" }));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(bridge.getWorkspaceRegistry.mock.calls.length).toBeGreaterThan(reads);
+    expect(toast.textContent).toContain(restriction === "end" ? "They are kept on this computer." : "A later change from the owner can replace these files.");
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notices = screen.getByTestId("notice-center");
+    expect(notices.textContent).toContain("tasks/automations.yaml");
+    expect(within(notices).getAllByText(restriction === "end" ? "Changes kept on this computer" : "Changes to copy now")).toHaveLength(1);
+  });
+
+  it("removes recovered files from the live capture Notice", async () => {
+    const bridge = collectionBridge();
+    const workspace = { ...ENDED_SHARE, workspaceId: "recovered-path-notice", shareView: { ...ENDED_SHARE.shareView!, unsavedPaths: ["tasks/recovered.md", "tasks/locked.md"] } };
+    vi.stubGlobal("dohcDesktop", bridge);
+    const view = render(shell(bridge, workspace));
+    await screen.findByTestId("workspace-shell-error");
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notices = screen.getByTestId("notice-center");
+    expect(notices.textContent).toContain("tasks/recovered.md");
+    view.rerender(shell(bridge, { ...workspace, shareView: { ...workspace.shareView, unsavedPaths: ["tasks/locked.md"] } }));
+    await waitFor(() => expect(notices.textContent).not.toContain("tasks/recovered.md"));
+    expect(notices.textContent).toContain("tasks/locked.md");
+    expect(within(notices).getAllByText("Changes kept on this computer")).toHaveLength(1);
+  });
+
+  it("ignores a dataset read failure that arrives after access ends", async () => {
+    const bridge = collectionBridge();
+    const read = deferred<Awaited<ReturnType<typeof bridge.dataset>>>();
+    bridge.dataset.mockReturnValueOnce(read.promise);
+    vi.stubGlobal("dohcDesktop", bridge);
+    const view = render(shell(bridge, EDIT_SHARE));
+    await waitFor(() => expect(bridge.dataset).toHaveBeenCalledOnce());
+    view.rerender(shell(bridge, ENDED_SHARE));
+    await act(async () => read.reject(new Error("Your access to this share ended.")));
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(bridge.dataset).toHaveBeenCalledOnce();
+  });
+
   it("keeps the capture Notice available after a dismissal fails and gives a next step", async () => {
     const bridge = collectionBridge();
     vi.stubGlobal("dohcDesktop", bridge);
@@ -206,15 +326,25 @@ describe("ended Edit Collection shares", () => {
       vi.stubGlobal("dohcDesktop", bridge);
       const view = render(shell(bridge, EDIT_SHARE));
       await screen.findByTestId("collection-new-record");
+      await act(async () => undefined);
+      const registryReads = bridge.getWorkspaceRegistry.mock.calls.length;
       bridge.checkSharedViewAccess.mockResolvedValue({ status: "current", access: "view" });
       await act(() => vi.advanceTimersByTimeAsync(5_000));
+      expect(bridge.getWorkspaceRegistry.mock.calls.length).toBe(registryReads + 1);
       expect(screen.queryByTestId("collection-new-record")).toBeNull();
       expect(screen.queryByTestId("collection-fields-button")).toBeNull();
       expect(screen.queryByTestId("collection-views-button")).toBeNull();
       expect(screen.queryByTestId("share-changes-send")).toBeNull();
       expect(screen.getByText("Retained task")).toBeTruthy();
+      await act(() => vi.advanceTimersByTimeAsync(10_000));
+      await act(async () => fireEvent.focus(window));
+      expect(bridge.getWorkspaceRegistry.mock.calls.length).toBe(registryReads + 1);
       bridge.checkSharedViewAccess.mockResolvedValue({ status: "ended" });
       await act(() => vi.advanceTimersByTimeAsync(5_000));
+      expect(bridge.getWorkspaceRegistry.mock.calls.length).toBe(registryReads + 2);
+      await act(() => vi.advanceTimersByTimeAsync(10_000));
+      await act(async () => fireEvent.focus(window));
+      expect(bridge.getWorkspaceRegistry.mock.calls.length).toBe(registryReads + 2);
       expect(screen.getByTestId("shared-view-banner").textContent).toContain("This share was ended");
       expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1);
       expect(screen.getByText("Retained task")).toBeTruthy();
@@ -226,19 +356,23 @@ describe("ended Edit Collection shares", () => {
     } finally { vi.useRealTimers(); }
   });
 
-  it("keeps unchanged access checks from rendering the shell again", async () => {
+  it.each(["edit", "view", "comment"] as const)("keeps unchanged %s access checks from reading the registry or rendering the shell again", async access => {
     const bridge = collectionBridge();
-    bridge.checkSharedViewAccess.mockResolvedValue({ status: "current", access: "edit" });
+    bridge.checkSharedViewAccess.mockResolvedValue({ status: "current", access });
     vi.stubGlobal("dohcDesktop", bridge);
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     try {
       const rendered = vi.fn();
-      const view = render(<Profiler id="shell" onRender={rendered}>{shell(bridge, EDIT_SHARE)}</Profiler>);
-      await screen.findByTestId("collection-new-record");
+      const workspace = { ...EDIT_SHARE, shareView: { ...EDIT_SHARE.shareView!, access } };
+      const view = render(<Profiler id="shell" onRender={rendered}>{shell(bridge, workspace)}</Profiler>);
+      await screen.findByText("Retained task");
       await act(async () => {});
       const before = rendered.mock.calls.length;
-      await act(() => vi.advanceTimersByTimeAsync(10_000));
-      expect(bridge.checkSharedViewAccess.mock.calls.length).toBeGreaterThanOrEqual(3);
+      const registryReads = bridge.getWorkspaceRegistry.mock.calls.length;
+      await act(() => vi.advanceTimersByTimeAsync(15_000));
+      await act(async () => fireEvent.focus(window));
+      expect(bridge.checkSharedViewAccess.mock.calls.length).toBeGreaterThanOrEqual(5);
+      expect(bridge.getWorkspaceRegistry.mock.calls.length).toBe(registryReads);
       expect(rendered.mock.calls.length).toBe(before);
       view.unmount();
     } finally { vi.useRealTimers(); }

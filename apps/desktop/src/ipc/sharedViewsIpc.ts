@@ -451,7 +451,7 @@ export function registerSharedViewsIpcHandlers<
       setWorkspaceShareView(input.workspaceId, { ...view, unconfirmedChanges: {
         paths: state.filePaths, unchecked: state.unchecked, checked: state.checked, dismissedKey: state.key,
       } });
-      notifyRenderer({ workspaceId: input.workspaceId });
+      notifyRenderer({ workspaceId: input.workspaceId, summaryChanged: true });
     },
     checkSharedViewAccess: async (input, { event }): Promise<CheckSharedViewAccessResult> => {
       if (checks.has(event.sender)) return { status: "unverified" };
@@ -501,7 +501,7 @@ export function registerSharedViewsIpcHandlers<
                 const committed = requireWorkspace(workspace.workspaceId).shareView;
                 if (committed?.shareId === view.shareId && committed.ended) {
                   refreshNativeWorkspaceSurfaces();
-                  notifyRenderer({ workspaceId: workspace.workspaceId });
+                  notifyRenderer({ workspaceId: workspace.workspaceId, summaryChanged: true });
                 }
               }
               scoped.assertCurrent();
@@ -527,7 +527,7 @@ export function registerSharedViewsIpcHandlers<
                   setWorkspaceShareView(workspace.workspaceId, { ...latest, grantedSelector: { ...latestPin, access: narrowed }, unsavedPaths, unconfirmedChanges });
                 }));
               refreshNativeWorkspaceSurfaces();
-              notifyRenderer({ workspaceId: workspace.workspaceId });
+              notifyRenderer({ workspaceId: workspace.workspaceId, summaryChanged: true });
             }
             scoped.assertCurrent();
             const committed = operation.workspace.shareView;
