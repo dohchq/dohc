@@ -9,7 +9,8 @@ export interface AgentProbeDependencies {
   workspaceRoot: string;
   realPath(path: string): string | null;
   isExecutable(path: string): boolean;
-  run(executable: string, args: readonly string[]): Promise<ProbeOutput>;
+  signal: AbortSignal;
+  run(executable: string, args: readonly string[], signal: AbortSignal): Promise<ProbeOutput>;
 }
 
 // Only absolute PATH entries and known user install locations participate.
@@ -73,6 +74,7 @@ export function parseAgentAuth(tool: AgentToolId, output: ProbeOutput): AgentToo
 }
 
 export async function probeAgentTools(deps: AgentProbeDependencies): Promise<AgentToolDetection[]> {
+  deps.signal.throwIfAborted();
   const path = deps.platform === "win32" ? win32 : posix;
   const canonicalWorkspace = deps.realPath(deps.workspaceRoot);
   const insideWorkspace = (candidate: string, root: string): boolean => {
@@ -87,19 +89,25 @@ export async function probeAgentTools(deps: AgentProbeDependencies): Promise<Age
     return canonical !== null && path.isAbsolute(canonical)
       && !insideWorkspace(canonical, deps.workspaceRoot) && !insideWorkspace(canonical, canonicalWorkspace);
   };
-  return Promise.all(AGENT_TOOLS.map(async (tool): Promise<AgentToolDetection> => {
+  // Join every started probe before reporting cancellation, so no probe outlives detection.
+  const probes = await Promise.allSettled(AGENT_TOOLS.map(async (tool): Promise<AgentToolDetection> => {
     const executable = agentExecutableCandidates(tool.id, deps).find(installedExecutable) ?? null;
     const result: AgentToolDetection = { tool: tool.id, executable, version: null, auth: "unknown", probe: executable ? "failed" : "not-found" };
     if (!executable) return result;
     try {
-      const version = await deps.run(executable, ["--version"]);
+      const version = await deps.run(executable, ["--version"], deps.signal);
       if (version.exitCode !== 0) return result;
       // Return the version only, never a tool's free-form diagnostic output.
       result.version = /\b\d+\.\d+\.\d+(?:[-+][\w.-]+)?\b/u.exec(version.stdout)?.[0] ?? null;
       if (!result.version) return result;
       result.probe = "detected";
-      if (tool.authArgs) result.auth = parseAgentAuth(tool.id, await deps.run(executable, tool.authArgs));
-    } catch { /* Keep detection separate from probe success and authentication. */ }
+      if (tool.authArgs && !deps.signal.aborted) result.auth = parseAgentAuth(tool.id, await deps.run(executable, tool.authArgs, deps.signal));
+    } catch { /* Keep detection separate from probe success and authentication; cancellation is reported after the join. */ }
     return result;
   }));
+  deps.signal.throwIfAborted();
+  return probes.map((probe) => {
+    if (probe.status === "rejected") throw probe.reason;
+    return probe.value;
+  });
 }
