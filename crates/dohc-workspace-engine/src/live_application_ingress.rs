@@ -678,9 +678,7 @@ impl LiveApplicationIngress {
             .values()
             .any(|upload| upload.stream_id() == stream_id)
         {
-            return restore::chunk(self, stream_id, fin, bytes).map(|result| {
-                result.map(|(request, input)| UploadCompletion::Admitted(request, input))
-            });
+            return restore::chunk(self, stream_id, fin, bytes);
         }
         let id = self
             .uploads

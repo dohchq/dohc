@@ -35,13 +35,17 @@ struct Header {
 
 pub(super) struct Upload {
     request: Request,
-    host: Arc<Host>,
-    config: RestoreConfig,
+    admission: Result<AdmittedRestore, WireError>,
     stream: Stream,
     bytes: Vec<u8>,
     deadline: Instant,
-    permit: Arc<Reservation>,
     max_output_bytes: usize,
+}
+
+struct AdmittedRestore {
+    host: Arc<Host>,
+    config: RestoreConfig,
+    permit: Arc<Reservation>,
 }
 
 impl Upload {
@@ -134,26 +138,39 @@ pub(super) fn begin(
         return Err(invalid("invalid-native-restore-bounds"));
     }
     let stream = Stream::new(params.stream_id, params.byte_length, params.digest)?;
-    let permit = Arc::new(Reservation {
-        _upload: ingress
-            .upload_slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| overloaded())?,
-        _bytes: ingress
-            .budget
-            .clone()
-            .try_acquire_many_owned(
-                ingress
-                    .restore_reservation(&config)
-                    .ok_or_else(overloaded)?,
-            )
-            .map_err(|_| overloaded())?,
-    });
+    if ingress.uploads.len() + ingress.restores.len() >= ingress.config.max_uploads {
+        return Err(overloaded());
+    }
     let mut bytes = Vec::new();
-    bytes
-        .try_reserve_exact(params.byte_length)
-        .map_err(|_| overloaded())?;
+    let admission = (|| {
+        let permit = Arc::new(Reservation {
+            _upload: ingress
+                .upload_slots
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| overloaded())?,
+            _bytes: ingress
+                .budget
+                .clone()
+                .try_acquire_many_owned(
+                    ingress
+                        .restore_reservation(&config)
+                        .ok_or_else(overloaded)?,
+                )
+                .map_err(|_| overloaded())?,
+        });
+        bytes
+            .try_reserve_exact(params.byte_length)
+            .map_err(|_| overloaded())?;
+        Ok(AdmittedRestore {
+            host,
+            config,
+            permit,
+        })
+    })();
+    if admission.is_err() {
+        bytes = Vec::new();
+    }
     let duration = request
         .deadline_ms
         .map(|ms| Duration::from_millis(u64::from(ms)))
@@ -167,12 +184,10 @@ pub(super) fn begin(
         request.id,
         Upload {
             request,
-            host,
-            config,
+            admission,
             stream,
             bytes,
             deadline,
-            permit,
             max_output_bytes: params.max_output_bytes,
         },
     );
@@ -263,7 +278,7 @@ pub(super) fn chunk(
     stream_id: u64,
     fin: bool,
     bytes: &[u8],
-) -> Result<Option<(Request, LiveApplicationInput)>, WireError> {
+) -> Result<Option<UploadCompletion>, WireError> {
     let id = ingress
         .restores
         .iter()
@@ -275,12 +290,18 @@ pub(super) fn chunk(
         return Err(invalid("restore-upload-expired"));
     }
     upload.stream.chunk(bytes, fin)?;
-    upload.bytes.extend_from_slice(bytes);
+    if upload.admission.is_ok() {
+        upload.bytes.extend_from_slice(bytes);
+    }
     if !fin {
         return Ok(None);
     }
     let mut upload = ingress.restores.remove(&id).expect("finished upload");
-    let operation = decode(&upload.bytes, &upload.request.method, &upload.config)?;
+    let admitted = match upload.admission {
+        Ok(admitted) => admitted,
+        Err(error) => return Ok(Some(UploadCompletion::Refused(upload.request.id, error))),
+    };
+    let operation = decode(&upload.bytes, &upload.request.method, &admitted.config)?;
     upload.request.deadline_ms = Some(
         u32::try_from(
             upload
@@ -290,14 +311,14 @@ pub(super) fn chunk(
         )
         .unwrap_or(u32::MAX),
     );
-    Ok(Some((
+    Ok(Some(UploadCompletion::Admitted(
         upload.request,
         LiveApplicationInput::Restore(Box::new(RestoreInput {
-            host: upload.host,
+            host: admitted.host,
             operation,
-            config: upload.config,
+            config: admitted.config,
             max_output_bytes: upload.max_output_bytes,
-            reservation: upload.permit,
+            reservation: admitted.permit,
         })),
     )))
 }
@@ -312,6 +333,172 @@ mod tests {
     use dohc_engine_storage::{EngineStore, NoFaults, hex_sha256};
     use dohc_engine_testkit::ScratchDir;
     use serde_json::{Value, json};
+
+    #[tokio::test]
+    async fn refused_restore_uploads_drain_under_slot_and_byte_pressure() {
+        for method in [
+            "liveApplication.prepareRestore",
+            "liveApplication.applyRestore",
+            "liveApplication.settleRestore",
+            "liveApplication.resumeRestore",
+        ] {
+            for slots_full in [true, false] {
+                let mut f = Fixture::new().await;
+                let header = match method {
+                    "liveApplication.prepareRestore" => {
+                        json!({"fence":f.fence().await,"point":f.point})
+                    }
+                    "liveApplication.resumeRestore" => f.settled_resume_header().await,
+                    _ => {
+                        let header = f.prepare_admitted().await;
+                        if method == "liveApplication.settleRestore" {
+                            drop(f.restore("liveApplication.applyRestore", &header).await);
+                        }
+                        header
+                    }
+                };
+                let bytes = framed(&header);
+                let admission = f.ingress.settlement_admission(4).unwrap();
+                let reservations = if slots_full {
+                    vec![admission.reserve().unwrap(), admission.reserve().unwrap()]
+                } else {
+                    Vec::new()
+                };
+                let byte_permit = if slots_full {
+                    None
+                } else {
+                    Some(
+                        f.ingress
+                            .budget
+                            .clone()
+                            .try_acquire_many_owned(f.ingress.budget.available_permits() as u32)
+                            .unwrap(),
+                    )
+                };
+                let remaining_slots = f.ingress.upload_slots.available_permits();
+                let remaining_bytes = f.ingress.budget.available_permits();
+                let stream = f.id + 10;
+                let request = f.request(method,json!({"streamId":stream,"byteLength":bytes.len(),"digest":hex_sha256(&bytes),"maxOutputBytes":1_000_000}));
+                let id = request.id;
+                f.ingress.begin(request, &f.owner.handle()).unwrap();
+                f.ingress
+                    .start(BlobStart {
+                        request_id: id,
+                        stream_id: stream,
+                        total_bytes: Some(bytes.len() as u64),
+                        sha256: Some(hex_sha256(&bytes)),
+                    })
+                    .unwrap();
+                let split = bytes.len() / 2;
+                assert!(
+                    f.ingress
+                        .chunk(stream, false, &bytes[..split])
+                        .unwrap()
+                        .is_none()
+                );
+                assert!(f.ingress.restores.get(&id).unwrap().bytes.is_empty());
+                let UploadCompletion::Refused(refused_id, error) = f
+                    .ingress
+                    .chunk(stream, true, &bytes[split..])
+                    .unwrap()
+                    .unwrap()
+                else {
+                    panic!("refused restore was dispatched")
+                };
+                assert_eq!(refused_id, id);
+                assert_eq!(error.code, ErrorCode::Overloaded);
+                assert!(f.ingress.restores.is_empty());
+                assert_eq!(f.ingress.upload_slots.available_permits(), remaining_slots);
+                assert_eq!(f.ingress.budget.available_permits(), remaining_bytes);
+                drop((reservations, byte_permit));
+                let request = f.request(method,json!({"streamId":stream+1,"byteLength":bytes.len(),"digest":hex_sha256(&bytes),"maxOutputBytes":1_000_000}));
+                let id = request.id;
+                f.ingress.begin(request, &f.owner.handle()).unwrap();
+                assert!(f.ingress.restores.get(&id).unwrap().admission.is_ok());
+                assert!(f.ingress.cancel(id));
+                f.close().await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn refused_restore_uploads_preserve_framing_cancel_expiry_and_header_bounds() {
+        let mut f = Fixture::new().await;
+        let bytes = framed(&json!({"fence":f.fence().await,"point":f.point}));
+        let admission = f.ingress.settlement_admission(4).unwrap();
+        let held = vec![admission.reserve().unwrap(), admission.reserve().unwrap()];
+        let remaining_bytes = f.ingress.budget.available_permits();
+        for (index, scenario) in ["cancel", "expiry", "digest", "length", "header-bound"]
+            .into_iter()
+            .enumerate()
+        {
+            let stream = 50 + index as u64 * 3;
+            let params = json!({"streamId":stream,"byteLength":bytes.len(),"digest":hex_sha256(&bytes),"maxOutputBytes":1_000_000});
+            let request = f.request("liveApplication.prepareRestore", params.clone());
+            let id = request.id;
+            f.ingress.begin(request, &f.owner.handle()).unwrap();
+            assert!(f.ingress.restores.get(&id).unwrap().admission.is_err());
+            if scenario == "header-bound" {
+                let mut params = params;
+                params["streamId"] = json!(stream + 1);
+                let second = f.request("liveApplication.applyRestore", params.clone());
+                let second_id = second.id;
+                f.ingress.begin(second, &f.owner.handle()).unwrap();
+                params["streamId"] = json!(stream + 2);
+                let third = f.request("liveApplication.settleRestore", params);
+                assert_eq!(
+                    f.ingress.begin(third, &f.owner.handle()).unwrap_err().code,
+                    ErrorCode::Overloaded
+                );
+                assert_eq!(f.ingress.restores.len(), f.ingress.config.max_uploads);
+                assert!(f.ingress.cancel(second_id));
+            } else if scenario == "expiry" {
+                f.ingress.restores.get_mut(&id).unwrap().deadline = Instant::now();
+                assert!(f.ingress.next_deadline().unwrap() <= Instant::now());
+                assert_eq!(f.ingress.expire(), vec![id]);
+                assert!(!f.ingress.cancel(id));
+            } else {
+                f.ingress
+                    .start(BlobStart {
+                        request_id: id,
+                        stream_id: stream,
+                        total_bytes: Some(bytes.len() as u64),
+                        sha256: Some(hex_sha256(&bytes)),
+                    })
+                    .unwrap();
+                if scenario == "digest" {
+                    let mut corrupt = bytes.clone();
+                    corrupt[0] ^= 1;
+                    assert_eq!(
+                        f.ingress
+                            .chunk(stream, true, &corrupt)
+                            .err()
+                            .unwrap()
+                            .message,
+                        "live-stream-digest"
+                    );
+                } else if scenario == "length" {
+                    assert_eq!(
+                        f.ingress
+                            .chunk(stream, true, &bytes[..bytes.len() - 1])
+                            .err()
+                            .unwrap()
+                            .message,
+                        "live-stream-length"
+                    );
+                }
+                assert!(f.ingress.restores.get(&id).unwrap().bytes.is_empty());
+            }
+            if scenario != "expiry" {
+                assert!(f.ingress.cancel(id));
+            }
+            assert!(f.ingress.restores.is_empty());
+            assert_eq!(f.ingress.upload_slots.available_permits(), 0);
+            assert_eq!(f.ingress.budget.available_permits(), remaining_bytes);
+        }
+        drop(held);
+        f.close().await;
+    }
 
     struct Fixture {
         _scratch: ScratchDir,
