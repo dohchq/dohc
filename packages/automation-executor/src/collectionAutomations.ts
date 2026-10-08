@@ -3346,7 +3346,7 @@ export class CollectionAutomations {
       const codeFiles = definition === null ? [] : codeFilesOf(definition, parsed.collectionPath);
       const source = needsReverseReach ? { roster: await this.options.roster(), collection: collectionNamed(parsed.collectionPath), codeFiles } : null;
       for (const run of runs) {
-        if (rebaseRun(run, (id) => this.collectionPathOf(id)).lost) return { status: "refused", reason: LOST_COLLECTION_ERROR };
+        if (rebaseRun(run, (id) => this.collectionPathOf(id)).lost) return { status: "refused", reason: movedReason() ?? LOST_COLLECTION_ERROR };
       }
       let reverseReach: ReachStep[];
       try {

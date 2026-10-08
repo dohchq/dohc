@@ -6280,13 +6280,13 @@ describe("Collection automations that a Group message starts", () => {
       expect(w.journaled).toEqual([]);
     });
 
-    it("refuses undo when its source Collection moves during the saved-run read", async () => {
-      const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: yes}}]\n" } });
+    it.each([false, true])("refuses undo when its source Collection moves during the saved-run read, lost destination=%s", async lostDestination => {
+      const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do:\n      - set: {Paid: yes}\n" + (lostDestination ? "      - add-record: {Title: Log entry}\n        collection: Log\n" : "") } });
       const invoice = w.addRecord("Tasks", "invoice", {});
       const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
       let armed = false, paused = false;
       const executor = w.makeExecutor({ store: { ...w.baseStore, runsOf: async (...args) => {
-        if (armed && !paused) { paused = true; reached.resolve(); await resume.promise; }
+        if (armed && !paused && (executor as unknown as { changing: Set<string> }).changing.has(args[1]!)) { paused = true; reached.resolve(); await resume.promise; }
         return w.baseStore.runsOf(...args);
       } } });
       onTestFinished(async () => { resume.resolve(); await executor.dispose(); });
@@ -6299,8 +6299,10 @@ describe("Collection automations that a Group message starts", () => {
       const undoing = executor.undo({ automationId: "collection:Tasks#paid", claimId: pressed.claimId, deletes: null }, async () => undefined);
       await reached.promise;
       await w.renameCollection("Tasks", "Shared/Tasks", false);
+      if (lostDestination) await w.removeCollection("Log");
       executor.handleWatcherEvents(["collection.yaml", "automations.yaml"].flatMap(name => [
         { operation: "delete" as const, path: `Tasks/${name}` }, { operation: "update" as const, path: `Shared/Tasks/${name}` },
+        ...(lostDestination ? [{ operation: "delete" as const, path: `Log/${name}` }] : []),
       ]));
       await executor.automationsIn("Shared/Tasks");
       const writes = w.journaled.length;
