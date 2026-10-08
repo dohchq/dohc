@@ -255,6 +255,7 @@ export function registered(
               suffixDigests: validation.evidence.suffixDigests,
               candidate: validation.evidence.candidate,
               ...state,
+              projectedMarkdownSha256:validation.evidence.projectedMarkdownSha256, projectedMarkdownByteLength:validation.evidence.projectedMarkdownByteLength,
               stateUpdateSha256: validation.evidence.stateUpdateSha256,
               stateUpdateByteLength: validation.evidence.stateUpdateByteLength,
             },

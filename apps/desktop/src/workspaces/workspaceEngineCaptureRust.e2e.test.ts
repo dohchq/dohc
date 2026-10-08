@@ -34,6 +34,7 @@ import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import {
   createRealDaemonLifecycle,
   createRealDaemonWorkspaceSessions,
+  REAL_DAEMON_DEADLINE_MS,
 } from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "./testTemp";
 import { waitForPathMoments } from "./waitForPathMoments";
@@ -142,7 +143,8 @@ async function waitForDaemonCaptureDeferral(
   sessions: EngineWorkspaceSessions,
   workspace: AttachedEngineWorkspace,
 ): Promise<void> {
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+  const deadline = performance.now() + REAL_DAEMON_DEADLINE_MS;
+  while (performance.now() < deadline) {
     const outcome = await sessions.run(
       workspace,
       async ({ client, workspace: handle }) =>

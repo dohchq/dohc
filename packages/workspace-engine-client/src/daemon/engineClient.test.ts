@@ -889,6 +889,31 @@ describe.each(["application", "bootstrap"] as const)(
             },
             args[2],
           );
+
+  it("preserves the connection when a terminal refusal arrives before final input drains", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, {privateLiveApplication: {aggregateBytes: 128 * 1024 * 1024, maxUploads: 1}});
+    peer.acknowledge(); await transport.ready();
+    const bytes = new Uint8Array([0, 0]);
+    const accepted = parseRelayAcceptedLiveUpdate({receipt:{deliveryId:"delivery",updateDigest:createHash("sha256").update(bytes).digest("hex"),journalCursor:1,acceptingHostEpoch:1},binding:{workspaceId:"workspace",mainVersionId:"main",objectId:"one",lineageClaimId:"a".repeat(64),currentPath:"one.md",selectorPaths:["one.md"],restoreFenceGeneration:0},authority:{principalKind:"owner",principalId:"owner",grantId:null,grantGeneration:null},receivedAtMs:0});
+    const reached = Promise.withResolvers<void>();
+    let chunks = 0;
+    peer.onBlobChunk = () => {
+      if (++chunks !== streamCount) return;
+      peer.backpressured = true;
+      peer.send({type:"error",id:1,error:{code:"OVERLOADED",message:"live-application-capacity",retry:"afterBackoff"}});
+      reached.resolve();
+    };
+    try {
+      const pending = upload(transport,{id:1,workspace:"ws-0000000000000001",registrationId:1,deadlineMs:30_000},{metadata:{accepted,firstSeen:[]},updateBytes:bytes}).catch(error => error);
+      await reached.promise;
+      peer.drain();
+      expect(await pending).toBeInstanceOf(EngineRequestError);
+      peer.onEnvelope = envelope => {if(envelope.type === "request") peer.send({type:"response",id:envelope.id,result:{}});};
+      await expect(transport.sendRequest(request(99,"after.refusal"))).resolves.toMatchObject({result:{}});
+    } finally {transport.close();}
+  });
+
   it.each(["local chunk", "local blob budget", "negotiated chunk"])("refuses a zero %s before writing an upload", async mode => {
     const peer = new FakePeerConnection();
     const transport = client(peer, {

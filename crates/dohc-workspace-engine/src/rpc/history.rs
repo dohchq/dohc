@@ -483,6 +483,25 @@ mod relay_author_tests {
     }
 
     #[test]
+    fn reads_live_human_and_agent_snapshot_as_native_moment_authors() {
+        let human = json!({"kind":"human", "humanId":"owner", "humanName":"Owner proof"});
+        let agent =
+            json!({"kind":"agent", "agentId":"hosted-agent", "onBehalfOf":"owner", "depth":0});
+        assert_eq!(
+            parsed_moment_authors(&json!([human, agent]).to_string()),
+            json!([{"kind":"human", "humanId":"owner", "humanName":"Owner proof"}, {"kind":"agent", "agentId":"hosted-agent", "onBehalfOf":"owner"}])
+        );
+        for name in [json!(null), json!(""), json!("x".repeat(513))] {
+            assert_eq!(
+                parsed_moment_author(
+                    &json!({"kind":"human", "humanId":"owner", "humanName":name}).to_string()
+                ),
+                json!({"corrupt":true})
+            );
+        }
+    }
+
+    #[test]
     fn reads_every_author_of_a_moment_and_refuses_a_value_that_is_not_a_list() {
         let agent = json!({"kind":"agent", "agentId":"agent"});
         let human = json!({"kind":"human", "humanId":"ada", "onBehalfOf":"ada"});

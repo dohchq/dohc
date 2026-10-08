@@ -185,7 +185,7 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
     await expect(collection.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Camera");
     const listed = await page.evaluate(async workspaceId => window.dohcDesktop!.dataset({ workspaceId, action: "list" }), workspaceId);
     if (listed.kind !== "list" || !listed.datasets[0]) throw Error("Expected the restored Collection.");
-    const savePath = join(workspace.rootPath, "equipment.dohc-recovery");
+    const savePath = join(workspace.baseDir, "equipment.dohc-recovery");
     const result = await sendCliRequest({ protocolVersion: CLI_PROTOCOL_VERSION, verb: "dataset", args: { cwd: workspace.rootPath, actor: "agent",
       request: { action: "export", workspaceId, datasetPath: listed.datasets[0].datasetPath!, savePath } } }, { stateDir: workspace.homeDir });
     expect(result).toMatchObject({ kind: "exported", savedPath: savePath });

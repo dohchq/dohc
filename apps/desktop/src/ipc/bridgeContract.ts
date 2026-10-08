@@ -3297,6 +3297,7 @@ export const WorkspaceActivityEvent = z
     workspaceId: z.string().min(1).optional(),
     paths: z.array(z.string()).max(MAX_ACTIVITY_EVENT_PATHS).optional(),
     pathSetChanged: z.boolean().optional(),
+    summaryChanged: z.literal(true).optional(),
   })
   .strict();
 export type WorkspaceActivityEvent = z.infer<typeof WorkspaceActivityEvent>;

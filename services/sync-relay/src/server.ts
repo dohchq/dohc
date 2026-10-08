@@ -1008,4 +1008,3 @@ export function streamsRequestBody(url: URL, method: string): boolean {
       route.route === "share-collection-writes" || route.route === "link-collection-writes";
   } catch { return false; }
 }
-

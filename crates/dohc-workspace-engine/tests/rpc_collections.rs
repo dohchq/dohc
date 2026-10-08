@@ -485,6 +485,8 @@ async fn assert_empty_seed_completion(full: &'static str, retires: bool, replica
         let bytes = doc.encode_full_state();
         let sha = store.put_binary_blob(&bytes).unwrap();
         let base = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: WORKSPACE_ID.into(),
             origin_id: "seed-origin".into(),
             origin_seq: 0,
@@ -1884,6 +1886,8 @@ async fn remote_id_edit_converges_on_both_devices_under_the_original_identity() 
         for (origin_seq, update) in updates.iter().enumerate() {
             let update_sha = store.put_binary_blob(update).expect("store remote update");
             let envelope = ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: WORKSPACE_ID.to_owned(),
                 origin_id: REMOTE_ORIGIN.to_owned(),
                 origin_seq: i64::try_from(origin_seq).expect("remote sequence"),
@@ -3045,6 +3049,8 @@ async fn remote_moment_append_updates_the_collection_index_at_apply_time() {
     assert_eq!(status_of(&baseline), json!("open"));
 
     let envelope = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: WORKSPACE_ID.to_owned(),
         origin_id: "remote-moment-editor".to_owned(),
         origin_seq: 0,
@@ -3224,6 +3230,8 @@ async fn remote_moment_append_without_frontmatter_clears_the_collection_index() 
     );
 
     let envelope = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: WORKSPACE_ID.to_owned(),
         origin_id: "remote-moment-editor".to_owned(),
         origin_seq: 0,
@@ -3453,6 +3461,8 @@ async fn park_remote_status_update() -> ParkedRecordUpdate {
     let mut store = EngineStore::open(&db, 2).expect("open remote apply store");
     let update_sha = store.put_binary_blob(&update).expect("store remote update");
     let envelope = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: WORKSPACE_ID.to_owned(),
         origin_id: PARKED_REMOTE_ORIGIN.to_owned(),
         origin_seq: 0,
@@ -4351,6 +4361,8 @@ automations: []
             })
             .expect("hydrate blob");
         let envelope = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: WORKSPACE_ID.to_owned(),
             origin_id: format!("relay:collection-file:{grant}"),
             origin_seq: 0,
@@ -4471,6 +4483,8 @@ async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
     let sha = hex_sha256(text.as_bytes());
     let author = json!({ "kind": "public", "principalId": PRINCIPAL, "grantId": GRANT });
     let envelope = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: WORKSPACE_ID.to_owned(),
         origin_id: format!("relay:collection-create:{GRANT}"),
         origin_seq: 0,

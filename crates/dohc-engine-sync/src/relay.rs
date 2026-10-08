@@ -53,12 +53,22 @@ pub struct PushRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushResponse {
+    pub settlement_refusals: Vec<SettlementPublicationRefusal>,
     pub accepted: usize,
     pub inserted: usize,
     pub skipped: usize,
     pub current_max_origin_seq: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SettlementPublicationRefusal {
+    pub origin_id: String,
+    pub origin_seq: i64,
+    pub moment_id: String,
+    pub settlement_id: String,
+    pub reason: String,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequest {
     pub workspace_id: String,
@@ -658,6 +668,7 @@ pub struct PushWorkspaceProgress {
     started: std::time::Instant,
     acknowledged: usize,
     page: Option<PreparedPushPage>,
+    batch_size: usize,
 }
 
 impl Default for PushWorkspaceProgress {
@@ -666,6 +677,7 @@ impl Default for PushWorkspaceProgress {
             started: std::time::Instant::now(),
             acknowledged: 0,
             page: None,
+            batch_size: crate::MAX_PUSH_OPS_PER_BATCH,
         }
     }
 }
@@ -1126,6 +1138,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut origins = list_workspace_origins(store, workspace_id).map_err(local)?;
         let mut pushed = 0_usize;
         let mut owner_admission_pending = Vec::new();
+        let mut publication_refusals = Vec::new();
         let mut resume_needed = false;
 
         let has_position = store
@@ -1271,7 +1284,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     break;
                 }
                 let mut conflict = false;
-                for batch in ops.chunks(crate::MAX_PUSH_OPS_PER_BATCH) {
+                let mut batch_start = 0;
+                while batch_start < ops.len() {
+                    let batch =
+                        &ops[batch_start..(batch_start + progress.batch_size).min(ops.len())];
                     let response = match self.transport.push(PushRequest {
                         workspace_id: workspace_id.to_owned(),
                         replication_epoch: identity.replication_epoch.clone(),
@@ -1281,6 +1297,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         ops: batch.to_vec(),
                     }) {
                         Ok(response) => response,
+                        Err(RelayError::SettlementProofBudget) if batch.len() > 1 => {
+                            progress.batch_size = (batch.len() / 2).max(1);
+                            continue;
+                        }
                         Err(RelayError::Conflict) if attempt == 0 => {
                             conflict = true;
                             break;
@@ -1294,11 +1314,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     if crashes(faults, FaultPoint::SyncAfterPushBeforeCursorPersist) {
                         return Ok(SyncPassOutcome::CrashedAfterRemoteCommit);
                     }
-                    match write_pushed_seq(
+                    match crate::cursor::write_pushed_seq_with_refusals(
                         store,
                         workspace_id,
                         &origin_id,
                         response.current_max_origin_seq,
+                        &response.settlement_refusals,
                         faults,
                         leases,
                         now_ms,
@@ -1310,6 +1331,17 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             return Ok(SyncPassOutcome::CrashedAfterRemoteCommit);
                         }
                     }
+                    publication_refusals.extend(response.settlement_refusals.iter().map(
+                        |refusal| crate::ReplicationRefusal {
+                            workspace_id: workspace_id.to_owned(),
+                            origin_id: refusal.origin_id.clone(),
+                            origin_seq: refusal.origin_seq,
+                            op_kind: "moment.append".into(),
+                            reason: crate::RefusalReason::InvalidInput {
+                                reason: crate::settlement_publication::REFUSAL_MESSAGE.to_owned(),
+                            },
+                        },
+                    ));
                     if !enrollment_prepared {
                         sharing_declined.extend(
                             crate::live_audit::enrollment::prepare_exports(
@@ -1335,6 +1367,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         .ok_or(RelayError::InvalidResponse)?;
                     cursor = response.current_max_origin_seq;
                     progress.acknowledged += batch.len();
+                    batch_start += batch.len();
                 }
                 if !conflict {
                     resume_needed |= count < prefix.allowed_ops || prefix.budget_exhausted;
@@ -1388,12 +1421,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     })
                     .map_err(local)?,
             applied: 0,
-            refused: 0,
+            refused: publication_refusals.len(),
             skipped: 0,
             conflicts_opened: 0,
             pending_cursor: None,
             changed_paths: Vec::new(),
-            refusals: Vec::new(),
+            refusals: publication_refusals,
             record_facts: Vec::new(),
             sharing_declined,
         })
@@ -2842,8 +2875,24 @@ pub(crate) fn collect_blob_refs(
 ) -> Result<BTreeMap<String, BTreeSet<BlobKind>>, RelayError> {
     let mut refs = BTreeMap::new();
     for op in ops {
+        // Deterministic refusal acknowledges only the immutable coordinate;
+        // unavailable hostile content must not hold up subsequent operations.
+        if matches!(
+            op.settlement_admission,
+            Some(crate::SettlementAdmission::Refused { .. })
+        ) {
+            continue;
+        }
         match op.op_kind.as_str() {
             "moment.append" => {
+                insert_optional_ref(
+                    &mut refs,
+                    op.payload
+                        .get("settlementReference")
+                        .and_then(|v| v.get("record"))
+                        .and_then(|v| v.get("acceptedStateBlobSha256")),
+                    BlobKind::Ydoc,
+                )?;
                 insert_optional_ref(
                     &mut refs,
                     op.payload.get("payloadBeforeBlobSha256"),
@@ -2934,6 +2983,13 @@ pub(crate) fn collect_blob_refs(
                 }
             }
             "live.audit.settlement" => {
+                insert_optional_ref(
+                    &mut refs,
+                    op.payload
+                        .get("record")
+                        .and_then(|v| v.get("acceptedStateBlobSha256")),
+                    BlobKind::Ydoc,
+                )?;
                 insert_optional_ref(
                     &mut refs,
                     op.payload
@@ -3354,6 +3410,8 @@ fn recompute_chat_projection_winners(
             continue;
         }
         let operation = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: workspace_id.to_owned(),
             origin_id,
             origin_seq,
@@ -3532,6 +3590,7 @@ fn validate_push_response(
     batch: &[ReplicationEnvelope],
     local_max: i64,
 ) -> Result<(), RelayError> {
+    crate::settlement_publication::validate_push_refusals(&response.settlement_refusals, batch)?;
     let last = batch
         .last()
         .map(|op| op.origin_seq)
@@ -3553,7 +3612,8 @@ fn validate_push_response(
 }
 
 fn validate_probe_response(response: &PushResponse) -> Result<(), RelayError> {
-    if response.accepted != 0
+    if !response.settlement_refusals.is_empty()
+        || response.accepted != 0
         || response.inserted != 0
         || response.skipped != 0
         || !(-1..=crate::MAX_WIRE_INTEGER).contains(&response.current_max_origin_seq)
@@ -3695,6 +3755,8 @@ fn share_envelope(
 ) -> Result<ReplicationEnvelope, ShareEnvelopeError> {
     let op_kind = op.op_kind.clone();
     let envelope = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: workspace_id.to_owned(),
         origin_id: op.origin_id,
         origin_seq: op.origin_seq,
@@ -5112,6 +5174,8 @@ mod push_budget_tests {
                 .into_iter()
                 .enumerate()
                 .map(|(index, kind)| ReplicationEnvelope {
+                    settlement_admission: None,
+                    admitted_author_snapshot: None,
                     workspace_id: "ws".into(),
                     origin_id: "local".into(),
                     origin_seq: index as i64,
@@ -5171,6 +5235,8 @@ mod push_budget_tests {
             revision: 0,
             ops: (0..2)
                 .map(|origin_seq| ReplicationEnvelope {
+                    settlement_admission: None,
+                    admitted_author_snapshot: None,
                     workspace_id: "ws".into(),
                     origin_id: "local".into(),
                     origin_seq,
@@ -5210,6 +5276,8 @@ mod pull_page_validation_tests {
 
     fn op(relay_seq: Option<i64>) -> ReplicationEnvelope {
         ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "ws".to_owned(),
             origin_id: "peer".to_owned(),
             origin_seq: 0,
@@ -5377,6 +5445,8 @@ mod conflict_resolve_blob_ref_tests {
     fn native_event_zero_keeps_the_ydoc_blob_ceiling() {
         let sha = "a".repeat(64);
         let envelope = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "workspace".into(),
             origin_id: "owner".into(),
             origin_seq: 0,
@@ -5395,6 +5465,8 @@ mod conflict_resolve_blob_ref_tests {
     fn native_settlement_keeps_projection_in_the_text_blob_lane() {
         let sha = "a".repeat(64);
         let envelope = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "workspace".into(),
             origin_id: "owner".into(),
             origin_seq: 0,
@@ -5414,6 +5486,8 @@ mod conflict_resolve_blob_ref_tests {
         let update = "a".repeat(64);
         let chunk = "b".repeat(64);
         let envelope = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "workspace".into(),
             origin_id: "owner".into(),
             origin_seq: 0,
@@ -5501,6 +5575,8 @@ mod conflict_resolve_blob_ref_tests {
         })
         .expect("valid conflict.resolve carrier");
         let envelope = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "workspace-carrier-roots".to_owned(),
             origin_id: "origin-a".to_owned(),
             origin_seq: 0,

@@ -112,6 +112,8 @@ export function compareLiveRestoreContent(input: RestoreContentInput, policy: Or
     return Object.freeze({candidateDigest: restored.evidence.candidate.updateDigest,
       frozenStateDigest: frozen.evidence.checkpoint.updateDigest, pointStateDigest: point.stateUpdateSha256,
       restoredStateDigest: restored.evidence.stateUpdateSha256,
+      projectedMarkdownSha256: restored.evidence.projectedMarkdownSha256,
+      projectedMarkdownByteLength: restored.evidence.projectedMarkdownByteLength,
       get stateUpdate() {return new Uint8Array(stateUpdate);},
       acceptedCheckpointRanges: "checkpointRanges" in context ? context.checkpointRanges : context.checkpoint.ranges,
       replacementRanges: Object.freeze(restored.evidence.candidate.ranges.map(range => Object.freeze({...range}))),

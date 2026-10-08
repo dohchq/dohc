@@ -137,6 +137,7 @@ impl Relay {
                 self.inserted += inserted;
                 self.skipped += skipped;
                 RelayIoResponse::Push(PushResponse {
+                    settlement_refusals: Vec::new(),
                     accepted: request.ops.len(),
                     inserted,
                     skipped,
@@ -242,6 +243,40 @@ fn deferred_push_returns_one_acknowledged_prefix_and_resumes_without_reuploading
     assert_eq!(pump_pass(&mut store, &mut relay), (0, false));
     assert_eq!(relay.pushes.len(), FILES.div_ceil(PREFIX_OPS));
     assert_eq!(relay.inventories, FILES.div_ceil(PREFIX_OPS));
+}
+
+#[test]
+fn deferred_proof_budget_reduces_batches_and_acknowledges_each_prefix() {
+    let (_scratch, _path, mut store) = fixture_with_files(7);
+    let transport = DeferredRelayTransport::default();
+    let mut cache = WriterDocCache::new();
+    let mut relay = Relay::default();
+    let mut sizes = Vec::new();
+    for _ in 0..100 {
+        if let Some((pushed, has_more)) = step(&mut store, &mut cache, &transport) {
+            assert_eq!(pushed, 7);
+            assert!(!has_more);
+            assert_eq!(read_pushed_seq(&store, WORKSPACE, ORIGIN).unwrap(), 6);
+            assert_eq!(sizes, vec![7, 3, 1, 1, 1, 1, 1, 1, 1]);
+            assert_eq!(relay.ops.len(), 7);
+            assert!(relay.uploads.values().all(|count| *count == 1));
+            return;
+        }
+        let request = transport.take_pending().expect("deferred request");
+        let response = match &request {
+            RelayIoRequest::Push(push) => {
+                sizes.push(push.ops.len());
+                if push.ops.len() > 2 {
+                    Err(RelayError::SettlementProofBudget)
+                } else {
+                    Ok(relay.answer(&request))
+                }
+            }
+            _ => Ok(relay.answer(&request)),
+        };
+        transport.complete(request, response);
+    }
+    panic!("proof budget retry did not finish a bounded prefix");
 }
 
 #[test]
@@ -365,51 +400,64 @@ async fn cancellation_during_deferred_upload_preserves_acknowledged_prefix() {
 }
 
 #[tokio::test]
-async fn deferred_push_keeps_authors_only_on_the_native_settlement_lane() {
-    let authors =
-        serde_json::json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"}]);
-    for native_settlements in [false, true] {
-        let (_scratch, path, mut store) = fixture_with_files(1);
-        store.write_with(&NoFaults, |tx| {
-            tx.execute("UPDATE replication_log SET payload_json=json_set(payload_json,'$.authors',json(?1)) WHERE op_kind='moment.append'", [authors.to_string()]).map_err(StorageError::persist_public)?;
+async fn deferred_push_requires_hosted_author_proof_and_preserves_neutral_markers() {
+    for authors in [
+        serde_json::json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"}]),
+        serde_json::json!([{"kind":"link","publicPrincipalId":"recipient","label":"Edit link"}]),
+        serde_json::json!([{"kind":"unattributed"}]),
+    ] {
+        for native_settlements in [false, true] {
+            let (_scratch, path, mut store) = fixture_with_files(2);
+            store.write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE replication_log SET payload_json=json_set(payload_json,'$.authors',json(?1)) WHERE op_kind='moment.append' AND origin_seq=0", [authors.to_string()]).map_err(StorageError::persist_public)?;
             Ok::<_, StorageError>(())
         }).unwrap();
-        drop(store);
-        let supervisor = WorkspaceSupervisor::new();
-        let actor = supervisor.open(&path, 2_100).unwrap().actor;
-        let relay = Arc::new(Mutex::new(Relay::default()));
-        let io_relay = Arc::clone(&relay);
-        actor
-            .relay_with_io(
-                native_settlements,
-                push_operation(),
-                LeaseRegistry::default(),
-                CancellationToken::new(),
-                None,
-                move |request, _token| {
-                    let relay = Arc::clone(&io_relay);
-                    async move { Ok(relay.lock().unwrap().answer(&request)) }
-                },
-            )
-            .await
-            .unwrap();
-        let expected = if native_settlements {
-            authors.clone()
-        } else {
-            serde_json::json!([{"kind":"unattributed"}])
-        };
-        assert_eq!(
-            relay
-                .lock()
-                .unwrap()
-                .ops
-                .values()
-                .find(|op| op.op_kind == "moment.append")
-                .unwrap()
-                .payload["authors"],
-            expected
-        );
-        supervisor.close(&path).unwrap();
+            drop(store);
+            let supervisor = WorkspaceSupervisor::new();
+            let actor = supervisor.open(&path, 2_100).unwrap().actor;
+            let relay = Arc::new(Mutex::new(Relay::default()));
+            let io_relay = Arc::clone(&relay);
+            let outcome = actor
+                .relay_with_io(
+                    native_settlements,
+                    push_operation(),
+                    LeaseRegistry::default(),
+                    CancellationToken::new(),
+                    None,
+                    move |request, _token| {
+                        let relay = Arc::clone(&io_relay);
+                        async move { Ok(relay.lock().unwrap().answer(&request)) }
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                outcome,
+                RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
+                    pushed: 2,
+                    has_more: false,
+                    ..
+                })
+            ));
+            {
+                let relay = relay.lock().unwrap();
+                assert_eq!(relay.ops.len(), 2, "later file must still push");
+                let payload = &relay.ops[&0].payload;
+                if authors[0]["kind"] == "unattributed" {
+                    assert_eq!(payload["authors"], authors);
+                    assert!(payload.get("attributionUnavailable").is_none());
+                } else {
+                    assert!(payload.get("authors").is_none());
+                    assert_eq!(
+                        payload["attributionUnavailable"]["reason"],
+                        "unproven-hosted-authors"
+                    );
+                }
+            }
+            supervisor.close(&path).unwrap();
+            let store = EngineStore::open(&path, 2_200).unwrap();
+            assert_eq!(read_pushed_seq(&store, WORKSPACE, ORIGIN).unwrap(), 1);
+        }
     }
 }
 

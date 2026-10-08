@@ -25,6 +25,7 @@ it("discovers only owned synced workspaces and sends credentials only to their p
     {...f.workspace, workspaceId: "bootstrapping", joinBootstrapPending: true}]);
   expect(f.connection.workspaceIds()).toEqual(["workspace"]);
   const session = await f.connection.connect(f.workspace, new AbortController().signal);
+  expect(session).toMatchObject({bearer: "secret", accountId: "owner"});
   expect(await session!.documents(new AbortController().signal)).toEqual({ok: true, documents: []});
   expect(await session!.documents(new AbortController().signal)).toEqual({ok: true, documents: []});
   expect(f.fetch).toHaveBeenCalledTimes(1);
@@ -139,4 +140,12 @@ it("rejects discovery errors and bounds response bytes before parsing", async ()
     const session = await f.connection.connect(f.workspace, new AbortController().signal);
     await expect(session!.documents(new AbortController().signal)).rejects.toThrow();
   }
+});
+
+it("keeps the credential account when discovery contains a client-selected account", async () => {
+  const f = fixture();
+  f.fetch.mockResolvedValue(new Response(JSON.stringify({ok: true, accountId: "forged-account", documents: []})));
+  const session = (await f.connection.connect(f.workspace, new AbortController().signal))!;
+  await session.documents(new AbortController().signal);
+  expect(session).toMatchObject({bearer: "secret", accountId: "owner"});
 });

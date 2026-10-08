@@ -1252,8 +1252,8 @@ export class EngineClient implements EngineTransport {
     } catch (error: unknown) {
       // Failed or expired input cannot leave a half-written stream on this connection.
       if (writeInput) {
-        if (!inputComplete) this.close();
         await writeTask.catch(() => undefined);
+        if (!inputComplete) this.close();
       }
       throw error;
     } finally {

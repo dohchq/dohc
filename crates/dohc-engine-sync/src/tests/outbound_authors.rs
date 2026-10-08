@@ -101,6 +101,11 @@ fn queue_legacy_moment(engine: &mut EngineStore, authors: serde_json::Value) -> 
                 crate::outbound::moment_append_payload_in_tx(tx, "ws", "record-moment")?;
             // Restore the affected build's already-serialized author list.
             payload["authors"] = authors;
+            payload
+                .as_object_mut()
+                .unwrap()
+                .remove("attributionUnavailable");
+            payload["metadata"]["summary"] = serde_json::Value::Null;
             journal_local_op_in_tx(tx, "ws", "moment.append", &payload, recorded_at_ms)?;
             legacy = payload;
             Ok::<_, SyncError>(())
@@ -114,6 +119,7 @@ fn queued_human_authors_are_durably_repaired_before_push_and_echo() {
     for authors in [
         json!([{"kind":"human","humanId":"person"}]),
         json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"}]),
+        json!([{"kind":"link","publicPrincipalId":"recipient","label":"Edit link"}]),
         json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"},{"kind":"unattributed"}]),
         json!([{"kind":"link","linkId":"link"},{"kind":"named","userId":"recipient"}]),
         json!([{"kind":"human","humanId":"person"},{"kind":"agent","agentId":"agent","onBehalfOf":"owner"}]),
@@ -121,6 +127,7 @@ fn queued_human_authors_are_durably_repaired_before_push_and_echo() {
         let (_scratch, path, mut engine) = open_store();
         let original_authors = authors.clone();
         let mut expected = queue_legacy_moment(&mut engine, authors);
+        crate::outbound::mark_unproven_hosted_authors(&mut expected);
         crate::outbound::omit_client_identity_authors(&mut expected);
         let client = RelaySyncClient::new(FakeRelay::default());
         let faults = ScriptedFaults::crash_at(FaultPoint::SyncAfterPushBeforeCursorPersist);
@@ -141,11 +148,19 @@ fn queued_human_authors_are_durably_repaired_before_push_and_echo() {
             .get_moment("ws", "record-moment")
             .unwrap()
             .unwrap();
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(history.author_json.as_deref().unwrap())
-                .unwrap(),
-            original_authors
-        );
+        if expected.get("attributionUnavailable").is_some() {
+            assert_eq!(history.author_json, None);
+            assert_eq!(
+                history.metadata_summary.as_deref(),
+                Some("Attribution unavailable")
+            );
+        } else {
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(history.author_json.as_deref().unwrap())
+                    .unwrap(),
+                original_authors
+            );
+        }
         client
             .push_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 2003, 0)
             .unwrap();
@@ -262,12 +277,16 @@ fn a_crashed_queued_author_repair_sends_nothing_and_recovers_on_retry() {
         .unwrap();
     assert_eq!(
         client.transport().pushes.lock().unwrap()[0].ops[1].payload["authors"],
-        json!([{"kind":"unattributed"}])
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        client.transport().pushes.lock().unwrap()[0].ops[1].payload["attributionUnavailable"]["reason"],
+        "unproven-hosted-authors"
     );
 }
 
 #[test]
-fn service_host_author_repair_keeps_relay_identities() {
+fn service_host_author_repair_refuses_unproved_relay_identities() {
     let (_scratch, _path, mut engine) = open_store();
     let authors = json!([
         {"kind":"human","humanId":"recipient","humanName":"Recipient"},
@@ -280,22 +299,176 @@ fn service_host_author_repair_keeps_relay_identities() {
         .write_with(&NoFaults, |tx| {
             let (payload, _) =
                 crate::outbound::moment_append_payload_in_tx(tx, "ws", "record-moment")?;
-            assert_eq!(payload["authors"], authors);
+            assert!(payload.get("authors").is_none());
+            assert_eq!(
+                payload["attributionUnavailable"]["reason"],
+                "unproven-hosted-authors"
+            );
             Ok::<_, SyncError>(())
         })
         .unwrap();
     let mut ops = list_replication_ops(&engine, "ws", "local", -1, 10).unwrap();
     crate::outbound::repair_queued_moment_authors(&mut engine, &mut ops, &NoFaults, true).unwrap();
-    assert_eq!(ops[1].payload, legacy);
+    let mut expected = legacy;
+    crate::outbound::mark_unproven_hosted_authors(&mut expected);
+    assert_eq!(ops[1].payload, expected);
     assert_eq!(
         list_replication_ops(&engine, "ws", "local", -1, 10).unwrap(),
         ops
     );
 }
 
+fn assert_unproven_authors_marked_before_first_push(authors: serde_json::Value) {
+    for native_settlements in [false, true] {
+        let (_scratch, path, mut engine) = open_store();
+        queue_legacy_moment(&mut engine, authors.clone());
+        engine
+            .write_with(&NoFaults, |tx| {
+                let (payload, _) =
+                    crate::outbound::moment_append_payload_in_tx(tx, "ws", "record-moment")?;
+                assert!(payload.get("authors").is_none());
+                assert_eq!(
+                    payload["attributionUnavailable"]["reason"],
+                    "unproven-hosted-authors"
+                );
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        let mut ops = list_replication_ops(&engine, "ws", "local", -1, 10).unwrap();
+        crate::outbound::repair_queued_moment_authors(
+            &mut engine,
+            &mut ops,
+            &NoFaults,
+            native_settlements,
+        )
+        .unwrap();
+        assert!(ops[1].payload.get("authors").is_none());
+        assert_eq!(
+            ops[1].payload["attributionUnavailable"]["reason"],
+            "unproven-hosted-authors"
+        );
+        drop(engine);
+        let mut engine = EngineStore::open(&path, 2001).unwrap();
+        assert_eq!(
+            list_replication_ops(&engine, "ws", "local", -1, 10).unwrap(),
+            ops
+        );
+        let moment = VersionedTextStore::new(&mut engine)
+            .get_moment("ws", "record-moment")
+            .unwrap()
+            .unwrap();
+        assert_eq!(moment.author_json, None);
+        assert_eq!(
+            moment.metadata_summary.as_deref(),
+            Some("Attribution unavailable")
+        );
+        let client = RelaySyncClient::new(FakeRelay::default());
+        client
+            .push_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 2002, 0)
+            .unwrap();
+        let pushed = client.transport().pushes.lock().unwrap()[0].ops.clone();
+        assert_eq!(pushed, ops);
+        *client.transport().pull.lock().unwrap() = Some(PullResponse {
+            ops: pushed,
+            next_cursor: 2,
+            has_more: false,
+        });
+        client
+            .pull_chat_workspace(
+                &mut engine,
+                &mut WriterDocCache::new(),
+                "ws",
+                &NoFaults,
+                &NoLiveLeases,
+                2003,
+            )
+            .expect("the first repaired push must have an exact own echo");
+    }
+}
+
 #[test]
-fn nameless_account_owner_is_omitted_on_both_lanes_without_changing_history() {
-    let owner = json!({"kind":"human","humanId":"8b183289-9c6e-46e9-bc2d-2e08dc144ea2"});
+fn nameless_account_human_keeps_agent_coauthors_for_relay_stamping() {
+    let account = "8b183289-9c6e-46e9-bc2d-2e08dc144ea2";
+    let agent = json!({"kind":"agent","agentId":"agent","onBehalfOf":account,"agentRunId":"run"});
+    let authors = json!([{"kind":"human","humanId":account}, agent]);
+    let mut payload = json!({"authors":authors,"metadata":{"origin":"api","summary":"Edited"}});
+    let original = payload.clone();
+    assert!(!crate::outbound::mark_unproven_hosted_authors(&mut payload));
+    assert_eq!(payload, original);
+    assert!(crate::outbound::omit_local_person_authors(&mut payload));
+    assert_eq!(payload["authors"], json!([agent]));
+    assert!(payload.get("attributionUnavailable").is_none());
+    assert_eq!(payload["metadata"]["summary"], "Edited");
+
+    for native_settlements in [false, true] {
+        let (_scratch, _path, mut engine) = open_store();
+        queue_legacy_moment(&mut engine, authors.clone());
+        engine
+            .write_with(&NoFaults, |tx| {
+                let (payload, _) =
+                    crate::outbound::moment_append_payload_in_tx(tx, "ws", "record-moment")?;
+                assert_eq!(payload["authors"], json!([agent]));
+                assert!(payload.get("attributionUnavailable").is_none());
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        let mut ops = list_replication_ops(&engine, "ws", "local", -1, 10).unwrap();
+        crate::outbound::repair_queued_moment_authors(
+            &mut engine,
+            &mut ops,
+            &NoFaults,
+            native_settlements,
+        )
+        .unwrap();
+        assert_eq!(ops[1].payload["authors"], json!([agent]));
+        assert!(ops[1].payload.get("attributionUnavailable").is_none());
+        assert_eq!(
+            list_replication_ops(&engine, "ws", "local", -1, 10).unwrap(),
+            ops
+        );
+        let moment = VersionedTextStore::new(&mut engine)
+            .get_moment("ws", "record-moment")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(moment.author_json.as_deref().unwrap())
+                .unwrap(),
+            authors
+        );
+        assert_eq!(moment.metadata_summary, None);
+    }
+}
+
+#[test]
+fn recipient_with_empty_relay_name_is_marked_before_first_push() {
+    assert_unproven_authors_marked_before_first_push(json!([
+        {"kind":"human","humanId":"8b183289-9c6e-46e9-bc2d-2e08dc144ea2","humanName":""}
+    ]));
+}
+
+#[test]
+fn unlabelled_link_is_marked_before_first_push() {
+    for author in [
+        json!({"kind":"link","publicPrincipalId":"recipient"}),
+        json!({"kind":"link","grantId":"grant","grantGeneration":2,"principalId":"holder"}),
+    ] {
+        assert_unproven_authors_marked_before_first_push(json!([author]));
+    }
+}
+
+#[test]
+fn public_and_named_authors_are_marked_before_first_push() {
+    for author in [
+        json!({"kind":"public","principalId":"holder","grantId":"grant"}),
+        json!({"kind":"named","userId":"recipient","grantId":"grant","grantGeneration":1}),
+    ] {
+        assert_unproven_authors_marked_before_first_push(json!([author]));
+    }
+}
+
+#[test]
+fn both_lanes_keep_nameless_local_history_and_remove_unproved_hosted_history() {
+    let owner = json!({"kind":"human","humanId":"local:8b183289-9c6e-46e9-bc2d-2e08dc144ea2"});
     let recipient = json!({"kind":"human","humanId":"recipient","humanName":"Recipient"});
     for native_settlements in [false, true] {
         for authors in [json!([owner]), json!([owner, recipient])] {
@@ -305,9 +478,7 @@ fn nameless_account_owner_is_omitted_on_both_lanes_without_changing_history() {
                 .write_with(&NoFaults, |tx| {
                     let (payload, _) =
                         crate::outbound::moment_append_payload_in_tx(tx, "ws", "record-moment")?;
-                    let expected =
-                        (authors.as_array().unwrap().len() > 1).then(|| json!([recipient]));
-                    assert_eq!(payload.get("authors"), expected.as_ref());
+                    assert!(payload.get("authors").is_none());
                     Ok::<_, SyncError>(())
                 })
                 .unwrap();
@@ -319,14 +490,13 @@ fn nameless_account_owner_is_omitted_on_both_lanes_without_changing_history() {
                 native_settlements,
             )
             .unwrap();
-            let expected = (authors.as_array().unwrap().len() > 1).then(|| {
-                if native_settlements {
-                    json!([recipient])
-                } else {
-                    json!([{"kind":"unattributed"}])
-                }
-            });
-            assert_eq!(ops[1].payload.get("authors"), expected.as_ref());
+            assert!(ops[1].payload.get("authors").is_none());
+            if authors.as_array().unwrap().len() > 1 {
+                assert_eq!(
+                    ops[1].payload["attributionUnavailable"]["reason"],
+                    "unproven-hosted-authors"
+                );
+            }
             assert_eq!(
                 list_replication_ops(&engine, "ws", "local", -1, 10).unwrap(),
                 ops
@@ -335,11 +505,21 @@ fn nameless_account_owner_is_omitted_on_both_lanes_without_changing_history() {
                 .get_moment("ws", "record-moment")
                 .unwrap()
                 .unwrap();
-            assert_eq!(
-                serde_json::from_str::<serde_json::Value>(moment.author_json.as_deref().unwrap())
+            if authors.as_array().unwrap().len() > 1 {
+                assert_eq!(moment.author_json, None);
+                assert_eq!(
+                    moment.metadata_summary.as_deref(),
+                    Some("Attribution unavailable")
+                );
+            } else {
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(
+                        moment.author_json.as_deref().unwrap()
+                    )
                     .unwrap(),
-                authors
-            );
+                    authors
+                );
+            }
         }
     }
 }
