@@ -641,9 +641,17 @@ it.skipIf(engine.missing).each([
         });
       } finally { await formula.close(); }
     }
-    await pushUntilDrained(relay);
-    await peer.capture.runRelaySync(materializePage => peer!.relay.pull(materializePage));
-    expect(await readFile(join(rootB, path), "utf8")).toBe(markdown);
+    await expect.poll(async () => {
+      await capture!.flush();
+      await pushUntilDrained(relay);
+      await peer!.capture.runRelaySync(materializePage => peer!.relay.pull(materializePage));
+      return readFile(join(rootB, path), "utf8");
+    }, {timeout: 120_000}).toBe(markdown);
+    expect(await source.sessions.run(source.workspace, async ({client, workspace}) =>
+      new WorkspaceDaemonRequester(client).request("sync.refusalNotices", {workspaceId}, {workspace}))).toEqual({
+        notices: seedRefusals.map(coordinate => expect.objectContaining({...coordinate,
+          document: expect.objectContaining({path}), refusalCoordinates: [coordinate]})),
+      });
     expect(errors).toEqual([]);
     await session.close({settle: false});
   } finally {
