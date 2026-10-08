@@ -2536,7 +2536,7 @@ export function DesktopWorkspaceShell(props: {
   }, [captureRecoveries, refreshAfterHistoryRestore]);
   // One row per file in Notices: a newer failure for the file replaces it. A
   // shared live file's refusal goes to its kept typing's row instead, which
-  // then says to copy the typing back in.
+  // then says to replace the file's text with the kept version.
   const reportRestoreError = useCallback(
     (fallback: string, error: unknown, retry: () => void, identity: string, path: string) => {
       if (captureRecoveries.restoreRefused(path, error)) return;
