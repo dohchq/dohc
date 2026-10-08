@@ -4053,6 +4053,10 @@ export function DesktopWorkspaceShell(props: {
     if (!shareView || !workspaceIsReady) return;
     void reloadMyShareChanges().catch(() => undefined);
   }, [!!shareView, workspaceIsReady, reloadMyShareChanges]);
+  // Read at call time: a direct-write notice keeps the callback it was shown
+  // with, and one shown before readiness must still send after it.
+  const workspaceIsReadyRef = useRef(workspaceIsReady);
+  workspaceIsReadyRef.current = workspaceIsReady;
   const sendShareChanges = useCallback(async () => {
     if (workspaceAdmission.superseded) return;
     if (!shareViewWritableRef.current) {
@@ -4060,6 +4064,9 @@ export function DesktopWorkspaceShell(props: {
       reportShellError(message, new Error(message));
       return;
     }
+    // Readiness takes a fresh list token, so a submit started before it could
+    // never clear its own Sending state.
+    if (!workspaceIsReadyRef.current) return;
     const token = myShareChangeToken.current;
     // The newest token this call owns. The reload below takes a fresh one, and
     // the cleanup has to compare against that — comparing against the token
@@ -4882,7 +4889,7 @@ export function DesktopWorkspaceShell(props: {
               <button
                 type="button"
                 data-testid="share-changes-send"
-                disabled={shareChangesSubmitting}
+                disabled={shareChangesSubmitting || !workspaceIsReady}
                 onClick={() => void sendShareChanges()}
                 className="flex shrink-0 items-center gap-1.5 rounded border border-line bg-panel px-2 py-0.5 text-[11px] text-muted hover:text-ink disabled:opacity-50"
               >
