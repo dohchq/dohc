@@ -4836,13 +4836,14 @@ function createShareViewFilesForOperation(
       if (target.kind !== "standalone" || !view) throw new Error("This shared view is no longer registered.");
       setWorkspaceShareView(target.workspaceId, { ...view, unsavedPaths: paths });
     },
-    markEnded: async (target, unsavedPaths) => {
+    markEnded: async (target, unsavedPaths, unconfirmedChanges) => {
       assertCurrent();
       if (target.kind === "standalone") {
         const view = currentWorkspace().shareView;
         if (!view) throw new Error("This shared view is no longer registered.");
         setWorkspaceShareView(target.workspaceId, { ...view, ended: true,
-          ...(unsavedPaths !== undefined ? { unsavedPaths } : {}) });
+          ...(unsavedPaths !== undefined ? { unsavedPaths } : {}),
+          ...(unconfirmedChanges !== undefined ? { unconfirmedChanges } : {}) });
         return;
       }
       const mounts = storedShareMounts(currentWorkspace());

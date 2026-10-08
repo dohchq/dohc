@@ -268,6 +268,9 @@ export const ShareSkippedOpsSummary = z.object({
   inexact: z.boolean().optional(),
 });
 export type ShareSkippedOpsSummary = z.infer<typeof ShareSkippedOpsSummary>;
+export const ShareUnconfirmedChangesSchema = z.object({
+  paths: z.array(z.string()), unchecked: z.boolean(), checked: z.number().int().nonnegative(), dismissedKey: z.string().optional(),
+});
 
 export const WorkspaceSummary = z.object({
   workspaceId: WORKSPACE_ID,
@@ -303,6 +306,7 @@ export const WorkspaceSummary = z.object({
       // refresh it has no grant to pull with, and says so in the banner.
       damaged: z.literal(true).optional(),
       unsavedPaths: z.array(z.string()).nullable().optional(),
+      unconfirmedChanges: ShareUnconfirmedChangesSchema.optional(),
       ended: z.boolean().optional(),
       skippedOps: ShareSkippedOpsSummary.optional(),
     })
@@ -5206,6 +5210,14 @@ export type CheckSharedViewAccessResult = z.infer<typeof CheckSharedViewAccessRe
 
 // The handler owns its workspace operation so a stale check replies unverified.
 export const sharedViewAccessOperations = {
+  dismissShareCaptureNotice: {
+    capabilityId: "share.capture.notice.dismiss",
+    scope: "workspace",
+    channel: "desktop:dismiss-share-capture-notice",
+    payload: z.object({ workspaceId: WORKSPACE_ID, shareId: OPAQUE_ID, key: z.string() }),
+    guard: "active-workspace",
+    inactiveMessage: "This share's Notice is no longer open in this window.",
+  },
   checkSharedViewAccess: {
     capabilityId: "share.access.read",
     scope: "workspace",
