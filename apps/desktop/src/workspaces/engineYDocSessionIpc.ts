@@ -852,24 +852,28 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     return ReadEngineYDocArtifactAssetResult.parse(await access.value);
   }
 
-  // Try again on a document that couldn't save: settle it now. The settle
-  // reports its outcome as a save state. A settle that cannot start, or that
-  // fails, rejects here, so the caller can say so instead of waiting.
+  // Try again on a document that couldn't save: settle the session open
+  // for it now, whichever editor opened it. The settle reports its outcome
+  // as a save state. A settle that cannot start, or that fails, rejects
+  // here, so the caller can say so instead of waiting.
   async retrySave(sender: EngineYDocIpcSender, payload: RetrySavePayload): Promise<RetrySaveResult> {
     const input = RetryEngineYDocSavePayload.parse(payload);
-    const access = this.#owner.accessOpenSession(
-      this.#caller(sender, input.sessionId),
-      (owned) => {
-        if (owned.workspace.workspaceId !== input.workspaceId) {
-          throw new Error("This document belongs to another workspace.");
-        }
-        if (owned.deleted) return null;
-        if (!owned.provider.settleNow) throw new Error("dohc could not start a save for this document.");
-        return owned.provider.settleNow();
-      },
-    );
-    if (access.kind === "refused" || access.value === null) return "closed";
-    await access.value;
+    const renderer = this.#sessionFor(sender);
+    if (!renderer?.isCurrent() || renderer.workspaceId !== input.workspaceId) {
+      throw new Error("This document belongs to another workspace.");
+    }
+    const authority = this.#acquireWorkspace(input.workspaceId);
+    let settle: Promise<unknown>;
+    try {
+      authority.assertCurrent();
+      const held = this.#owner.documentSession(authority.workspace.attachmentId, input.path);
+      if (!held || held.session.deleted) return "closed";
+      if (!held.session.provider.settleNow) throw new Error("dohc could not start a save for this document.");
+      settle = held.session.provider.settleNow();
+    } finally {
+      authority.release();
+    }
+    await settle;
     return "settled";
   }
 

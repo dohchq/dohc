@@ -9,7 +9,7 @@ import { useDocumentSaveNotices } from "./useDocumentSaveNotices";
 import { useShellError } from "./useShellError";
 
 const listeners = new Set<(event: EngineYDocSaveStateEvent) => void>();
-const retryEngineYDocSave = vi.fn<(payload: { workspaceId: string; sessionId: string }) => Promise<RetryEngineYDocSaveResult>>();
+const retryEngineYDocSave = vi.fn<(payload: { workspaceId: string; path: string }) => Promise<RetryEngineYDocSaveResult>>();
 const open = vi.fn<(path: string) => void>();
 
 // The shell's error list and notice center, with no editor mounted: a
@@ -132,7 +132,7 @@ describe("document save notices", () => {
     render(<Shell />);
     emit({ ...failed(), sessionId: "session-2" });
     await user.click(within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }));
-    expect(retryEngineYDocSave).toHaveBeenCalledWith({ workspaceId: "ws-1", sessionId: "session-2" });
+    expect(retryEngineYDocSave).toHaveBeenCalledWith({ workspaceId: "ws-1", path: "notes/a.md" });
     expect(screen.queryByTestId("connection-notices")).toBeNull();
 
     emit({ state: { kind: "saving" } });
@@ -165,15 +165,22 @@ describe("document save notices", () => {
     expect(screen.queryByTestId("connection-notices")).toBeNull();
   });
 
-  it("ignores a late failure from a session a newer one replaced, and retries the newer one", async () => {
-    const user = userEvent.setup();
+  it("ignores a late failure from a session a newer one replaced", () => {
     render(<Shell />);
     emit({ sessionId: "session-1", state: { kind: "saved-here" } });
     emit({ ...failed(), sessionId: "session-2" });
     emit({ ...failed(false), sessionId: "session-1", closing: true });
     expect(screen.getByTestId("workspace-shell-error").textContent).toContain("read-only");
+  });
+
+  it("asks main to settle whatever session is open when Try again is clicked, even one that has sent nothing", async () => {
+    const user = userEvent.setup();
+    render(<Shell />);
+    // The old session's closing failure arrives before the reopened editor's session says anything.
+    emit({ ...failed(), sessionId: "session-1", closing: true });
     await user.click(within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }));
-    expect(retryEngineYDocSave).toHaveBeenCalledWith({ workspaceId: "ws-1", sessionId: "session-2" });
+    expect(retryEngineYDocSave).toHaveBeenCalledWith({ workspaceId: "ws-1", path: "notes/a.md" });
+    expect(open).not.toHaveBeenCalled();
   });
 
   it("opens the document when its session has closed", async () => {

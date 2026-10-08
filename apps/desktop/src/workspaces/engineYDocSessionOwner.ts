@@ -364,21 +364,6 @@ export class EngineYDocSessionOwner<
     };
   }
 
-  // Like applyUpdate, only a session that is open: not one still opening
-  // or already closing.
-  accessOpenSession<TValue>(
-    input: EngineYDocSessionCaller<TSender>,
-    access: (session: TSession) => TValue,
-  ):
-    | { kind: "available"; value: TValue }
-    | { kind: "refused"; reason: "session-unavailable" } {
-    const record = this.#current(input);
-    if (!record || record.state !== "open" || record.session === null) {
-      return { kind: "refused", reason: "session-unavailable" };
-    }
-    return { kind: "available", value: access(record.session) };
-  }
-
   accessSession<TValue>(
     input: EngineYDocSessionCaller<TSender>,
     access: (session: TSession) => TValue,

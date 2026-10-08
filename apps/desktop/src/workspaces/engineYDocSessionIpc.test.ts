@@ -617,21 +617,20 @@ describe("engine Y.Doc IPC adapter", () => {
     ]);
   });
 
-  it("answers Try again with the settle it ran, or closed when nothing can settle", async () => {
+  it("answers Try again by settling the session open for the document, or closed when none is", async () => {
     const settleNow = vi.fn(async () => ({
       momentId: "moment-1", path: "notes/a.md", content: null, sha256: "a".repeat(64), materialized: true,
       projection: { contentKind: "richdoc" as const, sourceStateVectorSha256: "b".repeat(64), destructive: false },
     }));
     const h = harness(providerSession({ settleNow }));
     const sender = new FakeSender(7);
-    await h.ipc.open(sender, openPayload);
-    const retry = { workspaceId: "workspace-1", sessionId: openPayload.sessionId };
+    const retry = { workspaceId: "workspace-1", path: "notes/a.md" };
+    await expect(h.ipc.retrySave(sender, retry)).resolves.toBe("closed");
 
+    await h.ipc.open(sender, openPayload);
     await expect(h.ipc.retrySave(sender, retry)).resolves.toBe("settled");
     expect(settleNow).toHaveBeenCalledOnce();
-    // Another window, or a session this window never opened, has nothing to settle.
-    await expect(h.ipc.retrySave(new FakeSender(8), retry)).resolves.toBe("closed");
-    await expect(h.ipc.retrySave(sender, { ...retry, sessionId: "renderer-session-2" })).resolves.toBe("closed");
+    await expect(h.ipc.retrySave(sender, { ...retry, path: "notes/b.md" })).resolves.toBe("closed");
     await expect(h.ipc.retrySave(sender, { ...retry, workspaceId: "workspace-2" })).rejects.toThrow("another workspace");
     expect(settleNow).toHaveBeenCalledOnce();
 
@@ -646,7 +645,7 @@ describe("engine Y.Doc IPC adapter", () => {
     const failing = harness(providerSession({ settleNow: vi.fn(async () => { throw refusal; }) }));
     const sender = new FakeSender(7);
     await failing.ipc.open(sender, openPayload);
-    const retry = { workspaceId: "workspace-1", sessionId: openPayload.sessionId };
+    const retry = { workspaceId: "workspace-1", path: "notes/a.md" };
     await expect(failing.ipc.retrySave(sender, retry)).rejects.toBe(refusal);
     await failing.ipc.shutdown();
 

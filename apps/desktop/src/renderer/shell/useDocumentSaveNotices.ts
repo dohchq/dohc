@@ -49,7 +49,7 @@ export function useDocumentSaveNotices(input: {
   useEffect(() => {
     const owner = workspaceId;
     const current = () => latest.current.workspaceId === owner;
-    const documents = new Map<string, { sessionId: string; reported: boolean }>();
+    const documents = new Map<string, { reported: boolean }>();
     // The newest session for each path. A session that closes after a newer
     // one opened has been replaced: its late states describe nothing open.
     const sessions = new Map<string, { sessionId: string; closing: boolean }>();
@@ -57,7 +57,7 @@ export function useDocumentSaveNotices(input: {
       identity: string,
       path: string,
       readOnly: boolean,
-      document: { sessionId: string; reported: boolean },
+      document: { reported: boolean },
       cause?: unknown,
     ): void => {
       document.reported = true;
@@ -66,10 +66,11 @@ export function useDocumentSaveNotices(input: {
         ...(cause === undefined ? {} : { cause }),
         identity,
         retry: () => {
-          // Try again removes the row. The settle's failure files it again,
-          // and so does a settle that could not start.
+          // Try again removes the row. Main settles whichever session is open
+          // for the document when it is clicked. The settle's failure files
+          // the row again, and so does a settle that could not start.
           document.reported = false;
-          void bridge().retryEngineYDocSave({ workspaceId: owner, sessionId: document.sessionId }).then(
+          void bridge().retryEngineYDocSave({ workspaceId: owner, path }).then(
             (outcome) => {
               if (outcome !== "closed" || !current() || documents.get(identity) !== document) return;
               documents.delete(identity);
@@ -108,14 +109,12 @@ export function useDocumentSaveNotices(input: {
         return;
       }
       if (event.saveFailure) {
-        const document = known ?? { sessionId: event.sessionId, reported: false };
-        document.sessionId = event.sessionId;
+        const document = known ?? { reported: false };
         documents.set(identity, document);
         if (!document.reported) file(identity, event.path, event.saveFailure.readOnly, document);
         return;
       }
       if (!known) return;
-      known.sessionId = event.sessionId;
       if (event.access || REPLACES_FAILURE.has(event.state.kind)) {
         documents.delete(identity);
         latest.current.clear(identity);

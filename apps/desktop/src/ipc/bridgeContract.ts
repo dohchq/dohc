@@ -6191,13 +6191,14 @@ export const engineYDocAdmissionOperations = {
 
 export const RetryEngineYDocSavePayload = z.object({
   workspaceId: WORKSPACE_ID,
-  sessionId: ENGINE_YDOC_SESSION_ID,
+  path: PATH_STRING,
 });
 export type RetryEngineYDocSavePayload = z.infer<typeof RetryEngineYDocSavePayload>;
 
-// Try again on a document that couldn't save. "settled" means the settle ran;
-// its outcome arrives as the session's next save state. "closed" means the
-// session is no longer open, so nothing settled. A settle that could not
+// Try again on a document that couldn't save. Main settles the session open
+// for that document when asked. "settled" means the settle ran; its outcome
+// arrives as the session's next save state. "closed" means no session is
+// open, so nothing settled. A settle that could not
 // start or that failed rejects.
 export const RetryEngineYDocSaveResult = z.enum(["settled", "closed"]);
 export type RetryEngineYDocSaveResult = z.infer<typeof RetryEngineYDocSaveResult>;
@@ -6207,7 +6208,7 @@ export const engineYDocSaveOperations = {
     scope: "workspace",
     handlerCheck: {
       check: "engineYDocSessionIpc.retrySave",
-      reason: "Settles only a session this window opened, and only when the payload names that session's workspace.",
+      reason: "Settles only a document open in the workspace this window shows.",
     },
     channel: "desktop:engine-ydoc-retry-save",
     payload: RetryEngineYDocSavePayload,
