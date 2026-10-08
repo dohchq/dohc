@@ -50,8 +50,8 @@ function assertAdmission(row: Pick<OperationDefinition, "channel" | "guard" | "s
 
 describe("B1 main inventories (a4be19d5b)", () => {
   it("preserves every IPC wire name and the 26 enforced table guards", () => {
-    // Hand-reviewed removals and additions stay separate from the
-    // hashed main baseline.
+    // Hand-reviewed #1639 removals and #1701, #1688, #1747, reports, save retry and
+    // capture recovery additions, separate from the hashed main baseline.
     const expectedNames = [...mainIpc.names];
     expectedNames.push("desktop:check-shared-view-access");
     expectedNames.push("desktop:dismiss-share-capture-notice");
