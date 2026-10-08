@@ -3,7 +3,7 @@ import { appendFile, readdir, readFile, rename, rm, writeFile } from "node:fs/pr
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createTestScratch, metadataDirAt, testMetadataDir } from "./testScratch";
-import { createAutomationRunStore, MAX_RUN_FILE_BYTES, type ClaimStanding, type ExpiringClaim, type StoredRun } from "./automationRunStore";
+import { createAutomationRunStore, MAX_RUN_FILE_BYTES, RUN_PLAN_BUDGET_BYTES, type ClaimStanding, type ExpiringClaim, type StoredRun } from "./automationRunStore";
 
 const AUTOMATION = "collection:Tasks#bump";
 // Thirty days after 1000, when runs that ended before 1000 expire.
@@ -23,6 +23,53 @@ function run(claimId: string, state: "done" | "failed" | null, atMs: number, set
 }
 
 describe("the automation run store", () => {
+  it("reserves header space when appends fill the progress budget", async () => {
+    const root = await createTestScratch("dohc-automation-size-");
+    const store = createAutomationRunStore(root, testMetadataDir);
+    const saved = run("append-limit", null, 1);
+    await store.save(saved);
+    const folder = join(root, ".dohc", "automations", "runs", hashOf(AUTOMATION));
+    const path = join(folder, (await readdir(folder))[0]!);
+    const before = await readFile(path, "utf8");
+    const step = { ordinal: 1, effects: [], output: { kind: "code" as const, value: "" } };
+    const bytes = MAX_RUN_FILE_BYTES - RUN_PLAN_BUDGET_BYTES - Buffer.byteLength(before) - Buffer.byteLength(JSON.stringify({ kind: "step", ...step }) + "\n");
+    step.output.value = "x".repeat(bytes);
+    await store.appendStep(saved, step);
+    await expect(store.appendStep(saved, { ordinal: 2, effects: [] })).rejects.toThrow("too large");
+    const state = { finishedAtMs: NOW, settled: true, outcome: { state: "failed" as const, error: "e".repeat(RUN_PLAN_BUDGET_BYTES - 2048), run: 1, step: 1 } };
+    await store.updateState(saved, state);
+    const loaded = (await createAutomationRunStore(root, testMetadataDir).runsOf(AUTOMATION, saved.claimId)).runs[0]!;
+    expect(loaded.finishedAtMs).toBe(NOW);
+    expect(loaded.settled).toBe(true);
+    expect(loaded.outcome).toEqual(state.outcome);
+    expect(loaded.steps[1]?.output).toEqual(step.output);
+    expect(Buffer.byteLength(await readFile(path, "utf8"))).toBeLessThanOrEqual(MAX_RUN_FILE_BYTES);
+  });
+
+  it("can expire a saved run with a full progress budget and a large header", async () => {
+    const root = await createTestScratch("dohc-automation-size-");
+    const store = createAutomationRunStore(root, testMetadataDir);
+    const saved = run("save-limit", null, 1);
+    saved.definitionHash = "h".repeat(RUN_PLAN_BUDGET_BYTES - 2048);
+    saved.steps = [{ ordinal: 0, effects: [], output: { kind: "code", value: "" } }];
+    saved.applied = [];
+    const overhead = Buffer.byteLength(JSON.stringify({ kind: "step", ...saved.steps[0] }) + "\n");
+    const bytes = MAX_RUN_FILE_BYTES - RUN_PLAN_BUDGET_BYTES - overhead;
+    saved.steps[0]!.output = { kind: "code", value: "x".repeat(bytes) };
+    await store.save(saved);
+    const folder = join(root, ".dohc", "automations", "runs", hashOf(AUTOMATION));
+    const path = join(folder, (await readdir(folder))[0]!);
+    const head = (await readFile(path, "utf8")).split("\n")[0]! + "\n";
+    saved.definitionHash += "h".repeat(RUN_PLAN_BUDGET_BYTES - 32 - Buffer.byteLength(head));
+    await store.save(saved);
+    await expect(store.save({ ...saved, steps: [{ ...saved.steps[0]!, output: { kind: "code", value: "x".repeat(bytes + 1) } }] })).rejects.toThrow("too large");
+    await createAutomationRunStore(root, testMetadataDir).expire(NOW, async () => "gone", null);
+    const result = await createAutomationRunStore(root, testMetadataDir).runsOf(AUTOMATION, saved.claimId);
+    expect(result.unreadable).toBe(false);
+    expect(result.runs[0]?.finishedAtMs).toBe(NOW);
+    expect(result.runs[0]?.steps[0]?.output).toEqual(saved.steps[0]!.output);
+  });
+
   it("bounds the complete file, including its header, before replacing a readable run", async () => {
     const root = await createTestScratch("dohc-automation-size-");
     const store = createAutomationRunStore(root, testMetadataDir);

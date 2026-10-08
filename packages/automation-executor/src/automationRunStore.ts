@@ -33,6 +33,9 @@ export const RUN_PLAN_BUDGET_BYTES = 4 * 1024 * 1024;
 // The largest saved run this store writes or reads. It leaves room for
 // values other people changed that are larger than the plan expected.
 export const MAX_RUN_FILE_BYTES = 4 * RUN_PLAN_BUDGET_BYTES;
+// Progress cannot consume the space needed for terminal state and Undo.
+const MAX_RUN_HEADER_BYTES = RUN_PLAN_BUDGET_BYTES;
+const MAX_RUN_PROGRESS_BYTES = MAX_RUN_FILE_BYTES - MAX_RUN_HEADER_BYTES;
 // Run history keeps a claim's saved runs this long after its last run
 // ended, as both ledgers keep the claim itself.
 const RUN_HISTORY_MS = 30 * 24 * 60 * 60 * 1000;
@@ -685,32 +688,12 @@ function parseHeader(text: string | null | undefined): z.infer<typeof HeaderSche
   }
 }
 
-// Expiry weighs the header without loading the run's progress into memory.
-function readHeaderLine(path: string): Promise<string | null | undefined> {
-  return withFile(path, () => readHeaderLineUnlocked(path));
+async function readHeaderLine(path: string): Promise<string | null | undefined> {
+  return firstLine(await readBounded(path));
 }
 
 async function readHeaderLineUnlocked(path: string): Promise<string | null | undefined> {
-  const stats = await lstat(path).catch(() => undefined);
-  if (stats === undefined) return undefined;
-  if (stats.isSymbolicLink() || !stats.isFile() || stats.size > MAX_RUN_FILE_BYTES) return null;
-  const file = await retryFileAccess(() => open(path, "r"));
-  try {
-    const chunks: Buffer[] = [];
-    for (let position = 0; position < stats.size;) {
-      const chunk = Buffer.alloc(Math.min(4096, stats.size - position));
-      const { bytesRead } = await file.read(chunk, 0, chunk.length, position);
-      if (bytesRead === 0) return null;
-      const bytes = chunk.subarray(0, bytesRead);
-      const end = bytes.indexOf(0x0a);
-      chunks.push(end < 0 ? bytes : bytes.subarray(0, end));
-      if (end >= 0) return Buffer.concat(chunks).toString("utf8");
-      position += bytesRead;
-    }
-    return null;
-  } finally {
-    await file.close();
-  }
+  return firstLine(await readBoundedUnlocked(path));
 }
 
 // A file's JSON, undefined when it does not exist, or null when it cannot be
@@ -950,9 +933,12 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
   const readRun = async (folder: string, name: string, automationId: string) =>
     parseRun(await readBounded(join(folder, `${name}${RUN_SUFFIX}`)), name, automationId);
   const runText = (run: StoredRun) => {
-    const text = `${JSON.stringify({ ...header(run), kind: "header" })}\n${progressText(run)}`;
-    if (Buffer.byteLength(text) > MAX_RUN_FILE_BYTES) throw tooLarge();
-    return text;
+    const head = `${JSON.stringify({ ...header(run), kind: "header" })}\n`;
+    const progress = progressText(run);
+    // Replacing null with any finite JSON timestamp grows by fewer than 32 bytes.
+    const headerLimit = MAX_RUN_HEADER_BYTES - (run.finishedAtMs === null ? 32 : 0);
+    if (Buffer.byteLength(head) > headerLimit || Buffer.byteLength(progress) > MAX_RUN_PROGRESS_BYTES) throw tooLarge();
+    return head + progress;
   };
   // Appends one line durably. A torn line a crash left at the end goes first,
   // so the new line starts on a line of its own.
@@ -964,19 +950,18 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
       const text = `${JSON.stringify(line)}\n`;
       const existing = await lstat(path).catch(() => null);
       if (existing === null || existing.isSymbolicLink() || !existing.isFile()) throw new Error("dohc could not read this run's saved changes in .dohc/automations.");
-      {
-        if (existing.size + Buffer.byteLength(text) > MAX_RUN_FILE_BYTES) throw tooLarge();
-        const file = await open(path, "r+");
-        try {
-          const last = Buffer.alloc(1);
-          if (existing.size > 0 && (await file.read(last, 0, 1, existing.size - 1)).bytesRead === 1 && last[0] !== 0x0a) {
-            const whole = await readFile(path);
-            await file.truncate(whole.lastIndexOf(0x0a) + 1);
-            await file.sync();
-          }
-        } finally {
-          await file.close();
+      // Count the header too, so an append needs no separate header read.
+      if (existing.size + Buffer.byteLength(text) > MAX_RUN_PROGRESS_BYTES) throw tooLarge();
+      const repair = await open(path, "r+");
+      try {
+        const last = Buffer.alloc(1);
+        if (existing.size > 0 && (await repair.read(last, 0, 1, existing.size - 1)).bytesRead === 1 && last[0] !== 0x0a) {
+          const whole = await readFile(path);
+          await repair.truncate(whole.lastIndexOf(0x0a) + 1);
+          await repair.sync();
         }
+      } finally {
+        await repair.close();
       }
       const file = await retryFileAccess(() => open(path, "a"));
       try {
@@ -985,7 +970,6 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
       } finally {
         await file.close();
       }
-      if (existing === null) await syncFolder(folder);
     });
   };
   const removeRun = async (folder: string, name: string) => {
@@ -1074,8 +1058,9 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
           const newline = text.indexOf("\n");
           const header = parseHeader(text.slice(0, newline));
           if (header !== null && header.finishedAtMs === null) {
-            const next = `${JSON.stringify({ ...header, finishedAtMs: now })}\n${text.slice(newline + 1)}`;
-            if (Buffer.byteLength(next) > MAX_RUN_FILE_BYTES) throw tooLarge();
+            const head = `${JSON.stringify({ ...header, finishedAtMs: now })}\n`;
+            const next = head + text.slice(newline + 1);
+            if (Buffer.byteLength(head) > MAX_RUN_HEADER_BYTES || Buffer.byteLength(next) > MAX_RUN_FILE_BYTES) throw tooLarge();
             await writeDurablyUnlocked(path, next);
           }
         }
