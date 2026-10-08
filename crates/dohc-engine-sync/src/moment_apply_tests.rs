@@ -179,7 +179,11 @@ fn outbound_moment_authors_keep_local_people_and_replicate_agents_and_automation
             )
             .expect("source identity");
             let author = moment_author_json(
-                Some("creator"),
+                Some(if kind == ChangeActorKind::Human {
+                    "local:creator"
+                } else {
+                    "creator"
+                }),
                 Some(&ChangeAttribution {
                     actor_kind: kind,
                     on_behalf_of: principal.map(str::to_owned),
@@ -244,6 +248,7 @@ fn outbound_moment_authors_keep_local_people_and_replicate_agents_and_automation
                 .unwrap()
                 .unwrap();
             assert_eq!(local_history.author_json.as_deref(), Some(author.as_str()));
+            assert!(op.payload.get("attributionUnavailable").is_none());
             if kind == ChangeActorKind::Human {
                 assert!(op.payload.get("authors").is_none());
             } else {
@@ -1945,7 +1950,7 @@ fn disposition(store: &EngineStore, origin: &str) -> Option<String> {
 }
 
 #[test]
-fn public_create_author_survives_replay_and_payload_export() {
+fn public_create_author_survives_replay_but_is_not_republished_without_proof() {
     let (_scratch, mut store) = test_store();
     hydrate_texts(&mut store, &["---\nanswer: Lisbon\n---\n"]);
     let mut payload = absent_text_payload(
@@ -1974,10 +1979,22 @@ fn public_create_author_survives_replay_and_payload_export() {
             assert_eq!(count, 1);
             let (exported, _) =
                 crate::outbound::moment_append_payload_in_tx(tx, "ws", "accepted-create").unwrap();
-            assert_eq!(exported["authors"], authors);
+            assert!(exported.get("authors").is_none());
+            assert_eq!(
+                exported["attributionUnavailable"]["reason"],
+                "unproven-hosted-authors"
+            );
             Ok::<_, SyncError>(())
         })
         .unwrap();
+    let history = VersionedTextStore::new(&mut store)
+        .get_moment("ws", "accepted-create")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(history.author_json.as_deref().unwrap()).unwrap(),
+        authors
+    );
 }
 
 #[test]
