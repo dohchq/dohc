@@ -1,10 +1,11 @@
 import { engineSaveState } from "../workspaces/engineYDocSaveState";
 // @vitest-environment jsdom
 import { setupFileInspectorTests } from "./FileInspector.environment-fixture";
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
+import { StrictMode, Suspense } from "react";
 import { markdownToYDoc as projectMarkdownToYDoc } from "@dohc/ydoc-projection";
 import { markdownToYDoc, replaceYDocWithMarkdown } from "./editor/import-export";
 import { FileInspector } from "./FileInspector";
@@ -37,6 +38,17 @@ import {
   TEST_CONTENT_HASH,
 } from "./FileInspector.draft-fixture";
 import { type DraftFlush } from "./useAutosavedTextDraft";
+
+const snapshotDocs = vi.hoisted(() => ({ track: false, created: [] as import("yjs").Doc[] }));
+vi.mock("yjs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("yjs")>();
+  return { ...actual, Doc: class extends actual.Doc {
+    constructor(...args: ConstructorParameters<typeof actual.Doc>) {
+      super(...args);
+      if (snapshotDocs.track) snapshotDocs.created.push(this);
+    }
+  } };
+});
 
 setupFileInspectorTests();
 
@@ -93,6 +105,7 @@ describe("engine markdown source view", () => {
         sessionId: string;
         state: import("@dohc/workspace-contracts/save-state").SaveState;
         access?: "read-only" | "deleted" | "object-changed";
+        readOnlyCause?: import("../ipc/bridgeContract").ReadOnlyTransitionCause;
         seq: number;
       }) => void
     >();
@@ -162,6 +175,7 @@ describe("engine markdown source view", () => {
             sessionId: string;
             state: import("@dohc/workspace-contracts/save-state").SaveState;
         access?: "read-only" | "deleted" | "object-changed";
+        readOnlyCause?: import("../ipc/bridgeContract").ReadOnlyTransitionCause;
             seq: number;
           }) => void,
         ) => {
@@ -183,8 +197,9 @@ describe("engine markdown source view", () => {
     const pushSaveState = (
       state: "settling" | "saved" | "error" | "deleted" | "read-only",
       seq: number,
+      readOnlyCause?: import("../ipc/bridgeContract").ReadOnlyTransitionCause,
     ) => {
-      for (const listener of saveStateListeners) listener({ sessionId, ...engineSaveState(state), seq });
+      for (const listener of saveStateListeners) listener({ sessionId, ...engineSaveState(state), seq, readOnlyCause });
     };
     return {
       bridgeMock,
@@ -313,6 +328,172 @@ describe("engine markdown source view", () => {
     expect(asWritten.querySelector("details")?.open).toBe(false);
   });
 
+  it("keeps the read-only marker after clean share access ends and the live lease closes", async () => {
+    const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-source-toggle");
+
+    act(() => pushSaveState("read-only", 0));
+    await waitFor(() => expect(bridgeMock.closeEngineYDocSession).toHaveBeenCalled());
+    expect(screen.getByTestId("markdown-save-state").getAttribute("title")).not.toContain("set aside");
+    view.rerender(<FileInspector workspaceId="ws-1" path="a.md" readOnly />);
+
+    await waitFor(() => expect(screen.getByTestId("markdown-save-state").dataset.state).toBe("read-only"));
+    const marker = screen.getByTestId("markdown-save-state");
+    expect(marker.textContent).toBe("Read-only");
+    expect(marker.getAttribute("title")).toBe("Your access to this document ended.");
+    expect((screen.getByTestId("page-title") as HTMLTextAreaElement).readOnly).toBe(true);
+    expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
+  });
+
+  it.each(["host-status-first", "shell-first"] as const)("keeps the last live document in the rich editor after clean access ends (%s)", async (order) => {
+    const { bridgeMock, pushSaveState, pushRemoteMarkdown } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-editor");
+    const asWritten = () => screen.getByTestId("frontmatter-as-written").querySelector("pre")?.textContent;
+    const fileBlock = "---\ntitle: Plan\nstatus: draft\n---";
+    await waitFor(() => expect(asWritten()).toBe(fileBlock));
+    const fileReads = bridgeMock.readWorkspaceText.mock.calls.length;
+    const latest = "---\ntitle: Latest live title\nstatus: ready\n---\n\n# Latest live document\n\nThe recipient keeps this paragraph.\n";
+    act(() => pushRemoteMarkdown(latest));
+    await waitFor(() => expect(screen.getByTestId("markdown-editor").textContent).toContain("The recipient keeps this paragraph."));
+    if (order === "host-status-first") {
+      act(() => pushSaveState("read-only", 0));
+      await waitFor(() => expect(bridgeMock.closeEngineYDocSession).toHaveBeenCalled());
+    }
+    view.rerender(<FileInspector workspaceId="ws-1" path="a.md" readOnly accessEnded />);
+    await waitFor(() => expect(bridgeMock.closeEngineYDocSession).toHaveBeenCalled());
+
+    const editor = await screen.findByTestId("markdown-editor");
+    expect(editor.getAttribute("contenteditable")).toBe("false");
+    expect(editor.textContent).toContain("The recipient keeps this paragraph.");
+    expect((screen.getByTestId("page-title") as HTMLTextAreaElement).value).toBe("Latest live title");
+    expect(screen.getByTestId("markdown-save-state").dataset.state).toBe("read-only");
+    expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
+    expect(screen.getAllByTestId("frontmatter-as-written")).toHaveLength(1);
+    expect(asWritten()).toBe(fileBlock);
+    expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(fileReads);
+    fireEvent.click(screen.getByTestId("markdown-source-toggle"));
+    const source = codeEditorTestHost(await screen.findByTestId("markdown-source-view"));
+    await waitFor(() => expect(codeEditorText(source)).toContain("The recipient keeps this paragraph."));
+    expect(codeEditorText(source)).toContain("title: Latest live title");
+    expect(screen.getByTestId("view-markdown-source").textContent).not.toContain("make changes");
+    expect(bridgeMock.applyEngineYDocUpdate).not.toHaveBeenCalled();
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  it.each(["replace", "unmount", "discarded-render"] as const)("owns the ended snapshot in StrictMode (%s)", async (finish) => {
+    const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    let blocked = false;
+    const pending = new Promise<void>(() => undefined);
+    function CommitGate() { if (blocked) throw pending; return null; }
+    const surface = (readOnly = false, workspaceId = "ws-1", path = "a.md") => (
+      <StrictMode><Suspense fallback={<span data-testid="snapshot-pending" />}>
+        <FileInspector workspaceId={workspaceId} path={path} readOnly={readOnly} accessEnded={readOnly} />
+        <CommitGate />
+      </Suspense></StrictMode>
+    );
+    const view = render(surface());
+    await screen.findByTestId("markdown-editor");
+    snapshotDocs.created = [];
+    snapshotDocs.track = true;
+    const created = snapshotDocs.created;
+    try {
+      act(() => pushSaveState("read-only", 0));
+      if (finish === "discarded-render") {
+        blocked = true;
+        view.rerender(surface(true));
+        await screen.findByTestId("snapshot-pending");
+        expect(created).toHaveLength(0);
+        blocked = false;
+      }
+      view.rerender(surface(true));
+      await waitFor(() => expect(screen.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("false"));
+      if (finish !== "discarded-render") expect(created).toHaveLength(1);
+      const liveCopies = created.filter(doc => !doc.isDestroyed);
+      expect(liveCopies).toHaveLength(1);
+      const destroy = vi.spyOn(liveCopies[0]!, "destroy");
+      const createdCount = created.length;
+      view.rerender(surface(true));
+      expect(created).toHaveLength(createdCount);
+      expect(destroy).not.toHaveBeenCalled();
+      if (finish === "replace") {
+        view.rerender(surface(true, "ws-2", "b.md"));
+      } else view.unmount();
+      expect(destroy).toHaveBeenCalledOnce();
+      view.unmount();
+      expect(destroy).toHaveBeenCalledOnce();
+      expect(created.every(doc => doc.isDestroyed)).toBe(true);
+    } finally {
+      view.unmount();
+      snapshotDocs.track = false;
+      for (const doc of created) if (!doc.isDestroyed) doc.destroy();
+    }
+  });
+
+  it("keeps the marker hidden for a View share opened read-only", async () => {
+    const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" readOnly />);
+    await screen.findByTestId("markdown-edit-toggle");
+    expect(screen.queryByTestId("markdown-save-state")).toBeNull();
+    expect(bridgeMock.openEngineYDocSession).not.toHaveBeenCalled();
+  });
+
+  it("keeps the marker hidden while a live document is opening", async () => {
+    const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+    bridgeMock.openEngineYDocSession.mockImplementation(() => new Promise(() => {}));
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-open-state");
+    expect(screen.queryByTestId("markdown-save-state")).toBeNull();
+  });
+
+  it.each(["reconnecting", "lineage-failure"] as const)("uses unavailable words for %s without a draft", async (cause) => {
+    const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-source-toggle");
+    act(() => pushSaveState("read-only", 0, cause));
+    const marker = await screen.findByTestId("markdown-save-state");
+    expect(marker.dataset.state).toBe("read-only");
+    expect(marker.getAttribute("title")).toBeNull();
+    expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
+  });
+
+  it.each([{ workspaceId: "ws-2" }, { path: "b.md" }, { engineVersionKey: 1 }])("does not carry an ended marker into a changed request %j", async (changed) => {
+    const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-source-toggle");
+    act(() => pushSaveState("read-only", 0));
+    view.rerender(<FileInspector workspaceId="ws-1" path="a.md" readOnly accessEnded />);
+    await waitFor(() => expect(screen.getByTestId("markdown-save-state").dataset.state).toBe("read-only"));
+    view.rerender(<FileInspector workspaceId="ws-1" path="a.md" readOnly accessEnded {...changed} />);
+    await waitFor(() => expect(screen.queryByTestId("markdown-save-state")).toBeNull());
+  });
+
+  it("keeps recovery visible when share access ends with a local edit", async () => {
+    const drafts = renderHook(() => orphanedDraftsModule.useOrphanedDrafts("ws-1", "a.md"));
+    const user = userEvent.setup();
+    const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-source-toggle");
+    await user.type(screen.getByTestId("page-title"), " Local edit");
+
+    act(() => pushSaveState("read-only", 0));
+    await waitFor(() => expect(bridgeMock.closeEngineYDocSession).toHaveBeenCalled());
+    view.rerender(<FileInspector workspaceId="ws-1" path="a.md" readOnly />);
+
+    await waitFor(() => expect(screen.getByTestId("markdown-save-state").dataset.state).toBe("recovery"));
+    expect(screen.getByTestId("orphaned-draft-notice")).toBeTruthy();
+    await waitFor(() => expect(drafts.result.current.at(-1)?.text).toContain("Local edit"));
+  });
+
   it("shows the plain deletion notice when the last edit settled first", async () => {
     const user = userEvent.setup();
     const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
@@ -394,7 +575,7 @@ describe("engine markdown source view", () => {
     act(() => pushSaveState("read-only", 0));
     expect(readOnly).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(
-      "This document is shared with you to read.",
+      "Your access to this document ended.",
     );
     expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
     await waitFor(() =>
@@ -433,8 +614,17 @@ describe("engine markdown source view", () => {
     );
 
     view.rerender(<FileInspector workspaceId="ws-1" path="a.md" readOnly />);
-    await waitFor(() => expect(screen.queryByTestId("markdown-source-toggle")).toBeNull());
-    expect((screen.getByTestId("markdown-edit-toggle") as HTMLButtonElement).disabled).toBe(true);
+    if (options.saved) {
+      // A clean end keeps the last live document on screen, read-only.
+      await waitFor(() =>
+        expect((screen.getByTestId("page-title") as HTMLTextAreaElement).value).toBe("Plan Recipient continued."),
+      );
+      expect((screen.getByTestId("page-title") as HTMLTextAreaElement).readOnly).toBe(true);
+      expect(screen.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("false");
+    } else {
+      await waitFor(() => expect(screen.queryByTestId("markdown-source-toggle")).toBeNull());
+      expect((screen.getByTestId("markdown-edit-toggle") as HTMLButtonElement).disabled).toBe(true);
+    }
     const delivered = bridgeMock.applyEngineYDocUpdate.mock.calls.length;
     await user.type(screen.getByTestId("page-title"), " Typed after access stopped.");
     expect(bridgeMock.applyEngineYDocUpdate).toHaveBeenCalledTimes(delivered);

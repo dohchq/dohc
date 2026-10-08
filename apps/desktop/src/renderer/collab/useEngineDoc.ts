@@ -1,3 +1,4 @@
+import type { ReadOnlyTransitionCause } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { rearmDesktopAdmission } from "./rearmDesktopAdmission";
 import type { SharedDocumentOpenState } from "../../ipc/sharedDocumentOpenState";
@@ -111,11 +112,12 @@ export type UseEngineDoc = {
   // A local update exceeded the permanent transport limit, or main refused a
   // delivery outright. The rejected document is retained for recovery only.
   permanentFailureWhileEditing: boolean;
-  // Main refused a live edit because this workspace became read-only after
-  // the session opened. The rejected document is retained for recovery only.
+  // The live session became read-only after it opened. Unconfirmed local
+  // edits are retained for recovery; a clean access stop creates no draft.
   readOnlyWhileEditing: boolean;
   // The recovery row that read-only transition created, if it still exists.
   readOnlyDraftId: number | null;
+  readOnlyCause: ReadOnlyTransitionCause | null;
   // An open lost to a delete or move interval. This is not a terminal outcome:
   // the operation can still fail, so the caller stays read-only and retries.
   removalInProgress: EngineRemovalInProgress | null;
@@ -158,9 +160,21 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     snapshot: EngineDocLeaseSnapshot;
   } | null>(null);
 
+  const [readOnlyHistory, setReadOnlyHistory] = useState<{
+    versionKey: string;
+    retryKey: number;
+    bound: boolean;
+    cause: UseEngineDoc["readOnlyCause"];
+  } | null>(null);
+
   useEffect(() => {
     const previousRequest = committedRequestRef.current;
     if (!input.enabled) {
+      setReadOnlyHistory((previous) =>
+        previous?.versionKey === versionKey && previous.retryKey === retryKey && previous.bound && input.accessEnded
+          ? { ...previous, cause: "access-ended" }
+          : previous,
+      );
       previousRequest?.lease?.disposeIfReleased();
       committedRequestRef.current = { versionKey, retryKey, lease: null };
       setLeaseState(null);
@@ -173,11 +187,18 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     openingRevision.current = activityRevision.current;
     const lease = retainEngineDocLease(requestInput, requestKey, isRetry);
     committedRequestRef.current = { versionKey, retryKey, lease };
-    const update = () =>
-      setLeaseState({
-        requestKey,
-        snapshot: lease.getSnapshot(),
-      });
+    const update = () => {
+      const snapshot = lease.getSnapshot();
+      setLeaseState({ requestKey, snapshot });
+      const bound = snapshot.outcome?.kind === "bound";
+      const transition = snapshot.readOnlyTransition;
+      const cause = snapshot.outcome?.kind === "bound" && transition?.token === snapshot.outcome.token
+        ? transition.cause : null;
+      setReadOnlyHistory((previous) =>
+        previous?.versionKey === versionKey && previous.retryKey === retryKey && previous.bound === bound && previous.cause === cause
+          ? previous : { versionKey, retryKey, bound, cause },
+      );
+    };
     const unsubscribe = lease.subscribe(update);
     update();
     return () => {
@@ -194,6 +215,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     input.kind,
     input.reopenKey,
     retryKey,
+    input.accessEnded,
   ]);
 
   // Derive this during render. A result for an earlier request never grants
@@ -269,6 +291,11 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
   const readOnlyDraftId = readOnlyWhileEditing
     ? (settled?.readOnlyTransition?.draftId ?? null)
     : null;
+  const history = readOnlyHistory?.versionKey === versionKey && readOnlyHistory.retryKey === retryKey
+    ? readOnlyHistory : null;
+  const readOnlyCause = !input.enabled
+    ? input.accessEnded && history?.bound ? "access-ended" : history?.cause ?? null
+    : readOnlyWhileEditing ? settled!.readOnlyTransition!.cause : null;
   const permanentFailureWhileEditing =
     outcome?.kind === "bound" &&
     settled?.permanentFailure?.token === outcome.token;
@@ -304,6 +331,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     permanentFailureWhileEditing,
     readOnlyWhileEditing,
     readOnlyDraftId,
+    readOnlyCause,
     removalInProgress,
     artifactAssets,
     readArtifactAsset,

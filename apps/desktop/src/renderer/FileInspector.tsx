@@ -303,6 +303,7 @@ type FileInspectorProps = {
   onPendingUndoConsumed?: (token: number) => void;
   // Read-only shared views: every editable view refuses edits.
   readOnly?: boolean;
+  accessEnded?: boolean;
   // G2-C-3: a monotonic token that changes when the ACTIVE VERSION of this
   // workspace changes while the same file stays open (the shell's versionEpoch).
   // Threaded to the engine editor so a version switch re-binds it to the new
@@ -473,6 +474,7 @@ export const FileInspector = memo(function FileInspector(
     kind: liveDocumentKind ?? undefined,
     reopenKey: props.engineVersionKey,
     retryKey: engineRetryNonce,
+    accessEnded: props.accessEnded,
   });
   useAuthorCapacityNotice({
     workspaceId: props.workspaceId, path: props.path,

@@ -10,7 +10,7 @@ import {
 } from "@dohc/excalidraw-scene";
 import type { BinaryFileData } from "@excalidraw/excalidraw/types";
 import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
-import type { EngineYDocSaveStateEvent } from "../../ipc/bridgeContract";
+import type { EngineYDocSaveStateEvent, ReadOnlyTransitionCause } from "../../ipc/bridgeContract";
 import { readError, withErrorWords } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 import { documentKey, documentVersionKey } from "../documentVersionKey";
@@ -283,6 +283,7 @@ function makeTransport(
 }
 
 export type EngineDocInput = {
+  accessEnded?: boolean;
   workspaceId: string;
   path: string;
   // The caller gates which supported live files open an engine session.
@@ -313,7 +314,7 @@ export type EngineDocLeaseSnapshot = {
     cause: DocumentGoneCause;
   } | null;
   // The draft this transition set aside, when it set one aside.
-  readOnlyTransition: { token: number; draftId: number | null } | null;
+  readOnlyTransition: { token: number; cause: ReadOnlyTransitionCause; draftId: number | null } | null;
   permanentFailure: { token: number } | null;
   sceneRecoveryAssets: {
     token: number;
@@ -419,15 +420,11 @@ function createEngineDocSession(
   let deletionPending = false;
   let deletionCause: DocumentGoneCause = "deleted";
   let deliveryPending = false;
+  let confirmedLocalSeq = 0;
   let pendingSavedSeq: number | null = null;
   let replacementPending = false;
   let replacementSaveState: EngineYDocSaveStateEvent | null = null;
   let pendingSavedState: SaveState = SAVED_HERE;
-  // The last local edit a saved-here or saved-to-host report covered. Remote
-  // deltas also show saving, but they are not this window's work.
-  let savedLocalSeq = 0;
-  const localEditsSaved = (): boolean =>
-    !deliveryPending && savedLocalSeq >= localSeq.current;
   const retiredDraftObservers = new Map<Y.Doc, () => void>();
   let lifecycle: Promise<void> = Promise.resolve();
   let disposePromise: Promise<void> | null = null;
@@ -494,7 +491,6 @@ function createEngineDocSession(
     authorCapacity = false,
   ): void => {
     if (state.kind === "error" && error) state = saveProblem("error", error, "issueId" in state ? state.issueId : null);
-    if (state.kind === "saved-here" || state.kind === "saved-to-host") savedLocalSeq = localSeq.current;
     if (saveStateEqual(snapshot.saveState, state) && snapshot.saveError === error && snapshot.authorCapacity === authorCapacity) return;
     saveStateRef.current = state;
     publish((current) => ({ ...current, saveState: state, saveError: error, authorCapacity }));
@@ -512,6 +508,7 @@ function createEngineDocSession(
       !writesRefused.current &&
       pendingSavedSeq >= localSeq.current
     ) {
+      confirmedLocalSeq = pendingSavedSeq;
       reportSaveState(pendingSavedState);
     }
     pendingSavedSeq = null;
@@ -677,11 +674,15 @@ function createEngineDocSession(
         if (
           transition === "read-only" &&
           slot === recovery &&
-          snapshot.readOnlyTransition?.draftId !== slot.draftId
+          snapshot.readOnlyTransition &&
+          snapshot.readOnlyTransition.draftId !== slot.draftId
         ) {
           publish((current) => ({
             ...current,
-            readOnlyTransition: { token, draftId: slot.draftId },
+            readOnlyTransition: current.readOnlyTransition && {
+              ...current.readOnlyTransition,
+              draftId: slot.draftId,
+            },
           }));
         }
         if (!sceneRecovery) return;
@@ -772,19 +773,19 @@ function createEngineDocSession(
   };
 
   // A refused update always leaves work behind. A read-only status can also
-  // arrive after every edit saved; then `forceCreate` is false, nothing is set
-  // aside, and a later edit still starts a draft through the snapshot.
-  const captureReadOnlyTransition = (doc: Y.Doc, forceCreate: boolean): void => {
+  // arrive after every edit saved; then `recoverEdits` is false, nothing is
+  // set aside, and a later edit still starts a draft through the snapshot.
+  const captureReadOnlyTransition = (doc: Y.Doc, recoverEdits = true, cause: ReadOnlyTransitionCause = "access-ended"): void => {
     writesRefused.current = true;
     recovery.transition = "read-only";
     const bytes = Y.encodeStateAsUpdate(doc);
     recovery.snapshotBytes = bytes;
     const sceneRecovery =
-      forceCreate && documentKind === "scene" && binding
+      recoverEdits && documentKind === "scene" && binding
         ? prepareSceneRecovery(bytes, binding)
         : null;
     // Persist the waiting document synchronously before the session closes.
-    if (forceCreate) {
+    if (recoverEdits) {
       recovery.draftId = captureOrphanedDraft(
         workspaceId,
         path,
@@ -793,10 +794,12 @@ function createEngineDocSession(
     }
     publish((current) => ({
       ...current,
-      readOnlyTransition: { token, draftId: recovery.draftId },
+      readOnlyTransition: { token, cause, draftId: recovery.draftId },
     }));
     reportSaveState(UNKNOWN_SAVE_STATE);
-    enqueueRecoverySnapshot(bytes, forceCreate, recovery.transition, sceneRecovery);
+    if (recoverEdits) {
+      enqueueRecoverySnapshot(bytes, true, recovery.transition, sceneRecovery);
+    }
   };
 
   const refreshRecoveryDraft = (doc: Y.Doc): void => {
@@ -817,6 +820,12 @@ function createEngineDocSession(
         recovery.draftId,
         sceneRecovery?.immediateText ??
           crudeRecoveryText(documentKind, doc, bytes),
+      );
+    } else {
+      recovery.draftId = captureOrphanedDraft(
+        workspaceId,
+        path,
+        sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc, bytes),
       );
     }
     enqueueRecoverySnapshot(
@@ -908,7 +917,7 @@ function createEngineDocSession(
     if (disposed) return;
     publish((current) => ({
       ...current,
-      readOnlyTransition: { token, draftId: null },
+      readOnlyTransition: { token, cause: "lineage-failure", draftId: null },
     }));
     const bound = retiredBinding ?? binding;
     if (bound) {
@@ -958,10 +967,13 @@ function createEngineDocSession(
     if (event.access === "read-only") {
       pendingSavedSeq = null;
       const doc = binding?.doc;
-      // Unlike deletion, this report needs a session that allowed edits, so
-      // it cannot precede the binding.
       if (!doc) return;
-      captureReadOnlyTransition(doc, !localEditsSaved());
+      // Hosted status has seq 0. A refused apply names its staged edit.
+      // Remote updates can change saveState without staging a local edit.
+      captureReadOnlyTransition(doc,
+        event.seq > 0 || deliveryPending || localSeq.current > confirmedLocalSeq,
+        event.readOnlyCause ?? "access-ended",
+      );
       releaseBinding();
       return;
     }
@@ -975,7 +987,10 @@ function createEngineDocSession(
         }
         return;
       }
-      if (event.seq >= localSeq.current) reportSaveState(event.state);
+      if (event.seq >= localSeq.current) {
+        confirmedLocalSeq = event.seq;
+        reportSaveState(event.state);
+      }
       return;
     }
     if (event.state.kind === "file-locked" || event.state.kind === "pending-share") {
@@ -1260,6 +1275,8 @@ function createEngineDocSession(
             // reads. The winner starts a fresh slot so later delete/unmount
             // work cannot rewrite that draft with an independent lineage.
             recovery = newRecoverySlot();
+            // The replacement owns new work; retired edits have their own draft.
+            confirmedLocalSeq = localSeq.current;
             retiredBinding = null;
             // Deletion of the PATH outlives any lineage: the file is gone
             // whichever lineage wins, so only non-deletion refusals reset.
@@ -1273,8 +1290,6 @@ function createEngineDocSession(
               ...(deletionPending ? {} : { deletion: null }),
             }));
             if (!writesRefused.current && !deliveryPending) {
-              // A dirty retired mirror already has its own draft.
-              savedLocalSeq = localSeq.current;
               reportSaveState(UNKNOWN_SAVE_STATE);
             }
             replacementPending = false;

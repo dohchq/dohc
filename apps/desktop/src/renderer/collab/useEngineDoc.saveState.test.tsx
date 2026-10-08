@@ -64,6 +64,7 @@ function Harness(props: {
       <span data-testid="read-only-transition">
         {String(engine.readOnlyWhileEditing)}
       </span>
+      <span data-testid="read-only-cause">{engine.readOnlyCause ?? "none"}</span>
       <span data-testid="permanent-failure-transition">
         {String(engine.permanentFailureWhileEditing)}
       </span>
@@ -286,6 +287,7 @@ it("keeps a failed lineage handoff visible and read-only", async () => {
   );
   expect(screen.getByTestId("available").textContent).toBe("true");
   expect(screen.getByTestId("read-only-transition").textContent).toBe("true");
+  expect(screen.getByTestId("read-only-cause").textContent).toBe("lineage-failure");
   expect(screen.getByTestId("save-error").textContent).toContain(
     "acknowledgement refused",
   );

@@ -15,6 +15,7 @@ interface Credentials { relayUrl: string; token: string; userId: string; signal:
 export function createNamedDesktopLiveCapture(options: {
   shareId: string; selector: ShareViewSelector; credentials: Credentials; assertCurrent(): void; fetch?: typeof fetch;
   preserveDraft(draft: LiveDraft): Promise<void>;
+  accessEnded(): boolean;
   recordDelivery?(path: string): Promise<ShareRecordStatus | null>;
   isOnline?(): boolean;
 }): EngineYDocSessionCapture {
@@ -101,7 +102,7 @@ export function createNamedDesktopLiveCapture(options: {
       const unsubscribe = session.subscribe(state => {
         if (!active) { announce(); return; }
         if (closed) return;
-        if (state.status !== "live") input.onSaveState?.("read-only", token, "status");
+        if (state.status !== "live") input.onSaveState?.("read-only", token, "status", undefined, options.accessEnded() ? "access-ended" : "reconnecting");
         else if (state.pendingUpdates === 0) for (const accepted of pendingTokens.splice(0)) input.onSaveState?.("saved-to-host", accepted, "outcome");
       });
       try { await session.reconnect(); announce(); await ready; options.assertCurrent(); credentials.signal.throwIfAborted(); }
