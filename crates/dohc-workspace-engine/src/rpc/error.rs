@@ -179,6 +179,12 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         return WireError::new(ErrorCode::Internal, message);
     }
     match &error {
+        RuntimeError::RecoveryImportRefused { reason } => {
+            return WireError::new(
+                ErrorCode::InvalidParams,
+                format!("capture-recovery-refused:{reason}"),
+            );
+        }
         RuntimeError::Collab(CollabError::AuthorCapacity) => {
             return WireError::new(ErrorCode::LimitExceeded, "ydoc-author-capacity");
         }

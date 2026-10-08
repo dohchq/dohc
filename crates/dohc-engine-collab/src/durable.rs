@@ -3237,3 +3237,49 @@ mod append_compaction_query_tests {
         );
     }
 }
+
+/// Recovery retains each original request's ledger identity across a restart.
+#[allow(clippy::too_many_arguments)]
+pub fn record_recovery_update_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    original_path: &str,
+    request_id: &str,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+    now_ms: i64,
+) -> Result<AppendOutcome, CollabError> {
+    let path_identity = format!("some:{}", crate::hex_sha256(original_path.as_bytes()));
+    let update_sha = crate::hex_sha256(update);
+    let restore_generation: Option<i64> = None;
+    let hash = crate::hex_sha256(format!(
+        "ydoc-record-v6{sep}{restore_generation:?}{sep}false{sep}{}{sep}{}{sep}{}{sep}{path_identity}{sep}{}{sep}{}",
+        key.workspace_id, key.version_id, key.object_id, update_sha,
+        serde_json::json!([actor_origin_id, attribution]), sep = char::from(0),
+    ).as_bytes());
+    let recorded: Option<(String, i64)> = tx
+        .query_row(
+            "SELECT payload_hash,result_seq FROM engine_requests WHERE request_id=?1",
+            [request_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(map_sql)?;
+    if let Some((prior, seq)) = recorded {
+        if prior != hash {
+            return Err(CollabError::IdempotencyKeyReused);
+        }
+        return Ok(AppendOutcome {
+            settlement_requested: false,
+            seq: -seq,
+            deduped: true,
+            emit_outbound: false,
+            record_facts: None,
+        });
+    }
+    let outcome = record_update_in_tx(tx, key, update, actor_origin_id, attribution, now_ms)?;
+    tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES(?1,?2,?3,?4,'ydoc')",
+        rusqlite::params![request_id,hash,-outcome.seq,now_ms]).map_err(map_sql)?;
+    Ok(outcome)
+}

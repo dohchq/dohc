@@ -26,6 +26,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
         || matches!(
             method,
             "capture.reconcile"
+                | "capture.importRecovery"
                 | "versionedText.list"
                 | "versionedText.captureSources"
                 | "versionedText.read"
@@ -503,6 +504,9 @@ impl EngineService {
                     .await?
             }
             "watcher.status" => self.watcher_status(request.workspace).await?,
+            "capture.importRecovery" => {
+                Box::pin(self.capture_import_recovery(request.workspace, request.params)).await?
+            }
             "capture.clearRecovery" => {
                 self.capture_clear_recovery(request.workspace, request.params)
                     .await?

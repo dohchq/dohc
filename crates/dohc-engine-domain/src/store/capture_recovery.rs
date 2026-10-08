@@ -57,7 +57,29 @@ pub fn record_capture_recovery_in_tx(
         "moment-capture-recovery-{}",
         dohc_engine_storage::hex_sha256(fingerprint.as_bytes())
     );
-    if get_moment(tx, workspace_id, &moment_id)?.is_some() {
+    record_keyed_capture_recovery_in_tx(
+        tx,
+        workspace_id,
+        captured,
+        typing,
+        &moment_id,
+        author_json,
+        now_ms,
+    )
+}
+
+/// Imported checkpoint identity is independent of the current captured head.
+pub fn record_keyed_capture_recovery_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    captured: &TextSnapshot,
+    typing: &str,
+    moment_id: &str,
+    author_json: Option<&str>,
+    now_ms: i64,
+) -> Result<Option<i64>, DomainError> {
+    let typing_sha = dohc_engine_storage::hex_sha256(typing.as_bytes());
+    if get_moment(tx, workspace_id, moment_id)?.is_some() {
         return Ok(None);
     }
     tx.execute(

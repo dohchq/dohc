@@ -32,6 +32,7 @@ export const WORKSPACE_METHOD = {
   searchQueryChatMessagesGranular: "search.queryChatMessagesGranular",
   watcherStatus: "watcher.status",
   captureClearRecovery: "capture.clearRecovery",
+  captureImportRecovery: "capture.importRecovery",
   keptCopiesList: "keptCopies.list",
   keptCopiesSave: "keptCopies.save",
   captureFlush: "capture.flush",
@@ -90,6 +91,14 @@ export type WorkspaceOpenParams = WorkspaceJsonObject & {
   captureMode?: "none";
   recoverRunningDispatches?: boolean;
 };
+export type CaptureRecoveryImportParams = WorkspaceJsonObject & {
+  versionId: string; objectId: string; path: string;
+  expectedClaimId: string | null; expectedStateVectorSha256: string;
+  expectedDiskSha256: string | null; text: string;
+  updates: { requestId: string; updateBase64: string; actorOriginId?: string;
+    attribution?: {actorKind: "human" | "agent" | "automation"; onBehalfOf?: string; depth: number} }[];
+};
+export type CaptureRecoveryImportResult = WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.captureImportRecovery];
 type WorkspaceEmptyParams = WorkspaceJsonObject;
 export type CollectionGetParams = WorkspaceJsonObject &
   CollectionGetContractParams;
@@ -440,6 +449,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]: SearchQueryChatMessagesGranularParams;
   [WORKSPACE_METHOD.watcherStatus]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureClearRecovery]: WorkspaceJsonObject & { momentId: string };
+  [WORKSPACE_METHOD.captureImportRecovery]: CaptureRecoveryImportParams;
   [WORKSPACE_METHOD.keptCopiesList]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.keptCopiesSave]: WorkspaceJsonObject & { id: number };
   [WORKSPACE_METHOD.captureFlush]: WorkspaceEmptyParams;
@@ -1265,6 +1275,8 @@ const WorkspaceResultSchemas = {
     }))),
   }),
   [WORKSPACE_METHOD.captureClearRecovery]: mutableStruct({ cleared: Schema.Boolean }),
+  [WORKSPACE_METHOD.captureImportRecovery]: mutableStruct({ committed: Schema.Literal(true),
+    outcome: Schema.Literals(["replayed", "imported", "covered"]), momentId: Schema.NullOr(Schema.String) }),
   [WORKSPACE_METHOD.keptCopiesList]: mutableStruct({
     keptCopies: Schema.mutable(
       Schema.Array(

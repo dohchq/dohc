@@ -26,6 +26,8 @@
 
 mod automations;
 mod capture;
+mod recovery_import;
+pub use recovery_import::{RecoveryImport, RecoveryImportOutcome, RecoveryUpdate};
 mod chats;
 mod collections;
 mod journal;

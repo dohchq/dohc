@@ -142,7 +142,7 @@ fn check_identifier(value: &str, reason: &'static str) -> Result<(), CollabError
     Ok(())
 }
 
-pub(crate) fn validate_actor_origin_id(value: &str) -> Result<(), CollabError> {
+pub fn validate_actor_origin_id(value: &str) -> Result<(), CollabError> {
     // Locally admitted authors appear in History and must contain no controls.
     if value.is_empty()
         || value.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES
