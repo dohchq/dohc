@@ -88,6 +88,7 @@ import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useKeptCopyNotices } from "./shell/useKeptCopyNotices";
 import { ShellErrorReporter, useShellError } from "./shell/useShellError";
+import { useReportsNotice } from "./shell/useReportsNotice";
 import { useShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { useChatDispatchNotices } from "./shell/useChatDispatchNotices";
 import { useWorkspacePathOpenFailures } from "./shell/workspacePathOpenFailures";
@@ -799,6 +800,7 @@ export function DesktopWorkspaceShell(props: {
     clearEditorGroupRefusalError,
     showSettingsFileNotice,
     showSuccessNotice,
+    showReportsNotice,
     showKeptCopies,
     showKeptCopySaved,
     showDirectWriteNotice,
@@ -3907,6 +3909,15 @@ export function DesktopWorkspaceShell(props: {
     reportError: reportShellError,
     showSuccess: showSuccessNotice,
   });
+  // The person learns about reports before any leaves. The notice is about
+  // this computer, not the workspace, so any open window shows it.
+  const reportsNoticeRow = shellErrors.find((error) => error.kind === "reports");
+  const reportsNoticeShown = useReportsNotice({
+    workspaceId,
+    privacy: props.userSettings?.settings.privacy ?? null,
+    notice: reportsNoticeRow?.reports ? { id: reportsNoticeRow.id, reports: reportsNoticeRow.reports } : null,
+    show: (reports) => showReportsNotice(reports, () => openSettings("privacy")),
+  });
 
   const refreshShareView = useCallback(async (): Promise<ShareViewRefresh> => {
     if (!shareView) return "current";
@@ -4501,6 +4512,7 @@ export function DesktopWorkspaceShell(props: {
       shellErrors.map((error) => ({
         id: error.id,
         ...(error.tone ? { tone: error.tone } : {}),
+        ...(error.stays ? { stays: true } : {}),
         message: error.message,
         ...(error.title ? { title: error.title } : {}),
         details: errorDetails([
@@ -4932,6 +4944,7 @@ export function DesktopWorkspaceShell(props: {
               onWorkspaceErrorAction={runShellErrorAction}
               onHideWorkspaceError={hideWorkspaceError}
               onDismissWorkspaceError={dismissWorkspaceError}
+              onWorkspaceErrorShown={reportsNoticeShown}
               onRetryLiveDelivery={retryLiveDelivery}
               onOpenSharingDeclined={openSharingDeclined}
               {...(shareView

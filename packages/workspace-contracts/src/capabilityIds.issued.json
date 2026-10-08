@@ -117,5 +117,10 @@
   "workspace.open.retry",
   "workspace.open.failures.take",
   "share.access.read",
-  "document.shared.admission.wait"
+  "document.shared.admission.wait",
+  "diagnostics.read",
+  "diagnostics.save",
+  "reports.notice.read",
+  "reports.notice.acknowledge",
+  "reports.error.send"
 ]

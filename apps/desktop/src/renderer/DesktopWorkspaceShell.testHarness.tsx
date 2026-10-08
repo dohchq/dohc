@@ -34,6 +34,7 @@ import type {
   ImportWorkspaceFilesResult,
   ListEngineMomentsResponse,
   ListFileChatsResult,
+  ListKeptCopiesResult,
   ListMyShareChangesResult,
   ListShareProposalsResult,
   GetCollectionResult,
@@ -63,6 +64,7 @@ import type {
   ReadEngineMomentResult,
   RebuildEngineStoreResult,
   RefreshSharedViewResult,
+  ReportKinds,
   StartAgentRunResult,
   SwitchWorkspaceVersionResult,
   SyncDmsPayload,
@@ -626,7 +628,7 @@ function makeBaseBridge(
         menuCallback = null;
       };
     }),
-    listKeptCopies: vi.fn(async () => ({ keptCopies: [], more: false })),
+    listKeptCopies: vi.fn(async (): Promise<ListKeptCopiesResult> => ({ keptCopies: [], more: false })),
     saveKeptCopy: vi.fn(async () => ({ status: "gone" as const })),
     retryAutomationNotice: vi.fn(
       async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false }),
@@ -663,6 +665,11 @@ function makeBaseBridge(
     ),
     dismissCrashReport: vi.fn(async (_payload: { through: number }) => undefined),
     sendCrashReport: vi.fn(async (_payload: Record<string, never>) => ({ sent: true })),
+    readReportsNotice: vi.fn(async (_payload: Record<string, never>) => ({ usage: false, errors: false })),
+    acknowledgeReportsNotice: vi.fn(async (_shown: ReportKinds) => undefined),
+    readDiagnostics: vi.fn(async (_payload: Record<string, never>) => ({ text: "dohc diagnostics", available: { usage: false, errors: false } })),
+    saveDiagnostics: vi.fn(async (_payload: Record<string, never>) => ({ saved: true })),
+    reportRendererError: vi.fn(async (_payload: unknown) => undefined),
     emitCrashReportChanged: () => {
       for (const callback of [...crashReportCallbacks]) callback();
     },

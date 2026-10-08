@@ -561,7 +561,7 @@ for (const kind of ["engine", "desktop"]) test(`${kind} source identity scopes e
         engine:['RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CARGO_BUILD_JOBS','CARGO_PROFILE_DEV_DEBUG',
           'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS','CARGO_INCREMENTAL','RUSTC_WRAPPER','RUSTDOCFLAGS',
           'CC','CXX','AR','CFLAGS','CXXFLAGS'],
-        desktop:['VITE_FIXTURE','NODE_ENV','ESBUILD_BINARY_PATH'],
+        desktop:['VITE_FIXTURE','NODE_ENV','ESBUILD_BINARY_PATH','DOHC_POSTHOG_KEY','DOHC_POSTHOG_HOST','DOHC_SENTRY_DSN','DOHC_SENTRY_DIST'],
       };
       for(const [owner,names] of Object.entries(settings)) for(const name of names) {
         delete process.env[name];

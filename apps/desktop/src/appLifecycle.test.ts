@@ -116,6 +116,7 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
       stopSitePreviews: vi.fn(async () => { log.push("site-previews-stop"); }),
       settleYDocs: vi.fn(async () => { log.push("ydoc-settle"); }),
       stopAgentIntegration: vi.fn(async () => { log.push("integration-stop"); }),
+      flushReports: vi.fn(async () => { log.push("reports-flush"); }),
       closeWorkspaces: vi.fn(async () => { log.push("workspaces-close"); }),
       disposeDatabase: vi.fn(async () => { log.push("database-stop"); }),
       closeRelay: vi.fn(async () => { log.push("relay-close"); }),
@@ -873,6 +874,52 @@ describe("desktop shutdown", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(f.dependencies.shutdown.closeWorkspaces).toHaveBeenCalledOnce();
     expect(f.app.exit).toHaveBeenCalledOnce();
+  });
+
+  it("sends reports alongside teardown and exits only once both finish", async () => {
+    vi.useFakeTimers();
+    const ydoc = deferred();
+    const reports = deferred();
+    const f = fixture((d) => {
+      d.shutdown.settleYDocs = () => ydoc.promise;
+      d.shutdown.flushReports = vi.fn(() => reports.promise);
+    });
+    await boot(f);
+    f.app.emit("will-quit", event());
+    // Reports start while producers still drain, and teardown does not wait for them.
+    expect(f.dependencies.shutdown.flushReports).toHaveBeenCalledOnce();
+    ydoc.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.dependencies.shutdown.stopEngine).toHaveBeenCalledOnce();
+    expect(f.app.exit).not.toHaveBeenCalled();
+    reports.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.app.exit).toHaveBeenCalledExactlyOnceWith(0);
+  });
+
+  it("exits at the shutdown budget when reports never finish", async () => {
+    vi.useFakeTimers();
+    const f = fixture((d) => {
+      d.shutdown.budgetMs = WILL_QUIT_BUDGET_MS;
+      d.shutdown.deadlineExitCode = 1;
+      d.shutdown.flushReports = () => new Promise<void>(() => undefined);
+    });
+    await boot(f);
+    f.app.emit("will-quit", event());
+    await vi.advanceTimersByTimeAsync(WILL_QUIT_BUDGET_MS - 1);
+    expect(f.dependencies.shutdown.stopEngine).toHaveBeenCalledOnce();
+    expect(f.app.exit).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.app.exit).toHaveBeenCalledExactlyOnceWith(1);
+  });
+
+  it("exits normally when sending reports fails", async () => {
+    vi.useFakeTimers();
+    const f = fixture((d) => { d.shutdown.flushReports = async () => { throw new Error("reports"); }; });
+    await boot(f);
+    f.app.emit("will-quit", event());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.app.exit).toHaveBeenCalledExactlyOnceWith(0);
   });
 
   it("keeps producer failure contained and preserves database-failure skipping of relay teardown", async () => {

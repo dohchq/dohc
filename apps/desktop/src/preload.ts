@@ -47,6 +47,7 @@ import {
   WorkspaceSummary,
   WorkspacePathOpenFailedEvent,
   crashReportOperations,
+  reportingOperations,
   noticeOperations,
   scheduleHostOperations,
   chatDispatchNoticeOperations,
@@ -399,6 +400,7 @@ const bridge: DohcDesktopBridge = {
       ipcRenderer.removeListener(CHANNELS.automationRunsChanged, handler);
   },
   ...operationBridge(crashReportOperations, invoke),
+  ...operationBridge(reportingOperations, invoke),
   onCrashReportChanged: (listener) =>
     onEvent(CHANNELS.crashReportChanged, CrashReportChangedEvent, () => listener()),
   onAutomationHoldsChanged: (
