@@ -509,15 +509,19 @@ it.skipIf(engine.missing).each([
         return {documentCount: 1, acknowledged: result === "acknowledged"};
       },
       onError: error => { errors.push(String(error)); }});
+    // Adoption can finish on a baseline settlement, and a quiet capture is not
+    // the later manual edit's settlement, so wait for that field on disk too.
     await expect.poll(async () => {
       expect(errors).toEqual([]);
       return { pending: (await adapter.listPendingCollectionAdoptions()).adoptions.length,
-        settled: (await adapter.flushCapture()).settled, errors };
+        settled: (await adapter.flushCapture()).settled,
+        ...(hasId ? { manual: (await readFile(join(rootA, path), "utf8")).includes("Name: Manual") } : {}), errors };
     }, {timeout: 120_000})
-      .toEqual({pending: 0, settled: true, errors: []});
+      .toEqual({pending: 0, settled: true, ...(hasId ? { manual: true } : {}), errors: []});
     await capture.flush();
     const markdown = await readFile(join(rootA, path), "utf8");
     if (hasId) expect(markdown).toContain("Name: Manual");
+    if (hasId) expect(markdown).toContain("beforeActivation: ordinary-owner");
     expect(markdown).toContain(`id: ${pending.recordId}`);
     if (hasId) expect(markdown).toContain(body.trimEnd());
     else expect(markdown).toBe(`---\nid: ${pending.recordId}\n---\n\n${beforeAdoption}`);

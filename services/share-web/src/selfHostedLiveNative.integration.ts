@@ -506,6 +506,10 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
       }
       throw new Error("Pull exceeded its eight-page bound.");
     };
+    // The enrolled owner first receives both admitted intervals through its
+    // authenticated native delivery, as after the baseline's idle edit.
+    expect(await runOwnerPass()).toBe("empty");
+    expect((await owner!.ownerYDocReadState(nativeRequest(), target)).acceptedCursor).toBeGreaterThanOrEqual(automationAck.journalCursor);
     // The owner reconstructs the private grant authority from verified audit.
     await pullAll(rpc);
     expect((await rpc("versionedText.read", {versionId: mainVersionId, path: "docs/a.md"})).text).toBe(automationMarkdown);
