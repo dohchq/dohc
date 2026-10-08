@@ -166,6 +166,7 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
       const credentials = new AbortController();
       const capture = createNamedDesktopLiveCapture({shareId: overrides.shareId ?? `share-${index}`,
         selector: {access: "edit", versionId: null, paths: ["docs"]},
+        accessEnded: () => false,
         credentials: {relayUrl: audience, token: overrides.token ?? tokens[index]!, userId: users[index]!.id, signal: credentials.signal},
         assertCurrent, preserveDraft: draft => preserveLiveDraft(join(root, "profile"), localWorkspaceId, draft)});
       const ipc = createEngineYDocSessionIpc({sessionFor: () => ({workspaceId: localWorkspaceId, generation: 1, isCurrent: () => current}),
@@ -248,7 +249,9 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
     expect(wrong.mirror.available).toBe(false); expect(wrong.mirror.liveHostUnavailable).toBe(true);
     const stale = await desktop(0, "stale", {current: false}); expect(stale.mirror.available).toBe(false);
     const paused = [saveWhen(first, "read-only"), saveWhen(peer, "read-only")];
-    await active.close(); active = undefined; await Promise.all(paused);
+    await active.close(); active = undefined;
+    const pausedEvents = await Promise.all(paused);
+    expect(pausedEvents.map(event => event.readOnlyCause)).toEqual(["reconnecting", "reconnecting"]);
     const unavailable = await desktop(0, "offline");
     expect(unavailable.mirror.available).toBe(false); expect(unavailable.mirror.liveHostUnavailable).toBe(true);
     expect(readFileSync(join(unavailable.localRoot, "docs/a.md"), "utf8")).toBe("Hello");
