@@ -563,6 +563,17 @@ test("desktop releases start only by dispatch, run on self-hosted runners, and p
   );
   assert.match(stepBlock(workflow, "Verify release artifacts"), /verify-desktop-release-artifacts\.mjs/);
   const jobs = topLevelSection(workflow, "jobs");
+  const preflight = indentedSection(jobs, 2, "preflight");
+  const runtime = stepBlock(preflight, "Build desktop test runtime");
+  const engine = stepBlock(preflight, "Prepare native test engine");
+  const desktopTests = stepBlock(preflight, "Desktop tests");
+  assert.match(runtime, /pnpm --filter @dohc\/app-backend-runtime build/);
+  assert.match(engine, /pnpm qa:prepare -- --engine-only/);
+  assert.ok(preflight.indexOf(runtime) < preflight.indexOf(desktopTests), "desktop tests need built runtime exports");
+  assert.ok(preflight.indexOf(engine) < preflight.indexOf(desktopTests), "desktop tests need the native engine");
+  assert.match(desktopTests, /DOHC_REQUIRE_ENGINE_E2E: "1"/);
+  assert.match(desktopTests, /test:unit --maxWorkers=4/);
+  assert.match(stepBlock(preflight, "Desktop script tests"), /pnpm --filter @dohc\/desktop test:scripts/);
 
   // The release action reuses a release that has the same tag and turns it
   // back into a draft. Nothing is packaged for a version that already has a

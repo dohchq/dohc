@@ -47,7 +47,7 @@ jobs:
     name: Preflight
     if: github.ref == 'refs/heads/main'
     runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || '["self-hosted","windows","x64"]') }}
-    timeout-minutes: 20
+    timeout-minutes: 40
     outputs:
       release_channel: ${{ steps.release.outputs.release_channel }}
       version: ${{ steps.release.outputs.version }}
@@ -113,11 +113,22 @@ jobs:
       - name: Desktop release smoke
         run: pnpm smoke:release:desktop
 
+      - name: Build desktop test runtime
+        run: pnpm --filter @dohc/app-backend-runtime build
+
+      - name: Prepare native test engine
+        run: pnpm qa:prepare -- --engine-only
+
       - name: Desktop typecheck
         run: pnpm --filter @dohc/desktop typecheck
 
       - name: Desktop tests
-        run: pnpm test:desktop
+        env:
+          DOHC_REQUIRE_ENGINE_E2E: "1"
+        run: pnpm --filter @dohc/desktop test:unit --maxWorkers=4
+
+      - name: Desktop script tests
+        run: pnpm --filter @dohc/desktop test:scripts
 
   # The release action reuses an existing release with the same tag, published
   # or draft, and turns it back into a draft while it uploads. A dispatch must
