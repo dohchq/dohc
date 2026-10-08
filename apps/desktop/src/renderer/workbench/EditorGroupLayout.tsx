@@ -3,6 +3,14 @@ import { clampEditorGroupPairLeftSize } from "./workbenchState";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 
 const KEYBOARD_RESIZE_STEP = 0.05;
+// The group takes focus when its last tab closes. The global ring would
+// paint outside the group, where the window edge and its neighbours cut off
+// all but its top edge, and an inset outline would sit under the tab strip.
+// So the same 2px accent ring is drawn inside the group, on a layer above
+// its contents. Forced colors give every other focus ring the system
+// Highlight color, and this one takes it too.
+const GROUP_FOCUS_RING =
+  "focus-visible:outline-none focus-visible:after:pointer-events-none focus-visible:after:absolute focus-visible:after:inset-0 focus-visible:after:z-20 focus-visible:after:outline-2 focus-visible:after:-outline-offset-2 focus-visible:after:outline-accent forced-colors:focus-visible:after:outline-[Highlight]";
 
 interface EditorGroupLayoutItem {
   id: string;
@@ -99,7 +107,7 @@ export function EditorGroupLayout(props: {
               onPointerDownCapture={() => props.onFocusGroup(group.id)}
               onFocusCapture={() => props.onFocusGroup(group.id)}
               onContextMenuCapture={() => props.onFocusGroup(group.id)}
-              className="flex min-h-0 min-w-0 flex-col bg-bg"
+              className={`relative flex min-h-0 min-w-0 flex-col bg-bg ${GROUP_FOCUS_RING}`}
             >
               {group.content}
             </section>

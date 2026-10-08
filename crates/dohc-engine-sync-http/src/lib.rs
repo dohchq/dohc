@@ -522,6 +522,12 @@ fn name_relay_api_version(
 }
 
 impl RelayTransport for HttpRelayTransport {
+    fn publishes_native_settlements(&self) -> bool {
+        // main.ts mounts this credential prefix with provenance: native-settlements.
+        // The relay still authenticates the credential before accepting authors.
+        self.token.starts_with("dohc-service-v1.")
+    }
+
     fn push(&self, req: PushRequest) -> Result<PushResponse, RelayError> {
         validate_outbound_payloads(req.ops.iter().map(|op| &op.payload))?;
         let body = WirePushRequest {
@@ -1723,6 +1729,18 @@ mod tests {
             usize::try_from(MAX_JSON_RESPONSE_BYTES).is_ok_and(|budget| budget >= required),
             "a legal 500-row page must fit the configured response budget"
         );
+    }
+
+    #[test]
+    fn native_settlement_authors_follow_the_service_credential_route() {
+        for (token, native) in [
+            ("dohc-service-v1.test", true),
+            ("dohc-automation-v1.test", false),
+            ("test:owner", false),
+        ] {
+            let transport = HttpRelayTransport::new("https://relay.example", token).unwrap();
+            assert_eq!(transport.publishes_native_settlements(), native);
+        }
     }
 
     #[test]

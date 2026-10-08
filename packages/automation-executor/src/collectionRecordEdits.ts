@@ -455,28 +455,11 @@ export async function createCollectionRecord(
   context: CollectionRecordEditContext,
   input: CreateCollectionRecordInput,
 ): Promise<{ path: string; recordId: string; kept?: Record<string, unknown> } | CreationPartial> {
-  const name = input.name;
-  if (
-    name.length === 0 ||
-    name.includes("/") ||
-    name.includes("\\") ||
-    name.includes("\0")
-  ) {
-    throw new Error(
-      "Record name must be a plain file name without path separators.",
-    );
-  }
-  if (input.recordId !== undefined && !isRecordId(input.recordId)) {
-    throw new Error(
-      `Record id must be "rec_" followed by 26 lowercase base32 characters: ${input.recordId}`,
-    );
-  }
-  const validated = validateUserMaterializePath(`${input.collectionPath}/${name}.md`, { platform: process.platform });
-  if (!validated.ok) throw new Error(`Invalid record path: ${validated.reason}`);
+  const prepared = prepareCollectionRecord(input);
   const entries = writableFieldEntries(input.fields ?? {});
   throwIfAborted(context.signal);
-  const requestedId = input.recordId ?? recordIdFromBytes(randomBytes(16));
-  let path = `${input.collectionPath}/${name}.md`;
+  const requestedId = prepared.recordId;
+  let path = prepared.path;
   let recordId = requestedId;
   let durable = false;
   let failedStage: CreationStage = "index";
@@ -484,7 +467,7 @@ export async function createCollectionRecord(
     const existingPath = input.recordId === undefined
       ? null : await recordPathFor(context, input.collectionPath, requestedId);
     if (existingPath !== null) {
-      if (input.author.kind !== "automation" && existingPath !== validated.normalized) {
+      if (input.author.kind !== "automation" && existingPath !== prepared.path) {
         throw new Error("This record ID belongs to another path. Open that record to edit its fields.");
       }
       path = existingPath;
@@ -526,6 +509,32 @@ export async function createCollectionRecord(
       },
     };
   }
+}
+
+/** The same identity and validated path for local and received-share creation. */
+export function prepareCollectionRecord(input: Pick<CreateCollectionRecordInput, "collectionPath" | "name" | "recordId">): {
+  path: string; recordId: string; text: string;
+} {
+  const name = input.name;
+  if (
+    name.length === 0 ||
+    name.includes("/") ||
+    name.includes("\\") ||
+    name.includes("\0")
+  ) {
+    throw new Error(
+      "Record name must be a plain file name without path separators.",
+    );
+  }
+  if (input.recordId !== undefined && !isRecordId(input.recordId)) {
+    throw new Error(
+      `Record id must be "rec_" followed by 26 lowercase base32 characters: ${input.recordId}`,
+    );
+  }
+  const validated = validateUserMaterializePath(`${input.collectionPath}/${name}.md`, { platform: process.platform });
+  if (!validated.ok) throw new Error(`Invalid record path: ${validated.reason}`);
+  const recordId = input.recordId ?? recordIdFromBytes(randomBytes(16));
+  return { path: validated.normalized, recordId, text: `---\n${RECORD_ID_FRONTMATTER_KEY}: ${recordId}\n---\n` };
 }
 
 

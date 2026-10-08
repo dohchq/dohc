@@ -1,10 +1,53 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useRef, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { useFocusSurface } from "../ui/focusReturn";
 import { EditorGroupLayout } from "./EditorGroupLayout";
+import { EditorTabs } from "./EditorTabs";
 
 afterEach(cleanup);
+
+const noop = () => {};
+
+// Groups with real tab strips, closed the way the shell closes them: a group
+// in a split that loses its last tab collapses, and its right neighbour, or
+// else its left one, becomes active.
+function Workbench(props: { groups: { id: string; tabs: string[] }[]; active: string }) {
+  const [groups, setGroups] = useState(props.groups);
+  const [active, setActive] = useState(props.active);
+  const root = useRef<HTMLDivElement>(null);
+  useFocusSurface(root, () => null);
+  const close = (groupId: string, path: string) => {
+    const index = groups.findIndex((group) => group.id === groupId);
+    const next = groups.map((group) =>
+      group.id === groupId ? { ...group, tabs: group.tabs.filter((tab) => tab !== path) } : group);
+    if (next[index].tabs.length > 0 || next.length === 1) return setGroups(next);
+    const remaining = next.filter((group) => group.id !== groupId);
+    setGroups(remaining);
+    if (active === groupId) setActive((remaining[index] ?? remaining[index - 1]).id);
+  };
+  return (
+    <div ref={root} data-focus-surface="workspace" tabIndex={-1}>
+      <EditorGroupLayout
+        groups={groups.map((group, index) => ({
+          id: group.id,
+          size: 1,
+          content: (
+            <EditorTabs groupId={group.id} groupNumber={index + 1} tabs={group.tabs.map((path) => ({ path }))}
+              activeTab={group.tabs[0] ?? null} activeTabDirty={false} recoveryPaths={new Set<string>()}
+              onActivate={noop} onClose={close} onContextMenu={noop} onMove={noop} onMoveToGroup={noop}
+              onCreateGroupRight={noop} />
+          ),
+        }))}
+        activeGroupId={active}
+        onFocusGroup={setActive}
+        onResizeGroups={noop}
+      />
+    </div>
+  );
+}
 
 function renderLayout(onResizeGroups = vi.fn()) {
   const onFocusGroup = vi.fn();
@@ -75,6 +118,78 @@ describe("EditorGroupLayout", () => {
     expect(only.getAttribute("aria-current")).toBeNull();
     // No frame around the group: the strip carries the mark in a split.
     expect(only.className).not.toContain("ring");
+  });
+
+  // The window edge and the neighbours cut off a ring painted outside the
+  // group, and the tab strip covers one painted inset on the group itself.
+  it("draws the focus ring on a layer inside the group, in place of the global one", () => {
+    renderLayout();
+    const classes = screen.getByRole("region", { name: "Editor group 1" }).className.split(" ");
+    expect(classes).toEqual(expect.arrayContaining([
+      "relative",
+      "focus-visible:outline-none",
+      "focus-visible:after:absolute",
+      "focus-visible:after:inset-0",
+      "focus-visible:after:-outline-offset-2",
+      "focus-visible:after:outline-accent",
+      "forced-colors:focus-visible:after:outline-[Highlight]",
+    ]));
+  });
+
+  it("focuses an emptied single group after a keyboard close of its last tab", async () => {
+    render(<Workbench groups={[{ id: "only", tabs: ["a.md"] }]} active="only" />);
+    screen.getByTestId("tab-a.md").focus();
+    fireEvent.keyDown(document.activeElement!, { key: "Delete" });
+    const group = screen.getByRole("region", { name: "Editor group 1" });
+    await waitFor(() => expect(document.activeElement).toBe(group));
+    expect(screen.queryAllByRole("tab")).toHaveLength(0);
+    expect(group.dataset.active).toBe("true");
+  });
+
+  it("hands focus and the active mark to the empty group a keyboard close leaves in a split", async () => {
+    render(
+      <Workbench
+        groups={[{ id: "left", tabs: ["a.md"] }, { id: "middle", tabs: [] }, { id: "right", tabs: ["b.md"] }]}
+        active="right"
+      />,
+    );
+    screen.getByTestId("tab-b.md").focus();
+    fireEvent.keyDown(document.activeElement!, { key: "Delete" });
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    const middle = screen.getByRole("region", { name: "Editor group 2" });
+    await waitFor(() => expect(document.activeElement).toBe(middle));
+    expect(screen.queryByRole("region", { name: "Editor group 3" })).toBeNull();
+    expect(screen.getByTestId("editor-group-layout").dataset.split).toBe("true");
+    expect(middle.getAttribute("aria-current")).toBe("true");
+    expect(left.getAttribute("aria-current")).toBeNull();
+    // The empty group keeps its strip, which carries the active mark.
+    expect(middle.querySelector('[data-testid="editor-tabs-active-group"]')).not.toBeNull();
+  });
+
+  it("moves the active mark between empty and populated groups without moving focus", () => {
+    const onFocusGroup = vi.fn();
+    const groups = [
+      { id: "left", size: 1, content: <button type="button">Left editor</button> },
+      { id: "right", size: 1, content: null },
+    ];
+    const { rerender } = render(
+      <EditorGroupLayout groups={groups} activeGroupId="left" onFocusGroup={onFocusGroup} onResizeGroups={vi.fn()} />,
+    );
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    outside.focus();
+    rerender(<EditorGroupLayout groups={groups} activeGroupId="right" onFocusGroup={onFocusGroup} onResizeGroups={vi.fn()} />);
+    const [left, right] = [
+      screen.getByRole("region", { name: "Editor group 1" }),
+      screen.getByRole("region", { name: "Editor group 2" }),
+    ];
+    expect(right.dataset.active).toBe("true");
+    expect(right.getAttribute("aria-current")).toBe("true");
+    expect(left.dataset.active).toBeUndefined();
+    expect(left.getAttribute("aria-current")).toBeNull();
+    expect(document.activeElement).toBe(outside);
+    expect(onFocusGroup).not.toHaveBeenCalled();
+    outside.remove();
   });
 
   it("previews pointer moves locally and commits adjacent groups once on release", () => {

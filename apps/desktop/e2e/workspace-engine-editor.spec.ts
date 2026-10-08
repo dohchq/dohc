@@ -285,6 +285,65 @@ test("kept typing survives capture before the renderer reopens after restart", a
   } finally {await cleanupDesktopWorkspace(desktop, temp);}
 });
 
+test("renaming a property of a live document keeps its place and comments through save and reopen", async () => {
+  test.setTimeout(180_000);
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  // One file with comments and quoting, and one in canonical form.
+  const files = [
+    {
+      path: "trip.md", to: "cost",
+      written: '---\n# Monthly\nbudget:  100 # euros\n# Wi-Fi password\n"wifi": hunter2\n---\n\n# Trip\n\nBase paragraph.',
+      renamed: '---\n# Monthly\ncost:  100 # euros\n# Wi-Fi password\n"wifi": hunter2\n---\n\n# Trip\n\nBase paragraph.',
+    },
+    {
+      // The properties show every line, so its section starts closed.
+      path: "plan.md", to: "yearly", collapsed: true,
+      written: "---\nbudget: 100\nwifi: hunter2\n---\n\n# Plan\n\nBase paragraph.",
+      renamed: "---\nyearly: 100\nwifi: hunter2\n---\n\n# Plan\n\nBase paragraph.",
+    },
+  ];
+  const fileText = (path: string) => readFile(join(temp.rootPath, path), "utf8");
+  // An open document stays mounted while hidden, so read the visible panel.
+  const panel = (page: import("@playwright/test").Page) => page.locator('[data-testid="properties-panel"]:visible');
+  const names = (page: import("@playwright/test").Page) =>
+    panel(page).getByTestId("property-key").evaluateAll(inputs => inputs.map(input => (input as HTMLInputElement).value));
+  const asWritten = (page: import("@playwright/test").Page) =>
+    page.locator('[data-testid="frontmatter-as-written"]:visible pre');
+  try {
+    await writeWorkspaceFiles(temp, files.map(({path, written}) => ({path, contents: written})));
+    desktop = await launchDesktopApp({workspace: temp});
+    const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
+    for (const {path, to, renamed, collapsed} of files) {
+      await waitForWorkspaceFile(desktop.page, workspace.workspaceId, path);
+      await openEngineDoc(desktop.page, path);
+      const name = panel(desktop.page).getByLabel("Property 1 name");
+      await expect(name).toHaveValue("budget");
+      await name.fill("");
+      // One key at a time, as a person types: each letter renames the property.
+      await name.pressSequentially(to);
+      await expect.poll(() => fileText(path), {timeout: 20_000}).toBe(renamed);
+      expect(await names(desktop.page)).toEqual([to, "wifi"]);
+      // Once saved, the block shown as written is the file's. A closed section
+      // reads the file when a person opens it.
+      if (collapsed) await desktop.page.locator('[data-testid="frontmatter-as-written"]:visible summary').click();
+      await expect(asWritten(desktop.page)).toHaveText(renamed.slice(0, renamed.indexOf("---\n\n") + 3));
+    }
+    await quitDesktop(desktop);
+
+    desktop = await launchDesktopApp({workspace: temp});
+    await openWorkspaceFromFirstRun(desktop.page, temp);
+    for (const {path, to, renamed} of files) {
+      await waitForWorkspaceFile(desktop.page, workspace.workspaceId, path);
+      await openEngineDoc(desktop.page, path);
+      await expect(panel(desktop.page).getByLabel(`Property ${to} value`)).toHaveValue("100");
+      expect(await names(desktop.page)).toEqual([to, "wifi"]);
+      expect(await fileText(path)).toBe(renamed);
+    }
+    await quitDesktop(desktop);
+  } finally {await cleanupDesktopWorkspace(desktop, temp);}
+});
+
 // WS-G2-C-2 gate fix 2 — a version op while a rich doc is live must settle +
 // close the session FIRST. Otherwise the live session keeps its old versionId
 // and a later settle writes a stale projection into the now-active version

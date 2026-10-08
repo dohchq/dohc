@@ -1,3 +1,5 @@
+import { SharedDocumentWaitingError } from "./ipc/sharedDocumentOpenState";
+import { net } from "electron";
 import { writeWorkspaceFilesAs } from "./workspaces/workspaceFileWrites";
 import { createDesktopAutomationControls } from "./workspaces/desktopAutomationControls";
 import {parseDohcSiteConfig} from "@dohc/workspace-core";
@@ -147,6 +149,9 @@ import { createRecordByHand, desktopRecordEditContext, type DesktopRecordEditHos
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
 import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
 import { registerOperations, type OperationBoundary } from "./ipc/operationTable";
+import { createUsageStore } from "./usage/usageStore";
+import { createRendererUsage } from "./usage/rendererUsage";
+import { DESKTOP_USAGE_COVERAGE } from "./usage/cliUsage";
 
 import { createPresencePollRegistry } from "./collab/presencePollRegistry";
 
@@ -356,6 +361,10 @@ import { createDesktopEngine } from "./workspaces/desktopEngine";
 import { onWorkspaceCaptureSettled } from "./workspaces/captureActivityBridge";
 import {createServerOwnerConnection} from "./workspaces/serverOwnerConnection";
 import { createReceivedShareEngineAccess } from "./workspaces/receivedShareEngineAccess";
+import { shareRecordStatuses } from "./workspaces/shareRecordStatus";
+import { createReceivedShareRecord } from "./workspaces/receivedShareRecordCreation";
+import { recordedShareSelector } from "./workspaces/shareViewRecords";
+import { WorkspaceDaemonRequester } from "@dohc/workspace-engine-client";
 import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
 import type { ActiveAgentRun } from "./agents/activeAgentRun";
 import { startWorkspaceFileObservation } from "./workspaces/workspaceFileObservation";
@@ -485,6 +494,10 @@ import { createShareHandoffRedemptionCoordinator } from "./shareHandoffRedemptio
 // logging in the imports above is still unguarded, which is why this stays a
 // top-level statement rather than moving inside app.whenReady.
 makeProcessDiagnosticsNonFatal();
+
+let usageStore: ReturnType<typeof createUsageStore> | undefined;
+let usageLoad: ReturnType<typeof setImmediate> | undefined;
+const rendererUsage = createRendererUsage<IpcMainInvokeEvent>(invocation => usageStore?.recordSuccess(invocation));
 
 // Crashes are recorded on this computer before anything else can crash. A
 // report leaves only when the person confirms in main's own dialog, and
@@ -723,7 +736,7 @@ function notifyShareDirectWritesPushed(workspaceId: string, result: PushShareDir
 }
 
 // Main's queue of direct pushes, once the IPC handlers are registered.
-let shareDirectWrites: { shareViewEdited(workspaceId: string): void } | null = null;
+let shareDirectWrites: { shareViewEdited(workspaceId: string): void; recordCreated(workspaceId: string): void } | null = null;
 
 const {
   withWorkspaceAttachment,
@@ -4278,6 +4291,7 @@ const chatWrites = createChatWrites({
 let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null) => Promise<OwnerAppPublicationResult>) | undefined;
 let ownerAppResponsesForCli:((input:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>)|undefined;
 const { startDesktopCliServer } = createDesktopCliServer({
+  recordSuccess: invocation => usageStore?.recordSuccess(invocation),
   dataset: (input, agent) => {
     if (!datasetForCli) throw new Error("Collections are not ready. Try again.");
     return datasetForCli(input, agent);
@@ -4401,14 +4415,26 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
     await warmCredentialCache();
     const registered = findWorkspace(workspace.workspaceId), marker = registered?.shareView;
     const credentials = cachedCredentials;
-    if (!marker || !credentials?.relayUrl || !marker.relayUrl ||
-      !relayUrlsMatch(marker.relayUrl, credentials.relayUrl) || marker.ended ||
+    if (marker?.ended) throw new SharedDocumentWaitingError({ state: "access-ended", message: "Your access to this share ended." });
+    if (!credentials?.relayUrl) throw new SharedDocumentWaitingError({ state: "failed", message: "dohc could not connect. Check your connection." });
+    if (!marker || !marker.relayUrl || !relayUrlsMatch(marker.relayUrl, credentials.relayUrl) ||
       marker.grantedSelector?.access !== "edit" ||
-      (marker.grantedSelector.versionId !== null && marker.grantedSelector.versionId !== "main")) return null;
+      (marker.grantedSelector.versionId !== null && marker.grantedSelector.versionId !== "main")) {
+      throw new SharedDocumentWaitingError({ state: "failed", message: "dohc could not open this document for editing. Check the share's Edit access." });
+    }
     const identity = (value: typeof marker | undefined) => JSON.stringify({shareId: value?.shareId, relayUrl: value?.relayUrl,
       selector: value?.grantedSelector, ended: value?.ended === true});
     const pinned = identity(marker);
     return createNamedDesktopLiveCapture({ shareId: marker.shareId, selector: marker.grantedSelector,
+      isOnline: () => net.isOnline(),
+      recordDelivery: path => requireEngineSessions().run(workspace, async binding => {
+        const statuses = await shareRecordStatuses(new WorkspaceDaemonRequester(binding.client), {
+          workspaceId: workspace.workspaceId, shareId: marker.shareId, paths: [path], grantedSelector: {
+            paths: marker.grantedSelector.paths, versionId: marker.grantedSelector.versionId, access: marker.grantedSelector.access,
+          },
+        }, { workspace: binding.workspace });
+        return statuses[path] ?? null;
+      }).catch(() => null),
       preserveDraft: draft => preserveLiveDraft(join(stateDir(), "live-draft-recovery"), workspace.workspaceId, draft),
       credentials: {relayUrl: credentials.relayUrl, token: credentials.token, userId: credentials.userId,
         signal: ownerDeliveryCredentialLifetime.signal},
@@ -5060,6 +5086,17 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     markReady: () => {
       launchMarks.appReady();
       desktopMarks.markOnce("app-ready");
+      // Start retention even when Off. Never wait for measurement on startup.
+      usageLoad = setImmediate(() => {
+        usageLoad = undefined;
+        try {
+          usageStore = createUsageStore({ stateDir, appVersion: app.getVersion(), coverage: DESKTOP_USAGE_COVERAGE });
+        } catch {
+          usageStore = undefined;
+          return;
+        }
+        void usageStore.load().catch(() => {});
+      });
     },
     startEngine: () => desktopEngine.start(),
     loadSettings: () => readCachedUserSettingsFile(stateDir()),
@@ -5168,7 +5205,12 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       await ownerDatasetCopies.closeAll();
       await namedDatasetPages.close();
     },
-    disposeDatabase: async () => { await workspaceFilesWorker.dispose(); await workspaceDatabaseWorker.dispose(); },
+    disposeDatabase: async () => {
+      if (usageLoad) clearImmediate(usageLoad);
+      await usageStore?.close().catch(() => {});
+      await workspaceFilesWorker.dispose();
+      await workspaceDatabaseWorker.dispose();
+    },
     closeRelay: closeAllRelayTransportWorkspaces,
     stopEngine: async () => { await desktopEngine.daemon?.stop(); },
   },
@@ -5508,7 +5550,7 @@ function registerIpcHandlers(): void {
     requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection, activity,
     retryOwnerLiveDelivery: workspaceId => desktopEngine.retryOwnerDelivery(workspaceId),
     retryCloudSync: (workspaceId, reason) => activity.retryCloudSync(workspaceId, reason),
-    workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions,
+    workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions, isOnline: () => net.isOnline(),
     closeDispatchRunActivity, probeEngineStoreRefusal, moveEngineStoreAside,
     openWorkspaceActivityUnderEngineStoreLock, engineYDocSessionIpc,
   });
@@ -5772,17 +5814,66 @@ function registerIpcHandlers(): void {
   handleIpc(CHANNELS.createCollectionRecord, async (event, raw: unknown) => {
     assertTrustedSender(event);
     const input = CreateCollectionRecordPayload.parse(raw);
-    return createRecordByHand(input, {
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId,
+      "Record creation stopped because this window changed workspaces.", async operation => {
+      const files = createShareViewFilesForOperation(operation);
+      const found = await createOwnedWorkspaceFileReader({ workspace: operation.workspace, files }).resolveShare(`${input.collectionPath}/collection.yaml`);
+      operation.assertCurrent();
+      if (found) {
+        const resolved = resolveRegisteredShareViewFilesTarget(operation.workspace, found.target);
+        if (!resolved || resolved.kind !== "standalone") throw new Error("Open this share as a workspace to create a record.");
+        return createReceivedShareRecord(input, {
+          target: found.target, resolved, files,
+          collectionPath: found.path.slice(0, -"/collection.yaml".length),
+          assertCurrent: () => {
+            operation.assertCurrent();
+            if (JSON.stringify(resolveRegisteredShareViewFilesTarget(operation.workspace, found.target)) !== JSON.stringify(resolved)) {
+              throw new Error("The shared file session changed. Open the Collection again.");
+            }
+          },
+          checkAuthority: async () => {
+            await warmCredentialCache();
+            operation.assertCurrent();
+            const credentials = cachedCredentials;
+            if (!credentials?.relayUrl || resolved.relayUrl && !relayUrlsMatch(resolved.relayUrl, credentials.relayUrl)) return null;
+            const generation = credentialCacheGeneration;
+            try {
+              const info = await fetchShareViewInfo({ relay: { baseUrl: credentials.relayUrl, token: credentials.token }, shareId: resolved.shareId! });
+              operation.assertCurrent();
+              if (generation !== credentialCacheGeneration) throw new Error("The shared file session changed.");
+              if (!info.selector) throw new Error("This Collection does not have Edit access.");
+              return info.selector;
+            } catch (error) {
+              operation.assertCurrent();
+              if (generation !== credentialCacheGeneration) throw new Error("The shared file session changed.");
+              if (error instanceof TypeError || (error instanceof DOMException && error.name === "TimeoutError")) return null;
+              throw error;
+            }
+          },
+          withLease: work => withStaleSensitiveWorkspaceOperation(operation.workspace.rootPath, work),
+          recordStatus: path => requireEngineSessions().run({ workspaceId: resolved.storeWorkspaceId,
+            rootPath: resolved.rootPath, shareMount: true,
+            ...(resolved.kind === "standalone" ? { attachmentId: operation.workspace.attachmentId } : {}) }, async binding => {
+            const selector = recordedShareSelector(resolved.grantedSelector);
+            const statuses = await shareRecordStatuses(new WorkspaceDaemonRequester(binding.client), {
+              workspaceId: resolved.storeWorkspaceId, shareId: resolved.shareId!, paths: [path],
+              grantedSelector: selector ? {
+                paths: selector.paths,
+                versionId: selector.versionId,
+                access: selector.access,
+              } : null,
+            }, { workspace: binding.workspace });
+            return statuses[path] ?? null;
+          }),
+          shareViewEdited: () => { shareDirectWrites?.recordCreated(input.workspaceId); notifyRenderer({ workspaceId: input.workspaceId }); },
+        });
+      }
+      return createRecordByHand(input, {
       author: createLocalChangeAuthor(localUserDisplayName()),
       localPerson,
-      withWorkspaceOperation: work => withRendererWorkspaceOperation(event.sender, input.workspaceId,
-        "Record creation stopped because this window changed workspaces.", work),
-      editContext: (operation: DesktopWorkspaceOperation, person) => {
-        if (shareViewIsPresent(operation.workspace.shareView)) {
-          throw new Error("New record is not available in received shares yet. Ask the owner to create the record.");
-        }
-        return collectionEditContextFor(operation, person);
-      },
+      withWorkspaceOperation: work => work(operation),
+      editContext: (operation: DesktopWorkspaceOperation, person) => collectionEditContextFor(operation, person),
+      });
     });
   });
   handleIpc(CHANNELS.dataset, async (event, raw: unknown) => {
@@ -6044,7 +6135,10 @@ function registerIpcHandlers(): void {
         assertCurrent: () => lease.assertCurrent(),
       })),
     reportDirectWrites: notifyShareDirectWritesPushed,
-    automationDefinitionsChanged: notifyCollectionAutomationsChanged,
+    automationDefinitionsChanged: workspaceId => {
+      notifyCollectionAutomationsChanged(workspaceId);
+      notifyRenderer({ workspaceId });
+    },
     currentCredentials: () => cachedCredentials,
     currentCredentialGeneration: () => credentialCacheGeneration,
     normalizeServerUrl, isRecordValue, readOwnedWorkspaceTextFor, activity,
@@ -6167,7 +6261,7 @@ function registerIpcHandlers(): void {
   registerOperations(operationBoundary, workspaceVersionOperations, workspaceVersionHandlers({
     requireEngineCapture, notifyRenderer, activity, tryInVersionSessions, desktopMarks,
     onRefusalsChanged: notifyNoticesChanged,
-  }));
+  }), rendererUsage.version);
 
   workspaceEngineIpc.registerHistory();
 
@@ -6242,7 +6336,7 @@ function registerIpcHandlers(): void {
         }
       }),
     }),
-  });
+  }, rendererUsage.crash);
 
   registerOperations(operationBoundary, workspaceSearchOperations, workspaceSearchHandlers<
     IpcMainInvokeEvent,
@@ -6300,7 +6394,7 @@ function registerIpcHandlers(): void {
     retryAutomationNotice: (input) => retryFromFailureNotice({ notices: noticeStore(), retry: retryAutomationFromNotice }, input),
     takeWorkspacePathOpenFailures: (_input, { event }) => openPathFailures.take(event.sender),
     retryWorkspacePathOpen: (input, { event }) => openPathFailures.retry(input.attemptId, event.sender),
-  });
+  }, rendererUsage.notice);
 
   workspaceEngineIpc.registerYDoc();
 

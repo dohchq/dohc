@@ -32,6 +32,7 @@ import {
   readdir,
   realpath,
   rename,
+  rmdir,
   stat,
   writeFile,
 } from "node:fs/promises";
@@ -867,12 +868,15 @@ export async function screenDroppedPaths(
   return { usable, refused: absolutePaths.length - usable.length };
 }
 
-// Creates a folder (recursively) with the createFile containment sandwich:
+// Creates a folder with the createFile containment sandwich. Exclusive creates
+// require an existing parent and reject any existing destination.
+// For default recursive creates:
 // lexical validation first, then realpath containment of the deepest existing
 // ancestor before mkdir, re-checked after.
 export async function createFolder(
   rootPath: string,
   relativePath: string,
+  options: { exclusive?: boolean } = {},
 ): Promise<string> {
   const validated = validateUserMaterializePath(relativePath, { platform: process.platform });
   if (!validated.ok) {
@@ -890,11 +894,32 @@ export async function createFolder(
   if (!isInside(realRoot, await existingAncestor(target))) {
     throw new Error(`Invalid folder path (escapes workspace): ${relativePath}`);
   }
-  await mkdir(target, { recursive: true });
+  await mkdir(target, { recursive: !options.exclusive });
   if (!isInside(realRoot, await realpath(target))) {
     throw new Error(`Invalid folder path (escapes workspace): ${relativePath}`);
   }
   return validated.normalized;
+}
+
+// Rollback removes a folder only while it is empty. rmdir checks emptiness
+// atomically, so another writer's descendants can never enter the trash.
+export async function removeEmptyWorkspaceFolder(rootPath: string, relativePath: string): Promise<boolean> {
+  const validated = validateUserMaterializePath(relativePath, { platform: process.platform });
+  if (!validated.ok) throw new Error(
+    `Invalid folder path (${validated.reason}): ${relativePath}`,
+  );
+  const { resolvedAbsolute: target } = await assertResolvedWorkspacePath({
+    rootPath, absolutePath: join(rootPath, validated.normalized),
+    spelled: relativePath, label: "Folder path", access: "entry",
+  });
+  try {
+    await rmdir(target);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR" || code === "ENOTEMPTY" || code === "EEXIST") return false;
+    throw error;
+  }
 }
 
 // One move engine for rename + drag-move (F2 and DnD both land here).

@@ -51,8 +51,8 @@ async function setup(options: { enabled?: boolean; ready?: boolean; workspaceId?
   return { notices, refreshShareView, checkShareAccess, sendShareChanges, hook };
 }
 
-function answer(result: PushShareDirectWritesResult, workspaceId = "share-view") {
-  act(() => pushed?.({ workspaceId, result }));
+async function answer(result: PushShareDirectWritesResult, workspaceId = "share-view") {
+  await act(async () => { pushed?.({ workspaceId, result }); });
 }
 
 it("pushes when the view opens and shows what that push answered", async () => {
@@ -61,7 +61,7 @@ it("pushes when the view opens and shows what that push answered", async () => {
   });
   expect(pushShareDirectWrites).toHaveBeenCalledWith({ workspaceId: "share-view" });
   expect(notices.map((notice) => notice.message)).toEqual([
-    "ana@example.com's server didn't take your change to packing/automations.yaml. Send it as a proposal.",
+    "The sync relay did not accept your change to packing/automations.yaml. Send it as a proposal.",
   ]);
 });
 
@@ -85,7 +85,7 @@ it("listens while opening and gates Try again on the latest readiness", async ()
   }), { initialProps: { ready: false } });
   expect(pushed).not.toBeNull();
   expect(pushShareDirectWrites).not.toHaveBeenCalled();
-  answer({ status: "failed", writes: [], errorMessage: "offline", lasting: false });
+  await answer({ status: "failed", writes: [], errorMessage: "offline", lasting: false });
   expect(showNotice).toHaveBeenCalledOnce();
   const notice = showNotice.mock.calls[0]![0];
   await act(async () => { notice.retry?.(); });
@@ -135,19 +135,19 @@ it("waits for readiness before reporting unavailable, then shows only the access
 
 it("shows only the answers main reports for its own share view", async () => {
   const { notices, refreshShareView } = await setup();
-  answer({ status: "pushed", writes: [{ result: "written", paths: ["trip/packing/collection.yaml"] }] });
-  answer({ status: "pushed", writes: [{ result: "refused", paths: ["trip/a/collection.yaml"], reason: "" }] }, "other");
+  await answer({ status: "pushed", writes: [{ result: "written", paths: ["trip/packing/collection.yaml"] }] });
+  await answer({ status: "pushed", writes: [{ result: "refused", paths: ["trip/a/collection.yaml"], reason: "" }] }, "other");
   expect(notices).toEqual([]);
   expect(refreshShareView).not.toHaveBeenCalled();
 });
 
 it("refreshes after a stale write and offers each unsent write as a proposal, with the relay's reason", async () => {
   const { notices, refreshShareView, sendShareChanges } = await setup();
-  answer({
+  await answer({
     status: "pushed",
     writes: [
-      { result: "stale", paths: ["trip/packing/collection.yaml"], stalePath: "trip/packing/collection.yaml" },
-      { result: "stale", paths: ["trip/ideas/collection.yaml", "trip/ideas/a.md"], stalePath: "trip/ideas" },
+      { result: "stale", paths: ["trip/packing/collection.yaml"], stalePath: "trip/packing/collection.yaml", recoveredDraftPath: null },
+      { result: "stale", paths: ["trip/ideas/collection.yaml", "trip/ideas/a.md"], stalePath: "trip/ideas", recoveredDraftPath: null },
       {
         result: "refused",
         paths: ["trip/packing/automations.yaml"],
@@ -161,14 +161,14 @@ it("refreshes after a stale write and offers each unsent write as a proposal, wi
       kind: "direct-write-stale",
       message:
         "packing/collection.yaml and 1 more changed before your change reached ana@example.com. Check the new version, or send yours as a proposal.",
-      retry: null,
+      retry: expect.any(Function),
       label: "Send as proposal",
     },
     {
       kind: "direct-write-refused",
       message:
-        "ana@example.com's server didn't take your change: trip/packing/automations.yaml changes an automation with a personal step. Send it as a proposal.",
-      retry: null,
+        "The sync relay did not accept your change: trip/packing/automations.yaml changes an automation with a personal step. Send it as a proposal.",
+      retry: expect.any(Function),
       label: "Send as proposal",
     },
   ]);
@@ -178,16 +178,29 @@ it("refreshes after a stale write and offers each unsent write as a proposal, wi
 
 it("names a new Collection by its folder", async () => {
   const { notices } = await setup();
-  answer({
+  await answer({
     status: "pushed",
     writes: [{ result: "refused", paths: ["trip/ideas/collection.yaml", "trip/ideas/a.md"], reason: "" }],
   });
-  expect(notices[0]!.message).toBe("ana@example.com's server didn't take your change to ideas. Send it as a proposal.");
+  expect(notices[0]!.message).toBe("The sync relay did not accept your change to ideas. Send it as a proposal.");
+});
+
+it("reports a record name race once and tells where the losing draft is kept", async () => {
+  const { notices, refreshShareView } = await setup();
+  await answer({ status: "pushed", writes: [{ result: "stale", paths: ["trip/packing/One.md"], stalePath: "trip/packing/One.md", recoveredDraftPath: "trip/packing/Record draft abc-2.txt" }] });
+  await answer(NOTHING);
+  expect(notices).toHaveLength(1);
+  expect(notices[0]).toMatchObject({
+    kind: "direct-write-stale",
+    retry: null,
+    message: "packing/One.md is taken. Your text draft is kept in trip/packing/Record draft abc-2.txt on this computer. Use New record to create another record.",
+  });
+  expect(refreshShareView).toHaveBeenCalledOnce();
 });
 
 it("counts several refused writes and gives the first reason", async () => {
   const { notices } = await setup();
-  answer({
+  await answer({
     status: "pushed",
     writes: [
       { result: "refused", paths: ["trip/a/collection.yaml"], reason: "trip/a/collection.yaml is not a valid collection.yaml" },
@@ -195,13 +208,13 @@ it("counts several refused writes and gives the first reason", async () => {
     ],
   });
   expect(notices[0]!.message).toBe(
-    "ana@example.com's server didn't take 2 of your changes: trip/a/collection.yaml is not a valid collection.yaml. Send them as a proposal.",
+    "The sync relay did not accept 2 of your changes: trip/a/collection.yaml is not a valid collection.yaml. Send them as a proposal.",
   );
 });
 
 it("offers Try again for a failure that may pass, and keeps the writes answered before it", async () => {
   const { notices } = await setup();
-  answer({
+  await answer({
     status: "failed",
     writes: [{ result: "refused", paths: ["trip/packing/automations.yaml"], reason: "" }],
     errorMessage: "The relay did not answer.",
@@ -218,8 +231,8 @@ it("offers Try again for a failure that may pass, and keeps the writes answered 
 
 it("offers Send as proposal for a lasting refusal, keeping an earlier refusal's reason in the same row", async () => {
   const { notices } = await setup();
-  answer({ status: "failed", writes: [], errorMessage: "read only", lasting: true });
-  answer({
+  await answer({ status: "failed", writes: [], errorMessage: "read only", lasting: true });
+  await answer({
     status: "failed",
     writes: [{ result: "refused", paths: ["trip/a/collection.yaml"], reason: "trip/a/collection.yaml is not a valid collection.yaml" }],
     errorMessage: "read only",
@@ -229,12 +242,12 @@ it("offers Send as proposal for a lasting refusal, keeping an earlier refusal's 
     expect.objectContaining({
       kind: "direct-write-refused",
       message: "ana@example.com's share doesn't take your Collection changes directly. Send them as a proposal.",
-      retry: null,
+      retry: expect.any(Function),
       send: expect.objectContaining({ label: "Send as proposal" }),
     }),
     expect.objectContaining({
       kind: "direct-write-refused",
-      message: "ana@example.com's server didn't take your change: trip/a/collection.yaml is not a valid collection.yaml. ana@example.com's share doesn't take your Collection changes directly. Send them as a proposal.",
+      message: "The sync relay did not accept your change: trip/a/collection.yaml is not a valid collection.yaml. ana@example.com's share doesn't take your Collection changes directly. Send them as a proposal.",
     }),
   ]);
 });
@@ -335,4 +348,15 @@ it.each(["ended", "changed"] as const)("reports locally refused writes after acc
   expect(showNotice).toHaveBeenCalledOnce();
   expect(showNotice.mock.calls[0]![0]).toMatchObject({ retry: null, send: null });
   expect(showNotice.mock.calls[0]![0].message).toContain("Your unsent Collection changes stay in this workspace.");
+});
+
+it.each(["ended", "changed"] as const)("checks a relay refusal before showing exactly one %s notice", async access => {
+  const { notices, checkShareAccess } = await setup();
+  checkShareAccess.mockResolvedValue(access);
+  await answer({ status: "failed", writes: [{ result: "refused", paths: ["tasks/new.md"], reason: "forbidden" }],
+    lasting: true, errorMessage: "forbidden" });
+  expect(checkShareAccess).toHaveBeenCalledOnce();
+  expect(notices).toHaveLength(1);
+  expect(notices[0]).toMatchObject({ kind: "direct-write-unavailable", retry: null, send: null });
+  expect(notices[0]!.message).toContain(`Your access to this share ${access}.`);
 });

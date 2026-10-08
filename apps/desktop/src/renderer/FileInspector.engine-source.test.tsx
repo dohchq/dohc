@@ -1,3 +1,4 @@
+import { engineSaveState } from "../workspaces/engineYDocSaveState";
 // @vitest-environment jsdom
 import { setupFileInspectorTests } from "./FileInspector.environment-fixture";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -90,13 +91,15 @@ describe("engine markdown source view", () => {
     const saveStateListeners = new Set<
       (event: {
         sessionId: string;
-        state: "settling" | "saved" | "error" | "deleted";
+        state: import("@dohc/workspace-contracts/save-state").SaveState;
+        access?: "read-only" | "deleted" | "object-changed";
         seq: number;
       }) => void
     >();
     let sessionId = "";
     const bridgeMock = {
       platform: "linux" as const,
+      onWorkspaceActivity: vi.fn(() => () => undefined),
       readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(
         async () => ({
           text: markdown,
@@ -155,7 +158,8 @@ describe("engine markdown source view", () => {
         (
           listener: (event: {
             sessionId: string;
-            state: "settling" | "saved" | "error" | "deleted";
+            state: import("@dohc/workspace-contracts/save-state").SaveState;
+        access?: "read-only" | "deleted" | "object-changed";
             seq: number;
           }) => void,
         ) => {
@@ -178,7 +182,7 @@ describe("engine markdown source view", () => {
       state: "settling" | "saved" | "error" | "deleted",
       seq: number,
     ) => {
-      for (const listener of saveStateListeners) listener({ sessionId, state, seq });
+      for (const listener of saveStateListeners) listener({ sessionId, ...engineSaveState(state), seq });
     };
     return {
       bridgeMock,
@@ -290,6 +294,12 @@ describe("engine markdown source view", () => {
     // Until the engine saves, the file still holds the comment.
     expect(asWritten()).toBe("---\ntitle: Plan\nstatus: draft # delete drafts\n---");
 
+    // The engine writes the file, then reports the save.
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: "---\ntitle: Plan\nstatus: ready\n---\n\n# Plan\n",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
     act(() => pushSaveState("saved", 999));
     await waitFor(() => expect(asWritten()).toBe("---\ntitle: Plan\nstatus: ready\n---"));
   });
@@ -693,6 +703,7 @@ describe("engine markdown source view", () => {
     let opens = 0;
     vi.stubGlobal("dohcDesktop", {
       ...bridgeMock,
+      onWorkspaceActivity: vi.fn(() => () => undefined),
       readWorkspaceText: vi.fn(async () => {
         throw new Error("read failed");
       }),
@@ -768,6 +779,7 @@ describe("engine markdown source view", () => {
     let opens = 0;
     vi.stubGlobal("dohcDesktop", {
       ...bridgeMock,
+      onWorkspaceActivity: vi.fn(() => () => undefined),
       readWorkspaceText: vi.fn(async () => {
         throw new Error("read failed");
       }),
@@ -807,6 +819,7 @@ describe("engine markdown source view", () => {
     const onScrollConsumed = vi.fn();
     vi.stubGlobal("dohcDesktop", {
       ...bridgeMock,
+      onWorkspaceActivity: vi.fn(() => () => undefined),
       readWorkspaceText: vi.fn(async () => {
         throw new Error("read failed");
       }),
@@ -993,6 +1006,7 @@ describe("engine markdown source view", () => {
     let reads = 0;
     vi.stubGlobal("dohcDesktop", {
       ...bridgeMock,
+      onWorkspaceActivity: vi.fn(() => () => undefined),
       readWorkspaceText: vi.fn(async () => {
         reads += 1;
         return {
@@ -2871,6 +2885,7 @@ describe("engine markdown source view", () => {
     let reads = 0;
     vi.stubGlobal("dohcDesktop", {
       ...bridgeMock,
+      onWorkspaceActivity: vi.fn(() => () => undefined),
       readWorkspaceText: vi.fn(async () => {
         reads += 1;
         return {
@@ -2923,6 +2938,7 @@ describe("engine markdown source view", () => {
     const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
     vi.stubGlobal("dohcDesktop", {
       ...bridgeMock,
+      onWorkspaceActivity: vi.fn(() => () => undefined),
       readWorkspaceText: vi.fn(async () => {
         throw new Error("read failed");
       }),
@@ -2961,6 +2977,7 @@ describe("engine markdown source view", () => {
       let opens = 0;
       vi.stubGlobal("dohcDesktop", {
         ...bridgeMock,
+        onWorkspaceActivity: vi.fn(() => () => undefined),
         readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(
           async (payload) => {
             reads += 1;
@@ -3027,6 +3044,7 @@ describe("engine markdown source view", () => {
       let opens = 0;
       vi.stubGlobal("dohcDesktop", {
         ...bridgeMock,
+        onWorkspaceActivity: vi.fn(() => () => undefined),
         readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(
           async (payload) => {
             reads += 1;
@@ -3227,7 +3245,7 @@ describe("engine markdown source view", () => {
         <FileInspector
           workspaceId="ws-1"
           path="a.md"
-          onSaveStateChange={(state) => states.push(state)}
+          onSaveStateChange={(state) => states.push(state.kind)}
         />,
       );
       await user.click(await findEnabledMarkdownEditToggle());
@@ -3241,7 +3259,7 @@ describe("engine markdown source view", () => {
           workspaceId="ws-1"
           path="a.md"
           readOnly
-          onSaveStateChange={(state) => states.push(state)}
+          onSaveStateChange={(state) => states.push(state.kind)}
         />,
       );
       await act(async () => {

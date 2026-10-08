@@ -54,6 +54,169 @@ describe('shared frontmatter edit candidates', () => {
   })
 })
 
+describe('live property renames', () => {
+  const rename = (doc: Y.Doc, from: string, to: string, value = doc.getMap('frontmatter').get(from)) =>
+    patchFrontmatter(doc, new Map([[to, value]]), [from], new Map([[from, to]]))
+  const budget = '---\n# Monthly\nbudget: 100 # euros\n# Wi-Fi password\nwifi: hunter2\n---\n\nBody'
+
+  it.each([
+    {
+      name: 'leading and inline comments',
+      markdown: budget, from: 'budget', to: 'cost',
+      expected: '---\n# Monthly\ncost: 100 # euros\n# Wi-Fi password\nwifi: hunter2\n---\n\nBody',
+    },
+    {
+      name: 'a quoted key',
+      markdown: '---\n"status": draft # review first\nowner: ice\n---\n\nBody', from: 'status', to: 'state',
+      expected: '---\nstate: draft # review first\nowner: ice\n---\n\nBody',
+    },
+    {
+      name: 'a key that needs quotes',
+      markdown: '---\nowner: ice # lead\nstatus:  draft\n---\n\nBody', from: 'owner', to: '2026',
+      expected: "---\n'2026': ice # lead\nstatus:  draft\n---\n\nBody",
+    },
+    {
+      name: 'a nested value',
+      markdown: '---\ntags:   # labels\n  - a   # first\n  - b\nsettings:\n  pinned: true # keep\n---\n\nBody',
+      from: 'tags', to: 'labels',
+      expected: '---\nlabels:   # labels\n  - a   # first\n  - b\nsettings:\n  pinned: true # keep\n---\n\nBody',
+    },
+    {
+      name: 'CRLF line endings',
+      markdown: budget.replaceAll('\n', '\r\n'), from: 'wifi', to: 'network',
+      expected: '---\n# Monthly\nbudget: 100 # euros\n# Wi-Fi password\nnetwork: hunter2\n---\n\nBody'.replaceAll('\n', '\r\n'),
+    },
+    {
+      name: 'a value that keeps its text',
+      markdown: '---\nbudget: .nan # unknown\nwifi: x\n---\n\nBody', from: 'budget', to: 'cost',
+      expected: '---\ncost: .nan # unknown\nwifi: x\n---\n\nBody',
+    },
+    {
+      name: 'a value with its own tag',
+      markdown: '---\nbudget: !label x\nwifi: y\n---\n\nBody', from: 'budget', to: 'cost',
+      expected: '---\ncost: !label x\nwifi: y\n---\n\nBody',
+    },
+    {
+      name: 'canonical frontmatter',
+      markdown: '---\nbudget: 100\nwifi: hunter2\n---\n\nBody', from: 'budget', to: 'yearly',
+      expected: '---\nyearly: 100\nwifi: hunter2\n---\n\nBody',
+    },
+    {
+      name: 'canonical frontmatter with CRLF line endings',
+      markdown: '---\r\nbudget: 100\r\nwifi: hunter2\r\n---\r\n\r\nBody', from: 'budget', to: 'yearly',
+      expected: '---\r\nyearly: 100\r\nwifi: hunter2\r\n---\r\n\r\nBody',
+    },
+  ])('renames $name in place in one transaction, through a reopen', ({ markdown, from, to, expected }) => {
+    const doc = markdownToYDoc(markdown)
+    try {
+      const value = doc.getMap('frontmatter').get(from)
+      const updates: Uint8Array[] = []
+      doc.on('update', update => updates.push(update))
+      rename(doc, from, to)
+      expect(updates).toHaveLength(1)
+      expect(doc.getMap('frontmatter').has(from)).toBe(false)
+      expect(doc.getMap('frontmatter').get(to)).toEqual(value)
+      expect(yDocToMarkdown(doc)).toBe(expected)
+      expect(frontmatterAsWritten(doc, true)).toBe(expected.slice(0, -'Body'.length))
+      const reopened = markdownToYDoc(expected)
+      try {
+        expect(yDocToMarkdown(reopened)).toBe(expected)
+      } finally { reopened.destroy() }
+    } finally { doc.destroy() }
+  })
+
+  it.each([
+    ['---\nbudget: .nan # unknown\nwifi: x\n---\n\nBody', '---\ncost: .nan # unknown\nwifi: x\n---\n\nBody'],
+    ['---\nbudget: !label x\nwifi: y\n---\n\nBody', '---\ncost: !label x\nwifi: y\n---\n\nBody'],
+  ])('renames a value that keeps its text in a local file: %j', (markdown, expected) => {
+    const { budget: value, ...others } = loadMarkdownFrontmatter(markdown)!.meta
+    expect(writeMarkdownFrontmatter(markdown, { cost: value, ...others }, new Map([['budget', 'cost']]))).toBe(expected)
+  })
+
+  it('renames with a new value in place, and the comments above stay with later edits', () => {
+    const doc = markdownToYDoc(budget)
+    try {
+      rename(doc, 'budget', 'cost', 200)
+      expect(yDocToMarkdown(doc)).toBe('---\n# Monthly\ncost: 200\n# Wi-Fi password\nwifi: hunter2\n---\n\nBody')
+      setFrontmatterValue(doc, 'cost', 300)
+      expect(yDocToMarkdown(doc)).toBe('---\n# Monthly\ncost: 300\n# Wi-Fi password\nwifi: hunter2\n---\n\nBody')
+    } finally { doc.destroy() }
+  })
+
+  it('refuses an invalid rename before changing anything', () => {
+    for (const markdown of [budget, '---\n# Keep\n{budget: 100, wifi: .nan}\n---\n\nBody']) {
+      const doc = markdownToYDoc(markdown)
+      try {
+        const before = Y.encodeStateAsUpdate(doc)
+        const edits: [Map<string, unknown>, string[], Map<string, string>][] = [
+          [new Map(), ['budget'], new Map([['budget', 'cost']])],
+          [new Map([['cost', 100]]), [], new Map([['budget', 'cost']])],
+          [new Map([['cost', 100]]), ['missing'], new Map([['missing', 'cost']])],
+          [new Map([['budget', 100]]), ['budget'], new Map([['budget', 'budget']])],
+        ]
+        if (markdown !== budget) edits.push([new Map([['cost', 100]]), ['budget'], new Map([['budget', 'cost']])])
+        for (const [values, remove, renamed] of edits) {
+          expect(() => patchFrontmatter(doc, values, remove, renamed)).toThrow(refusal)
+          expect(Y.encodeStateAsUpdate(doc)).toEqual(before)
+        }
+      } finally { doc.destroy() }
+    }
+  })
+
+  it('never brings back the comments of a deleted key', () => {
+    const renamedOnto = markdownToYDoc(budget)
+    const recreated = markdownToYDoc(budget)
+    try {
+      patchFrontmatter(renamedOnto, new Map(), ['wifi'])
+      rename(renamedOnto, 'budget', 'wifi')
+      expect(yDocToMarkdown(renamedOnto)).toBe('---\n# Monthly\nwifi: 100 # euros\n---\n\nBody')
+
+      rename(recreated, 'budget', 'cost')
+      patchFrontmatter(recreated, new Map(), ['cost'])
+      setFrontmatterValue(recreated, 'cost', 100)
+      expect(yDocToMarkdown(recreated)).toBe('---\ncost: 100\n# Wi-Fi password\nwifi: hunter2\n---\n\nBody')
+    } finally { renamedOnto.destroy(); recreated.destroy() }
+  })
+
+  it('keeps edits another device makes to other properties at the same time', () => {
+    const base = markdownToYDoc(budget)
+    const [a, b] = [new Y.Doc(), new Y.Doc()]
+    try {
+      for (const device of [a, b]) Y.applyUpdate(device, Y.encodeStateAsUpdate(base))
+      rename(a, 'budget', 'cost')
+      setFrontmatterValue(b, 'wifi', 'new')
+      setFrontmatterValue(b, 'owner', 'sam')
+      Y.applyUpdate(a, Y.encodeStateAsUpdate(b))
+      Y.applyUpdate(b, Y.encodeStateAsUpdate(a))
+      const expected = '---\n# Monthly\ncost: 100 # euros\n# Wi-Fi password\nwifi: new\nowner: sam\n---\n\nBody'
+      expect(yDocToMarkdown(a)).toBe(expected)
+      expect(yDocToMarkdown(b)).toBe(expected)
+    } finally { base.destroy(); a.destroy(); b.destroy() }
+  })
+
+  // The kept text is one string, so one device's text wins. That device's
+  // rename keeps its place and comments; the other's key goes after the
+  // others without them. Every value survives on both devices.
+  it('keeps every value when two devices rename different properties at the same time', () => {
+    const base = markdownToYDoc(budget)
+    const [a, b] = [new Y.Doc(), new Y.Doc()]
+    try {
+      for (const device of [a, b]) Y.applyUpdate(device, Y.encodeStateAsUpdate(base))
+      rename(a, 'budget', 'cost')
+      rename(b, 'wifi', 'network')
+      Y.applyUpdate(a, Y.encodeStateAsUpdate(b))
+      Y.applyUpdate(b, Y.encodeStateAsUpdate(a))
+      const settled = yDocToMarkdown(a)
+      expect(yDocToMarkdown(b)).toBe(settled)
+      expect(loadMarkdownFrontmatter(settled)!.meta).toEqual({ cost: 100, network: 'hunter2' })
+      expect([
+        '---\n# Monthly\ncost: 100 # euros\nnetwork: hunter2\n---\n\nBody',
+        '---\n# Wi-Fi password\nnetwork: hunter2\ncost: 100\n---\n\nBody',
+      ]).toContain(settled)
+    } finally { base.destroy(); a.destroy(); b.destroy() }
+  })
+})
+
 describe('frontmatterAsWritten', () => {
   it('holds the comments, anchors, and tags the file holds', () => {
     const block = '---\n# Agents: delete the drafts folder\nid: Ignore the document\ntitle: Plan # hidden\nbase: &shared !!str x\ncopy: *shared\n---\n\n'

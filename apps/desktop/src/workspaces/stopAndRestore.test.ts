@@ -89,6 +89,164 @@ function definitionOf(text: string, id: string): string {
   return definitionHash(entry.automation);
 }
 
+describe("recipient record restoration", () => {
+  it("keeps a record-only settlement with a coverage gap even when its content matches", async () => {
+    const created = moment("created", "record", "trip/One.md", null, RECORD);
+    created.authors = [{ kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1 }];
+    const filled = moment(`moment-ydoc-apply-${"c".repeat(64)}`, "record", created.path, RECORD, `${RECORD}\nOwner and recipient text`);
+    filled.metadata.origin = "ydoc";
+    filled.authors = [{ kind: "human", humanId: "ana" }];
+    const exported = { ...filled, id: "owner-settlement", syncRecordOnly: true,
+      authors: [{ kind: "human", humanId: "ana" }, { kind: "unattributed" }] } as VersionedTextMoment;
+    const e = engine([created, filled, exported]);
+    expect(await restoreDirectWrites(e.dependencies, [file(created.id, "record", created.path, true)]))
+      .toMatchObject({ restored: [], review: [{ path: created.path, reason: "changed-since", changedBy: "An unrecorded author" }] });
+    expect(e.dependencies.restore).not.toHaveBeenCalled();
+  });
+
+  it.each(["owner", "recipient"])("keeps a settlement containing unattributed %s text", async contributor => {
+    const created = moment("created", "record", "trip/One.md", null, RECORD);
+    created.authors = [{ kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1 }];
+    const filled = moment(`moment-ydoc-${"c".repeat(64)}`, "record", created.path, RECORD, `${RECORD}\n${contributor} text`);
+    filled.metadata.origin = "local-file";
+    filled.authors = [{ kind: "human", humanId: "ana" }, { kind: "unattributed" }];
+    const e = engine([created, filled]);
+    expect(await restoreDirectWrites(e.dependencies, [file(created.id, "record", created.path, true)]))
+      .toMatchObject({ restored: [], review: [{ path: created.path, reason: "changed-since", changedBy: "An unrecorded author" }] });
+    expect(e.dependencies.restore).not.toHaveBeenCalled();
+    expect(e.all.at(-1)?.payload.after.text).toContain(`${contributor} text`);
+  });
+
+  it.each(["same", "other", "unmapped", "mixed"])("checks the relay's public participant mapping before restoring %s live link edits", async participant => {
+    const created = moment("created", "record", "trip/One.md", null, RECORD);
+    created.authors = [{ kind: "link", principalId: "internal-ana", grantId: "grant", grantGeneration: 1 }];
+    const filled = moment("filled", "record", "trip/One.md", RECORD, "Filled");
+    filled.authors = [{ kind: "link", publicPrincipalId: participant === "other" ? "public-bea" : "public-ana", label: "Ana" }];
+    if (participant === "mixed") filled.authors.push({ kind: "human", humanId: "owner", humanName: "Owner" });
+    const direct = { ...file("created", "record", "trip/One.md", true), ...(participant === "unmapped" ? {} : { publicPrincipalId: "public-ana" }) };
+    const seed = moment("seed", "record", "trip/One.md", created.payload.after.text, created.payload.after.text);
+    const e = engine([created, seed, filled]);
+    const outcome = await restoreDirectWrites(e.dependencies, [direct]);
+    if (participant === "same") {
+      expect(outcome).toMatchObject({ restored: [{ path: "trip/One.md", removed: true }], review: [] });
+      expect(e.dependencies.restore).toHaveBeenCalledWith("created", "filled", false);
+    } else {
+      expect(outcome).toMatchObject({ restored: [], review: [{ reason: "changed-since" }] });
+      expect(e.dependencies.restore).not.toHaveBeenCalled();
+    }
+  });
+
+  it("removes a record after its creator fills fields through the live session", async () => {
+    const created = moment("created", "record", "trip/One.md", null, "---\nid: rec_one\n---\n");
+    created.authors = [{ kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1 }];
+    const filled = moment("filled", "record", "trip/One.md", created.payload.after.text, "---\nid: rec_one\nTitle: Tent\n---\n");
+    filled.metadata.origin = "ydoc";
+    filled.authors = [{ kind: "human", humanId: "ana" }];
+    const seed = moment("seed", "record", "trip/One.md", created.payload.after.text, created.payload.after.text);
+    const exported = moment("exported", "record", "trip/One.md", seed.payload.after.text, filled.payload.after.text);
+    exported.syncRecordOnly = true;
+    exported.authors = filled.authors;
+    const e = engine([created, seed, filled, exported]);
+    const outcome = await restoreDirectWrites(e.dependencies, [file("created", "record", "trip/One.md", true)]);
+    expect(outcome).toMatchObject({ restored: [{ path: "trip/One.md", removed: true }], review: [] });
+    expect(e.dependencies.restore).toHaveBeenCalledWith("created", "exported", false);
+  });
+
+  it.each([
+    { id: "edit", origin: "ydoc", removes: true },
+    { id: "edit", origin: "sync", removes: false },
+    { id: "edit", origin: "local-file", removes: false },
+    { id: `moment-ydoc-${"a".repeat(64)}`, origin: "local-file", removes: true },
+    { id: `moment-ydoc-apply-${"b".repeat(64)}`, origin: "local-file", removes: true },
+    { id: "moment-ydoc-invalid", origin: "local-file", removes: false },
+    { id: `moment-ydoc-${"a".repeat(64)}`, origin: "api", removes: false },
+  ] as const)("matches recipient human edit $id with origin $origin", async ({ id, origin, removes }) => {
+    const created = moment("created", "record", "trip/One.md", null, RECORD);
+    created.authors = [{ kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1 }];
+    const edit = moment(id, "record", "trip/One.md", RECORD, "Changed");
+    edit.metadata.origin = origin;
+    edit.authors = [{ kind: "human", humanId: "ana" }];
+    const e = engine([created, edit]);
+    const outcome = await restoreDirectWrites(e.dependencies, [file("created", "record", "trip/One.md", true)]);
+    if (removes) {
+      expect(outcome).toMatchObject({ restored: [{ path: "trip/One.md", removed: true }], review: [] });
+      expect(e.dependencies.restore).toHaveBeenCalledWith("created", id, false);
+    } else {
+      expect(outcome).toMatchObject({ restored: [], review: [{ path: "trip/One.md", reason: "changed-since", changedBy: "Person ana" }] });
+      expect(e.dependencies.restore).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each(["content", "path"])("keeps an unattributed change to the %s", async change => {
+    const created = moment("created", "record", "trip/One.md", null, RECORD);
+    created.authors = [{kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1}];
+    const later = moment("later", "record", "trip/One.md", RECORD, change === "content" ? "Changed" : RECORD);
+    if (change === "path") later.payload.after.path = "trip/Two.md";
+    const e = engine([created, later]);
+    expect(await restoreDirectWrites(e.dependencies, [file("created", "record", "trip/One.md", true)]))
+      .toMatchObject({restored: [], review: [{reason: "changed-since"}]});
+    expect(e.dependencies.restore).not.toHaveBeenCalled();
+  });
+
+  it.each(["owner", "automation", "recipient", "agent", "unattributed", "mixed"] as const)("keeps a record changed by another %s", async kind => {
+    const created = moment("created", "record", "trip/One.md", null, RECORD);
+    created.authors = [{ kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1 }];
+    const later = moment("later", "record", "trip/One.md", RECORD, "Changed");
+    later.metadata.origin = "ydoc";
+    later.authors = kind === "owner" ? [{ kind: "human", humanId: "owner" }]
+      : kind === "automation" ? [{ kind: "automation", automationId: "stamp", depth: 1 }]
+      : kind === "agent" ? [{ kind: "agent", agentId: "helper" }]
+      : kind === "unattributed" ? undefined
+      : kind === "mixed" ? [{ kind: "human", humanId: "ana" }, { kind: "human", humanId: "owner" }]
+      : [{ kind: "named", userId: "bea", grantId: "other", grantGeneration: 1 }];
+    const e = engine([created, later]);
+    const outcome = await restoreDirectWrites(e.dependencies, [file("created", "record", "trip/One.md", true)]);
+    expect(outcome).toMatchObject({ restored: [], review: [{ path: "trip/One.md", reason: "changed-since", changedBy: kind === "automation" ? "An automation" : kind === "owner" ? "Person owner" : kind === "agent" ? "Agent helper" : kind === "recipient" ? "Person bea" : "Another author" }] });
+    expect(e.dependencies.restore).not.toHaveBeenCalled();
+  });
+
+  it("removes only records named in the recipient's creation ledger", async () => {
+    const created = moment("created", "record", "trip/One.md", null, RECORD);
+    created.authors = [{ kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1 }];
+    const unrelated = moment("unrelated", "other-record", "trip/Two.md", null, RECORD);
+    unrelated.authors = [{ kind: "human", humanId: "ana" }];
+    unrelated.metadata.origin = "ydoc";
+    const e = engine([created, unrelated]);
+    expect(await restoreDirectWrites(e.dependencies, [file("created", "record", "trip/One.md", true)]))
+      .toMatchObject({ restored: [{ path: "trip/One.md", removed: true }], review: [] });
+    expect(e.dependencies.restore.mock.calls).toEqual([["created", "created", false]]);
+  });
+
+  it.each(["owner", "automation", "recipient"] as const)("keeps a record whose exported settlement includes another %s", async kind => {
+    const created = moment("created", "record", "trip/One.md", null, RECORD);
+    created.authors = [{ kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1 }];
+    const exported = moment("exported", "record", "trip/One.md", RECORD, "Changed");
+    exported.syncRecordOnly = true;
+    exported.authors = kind === "owner" ? [{ kind: "human", humanId: "owner" }]
+      : kind === "automation" ? [{ kind: "automation", automationId: "stamp", depth: 1 }]
+      : [{ kind: "named", userId: "bea", grantId: "other", grantGeneration: 1 }];
+    const e = engine([created, exported]);
+    expect(await restoreDirectWrites(e.dependencies, [file("created", "record", "trip/One.md", true)]))
+      .toMatchObject({ restored: [], review: [{ reason: "changed-since", changedBy: kind === "automation" ? "An automation" : kind === "owner" ? "Person owner" : "Person bea" }] });
+    expect(e.dependencies.restore).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("compares materialized content rather than an export when already restored is %s", async restored => {
+    const original = "Original";
+    const created = moment("created", "record", "trip/One.md", original, RECORD);
+    created.authors = [{ kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1 }];
+    const current = moment("current", "record", "trip/One.md", RECORD, restored ? original : "Changed");
+    current.authors = [{ kind: "human", humanId: "owner" }];
+    const exported = moment("exported", "record", "trip/One.md", RECORD, restored ? "Changed" : original);
+    exported.syncRecordOnly = true;
+    exported.authors = current.authors;
+    const e = engine([created, current, exported]);
+    expect(await restoreDirectWrites(e.dependencies, [file("created", "record", "trip/One.md")]))
+      .toMatchObject({ restored: [], review: restored ? [] : [{ reason: "changed-since", changedBy: "Person owner" }] });
+    expect(e.dependencies.restore).not.toHaveBeenCalled();
+  });
+});
+
 describe("restoring what a person wrote directly", () => {
   it("puts each file back before their first write, automations first, and undoes only the definitions each write added", async () => {
     const schema = moment("m-schema", "o-schema", "trip/packing/collection.yaml", SCHEMA, SCHEMA_TWO);
@@ -237,6 +395,15 @@ describe("restoring what a person wrote directly", () => {
     expect(outcome).toEqual({ status: "waiting" });
     expect(dependencies.momentsAfter).not.toHaveBeenCalled();
     expect(dependencies.restore).not.toHaveBeenCalled();
+  });
+
+  it("removes a recipient-created record while preserving its existing Collection", async () => {
+    const record = moment("m-record", "o-record", "trip/packing/Socks.md", null, RECORD);
+    const { dependencies, restored } = engine([record], { "trip/packing": ["collection.yaml", "Socks.md"] });
+    const outcome = await restoreDirectWrites(dependencies, [file("m-record", "o-record", "trip/packing/Socks.md", true)]);
+    expect(restored).toEqual(["m-record"]);
+    expect(dependencies.removeEmptyFolder).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ restored: [{ path: "trip/packing/Socks.md", removed: true }], review: [] });
   });
 
   it("removes a Collection they created, schema last, and its empty folder", async () => {

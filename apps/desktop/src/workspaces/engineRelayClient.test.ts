@@ -887,7 +887,7 @@ describe("EngineRelayClient", () => {
               {
                 paths: ["docs/ideas/collection.yaml", "docs/ideas/a.md"],
                 result: "stale",
-                stalePath: "docs/ideas",
+                stalePath: "docs/ideas", recoveredDraftPath: null,
                 currentBlobSha256: null,
               },
               { paths: ["docs/packing/automations.yaml"], result: "refused", reason: "" },
@@ -906,7 +906,7 @@ describe("EngineRelayClient", () => {
         {
           paths: ["docs/ideas/collection.yaml", "docs/ideas/a.md"],
           result: "stale",
-          stalePath: "docs/ideas",
+          stalePath: "docs/ideas", recoveredDraftPath: null,
           currentBlobSha256: null,
         },
         { paths: ["docs/packing/automations.yaml"], result: "refused", reason: "" },

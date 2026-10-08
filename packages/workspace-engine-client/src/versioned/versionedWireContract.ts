@@ -652,6 +652,11 @@ const LinkAuthorSchema = mutableStruct({
   grantGeneration: Schema.Int,
   principalId: Schema.String,
 });
+const LiveLinkAuthorSchema = mutableStruct({
+  kind: Schema.Literal("link"),
+  publicPrincipalId: Schema.String,
+  label: Schema.String,
+});
 const AutomationAuthorSchema = mutableStruct({
   kind: Schema.Literal("automation"),
   automationId: Schema.String,
@@ -661,6 +666,7 @@ const AutomationAuthorSchema = mutableStruct({
 const HumanAuthorSchema = mutableStruct({
   kind: Schema.Literal("human"),
   humanId: Schema.String,
+  humanName: Schema.optionalKey(Schema.String),
   onBehalfOf: Schema.optionalKey(Schema.String),
 });
 const CorruptAuthorSchema = mutableStruct({ corrupt: Schema.Literal(true) });
@@ -672,8 +678,10 @@ const MomentAuthorsSchema = Schema.NullOr(
       PublicAuthorSchema,
       NamedAuthorSchema,
       LinkAuthorSchema,
+      LiveLinkAuthorSchema,
       AutomationAuthorSchema,
       CorruptAuthorSchema,
+      mutableStruct({ kind: Schema.Literal("unattributed") }),
     ]),
   )),
 );

@@ -117,7 +117,7 @@ describe("crash report messages", () => {
     expect(mainError(engineError("Rust engine daemon exited unexpectedly with signal ACMEPLANS.")))
       .toContain("Rust engine daemon exited unexpectedly with signal <withheld>.");
     expect(mainError(engineError("Rust engine acme.merger.plans timed out after 5000ms.")))
-      .toContain("EngineDaemonUnavailableError: Rust engine request timed out after 5000ms.");
+      .toContain("EngineDaemonUnavailableError: Rust engine <withheld> timed out after 5000ms.");
     expect(mainError(engineError(
       "The Rust engine crashed again after 10 restarts in the last 10 minutes. The limit is 10 restarts per 10 minutes. dohc stopped restarting it.",
     ))).toContain("in the last 10 minutes. The limit is 10 restarts per 10 minutes.");
@@ -145,7 +145,6 @@ describe("crash report messages", () => {
       "The Rust engine crashed again after 10 restarts in the last 10 minutes. The limit is 10 restarts per 10 minutes. dohc stopped restarting it.",
       "The Rust engine went silent on 2 launches: 3 probes in a row expired after 45000ms each with no frame of any kind from the engine. The limit is 2 wedges with no traffic in between. dohc stopped restarting it.",
       "The Rust engine is running but sent nothing: 3 probes in a row expired after 45000ms each with no frame of any kind from the engine. The limit is 3 probes with no traffic. dohc is restarting it.",
-      "Rust engine request timed out after 5000ms.",
     ];
     for (const message of messages) {
       expect(mainError(new EngineDaemonUnavailableError(message))).toContain(message);
@@ -158,6 +157,145 @@ describe("crash report messages", () => {
         }
       }
     }
+  });
+
+  it("preserves issued RPC names in invalid-result diagnostics", () => {
+    for (const method of ["workspace.open", "workspace.close", "versions.active",
+      "search.queryChatMessagesGranular", "chats.readState.listUnreadFileThreads", "ydoc.open", "keys.download"]) {
+      const message = `Rust engine ${method} returned an invalid result.`;
+      expect(mainError(new EngineDaemonUnavailableError(message))).toContain(message);
+    }
+  });
+
+  it("keeps a timeout diagnostic while withholding an unknown method", () => {
+    const text = mainError(new EngineDaemonUnavailableError("Rust engine acme.merger.plans timed out after 5000ms."));
+    expect(text).toContain("EngineDaemonUnavailableError: Rust engine <withheld> timed out after 5000ms.");
+    expect(text).not.toContain("acme.merger.plans");
+  });
+
+  it("keeps engine.ping in lifecycle diagnostics", () => {
+    for (const message of [
+      "Rust engine engine.ping returned an invalid result.",
+      "Rust engine engine.ping timed out after 5000ms.",
+      "Rust engine engine.ping got no answer: a probe expired after 45000ms with no frame of any kind from the engine.",
+    ]) {
+      expect(mainError(new EngineDaemonUnavailableError(message))).toContain(message);
+    }
+  });
+
+  it("reconstructs current lifecycle caps, read budgets, and silence diagnostics", () => {
+    for (const message of [
+      "Rust engine workspace.open timed out after 120000ms.",
+      "Rust engine workspace.close timed out after 10000ms.",
+      "Rust engine versions.active timed out after 5000ms.",
+      "Rust engine search.queryChatMessagesGranular timed out after 8732ms.",
+      "Rust engine workspace.open timed out after 1ms.",
+      "Rust engine search.queryChatMessagesGranular did not start within its 10000ms budget.",
+      "Rust engine chats.readState.listUnreadFileThreads ran out of its 10000ms budget before the read.",
+      "Rust engine workspace.open got no answer: a probe expired after 45000ms with no frame of any kind from the engine.",
+    ]) {
+      expect(mainError(new EngineDaemonUnavailableError(message))).toContain(message);
+    }
+  });
+
+  it("withholds unknown RPCs, method-shaped filenames, paths, and forged templates in nested causes", () => {
+    const templates = [
+      (method: string) => `Rust engine ${method} returned an invalid result.`,
+      (method: string) => `Rust engine ${method} timed out after 120000ms.`,
+      (method: string) => `Rust engine ${method} did not start within its 10000ms budget.`,
+      (method: string) => `Rust engine ${method} ran out of its 10000ms budget before the read.`,
+      (method: string) => `Rust engine ${method} got no answer: a probe expired after 45000ms with no frame of any kind from the engine.`,
+    ];
+    const sensitiveMethods = ["acme.merger.plans", "files.drain", "liveApplication.resumeRestore",
+      "engine.ping.md", "workspace.open.backup", "ENGINE.PING",
+      "C:\\Users\\sam\\engine.ping", "/Private/engine.ping", "engine.ping/secret", "engine.ping\u0000secret"];
+    for (const method of sensitiveMethods) {
+      for (const template of templates) {
+        const error = new EngineDaemonUnavailableError("Rust engine failed its startup handshake.", {
+          cause: new EngineDaemonUnavailableError(template(method)),
+        });
+        const text = crashReportText([formatCrashEvent({ kind: "engine", error, stage: "startup" }, FACTS, codeFrame)], 0);
+        expect(text).toContain(`Caused by: EngineDaemonUnavailableError: ${template("<withheld>")}`);
+        expect(text).not.toContain(method);
+      }
+    }
+    const sensitiveMessages = [
+      ...templates.flatMap((template) => [
+        `secret ${template("engine.ping")}`, `${template("engine.ping")} /Private/secret.md`,
+        `${template("engine.ping")}\nsecret`,
+      ]),
+      ...["0", "-1", "1.5", "0120000", "120001", "15551234567", "9".repeat(400), "/Private/secret.md"]
+        .map((cap) => `Rust engine workspace.open timed out after ${cap}ms.`),
+      "Rust engine engine.ping got no answer: a probe expired after 15551234567ms with no frame of any kind from the engine.",
+      "Rust engine workspace.open did not start within its 15551234567ms budget.",
+      "Rust engine workspace.open ran out of its 15551234567ms budget before the read.",
+    ];
+    for (const message of sensitiveMessages) {
+      const error = new EngineDaemonUnavailableError("Rust engine failed its startup handshake.", {
+        cause: new EngineDaemonUnavailableError("Rust engine workspace.open returned an invalid result.", {
+          cause: new EngineDaemonUnavailableError(message),
+        }),
+      });
+      const text = crashReportText([formatCrashEvent({ kind: "engine", error, stage: "startup" }, FACTS, codeFrame)], 0);
+      expect(text, message).toContain("Caused by: EngineDaemonUnavailableError: <message withheld>");
+      expect(text, message).not.toContain(message);
+      for (const sensitive of [...sensitiveMethods, "secret", "15551234567"]) expect(text).not.toContain(sensitive);
+    }
+    for (const message of templates.map((template) => template("engine.ping"))) {
+      const spoof = Object.assign(new Error(message), { name: "EngineDaemonUnavailableError" });
+      for (const error of [new Error(message), spoof, new EngineDaemonUnavailableError("unknown", { cause: spoof })]) {
+        expect(mainError(error)).not.toContain(message);
+      }
+    }
+  });
+
+  it("keeps the no-progress diagnostic and withholds an unknown method", () => {
+    for (const [method, expected] of [["engine.ping", "engine.ping"], ["private.plan", "<withheld>"]]) {
+      const message = `Rust engine ${method} made no progress while the daemon was responding.`;
+      expect(mainError(new EngineDaemonUnavailableError(message)))
+        .toContain(`EngineDaemonUnavailableError: Rust engine ${expected} made no progress while the daemon was responding.`);
+      if (method !== expected) expect(mainError(new EngineDaemonUnavailableError(message))).not.toContain(method);
+      for (const suffix of [" private plan", "\n"]) {
+        expect(mainError(new EngineDaemonUnavailableError(message + suffix)))
+          .toContain("EngineDaemonUnavailableError: <message withheld>");
+      }
+      expect(mainError(new Error(message))).toContain("Error: Error: <message withheld>");
+    }
+  });
+
+  it("keeps the retired-generation diagnostic only as an exact supervisor sentence", () => {
+    const message = "Rust engine request generation was retired.";
+    expect(mainError(new EngineDaemonUnavailableError(message))).toContain(`EngineDaemonUnavailableError: ${message}`);
+    for (const suffix of [" private plan", "\n"]) {
+      expect(mainError(new EngineDaemonUnavailableError(message + suffix)))
+        .toContain("EngineDaemonUnavailableError: <message withheld>");
+    }
+    expect(mainError(new Error(message))).toContain("Error: Error: <message withheld>");
+  });
+
+  it("withholds a template with a trailing newline", () => {
+    const message = "Rust engine workspace.open timed out after 5000ms.";
+    const text = formatCrashEvent({
+      kind: "engine", error: new EngineDaemonUnavailableError(`${message}\n`), stage: "startup",
+    }, FACTS, codeFrame);
+    expect(text.endsWith("EngineDaemonUnavailableError: <message withheld>")).toBe(true);
+    expect(text.endsWith("\n")).toBe(false);
+  });
+
+  it("preserves allowed diagnostics through nested causes while withholding free text", () => {
+    const privateMessage = "Cookie: sid=private-token; /Private/Acquisition.md";
+    const error = new EngineDaemonUnavailableError("Rust engine failed its startup handshake.", {
+      cause: new EngineDaemonUnavailableError("Rust engine workspace.open timed out after 120000ms.", {
+        cause: new EngineDaemonUnavailableError("Rust engine workspace.close returned an invalid result.", {
+          cause: new Error(privateMessage),
+        }),
+      }),
+    });
+    const text = crashReportText([formatCrashEvent({ kind: "engine", error, stage: "startup" }, FACTS, codeFrame)], 0);
+    expect(text).toContain("Caused by: EngineDaemonUnavailableError: Rust engine workspace.open timed out after 120000ms.");
+    expect(text).toContain("Caused by: EngineDaemonUnavailableError: Rust engine workspace.close returned an invalid result.");
+    expect(text).toContain("Caused by: Error: <message withheld>");
+    for (const sensitive of ["private-token", "/Private/Acquisition.md", privateMessage]) expect(text).not.toContain(sensitive);
   });
 
   it("bounds supervisor exit codes to signed or unsigned 32-bit integers", () => {

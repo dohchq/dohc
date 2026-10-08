@@ -88,7 +88,7 @@ export function registerShareProposalsIpcHandlers<
   shareViewFiles: Pick<ShareViewFiles, "reconcile">;
   receivedShareEngine: Pick<ReturnType<typeof createReceivedShareEngineAccess>, "relayFor">;
   automationDefinitionsChanged?(workspaceId: string): void;
-}): { shareViewEdited(workspaceId: string): void } {
+}): { shareViewEdited(workspaceId: string): void; recordCreated(workspaceId: string): void } {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
     warmCredentialCache, currentCredentials, currentCredentialGeneration, normalizeServerUrl,
@@ -568,7 +568,7 @@ export function registerShareProposalsIpcHandlers<
               }
               writes.push(
                 write.result === "stale"
-                  ? { result: "stale", paths: write.paths, stalePath: write.stalePath }
+                  ? { result: "stale", paths: write.paths, stalePath: write.stalePath, recoveredDraftPath: write.recoveredDraftPath }
                   : write,
               );
             }
@@ -678,5 +678,7 @@ export function registerShareProposalsIpcHandlers<
     );
   });
 
-  return { shareViewEdited: directWrites.edited };
+  return { shareViewEdited: directWrites.edited, recordCreated: workspaceId => {
+    void directWrites.pushNow(workspaceId).then(result => directWrites.report(workspaceId, result));
+  } };
 }

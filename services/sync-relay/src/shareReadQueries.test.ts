@@ -20,6 +20,12 @@ function page(payload: Record<string, unknown>, audience: "authenticated" | "acc
 }
 
 describe("authenticated selected moment declarations", () => {
+  it("keeps unattributed coverage alongside a public recipient author", () => {
+    const authors = [{kind: "human", humanId: "recipient", humanName: "Recipient"}, {kind: "unattributed"}];
+    const served = page(moment([...authors, {kind: "unattributed", humanId: "forged"}])).ops[0]!.payload as Record<string, unknown>;
+    expect(served.authors).toEqual(authors);
+  });
+
   it("rebuilds only declared agents after filtering, while the default and accountless payloads stay minimal", () => {
     const payload = moment([
       { kind: "agent", agentId: "trip-agent 旅行", onBehalfOf: "opaque-relay-owner", depth: 0,

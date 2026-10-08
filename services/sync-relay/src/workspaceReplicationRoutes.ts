@@ -5,7 +5,7 @@ import {
   type DiscussionActivityHub,
 } from "./discussionActivity";
 import { badRequest, notFound, relayError } from "./errors";
-import { assertChatAuthorship, assertClientLogProvenance, parseAuthenticatedLogOps, type LogAuthorNameLookup } from "./relayLogInputs";
+import { assertChatAuthorship, assertClientLogProvenance, assertServiceReplicaLogProvenance, parseAuthenticatedLogOps, type LogAuthorNameLookup } from "./relayLogInputs";
 import { parseCursor, parseLimit, parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
 import type { EnforceWorkspaceIdentityResult, SyncRelayStorage } from "./storage";
 import { MAX_DISCUSSION_ACTIVITY_HOLD_MS, MAX_OPS_PER_REQUEST, MAX_ORIGIN_ID_CHARS } from "./wireLimits";
@@ -35,6 +35,7 @@ export function createWorkspaceReplicationRoutes(
   nowMs: () => number,
   discussionActivity: Pick<DiscussionActivityHub, "wakeLog" | "wait">,
   lookupUserDisplayName?: LogAuthorNameLookup,
+  logProvenance: "client" | "native-settlements" = "client",
 ) {
   async function respondToWorkspaceRegistration(
     request: Request,
@@ -125,7 +126,8 @@ export function createWorkspaceReplicationRoutes(
       // parseLogOp and appendLogBatch, so the relay rejects the full batch
       // before it writes any operation.
       assertChatAuthorship(input.ops, actor.userId);
-      assertClientLogProvenance(originId, input.ops);
+      if (logProvenance === "native-settlements") assertServiceReplicaLogProvenance(originId, input.ops);
+      else assertClientLogProvenance(originId, input.ops);
       const ops = await parseAuthenticatedLogOps(input.ops, actor.userId, lookupUserDisplayName);
       const result = storage.appendLogBatch({
         workspaceId: route.workspaceId,

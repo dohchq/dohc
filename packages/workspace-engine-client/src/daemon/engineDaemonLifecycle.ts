@@ -9,10 +9,20 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 
 import type { Event, JsonValue, Request, Response, WorkspaceHandle } from "../protocol";
+import { VERSIONED_METHOD } from "../versioned/versionedWireContract";
+import { WORKSPACE_METHOD } from "../workspace/workspaceWireContract";
 import {
   createEngineClient,
+  EngineRequestDeadlineError,
   type EngineClientSpawnOptions,
 } from "./engineClient";
+
+export const ENGINE_LIFECYCLE_METHOD = {
+  ping: "engine.ping",
+  workspaceOpen: WORKSPACE_METHOD.open,
+  workspaceClose: WORKSPACE_METHOD.close,
+  versionsActive: VERSIONED_METHOD.versionsActive,
+} as const;
 
 const ENGINE_BINARY_RESOURCE_DIR = "workspace-engine";
 const ENGINE_BINARY_BASENAME = "dohc-workspace-engine";
@@ -29,7 +39,7 @@ const DEFAULT_RESTART_WINDOW_MS = 600_000;
 const DEFAULT_MAX_RESTARTS_PER_WINDOW = 10;
 // A lifecycle request (the startup smoke and read attaches) fails when the
 // engine goes silent, not when it is slow; see watchRequestLiveness. This cap
-// ends a live engine that never finishes. It matches the desktop's deadline
+// ends a request that never finishes. It matches the desktop's deadline
 // for opening a real workspace.
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 // Quiet time before a pending lifecycle request probes the engine. Most
@@ -118,6 +128,8 @@ const DEFAULT_MAX_PING_EXPIRIES = 3;
 const DEFAULT_MAX_CONSECUTIVE_WEDGES = 2;
 
 export interface EngineDaemonClient extends MinimalDaemonClient {
+  sendRequest(request: Request, signal?: AbortSignal, onProgress?: () => void): Promise<Response>;
+  reportsProgress?(): boolean;
   cancelRequest?(requestId: number): Promise<void>;
   onEvent?(handler: (event: Event) => void): () => void;
   // Kill a daemon that stopped answering. `close` reports a deliberate
@@ -189,7 +201,8 @@ interface InFlightLaunch {
 // launch runs its smoke in the background so start() can resolve on the
 // handshake; every restart keeps the blocking smoke, because restartAfterExit
 // counts a failed smoke as a failed attempt — which is what bounds a daemon
-// that relaunches but cannot do workspace work.
+// that relaunches but cannot do workspace work. Smokes wait through progress
+// stalls until their cap; daemon silence can fail them sooner.
 type SmokeMode = "background" | "blocking";
 
 export class EngineDaemonUnavailableError extends Error {
@@ -333,7 +346,7 @@ export class EngineDaemonLifecycle {
   // one open lock through capture adoption, and a close leaves the workspace
   // closing, which a reopen waits on, until capture drain and shutdown end.
   private readonly holdsOpenLock = (request: Request) =>
-    (request.method === "workspace.open" || request.method === "workspace.close") &&
+    (request.method === ENGINE_LIFECYCLE_METHOD.workspaceOpen || request.method === ENGINE_LIFECYCLE_METHOD.workspaceClose) &&
     !this.readRequests.has(request);
 
   constructor(options: EngineDaemonLifecycleOptions) {
@@ -473,7 +486,7 @@ export class EngineDaemonLifecycle {
         client,
         {
           id: this.requestId(),
-          method: "workspace.open",
+          method: ENGINE_LIFECYCLE_METHOD.workspaceOpen,
           params: {
             rootDir,
             workspaceId,
@@ -489,7 +502,7 @@ export class EngineDaemonLifecycle {
           read: true,
         },
       ),
-      "workspace.open",
+      ENGINE_LIFECYCLE_METHOD.workspaceOpen,
     );
     if (typeof opened.workspace !== "string" || opened.workspace.length === 0) {
       throw new EngineDaemonUnavailableError(
@@ -526,7 +539,7 @@ export class EngineDaemonLifecycle {
           client,
           {
             id: this.requestId(),
-            method: "workspace.close",
+            method: ENGINE_LIFECYCLE_METHOD.workspaceClose,
             workspace,
             params: {},
           },
@@ -602,18 +615,19 @@ export class EngineDaemonLifecycle {
     const smokeCap = {
       capMs: this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
       condemnOnCap: () => true,
+      cancelOnStall: false,
     };
     const opened = resultObject(
       await this.sendLifecycleRequest(
         client,
         {
           id: this.requestId(),
-          method: "workspace.open",
+          method: ENGINE_LIFECYCLE_METHOD.workspaceOpen,
           params: { rootDir, workspaceId },
         },
         smokeCap,
       ),
-      "workspace.open",
+      ENGINE_LIFECYCLE_METHOD.workspaceOpen,
     );
     if (typeof opened.workspace !== "string" || opened.workspace.length === 0) {
       throw new EngineDaemonUnavailableError(
@@ -626,7 +640,7 @@ export class EngineDaemonLifecycle {
         client,
         {
           id: this.requestId(),
-          method: "workspace.close",
+          method: ENGINE_LIFECYCLE_METHOD.workspaceClose,
           workspace,
           params: {},
         },
@@ -638,7 +652,7 @@ export class EngineDaemonLifecycle {
         client,
         {
           id: this.requestId(),
-          method: "versions.active",
+          method: ENGINE_LIFECYCLE_METHOD.versionsActive,
           workspace,
           params: {},
         },
@@ -669,13 +683,13 @@ export class EngineDaemonLifecycle {
     return this.client;
   }
 
-  // At the cap, `condemnOnCap` decides whether the request proves the engine
-  // stuck (kill it for replacement) or only ran out of a caller's budget
-  // (cancel it and leave the engine alone). Silence condemns either way.
+  // The cap ends the request even when it progresses. Only a request with no
+  // evidence of daemon health can condemn at the cap; proven silence also
+  // condemns before it. A responding daemon survives request cancellation.
   private async sendLifecycleRequest(
     client: EngineDaemonClient,
     request: Request,
-    bound: { capMs: number; condemnOnCap: () => boolean; read?: boolean },
+    bound: { capMs: number; condemnOnCap: () => boolean; read?: boolean; cancelOnStall?: boolean },
   ): Promise<Response> {
     const { method } = request;
     const timeoutMs = bound.capMs;
@@ -684,12 +698,17 @@ export class EngineDaemonLifecycle {
       deadlineMs: request.deadlineMs ?? timeoutMs,
     };
     if (bound.read) this.readRequests.add(boundedRequest);
+    const generation = this.activeGeneration;
+    const current = () => !this.stopping && generation === this.activeGeneration &&
+      !this.exitedGenerations.has(generation) &&
+      (this.client === client || this.launchingClients.has(client));
+    const controller = new AbortController();
+    const watch = this.watchRequestLiveness(client, method, controller.signal, bound.cancelOnStall ?? true);
     const startedAt = this.monotonicNowMs(), activityBefore = client.inboundActivity?.();
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let settled = false;
     const deadline = new Promise<never>((_resolve, reject) => {
       timeout = setTimeout(() => {
-        const condemnOnCap = bound.condemnOnCap();
         const elapsedMs = Math.round(this.monotonicNowMs() - startedAt);
         const diagnostic = { at: new Date(this.wallNowMs()).toISOString(), method, requestId: request.id, timeoutMs,
           elapsedMs, timerLagMs: Math.max(0,elapsedMs-timeoutMs) };
@@ -701,6 +720,7 @@ export class EngineDaemonLifecycle {
             console.warn("[engine-daemon] request deadline", JSON.stringify({...diagnostic,inboundFrames,action:"reply-drained"}));
             return;
           }
+          const condemnOnCap = current() && !watch.responding() && bound.condemnOnCap();
           console.warn("[engine-daemon] request deadline", JSON.stringify({...diagnostic,inboundFrames,action:condemnOnCap ? "kill-for-replacement" : "cancel-request"}));
           void client.cancelRequest?.(request.id).catch(() => undefined);
           const error = new EngineDaemonUnavailableError(
@@ -712,40 +732,65 @@ export class EngineDaemonLifecycle {
       }, timeoutMs);
       timeout.unref();
     });
-    const watch = this.watchRequestLiveness(client, method);
     const silent = watch.silent.catch((error: unknown) => {
       if (settled) return new Promise<never>(() => {});
-      // Silence is evidence about the whole engine, whichever request saw it.
+      // A stalled open can fail while the rest of the daemon remains healthy.
       void client.cancelRequest?.(request.id).catch(() => undefined);
-      this.condemn(client, asError(error));
+      if (current() && watch.daemonSilent()) this.condemn(client, asError(error));
       throw error;
     });
+    let rejectRetired!: (error: Error) => void;
+    const retired = new Promise<never>((_resolve, reject) => { rejectRetired = reject; });
+    const checkGeneration = () => {
+      if (!current()) rejectRetired(new EngineDaemonUnavailableError("Rust engine request generation was retired."));
+    };
+    const unsubscribe = this.onClientChanged(checkGeneration);
     try {
-      return await Promise.race([client.sendRequest(boundedRequest), deadline, silent]);
+      if (!current()) throw new EngineDaemonUnavailableError("Rust engine request generation was retired.");
+      const response = client.sendRequest(boundedRequest, controller.signal, method === "workspace.open" ? () => {
+        if (!settled && current()) watch.progress();
+      } : undefined).catch((error: unknown) => {
+        // The client deadline can win before our final frame drain. Keep the
+        // lifecycle cap responsible for the daemon-health verdict.
+        if (error instanceof EngineRequestDeadlineError) return deadline;
+        throw error;
+      });
+      return await Promise.race([response, deadline, silent, retired]);
     } finally {
       settled = true;
+      unsubscribe();
+      controller.abort();
       watch.stop();
       if (timeout) clearTimeout(timeout);
     }
   }
 
-  // A fixed 5s bound on the startup smoke killed healthy engines on busy
-  // machines, and three restarts later the engine stopped. Now a request fails
-  // on silence: after requestProbeDelayMs with no frame from the engine, this
-  // sends the wedge watch's probe, and rejects only when that probe expires
-  // with no frame of any kind since it was sent. The expiry is the longest a
-  // live engine takes to answer a probe (DEFAULT_PING_EXPIRY_MS).
+  // An open waiting for the engine lock has not started reporting progress.
+  // Watch daemon health until its first frame, then use only its callback to
+  // extend the quiet wait. Ordinary requests cancel on a progress stall; smokes
+  // keep watching daemon health until their cap. Silence condemns either.
   private watchRequestLiveness(
     client: EngineDaemonClient,
     method: string,
-  ): { silent: Promise<never>; stop(): void } {
+    signal: AbortSignal,
+    cancelOnStall: boolean,
+  ): { silent: Promise<never>; progress(): void; responding(): boolean; daemonSilent(): boolean; stop(): void } {
     const probeDelayMs =
       this.options.requestProbeDelayMs ?? DEFAULT_REQUEST_PROBE_DELAY_MS;
     const expiryMs = this.options.pingExpiryMs ?? DEFAULT_PING_EXPIRY_MS;
+    const tracksProgress = method === "workspace.open" && client.reportsProgress?.() === true;
+    const activityBefore = client.inboundActivity?.();
+    let progressCount = 0;
+    let answeredProbe = false;
+    let daemonSilent = false;
+    const responding = () => answeredProbe || progressCount > 0 ||
+      (activityBefore !== undefined && (client.inboundActivity?.() ?? activityBefore) > activityBefore);
     let stopped = false;
+    let endQuiet: (() => void) | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const quiet = () =>
       new Promise<void>((resolve) => {
+        endQuiet = resolve;
         timer = setTimeout(resolve, probeDelayMs);
         timer.unref();
       });
@@ -753,28 +798,37 @@ export class EngineDaemonLifecycle {
     // it. Read them first, so the stall does not look like engine silence.
     const drained = () => new Promise<void>((resolve) => setImmediate(resolve));
     const silent = (async (): Promise<never> => {
-      let seen = client.inboundActivity?.();
+      let seen = client.inboundActivity?.(), seenProgress = progressCount;
       for (;;) {
         await quiet();
         await drained();
-        if (stopped) return await new Promise<never>(() => {});
+        if (stopped || signal.aborted) return await new Promise<never>(() => {});
         const beforeProbe = client.inboundActivity?.();
-        if (beforeProbe !== seen) {
+        if (tracksProgress && progressCount > 0 ? progressCount !== seenProgress : beforeProbe !== seen) {
+          seenProgress = progressCount;
           seen = beforeProbe;
           continue;
         }
         const probedAt = this.monotonicNowMs();
-        const answered = await this.sendPing(client);
+        const answered = await this.sendPing(client, signal);
         await drained();
-        if (stopped) return await new Promise<never>(() => {});
+        if (stopped || signal.aborted) return await new Promise<never>(() => {});
+        answeredProbe ||= answered;
         const afterProbe = client.inboundActivity?.();
+        if (tracksProgress && progressCount !== seenProgress) {
+          seenProgress = progressCount;
+          seen = afterProbe;
+          continue;
+        }
+        if (!answered && this.monotonicNowMs() - probedAt > expiryMs + LATE_TIMER_TOLERANCE_MS) continue;
+        if (cancelOnStall && tracksProgress && progressCount > 0 && (answered || afterProbe !== seen)) {
+          throw new EngineDaemonUnavailableError(`Rust engine ${method} made no progress while the daemon was responding.`);
+        }
         if (answered || afterProbe !== seen) {
           seen = afterProbe;
           continue;
         }
-        // An expiry that fired late measured this host's own stall or suspend,
-        // not the engine. Probe again instead of condemning on it.
-        if (this.monotonicNowMs() - probedAt > expiryMs + LATE_TIMER_TOLERANCE_MS) continue;
+        daemonSilent = true;
         throw new EngineDaemonUnavailableError(
           `Rust engine ${method} got no answer: a probe expired after ${expiryMs}ms with no frame of any kind from the engine.`,
         );
@@ -782,9 +836,13 @@ export class EngineDaemonLifecycle {
     })();
     return {
       silent,
+      progress() { if (!stopped && !signal.aborted && tracksProgress) progressCount += 1; },
+      responding,
+      daemonSilent: () => daemonSilent,
       stop() {
         stopped = true;
         if (timer) clearTimeout(timer);
+        endQuiet?.();
       },
     };
   }
@@ -829,7 +887,7 @@ export class EngineDaemonLifecycle {
         cwd: dirname(this.options.command),
         authToken,
         protocolVersion: ENGINE_PROTOCOL_VERSION,
-        capabilities: ["blobs"],
+        capabilities: ["blobs", "progress"],
         signal,
         onExit: (code, signal) => {
           this.handleUnexpectedExit(generation, code, signal);
@@ -912,8 +970,8 @@ export class EngineDaemonLifecycle {
     await client.waitForExit?.();
   }
 
-  private async runSmoke(client: EngineDaemonClient): Promise<JsonValue> {
-    return await runEngineDaemonSmoke(
+  private async runSmoke(client: EngineDaemonClient): Promise<void> {
+    await runEngineDaemonSmoke(
       async (rootDir, workspaceId) =>
         await this.smokeWorkspaceWithClient(client, rootDir, workspaceId),
       (error) => this.reportFailure(
@@ -923,13 +981,8 @@ export class EngineDaemonLifecycle {
     );
   }
 
-  // The first launch's startup smoke, run after start() resolved. The daemon
-  // already proved it is alive and speaking the protocol; this checks that it
-  // can do real workspace work. A failure is handled the way a wedge is:
-  // kill, then report. The kill becomes a process exit, and the exit carries
-  // the failure into the same restart machinery a crash uses — whose
-  // relaunches run the blocking smoke and bound a daemon that keeps failing
-  // it.
+  // The first launch's smoke checks workspace work after the handshake.
+  // Failures kill for replacement through the normal restart path.
   private async runDeferredSmoke(
     generation: number,
     client: EngineDaemonClient,
@@ -1162,7 +1215,7 @@ export class EngineDaemonLifecycle {
   // for any request that names one and rejects when it fires, so a wire
   // deadline would convert a wedged daemon's silence into a rejection this
   // reads as life, and the detector would never fire against the real client.
-  private async sendPing(client: EngineDaemonClient): Promise<boolean> {
+  private async sendPing(client: EngineDaemonClient, signal?: AbortSignal): Promise<boolean> {
     let timeout: ReturnType<typeof setTimeout> | undefined;
     // This resolves false for "no reply in time", which is not yet a verdict.
     // `probeOnce` decides, because liveness is judged on traffic seen since the
@@ -1177,16 +1230,21 @@ export class EngineDaemonLifecycle {
     const answer = client
       .sendRequest({
         id: this.requestId(),
-        method: "engine.ping",
+        method: ENGINE_LIFECYCLE_METHOD.ping,
         params: {},
-      })
+      }, signal)
       .then(
         () => true,
         () => true,
       );
+    let onAbort!: () => void;
+    const aborted = new Promise<boolean>((resolve) => { onAbort = () => resolve(false); });
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
     try {
-      return await Promise.race([answer, silence]);
+      return await Promise.race([answer, silence, aborted]);
     } finally {
+      signal?.removeEventListener("abort", onAbort);
       if (timeout) clearTimeout(timeout);
     }
   }

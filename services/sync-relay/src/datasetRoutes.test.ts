@@ -156,7 +156,7 @@ it("tells callers when to retry a dataset that waits to reopen", async () => {
   const waiting = await f.invoke();
   expect(waiting.status).toBe(503);
   expect(waiting.headers.get("retry-after")).toBe("10");
-  expect(await waiting.json()).toEqual({code: "dataset_reopen_wait", message: "dohc's work on this Collection stopped before it finished. Try again in 10 s."});
+  expect(await waiting.json()).toEqual({code: "dataset_reopen_wait", message: "This Collection is waiting to reopen. Try again in 10 seconds."});
   // The failure that starts a wait says why, and when to retry.
   const message = "The app's code ran too long: it used more than 5 s of CPU time while reapplying saved change 3 of 64. Try again.";
   f.host.invoke = async () => { throw Object.assign(new PersistentRuntimeError("worker_budget", message), {retryAfterMs: 5_000}); };

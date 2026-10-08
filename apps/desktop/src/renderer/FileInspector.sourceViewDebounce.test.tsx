@@ -38,7 +38,7 @@ function engineState(doc: Y.Doc): UseEngineDoc {
     doc,
     objectId: "object-1",
     versionId: "version-1",
-    saveState: "saved",
+    saveState: { kind: "saved-here" },
     saveError: null,
     authorCapacity: false,
     notInVersion: false,
@@ -100,6 +100,7 @@ function stubEditorGlobals(): void {
 
 function makeBridge(markdownByPath: Record<string, string>): DohcDesktopBridge {
   return {
+    onWorkspaceActivity: vi.fn(() => () => undefined),
     readWorkspaceText: vi.fn(async ({ relativePath }) => ({
       text: markdownByPath[relativePath] ?? "",
       truncated: false,

@@ -20,6 +20,7 @@ export function selfHostLiveProfile() {
   const gateway = {...connections, maxFrameBytes: frames.receive.maxFrameBytes, maxPendingFrames: 128};
   return {
     frames, nativeIngress, nativeClient, editor, gateway, requests, validation,
+    desktopReadiness: {maxPendingRequests: 64, maxPendingPerUser: 4, timeoutMs: 30_000},
     owner: {frames, nativeIngress, nativeClient, attemptTimeoutMs: 30_000, retryDelayMs: 2_000},
     browserSessions: {...requests, maxSessions: 256, retentionMs: 12 * 60 * 60 * 1000},
     namedLive: {version: 1, tickets: {retainedTicketsPerPrincipalGrant: 8, expiredTicketCleanupBatchSize: 64},

@@ -1,3 +1,7 @@
+import { bridge } from "../bridge";
+import { rearmDesktopAdmission } from "./rearmDesktopAdmission";
+import type { SharedDocumentOpenState } from "../../ipc/sharedDocumentOpenState";
+import { UNKNOWN_SAVE_STATE, type SaveState } from "@dohc/workspace-contracts/save-state";
 import { useEffect, useRef, useState } from "react";
 import type * as Y from "yjs";
 import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
@@ -12,7 +16,6 @@ import {
   type EngineDocInput,
   type EngineDocLease,
   type EngineDocLeaseSnapshot,
-  type EngineDocSaveState,
   type DocumentGoneCause,
 } from "./engineDocLease";
 
@@ -68,7 +71,7 @@ export type UseEngineDoc = {
   // committed and wrote the .md, "error" when a settle failed. This used to be
   // a 1s timer that flipped to "saved" regardless of what the engine did —
   // three dogfood journeys watched a doc read "Saved" over a zero-byte file.
-  saveState: EngineDocSaveState;
+  saveState: SaveState;
   // A known terminal save failure. The save-state chip uses this instead of
   // its generic error text so it can name the constraint and measured bytes.
   saveError: string | null;
@@ -82,6 +85,7 @@ export type UseEngineDoc = {
   // The caller replaces the stale document instead of recreating the file.
   documentUnavailable: boolean;
   liveHostUnavailable: boolean;
+  sharedWaiting?: SharedDocumentOpenState | null;
   // The open did not land and a session for this document may still be the
   // engine's. Same no-downgrade rule as notInVersion: the caller
   // stays read-only, states the reason, and offers a retry (bump retryKey),
@@ -124,8 +128,19 @@ export type UseEngineDoc = {
 };
 
 export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
-  const requestKey = engineDocRequestKey(input);
-  const retryKey = input.retryKey ?? 0;
+  const [deliveryRetry, setDeliveryRetry] = useState(0);
+  const retryKey = (input.retryKey ?? 0) + deliveryRetry;
+  const requestInput = { ...input, retryKey };
+  const requestKey = engineDocRequestKey(requestInput);
+  const waiting = useRef(false);
+  const activityRevision = useRef(0);
+  const openingRevision = useRef(0);
+  useEffect(() => bridge().onWorkspaceActivity?.(event => {
+    if (event.workspaceId !== undefined && event.workspaceId !== input.workspaceId) return;
+    if (event.paths?.length && !event.paths.includes(input.path)) return;
+    activityRevision.current++;
+    if (waiting.current) setDeliveryRetry(value => value + 1);
+  }), [input.workspaceId, input.path]);
   const versionKey = documentVersionKey(
     input.workspaceId,
     input.path,
@@ -153,7 +168,8 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     const isRetry =
       previousRequest?.versionKey === versionKey &&
       previousRequest.retryKey !== retryKey;
-    const lease = retainEngineDocLease(input, requestKey, isRetry);
+    openingRevision.current = activityRevision.current;
+    const lease = retainEngineDocLease(requestInput, requestKey, isRetry);
     committedRequestRef.current = { versionKey, retryKey, lease };
     const update = () =>
       setLeaseState({
@@ -175,7 +191,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     input.enabled,
     input.kind,
     input.reopenKey,
-    input.retryKey,
+    retryKey,
   ]);
 
   // Derive this during render. A result for an earlier request never grants
@@ -183,6 +199,34 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
   const settled =
     leaseState?.requestKey === requestKey ? leaseState.snapshot : null;
   const outcome = settled?.outcome ?? null;
+  const admissionWaiting = input.enabled && outcome?.kind === "shared-waiting" && outcome.waiting.state === "failed";
+  useEffect(() => {
+    if (!admissionWaiting) return;
+    let active: {cancel: AbortController; sessionId: string} | undefined;
+    const stop = () => {
+      if (!active) return;
+      active.cancel.abort();
+      void bridge().closeEngineYDocSession({sessionId: active.sessionId}).catch(() => {});
+      active = undefined;
+    };
+    const start = () => {
+      if (document.visibilityState === "hidden") { stop(); return; }
+      if (active) return;
+      const run = {cancel: new AbortController(), sessionId: crypto.randomUUID()};
+      active = run;
+      void rearmDesktopAdmission({signal: run.cancel.signal,
+        wait: () => bridge().waitForEngineYDocAdmission({workspaceId: input.workspaceId, path: input.path, sessionId: run.sessionId}),
+        ready: () => setDeliveryRetry(value => value + 1),
+      });
+    };
+    document.addEventListener("visibilitychange", start);
+    start();
+    return () => { document.removeEventListener("visibilitychange", start); stop(); };
+  }, [admissionWaiting, input.workspaceId, input.path, requestKey]);
+  waiting.current = outcome?.kind === "shared-waiting" || outcome?.kind === "live-host-unavailable";
+  useEffect(() => {
+    if (waiting.current && activityRevision.current > openingRevision.current) setDeliveryRetry(value => value + 1);
+  }, [outcome]);
   const available = outcome?.kind === "bound";
   const doc = outcome?.kind === "bound" ? outcome.doc : null;
   const objectId = outcome?.kind === "bound" ? outcome.objectId : null;
@@ -239,12 +283,13 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     doc,
     objectId,
     versionId,
-    saveState: settled?.saveState ?? "saved",
+    saveState: settled?.saveState ?? UNKNOWN_SAVE_STATE,
     saveError: settled?.saveError ?? null,
     authorCapacity: settled?.authorCapacity ?? false,
     notInVersion,
     documentUnavailable,
-    liveHostUnavailable: outcome?.kind === "live-host-unavailable",
+    liveHostUnavailable: outcome?.kind === "live-host-unavailable" || outcome?.kind === "shared-waiting",
+    sharedWaiting: outcome?.kind === "shared-waiting" ? outcome.waiting : null,
     engineMayHoldDocument,
     artifactAssetsInvalid,
     deletedWhileEditing,

@@ -33,6 +33,8 @@ import { createChatWrites } from "../workspaces/chatWrites";
 import { CredentialSessionCache } from "../workspaces/credentialSessionCache";
 import { createLocalAuthorship } from "../workspaces/localAuthorship";
 import { deferred } from "../testing/deferred";
+import { createUsageStore } from "../usage/usageStore";
+import { DESKTOP_USAGE_COVERAGE } from "../usage/cliUsage";
 import { createLiveLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -486,6 +488,97 @@ describe("CLI socket server", () => {
     sessions = null;
     store = null;
     await rm(tempRoot, { recursive: true, force: true });
+  });
+
+  it("labels success without changing token admission, read-only authority, actor gates or results", async () => {
+    const recordSuccess = vi.fn();
+    serverOptions.recordSuccess = recordSuccess;
+    const writeFiles = vi.fn<NonNullable<CliWorkspaceContext["writeFiles"]>>(async files => ({ ok: true, written: files.map(file => file.path) }));
+    context.writeFiles = writeFiles;
+    context.documents = { read: async () => ({ path: "a.md", markdown: "" }), edit: async () => ({ path: "a.md", changed: true }), create: async () => ({ path: "a.md" }) };
+    const args = { cwd: workspaceRoot, actor: "agent", requestId: "door", files: [{ path: "a.txt", contentBase64: "eA==" }] };
+    const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "fileWrite", args };
+    const results = [];
+    for (const door of ["cli", "mcp"] as const) {
+      results.push(await rawRequest({ ...request, door }));
+      expect(recordSuccess).toHaveBeenCalledTimes(1);
+      expect(await rawRequest({ ...request, door, token: "0".repeat(64) })).toMatchObject({ ok: false, error: "dohc: CLI authentication failed" });
+      registryWorkspace.readOnly = true;
+      expect(await rawRequest({ ...request, door })).toMatchObject({ ok: false, error: "dohc: This workspace is read-only. Write in the owning workspace." });
+      registryWorkspace.readOnly = false;
+      expect(await rawRequest({ ...request, door, verb: "documentEdit", args: { cwd: workspaceRoot, actor: "human", path: "a.md", replacement: "x" } }))
+        .toMatchObject({ ok: true, result: { ok: false } });
+    }
+    expect(results[0]).toEqual(results[1]);
+    expect(writeFiles).toHaveBeenCalledTimes(2);
+    expect(writeFiles.mock.calls[0]).toEqual(writeFiles.mock.calls[1]);
+    expect(recordSuccess.mock.calls).toEqual([
+      [{ capabilityId: "file.write", door: "cli" }],
+    ]);
+  });
+
+  it("counts only validated successful commands, defaults missing labels to CLI and rejects unknown labels", async () => {
+    const recordSuccess = vi.fn();
+    serverOptions.recordSuccess = recordSuccess;
+    context.keptCopies = { list: async () => ({ keptCopies: [], more: false }), save: vi.fn(async () => ({ status: "saved" as const, path: "kept.md" })) };
+    const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "saveKeptCopy", args: { cwd: workspaceRoot, actor: "agent", id: 1 } };
+    expect(await rawRequest(request)).toMatchObject({ ok: true, result: { status: "saved" } });
+    expect(recordSuccess).toHaveBeenLastCalledWith({ capabilityId: "file.kept.save", door: "cli" });
+    recordSuccess.mockClear();
+    for (const door of ["unknown", "automation", "renderer"]) expect(await rawRequest({ ...request, door })).toMatchObject({ ok: false, error: "dohc: invalid CLI request" });
+    for (const verb of ["usageRead", "usageQuery", "usageCopy"]) expect(await rawRequest({ ...request, verb })).toMatchObject({ ok: false });
+    await invoke("groups", { cwd: workspaceRoot, actor: "agent" });
+    await invoke("keptCopies", { cwd: workspaceRoot, actor: "agent" });
+    vi.mocked(context.keptCopies.save).mockResolvedValueOnce({ status: "gone" });
+    await rawRequest(request);
+    vi.mocked(context.keptCopies.save).mockResolvedValueOnce({ status: "saved" } as Awaited<ReturnType<NonNullable<CliWorkspaceContext["keptCopies"]>["save"]>>);
+    expect(await rawRequest(request)).toMatchObject({ ok: false });
+    vi.mocked(context.keptCopies.save).mockRejectedValueOnce(new Error("failed"));
+    await rawRequest(request);
+    expect(recordSuccess).not.toHaveBeenCalled();
+    recordSuccess.mockImplementationOnce(() => { throw new Error("measurement failed"); });
+    expect(await rawRequest(request)).toMatchObject({ ok: true, result: { status: "saved" } });
+  });
+
+  it("records once after a pending command settles and excludes concurrent and later request-id replays", async () => {
+    const recordSuccess = vi.fn();
+    serverOptions.recordSuccess = recordSuccess;
+    const entered = deferred(); const release = deferred();
+    const edit = vi.fn(async () => { entered.resolve(); await release.promise; return { path: "a.md", changed: true }; });
+    context.documents = { edit, read: async () => ({ path: "a.md", markdown: "x" }), create: async () => ({ path: "a.md" }) };
+    const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, door: "mcp", verb: "documentEdit",
+      args: { cwd: workspaceRoot, actor: "agent", path: "a.md", replacement: "PRIVATE", requestId: "edit" } };
+    const first = rawRequest(request); await entered.promise;
+    const replay = rawRequest({ ...request, door: "cli" });
+    expect(recordSuccess).not.toHaveBeenCalled();
+    release.resolve();
+    const results = await Promise.all([first, replay]);
+    expect(results[0]).toEqual(results[1]);
+    expect(await rawRequest(request)).toEqual(results[0]);
+    expect(edit).toHaveBeenCalledTimes(1);
+    expect(recordSuccess.mock.calls).toEqual([[{ capabilityId: "document.edit", door: "mcp" }]]);
+  });
+
+  it("stops both socket doors immediately when Off begins, including pending completions", async () => {
+    const usage = createUsageStore({ stateDir: () => stateDir, appVersion: "0.1.0", coverage: DESKTOP_USAGE_COVERAGE });
+    try {
+      await usage.load();
+      serverOptions.recordSuccess = invocation => usage.recordSuccess(invocation);
+      const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "saveKeptCopy", args: { cwd: workspaceRoot, actor: "agent", id: 1 } };
+      const entered = deferred(); const release = deferred();
+      context.keptCopies = { list: async () => ({ keptCopies: [], more: false }), save: async () => ({ status: "saved", path: "kept.md" }) };
+      await rawRequest({ ...request, door: "cli" });
+      const save = context.keptCopies.save;
+      context.keptCopies.save = async () => { entered.resolve(); await release.promise; return save(1); };
+      const pending = rawRequest({ ...request, door: "mcp" }); await entered.promise;
+      const off = usage.setEnabled(false);
+      release.resolve(); await pending;
+      await rawRequest({ ...request, door: "cli" });
+      await rawRequest({ ...request, door: "mcp" });
+      await off;
+      expect((await usage.read()).counts.map(({ capabilityId, door, count }) => ({ capabilityId, door, count })))
+        .toEqual([{ capabilityId: "file.kept.save", door: "cli", count: 1 }]);
+    } finally { await usage.close(); }
   });
 
   it("rejects a wrong token over the live transport before request parsing", async (ctx) => {

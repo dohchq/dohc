@@ -456,6 +456,10 @@ function admittedMomentAuthors(payloadJson: string): Array<Record<string, unknow
   for (const value of raw) {
     if (!value || typeof value !== "object" || Array.isArray(value)) continue;
     const author = value as Record<string, unknown>;
+    if (author.kind === "unattributed" && Object.keys(author).length === 1) {
+      authors.push({kind: "unattributed"});
+      continue;
+    }
     if (author.kind !== "human" && author.kind !== "link" && author.kind !== "agent") continue;
     if (author.kind === "human" && (typeof author.humanName !== "string" || String(author.humanId).startsWith("local:"))) continue;
     const publicAuthor = author.kind === "agent" ? {kind: "agent", agentId: author.agentId,

@@ -193,6 +193,15 @@ struct ShareDirectStatusParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ShareRecordCreationStatusesParams {
+    workspace_id: String,
+    share_id: String,
+    paths: Vec<String>,
+    granted_selector: GrantedSelectorParams,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct GrantedSelectorParams {
     paths: Vec<String>,
     #[serde(default)]
@@ -217,6 +226,7 @@ fn direct_write_json(write: &dohc_engine_sync::DirectWriteReport) -> Value {
             "paths": write.paths,
             "result": "stale",
             "stalePath": path,
+            "recoveredDraftPath": write.recovered_draft_path,
             "currentBlobSha256": current_blob_sha256,
         }),
         dohc_engine_sync::DirectWriteResult::Refused { reason } => json!({
@@ -1491,6 +1501,36 @@ impl EngineService {
             )
         })
     }
+
+    pub(super) async fn share_record_creation_statuses(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ShareRecordCreationStatusesParams = parse(params)?;
+        let granted = share_grant(params.granted_selector)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let statuses = Self::read_under_ctx(
+            &cancellation,
+            "share.records.status",
+            open.actor.share_record_creation_statuses(
+                open.workspace_id.clone(),
+                params.share_id,
+                params.paths,
+                granted,
+            ),
+        )
+        .await?;
+        serde_json::to_value(statuses).map_err(|_| {
+            WireError::new(
+                ErrorCode::Internal,
+                "record-creation-status-serialization-failed",
+            )
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1531,7 +1571,7 @@ mod tests {
                 )
                 .await
                 .expect("offline status"),
-            json!({"contentHash": null, "state": "accepted"})
+            json!({"contentHash": null, "state": "accepted", "canDiscard": false})
         );
         let mut wrong_workspace = params.clone();
         wrong_workspace["workspaceId"] = json!("other");
@@ -1749,10 +1789,12 @@ mod tests {
             dohc_engine_sync::DirectWritePushOutcome {
                 writes: vec![
                     dohc_engine_sync::DirectWriteReport {
+                        recovered_draft_path: None,
                         paths: vec!["trip/packing/collection.yaml".to_owned()],
                         result: dohc_engine_sync::DirectWriteResult::Written,
                     },
                     dohc_engine_sync::DirectWriteReport {
+                        recovered_draft_path: None,
                         paths: vec!["trip/ideas/collection.yaml".to_owned()],
                         result: dohc_engine_sync::DirectWriteResult::Stale {
                             path: "trip/ideas".to_owned(),
@@ -1760,6 +1802,7 @@ mod tests {
                         },
                     },
                     dohc_engine_sync::DirectWriteReport {
+                        recovered_draft_path: None,
                         paths: vec!["trip/packing/automations.yaml".to_owned()],
                         result: dohc_engine_sync::DirectWriteResult::Refused {
                             reason: "changes an automation with a personal step".to_owned(),
@@ -1779,6 +1822,7 @@ mod tests {
                         "paths": ["trip/ideas/collection.yaml"],
                         "result": "stale",
                         "stalePath": "trip/ideas",
+                        "recoveredDraftPath": null,
                         "currentBlobSha256": null,
                     },
                     {

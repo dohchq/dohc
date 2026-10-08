@@ -199,6 +199,21 @@ describe("Explorer kind glyphs", () => {
   });
 
   it.each([
+    // A file without an extension stays a plain file.
+    ["LICENSE", "NOTICE", "lucide-file"],
+    // A name typed without an extension keeps the file's own.
+    ["report.csv", "summary", "lucide-file-spreadsheet"],
+  ])("keeps %s's kind while renaming it to %s", async (path, name, glyph) => {
+    render(<Explorer {...explorerProps({ files: [file(path)] })} />);
+    fireEvent.click(treeRow(path));
+    fireEvent.keyDown(treeRow(path), { key: "F2" });
+    const rename = await screen.findByTestId("tree-edit-input");
+    fireEvent.change(rename, { target: { value: name } });
+    expect(editRowGlyph().classList.contains(glyph)).toBe(true);
+    fireEvent.keyDown(rename, { key: "Escape" });
+  });
+
+  it.each([
     // A `.db` the listing does not report as a database stays a plain file.
     ["cache.db", "file", "lucide-file"],
     // A file the listing reports as a database stays one whatever its name.

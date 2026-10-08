@@ -1,3 +1,5 @@
+import { SharedDocumentWaitingError } from "../ipc/sharedDocumentOpenState";
+import { engineSaveState } from "./engineYDocSaveState";
 import {
   DaemonRefusalError,
   type ArtifactAssetDescriptor,
@@ -198,7 +200,7 @@ describe("engine Y.Doc IPC adapter", () => {
     h.capturedOpen()?.onEditRefused?.("request-1", message);
     expect(sender.sent).toContainEqual({
       channel: CHANNELS.engineYDocSaveState,
-      payload: { sessionId: openPayload.sessionId, state: "error", seq: 0,
+      payload: { sessionId: openPayload.sessionId, ...engineSaveState("error", { requestId: "request-1", message }), seq: 0,
         editRefusal: { workspaceId: "workspace-1", path: "notes/a.md", requestId: "request-1", message } },
     });
     await h.ipc.shutdown();
@@ -348,7 +350,7 @@ describe("engine Y.Doc IPC adapter", () => {
     h.capturedOpen()?.onSaveState?.("error", 1, "outcome", true);
     expect(sender.sent).toContainEqual({
       channel: CHANNELS.engineYDocSaveState,
-      payload: {sessionId: openPayload.sessionId, state: "error", seq: 0, authorCapacity: true},
+      payload: {sessionId: openPayload.sessionId, ...engineSaveState("error"), seq: 0, authorCapacity: true},
     });
     await h.ipc.shutdown();
   });
@@ -372,10 +374,55 @@ describe("engine Y.Doc IPC adapter", () => {
     await h.ipc.shutdown();
   });
 
+  it("owns readiness by caller and cancels it on close or attachment retirement", async () => {
+    const started = deferred<void>();
+    const waitForAdmission = vi.fn((_path: string, signal: AbortSignal) => new Promise<boolean>(resolve => {
+      signal.addEventListener("abort", () => resolve(false), {once: true});
+      started.resolve();
+    }));
+    const h = harness(providerSession(), {sharedCaptureFor: async () => ({openYDocSession: vi.fn(), waitForAdmission})});
+    h.setReadOnly(true);
+    const first = new FakeSender(7), second = new FakeSender(8);
+    const waiting = h.ipc.waitForAdmission(first, openPayload);
+    await started.promise;
+    await h.ipc.close(second, {sessionId: openPayload.sessionId});
+    expect(waitForAdmission.mock.calls[0]![1].aborted).toBe(false);
+    await h.ipc.close(first, {sessionId: openPayload.sessionId});
+    expect(await waiting).toBe(false);
+    const retired = h.ipc.waitForAdmission(first, openPayload);
+    await vi.waitFor(() => expect(waitForAdmission).toHaveBeenCalledTimes(2));
+    await h.ipc.retireAuthority(AUTHORITY_ID);
+    expect(await retired).toBe(false);
+    await h.ipc.shutdown();
+  });
+
+  it("rejects readiness for another workspace and ignores readiness after the caller changes generation", async () => {
+    const reply = deferred<boolean>();
+    const waitForAdmission = vi.fn(async () => reply.promise);
+    const h = harness(providerSession(), {sharedCaptureFor: async () => ({openYDocSession: vi.fn(), waitForAdmission})});
+    h.setReadOnly(true);
+    const sender = new FakeSender(7);
+    expect(await h.ipc.waitForAdmission(sender, {...openPayload, workspaceId: "other"})).toBe(false);
+    expect(waitForAdmission).not.toHaveBeenCalled();
+    const pending = h.ipc.waitForAdmission(sender, openPayload);
+    await vi.waitFor(() => expect(waitForAdmission).toHaveBeenCalledOnce());
+    h.setGeneration(2); reply.resolve(true);
+    expect(await pending).toBe(false);
+    await h.ipc.shutdown();
+  });
+
   it("keeps an unavailable named host read-only without opening a local proposal editor", async () => {
     const h = harness(providerSession(), {sharedCaptureFor: async () => ({openYDocSession: async () => {throw new Error("offline");}})});
     h.setReadOnly(true);
     expect(await h.ipc.open(new FakeSender(7), openPayload)).toEqual({available: false, liveHostUnavailable: true});
+    expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+  });
+
+  it("carries pending record delivery through a refused open", async () => {
+    const waiting = { state: "pending" as const, message: "Record saved on this device. Waiting to send." };
+    const h = harness(providerSession(), { sharedCaptureFor: async () => ({ openYDocSession: async () => { throw new SharedDocumentWaitingError(waiting); } }) });
+    h.setReadOnly(true);
+    expect(await h.ipc.open(new FakeSender(7), openPayload)).toEqual({ available: false, sharedWaiting: waiting });
     expect(h.capture.openYDocSession).not.toHaveBeenCalled();
   });
 
@@ -557,8 +604,8 @@ describe("engine Y.Doc IPC adapter", () => {
     h.capturedOpen()?.onSaveState?.("settling", 9, "start");
     h.capturedOpen()?.onSaveState?.("saved", 9, "outcome");
     expect(sender.sent.slice(-2).map(({ payload }) => payload)).toEqual([
-      { sessionId: openPayload.sessionId, state: "settling", seq: 4 },
-      { sessionId: openPayload.sessionId, state: "saved", seq: 4 },
+      { sessionId: openPayload.sessionId, ...engineSaveState("settling"), seq: 4 },
+      { sessionId: openPayload.sessionId, ...engineSaveState("saved"), seq: 4 },
     ]);
   });
 
@@ -580,12 +627,11 @@ describe("engine Y.Doc IPC adapter", () => {
     h.capturedOpen()?.onSaveState?.("saved", 9, "outcome");
     h.capturedOpen()?.onSaveState?.("settling", 10, "start");
     h.capturedOpen()?.onSaveState?.("saved", 10, "outcome");
-    expect(sender.sent.slice(-5).map(({ payload }) => payload)).toEqual([
-      { sessionId: openPayload.sessionId, state: "settling", seq: 4 },
-      { sessionId: openPayload.sessionId, state: "settling", seq: 4 },
-      { sessionId: openPayload.sessionId, state: "saved", seq: 0 },
-      { sessionId: openPayload.sessionId, state: "settling", seq: 5 },
-      { sessionId: openPayload.sessionId, state: "saved", seq: 5 },
+    expect(sender.sent.slice(-4).map(({ payload }) => payload)).toEqual([
+      { sessionId: openPayload.sessionId, ...engineSaveState("settling"), seq: 4 },
+      { sessionId: openPayload.sessionId, ...engineSaveState("saved"), seq: 0 },
+      { sessionId: openPayload.sessionId, ...engineSaveState("settling"), seq: 5 },
+      { sessionId: openPayload.sessionId, ...engineSaveState("saved"), seq: 5 },
     ]);
     await h.ipc.shutdown();
   });
@@ -606,13 +652,12 @@ describe("engine Y.Doc IPC adapter", () => {
     h.capturedOpen()?.onSaveState?.("changed-on-disk", 9, "status");
     h.capturedOpen()?.onSaveState?.("settling", 0, "status");
     h.capturedOpen()?.onSaveState?.("error", 0, "status");
-    expect(sender.sent.slice(-6).map(({ payload }) => payload)).toEqual([
-      { sessionId: openPayload.sessionId, state: "settling", seq: 0 },
-      { sessionId: openPayload.sessionId, state: "settling", seq: 4 },
-      { sessionId: openPayload.sessionId, state: "error", seq: 4 },
-      { sessionId: openPayload.sessionId, state: "changed-on-disk", seq: 0 },
-      { sessionId: openPayload.sessionId, state: "settling", seq: 0 },
-      { sessionId: openPayload.sessionId, state: "error", seq: 0 },
+    expect(sender.sent.slice(-5).map(({ payload }) => payload)).toEqual([
+      { sessionId: openPayload.sessionId, ...engineSaveState("settling"), seq: 0 },
+      { sessionId: openPayload.sessionId, ...engineSaveState("error"), seq: 4 },
+      { sessionId: openPayload.sessionId, ...engineSaveState("changed-on-disk"), seq: 0 },
+      { sessionId: openPayload.sessionId, ...engineSaveState("settling"), seq: 0 },
+      { sessionId: openPayload.sessionId, ...engineSaveState("error"), seq: 0 },
     ]);
     await h.ipc.shutdown();
   });
@@ -785,7 +830,7 @@ describe("engine Y.Doc IPC adapter", () => {
     h.ipc
       .fileMutationPort()
       .markDeletedUnderPath(AUTHORITY_ID, "Notes/Folder");
-    expect(sender.sent.at(-1)?.payload).toMatchObject({ state: "deleted" });
+    expect(sender.sent.at(-1)?.payload).toMatchObject({ ...engineSaveState("deleted") });
   });
 
   it("opens the workspace activity when the renderer outruns daemon startup", async () => {
@@ -1167,7 +1212,7 @@ describe("engine Y.Doc IPC adapter", () => {
     ).toEqual({ accepted: false, reason: "read-only" });
     expect(sender.sent.at(-1)?.payload).toEqual({
       sessionId: openPayload.sessionId,
-      state: "read-only",
+      ...engineSaveState("read-only"),
       seq: 5,
     });
 
@@ -1177,7 +1222,7 @@ describe("engine Y.Doc IPC adapter", () => {
       .markDeletedUnderPath(AUTHORITY_ID, "notes");
     expect(sender.sent.at(-1)?.payload).toEqual({
       sessionId: openPayload.sessionId,
-      state: "deleted",
+      ...engineSaveState("deleted"),
       seq: 0,
     });
     expect(
@@ -1199,7 +1244,7 @@ describe("engine Y.Doc IPC adapter", () => {
     h.capturedOpen()?.onObjectChanged?.();
     expect(sender.sent.at(-1)?.payload).toEqual({
       sessionId: openPayload.sessionId,
-      state: "object-changed",
+      ...engineSaveState("object-changed"),
       seq: 0,
     });
     expect(
