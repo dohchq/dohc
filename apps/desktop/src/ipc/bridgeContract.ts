@@ -6240,6 +6240,34 @@ export const engineYDocAdmissionOperations = {
   },
 } satisfies OperationTable;
 
+export const RetryEngineYDocSavePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  path: PATH_STRING,
+});
+export type RetryEngineYDocSavePayload = z.infer<typeof RetryEngineYDocSavePayload>;
+
+// Try again on a document that couldn't save. Main settles the session open
+// for that document when asked. "settled" means the settle ran; its outcome
+// arrives as the session's next save state. "closed" means no session is
+// open, so nothing settled. A settle that could not
+// start or that failed rejects.
+export const RetryEngineYDocSaveResult = z.enum(["settled", "closed"]);
+export type RetryEngineYDocSaveResult = z.infer<typeof RetryEngineYDocSaveResult>;
+export const engineYDocSaveOperations = {
+  retryEngineYDocSave: {
+    capabilityId: "document.save.retry",
+    scope: "workspace",
+    handlerCheck: {
+      check: "engineYDocSessionIpc.retrySave",
+      reason: "Settles only a document open in the workspace this window shows.",
+    },
+    channel: "desktop:engine-ydoc-retry-save",
+    payload: RetryEngineYDocSavePayload,
+    result: RetryEngineYDocSaveResult,
+    guard: "trusted-sender",
+  },
+} satisfies OperationTable;
+
 export const OpenEngineYDocSessionResult = z.object({
   available: z.boolean(),
   initialUpdate: ENGINE_YDOC_INITIAL_UPDATE.optional(),
@@ -6407,8 +6435,17 @@ export const EngineYDocSaveStateEvent = z.object({
     message: z.string(),
   }).optional(),
   sessionId: ENGINE_YDOC_SESSION_ID,
+  // The document this session edits, so a listener outside its editor can
+  // tell documents apart.
+  workspaceId: WORKSPACE_ID,
+  path: z.string(),
   state: SaveStateSchema,
   access: z.enum(["read-only", "deleted", "object-changed"]).optional(),
+  // A settle failed to write the file. Absent for an edit refusal, an
+  // author-capacity refusal, and an error no settle reported.
+  saveFailure: z.object({ readOnly: z.boolean() }).optional(),
+  // Sent while the session closes, after its editor has gone.
+  closing: z.literal(true).optional(),
   seq: z.number().int().nonnegative(),
 });
 export type EngineYDocSaveStateEvent = z.infer<typeof EngineYDocSaveStateEvent>;
@@ -6450,7 +6487,8 @@ export interface DohcDesktopBridge
     OperationBridge<typeof chatDispatchNoticeOperations>,
     OperationBridge<typeof sharedViewAccessOperations>,
     OperationBridge<typeof engineYDocAdmissionOperations>,
-    OperationBridge<typeof liveDraftRecoveryOperations> {
+    OperationBridge<typeof liveDraftRecoveryOperations>,
+    OperationBridge<typeof engineYDocSaveOperations> {
   listOwnerLiveDocuments(payload: ListOwnerLiveDocumentsPayload): Promise<OwnerLiveDocumentsResult>;
   listOwnerLiveRefusals(payload: ListOwnerLiveRefusalsPayload): Promise<OwnerLiveRefusalsResult>;
   retryOwnerLiveShare(payload: RetryOwnerLiveSharePayload): Promise<void>;

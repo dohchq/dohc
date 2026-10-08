@@ -31,7 +31,8 @@ export interface EngineYDocSessionSignals<TEvent, TUpdate, TReplacement> {
 }
 
 export type EngineYDocSessionOutboundMessage<TEvent, TUpdate, TReplacement> =
-  | { kind: "session-event"; event: TEvent }
+  // `closing`: sent while the session releases, after its editor has gone.
+  | { kind: "session-event"; event: TEvent; closing?: true }
   | {
       kind: "remote-update";
       update: TUpdate;
@@ -384,8 +385,10 @@ export class EngineYDocSessionOwner<
     );
   }
 
-  documentSession(authorityId: symbol, path: string) {
-    const record = [...this.#records].find(row => row.authorityId === authorityId && row.path === path && row.state === "open" && row.session !== null && row.handoff === null);
+  // `of` narrows the lookup to the session one window opened.
+  documentSession(authorityId: symbol, path: string, of?: { sender: TSender; generation: number }) {
+    const record = [...this.#records].find(row => row.authorityId === authorityId && row.path === path && row.state === "open" && row.session !== null && row.handoff === null &&
+      (!of || (row.sender === of.sender && row.generation === of.generation)));
     if (!record) return undefined;
     const caller = { sender: record.sender, generation: record.generation, sessionId: record.sessionId, lineageGeneration: record.lineageGeneration };
     return { caller, session: record.session!, assertCurrent: () => {
@@ -540,8 +543,13 @@ export class EngineYDocSessionOwner<
     record: SessionRecord<TSender, TSession, TUpdate, TReplacement>,
   ): EngineYDocSessionSignals<TEvent, TUpdate, TReplacement> {
     return {
+      // Save states keep arriving while the session closes: its closing
+      // settle can fail after the editor has gone, and the shell still owes
+      // that failure a notice.
       emit: (event) => {
-        this.#send(record, { kind: "session-event", event });
+        this.#send(record, {
+          kind: "session-event", event, ...(record.state === "releasing" ? { closing: true as const } : {}),
+        }, true);
       },
       remoteUpdate: (update) => {
         if (!this.#maySend(record)) return;
@@ -595,8 +603,10 @@ export class EngineYDocSessionOwner<
   #send(
     record: SessionRecord<TSender, TSession, TUpdate, TReplacement>,
     message: EngineYDocSessionOutboundMessage<TEvent, TUpdate, TReplacement>,
+    whileClosing = false,
   ): boolean {
-    if (!this.#maySend(record)) return false;
+    const closing = whileClosing && record.state === "releasing" && this.#records.has(record) && this.#ownsActiveGeneration(record);
+    if (!(this.#maySend(record) || closing)) return false;
     try {
       this.#onOutbound({
         sender: record.sender,

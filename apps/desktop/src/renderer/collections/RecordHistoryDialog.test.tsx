@@ -287,7 +287,7 @@ describe("RecordHistoryDialog", () => {
     fireEvent.click(retry);
     await screen.findByText(/Owner:/);
     expect(screen.queryByText("dohc could not read this record's history.")).toBeNull();
-    expect(document.activeElement).toBe(screen.getByTestId("record-history"));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("record-history")));
   });
 
   it("keeps one status line through loading and failure, and marks its Try again busy while it reads", async () => {
@@ -351,7 +351,7 @@ describe("RecordHistoryDialog", () => {
     expect(document.activeElement).toBe(button);
     older.resolve({ entries: [entry(4, null, "Owner")], nextBeforeHistoryId: null });
     await screen.findByText(/Owner:/);
-    expect(document.activeElement).toBe(screen.getByTestId("record-history"));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("record-history")));
   });
 
   it("groups only consecutive changes from one run", () => {

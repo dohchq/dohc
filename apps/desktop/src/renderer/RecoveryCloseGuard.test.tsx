@@ -1439,7 +1439,7 @@ describe("RecoveryCloseGuard with pending collection writes", () => {
         );
         expect(seq).toBeGreaterThan(0);
         for (const listener of [...saveStateListeners]) {
-          listener({ sessionId: sessionId!, state: { kind: "saved-here" }, seq });
+          listener({ sessionId: sessionId!, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "saved-here" }, seq });
         }
       });
     };

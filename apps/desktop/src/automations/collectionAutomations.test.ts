@@ -3629,10 +3629,9 @@ describe("Collection automations", () => {
     for (const automation of await readdir(folder)) {
       for (const file of await readdir(join(folder, automation))) {
         if (!file.endsWith(".json")) continue;
-        const saved = JSON.parse(await readFile(join(folder, automation, file), "utf8")) as { definitionHash: string };
+        const saved = JSON.parse((await readFile(join(folder, automation, file), "utf8")).split("\n")[0]!) as { definitionHash: string };
         if (saved.definitionHash !== hashA) continue;
         await rm(join(folder, automation, file));
-        await rm(join(folder, automation, file.replace(/\.json$/, ".progress.jsonl")), { force: true });
       }
     }
     // A comes back, and a restart under it is confirmed.

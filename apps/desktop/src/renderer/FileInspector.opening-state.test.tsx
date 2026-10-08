@@ -113,7 +113,7 @@ describe("markdown document opening state", () => {
       bind: () => act(() => settle?.(true)),
       reportSavedOutcome: () => act(() => {
         const sessionId = bridgeMock.openEngineYDocSession.mock.calls.at(-1)![0].sessionId;
-        for (const listener of saveListeners) listener({ sessionId, state: { kind: "saved-here" }, seq: 0 });
+        for (const listener of saveListeners) listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "saved-here" }, seq: 0 });
       }),
       answerNotEngineBacked: () => act(() => settle?.(false)),
     };
