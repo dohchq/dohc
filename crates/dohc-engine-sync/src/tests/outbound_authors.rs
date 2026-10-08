@@ -387,9 +387,62 @@ fn assert_unproven_authors_marked_before_first_push(authors: serde_json::Value) 
 }
 
 #[test]
-fn nameless_recipient_is_marked_before_first_push() {
+fn nameless_account_human_keeps_agent_coauthors_for_relay_stamping() {
+    let account = "8b183289-9c6e-46e9-bc2d-2e08dc144ea2";
+    let agent = json!({"kind":"agent","agentId":"agent","onBehalfOf":account,"agentRunId":"run"});
+    let authors = json!([{"kind":"human","humanId":account}, agent]);
+    let mut payload = json!({"authors":authors,"metadata":{"origin":"api","summary":"Edited"}});
+    let original = payload.clone();
+    assert!(!crate::outbound::mark_unproven_hosted_authors(&mut payload));
+    assert_eq!(payload, original);
+    assert!(crate::outbound::omit_local_person_authors(&mut payload));
+    assert_eq!(payload["authors"], json!([agent]));
+    assert!(payload.get("attributionUnavailable").is_none());
+    assert_eq!(payload["metadata"]["summary"], "Edited");
+
+    for native_settlements in [false, true] {
+        let (_scratch, _path, mut engine) = open_store();
+        queue_legacy_moment(&mut engine, authors.clone());
+        engine
+            .write_with(&NoFaults, |tx| {
+                let (payload, _) =
+                    crate::outbound::moment_append_payload_in_tx(tx, "ws", "record-moment")?;
+                assert_eq!(payload["authors"], json!([agent]));
+                assert!(payload.get("attributionUnavailable").is_none());
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        let mut ops = list_replication_ops(&engine, "ws", "local", -1, 10).unwrap();
+        crate::outbound::repair_queued_moment_authors(
+            &mut engine,
+            &mut ops,
+            &NoFaults,
+            native_settlements,
+        )
+        .unwrap();
+        assert_eq!(ops[1].payload["authors"], json!([agent]));
+        assert!(ops[1].payload.get("attributionUnavailable").is_none());
+        assert_eq!(
+            list_replication_ops(&engine, "ws", "local", -1, 10).unwrap(),
+            ops
+        );
+        let moment = VersionedTextStore::new(&mut engine)
+            .get_moment("ws", "record-moment")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(moment.author_json.as_deref().unwrap())
+                .unwrap(),
+            authors
+        );
+        assert_eq!(moment.metadata_summary, None);
+    }
+}
+
+#[test]
+fn recipient_with_empty_relay_name_is_marked_before_first_push() {
     assert_unproven_authors_marked_before_first_push(json!([
-        {"kind":"human","humanId":"8b183289-9c6e-46e9-bc2d-2e08dc144ea2"}
+        {"kind":"human","humanId":"8b183289-9c6e-46e9-bc2d-2e08dc144ea2","humanName":""}
     ]));
 }
 

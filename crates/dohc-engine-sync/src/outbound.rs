@@ -49,9 +49,12 @@ pub(crate) fn mark_unproven_hosted_authors(payload: &mut serde_json::Value) -> b
         .is_some_and(|authors| {
             authors.iter().any(|author| {
                 match author.get("kind").and_then(serde_json::Value::as_str) {
-                    Some("human") => author["humanId"]
-                        .as_str()
-                        .is_none_or(|id| relay_person_id(id).is_some()),
+                    Some("human") => {
+                        author["humanName"].as_str().is_some()
+                            && author["humanId"]
+                                .as_str()
+                                .is_some_and(|id| relay_person_id(id).is_some())
+                    }
                     Some("public" | "named" | "link") => true,
                     _ => false,
                 }
