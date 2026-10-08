@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readdir, readFile } from 'node:fs/promises';
+import { open, readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { classifyProcess, recordId } from './packaged-surfaces.mjs';
@@ -299,6 +299,30 @@ export async function dismissToasts(page) {
   while (await dismiss.count()) await dismiss.first().click();
 }
 
+// Read and stat the same open file so a replacement cannot mix their byte counts.
+async function readRunHeader(path) {
+  const file = await open(path, 'r').catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+  if (file === null) return null;
+  try {
+    const chunk = Buffer.alloc(4096), parts = [];
+    const maxHeaderBytes = 4 * 1024 * 1024;
+    for (let position = 0; position < maxHeaderBytes;) {
+      const { bytesRead } = await file.read(chunk, 0, Math.min(chunk.length, maxHeaderBytes - position), position);
+      if (bytesRead === 0) return null;
+      const newline = chunk.subarray(0, bytesRead).indexOf(10);
+      parts.push(Buffer.from(chunk.subarray(0, newline < 0 ? bytesRead : newline + 1)));
+      if (newline >= 0) {
+        let header;
+        try { header = JSON.parse(Buffer.concat(parts).toString('utf8')); } catch { return null; }
+        if (header?.kind !== 'header') return null;
+        return { header, headerBytes: position + newline + 1, size: (await file.stat()).size };
+      }
+      position += bytesRead;
+    }
+    return null;
+  } finally { await file.close(); }
+}
+
 async function readRunFile(path) {
   const text = await readFile(path, 'utf8').catch(error => { if (error.code === 'ENOENT') return null; throw error; });
   if (text === null) return null;
@@ -323,7 +347,7 @@ async function runFolder(workspaceRoot, automation) {
   for (const folder of folders) {
     const headers = (await readdir(join(root, folder)).catch(() => [])).filter(file => file.endsWith('.json'));
     for (const file of headers) {
-      const header = (await readRunFile(join(root, folder, file)))?.header;
+      const header = (await readRunHeader(join(root, folder, file)))?.header;
       const collection = header?.collections?.find(entry => entry.path === automation.collectionPath);
       if (collection && header.automationId === `collection:${collection.collectionId}#${automation.name}`) return { folder: join(root, folder), automationId: header.automationId };
     }
@@ -341,10 +365,10 @@ export async function journalBytes(workspaceRoot, automation) {
   try { files = await readdir(folder); } catch (error) { if (error.code === 'ENOENT') return sizes; throw error; }
   for (const file of files) {
     if (!file.endsWith('.json')) continue;
-    const saved = await readRunFile(join(folder, file));
+    const saved = await readRunHeader(join(folder, file));
     if (saved === null || saved.header.automationId !== found.automationId) continue;
-    sizes.headerBytes += Buffer.byteLength(saved.headerText);
-    sizes.progressBytes += Buffer.byteLength(saved.progressText);
+    sizes.headerBytes += saved.headerBytes;
+    sizes.progressBytes += saved.size - saved.headerBytes;
   }
   return sizes;
 }

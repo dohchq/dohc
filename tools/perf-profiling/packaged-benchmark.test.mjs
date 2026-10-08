@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdir, mkdtemp, realpath, rm, readFile, writeFile } from 'node:fs/promises';
+import fsPromises from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -12,7 +13,7 @@ import { startWindowController, waitForVisibleWindow } from './window-controller
 import { closeOwnedPackage, observeExit, benchmarkCancellation, verifyRestartInput } from './packaged-process.mjs';
 import { summarize } from './summarize-packaged-benchmark.mjs';
 import { compareSummaries, DEFAULT_MARGIN } from './compare-packaged-benchmark.mjs';
-import { createRequire } from 'node:module';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
 import { observeSurface, observeSearchSubmit, seededPostThreadId, collectionFixtureFiles, recordId, classifyProcess, aggregateByKind } from './packaged-surfaces.mjs';
 import { automationCases, automationFixtureDigest, automationOf, busyShare, classifyOutcome, cpuByKind, DATASET_NAME, datasetAutomationDefinition, datasetListRequest, datasetRowValues, datasetSetupRequest, DEFAULT_LIMITS,
@@ -918,6 +919,57 @@ test('step-1 refusals in both Collections use the new Notice body with no saved 
       assert.equal(p.frames.size + p.timers.size, 0);
     }
   }
+});
+
+test('journal byte samples read only bounded headers and stat progress after appends and rewrites', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'dohc-automation-byte-sample-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const folder = join(root, '.dohc', 'automations', 'runs', 'f1');
+  await mkdir(folder, { recursive: true });
+  const path = join(folder, 'run-c1.json');
+  const automation = automationOf('document', 'baseline');
+  const header = extra => JSON.stringify({ kind: 'header', automationId: 'collection:object-a#bench-baseline',
+    collections: [{ collectionId: 'object-a', path: automation.collectionPath }], ...extra }) + '\n';
+  let headerText = header({ label: 'é', padding: 'x'.repeat(5000) });
+  let progress = 'x'.repeat(1024 * 1024);
+  await writeFile(path, headerText + progress);
+  const originalReadFile = fsPromises.readFile;
+  const originalOpen = fsPromises.open;
+  let bytesRead = 0, stats = 0;
+  t.mock.method(fsPromises, 'readFile', (file, ...args) => {
+    assert.notEqual(file, path, 'byte sampling must not read the whole run');
+    return originalReadFile(file, ...args);
+  });
+  t.mock.method(fsPromises, 'open', async (...args) => {
+    const handle = await originalOpen(...args);
+    const read = handle.read.bind(handle), stat = handle.stat.bind(handle);
+    handle.read = async (...readArgs) => {
+      const result = await read(...readArgs);
+      bytesRead += result.bytesRead;
+      return result;
+    };
+    handle.stat = async (...statArgs) => { stats++; return stat(...statArgs); };
+    return handle;
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const sample = async () => {
+    bytesRead = 0; stats = 0;
+    assert.deepEqual(await journalBytes(root, automation), {
+      headerBytes: Buffer.byteLength(headerText), progressBytes: Buffer.byteLength(progress),
+    });
+    assert.ok(stats > 0, 'sample must use stat for the total size');
+    assert.ok(bytesRead < 32 * 1024, `sample read ${bytesRead} bytes of progress`);
+  };
+  await sample();
+  await fsPromises.appendFile(path, '\nmore progress\n');
+  progress += '\nmore progress\n';
+  await sample();
+  headerText = header({ outcome: { state: 'done' } });
+  const replacement = join(folder, 'replacement.tmp');
+  await writeFile(replacement, headerText + progress);
+  await fsPromises.rename(replacement, path);
+  await sample();
 });
 
 test('run journal reads saved headers and progress, and a refused run leaves none', async t => {
