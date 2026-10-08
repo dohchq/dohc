@@ -9,6 +9,7 @@ import * as Y from "yjs";
 import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment.js";
 import { startServiceLiveHost } from "./serviceLiveHost.js";
 import {hasRelayWriteObservers, notifyRelayWrite, observeRelayWrites} from "./relayWriteChanges.js";
+import {createNamedFrameChanges} from "./liveHostChanges.js";
 import {ServiceActivationDriver} from "./serviceActivationDriver.js";
 import { OwnerCommittedDelivery } from "./ownerCommittedDelivery.js";
 import type { NativeOwnerActivation } from "@dohc/workspace-engine-client/daemon";
@@ -54,6 +55,26 @@ function clientFrom(options: { env: Record<string, string> }) {
 }
 
 function deferred<T>() {let resolve!: (value: T) => void; const promise = new Promise<T>(done => {resolve = done;}); return {promise,resolve};}
+
+it("wakes served document and desktop listeners when service startup completes and the host closes", async () => {
+  const f = await fixture(), entered = deferred<void>(), release = deferred<void>();
+  const changes = createNamedFrameChanges(8), documentWake = vi.fn(), desktopWake = vi.fn(), unrelated = vi.fn();
+  changes.subscribe(documentWake, {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64)});
+  changes.subscribe(desktopWake, {workspaceId: "workspace", objectId: "waiting-object"});
+  changes.subscribe(unrelated, {workspaceId: "other-workspace", objectId: "object"});
+  spawn.mockImplementation(async options => {entered.resolve(); await release.promise; return clientFrom(options).client;});
+  const starting = startServiceLiveHost({...f, frameChanges: changes});
+  await entered.promise;
+  expect(documentWake).not.toHaveBeenCalled(); expect(desktopWake).not.toHaveBeenCalled();
+  release.resolve();
+  const host = await starting;
+  try {
+    await new Promise<void>(queueMicrotask);
+    expect(documentWake).toHaveBeenCalledOnce(); expect(desktopWake).toHaveBeenCalledOnce(); expect(unrelated).not.toHaveBeenCalled();
+    await host.close();
+    expect(documentWake).toHaveBeenCalledTimes(2); expect(desktopWake).toHaveBeenCalledTimes(2); expect(unrelated).not.toHaveBeenCalled();
+  } finally {await host.close();}
+});
 
 it("joins concurrent closes and retains the directory and reservation until process exit",async () => {
   const f = await fixture(), exited = deferred<void>(); let captured!: ReturnType<typeof clientFrom>;
@@ -108,7 +129,7 @@ it("retains an observer registered while the native process is closing",async ()
     captured.client.waitForExit.mockImplementation(() => exited.promise);
     return captured.client;
   });
-  const host = await startServiceLiveHost({...f,frameChanges: {maxListeners: 16,notify() {},subscribe: () => () => {}}});
+  const host = await startServiceLiveHost({...f,frameChanges: {maxListeners: 16,notify() {},notifyHost() {},subscribe: () => () => {}}});
   const closing = host.close();
   expect(hasRelayWriteObservers(f.storage)).toBe(false);
   const changed = vi.fn(), stop = observeRelayWrites(f.storage,changed);
@@ -261,7 +282,7 @@ it("preserves a replacement connection when an older host closes", async () => {
 it("wakes captures after stored authority changes and releases its observer on close", async () => {
   const f = await fixture(), notify = vi.fn();
   spawn.mockImplementation(async options => clientFrom(options).client);
-  const host = await startServiceLiveHost({...f, frameChanges: {maxListeners: 16, notify, subscribe: () => () => {}}});
+  const host = await startServiceLiveHost({...f, frameChanges: {maxListeners: 16, notify, notifyHost() {}, subscribe: () => () => {}}});
   await new Promise<void>(queueMicrotask);
   notify.mockClear();
   const stopReading = observeRelayWrites(f.storage, () => {

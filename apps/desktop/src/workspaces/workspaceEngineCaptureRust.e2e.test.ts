@@ -907,7 +907,7 @@ it.skipIf(engine.missing || process.platform !== "win32")(
       // the editor gets its own state whose copy names the blocker instead
       // of advising another edit.
       await expect(session.settleNow()).rejects.toThrow();
-      expect(states).toEqual(["settling", "file-locked"]);
+      expect(states).toEqual(["saved", "settling", "file-locked"]);
       expect(errors).toEqual(["ydoc settle of note.md"]);
       expect(await readFile(absolute, "utf8")).toBe("base\n");
 

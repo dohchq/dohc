@@ -1,3 +1,5 @@
+import { SharedDocumentWaitingError } from "./ipc/sharedDocumentOpenState";
+import { net } from "electron";
 import { writeWorkspaceFilesAs } from "./workspaces/workspaceFileWrites";
 import { createDesktopAutomationControls } from "./workspaces/desktopAutomationControls";
 import {parseDohcSiteConfig} from "@dohc/workspace-core";
@@ -147,6 +149,8 @@ import { createRecordByHand, desktopRecordEditContext, type DesktopRecordEditHos
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
 import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
 import { registerOperations, type OperationBoundary } from "./ipc/operationTable";
+import { createUsageStore } from "./usage/usageStore";
+import { createRendererUsage, RENDERER_USAGE_COVERAGE } from "./usage/rendererUsage";
 
 import { createPresencePollRegistry } from "./collab/presencePollRegistry";
 
@@ -207,7 +211,6 @@ import {
   removeWorkspace,
   setWorkspaceRemote,
   acknowledgeWorkspaceShareSkips,
-  endWorkspaceShareView,
   setWorkspaceShareMounts,
   markWorkspaceShareRosterPulled,
   setWorkspaceShareRoster,
@@ -336,7 +339,7 @@ import { createShareSkipRecorder } from "./workspaces/shareSkipRecorder";
 import { SharedChannelReadOnlyError, type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import { type ShareAccess } from "@dohc/security-contract/share-selector";
 import {
-  fetchShareViewInfo, fetchShareAutomationSwitchable,
+  fetchShareViewInfo, fetchShareViewAccess, fetchShareAutomationSwitchable,
 } from "./workspaces/shareViewInfo";
 import { installWorkspaceDataKey } from "./workspaces/workspaceDataKey";
 import { enrollWorkspaceKeyEnvelope } from "./workspaces/workspaceKeyEnvelopeEnrollment";
@@ -357,6 +360,10 @@ import { createDesktopEngine } from "./workspaces/desktopEngine";
 import { onWorkspaceCaptureSettled } from "./workspaces/captureActivityBridge";
 import {createServerOwnerConnection} from "./workspaces/serverOwnerConnection";
 import { createReceivedShareEngineAccess } from "./workspaces/receivedShareEngineAccess";
+import { shareRecordStatuses } from "./workspaces/shareRecordStatus";
+import { createReceivedShareRecord } from "./workspaces/receivedShareRecordCreation";
+import { recordedShareSelector } from "./workspaces/shareViewRecords";
+import { WorkspaceDaemonRequester } from "@dohc/workspace-engine-client";
 import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
 import type { ActiveAgentRun } from "./agents/activeAgentRun";
 import { startWorkspaceFileObservation } from "./workspaces/workspaceFileObservation";
@@ -486,6 +493,10 @@ import { createShareHandoffRedemptionCoordinator } from "./shareHandoffRedemptio
 // logging in the imports above is still unguarded, which is why this stays a
 // top-level statement rather than moving inside app.whenReady.
 makeProcessDiagnosticsNonFatal();
+
+let usageStore: ReturnType<typeof createUsageStore> | undefined;
+let usageLoad: ReturnType<typeof setImmediate> | undefined;
+const rendererUsage = createRendererUsage<IpcMainInvokeEvent>(invocation => usageStore?.recordSuccess(invocation));
 
 // Crashes are recorded on this computer before anything else can crash. A
 // report leaves only when the person confirms in main's own dialog, and
@@ -724,7 +735,7 @@ function notifyShareDirectWritesPushed(workspaceId: string, result: PushShareDir
 }
 
 // Main's queue of direct pushes, once the IPC handlers are registered.
-let shareDirectWrites: { shareViewEdited(workspaceId: string): void } | null = null;
+let shareDirectWrites: { shareViewEdited(workspaceId: string): void; recordCreated(workspaceId: string): void } | null = null;
 
 const {
   withWorkspaceAttachment,
@@ -4402,14 +4413,26 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
     await warmCredentialCache();
     const registered = findWorkspace(workspace.workspaceId), marker = registered?.shareView;
     const credentials = cachedCredentials;
-    if (!marker || !credentials?.relayUrl || !marker.relayUrl ||
-      !relayUrlsMatch(marker.relayUrl, credentials.relayUrl) || marker.ended ||
+    if (marker?.ended) throw new SharedDocumentWaitingError({ state: "access-ended", message: "Your access to this share ended." });
+    if (!credentials?.relayUrl) throw new SharedDocumentWaitingError({ state: "failed", message: "dohc could not connect. Check your connection." });
+    if (!marker || !marker.relayUrl || !relayUrlsMatch(marker.relayUrl, credentials.relayUrl) ||
       marker.grantedSelector?.access !== "edit" ||
-      (marker.grantedSelector.versionId !== null && marker.grantedSelector.versionId !== "main")) return null;
+      (marker.grantedSelector.versionId !== null && marker.grantedSelector.versionId !== "main")) {
+      throw new SharedDocumentWaitingError({ state: "failed", message: "dohc could not open this document for editing. Check the share's Edit access." });
+    }
     const identity = (value: typeof marker | undefined) => JSON.stringify({shareId: value?.shareId, relayUrl: value?.relayUrl,
       selector: value?.grantedSelector, ended: value?.ended === true});
     const pinned = identity(marker);
     return createNamedDesktopLiveCapture({ shareId: marker.shareId, selector: marker.grantedSelector,
+      isOnline: () => net.isOnline(),
+      recordDelivery: path => requireEngineSessions().run(workspace, async binding => {
+        const statuses = await shareRecordStatuses(new WorkspaceDaemonRequester(binding.client), {
+          workspaceId: workspace.workspaceId, shareId: marker.shareId, paths: [path], grantedSelector: {
+            paths: marker.grantedSelector.paths, versionId: marker.grantedSelector.versionId, access: marker.grantedSelector.access,
+          },
+        }, { workspace: binding.workspace });
+        return statuses[path] ?? null;
+      }).catch(() => null),
       preserveDraft: draft => preserveLiveDraft(join(stateDir(), "live-draft-recovery"), workspace.workspaceId, draft),
       credentials: {relayUrl: credentials.relayUrl, token: credentials.token, userId: credentials.userId,
         signal: ownerDeliveryCredentialLifetime.signal},
@@ -4691,6 +4714,9 @@ function createShareViewFilesForOperation(
     resolveRelay: async (target) => {
       await warmCredentialCache().catch(() => undefined);
       const credentials = cachedCredentials;
+      if (target.kind === "standalone" && !target.recipientUserId) {
+        throw new Error("This share must be reopened. Choose Forget in the workspace menu, then open the share code again. Forget keeps your files.");
+      }
       if (!credentials?.relayUrl) {
         if (target.kind === "standalone") {
           throw new Error("Sign in to your server first.");
@@ -4700,6 +4726,7 @@ function createShareViewFilesForOperation(
       if (
         (target.relayUrl &&
           !relayUrlsMatch(credentials.relayUrl, target.relayUrl)) ||
+        (target.kind === "standalone" && target.recipientUserId !== credentials.userId) ||
         (target.kind === "mount" &&
           target.recipientEmail != null &&
           credentials.email != null &&
@@ -4755,10 +4782,19 @@ function createShareViewFilesForOperation(
             });
       await recorder([...refusals]);
     },
-    markEnded: async (target) => {
+    updateUnsavedPaths: async (target, paths) => {
+      assertCurrent();
+      const view = currentWorkspace().shareView;
+      if (target.kind !== "standalone" || !view) throw new Error("This shared view is no longer registered.");
+      setWorkspaceShareView(target.workspaceId, { ...view, unsavedPaths: paths });
+    },
+    markEnded: async (target, unsavedPaths) => {
       assertCurrent();
       if (target.kind === "standalone") {
-        endWorkspaceShareView(target.workspaceId);
+        const view = currentWorkspace().shareView;
+        if (!view) throw new Error("This shared view is no longer registered.");
+        setWorkspaceShareView(target.workspaceId, { ...view, ended: true,
+          ...(unsavedPaths !== undefined ? { unsavedPaths } : {}) });
         return;
       }
       const mounts = storedShareMounts(currentWorkspace());
@@ -4814,6 +4850,10 @@ function withShareViewFilesOperation<Result>(
 }
 
 shareViewFiles = {
+  narrow: (lease, target, assertCurrent, commit) =>
+    withShareViewFilesOperation(target, files => files.narrow(lease, target, assertCurrent, commit)),
+  end: (lease, target, assertCurrent) =>
+    withShareViewFilesOperation(target, (files) => files.end(lease, target, assertCurrent)),
   mount: (lease, target) =>
     withShareViewFilesOperation(target, (files) => files.mount(lease, target)),
   change: (lease, target, change) =>
@@ -5044,6 +5084,17 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     markReady: () => {
       launchMarks.appReady();
       desktopMarks.markOnce("app-ready");
+      // Start retention even when Off. Never wait for measurement on startup.
+      usageLoad = setImmediate(() => {
+        usageLoad = undefined;
+        try {
+          usageStore = createUsageStore({ stateDir, appVersion: app.getVersion(), coverage: RENDERER_USAGE_COVERAGE });
+        } catch {
+          usageStore = undefined;
+          return;
+        }
+        void usageStore.load().catch(() => {});
+      });
     },
     startEngine: () => desktopEngine.start(),
     loadSettings: () => readCachedUserSettingsFile(stateDir()),
@@ -5152,7 +5203,12 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       await ownerDatasetCopies.closeAll();
       await namedDatasetPages.close();
     },
-    disposeDatabase: async () => { await workspaceFilesWorker.dispose(); await workspaceDatabaseWorker.dispose(); },
+    disposeDatabase: async () => {
+      if (usageLoad) clearImmediate(usageLoad);
+      await usageStore?.close().catch(() => {});
+      await workspaceFilesWorker.dispose();
+      await workspaceDatabaseWorker.dispose();
+    },
     closeRelay: closeAllRelayTransportWorkspaces,
     stopEngine: async () => { await desktopEngine.daemon?.stop(); },
   },
@@ -5492,7 +5548,7 @@ function registerIpcHandlers(): void {
     requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection, activity,
     retryOwnerLiveDelivery: workspaceId => desktopEngine.retryOwnerDelivery(workspaceId),
     retryCloudSync: (workspaceId, reason) => activity.retryCloudSync(workspaceId, reason),
-    workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions,
+    workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions, isOnline: () => net.isOnline(),
     closeDispatchRunActivity, probeEngineStoreRefusal, moveEngineStoreAside,
     openWorkspaceActivityUnderEngineStoreLock, engineYDocSessionIpc,
   });
@@ -5756,12 +5812,66 @@ function registerIpcHandlers(): void {
   handleIpc(CHANNELS.createCollectionRecord, async (event, raw: unknown) => {
     assertTrustedSender(event);
     const input = CreateCollectionRecordPayload.parse(raw);
-    return createRecordByHand(input, {
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId,
+      "Record creation stopped because this window changed workspaces.", async operation => {
+      const files = createShareViewFilesForOperation(operation);
+      const found = await createOwnedWorkspaceFileReader({ workspace: operation.workspace, files }).resolveShare(`${input.collectionPath}/collection.yaml`);
+      operation.assertCurrent();
+      if (found) {
+        const resolved = resolveRegisteredShareViewFilesTarget(operation.workspace, found.target);
+        if (!resolved || resolved.kind !== "standalone") throw new Error("Open this share as a workspace to create a record.");
+        return createReceivedShareRecord(input, {
+          target: found.target, resolved, files,
+          collectionPath: found.path.slice(0, -"/collection.yaml".length),
+          assertCurrent: () => {
+            operation.assertCurrent();
+            if (JSON.stringify(resolveRegisteredShareViewFilesTarget(operation.workspace, found.target)) !== JSON.stringify(resolved)) {
+              throw new Error("The shared file session changed. Open the Collection again.");
+            }
+          },
+          checkAuthority: async () => {
+            await warmCredentialCache();
+            operation.assertCurrent();
+            const credentials = cachedCredentials;
+            if (!credentials?.relayUrl || resolved.relayUrl && !relayUrlsMatch(resolved.relayUrl, credentials.relayUrl)) return null;
+            const generation = credentialCacheGeneration;
+            try {
+              const info = await fetchShareViewInfo({ relay: { baseUrl: credentials.relayUrl, token: credentials.token }, shareId: resolved.shareId! });
+              operation.assertCurrent();
+              if (generation !== credentialCacheGeneration) throw new Error("The shared file session changed.");
+              if (!info.selector) throw new Error("This Collection does not have Edit access.");
+              return info.selector;
+            } catch (error) {
+              operation.assertCurrent();
+              if (generation !== credentialCacheGeneration) throw new Error("The shared file session changed.");
+              if (error instanceof TypeError || (error instanceof DOMException && error.name === "TimeoutError")) return null;
+              throw error;
+            }
+          },
+          withLease: work => withStaleSensitiveWorkspaceOperation(operation.workspace.rootPath, work),
+          recordStatus: path => requireEngineSessions().run({ workspaceId: resolved.storeWorkspaceId,
+            rootPath: resolved.rootPath, shareMount: true,
+            ...(resolved.kind === "standalone" ? { attachmentId: operation.workspace.attachmentId } : {}) }, async binding => {
+            const selector = recordedShareSelector(resolved.grantedSelector);
+            const statuses = await shareRecordStatuses(new WorkspaceDaemonRequester(binding.client), {
+              workspaceId: resolved.storeWorkspaceId, shareId: resolved.shareId!, paths: [path],
+              grantedSelector: selector ? {
+                paths: selector.paths,
+                versionId: selector.versionId,
+                access: selector.access,
+              } : null,
+            }, { workspace: binding.workspace });
+            return statuses[path] ?? null;
+          }),
+          shareViewEdited: () => { shareDirectWrites?.recordCreated(input.workspaceId); notifyRenderer({ workspaceId: input.workspaceId }); },
+        });
+      }
+      return createRecordByHand(input, {
       author: createLocalChangeAuthor(localUserDisplayName()),
       localPerson,
-      withWorkspaceOperation: work => withRendererWorkspaceOperation(event.sender, input.workspaceId,
-        "Record creation stopped because this window changed workspaces.", work),
+      withWorkspaceOperation: work => work(operation),
       editContext: (operation: DesktopWorkspaceOperation, person) => collectionEditContextFor(operation, person),
+      });
     });
   });
   handleIpc(CHANNELS.dataset, async (event, raw: unknown) => {
@@ -6023,7 +6133,10 @@ function registerIpcHandlers(): void {
         assertCurrent: () => lease.assertCurrent(),
       })),
     reportDirectWrites: notifyShareDirectWritesPushed,
-    automationDefinitionsChanged: notifyCollectionAutomationsChanged,
+    automationDefinitionsChanged: workspaceId => {
+      notifyCollectionAutomationsChanged(workspaceId);
+      notifyRenderer({ workspaceId });
+    },
     currentCredentials: () => cachedCredentials,
     currentCredentialGeneration: () => credentialCacheGeneration,
     normalizeServerUrl, isRecordValue, readOwnedWorkspaceTextFor, activity,
@@ -6036,8 +6149,13 @@ function registerIpcHandlers(): void {
     registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, loadAndCacheCurrentCredentials,
     warmCredentialCache, currentCredentials: () => cachedCredentials,
+    currentCredentialGeneration: () => credentialCacheGeneration,
+    onSenderClosed: (sender, close) => {
+      sender.once("destroyed", close);
+      return () => { sender.removeListener("destroyed", close); };
+    },
     engineDaemonStartup: () => desktopEngine.startup,
-    fetchShareViewInfo, usableRoot, readdir, mkdir, createJoinedWorkspace,
+    fetchShareViewInfo, fetchShareViewAccess, usableRoot, readdir, mkdir, createJoinedWorkspace,
     setWorkspaceShareView, refreshNativeWorkspaceSurfaces, workspaceAuthorities,
     canonicalWorkspaceFor, withStaleSensitiveWorkspaceOperation, shareViewFiles,
     receivedShareEngine, openWorkspaceActivity, requireWorkspace, notifyRenderer,
@@ -6141,7 +6259,7 @@ function registerIpcHandlers(): void {
   registerOperations(operationBoundary, workspaceVersionOperations, workspaceVersionHandlers({
     requireEngineCapture, notifyRenderer, activity, tryInVersionSessions, desktopMarks,
     onRefusalsChanged: notifyNoticesChanged,
-  }));
+  }), rendererUsage.version);
 
   workspaceEngineIpc.registerHistory();
 
@@ -6216,7 +6334,7 @@ function registerIpcHandlers(): void {
         }
       }),
     }),
-  });
+  }, rendererUsage.crash);
 
   registerOperations(operationBoundary, workspaceSearchOperations, workspaceSearchHandlers<
     IpcMainInvokeEvent,
@@ -6274,7 +6392,7 @@ function registerIpcHandlers(): void {
     retryAutomationNotice: (input) => retryFromFailureNotice({ notices: noticeStore(), retry: retryAutomationFromNotice }, input),
     takeWorkspacePathOpenFailures: (_input, { event }) => openPathFailures.take(event.sender),
     retryWorkspacePathOpen: (input, { event }) => openPathFailures.retry(input.attemptId, event.sender),
-  });
+  }, rendererUsage.notice);
 
   workspaceEngineIpc.registerYDoc();
 

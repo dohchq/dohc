@@ -476,22 +476,37 @@ describe("Menu", () => {
 // The keys every menu shares, the Menu part and the editor menus alike.
 describe("moveInMenu", () => {
   const labels = ["Text", "Heading 1", "Heading 2", "Duplicate", "Delete"];
+  const key = (name: string, modifiers: { ctrlKey?: boolean; metaKey?: boolean; altKey?: boolean } = {}) => ({
+    key: name,
+    ctrlKey: false,
+    metaKey: false,
+    altKey: false,
+    ...modifiers,
+  });
+
   it("wraps the arrows, jumps with Home and End, and finds the next row by its first letter", () => {
-    expect(moveInMenu("ArrowDown", 4, labels)).toBe(0);
-    expect(moveInMenu("ArrowUp", 0, labels)).toBe(4);
-    expect(moveInMenu("Home", 3, labels)).toBe(0);
-    expect(moveInMenu("End", 0, labels)).toBe(4);
-    expect(moveInMenu("h", 0, labels)).toBe(1);
-    expect(moveInMenu("h", 1, labels)).toBe(2);
-    expect(moveInMenu("D", 2, labels)).toBe(3);
-    expect(moveInMenu("d", 3, labels)).toBe(4);
+    expect(moveInMenu(key("ArrowDown"), 4, labels)).toBe(0);
+    expect(moveInMenu(key("ArrowUp"), 0, labels)).toBe(4);
+    expect(moveInMenu(key("Home"), 3, labels)).toBe(0);
+    expect(moveInMenu(key("End"), 0, labels)).toBe(4);
+    expect(moveInMenu(key("h"), 0, labels)).toBe(1);
+    expect(moveInMenu(key("h"), 1, labels)).toBe(2);
+    expect(moveInMenu(key("D"), 2, labels)).toBe(3);
+    expect(moveInMenu(key("d"), 3, labels)).toBe(4);
   });
 
   it("answers null for other keys, a letter no row starts with, and an empty list", () => {
-    expect(moveInMenu("Enter", 0, labels)).toBeNull();
-    expect(moveInMenu(" ", 0, labels)).toBeNull();
-    expect(moveInMenu("z", 0, labels)).toBeNull();
-    expect(moveInMenu("ArrowDown", 0, [])).toBeNull();
+    expect(moveInMenu(key("Enter"), 0, labels)).toBeNull();
+    expect(moveInMenu(key(" "), 0, labels)).toBeNull();
+    expect(moveInMenu(key("z"), 0, labels)).toBeNull();
+    expect(moveInMenu(key("ArrowDown"), 0, [])).toBeNull();
+  });
+
+  // Ctrl+N is New file and Ctrl+D a shortcut too: they belong to the app.
+  it("leaves a letter held with Ctrl, Meta or Alt to the app's shortcuts", () => {
+    expect(moveInMenu(key("h", { ctrlKey: true }), 0, labels)).toBeNull();
+    expect(moveInMenu(key("d", { metaKey: true }), 0, labels)).toBeNull();
+    expect(moveInMenu(key("d", { altKey: true }), 0, labels)).toBeNull();
   });
 });
 

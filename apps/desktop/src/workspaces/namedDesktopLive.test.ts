@@ -1,9 +1,10 @@
+import type { ShareRecordStatus } from "./shareRecordStatus";
 import * as Y from "yjs";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-import { createNamedDesktopLiveCapture } from "./namedDesktopLive";
+import { createNamedDesktopLiveCapture, waitForNamedDesktopAdmission } from "./namedDesktopLive";
 import { preserveLiveDraft } from "./liveDraftRecovery";
 
 const transport = vi.hoisted(() => ({ factory: vi.fn() }));
@@ -14,7 +15,7 @@ vi.mock("@dohc/ydoc-projection/named-live-browser-transport", async importOrigin
 const cleanup: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn(); vi.clearAllMocks(); });
 
-function fixture() {
+function fixture(recordDelivery?: () => Promise<ShareRecordStatus | null>, isOnline = true) {
   const doc = new Y.Doc();
   cleanup.push(async () => doc.destroy());
   let current = true, status = "disconnected", pendingUpdates = 0;
@@ -41,20 +42,44 @@ function fixture() {
   const preserveDraft = vi.fn(async () => {});
   const capture = createNamedDesktopLiveCapture({shareId: "share", selector: {access: "edit", versionId: null, paths: ["docs"]},
     credentials: {relayUrl: "https://relay.test", token: "real-account-token", userId: "reader", signal: new AbortController().signal},
-    assertCurrent() {if (!current) throw new Error("switched");}, fetch: request, preserveDraft});
+    assertCurrent() {if (!current) throw new Error("switched");}, fetch: request, preserveDraft, recordDelivery, isOnline: () => isOnline});
   return {capture, request, closed, preserveDraft, session, switchWorkspace() {current = false;},
     quarantineEdit(change: () => void) {doc.transact(change); status = "quarantined"; notify(); return false;},
     ack() {pendingUpdates = 0; notify();}};
 }
 
+it.each(["pending", "refused"] as const)("does not open body or field editing for a %s record draft", async state => {
+  const f = fixture(async () => ({state, contentHash: null, canDiscard: false}));
+  await expect(f.capture.openYDocSession({path: "docs/a.md", contentKind: "richdoc", onRemoteUpdate: vi.fn()}))
+    .rejects.toThrow(state === "pending" ? "Waiting to send" : "did not accept");
+  expect(f.request).not.toHaveBeenCalled();
+  expect(transport.factory).not.toHaveBeenCalled();
+});
+
+it("reports a failed connection without blaming the owner after acceptance", async () => {
+  const f = fixture(async () => ({state: "accepted", contentHash: null, canDiscard: false}));
+  f.request.mockRejectedValue(new TypeError("offline"));
+  await expect(f.capture.openYDocSession({path: "docs/a.md", contentKind: "richdoc", onRemoteUpdate: vi.fn()}))
+    .rejects.toMatchObject({waiting: {state: "failed", message: "dohc could not connect. Check your connection."}});
+  expect(transport.factory).not.toHaveBeenCalled();
+});
+
+it("shows known offline state even while a creation is still pending", async () => {
+  const f = fixture(async () => ({state: "pending", contentHash: null, canDiscard: false}), false);
+  await expect(f.capture.openYDocSession({path: "docs/a.md", contentKind: "richdoc", onRemoteUpdate: vi.fn()}))
+    .rejects.toMatchObject({waiting: {state: "offline", message: "This device is offline. Connect to edit this file."}});
+  expect(f.request).not.toHaveBeenCalled();
+});
+
 it("reports only host acknowledgement as saved and never settles a local file", async () => {
   const f = fixture(), onSaveState = vi.fn();
   const provider = await f.capture.openYDocSession({path: "docs/a.md", contentKind: "richdoc", onRemoteUpdate: vi.fn(), onSaveState});
+  expect(transport.factory.mock.calls[0]![0].recordingContext()).toEqual({kind: "account", accountId: "reader"});
   const edit = new Y.Doc(); edit.getText("body").insert(0, "pending");
   provider.applyLocalUpdate(Y.encodeStateAsUpdate(edit)); edit.destroy();
   expect(onSaveState).toHaveBeenLastCalledWith("settling", 1, "start");
   f.ack();
-  expect(onSaveState).toHaveBeenLastCalledWith("saved", 1, "outcome");
+  expect(onSaveState).toHaveBeenLastCalledWith("saved-to-host", 1, "outcome");
   await provider.close();
   expect(f.preserveDraft).not.toHaveBeenCalled();
 });
@@ -115,4 +140,58 @@ it("writes exact recovery under its original local workspace without admitting s
   expect(Buffer.from(row.updateBase64, "base64")).toEqual(Buffer.from(draft.update));
   await expect(preserveLiveDraft(directory, "other-workspace", {...draft, path: ".env"})).rejects.toThrow("cannot enter draft recovery");
   expect(await readdir(directory)).toEqual(names);
+});
+
+it("opens the winner of a record name race once creation status clears", async () => {
+  let delivery: ShareRecordStatus | null = {state: "refused", contentHash: null, canDiscard: false};
+  const f = fixture(async () => delivery);
+  await expect(f.capture.openYDocSession({path: "docs/a.md", contentKind: "richdoc", onRemoteUpdate: vi.fn()}))
+    .rejects.toThrow("did not accept");
+  expect(f.request).not.toHaveBeenCalled();
+  delivery = null;
+  const provider = await f.capture.openYDocSession({path: "docs/a.md", contentKind: "richdoc", onRemoteUpdate: vi.fn()});
+  expect(f.request).toHaveBeenCalledOnce();
+  expect(provider.liveWritable?.()).toBe(true);
+  const edit = new Y.Doc();
+  edit.getText("body").insert(0, "Continue the winner's record");
+  provider.applyLocalUpdate(Y.encodeStateAsUpdate(edit));
+  edit.destroy();
+  expect(provider.doc.getText("body").toString()).toBe("Continue the winner's record");
+  f.ack();
+  await provider.close();
+  expect(f.preserveDraft).not.toHaveBeenCalled();
+});
+
+it("keeps a readiness stream until the host wakes it and closes it after readiness", async () => {
+  let stream!: ReadableStreamDefaultController<Uint8Array>;
+  const cancel = vi.fn();
+  const fetch = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+    start(controller) { stream = controller; controller.enqueue(new TextEncoder().encode("waiting\n")); }, cancel,
+  }), {headers: {"content-type": "text/plain"}}));
+  const waiting = waitForNamedDesktopAdmission({relayUrl: "https://relay.test", token: "token", shareId: "share",
+    path: "docs/a.md", signal: new AbortController().signal, fetch});
+  await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+  stream.enqueue(new TextEncoder().encode("ready\n"));
+  expect(await waiting).toBe(true);
+  expect(cancel).toHaveBeenCalledOnce();
+  expect(fetch.mock.calls).toHaveLength(1);
+});
+
+it("checks readiness only inside the pinned share and discards an answer after switching", async () => {
+  const f = fixture();
+  expect(await f.capture.waitForAdmission!("other/a.md", new AbortController().signal)).toBe(false);
+  expect(f.request).not.toHaveBeenCalled();
+  f.request.mockImplementationOnce(async () => {
+    f.switchWorkspace();
+    return new Response("waiting\nready\n", {headers: {"content-type": "text/plain"}});
+  });
+  await expect(f.capture.waitForAdmission!("docs/a.md", new AbortController().signal)).rejects.toThrow("switched");
+  expect(f.request).toHaveBeenCalledOnce();
+});
+
+it("returns unavailable when the relay ends a readiness wait", async () => {
+  const f = fixture();
+  f.request.mockResolvedValueOnce(new Response("waiting\nunavailable\n", {headers: {"content-type": "text/plain"}}));
+  expect(await f.capture.waitForAdmission!("docs/a.md", new AbortController().signal)).toBe(false);
+  expect(transport.factory).not.toHaveBeenCalled();
 });

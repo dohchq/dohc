@@ -86,6 +86,7 @@ const LedgerPage = z.object({
       objectId: ID,
       momentId: ID,
       created: z.boolean(),
+      publicPrincipalId: ID.optional(),
     })),
   })),
   nextAfterOriginSeq: z.number().int().nullable(),

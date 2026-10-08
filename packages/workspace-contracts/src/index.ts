@@ -11,3 +11,4 @@ export type {
   MomentAuthor,
 } from "./engine";
 export * from "./kinds";
+export * from "./saveState";

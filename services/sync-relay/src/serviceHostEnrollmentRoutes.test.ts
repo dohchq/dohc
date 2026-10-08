@@ -10,7 +10,7 @@ import {relayError} from "./errors";
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) await close();});
 const key = new Uint8Array(32).fill(17), namespace = "service-route-test";
-const serviceReplication = (storage: Parameters<typeof authorizeServiceHostReplication>[0]) => createServiceHostReplication({storage, prefix: "dohc-service-v1.",
+const serviceReplication = (storage: Parameters<typeof authorizeServiceHostReplication>[0]) => createServiceHostReplication({storage, prefix: "dohc-service-v1.", provenance: "native-settlements",
   authorize: input => authorizeServiceHostReplication(storage, {key, namespace, ...input})});
 async function fixture() {
   const f = await ticketFixture(); cleanup.push(f.close);

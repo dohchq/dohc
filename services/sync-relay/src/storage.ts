@@ -357,10 +357,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   captureStanding(): () => void { return this.owner.captureStanding(); }
 
   enrollServiceHostDocument(input: serviceHostEnrollmentStorage.EnrollServiceHostDocumentInput) {
-    return serviceHostEnrollmentStorage.enrollServiceHostDocument(this, input);
+    const result = serviceHostEnrollmentStorage.enrollServiceHostDocument(this, input);
+    notifyDesktopReadiness(this, {workspaceId: result.workspaceId, path: result.path});
+    return result;
   }
   enrollServiceHostDocuments(inputs: readonly serviceHostEnrollmentStorage.EnrollServiceHostDocumentInput[]) {
-    return serviceHostEnrollmentStorage.enrollServiceHostDocuments(this, inputs);
+    const result = serviceHostEnrollmentStorage.enrollServiceHostDocuments(this, inputs);
+    for (const enrollment of result) notifyDesktopReadiness(this, {workspaceId: enrollment.workspaceId, path: enrollment.path});
+    return result;
   }
   listServiceHostEnrollments(workspaceId?: string) {
     return serviceHostEnrollmentStorage.listServiceHostEnrollments(this, workspaceId);
@@ -384,7 +388,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return serviceHostEnrollmentStorage.checkServiceHostDocuments(this, input);
   }
   setServiceHostEnrollmentEnabled(input: serviceHostEnrollmentStorage.SetServiceHostEnrollmentEnabledInput) {
-    return serviceHostEnrollmentStorage.setServiceHostEnrollmentEnabled(this, input);
+    const result = serviceHostEnrollmentStorage.setServiceHostEnrollmentEnabled(this, input);
+    if (result) notifyDesktopReadiness(this, {workspaceId: result.workspaceId, path: result.path});
+    return result;
   }
 
   readStopRestorePlan(input: Parameters<typeof liveRestoreOperationStorage.readStopRestorePlan>[1]) {
@@ -408,6 +414,23 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest, activation?: ServiceActivationAccess): CurrentLiveBindingResult {
     return liveDocumentAuthorityStorage.resolveCurrentLiveDocumentBinding(this, input, activation);
+  }
+
+  automationRecordWriteAllowed(input: Parameters<SyncRelayStorage["automationRecordWriteAllowed"]>[0]): boolean {
+    const {authority, ...target} = input;
+    return this.readTx(() => "hostPressId" in authority ? automationPressStorage.automationPressAdmissionAllowed(this, {...target, ...authority})
+      : automationPressStorage.automationGrantAdmissionAllowed(this, {...target, ...authority}));
+  }
+
+  automationRecordBinding(workspaceId: string, ownerUserId: string, path: string) {
+    return liveDocumentAuthorityStorage.automationRecordBinding(this, workspaceId, ownerUserId, path);
+  }
+
+  /** Internal replica refresh hint; accepted bytes still pass the journal's validated sync path. */
+  automationRecordJournalCursor(binding: import("@dohc/live-session-contract/live-object-binding").LiveObjectBinding): number {
+    return Number(this.db.prepare(`SELECT COALESCE(MAX(journal_cursor),0) AS cursor FROM sync_relay_live_update_journal
+      WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?`)
+      .get(binding.workspaceId, binding.mainVersionId, binding.objectId, binding.lineageClaimId)!.cursor);
   }
 
   resolveLiveObjectHostBinding(scope: Parameters<typeof liveDocumentAuthorityStorage.resolveLiveObjectHostBinding>[1], objectId: string): liveDocumentAuthorityStorage.LiveObjectHostBindingResult {
@@ -881,7 +904,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     guard: () => void;
     mintCredential?: () => SyncRelayLinkCredentialMint;
   }): LinkGrantTransitionResult {
-    return sharesStorage.retuneShareGrant(this, input);
+    const result = sharesStorage.retuneShareGrant(this, input);
+    if (result.ok) notifyDesktopReadiness(this, {shareId: result.grant.shareId});
+    return result;
   }
 
   revokeShareGrant(input: {
@@ -891,7 +916,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     expectedDependentGrantIds?: readonly string[];
     guard?: () => void;
   }): LinkGrantTransitionResult {
-    return sharesStorage.revokeShareGrant(this, input);
+    const result = sharesStorage.revokeShareGrant(this, input);
+    if (result.ok) notifyDesktopReadiness(this, {shareId: result.grant.shareId});
+    return result;
   }
 
   promoteShareGrant(input: {
@@ -1081,7 +1108,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
 
   removeShareAccess(input: shareRemovalStorage.ShareRemovalInput) {
-    return shareRemovalStorage.removeShareAccess(this, input);
+    const result = shareRemovalStorage.removeShareAccess(this, input);
+    if (result.ok) notifyDesktopReadiness(this, {shareId: result.grant?.shareId ?? input.shareId});
+    return result;
   }
 
   purgeExpiredShareRemovals(nowMs: number): void {
@@ -1097,7 +1126,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
 
   revokeShare(shareId: string, revokedAtMs: number): boolean {
-    return sharesStorage.revokeShare(this, shareId, revokedAtMs);
+    try { return sharesStorage.revokeShare(this, shareId, revokedAtMs); }
+    finally { notifyDesktopReadiness(this, {shareId}); }
   }
 
   listObjectMomentLogRowsByBlob(input: {
@@ -1391,3 +1421,4 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
 }
 import {hasRelayWriteObservers, notifyRelayWrite} from "./relayWriteChanges";
+import {notifyDesktopReadiness} from "./desktopReadinessChanges";

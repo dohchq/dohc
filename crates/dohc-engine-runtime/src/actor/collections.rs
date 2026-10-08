@@ -92,7 +92,7 @@ impl ActorHandle {
                                     binding: draft.descriptor.binding,
                                     expected_revision: draft.descriptor.revision,
                                     append_key: format!("collection-adoption:{}:{}", candidate.record_id, hex_sha256(&update)),
-                                    update, now_ms, agent_declaration: None,
+                                    update, now_ms, agent_declaration: None, automation_declaration: None,
                                 }, &dohc_engine_storage::NoFaults);
                             if let Err(error) = result { return Ok(Err(error)); }
                         }

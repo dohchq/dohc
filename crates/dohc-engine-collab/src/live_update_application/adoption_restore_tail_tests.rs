@@ -20,6 +20,174 @@ fn history_recovery_keeps_compacted_adopted_private_tail_authors() {
     assert!(recovered.json().contains("native-agent"));
 }
 
+#[test]
+fn owner_adoption_keeps_unattributed_accepted_prefix_coverage() {
+    let mut f = Fixture::new();
+    f.edit(true);
+    f.adopt().unwrap();
+    let authors = f
+        .store
+        .read_with(|conn| crate::author_coverage::interval_in(conn, &f.key, i64::MAX))
+        .unwrap();
+    assert_eq!(
+        authors.moment_json().unwrap(),
+        r#"[{"kind":"unattributed"}]"#
+    );
+}
+
+#[test]
+fn adopted_settlement_preserves_unattributed_owner_and_recipient_contributions() {
+    for contributor in ["owner", "recipient", "recipient-only"] {
+        let mut f = Fixture::new();
+        f.adopt().unwrap();
+        assert!(
+            f.store
+                .read_with(|conn| crate::author_coverage::accepted_only_in(conn, &f.key))
+                .unwrap()
+        );
+        let mut terminal = None;
+        for cursor in 1..=if contributor == "recipient-only" {
+            1
+        } else {
+            2
+        } {
+            let text = if cursor == 1 {
+                "Recipient text"
+            } else {
+                contributor
+            };
+            let bytes = f.doc.richdoc_append_paragraph(text);
+            let event = AdmittedLiveUpdate {
+                metadata: AdmittedLiveUpdateMetadata {
+                    accepted: RelayAcceptedLiveUpdate {
+                        receipt: LiveUpdateReceipt {
+                            delivery_id: format!("edit-{cursor}"),
+                            update_digest: hex_sha256(&bytes),
+                            journal_cursor: cursor,
+                            accepting_host_epoch: 1,
+                        },
+                        binding: f.binding.clone(),
+                        authority: if cursor == 2 && contributor == "owner" {
+                            ServerDerivedLiveUpdateAuthority::Owner {
+                                principal_id: "owner".into(),
+                            }
+                        } else {
+                            ServerDerivedLiveUpdateAuthority::Named {
+                                principal_id: "recipient".into(),
+                                grant_id: "grant".into(),
+                                grant_generation: 1,
+                            }
+                        },
+                        received_at_ms: cursor,
+                    },
+                    first_seen: vec![],
+                    canonical_version: Some(2),
+                    author_snapshot: Some(if cursor == 1 {
+                        vec![LiveAuthorEntry::Human {
+                            human_id: "recipient".into(),
+                            human_name: "Recipient".into(),
+                        }]
+                    } else {
+                        vec![]
+                    }),
+                    first_seen_deletes: Some(vec![]),
+                    checkpoint_coverage: None,
+                },
+                update_bytes: bytes,
+            };
+            terminal = Some(event.metadata.accepted.receipt.clone());
+            assert!(matches!(
+                apply_committed(
+                    &mut f.store,
+                    &mut WriterDocCache::new(),
+                    &f.handle,
+                    event,
+                    &NoFaults,
+                    100_000_000,
+                    |_, _, _, _| Ok(())
+                )
+                .unwrap(),
+                ApplicationResult::Applied(..)
+            ));
+        }
+        crate::maybe_compact(&mut f.store, &f.key, 0, &NoFaults, 20).unwrap();
+        drop(f.store);
+        f.store = EngineStore::open(&f._scratch.join("engine.db"), 21).unwrap();
+        let settlement = with_settlement(
+            &mut f.store,
+            &f.handle,
+            terminal,
+            128,
+            NativeHistoryReconstruction {
+                working_reserve_bytes: 8 * 1024 * 1024,
+            },
+            |store, audit| {
+                let doc = store.read_with(|conn| durable::load_doc_in(conn, &f.key))?;
+                let text = doc.project(ContentKind::Richdoc)?.content;
+                let vector = hex_sha256(&doc.encode_state_vector());
+                let result = store.write_with(&NoFaults, |tx| -> Result<_, ApplicationError> {
+                    let authors =
+                        crate::author_coverage::interval_in(tx, &f.key, i64::MAX)?.moment_json();
+                    let written = dohc_engine_domain::write_projected_text_in_tx(
+                        tx,
+                        dohc_engine_domain::ProjectedWriteText {
+                            workspace_id: "workspace",
+                            version_id: "main",
+                            object_id: "object",
+                            path: std::borrow::Cow::Borrowed("owner.md"),
+                            text: std::borrow::Cow::Borrowed(&text),
+                            moment_id: "settled",
+                            metadata_origin: "ydoc",
+                            metadata_summary: None,
+                            metadata_correlation_id: None,
+                            author_json: authors.as_deref(),
+                            now_ms: 30,
+                            request_id: None,
+                        },
+                    )
+                    .map_err(|_| ApplicationError::Corrupt)?;
+                    tx.execute("UPDATE ydoc_docs SET last_settled_sha=?1 WHERE workspace_id='workspace' AND version_id='main' AND object_id='object'", [&written.snapshot.blob_sha256]).map_err(write_sql)?;
+                    let id = audit.record_in_tx(
+                        tx,
+                        "settled",
+                        &written.snapshot.blob_sha256,
+                        &vector,
+                        30,
+                    )?;
+                    crate::author_coverage::advance_in(tx, &f.key, false)?;
+                    Ok(audit.result(id, "settled".into(), written.snapshot.blob_sha256, false))
+                })?;
+                let TxnOutcome::Committed(result) = result else {
+                    return Err(ApplicationError::Interrupted);
+                };
+                Ok(result)
+            },
+        )
+        .unwrap();
+        let (authors, text): (String, String) = f.store.read_with(|conn| conn.query_row("SELECT m.author_json,b.text FROM moments m JOIN blobs b ON b.sha256=m.after_blob_sha256 WHERE m.moment_id=?1", [&settlement.moment_id], |row| Ok((row.get(0)?, row.get(1)?)))).unwrap();
+        let authors: Value = serde_json::from_str(&authors).unwrap();
+        assert_eq!(authors[0]["humanId"], "recipient");
+        assert_eq!(
+            authors.as_array().unwrap().len(),
+            if contributor == "recipient-only" {
+                1
+            } else {
+                2
+            }
+        );
+        if contributor != "recipient-only" {
+            assert_eq!(authors[1], serde_json::json!({"kind":"unattributed"}));
+            assert!(text.contains(contributor));
+        }
+        assert!(text.contains("Recipient text"));
+        assert!(
+            f.store
+                .read_with(|conn| crate::author_coverage::interval_in(conn, &f.key, i64::MAX))
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
 fn native_tail_edit(f: &mut Fixture, source: &str, now: i64) -> owner_outbox::OwnerOutboxEntry {
     let update = f
         .doc
@@ -1518,6 +1686,16 @@ fn restored_owner_capacity_rescue_streams_past_a_large_baseline_restore_proof_an
 }
 
 fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
+    let started = std::time::Instant::now();
+    let mark = |phase| {
+        if std::env::var_os("DOHC_RUST_PROFILE").is_some() {
+            eprintln!(
+                "RUST_PROFILE restored-{events}-{select_terminal} {phase} {:.3}s",
+                started.elapsed().as_secs_f64()
+            );
+        }
+    };
+    mark("fixture-start");
     let seed = Fixture::new();
     let baseline = seed.cut.baseline_bytes.clone();
     let source: String = seed
@@ -1536,6 +1714,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
     selectors.sort();
     let mut f = Fixture::with_source_selectors(source, baseline.clone(), selectors);
     f.adopt().unwrap();
+    mark("fixture");
     let mut terminal = None;
     let mut sequence = 0;
     for cursor in 1..=events {
@@ -1548,6 +1727,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
             accepting_host_epoch: 1,
         });
     }
+    mark("ingress");
     let mut preparation = native_tail_input(&mut f, terminal, sequence);
     // The selected current point retains a second authentic copy of the
     // accepted suffix: >60MiB of proof with half as many ingress operations.
@@ -1578,6 +1758,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
         })
         .unwrap();
     assert!(proof_length > 60 * 1024 * 1024);
+    mark("prepare-proof");
     let mut binding = f.binding.clone();
     binding.restore_fence_generation = 1;
     let input = NativeRestoreApplication {
@@ -1623,6 +1804,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
             |_, _, _, _| Ok(()),
         )
         .unwrap();
+    mark("apply-restore");
     let settled = f
         ._owner
         .with_restore_settlement(
@@ -1636,6 +1818,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
             },
         )
         .unwrap();
+    mark("settle-restore");
     f._owner
         .resume_restore(
             &mut f.store,
@@ -1651,6 +1834,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
             |_, _, _, _| Ok(()),
         )
         .unwrap();
+    mark("resume-restore");
     f.binding = binding;
     f.doc = f
         .store
@@ -1675,6 +1859,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
         assert_eq!(resumed.application_receipt.journal_cursor, events + 1);
         assert_eq!(resumed.binding, f.binding);
     }
+    mark("register-resumed");
     let peer = Ydoc::wire();
     peer.apply(&f.doc.encode_full_state()).unwrap();
     native_tail_edit(&mut f, "Private after restore", events + 4);
@@ -1738,6 +1923,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
             other => panic!("unexpected {other:?}"),
         }
     };
+    mark("fill-capacity");
     let rescue = with_settlement(
         &mut f.store,
         &f.handle,
@@ -1757,6 +1943,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
         },
     )
     .unwrap();
+    mark("rescue");
     let text: String = f
         .store
         .read_with(|conn| {
@@ -1783,6 +1970,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
         Err(ApplicationError::ConfiguredByteBudgetExceeded)
     ));
     drop(held);
+    mark("proof-budget-refusal");
     let retry = apply_committed(
         &mut f.store,
         &mut WriterDocCache::new(),
@@ -1794,4 +1982,5 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
     )
     .unwrap();
     assert!(matches!(retry, ApplicationResult::Applied(..)));
+    mark("complete");
 }

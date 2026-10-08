@@ -87,6 +87,7 @@ pub enum DirectWriteResult {
 pub struct DirectWriteReport {
     pub paths: Vec<String>,
     pub result: DirectWriteResult,
+    pub recovered_draft_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -103,6 +104,9 @@ pub struct DirectWriteStatus {
     pub state: DirectWriteState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_record_id: Option<String>,
+    pub can_discard: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -111,6 +115,91 @@ pub enum DirectWriteState {
     Accepted,
     Pending,
     Refused,
+}
+
+/// Delivery facts for this replica's record creations, including after restart.
+pub fn read_record_creation_statuses(
+    store: &EngineStore,
+    workspace_id: &str,
+    share_id: &str,
+    paths: &[String],
+    granted: &crate::ShareGrant,
+) -> Result<BTreeMap<String, DirectWriteStatus>, SyncError> {
+    if paths.len() > 1000 {
+        return Err(SyncError::ShareBoundaryViolation);
+    }
+    let mut statuses = BTreeMap::new();
+    for path in paths {
+        if !crate::share::selected_path_within_grant(path, granted) {
+            return Err(SyncError::ShareBoundaryViolation);
+        }
+        let creation: Option<(String, String, i64)> = store.read_with(|conn| {
+            conn.query_row(
+                "SELECT substr(blob.text,1,65536),s.object_id,log.origin_seq FROM snapshots s JOIN replication_log log \
+                 ON log.workspace_id=s.workspace_id JOIN sync_identity identity \
+                 ON identity.workspace_id=log.workspace_id AND identity.origin_id=log.origin_id \
+                 JOIN blobs blob ON blob.sha256=json_extract(log.payload_json,'$.payloadAfterBlobSha256') \
+                 WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.path=?3 \
+                 AND log.imported=0 AND log.op_kind='moment.append' \
+                 AND json_extract(log.payload_json,'$.objectId')=s.object_id \
+                 AND json_extract(log.payload_json,'$.versionId')=s.version_id \
+                 AND json_extract(log.payload_json,'$.payloadBeforePath') IS NULL \
+                 AND json_extract(log.payload_json,'$.operation')='write' ORDER BY log.origin_seq LIMIT 1",
+                params![workspace_id, MAIN_VERSION_ID, path],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional().map_err(SyncError::corrupt)
+        })?;
+        if let Some((text, object_id, seq)) = creation {
+            // Only delivery of this creation acknowledges it.
+            let mut status = store.read_with(|conn| {
+                let mark = conn.query_row(
+                    "SELECT delivered_through,decided_through,refusal_reason FROM share_direct_write_marks \
+                     WHERE workspace_id=?1 AND share_id=?2 AND object_id=?3",
+                    params![workspace_id, share_id, object_id],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, Option<String>>(2)?)),
+                ).optional().map_err(SyncError::corrupt)?;
+                let unresolved: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM share_direct_write_plan p,json_each(p.objects_json) o \
+                     WHERE p.workspace_id=?1 AND p.share_id=?2 AND p.result_json IS NULL \
+                     AND json_extract(o.value,'$[0]')=?3)",
+                    params![workspace_id, share_id, object_id], |row| row.get(0),
+                ).map_err(SyncError::corrupt)?;
+                let (state, reason) = match mark {
+                    Some((delivered, _, _)) if delivered >= seq => (DirectWriteState::Accepted, None),
+                    Some((_, decided, reason)) if decided >= seq => (DirectWriteState::Refused, reason),
+                    _ => (DirectWriteState::Pending, None),
+                };
+                Ok::<_, SyncError>(DirectWriteStatus { state, reason, content_hash: None,
+                    original_record_id: None, can_discard: state != DirectWriteState::Accepted && !unresolved })
+            })?;
+            status.original_record_id = dohc_engine_domain::collections::markdown_frontmatter_json(
+                &text,
+            )
+            .and_then(|fields| {
+                fields
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            });
+            let current_id = store.read_with(|conn| {
+                conn.query_row(
+                    "SELECT substr(b.text,1,65536) FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
+                     WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.path=?3",
+                    params![workspace_id, MAIN_VERSION_ID, path], |row| row.get::<_, String>(0),
+                ).optional().map_err(SyncError::corrupt)
+            })?.and_then(|text| dohc_engine_domain::collections::markdown_frontmatter_json(&text))
+                .and_then(|fields| fields.get("id").and_then(serde_json::Value::as_str).map(str::to_owned));
+            // A refused name may now show another recipient's record. It is
+            // never a disposable copy of this creation.
+            if current_id != status.original_record_id {
+                continue;
+            }
+            status.can_discard &= current_id.is_some();
+            statuses.insert(path.clone(), status);
+        }
+    }
+    Ok(statuses)
 }
 
 /// Read delivery of the current file, without contacting the relay. A receipt
@@ -148,6 +237,8 @@ pub fn read_direct_write_status(
             content_hash: snapshot.as_ref().and_then(|(_, hash, _, _)| hash.clone()),
             state: DirectWriteState::Pending,
             reason: None,
+            original_record_id: None,
+            can_discard: false,
         };
         let Some((object_id, hash, moment_id, origin)) = snapshot else {
             status.state = DirectWriteState::Accepted;
@@ -299,6 +390,19 @@ impl<T: RelayTransport> RelaySyncClient<T> {
 
         let mut uploaded = BTreeMap::new();
         for write in plan.writes.iter().filter(|write| write.result.is_none()) {
+            if record_draft_was_discarded(store, workspace_id, write)? {
+                record_direct_write_result(
+                    store,
+                    workspace_id,
+                    share_id,
+                    write,
+                    &DirectWriteResult::Refused {
+                        reason: "local-record-draft-discarded".to_owned(),
+                    },
+                    faults,
+                )?;
+                continue;
+            }
             let mut changes = write.request.changes.clone();
             let sent = self
                 .upload_proposed_blobs(store, share_id, &mut changes, &mut uploaded)
@@ -325,10 +429,38 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             .ok_or(RelayError::InvalidResponse)?;
         let mut reports = Vec::with_capacity(finished.writes.len());
         for write in finished.writes {
+            let recovered_draft_path = if matches!(
+                write.result,
+                Some(DirectWriteResult::Stale { .. })
+            ) && write.request.changes.len() == 1
+            {
+                let change = &write.request.changes[0];
+                if let Some(path) = change.after_path.as_deref() {
+                    let identity = hex_sha256(
+                        format!("{workspace_id}\0{}\0{path}", write.request.submit_id).as_bytes(),
+                    );
+                    store
+                        .read_with(|conn| {
+                            conn.query_row(
+                                "SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id='main' AND object_id=?2",
+                                params![workspace_id, format!("refused-record-{identity}")],
+                                |row| row.get(0),
+                            )
+                            .optional()
+                            .map_err(SyncError::corrupt)
+                        })
+                        .map_err(local)?
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             let result = write.result.ok_or(RelayError::InvalidResponse)?;
             reports.push(DirectWriteReport {
                 paths: request_paths(&write.request),
                 result,
+                recovered_draft_path,
             });
         }
         finish_direct_write_plan(store, workspace_id, share_id, finished.position, faults)?;
@@ -337,6 +469,31 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             more_pending: finished.more_pending,
         })
     }
+}
+
+fn record_draft_was_discarded(
+    store: &EngineStore,
+    workspace_id: &str,
+    write: &PlannedWrite,
+) -> Result<bool, RelayError> {
+    if write.request.changes.len() != 1 {
+        return Ok(false);
+    }
+    let change = &write.request.changes[0];
+    if change.based_on_path.is_some() || !change.after_path.as_deref().is_some_and(is_markdown) {
+        return Ok(false);
+    }
+    let (object, position) = &write.objects[0];
+    store.read_with(|conn| {
+        conn.query_row("SELECT json_extract(log.payload_json,'$.operation')='delete' \
+            FROM replication_log log JOIN sync_identity identity \
+              ON identity.workspace_id=log.workspace_id AND identity.origin_id=log.origin_id \
+            WHERE log.workspace_id=?1 AND log.imported=0 AND log.origin_seq>?2 \
+              AND log.op_kind='moment.append' AND json_extract(log.payload_json,'$.objectId')=?3 \
+              AND json_extract(log.payload_json,'$.versionId')=?4 ORDER BY log.origin_seq DESC LIMIT 1",
+            params![workspace_id, position, object, MAIN_VERSION_ID], |row| row.get(0),
+        ).optional().map(|result| result.unwrap_or(false)).map_err(SyncError::corrupt)
+    }).map_err(local)
 }
 
 /// The relay's lasting no to the route itself: it does not take direct
@@ -591,6 +748,9 @@ fn plan_direct_writes<'a>(
         let direct = match name {
             COLLECTION_SCHEMA_FILE => net.change.based_on_path.is_some(),
             COLLECTION_AUTOMATIONS_FILE => folder_holds_schema(store, workspace_id, folder)?,
+            _ if is_markdown(name) && net.change.based_on_path.is_none() => {
+                folder_holds_document_schema(store, workspace_id, folder)?
+            }
             _ => false,
         };
         if direct {
@@ -651,6 +811,20 @@ fn folder_holds_schema(
             .map_err(SyncError::corrupt)
         })
         .map_err(local)
+}
+
+fn folder_holds_document_schema(
+    store: &EngineStore,
+    workspace_id: &str,
+    folder: &str,
+) -> Result<bool, RelayError> {
+    store.read_with(|conn| {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND path=?3)",
+            params![workspace_id, MAIN_VERSION_ID, format!("{folder}/{COLLECTION_SCHEMA_FILE}")],
+            |row| row.get(0),
+        ).map_err(SyncError::corrupt)
+    }).map_err(local)
 }
 
 /// A change's content length: the one its moment states, or the stored
@@ -959,6 +1133,10 @@ fn record_direct_write_result(
     let delivered = *result == DirectWriteResult::Written;
     let outcome = store
         .write_with(faults, |tx| {
+            if matches!(result, DirectWriteResult::Stale { .. }) && write.request.changes.len() == 1
+            {
+                preserve_refused_record_drafts(tx, workspace_id, write)?;
+            }
             tx.execute(
                 "UPDATE share_direct_write_plan SET result_json=?4 \
                  WHERE workspace_id=?1 AND share_id=?2 AND ordinal=?3",
@@ -976,11 +1154,138 @@ fn record_direct_write_result(
                         decided_through: *last_seq,
                     },
                 )?;
+                let reason = match result {
+                    DirectWriteResult::Refused { reason } => Some(reason.as_str()),
+                    DirectWriteResult::Stale { .. } => {
+                        Some("This record name is taken. Use New record to create another record.")
+                    }
+                    DirectWriteResult::Written => None,
+                };
+                tx.execute(
+                    "UPDATE share_direct_write_marks SET refusal_reason=?4 \
+                    WHERE workspace_id=?1 AND share_id=?2 AND object_id=?3",
+                    params![workspace_id, share_id, object_id, reason],
+                )
+                .map_err(SyncError::persist)?;
             }
             Ok::<(), SyncError>(())
         })
         .map_err(local)?;
     crashed(outcome)
+}
+
+// A refused creation can be replaced by the winner during the next pull.
+// Keep its current bytes as an ordinary local text file, outside the record
+// index and the outbound journal. The receipt and copy commit together.
+fn preserve_refused_record_drafts(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    write: &PlannedWrite,
+) -> Result<(), SyncError> {
+    for change in &write.request.changes {
+        let Some(path) = change.after_path.as_deref() else {
+            continue;
+        };
+        if change.based_on_path.is_some()
+            || change.based_on_blob_sha256.is_some()
+            || !is_markdown(path)
+        {
+            continue;
+        }
+        let snapshot: Option<String> = tx.query_row(
+            "SELECT b.text FROM replication_log log JOIN sync_identity identity \
+             ON identity.workspace_id=log.workspace_id AND identity.origin_id=log.origin_id \
+             JOIN blobs b ON b.sha256=json_extract(log.payload_json,'$.payloadAfterBlobSha256') \
+             WHERE log.workspace_id=?1 AND log.imported=0 AND log.op_kind='moment.append' \
+             AND json_extract(log.payload_json,'$.payloadAfterPath')=?2 ORDER BY log.origin_seq DESC LIMIT 1",
+            params![workspace_id,path], |row| row.get(0),
+        ).optional().map_err(SyncError::corrupt)?;
+        let submitted: Option<String> = tx
+            .query_row(
+                "SELECT text FROM blobs WHERE sha256=?1",
+                params![change.after_blob_sha256],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(SyncError::corrupt)?;
+        let Some(submitted) = submitted else { continue };
+        let record_id = |text: &str| {
+            dohc_engine_domain::collections::markdown_frontmatter_json(text).and_then(|fields| {
+                fields
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+        };
+        let Some(submitted_id) = record_id(&submitted) else {
+            continue;
+        };
+        let text = snapshot
+            .filter(|text| record_id(text).as_deref() == Some(submitted_id.as_str()))
+            .unwrap_or(submitted);
+        let now_ms = change.recorded_at_ms;
+        let identity =
+            hex_sha256(format!("{workspace_id}\0{}\0{path}", write.request.submit_id).as_bytes());
+        let moment_id = format!("moment-refused-record-{identity}");
+        let exists: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM moments WHERE workspace_id=?1 AND moment_id=?2)",
+                params![workspace_id, moment_id],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)?;
+        if exists {
+            continue;
+        }
+        let folder = path.rsplit_once('/').map_or("", |(folder, _)| folder);
+        let prefix = if folder.is_empty() {
+            String::new()
+        } else {
+            format!("{folder}/")
+        };
+        let mut ordinal = 1_u64;
+        let recovered_path = loop {
+            let candidate = format!("{prefix}Record draft {}-{ordinal}.txt", &identity[..12]);
+            let occupied: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id='main' AND path=?2)",
+                params![workspace_id,candidate], |row| row.get(0),
+            ).map_err(SyncError::corrupt)?;
+            if !occupied {
+                break candidate;
+            }
+            ordinal = ordinal
+                .checked_add(1)
+                .ok_or_else(|| crate::error::local_corruption("draft name overflow"))?;
+        };
+        let recovered = dohc_engine_domain::write_text_in_tx(
+            tx,
+            &dohc_engine_domain::WriteText {
+                workspace_id: workspace_id.to_owned(),
+                version_id: MAIN_VERSION_ID.to_owned(),
+                object_id: format!("refused-record-{identity}"),
+                path: recovered_path,
+                text,
+                moment_id,
+                metadata_origin: "sync".to_owned(),
+                metadata_summary: Some(
+                    "Draft kept after another person took the record name".to_owned(),
+                ),
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms,
+                request_id: None,
+            },
+        )
+        .map_err(SyncError::corrupt)?;
+        dohc_engine_domain::enqueue_write(
+            tx,
+            &recovered,
+            dohc_engine_storage::Preimage::Absent,
+            "sync",
+        )
+        .map_err(SyncError::corrupt)?;
+    }
+    Ok(())
 }
 
 /// The relay will not answer the rest of the plan: drop it without moving the

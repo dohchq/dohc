@@ -100,6 +100,7 @@ fn input(
         journal_cursor: 9,
         checkpoint,
         host_vector: host.encode_state_vector(),
+        recovery: false,
     }
 }
 fn enroll(
@@ -145,7 +146,7 @@ fn converged_enrollment_reopens_without_pending_and_uncertain_retry_discovers_co
     let store = EngineStore::open(&dir.join("engine.db"), 11).unwrap();
     assert!(matches!(
         store
-            .read_with(|conn| prepare_in(conn, &observed.binding, "relay"))
+            .read_with(|conn| prepare_in(conn, &observed.binding, "relay", false))
             .unwrap(),
         OwnerEnrollmentPreparation::Observed { .. }
     ));
@@ -296,6 +297,279 @@ fn enrolled_with_unsent_draft() -> (
         bounded(&host).unwrap(),
     )
 }
+
+#[test]
+fn explicit_recovery_keeps_old_writes_refused_and_installs_only_the_host_checkpoint() {
+    use super::super::draft::{append_draft_in_tx, write_states_in, OwnerDraftWrite};
+    let (dir, mut store, observed, checkpoint, unsent, host) = enrolled_with_unsent_draft();
+    let (outbox_id, sequence): (String, i64) = store.read_with(|conn| conn.query_row(
+        "SELECT outbox_id,sequence FROM owner_ydoc_outbox_entries WHERE append_key='unsent'", [], |r| Ok((r.get(0)?,r.get(1)?)),
+    )).unwrap();
+    let write = OwnerDraftWrite {
+        outbox_id: Some(outbox_id.clone()),
+        binding: observed.binding.clone(),
+        native_head_sequence: observed.native_head_sequence,
+        append_key: "unsent".into(),
+    };
+    super::super::quarantine(
+        &mut store,
+        "workspace",
+        OwnerOutboxQuarantineInput {
+            outbox_id: outbox_id.clone(),
+            reason: "stale-binding".into(),
+            observed_binding: None,
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        store
+            .read_with(|conn| prepare_in(conn, &observed.binding, "relay", false))
+            .unwrap(),
+        OwnerEnrollmentPreparation::Observed { .. }
+    ));
+    let captured = match store
+        .read_with(|conn| prepare_in(conn, &observed.binding, "relay", true))
+        .unwrap()
+    {
+        OwnerEnrollmentPreparation::Capture { captured } => captured,
+        _ => panic!("recovery needs a fresh authenticated cut"),
+    };
+    let accepted = Ydoc::wire();
+    accepted.apply(&host).unwrap();
+    let mut recovery = OwnerEnrollmentInput {
+        binding: observed.binding.clone(),
+        relay_database_namespace: "relay".into(),
+        captured,
+        journal_cursor: 12,
+        checkpoint: host.clone(),
+        host_vector: accepted.encode_state_vector(),
+        recovery: true,
+    };
+    recovery.captured.native_head_sequence += 1;
+    assert!(enroll(&mut store, &recovery, &observed.limits).is_err());
+    assert_eq!(
+        super::super::read_pending(&store, "workspace", &outbox_id)
+            .unwrap()
+            .entries
+            .len(),
+        1
+    );
+    recovery.captured.native_head_sequence -= 1;
+    recovery.host_vector = vec![0];
+    assert!(enroll(&mut store, &recovery, &observed.limits).is_err());
+    recovery.host_vector = accepted.encode_state_vector();
+    let draft = enroll(&mut store, &recovery, &observed.limits).unwrap();
+    assert_eq!(draft.state.as_deref(), Some("active"));
+    assert_eq!(draft.pending_bytes, 0);
+    let restored = store
+        .read_with(|conn| open_draft_in(conn, &observed.binding, draft.revision))
+        .unwrap();
+    assert_eq!(bounded(&restored.doc).unwrap(), host);
+    assert_ne!(bounded(&restored.doc).unwrap(), checkpoint);
+    assert_eq!(
+        store
+            .read_with(|conn| write_states_in(conn, "workspace", std::slice::from_ref(&write)))
+            .unwrap(),
+        ["not-accepted"]
+    );
+    let retained: (String, Vec<u8>) = store.read_with(|conn| {
+        let (reason, digest): (String, String) = conn.query_row("SELECT terminal_reason,terminal_blob_digest FROM owner_ydoc_outbox_entries WHERE append_key='unsent'", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+        Ok::<_,OwnerOutboxError>((reason, bounded_blob(conn, &digest)?))
+    }).unwrap();
+    assert_eq!(retained, ("stale-binding".into(), unsent));
+    let fresh = restored
+        .doc
+        .richdoc_append_paragraph("fresh after recovery");
+    let appended = committed(
+        store
+            .write_with(&NoFaults, |tx| {
+                append_draft_in_tx(
+                    tx,
+                    "workspace",
+                    &observed.binding,
+                    draft.revision,
+                    "fresh".into(),
+                    fresh,
+                    13,
+                )
+            })
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(appended.sequence > sequence);
+    let pending = super::super::read_pending(&store, "workspace", &outbox_id).unwrap();
+    assert_eq!(pending.entries.len(), 1);
+    assert_eq!(pending.entries[0].append_key, "fresh");
+    drop(store);
+    let reopened = EngineStore::open(&dir.join("engine.db"), 14).unwrap();
+    assert_eq!(
+        reopened
+            .read_with(|conn| write_states_in(conn, "workspace", &[write]))
+            .unwrap(),
+        ["not-accepted"]
+    );
+    assert!(
+        enroll(
+            &mut EngineStore::open(&dir.join("engine.db"), 15).unwrap(),
+            &recovery,
+            &observed.limits
+        )
+        .is_err(),
+        "an active queue cannot silently reset"
+    );
+}
+
+#[test]
+fn recovery_rebinds_current_coordinates_without_rewriting_the_old_delivery_parent() {
+    use super::super::draft::{append_draft_in_tx, write_states_in, OwnerDraftWrite};
+    let (_dir, mut store, observed, _checkpoint, _unsent, host) = enrolled_with_unsent_draft();
+    let old = store
+        .read_with(|conn| find_parent_for_binding(conn, &observed.binding))
+        .unwrap()
+        .unwrap();
+    super::super::quarantine(
+        &mut store,
+        "workspace",
+        OwnerOutboxQuarantineInput {
+            outbox_id: old.outbox_id.clone(),
+            reason: "binding-changed".into(),
+            observed_binding: None,
+        },
+    )
+    .unwrap();
+    let mut next = observed.binding.clone();
+    next.current_path = "renamed.md".into();
+    next.selector_paths = vec!["renamed.md".into()];
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE ydoc_docs SET path='renamed.md'", [])
+                .map_err(write_sql)?;
+            Ok::<_, OwnerOutboxError>(())
+        })
+        .unwrap();
+    assert!(store
+        .read_with(|conn| prepare_in(conn, &next, "other-relay", true))
+        .is_err());
+    let captured = match store
+        .read_with(|conn| prepare_in(conn, &next, "relay", true))
+        .unwrap()
+    {
+        OwnerEnrollmentPreparation::Capture { captured } => captured,
+        _ => panic!("rebind captures"),
+    };
+    let accepted = Ydoc::wire();
+    accepted.apply(&host).unwrap();
+    let recovery = OwnerEnrollmentInput {
+        binding: next.clone(),
+        relay_database_namespace: "relay".into(),
+        captured,
+        journal_cursor: 12,
+        checkpoint: host,
+        host_vector: accepted.encode_state_vector(),
+        recovery: true,
+    };
+    let draft = enroll(&mut store, &recovery, &observed.limits).unwrap();
+    assert_eq!(draft.binding, next);
+    assert!(draft.outbox_id.is_none());
+    let old_after = store
+        .read_with(|conn| read_parent(conn, &old.outbox_id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(old_after.binding, old.binding);
+    assert_eq!(old_after.state, OwnerOutboxState::Quarantined);
+    assert_eq!(old_after.pending_bytes, 0);
+    let write = OwnerDraftWrite {
+        outbox_id: Some(old.outbox_id.clone()),
+        binding: observed.binding.clone(),
+        native_head_sequence: observed.native_head_sequence,
+        append_key: "unsent".into(),
+    };
+    assert_eq!(
+        store
+            .read_with(|conn| write_states_in(conn, "workspace", &[write]))
+            .unwrap(),
+        ["not-accepted"]
+    );
+    let doc = store
+        .read_with(|conn| open_draft_in(conn, &next, draft.revision))
+        .unwrap();
+    let fresh = doc.doc.richdoc_append_paragraph("fresh renamed record");
+    let appended = committed(
+        store
+            .write_with(&NoFaults, |tx| {
+                append_draft_in_tx(
+                    tx,
+                    "workspace",
+                    &next,
+                    draft.revision,
+                    "fresh-renamed".into(),
+                    fresh,
+                    13,
+                )
+            })
+            .unwrap(),
+    )
+    .unwrap();
+    assert_ne!(appended.outbox_id, old.outbox_id);
+    assert_eq!(store.table_row_count("owner_ydoc_outboxes").unwrap(), 2);
+    assert_eq!(
+        super::super::read_pending(&store, "workspace", &appended.outbox_id)
+            .unwrap()
+            .binding,
+        next
+    );
+    super::super::quarantine(
+        &mut store,
+        "workspace",
+        OwnerOutboxQuarantineInput {
+            outbox_id: appended.outbox_id,
+            reason: "binding-changed".into(),
+            observed_binding: None,
+        },
+    )
+    .unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE ydoc_docs SET path='owner.md'", [])
+                .map_err(write_sql)?;
+            Ok::<_, OwnerOutboxError>(())
+        })
+        .unwrap();
+    let mut back = recovery.clone();
+    back.binding = observed.binding.clone();
+    back.captured = match store
+        .read_with(|conn| prepare_in(conn, &back.binding, "relay", true))
+        .unwrap()
+    {
+        OwnerEnrollmentPreparation::Capture { captured } => captured,
+        _ => panic!("returning coordinates capture"),
+    };
+    let returned = enroll(&mut store, &back, &observed.limits).unwrap();
+    assert_eq!(returned.outbox_id.as_deref(), Some(old.outbox_id.as_str()));
+    assert_eq!(returned.state.as_deref(), Some("active"));
+    assert_eq!(returned.pending_bytes, 0);
+}
+
+#[test]
+fn recovery_permission_keeps_first_enrollment_and_active_preparation_ordinary() {
+    let (_dir, mut store, observed, checkpoint) = fixture();
+    assert!(matches!(
+        store
+            .read_with(|conn| prepare_in(conn, &observed.binding, "relay", true))
+            .unwrap(),
+        OwnerEnrollmentPreparation::Capture { .. }
+    ));
+    let mut first = input(&store, &observed, checkpoint);
+    first.recovery = true;
+    let draft = enroll(&mut store, &first, &observed.limits).unwrap();
+    assert!(matches!(
+        store
+            .read_with(|conn| prepare_in(conn, &observed.binding, "relay", true))
+            .unwrap(),
+        OwnerEnrollmentPreparation::Observed { .. }
+    ));
+    assert_eq!(draft.revision, 1);
+}
 fn next_generation(observed: &ObservedOwnerBinding) -> LiveObjectBinding {
     LiveObjectBinding {
         restore_fence_generation: observed.binding.restore_fence_generation + 1,
@@ -308,7 +582,7 @@ fn successor_input(
     checkpoint: Vec<u8>,
 ) -> OwnerEnrollmentInput {
     let captured = match store
-        .read_with(|conn| prepare_in(conn, binding, "relay"))
+        .read_with(|conn| prepare_in(conn, binding, "relay", false))
         .unwrap()
     {
         OwnerEnrollmentPreparation::Capture { captured } => captured,
@@ -325,6 +599,7 @@ fn successor_input(
         journal_cursor: 12,
         checkpoint,
         host_vector: host.encode_state_vector(),
+        recovery: false,
     }
 }
 fn old_generation_queue(conn: &Connection) -> (String, Option<String>, Option<String>, Vec<u8>) {
@@ -387,11 +662,11 @@ fn later_restore_generation_installs_the_host_checkpoint_and_quarantines_unsent_
             assert_eq!(preserved, unsent);
             assert_ne!(host, checkpoint);
             assert!(matches!(
-                prepare_in(conn, &next, "relay")?,
+                prepare_in(conn, &next, "relay", false)?,
                 OwnerEnrollmentPreparation::Observed { .. }
             ));
             assert!(
-                prepare_in(conn, &observed.binding, "relay").is_err(),
+                prepare_in(conn, &observed.binding, "relay", false).is_err(),
                 "a generation never moves backwards"
             );
             Ok::<_, OwnerOutboxError>(())
@@ -418,9 +693,9 @@ fn restore_generation_refuses_another_namespace_or_document_identity() {
     };
     store
         .read_with(|conn| {
-            assert!(prepare_in(conn, &next, "other-relay").is_err());
-            assert!(prepare_in(conn, &moved, "relay").is_err());
-            assert!(prepare_in(conn, &same_generation, "relay").is_err());
+            assert!(prepare_in(conn, &next, "other-relay", false).is_err());
+            assert!(prepare_in(conn, &moved, "relay", false).is_err());
+            assert!(prepare_in(conn, &same_generation, "relay", false).is_err());
             Ok::<_, OwnerOutboxError>(())
         })
         .unwrap();

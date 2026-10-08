@@ -2891,6 +2891,17 @@ impl SharedChangeAuthor {
     }
 }
 
+/// The sole relay-derived author of a direct Collection write.
+pub fn moment_shared_author(author_json: Option<&str>) -> Option<SharedChangeAuthor> {
+    let authors = moment_author_entries(author_json);
+    let [author] = authors.as_slice() else {
+        return None;
+    };
+    serde_json::from_value::<SharedChangeAuthor>(author.clone())
+        .ok()
+        .filter(SharedChangeAuthor::is_valid)
+}
+
 /// The automation run a write came from: the claim it ran for, and the
 /// automation's name when it ran. Record history names the automation by
 /// it after the definition changes or goes, and opens the run by its claim
@@ -3097,6 +3108,45 @@ pub struct AgentDeclaration {
     #[serde(deserialize_with = "Option::deserialize")]
     pub on_behalf_of: Option<String>,
     pub depth: u32,
+}
+
+/// Automation provenance carried by a durable shared record draft. Never authority.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AutomationDeclaration {
+    pub automation_id: String,
+    pub attribution: ChangeAttribution,
+}
+
+impl AutomationDeclaration {
+    pub fn deserialize_present<'de, D: serde::Deserializer<'de>>(
+        decoder: D,
+    ) -> Result<Option<Self>, D::Error> {
+        let declaration = Self::deserialize(decoder)?;
+        declaration.validate().map_err(serde::de::Error::custom)?;
+        Ok(Some(declaration))
+    }
+    pub fn from_change(
+        actor_origin_id: Option<&str>,
+        attribution: Option<&ChangeAttribution>,
+    ) -> Option<Self> {
+        let attribution = attribution.filter(|a| a.actor_kind == ChangeActorKind::Automation)?;
+        Some(Self {
+            automation_id: actor_origin_id?.to_owned(),
+            attribution: attribution.clone(),
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.automation_id.is_empty()
+            || self.automation_id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES
+            || self.automation_id.chars().any(char::is_control)
+            || self.attribution.actor_kind != ChangeActorKind::Automation
+        {
+            return Err("invalid automation declaration");
+        }
+        self.attribution.validate()
+    }
 }
 
 impl AgentDeclaration {

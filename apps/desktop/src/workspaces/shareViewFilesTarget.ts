@@ -78,7 +78,13 @@ export function resolveRegisteredShareViewFilesTarget(
           ? shareView.granterEmail
           : null,
       grantedSelector: shareView.grantedSelector,
+      recipientUserId: typeof shareView.recipientUserId === "string" ? shareView.recipientUserId : undefined,
       ended: shareView.ended === true,
+      unsavedPaths: shareView.unsavedPaths === undefined
+        ? undefined
+        : Array.isArray(shareView.unsavedPaths) && shareView.unsavedPaths.every(path => typeof path === "string")
+          ? shareView.unsavedPaths
+          : null,
       relayUrl:
         typeof shareView.relayUrl === "string" ? shareView.relayUrl : null,
     };

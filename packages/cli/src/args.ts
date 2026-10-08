@@ -284,7 +284,6 @@ const DOCUMENT_VERBS = {
       const text = lastValue(input, "--text");
       if (body !== undefined && (body !== "-" || text !== undefined)) fail("use either - for stdin or --text <markdown>");
       if (body === undefined && text === undefined) fail("use either - for stdin or --text <markdown>");
-      if (text !== undefined && !text.trim()) fail("comment body must contain text that is not all whitespace");
       const agent = lastValue(input, "--agent");
       const requestId = lastValue(input, "--request-id");
       const runId = lastValue(input, "--run-id");

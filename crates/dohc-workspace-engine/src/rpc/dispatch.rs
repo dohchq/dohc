@@ -161,6 +161,9 @@ impl EngineService {
         if request.method == "ydoc.ownerDelivery.prepareEnrollment" {
             return self.owner_delivery_prepare_enrollment(ctx, request).await;
         }
+        if request.method == "ydoc.ownerDelivery.refuseEntry" {
+            return self.owner_delivery_refuse_entry(ctx, request).await;
+        }
         if request.method == "ydoc.ownerDelivery.listDrafts" {
             return self.owner_delivery_list_drafts(ctx, request).await;
         }
@@ -357,6 +360,10 @@ impl EngineService {
             }
             "share.direct.status" => {
                 self.share_direct_status(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "share.records.status" => {
+                self.share_record_creation_statuses(&ctx, request.workspace, request.params)
                     .await?
             }
             "versionedText.writeBlob" => {
@@ -1380,6 +1387,7 @@ mod tests {
             "share.channel.push",
             "share.direct.push",
             "share.direct.status",
+            "share.records.status",
             "share.proposal.submit",
             "share.view.pull",
             "share.view.recordIdentity",

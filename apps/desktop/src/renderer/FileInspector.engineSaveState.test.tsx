@@ -2,7 +2,7 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import type { EngineDocSaveState } from "./collab/engineDocLease";
+import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import { FileInspector } from "./FileInspector";
 
 // WS-G2-C-2: the engine Y.Doc is the PRIMARY editing surface,
@@ -20,7 +20,9 @@ const engineDocStore = vi.hoisted(() => {
   let state = {
     available: false,
     doc: null as Y.Doc | null,
-    saveState: "saved" as EngineDocSaveState,
+    saveState: { kind: "saved-here" } as SaveState,
+    readOnlyWhileEditing: false,
+    saveError: null as string | null,
   };
   const listeners = new Set<() => void>();
   return {
@@ -53,7 +55,7 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
   };
 
   beforeEach(() => {
-    engineDocStore.set({ available: true, doc: new Y.Doc(), saveState: "saved" });
+    engineDocStore.set({ available: true, doc: new Y.Doc(), saveState: { kind: "saved-here" }, readOnlyWhileEditing: false, saveError: null });
     vi.stubGlobal(
       "ResizeObserver",
       class {
@@ -69,12 +71,28 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
     cleanup();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
-    engineDocStore.set({ available: false, doc: null, saveState: "saved" });
+    engineDocStore.set({ available: false, doc: null, saveState: { kind: "saved-here" } });
+  });
+
+  it("keeps the read-only data-state after an edit is refused", async () => {
+    engineDocStore.set({ saveState: { kind: "unknown" }, readOnlyWhileEditing: true });
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    const chip = await screen.findByTestId("markdown-save-state");
+    expect(chip.getAttribute("data-state")).toBe("read-only");
+    expect(chip.textContent).toBe("Read-only");
+  });
+
+  it("keeps the existing unexplained error tooltip", async () => {
+    engineDocStore.set({ saveState: { kind: "error", reason: "generic reason", issueId: null } });
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    const chip = await screen.findByTestId("markdown-save-state");
+    expect(chip.getAttribute("data-state")).toBe("error");
+    expect(chip.getAttribute("title")).toBe("Your edits are still here, but dohc can't confirm the file on disk matches them. Keep this document open and try another edit.");
   });
 
   it("lifts the engine's in-flight settle state to onSaveStateChange, returning to saved after settle", async () => {
     // A pending settle: the engine reports "saving" while it projects the edit.
-    engineDocStore.set({ saveState: "saving" });
+    engineDocStore.set({ saveState: { kind: "saving" } });
     const onSaveStateChange = vi.fn();
     render(
       <FileInspector workspaceId="ws-1" path="a.md" onSaveStateChange={onSaveStateChange} />,
@@ -87,7 +105,7 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
     // (waitFor, not a bare assert: the lift is a passive effect, so a sibling's
     // mount work can push it a tick past when the header first paints.)
     await waitFor(() =>
-      expect(onSaveStateChange).toHaveBeenLastCalledWith("saving"),
+      expect(onSaveStateChange).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "saving" })),
     );
     // And the header agrees.
     expect(header.getAttribute("data-state")).toBe("saving");
@@ -95,8 +113,8 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
     // The settle completes: the engine publishes "saved" from inside the
     // component, exactly like the real hook — no parent re-render involved
     // (FileInspector is memoized, so a shallow-equal parent render is elided).
-    act(() => engineDocStore.set({ saveState: "saved" }));
-    expect(onSaveStateChange).toHaveBeenLastCalledWith("saved");
+    act(() => engineDocStore.set({ saveState: { kind: "saved-here" } }));
+    expect(onSaveStateChange).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "saved-here" }));
     expect(screen.getByTestId("markdown-save-state").getAttribute("data-state")).toBe("saved");
   });
 
@@ -104,7 +122,7 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
     // AUDIT-SILENTSAVE: the visible half of the fix. A failed settle means the
     // file on disk is behind the editor — the header must say so, and the tab
     // dot must stay dirty.
-    engineDocStore.set({ saveState: "error" });
+    engineDocStore.set({ saveState: { kind: "error", reason: "test failure", issueId: null } });
     const onSaveStateChange = vi.fn();
     render(
       <FileInspector workspaceId="ws-1" path="a.md" onSaveStateChange={onSaveStateChange} />,
@@ -119,7 +137,7 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
       "dohc can't confirm the file on disk matches them",
     );
     await waitFor(() =>
-      expect(onSaveStateChange).toHaveBeenLastCalledWith("error"),
+      expect(onSaveStateChange).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "error" })),
     );
   });
 
@@ -127,7 +145,7 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
     // A file-locked settle is transient by contract — the engine keeps
     // the write pending and retries by itself. The chip must name the blocker
     // and say the edits are safe, not advise another edit.
-    engineDocStore.set({ saveState: "file-locked" });
+    engineDocStore.set({ saveState: { kind: "file-locked", reason: "test failure", issueId: null } });
     const onSaveStateChange = vi.fn();
     render(
       <FileInspector workspaceId="ws-1" path="a.md" onSaveStateChange={onSaveStateChange} />,
@@ -145,12 +163,12 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
     expect(header.getAttribute("title")).toContain("retries until the file is free");
     // The tab dot stays dirty: the disk is behind this document.
     await waitFor(() =>
-      expect(onSaveStateChange).toHaveBeenLastCalledWith("error"),
+      expect(onSaveStateChange).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "file-locked" })),
     );
   });
 
   it("distinguishes a durable local draft from the shared file", async () => {
-    engineDocStore.set({ saveState: "pending-share" });
+    engineDocStore.set({ saveState: { kind: "pending-share" } });
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
     const header = await screen.findByTestId("markdown-save-state");
     expect(header.getAttribute("data-state")).toBe("pending-share");
@@ -159,7 +177,7 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
   });
 
   it("names host acceptance without claiming local file settlement", async () => {
-    engineDocStore.set({ saveState: "saved-to-host" });
+    engineDocStore.set({ saveState: { kind: "saved-to-host" } });
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
     const header = await screen.findByTestId("markdown-save-state");
     expect(header.getAttribute("data-state")).toBe("saved-to-host");
@@ -171,7 +189,7 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
     // The settle committed, but the FILE holds an edit made outside dohc
     // that dohc refuses to overwrite. "Couldn't save" would be wrong twice —
     // the document IS saved, and another edit cannot help.
-    engineDocStore.set({ saveState: "changed-on-disk" });
+    engineDocStore.set({ saveState: { kind: "changed-on-disk", reason: "test failure", issueId: null } });
     const onSaveStateChange = vi.fn();
     render(
       <FileInspector workspaceId="ws-1" path="a.md" onSaveStateChange={onSaveStateChange} />,
@@ -184,7 +202,7 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
     expect(header.getAttribute("title")).toContain("Open History to restore your text");
     // The tab dot stays dirty: this document's text is not what the file holds.
     await waitFor(() =>
-      expect(onSaveStateChange).toHaveBeenLastCalledWith("error"),
+      expect(onSaveStateChange).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "changed-on-disk" })),
     );
   });
 });

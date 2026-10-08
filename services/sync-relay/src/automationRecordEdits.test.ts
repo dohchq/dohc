@@ -3,9 +3,11 @@ import * as Y from "yjs";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { VersionedTextStoreError, type VersionRecord } from "@dohc/workspace-contracts/engine";
 import { DaemonRefusalError, type EngineYdocProviderSession } from "@dohc/workspace-engine-client";
+import type {EngineClient} from "@dohc/workspace-engine-client/daemon";
+import {YdocLoopbackEngine} from "@dohc/workspace-engine-client/testing";
 import { createCollectionRecord, setCollectionRecordFields } from "@dohc/automation-executor/collection-record-edits";
 import { derivedRecordId } from "@dohc/automation-executor/record-ids";
-import { replicaRecordEditContext, type ReplicaRecordEngine } from "./automationRecordEdits";
+import { replicaRecordEditContext, replicaRecordEngine, type ReplicaRecordEngine } from "./automationRecordEdits";
 
 const AUTOMATION = { kind: "automation", automationId: "collection:Tasks#stamp", onBehalfOf: "owner", depth: 1,
   run: { claimId: "claim-1", automationName: "Stamp the finish date" } } as const;
@@ -104,6 +106,23 @@ function replicaEngine(options: {
 const replica = (signal = new AbortController().signal) => ({ workspaceId: "workspace-trip", signal });
 
 describe("an automation's record writes on this server's replica", () => {
+  it("forwards server automation provenance through the production record provider", async () => {
+    const daemon = new YdocLoopbackEngine();
+    daemon.seedFile({workspace: "engine-handle", versionId: "main", path: "Tasks/one.md", contentKind: "richdoc",
+      content: `---\nid: ${RECORD}\nStatus: Doing\n---\n`});
+    const provider = await replicaRecordEngine({client: daemon as unknown as EngineClient, workspace: "engine-handle",
+      workspaceId: MAIN.workspaceId}).openSession({versionId: "main", path: "Tasks/one.md"});
+    try {
+      const vector = Y.encodeStateVector(provider.doc);
+      provider.doc.getMap("frontmatter").set("Status", "Done");
+      await provider.applyLocalUpdate(Y.encodeStateAsUpdate(provider.doc, vector), {actorOriginId: AUTOMATION.automationId,
+        attribution: {actorKind: "automation", onBehalfOf: "owner", depth: 1, run: AUTOMATION.run}, armSettle: false});
+      const recorded = daemon.requests.filter(request => request.method === "ydoc.recordUpdate").at(-1);
+      expect(recorded?.params).toMatchObject({trustedAutomationDraft: true, actorOriginId: AUTOMATION.automationId,
+        attribution: {actorKind: "automation", onBehalfOf: "owner", run: AUTOMATION.run}});
+    } finally {await provider.evict();}
+  });
+
   it("writes each field as the automation under its key, then settles and closes", async () => {
     const { engine, files, events, journaled } = replicaEngine();
     files.set("Tasks/one.md", `---\nid: ${RECORD}\nStatus: Doing\n---\n`);
@@ -250,4 +269,20 @@ describe("an automation's record writes on this server's replica", () => {
     await expect(context.withAdapter(async () => "read")).resolves.toBeNull();
     expect(events).toEqual([]);
   });
+});
+
+it("checks recipient authority before both ordinary record updates and creations", async () => {
+  const text = `---\nid: ${RECORD}\nStatus: Doing\n---\n`;
+  const f = replicaEngine();
+  f.files.set("Tasks/one.md", text);
+  const checked: string[] = [];
+  f.engine.checkWriteAuthority = async path => {checked.push(path); throw Error("This update was not accepted.");};
+  const context = replicaRecordEditContext(replica(), f.engine, new AbortController().signal);
+  await expect(setCollectionRecordFields(context, {recordPath: "Tasks/one.md", fields: {Status: "Done"}, author: AUTOMATION, idempotencyKeyPrefix: "refused"}))
+    .rejects.toThrow("not accepted");
+  expect(f.journaled).toHaveLength(0);
+  expect(f.files.get("Tasks/one.md")).toBe(text);
+  await expect(context.createFile("Tasks/two.md", "New record", AUTOMATION)).rejects.toThrow("not accepted");
+  expect(f.writes).toHaveLength(0);
+  expect(checked).toEqual(["Tasks/one.md", "Tasks/two.md"]);
 });

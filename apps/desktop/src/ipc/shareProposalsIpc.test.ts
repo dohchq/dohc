@@ -218,7 +218,7 @@ describe("registered share proposal handlers", () => {
       .mockResolvedValueOnce({
         writes: [
           { paths: ["docs/packing/collection.yaml"], result: "written" },
-          { paths: ["docs/ideas/collection.yaml"], result: "stale", stalePath: "docs/ideas", currentBlobSha256: null },
+          { paths: ["docs/ideas/collection.yaml"], result: "stale", stalePath: "docs/ideas", recoveredDraftPath: null, currentBlobSha256: null },
         ],
         morePending: true,
       })
@@ -230,7 +230,7 @@ describe("registered share proposal handlers", () => {
       status: "pushed",
       writes: [
         { paths: ["docs/packing/collection.yaml"], result: "written" },
-        { paths: ["docs/ideas/collection.yaml"], result: "stale", stalePath: "docs/ideas" },
+        { paths: ["docs/ideas/collection.yaml"], result: "stale", stalePath: "docs/ideas", recoveredDraftPath: null },
         { paths: ["docs/packing/automations.yaml"], result: "refused", reason: "not valid" },
       ],
     });

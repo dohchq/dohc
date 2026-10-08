@@ -959,7 +959,7 @@ async fn live_settlement_names_declared_agents_of_its_exact_interval() {
         .unwrap();
     assert_eq!(
         latest_authors(&f),
-        serde_json::json!([{"kind":"agent","agentId":"trip-agent ✈","onBehalfOf":"owner","depth":1}])
+        serde_json::json!([{"kind":"agent","agentId":"trip-agent ✈","onBehalfOf":"owner","depth":1}, {"kind":"unattributed"}])
     );
     let vector = f.doc.encode_state_vector();
     let removed = delete_last_block(&f.doc);

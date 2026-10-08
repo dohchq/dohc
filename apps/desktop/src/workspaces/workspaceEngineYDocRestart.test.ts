@@ -3808,6 +3808,8 @@ it.each(["failure", "success"] as const)(
     const rendererDoc = new Y.Doc();
     Y.applyUpdate(rendererDoc, session.initialUpdate);
     let rendererSeq = 0;
+    expect(reported).toEqual([{ state: "saved", seq: 0 }]);
+    reported.length = 0;
     const type = (text: string) => {
       const before = Y.encodeStateVector(rendererDoc);
       const body = rendererDoc.getText("plainText");

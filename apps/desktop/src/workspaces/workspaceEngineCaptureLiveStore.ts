@@ -267,10 +267,12 @@ function authorFromWire(author: NonNullable<MomentRecord["authors"]>[number]): M
       "Engine moment contains corrupt author provenance.",
     );
   }
+  if (author.kind === "unattributed") return { kind: "unattributed" };
   if (author.kind === "human") {
     return {
       kind: "human",
       humanId: author.humanId,
+      ...(author.humanName !== undefined ? { humanName: author.humanName } : {}),
       ...(author.onBehalfOf !== undefined ? { onBehalfOf: author.onBehalfOf } : {}),
     };
   }
@@ -279,6 +281,9 @@ function authorFromWire(author: NonNullable<MomentRecord["authors"]>[number]): M
     return { kind: "named", userId: author.userId, grantId: author.grantId, grantGeneration: author.grantGeneration };
   }
   if (author.kind === "link") {
+    if ("publicPrincipalId" in author) {
+      return { kind: "link", publicPrincipalId: author.publicPrincipalId, label: author.label };
+    }
     return { kind: "link", grantId: author.grantId, grantGeneration: author.grantGeneration, principalId: author.principalId };
   }
   if (author.kind === "automation") {

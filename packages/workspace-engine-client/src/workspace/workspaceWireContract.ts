@@ -1016,6 +1016,8 @@ const CaptureFlushResultSchema = mutableStruct({
 });
 
 const automationClaimFields = {
+  /** The claim whose automation write triggered this run, when present. */
+  parentClaimId: Schema.optionalKey(Schema.NonEmptyString),
   claimId: Schema.NonEmptyString,
   automationId: Schema.NonEmptyString,
   /**

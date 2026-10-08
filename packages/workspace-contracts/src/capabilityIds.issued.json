@@ -116,6 +116,8 @@
   "app.link.create",
   "workspace.open.retry",
   "workspace.open.failures.take",
+  "share.access.read",
+  "document.shared.admission.wait",
   "capture.recovery.read",
   "capture.recovery.clear"
 ]

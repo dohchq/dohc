@@ -24,6 +24,7 @@ const staleSelector = { paths: ["docs"], versionId: null };
 
 const shareView = (selector: unknown, genericChatWritable: unknown = false) => ({
   shareId: "share-1",
+  recipientUserId: "recipient",
   granterEmail: "sam@dohc.test",
   genericChatWritable,
   grantedSelector: selector,
@@ -38,6 +39,24 @@ const mount = (id: string, label: string, selector: unknown) => ({
 });
 
 describe("workspace summary projection", () => {
+  it("marks a received copy without a recipient pin as damaged", () => {
+    const raw = { ...shareView(goodSelector), recipientUserId: undefined };
+    expect(workspaceSummaryFor(entry({ shareView: raw })).shareView).toMatchObject({ damaged: true });
+    expect(workspaceSummaryFor(entry({ shareView: raw })).shareView?.access).toBeUndefined();
+    expect(workspaceSummaryFor(entry({ shareView: raw })).shareView?.recipientUserId).toBeUndefined();
+  });
+
+  it("keeps the recipient pin when the grant is unreadable", () => {
+    expect(workspaceSummaryFor(entry({ shareView: shareView(staleSelector) })).shareView)
+      .toMatchObject({ damaged: true, recipientUserId: "recipient" });
+  });
+
+  it("carries durable unsaved paths to the shell", () => {
+    for (const unsavedPaths of [["docs/locked.md"], null]) {
+      expect(workspaceSummaryFor(entry({ shareView: { ...shareView(goodSelector), unsavedPaths } })).shareView?.unsavedPaths).toEqual(unsavedPaths);
+    }
+  });
+
   it("carries the level from the pinned grant", () => {
     const summary = workspaceSummaryFor(
       entry({

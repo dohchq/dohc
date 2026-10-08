@@ -139,6 +139,7 @@ interface AgentMomentAuthor {
 interface HumanMomentAuthor {
   kind: "human";
   humanId: string;
+  humanName?: string;
   onBehalfOf?: string;
 }
 
@@ -162,6 +163,12 @@ interface LinkMomentAuthor {
   principalId: string;
 }
 
+interface LiveLinkMomentAuthor {
+  kind: "link";
+  publicPrincipalId: string;
+  label: string;
+}
+
 /**
  * An automation writing a file. The depth is its trigger's chain depth plus
  * one, so the claims its write causes carry the chain onward and stop at the
@@ -175,11 +182,13 @@ interface AutomationMomentAuthor {
 }
 
 export type MomentAuthor =
+  | { kind: "unattributed" }
   | AgentMomentAuthor
   | HumanMomentAuthor
   | PublicMomentAuthor
   | NamedMomentAuthor
   | LinkMomentAuthor
+  | LiveLinkMomentAuthor
   | AutomationMomentAuthor;
 
 // A person's own write names them, as desktop main reads them. A local agent
@@ -187,7 +196,7 @@ export type MomentAuthor =
 // person, and none when its run has none.
 export type MomentWriteAuthor =
   | (AgentMomentAuthor & { onBehalfOf: string })
-  | Omit<HumanMomentAuthor, "onBehalfOf">
+  | Omit<HumanMomentAuthor, "onBehalfOf" | "humanName">
   | AutomationMomentAuthor;
 
 type VersionedFileContentKind = "text" | "binary";

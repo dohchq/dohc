@@ -416,6 +416,8 @@ pub enum AutomationTrigger {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutomationClaim {
+    /// The automation claim whose write started this run.
+    pub parent_claim_id: Option<String>,
     pub claim_id: String,
     pub automation_id: String,
     pub trigger: AutomationTrigger,
@@ -535,12 +537,13 @@ fn committed<T>(outcome: TxnOutcome<T>) -> Result<T, DomainError> {
 const CLAIM_COLUMNS: &str = "claim_id, automation_id, trigger_origin_id, trigger_origin_seq, \
      trigger_history_id, record_id, collection_path, depth, state, attempts, error, \
      created_at_ms, updated_at_ms, change_kind, author_origin_id, actor_kind, on_behalf_of, run, \
-     trigger_moment_order, trigger_key, change_author_json, change_live_cursor";
+     trigger_moment_order, trigger_key, change_author_json, change_live_cursor, parent_claim_id";
 
 fn claim_from_row(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<Result<AutomationClaim, DomainError>> {
     let claim_id: String = row.get(0)?;
+    let parent_claim_id: Option<String> = row.get(22)?;
     let automation_id: String = row.get(1)?;
     let trigger_origin_id: Option<String> = row.get(2)?;
     let trigger_origin_seq: Option<i64> = row.get(3)?;
@@ -607,6 +610,7 @@ fn claim_from_row(
             }
         };
         Ok(AutomationClaim {
+            parent_claim_id,
             claim_id,
             automation_id,
             trigger,
@@ -1031,6 +1035,7 @@ fn decide_group_message(
     };
     let chain_stopped = depth >= AUTOMATION_CHAIN_DEPTH_CAP;
     let claimed = ClaimedChange {
+        parent_claim_id: None,
         trigger: AutomationTrigger::Key {
             key: format!("message:{}", message.message_id),
         },
@@ -1792,6 +1797,7 @@ fn subscriptions_wanting(
 /// Everything one change's claims share: every claiming automation gets a
 /// claim with these facts.
 struct ClaimedChange<'a> {
+    parent_claim_id: Option<&'a str>,
     trigger: AutomationTrigger,
     record_id: Option<&'a str>,
     collection_path: Option<&'a str>,
@@ -1874,9 +1880,9 @@ fn insert_claims(
                   state, attempts, error, created_at_ms, updated_at_ms, change_kind, \
                   author_origin_id, actor_kind, on_behalf_of, change_fields_json, \
                   change_fields_omitted, trigger_key, message_json, change_author_json, \
-                  change_live_cursor) \
+                  change_live_cursor, parent_claim_id) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12, ?13, ?13, ?14, \
-                         ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                         ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
                 params![
                     workspace_id,
                     claim_id,
@@ -1901,11 +1907,13 @@ fn insert_claims(
                     message_json,
                     shared_author_json,
                     claimed.change.live_cursor,
+                    claimed.parent_claim_id,
                 ],
             )
             .map_err(DomainError::sql_persist)?;
         if rows == 1 {
             inserted.push(AutomationClaim {
+                parent_claim_id: claimed.parent_claim_id.map(str::to_owned),
                 claim_id,
                 automation_id: (*automation_id).to_owned(),
                 trigger: claimed.trigger.clone(),
@@ -1992,6 +2000,11 @@ pub fn claim_automation_triggers_in_tx(
     }
     let changes: Vec<FieldChange<'_>> = facts.fields.iter().map(FieldChange::from).collect();
     let claimed = ClaimedChange {
+        parent_claim_id: facts
+            .attribution
+            .as_ref()
+            .and_then(|a| a.run.as_ref())
+            .map(|run| run.claim_id.as_str()),
         trigger,
         record_id: Some(&facts.record_id),
         collection_path: Some(&facts.collection_path),
@@ -2229,21 +2242,55 @@ fn moment_is_local(
     .map_err(DomainError::sql_corrupt)
 }
 
+fn moment_is_direct_creation(
+    conn: &Connection,
+    workspace_id: &str,
+    moment_order: i64,
+    author: Option<&SharedChangeAuthor>,
+) -> Result<bool, DomainError> {
+    let grant_id = match author {
+        Some(SharedChangeAuthor::Named { grant_id, .. })
+        | Some(SharedChangeAuthor::Link { grant_id, .. }) => grant_id,
+        None => return Ok(false),
+    };
+    // Sync accepts this origin only with its matching relay-derived author
+    // and a Collection record creation. Other imported moments stay remote.
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM moments m JOIN replication_log r \
+           ON r.workspace_id = m.workspace_id AND r.op_kind = 'moment.append' \
+          AND json_extract(r.payload_json, '$.momentId') = m.moment_id \
+         WHERE m.workspace_id = ?1 AND m.moment_order = ?2 \
+           AND m.operation = 'write' AND m.before_present <> 2 \
+           AND r.imported = 1 AND r.origin_id = ?3)",
+        params![
+            workspace_id,
+            moment_order,
+            format!("relay:collection-file:{grant_id}")
+        ],
+        |row| row.get(0),
+    )
+    .map_err(DomainError::sql_corrupt)
+}
+
 /// A moment's author as a claim names it ([`moment_author_attribution`]),
 /// with the deepest chain its authors declared ([`moment_author_depth`]).
 fn moment_change(kind: AutomationChangeKind, author_json: Option<&str>) -> (AutomationChange, u32) {
     let (author_origin_id, attribution) = moment_author_attribution(author_json);
+    let shared_author = crate::collections::moment_shared_author(author_json);
     let change = AutomationChange {
         kind,
         author_origin_id,
         actor_kind: attribution
             .as_ref()
             .map(|attribution| attribution.actor_kind),
-        on_behalf_of: attribution
-            .as_ref()
-            .and_then(|attribution| attribution.on_behalf_of.clone()),
-        // A moment a claim is made from was committed on this computer.
-        shared_author: None,
+        on_behalf_of: match &shared_author {
+            Some(SharedChangeAuthor::Named { user_id, .. }) => Some(user_id.clone()),
+            Some(SharedChangeAuthor::Link { .. }) => None,
+            None => attribution
+                .as_ref()
+                .and_then(|attribution| attribution.on_behalf_of.clone()),
+        },
+        shared_author,
         live_cursor: None,
     };
     (change, moment_author_depth(author_json))
@@ -2341,12 +2388,18 @@ pub fn claim_record_lifecycle_in_tx(
                     continue;
                 }
             }
-            if !moment_is_local(conn, workspace_id, moment.moment_order)?
-                || moment_is_merged(conn, workspace_id, moment.moment_order)?
-            {
+            let (change, depth) = moment_change(kind, moment.author_json.as_deref());
+            let claims_here = moment_is_local(conn, workspace_id, moment.moment_order)?
+                || (kind == AutomationChangeKind::Added
+                    && moment_is_direct_creation(
+                        conn,
+                        workspace_id,
+                        moment.moment_order,
+                        change.shared_author.as_ref(),
+                    )?);
+            if !claims_here || moment_is_merged(conn, workspace_id, moment.moment_order)? {
                 continue;
             }
-            let (change, depth) = moment_change(kind, moment.author_json.as_deref());
             let author_ids: Vec<String> = moment_author_entries(moment.author_json.as_deref())
                 .iter()
                 .filter_map(|author| match author.get("kind").and_then(Value::as_str) {
@@ -2402,7 +2455,12 @@ pub fn claim_record_lifecycle_in_tx(
                     }
                 })
                 .collect();
+            let (_, parent_attribution) = moment_author_attribution(moment.author_json.as_deref());
             let claimed = ClaimedChange {
+                parent_claim_id: parent_attribution
+                    .as_ref()
+                    .and_then(|a| a.run.as_ref())
+                    .map(|run| run.claim_id.as_str()),
                 trigger: AutomationTrigger::Moment {
                     moment_order: moment.moment_order,
                 },
@@ -2618,6 +2676,7 @@ pub fn press_automation_in_tx(
         }
         (None, None) => {
             let claimed = ClaimedChange {
+                parent_claim_id: None,
                 trigger: AutomationTrigger::Key { key },
                 record_id: Some(record_id.as_str()),
                 collection_path: None,
@@ -2764,6 +2823,7 @@ pub fn claim_automation_schedule_in_tx(
             }
             for due_ms in &schedule.run {
                 let claimed = ClaimedChange {
+                    parent_claim_id: None,
                     trigger: AutomationTrigger::Key {
                         key: format!("schedule:{due_ms}"),
                     },
@@ -2856,6 +2916,7 @@ pub fn claim_automation_run_now_in_tx(
         });
     }
     let claimed = ClaimedChange {
+        parent_claim_id: None,
         trigger: AutomationTrigger::Key { key },
         record_id: None,
         collection_path: None,

@@ -1,6 +1,6 @@
+import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import { useCallback, useMemo, useRef, useState } from "react";
 import type { DraftFlush, DraftFlushOptions } from "../useAutosavedTextDraft";
-import type { FileSaveState } from "../fileInspectorUi";
 import { beginCollectionLineageOperation } from "../collections/collectionLineageGate";
 import type { ActiveUndoHandler } from "../workbench/EngineMomentDiffPage";
 import type { TreeChangeOperation } from "../workbench/Explorer";
@@ -14,7 +14,7 @@ type MountedEditorRegistration = {
 };
 
 type EditorRegistrationCallbacks = {
-  onSaveStateChange: (state: FileSaveState) => void;
+  onSaveStateChange: (state: SaveState) => void;
   registerDraftFlush: (flush: DraftFlush | null) => void;
   registerSourceToggle: (toggle: (() => void) | null) => void;
   registerActiveUndo: (handler: ActiveUndoHandler | null) => void;
@@ -72,7 +72,7 @@ export function useEditorRegistry(
       };
       const callbacks: EditorRegistrationCallbacks = {
         onSaveStateChange: (state) => {
-          const dirty = state !== "saved" && state !== "deleted";
+          const dirty = state.kind !== "saved-here" && state.kind !== "unknown";
           if (dirty === dirtyTabsRef.current.has(tab)) return;
           if (dirty) {
             dirtyTabsRef.current.add(tab);

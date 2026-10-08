@@ -253,3 +253,14 @@ export function isWorkspaceUpdatingError(error: unknown): boolean {
   return name === "DaemonRefusalError" && code === "OVERLOADED" &&
     ERROR_WORDS.DaemonRefusalError?.[message] === UPDATING;
 }
+
+/** Access and connection failures can hide a changed grant behind an IPC error. */
+export function shouldRecheckShareAccess(error: unknown): boolean {
+  const { name, code, message } = parse(error);
+  if (["RelayUnauthorizedError", "RelayClaimRefusedError", "RelayWorkspaceUnavailableError",
+    "RelayUnreachableError", "SharedFileReadOnlyError", "ShareUnavailableError", "TimeoutError", "NetworkError"].includes(name)) return true;
+  if (name === "DaemonRefusalError" && code !== undefined &&
+    ["AUTH_FAILED", "FORBIDDEN", "SHARE_UNAVAILABLE", "SHARE_READ_ONLY", "SHARE_OPERATION_REJECTED",
+      "SESSION_EXPIRED", "WORKSPACE_UNAVAILABLE", "IDENTITY_NOT_RECOGNIZED"].includes(code)) return true;
+  return /\b(?:unauthorized|forbidden|authorization failed|does not have Edit access|access to this share (?:ended|changed)|share is no longer available|network (?:error|request failed|failure)|fetch failed|failed to fetch|ECONN\w*|ENOTFOUND|ETIMEDOUT)\b|Share request failed \((?:401|403|404)\)/i.test(message);
+}

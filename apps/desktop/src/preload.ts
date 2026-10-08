@@ -51,10 +51,12 @@ import {
   noticeOperations,
   scheduleHostOperations,
   chatDispatchNoticeOperations,
+  sharedViewAccessOperations,
   ScheduleHostChangedEvent,
   ChatDispatchNoticesEvent,
   workspaceSearchOperations,
   workspaceVersionOperations,
+  engineYDocAdmissionOperations,
   parseWorkspaceActivityEventForIpc,
 } from "./ipc/bridgeContract";
 import { CHANNELS } from "./ipc/channels";
@@ -318,6 +320,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.leaveSharedChannel, payload),
   openSharedView: (payload) => ipcRenderer.invoke(CHANNELS.openSharedView, payload),
   refreshSharedView: (payload) => ipcRenderer.invoke(CHANNELS.refreshSharedView, payload),
+  ...operationBridge(sharedViewAccessOperations, invoke),
   dismissShareSkips: (payload) => ipcRenderer.invoke(CHANNELS.dismissShareSkips, payload),
   listCollectionAutomations: (payload) =>
     ipcRenderer.invoke(CHANNELS.listCollectionAutomations, payload),
@@ -647,6 +650,7 @@ const bridge: DohcDesktopBridge = {
   // session.
   openEngineYDocSession: (payload) =>
     ipcRenderer.invoke(CHANNELS.engineYDocOpen, payload),
+  ...operationBridge(engineYDocAdmissionOperations, invoke),
   readEngineYDocArtifactAsset: (payload) =>
     ipcRenderer.invoke(CHANNELS.engineYDocReadArtifactAsset, payload),
   applyEngineYDocUpdate: (payload) =>

@@ -175,7 +175,7 @@ export function useWorkspaceSearch(
           failedSearchRef.current = null;
           activeSearchRef.current = retry;
           rendererMarks.mark("content-search-start");
-          commit(beginSearch(retry.payload.searchId));
+          commit(beginSearch(retry.payload.searchId, retry.payload.query));
           issue(retry);
         });
       };
@@ -238,7 +238,7 @@ export function useWorkspaceSearch(
       // issue → rg spawn → first streamed batch / final batch COMMITTED.
       // The SearchView's post-commit effects record the measures.
       rendererMarks.mark("content-search-start");
-      commit(beginSearch(searchId));
+      commit(beginSearch(searchId, options.query));
       const active: ActiveSearch = {
         workspaceId,
         payload: {

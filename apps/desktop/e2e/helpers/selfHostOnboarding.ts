@@ -85,7 +85,15 @@ export async function startSelfHostOnboardingStack(directory: string, options: {
 // The same public origin routes to separate services, like the self-host proxy.
 // Bodies, headers, and status codes pass through unchanged; no route mints credentials.
 // With a certificate it terminates TLS, and it forwards live editing's WebSocket upgrades.
-export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "key">) {
+export interface ProxiedCollectionWriteResponse {
+  requestBody: string;
+  status: number;
+  body: string;
+}
+
+export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "key">, options: {
+  collectionWriteResponse?(response: ProxiedCollectionWriteResponse): "drop" | void | Promise<"drop" | void>;
+} = {}) {
   let authInternalUrl: string | undefined;
   let relayUrl: string | undefined;
   const upstreams = new Set<ReturnType<typeof requestHttp>>();
@@ -95,7 +103,27 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
     const path = incoming.url ?? "/";
     const target = route(path);
     if (!target) { outgoing.writeHead(503).end(); return; }
+    const intercept = options.collectionWriteResponse && incoming.method === "POST"
+      && /^\/sync\/shares\/[^/]+\/collection-writes$/u.test(path);
+    const requestChunks: Buffer[] = [];
+    if (intercept) incoming.on("data", chunk => requestChunks.push(Buffer.from(chunk)));
     const upstream = requestHttp(new URL(path, target), { method: incoming.method, headers: incoming.headers }, (response) => {
+      if (intercept) {
+        const chunks: Buffer[] = [];
+        response.on("data", chunk => chunks.push(Buffer.from(chunk)));
+        response.on("error", () => outgoing.destroy());
+        response.once("end", () => {
+          const body = Buffer.concat(chunks);
+          void Promise.resolve(options.collectionWriteResponse!({ requestBody: Buffer.concat(requestChunks).toString("utf8"),
+            status: response.statusCode ?? 502, body: body.toString("utf8") })).then(action => {
+            // The upstream has completed its commit before the client loses the answer.
+            if (action === "drop") { outgoing.destroy(); return; }
+            outgoing.writeHead(response.statusCode ?? 502, response.headers);
+            outgoing.end(body);
+          }).catch(() => outgoing.destroy());
+        });
+        return;
+      }
       outgoing.writeHead(response.statusCode ?? 502, response.headers);
       response.pipe(outgoing);
       response.on("error", () => outgoing.destroy());

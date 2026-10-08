@@ -1,4 +1,5 @@
 import { ReservedWorkspaceIdError } from "@dohc/workspace-core";
+import { RelayUnauthorizedError, RelayUnreachableError, SharedFileReadOnlyError, ShareUnavailableError } from "@dohc/workspace-contracts/relay";
 import { readFileSync } from "node:fs";
 import { PersistentRuntimeError } from "@dohc/app-backend-runtime/persistent";
 import { DaemonRefusalError, type DaemonErrorCode } from "@dohc/workspace-engine-client";
@@ -13,6 +14,7 @@ import {
   isWorkspaceUpdatingError,
   needsNewerDohc,
   readError,
+  shouldRecheckShareAccess,
   withErrorWords,
 } from "./errorWords";
 
@@ -33,6 +35,37 @@ const engineCodes = [
 ].map((match) => match[1]!);
 
 describe("error words", () => {
+  it.each([
+    new RelayUnauthorizedError(),
+    new SharedFileReadOnlyError(),
+    new ShareUnavailableError(),
+    new RelayUnreachableError(),
+    new DOMException("The request timed out.", "TimeoutError"),
+    new TypeError("Failed to fetch"),
+    new Error("Share request failed (403)"),
+    new Error("This Collection does not have Edit access."),
+    new Error("Your access to this share ended."),
+    new Error("connect ECONNREFUSED 127.0.0.1:3000"),
+  ])("rechecks share access for %s across IPC", error => {
+    expect(shouldRecheckShareAccess(acrossIpc(error))).toBe(true);
+  });
+
+  it.each(["FORBIDDEN", "AUTH_FAILED", "SHARE_UNAVAILABLE", "SHARE_READ_ONLY"] as const)(
+    "rechecks share access for engine %s across IPC", code => {
+      expect(shouldRecheckShareAccess(acrossIpc(refusal(code, "The request was rejected.")))).toBe(true);
+    },
+  );
+
+  it.each([
+    new Error("tasks/Untitled.md already exists. Choose another record name."),
+    new Error("network/Untitled.md already exists. Choose another record name."),
+    new Error("This Collection does not have a current document schema."),
+    new TypeError("Cannot read properties of undefined"),
+    refusal("CONFLICT", "The record changed."),
+  ])("does not recheck share access for %s", error => {
+    expect(shouldRecheckShareAccess(acrossIpc(error))).toBe(false);
+  });
+
   it.each(["link", "shares", "notices"])("keeps the reserved-ID refusal title and body across IPC for %s", (workspaceId) => {
     const error = new ReservedWorkspaceIdError(workspaceId);
     const expected = {

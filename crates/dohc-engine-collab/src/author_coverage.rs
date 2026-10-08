@@ -42,6 +42,13 @@ impl Authors {
             .get("kind")
             .and_then(Value::as_str)
             .ok_or_else(|| corrupt("author has no kind"))?;
+        if kind == "unattributed" {
+            if author.as_object().is_none_or(|object| object.len() != 1) {
+                return Err(corrupt("invalid unattributed coverage marker"));
+            }
+            self.0.insert("unattributed".into(), author);
+            return Ok(());
+        }
         let field = match kind {
             "agent" => "agentId",
             "automation" => "automationId",
@@ -340,9 +347,13 @@ pub fn admit_accepted_in(
     key: &DocKey,
     authors: &[String],
 ) -> Result<(), CollabError> {
-    if authors.is_empty() {
-        return Ok(());
-    }
+    // Missing recording context is coverage too, never proof of recipient-only edits.
+    let unattributed = [r#"[{"kind":"unattributed"}]"#.to_owned()];
+    let authors = if authors.is_empty() {
+        &unattributed
+    } else {
+        authors
+    };
     let mut covered = reserved_in(conn, key)?;
     for json in authors {
         admit(&mut covered, json)?;

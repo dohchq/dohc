@@ -107,8 +107,11 @@ const PANE_CORNER_ARC = `${DECORATION_ARC} border-t shadow-[0_0_0_8px_var(--dohc
 // layout, `data-active` on the group that takes opened files. In a split the
 // active group's strip shows an accent line along its whole top, so the mark
 // stays in view however the strip scrolls and on a group with no tabs. The
-// other groups' active tabs recede to muted text.
-const ACTIVE_GROUP_LINE = "[[data-split]_[data-editor-group-id][data-active]_&]:block";
+// other groups' active tabs recede to muted text. The line is a border, not a
+// fill, because forced colors remove fills; there it takes the system
+// Highlight color.
+const ACTIVE_GROUP_LINE =
+  "border-t-2 border-accent forced-colors:border-[Highlight] [[data-split]_[data-editor-group-id][data-active]_&]:block";
 const INACTIVE_GROUP_TAB = "[[data-split]_[data-editor-group-id]:not([data-active])_&]:text-muted";
 
 // Memoized so the dirty flips while typing (saveState ticks every autosave)
@@ -864,7 +867,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
       <span
         aria-hidden
         data-testid="editor-tabs-active-group"
-        className={`pointer-events-none absolute inset-x-0 top-0 hidden h-0.5 bg-accent ${ACTIVE_GROUP_LINE}`}
+        className={`pointer-events-none absolute inset-x-0 top-0 hidden ${ACTIVE_GROUP_LINE}`}
       />
       <div
         ref={stripRef}

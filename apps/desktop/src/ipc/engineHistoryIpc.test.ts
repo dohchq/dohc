@@ -61,6 +61,7 @@ describe("listEngineMomentsForIpc", () => {
       {kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1},
       {kind: "link", grantId: "grant", grantGeneration: 1, principalId: "holder"},
       {kind: "public", principalId: "public", grantId: "grant"},
+      {kind: "unattributed"},
     ];
     const response = await listEngineMomentsForIpc(async () => ({
       moments: [{...detail.moment, authors, momentOrder: 1, protected: false}],
@@ -189,6 +190,17 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
     expect(record.publicAuthor).toBeUndefined();
     expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
   });
+  it("preserves a live link author without inventing the grant for Stop and restore", () => {
+    const detail = detailWith({before: textSide("old"), after: textSide("new")});
+    if (detail.protected) throw new Error("Expected a plaintext moment");
+    const author = {kind: "link", publicPrincipalId: "public-holder", label: "Ana"} as const;
+    detail.moment.authors = [author];
+    const record = engineMomentDetailForIpc(detail, names);
+    expect(record.authors).toEqual([author]);
+    expect(record.linkAuthor).toBeUndefined();
+    expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
+  });
+
   it("carries an Edit link's grant and principal, and names no person for it", () => {
     const detail = detailWith({before: textSide("old"), after: textSide("new")});
     if (detail.protected) throw new Error("Expected a plaintext moment");

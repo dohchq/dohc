@@ -38,6 +38,32 @@ pub(crate) fn omit_local_person_authors(payload: &mut serde_json::Value) -> bool
     true
 }
 
+/// Client log routes cannot attest relay identities. Keep local coverage intact.
+pub(crate) fn omit_client_identity_authors(payload: &mut serde_json::Value) -> bool {
+    let before = payload.get("authors").cloned();
+    omit_local_person_authors(payload);
+    if let Some(authors) = payload
+        .get_mut("authors")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        let mut marker = false;
+        authors.retain_mut(|author| {
+            if matches!(
+                author.get("kind").and_then(serde_json::Value::as_str),
+                Some("human" | "public" | "named" | "link" | "unattributed")
+            ) {
+                if marker {
+                    return false;
+                }
+                *author = serde_json::json!({"kind": "unattributed"});
+                marker = true;
+            }
+            true
+        });
+    }
+    payload.get("authors") != before.as_ref()
+}
+
 pub(crate) fn relay_person_id(id: &str) -> Option<&str> {
     (!id.starts_with("local:")).then_some(id)
 }
@@ -47,6 +73,7 @@ pub(crate) fn repair_queued_moment_authors(
     store: &mut dohc_engine_storage::EngineStore,
     ops: &mut [crate::ReplicationEnvelope],
     faults: &dyn dohc_engine_storage::FaultInjector,
+    native_settlements: bool,
 ) -> Result<dohc_engine_storage::TxnOutcome<()>, SyncError> {
     use dohc_engine_storage::TxnOutcome;
     let repairs: Vec<_> = ops
@@ -57,7 +84,12 @@ pub(crate) fn repair_queued_moment_authors(
                 return None;
             }
             let mut payload = op.payload.clone();
-            omit_local_person_authors(&mut payload).then_some((index, payload))
+            let changed = if native_settlements {
+                omit_local_person_authors(&mut payload)
+            } else {
+                omit_client_identity_authors(&mut payload)
+            };
+            changed.then_some((index, payload))
         })
         .collect();
     if repairs.is_empty() {
