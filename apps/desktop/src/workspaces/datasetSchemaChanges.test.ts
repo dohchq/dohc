@@ -7,6 +7,7 @@ import { datasetColumnFields, datasetRevisionsPreserveAccess, type DatasetDefini
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetSchemaChange } from "@dohc/cli/dataset";
 import { DatasetSchemaChangeError, generateDatasetSchemaChange } from "./datasetSchemaChanges";
+import { invalidateDatasetAddresses, resolveDatasetAddress } from "./datasetAddress";
 import { generateDatasetSources } from "./datasetGenerator";
 import { createLocalDatasetHost, type LocalDatasetHost } from "./localDatasetHost";
 import { createDatasetHandler } from "../ipc/datasetIpc";
@@ -49,6 +50,7 @@ async function fixture(initial: DatasetDefinition = definition, remote = false) 
       prepareMigrationCandidate: host.prepareMigrationCandidate, approveMigrationCandidate: host.approveMigrationCandidate, discardMigrationCandidate: host.discardMigrationCandidate,
       migrationPreviewPage: host.migrationPreviewPage }) as unknown as import("./remoteDataset").OwnerDatasetData } : {}), withAdapter: async (_workspace, work) => work(adapter), createSources: async (_workspace, sources) => {
       for (const [path, source] of Object.entries(sources)) { if (files.has(path)) throw new Error("Existing source"); files.set(path, source); }
+      invalidateDatasetAddresses({ workspaceId: "w" });
       alterSources?.(Object.keys(sources));
     } });
   async function prepare(change: DatasetSchemaChange, current = host.approvedArtifacts(id(1)).revision) {
@@ -66,6 +68,21 @@ const approve = async (setup: Awaited<ReturnType<typeof fixture>>, review: Await
   if (result.kind !== "migrated") throw new Error("Expected migration");
   return result;
 };
+
+it("keeps the Collection address available during, after, and between field reviews", async () => {
+  const f = await fixture();
+  const describe = () => f.handler("owner", { action: "describe", workspaceId: "w", datasetPath: "people/dataset.json" });
+  const review = await f.prepare({ kind: "addField", tableId: id(2), field: { name: "Location", type: "text", required: false, unique: false } });
+  await expect(describe()).resolves.toMatchObject({ kind: "description", dataset: { datasetId: id(1), revision: 1 } });
+  await approve(f, review);
+  await expect(describe()).resolves.toMatchObject({ kind: "description", dataset: { datasetId: id(1), revision: 2 } });
+  const discarded = await f.prepare({ kind: "renameCollection", name: "Guests" });
+  await f.handler("owner", { action: "discardMigration", workspaceId: "w", preparationId: discarded.preparationId });
+  await expect(describe()).resolves.toMatchObject({ kind: "description", dataset: { datasetId: id(1), revision: 2 } });
+  f.files.set("copy/dataset.json", f.files.get("people/dataset.json")!);
+  invalidateDatasetAddresses({ workspaceId: "w" });
+  await expect(describe()).rejects.toThrow("Collection address ambiguous");
+});
 
 it("keeps schema edits beside revisions at the workspace root", () => {
   const rootDefinition = { ...definition, schemaPath: "revisions/2-original/schema.sql", operationsPath: "revisions/2-original/operations.js" };
@@ -347,6 +364,7 @@ it.each([false, true])("reviews public relation choices on the current authority
   const result = await f.handler("owner", { action: "prepareRelationChoices", workspaceId: "w", datasetPath: "people/dataset.json",
     revision: f.revision.revision, revisionSha256: f.revision.revisionSha256, tableId: id(2), fieldId: id(10), labelFieldId: id(4) });
   if (result.kind !== "migration-prepared") throw Error("Expected explicit choice review");
+  await expect(resolveDatasetAddress(f.adapter, "w", "people/dataset.json", new AbortController().signal)).resolves.toBe(id(1));
   const choice = result.revision.definition.operations.at(-1)!;
   expect(choice).toMatchObject({ access: "link", readOnly: true, fieldIds: [id(3), id(4)] });
   expect(f.host.approvedArtifacts(id(1)).revision.revisionSha256).toBe(f.revision.revisionSha256);

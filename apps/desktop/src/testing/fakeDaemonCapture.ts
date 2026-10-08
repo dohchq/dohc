@@ -331,6 +331,17 @@ export function createFakeDaemonCapture(input: {
           return response;
         }
         case VERSIONED_METHOD.textDelete: {
+            if (typeof params.expectedSha256 === "string") {
+              const disk = await readDiskContent(join(rootPath, String(params.path)));
+              if ((disk.kind !== "text" && disk.kind !== "binary") || disk.sha256 !== params.expectedSha256) {
+                throw Object.assign(new Error("write-precondition-failed"), {
+                  wireError: { code: "INVALID_PARAMS", message: "write-precondition-failed", retry: "no" },
+                });
+              }
+              const response = await loopback.sendRequest(request);
+              await rm(join(rootPath, String(params.path)));
+              return response;
+            }
           // Like the engine, confirm the caller's absence against the disk.
           if (params.onlyIfAbsentOnDisk === true) {
             const present = await lstat(join(rootPath, String(params.path))).then(

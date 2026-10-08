@@ -364,7 +364,7 @@ pub(crate) fn list_jobs(
     pending_only: bool,
 ) -> Result<Vec<MaterializationJob>, StorageError> {
     let filter = if pending_only {
-        "WHERE status = 'pending'"
+        "WHERE status = 'pending' AND job_id NOT GLOB 'restore-delete-mat_*'"
     } else {
         ""
     };

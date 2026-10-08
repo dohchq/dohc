@@ -34,7 +34,7 @@ impl<'a> VersionedTextStore<'a> {
         faults: &dyn FaultInjector,
     ) -> Result<DeleteResult, DomainError> {
         let outcome = self.store.write_with(faults, |tx| {
-            delete_text_in_tx_checked(tx, input, expected_object_id)
+            delete_text_in_tx_checked(tx, input, expected_object_id, None)
         })?;
         committed(outcome)
     }
@@ -401,7 +401,7 @@ pub fn delete_text_in_tx(
     tx: &Transaction<'_>,
     input: &DeleteTextFile,
 ) -> Result<DeleteResult, DomainError> {
-    delete_text_in_tx_checked(tx, input, None)
+    delete_text_in_tx_checked(tx, input, None, None)
 }
 
 /// Checks object identity before changing the path or its history.
@@ -412,6 +412,26 @@ pub fn delete_text_in_tx_checked(
     tx: &Transaction<'_>,
     input: &DeleteTextFile,
     expected_object_id: Option<&str>,
+    expected_sha256: Option<&str>,
+) -> Result<DeleteResult, DomainError> {
+    delete_text_in_tx_prepared(tx, input, expected_object_id, expected_sha256, false)
+}
+
+pub fn prepare_checked_delete_in_tx(
+    tx: &Transaction<'_>,
+    input: &DeleteTextFile,
+    expected_object_id: Option<&str>,
+    expected_sha256: &str,
+) -> Result<DeleteResult, DomainError> {
+    delete_text_in_tx_prepared(tx, input, expected_object_id, Some(expected_sha256), true)
+}
+
+fn delete_text_in_tx_prepared(
+    tx: &Transaction<'_>,
+    input: &DeleteTextFile,
+    expected_object_id: Option<&str>,
+    expected_sha256: Option<&str>,
+    pending: bool,
 ) -> Result<DeleteResult, DomainError> {
     let normalized_input = normalized_delete_input(input)?;
     if let Some(expected) = expected_object_id {
@@ -439,6 +459,9 @@ pub fn delete_text_in_tx_checked(
     if let Some(expected) = expected_object_id {
         payload_fields.extend([b"expected-object".as_slice(), expected.as_bytes()]);
     }
+    if let Some(expected) = expected_sha256 {
+        payload_fields.extend([b"expected-content".as_slice(), expected.as_bytes()]);
+    }
     let payload_hash = hash_fields(&payload_fields);
     if let Some(request_id) = &input.request_id
         && let Some(recorded) = lookup_request(tx, request_id)?
@@ -460,6 +483,18 @@ pub fn delete_text_in_tx_checked(
     }
     let before =
         get_snapshot(tx, ws, &input.version_id, &object_id)?.ok_or(DomainError::FileNotFound)?;
+    if let Some(expected) = expected_sha256 {
+        let current_sha256 = if before.content_kind == "binary" {
+            before.binary_sha256.as_deref()
+        } else {
+            before.blob_sha256.as_deref()
+        };
+        if current_sha256 != Some(expected) {
+            return Err(DomainError::WritePreconditionFailed {
+                current_sha256: current_sha256.map(str::to_owned),
+            });
+        }
+    }
     if moment_exists(tx, ws, &input.moment_id)? {
         return Err(DomainError::DuplicateMomentId);
     }
@@ -500,27 +535,29 @@ pub fn delete_text_in_tx_checked(
         ],
     )
     .map_err(DomainError::sql_persist)?;
-    crate::collections::index_historical_record_owner_moment_in_tx(tx, ws, moment_order)?;
-    tx.execute(
-        "DELETE FROM path_aliases WHERE workspace_id = ?1 AND version_id = ?2 \
+    if !pending {
+        crate::collections::index_historical_record_owner_moment_in_tx(tx, ws, moment_order)?;
+        tx.execute(
+            "DELETE FROM path_aliases WHERE workspace_id = ?1 AND version_id = ?2 \
          AND path = ?3 AND object_id = ?4",
-        params![ws, input.version_id, input.path, before.object_id],
-    )
-    .map_err(DomainError::sql_persist)?;
-    tx.execute(
-        "DELETE FROM snapshots WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-        params![ws, input.version_id, before.object_id],
-    )
-    .map_err(DomainError::sql_persist)?;
-    // Must run in this same transaction as the path_aliases removal
-    // above — see `cancel_pending_jobs_for_path` for why. Materialization
-    // jobs carry no version identity — they mirror the active version's
-    // working tree only, the same gate `enqueue_binary_delete` applies to
-    // its own job — so an inactive version's delete must not touch them: a
-    // named version deleting its own `note.md` must never cancel a pending
-    // job that belongs to `main`'s `note.md` of the same name.
-    if version_is_active(tx, ws, &input.version_id)? {
-        cancel_pending_jobs_for_path(tx, ws, &input.path, input.now_ms)?;
+            params![ws, input.version_id, input.path, before.object_id],
+        )
+        .map_err(DomainError::sql_persist)?;
+        tx.execute(
+            "DELETE FROM snapshots WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+            params![ws, input.version_id, before.object_id],
+        )
+        .map_err(DomainError::sql_persist)?;
+        // Must run in this same transaction as the path_aliases removal
+        // above — see `cancel_pending_jobs_for_path` for why. Materialization
+        // jobs carry no version identity — they mirror the active version's
+        // working tree only, the same gate `enqueue_binary_delete` applies to
+        // its own job — so an inactive version's delete must not touch them: a
+        // named version deleting its own `note.md` must never cancel a pending
+        // job that belongs to `main`'s `note.md` of the same name.
+        if version_is_active(tx, ws, &input.version_id)? {
+            cancel_pending_jobs_for_path(tx, ws, &input.path, input.now_ms)?;
+        }
     }
 
     let result = DeleteResult {
@@ -539,6 +576,57 @@ pub fn delete_text_in_tx_checked(
         input.now_ms,
     )?;
     Ok(result)
+}
+
+/// Complete or discard a deletion whose disk publication has not been journaled.
+pub fn finish_checked_delete_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    moment_id: &str,
+    applied: bool,
+) -> Result<Option<DeleteResult>, DomainError> {
+    let moment = get_moment(tx, workspace_id, moment_id)?.ok_or(DomainError::FileNotFound)?;
+    let result = delete_result_from_moment(tx, workspace_id, moment, false)?;
+    if applied {
+        tx.execute("DELETE FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND path=?3 AND object_id=?4", params![workspace_id, result.moment.version_id, result.moment.path, result.object.object_id]).map_err(DomainError::sql_persist)?;
+        tx.execute(
+            "DELETE FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![
+                workspace_id,
+                result.moment.version_id,
+                result.object.object_id
+            ],
+        )
+        .map_err(DomainError::sql_persist)?;
+        crate::collections::index_historical_record_owner_moment_in_tx(
+            tx,
+            workspace_id,
+            result.moment.moment_order,
+        )?;
+        cancel_pending_jobs_for_path(
+            tx,
+            workspace_id,
+            &result.moment.path,
+            result.moment.recorded_at_ms,
+        )?;
+    } else {
+        tx.execute(
+            "DELETE FROM engine_requests WHERE result_seq=?1 AND kind='versioned'",
+            [result.moment.moment_order],
+        )
+        .map_err(DomainError::sql_persist)?;
+        tx.execute(
+            "DELETE FROM moments WHERE workspace_id=?1 AND moment_id=?2",
+            params![workspace_id, moment_id],
+        )
+        .map_err(DomainError::sql_persist)?;
+    }
+    tx.execute(
+        "DELETE FROM materialization_jobs WHERE workspace_id=?1 AND job_id=?2",
+        params![workspace_id, format!("restore-delete-mat_{moment_id}")],
+    )
+    .map_err(DomainError::sql_persist)?;
+    Ok(applied.then_some(result))
 }
 
 fn reconstruct_delete(

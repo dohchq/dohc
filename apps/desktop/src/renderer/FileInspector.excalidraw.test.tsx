@@ -220,7 +220,7 @@ function bridgeFor(
     emitSaveState(state: import("../ipc/channels").EngineYDocSaveStateName, seq: number) {
       if (!sessionId) throw new Error("The scene session is not open.");
       for (const listener of saveStateListeners) {
-        listener({ sessionId, ...engineSaveState(state), seq });
+        listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", ...engineSaveState(state), seq });
       }
     },
     emitLineageReplacement(

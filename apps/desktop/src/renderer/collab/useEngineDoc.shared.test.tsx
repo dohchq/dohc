@@ -95,7 +95,7 @@ function sharedBridge() {
     if (!sessionId) throw new Error("session not open yet");
     act(() => {
       for (const listener of [...saveStateListeners]) {
-        listener({ sessionId, ...engineSaveState(state), seq });
+        listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", ...engineSaveState(state), seq });
       }
     });
   }

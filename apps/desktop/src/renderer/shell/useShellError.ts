@@ -1,4 +1,6 @@
 import { createContext, useCallback, useEffect, useRef, useState } from "react";
+import { shareCaptureNoticeState } from "../../workspaces/shareCaptureNotice";
+import type { ShareUnconfirmedChanges } from "../../workspaces/shareViewInfo";
 import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import type { ReportKinds } from "../../ipc/bridgeContract";
 import { readError, UNKNOWN_ERROR_WORDS, withErrorWords } from "../../ipc/errorWords";
@@ -148,11 +150,11 @@ export function useShellError(workspaceId: string) {
   }, []);
 
   const filedShareCapture = useRef<string | null>(null);
-  const reportShareCapture = useCallback((shareId: string, paths: readonly string[] | null | undefined) => {
+  const reportShareCapture = useCallback((shareId: string, paths: readonly string[] | null | undefined,
+    snapshot?: ShareUnconfirmedChanges, ended = true) => {
     const identity = `share-capture:${workspaceId}:${shareId}`;
-    const sortedPaths = paths === null ? null : [...new Set(paths ?? [])].sort();
-    const key = JSON.stringify(sortedPaths);
-    if (sortedPaths !== null && sortedPaths.length === 0) {
+    const { filePaths: sortedPaths, unchecked, checked, key } = shareCaptureNoticeState(paths, snapshot, ended);
+    if (snapshot?.dismissedKey === key || (!unchecked && sortedPaths.length === 0)) {
       shareCaptureNotices.delete(identity);
       filedShareCapture.current = null;
       clearKind("share-capture");
@@ -166,10 +168,17 @@ export function useShellError(workspaceId: string) {
     push({
       identity,
       kind: "share-capture",
-      message: sortedPaths === null
-        ? "dohc could not check this share's files. Your changes may not have been sent. Copy your changed files to another workspace."
-        : "Your changes weren't sent and remain on this computer. Copy these files to another workspace.",
-      details: sortedPaths?.map(path => ["File", path, path.length] as const),
+      title: sortedPaths.length ? ended ? "Changes kept on this computer" : "Changes to copy now" : "Share check incomplete",
+      message: [
+        ...(unchecked ? [checked > 0 || sortedPaths.length > 0
+          ? "dohc checked only some of this share's files." : "dohc couldn't check this share's files."] : []),
+        ...(sortedPaths.length ? ["dohc couldn't confirm these changes reached the share.",
+          ...(ended ? ["They are kept on this computer."]
+            : ["A later change from the owner can replace these files.", "Your saved changes stay in History."])] : []),
+        unchecked ? sortedPaths.length ? "Copy these files and any others you changed to another workspace now." : "Copy any files you changed to another workspace now."
+          : ended ? "Copy these files to another workspace." : "Copy these files to another workspace now.",
+      ].join(" "),
+      details: sortedPaths.length ? sortedPaths.map(path => ["File", path, path.length] as const) : undefined,
       retry: null,
       onDismiss: () => { notice.dismissed = true; },
     }, previous?.key === key ? true : false);
@@ -247,6 +256,7 @@ export function useShellError(workspaceId: string) {
   // thing, such as one folder.
   const reportShellFailure = useCallback(
     (failure: {
+      title?: string;
       message: string;
       cause?: unknown;
       details?: ReadonlyArray<ErrorDetailField>;
@@ -262,6 +272,7 @@ export function useShellError(workspaceId: string) {
         ...(cause ? [["Cause", cause] as const] : []),
       ];
       push({
+        ...(failure.title ? { title: failure.title } : {}),
         message: shown.words ?? UNKNOWN_ERROR_WORDS,
         retry: failure.retry ?? null,
         ...(details.length ? { details } : {}),

@@ -33,6 +33,7 @@ function capability(description: string, exposure: {
 
 export const CAPABILITIES = {
   "share.access.read": capability("Check the current user's received share access.", {ipc: ["checkSharedViewAccess"]}),
+  "share.capture.notice.dismiss": capability("Dismiss a received share's capture Notice.", {ipc: ["dismissShareCaptureNotice"]}),
   "capture.recovery.read": capability("Read capture recovery status.", {ipc: ["getCaptureRecoveryStatus"]}),
   "capture.recovery.clear": capability("Clear a capture recovery notice persistently.", {ipc: ["clearCaptureRecovery"]}),
   "version.list": capability("List workspace versions.", {ipc: ["listWorkspaceVersions"]}),
@@ -158,6 +159,8 @@ export const CAPABILITIES = {
   "data.import": capability("Import data into the local database.", {mcp: {owner: ["dohc_import_data"]}, mcpReason: "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates."}),
   "data.query": capability("Query the local database.", {mcp: {owner: ["dohc_query_database"], view: ["dohc_query_database"], comment: ["dohc_query_database"], edit: ["dohc_query_database"]}}),
   "document.shared.admission.wait": capability("Wait until a shared document is ready for live editing.", {ipc: ["waitForEngineYDocAdmission"]}),
+  "document.draft.discard": capability("Discard the recovery copy of a set-aside draft.", {ipc: ["discardLiveDraftRecovery"]}),
+  "document.save.retry": capability("Try again to save an open document to its file.", {ipc: ["retryEngineYDocSave"]}),
 } as const;
 
 export type CapabilityId = keyof typeof CAPABILITIES;

@@ -348,6 +348,16 @@ describe("update toast", () => {
 });
 
 describe("notice center", () => {
+  it("hides empty path Copy on both the toast and the Notice row", async () => {
+    renderNotices({ workspaceErrors: [{ id: "empty-paths", title: "Share check incomplete",
+      message: "dohc couldn't check this share's files. Copy any files you changed to another workspace now.",
+      details: "", filePaths: [], copyLabel: "Copy file paths", atMs: 1, canRetry: false, seen: false }] });
+    expect(screen.getByTestId("workspace-shell-error").textContent).toContain("Share check incomplete");
+    expect(screen.queryByTestId("workspace-shell-error-copy")).toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(await screen.findByTestId("notice-center")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Copy file paths" })).toBeNull();
+  });
   it("offers to repair shared files whose folder projection is pending", async () => {
     const onRefreshShareView = vi.fn();
     renderNotices({

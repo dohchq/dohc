@@ -4,10 +4,11 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { insertElementRevision, putSceneAsset } from "@dohc/excalidraw-scene";
 import { resetOrphanedDrafts, useOrphanedDrafts } from "../orphanedDrafts";
-import { ORPHANED_DRAFT_STORAGE_KEY } from "../orphanedDraftStorage";
+import { ORPHANED_DRAFT_STORAGE_KEY, loadStoredDrafts } from "../orphanedDraftStorage";
 import { disposeEngineDocLeasesForTests } from "./engineDocLease";
 import { retainObservedEngineDocLease } from "./engineDocLeaseTestHarness";
 import { harnessBridge, IMAGE_DESCRIPTOR } from "./engineDocSaveStateTestHarness";
+import { EngineYDocDeliveryRefusedError } from "./engineYDocProvider";
 import { parseExcalidrawDocument } from "../excalidrawDocument";
 
 const projectionGate = vi.hoisted(() => ({
@@ -714,11 +715,11 @@ it("keeps generic reasons out of saveError and gives refusal text precedence ove
   await retainBound();
   const listener = subscribe.mock.calls[0]![0];
   const sessionId = harness.sessionId()!;
-  act(() => listener({ sessionId, state: { kind: "error", reason: "generic reason", issueId: null }, seq: 0 }));
+  act(() => listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "error", reason: "generic reason", issueId: null }, seq: 0 }));
   expect(retained.snapshot.saveError).toBeNull();
-  act(() => listener({ sessionId, state: { kind: "changed-on-disk", reason: "The file changed on disk.", issueId: null }, seq: 0 }));
+  act(() => listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "changed-on-disk", reason: "The file changed on disk.", issueId: null }, seq: 0 }));
   expect(retained.snapshot.saveError).toBeNull();
-  act(() => listener({ sessionId, state: { kind: "error", reason: "generic reason", issueId: "refusal" }, seq: 0,
+  act(() => listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "error", reason: "generic reason", issueId: "refusal" }, seq: 0,
     authorCapacity: true, editRefusal: { workspaceId: "ws-1", path: "notes/big.md", requestId: "refusal", message: "refusal message" } }));
   expect(retained.snapshot.saveError).toBe("refusal message");
 });
@@ -729,4 +730,121 @@ it("keeps main's checked save state across a delayed replacement acknowledgement
   harness.emit("saved", 0);
   await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
   await waitFor(() => expect(retained.snapshot.saveState.kind).toBe("saved-here"));
+});
+
+it("ends clean share access as read-only without a recovery draft", async () => {
+  await retainBound();
+  harness.emit("saved-to-host", 0);
+  harness.emit("read-only", 0);
+
+  expect(retained.snapshot.readOnlyTransition?.token).toBe(boundOutcome().token);
+  expect(drafts.result.current).toHaveLength(0);
+  await waitFor(() => expect(harness.closed).toHaveLength(1));
+  harness.emit("saved-to-host", 0);
+  expect(retained.snapshot.readOnlyTransition?.token).toBe(boundOutcome().token);
+  expect(drafts.result.current).toHaveLength(0);
+});
+
+it("ends clean share access after acknowledged edits without a recovery draft", async () => {
+  await retainBound();
+  act(() => editDocument());
+  await boundOutcome().flushPendingLocalUpdates();
+  harness.emit("saved-to-host", harness.applied.at(-1)!.seq);
+  harness.emit("read-only", 0);
+
+  expect(retained.snapshot.readOnlyTransition?.token).toBe(boundOutcome().token);
+  await waitFor(() => expect(harness.closed).toHaveLength(1));
+  expect(drafts.result.current).toHaveLength(0);
+});
+
+it("keeps unsent edits in recovery when share access ends", async () => {
+  await retainBound();
+  act(() => editDocument());
+  harness.emit("read-only", 0);
+
+  expect(retained.snapshot.readOnlyTransition?.token).toBe(boundOutcome().token);
+  await waitFor(() => expect(drafts.result.current.at(-1)?.text).toBe("seed!"));
+  expect(harness.mainText()).toBe("seed");
+  expect(drafts.result.current).toHaveLength(1);
+});
+
+it("keeps explicitly rejected edits in recovery when share access ends", async () => {
+  vi.spyOn(harness.api, "applyEngineYDocUpdate").mockImplementationOnce(async () => {
+    throw new EngineYDocDeliveryRefusedError("read-only");
+  });
+  await retainBound();
+  act(() => editDocument());
+  await boundOutcome().flushPendingLocalUpdates();
+
+  expect(retained.snapshot.readOnlyTransition?.token).toBe(boundOutcome().token);
+  await waitFor(() => expect(drafts.result.current.at(-1)?.text).toBe("seed!"));
+  expect(harness.mainText()).toBe("seed");
+  expect(drafts.result.current).toHaveLength(1);
+});
+
+
+it("keeps delivered edits awaiting host confirmation in recovery when share access ends", async () => {
+  await retainBound();
+  act(() => editDocument());
+  await boundOutcome().flushPendingLocalUpdates();
+  harness.emit("pending-share", harness.applied.at(-1)!.seq);
+  harness.emit("read-only", 0);
+
+  await waitFor(() => expect(drafts.result.current.at(-1)?.text).toBe("seed!"));
+  expect(drafts.result.current).toHaveLength(1);
+});
+
+it("keeps a refused apply report in recovery even after delivery drains", async () => {
+  await retainBound();
+  act(() => editDocument());
+  await boundOutcome().flushPendingLocalUpdates();
+  harness.emit("saved-to-host", harness.applied.at(-1)!.seq);
+  harness.emit("read-only", harness.applied.at(-1)!.seq);
+
+  await waitFor(() => expect(drafts.result.current.at(-1)?.text).toBe("seed!"));
+  expect(drafts.result.current).toHaveLength(1);
+});
+
+it("keeps edits made before the clean read-only render commits", async () => {
+  await retainBound();
+  harness.emit("saved-to-host", 0);
+  harness.emit("read-only", 0);
+  let releaseProjection!: () => void;
+  projectionGate.pending = new Promise<void>((resolve) => { releaseProjection = resolve; });
+  try {
+    act(() => editDocument());
+    expect(loadStoredDrafts(Date.now()).at(-1)?.text).toBe("seed!");
+    expect(projectionGate.completed).toBe(0);
+  } finally {
+    releaseProjection();
+    projectionGate.pending = null;
+  }
+
+  await waitFor(() => expect(drafts.result.current.at(-1)?.text).toBe("seed!"));
+  expect(harness.mainText()).toBe("seed");
+  expect(drafts.result.current).toHaveLength(1);
+});
+
+
+it("ends clean share access after remote updates without a recovery draft", async () => {
+  const remote = vi.spyOn(harness.api, "onEngineYDocRemoteUpdate");
+  await retainBound();
+  act(() => editDocument());
+  await boundOutcome().flushPendingLocalUpdates();
+  harness.emit("saved-to-host", harness.applied.at(-1)!.seq);
+  act(() => {
+    const before = Y.encodeStateVector(harness.sourceDoc);
+    harness.sourceDoc.getText("plainText").insert(5, "+remote");
+    const event = {
+      sessionId: harness.sessionId()!,
+      update: Y.encodeStateAsUpdate(harness.sourceDoc, before),
+      lineageGeneration: 1,
+    };
+    remote.mock.calls[0]![0](event);
+  });
+  expect(retained.boundDoc().getText("plainText").toString()).toBe("seed!+remote");
+  harness.emit("read-only", 0);
+
+  await waitFor(() => expect(harness.closed).toHaveLength(1));
+  expect(drafts.result.current).toHaveLength(0);
 });

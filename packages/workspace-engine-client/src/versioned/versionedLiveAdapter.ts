@@ -1060,6 +1060,7 @@ export class VersionedLiveAdapter {
     versionId: string;
     path: string;
     expectedObjectId?: string;
+    expectedSha256?: string;
     onlyIfAbsentOnDisk?: boolean;
     requestId?: string;
     metadata: AdapterWriteMetadata;
@@ -1081,6 +1082,7 @@ export class VersionedLiveAdapter {
         versionId: input.versionId,
         path: input.path,
         ...(input.expectedObjectId !== undefined ? { expectedObjectId: input.expectedObjectId } : {}),
+        ...(input.expectedSha256 !== undefined ? { expectedSha256: input.expectedSha256 } : {}),
         ...(input.onlyIfAbsentOnDisk ? { onlyIfAbsentOnDisk: true } : {}),
         origin: input.metadata.origin,
         ...(input.metadata.summary !== undefined

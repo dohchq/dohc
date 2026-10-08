@@ -362,6 +362,10 @@ impl EngineService {
                 self.share_direct_status(&ctx, request.workspace, request.params)
                     .await?
             }
+            "share.direct.statuses" => {
+                self.share_direct_statuses(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "share.records.status" => {
                 self.share_record_creation_statuses(&ctx, request.workspace, request.params)
                     .await?
@@ -1387,6 +1391,7 @@ mod tests {
             "share.channel.push",
             "share.direct.push",
             "share.direct.status",
+            "share.direct.statuses",
             "share.records.status",
             "share.proposal.submit",
             "share.view.pull",

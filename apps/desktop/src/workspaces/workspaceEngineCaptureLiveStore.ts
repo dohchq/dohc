@@ -20,6 +20,7 @@ import type {
 import {
   DaemonRefusalError,
   VersionedLiveAdapter,
+  WorkspaceDaemonRequester,
   type AgentAuthor,
   type WriteAuthor,
   type CollectionPendingAdoptionCursor,
@@ -38,6 +39,9 @@ import {
 } from "@dohc/workspace-engine-client";
 import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
+import { z } from "zod";
+import type { ShareUnconfirmedChanges, ShareViewSelector } from "./shareViewInfo";
+import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import {
   EngineWorkspaceSessions,
   type AttachedEngineWorkspace,
@@ -52,6 +56,7 @@ import {
 // missing quiescence, and that must still surface as an error rather than hang.
 const FLUSH_SETTLE_ATTEMPTS = 50;
 const FLUSH_SETTLE_POLL_MS = 20;
+const ShareDeliveryStatus = z.object({ state: z.enum(["accepted", "pending", "refused"]) });
 
 // Every `VersionedTextStoreErrorCode`. The engine writes its domain code
 // verbatim into the wire MESSAGE (`map_runtime`,
@@ -143,6 +148,7 @@ export interface CaptureTextFileMetadata {
 }
 
 export type CaptureVersionedTextStore = VersionedTextStore & {
+  listUnconfirmedSharePaths(input: { workspaceId: string; shareId: string; grantedSelector: ShareViewSelector }): Promise<ShareUnconfirmedChanges>;
   // Preflight the author of the following rename or delete.
   checkMove(input: { workspaceId: string; versionId: string; path: string; author?: MomentWriteAuthor }): Promise<void>;
   listPendingCollectionAdoptions?(input?: {
@@ -879,6 +885,40 @@ export function createCaptureLiveStores(
   }
 
   const store = {
+    async listUnconfirmedSharePaths(input: { workspaceId: string; shareId: string; grantedSelector: ShareViewSelector }): Promise<ShareUnconfirmedChanges> {
+      return sessions.run(workspace, async binding => {
+        const adapter = adapterFor(binding);
+        const rows = (await adapter.listTextFileMetadata({ workspaceId: input.workspaceId, versionId: input.grantedSelector.versionId ?? "main" }))
+          .filter(row => classifyEngineFilePath(row.path).kind === "tracked"
+            && input.grantedSelector.paths.some(path => row.path === path || row.path.startsWith(`${path}/`))
+            && !(row.metadataOrigin === "sync" && row.latestMomentId.startsWith("moment-share-")));
+        const requester = new WorkspaceDaemonRequester(binding.client);
+        const paths: string[] = [];
+        // Bound the one-time check; owner-pull heads need no receipt query.
+        const deadline = Date.now() + 1_000;
+        let checked = 0;
+        for (let offset = 0; offset < rows.length; offset += 256) {
+          const remainingMs = deadline - Date.now();
+          if (offset === 8_192 || remainingMs <= 0) return { paths, unchecked: true, checked };
+          const batch = rows.slice(offset, offset + 256).map(row => row.path);
+          try {
+            const statuses = z.record(z.string(), ShareDeliveryStatus).parse(
+              await requester.request("share.direct.statuses", { ...input, grantedSelector: { ...input.grantedSelector }, paths: batch },
+                { workspace: binding.workspace, deadlineMs: remainingMs }),
+            );
+            for (const path of batch) {
+              const status = statuses[path];
+              if (!status) return { paths, unchecked: true, checked };
+              checked += 1;
+              if (status.state !== "accepted") paths.push(path);
+            }
+          } catch {
+            return { paths, unchecked: true, checked };
+          }
+        }
+        return { paths, unchecked: false, checked };
+      });
+    },
     ensureMainVersion: (input: { workspaceId: string }) =>
       runMutation(async (adapter) => await adapter.ensureMainVersion(input)),
     getMainVersion: (input: { workspaceId: string }) =>
@@ -1029,6 +1069,7 @@ export function createCaptureLiveStores(
       versionId: string;
       path: string;
       expectedObjectId?: string;
+      expectedSha256?: string;
       onlyIfAbsentOnDisk?: boolean;
       requestId?: string;
       metadata: ActorNeutralWriteMetadata;

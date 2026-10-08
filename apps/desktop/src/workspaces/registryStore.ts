@@ -14,7 +14,7 @@ import type { ShareRoster } from "../automations/shareRoster";
 import type { RosterListing } from "@dohc/automation-executor/roster-listing";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import type { ConfirmedShareRemoval } from "./recipientShareReconciliation";
-import type { ShareViewSelector } from "./shareViewInfo";
+import type { ShareUnconfirmedChanges, ShareViewSelector } from "./shareViewInfo";
 
 // Pure registry persistence: a JSON file of known local workspaces. The
 // electron wiring (userData path, test-home seam) lives in
@@ -251,6 +251,7 @@ export interface ShareViewIdentity {
   // Paths capture could not save before a restriction. Null protects the whole
   // copy when capture failed before it could enumerate paths. Reopen to resume.
   unsavedPaths?: string[] | null;
+  unconfirmedChanges?: ShareUnconfirmedChanges;
 }
 
 // A shared CHANNEL this workspace joined through a chat grant

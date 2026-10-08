@@ -81,6 +81,7 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
     // not. Dropping one costs a line of display; rejecting the record costs
     // the whole workspace list.
     const skipped = ShareSkippedOpsSummary.safeParse(raw.skippedOps);
+    const unconfirmed = WorkspaceSummary.shape.shareView.unwrap().shape.unconfirmedChanges.safeParse(raw.unconfirmedChanges);
     shareView = {
       ...(shareId !== null ? { shareId } : {}),
       ...(recipientUserId !== null ? { recipientUserId } : {}),
@@ -96,6 +97,7 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
           ? raw.unsavedPaths : null,
       } : {}),
       ...(skipped.success ? { skippedOps: skipped.data } : {}),
+      ...(unconfirmed.success ? { unconfirmedChanges: unconfirmed.data } : {}),
     };
   }
 

@@ -17,6 +17,7 @@ import { KeptAutomationFieldShape } from "./bridgeContract";
 import {
   LiveDocumentMutationError,
   RestoreHeadChangedError,
+  RestoreLocalChangesError,
   type WorkspaceEngineMomentDetail,
 } from "../workspaces/workspaceEngineCapture";
 import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
@@ -54,6 +55,7 @@ function fixture(options: {
   moment?: VersionedTextMoment | null;
   protectedMoment?: boolean;
   changed?: boolean;
+  otherWindow?: boolean;
   restoreError?: Error;
   undoRunsOf?: CollectionAutomations["undoRunsOf"];
   serverRestore?: (definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>, again: boolean) => Promise<Pass>;
@@ -138,6 +140,7 @@ function fixture(options: {
     state: { collectionAutomations: CollectionAutomations };
     assertCurrent(): void;
   }, string>({
+    hasOtherWorkspaceWindow: () => options.otherWindow ?? false,
     registerHandler: (channel, handler) => handlers.set(channel, handler),
     assertTrustedSender: () => undefined,
     withRendererWorkspaceOperation: async (_sender, _workspaceId, _message, work) => await work({
@@ -562,6 +565,14 @@ describe("stop and restore in main", () => {
     });
   });
 
+  it("keeps local content and unsettled drafts for review with the engine's reason", async () => {
+    const f = fixture({ restoreError: new RestoreLocalChangesError(SCHEMA) });
+    await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({
+      restored: [], review: [{ path: SCHEMA, reason: "restore-refused", detail: "Changed on this device since the last saved version" }],
+      unfinished: null,
+    });
+  });
+
   it("reviews a shared live file History refuses, and reports any other restore failure", async () => {
     const live = fixture({ restoreError: new LiveDocumentMutationError("dohc could not restore it. This action is unavailable for shared live files.") });
     await expect(live.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({
@@ -660,13 +671,13 @@ describe("stop and restore in main", () => {
       files: [{ momentId: "new", kind: "restored", receipt: { path: SCHEMA, restoredMomentId: "undo-new" } }],
       errorMessage: "The workspace engine is not running.",
     });
-    expect(f.capture.restoreFileToBeforeMoment.mock.calls).toEqual([["new", OWNER], ["middle", OWNER]]);
+    expect(f.capture.restoreFileToBeforeMoment.mock.calls).toEqual([["new", OWNER, {expectedHeadMomentId: "new"}], ["middle", OWNER, {expectedHeadMomentId: "middle"}]]);
   });
 
   it("undoes the restores newest first", async () => {
     const f = fixture();
     await f.call(CHANNELS.undoStopAndRestore, { restoredMomentIds: ["back-1", "back-2"] });
-    expect(f.capture.restoreFileToBeforeMoment.mock.calls).toEqual([["back-2", OWNER], ["back-1", OWNER]]);
+    expect(f.capture.restoreFileToBeforeMoment.mock.calls).toEqual([["back-2", OWNER, {expectedHeadMomentId: "back-2"}], ["back-1", OWNER, {expectedHeadMomentId: "back-1"}]]);
   });
 
   it("names the person signed in here when the request arrived, never one the renderer sends", async () => {
@@ -685,5 +696,25 @@ describe("stop and restore in main", () => {
     f.account.person = { kind: "human", humanId: "user_other" };
     await restored;
     expect(f.capture.restoreFileToBeforeMoment).toHaveBeenCalledWith("m-schema", OWNER, { expectedHeadMomentId: "m-schema" });
+  });
+});
+
+
+describe("renderer-held restore guards", () => {
+  it.each(["retained", "other-window"])("reviews files protected by %s state", async source => {
+    const f = fixture({otherWindow: source === "other-window"});
+    const result = await f.call(CHANNELS.stopAndRestore, {target: {kind: "person", userId: "user_ana"}, reviewPaths: source === "retained" ? [SCHEMA] : []});
+    expect(result).toMatchObject({status: "restored", restored: [], review: [{path: SCHEMA, reason: "restore-refused"}], unfinished: null});
+    expect(f.capture.restoreFileToBeforeMoment).not.toHaveBeenCalled();
+  });
+  it.each([{paths: ["../a.md"]}, {paths: ["C:/a.md"]}, {paths: Array.from({length: 4097}, () => "a.md")}])("rejects an invalid or unbounded retained-path list", async ({paths: reviewPaths}) => {
+    const f = fixture();
+    await expect(f.call(CHANNELS.stopAndRestore, {target: {kind: "person", userId: "user_ana"}, reviewPaths})).rejects.toThrow();
+    expect(f.calls).toEqual([]);
+  });
+  it("refuses Undo for renderer-held drafts and continues with other files", async () => {
+    const f = fixture();
+    await expect(f.call(CHANNELS.undoStopAndRestore, {restoredMomentIds: ["back"], reviewPaths: [SCHEMA]})).resolves.toMatchObject({files: [{kind: "refused"}], errorMessage: null});
+    expect(f.capture.restoreFileToBeforeMoment).not.toHaveBeenCalled();
   });
 });

@@ -363,6 +363,9 @@ fn direct_status_accepts_real_share_pull_heads_on_both_replicas() {
             .pull_share_view(&mut engine, "ws", SHARE, &edit_grant(), &NoFaults)
             .expect("real share pull");
         assert_eq!(pulled.applied, 1);
+        client
+            .commit_share_view_cursor(&mut engine, "ws", &pulled.pending_cursor, &NoFaults)
+            .expect("commit initial share pull");
         assert_eq!(delivery_status(&engine).state, DirectWriteState::Accepted);
         assert_eq!(delivery_status(&engine).content_hash, Some(sha.clone()));
         save_status_file(
@@ -372,6 +375,36 @@ fn direct_status_accepts_real_share_pull_heads_on_both_replicas() {
             Some(text),
         );
         assert_eq!(delivery_status(&engine).state, DirectWriteState::Pending);
+        let owner_text = "version: 1\nautomations: []\n# later owner version\n";
+        let owner_sha = hex_sha256(owner_text.as_bytes());
+        let owner = RelaySyncClient::new(
+            PagedShareRelay::new([], [(1, ShareViewResponse {
+                ops: vec![ShareReplicationEnvelope {
+                    origin_id: "owner".to_owned(), origin_seq: 1,
+                    op_kind: "moment.append".to_owned(), recorded_at_ms: 3_000,
+                    payload: json!({ "versionId": "main", "operation": "write", "path": path,
+                        "payloadAfterPath": path, "payloadAfterBlobSha256": owner_sha, "payloadAfterContentKind": "text" }),
+                }], next_cursor: 2, has_more: false,
+            })]).with_view_blobs([(owner_sha, owner_text.as_bytes().to_vec())]),
+        );
+        let view_grant = proposal_grant(crate::ShareAccess::View);
+        owner
+            .pull_share_view(&mut engine, "ws", SHARE, &view_grant, &NoFaults)
+            .expect("later owner pull");
+        let history = VersionedTextStore::new(&mut engine);
+        assert_eq!(
+            history.read_text("ws", "main", path).unwrap().unwrap().text,
+            owner_text
+        );
+        assert_eq!(
+            history
+                .get_moment("ws", "local-save")
+                .unwrap()
+                .unwrap()
+                .after_text
+                .as_deref(),
+            Some("version: 1\nautomations: []\n# local\n")
+        );
     }
 }
 

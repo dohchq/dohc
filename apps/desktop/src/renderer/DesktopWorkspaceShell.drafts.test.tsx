@@ -237,7 +237,7 @@ describe("workspace admission over collection writes", () => {
     await waitFor(() => expect(harness.bridge.applyEngineYDocUpdate).toHaveBeenCalled());
     act(() => {
       const sessionId = harness.sessions.get("tasks/two.md")!;
-      for (const listener of [...harness.saveListeners]) listener({ sessionId, state: { kind: "saved-here" }, seq: 1 });
+      for (const listener of [...harness.saveListeners]) listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "saved-here" }, seq: 1 });
     });
     await waitFor(() => expect(hasPendingCollectionFieldWrites()).toBe(false));
     expect(collectionWriteFailures()).toHaveLength(0);
@@ -270,7 +270,7 @@ describe("workspace admission over collection writes", () => {
       await act(async () => {
         const sessionId = harness.sessions.get("tasks/one.md")!;
         for (const listener of [...harness.saveListeners]) {
-          listener({ sessionId, state: { kind: "saved-here" }, seq: 1 });
+          listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "saved-here" }, seq: 1 });
         }
       });
       expect(harness.bridge.openWorkspace).toHaveBeenCalledExactlyOnceWith({ workspaceId: OTHER_WORKSPACE.workspaceId });
@@ -312,7 +312,7 @@ describe("workspace admission over collection writes", () => {
     act(() => {
       const sessionId = harness.sessions.get("tasks/one.md")!;
       for (const listener of [...harness.saveListeners]) {
-        listener({ sessionId, state: { kind: "saved-here" }, seq: 1 });
+        listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "saved-here" }, seq: 1 });
       }
     });
     await waitFor(() =>
@@ -2105,7 +2105,7 @@ describe("set-aside draft recovery", () => {
     await screen.findByTestId("tab-dirty");
     act(() => {
       for (const listener of [...saveStateListeners]) {
-        listener({ sessionId, state: { kind: "unknown" }, access: "deleted", seq: 1 });
+        listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "unknown" }, access: "deleted", seq: 1 });
       }
     });
     await screen.findByTestId("deleted-while-editing-notice");

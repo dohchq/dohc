@@ -21,6 +21,14 @@ export interface ShareViewSelector {
   access: ShareAccess;
 }
 
+// A restriction's display snapshot. Capture and pull must not use these paths.
+export interface ShareUnconfirmedChanges {
+  paths: string[];
+  unchecked: boolean;
+  checked: number;
+  dismissedKey?: string;
+}
+
 export interface ShareViewInfo {
   subjectName?: string | null;
   sharerName?: string | null;

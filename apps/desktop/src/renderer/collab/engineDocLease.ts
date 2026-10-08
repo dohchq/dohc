@@ -10,7 +10,7 @@ import {
 } from "@dohc/excalidraw-scene";
 import type { BinaryFileData } from "@excalidraw/excalidraw/types";
 import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
-import type { EngineYDocSaveStateEvent } from "../../ipc/bridgeContract";
+import type { EngineYDocSaveStateEvent, ReadOnlyTransitionCause } from "../../ipc/bridgeContract";
 import { readError, withErrorWords } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 import { documentKey, documentVersionKey } from "../documentVersionKey";
@@ -22,6 +22,7 @@ import {
   captureOrphanedDraft,
   replaceOrphanedDraft,
 } from "../orphanedDrafts";
+import { bytesToBase64 } from "../base64";
 import {
   bindEngineYDoc,
   EngineYDocDeliveryRefusedError,
@@ -283,6 +284,7 @@ function makeTransport(
 }
 
 export type EngineDocInput = {
+  accessEnded?: boolean;
   workspaceId: string;
   path: string;
   // The caller gates which supported live files open an engine session.
@@ -312,7 +314,7 @@ export type EngineDocLeaseSnapshot = {
     draftId: number | null;
     cause: DocumentGoneCause;
   } | null;
-  readOnlyTransition: { token: number } | null;
+  readOnlyTransition: { token: number; cause: ReadOnlyTransitionCause } | null;
   permanentFailure: { token: number } | null;
   sceneRecoveryAssets: {
     token: number;
@@ -411,6 +413,8 @@ function createEngineDocSession(
   let started = false;
   let disposed = false;
   let binding: EngineYDocBinding | null = null;
+  const recoveryIdentity = (bytes: Uint8Array, objectId: string | null = binding?.objectId ?? null) =>
+    objectId ? {objectId, updateBase64: bytesToBase64(bytes)} : undefined;
   let retiredBinding: EngineYDocBinding | null = null;
   let bindingDestroyed = false;
   let detachSaveObserver: (() => void) | null = null;
@@ -418,6 +422,7 @@ function createEngineDocSession(
   let deletionPending = false;
   let deletionCause: DocumentGoneCause = "deleted";
   let deliveryPending = false;
+  let confirmedLocalSeq = 0;
   let pendingSavedSeq: number | null = null;
   let replacementPending = false;
   let replacementSaveState: EngineYDocSaveStateEvent | null = null;
@@ -505,6 +510,7 @@ function createEngineDocSession(
       !writesRefused.current &&
       pendingSavedSeq >= localSeq.current
     ) {
+      confirmedLocalSeq = pendingSavedSeq;
       reportSaveState(pendingSavedState);
     }
     pendingSavedSeq = null;
@@ -621,6 +627,7 @@ function createEngineDocSession(
     sceneRecovery: SceneRecoveryWork | null = null,
   ): void => {
     const slot = recovery;
+    const snapshotObjectId = binding?.objectId ?? null;
     const revision = ++slot.revision;
     const statusRevision = transition && sceneRecovery
       ? ++recoveryStatusRevision
@@ -654,9 +661,9 @@ function createEngineDocSession(
         }
         if (slot.draftId === null) {
           if (!forceCreate) return;
-          slot.draftId = captureOrphanedDraft(workspaceId, path, text);
+          slot.draftId = captureOrphanedDraft(workspaceId, path, text, recoveryIdentity(newest, snapshotObjectId));
         } else {
-          replaceOrphanedDraft(workspaceId, path, slot.draftId, text);
+          replaceOrphanedDraft(workspaceId, path, slot.draftId, text, recoveryIdentity(newest, snapshotObjectId));
         }
         // Only the published render state dies with the session — the draft
         // itself is already durable in the module-level store, unmount or not.
@@ -738,6 +745,7 @@ function createEngineDocSession(
         workspaceId,
         path,
         sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc, bytes),
+        recoveryIdentity(bytes),
       );
     }
     publish((current) => ({
@@ -753,28 +761,32 @@ function createEngineDocSession(
     );
   };
 
-  const captureReadOnlyTransition = (doc: Y.Doc): void => {
+  const captureReadOnlyTransition = (doc: Y.Doc, recoverEdits = true, cause: ReadOnlyTransitionCause = "access-ended"): void => {
     writesRefused.current = true;
     recovery.transition = "read-only";
     const bytes = Y.encodeStateAsUpdate(doc);
     recovery.snapshotBytes = bytes;
     const sceneRecovery =
-      documentKind === "scene" && binding
+      recoverEdits && documentKind === "scene" && binding
         ? prepareSceneRecovery(bytes, binding)
         : null;
-    // Main sends this state only after it has discarded a local update.
-    // Persist the rejected document synchronously before the session closes.
-    recovery.draftId = captureOrphanedDraft(
-      workspaceId,
-      path,
-      sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc, bytes),
-    );
+    if (recoverEdits) {
+      // Persist the rejected document synchronously before the session closes.
+      recovery.draftId = captureOrphanedDraft(
+        workspaceId,
+        path,
+        sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc, bytes),
+        recoveryIdentity(bytes),
+      );
+    }
     publish((current) => ({
       ...current,
-      readOnlyTransition: { token },
+      readOnlyTransition: { token, cause },
     }));
     reportSaveState(UNKNOWN_SAVE_STATE);
-    enqueueRecoverySnapshot(bytes, true, recovery.transition, sceneRecovery);
+    if (recoverEdits) {
+      enqueueRecoverySnapshot(bytes, true, recovery.transition, sceneRecovery);
+    }
   };
 
   const refreshRecoveryDraft = (doc: Y.Doc): void => {
@@ -795,6 +807,13 @@ function createEngineDocSession(
         recovery.draftId,
         sceneRecovery?.immediateText ??
           crudeRecoveryText(documentKind, doc, bytes),
+        recoveryIdentity(bytes),
+      );
+    } else {
+      recovery.draftId = captureOrphanedDraft(
+        workspaceId,
+        path,
+        sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc, bytes),
       );
     }
     enqueueRecoverySnapshot(
@@ -818,6 +837,7 @@ function createEngineDocSession(
       workspaceId,
       path,
       sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc, bytes),
+      recoveryIdentity(bytes),
     );
     if (!disposed) {
       publish((current) => ({
@@ -886,7 +906,7 @@ function createEngineDocSession(
     if (disposed) return;
     publish((current) => ({
       ...current,
-      readOnlyTransition: { token },
+      readOnlyTransition: { token, cause: "lineage-failure" },
     }));
     const bound = retiredBinding ?? binding;
     if (bound) {
@@ -936,10 +956,13 @@ function createEngineDocSession(
     if (event.access === "read-only") {
       pendingSavedSeq = null;
       const doc = binding?.doc;
-      // Unlike deletion, this report answers a local update, so it cannot
-      // precede the binding that allowed that update.
       if (!doc) return;
-      captureReadOnlyTransition(doc);
+      // Hosted status has seq 0. A refused apply names its staged edit.
+      // Remote updates can change saveState without staging a local edit.
+      captureReadOnlyTransition(doc,
+        event.seq > 0 || deliveryPending || localSeq.current > confirmedLocalSeq,
+        event.readOnlyCause ?? "access-ended",
+      );
       releaseBinding();
       return;
     }
@@ -953,7 +976,10 @@ function createEngineDocSession(
         }
         return;
       }
-      if (event.seq >= localSeq.current) reportSaveState(event.state);
+      if (event.seq >= localSeq.current) {
+        confirmedLocalSeq = event.seq;
+        reportSaveState(event.state);
+      }
       return;
     }
     pendingSavedSeq = null;
@@ -1049,6 +1075,7 @@ function createEngineDocSession(
             workspaceId,
             path,
             sceneRecovery.immediateText,
+            recoveryIdentity(bytes, retiredAuthority?.objectId ?? null),
           );
         } else {
           replaceOrphanedDraft(
@@ -1056,6 +1083,7 @@ function createEngineDocSession(
             path,
             draftId,
             sceneRecovery.immediateText,
+            recoveryIdentity(bytes, retiredAuthority?.objectId ?? null),
           );
         }
         if (publishesRecoveryStatus) {
@@ -1111,9 +1139,9 @@ function createEngineDocSession(
       }
       const crude = durableMarkdownFromSnapshot(retired, bytes);
       if (draftId === null) {
-        draftId = captureOrphanedDraft(workspaceId, path, crude);
+        draftId = captureOrphanedDraft(workspaceId, path, crude, recoveryIdentity(bytes, retiredAuthority?.objectId ?? null));
       } else {
-        replaceOrphanedDraft(workspaceId, path, draftId, crude);
+        replaceOrphanedDraft(workspaceId, path, draftId, crude, recoveryIdentity(bytes, retiredAuthority?.objectId ?? null));
       }
       if (retiredRecoverySlot === recovery) {
         // The slot must know about this draft and snapshot: a deletion or
@@ -1234,6 +1262,8 @@ function createEngineDocSession(
             // reads. The winner starts a fresh slot so later delete/unmount
             // work cannot rewrite that draft with an independent lineage.
             recovery = newRecoverySlot();
+            // The replacement owns new work; retired edits have their own draft.
+            confirmedLocalSeq = localSeq.current;
             retiredBinding = null;
             // Deletion of the PATH outlives any lineage: the file is gone
             // whichever lineage wins, so only non-deletion refusals reset.

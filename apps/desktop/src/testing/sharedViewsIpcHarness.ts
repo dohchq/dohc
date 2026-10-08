@@ -93,7 +93,7 @@ export async function createSharedViewsIpcHarness() {
     assertCurrent();
     registry.get(target.workspaceId)!.shareView!.ended = true;
   });
-  const narrow = vi.fn<Dependencies["shareViewFiles"]["narrow"]>(async (_lease, _target, assertCurrent, commit) => { assertCurrent(); commit([]); });
+  const narrow = vi.fn<Dependencies["shareViewFiles"]["narrow"]>(async (_lease, _target, assertCurrent, commit) => { assertCurrent(); commit([], { paths: [], unchecked: false, checked: 0 }); });
   const closed = new Set<() => void>();
   const open = vi.fn<Dependencies["openWorkspaceActivity"]>(async () => { steps.push("open"); });
   const recordRefusal = vi.fn<Dependencies["recordShareViewStoreRefusal"]>();

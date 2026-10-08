@@ -268,6 +268,9 @@ export const ShareSkippedOpsSummary = z.object({
   inexact: z.boolean().optional(),
 });
 export type ShareSkippedOpsSummary = z.infer<typeof ShareSkippedOpsSummary>;
+export const ShareUnconfirmedChangesSchema = z.object({
+  paths: z.array(z.string()), unchecked: z.boolean(), checked: z.number().int().nonnegative(), dismissedKey: z.string().optional(),
+});
 
 export const WorkspaceSummary = z.object({
   workspaceId: WORKSPACE_ID,
@@ -303,6 +306,7 @@ export const WorkspaceSummary = z.object({
       // refresh it has no grant to pull with, and says so in the banner.
       damaged: z.literal(true).optional(),
       unsavedPaths: z.array(z.string()).nullable().optional(),
+      unconfirmedChanges: ShareUnconfirmedChangesSchema.optional(),
       ended: z.boolean().optional(),
       skippedOps: ShareSkippedOpsSummary.optional(),
     })
@@ -4930,8 +4934,20 @@ export type StopAndRestoreTarget = z.infer<typeof StopAndRestoreTarget>;
 export const StopAndRestorePayload = z.object({
   workspaceId: WORKSPACE_ID,
   target: StopAndRestoreTarget,
+  reviewPaths: z.array(PATH_STRING.refine(isNormalizedRelativePath)).max(4096).optional(),
 }).strict();
 export type StopAndRestorePayload = z.infer<typeof StopAndRestorePayload>;
+export const DiscardLiveDraftRecoveryPayload = z.object({workspaceId: WORKSPACE_ID, path: PATH_STRING.refine(isNormalizedRelativePath), objectId: z.string().min(1).max(512), snapshotSha256: z.string().regex(/^[a-f0-9]{64}$/), discardedAtMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)}).strict();
+export const liveDraftRecoveryOperations = {
+  discardLiveDraftRecovery: {
+    capabilityId: "document.draft.discard",
+    channel: "desktop:discard-live-draft-recovery",
+    payload: DiscardLiveDraftRecoveryPayload,
+    guard: "active-workspace",
+    scope: "workspace",
+    inactiveMessage: "This window changed workspaces.",
+  },
+} satisfies OperationTable;
 export const KeptAutomationFieldShape = z.object({
   id: z.string().regex(/^[a-f0-9]{32}$/),
   path: PATH_STRING.refine(isNormalizedRelativePath).nullable(),
@@ -4977,6 +4993,7 @@ export type StopAndRestoreResult = z.infer<typeof StopAndRestoreResult>;
 export const UndoStopAndRestorePayload = z.object({
   workspaceId: WORKSPACE_ID,
   restoredMomentIds: z.array(OPAQUE_ID).min(1).max(20_000),
+  reviewPaths: z.array(PATH_STRING.refine(isNormalizedRelativePath)).max(4096).optional(),
 }).strict();
 export type UndoStopAndRestorePayload = z.infer<typeof UndoStopAndRestorePayload>;
 export const UndoStopAndRestoreResult = z.object({
@@ -5222,6 +5239,14 @@ export type CheckSharedViewAccessResult = z.infer<typeof CheckSharedViewAccessRe
 
 // The handler owns its workspace operation so a stale check replies unverified.
 export const sharedViewAccessOperations = {
+  dismissShareCaptureNotice: {
+    capabilityId: "share.capture.notice.dismiss",
+    scope: "workspace",
+    channel: "desktop:dismiss-share-capture-notice",
+    payload: z.object({ workspaceId: WORKSPACE_ID, shareId: OPAQUE_ID, key: z.string() }),
+    guard: "active-workspace",
+    inactiveMessage: "This share's Notice is no longer open in this window.",
+  },
   checkSharedViewAccess: {
     capabilityId: "share.access.read",
     scope: "workspace",
@@ -6218,6 +6243,34 @@ export const engineYDocAdmissionOperations = {
   },
 } satisfies OperationTable;
 
+export const RetryEngineYDocSavePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  path: PATH_STRING,
+});
+export type RetryEngineYDocSavePayload = z.infer<typeof RetryEngineYDocSavePayload>;
+
+// Try again on a document that couldn't save. Main settles the session open
+// for that document when asked. "settled" means the settle ran; its outcome
+// arrives as the session's next save state. "closed" means no session is
+// open, so nothing settled. A settle that could not
+// start or that failed rejects.
+export const RetryEngineYDocSaveResult = z.enum(["settled", "closed"]);
+export type RetryEngineYDocSaveResult = z.infer<typeof RetryEngineYDocSaveResult>;
+export const engineYDocSaveOperations = {
+  retryEngineYDocSave: {
+    capabilityId: "document.save.retry",
+    scope: "workspace",
+    handlerCheck: {
+      check: "engineYDocSessionIpc.retrySave",
+      reason: "Settles only a document open in the workspace this window shows.",
+    },
+    channel: "desktop:engine-ydoc-retry-save",
+    payload: RetryEngineYDocSavePayload,
+    result: RetryEngineYDocSaveResult,
+    guard: "trusted-sender",
+  },
+} satisfies OperationTable;
+
 export const OpenEngineYDocSessionResult = z.object({
   available: z.boolean(),
   initialUpdate: ENGINE_YDOC_INITIAL_UPDATE.optional(),
@@ -6372,7 +6425,11 @@ export type EngineYDocLineageReplacementEvent = z.infer<
 // STARTED. The renderer clears to "saved" only once this covers its latest
 // local edit — otherwise an in-flight settle's success would claim edits it
 // never carried.
+export const ReadOnlyTransitionCause = z.enum(["access-ended", "reconnecting", "lineage-failure"]);
+export type ReadOnlyTransitionCause = z.infer<typeof ReadOnlyTransitionCause>;
+
 export const EngineYDocSaveStateEvent = z.object({
+  readOnlyCause: ReadOnlyTransitionCause.optional(),
   authorCapacity: z.boolean().optional(),
   editRefusal: z.object({
     workspaceId: WORKSPACE_ID,
@@ -6381,8 +6438,17 @@ export const EngineYDocSaveStateEvent = z.object({
     message: z.string(),
   }).optional(),
   sessionId: ENGINE_YDOC_SESSION_ID,
+  // The document this session edits, so a listener outside its editor can
+  // tell documents apart.
+  workspaceId: WORKSPACE_ID,
+  path: z.string(),
   state: SaveStateSchema,
   access: z.enum(["read-only", "deleted", "object-changed"]).optional(),
+  // A settle failed to write the file. Absent for an edit refusal, an
+  // author-capacity refusal, and an error no settle reported.
+  saveFailure: z.object({ readOnly: z.boolean() }).optional(),
+  // Sent while the session closes, after its editor has gone.
+  closing: z.literal(true).optional(),
   seq: z.number().int().nonnegative(),
 });
 export type EngineYDocSaveStateEvent = z.infer<typeof EngineYDocSaveStateEvent>;
@@ -6424,7 +6490,9 @@ export interface DohcDesktopBridge
     OperationBridge<typeof scheduleHostOperations>,
     OperationBridge<typeof chatDispatchNoticeOperations>,
     OperationBridge<typeof sharedViewAccessOperations>,
-    OperationBridge<typeof engineYDocAdmissionOperations> {
+    OperationBridge<typeof engineYDocAdmissionOperations>,
+    OperationBridge<typeof liveDraftRecoveryOperations>,
+    OperationBridge<typeof engineYDocSaveOperations> {
   listOwnerLiveDocuments(payload: ListOwnerLiveDocumentsPayload): Promise<OwnerLiveDocumentsResult>;
   listOwnerLiveRefusals(payload: ListOwnerLiveRefusalsPayload): Promise<OwnerLiveRefusalsResult>;
   retryOwnerLiveShare(payload: RetryOwnerLiveSharePayload): Promise<void>;

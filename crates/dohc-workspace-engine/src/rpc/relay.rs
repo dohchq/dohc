@@ -193,7 +193,7 @@ struct ShareDirectStatusParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ShareRecordCreationStatusesParams {
+struct ShareFileStatusesParams {
     workspace_id: String,
     share_id: String,
     paths: Vec<String>,
@@ -1502,13 +1502,56 @@ impl EngineService {
         })
     }
 
+    pub(super) async fn share_direct_statuses(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ShareFileStatusesParams = parse(params)?;
+        if params.paths.len() > 256 {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "too-many-share-status-paths",
+            ));
+        }
+        let granted = share_grant(params.granted_selector)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let mut statuses = serde_json::Map::new();
+        for path in params.paths {
+            let status = Self::read_under_ctx(
+                &cancellation,
+                "share.direct.statuses",
+                open.actor.share_direct_status(
+                    open.workspace_id.clone(),
+                    params.share_id.clone(),
+                    path.clone(),
+                    granted.clone(),
+                ),
+            )
+            .await?;
+            statuses.insert(
+                path,
+                serde_json::to_value(status).map_err(|_| {
+                    WireError::new(
+                        ErrorCode::Internal,
+                        "direct-write-status-serialization-failed",
+                    )
+                })?,
+            );
+        }
+        Ok(Value::Object(statuses))
+    }
+
     pub(super) async fn share_record_creation_statuses(
         &self,
         ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
-        let params: ShareRecordCreationStatusesParams = parse(params)?;
+        let params: ShareFileStatusesParams = parse(params)?;
         let granted = share_grant(params.granted_selector)?;
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
@@ -1572,6 +1615,57 @@ mod tests {
                 .await
                 .expect("offline status"),
             json!({"contentHash": null, "state": "accepted", "canDiscard": false})
+        );
+        let batch = json!({
+            "workspaceId": "offline-share", "shareId": "share",
+            "paths": ["data/automations.yaml", "data/draft.md"],
+            "grantedSelector": {"paths": ["data"], "access": "edit"},
+        });
+        let statuses = service
+            .share_direct_statuses(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                batch.clone(),
+            )
+            .await
+            .expect("offline batch");
+        assert_eq!(statuses["data/automations.yaml"]["state"], "accepted");
+        assert_eq!(statuses["data/draft.md"]["state"], "accepted");
+        let mut bad_batch = batch.clone();
+        bad_batch["workspaceId"] = json!("other");
+        assert!(
+            service
+                .share_direct_statuses(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    bad_batch
+                )
+                .await
+                .is_err()
+        );
+        let mut bad_batch = batch.clone();
+        bad_batch["paths"] = json!(["data/automations.yaml", "private/file.md"]);
+        assert!(
+            service
+                .share_direct_statuses(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    bad_batch
+                )
+                .await
+                .is_err()
+        );
+        let mut bad_batch = batch;
+        bad_batch["paths"] = json!(vec!["data/file.md"; 257]);
+        assert!(
+            service
+                .share_direct_statuses(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    bad_batch
+                )
+                .await
+                .is_err()
         );
         let mut wrong_workspace = params.clone();
         wrong_workspace["workspaceId"] = json!("other");

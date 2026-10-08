@@ -35,5 +35,8 @@
   "desktop:check-shared-view-access": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "sharedViewsIpc.withRendererWorkspaceOperation" } },
   "desktop:take-workspace-path-open-failures": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:retry-workspace-path-open": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
-  "desktop:engine-ydoc-wait-admission": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "engineYDocSessionIpc.waitForAdmission" } }
+  "desktop:engine-ydoc-wait-admission": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "engineYDocSessionIpc.waitForAdmission" } },
+  "desktop:discard-live-draft-recovery": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:dismiss-share-capture-notice": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:engine-ydoc-retry-save": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "engineYDocSessionIpc.retrySave" } }
 }

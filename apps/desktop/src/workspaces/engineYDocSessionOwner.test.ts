@@ -572,7 +572,9 @@ describe("EngineYDocSessionOwner", () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
-  it("suppresses every outbound message as soon as release starts", async () => {
+  // A closing settle can fail after the editor has gone, and the shell owes
+  // that failure a notice, so save states are the one message release keeps.
+  it("keeps only save states once release starts", async () => {
     const outbound: TestOutbound[] = [];
     const owner = createOwner(outbound);
     const sender = { id: 7, label: "window-a" };
@@ -608,7 +610,10 @@ describe("EngineYDocSessionOwner", () => {
       sessionId: "renderer-session-1",
     });
 
-    expect(outbound).toHaveLength(1);
+    expect(outbound.map(({ message }) => message)).toEqual([
+      { kind: "session-event", event: "before-release" },
+      { kind: "session-event", event: "save-state-during-release", closing: true },
+    ]);
     expect(
       owner.applyUpdate(
         {
@@ -623,6 +628,9 @@ describe("EngineYDocSessionOwner", () => {
 
     closeGate.resolve();
     await expect(release).resolves.toEqual({ kind: "released" });
+    // A completed release forgets the session: nothing it emits later is sent.
+    signals.emit("after-release");
+    expect(outbound).toHaveLength(2);
   });
 
   it("keeps valid empty lineage acknowledgements distinct from refusals", async () => {
@@ -953,7 +961,7 @@ describe("EngineYDocSessionOwner", () => {
     expect(afterShutdown).not.toHaveBeenCalled();
   });
 
-  it("retains a failed release for an exact-owner retry and stays silent", async () => {
+  it("retains a failed release for an exact-owner retry and sends only its save states", async () => {
     const outbound: TestOutbound[] = [];
     const onReleaseFailed = vi.fn();
     const owner = createOwner(outbound, { onReleaseFailed });
@@ -992,7 +1000,11 @@ describe("EngineYDocSessionOwner", () => {
       }),
     );
     signals.emit("after failed close");
-    expect(outbound).toEqual([]);
+    signals.remoteUpdate("remote update after failed close");
+    expect(outbound.map(({ message }) => message)).toEqual([
+      { kind: "session-event", event: "during close", closing: true },
+      { kind: "session-event", event: "after failed close", closing: true },
+    ]);
 
     const duplicateEngineOpen = vi.fn();
     await expect(

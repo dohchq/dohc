@@ -57,6 +57,17 @@ describe("workspace summary projection", () => {
     }
   });
 
+  it("projects a display snapshot independently of capture protection", () => {
+    const unconfirmedChanges = { paths: ["docs/automations.yaml"], unchecked: true, checked: 0 };
+    const raw = { ...shareView(goodSelector), unsavedPaths: ["docs/locked.md"], unconfirmedChanges };
+    expect(workspaceSummaryFor(entry({ shareView: raw })).shareView).toMatchObject({
+      unsavedPaths: ["docs/locked.md"], unconfirmedChanges,
+    });
+    const malformed = workspaceSummaryFor(entry({ shareView: { ...raw, unconfirmedChanges: { paths: null } } })).shareView;
+    expect(malformed?.unconfirmedChanges).toBeUndefined();
+    expect(malformed?.unsavedPaths).toEqual(["docs/locked.md"]);
+  });
+
   it("carries the level from the pinned grant", () => {
     const summary = workspaceSummaryFor(
       entry({
