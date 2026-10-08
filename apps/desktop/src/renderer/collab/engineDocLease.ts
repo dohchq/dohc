@@ -22,6 +22,7 @@ import {
   captureOrphanedDraft,
   replaceOrphanedDraft,
 } from "../orphanedDrafts";
+import { bytesToBase64 } from "../base64";
 import {
   bindEngineYDoc,
   EngineYDocDeliveryRefusedError,
@@ -412,6 +413,8 @@ function createEngineDocSession(
   let started = false;
   let disposed = false;
   let binding: EngineYDocBinding | null = null;
+  const recoveryIdentity = (bytes: Uint8Array, objectId: string | null = binding?.objectId ?? null) =>
+    objectId ? {objectId, updateBase64: bytesToBase64(bytes)} : undefined;
   let retiredBinding: EngineYDocBinding | null = null;
   let bindingDestroyed = false;
   let detachSaveObserver: (() => void) | null = null;
@@ -624,6 +627,7 @@ function createEngineDocSession(
     sceneRecovery: SceneRecoveryWork | null = null,
   ): void => {
     const slot = recovery;
+    const snapshotObjectId = binding?.objectId ?? null;
     const revision = ++slot.revision;
     const statusRevision = transition && sceneRecovery
       ? ++recoveryStatusRevision
@@ -657,9 +661,9 @@ function createEngineDocSession(
         }
         if (slot.draftId === null) {
           if (!forceCreate) return;
-          slot.draftId = captureOrphanedDraft(workspaceId, path, text);
+          slot.draftId = captureOrphanedDraft(workspaceId, path, text, recoveryIdentity(newest, snapshotObjectId));
         } else {
-          replaceOrphanedDraft(workspaceId, path, slot.draftId, text);
+          replaceOrphanedDraft(workspaceId, path, slot.draftId, text, recoveryIdentity(newest, snapshotObjectId));
         }
         // Only the published render state dies with the session — the draft
         // itself is already durable in the module-level store, unmount or not.
@@ -741,6 +745,7 @@ function createEngineDocSession(
         workspaceId,
         path,
         sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc, bytes),
+        recoveryIdentity(bytes),
       );
     }
     publish((current) => ({
@@ -766,10 +771,12 @@ function createEngineDocSession(
         ? prepareSceneRecovery(bytes, binding)
         : null;
     if (recoverEdits) {
+      // Persist the rejected document synchronously before the session closes.
       recovery.draftId = captureOrphanedDraft(
         workspaceId,
         path,
         sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc, bytes),
+        recoveryIdentity(bytes),
       );
     }
     publish((current) => ({
@@ -800,6 +807,7 @@ function createEngineDocSession(
         recovery.draftId,
         sceneRecovery?.immediateText ??
           crudeRecoveryText(documentKind, doc, bytes),
+        recoveryIdentity(bytes),
       );
     } else {
       recovery.draftId = captureOrphanedDraft(
@@ -829,6 +837,7 @@ function createEngineDocSession(
       workspaceId,
       path,
       sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc, bytes),
+      recoveryIdentity(bytes),
     );
     if (!disposed) {
       publish((current) => ({
@@ -1066,6 +1075,7 @@ function createEngineDocSession(
             workspaceId,
             path,
             sceneRecovery.immediateText,
+            recoveryIdentity(bytes, retiredAuthority?.objectId ?? null),
           );
         } else {
           replaceOrphanedDraft(
@@ -1073,6 +1083,7 @@ function createEngineDocSession(
             path,
             draftId,
             sceneRecovery.immediateText,
+            recoveryIdentity(bytes, retiredAuthority?.objectId ?? null),
           );
         }
         if (publishesRecoveryStatus) {
@@ -1128,9 +1139,9 @@ function createEngineDocSession(
       }
       const crude = durableMarkdownFromSnapshot(retired, bytes);
       if (draftId === null) {
-        draftId = captureOrphanedDraft(workspaceId, path, crude);
+        draftId = captureOrphanedDraft(workspaceId, path, crude, recoveryIdentity(bytes, retiredAuthority?.objectId ?? null));
       } else {
-        replaceOrphanedDraft(workspaceId, path, draftId, crude);
+        replaceOrphanedDraft(workspaceId, path, draftId, crude, recoveryIdentity(bytes, retiredAuthority?.objectId ?? null));
       }
       if (retiredRecoverySlot === recovery) {
         // The slot must know about this draft and snapshot: a deletion or

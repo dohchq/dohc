@@ -1028,6 +1028,7 @@ export function createCaptureLiveStores(
       versionId: string;
       path: string;
       expectedObjectId?: string;
+      expectedSha256?: string;
       onlyIfAbsentOnDisk?: boolean;
       requestId?: string;
       metadata: ActorNeutralWriteMetadata;

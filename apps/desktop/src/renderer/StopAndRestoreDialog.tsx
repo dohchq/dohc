@@ -1,3 +1,5 @@
+import { retainedCollectionFieldWritePaths } from "./collections/recordFieldWrites";
+import { retainedOrphanedDraftPaths } from "./orphanedDrafts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { StopAndRestoreResult, StopAndRestoreTarget } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
@@ -235,7 +237,7 @@ export function StopAndRestoreDialog({
   };
 
   const stop = (): Promise<void> => perform(stopFallback(), "stop", async (token) => {
-    const result = await bridge().stopAndRestore({ workspaceId, target: chosen.target });
+    const result = await bridge().stopAndRestore({ workspaceId, target: chosen.target, reviewPaths: [...new Set([...retainedCollectionFieldWritePaths(workspaceId), ...retainedOrphanedDraftPaths(workspaceId)])] });
     if (result.status === "waiting") {
       if (request.isCurrent(token)) setState((current) => ({ kind: "waiting", targets: listedTargets(current) }));
       return;
@@ -277,7 +279,7 @@ export function StopAndRestoreDialog({
   const undo = (): Promise<void> => perform("dohc could not undo the restore.", "undo", async (token) => {
     const restored = receipts.get(workspaceId, chosen.target);
     const result = restored.length > 0
-      ? await bridge().undoStopAndRestore({ workspaceId, restoredMomentIds: restored.map((file) => file.restoredMomentId) })
+      ? await bridge().undoStopAndRestore({ workspaceId, reviewPaths: [...new Set([...retainedCollectionFieldWritePaths(workspaceId), ...retainedOrphanedDraftPaths(workspaceId)])], restoredMomentIds: restored.map((file) => file.restoredMomentId) })
       : { files: [], errorMessage: null };
     const completed = new Set(result.files.flatMap(file => file.kind === "restored" ? [file.momentId] : []));
     receipts.set(workspaceId, chosen.target, restored.filter(file => !completed.has(file.restoredMomentId)));

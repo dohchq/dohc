@@ -1,4 +1,5 @@
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -7,7 +8,8 @@ import { foldScene, insertElementRevision, setAppStateProperty } from "@dohc/exc
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
 import { createPhysicalWorkspaceRemoval } from "./physicalWorkspaceRemoval";
-import { preserveLiveDraft, preserveUnsentLiveDraft, removeWorkspaceLiveDrafts } from "./liveDraftRecovery";
+import { hasRetainedLiveDraft, preserveLiveDraft, preserveUnsentLiveDraft, removeLiveDraftCopies, removeWorkspaceLiveDrafts } from "./liveDraftRecovery";
+const snapshotSha = (update: Uint8Array) => createHash("sha256").update(update).digest("hex");
 
 vi.mock("node:fs/promises", async importOriginal => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -19,6 +21,81 @@ afterEach(async () => {
   vi.mocked(readFile).mockReset();
   vi.mocked(rm).mockReset();
   for (const directory of directories.splice(0)) await rm(directory, {recursive: true, force: true});
+});
+
+it("finds retained drafts by workspace and object or path without blocking unrelated files", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-restore-recovery-")); directories.push(directory);
+  const draft = {path: "a.md", objectId: "object", remoteWorkspaceId: "owner", update: new Uint8Array([0, 0])};
+  await preserveLiveDraft(directory, "workspace", draft);
+  expect(await hasRetainedLiveDraft(directory, "workspace", "renamed.md", "object")).toBe(true);
+  expect(await hasRetainedLiveDraft(directory, "workspace", "a.md", "replacement")).toBe(true);
+  expect(await hasRetainedLiveDraft(directory, "other", "a.md", "object")).toBe(false);
+  expect(await hasRetainedLiveDraft(directory, "workspace", "b.md", "other")).toBe(false);
+  expect(await hasRetainedLiveDraft(join(directory, "absent"), "workspace", "a.md", "object")).toBe(false);
+});
+
+it.each(["malformed", "incomplete", "unreadable"] as const)("refuses to prove a file safe with %s recovery state", async kind => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-restore-recovery-")); directories.push(directory);
+  await writeFile(join(directory, `${"0".repeat(64)}.${kind === "incomplete" ? "tmp" : "json"}`), "{");
+  if (kind === "unreadable") vi.mocked(readFile).mockRejectedValueOnce(Object.assign(new Error("access denied"), {code: "EACCES"}));
+  await expect(hasRetainedLiveDraft(directory, "workspace", "a.md", "object")).rejects.toThrow();
+});
+
+it("ignores another workspace's malformed and temporary records", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-scoped-recovery-")); directories.push(directory);
+  await writeFile(join(directory, `${"0".repeat(64)}.json`), '{"workspaceId":"other",');
+  await writeFile(join(directory, `${"1".repeat(64)}.tmp`), JSON.stringify({workspaceId: "other", path: "a.md", objectId: "object"}));
+  expect(await hasRetainedLiveDraft(directory, "workspace", "a.md", "object")).toBe(false);
+});
+
+it("quarantines a stale incomplete temporary draft so a later try can prove safety", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-stale-recovery-")); directories.push(directory);
+  const name = `${"0".repeat(64)}.tmp`;
+  await writeFile(join(directory, name), "{");
+  const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
+  await utimes(join(directory, name), old, old);
+  expect(await hasRetainedLiveDraft(directory, "workspace", "a.md", "object")).toBe(false);
+  expect(await readFile(join(directory, "quarantine", name), "utf8")).toBe("{");
+  expect(await hasRetainedLiveDraft(directory, "workspace", "a.md", "object")).toBe(false);
+});
+
+it("stops blocking a path after its recovery is discarded and preserves other drafts", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-retired-recovery-")); directories.push(directory);
+  const draft = {path: "a.md", objectId: "object", remoteWorkspaceId: "owner", update: new Uint8Array([0, 0])};
+  await preserveLiveDraft(directory, "workspace", draft);
+  await preserveLiveDraft(directory, "other", draft);
+  await removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(draft.update), Date.now());
+  expect(await hasRetainedLiveDraft(directory, "workspace", "a.md", "object")).toBe(false);
+  expect(await hasRetainedLiveDraft(directory, "other", "a.md", "object")).toBe(true);
+});
+
+it("keeps recovery written after a dismissal request", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-newer-recovery-")); directories.push(directory);
+  await preserveLiveDraft(directory, "workspace", {path: "a.md", objectId: "object", remoteWorkspaceId: "owner", update: new Uint8Array([0, 0])});
+  const file = join(directory, (await readdir(directory))[0]!);
+  const newer = new Date(Date.now() + 1000);
+  await utimes(file, newer, newer);
+  await removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(new Uint8Array([0, 0])), Date.now());
+  expect(await hasRetainedLiveDraft(directory, "workspace", "a.md", "object")).toBe(true);
+});
+
+it("discards only the captured snapshot by object after a rename, preserving unseen copies", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-exact-recovery-")); directories.push(directory);
+  const update = new Uint8Array([0, 0]);
+  const draft = {path: "old.md", objectId: "object", remoteWorkspaceId: "owner", update};
+  await preserveLiveDraft(directory, "workspace", draft);
+  await preserveLiveDraft(directory, "workspace", {...draft, path: "renamed.md"});
+  await preserveLiveDraft(directory, "workspace", {...draft, update: new Uint8Array([0, 1])});
+  await preserveLiveDraft(directory, "workspace", {...draft, objectId: "replacement"});
+  await preserveLiveDraft(directory, "other", draft);
+  await removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(update), Date.now());
+  const records = await Promise.all((await readdir(directory)).map(async name => JSON.parse(await readFile(join(directory, name), "utf8"))));
+  expect(records).toHaveLength(3);
+  expect(records).toEqual(expect.arrayContaining([
+    expect.objectContaining({workspaceId: "workspace", objectId: "object", updateBase64: "AAE="}),
+    expect.objectContaining({workspaceId: "workspace", objectId: "replacement"}),
+    expect.objectContaining({workspaceId: "other"}),
+  ]));
 });
 
 it("keeps a complete recovery when a repeated snapshot write fails after partial output", async () => {
@@ -105,14 +182,18 @@ it("forgets matching drafts despite a malformed record and removes interrupted t
   const draft = {path: "a.md", objectId: "object", remoteWorkspaceId: "owner", update: new Uint8Array([0, 0])};
   const malformed = `${"0".repeat(64)}.json`;
   await writeFile(join(directory, malformed), "{");
-  await writeFile(join(directory, `${"1".repeat(64)}.interrupted.tmp`), '{"text":"partial private text');
+  const temporary = join(directory, `${"1".repeat(64)}.interrupted.tmp`);
+  await writeFile(temporary, '{"text":"partial private text');
+  const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
+  await utimes(temporary, old, old);
   await preserveLiveDraft(directory, "removed", draft);
   await preserveLiveDraft(directory, "kept", draft);
   await removeWorkspaceLiveDrafts(directory, "removed");
   const names = await readdir(directory);
   expect(names).toContain(malformed);
-  expect(names).toHaveLength(2);
-  const kept = names.find(name => name !== malformed)!;
+  expect(names).toHaveLength(3);
+  expect(names).toContain("quarantine");
+  const kept = names.find(name => name !== malformed && name !== "quarantine")!;
   expect(JSON.parse(await readFile(join(directory, kept), "utf8"))).toMatchObject({workspaceId: "kept"});
 });
 
@@ -168,6 +249,8 @@ it("removes leftover temporary drafts without interrupting another workspace's p
   const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
   const leftover = join(directory, "interrupted.tmp");
   await writeFile(leftover, "private text from an interrupted write");
+  const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
+  await utimes(leftover, old, old);
   let resume!: () => void;
   let reached!: () => void;
   const paused = new Promise<void>(resolve => { reached = resolve; });
@@ -183,11 +266,11 @@ it("removes leftover temporary drafts without interrupting another workspace's p
   await paused;
   try {
     await removeWorkspaceLiveDrafts(directory, "removed");
-    expect(await readdir(directory)).toHaveLength(1);
+    expect(await readdir(directory)).toHaveLength(2);
     await expect(readFile(leftover)).rejects.toMatchObject({code: "ENOENT"});
   } finally { resume(); }
   await preserving;
-  const names = await readdir(directory);
+  const names = (await readdir(directory)).filter(name => name.endsWith(".json"));
   expect(names).toHaveLength(1);
   expect(names[0]).toMatch(/\.json$/);
   expect(JSON.parse(await readFile(join(directory, names[0]!), "utf8"))).toMatchObject({workspaceId: "kept"});

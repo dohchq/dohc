@@ -123,5 +123,6 @@
   "reports.notice.read",
   "reports.notice.acknowledge",
   "reports.error.send",
+  "document.draft.discard",
   "document.save.retry"
 ]

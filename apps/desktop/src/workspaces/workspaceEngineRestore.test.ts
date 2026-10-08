@@ -12,6 +12,7 @@ import {
   createWorkspaceEngineCapture,
   RestoreFolderInUseError,
   RestoreHeadChangedError,
+  RestoreLocalChangesError,
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
 
@@ -43,6 +44,7 @@ function capture(
   root: string,
   loopback: VersionedLoopbackEngine,
   requests?: Request[],
+  hasRetainedLiveDraft?: (path: string, objectId: string) => Promise<boolean>,
 ): WorkspaceEngineCapture {
   const workspaceId = "engine-restore-test";
   return createWorkspaceEngineCapture({
@@ -50,6 +52,7 @@ function capture(
     rootPath: root,
     attachmentId: Symbol("test-workspace-attachment"),
     rustEngineSessions: mockDaemonSessions({ rootPath: root, workspaceId, loopback, requests }),
+    hasRetainedLiveDraft,
   });
 }
 
@@ -116,6 +119,139 @@ describe("engine history reads", () => {
 });
 
 describe("engine restore", () => {
+  it("guarded Undo recreates a removed record with its original identity and History", async () => {
+    const root = await createTestScratch("dohc-engine-undo-");
+    await write(root, "new.md", "recipient text\n");
+    const requests: Request[] = [];
+    const engine = capture(root, new VersionedLoopbackEngine(), requests);
+    engine.start();
+    try {
+      await engine.flush();
+      const created = (await engine.listMoments()).moments[0]!;
+      const removed = await engine.restoreFileToBeforeMoment(created.id, RESTORER, { expectedHeadMomentId: created.id });
+      expect(existsSync(join(root, "new.md"))).toBe(false);
+      const undone = await engine.restoreFileToBeforeMoment(removed.restoredMomentId, RESTORER, { expectedHeadMomentId: removed.restoredMomentId });
+      expect(await readText(root, "new.md")).toBe("recipient text\n");
+      const moments = (await engine.listMoments()).moments;
+      expect(moments).toHaveLength(3);
+      expect(moments[0]).toMatchObject({ id: undone.restoredMomentId, objectId: created.objectId, operation: "write", authors: [RESTORER] });
+      expect(requests.filter(request => request.method === VERSIONED_METHOD.textWrite).at(-1)?.params)
+        .toMatchObject({ createOnly: true, restoreBeforeMomentId: removed.restoredMomentId, publish: true });
+    } finally { await engine.stop(); }
+  });
+
+  it("Undo recreates a removed record only while the path is still absent", async () => {
+    const root = await createTestScratch("dohc-engine-undo-");
+    await write(root, "new.md", "recipient text\n");
+    const engine = capture(root, new VersionedLoopbackEngine());
+    engine.start();
+    try {
+      await engine.flush();
+      const created = (await engine.listMoments()).moments[0]!;
+      const removed = await engine.restoreFileToBeforeMoment(created.id, RESTORER, {expectedHeadMomentId: created.id});
+      await write(root, "new.md", "Owner text KEEP\n");
+      await expect(engine.restoreFileToBeforeMoment(removed.restoredMomentId, RESTORER, {expectedHeadMomentId: removed.restoredMomentId})).rejects.toThrow(RestoreLocalChangesError);
+      expect(await readText(root, "new.md")).toBe("Owner text KEEP\n");
+    } finally {await engine.stop();}
+  });
+
+  it("reports a moved History head before attributing disk differences to this device", async () => {
+    const root = await createTestScratch("dohc-engine-head-");
+    await write(root, "new.md", "recipient text\n");
+    const engine = capture(root, new VersionedLoopbackEngine());
+    engine.start();
+    try {
+      await engine.flush();
+      const head = (await engine.listMoments()).moments[0]!;
+      await write(root, "new.md", "sync revision\n");
+      engine.observeFileEvents([{path: "new.md", operation: "update"}]);
+      await engine.flush();
+      await expect(engine.restoreFileToBeforeMoment(head.id, RESTORER, {expectedHeadMomentId: head.id})).rejects.toThrow(RestoreHeadChangedError);
+      expect(await readText(root, "new.md")).toBe("sync revision\n");
+    } finally {await engine.stop();}
+  });
+
+  it.each(["created", "edited"] as const)("keeps current disk content that differs from the planned %s head", async kind => {
+    const root = await createTestScratch("dohc-engine-restore-");
+    await write(root, "new.md", "recipient text\n");
+    const requests: Request[] = [];
+    const loopback = new VersionedLoopbackEngine();
+    const engine = capture(root, loopback, requests);
+    engine.start();
+    try {
+      await engine.flush();
+      if (kind === "edited") {
+        await write(root, "new.md", "recipient revision\n");
+        engine.observeFileEvents([{ path: "new.md", operation: "update" }]);
+        await engine.flush();
+      }
+      const head = (await engine.listMoments()).moments[0]!;
+      const send = loopback.sendRequest.bind(loopback);
+      vi.spyOn(loopback, "sendRequest").mockImplementation(async request => {
+        if (request.method === VERSIONED_METHOD.momentsGet) await write(root, "new.md", "Owner text KEEP\n");
+        return send(request);
+      });
+      const before = requests.length;
+      await expect(engine.restoreFileToBeforeMoment(head.id, RESTORER, { expectedHeadMomentId: head.id }))
+        .rejects.toThrow(RestoreLocalChangesError);
+      expect(await readText(root, "new.md")).toBe("Owner text KEEP\n");
+      expect(requests.slice(before).some(request => request.method === VERSIONED_METHOD.textDelete || request.method === VERSIONED_METHOD.textWrite)).toBe(false);
+    } finally { await engine.stop(); }
+  });
+
+  it("keeps a file for review when retained draft recovery cannot be inspected", async () => {
+    const root = await createTestScratch("dohc-engine-restore-");
+    await write(root, "new.md", "recipient text\n");
+    const engine = capture(root, new VersionedLoopbackEngine(), undefined, async () => { throw new Error("access denied"); });
+    engine.start();
+    try {
+      await engine.flush();
+      const created = (await engine.listMoments()).moments[0]!;
+      await expect(engine.restoreFileToBeforeMoment(created.id, RESTORER, { expectedHeadMomentId: created.id }))
+        .rejects.toThrow("Could not check saved drafts on this device. Try again.");
+      expect(await readText(root, "new.md")).toBe("recipient text\n");
+    } finally { await engine.stop(); }
+  });
+
+  it("keeps a recipient-created file with a retained live draft outside History", async () => {
+    const root = await createTestScratch("dohc-engine-restore-");
+    await write(root, "new.md", "recipient text\n");
+    const requests: Request[] = [];
+    const draft = vi.fn(async () => true);
+    const engine = capture(root, new VersionedLoopbackEngine(), requests, draft);
+    engine.start();
+    try {
+      await engine.flush();
+      const created = (await engine.listMoments()).moments[0]!;
+      await expect(engine.restoreFileToBeforeMoment(created.id, RESTORER, { expectedHeadMomentId: created.id }))
+        .rejects.toThrow("Changed on this device since the last saved version");
+      expect(await readText(root, "new.md")).toBe("recipient text\n");
+      expect(requests.some(request => request.method === VERSIONED_METHOD.textDelete)).toBe(false);
+    } finally { await engine.stop(); }
+  });
+
+  it("refuses deletion when current bytes change after the History check", async () => {
+    const root = await createTestScratch("dohc-engine-restore-");
+    await write(root, "new.md", "recipient text\n");
+    const loopback = new VersionedLoopbackEngine();
+    const sessions = mockDaemonSessions({ rootPath: root, workspaceId: "engine-restore-test", loopback,
+      beforeRequest: async request => {
+        if (request.method === VERSIONED_METHOD.textDelete) await write(root, "new.md", "Owner text KEEP\n");
+      },
+    });
+    const engine = createWorkspaceEngineCapture({ workspaceId: "engine-restore-test", rootPath: root,
+      attachmentId: Symbol("test"), rustEngineSessions: sessions });
+    engine.start();
+    try {
+      await engine.flush();
+      const created = (await engine.listMoments()).moments[0]!;
+      await expect(engine.restoreFileToBeforeMoment(created.id, RESTORER, { expectedHeadMomentId: created.id }))
+        .rejects.toThrow("Changed on this device since the last saved version");
+      expect(await readText(root, "new.md")).toBe("Owner text KEEP\n");
+      expect((await engine.listMoments()).moments.some(moment => moment.operation === "delete")).toBe(false);
+    } finally { await engine.stop(); }
+  });
+
   it("restores a file to before a moment: forward moment, disk write, no re-capture", async () => {
     const root = await createTestScratch("dohc-engine-restore-");
     await write(root, "doc.md", "original\n");
@@ -305,6 +441,16 @@ describe("engine restore", () => {
     const send = loopback.sendRequest.bind(loopback);
     let exportId = "exported-settlement";
     vi.spyOn(loopback, "sendRequest").mockImplementation(async request => {
+      const params = request.params;
+      if (request.method === VERSIONED_METHOD.momentsGet && params && typeof params === "object" && !Array.isArray(params)
+        && params.momentId === exportId) {
+        const response = await send({ ...request, params: { ...params, momentId: edit.id } });
+        const result = response.result;
+        if (result && typeof result === "object" && !Array.isArray(result)) {
+          return { ...response, result: { ...result, momentId: exportId, syncRecordOnly: true } };
+        }
+        return response;
+      }
       const response = await send(request);
       if (request.method !== VERSIONED_METHOD.momentsList) return response;
       const page = response.result;
