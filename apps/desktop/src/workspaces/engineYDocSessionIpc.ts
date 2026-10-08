@@ -852,8 +852,8 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     return ReadEngineYDocArtifactAssetResult.parse(await access.value);
   }
 
-  // Try again on a document that couldn't save: settle the session open
-  // for it now, whichever editor opened it. The settle reports its outcome
+  // Try again on a document that couldn't save: settle the session this
+  // window has open for it now, whichever of its editors opened it. The settle reports its outcome
   // as a save state. A settle that cannot start, or that fails, rejects
   // here, so the caller can say so instead of waiting.
   async retrySave(sender: EngineYDocIpcSender, payload: RetrySavePayload): Promise<RetrySaveResult> {
@@ -867,7 +867,10 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     try {
       authority.assertCurrent();
       const held = this.#owner.documentSession(authority.workspace.attachmentId, input.path);
-      if (!held || held.session.deleted) return "closed";
+      if (
+        !held || held.session.deleted ||
+        held.caller.sender !== sender || held.caller.generation !== renderer.generation
+      ) return "closed";
       if (!held.session.provider.settleNow) throw new Error("dohc could not start a save for this document.");
       settle = held.session.provider.settleNow();
     } finally {

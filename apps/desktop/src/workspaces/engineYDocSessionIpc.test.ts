@@ -631,6 +631,8 @@ describe("engine Y.Doc IPC adapter", () => {
     await expect(h.ipc.retrySave(sender, retry)).resolves.toBe("settled");
     expect(settleNow).toHaveBeenCalledOnce();
     await expect(h.ipc.retrySave(sender, { ...retry, path: "notes/b.md" })).resolves.toBe("closed");
+    // Another window in the same workspace cannot save this window's session.
+    await expect(h.ipc.retrySave(new FakeSender(8), retry)).resolves.toBe("closed");
     await expect(h.ipc.retrySave(sender, { ...retry, workspaceId: "workspace-2" })).rejects.toThrow("another workspace");
     expect(settleNow).toHaveBeenCalledOnce();
 
