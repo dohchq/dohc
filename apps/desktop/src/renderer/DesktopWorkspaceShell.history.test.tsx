@@ -2541,6 +2541,11 @@ describe("history page", () => {
     );
     await screen.findByTestId("mcp-enable-toggle");
 
+    // Wait for the panel's initial read before starting the run.
+    await waitFor(() =>
+      expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"),
+    );
+
     // A run starts, and the toggle's reread catches it alive — but the reread
     // is still in flight.
     activeRunId = "run-1";
