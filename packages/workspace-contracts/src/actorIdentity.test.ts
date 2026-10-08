@@ -130,6 +130,16 @@ describe("ActorKey derivation", () => {
       .toEqual(actorHueInput(link.key));
   });
 
+  it("keeps a live link's public identity without inventing a grant or internal participant", () => {
+    const actor = deriveMomentActor({ kind: "link", publicPrincipalId: "public-ana", label: "Ana" }, received, "Ana");
+    expect(actor.key).toEqual({ kind: "link", publicPrincipalId: "public-ana" });
+    expect(parseActorKey(serializeActorKey(actor.key))).toEqual(actor.key);
+    expect(actor.assurance).toBe("owner-asserted");
+    const other = deriveMomentActor({ kind: "link", publicPrincipalId: "public-bea", label: "Ana" }, received, "Ana");
+    expect(actorKeysEqual(actor.key, other.key)).toBe(false);
+    expect(actorHueInput(actor.key)).not.toEqual(actorHueInput(other.key));
+  });
+
   it("projects legacy human IDs without an issuer or verified self assurance", () => {
     for (const [humanId, identityKind] of [["alice", "account"], ["local:installation", "installation"]] as const) {
       const actor = deriveMomentActor({ kind: "human", humanId }, { source: "legacy" }, "Alice");
@@ -287,6 +297,7 @@ it("normalizes issuer scheme, host, trailing slashes and default ports in every 
 
 describe("ActorKey storage", () => {
   const moments: readonly MomentAuthor[] = [
+    { kind: "unattributed" },
     { kind: "human", humanId: "alice" },
     { kind: "human", humanId: identity.installationId },
     { kind: "agent", agentId: "Opus", onBehalfOf: "alice" },

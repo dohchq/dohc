@@ -2400,6 +2400,28 @@ describe("Collection automations", () => {
     expect(listed!.trigger).toEqual({ kind: "changed", recordId: task.id, by: null, sharedAuthor: link, depth: 0 });
   });
 
+  it.each(["record-added", '{starts-matching: record.Status == "Done"}'])("keeps the recipient author and person for a creation's %s run", async when => {
+    const rules = `  - id: null-person\n    name: Null person\n    when: ${when}\n    if: person == null\n    do: [{set: {Note: Should not run}}]\n  - id: who\n    name: Who\n    when: ${when}\n    do: [{set: {Note: '=person == null ? trigger.author.kind : person.id + ":" + trigger.author.userId'}}]\n`;
+    const w = await world({ automations: { Tasks: rules } });
+    const guarded = w.addRecord("Tasks", "guarded", { Status: "Done" });
+    const namedRecord = w.addRecord("Tasks", "named", { Status: "Done" });
+    const linkRecord = w.addRecord("Tasks", "link", { Status: "Done" });
+    const named = { kind: "named" as const, userId: "user-ana", grantId: "grant-ana", grantGeneration: 2 };
+    const link = { kind: "link" as const, principalId: "holder-1", grantId: "grant-link", grantGeneration: 2 };
+    const namedChange = { kind: "added" as const, actorKind: null, onBehalfOf: named.userId, sharedAuthor: named };
+    const claims = [
+      w.claim("collection:Tasks#null-person", guarded, namedChange),
+      w.claim("collection:Tasks#who", namedRecord, namedChange),
+      w.claim("collection:Tasks#who", linkRecord, { kind: "added", actorKind: null, onBehalfOf: null, sharedAuthor: link }),
+    ];
+    await w.executor.open();
+    for (const claim of claims) await w.settledClaim(claim);
+    expect(claims.map(claim => claim.state)).toEqual(["done", "done", "done"]);
+    expect(w.fieldsOf(guarded).Note).toBeUndefined();
+    expect(w.fieldsOf(namedRecord).Note).toBe("user-ana:user-ana");
+    expect(w.fieldsOf(linkRecord).Note).toBe("link");
+  });
+
   const ITEMS = "  - id: tick\n    name: Tick\n    when: {field-changed: Status}\n    do:\n      - find: 'true'\n        collection: Items\n        as: items\n      - set: {Count: '=record.Count + 1'}\n        records: items\n";
 
   it.each([50, 51])("requires a complete Find before using its records with %i matches", async (count) => {

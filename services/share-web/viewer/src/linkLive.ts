@@ -13,13 +13,21 @@ export async function openLinkDocument(discriminator: string, path: string, sign
   signal.throwIfAborted();
   if (!exact(metadata, "limits,objectId")) throw Error("Invalid file");
   const objectId = parseLiveUpdateIdentifier(metadata.objectId), limits = parseNamedLiveBrowserLimits(metadata.limits);
+  let publicPrincipalId: string | undefined;
   const transport = createNamedLiveBrowserTransport<{objectId: string}>({publicOrigin: location.origin, limits,
+    recordingContext() {
+      if (!publicPrincipalId) throw Error("Link identity is unavailable");
+      return {kind: "link", publicPrincipalId};
+    },
     async authorize(selection, attemptSignal) {
       const ticket = await namedRequest("/api/live/link-ticket", attemptSignal, {discriminator, objectId: selection.objectId});
       attemptSignal.throwIfAborted();
-      if (!exact(ticket, "expiresAtMs,token") || typeof ticket.expiresAtMs !== "number" ||
+      if (!exact(ticket, "expiresAtMs,publicPrincipalId,token") || typeof ticket.expiresAtMs !== "number" ||
         !Number.isSafeInteger(ticket.expiresAtMs) || ticket.expiresAtMs <= Date.now()) throw Error("Invalid ticket");
       parseLiveTicketToken(ticket.token);
+      const principal = parseLiveUpdateIdentifier(ticket.publicPrincipalId);
+      if (publicPrincipalId !== undefined && publicPrincipalId !== principal) throw Error("Link identity changed");
+      publicPrincipalId = principal;
       const ticketToken = ticket.token as string;
       const url = new URL("/api/live/link", location.origin); url.protocol = "wss:"; url.searchParams.set("session", discriminator);
       return {ticketToken, discriminator, websocketUrl: url.href};

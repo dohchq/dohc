@@ -680,7 +680,7 @@ export const FileInspector = memo(function FileInspector(
           // MarkdownView mounts — without this the timeout had no notice and
           // no retry on exactly the path where the engine session is the only
           // way back to the content.
-          <EngineMayHoldDocumentNotice onRetry={retryEngineOpen} contentShown={false} />
+          <EngineMayHoldDocumentNotice onRetry={retryEngineOpen} contentShown={false} message={engine.sharedWaiting?.message} />
         ) : null}
         {engine.artifactAssetsInvalid ? (
           <EngineArtifactAssetsInvalidNotice

@@ -1,6 +1,7 @@
 import {
   chatDispatchNoticeOperations,
   crashReportOperations,
+  engineYDocAdmissionOperations,
   noticeOperations,
   reportingOperations,
   scheduleHostOperations,
@@ -16,6 +17,7 @@ export const OPERATION_TABLES = [
   workspaceSearchOperations,
   crashReportOperations,
   reportingOperations,
+  engineYDocAdmissionOperations,
   chatDispatchNoticeOperations,
   scheduleHostOperations,
   noticeOperations,

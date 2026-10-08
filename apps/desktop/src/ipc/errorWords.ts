@@ -3,8 +3,9 @@ import type { DaemonErrorCode } from "@dohc/workspace-engine-client";
 
 // Electron hands a rejected handler's error to the renderer as one string,
 // `error.toString()`: the class survives, the code does not. `ipcWireError`
-// keeps the code (`DaemonRefusalError [OVERLOADED]: …`) and `readError` turns
-// that string back into words a person can act on.
+// keeps the code (`DaemonRefusalError [OVERLOADED]: …`), and a wait the error
+// sets (`… [dataset_reopen_wait] [retryAfterMs=5000]: …`), and `readError`
+// turns that string back into words a person can act on.
 
 // `null`: the error names nothing a person can act on, so the caller's own
 // sentence stands alone. Copy details still carry the error as it arrived.
@@ -158,7 +159,7 @@ export const UNKNOWN_ERROR_WORDS = "dohc could not finish that.";
 // A bare code such as `invalid-input` or `EACCES`, or one that leads a message.
 const RAW_CODE = /^(?:\S*[-_]\S*|[A-Z0-9]{3,})$|^[A-Z][A-Z0-9_]+: /;
 const IPC_PREFIX = /^Error invoking remote method '[^']*': /;
-const CLASS_PREFIX = /^((?:[A-Z][A-Za-z0-9]*)?Error)(?: \[([^\]\s]+)\])?: /;
+const CLASS_PREFIX = /^((?:[A-Z][A-Za-z0-9]*)?Error)(?: \[([^\]\s]+)\])?(?: \[retryAfterMs=(\d{1,15})\])?: /;
 
 // The engine client's `wireCode`, the dataset worker's `code`, the compiler's
 // `reason`.
@@ -170,13 +171,25 @@ function codeOf(error: Error): string | null {
   return null;
 }
 
-/** Main's IPC boundary: keeps the error's code in the one string Electron sends. */
+// How long the error says to wait before trying again, as a Collection's dataset worker sets it.
+function retryAfterOf(error: Error): number | null {
+  const value: unknown = Reflect.get(error, "retryAfterMs");
+  return Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : null;
+}
+
+// The class, the code, and the wait, as the wire carries them before the message.
+function wireName(error: Error, code: string): string {
+  const wait = retryAfterOf(error);
+  return `${error.name} [${code}]${wait === null ? "" : ` [retryAfterMs=${wait}]`}`;
+}
+
+/** Main's IPC boundary: keeps the error's code and wait in the one string Electron sends. */
 export function ipcWireError(error: unknown): unknown {
   if (!(error instanceof Error)) return error;
   const code = codeOf(error);
   if (code === null) return error;
   const wire = new Error(error.message, { cause: error });
-  wire.name = `${error.name} [${code}]`;
+  wire.name = wireName(error, code);
   return wire;
 }
 
@@ -187,7 +200,7 @@ function parse(error: unknown) {
     const code = codeOf(error);
     text = error.name === "Error" && code === null
       ? error.message
-      : `${error.name}${code === null ? "" : ` [${code}]`}: ${error.message}`;
+      : `${code === null ? error.name : wireName(error, code)}: ${error.message}`;
   }
   text = text.replace(IPC_PREFIX, "").trim();
   const match = CLASS_PREFIX.exec(text);
@@ -195,6 +208,7 @@ function parse(error: unknown) {
     text,
     name: match?.[1] ?? "Error",
     code: match?.[2],
+    retryAfterMs: match?.[3] === undefined ? undefined : Number(match[3]),
     message: (match ? text.slice(match[0].length) : text).trim(),
   };
 }
@@ -242,6 +256,13 @@ export function withErrorWords(sentence: string, error: unknown): string {
     : words || sentence;
 }
 
+/** A Collection that waits before it reopens, because reopening it kept failing: the supervisor's words and its wait. */
+export function readCollectionReopenWait(error: unknown): { words: string; waitMs: number } | null {
+  const { name, code, retryAfterMs, message } = parse(error);
+  return name === "DatasetReopenWaitError" && code === "dataset_reopen_wait" && retryAfterMs !== undefined
+    ? { words: message, waitMs: retryAfterMs } : null;
+}
+
 /** A refusal only a newer dohc can get past, so Try again would do nothing. */
 export function needsNewerDohc(error: unknown): boolean {
   return readError(error).words === NEWER_DOHC;
@@ -252,4 +273,15 @@ export function isWorkspaceUpdatingError(error: unknown): boolean {
   const { name, code, message } = parse(error);
   return name === "DaemonRefusalError" && code === "OVERLOADED" &&
     ERROR_WORDS.DaemonRefusalError?.[message] === UPDATING;
+}
+
+/** Access and connection failures can hide a changed grant behind an IPC error. */
+export function shouldRecheckShareAccess(error: unknown): boolean {
+  const { name, code, message } = parse(error);
+  if (["RelayUnauthorizedError", "RelayClaimRefusedError", "RelayWorkspaceUnavailableError",
+    "RelayUnreachableError", "SharedFileReadOnlyError", "ShareUnavailableError", "TimeoutError", "NetworkError"].includes(name)) return true;
+  if (name === "DaemonRefusalError" && code !== undefined &&
+    ["AUTH_FAILED", "FORBIDDEN", "SHARE_UNAVAILABLE", "SHARE_READ_ONLY", "SHARE_OPERATION_REJECTED",
+      "SESSION_EXPIRED", "WORKSPACE_UNAVAILABLE", "IDENTITY_NOT_RECOGNIZED"].includes(code)) return true;
+  return /\b(?:unauthorized|forbidden|authorization failed|does not have Edit access|access to this share (?:ended|changed)|share is no longer available|network (?:error|request failed|failure)|fetch failed|failed to fetch|ECONN\w*|ENOTFOUND|ETIMEDOUT)\b|Share request failed \((?:401|403|404)\)/i.test(message);
 }

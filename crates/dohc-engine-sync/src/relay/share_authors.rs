@@ -15,6 +15,11 @@ pub(super) fn received_authors(envelope: &ReplicationEnvelope) -> Option<String>
     let mut authors = Vec::new();
     for value in raw {
         let kind = value.get("kind").and_then(Value::as_str);
+        if kind == Some("unattributed") && value.as_object().is_some_and(|object| object.len() == 1)
+        {
+            authors.push(value.clone());
+            continue;
+        }
         if matches!(kind, Some("human" | "link")) {
             let (id_field, label_field) = if kind == Some("human") {
                 ("humanId", "humanName")

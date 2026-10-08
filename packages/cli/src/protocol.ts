@@ -23,6 +23,8 @@ const cliAuthorKindSchema = z.enum(["human", "agent", "automation"]);
 const requestBase = {
   token: z.string().regex(/^[a-f0-9]{64}$/),
   protocolVersion: z.literal(CLI_PROTOCOL_VERSION),
+  // Caller-reported, unverified attribution; grants no authority.
+  door: z.enum(["cli", "mcp"]).optional(),
 };
 
 const argsBase = {
@@ -721,6 +723,7 @@ const exportResultSchema = z
   .strict();
 
 const rawMomentAuthorSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("unattributed") }).strict(),
   z.object({
     kind: z.literal("agent"),
     agentId: z.string().min(1),

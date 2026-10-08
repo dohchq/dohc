@@ -6317,7 +6317,7 @@ export function createWorkspaceEngineCapture(
         });
         for (const moment of page.moments) {
           if (moment.id === momentId) return after;
-          if (!moment.syncRecordOnly) after.push(moment.id);
+          after.push(moment.id);
         }
         if (page.nextBeforeMomentOrder === null) return after;
         beforeMomentOrder = page.nextBeforeMomentOrder;
@@ -6488,11 +6488,16 @@ export function createWorkspaceEngineCapture(
             versionId: activeVersionId,
             path,
           });
-          if (
-            options.expectedHeadMomentId !== undefined &&
-            (current?.objectId !== moment.objectId || current.latestMomentId !== options.expectedHeadMomentId)
-          ) {
-            throw new RestoreHeadChangedError(path);
+          if (options.expectedHeadMomentId !== undefined) {
+            const history = await engine.listMoments({
+              workspaceId,
+              versionId: activeVersionId,
+              objectId: moment.objectId,
+              limit: 1,
+            });
+            if (current?.objectId !== moment.objectId || history.moments[0]?.id !== options.expectedHeadMomentId) {
+              throw new RestoreHeadChangedError(path);
+            }
           }
           if (target) {
             // Equal bytes are the pre-moment state, whatever their kinds.

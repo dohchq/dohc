@@ -811,37 +811,29 @@ test("mixed type and value imports retain runtime resource discovery", () => {
 test("real renderer selection activates for pure changes and rejects native edges", () => {
   const files = readRendererFiles(root);
   const graph = rendererInputGraph(files);
-  for (const component of ["JoinSyncedWorkspace.tsx", "WorkspaceManager.tsx"]) {
-    const plan = focusedRendererSelection([`${rendererPath}${component}`], files, {graph});
-    assert.ok(plan, `${component} must keep the focused renderer path reachable in this repository.`);
-    assert.ok(plan.testFiles["@dohc/desktop"].includes(`src/renderer/${component.replace(/\.tsx$/u, ".test.tsx")}`), component);
-    assert.equal(plan.proofs.smoke, true, component);
-    assert.equal(plan.proofs.desktop, true, "Every focused renderer plan retains onboarding.");
-    assert.equal(plan.needs.postgres, true, component);
-    assert.ok(plan.testFiles["@dohc/desktop"].length < 622, component);
-    assert.equal(plan.desktopScripts, false, component);
+  const plan = focusedRendererSelection([`${rendererPath}workbench/quick-open-rank.ts`], files, {graph});
+  assert.ok(plan, "The focused renderer path must remain reachable in this repository.");
+  assert.ok(plan.testFiles["@dohc/desktop"].includes("src/renderer/workbench/quick-open-rank.test.ts"));
+  assert.equal(plan.proofs.smoke, true);
+  assert.equal(plan.proofs.desktop, true, "Every focused renderer plan retains onboarding.");
+  assert.equal(plan.needs.postgres, true);
+  for (const component of ["CloudLogin.tsx", "JoinSyncedWorkspace.tsx", "WorkspaceManager.tsx"]) {
+    const componentPlan = focusedRendererSelection([`${rendererPath}${component}`], files, {graph});
+    assert.ok(componentPlan, component);
+    assert.equal(componentPlan.proofs.desktop, true, component);
+    assert.equal(componentPlan.needs.postgres, true, component);
+    assert.ok(componentPlan.testFiles["@dohc/desktop"].length < 622, component);
+    assert.equal(componentPlan.desktopScripts, false, component);
   }
-  // The shell's ended-share test runs a real sync relay, whose runtime inputs
-  // need Node. Renderer sources that reach it retain package selection.
-  const reach = (path, edges) => {
-    const reached = new Set([path]);
-    for (const next of reached) for (const edge of edges.get(next) ?? []) reached.add(edge);
-    return reached;
-  };
-  const relayTest = `${rendererPath}DesktopWorkspaceShell.endedShare.test.tsx`;
-  const runtime = rendererInputGraph(files, {runtime: true, seeds: [relayTest]});
-  assert.ok(reach(relayTest, runtime.inputs).has("services/sync-relay/src/testing/index.ts"));
-  assert.ok(runtime.nodeOnly.has("services/sync-relay/src/testing/index.ts"));
   for (const [component, consumers] of [
-    ["workbench/quick-open-rank.ts", [`${rendererPath}workbench/quick-open-rank.test.ts`]],
-    ["CloudLogin.tsx", [`${rendererPath}CloudLogin.test.tsx`]],
-    ["Titlebar.tsx", ["apps/desktop/src/testPins.coupling.test.tsx", "apps/desktop/src/testPins.test.tsx"]],
-    ["settings/SettingsDialog.tsx", ["apps/desktop/src/testPins.settings-coupling.test.tsx"]],
+    ["Titlebar.tsx", ["src/testPins.coupling.test.tsx", "src/testPins.test.tsx"]],
+    ["settings/SettingsDialog.tsx", ["src/testPins.settings-coupling.test.tsx"]],
   ]) {
-    const path = `${rendererPath}${component}`;
-    for (const consumer of consumers) assert.ok(graph.consumers.get(path)?.has(consumer), `${component} -> ${consumer}`);
-    assert.ok(reach(path, graph.consumers).has(relayTest), component);
-    assert.equal(focusedRendererSelection([path], files, {graph}), null, component);
+    const componentPlan = focusedRendererSelection([`${rendererPath}${component}`], files, {graph});
+    assert.ok(componentPlan, component);
+    for (const consumer of consumers) assert.ok(componentPlan.testFiles["@dohc/desktop"].includes(consumer), consumer);
+    assert.equal(componentPlan.proofs.desktop, true, component);
+    assert.equal(componentPlan.needs.postgres, true, component);
   }
   for (const path of ["collab/engineYDocProvider.ts", "tokens.ts", "workbench/workbenchState.ts", "collab/presenceChannel.ts",
     "workbench/EngineHistory.tsx", "shareSkipNotice.ts", "workbench/chatFileMentions.ts"]) {

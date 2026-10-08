@@ -100,6 +100,7 @@ function stubEditorGlobals(): void {
 
 function makeBridge(markdownByPath: Record<string, string>): DohcDesktopBridge {
   return {
+    onWorkspaceActivity: vi.fn(() => () => undefined),
     readWorkspaceText: vi.fn(async ({ relativePath }) => ({
       text: markdownByPath[relativePath] ?? "",
       truncated: false,

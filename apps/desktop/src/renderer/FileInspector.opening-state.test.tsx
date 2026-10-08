@@ -55,6 +55,7 @@ describe("markdown document opening state", () => {
     const saveListeners = new Set<Parameters<DohcDesktopBridge["onEngineYDocSaveState"]>[0]>();
     const bridgeMock = {
       platform: "linux" as const,
+      onWorkspaceActivity: vi.fn(() => () => undefined),
       readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(
         async () => ({
           text: DOC_MARKDOWN,

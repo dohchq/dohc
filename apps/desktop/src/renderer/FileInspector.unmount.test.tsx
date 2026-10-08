@@ -100,6 +100,7 @@ async function settleUserEventAction<T>(pending: Promise<T>): Promise<T> {
 describe("markdown editor unmount flush", () => {
   const bridgeMock = {
     platform: "linux" as const,
+    onWorkspaceActivity: vi.fn(() => () => undefined),
     readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(async () => ({
       text: "# Hello\n",
       truncated: false as const,
