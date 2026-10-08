@@ -83,7 +83,7 @@ export function createLocalDatasetMigrations(dependencies: MigrationAuthority) {
       for (const [key, value] of pending) if (value.expiresAtMs <= Date.now()) pending.delete(key);
       if (pending.size + preparing >= 8) throw new Error("Too many Collection changes await approval. Finish or discard a review.");
       if (!allowed(input.descriptorPath) || !allowed(input.migrationPath)
-        || (input.descriptorPath !== "dataset.json" && !input.descriptorPath.endsWith("/dataset.json"))) throw new Error("Choose Collection sources in this workspace.");
+        || !["dataset.json", "revision.json"].includes(input.descriptorPath.split("/").at(-1)!)) throw new Error("Choose Collection sources in this workspace.");
       preparing++;
       try {
         const previous = await dependencies.approvedArtifacts(input.datasetId);
