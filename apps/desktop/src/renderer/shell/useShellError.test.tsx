@@ -4,6 +4,7 @@ import { StrictMode, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ipcErrorMessage } from "../ipcError";
 import { useShellError } from "./useShellError";
+import { shareCaptureNoticeState } from "../../workspaces/shareCaptureNotice";
 import { CreationPartialError } from "@dohc/cli/creation";
 import { errorDetails } from "./copyDetails";
 
@@ -14,13 +15,30 @@ const strict = ({ children }: { children: ReactNode }) => (
 );
 
 describe("useShellError", () => {
+  it("hides only the persisted dismissal's matching restriction key", () => {
+    const snapshot = { paths: ["tasks/local.yaml"], unchecked: false, checked: 1 };
+    const dismissed = { ...snapshot, dismissedKey: shareCaptureNoticeState([], snapshot, false).key };
+    const { result } = renderHook(() => useShellError("restriction-dismissal-key"));
+    act(() => result.current.reportShareCapture("share", [], dismissed, false));
+    expect(result.current.shellErrors).toHaveLength(0);
+    act(() => result.current.reportShareCapture("share", [], dismissed, true));
+    expect(result.current.shellErrors).toHaveLength(1);
+    expect(result.current.shellErrors[0]!.message).toContain("They are kept on this computer.");
+    expect(result.current.shellErrors[0]!.seen).toBe(false);
+    act(() => result.current.reportShareCapture("share", [], {
+      ...snapshot, dismissedKey: shareCaptureNoticeState([], snapshot, true).key,
+    }, true));
+    expect(result.current.shellErrors).toHaveLength(0);
+  });
+
   it("keeps a dismissed capture Notice dismissed across remounts until the path set changes", () => {
     const first = renderHook(() => useShellError("capture-notice-workspace"));
     const paths = ["tasks/locked.md", "tasks/another.md"];
     act(() => first.result.current.reportShareCapture("share-a", paths));
     const notice = first.result.current.shellErrors[0]!;
     expect(notice.identity).toBe("share-capture:capture-notice-workspace:share-a");
-    expect(notice.message).toBe("Your changes weren't sent and remain on this computer. Copy these files to another workspace.");
+    expect(notice.title).toBe("Changes kept on this computer");
+    expect(notice.message).toBe("dohc couldn't confirm these changes reached the share. They are kept on this computer. Copy these files to another workspace.");
     expect(notice.message).not.toContain(paths[0]);
     expect(errorDetails(notice.details!)).toContain("File: tasks/another.md\nFile: tasks/locked.md");
     act(() => first.result.current.hideShellError(notice.id));
@@ -40,8 +58,19 @@ describe("useShellError", () => {
     expect(reopened.result.current.shellErrors).toHaveLength(0);
     act(() => reopened.result.current.reportShareCapture("share-a", null));
     expect(reopened.result.current.shellErrors).toHaveLength(1);
-    expect(reopened.result.current.shellErrors[0]!.message).toBe("dohc could not check this share's files. Your changes may not have been sent. Copy your changed files to another workspace.");
+    expect(reopened.result.current.shellErrors[0]!.message).toBe("dohc couldn't check this share's files. Copy any files you changed to another workspace now.");
     expect(reopened.result.current.shellErrors[0]!.details).toBeUndefined();
+    act(() => reopened.result.current.reportShareCapture("share-a", [], { paths: ["tasks/draft.md"], unchecked: true, checked: 0 }));
+    expect(reopened.result.current.shellErrors).toHaveLength(1);
+    expect(reopened.result.current.shellErrors[0]!.message).toBe("dohc checked only some of this share's files. dohc couldn't confirm these changes reached the share. They are kept on this computer. Copy these files and any others you changed to another workspace now.");
+    expect(reopened.result.current.shellErrors[0]!.details).toEqual([["File", "tasks/draft.md", "tasks/draft.md".length]]);
+  });
+
+  it("describes a partial check with no names without claiming changes exist", () => {
+    const { result } = renderHook(() => useShellError("partial-empty-share"));
+    act(() => result.current.reportShareCapture("share", [], { paths: [], unchecked: true, checked: 256 }, false));
+    expect(result.current.shellErrors[0]).toMatchObject({ title: "Share check incomplete",
+      message: "dohc checked only some of this share's files. Copy any files you changed to another workspace now.", details: undefined });
   });
 
   it.each([true, false])("keeps separate partial creations and replaces only the retried creation (record: %s)", record => {

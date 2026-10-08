@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { shareCaptureNoticeState } from "../workspaces/shareCaptureNotice";
 import { CHANNELS } from "./channels";
 import { OpenSharedViewPayload, OpenSharedViewResult, RefreshSharedViewPayload, RefreshSharedViewResult, sharedViewAccessOperations, type CheckSharedViewAccessResult, engineStoreRefusalRecovery } from "./bridgeContract";
 import { registerOperations } from "./operationTable";
@@ -434,12 +435,24 @@ export function registerSharedViewsIpcHandlers<
   });
 
   const checks = new Set<Sender>();
-  registerOperations({
+  registerOperations<typeof sharedViewAccessOperations, Event, Operation>({
     handle: registerHandler,
     assertTrustedSender,
     withActiveWorkspace: (event, workspaceId, inactiveMessage, work) =>
       withRendererWorkspaceOperation(event.sender, workspaceId, inactiveMessage, work),
   }, sharedViewAccessOperations, {
+    dismissShareCaptureNotice: async (input, { operation }) => {
+      operation.assertCurrent();
+      const view = operation.workspace.shareView;
+      if (!view || view.shareId !== input.shareId) return;
+      const state = shareCaptureNoticeState(view.unsavedPaths, view.unconfirmedChanges, view.ended === true);
+      // A dismissal of an older restriction must not hide a newer Notice.
+      if (state.key !== input.key) return;
+      setWorkspaceShareView(input.workspaceId, { ...view, unconfirmedChanges: {
+        paths: state.filePaths, unchecked: state.unchecked, checked: state.checked, dismissedKey: state.key,
+      } });
+      notifyRenderer({ workspaceId: input.workspaceId });
+    },
     checkSharedViewAccess: async (input, { event }): Promise<CheckSharedViewAccessResult> => {
       if (checks.has(event.sender)) return { status: "unverified" };
       const controller = new AbortController();
@@ -506,12 +519,12 @@ export function registerSharedViewsIpcHandlers<
             const access = ranks[statedAccess] < ranks[currentPin.access] ? statedAccess : currentPin.access;
             if (access !== currentPin.access) {
               await withStaleSensitiveWorkspaceOperation(workspace.rootPath, lease =>
-                shareViewFiles.narrow(lease, { kind: "standalone", workspaceId: workspace.workspaceId }, scoped.assertCurrent, (unsavedPaths) => {
+                shareViewFiles.narrow(lease, { kind: "standalone", workspaceId: workspace.workspaceId }, scoped.assertCurrent, (unsavedPaths, unconfirmedChanges) => {
                   const latest = operation.workspace.shareView;
                   const latestPin = recordedShareSelector(latest?.grantedSelector);
                   if (!latest || latest.shareId !== view.shareId || !latestPin || latest.ended) return;
                   const narrowed = ranks[access] < ranks[latestPin.access] ? access : latestPin.access;
-                  setWorkspaceShareView(workspace.workspaceId, { ...latest, grantedSelector: { ...latestPin, access: narrowed }, unsavedPaths });
+                  setWorkspaceShareView(workspace.workspaceId, { ...latest, grantedSelector: { ...latestPin, access: narrowed }, unsavedPaths, unconfirmedChanges });
                 }));
               refreshNativeWorkspaceSurfaces();
               notifyRenderer({ workspaceId: workspace.workspaceId });

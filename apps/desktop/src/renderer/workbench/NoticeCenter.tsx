@@ -47,6 +47,7 @@ export type Notice = {
   // A report a person can paste: shown as a copy control on the row.
   copyText?: string;
   copyLabel?: string;
+  filePaths?: readonly string[];
   Icon: typeof Bell;
 };
 
@@ -54,6 +55,7 @@ export type Notice = {
 // on the clipboard; `seen` means its toast was closed and only the row in
 // Notices remains.
 export interface WorkspaceErrorNotice {
+  copyLabel?: string;
   tone?: "success";
   // A success toast that stays until it is closed, rather than fading.
   stays?: boolean;
@@ -61,6 +63,7 @@ export interface WorkspaceErrorNotice {
   title?: string;
   message: string;
   details: string;
+  filePaths?: readonly string[];
   atMs: number;
   canRetry: boolean;
   // A step that fixes the cause, such as opening the file it names.
@@ -335,14 +338,14 @@ export function WorkspaceErrorToast(props: {
           Try again
         </button>
       ) : null}
-      <CopyButton
+      {error.filePaths === undefined || error.filePaths.length > 0 ? <CopyButton
         key={error.id}
         iconOnly
         pinName
-        label={error.tone === "success" ? "Copy notice details" : "Copy error details"}
+        label={error.copyLabel ?? (error.tone === "success" ? "Copy notice details" : "Copy error details")}
         testId="workspace-shell-error-copy"
         getText={() => error.details}
-      />
+      /> : null}
       {props.onHide ? (
         <button
           type="button"
@@ -394,7 +397,7 @@ export function LocalNoticeRow(props: {
               {action.label}
             </button>
           ))}
-          {notice.copyText !== undefined ? (
+          {notice.copyText !== undefined && !notice.filePaths?.length ? (
             <CopyButton
               iconOnly
               pinName
@@ -415,9 +418,21 @@ export function LocalNoticeRow(props: {
             </button>
           ) : null}
         </div>
-        <p className="m-0 mt-0.5 line-clamp-3 text-[11px] leading-snug text-muted">
+        <p className={`m-0 mt-0.5 ${notice.filePaths !== undefined ? "" : "line-clamp-3 "}text-[11px] leading-snug text-muted`}>
           {notice.body}
         </p>
+        {notice.filePaths?.length ? (
+          <div className="mt-1 flex items-start gap-2">
+            <ul className="m-0 min-w-0 flex-1 list-none p-0 font-mono text-[12px] text-muted">
+              {notice.filePaths.slice(0, 5).map(path => <li key={path} className="select-text break-all">{path}</li>)}
+              {notice.filePaths.length > 5 ? <li>{notice.filePaths.length - 5} more</li> : null}
+            </ul>
+            {notice.copyText !== undefined ? (
+              <CopyButton iconOnly pinName label={notice.copyLabel ?? "Copy error details"}
+                testId={`notice-${notice.id}-copy`} getText={() => notice.copyText ?? ""} />
+            ) : null}
+          </div>
+        ) : null}
         {notice.timeMs !== undefined ? (
           <time
             dateTime={new Date(notice.timeMs).toISOString()}
@@ -894,7 +909,9 @@ export function NoticeCenter(props: {
           ? { onDismiss: () => props.onDismissWorkspaceError?.(error.id) }
           : {}),
         timeMs: error.atMs,
-        copyText: error.details,
+        copyText: error.filePaths?.length === 0 ? undefined : error.details,
+        copyLabel: error.copyLabel,
+        filePaths: error.filePaths,
         Icon: error.tone === "success" ? CheckCircle2 : AlertTriangle,
       });
     }

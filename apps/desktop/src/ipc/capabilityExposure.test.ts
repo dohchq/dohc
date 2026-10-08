@@ -52,6 +52,7 @@ describe("B1 main inventories (a4be19d5b)", () => {
     // separate from the hashed main baseline.
     const expectedNames = [...mainIpc.names];
     expectedNames.push("desktop:check-shared-view-access");
+    expectedNames.push("desktop:dismiss-share-capture-notice");
     for (const name of clipboardIpc.nameRemovals) {
       expect(expectedNames).toContain(name);
       expectedNames.splice(expectedNames.indexOf(name), 1);
