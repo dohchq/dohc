@@ -437,7 +437,11 @@ mod tests {
                     sha256: Some(hex_sha256(bytes)),
                 })
                 .unwrap();
-            let (request, input) = self.ingress.chunk(stream, true, bytes).unwrap().unwrap();
+            let super::UploadCompletion::Admitted(request, input) =
+                self.ingress.chunk(stream, true, bytes).unwrap().unwrap()
+            else {
+                panic!("unexpected refusal")
+            };
             self.service
                 .call_with_input(self.context(), request, Some(input))
                 .await
@@ -473,7 +477,11 @@ mod tests {
                 total_bytes: Some(bytes.len() as u64),
                 sha256: Some(hex_sha256(&bytes)),
             })?;
-            let (request, input) = self.ingress.chunk(stream, true, &bytes)?.unwrap();
+            let super::UploadCompletion::Admitted(request, input) =
+                self.ingress.chunk(stream, true, &bytes)?.unwrap()
+            else {
+                panic!("unexpected refusal")
+            };
             self.service
                 .call_with_input(self.context(), request, Some(input))
                 .await
@@ -515,7 +523,11 @@ mod tests {
                     sha256: Some(hex_sha256(&[])),
                 })
                 .unwrap();
-            let (request, input) = self.ingress.chunk(stream + 1, true, &[]).unwrap().unwrap();
+            let super::UploadCompletion::Admitted(request, input) =
+                self.ingress.chunk(stream + 1, true, &[]).unwrap().unwrap()
+            else {
+                panic!("unexpected refusal")
+            };
             let response = self
                 .service
                 .call_with_input(self.context(), request, Some(input))
@@ -630,7 +642,11 @@ mod tests {
                         sha256: Some(hex_sha256(&vector)),
                     })
                     .unwrap();
-                let (request, input) = f.ingress.chunk(200, true, &vector).unwrap().unwrap();
+                let super::UploadCompletion::Admitted(request, input) =
+                    f.ingress.chunk(200, true, &vector).unwrap().unwrap()
+                else {
+                    panic!("unexpected refusal")
+                };
                 f.service.call_with_input(ctx, request, Some(input)).await
             } else {
                 let request = f.request(
