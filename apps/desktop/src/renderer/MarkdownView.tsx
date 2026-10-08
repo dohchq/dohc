@@ -37,7 +37,7 @@ import {
   useSyncExternalStore,
   type LazyExoticComponent,
 } from "react";
-import type * as Y from "yjs";
+import * as Y from "yjs";
 import type { ChatFileMentionRecord } from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
@@ -617,6 +617,27 @@ export function MarkdownView(props: {
   // writeDraftNow documents). The transition guard keeps it idempotent under
   // replayed renders (`readOnlyRef` precedent below).
   const orphanedDrafts = useOrphanedDrafts(props.workspaceId, props.path);
+  const lastLiveDoc = useRef<{ key: string; doc: Y.Doc } | null>(null);
+  const [endedCopy, setEndedCopy] = useState<{ key: string; doc: Y.Doc } | null>(null);
+  if (engine.doc) lastLiveDoc.current = { key: props.documentKey, doc: engine.doc };
+  const showEndedCopy = !engine.doc && !opening &&
+    engine.readOnlyCause === "access-ended" && orphanedDrafts.length === 0;
+  let readOnlyCopy = showEndedCopy && endedCopy?.key === props.documentKey ? endedCopy.doc : null;
+  if (showEndedCopy && !readOnlyCopy && lastLiveDoc.current?.key === props.documentKey) {
+    // A display snapshot keeps the live content after the lease closes. It
+    // has no provider and cannot send edits back to the shared document.
+    readOnlyCopy = new Y.Doc();
+    Y.applyUpdate(readOnlyCopy, Y.encodeStateAsUpdate(lastLiveDoc.current.doc));
+    setEndedCopy({ key: props.documentKey, doc: readOnlyCopy });
+  } else if (!showEndedCopy && endedCopy !== null) {
+    setEndedCopy(null);
+  }
+  useEffect(() => {
+    if (endedCopy) lastLiveDoc.current = null;
+    return () => { endedCopy?.doc.destroy(); };
+  }, [endedCopy]);
+  const displayDoc = engine.doc ?? readOnlyCopy;
+
   const openingRef = useRef(opening);
   if (opening && !openingRef.current) {
     if (saveTimer.current) {
@@ -720,17 +741,17 @@ export function MarkdownView(props: {
     // whose retry bound the document), it is empty. Refuse instead of
     // exporting stale text; the menu says the document is not ready.
     const editorBody = wysiwygRef.current?.getMarkdown();
-    if (editorBody === undefined && engine.doc !== null) return null;
+    if (editorBody === undefined && displayDoc !== null) return null;
     const body = editorBody ?? markdownEditorBody(props.body);
-    if (!engine.doc) {
+    if (!displayDoc) {
       return mergeMarkdownEditorBody(latestDraft.current, body);
     }
     const liveMeta = Object.fromEntries(
-      engine.doc.getMap(ENGINE_FRONTMATTER_FIELD).entries(),
+      displayDoc.getMap(ENGINE_FRONTMATTER_FIELD).entries(),
     ) as Record<string, unknown>;
     // The frontmatter text the settle keeps, so a copy matches the file.
-    const meta = engine.doc.getMap("meta");
-    const written = writtenFrontmatterKeys(engine.doc.getMap(ENGINE_FRONTMATTER_FIELD), meta);
+    const meta = displayDoc.getMap("meta");
+    const written = writtenFrontmatterKeys(displayDoc.getMap(ENGINE_FRONTMATTER_FIELD), meta);
     const block = frontmatterBlockFor(
       orderFrontmatter(liveMeta),
       meta.get("dohcFrontmatterSource"),
@@ -840,6 +861,7 @@ export function MarkdownView(props: {
     onPendingDraftChange?.(unsavedDraft.current);
   });
   const readOnly =
+    readOnlyCopy !== null ||
     !!props.forceReadOnly ||
     engine.notInVersion ||
     engine.documentUnavailable ||
@@ -877,7 +899,7 @@ export function MarkdownView(props: {
   const { writesRefusedRef } = props;
   const writesBlocked = () =>
     readOnlyRef.current || writesRefusedRef.current || staleBaseline.current;
-  const engineMode = engine.available && engine.doc !== null;
+  const engineMode = displayDoc !== null;
   const engineModeRef = useRef(engineMode);
   engineModeRef.current = engineMode;
   const flushEngineUpdatesRef = useRef(engine.flushPendingLocalUpdates);
@@ -900,7 +922,7 @@ export function MarkdownView(props: {
   // doc identity also covers a same-version engine retry.
   const sourceMarkdown =
     sourceProjection?.documentKey === props.documentKey &&
-    sourceProjection.doc === engine.doc
+    sourceProjection.doc === displayDoc
       ? sourceProjection.markdown
       : null;
   const readDocumentRef = useRef<HTMLDivElement | null>(null);
@@ -1200,11 +1222,11 @@ export function MarkdownView(props: {
     setJump(null);
   }, [jump, showSource]);
   useEffect(() => {
-    if (!showSource || !engine.doc) {
+    if (!showSource || !displayDoc) {
       setSourceProjection(null);
       return;
     }
-    const doc = engine.doc;
+    const doc = displayDoc;
     const documentKey = props.documentKey;
     let cancelled = false;
     let serialize: ((doc: Y.Doc) => string) | null = null;
@@ -1252,7 +1274,7 @@ export function MarkdownView(props: {
       if (updateTimer !== null) clearTimeout(updateTimer);
       doc.off("update", scheduleRecompute);
     };
-  }, [showSource, engine.doc, props.documentKey]);
+  }, [showSource, displayDoc, props.documentKey]);
 
   // One toggle for both branches (the shell's palette command and Ctrl/Cmd+/
   // route through it): engine mode flips the read-only source projection; the
@@ -1898,7 +1920,7 @@ export function MarkdownView(props: {
   // Yjs UndoManager.
   // "Source" flips to a read-only projection of the Y.Doc's markdown — a VIEW,
   // never a second editing surface (see the showSource comment above).
-  if (engine.available && engine.doc) {
+  if (displayDoc) {
     return (
       <div className="flex min-h-0 flex-1 flex-col">
         <ViewHeader
@@ -1908,8 +1930,8 @@ export function MarkdownView(props: {
             <StateMark
               testId="markdown-save-state"
               truncate
-              state={engine.readOnlyWhileEditing ? "read-only" : engineChipState}
-              shown={engine.readOnlyWhileEditing
+              state={engine.readOnlyWhileEditing || readOnlyCopy ? "read-only" : engineChipState}
+              shown={engine.readOnlyWhileEditing || readOnlyCopy
                 ? orphanedDrafts.length > 0 ? "read-only-transition" : engine.readOnlyCause === "access-ended" ? "read-only" : "read-only-unavailable"
                 : engineChipState}
               title={
@@ -1954,7 +1976,7 @@ export function MarkdownView(props: {
           // steps aside, like the legacy editor's source mode.
           <div data-testid="view-markdown-source" className="flex min-h-0 flex-1 flex-col">
             <div className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px] text-subtle">
-              <span>Read-only markdown source — switch back to Editor to make changes.</span>
+              <span>{readOnly ? "Read-only markdown source" : "Read-only markdown source — switch back to Editor to make changes."}</span>
               <CopyButton testId="markdown-source-copy" getText={() => sourceMarkdown} />
             </div>
             {sourceMarkdown === null ? (
@@ -1999,7 +2021,7 @@ export function MarkdownView(props: {
               reveals the quiet "Add a property" affordance on empty docs). */}
           <div className="dohc-page-topmatter">
             <PageIdentity
-              ydoc={engine.doc}
+              ydoc={displayDoc}
               filenameStem={filenameStem(props.path)}
               readOnly={readOnly}
               onEnterBody={() => wysiwygRef.current?.focus("start")}
@@ -2007,10 +2029,10 @@ export function MarkdownView(props: {
             {recordButtons}
             {readOnly ? null : (
               <Suspense fallback={<PropertiesFallback />}>
-                <LazyPropertiesPanel ydoc={engine.doc} fieldMarks={fieldMarks} />
+                <LazyPropertiesPanel ydoc={displayDoc} fieldMarks={fieldMarks} />
               </Suspense>
             )}
-            <FrontmatterAsWritten ydoc={engine.doc} saved={engine.saveState.kind === "saved-here"} propertiesShown={!readOnly} />
+            <FrontmatterAsWritten ydoc={displayDoc} saved={engine.saveState.kind === "saved-here"} propertiesShown={!readOnly} />
           </div>
           <EditorErrorBoundary
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:engine`}
@@ -2031,7 +2053,7 @@ export function MarkdownView(props: {
               onPendingUndoConsumed={props.onPendingUndoConsumed}
               readOnly={readOnly}
               collab={{
-                ydoc: engine.doc,
+                ydoc: displayDoc,
                 // Solo engine editing shows the settle indicator, not presence
                 // chrome — "disabled" hides the in-editor presence bar while the
                 // ydoc still drives Tiptap (collabActive keys off ydoc, not this).
