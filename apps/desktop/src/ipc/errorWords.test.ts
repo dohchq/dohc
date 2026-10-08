@@ -7,12 +7,13 @@ import { DaemonRefusalError, type DaemonErrorCode } from "@dohc/workspace-engine
 import { describe, expect, it } from "vitest";
 import { CompilerProcessError } from "../workspaces/compilerProcessSupervisor";
 import { WorkspaceManifestError } from "../workspaces/createWorkspaceFolder";
-import { RestorePolicyRefusalError } from "../workspaces/workspaceEngineCapture";
+import { LiveDocumentMutationError, RestorePolicyRefusalError } from "../workspaces/workspaceEngineCapture";
 import type { WorkspacePolicyPath } from "./bridgeContract";
 import {
   ERROR_WORDS,
   ipcWireError,
   isShareReadOnlyRefusal,
+  isSharedLiveFileRefusal,
   isWorkspaceUpdatingError,
   needsNewerDohc,
   readCollectionReopenWait,
@@ -139,6 +140,17 @@ describe("error words", () => {
     expect(isWorkspaceUpdatingError(received)).toBe(true);
     expect(isWorkspaceUpdatingError(acrossIpc(refusal("OVERLOADED", "engine-store-busy")))).toBe(false);
     expect(isWorkspaceUpdatingError(acrossIpc(new Error("Workspace is still updating. Try again.")))).toBe(false);
+  });
+
+  it("knows a shared live file's restore refusal across IPC, and keeps its words", () => {
+    const refused = new LiveDocumentMutationError(
+      "dohc could not restore notes/plan.md. This action is unavailable for shared live files. Continue editing at the current location.",
+    );
+    const received = acrossIpc(refused, "desktop:restore-engine-moment-file");
+    expect(isSharedLiveFileRefusal(received)).toBe(true);
+    expect(readError(received).words).toBe(refused.message);
+    expect(isSharedLiveFileRefusal(acrossIpc(new Error(refused.message), "desktop:restore-engine-moment-file"))).toBe(false);
+    expect(isSharedLiveFileRefusal(acrossIpc(refusal("INVALID_PARAMS", "live-document-binding-active")))).toBe(false);
   });
 
   it("leaves the caller's words for a refusal that names nothing a person can act on", () => {

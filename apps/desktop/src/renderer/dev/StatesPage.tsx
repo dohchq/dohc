@@ -2,7 +2,7 @@ import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contrac
 import { AlertTriangle, Bot, CheckCircle2, Globe2, MoreHorizontal, SearchX } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import type { HistoryPolicyUnreadableResult, SyncStatusResult } from "../../ipc/bridgeContract";
+import type { EngineMomentRecord, HistoryPolicyUnreadableResult, SyncStatusResult } from "../../ipc/bridgeContract";
 import { readError, withErrorWords } from "../../ipc/errorWords";
 import { DocumentMenu } from "../DocumentMenu";
 import { FrontmatterAsWritten } from "../FrontmatterAsWritten";
@@ -30,6 +30,8 @@ import { EditorTabs } from "../workbench/EditorTabs";
 import { HistoryHiddenState, HistoryUntrackedState } from "../workbench/HistoryPolicyStates";
 import { TreeRow, type VisibleRow } from "../workbench/Explorer";
 import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
+import { MomentRow } from "../workbench/EngineHistory";
+import { CAPTURE_RECOVERY_TITLE, captureRecoveryMessage } from "../shell/useCaptureRecoveryNotices";
 import { WorkspaceSyncStatus } from "../workbench/WorkspaceSyncStatus";
 import { closeStatesPage } from "./statesRoute";
 
@@ -295,6 +297,45 @@ const REFUSED_RESTORE_TOAST = {
   atMs: 0,
   canRetry: true,
   seen: false,
+};
+
+// Typing capture kept when its file changed outside dohc: the toast and the
+// rows the shell builds for it, and its change in History. The time is
+// local, so the row reads the same in every time zone.
+const RECOVERY_PATH = "trip/plan.md";
+const RECOVERY_DETAILS = `Notice: ${captureRecoveryMessage(RECOVERY_PATH, false)}\nTitle: ${CAPTURE_RECOVERY_TITLE}\nFile: ${RECOVERY_PATH}`;
+const RECOVERY_TOAST = {
+  id: "capture-recovery",
+  tone: "warning" as const,
+  title: CAPTURE_RECOVERY_TITLE,
+  message: captureRecoveryMessage(RECOVERY_PATH, false),
+  details: RECOVERY_DETAILS,
+  atMs: 0,
+  canRetry: false,
+  actionLabel: "Open History",
+  seen: false,
+};
+function recoveryNotice(id: string, shared: boolean) {
+  return {
+    id,
+    tone: "warning" as const,
+    title: CAPTURE_RECOVERY_TITLE,
+    body: captureRecoveryMessage(RECOVERY_PATH, shared),
+    Icon: AlertTriangle,
+    actions: [{ label: "Open History", onClick: noop }],
+    copyText: RECOVERY_DETAILS,
+    copyLabel: "Copy notice details",
+    onDismiss: noop,
+  };
+}
+const RECOVERY_MOMENT: EngineMomentRecord = {
+  id: "moment-capture-recovery",
+  versionId: "main",
+  path: RECOVERY_PATH,
+  recordedAtMs: new Date(2026, 6, 8, 9, 41).getTime(),
+  operation: "write",
+  origin: "capture-recovery",
+  momentOrder: 7,
 };
 
 function notice(id: string, tone: "danger" | "success") {
@@ -1078,7 +1119,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. */}
+      {/* After the parts above, so they keep their places. */}
       <Section part="frontmatter-as-written" title="Frontmatter as written">
         <Specimen label="rename saved">
           <AsWrittenSpecimen name="cost" />
@@ -1098,6 +1139,30 @@ function Pane(props: { theme: "light" | "dark" }) {
             </span>
           </Specimen>
         ))}
+      </Section>
+
+      {/* Last, so the parts above keep their places. */}
+      <Section part="capture-recovery" title="Typing kept in History">
+        <Specimen label="toast">
+          <div className={SHADOW_ROOM}>
+            <WorkspaceErrorToast error={RECOVERY_TOAST} onAction={noop} onHide={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="Notices: History Restore, then a shared live file">
+          <div className="w-[360px] rounded-lg border border-line bg-panel text-xs text-ink">
+            <ul className="m-0 list-none p-0">
+              <LocalNoticeRow notice={recoveryNotice("capture-recovery", false)} onKeyDown={noop} onAction={noop} onDismiss={noop} />
+              <LocalNoticeRow notice={recoveryNotice("capture-recovery-shared", true)} onKeyDown={noop} onAction={noop} onDismiss={noop} />
+            </ul>
+          </div>
+        </Specimen>
+        <Specimen label="History at its default width: the recovery change">
+          <ul className="m-0 w-[240px] list-none rounded-lg border border-line bg-panel p-0">
+            <li className="border-b border-line last:border-b-0">
+              <MomentRow moment={RECOVERY_MOMENT} onOpenMoment={noop} />
+            </li>
+          </ul>
+        </Specimen>
       </Section>
     </section>
   );
