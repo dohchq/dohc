@@ -906,18 +906,23 @@ export function MarkdownView(props: {
   const { writesRefusedRef } = props;
   const writesBlocked = () =>
     readOnlyRef.current || writesRefusedRef.current || staleBaseline.current;
-  // What a plain write did, for the shell's save notices. Their Try again
-  // saves the newest draft while this view is open and can write the file.
+  // What a plain write did to the file it wrote, for the shell's save
+  // notices. Their Try again saves the newest draft only while this view
+  // still shows that file and can write it.
   const saveNowRef = useRef<() => Promise<void>>(() => Promise.resolve());
-  const reportSave = (failure: { cause?: unknown } | null) =>
+  const reportSave = (failure: { cause?: unknown } | null) => {
+    const written = props.localBuffer;
     reportTextSave(props.workspaceId, props.path, failure && {
       ...failure,
       retry: () => {
-        if (unmounted.current || writesBlocked() || openingRef.current) return false;
+        if (unmounted.current || activeLocalBuffer.current !== written || writesBlocked() || openingRef.current) {
+          return false;
+        }
         void saveNowRef.current();
         return true;
       },
     });
+  };
   const engineMode = displayDoc !== null;
   const engineModeRef = useRef(engineMode);
   engineModeRef.current = engineMode;
@@ -1437,6 +1442,7 @@ export function MarkdownView(props: {
       unsavedDraft.current = false;
       if (!unmounted.current) setSaveState(SAVING);
       let issuedText: string | null = null;
+      let answered = false;
       try {
         const writing = props.localBuffer.write(
           localSource.current,
@@ -1452,6 +1458,8 @@ export function MarkdownView(props: {
         );
         if (options.releaseUnusedDraft) props.localBuffer.releaseUnusedDraft();
         const result = await writing;
+        answered = true;
+        reportSave(result.status === "no-baseline" ? {} : null);
         if (activeLocalBuffer.current !== props.localBuffer) {
           if (result.status === "conflict" || result.status === "no-baseline") {
             captureOrphanedDraft(props.workspaceId, props.path, result.body);
@@ -1460,7 +1468,6 @@ export function MarkdownView(props: {
         }
         const text = result.body;
         latestDraft.current = props.localBuffer.getSnapshot().body;
-        reportSave(result.status === "no-baseline" ? {} : null);
         if (result.status === "skipped") {
           baseContentHash.current = result.contentHash;
           if (!unmounted.current) setSaveState(SAVED_HERE);
@@ -1524,6 +1531,9 @@ export function MarkdownView(props: {
           setSaveState(SAVED_HERE);
         }
       } catch (error) {
+        // After the write answered, the throw is a conflict's or a missing
+        // baseline's, and the answer has been reported.
+        if (!answered) reportSave({ cause: error });
         if (activeLocalBuffer.current !== props.localBuffer) {
           if (issuedText !== null) {
             captureOrphanedDraft(props.workspaceId, props.path, issuedText);
@@ -1537,7 +1547,6 @@ export function MarkdownView(props: {
         if (options.captureOnFailure && options.textSnapshot !== undefined) {
           captureLatestConflictDraft(options.textSnapshot);
         }
-        reportSave({ cause: error });
         if (!unmounted.current) setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
         if (options.rejectOnError) throw error;
       }

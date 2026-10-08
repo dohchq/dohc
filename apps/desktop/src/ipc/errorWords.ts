@@ -278,8 +278,7 @@ export function isWorkspaceUpdatingError(error: unknown): boolean {
 /** A share's refusal of a write: the file is read-only inside dohc, not on disk. */
 export function isShareReadOnlyRefusal(error: unknown): boolean {
   const { name, code } = parse(error);
-  return name === "SharedFileReadOnlyError" ||
-    (name === "DaemonRefusalError" && (code === "SHARE_READ_ONLY" || code === "share-read-only"));
+  return name === "SharedFileReadOnlyError" || (name === "DaemonRefusalError" && code === "SHARE_READ_ONLY");
 }
 
 /** Access and connection failures can hide a changed grant behind an IPC error. */

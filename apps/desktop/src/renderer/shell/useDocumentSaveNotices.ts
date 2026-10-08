@@ -11,6 +11,7 @@ export interface DocumentSaveFailure {
   cause?: unknown;
   details?: ReadonlyArray<ErrorDetailField>;
   retry?: (() => void) | null;
+  onDismiss?: () => void;
   kind?: ShellErrorKind;
   identity?: string;
 }
@@ -55,6 +56,7 @@ export function reportTextSave(workspaceId: string, path: string, failure: TextS
 // A file whose save failed. `reported` says a toast and a row stand for it,
 // and `retry` is the newest way to save it again.
 interface FailedSave {
+  path: string;
   reported: boolean;
   readOnly: boolean;
   retry: (failure: FailedSave) => void;
@@ -63,9 +65,14 @@ interface FailedSave {
 // Every save in the workspace reports here, whether or not an editor still
 // shows its file: a closing settle or an unmount write can fail after its
 // tab has gone. A failed save files one toast and one Notices row per file;
-// later failures keep that row, and a save removes it. An edit refusal gets
+// later failures keep that row, and a save removes it. Dismissing the row
+// keeps the failure, so the next one files a row again. An edit refusal gets
 // its own notice. Returns how many files have a failed save, from the same
 // records, for the title bar.
+//
+// A live document's path can also open in the plain editor, when main
+// cannot open its session, so each writer's failure is its own record: a
+// plain save never clears what the engine has not settled, nor the reverse.
 export function useDocumentSaveNotices(input: {
   workspaceId: string;
   report: (failure: DocumentSaveFailure) => void;
@@ -83,7 +90,10 @@ export function useDocumentSaveNotices(input: {
     const owner = workspaceId;
     const current = () => latest.current.workspaceId === owner;
     const failures = new Map<string, FailedSave>();
-    const counted = () => setFailedSaves({ workspaceId: owner, count: failures.size });
+    const counted = () => setFailedSaves({
+      workspaceId: owner,
+      count: new Set([...failures.values()].map((failure) => failure.path)).size,
+    });
     // The newest session for each path. A session that closes after a newer
     // one opened has been replaced: its late states describe nothing open.
     const sessions = new Map<string, { sessionId: string; closing: boolean }>();
@@ -99,11 +109,14 @@ export function useDocumentSaveNotices(input: {
           failure.reported = false;
           failure.retry(failure);
         },
+        onDismiss: () => {
+          failure.reported = false;
+        },
       });
     };
     const fail = (identity: string, path: string, readOnly: boolean, retry: FailedSave["retry"], cause?: unknown): void => {
       const known = failures.get(identity);
-      const failure = known ?? { reported: false, readOnly, retry };
+      const failure = known ?? { path, reported: false, readOnly, retry };
       failure.readOnly = readOnly;
       failure.retry = retry;
       if (!known) {
@@ -157,7 +170,7 @@ export function useDocumentSaveNotices(input: {
     });
     const textSave = (save: TextSave): void => {
       if (!current() || save.workspaceId !== owner) return;
-      const identity = `document-save:${owner}:${save.path}`;
+      const identity = `text-save:${owner}:${save.path}`;
       const failed = save.failure;
       if (!failed) {
         forget(identity);

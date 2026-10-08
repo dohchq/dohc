@@ -138,18 +138,21 @@ export function useAutosavedTextDraft(props: {
     disabledRef.current === true ||
     props.switchUnresyncedRef.current === true ||
     staleBaseline.current;
-  // What a write did, for the shell's save notices. Their Try again saves
-  // the newest draft while this editor is open and can write the file.
+  // What a write did to the file it wrote, for the shell's save notices.
+  // Their Try again saves the newest draft only while this editor still
+  // shows that file and can write it.
   const saveNowRef = useRef<() => Promise<void>>(() => Promise.resolve());
-  const reportSave = (failure: { cause?: unknown } | null) =>
+  const reportSave = (failure: { cause?: unknown } | null) => {
+    const written = props.localBuffer;
     reportTextSave(props.workspaceId, props.path, failure && {
       ...failure,
       retry: () => {
-        if (unmounted.current || writesBlocked()) return false;
+        if (unmounted.current || activeLocalBuffer.current !== written || writesBlocked()) return false;
         void saveNowRef.current();
         return true;
       },
     });
+  };
 
   useEffect(() => {
     if (
@@ -469,6 +472,7 @@ export function useAutosavedTextDraft(props: {
       unsavedDraft.current = false;
       if (!unmounted.current) setSaveState(SAVING);
       let issuedText: string | null = null;
+      let answered = false;
       try {
         const writing = props.localBuffer.write(
           localSource.current,
@@ -484,6 +488,8 @@ export function useAutosavedTextDraft(props: {
         );
         if (options.releaseUnusedDraft) props.localBuffer.releaseUnusedDraft();
         const result = await writing;
+        answered = true;
+        reportSave(result.status === "no-baseline" ? {} : null);
         if (activeLocalBuffer.current !== props.localBuffer) {
           if (result.status === "conflict" || result.status === "no-baseline") {
             captureOrphanedDraft(props.workspaceId, props.path, result.body);
@@ -492,7 +498,6 @@ export function useAutosavedTextDraft(props: {
         }
         const text = result.body;
         latestDraft.current = props.localBuffer.getSnapshot().body;
-        reportSave(result.status === "no-baseline" ? {} : null);
         if (result.status === "skipped") {
           if (!unmounted.current) setSaveState(SAVED_HERE);
           return;
@@ -551,6 +556,9 @@ export function useAutosavedTextDraft(props: {
           setSaveState(SAVED_HERE);
         }
       } catch (error) {
+        // After the write answered, the throw is a conflict's or a missing
+        // baseline's, and the answer has been reported.
+        if (!answered) reportSave({ cause: error });
         if (activeLocalBuffer.current !== props.localBuffer) {
           if (issuedText !== null) {
             captureOrphanedDraft(props.workspaceId, props.path, issuedText);
@@ -562,7 +570,6 @@ export function useAutosavedTextDraft(props: {
         if (options.captureOnFailure && options.textSnapshot !== undefined) {
           captureLatestConflictDraft(options.textSnapshot);
         }
-        reportSave({ cause: error });
         if (!unmounted.current) setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
         if (options.rejectOnError) throw error;
       }

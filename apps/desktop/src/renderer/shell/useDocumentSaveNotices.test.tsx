@@ -10,7 +10,7 @@ import { documentVersionKey } from "../documentVersionKey";
 import { resetOrphanedDrafts } from "../orphanedDrafts";
 import { loadStoredDrafts } from "../orphanedDraftStorage";
 import { acquireSharedLocalDocument, resetSharedLocalDocumentsForTests } from "../sharedLocalDocument";
-import { AUTOSAVE_DEBOUNCE_MS, useAutosavedTextDraft } from "../useAutosavedTextDraft";
+import { AUTOSAVE_DEBOUNCE_MS, useAutosavedTextDraft, type DraftFlush } from "../useAutosavedTextDraft";
 import { WorkspaceSyncStatus } from "../workbench/WorkspaceSyncStatus";
 import { ConnectionNotices } from "./connectionNotices";
 import { errorDetails } from "./copyDetails";
@@ -399,5 +399,116 @@ describe("document save notices", () => {
     expect(writeWorkspaceText).toHaveBeenCalledTimes(3);
     expect(titleBar().textContent).toBe("Local · saved");
     expect(screen.queryByTestId("connection-notices")).toBeNull();
+  });
+
+  it("keeps counting a dismissed failure in the title bar, and files the next failure again", async () => {
+    const user = userEvent.setup();
+    writeWorkspaceText.mockRejectedValue(writeRejected(READ_ONLY_ON_DISK));
+    render(<Shell />);
+    const document = textFile("ws-1", "notes.txt", "before");
+    const editor = renderHook(useAutosavedTextDraft, { initialProps: document });
+    act(() => editor.result.current.setDraft("first"));
+    await act(async () => { await editor.result.current.saveNow(); });
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await user.click(within(screen.getByRole("dialog", { name: "Notices" })).getByRole("button", { name: "Dismiss notice" }));
+    expect(screen.queryByTestId("connection-notices")).toBeNull();
+    // The file still isn't saved.
+    expect(titleBar().textContent).toBe("Couldn't save 1 file");
+
+    act(() => editor.result.current.setDraft("second"));
+    await act(async () => { await editor.result.current.saveNow(); });
+    expect(screen.getByTestId("workspace-shell-error").textContent).toContain("Couldn't save notes.txt");
+    expect(await rows(user, "notes.txt")).toHaveLength(1);
+    await closeEditor(editor, document);
+  });
+
+  it("files nothing for a change on disk that a flush rejects with", async () => {
+    writeWorkspaceText.mockResolvedValue({ status: "conflict", currentContentHash: "changed-hash" });
+    render(<Shell />);
+    let flush: DraftFlush | null = null;
+    const document = { ...textFile("ws-1", "notes.txt", "before"), registerDraftFlush: (next: DraftFlush | null) => { flush = next; } };
+    const editor = renderHook(useAutosavedTextDraft, { initialProps: document });
+    act(() => editor.result.current.setDraft("after"));
+    await act(async () => {
+      await expect(flush!()).rejects.toThrow("The file changed on disk while dohc saved it.");
+    });
+    expect(writeWorkspaceText).toHaveBeenCalledOnce();
+    expect(screen.queryByTestId("connection-notices")).toBeNull();
+    expect(titleBar().textContent).toBe("Local · saved");
+    await closeEditor(editor, document);
+  });
+
+  it("reports a write for the file it wrote after the editor moves on, and Try again opens that file instead of saving the other", async () => {
+    const user = userEvent.setup();
+    const late = deferred<WriteResult>();
+    writeWorkspaceText.mockReturnValueOnce(late.promise);
+    render(<Shell />);
+    const first = textFile("ws-1", "a.txt", "a before");
+    const second = textFile("ws-1", "b.txt", "b before");
+    const editor = renderHook(useAutosavedTextDraft, { initialProps: first });
+    act(() => editor.result.current.setDraft("a after"));
+    let saving: Promise<void> | undefined;
+    act(() => { saving = editor.result.current.saveNow(); });
+    editor.rerender(second);
+    await act(async () => {
+      late.reject(writeRejected(READ_ONLY_ON_DISK));
+      await saving;
+    });
+    expect(screen.getByTestId("workspace-shell-error").textContent).toContain("Couldn't save a.txt");
+    expect(titleBar().textContent).toBe("Couldn't save 1 file");
+
+    await user.click(within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }));
+    expect(open).toHaveBeenCalledWith("a.txt");
+    expect(writeWorkspaceText).toHaveBeenCalledOnce();
+    expect(titleBar().textContent).toBe("Local · saved");
+    await closeEditor(editor, second);
+  });
+
+  it("clears a file's row when its write lands after the editor moved on", async () => {
+    const late = deferred<WriteResult>();
+    writeWorkspaceText.mockRejectedValueOnce(writeRejected(READ_ONLY_ON_DISK)).mockReturnValueOnce(late.promise);
+    render(<Shell />);
+    const first = textFile("ws-1", "a.txt", "a before");
+    const second = textFile("ws-1", "b.txt", "b before");
+    const editor = renderHook(useAutosavedTextDraft, { initialProps: first });
+    act(() => editor.result.current.setDraft("a after"));
+    await act(async () => { await editor.result.current.saveNow(); });
+    expect(titleBar().textContent).toBe("Couldn't save 1 file");
+    let saving: Promise<void> | undefined;
+    act(() => { saving = editor.result.current.saveNow(); });
+    editor.rerender(second);
+    await act(async () => {
+      late.resolve({ status: "written", contentHash: "a-saved" });
+      await saving;
+    });
+    expect(screen.queryByTestId("connection-notices")).toBeNull();
+    expect(titleBar().textContent).toBe("Local · saved");
+    await closeEditor(editor, second);
+  });
+
+  it("keeps a live document's failure and a plain editor's failure for one path apart, and counts the file once", async () => {
+    writeWorkspaceText.mockRejectedValueOnce(writeRejected(READ_ONLY_ON_DISK)).mockResolvedValue({ status: "written", contentHash: "saved" });
+    render(<Shell />);
+    emit(failed());
+    const document = textFile("ws-1", "notes/a.md", "before");
+    const editor = renderHook(useAutosavedTextDraft, { initialProps: document });
+    act(() => editor.result.current.setDraft("plain edit"));
+    await act(async () => { await editor.result.current.saveNow(); });
+    expect(titleBar().textContent).toBe("Couldn't save 1 file");
+
+    // The engine's save does not clear the plain editor's failure.
+    emit({ state: { kind: "saved-here" } });
+    expect(titleBar().textContent).toBe("Couldn't save 1 file");
+    // The plain editor's save clears its own.
+    act(() => editor.result.current.setDraft("plain edit, saved"));
+    await act(async () => { await editor.result.current.saveNow(); });
+    expect(titleBar().textContent).toBe("Local · saved");
+
+    // A plain save does not clear what the engine has not settled.
+    emit(failed());
+    act(() => editor.result.current.setDraft("another plain edit"));
+    await act(async () => { await editor.result.current.saveNow(); });
+    expect(titleBar().textContent).toBe("Couldn't save 1 file");
+    await closeEditor(editor, document);
   });
 });
