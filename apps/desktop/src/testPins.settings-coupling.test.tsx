@@ -20,6 +20,7 @@ vi.mock("./renderer/bridge", async () => {
   return { bridge: () => ({
     onUserSettingsChanged: () => () => {},
     getUserSettings: async () => ({ settings: DEFAULT_USER_SETTINGS, source: "default", warning: "fixture warning" }),
+    readDiagnostics: async () => ({ text: "dohc diagnostics", available: { usage: false, errors: false } }),
     getWorkspaceSettings: async () => ({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" }),
     getUserSettingsFilePath: async () => "/fixture/settings.json",
     onUpdateState: () => () => {},

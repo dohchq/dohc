@@ -114,7 +114,7 @@ import {
   type WebContents,
 } from "electron";
 import { existsSync, realpathSync, statSync } from "node:fs";
-import { lstat, mkdir, readdir } from "node:fs/promises";
+import { lstat, mkdir, readdir, writeFile } from "node:fs/promises";
 import { hostname, release as osRelease, type as osType } from "node:os";
 import { dirname, join, posix } from "node:path";
 import {
@@ -128,6 +128,7 @@ import {
   UpdateStateEvent,
   ShareHandoffStatus,
   crashReportOperations,
+  reportingOperations,
   noticeOperations,
   scheduleHostOperations,
   chatDispatchNoticeOperations,
@@ -150,7 +151,8 @@ import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMuta
 import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
 import { registerOperations, type OperationBoundary } from "./ipc/operationTable";
 import { createUsageStore } from "./usage/usageStore";
-import { createRendererUsage, RENDERER_USAGE_COVERAGE } from "./usage/rendererUsage";
+import { createRendererUsage } from "./usage/rendererUsage";
+import { DESKTOP_USAGE_COVERAGE } from "./usage/cliUsage";
 
 import { createPresencePollRegistry } from "./collab/presencePollRegistry";
 
@@ -477,10 +479,13 @@ import {
 } from "./cli/cliServer";
 import { makeProcessDiagnosticsNonFatal } from "./process/stdioResilience";
 import { installCrashCapture } from "./crashReports/crashCapture";
-import { createCodeFrames, crashReportRoot } from "./crashReports/crashReport";
+import { createCodeFrames, createCodeLocations, crashReportRoot, type CrashEvent } from "./crashReports/crashReport";
 import { confirmCrashReportSend } from "./crashReports/crashReportConsent";
 import { createCrashReportPreview } from "./crashReports/crashReportPreview";
 import { createCrashReportStore, crashReportEndpoint } from "./crashReports/crashReportStore";
+import { REPORTING_BUILD, resolveReporting } from "./telemetry/reportingConfig";
+import { createTelemetry, privacyInEffect, usageEventFor } from "./telemetry/telemetry";
+import { diagnosticsText, saveDiagnostics } from "./telemetry/diagnostics";
 import {
   createShareHandoffIntentSlot,
   registerShareHandoffProtocol,
@@ -498,26 +503,26 @@ let usageStore: ReturnType<typeof createUsageStore> | undefined;
 let usageLoad: ReturnType<typeof setImmediate> | undefined;
 const rendererUsage = createRendererUsage<IpcMainInvokeEvent>(invocation => usageStore?.recordSuccess(invocation));
 
+const crashFacts = () => ({
+  atMs: Date.now(),
+  version: app.getVersion(),
+  channel: resolveUpdateChannel(app.getVersion()),
+  packaged: app.isPackaged,
+  system: `${osType()} ${osRelease()}`,
+  arch: process.arch,
+  electron: process.versions.electron ?? "unknown",
+  uptimeSeconds: Math.round(process.uptime()),
+});
+const codeRoots = [crashReportRoot({ isPackaged: app.isPackaged, appPath: app.getAppPath(), resourcesPath: process.resourcesPath })];
+
 // Crashes are recorded on this computer before anything else can crash. A
-// report leaves only when the person confirms in main's own dialog, and
-// only to the report server this build names.
+// detailed report leaves only when the person confirms in main's own
+// dialog, and only to the report server this build names.
 const crashReports = createCrashReportStore({
   path: join(stateDir(), "crash-report.json"),
   endpoint: crashReportEndpoint(process.env.DOHC_CRASH_REPORT_URL, app.isPackaged),
-  facts: () => ({
-    atMs: Date.now(),
-    version: app.getVersion(),
-    channel: resolveUpdateChannel(app.getVersion()),
-    packaged: app.isPackaged,
-    system: `${osType()} ${osRelease()}`,
-    arch: process.arch,
-    electron: process.versions.electron ?? "unknown",
-    uptimeSeconds: Math.round(process.uptime()),
-  }),
-  codeFrame: createCodeFrames(
-    [crashReportRoot({ isPackaged: app.isPackaged, appPath: app.getAppPath(), resourcesPath: process.resourcesPath })],
-    process.platform,
-  ),
+  facts: crashFacts,
+  codeFrame: createCodeFrames(codeRoots, process.platform),
   onChanged: () => {
     for (const window of BrowserWindow.getAllWindows()) {
       if (!window.isDestroyed()) window.webContents.send(CHANNELS.crashReportChanged);
@@ -530,11 +535,48 @@ const crashReportPreview = createCrashReportPreview({
   openPath: (path) => shell.openPath(path),
 });
 void crashReportPreview.remove();
+// Usage and short error reports. Only a packaged build that names a report
+// service sends them, and only as the switches in Privacy allow.
+const telemetry = createTelemetry({
+  reporting: resolveReporting({
+    build: REPORTING_BUILD,
+    packaged: app.isPackaged,
+    env: process.env,
+    argv: process.argv,
+    version: app.getVersion(),
+    channel: resolveUpdateChannel(app.getVersion()),
+  }),
+  statePath: join(stateDir(), "reporting.json"),
+  facts: () => ({
+    atMs: Date.now(),
+    version: app.getVersion(),
+    channel: resolveUpdateChannel(app.getVersion()),
+    os: osType(),
+    osVersion: osRelease(),
+    arch: process.arch,
+    electron: process.versions.electron ?? "unknown",
+  }),
+  locate: createCodeLocations(codeRoots, process.platform),
+});
+// The report switches as the settings file sets them. A file main cannot
+// read turns both off.
+const readPrivacy = () => readCachedUserSettingsFile(stateDir()).then(
+  privacyInEffect,
+  () => ({ usageReports: false, errorReports: false }),
+);
+if (telemetry.available.usage || telemetry.available.errors) {
+  void readPrivacy().then((privacy) => telemetry.setPrivacy(privacy));
+}
+telemetry.track({ name: "app_launched" });
+function recordCrash(event: CrashEvent): void {
+  crashReports.record(event);
+  telemetry.reportError({ kind: "crash", event });
+}
 installCrashCapture({
   process,
   app,
   isWindowPage: (contents: WebContents) => BrowserWindow.fromWebContents(contents)?.webContents === contents,
-  record: (event) => crashReports.record(event),
+  record: recordCrash,
 });
 
 const shareHandoffIntentSlot = createShareHandoffIntentSlot();
@@ -4290,6 +4332,7 @@ const chatWrites = createChatWrites({
 let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null) => Promise<OwnerAppPublicationResult>) | undefined;
 let ownerAppResponsesForCli:((input:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>)|undefined;
 const { startDesktopCliServer } = createDesktopCliServer({
+  recordSuccess: invocation => usageStore?.recordSuccess(invocation),
   dataset: (input, agent) => {
     if (!datasetForCli) throw new Error("Collections are not ready. Try again.");
     return datasetForCli(input, agent);
@@ -4558,7 +4601,7 @@ const desktopEngine = createDesktopEngine({
   findWorkspace,
   app, dialog, process, createRustEngineDaemon, defaultEngineBinaryPath,
   isQuitting: (): boolean => appLifecycle.isQuitting(),
-  recordEngineProblem: (error, stage) => crashReports.record({ kind: "engine", error, stage }),
+  recordEngineProblem: (error, stage) => recordCrash({ kind: "engine", error, stage }),
   workspaceAuthorities, notifyRenderer,
   collectionAutomations: { current: collectionAutomationsOf },
   launchMarks, desktopMarks, logLaunchMarksOnce,
@@ -5088,7 +5131,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       usageLoad = setImmediate(() => {
         usageLoad = undefined;
         try {
-          usageStore = createUsageStore({ stateDir, appVersion: app.getVersion(), coverage: RENDERER_USAGE_COVERAGE });
+          usageStore = createUsageStore({ stateDir, appVersion: app.getVersion(), coverage: DESKTOP_USAGE_COVERAGE });
         } catch {
           usageStore = undefined;
           return;
@@ -5196,6 +5239,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       closeAllEngineYDocSessions,
     ),
     stopAgentIntegration: () => agentIntegration.stopAll(),
+    flushReports: () => telemetry.flush(),
     closeWorkspaces: async () => {
       await workspaceAuthorities.close();
       await Promise.allSettled([...activeDatasetHosts].map(async pending => (await pending).close()));
@@ -5306,10 +5350,14 @@ function isTrustedFrame(frameUrl: string): boolean {
 
 // Every invoke handler registers here. Electron sends a rejected handler's
 // error to the renderer as one string, so this keeps its code in that string.
+// A handler that answers finished its action, which a usage report may count.
 function handleIpc(channel: string, listener: Parameters<typeof ipcMain.handle>[1]): void {
   ipcMain.handle(channel, async (event, ...args) => {
     try {
-      return await listener(event, ...args);
+      const result: unknown = await listener(event, ...args);
+      const counted = usageEventFor(channel, result);
+      if (counted) telemetry.track(counted);
+      return result;
     } catch (error) {
       throw ipcWireError(error);
     }
@@ -5439,12 +5487,23 @@ const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRe
   applyZoomLevelToWindows, refreshDispatchTray, openDispatchWorkspaces,
   chatDispatchService, withRendererWorkspaceOperation, notifyRenderer,
   broadcastUserSettings: (settings) => {
+    // Reports follow the switches before any window learns of them.
+    telemetry.setPrivacy(privacyInEffect(settings));
     broadcastUserSettings(settings);
     void automationWakeConsumer.resume();
   },
   openPath: (path) => shell.openPath(path),
   knownWorkspaceIds: () => workspaceSummaries().map((workspace) => workspace.workspaceId),
 });
+
+async function currentDiagnostics(): Promise<string> {
+  return diagnosticsText({
+    facts: crashFacts(),
+    available: telemetry.available,
+    privacy: privacyInEffect(await readCachedUserSettingsFile(stateDir())),
+    crashReport: crashReports.read().report?.text ?? null,
+  });
+}
 
 function registerIpcHandlers(): void {
   const windowIpc = createWindowIpc<WebContents, IpcMainInvokeEvent, IpcMainEvent>({
@@ -6335,6 +6394,28 @@ function registerIpcHandlers(): void {
       }),
     }),
   }, rendererUsage.crash);
+
+  registerOperations(operationBoundary, reportingOperations, {
+    readDiagnostics: async () => ({ text: await currentDiagnostics(), available: telemetry.available }),
+    // Main asks where, and writes the text it builds itself.
+    saveDiagnostics: async (_input, { event }) => ({
+      saved: await saveDiagnostics({
+        showSaveDialog: async (options) => {
+          const window = BrowserWindow.fromWebContents(event.sender);
+          return window ? await dialog.showSaveDialog(window, options) : await dialog.showSaveDialog(options);
+        },
+        writeFile: (path, text) => writeFile(path, text, "utf8"),
+        defaultPath: join(app.getPath("documents"), "dohc-diagnostics.txt"),
+      }, await currentDiagnostics()),
+    }),
+    // The settings file decides, not the window, and is read here so a
+    // window that asks early still gets the saved switches.
+    readReportsNotice: async () => telemetry.noticeDue(await readPrivacy()),
+    acknowledgeReportsNotice: (shown) => telemetry.acknowledgeNotice(shown),
+    reportRendererError: ({ origin, error }) => {
+      telemetry.reportError({ kind: "renderer", origin, error });
+    },
+  });
 
   registerOperations(operationBoundary, workspaceSearchOperations, workspaceSearchHandlers<
     IpcMainInvokeEvent,

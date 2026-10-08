@@ -7,6 +7,7 @@ import {
   crashReportRoot,
   crashReportText,
   createCodeFrames,
+  createCodeLocations,
   formatCrashEvent,
   type CrashFacts,
 } from "./crashReport";
@@ -72,6 +73,18 @@ describe("crash report stack frames", () => {
       .toBe("at <dohc>/Resources/app.asar/out/main/index.js:4:2");
     expect(crashReportRoot({ isPackaged: false, appPath: join(INSTALL, "apps", "desktop"), resourcesPath: "unused" }))
       .toBe(INSTALL);
+  });
+});
+
+describe("code locations for error reports", () => {
+  it("keeps a file name's own case, which Windows folds for the report text", () => {
+    const asset = join(INSTALL, "resources", "app.asar", "dist", "renderer", "assets", "Index-AbC9.js");
+    const frame = `at render (${asset}:7:8)`;
+    expect(createCodeLocations([INSTALL.toUpperCase()], "win32")(frame))
+      .toEqual({ path: "/resources/app.asar/dist/renderer/assets/Index-AbC9.js", line: 7, column: 8 });
+    expect(createCodeFrames([INSTALL], "win32")(frame))
+      .toBe("at <dohc>/resources/app.asar/dist/renderer/assets/index-abc9.js:7:8");
+    expect(createCodeLocations([INSTALL], process.platform)(`at x (${join(INSTALL, "..", "elsewhere.js")}:1:1)`)).toBeNull();
   });
 });
 
@@ -349,6 +362,33 @@ describe("crash report messages", () => {
       `    at <dohc>${BUNDLE_REL}:40:7`,
       "    <frame>",
     ].join("\n"));
+  });
+
+  it("still writes the report when an error's stack is not text", () => {
+    for (const stack of [42, { toString: () => `    at x (C:\\Users\\sam\\Trip plans.js:1:1)` }]) {
+      const cause = Object.assign(new Error("open C:\\Users\\sam\\Trip plans.md"), { code: "ENOENT", stack });
+      const error = Object.assign(new TypeError("the title of Trip plans", { cause }), { stack });
+      const main = mainError(error);
+      expect(main.split("\n").slice(-2)).toEqual([
+        "Error: TypeError: <message withheld>",
+        "Caused by: Error: <message withheld> (code ENOENT)",
+      ]);
+      const engine = formatCrashEvent({
+        kind: "engine",
+        stage: "stopped",
+        error: Object.assign(new EngineDaemonUnavailableError("Rust engine restart limit exceeded after 3 attempts.", {
+          cause: Object.assign(new EngineDaemonUnavailableError("Rust engine daemon exited unexpectedly with code 101."), { stack }),
+        }), { stack }),
+      }, FACTS, codeFrame);
+      expect(engine.split("\n").slice(-2)).toEqual([
+        "Error: EngineDaemonUnavailableError: Rust engine restart limit exceeded after 3 attempts.",
+        "Caused by: EngineDaemonUnavailableError: Rust engine daemon exited unexpectedly with code 101.",
+      ]);
+      for (const text of [main, engine]) {
+        expect(text).not.toContain("Trip plans");
+        expect(text).not.toContain("sam");
+      }
+    }
   });
 
   it("never spells out a thrown value, and keeps only a known class name", () => {

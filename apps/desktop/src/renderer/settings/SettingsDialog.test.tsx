@@ -78,6 +78,7 @@ async function resetWorkspaceSettings(): Promise<WorkspaceSettingsResult> {
 
 const bridge = {
   onWorkspaceActivity: vi.fn(() => () => {}),
+  readDiagnostics: vi.fn(async () => ({ text: "dohc diagnostics", available: { usage: false, errors: false } })),
   listRelayShares: vi.fn(async () => ({ owned: [], received: [], removed: [] })),
   getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
   detectAgentTools: vi.fn(async () => ({ workingDirectory: "/workspace", tools: [] })),

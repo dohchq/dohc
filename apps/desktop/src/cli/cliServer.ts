@@ -1,4 +1,5 @@
 import { creationPartialMessage } from "@dohc/cli/creation";
+import { cliUsageInvocation, type CliUsageInvocation } from "../usage/cliUsage";
 import { nameSlug } from "@dohc/workspace-contracts/names";
 import { SHARED_AUTOMATION_HISTORY_REASON } from "@dohc/workspace-contracts/automation-controls";
 import type { WorkspacePolicyPath } from "@dohc/security-contract/effective-policy";
@@ -316,6 +317,7 @@ export interface CliRunMessageLink {
 }
 
 export interface CliServerOptions {
+  recordSuccess?(invocation: CliUsageInvocation): unknown;
   stateDir: string;
   listWorkspaces(): readonly CliRegistryWorkspace[];
   openWorkspace(workspace: CliRegistryWorkspace): Promise<CliWorkspaceContext>;
@@ -1981,12 +1983,14 @@ async function onceForRequestId(
   requestId: string,
   input: unknown,
   run: () => Promise<{ done: boolean; result: unknown }>,
+  completion: { replayed: boolean },
 ): Promise<unknown> {
   const memory = workspaceRequests(options, context.workspaceId);
   // A digest, so a remembered edit does not keep its text in memory.
   const inputKey = createHash("sha256").update(JSON.stringify(input)).digest("hex");
   const remembered = memory.requests.get(requestId);
   if (remembered) {
+    completion.replayed = true;
     if (remembered.input !== inputKey) {
       return { ok: false as const, reason: `request id ${requestId} was already used for a different request` };
     }
@@ -2130,11 +2134,12 @@ async function dispatch(
   request: CliRequest,
   context: CliWorkspaceContext,
   options: CliServerOptions,
+  completion: { replayed: boolean },
 ): Promise<unknown> {
   const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "fileWrite", "fileMove", "fileDelete", "appPublication"]);
   if (!pathVerbs.has(request.verb)) {
     validateRequestPathSpellings(request);
-    return dispatchWorkspace(request, context, options);
+    return dispatchWorkspace(request, context, options, completion);
   }
   let paths: Awaited<ReturnType<typeof callerPaths>>;
   try { paths = await callerPaths(context, request.args.cwd); } catch (error) {
@@ -2233,7 +2238,7 @@ async function dispatch(
     return request.verb === "dataset" ? { kind: "refused", code: "path_rejected", message: reason } : { ok: false, reason };
   }
   try {
-    return paths.result(parseCliResult(request.verb, await dispatchWorkspace(rebased, context, options)), request.verb === "moment");
+    return paths.result(parseCliResult(request.verb, await dispatchWorkspace(rebased, context, options, completion)), request.verb === "moment");
   } catch (error) {
     const workspacePaths = error instanceof DatasetSchemaChangeError
       ? error.workspacePaths
@@ -2248,6 +2253,7 @@ async function dispatchWorkspace(
   request: CliRequest,
   context: CliWorkspaceContext,
   options: CliServerOptions,
+  completion: { replayed: boolean },
 ): Promise<unknown> {
   if (request.verb === "reply" && request.args.choose !== undefined && request.args.resolve === undefined) {
     throw new CliCommandError("--choose needs --resolve <message>");
@@ -2782,7 +2788,7 @@ async function dispatchWorkspace(
         // The request id is the press's key, so a resend after a restart names the same press.
         const result = await pressWith(requestId);
         return { done: result.ok, result };
-      });
+      }, completion);
     }
 
     case "documentRead": {
@@ -2848,7 +2854,7 @@ async function dispatchWorkspace(
       };
       const requestId = request.args.requestId;
       if (requestId === undefined) return (await edit()).result;
-      return await onceForRequestId(context, options, requestId, [path, find ?? null, replacement, agent ?? null], edit);
+      return await onceForRequestId(context, options, requestId, [path, find ?? null, replacement, agent ?? null], edit, completion);
     }
 
     case "documentCreate": {
@@ -2906,6 +2912,7 @@ async function dispatchWorkspace(
           const started = await startFileChat(context, input, options);
           return { done: started.created, result: started.result };
         },
+        completion,
       );
     }
   }
@@ -3453,14 +3460,21 @@ export async function handleCliRequestLine(
   }
 
   try {
-    const context = await workspaceContextForRequest(parsed.data, options);
-    const unvalidated = await dispatch(parsed.data, context, options);
+    // The caller's door labels counting only; authority never receives it.
+    const { door: _door, ...request } = parsed.data;
+    const completion = { replayed: false };
+    const context = await workspaceContextForRequest(request, options);
+    const unvalidated = await dispatch(request, context, options, completion);
     const result = parseCliResult(parsed.data.verb, unvalidated);
     const response = cliTransportResponseSchema.parse({
       protocolVersion: CLI_PROTOCOL_VERSION,
       ok: true,
       result,
     });
+    const invocation = completion.replayed ? null : cliUsageInvocation(parsed.data, result);
+    if (invocation) {
+      try { options.recordSuccess?.(invocation); } catch { /* Measurement cannot fail the command. */ }
+    }
     return `${JSON.stringify(response)}\n`;
   } catch (error) {
     const response = cliTransportResponseSchema.parse({

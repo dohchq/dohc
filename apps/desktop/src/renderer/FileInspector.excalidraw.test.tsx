@@ -171,6 +171,7 @@ function bridgeFor(
   let sessionId: string | null = null;
   return {
     platform: "linux" as const,
+    onWorkspaceActivity: vi.fn(() => () => undefined),
     readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(async () => ({
       text,
       truncated: false,

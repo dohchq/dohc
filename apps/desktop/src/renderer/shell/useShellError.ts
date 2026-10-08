@@ -1,8 +1,10 @@
 import { createContext, useCallback, useEffect, useRef, useState } from "react";
 import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
+import type { ReportKinds } from "../../ipc/bridgeContract";
 import { readError, UNKNOWN_ERROR_WORDS, withErrorWords } from "../../ipc/errorWords";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
 import type { ErrorDetailField } from "./copyDetails";
+import { reportsNoticeText } from "./useReportsNotice";
 import type { DirectWriteNotice, DirectWriteNoticeKind } from "./useShareDirectWrites";
 
 // A file dohc kept while it saved, as its Notices row reads, and the step
@@ -33,6 +35,7 @@ export type ShellErrorKind =
   | "kept-files"
   | "record-history"
   | "record-history-run"
+  | "reports"
   | DirectWriteNoticeKind
   | SettingsFileKind;
 
@@ -48,6 +51,8 @@ const shareCaptureNotices = new Map<string, { key: string; dismissed: boolean }>
 // retry rides with it; errors that are already over carry none.
 export interface ShellError {
   tone?: "success";
+  // A success toast that stays until it is closed, rather than fading.
+  stays?: boolean;
   id: string;
   title?: string;
   message: string;
@@ -63,6 +68,8 @@ export interface ShellError {
   kind?: ShellErrorKind;
   // A kept copy's row: it stays while the engine lists that copy.
   keptCopyId?: number;
+  // The reports notice's row: the reports its words name.
+  reports?: ReportKinds;
   // What the row is about, such as one record a creation left part way or
   // one person's Stop and restore. A row replaces only a row of the same
   // identity, whatever its message.
@@ -430,6 +437,19 @@ export function useShellError(workspaceId: string) {
     },
     [push],
   );
+  // The one-time notice about the reports this launch sends, with the way
+  // to turn them off. It stays until the person closes it.
+  const showReportsNotice = useCallback((reports: ReportKinds, openPrivacy: () => void) => {
+    push({
+      message: reportsNoticeText(reports),
+      retry: null,
+      tone: "success",
+      stays: true,
+      kind: "reports",
+      reports,
+      action: { label: "Privacy settings", run: openPrivacy },
+    });
+  }, [push]);
   // One row per kept copy the engine lists. A copy listed for the first time
   // arrives as a toast; several at once arrive as one summary toast instead.
   // A copy no longer listed, because it was saved, loses its row. `more`
@@ -535,6 +555,7 @@ export function useShellError(workspaceId: string) {
     showSettingsFileNotice,
     showDirectWriteNotice,
     showSuccessNotice,
+    showReportsNotice,
     showKeptCopies,
     showKeptCopySaved,
     hideShellError,

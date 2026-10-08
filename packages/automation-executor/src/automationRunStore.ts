@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readdir, readFile, rename, rm, rmdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import type { JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { AutomationChangeKind } from "@dohc/workspace-engine-client";
@@ -618,6 +619,33 @@ async function existingFolder(path: string): Promise<string | null | "unusable">
   return stats.isSymbolicLink() || !stats.isDirectory() ? "unusable" : path;
 }
 
+// A snapshot read closes before this process replaces the same file. Share
+// the queue across store instances, and release it when the last caller leaves.
+const fileQueues = new Map<string, Promise<unknown>>();
+function withFile<T>(path: string, work: () => Promise<T>): Promise<T> {
+  if (process.platform !== "win32") return work();
+  const key = resolve(path).toLowerCase();
+  const next = (fileQueues.get(key) ?? Promise.resolve()).then(work, work);
+  const tail = next.then(() => undefined, () => undefined);
+  fileQueues.set(key, tail);
+  return next.finally(() => {
+    if (fileQueues.get(key) === tail) fileQueues.delete(key);
+  });
+}
+
+async function retryFileAccess<T>(work: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await work();
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (process.platform !== "win32" || attempt >= 99 || !["EPERM", "EACCES", "EBUSY"].includes(code ?? "")) throw error;
+      // At most 100 attempts and 2,381 ms of backoff, then the real error.
+      await delay(Math.min(2 ** attempt, 25));
+    }
+  }
+}
+
 async function writeDurably(path: string, text: string): Promise<void> {
   const temp = `${path}.tmp-${process.pid}-${randomUUID()}`;
   try {
@@ -628,7 +656,9 @@ async function writeDurably(path: string, text: string): Promise<void> {
     } finally {
       await file.close();
     }
-    await rename(temp, path);
+    // Windows MoveFileEx cannot replace an open destination, even when the
+    // reader shares deletion. Keep the flushed snapshot while brief reads finish.
+    await withFile(path, () => retryFileAccess(() => rename(temp, path)));
     await syncFolder(dirname(path));
   } finally {
     await rm(temp, { force: true }).catch(() => undefined);
@@ -637,15 +667,17 @@ async function writeDurably(path: string, text: string): Promise<void> {
 
 // A file's text, undefined when it does not exist, or null when it is not a
 // plain file within the size bound.
-async function readBounded(path: string): Promise<string | undefined | null> {
-  const stats = await lstat(path).catch(() => undefined);
-  if (stats === undefined) return undefined;
-  if (stats.isSymbolicLink() || !stats.isFile() || stats.size > MAX_RUN_FILE_BYTES) return null;
-  try {
-    return await readFile(path, "utf8");
-  } catch {
-    return null;
-  }
+function readBounded(path: string): Promise<string | undefined | null> {
+  return withFile(path, async () => {
+    const stats = await lstat(path).catch(() => undefined);
+    if (stats === undefined) return undefined;
+    if (stats.isSymbolicLink() || !stats.isFile() || stats.size > MAX_RUN_FILE_BYTES) return null;
+    try {
+      return await readFile(path, "utf8");
+    } catch {
+      return null;
+    }
+  });
 }
 
 // A file's JSON, undefined when it does not exist, or null when it cannot be
@@ -888,30 +920,32 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
   const appendLine = async (run: StoredRun, line: ProgressLine) => {
     const folder = await runsFolder(run.automationId);
     const path = join(folder, `${runName(run.claimId, run.keySeed)}${PROGRESS_SUFFIX}`);
-    const text = `${JSON.stringify(line)}\n`;
-    const existing = await lstat(path).catch(() => null);
-    if (existing !== null) {
-      if (existing.size + Buffer.byteLength(text) > MAX_RUN_FILE_BYTES) throw tooLarge();
-      const file = await open(path, "r+");
-      try {
-        const last = Buffer.alloc(1);
-        if (existing.size > 0 && (await file.read(last, 0, 1, existing.size - 1)).bytesRead === 1 && last[0] !== 0x0a) {
-          const whole = await readFile(path);
-          await file.truncate(whole.lastIndexOf(0x0a) + 1);
-          await file.sync();
+    return withFile(path, async () => {
+      const text = `${JSON.stringify(line)}\n`;
+      const existing = await lstat(path).catch(() => null);
+      if (existing !== null) {
+        if (existing.size + Buffer.byteLength(text) > MAX_RUN_FILE_BYTES) throw tooLarge();
+        const file = await open(path, "r+");
+        try {
+          const last = Buffer.alloc(1);
+          if (existing.size > 0 && (await file.read(last, 0, 1, existing.size - 1)).bytesRead === 1 && last[0] !== 0x0a) {
+            const whole = await readFile(path);
+            await file.truncate(whole.lastIndexOf(0x0a) + 1);
+            await file.sync();
+          }
+        } finally {
+          await file.close();
         }
+      }
+      const file = await retryFileAccess(() => open(path, "a"));
+      try {
+        await file.appendFile(text);
+        await file.sync();
       } finally {
         await file.close();
       }
-    }
-    const file = await open(path, "a");
-    try {
-      await file.appendFile(text);
-      await file.sync();
-    } finally {
-      await file.close();
-    }
-    if (existing === null) await syncFolder(folder);
+      if (existing === null) await syncFolder(folder);
+    });
   };
   const removeRun = async (folder: string, name: string) => {
     await rm(join(folder, `${name}${PROGRESS_SUFFIX}`), { force: true });

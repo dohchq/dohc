@@ -24,6 +24,8 @@ on:
         type: choice
         options:
           - windows
+          - linux
+          - windows-linux
           - all
       dry_run:
         description: Build and test without publishing artifacts
@@ -44,7 +46,7 @@ jobs:
   preflight:
     name: Preflight
     if: github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, windows, x64]
+    runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || '["self-hosted","windows","x64"]') }}
     timeout-minutes: 20
     outputs:
       release_channel: ${{ steps.release.outputs.release_channel }}
@@ -125,7 +127,7 @@ jobs:
   unused-version:
     name: Check release publication
     needs: preflight
-    runs-on: [self-hosted, windows, x64]
+    runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || '["self-hosted","windows","x64"]') }}
     timeout-minutes: 5
     permissions:
       contents: write
@@ -194,6 +196,8 @@ jobs:
     timeout-minutes: 40
     strategy:
       fail-fast: false
+      # Windows and WSL share the same PC for this selection.
+      max-parallel: ${{ inputs.platforms == 'windows-linux' && 1 || 4 }}
       matrix:
         include: ${{ fromJSON(needs.preflight.outputs.matrix) }}
     steps:
@@ -221,14 +225,36 @@ jobs:
           DESKTOP_VERSION: ${{ needs.preflight.outputs.version }}
         run: node scripts/update-desktop-package-version.mjs
 
+      # Report services are repository variables, not secrets: the key and
+      # DSN ship inside the app. A dry run builds an app that sends nothing.
       - name: Build desktop
+        env:
+          DOHC_POSTHOG_KEY: ${{ needs.preflight.outputs.dry_run != 'true' && vars.DOHC_POSTHOG_KEY || '' }}
+          DOHC_POSTHOG_HOST: ${{ needs.preflight.outputs.dry_run != 'true' && vars.DOHC_POSTHOG_HOST || '' }}
+          DOHC_SENTRY_DSN: ${{ needs.preflight.outputs.dry_run != 'true' && vars.DOHC_SENTRY_DSN || '' }}
+          DOHC_SENTRY_DIST: ${{ matrix.artifact_platform }}-${{ matrix.arch }}
         run: pnpm build:desktop
+
+      # Error reports name frames in the minified files. These source maps,
+      # which the installer leaves out, let Sentry show the original lines.
+      # A build with a DSN fails here if the upload cannot run.
+      - name: Upload source maps
+        if: needs.preflight.outputs.dry_run != 'true'
+        env:
+          DOHC_SENTRY_DSN: ${{ needs.preflight.outputs.dry_run != 'true' && vars.DOHC_SENTRY_DSN || '' }}
+          DOHC_SENTRY_DIST: ${{ matrix.artifact_platform }}-${{ matrix.arch }}
+          DESKTOP_VERSION: ${{ needs.preflight.outputs.version }}
+          SENTRY_AUTH_TOKEN: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.SENTRY_AUTH_TOKEN || '' }}
+          SENTRY_URL: ${{ vars.SENTRY_URL }}
+          SENTRY_ORG: ${{ vars.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
+        run: node scripts/upload-desktop-source-maps.mjs
 
       - name: Build workspace engine
         shell: bash
         run: |
           rustup target add "${{ matrix.target }}"
-          pnpm --filter @dohc/desktop run build:engine -- --target "${{ matrix.target }}"
+          pnpm --filter @dohc/desktop run build:engine --target "${{ matrix.target }}"
 
       - id: signing
         name: Resolve signing mode
@@ -336,7 +362,7 @@ jobs:
       - preflight
       - build
     if: ${{ needs.preflight.outputs.dry_run != 'true' }}
-    runs-on: [self-hosted, windows, x64]
+    runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || '["self-hosted","windows","x64"]') }}
     timeout-minutes: 20
     permissions:
       # Required for creating GitHub releases via softprops/action-gh-release.

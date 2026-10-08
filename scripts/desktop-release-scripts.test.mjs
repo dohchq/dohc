@@ -44,6 +44,7 @@ import {
   createMockUpdateServer,
   resolveServablePath,
 } from "./mock-update-server.mjs";
+import { sourceMapUpload, uploadSourceMaps } from "./upload-desktop-source-maps.mjs";
 
 async function fixtureRoot(version = "0.1.0") {
   const root = await mkdtemp(join(tmpdir(), "dohc-release-"));
@@ -88,6 +89,12 @@ test("release platform selection defaults to Windows and keeps every native targ
   assert.equal(windows.length, 1);
   assert.deepEqual(windows[0].runner, ["self-hosted", "windows", "x64"]);
   assert.equal(windows[0].target, "x86_64-pc-windows-msvc");
+  const linux = desktopReleaseTargets("linux");
+  assert.equal(linux.length, 1);
+  assert.deepEqual(linux[0].runner, ["self-hosted", "linux", "x64"]);
+  assert.equal(linux[0].target, "x86_64-unknown-linux-gnu");
+  assert.equal(linux[0].require_signing, "0");
+  assert.deepEqual(desktopReleaseTargets("windows-linux"), [windows[0], linux[0]]);
   const all = desktopReleaseTargets("all");
   assert.deepEqual(all.map((target) => [target.arch, target.target]), [
     ["x64", "x86_64-pc-windows-msvc"],
@@ -96,7 +103,32 @@ test("release platform selection defaults to Windows and keeps every native targ
     ["x64", "x86_64-unknown-linux-gnu"],
   ]);
   for (const target of all) assert.equal(target.runner[0], "self-hosted");
-  assert.throws(() => desktopReleaseTargets("linux"), /Invalid release platforms/);
+  assert.throws(() => desktopReleaseTargets("mac"), /Invalid release platforms/);
+});
+
+test("Linux nightly metadata keeps the version generator and selects only Linux", async () => {
+  for (const platforms of ["linux", "windows-linux"]) {
+    const release = await resolveDesktopRelease({
+      packageVersion: "0.1.0", channel: "nightly", platforms,
+      date: "20261007", runNumber: 2, runAttempt: 1, sha: "0123456789abcdef",
+    });
+    assert.equal(release.version, "0.1.1-nightly.20261007.2.1");
+    assert.deepEqual(JSON.parse(release.matrix), desktopReleaseTargets(platforms));
+  }
+});
+
+test("Linux and combined publication preserve previously shipped platform feeds", () => {
+  for (const channel of ["nightly", "latest"]) {
+    const release = (names) => [{ draft: false, assets: names.map((name) => ({ name })) }];
+    const linuxOnly = release([`${channel}-linux.yml`]);
+    const windowsAndLinux = release([`${channel}.yml`, `${channel}-linux.yml`]);
+    assert.doesNotThrow(() => checkDesktopReleasePlatforms({ channel, platforms: "linux", releases: linuxOnly }));
+    assert.throws(() => checkDesktopReleasePlatforms({ channel, platforms: "linux", releases: windowsAndLinux }), /win update manifests/);
+    assert.doesNotThrow(() => checkDesktopReleasePlatforms({ channel, platforms: "windows-linux", releases: windowsAndLinux }));
+    for (const platforms of ["linux", "windows-linux"]) {
+      assert.throws(() => checkDesktopReleasePlatforms({ channel, platforms, releases: release([`${channel}-mac.yml`]) }), /mac update manifests/);
+    }
+  }
 });
 
 test("publication preserves every platform previously published on its channel", () => {
@@ -579,12 +611,17 @@ test("desktop releases start only by dispatch, run on self-hosted runners, and p
   assert.equal(runsOn.length, jobNames.length, "every job names its runner");
   assert.match(jobs, /include: \$\{\{ fromJSON\(needs\.preflight\.outputs\.matrix\) \}\}/);
   assert.match(indentedSection(jobs, 2, "preflight"), /--platforms "\$DISPATCH_PLATFORMS"/);
+  const coordinatorRunner = "${{ fromJSON(inputs.platforms == 'linux' && '[\"self-hosted\",\"linux\",\"x64\"]' || '[\"self-hosted\",\"windows\",\"x64\"]') }}";
   for (const name of ["preflight", "unused-version", "publish"]) {
-    assert.match(indentedSection(jobs, 2, name), /runs-on: \[self-hosted, windows, x64\]/);
+    assert.ok(indentedSection(jobs, 2, name).includes(`runs-on: ${coordinatorRunner}`));
   }
+  assert.match(indentedSection(jobs, 2, "build"), /max-parallel: \$\{\{ inputs\.platforms == 'windows-linux' && 1 \|\| 4 \}\}/);
   const matrixRunners = desktopReleaseTargets("all").map((target) => `[${target.runner.join(", ")}]`);
+  const coordinatorRunners = [...coordinatorRunner.matchAll(/'(\[[^']+\])'/g)]
+    .map((match) => `[${JSON.parse(match[1]).join(", ")}]`);
   for (const runner of [
-    ...runsOn.filter((value) => value !== "${{ matrix.runner }}"),
+    ...runsOn.filter((value) => value !== "${{ matrix.runner }}" && value !== coordinatorRunner),
+    ...coordinatorRunners,
     ...matrixRunners,
   ]) {
     assert.match(
@@ -625,6 +662,10 @@ test("desktop releases start only by dispatch, run on self-hosted runners, and p
   assert.match(fuseSmoke, /^ {8}if: runner\.os == 'Linux'$/m);
   assert.match(fuseSmoke, /^ {10}DOHC_E2E_NO_CHROMIUM_SANDBOX: "1"$/m);
   assert.match(fuseSmoke, /^ {8}run: xvfb-run -a pnpm smoke:fuses:desktop$/m);
+  assert.ok(workflow.indexOf(packageDesktop) < workflow.indexOf(fuseSmoke),
+    "Linux fuse smoke reads the actual package after electron-builder finishes");
+  assert.ok(workflow.indexOf(fuseSmoke) < workflow.indexOf(stepBlock(workflow, "Upload packaged artifacts")),
+    "a failed packaged boot must prevent artifact upload");
 
   const secretLines = workflow
     .split(/\r?\n/)
@@ -748,10 +789,14 @@ test("desktop release stages the Rust engine built for the packaged architecture
     join(process.cwd(), ".github/workflows/desktop-release.yml"),
     "utf8",
   );
-  assert.match(
-    stepBlock(workflow, "Build workspace engine"),
-    /build:engine -- --target "\$\{\{ matrix\.target \}\}"/,
+  const engineCommand = stepBlock(workflow, "Build workspace engine").match(
+    /^\s*pnpm --filter @dohc\/desktop run build:engine (.+)$/m,
   );
+  assert.ok(engineCommand, "the workflow builds the selected Rust target");
+  const engineArgs = engineCommand[1]
+    .replace('"${{ matrix.target }}"', target)
+    .trim().split(/\s+/);
+  assert.equal(buildModule.parseTargetArgument(engineArgs), target);
 });
 
 test("desktop release workflow uploads only distributable release assets", async () => {
@@ -780,6 +825,95 @@ test("desktop release workflow uploads only distributable release assets", async
     prepareReleaseUpload,
     /if ! is_release_upload_file "\$file"; then\s+continue\s+fi/,
     "release upload step must skip non-release files before the basename conflict guard",
+  );
+});
+
+const SOURCE_MAP_ENV = {
+  DOHC_SENTRY_DSN: "https://abcdef0123456789abcdef0123456789@sentry.example.test/42",
+  SENTRY_AUTH_TOKEN: "sntrys_fixture",
+  DESKTOP_VERSION: "0.1.1-nightly.20260621.2.1",
+  DOHC_SENTRY_DIST: "win-x64",
+};
+
+test("a build with a Sentry DSN uploads its source maps under the names its reports carry", () => {
+  assert.deepEqual(sourceMapUpload(SOURCE_MAP_ENV).args, [
+    "dlx", "@sentry/cli@3.8.0", "sourcemaps", "upload",
+    "--release", "dohc-desktop@0.1.1-nightly.20260621.2.1",
+    "--dist", "win-x64",
+    "--url-prefix", "app:///dist",
+    "apps/desktop/dist",
+  ]);
+  assert.match(sourceMapUpload({ ...SOURCE_MAP_ENV, DOHC_SENTRY_DSN: " " }).skip, /DOHC_SENTRY_DSN is not set/);
+  assert.match(sourceMapUpload({ DOHC_SENTRY_DSN: "" }).skip, /needs no source maps/);
+  for (const missing of [{ SENTRY_AUTH_TOKEN: "" }, { SENTRY_AUTH_TOKEN: undefined }]) {
+    assert.throws(() => sourceMapUpload({ ...SOURCE_MAP_ENV, ...missing }), /Add the SENTRY_AUTH_TOKEN secret/);
+  }
+  assert.throws(() => sourceMapUpload({ ...SOURCE_MAP_ENV, DESKTOP_VERSION: "" }), /DESKTOP_VERSION/);
+  assert.throws(() => sourceMapUpload({ ...SOURCE_MAP_ENV, DOHC_SENTRY_DIST: "win x64" }), /DOHC_SENTRY_DIST/);
+});
+
+test("the source map upload leaves Sentry settings the release did not set unset, and keeps the ones it did", () => {
+  const calls = [];
+  const spawn = (command, args, options) => {
+    calls.push({ command, args, env: options.env });
+    return { status: 0 };
+  };
+  // A repository variable that is not set reaches the step as an empty string.
+  uploadSourceMaps({ ...SOURCE_MAP_ENV, PATH: "/bin", SENTRY_URL: "", SENTRY_ORG: " ", SENTRY_PROJECT: "" }, spawn);
+  uploadSourceMaps({
+    ...SOURCE_MAP_ENV,
+    SENTRY_URL: "https://sentry.example.test/",
+    SENTRY_ORG: "dohc",
+    SENTRY_PROJECT: "desktop",
+  }, spawn);
+
+  const [unset, configured] = calls;
+  assert.equal(unset.command, "pnpm");
+  assert.deepEqual(unset.args, sourceMapUpload(SOURCE_MAP_ENV).args);
+  for (const name of ["SENTRY_URL", "SENTRY_ORG", "SENTRY_PROJECT"]) assert.equal(name in unset.env, false, name);
+  assert.equal(unset.env.SENTRY_AUTH_TOKEN, SOURCE_MAP_ENV.SENTRY_AUTH_TOKEN);
+  assert.equal(unset.env.PATH, "/bin");
+  assert.equal(configured.env.SENTRY_URL, "https://sentry.example.test/");
+  assert.equal(configured.env.SENTRY_ORG, "dohc");
+  assert.equal(configured.env.SENTRY_PROJECT, "desktop");
+
+  assert.throws(
+    () => uploadSourceMaps(SOURCE_MAP_ENV, () => ({ status: 1 })),
+    /The source map upload failed with exit code 1/,
+  );
+});
+
+test("upload-desktop-source-maps skips without a DSN and fails without a token when run as a command", async () => {
+  const skipped = await runReleaseScript("upload-desktop-source-maps.mjs", [], {
+    ...SOURCE_MAP_ENV,
+    DOHC_SENTRY_DSN: "",
+    SENTRY_AUTH_TOKEN: "",
+  });
+  assert.match(skipped.stdout, /needs no source maps/);
+
+  await assert.rejects(
+    runReleaseScript("upload-desktop-source-maps.mjs", [], { ...SOURCE_MAP_ENV, SENTRY_AUTH_TOKEN: "" }),
+    (error) => error.code === 1 && /Add the SENTRY_AUTH_TOKEN secret/.test(error.stderr),
+  );
+});
+
+test("the release uploads source maps for every build that names Sentry, and never in a dry run", async () => {
+  const workflow = await readFile(join(process.cwd(), ".github/workflows/desktop-release.yml"), "utf8");
+  const build = stepBlock(workflow, "Build desktop");
+  const upload = stepBlock(workflow, "Upload source maps");
+  assert.match(upload, /^ {8}if: needs\.preflight\.outputs\.dry_run != 'true'$/m);
+  assert.match(upload, /^ {8}run: node scripts\/upload-desktop-source-maps\.mjs$/m);
+  // The upload sees the DSN and dist the build compiled in.
+  const envLine = (step, name) => step.match(new RegExp(`^ {10}${name}: (.+)$`, "m"))?.[1];
+  for (const name of ["DOHC_SENTRY_DSN", "DOHC_SENTRY_DIST"]) {
+    assert.ok(envLine(build, name), `the build sets ${name}`);
+    assert.equal(envLine(upload, name), envLine(build, name), `the upload reads the build's ${name}`);
+  }
+  assert.equal(envLine(upload, "DESKTOP_VERSION"), "${{ needs.preflight.outputs.version }}");
+  assert.match(envLine(upload, "SENTRY_AUTH_TOKEN"), /needs\.preflight\.outputs\.dry_run != 'true' && secrets\.SENTRY_AUTH_TOKEN/);
+  assert.ok(
+    stepBlocks(workflow).indexOf(upload) > stepBlocks(workflow).indexOf(build),
+    "the upload runs after the build writes the source maps",
   );
 });
 
