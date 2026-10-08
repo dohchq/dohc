@@ -1856,6 +1856,7 @@ async function requestCli<Verb extends CliVerb>(
 ): Promise<CliResultByVerb[Verb] | { ok: false; reason: string }> {
   const request = {
     protocolVersion: CLI_PROTOCOL_VERSION,
+    door: "mcp",
     verb,
     args: {
       cwd: ctx.root,

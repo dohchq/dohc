@@ -151,7 +151,8 @@ import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMuta
 import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
 import { registerOperations, type OperationBoundary } from "./ipc/operationTable";
 import { createUsageStore } from "./usage/usageStore";
-import { createRendererUsage, RENDERER_USAGE_COVERAGE } from "./usage/rendererUsage";
+import { createRendererUsage } from "./usage/rendererUsage";
+import { DESKTOP_USAGE_COVERAGE } from "./usage/cliUsage";
 
 import { createPresencePollRegistry } from "./collab/presencePollRegistry";
 
@@ -4281,6 +4282,7 @@ const chatWrites = createChatWrites({
 let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null) => Promise<OwnerAppPublicationResult>) | undefined;
 let ownerAppResponsesForCli:((input:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>)|undefined;
 const { startDesktopCliServer } = createDesktopCliServer({
+  recordSuccess: invocation => usageStore?.recordSuccess(invocation),
   dataset: (input, agent) => {
     if (!datasetForCli) throw new Error("Collections are not ready. Try again.");
     return datasetForCli(input, agent);
@@ -5079,7 +5081,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       usageLoad = setImmediate(() => {
         usageLoad = undefined;
         try {
-          usageStore = createUsageStore({ stateDir, appVersion: app.getVersion(), coverage: RENDERER_USAGE_COVERAGE });
+          usageStore = createUsageStore({ stateDir, appVersion: app.getVersion(), coverage: DESKTOP_USAGE_COVERAGE });
         } catch {
           usageStore = undefined;
           return;

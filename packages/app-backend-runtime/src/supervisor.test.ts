@@ -487,7 +487,7 @@ async function failingReopens(options:Partial<DatasetSupervisorOptions>) {
     if(command.command.kind==="applyBatch")state.replayed.push(...command.command.input.map((event:{revision:number})=>event.revision));
     // The worker's CPU budget watch leaves this marker, then ends the worker.
     if(command.command.kind===state.failing){
-      if(state.marker)void writeFile(join(directory,"cpu-budget-exceeded"),"app 5000").then(controls.stop);else controls.stop();
+      if(state.marker)void writeFile(join(directory,"cpu-budget-exceeded-app-5000"),"").then(controls.stop);else controls.stop();
       return;
     }
     controls.deliver();
@@ -1081,7 +1081,7 @@ async function unsavedTailFixture(mode:"busy"|"blocked") {
       if(request.command.kind==='open')directory=request.command.input.directory;
       if(request.command.kind==='applyBatch')state.applied.push(...request.command.input.map((event:{revision:number})=>event.revision));
       if(request.command.kind==='prepare'&&JSON.parse(request.command.guest.inputJson).killWorker){
-        void writeFile(join(directory,'cpu-budget-exceeded'),'app 5000').then(controls.stop);return;
+        void writeFile(join(directory,'cpu-budget-exceeded-app-5000'),'').then(controls.stop);return;
       }
       controls.deliver();
     },undefined,pids,closedPids)(options);

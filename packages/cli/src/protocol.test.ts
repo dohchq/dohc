@@ -9,6 +9,16 @@ import {
 const token = "a".repeat(64);
 const argsBase = { cwd: "C:/ws", actor: "agent" as const };
 
+it("accepts only CLI and MCP counting labels, with an optional label on the strict envelope", () => {
+  const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "groups", args: argsBase };
+  expect(cliRequestSchema.parse(request)).not.toHaveProperty("door");
+  for (const door of ["cli", "mcp"]) expect(cliRequestSchema.parse({ ...request, door })).toMatchObject({ door });
+  for (const door of ["automation", "renderer", "unknown", null, 1]) {
+    expect(cliRequestSchema.safeParse({ ...request, door }).success).toBe(false);
+  }
+  expect(cliRequestSchema.safeParse({ ...request, usage: true }).success).toBe(false);
+});
+
 it("rejects unused agent attribution on automation switches", () => {
   const args = { ...argsBase, collectionPath: "tasks", automation: "stamp", enabled: false,
     expectedContentHash: token, reformat: true, submitId: "switch-1" };
