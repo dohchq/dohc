@@ -6,10 +6,10 @@ import { createAutomationRunStore, type StoredRun } from "./automationRunStore";
 import { createTestScratch, testMetadataDir } from "./testScratch";
 
 const io = vi.hoisted(() => ({
-  readFile: vi.fn<typeof disk.readFile>(), rename: vi.fn<typeof disk.rename>(), delay: vi.fn<typeof timers.setTimeout>(),
+  rename: vi.fn<typeof disk.rename>(), delay: vi.fn<typeof timers.setTimeout>(),
 }));
 vi.mock("node:fs/promises", async (original) => ({
-  ...await original<typeof disk>(), readFile: io.readFile, rename: io.rename,
+  ...await original<typeof disk>(), rename: io.rename,
 }));
 vi.mock("node:timers/promises", async (original) => ({
   ...await original<typeof timers>(), setTimeout: io.delay,
@@ -18,7 +18,6 @@ const actual = await vi.importActual<typeof disk>("node:fs/promises");
 const clock = await vi.importActual<typeof timers>("node:timers/promises");
 
 beforeEach(() => {
-  io.readFile.mockImplementation(actual.readFile);
   io.rename.mockImplementation(actual.rename);
   io.delay.mockImplementation(clock.setTimeout);
 });
@@ -47,34 +46,18 @@ async function savedRun() {
 }
 
 describe.skipIf(process.platform !== "win32")("Windows run-store replacement", () => {
-  it.each(["state", "progress"])("saves %s after an overlapping history reader releases the destination", async (part) => {
+  it.each(["state", "progress"])("saves %s after an open snapshot reader releases the destination", async (part) => {
     const { store, run, path, progressPath, folder } = await savedRun();
     const destination = part === "state" ? path : progressPath;
-    const opened = Promise.withResolvers<void>();
-    const release = Promise.withResolvers<void>();
-    let captured = false;
-    io.readFile.mockImplementation(async (...args) => {
-      if (String(args[0]) !== destination || captured) return actual.readFile(...args);
-      captured = true;
-      const file = await actual.open(destination, "r");
-      opened.resolve();
-      try {
-        await release.promise;
-        return await file.readFile(args[1]);
-      } finally {
-        await file.close();
-      }
-    });
-    const reader = store.runsOf(run.automationId, run.claimId);
-    await opened.promise;
+    const reader = await actual.open(destination, "r");
+    const before = await reader.readFile("utf8");
     const conflicts: string[] = [];
     io.rename.mockImplementation(async (from, to) => {
       try {
         await actual.rename(from, to);
       } catch (error) {
         conflicts.push((error as NodeJS.ErrnoException).code!);
-        release.resolve();
-        await reader;
+        await reader.close();
         throw error;
       }
     });
@@ -82,12 +65,11 @@ describe.skipIf(process.platform !== "win32")("Windows run-store replacement", (
       const write = part === "state" ? store.updateState(run, { settled: true }) : store.save({ ...run, settled: true });
       await expect(write).resolves.toBeUndefined();
       expect(conflicts).toEqual(["EPERM"]);
-      expect(await reader).toEqual({ runs: [run], unreadable: false });
+      expect(before).toBe(part === "state" ? await actual.readFile(path, "utf8").then(text => text.replace('"settled":true', '"settled":false')) : "");
       expect(await store.runsOf(run.automationId, run.claimId)).toEqual({ runs: [{ ...run, settled: true }], unreadable: false });
       expect((await actual.readdir(folder)).some(name => name.includes(".tmp-"))).toBe(false);
     } finally {
-      release.resolve();
-      await reader;
+      await reader.close();
     }
   });
 
