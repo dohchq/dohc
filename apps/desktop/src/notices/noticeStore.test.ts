@@ -28,6 +28,7 @@ import { ListNoticesResult, RetryAutomationNoticeResult } from "../ipc/bridgeCon
 import { FAILED_ELSEWHERE_BODY, AUTOMATION_SWITCHED_OFF_BODY, AUTOMATION_SWITCHED_OFF_VIEW_BODY } from "@dohc/automation-executor/automation-failed-notice";
 import {
   RETRY_ELSEWHERE,
+  RETRY_NO_RUN,
   retryAutomationRun,
   retryFromFailureNotice,
   sendFailureNotices,
@@ -39,6 +40,7 @@ import {
 } from "../automations/automationNotices";
 import { createAutomationWakeConsumer, createAutomationWakeIntents } from "../automations/automationWakeIntents";
 import { createTestScratch } from "../workspaces/testTemp";
+import { deferred } from "../testing/deferred";
 import { NoticeNotSentError } from "@dohc/automation-executor/automation-chat";
 import {
   createNoticeStore,
@@ -1127,6 +1129,174 @@ it("lists cached, local, and account Notices when the refusal reader fails", asy
     expect.objectContaining({ noticeId: "local-notice", store: "local" }),
     expect.objectContaining({ noticeId: "sync-refusal-cached", store: "local" }),
   ]));
+});
+
+describe("refusal work after quit stops it", () => {
+  const first = { originId: "peer", originSeq: 1 };
+  const second = { originId: "peer", originSeq: 2 };
+  const hold = () => ({ started: deferred(), release: deferred() });
+
+  // One workspace's engine with one refusal Notice. Null coordinates mean the
+  // workspace could not be read.
+  function engine() {
+    const state = {
+      coordinates: [first] as (typeof first)[] | null,
+      read: null as ReturnType<typeof hold> | null,
+      dismissal: null as ReturnType<typeof hold> | null,
+      events: [] as string[],
+    };
+    const refusalNotices = vi.fn(async () => {
+      const held = state.read;
+      state.read = null;
+      if (held) { held.started.resolve(); await held.release.promise; }
+      const coordinates = state.coordinates;
+      return [{ workspaceId: WORKSPACE, notices: coordinates && [{ noticeId: "refusal", ...coordinates.at(-1)!,
+        refusalCoordinates: coordinates, reason: "Review this file", document: null }] }];
+    });
+    const dismissRefusal = vi.fn(async () => {
+      const held = state.dismissal;
+      state.dismissal = null;
+      if (held) { held.started.resolve(); await held.release.promise; }
+      state.events.push("dismissed");
+    });
+    return Object.assign(state, {
+      refusalNotices,
+      dismissRefusal,
+      holdRead: () => state.read = hold(),
+      holdDismissal: () => state.dismissal = hold(),
+    });
+  }
+
+  // Leaves a refusal with a dismissal queued for its first coordinate and a
+  // newer second coordinate still shown.
+  async function withQueuedDismissal(refusals: ReturnType<typeof engine>, options: { directory?: string } = {}) {
+    const each = await computer(null, { ...options, refusalNotices: refusals.refusalNotices, dismissRefusal: refusals.dismissRefusal });
+    const [shown] = (await each.store.list()).notices;
+    refusals.coordinates = null;
+    await each.store.mark([shown!], "dismissed", null);
+    refusals.coordinates = [first, second];
+    const [row] = (await each.store.list()).notices;
+    expect(row).toMatchObject({ noticeId: "refusal", refusalCoordinates: [second] });
+    return { each, row: row! };
+  }
+
+  const localFile = (each: Computer) => readFile(join(each.directory, "local.json"), "utf8");
+
+  it("finishes the refresh already running, skips queued ones, and returns one drain", async () => {
+    const refusals = engine();
+    const { each } = await withQueuedDismissal(refusals);
+    const reads = refusals.refusalNotices.mock.calls.length;
+    const changes = each.changes;
+    refusals.coordinates = [first, second, { originId: "peer", originSeq: 3 }];
+    const read = refusals.holdRead();
+    const dismissal = refusals.holdDismissal();
+    const running = each.store.refreshRefusals(WORKSPACE);
+    await read.started.promise;
+    const queued = each.store.refreshRefusals();
+    const listed = each.store.list();
+    const drain = each.store.stopWorkspaceRefusals();
+    expect(each.store.stopWorkspaceRefusals()).toBe(drain);
+    void drain.then(() => refusals.events.push("drained"));
+    read.release.resolve();
+    // The running refresh replays the queued dismissal before it saves.
+    await dismissal.started.promise;
+    expect(refusals.events).toEqual(["dismissed", "dismissed"]);
+    dismissal.release.resolve();
+    await drain;
+    expect(refusals.events.slice(-2)).toEqual(["dismissed", "drained"]);
+    await expect(running).resolves.toBeUndefined();
+    await expect(queued).resolves.toBeUndefined();
+    expect((await listed).notices).toEqual([expect.objectContaining({ refusalCoordinates: [second, { originId: "peer", originSeq: 3 }] })]);
+    expect(refusals.refusalNotices).toHaveBeenCalledTimes(reads + 1);
+    expect(each.changes).toBe(changes + 1);
+    // The running refresh's save reached the file before the drain settled.
+    const restarted = await computer(null, { directory: each.directory });
+    expect((await restarted.store.list()).notices).toEqual([expect.objectContaining({
+      noticeId: "refusal", refusalCoordinates: [second, { originId: "peer", originSeq: 3 }] })]);
+    expect(JSON.parse(await localFile(each)).rows[0].pendingRefusalDismissals).toEqual([first]);
+  });
+
+  it("skips a refresh queued behind a running dismissal, which finishes first", async () => {
+    const refusals = engine();
+    const each = await computer(null, { refusalNotices: refusals.refusalNotices, dismissRefusal: refusals.dismissRefusal });
+    const [shown] = (await each.store.list()).notices;
+    const changes = each.changes;
+    const dismissal = refusals.holdDismissal();
+    const marking = each.store.mark([shown!], "dismissed", null);
+    await dismissal.started.promise;
+    const queued = each.store.refreshRefusals(WORKSPACE);
+    const drain = each.store.stopWorkspaceRefusals();
+    void drain.then(() => refusals.events.push("drained"));
+    refusals.coordinates = [second];
+    dismissal.release.resolve();
+    await drain;
+    expect(refusals.events).toEqual(["dismissed", "drained"]);
+    await expect(marking).resolves.toBeUndefined();
+    await expect(queued).resolves.toBeUndefined();
+    expect(refusals.refusalNotices).toHaveBeenCalledOnce();
+    expect(each.changes).toBe(changes + 1);
+    expect(JSON.parse(await localFile(each)).rows).toEqual([expect.objectContaining({
+      noticeId: "refusal", refusalCoordinates: [], pendingRefusalDismissals: [first], dismissedAtMs: clock })]);
+  });
+
+  it("keeps rows when refresh, list, or a run retry asks after the stop", async () => {
+    const server = await relay();
+    const refusals = engine();
+    const each = await computer(account(server, "owner"), { refusalNotices: refusals.refusalNotices });
+    await each.store.postNotice(notice());
+    await each.store.sync();
+    const refusal = (await each.store.list()).notices.find(row => row.kind === "sync-refusal")!;
+    await each.store.mark([refusal], "read", null);
+    const before = await each.store.list();
+    expect(before.notices).toEqual(expect.arrayContaining([
+      expect.objectContaining({ noticeId: "agent-run:1", store: "account" }),
+      expect.objectContaining({ noticeId: "refusal", store: "local", readAtMs: clock }),
+    ]));
+    const reads = refusals.refusalNotices.mock.calls.length;
+    await each.store.stopWorkspaceRefusals();
+    // An engine read now would remove the row; the stop must not read it as empty.
+    refusals.coordinates = [second];
+    await expect(each.store.refreshRefusals(WORKSPACE)).resolves.toBeUndefined();
+    await expect(each.store.refreshRefusals()).resolves.toBeUndefined();
+    expect(await each.store.list()).toEqual(before);
+    const retry = vi.fn();
+    await expect(retryFromFailureNotice({ notices: each.store, retry },
+      { notice: { store: "local", noticeId: "refusal" }, account: before.account, startOver: false }))
+      .resolves.toEqual({ status: "refused", reason: RETRY_NO_RUN });
+    expect(retry).not.toHaveBeenCalled();
+    expect(refusals.refusalNotices).toHaveBeenCalledTimes(reads);
+  });
+
+  it("rejects a refusal dismissal queued before or sent after the stop, keeping rows and queued coordinates", async () => {
+    const refusals = engine();
+    const { each, row } = await withQueuedDismissal(refusals);
+    await each.store.postNotice(notice({ onlyHere: true }));
+    const read = refusals.holdRead();
+    const running = each.store.refreshRefusals(WORKSPACE);
+    await read.started.promise;
+    const queuedMark = expect(each.store.mark([row], "dismissed", null)).rejects.toMatchObject({ name: "AbortError" });
+    const drain = each.store.stopWorkspaceRefusals();
+    read.release.resolve();
+    await drain;
+    await running;
+    const dismissals = refusals.dismissRefusal.mock.calls.length;
+    const saved = await localFile(each);
+    const changes = each.changes;
+    await queuedMark;
+    // The whole batch stops, so the other Notice in it stays too.
+    await expect(each.store.mark([row, { store: "local", noticeId: "agent-run:1" }], "dismissed", null))
+      .rejects.toMatchObject({ name: "AbortError" });
+    expect(refusals.dismissRefusal).toHaveBeenCalledTimes(dismissals);
+    expect(await localFile(each)).toBe(saved);
+    expect(each.changes).toBe(changes);
+    expect(JSON.parse(saved).rows).toEqual(expect.arrayContaining([expect.objectContaining({
+      noticeId: "refusal", refusalCoordinates: [second], pendingRefusalDismissals: [first], dismissedAtMs: null })]));
+    expect((await each.store.list()).notices.map(listed => listed.noticeId).sort()).toEqual(["agent-run:1", "refusal"]);
+    // Marking read reaches no engine, so it still works.
+    await each.store.mark([row], "read", null);
+    expect((await each.store.list()).notices.find(listed => listed.noticeId === "refusal")?.readAtMs).toBe(clock);
+    expect(refusals.dismissRefusal).toHaveBeenCalledTimes(dismissals);
+  });
 });
 
 describe("automation notices reach the people involved", () => {

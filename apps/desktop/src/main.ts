@@ -1020,6 +1020,12 @@ function clearCachedCredentials(): void {
 // Notices sent to the signed-in person, and this computer's own. The store
 // pulls after each sync pass, at sign-in, and when a window gains focus.
 let cachedNoticeStore: NoticeStore | null = null;
+// Set at quit. A store made afterwards starts with its refusal work stopped.
+let noticeRefusalsStopped = false;
+function stopNoticeRefusals(): Promise<void> {
+  noticeRefusalsStopped = true;
+  return cachedNoticeStore?.stopWorkspaceRefusals() ?? Promise.resolve();
+}
 // The signed-in session from one credential snapshot: the account and every
 // reach read the same credentials, and the session stops being current as
 // soon as the credentials change.
@@ -1064,6 +1070,7 @@ function noticeStore(): NoticeStore {
       workspaceForRegistered: workspace => receivedShareEngine.workspaceForRegistered(workspace),
     }),
   });
+  if (noticeRefusalsStopped) void cachedNoticeStore.stopWorkspaceRefusals();
   return cachedNoticeStore;
 }
 app.on("browser-window-focus", () => void noticeStore().sync());
@@ -5290,6 +5297,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       desktopEngine.sessions?.beginShutdown();
       desktopChatBookmarks.stop();
     },
+    stopNoticeRefusals,
     stopSearch: () => workspaceSearchOwner.dispose(),
     stopSitePreviews: stopAllSitePreviews,
     settleYDocs: () => settleYDocsAfterFileObservation(
