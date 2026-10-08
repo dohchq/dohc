@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import type { HistoryPolicyUnreadableResult } from "../../ipc/bridgeContract";
 import { readError, withErrorWords } from "../../ipc/errorWords";
 import { DocumentMenu } from "../DocumentMenu";
+import { FrontmatterAsWritten } from "../FrontmatterAsWritten";
 import { DocumentControls, OPENING_TITLE, ViewHeader } from "../fileInspectorUi";
 import { BlockMenu } from "../editor/blockControls";
 import { SlashCommandMenu, type SlashCommandState } from "../editor/slashCommands";
@@ -499,6 +500,16 @@ function TableMenuSpecimen(props: { menuId: string }) {
     return () => menu.remove();
   }, [props.menuId]);
   return <div ref={host} className={`${EDITOR_MENU_BOX} h-[300px] w-[260px]`} />;
+}
+
+// The section shows file text only. After `budget` is renamed `cost`, the
+// file holds the old name until the save lands.
+function AsWrittenSpecimen(props: { name: string }) {
+  return (
+    <div className="w-[420px] rounded-lg border border-line bg-bg">
+      <FrontmatterAsWritten markdown={`---\n# Monthly\n${props.name}: 100 # euros\n---\n\nBody`} propertiesShown />
+    </div>
+  );
 }
 
 function Pane(props: { theme: "light" | "dark" }) {
@@ -1063,6 +1074,16 @@ function Pane(props: { theme: "light" | "dark" }) {
           <div data-force-state="focus focus-visible" data-force-target='[data-editor-group-id="first"]'>
             <EditorGroupsSpecimen activeHasTabs={false} />
           </div>
+        </Specimen>
+      </Section>
+
+      {/* Last, so the parts above keep their places. */}
+      <Section part="frontmatter-as-written" title="Frontmatter as written">
+        <Specimen label="rename saved">
+          <AsWrittenSpecimen name="cost" />
+        </Specimen>
+        <Specimen label="rename saving: the file keeps the old name">
+          <AsWrittenSpecimen name="budget" />
         </Specimen>
       </Section>
     </section>

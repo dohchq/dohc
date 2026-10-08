@@ -27,6 +27,7 @@ function engineBridge(
 ) {
   const serverDoc = markdownToYDoc(markdown);
   return {
+    onWorkspaceActivity: vi.fn(() => () => undefined),
     readWorkspaceText: vi.fn(async () => ({ text: markdown, truncated: false })),
     writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
     listWorkspaceFiles: vi.fn(async () => ({
