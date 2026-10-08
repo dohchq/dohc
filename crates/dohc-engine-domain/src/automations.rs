@@ -2239,21 +2239,55 @@ fn moment_is_local(
     .map_err(DomainError::sql_corrupt)
 }
 
+fn moment_is_direct_creation(
+    conn: &Connection,
+    workspace_id: &str,
+    moment_order: i64,
+    author: Option<&SharedChangeAuthor>,
+) -> Result<bool, DomainError> {
+    let grant_id = match author {
+        Some(SharedChangeAuthor::Named { grant_id, .. })
+        | Some(SharedChangeAuthor::Link { grant_id, .. }) => grant_id,
+        None => return Ok(false),
+    };
+    // Sync accepts this origin only with its matching relay-derived author
+    // and a Collection record creation. Other imported moments stay remote.
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM moments m JOIN replication_log r \
+           ON r.workspace_id = m.workspace_id AND r.op_kind = 'moment.append' \
+          AND json_extract(r.payload_json, '$.momentId') = m.moment_id \
+         WHERE m.workspace_id = ?1 AND m.moment_order = ?2 \
+           AND m.operation = 'write' AND m.before_present <> 2 \
+           AND r.imported = 1 AND r.origin_id = ?3)",
+        params![
+            workspace_id,
+            moment_order,
+            format!("relay:collection-file:{grant_id}")
+        ],
+        |row| row.get(0),
+    )
+    .map_err(DomainError::sql_corrupt)
+}
+
 /// A moment's author as a claim names it ([`moment_author_attribution`]),
 /// with the deepest chain its authors declared ([`moment_author_depth`]).
 fn moment_change(kind: AutomationChangeKind, author_json: Option<&str>) -> (AutomationChange, u32) {
     let (author_origin_id, attribution) = moment_author_attribution(author_json);
+    let shared_author = crate::collections::moment_shared_author(author_json);
     let change = AutomationChange {
         kind,
         author_origin_id,
         actor_kind: attribution
             .as_ref()
             .map(|attribution| attribution.actor_kind),
-        on_behalf_of: attribution
-            .as_ref()
-            .and_then(|attribution| attribution.on_behalf_of.clone()),
-        // A moment a claim is made from was committed on this computer.
-        shared_author: None,
+        on_behalf_of: match &shared_author {
+            Some(SharedChangeAuthor::Named { user_id, .. }) => Some(user_id.clone()),
+            Some(SharedChangeAuthor::Link { .. }) => None,
+            None => attribution
+                .as_ref()
+                .and_then(|attribution| attribution.on_behalf_of.clone()),
+        },
+        shared_author,
         live_cursor: None,
     };
     (change, moment_author_depth(author_json))
@@ -2351,12 +2385,18 @@ pub fn claim_record_lifecycle_in_tx(
                     continue;
                 }
             }
-            if !moment_is_local(conn, workspace_id, moment.moment_order)?
-                || moment_is_merged(conn, workspace_id, moment.moment_order)?
-            {
+            let (change, depth) = moment_change(kind, moment.author_json.as_deref());
+            let claims_here = moment_is_local(conn, workspace_id, moment.moment_order)?
+                || (kind == AutomationChangeKind::Added
+                    && moment_is_direct_creation(
+                        conn,
+                        workspace_id,
+                        moment.moment_order,
+                        change.shared_author.as_ref(),
+                    )?);
+            if !claims_here || moment_is_merged(conn, workspace_id, moment.moment_order)? {
                 continue;
             }
-            let (change, depth) = moment_change(kind, moment.author_json.as_deref());
             let author_ids: Vec<String> = moment_author_entries(moment.author_json.as_deref())
                 .iter()
                 .filter_map(|author| match author.get("kind").and_then(Value::as_str) {

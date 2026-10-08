@@ -301,6 +301,43 @@ const unusedReconcilePorts: Pick<
 };
 
 describe("ShareViewFiles", () => {
+  it.each(["end", "narrow"] as const)("preserves a recipient-created record's unreadable edits before %s", async restriction => {
+    const rootPath = await workspaceRoot();
+    const path = "tasks/Created.md";
+    const text = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\nRecipient draft\n";
+    const registered = { ...target(rootPath), unsavedPaths: undefined as string[] | null | undefined,
+      grantedSelector: { paths: ["tasks"], versionId: null, access: "edit" as "edit" | "view" } };
+    const store = mutableTextStore({ initial: [] });
+    const ports = { ...unusedReconcilePorts, resolveTarget: () => registered, openStore: () => store,
+      markEnded: async (_target: ResolvedShareViewFilesTarget, unsavedPaths?: string[] | null) => {
+        registered.ended = true; registered.unsavedPaths = unsavedPaths;
+      } };
+    const files = createShareViewFiles(ports);
+    const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
+    await withStaleSensitiveWorkspaceOperation(rootPath, lease => files.change(lease, requested,
+      { kind: "create", path, initialText: text }));
+    await writeFile(join(rootPath, path), `${text}Unsent edit\n`);
+    const original = fsPromises.lstat;
+    const inspect = vi.spyOn(fsPromises, "lstat").mockImplementation((...args) => {
+      if (String(args[0]) === join(rootPath, path)) return Promise.reject(Object.assign(new Error("locked"), { code: "EACCES" }));
+      return original(...args);
+    });
+    try {
+      await withStaleSensitiveWorkspaceOperation(rootPath, async lease => {
+        if (restriction === "end") await files.end(lease, requested, () => undefined);
+        else await files.narrow(lease, requested, () => undefined, unsavedPaths => {
+          registered.grantedSelector.access = "view"; registered.unsavedPaths = unsavedPaths;
+        });
+      });
+      expect(registered.unsavedPaths).toEqual([path]);
+      const saved = JSON.parse(JSON.stringify(registered)) as typeof registered;
+      const restarted = createShareViewFiles({ ...ports, resolveTarget: () => saved });
+      await withStaleSensitiveWorkspaceOperation(rootPath, lease => restarted.reconcile(lease, requested, "settle"));
+      expect(await readFile(join(rootPath, path), "utf8")).toBe(`${text}Unsent edit\n`);
+      expect(saved.unsavedPaths).toEqual([path]);
+    } finally { inspect.mockRestore(); }
+  });
+
   it.each(["end", "narrow"] as const)("captures an on-disk Edit change before %s and keeps it after a later read", async restriction => {
     const rootPath = await workspaceRoot();
     const path = "tasks/notes.md";

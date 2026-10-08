@@ -192,6 +192,7 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>):
   });
   if (collectionWritesAllowed(metadata)) server.registerTool(COLLECTION_WRITE_TOOL, {
     description: "Change a Collection's own files through this Edit link: edit its collection.yaml, create or replace the automations.yaml beside it, " +
+      "create one Markdown record in an existing document Collection, with a frontmatter id of rec_ followed by 26 lowercase base32 characters, " +
       "or create a new Collection in a new folder with its collection.yaml, an optional automations.yaml, and up to 500 Markdown records. " +
       "Read a file with dohc_read_file before replacing it. The files apply together or not at all. Send this tool alone, not in a batch. " +
       "stale means the file changed since you read it: read it again, merge your change, and send it with a new submitId. " +

@@ -18,6 +18,9 @@ mod origin_record;
 mod restore_record;
 mod settlement_record;
 pub use application_record::journal_live_event_in_tx;
+pub(crate) use application_record::{
+    annotate_drained_projection_in_tx, annotate_projected_moment_in_tx, drained_coordinate_authors,
+};
 pub use enrollment::journal_live_event_or_defer_in_tx;
 pub use settlement_record::journal_live_settlement_in_tx;
 pub(crate) use settlement_record::{owner_settlement_cursor_in, restore_successor_settlement_in};

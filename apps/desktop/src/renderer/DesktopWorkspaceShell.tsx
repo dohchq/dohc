@@ -45,7 +45,7 @@ import {
   engineStoreRefusalRecovery,
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
-import { readError } from "../ipc/errorWords";
+import { readError, shouldRecheckShareAccess } from "../ipc/errorWords";
 import {
   formatSize,
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
@@ -134,6 +134,7 @@ import {
   collectionWriteFailures,
   remapCollectionFieldWritePaths,
   settleCollectionFieldWrites,
+  setCollectionFieldWriteAccess,
   useCollectionWritesBlockingAdmission,
   useCollectionWriteLineage,
 } from "./collections/recordFieldWrites";
@@ -1439,8 +1440,23 @@ export function DesktopWorkspaceShell(props: {
   const shareAccess = accessFor?.view === shareView ? accessFor.access : shareView?.access;
   const shareViewWritable =
     !shareViewDamaged && !shareViewEnded && shareAccess === "edit";
+  const shareViewEndedRef = useRef(shareViewEnded);
+  shareViewEndedRef.current = shareViewEnded;
   const shareViewWritableRef = useRef(shareViewWritable);
   shareViewWritableRef.current = shareViewWritable;
+  const shareHadEditRef = useRef(shareView?.access === "edit");
+  if (shareViewWritable) shareHadEditRef.current = true;
+  const shareReopenMessage = "This share must be reopened. Choose Forget in the workspace menu, then open the share code again. Forget keeps your files.";
+  const shareWriteRefusal = shareViewEnded ? "Your access to this share ended."
+    : shareViewDamaged ? !shareView?.recipientUserId || needsReopenFor === shareView ? shareReopenMessage
+      : "dohc can't read what this share grants. Open the share again to restore it."
+    : shareHadEditRef.current ? "Your access to this share changed. Ask for Edit access, then reopen the share."
+    : "This share does not have Edit access.";
+  const shareWriteRefusalRef = useRef(shareWriteRefusal);
+  shareWriteRefusalRef.current = shareWriteRefusal;
+  useEffect(() => {
+    setCollectionFieldWriteAccess(workspaceId, shareView && !shareViewWritable ? shareWriteRefusal : null);
+  }, [workspaceId, !!shareView, shareViewWritable, shareWriteRefusal]);
   // History reads are separate. A shared view reads the history its share
   // imported, list and detail only, from its own store.
   const historyReadable = (status: SyncStatusResult | null) =>
@@ -1507,6 +1523,16 @@ export function DesktopWorkspaceShell(props: {
     relayFailed: captureDecidedFor !== workspaceId || syncStatus === null ? undefined : !!syncStatus.syncFailure,
     onVerified: result => {
       if (!shareView) return;
+      if (result.status === "ended" || result.status === "needs-reopen" || result.access && result.access !== "edit") {
+        const message = result.status === "ended" ? "Your access to this share ended."
+          : result.status === "needs-reopen" ? shareReopenMessage
+          : shareHadEditRef.current ? "Your access to this share changed. Ask for Edit access, then reopen the share."
+          : "This share does not have Edit access.";
+        shareViewEndedRef.current = result.status === "ended";
+        shareViewWritableRef.current = false;
+        shareWriteRefusalRef.current = message;
+        setCollectionFieldWriteAccess(workspaceId, message);
+      }
       if (result.status === "needs-reopen") setNeedsReopenFor(shareView);
       else if (result.status === "ended") setEndedFor(shareView);
       else if (result.access && result.access !== shareAccess) setAccessFor({ view: shareView, access: result.access });
@@ -2943,7 +2969,8 @@ export function DesktopWorkspaceShell(props: {
       const execute = async (recordId?: string): Promise<void> => {
         if (workspaceSelection.current !== selection) return;
         if (shareView && !shareViewWritableRef.current) {
-          reportShellError("Your access to this share ended.", new Error("Your access to this share ended."));
+          const message = shareViewEndedRef.current ? "Your access to this share ended." : shareWriteRefusalRef.current;
+          reportShellError(message, new Error(message));
           return;
         }
         try {
@@ -2956,9 +2983,21 @@ export function DesktopWorkspaceShell(props: {
           }
           await refreshFiles();
           if (workspaceSelection.current !== selection) return;
+          if (result.delivery === "refused") {
+            if (shareView) await checkShareAccess();
+            if (workspaceSelection.current !== selection) return;
+            const restricted = shareView && !shareViewWritableRef.current;
+            const reason = restricted ? shareWriteRefusalRef.current : result.reason ?? "The sync relay did not accept this record.";
+            reportShellError(reason, new Error(reason), restricted ? null : () => void createCollectionRecord(collectionPath));
+          }
           openFile(result.path);
         } catch (error) {
-          if (workspaceSelection.current === selection) reportShellError("Could not create a record.", error);
+          if (shareView && shouldRecheckShareAccess(error)) await checkShareAccess();
+          if (workspaceSelection.current !== selection) return;
+          if (shareView && !shareViewWritableRef.current) {
+            const message = shareWriteRefusalRef.current;
+            reportShellError(message, new Error(message));
+          } else reportShellError("Could not create a record.", error);
         }
       };
       try { await execute(); }
@@ -3798,7 +3837,7 @@ export function DesktopWorkspaceShell(props: {
   const shareViewHasIndependentChat =
     !shareViewDamaged &&
     !shareViewEnded &&
-    shareView?.access === "comment" &&
+    shareAccess === "comment" &&
     shareView?.genericChatWritable === true;
   const shareGranterName = shareSenderLabel(shareView?.sharerName, shareView?.granterEmail);
   const shareBannerText = !shareView
@@ -3813,7 +3852,7 @@ export function DesktopWorkspaceShell(props: {
           ? `Shared view from ${shareGranterName}. Markdown edits save to the live host. Other file changes need their acceptance.`
           : shareViewHasIndependentChat
             ? `Shared view from ${shareGranterName}. Files and Chats are read-only here. Ask ${shareGranterName} where to continue the conversation.`
-            : shareView.access === "comment"
+            : shareAccess === "comment"
               ? `Shared view from ${shareGranterName}. Files are read-only here. Continue commenting in the browser where you opened the link.`
               : `Shared view from ${shareGranterName} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`;
   const [shareRefreshing, setShareRefreshing] = useState(false);
@@ -4010,7 +4049,8 @@ export function DesktopWorkspaceShell(props: {
   const sendShareChanges = useCallback(async () => {
     if (workspaceAdmission.superseded) return;
     if (!shareViewWritableRef.current) {
-      reportShellError("Your access to this share ended.", new Error("Your access to this share ended."));
+      const message = shareViewEndedRef.current ? "Your access to this share ended." : shareWriteRefusalRef.current;
+      reportShellError(message, new Error(message));
       return;
     }
     const token = myShareChangeToken.current;
@@ -5263,6 +5303,8 @@ export function DesktopWorkspaceShell(props: {
                     workspaceId={workspaceId}
                     collectionPath={groupCollectionPath}
                     readOnly={(!!shareView && !shareViewWritable) || isMountedSharePath(groupCollectionPath)}
+                    accessEnded={shareViewEnded}
+                    writeRefusal={shareView ? shareWriteRefusal : undefined}
                     activeViewName={wb.collectionViews[groupCollectionPath] ?? null}
                     onActiveViewChange={(viewName) =>
                       mutateWb((state) =>

@@ -78,6 +78,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "live_audit_settlement_conflicts",
     "live_audit_record_chunks",
     "live_audit_events",
+    "live_audit_projection_authors",
     "live_audit_event_publications",
     "live_audit_event_conflicts",
     "live_accepted_updates",

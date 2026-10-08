@@ -1,3 +1,4 @@
+import { ensureLiveLinkPublicPrincipal } from "./liveAuthorSnapshot";
 import type { StoredLiveDocumentAuthority } from "./types";
 import {serviceHostDocumentEnabled} from "./serviceHostEnrollment";
 import {ordinaryActivationBaseline,ordinaryActivationBasisCharge,persistOrdinaryActivationBasis,type VerifiedOrdinaryActivationCut} from "./ordinaryActivationSource";
@@ -70,6 +71,7 @@ import { nextShareDiscussionRevision } from "./discussion";
 import { liveBrowserActor } from "../liveBrowserContext";
 import { readLinkEnrollment, linkWriteRefusal, linkPrincipalLimitReached, linkPrincipalStorageBytes, commitLinkEnrollment } from "./linkEnrollment";
 import { authorizeLinkShareAction } from "../shareAuthorization";
+import { notifyDesktopReadiness } from "../desktopReadinessChanges";
 
 export function snapshotCurrentBindingRequest(input: CurrentLiveBindingRequest): CurrentLiveBindingRequest {
   const outer = ticketRecord(input, ["document", "actor"]);
@@ -130,7 +132,7 @@ export const baselineBufferLength = Object.getOwnPropertyDescriptor(ArrayBuffer.
 
 export const baselineBufferResizable = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "resizable")?.get;
 
-function snapshotBaseline(outer: Record<string, unknown>, host: LiveHostConnectionCoordinate): LiveDocumentBaselineRegistrationInput {
+function snapshotBaseline(outer: Record<string, unknown>): Omit<LiveDocumentBaselineRegistrationInput, "host"> {
   const evidence = baselineRecord(outer.evidence,
     ["version", "document", "currentPath", "checkpoint", "projectedMarkdownSha256", "projectedMarkdownByteLength"], true);
   if (evidence.version !== 1) throw new TypeError("Unknown baseline evidence version.");
@@ -176,7 +178,7 @@ function snapshotBaseline(outer: Record<string, unknown>, host: LiveHostConnecti
   const projectedMarkdownByteLength = parseHostControlTimestamp(evidence.projectedMarkdownByteLength, "projection length");
   if (projectedMarkdownByteLength > 2_097_152) throw new TypeError("Invalid baseline projection length.");
   const registeredAtMs = parseHostControlTimestamp(outer.registeredAtMs, "registration timestamp");
-  return { host, baselineBytes, registeredAtMs, evidence: { version: 1, document, currentPath,
+  return { baselineBytes, registeredAtMs, evidence: { version: 1, document, currentPath,
     checkpoint: { updateDigest, ranges }, projectedMarkdownSha256, projectedMarkdownByteLength } };
 }
 
@@ -463,7 +465,7 @@ export function readLiveTicketTarget(storage: StorageContext, input: LiveTicketL
     });
   }
 
-export function mintLiveTicket(storage: StorageContext, input: LiveTicketMint): { expiresAtMs: number } | null {
+export function mintLiveTicket(storage: StorageContext, input: LiveTicketMint): { expiresAtMs: number; publicPrincipalId?: string } | null {
     const raw = ticketRecord(input, ["tokenHash", "scope", "audience", "objectId", "ticketId", "report"]);
     const owned = snapshotTicketLookup(raw);
     const objectId = parseLiveUpdateIdentifier(raw.objectId, "object ID");
@@ -504,7 +506,8 @@ export function mintLiveTicket(storage: StorageContext, input: LiveTicketMint): 
         claims.authority.grantId, claims.authority.grantGeneration, claims.hostEpoch, claims.mintedAtMs, claims.expiresAtMs,
         owned.scope.kind === "link" ? owned.scope.sessionId : null,
       );
-      return { expiresAtMs: claims.expiresAtMs };
+      return { expiresAtMs: claims.expiresAtMs,
+        ...(current.authority.principalKind === "link" ? {publicPrincipalId: ensureLiveLinkPublicPrincipal(storage, current.authority)} : {}) };
     });
   }
 
@@ -544,12 +547,21 @@ function registerBaseline(storage: StorageContext, input: LiveDocumentBaselineRe
     let outer: Record<string, unknown>;
     try { outer = baselineRecord(input, ["host", "evidence", "baselineBytes", "registeredAtMs"]); }
     catch { return { kind: "refused", reason: "invalid-baseline" }; }
-    let coordinate: LiveHostConnectionCoordinate;
-    try { coordinate = snapshotHostCoordinate(baselineRecord(outer.host, ["mode", "hostId", "hostEpoch", "instanceId", "connectionId"])); }
-    catch { return { kind: "refused", reason: "stale-host" }; }
-    let owned: LiveDocumentBaselineRegistrationInput;
-    try { owned = snapshotBaseline(outer, coordinate); }
+    let baseline: Omit<LiveDocumentBaselineRegistrationInput, "host">;
+    try { baseline = snapshotBaseline(outer); }
     catch { return { kind: "refused", reason: "invalid-baseline" }; }
+    try {
+      let coordinate: LiveHostConnectionCoordinate;
+      try { coordinate = snapshotHostCoordinate(baselineRecord(outer.host, ["mode", "hostId", "hostEpoch", "instanceId", "connectionId"])); }
+      catch { return { kind: "refused", reason: "stale-host" }; }
+      return registerValidatedBaseline(storage, {...baseline, host: coordinate}, run, ordinaryCut);
+    } finally {
+      notifyDesktopReadiness(storage, {workspaceId: baseline.evidence.document.workspaceId, path: baseline.evidence.currentPath});
+    }
+  }
+
+function registerValidatedBaseline(storage: StorageContext, owned: LiveDocumentBaselineRegistrationInput, run: (operation: () => RelayBaselineRegistrationResult) => RelayBaselineRegistrationResult, ordinaryCut?: VerifiedOrdinaryActivationCut): RelayBaselineRegistrationResult {
+    const coordinate = owned.host;
     const { evidence, baselineBytes, registeredAtMs } = owned;
     const { document, currentPath, checkpoint } = evidence;
     return run(() => {

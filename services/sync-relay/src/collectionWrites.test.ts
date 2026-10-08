@@ -249,6 +249,107 @@ describe("the fixtures", () => {
 });
 
 describe("direct writes to a Collection's own files", () => {
+  const record = (id = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa") => `---\nid: ${id}\nTitle: Socks\n---\nBring two pairs.\n`;
+
+  it("creates one record in an existing Collection, attributes it, and replays a lost acknowledgement after restart", async () => {
+    const r = await relay();
+    const path = `${PACKING}/Socks.md`, body = record();
+    await upload(r, body);
+    const first = await json(await write(r, [create(path, body)]));
+    expect(first).toMatchObject({ ok: true, created: true, paths: [path] });
+    expect((await r.owner.directMoments())[0]?.payload).toMatchObject({ path,
+      authors: [{ kind: "named", userId: RECIPIENT, grantId: r.grantId, grantGeneration: 1 }] });
+    const dbPath = storagePath(r.storage);
+    closeTestStorage(r.storage);
+    r.storage = reopenTestStorage(dbPath);
+    r.h = testHandler(r.storage, { nowMs: () => CLOCK });
+    expect(await json(await write(r, [create(path, body)]))).toEqual({ ...first, created: false });
+    const response = await r.h(request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=1000`));
+    const ops = (await json(response)).ops as Array<{ originId: string }>;
+    expect(ops.filter(op => op.originId.startsWith("relay:collection-file:"))).toHaveLength(1);
+  });
+
+  it("refuses path and record ID collisions without overwriting either file", async () => {
+    const r = await relay();
+    const body = record(), another = record("rec_bbbbbbbbbbbbbbbbbbbbbbbbbb");
+    await r.owner.write("socks", `${PACKING}/Socks.md`, body);
+    await upload(r, body, another);
+    await expectCode(await write(r, [create(`${PACKING}/SOCKS.md`, another)]), 409, "stale");
+    await expectCode(await write(r, [create(`${PACKING}/Other.md`, body)]), 403, "share_op_rejected");
+    expect(await r.owner.directMoments()).toEqual([]);
+  });
+
+  it("keeps two recipients racing for one name as separate creations", async () => {
+    const r = await relay();
+    const otherUser = "recipient-two";
+    const shareId = await createShare(r.h, OWNER, WORKSPACE, {
+      recipientUserId: otherUser, paths: ["trip"], access: "edit",
+    });
+    const path = `${PACKING}/Untitled.md`, first = record(), second = record("rec_bbbbbbbbbbbbbbbbbbbbbbbbbb");
+    await upload(r, first);
+    expect((await r.h(request(otherUser, `/sync/shares/${shareId}/blobs/${sha256(second)}`, {
+      method: "PUT", body: new TextEncoder().encode(second),
+    }))).status).toBe(200);
+    const responses = await Promise.all([
+      write(r, [create(path, first)]),
+      write({ ...r, shareId }, [create(path, second)], { as: otherUser }),
+    ]);
+    expect(responses.map(response => response.status).sort()).toEqual([200, 409]);
+    const moments = await r.owner.directMoments();
+    expect(moments).toHaveLength(1);
+    const retry = await write({ ...r, shareId }, [create(path, second)], { as: otherUser });
+    expect(retry.status).toBe(responses[1]!.status);
+    expect(await r.owner.directMoments()).toEqual(moments);
+  });
+
+  it("validates identity without counting a large Markdown body as frontmatter", async () => {
+    const r = await relay(), body = record() + "é".repeat(40_000);
+    await upload(r, body);
+    expect((await write(r, [create(`${PACKING}/Large.md`, body)])).status).toBe(200);
+    await expectCode(await write(r, [create(`${PACKING}/Duplicate.md`, body)], { submitId: "duplicate" }), 403, "share_op_rejected");
+    expect(await r.owner.directMoments()).toHaveLength(1);
+  });
+
+  it("requires one create, a valid ID, a current document schema, and folder Edit", async () => {
+    const r = await relay();
+    const body = record();
+    await upload(r, body, "---\nid: forged\n---\n");
+    for (const changes of [
+      [create(`${PACKING}/One.md`, body), create(`${PACKING}/Two.md`, body)],
+      [edit(`${PACKING}/Socks.md`, body, body)],
+      [create(`${PACKING}/Bad.md`, "---\nid: forged\n---\n")],
+      [create("trip/not-a-collection/One.md", body)],
+      [create("private/One.md", body)],
+    ]) await expectCode(await write(r, changes), 403, "share_op_rejected");
+    await r.owner.write("object-schema", `${PACKING}/collection.yaml`, "broken: [");
+    await expectCode(await write(r, [create(`${PACKING}/One.md`, body)]), 403, "share_op_rejected");
+    const narrow = await relay({ paths: [`${PACKING}/collection.yaml`] });
+    await upload(narrow, body);
+    await expectCode(await write(narrow, [create(`${PACKING}/One.md`, body)]), 403, "share_op_rejected");
+  });
+
+  it("rejects a forged author or owner identity on a record request", async () => {
+    const r = await relay();
+    const body = record(), change = create(`${PACKING}/One.md`, body);
+    await upload(r, body);
+    await expectCode(await write(r, [{ ...change, author: { kind: "named", userId: OWNER } }]), 403, "share_op_rejected");
+    await expectCode(await r.h(request(RECIPIENT, `/sync/shares/${r.shareId}/collection-writes`,
+      jsonBody({ submitId: "forged", changes: [change], workspaceId: WORKSPACE }))), 403, "share_op_rejected");
+    expect(await r.owner.directMoments()).toEqual([]);
+  });
+
+  it("rechecks revocation inside the commit after record content validation", async () => {
+    const r = await relay();
+    const body = record();
+    await upload(r, body);
+    const original = r.storage.getBlob.bind(r.storage);
+    vi.spyOn(r.storage, "getBlob").mockImplementation((workspaceId, hash) => {
+      if (hash === sha256(body)) r.storage.revokeShareGrant({ shareId: r.shareId, grantId: r.grantId, revokedAtMs: CLOCK });
+      return original(workspaceId, hash);
+    });
+    await expectCode(await write(r, [create(`${PACKING}/One.md`, body)]), 404, "not_found");
+    expect(await r.owner.directMoments()).toEqual([]);
+  });
   it.each(["view", "comment", "edit"] as const)("reads definitions through the named %s log and blob transport", async access => {
     const r = await relay({ access }), text = automations(STAMP), path = `${PACKING}/automations.yaml`;
     await r.owner.write("object-automations", path, text);
@@ -1148,6 +1249,17 @@ describe("the direct-write decision", () => {
 // An Edit share link writes the same files through its own route (ADR 0013),
 // with its content in the request and its authority from the capability.
 describe("direct writes through an Edit share link", () => {
+  it("creates a record with link-principal provenance and obeys the owner's pause control", async () => {
+    const r = await linkRelay();
+    const path = `${PACKING}/One.md`;
+    const text = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\n";
+    expect((await linkWrite(r, [linkCreate(path, text)])).status).toBe(200);
+    expect((await r.owner.directMoments())[0]?.payload).toMatchObject({ path,
+      authors: [{ kind: "link", grantId: LINK_GRANT, grantGeneration: 1, principalId: expect.any(String) }] });
+    sql(r, `UPDATE sync_relay_shares SET link_writes_paused_at_ms = 1 WHERE share_id = '${r.shareId}'`);
+    await expectOpaque(await linkWrite(r, [linkCreate(`${PACKING}/Two.md`, text.replace(/a/g, "b"))], { submitId: "create-two" }));
+    expect(await r.owner.directMoments()).toHaveLength(1);
+  });
   it.each(["matching", "different", "wrong-folder", "unapproved", "malformed"] as const)("advertises catalog permission for a %s dataset through the link inventory", async problem => {
     const r = await linkRelay(), folder = await datasetFolder(r, problem);
     await r.owner.write("object-automations", `${folder}/automations.yaml`, automations(STAMP));
@@ -1243,6 +1355,23 @@ describe("direct writes through an Edit share link", () => {
       db.close();
     }
   }
+
+  it("returns only the direct writer's scoped public participant mapping to the owner", async () => {
+    const r = await linkRelay();
+    expect((await linkWrite(r, [linkCreate(`${PACKING}/automations.yaml`, automations(STAMP))])).status).toBe(200);
+    const [row] = ledger(r);
+    const read = async () => await json(await r.h(request(OWNER, `/sync/${WORKSPACE}/collection-writes/${LINK_GRANT}`)));
+    expect(await read()).not.toHaveProperty("writes.0.files.0.publicPrincipalId");
+    sql(r, `INSERT INTO sync_relay_app_public_principals(workspace_id,grant_id,principal_id,public_principal_id,storage_bytes)
+      VALUES('${WORKSPACE}','${LINK_GRANT}','${row!.principal_id}','public-ana',256)`);
+    expect(await read()).toMatchObject({ writes: [{ files: [{ publicPrincipalId: "public-ana" }] }] });
+    sql(r, "PRAGMA foreign_keys=OFF; UPDATE sync_relay_app_public_principals SET principal_id='different-participant'");
+    expect(await read()).not.toHaveProperty("writes.0.files.0.publicPrincipalId");
+    sql(r, `PRAGMA foreign_keys=OFF; UPDATE sync_relay_app_public_principals SET principal_id='${row!.principal_id}',grant_id='different-grant'`);
+    expect(await read()).not.toHaveProperty("writes.0.files.0.publicPrincipalId");
+    sql(r, `PRAGMA foreign_keys=OFF; UPDATE sync_relay_app_public_principals SET grant_id='${LINK_GRANT}',workspace_id='different-workspace'`);
+    expect(await read()).not.toHaveProperty("writes.0.files.0.publicPrincipalId");
+  });
 
   it("writes an automations file under the link, never a person, with content the relay hashed", async () => {
     const r = await linkRelay();
@@ -1394,7 +1523,7 @@ describe("direct writes through an Edit share link", () => {
     const one = automations(STAMP);
     const decision = filterCollectionWriteForShare(
       { versionId: null, paths: ["trip"], access: "edit" },
-      [{ ...linkCreate(`${PACKING}/automations.yaml`, one), afterContentBase64: undefined, afterBlobSha256: sha256(one), afterByteLength: bytes(one) }],
+      [create(`${PACKING}/automations.yaml`, one)],
     );
     if (!decision.allowed) throw new Error("expected the write to be allowed");
     expect(r.storage.revokeShareGrant({ shareId: r.shareId, grantId: LINK_GRANT, revokedAtMs: CLOCK }).ok).toBe(true);
@@ -1490,7 +1619,7 @@ describe("direct writes through an Edit share link", () => {
     const one = automations(STAMP);
     const decision = filterCollectionWriteForShare(
       { versionId: null, paths: ["trip"], access: "edit" },
-      [{ ...linkCreate(`${PACKING}/automations.yaml`, one), afterContentBase64: undefined, afterBlobSha256: sha256(one), afterByteLength: bytes(one) }],
+      [create(`${PACKING}/automations.yaml`, one)],
     );
     if (!decision.allowed) throw new Error("expected the write to be allowed");
     now = CLOCK + 1;

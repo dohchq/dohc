@@ -1,3 +1,4 @@
+import type { SharedDocumentOpenState } from "../../ipc/sharedDocumentOpenState";
 import { SAVED_HERE, SAVING, UNKNOWN_SAVE_STATE, saveProblem, saveStateEqual, type SaveState } from "@dohc/workspace-contracts/save-state";
 import * as Y from "yjs";
 import { authorCapacityMessage } from "./authorCapacityMessage";
@@ -154,6 +155,7 @@ type EngineDocOpenOutcome =
   | { kind: "not-in-version" }
   | { kind: "document-unavailable" }
   | { kind: "live-host-unavailable" }
+  | { kind: "shared-waiting"; waiting: SharedDocumentOpenState }
   | { kind: "engine-may-hold-document" }
   | { kind: "artifact-assets-invalid" }
   | { kind: "removal-in-progress"; removal: EngineRemovalInProgress };
@@ -201,6 +203,7 @@ function makeTransport(
           : {}),
         ...(result.notInVersion ? { notInVersion: true } : {}),
         ...(result.liveHostUnavailable ? { liveHostUnavailable: true } : {}),
+        ...(result.sharedWaiting ? { sharedWaiting: result.sharedWaiting } : {}),
         ...(result.documentUnavailable ? { documentUnavailable: true } : {}),
         ...(result.engineMayHoldDocument ? { engineMayHoldDocument: true } : {}),
         ...(result.artifactAssetsInvalid ? { artifactAssetsInvalid: true } : {}),
@@ -1220,6 +1223,8 @@ function createEngineDocSession(
             // autosave would race the session it still binds.
             if (bound.notInVersion) {
               setOutcome({ kind: "not-in-version" });
+            } else if (bound.sharedWaiting) {
+              setOutcome({ kind: "shared-waiting", waiting: bound.sharedWaiting });
             } else if (bound.liveHostUnavailable) {
               setOutcome({ kind: "live-host-unavailable" });
             } else if (bound.documentUnavailable) {

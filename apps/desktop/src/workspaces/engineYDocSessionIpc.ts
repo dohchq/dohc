@@ -1,3 +1,4 @@
+import { SharedDocumentWaitingError } from "../ipc/sharedDocumentOpenState";
 import { engineSaveState } from "./engineYDocSaveState";
 import { createHash } from "node:crypto";
 import { validateUserWritePath } from "@dohc/workspace-core";
@@ -83,8 +84,11 @@ export type EngineYDocSessionProvider = Omit<WorkspaceEngineYDocProviderSession,
   settleNow?: WorkspaceEngineYDocProviderSession["settleNow"];
 };
 export interface EngineYDocSessionCapture {
+  waitForAdmission?(path: string, signal: AbortSignal): Promise<boolean>;
   openYDocSession(input: Omit<Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], "onSaveState"> & {onSaveState?: (state: EngineYDocSaveStateName, token: number, event: EngineYDocSaveEvent, authorCapacity?: boolean, readOnlyCause?: ReadOnlyTransitionCause) => void}): Promise<EngineYDocSessionProvider>;
 }
+
+type SharedAdmissionWait = {cancel: AbortController; authorityId: symbol; generation: number};
 
 interface EngineYDocWorkspace {
   workspaceId: string;
@@ -422,6 +426,8 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   readonly #onError: EngineYDocSessionIpcOptions["onError"];
   readonly #localPersonId: EngineYDocSessionIpcOptions["localPersonId"];
   readonly #arrivals = new EngineYDocArrivals();
+  readonly #admissionWaits = new Map<EngineYDocIpcSender, Map<string, SharedAdmissionWait>>();
+  readonly #admissionSenders = new WeakSet<EngineYDocIpcSender>();
   readonly #owner: EngineYDocIpcSessionOwner;
   readonly #documentReservations: DocumentMutationReservations;
   // One main-side edit at a time per document. Each edit reads the document's
@@ -581,7 +587,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     let capture: EngineYDocSessionCapture | null;
     if (shared && this.#sharedCaptureFor) {
       try { capture = await this.#sharedCaptureFor?.(workspace) ?? null; }
-      catch { return unavailableOpen({ liveHostUnavailable: true }); }
+      catch (error) { return unavailableOpen(error instanceof SharedDocumentWaitingError ? { sharedWaiting: error.waiting } : { liveHostUnavailable: true }); }
       authority.assertCurrent();
       if (!capture || !rendererSession.isCurrent()) return unavailableOpen({ liveHostUnavailable: true });
     } else capture = this.#captureFor(workspace);
@@ -793,7 +799,8 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       `[desktop] engine Y.Doc open refused for ${canonicalPath}:`,
       opened.error,
     );
-    return shared ? unavailableOpen({ liveHostUnavailable: true }) : this.#openRefusal(opened.error);
+    return shared ? unavailableOpen(opened.error instanceof SharedDocumentWaitingError
+      ? { sharedWaiting: opened.error.waiting } : { liveHostUnavailable: true }) : this.#openRefusal(opened.error);
   }
 
   async readArtifactAsset(
@@ -1172,17 +1179,53 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
 
   async close(sender: EngineYDocIpcSender, payload: ClosePayload): Promise<void> {
     const input = CloseEngineYDocSessionPayload.parse(payload);
+    this.#admissionWaits.get(sender)?.get(input.sessionId)?.cancel.abort();
     await this.#owner.release(this.#caller(sender, input.sessionId));
+  }
+
+  async waitForAdmission(sender: EngineYDocIpcSender, payload: OpenPayload): Promise<boolean> {
+    const input = OpenEngineYDocSessionPayload.parse(payload);
+    const renderer = this.#sessionFor(sender);
+    if (!renderer?.isCurrent() || renderer.workspaceId !== input.workspaceId || sender.isDestroyed()) return false;
+    const authority = this.#acquireWorkspace(input.workspaceId);
+    const waits = this.#admissionWaits.get(sender) ?? new Map<string, SharedAdmissionWait>();
+    // Bound IPC waits too, including requests that have not reached relay authentication.
+    if (waits.size >= 4 || waits.has(input.sessionId)) { authority.release(); return false; }
+    this.#admissionWaits.set(sender, waits);
+    if (!this.#admissionSenders.has(sender)) {
+      this.#admissionSenders.add(sender);
+      sender.once("destroyed", () => {
+        for (const wait of this.#admissionWaits.get(sender)?.values() ?? []) wait.cancel.abort();
+      });
+    }
+    const cancel = new AbortController();
+    waits.set(input.sessionId, {cancel, authorityId: authority.workspace.attachmentId, generation: renderer.generation});
+    try {
+      if (!this.#isSharedView(authority.workspace)) return false;
+      const capture = await this.#sharedCaptureFor?.(authority.workspace);
+      authority.assertCurrent(); cancel.signal.throwIfAborted();
+      if (!renderer.isCurrent()) return false;
+      const ready = await capture?.waitForAdmission?.(input.path, AbortSignal.any([cancel.signal, AbortSignal.timeout(45_000)]));
+      authority.assertCurrent(); cancel.signal.throwIfAborted();
+      return ready === true && renderer.isCurrent();
+    } catch { return false; }
+    finally {
+      waits.delete(input.sessionId);
+      if (waits.size === 0) this.#admissionWaits.delete(sender);
+      authority.release();
+    }
   }
 
   retireSender(
     sender: EngineYDocIpcSender,
     generation: number,
   ): Promise<EngineYDocSessionReleaseOutcome[]> {
+    for (const wait of this.#admissionWaits.get(sender)?.values() ?? []) if (wait.generation === generation) wait.cancel.abort();
     return this.#owner.retireSender({ sender, generation });
   }
 
   shutdown(): Promise<EngineYDocSessionReleaseOutcome[]> {
+    for (const waits of this.#admissionWaits.values()) for (const wait of waits.values()) wait.cancel.abort();
     this.#arrivals.clear();
     return this.#owner.shutdown();
   }
@@ -1194,6 +1237,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   retireAuthority(
     authorityId: symbol,
   ): Promise<EngineYDocSessionReleaseOutcome[]> {
+    for (const waits of this.#admissionWaits.values()) for (const wait of waits.values()) if (wait.authorityId === authorityId) wait.cancel.abort();
     // The attachment's documents and their pending updates go with it.
     this.#arrivals.retireAuthority(authorityId);
     return this.#owner.retireAuthority(authorityId);

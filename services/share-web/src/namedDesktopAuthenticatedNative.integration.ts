@@ -135,7 +135,8 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
     const tickets = createLiveTickets({storage, audience, key: "desktop-proof-ticket-key-".repeat(2),
       hostReports: createLiveHostReports({storage, captureNative})});
     const hosts = new Set([new URL(audience).host]);
-    const admission = createDesktopAdmission({storage, resolveActor, publicOrigin: audience, hosts, tickets,
+    const admission = createDesktopAdmission({storage, resolveActor, publicOrigin: audience, hosts, tickets, changes: sharedChanges,
+      readinessLimits: {maxPendingRequests: 8, maxPendingPerUser: 4, timeoutMs: 30000},
       limits: {...browserLimits, maxSessions: 16, retentionMs: 120000},
       editorLimits: {provider: {frames, maxPendingUpdateBytes: 2000000, maxPendingUpdates: 4, maxDeliveryAttempts: 3},
         maxHttpResponseBytes: 8192, maxSocketBufferedBytes: 2000000, connectTimeoutMs: 30000, sendTimeoutMs: 30000, drainPollMs: 10}});

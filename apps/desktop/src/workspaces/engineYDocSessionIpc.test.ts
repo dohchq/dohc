@@ -1,3 +1,4 @@
+import { SharedDocumentWaitingError } from "../ipc/sharedDocumentOpenState";
 import { engineSaveState } from "./engineYDocSaveState";
 import {
   DaemonRefusalError,
@@ -401,10 +402,55 @@ describe("engine Y.Doc IPC adapter", () => {
     await h.ipc.shutdown();
   });
 
+  it("owns readiness by caller and cancels it on close or attachment retirement", async () => {
+    const started = deferred<void>();
+    const waitForAdmission = vi.fn((_path: string, signal: AbortSignal) => new Promise<boolean>(resolve => {
+      signal.addEventListener("abort", () => resolve(false), {once: true});
+      started.resolve();
+    }));
+    const h = harness(providerSession(), {sharedCaptureFor: async () => ({openYDocSession: vi.fn(), waitForAdmission})});
+    h.setReadOnly(true);
+    const first = new FakeSender(7), second = new FakeSender(8);
+    const waiting = h.ipc.waitForAdmission(first, openPayload);
+    await started.promise;
+    await h.ipc.close(second, {sessionId: openPayload.sessionId});
+    expect(waitForAdmission.mock.calls[0]![1].aborted).toBe(false);
+    await h.ipc.close(first, {sessionId: openPayload.sessionId});
+    expect(await waiting).toBe(false);
+    const retired = h.ipc.waitForAdmission(first, openPayload);
+    await vi.waitFor(() => expect(waitForAdmission).toHaveBeenCalledTimes(2));
+    await h.ipc.retireAuthority(AUTHORITY_ID);
+    expect(await retired).toBe(false);
+    await h.ipc.shutdown();
+  });
+
+  it("rejects readiness for another workspace and ignores readiness after the caller changes generation", async () => {
+    const reply = deferred<boolean>();
+    const waitForAdmission = vi.fn(async () => reply.promise);
+    const h = harness(providerSession(), {sharedCaptureFor: async () => ({openYDocSession: vi.fn(), waitForAdmission})});
+    h.setReadOnly(true);
+    const sender = new FakeSender(7);
+    expect(await h.ipc.waitForAdmission(sender, {...openPayload, workspaceId: "other"})).toBe(false);
+    expect(waitForAdmission).not.toHaveBeenCalled();
+    const pending = h.ipc.waitForAdmission(sender, openPayload);
+    await vi.waitFor(() => expect(waitForAdmission).toHaveBeenCalledOnce());
+    h.setGeneration(2); reply.resolve(true);
+    expect(await pending).toBe(false);
+    await h.ipc.shutdown();
+  });
+
   it("keeps an unavailable named host read-only without opening a local proposal editor", async () => {
     const h = harness(providerSession(), {sharedCaptureFor: async () => ({openYDocSession: async () => {throw new Error("offline");}})});
     h.setReadOnly(true);
     expect(await h.ipc.open(new FakeSender(7), openPayload)).toEqual({available: false, liveHostUnavailable: true});
+    expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+  });
+
+  it("carries pending record delivery through a refused open", async () => {
+    const waiting = { state: "pending" as const, message: "Record saved on this device. Waiting to send." };
+    const h = harness(providerSession(), { sharedCaptureFor: async () => ({ openYDocSession: async () => { throw new SharedDocumentWaitingError(waiting); } }) });
+    h.setReadOnly(true);
+    expect(await h.ipc.open(new FakeSender(7), openPayload)).toEqual({ available: false, sharedWaiting: waiting });
     expect(h.capture.openYDocSession).not.toHaveBeenCalled();
   });
 

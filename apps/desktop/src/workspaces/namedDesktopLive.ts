@@ -1,3 +1,5 @@
+import { SharedDocumentWaitingError } from "../ipc/sharedDocumentOpenState";
+import type { ShareRecordStatus } from "./shareRecordStatus";
 import * as Y from "yjs";
 import { WebSocket as NodeWebSocket } from "ws";
 import { readBoundedJson } from "@dohc/service-http";
@@ -14,6 +16,8 @@ export function createNamedDesktopLiveCapture(options: {
   shareId: string; selector: ShareViewSelector; credentials: Credentials; assertCurrent(): void; fetch?: typeof fetch;
   preserveDraft(draft: LiveDraft): Promise<void>;
   accessEnded(): boolean;
+  recordDelivery?(path: string): Promise<ShareRecordStatus | null>;
+  isOnline?(): boolean;
 }): EngineYDocSessionCapture {
   const credentials = { ...options.credentials }, origin = new URL(credentials.relayUrl);
   if (origin.protocol !== "https:" || origin.username || origin.password || origin.search || origin.hash) throw new Error("Invalid live relay.");
@@ -42,14 +46,35 @@ export function createNamedDesktopLiveCapture(options: {
     } finally { await response.body?.cancel().catch(() => {}); }
   }
   return {
+    async waitForAdmission(path, signal) {
+      options.assertCurrent(); signal.throwIfAborted();
+      if (options.selector.access !== "edit" ||
+        (options.selector.versionId !== null && options.selector.versionId !== "main") ||
+        !(options.selector.paths.length === 0 ? options.selector.versionId === "main" : options.selector.paths.some(root => path === root || path.startsWith(`${root}/`)))) return false;
+      const ready = await waitForNamedDesktopAdmission({relayUrl: credentials.relayUrl, token: credentials.token,
+        shareId: options.shareId, path, signal: AbortSignal.any([signal, credentials.signal]), fetch: request});
+      options.assertCurrent(); signal.throwIfAborted();
+      return ready;
+    },
     async openYDocSession(input): Promise<EngineYDocSessionProvider> {
       if (options.selector.access !== "edit" || (options.selector.versionId !== null && options.selector.versionId !== "main") ||
         !(options.selector.paths.length === 0 ? options.selector.versionId === "main" : options.selector.paths.some(path => input.path === path || input.path.startsWith(`${path}/`)))) throw new Error("The shared file is outside this view.");
       if (input.contentKind !== "richdoc" || !/\.md$/i.test(input.path)) throw new Error("Only shared Markdown supports live editing.");
       const opening = AbortSignal.any([credentials.signal, AbortSignal.timeout(RELAY_FETCH_TIMEOUT_MS)]);
-      const first = await admit(input.path, opening);
+      if (options.isOnline?.() === false) throw new SharedDocumentWaitingError({ state: "offline", message: "This device is offline. Connect to edit this file." });
+      const delivery = await options.recordDelivery?.(input.path);
+      if (delivery?.state === "pending") throw new SharedDocumentWaitingError({ state: "pending", message: "Record saved on this device. Waiting to send." });
+      if (delivery?.state === "refused") throw new SharedDocumentWaitingError({ state: "refused", message: delivery.reason ?? "The sync relay did not accept this file." });
+      let first: Awaited<ReturnType<typeof admit>>;
+      try { first = await admit(input.path, opening); }
+      catch (error) {
+        if (error instanceof SharedDocumentWaitingError) throw error;
+        throw new SharedDocumentWaitingError({ state: "failed",
+          message: error instanceof TypeError ? "dohc could not connect. Check your connection." : "dohc could not open this file for editing." });
+      }
       let initial: typeof first | undefined = first;
       const transport = createNamedLiveBrowserTransport<NamedLiveSelection>({ publicOrigin: origin.origin, limits: first.limits,
+        recordingContext: () => ({ kind: "account", accountId: credentials.userId }),
         authorize: async (selection, signal) => {
           const next = initial ?? await admit(input.path, AbortSignal.any([signal, credentials.signal]));
           initial = undefined;
@@ -126,4 +151,30 @@ export function createNamedDesktopLiveCapture(options: {
       return provider;
     },
   };
+}
+
+/** One readiness subscription, driven by the relay's existing live-host signal. */
+export async function waitForNamedDesktopAdmission(options: {
+  relayUrl: string; token: string; shareId: string; path: string; signal: AbortSignal; fetch?: typeof fetch;
+}): Promise<boolean> {
+  const response = await (options.fetch ?? relayApiFetch())(new URL("/sync/live/desktop-ready", options.relayUrl), {
+    method: "POST", redirect: "error", cache: "no-store", signal: options.signal,
+    headers: { authorization: `Bearer ${options.token}`, "content-type": "application/json" },
+    body: JSON.stringify({ shareId: options.shareId, path: options.path }),
+  });
+  const reader = response.body?.getReader();
+  try {
+    if (response.status !== 200 || response.redirected || response.headers.get("content-type") !== "text/plain" || !reader) return false;
+    const decoder = new TextDecoder("utf-8", {fatal: true});
+    let text = "";
+    for (;;) {
+      const chunk = await reader.read();
+      options.signal.throwIfAborted();
+      if (chunk.done) return text === "waiting\nready\n";
+      if (text.length + chunk.value.byteLength > 32) return false;
+      text += decoder.decode(chunk.value, {stream: true});
+      if (text === "waiting\nready\n") return true;
+      if (!"waiting\nready\n".startsWith(text)) return false;
+    }
+  } finally { await reader?.cancel().catch(() => {}); }
 }
