@@ -249,6 +249,8 @@ fn recover_local_origin(engine: &mut EngineStore, new_origin_id: &str) {
         0,
         PullResponse {
             ops: vec![ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: "ws".to_owned(),
                 origin_id: "local".to_owned(),
                 origin_seq: 0,
@@ -625,6 +627,8 @@ fn recover_origin_rebases_ydoc_suffix_coordinates_before_repair_and_arbitration(
 
     let shared_prefix = vec![
         ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "ws".to_owned(),
             origin_id: "local".to_owned(),
             origin_seq: 0,
@@ -634,6 +638,8 @@ fn recover_origin_rebases_ydoc_suffix_coordinates_before_repair_and_arbitration(
             recorded_at_ms: 1_000,
         },
         ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "ws".to_owned(),
             origin_id: "local".to_owned(),
             origin_seq: 1,
@@ -783,6 +789,8 @@ fn recover_origin_rebases_each_current_lww_projection_coordinate() {
         0,
         PullResponse {
             ops: vec![ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: "ws".to_owned(),
                 origin_id: "local".to_owned(),
                 origin_seq: 0,

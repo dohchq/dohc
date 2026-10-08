@@ -5047,6 +5047,8 @@ async fn record_update_refuses_a_replaced_lineage_until_resync_refreshes_the_ses
         )
         .expect("replace durable lineage claim");
     let foreign = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: WORKSPACE_ID.to_owned(),
         origin_id: "foreign-origin".to_owned(),
         origin_seq: 0,
@@ -5266,6 +5268,8 @@ async fn assert_close_drains_deferred_winning_lineage(winner_seed: &str, expect_
     let winner_base = winner.encode_full_state();
     let winner_claim = store.put_binary_blob(&winner_base).expect("winner blob");
     let foreign = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: WORKSPACE_ID.to_owned(),
         origin_id: "winner-origin".to_owned(),
         origin_seq: 0,

@@ -542,6 +542,8 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
         let bytes = blob_bytes(&source_db, &sha);
         peer.put_binary_blob(&bytes).expect("copy Y.Doc blob");
         let envelope = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: WS.to_owned(),
             origin_id: op.origin_id.clone(),
             origin_seq: op.origin_seq - first_origin_seq,
@@ -661,6 +663,8 @@ async fn an_automations_write_replicated_to_the_live_host_keeps_its_depth_and_cl
         host.put_binary_blob(&blob_bytes(&server_db, &sha))
             .expect("copy Y.Doc blob");
         let envelope = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: WS.to_owned(),
             origin_id: op.origin_id.clone(),
             origin_seq: op.origin_seq - first_origin_seq,
@@ -1444,6 +1448,8 @@ async fn every_chat_write_announces_the_group_claims_it_committed() {
         .expect("watch");
         // A member's message arrives before its thread and is parked.
         let early = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: GROUP_WS.to_owned(),
             origin_id: "peer".to_owned(),
             origin_seq: 0,

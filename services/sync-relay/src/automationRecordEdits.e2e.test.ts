@@ -773,7 +773,7 @@ it.skipIf(engine.missing)("finds one filtered record among 5000 without refreshi
 }, 180_000);
 
 it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as const)(
-  "pushes %s device settlements, reviews peer restore, and checks hosting engine refusal only", async (authors) => {
+  "pushes %s proved settlements, restores by contributor coverage, and checks hosting engine refusal", async (authors) => {
   const root = await tempRoot("device-settlement"), storage = await testStorage({liveTickets: {retainedTicketsPerPrincipalGrant: 32, expiredTicketCleanupBatchSize: 32, now: Date.now}});
   const namespace = "device-settlement", key = new Uint8Array(32).fill(7);
   const history = createLiveJournalHistoryAuthority({namespace, reconciled: true});
@@ -905,9 +905,13 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
   await owner.sync();
   const rows = storage.fetchLogPage({workspaceId: WORKSPACE, sinceRelaySeq: 0, limit: 1000}).rows;
   expect(rows.some(row => JSON.parse(row.payloadJson).path === "after.txt")).toBe(true);
-  expect(rows.find(row => JSON.parse(row.payloadJson).momentId === recipientMoment.momentId)).toBeDefined();
-  expect(JSON.parse(rows.find(row => JSON.parse(row.payloadJson).momentId === recipientMoment.momentId)!.payloadJson).authors)
-    .toEqual([{kind: "unattributed"}]);
+  const published = rows.find(row => JSON.parse(row.payloadJson).momentId === recipientMoment.momentId)!;
+  expect(published).toBeDefined();
+  expect(JSON.parse(published.payloadJson).authors).toBeUndefined();
+  expect(JSON.parse(published.payloadJson).settlementReference).toBeDefined();
+  expect(published.settlementAdmission).toMatchObject({status: "accepted"});
+  expect(published.admittedAuthorSnapshot).toEqual(expect.arrayContaining(expectedAuthors));
+  expect(published.admittedAuthorSnapshot).toHaveLength(expectedAuthors.length);
   const ownerDatabase = new DatabaseSync(join(owner.root, ".dohc/engine/engine.db"), {readOnly: true});
   try {
     expect(ownerDatabase.prepare("SELECT COUNT(*) AS total FROM replication_pending_refusals WHERE workspace_id=?").get(WORKSPACE)?.total).toBe(0);
@@ -917,10 +921,10 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
     identity: {kind: "join", replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity}});
   await peer.sync();
   const imported = (await peer.request("moments.list", {limit: 100}, peer.workspace)).moments as unknown as Array<{momentId: string; authors?: unknown}>;
-  expect(imported.find(moment => moment.momentId === recipientMoment.momentId)?.authors).toEqual([{kind: "unattributed"}]);
+  expect(imported.find(moment => moment.momentId === recipientMoment.momentId)?.authors).toEqual(expect.arrayContaining(expectedAuthors));
   const peerHistory = new VersionedLiveAdapter(peer.client, peer.workspace, {workspaceId: WORKSPACE});
   expect(await peerHistory.getMoment({workspaceId: WORKSPACE, momentId: recipientMoment.momentId}))
-    .toMatchObject({syncRecordOnly: true, authors: [{kind: "unattributed"}]});
+    .toMatchObject({syncRecordOnly: true, authors: expect.arrayContaining(expectedAuthors)});
   expect((await moments()).find(moment => moment.momentId === recipientMoment.momentId)?.authors)
     .toEqual(recipientMoment.authors);
   expect(await readFile(join(peer.root, "Tasks/one.md"), "utf8")).toContain("RecipientNote: Keep this text");
@@ -961,16 +965,19 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
       undoRuns: async () => ({undone: 0, left: 0, keptFields: [], missing: 0, otherKept: 0, errorMessage: null}),
     }, [{path: "Tasks/one.md", objectId: document.objectId, momentId: creationMoment.momentId, created: true}]);
   };
-  // Verified live audit coverage cannot erase the wire settlement's marker.
+  // The relay-admitted settlement and live audit both retain the recipient.
   expect(imported).toContainEqual(expect.objectContaining({authors: [{kind: "human", humanId: "reader", humanName: "Reader"}]}));
-  expect(await restore(peer)).toMatchObject({status: "restored", restored: [],
-    review: [{path: "Tasks/one.md", reason: "changed-since"}], unfinished: null});
-  expect(await readFile(join(peer.root, "Tasks/one.md"), "utf8")).toContain("RecipientNote: Keep this text");
   if (authors === "owner-and-recipient") {
+    expect(await restore(peer)).toMatchObject({status: "restored", restored: [],
+      review: [{path: "Tasks/one.md", reason: "changed-since"}], unfinished: null});
+    expect(await readFile(join(peer.root, "Tasks/one.md"), "utf8")).toContain("RecipientNote: Keep this text");
     expect(await readFile(join(peer.root, "Tasks/one.md"), "utf8")).toContain("OwnerNote: Keep this text");
     expect(await restore(owner)).toMatchObject({status: "restored", restored: [],
       review: [{path: "Tasks/one.md", reason: "changed-since"}], unfinished: null});
   } else {
+    expect(await restore(peer)).toMatchObject({status: "restored",
+      restored: [{path: "Tasks/one.md", removed: true}], review: [], unfinished: null});
+    expect(await peerHistory.readTextFile({workspaceId: WORKSPACE, versionId: "main", path: "Tasks/one.md"})).toBeNull();
     // This checks the engine refusal only. The product IPC maps an active live
     // binding to review. recipient-record-creation.spec.ts covers removal on
     // the hosting computer through the product path.

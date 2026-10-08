@@ -41,6 +41,12 @@ struct CaptureSetAuthorParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ClearCaptureRecoveryParams {
+    moment_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CaptureHoldIdParams {
     hold_id: String,
 }
@@ -200,6 +206,19 @@ pub(super) fn reject_capture_origin(origin: Option<&str>) -> Result<(), WireErro
 }
 
 impl EngineService {
+    pub(super) async fn capture_clear_recovery(
+        &self,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let input: ClearCaptureRecoveryParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        open.actor
+            .clear_capture_recovery(open.workspace_id.clone(), input.moment_id)
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({"cleared":true}))
+    }
     pub(super) async fn watcher_status(
         &self,
         handle: Option<WorkspaceHandle>,
@@ -213,6 +232,11 @@ impl EngineService {
             .kept_materialization_files(open.workspace_id.clone(), open.root.clone())
             .await
             .unwrap_or_default();
+        let capture_recoveries = open
+            .actor
+            .capture_recoveries(open.workspace_id.clone())
+            .await
+            .map_err(map_runtime)?;
         let guard = lock(&open.capture);
         Ok(match guard.as_ref() {
             Some(driver) => {
@@ -227,6 +251,7 @@ impl EngineService {
                     "phase": snapshot.phase.as_str(),
                     "noAtomicPlacement": no_atomic_placement,
                     "keptFiles": kept_files,
+                    "captureRecoveries": capture_recoveries,
                     "recoveryUnavailable": recovery_unavailable,
                 })
             }
@@ -239,6 +264,7 @@ impl EngineService {
                 "phase": "degraded",
                 "noAtomicPlacement": no_atomic_placement,
                 "keptFiles": kept_files,
+                "captureRecoveries": capture_recoveries,
                     "recoveryUnavailable": recovery_unavailable,
             }),
         })

@@ -214,6 +214,8 @@ fn local_only_decision_resolver_producer_converges_through_apply() {
                 .query_map([], |row| {
                     let payload_json: String = row.get(3)?;
                     Ok(ReplicationEnvelope {
+                        settlement_admission: None,
+                        admitted_author_snapshot: None,
                         workspace_id: "ws".to_owned(),
                         origin_id: row.get(0)?,
                         origin_seq: row.get(1)?,
@@ -1675,6 +1677,8 @@ fn a_relay_pass_keeps_committed_claims_when_a_later_envelope_fails() {
          BEGIN SELECT RAISE(ABORT, 'injected apply failure'); END",
     );
     let client = RelaySyncClient::new(FakeRelay {
+        refuse_oversized_proofs: false,
+        push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![
@@ -2931,6 +2935,8 @@ fn overlong_wire_only_placeholder_slug_round_trips_through_local_thread_journal(
                 |row| {
                     let payload_json: String = row.get(2)?;
                     Ok(ReplicationEnvelope {
+                        settlement_admission: None,
+                        admitted_author_snapshot: None,
                         workspace_id: "ws".to_owned(),
                         origin_id: row.get(0)?,
                         origin_seq: row.get(1)?,
@@ -3733,6 +3739,8 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
                 .query_map([], |row| {
                     let payload_json: String = row.get(3)?;
                     Ok(ReplicationEnvelope {
+                        settlement_admission: None,
+                        admitted_author_snapshot: None,
                         workspace_id: "ws".to_owned(),
                         origin_id: row.get(0)?,
                         origin_seq: row.get(1)?,
