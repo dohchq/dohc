@@ -3074,6 +3074,27 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     },
     Migration {
         ordinal: 36,
+        id: "share-direct-write-refusal-reason",
+        sql: "ALTER TABLE share_direct_write_marks ADD COLUMN refusal_reason TEXT;",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 37,
+        id: "v2-audited-projection-authors",
+        sql: "CREATE TABLE live_audit_projection_authors ( \
+                workspace_id TEXT NOT NULL, origin_id TEXT NOT NULL, origin_seq INTEGER NOT NULL, \
+                version_id TEXT NOT NULL, object_id TEXT NOT NULL, path TEXT NOT NULL, \
+                lineage_claim_id TEXT NOT NULL, author_json TEXT NOT NULL \
+                  CHECK (json_valid(author_json) AND json_type(author_json)='array' \
+                    AND json_array_length(author_json) BETWEEN 1 AND 1024 \
+                    AND length(CAST(author_json AS BLOB))<=131072), \
+                PRIMARY KEY(workspace_id,origin_id,origin_seq), \
+                FOREIGN KEY(workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE \
+              ) STRICT;",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 38,
         id: "v2-live-settlement-publication",
         sql: V2_LIVE_SETTLEMENT_PUBLICATION_DDL,
         sets_user_version: None,
@@ -3543,6 +3564,14 @@ mod tests {
             (
                 "v2-automation-claim-parent",
                 "40ce1151cb687e0cd5a4f3ccca776ab3a1fbae59ff5f143b79d149c5b3e36c29",
+            ),
+            (
+                "share-direct-write-refusal-reason",
+                "736fa9f1e41d88dc962377d775966f3295f1b412a0f531aae1fd5b404c838dcc",
+            ),
+            (
+                "v2-audited-projection-authors",
+                "cb6dbdfebbadb6df1f3c271f602022a40d5ef543d72681275ab50450f4483437",
             ),
             (
                 "v2-live-settlement-publication",

@@ -3,7 +3,7 @@ import { ObserverStub } from "./DesktopWorkspaceShell.testSupport";
 import "./CollectionPage";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useMemo, useRef, useState } from "react";
+import { Profiler, useMemo, useRef, useState } from "react";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { deferred } from "../testing/deferred";
 import { collectionTabPath } from "./workbench/workbenchState";
@@ -107,7 +107,139 @@ describe("ended Edit Collection shares", () => {
     }
   });
 
-  it.each(["registry props", "registry refresh", "refresh outcome"] as const)(
+  it("reports unsaved files in one Notice with Copy after access ends", async () => {
+    const bridge = collectionBridge();
+    vi.stubGlobal("dohcDesktop", bridge);
+    const writeText = vi.fn(async (_text: string) => undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const paths = ["tasks/locked.md", "tasks/another.md"];
+    const workspace = { ...ENDED_SHARE, shareView: { ...ENDED_SHARE.shareView!, unsavedPaths: paths } };
+    const rendered = render(shell(bridge, workspace));
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    const message = "Your changes weren't sent and remain on this computer. Copy these files to another workspace.";
+    expect(screen.getByTestId("workspace-shell-error").textContent).not.toContain(paths[0]);
+    expect(screen.getByTestId("workspace-shell-error").textContent).not.toContain("could not save");
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    expect(within(notices).getAllByText(message)).toHaveLength(1);
+    const copies = within(notices).getAllByRole("button", { name: "Copy error details" });
+    expect(copies).toHaveLength(1);
+    fireEvent.click(copies[0]!);
+    await waitFor(() => expect(writeText).toHaveBeenCalledOnce());
+    expect(writeText.mock.calls[0]![0]).toContain("File: tasks/another.md\nFile: tasks/locked.md");
+    const samePaths = { ...workspace, shareView: { ...workspace.shareView, unsavedPaths: [...paths].reverse() } };
+    rendered.rerender(shell(bridge, samePaths));
+    expect(within(notices).getAllByText(message)).toHaveLength(1);
+    fireEvent.click(within(notices).getByRole("button", { name: "Dismiss notice" }));
+    rendered.rerender(shell(bridge, { ...workspace, shareView: { ...workspace.shareView, unsavedPaths: [...paths] } }));
+    expect(within(notices).queryByText(message)).toBeNull();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    rendered.rerender(shell(bridge, { ...workspace, shareView: { ...workspace.shareView, unsavedPaths: [paths[0]!] } }));
+    expect(within(notices).getAllByText(message)).toHaveLength(1);
+    expect(within(notices).queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(bridge.checkSharedViewAccess).not.toHaveBeenCalled();
+    expect(bridge.refreshSharedView).not.toHaveBeenCalled();
+    rendered.unmount();
+  });
+
+  it("explains reopening a received share with a damaged recipient pin", async () => {
+    const bridge = collectionBridge();
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(shell(bridge, { ...EDIT_SHARE, shareView: { ...EDIT_SHARE.shareView!, damaged: true } }));
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    expect(screen.getByTestId("shared-view-banner").textContent).toContain("This share must be reopened");
+    expect(screen.getByTestId("shared-view-banner").textContent).toContain("granter@dohc.test This share");
+    expect(screen.getByTestId("shared-view-banner").textContent).not.toContain("dohc can't read what this share grants");
+    expect(screen.queryByTestId("share-changes-send")).toBeNull();
+    expect(bridge.checkSharedViewAccess).not.toHaveBeenCalled();
+    expect(bridge.refreshSharedView).not.toHaveBeenCalled();
+  });
+
+  it("discovers an Edit-to-View downgrade and revocation while the Collection stays open", async () => {
+    const bridge = collectionBridge();
+    bridge.checkSharedViewAccess.mockResolvedValue({ status: "current", access: "edit" });
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      vi.stubGlobal("dohcDesktop", bridge);
+      const view = render(shell(bridge, EDIT_SHARE));
+      await screen.findByTestId("collection-new-record");
+      bridge.checkSharedViewAccess.mockResolvedValue({ status: "current", access: "view" });
+      await act(() => vi.advanceTimersByTimeAsync(5_000));
+      expect(screen.queryByTestId("collection-new-record")).toBeNull();
+      expect(screen.queryByTestId("collection-fields-button")).toBeNull();
+      expect(screen.queryByTestId("collection-views-button")).toBeNull();
+      expect(screen.queryByTestId("share-changes-send")).toBeNull();
+      expect(screen.getByText("Retained task")).toBeTruthy();
+      bridge.checkSharedViewAccess.mockResolvedValue({ status: "ended" });
+      await act(() => vi.advanceTimersByTimeAsync(5_000));
+      expect(screen.getByTestId("shared-view-banner").textContent).toContain("This share was ended");
+      expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1);
+      expect(screen.getByText("Retained task")).toBeTruthy();
+      expect(bridge.checkSharedViewAccess).toHaveBeenCalled();
+      for (const [payload] of bridge.checkSharedViewAccess.mock.calls) {
+        expect(payload).toEqual({ workspaceId: EDIT_SHARE.workspaceId });
+      }
+      view.unmount();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("keeps unchanged access checks from rendering the shell again", async () => {
+    const bridge = collectionBridge();
+    bridge.checkSharedViewAccess.mockResolvedValue({ status: "current", access: "edit" });
+    vi.stubGlobal("dohcDesktop", bridge);
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      const rendered = vi.fn();
+      const view = render(<Profiler id="shell" onRender={rendered}>{shell(bridge, EDIT_SHARE)}</Profiler>);
+      await screen.findByTestId("collection-new-record");
+      await act(async () => {});
+      const before = rendered.mock.calls.length;
+      await act(() => vi.advanceTimersByTimeAsync(10_000));
+      expect(bridge.checkSharedViewAccess.mock.calls.length).toBeGreaterThanOrEqual(3);
+      expect(rendered.mock.calls.length).toBe(before);
+      view.unmount();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("shows the access-ended notice for a save after the owner stops sharing", async () => {
+    const bridge = collectionBridge();
+    bridge.readWorkspaceText.mockResolvedValue({
+      text: serializeCollectionSchema({ name: "Tasks", description: null, fields: [{ name: "Name", type: "text" }], views: [] }),
+      truncated: false, contentHash: "a".repeat(64),
+    });
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(shell(bridge, EDIT_SHARE));
+    fireEvent.click(await screen.findByTestId("collection-fields-button"));
+    const dialog = await screen.findByTestId("collection-fields-dialog");
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "Field name" }), { target: { value: "Extra" } });
+    const write = deferred<Awaited<ReturnType<typeof bridge.writeWorkspaceText>>>();
+    bridge.writeWorkspaceText.mockImplementationOnce(() => write.promise);
+    bridge.checkSharedViewAccess.mockResolvedValue({ status: "ended" });
+    fireEvent.click(screen.getByTestId("collection-add-field"));
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
+    fireEvent.focus(window);
+    await waitFor(() => expect(screen.queryByTestId("collection-fields-dialog")).toBeNull());
+    await act(async () => write.reject(new Error("Your access to this share ended.")));
+    await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain("Your access to this share ended."));
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-center").textContent).toContain("Your access to this share ended.");
+  });
+
+  it("makes one access recheck for one refused push", async () => {
+    const bridge = collectionBridge();
+    bridge.checkSharedViewAccess.mockResolvedValue({ status: "current", access: "edit" });
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(shell(bridge, EDIT_SHARE));
+    await screen.findByTestId("collection-fields-button");
+    await act(async () => {});
+    const before = bridge.checkSharedViewAccess.mock.calls.length;
+    await act(async () => bridge.emitShareDirectWritesPushed({ workspaceId: EDIT_SHARE.workspaceId, result: {
+      status: "pushed", writes: [{ result: "refused", paths: ["tasks/collection.yaml"], reason: "access changed" }],
+    } }));
+    expect(bridge.checkSharedViewAccess.mock.calls.length).toBe(before + 1);
+  });
+
+  it.each(["registry props", "registry refresh", "refresh outcome", "access check"] as const)(
     "keeps retained records and removes every write control when revocation arrives through %s while mounted",
     async (arrival) => {
       const bridge = collectionBridge();
@@ -126,6 +258,9 @@ describe("ended Edit Collection shares", () => {
       await waitFor(() => expect((screen.getByTestId("shared-view-refresh") as HTMLButtonElement).disabled).toBe(false));
       if (arrival === "registry props") {
         view.rerender(shell(bridge, ENDED_SHARE));
+      } else if (arrival === "access check") {
+        bridge.checkSharedViewAccess.mockResolvedValue({ status: "ended" });
+        fireEvent.focus(window);
       } else {
         if (arrival === "registry refresh") bridge.getWorkspaceRegistry.mockResolvedValue({ workspaces: [ENDED_SHARE] });
         else bridge.refreshSharedView.mockImplementation(async () => {
@@ -199,7 +334,7 @@ describe("ended Edit Collection shares", () => {
       if (arrival === "push response") push.resolve({ status: "unavailable" });
       else bridge.emitShareDirectWritesPushed({ workspaceId: EDIT_SHARE.workspaceId, result: { status: "unavailable" } });
     });
-    const message = "Your access to this share ended, so your Collection changes didn't reach granter@dohc.test. Ask granter@dohc.test to share it again.";
+    const message = "Your access to this share ended. Your unsent Collection changes stay in this workspace. Ask granter@dohc.test to share it again.";
     await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain(message));
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
     expect(within(screen.getByTestId("notice-center")).getByText(message)).toBeTruthy();
@@ -222,6 +357,43 @@ describe("ended Edit Collection shares", () => {
     expect(bridge.submitShareChanges).not.toHaveBeenCalled();
   });
 
+  it("reports a non-access creation error without waiting for an access check", async () => {
+    const bridge = collectionBridge();
+    bridge.checkSharedViewAccess.mockResolvedValue({ status: "current", access: "edit" });
+    bridge.createCollectionRecord.mockRejectedValueOnce(new Error("tasks/Untitled.md already exists. Choose another record name."));
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(shell(bridge, EDIT_SHARE));
+    const create = await screen.findByTestId("collection-new-record");
+    await waitFor(() => expect(bridge.checkSharedViewAccess).toHaveBeenCalledOnce());
+    const pending = deferred<Awaited<ReturnType<typeof bridge.checkSharedViewAccess>>>();
+    bridge.checkSharedViewAccess.mockReturnValue(pending.promise);
+    fireEvent.click(create);
+    await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain("already exists"));
+    expect(bridge.checkSharedViewAccess).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { error: "ShareUnavailableError: This share was ended, or the code does not match your account.", access: "ended" },
+    { error: "This Collection does not have Edit access.", access: "changed" },
+    { error: "RelayClaimRefusedError: The relay refused this change.", access: "changed" },
+    { error: "TypeError: fetch failed", access: "ended" },
+  ] as const)("rechecks creation failure $error and reports $access access", async ({ error, access }) => {
+    const bridge = collectionBridge();
+    bridge.checkSharedViewAccess.mockResolvedValue({ status: "current", access: "edit" });
+    bridge.createCollectionRecord.mockRejectedValueOnce(new Error(error));
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(shell(bridge, EDIT_SHARE));
+    const create = await screen.findByTestId("collection-new-record");
+    await waitFor(() => expect(bridge.checkSharedViewAccess).toHaveBeenCalledOnce());
+    const pending = deferred<Awaited<ReturnType<typeof bridge.checkSharedViewAccess>>>();
+    bridge.checkSharedViewAccess.mockReturnValueOnce(pending.promise);
+    fireEvent.click(create);
+    await waitFor(() => expect(bridge.checkSharedViewAccess).toHaveBeenCalledTimes(2));
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    await act(async () => pending.resolve(access === "ended" ? { status: "ended" } : { status: "current", access: "view" }));
+    await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain(`Your access to this share ${access}.`));
+  });
+
   it("reports a record creation retry after the share ends", async () => {
     const bridge = collectionBridge();
     bridge.createCollectionRecord.mockResolvedValueOnce({
@@ -236,6 +408,55 @@ describe("ended Edit Collection shares", () => {
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
     fireEvent.click(within(screen.getByTestId("notice-center")).getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain("Your access to this share ended."));
+    expect(bridge.createCollectionRecord).toHaveBeenCalledOnce();
+  });
+
+  it.each(["view", "comment"] as const)("blocks retained creation retries and draft delivery after access narrows to %s", async access => {
+    const bridge = collectionBridge();
+    bridge.queryCollectionRecords.mockResolvedValue({
+      collection: { path: "tasks", objectId: "schema", status: "valid", reasons: [] },
+      records: [{ id: "draft", path: "tasks/draft.md", conflicted: false, creationDelivery: "pending", creationCanDiscard: false,
+        values: [{ field: "Name", value: "Created draft", validation: { status: "valid" }, resolvedRelations: [] }] }],
+      groups: null, nextCursor: null,
+    });
+    bridge.createCollectionRecord.mockResolvedValueOnce({
+      kind: "partial", created: ["tasks/Untitled.md"], failedStage: "index", reason: "index unavailable",
+      retry: { mode: "resume", recordId: "rec_abcdefghijklmnopqrstuvwxyz", instruction: "Try again to finish this record." },
+    });
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(shell(bridge, EDIT_SHARE));
+    fireEvent.click(await screen.findByTestId("collection-new-record"));
+    await screen.findByTestId("workspace-shell-error");
+    bridge.checkSharedViewAccess.mockResolvedValue({ status: "current", access });
+    fireEvent.focus(window);
+    await waitFor(() => expect(screen.queryByTestId("collection-new-record")).toBeNull());
+    const drafts = screen.getByTestId("collection-record-drafts");
+    expect(drafts.textContent).toContain("This draft cannot be sent with the current share access.");
+    expect(within(drafts).queryByRole("button", { name: "Try again" })).toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    fireEvent.click(within(screen.getByTestId("notice-center")).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain("Your access to this share changed."));
+    expect(bridge.createCollectionRecord).toHaveBeenCalledOnce();
+    expect(bridge.pushShareDirectWrites).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the reopen explanation on a retained creation retry after the recipient pin becomes unreadable", async () => {
+    const bridge = collectionBridge();
+    bridge.createCollectionRecord.mockResolvedValueOnce({
+      kind: "partial", created: ["tasks/Untitled.md"], failedStage: "index", reason: "index unavailable",
+      retry: { mode: "resume", recordId: "rec_abcdefghijklmnopqrstuvwxyz", instruction: "Try again to finish this record." },
+    });
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(shell(bridge, EDIT_SHARE));
+    fireEvent.click(await screen.findByTestId("collection-new-record"));
+    await screen.findByTestId("workspace-shell-error");
+    bridge.checkSharedViewAccess.mockResolvedValue({ status: "needs-reopen" });
+    fireEvent.focus(window);
+    await waitFor(() => expect(screen.queryByTestId("collection-new-record")).toBeNull());
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    fireEvent.click(within(screen.getByTestId("notice-center")).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain("This share must be reopened."));
+    expect(screen.getByTestId("workspace-shell-error").textContent).not.toContain("access to this share changed");
     expect(bridge.createCollectionRecord).toHaveBeenCalledOnce();
   });
 

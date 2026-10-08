@@ -204,6 +204,7 @@ struct DeferredRelayState {
 
 #[derive(Clone, Default)]
 struct DeferredRelayTransport {
+    native_settlements: bool,
     state: Arc<Mutex<DeferredRelayState>>,
     push_progress: Arc<Mutex<PushWorkspaceProgress>>,
 }
@@ -355,6 +356,10 @@ macro_rules! relay_transport_method {
 }
 
 impl RelayTransport for DeferredRelayTransport {
+    fn publishes_native_settlements(&self) -> bool {
+        self.native_settlements
+    }
+
     relay_transport_method!(push, PushRequest, Push, PushResponse, Push);
     relay_transport_method!(pull, PullRequest, Pull, PullResponse, Pull);
     relay_transport_method!(
@@ -1148,6 +1153,27 @@ pub enum ShareViewIdentityRecord {
 }
 
 impl ActorHandle {
+    pub async fn share_record_creation_statuses(
+        &self,
+        workspace_id: String,
+        share_id: String,
+        paths: Vec<String>,
+        granted: dohc_engine_sync::ShareGrant,
+    ) -> Result<std::collections::BTreeMap<String, dohc_engine_sync::DirectWriteStatus>, RuntimeError>
+    {
+        self.run(move |store, _cache| {
+            dohc_engine_sync::read_record_creation_statuses(
+                store,
+                &workspace_id,
+                &share_id,
+                &paths,
+                &granted,
+            )
+            .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
     pub async fn share_direct_status(
         &self,
         workspace_id: String,
@@ -1247,6 +1273,7 @@ impl ActorHandle {
         let http_transport = Arc::new(build_http_transport(configuration)?);
         // Keep the deferred I/O state out of callers' inline RPC futures.
         Box::pin(self.relay_with_io(
+            http_transport.publishes_native_settlements(),
             operation,
             leases,
             token,
@@ -1258,6 +1285,7 @@ impl ActorHandle {
 
     async fn relay_with_io<F, Fut>(
         &self,
+        native_settlements: bool,
         operation: RelayOperation,
         leases: LeaseRegistry,
         token: CancellationToken,
@@ -1268,7 +1296,10 @@ impl ActorHandle {
         F: Fn(RelayIoRequest, CancellationToken) -> Fut,
         Fut: std::future::Future<Output = Result<RelayIoResponse, RelayError>>,
     {
-        let transport = DeferredRelayTransport::default();
+        let transport = DeferredRelayTransport {
+            native_settlements,
+            ..DeferredRelayTransport::default()
+        };
         loop {
             if token.is_cancelled() {
                 return Err(RuntimeError::Cancelled);

@@ -112,6 +112,7 @@ export function createDeviceLiveDelivery(options: {
     }
     clearTimeout(timer);
     ready = true;
+    changes?.notifyHost(config.workspaceIds);
   }
   const requireReady = () => {
     check();
@@ -224,7 +225,7 @@ export function createDeviceLiveDelivery(options: {
     },
     close(): void {
       if (closed) return;
-      closed = true; ready = false; clearTimeout(timer); invalidated.abort(); stopObserving(); stopOwnerEvents(); ownerWake.close(); changes?.notify(); client?.close(); connection?.close(); consumers.clear();
+      closed = true; ready = false; clearTimeout(timer); invalidated.abort(); stopObserving(); stopOwnerEvents(); ownerWake.close(); changes?.notifyHost(config.workspaceIds); client?.close(); connection?.close(); consumers.clear();
     },
   };
 }

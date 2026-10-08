@@ -63,6 +63,7 @@ async function fixture(mode: "local" | "standalone" | "mount" = "local") {
     resolveTarget: (target) => resolveRegisteredShareViewFilesTarget(workspace, target),
     openStore: () => store as unknown as ShareViewFilesStore,
     resolveRelay: async () => null, pull: unused, recordRefusals: unused,
+    updateUnsavedPaths: async () => undefined,
     markEnded: unused, retireTarget: unused,
     assertProjectionRoot: async (target) => {
       if (target.kind === "mount" && target.mountLabel) {

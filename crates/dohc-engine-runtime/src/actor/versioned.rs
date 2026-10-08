@@ -1146,6 +1146,17 @@ fn versioned_text_delete_on_store(
         )?;
     }
     let outcome = store.write_with(faults, |tx| {
+        let unresolved: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM share_direct_write_plan p,json_each(p.objects_json) o \
+             JOIN snapshots s ON s.workspace_id=p.workspace_id AND s.object_id=json_extract(o.value,'$[0]') \
+             WHERE p.workspace_id=?1 AND p.result_json IS NULL AND s.version_id=?2 AND s.path=?3)",
+            rusqlite::params![input.workspace_id, input.version_id, input.path], |row| row.get(0),
+        ).map_err(StorageError::corrupt_public)?;
+        if unresolved {
+            return Err(RuntimeError::from(dohc_engine_domain::DomainError::InvalidInput {
+                reason: "record-delivery-unknown",
+            }));
+        }
         let result = dohc_engine_domain::delete_text_in_tx_checked(tx, input, expected_object_id)
             .map_err(RuntimeError::from)?;
         let asset_jobs = if !result.deduped {
@@ -2499,6 +2510,78 @@ mod doc_cache_reset_tests {
     use dohc_engine_collab::{ContentKind, Regime, Ydoc};
     use dohc_engine_storage::NoFaults;
     use dohc_engine_testkit::ScratchDir;
+
+    #[test]
+    fn an_unacknowledged_creation_cannot_be_discarded() {
+        let scratch = ScratchDir::new().unwrap();
+        let mut store =
+            EngineStore::open(&dohc_engine_testkit::engine_db_path(&scratch).unwrap(), 1).unwrap();
+        ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults).unwrap();
+        VersionedTextStore::new(&mut store)
+            .write_text(
+                &WriteText {
+                    workspace_id: "workspace".into(),
+                    version_id: "main".into(),
+                    object_id: "document".into(),
+                    path: "record.md".into(),
+                    text: "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\n".into(),
+                    moment_id: "creation".into(),
+                    metadata_origin: "user".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO share_direct_write_plan (workspace_id,share_id,ordinal,submit_id,changes_json,objects_json) \
+                VALUES ('workspace','share',0,'same-submit','[]','[[\"document\",1]]')", [])
+                .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        }).unwrap();
+        let delete = DeleteTextFile {
+            workspace_id: "workspace".into(),
+            version_id: "main".into(),
+            path: "record.md".into(),
+            moment_id: "discard".into(),
+            request_id: None,
+            metadata_origin: "user".into(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            author_json: None,
+            now_ms: 3,
+        };
+        let result = versioned_text_delete_on_store(
+            &mut store,
+            &delete,
+            None,
+            false,
+            &scratch,
+            &(),
+            &NoFaults,
+            &CancellationToken::new(),
+        );
+        assert!(matches!(
+            result,
+            Err(RuntimeError::Domain(DomainError::InvalidInput {
+                reason: "record-delivery-unknown"
+            }))
+        ));
+        let head: String = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT latest_moment_id FROM snapshots \
+            WHERE workspace_id='workspace' AND version_id='main' AND path='record.md'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(head, "creation");
+    }
 
     #[test]
     fn local_file_retire_removes_a_poisoned_warm_entry_immediately() {

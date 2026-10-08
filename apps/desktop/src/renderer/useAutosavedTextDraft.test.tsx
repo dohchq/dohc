@@ -85,11 +85,11 @@ describe("useAutosavedTextDraft", () => {
       expect(loadStoredDrafts(Date.now())).toEqual(persisted
         ? [expect.objectContaining({ text: "latest edit" })] : []);
       expect(screen.queryByTestId("recovery-close-warning") !== null).toBe(!persisted);
-      expect(editor.result.current.saveState).toBe("error");
+      expect(editor.result.current.saveState.kind).toBe("error");
       act(() => editor.result.current.setDraft("newer edit"));
       await act(async () => { held.resolve({ status: "written", contentHash: "first-saved" }); });
       expect(editor.result.current.draft).toBe("newer edit");
-      expect(editor.result.current.saveState).not.toBe("saved");
+      expect(editor.result.current.saveState.kind).not.toBe("saved-here");
       expect(writeWorkspaceText).toHaveBeenCalledTimes(2);
       expect(writeWorkspaceText.mock.calls[1]![0].text).toBe("newer edit");
       await act(async () => { later.resolve({ status: "written", contentHash: "newer-saved" }); });
@@ -245,7 +245,7 @@ describe("useAutosavedTextDraft", () => {
 
       expect(editor.result.current.draft).toBe("new unsaved text");
       expect(editor.result.current.getDraft()).toBe("new unsaved text");
-      expect(editor.result.current.saveState).toBe("saving");
+      expect(editor.result.current.saveState.kind).toBe("saving");
       expect(newDocument.localBuffer.getSnapshot()).toMatchObject({
         body: "new unsaved text",
         contentHash: "new-workspace-hash",
@@ -271,7 +271,7 @@ describe("useAutosavedTextDraft", () => {
         text: "new unsaved text",
         expectedContentHash: "new-workspace-hash",
       });
-      expect(editor.result.current.saveState).toBe("saved");
+      expect(editor.result.current.saveState.kind).toBe("saved-here");
     } finally {
       await act(async () => {
         heldWrite.resolve({ status: "written", contentHash: "old-saved-hash" });
@@ -334,4 +334,24 @@ describe("useAutosavedTextDraft", () => {
       recovery.unmount();
     }
   });
+});
+
+
+it("publishes saving once across repeated dirty edits and saved once after the write", async () => {
+  vi.useFakeTimers();
+  const onSaveStateChange = vi.fn();
+  vi.stubGlobal("dohcDesktop", { writeWorkspaceText: vi.fn(async () => ({ status: "written", contentHash: "saved" })) });
+  const editor = renderHook(useAutosavedTextDraft, { initialProps: { ...documentProps("ws", "typing.txt", "before"), onSaveStateChange } });
+  try {
+    onSaveStateChange.mockClear();
+    act(() => editor.result.current.setDraft("first"));
+    expect(onSaveStateChange).toHaveBeenCalledTimes(1);
+    expect(onSaveStateChange).toHaveBeenLastCalledWith({ kind: "saving" });
+    onSaveStateChange.mockClear();
+    for (let i = 0; i < 30; i++) act(() => editor.result.current.setDraft("first" + "!".repeat(i + 1)));
+    expect(onSaveStateChange).not.toHaveBeenCalled();
+    await act(async () => { await editor.result.current.saveNow(); });
+    expect(onSaveStateChange).toHaveBeenCalledTimes(1);
+    expect(onSaveStateChange).toHaveBeenLastCalledWith({ kind: "saved-here" });
+  } finally { vi.useRealTimers(); }
 });

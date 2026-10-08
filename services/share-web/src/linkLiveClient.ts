@@ -77,8 +77,8 @@ export function createLinkLiveClient(options: {relayUrl: string; publicOrigin: s
         if (!exact(result.value, "objectId")) return refused();
         output = {objectId: parseLiveUpdateIdentifier(result.value.objectId), limits: browserLimits};
       } else {
-        if (!exact(result.value, "expiresAtMs,token") || typeof result.value.expiresAtMs !== "number" || !Number.isSafeInteger(result.value.expiresAtMs) || result.value.expiresAtMs <= Date.now()) return refused();
-        parseLiveTicketToken(result.value.token); output = result.value;
+        if (!exact(result.value, "expiresAtMs,publicPrincipalId,token") || typeof result.value.expiresAtMs !== "number" || !Number.isSafeInteger(result.value.expiresAtMs) || result.value.expiresAtMs <= Date.now()) return refused();
+        parseLiveTicketToken(result.value.token); parseLiveUpdateIdentifier(result.value.publicPrincipalId); output = result.value;
       }
       signal.throwIfAborted();
       const encoded = JSON.stringify(output);

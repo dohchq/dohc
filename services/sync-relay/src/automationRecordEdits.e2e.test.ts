@@ -26,6 +26,7 @@ import {startAutomationServer} from "./automationServer";
 import type {AutomationReplica, startAutomationReplicas} from "./automationReplicas";
 import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
 import type { CollectionGetRecordResult } from "@dohc/workspace-contracts";
+import type {VersionedTextMoment} from "@dohc/workspace-contracts/engine";
 import type { JsonValue } from "@dohc/workspace-engine-client";
 import { createEngineClient } from "@dohc/workspace-engine-client/daemon";
 import { createCollectionRecord, setCollectionRecordFields } from "@dohc/automation-executor/collection-record-edits";
@@ -35,6 +36,7 @@ import { ChatsLiveAdapter, VersionedLiveAdapter } from "@dohc/workspace-engine-c
 import {SHARED_BUTTON_HELD} from "@dohc/automation-executor/button-presser";
 import {registerStopAndRestoreIpc} from "../../../apps/desktop/src/ipc/stopAndRestoreIpc";
 import {CHANNELS} from "../../../apps/desktop/src/ipc/channels";
+import {restoreDirectWrites} from "../../../apps/desktop/src/workspaces/stopAndRestore";
 import type {WorkspaceEngineMomentDetail} from "../../../apps/desktop/src/workspaces/workspaceEngineCapture";
 import { replicaAutomationChat, replicaChatStore } from "./automationChatWrites";
 import { replicaRecordEditContext, replicaRecordEngine } from "./automationRecordEdits";
@@ -760,3 +762,211 @@ it.skipIf(engine.missing)("finds one filtered record among 5000 without refreshi
   console.log("FIND_5000 " + JSON.stringify(measurement));
   if (process.env.DOHC_AUTOMATION_FIND_MEASUREMENT) await writeFile(process.env.DOHC_AUTOMATION_FIND_MEASUREMENT, JSON.stringify(measurement));
 }, 180_000);
+
+it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as const)(
+  "pushes %s device settlements, reviews peer restore, and checks hosting engine refusal only", async (authors) => {
+  const root = await tempRoot("device-settlement"), storage = await testStorage({liveTickets: {retainedTicketsPerPrincipalGrant: 32, expiredTicketCleanupBatchSize: 32, now: Date.now}});
+  const namespace = "device-settlement", key = new Uint8Array(32).fill(7);
+  const history = createLiveJournalHistoryAuthority({namespace, reconciled: true});
+  attachLiveJournalHistory(storage as StorageContext, history);
+  const serverHost = {label: "Test server"};
+  const relay = createSyncRelayHandler({storage, resolveActor: testActor, automationServer: serverHost});
+  const http = serveFetchHandler({handler: relay,
+    streamBody: streamsRequestBody, maxBodyBytes: () => 21 * 1024 * 1024, oversized: () => new Response(null, {status: 413}), failure: () => new Response(null, {status: 500})});
+  await new Promise<void>(resolve => http.listen(0, "127.0.0.1", resolve));
+  cleanup.push(async () => {http.closeAllConnections(); await new Promise<void>(resolve => http.close(() => resolve()));});
+  const relayUrl = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
+  const owner = await computer({root: join(root, "owner"), relayUrl, bearerToken: "test:owner", identity: {kind: "claim"}});
+  await owner.request("versionedText.write", {versionId: "main", path: "Tasks/collection.yaml", text: "fields: {}\n", origin: "api", publish: true}, owner.workspace);
+  await owner.sync();
+  storage.createShare({share: {shareId: "native-share", workspaceId: WORKSPACE, granterUserId: "owner", selectorJson: JSON.stringify({paths: ["Tasks"], versionId: null}), createdAtMs: 0},
+    grant: {grantId: "native-grant", shareId: "native-share", principalKind: "user", principalUserId: "reader", principalEmail: null, access: "edit", generation: 1, status: "active", createdAtMs: 0, revokedAtMs: null, parentGrantId: null}});
+  const text = `---\nid: ${ONE}\nStatus: Doing\n---\n\nPack the car.\n`;
+  const digest = createHash("sha256").update(text).digest("hex");
+  const upload = await relay(new Request(`${relayUrl}/sync/shares/native-share/blobs/${digest}`, {
+    method: "PUT", headers: {authorization: "Bearer test:reader"}, body: text,
+  }));
+  expect(upload.status).toBe(200);
+  const created = await relay(new Request(`${relayUrl}/sync/shares/native-share/collection-writes`, {
+    method: "POST", headers: {authorization: "Bearer test:reader", "content-type": "application/json"},
+    body: JSON.stringify({submitId: "recipient-record", changes: [{basedOnPath: null, basedOnBlobSha256: null,
+      operation: "write", afterPath: "Tasks/one.md", afterBlobSha256: digest, afterContentKind: "text",
+      afterByteLength: Buffer.byteLength(text), recordedAtMs: Date.now()}]}),
+  }));
+  expect(created.status, await created.clone().text()).toBe(200);
+  const ownerEngine = replicaRecordEngine({...owner, workspaceId: WORKSPACE});
+  await owner.sync();
+  const session = await ownerEngine.openSession({versionId: "main", path: "Tasks/one.md"});
+  cleanup.push(() => session.close({settle: false}));
+  const profile = selfHostLiveProfile(), validate = liveValidation.validator(profile.validation);
+  const host = {mode: "device" as const, hostId: "native-owner", hostEpoch: parseHostEpoch(1), instanceId: "instance", connectionId: "connection"};
+  storage.provisionLiveHostControl({mode: host.mode, hostId: host.hostId, updatedAtMs: 1, guard() {}});
+  storage.registerLiveHost({...host, updatedAtMs: 2, guard() {}});
+  const document = {workspaceId: WORKSPACE, mainVersionId: "main", objectId: session.objectId!, lineageClaimId: session.lineageClaimId!};
+  const database = new DatabaseSync(join(owner.root, ".dohc/engine/engine.db"), {readOnly: true});
+  let baselineBytes: Uint8Array;
+  try {
+    const blob = database.prepare("SELECT bytes FROM binary_blobs WHERE sha256 = ?").get(document.lineageClaimId);
+    baselineBytes = blob!.bytes as Uint8Array;
+  } finally {database.close();}
+  const validated = createLiveMarkdownRegistrationValidator(profile.validation)({document, currentPath: session.path, checkpoint: baselineBytes});
+  if (validated.kind !== "accepted") throw new Error(JSON.stringify(validated));
+  const registrationResult = storage.registerLiveDocumentBaseline({host, baselineBytes, evidence: validated.evidence, registeredAtMs: 3});
+  expect(registrationResult, JSON.stringify(registrationResult)).toMatchObject({kind: "registered"});
+  await owner.request("liveApplication.provisionOwner", {relayNamespace: namespace, host: {hostId: host.hostId, hostEpoch: host.hostEpoch, instanceId: host.instanceId, connectionId: host.connectionId}}, owner.workspace);
+  const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: "owner", shareId: "native-share"}});
+  if (current.kind !== "current") throw new Error(JSON.stringify(current));
+  const {binding} = current;
+  const nativeSession = session.nativeOwner!.sessionId;
+  // The desktop bridge holds this exact native session and forwards only its private methods.
+  const native = {
+    sendRequest: async (request, signal) => {
+      if (request.method === "liveApplication.ownerState") {
+        const result = (await owner.client.sendRequest({...request, params: {...(request.params as {[key: string]: JsonValue}), sessionId: nativeSession}}, signal)).result as {adoptionId: string; expectedLocalSequence: number; throughCursor: number | null};
+        return {id: request.id, result: {adoptionId: result.adoptionId, expectedLocalSequence: result.expectedLocalSequence, throughCursor: result.throughCursor ?? 0, sessionId: nativeSession}};
+      }
+      if (request.method === "liveApplication.ownerOutbox") {
+        const result = (await owner.client.sendRequest({...request, method: "liveApplication.ownerState", params: {...(request.params as {[key: string]: JsonValue}), sessionId: nativeSession}}, signal)).result as {outboxId: string | null; pendingBytes: number; outboxState: string | null};
+        return {id: request.id, result: {outboxId: result.outboxId, pendingBytes: result.pendingBytes, state: result.outboxState}};
+      }
+      if (request.method === "liveApplication.readOwnerOutbox" || request.method === "liveApplication.acknowledgeOwnerOutbox") {
+        const params = request.params as {[key: string]: JsonValue};
+        const state = (await owner.client.sendRequest({...request, id: owner.nextRequestId(), method: "liveApplication.ownerState", params: {registrationId: params.registrationId!, sessionId: nativeSession}}, signal)).result as {outboxId: string};
+        const {registrationId: _registration, ...rest} = params;
+        return owner.client.sendRequest({...request, method: request.method === "liveApplication.readOwnerOutbox" ? "ydoc.ownerOutbox.readPending" : "ydoc.ownerOutbox.acknowledge", params: {outboxId: state.outboxId, ...rest}}, signal);
+      }
+      return owner.client.sendRequest(request, signal);
+    },
+    sendLiveOwnerAdoption: (request, cut, bounds, signal) => owner.client.sendLiveOwnerAdoption({...request, sessionId: nativeSession}, cut, bounds, signal),
+    sendLiveApplication: async (request, admitted, signal) => {
+      const result = await owner.client.sendLiveApplication(request, admitted, signal);
+      await session.nativeOwner!.applyRemoteUpdate(admitted.updateBytes);
+      return result;
+    },
+    readLiveApplicationAck: (request, receipt, signal) => owner.client.readLiveApplicationAck(request, receipt, signal),
+    openLiveAppliedSync: (request, vector, bounds, signal) => owner.client.openLiveAppliedSync(request, vector, bounds, signal),
+    readNextLiveApplied: (request, after, maximum, signal) => owner.client.readNextLiveApplied(request, after, maximum, signal),
+  } satisfies Pick<EngineClient, "sendRequest" | "sendLiveOwnerAdoption" | "sendLiveApplication" | "readLiveApplicationAck" | "openLiveAppliedSync" | "readNextLiveApplied">;
+  const consumer = new OwnerCommittedDelivery(storage, history, {client: native as EngineClient, workspace: owner.workspace, host, deadlineMs: DEADLINE_MS, nextRequestId: owner.nextRequestId,
+    bounds: {maxBytes: profile.nativeIngress.maxAdoptionBytes, maxEvents: profile.nativeIngress.maxAdoptionEvents},
+    ownerAdmission: {shares: new Map([[WORKSPACE, "native-share"]]), maxEntriesPerDrain: 128, maxBytesPerDrain: profile.nativeIngress.maxAdoptionBytes, validate}});
+  await consumer.drain(document);
+  const nativeRegistration = consumer.captureRegistration(binding);
+  const common = {storage, bounds: profile.namedLive.host, validate,
+    native: {client: native, workspace: owner.workspace, registrationId: nativeRegistration.id, coordinate: host, binding,
+      invalidated: nativeRegistration.invalidated, changes: createNamedFrameChanges(16), deadlineMs: DEADLINE_MS,
+      nextRequestId: owner.nextRequestId, drain: (doc: typeof document, signal: AbortSignal) => consumer.drain(doc, signal)}};
+  const edit = async (host: ReturnType<typeof captureOwnerLiveFrameHost>, field: string, authorContext: {kind: "account"; accountId: string}, settle = true) => {
+    const doc = new Y.Doc();
+    try {
+      const sync = await host.openSync(Uint8Array.of(0), owner.lifetime);
+      try {Y.applyUpdate(doc, sync.missingStateUpdate);} finally {sync.close();}
+      const vector = Y.encodeStateVector(doc);
+      doc.getMap("frontmatter").set(field, "Keep this text");
+      const updateBytes = Y.encodeStateAsUpdate(doc, vector);
+      expect(await host.submit({deliveryId: `edit-${field}`, updateDigest: createHash("sha256").update(updateBytes).digest("hex"), updateBytes,
+        authorContext}, owner.lifetime)).toMatchObject({result: "success"});
+    } finally {doc.destroy(); host.close();}
+    if (settle) await consumer.settle(document);
+  };
+  const moments = async () => (await owner.request("moments.list", {limit: 100}, owner.workspace)).moments as unknown as Array<{momentId: string; authors?: unknown}>;
+  const creationMoment = (await moments()).find(moment => Array.isArray(moment.authors) && moment.authors[0]?.kind === "named")!;
+  expect(creationMoment).toBeDefined();
+  const viewer = {kind: "named" as const, workspaceId: WORKSPACE, userId: "reader", shareId: "native-share", grantId: "native-grant"};
+  const tickets = createLiveTickets({storage, audience: "https://relay.example.test", key,
+    hostReports: {currentBinding: async () => ({connection: host, binding})}});
+  const minted = await tickets.mint({objectId: document.objectId}, viewer);
+  const ticket = await tickets.redeem(minted!.token, viewer);
+  if (authors === "owner-and-recipient") {
+    const ownerHost = captureOwnerLiveFrameHost({...common, authenticatedUserId: "owner", shareId: "native-share",
+      trustedAccount: {accountId: "owner", name: "Owner"}});
+    await edit(ownerHost, "OwnerNote", {kind: "account", accountId: "owner"}, false);
+  }
+  const recipientHost = captureNamedLiveFrameHost({...common, ticket: ticket!, actor: liveBrowserActor(viewer), trustedAccount: {accountId: "reader", name: "Reader"}});
+  await edit(recipientHost, "RecipientNote", {kind: "account", accountId: "reader"});
+  const recipientMoment = (await moments())[0]!;
+  const expectedAuthors = authors === "recipient-only"
+    ? [{kind: "human", humanId: "reader", humanName: "Reader"}]
+    : [{kind: "human", humanId: "owner", humanName: "Owner"}, {kind: "human", humanId: "reader", humanName: "Reader"}];
+  expect(recipientMoment.authors).toEqual(expect.arrayContaining(expectedAuthors));
+  expect(recipientMoment.authors).toHaveLength(expectedAuthors.length);
+  await owner.sync();
+  // A later operation proves that no refused batch blocks the owner's log.
+  await owner.request("versionedText.write", {versionId: "main", path: "after.txt", text: "After recipient settlement", origin: "api", publish: true}, owner.workspace);
+  await owner.sync();
+  const rows = storage.fetchLogPage({workspaceId: WORKSPACE, sinceRelaySeq: 0, limit: 1000}).rows;
+  expect(rows.some(row => JSON.parse(row.payloadJson).path === "after.txt")).toBe(true);
+  expect(rows.find(row => JSON.parse(row.payloadJson).momentId === recipientMoment.momentId)).toBeDefined();
+  expect(JSON.parse(rows.find(row => JSON.parse(row.payloadJson).momentId === recipientMoment.momentId)!.payloadJson).authors)
+    .toEqual([{kind: "unattributed"}]);
+  const ownerDatabase = new DatabaseSync(join(owner.root, ".dohc/engine/engine.db"), {readOnly: true});
+  try {
+    expect(ownerDatabase.prepare("SELECT COUNT(*) AS total FROM replication_pending_refusals WHERE workspace_id=?").get(WORKSPACE)?.total).toBe(0);
+  } finally {ownerDatabase.close();}
+  const identity = storage.getWorkspaceIdentity(WORKSPACE)!;
+  const peer = await computer({root: join(root, "peer"), relayUrl, bearerToken: "test:owner",
+    identity: {kind: "join", replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity}});
+  await peer.sync();
+  const imported = (await peer.request("moments.list", {limit: 100}, peer.workspace)).moments as unknown as Array<{momentId: string; authors?: unknown}>;
+  expect(imported.find(moment => moment.momentId === recipientMoment.momentId)?.authors).toEqual([{kind: "unattributed"}]);
+  const peerHistory = new VersionedLiveAdapter(peer.client, peer.workspace, {workspaceId: WORKSPACE});
+  expect(await peerHistory.getMoment({workspaceId: WORKSPACE, momentId: recipientMoment.momentId}))
+    .toMatchObject({syncRecordOnly: true, authors: [{kind: "unattributed"}]});
+  expect((await moments()).find(moment => moment.momentId === recipientMoment.momentId)?.authors)
+    .toEqual(recipientMoment.authors);
+  expect(await readFile(join(peer.root, "Tasks/one.md"), "utf8")).toContain("RecipientNote: Keep this text");
+  await session.close({settle: false});
+  const restore = async (side: typeof owner) => {
+    const adapter = new VersionedLiveAdapter(side.client, side.workspace, {workspaceId: WORKSPACE});
+    return restoreDirectWrites({
+      moment: async (momentId): Promise<VersionedTextMoment | null> => {
+        const moment = await adapter.getMoment({workspaceId: WORKSPACE, momentId});
+        if (!moment) return null;
+        const text = async (side: "before" | "after") => {
+          const inline = side === "before" ? moment.beforeText : moment.afterText;
+          const sha256 = side === "before" ? moment.beforeBlobSha256 : moment.afterBlobSha256;
+          return inline ?? (sha256 === null ? "" : (await adapter.readTextBlob({workspaceId: WORKSPACE, sha256}))!);
+        };
+        return {id: moment.momentId, workspaceId: WORKSPACE, versionId: moment.versionId, objectId: moment.objectId,
+          path: moment.path, recordedAtMs: moment.recordedAtMs, operation: moment.operation,
+          authors: moment.authors as VersionedTextMoment["authors"], syncRecordOnly: moment.syncRecordOnly,
+          metadata: {origin: moment.metadataOrigin as VersionedTextMoment["metadata"]["origin"]},
+          payload: {before: moment.beforePresent ? {path: moment.beforePath!, text: await text("before")} : null,
+            after: {path: moment.path, text: await text("after")}}};
+      },
+      assertCurrent() {},
+      momentsAfter: async (objectId, momentId) => {
+        const page = await adapter.listMoments({workspaceId: WORKSPACE, objectId, versionId: "main", limit: 100});
+        return page.moments.slice(0, page.moments.findIndex(moment => moment.momentId === momentId)).map(moment => moment.momentId);
+      },
+      restore: async (_momentId, expectedHeadMomentId) => {
+        const current = await adapter.readTextFile({workspaceId: WORKSPACE, versionId: "main", path: "Tasks/one.md"});
+        const page = await adapter.listMoments({workspaceId: WORKSPACE, versionId: "main", objectId: document.objectId, limit: 1});
+        expect(current?.objectId).toBe(document.objectId);
+        expect(page.moments[0]?.momentId).toBe(expectedHeadMomentId);
+        const result = await adapter.deleteTextFile({workspaceId: WORKSPACE, versionId: "main", path: "Tasks/one.md",
+          expectedObjectId: document.objectId, metadata: {origin: "restore"}, author: {kind: "human", humanId: "local:owner"}});
+        return {kind: "restored", receipt: {path: "Tasks/one.md", restoredMomentId: result.moment.momentId, removed: true}};
+      },
+      folderEntries: async () => [], removeEmptyFolder: async () => undefined,
+      undoRuns: async () => ({undone: 0, left: 0, keptFields: [], missing: 0, otherKept: 0, errorMessage: null}),
+    }, [{path: "Tasks/one.md", objectId: document.objectId, momentId: creationMoment.momentId, created: true}]);
+  };
+  // Verified live audit coverage cannot erase the wire settlement's marker.
+  expect(imported).toContainEqual(expect.objectContaining({authors: [{kind: "human", humanId: "reader", humanName: "Reader"}]}));
+  expect(await restore(peer)).toMatchObject({status: "restored", restored: [],
+    review: [{path: "Tasks/one.md", reason: "changed-since"}], unfinished: null});
+  expect(await readFile(join(peer.root, "Tasks/one.md"), "utf8")).toContain("RecipientNote: Keep this text");
+  if (authors === "owner-and-recipient") {
+    expect(await readFile(join(peer.root, "Tasks/one.md"), "utf8")).toContain("OwnerNote: Keep this text");
+    expect(await restore(owner)).toMatchObject({status: "restored", restored: [],
+      review: [{path: "Tasks/one.md", reason: "changed-since"}], unfinished: null});
+  } else {
+    // This checks the engine refusal only. The product IPC maps an active live
+    // binding to review. recipient-record-creation.spec.ts covers removal on
+    // the hosting computer through the product path.
+    expect(await restore(owner)).toMatchObject({status: "restored", restored: [], review: [],
+      unfinished: {step: "files", message: "live-document-binding-active"}});
+  }
+
+}, 120_000);

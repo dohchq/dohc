@@ -311,6 +311,7 @@ impl RelayError {
             | RelayError::QuotaExceeded
             | RelayError::DiscussionRateLimited
             | RelayError::LinkReadRateLimited
+            | RelayError::ShareAccessRateLimited
             | RelayError::SelfShare
             | RelayError::AmbiguousSelector
             | RelayError::InvalidChannel
@@ -427,6 +428,8 @@ pub enum RelayError {
     DiscussionRateLimited,
     #[error("relay rate-limited link reads")]
     LinkReadRateLimited,
+    #[error("relay rate-limited share access checks")]
+    ShareAccessRateLimited,
     #[error("self-sharing is not allowed")]
     SelfShare,
     #[error("share selector is ambiguous")]

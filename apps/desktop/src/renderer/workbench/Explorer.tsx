@@ -36,7 +36,7 @@ import { Overlay } from "../Overlay";
 import { momentDiffName } from "./EditorTabs";
 import { planDrop, type DragSource } from "./file-tree-dnd";
 import { navigateTree, type FlatRow } from "./file-tree-nav";
-import { withMarkdownDefault } from "./new-file-name";
+import { withMarkdownDefault, withRenameDefault } from "./new-file-name";
 import {
   applyPendingTreeMoves,
   pendingTreeMoveSettled,
@@ -184,11 +184,14 @@ function explorerFileKind(path: string, listed: WorkspaceFileEntry["kind"] | nul
 }
 
 // The kind a create or rename draft will have once committed, so the glyph
-// follows the name as it is typed. The commit adds `.md` to a name without
-// an extension; an empty draft shows that Markdown default.
-function draftFileKind(value: string): FileKindRecord {
+// follows the name as it is typed. `renameFrom` is the renamed file's path,
+// or null for a create. An empty draft shows the Markdown default.
+function draftFileKind(value: string, renameFrom: string | null): FileKindRecord {
   const name = value.trim();
-  return name ? fileKindForPath(withMarkdownDefault(name)) : FILE_KIND_RECORDS.markdown;
+  if (!name) return FILE_KIND_RECORDS.markdown;
+  return fileKindForPath(
+    renameFrom === null ? withMarkdownDefault(name) : withRenameDefault(renameFrom, name),
+  );
 }
 
 // Every Explorer row draws its glyph at the drawing's 15px.
@@ -951,9 +954,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     (edit: Extract<EditingState, { mode: "rename" }>, value: string) => {
       const { path, isFolder } = edit;
       const typed = resolveTypedPath(value, dirnameOf(path));
-      // A file name without an extension means markdown here too, so
-      // "hello.md" typed as "hello" stays put and "hello.m" becomes markdown.
-      const toPath = typed && !isFolder ? withMarkdownDefault(typed) : typed;
+      const toPath = typed && !isFolder ? withRenameDefault(path, typed) : typed;
       if (!toPath || toPath === path) {
         setEditing(null);
         return;
@@ -1487,7 +1488,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               // keeps deciding whether it is a database.
               editing?.mode === "rename" && editValue.trim() === basenameOf(editing.path)
                 ? explorerFileKind(editing.path, fileByPath.get(editing.path)?.kind)
-                : draftFileKind(editValue)
+                : draftFileKind(editValue, editing?.mode === "rename" ? editing.path : null)
             }
             size={GLYPH_SIZE}
             className={glyphTone(false)}
@@ -1533,7 +1534,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       const typed = commit ? resolveTypedPath(editValue, dirnameOf(editing.path)) : null;
       renameFocus.current = {
         from: editing.path,
-        to: typed ? (editing.isFolder ? typed : withMarkdownDefault(typed)) : editing.path,
+        to: typed ? (editing.isFolder ? typed : withRenameDefault(editing.path, typed)) : editing.path,
       };
     }
     if (!commit || editValue.trim() === "") {

@@ -395,15 +395,33 @@ it("coalesces shared wakes and preserves listener bounds and independent deliver
   expect(changes.listenerCount()).toBe(1);
 });
 
-it("checks authority globally while waking native readers only for their document", async () => {
-  const changes = createNamedFrameChanges(3), authority = vi.fn(), first = vi.fn(), second = vi.fn();
+it("checks authority globally while waking native readers for their document or serving host", async () => {
+  const changes = createNamedFrameChanges(4), authority = vi.fn(), first = vi.fn(), second = vi.fn(), third = vi.fn(), waiting = vi.fn();
   changes.subscribe(authority); changes.subscribe(first, binding); changes.subscribe(second, {...binding, workspaceId: "other-workspace"});
+  changes.subscribe(third, {...binding, objectId: "other-object"});
+  changes.subscribe(waiting, {workspaceId: binding.workspaceId, objectId: "waiting-object"});
   changes.notify(); await new Promise<void>(queueMicrotask);
   expect(authority).toHaveBeenCalledOnce(); expect(first).not.toHaveBeenCalled(); expect(second).not.toHaveBeenCalled();
   changes.notify(binding); changes.notify(binding); await new Promise<void>(queueMicrotask);
   expect(authority).toHaveBeenCalledTimes(2); expect(first).toHaveBeenCalledOnce(); expect(second).not.toHaveBeenCalled();
   changes.notify({...binding, workspaceId: "other-workspace"}); await new Promise<void>(queueMicrotask);
   expect(authority).toHaveBeenCalledTimes(3); expect(first).toHaveBeenCalledOnce(); expect(second).toHaveBeenCalledOnce();
+  expect(third).not.toHaveBeenCalled(); expect(waiting).not.toHaveBeenCalled();
+  changes.notifyHost([binding.workspaceId]); changes.notifyHost([binding.workspaceId]); await new Promise<void>(queueMicrotask);
+  expect(authority).toHaveBeenCalledTimes(4); expect(first).toHaveBeenCalledTimes(2); expect(second).toHaveBeenCalledOnce();
+  expect(third).toHaveBeenCalledOnce(); expect(waiting).toHaveBeenCalledOnce();
+});
+
+it("keeps desktop object subscriptions separate from live frame listener capacity", async () => {
+  const changes = createNamedFrameChanges(1), waiting = vi.fn(), reader = vi.fn();
+  changes.subscribe(waiting, {workspaceId: binding.workspaceId, objectId: binding.objectId});
+  changes.subscribe(reader, binding);
+  changes.notify();
+  await new Promise<void>(queueMicrotask);
+  expect(waiting).not.toHaveBeenCalled(); expect(reader).not.toHaveBeenCalled();
+  changes.notify(binding);
+  await new Promise<void>(queueMicrotask);
+  expect(waiting).toHaveBeenCalledOnce(); expect(reader).toHaveBeenCalledOnce();
 });
 
 it("rechecks revocation after asynchronous validation and never commits its stale result", async () => {

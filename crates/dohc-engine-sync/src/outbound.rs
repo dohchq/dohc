@@ -68,6 +68,32 @@ pub(crate) fn mark_unproven_hosted_authors(payload: &mut serde_json::Value) -> b
     true
 }
 
+/// Client log routes cannot attest relay identities. Keep local coverage intact.
+pub(crate) fn omit_client_identity_authors(payload: &mut serde_json::Value) -> bool {
+    let before = payload.get("authors").cloned();
+    omit_local_person_authors(payload);
+    if let Some(authors) = payload
+        .get_mut("authors")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        let mut marker = false;
+        authors.retain_mut(|author| {
+            if matches!(
+                author.get("kind").and_then(serde_json::Value::as_str),
+                Some("human" | "public" | "named" | "link" | "unattributed")
+            ) {
+                if marker {
+                    return false;
+                }
+                *author = serde_json::json!({"kind": "unattributed"});
+                marker = true;
+            }
+            true
+        });
+    }
+    payload.get("authors") != before.as_ref()
+}
+
 pub(crate) fn relay_person_id(id: &str) -> Option<&str> {
     (!id.starts_with("local:")).then_some(id)
 }
@@ -77,6 +103,7 @@ pub(crate) fn repair_queued_moment_authors(
     store: &mut dohc_engine_storage::EngineStore,
     ops: &mut [crate::ReplicationEnvelope],
     faults: &dyn dohc_engine_storage::FaultInjector,
+    native_settlements: bool,
 ) -> Result<dohc_engine_storage::TxnOutcome<()>, SyncError> {
     use dohc_engine_storage::TxnOutcome;
     let repairs: Vec<_> = ops
@@ -88,7 +115,11 @@ pub(crate) fn repair_queued_moment_authors(
             }
             let mut payload = op.payload.clone();
             let marked = mark_unproven_hosted_authors(&mut payload);
-            let omitted = omit_local_person_authors(&mut payload);
+            let omitted = if native_settlements {
+                omit_local_person_authors(&mut payload)
+            } else {
+                omit_client_identity_authors(&mut payload)
+            };
             (marked || omitted).then_some((index, payload))
         })
         .collect();

@@ -9,7 +9,7 @@ import type { WorkspaceAuthorityOperation } from "./workspaceAuthorityOwner";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
 import type { AuthoredPathChanges, WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { historyExcludesSubtree, historyPathAdmission, type WorkspaceEnginePolicySnapshot } from "./workspaceEnginePolicyFile";
-import { deletePath, moveIntoWorkspaceTrash, prepareWorkspaceDelete } from "./workspaceFiles";
+import { deletePath, moveIntoWorkspaceTrash, prepareWorkspaceDelete, removeEmptyWorkspaceFolder } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 
 type PathChangeWorkspace = { rootPath: string; readOnly?: boolean; shareView?: unknown };
@@ -572,12 +572,17 @@ export async function deleteWorkspacePathByHand(
   operation: PathChangeOperation,
   path: string,
   person: Extract<MomentWriteAuthor, { kind: "human" }>,
-  options: Omit<PathChangeOptions, "capture"> & { capture: PathChangeOptions["capture"] | null },
+  options: Omit<PathChangeOptions, "capture"> & { capture: PathChangeOptions["capture"] | null; emptyFolderOnly?: boolean },
 ): Promise<{ trashed: boolean }> {
   const rootPath = operation.workspace.rootPath;
   assertWritable(operation);
   const { capture } = options;
   const outcome = await withExclusiveWorkspaceOperation(rootPath, async markChanged => {
+    if (options.emptyFolderOnly) {
+      assertWritable(operation);
+      if (await removeEmptyWorkspaceFolder(rootPath, path)) markChanged();
+      return { trashed: false, refused: undefined };
+    }
     const endpoint = await prepareWorkspaceDelete(rootPath, path);
     const trash = async () => {
       const trashed = await deletePath(rootPath, endpoint, options.trashItem);

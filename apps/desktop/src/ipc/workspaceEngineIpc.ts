@@ -1,4 +1,6 @@
-import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { shareRecordStatuses } from "../workspaces/shareRecordStatus";
+import { WorkspaceDaemonRequester, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { z } from "zod";
 import type { EngineWorkspace, EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import {
   ListCollectionsPayload, ListCollectionsResult, GetCollectionPayload, GetCollectionResult,
@@ -8,7 +10,9 @@ import {
   RebuildEngineStorePayload, RebuildEngineStoreResult, engineStoreRefusalRecovery,
   GetCollectionRecordHistoryPayload, GetCollectionRecordHistoryResult, RECORD_HISTORY_PAGE,
   LocateRecordHistoryRunPayload, LocateRecordHistoryRunResult,
+  engineYDocAdmissionOperations,
 } from "./bridgeContract";
+import { registerOperations } from "./operationTable";
 import { CHANNELS } from "./channels";
 import { engineMomentDetailForIpc, listEngineMomentsForIpc, type EngineMomentAuthorNames } from "./engineHistoryIpc";
 import { createRunLocator, recordHistoryForIpc, type RecordHistoryAuthors } from "./recordHistoryIpc";
@@ -25,6 +29,9 @@ import { sharedViewHistory } from "../workspaces/sharedViewHistory";
 import { historyPathAdmission, historyMomentPathsAdmitted, type readWorkspaceEnginePolicy, type WorkspaceEnginePolicySnapshot } from "../workspaces/workspaceEnginePolicyFile";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { collectionListSources, collectionReadSource, mountedCollectionSchema, receivedCollectionQuery } from "../workspaces/receivedShareCollections";
+import { resolveRegisteredShareViewFilesTarget } from "../workspaces/shareViewFilesTarget";
+import { resolveOwnedWorkspaceSharePath } from "../workspaces/ownedWorkspaceFileReader";
+import { recordedShareSelector } from "../workspaces/shareViewRecords";
 
 type EngineStoreAuthorityState = {
   operationLanes: Map<string, Promise<void>>;
@@ -71,6 +78,7 @@ export function createWorkspaceEngineIpc<
   serverRuns: Pick<ServerRuns, "shownTo">;
   /** The signed-in account now, or null when signed out. */
   signedInAccount(): string | null;
+  isOnline?(): boolean;
   notifyRenderer(target: { workspaceId: string }): void;
   retryOwnerLiveDelivery?(workspaceId: string): void;
   retryCloudSync(workspaceId: string, reason: RetryCloudSyncPayload["reason"]): Promise<void>;
@@ -91,7 +99,7 @@ export function createWorkspaceEngineIpc<
   moveEngineStoreAside: typeof moveEngineStoreAside;
   openWorkspaceActivityUnderEngineStoreLock(workspace: Workspace, options: { afterReopenRecoverySettled: () => void }): Promise<SyncStatusResult>;
   engineYDocSessionIpc: Pick<ReturnType<typeof createEngineYDocSessionIpc>,
-    "open" | "readArtifactAsset" | "applyUpdate" | "acknowledgeLineageReplacement" | "prepareOwnerHandoff" | "close">;
+    "open" | "waitForAdmission" | "readArtifactAsset" | "applyUpdate" | "acknowledgeLineageReplacement" | "prepareOwnerHandoff" | "close">;
 }) {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
@@ -179,6 +187,26 @@ export function createWorkspaceEngineIpc<
               ...(cursor ? { cursor: { ...cursor, recordPath: cursor.recordPath.slice(source.prefix.length) } } : {}) }),
           );
           if (!result) throw new Error("The workspace engine is not running.");
+          const found = await resolveOwnedWorkspaceSharePath(operation.workspace, `${input.collectionPath}/collection.yaml`);
+          const target = found && resolveRegisteredShareViewFilesTarget(operation.workspace, found.target);
+          const grant = target && recordedShareSelector(target.grantedSelector);
+          if (target?.shareId && grant?.versionId === null) {
+            const records = [...result.records, ...(result.groups?.flatMap(group => group.records) ?? [])];
+            const paths = [...new Set(records.map(record => record.path))];
+            const statuses = await dependencies.requireEngineSessions().run(source.workspace, async binding =>
+              shareRecordStatuses(new WorkspaceDaemonRequester(binding.client), {
+                workspaceId: target.storeWorkspaceId, shareId: target.shareId!, paths,
+                grantedSelector: { paths: grant.paths, versionId: grant.versionId, access: grant.access },
+              }, { workspace: binding.workspace })).catch((): Awaited<ReturnType<typeof shareRecordStatuses>> => ({}));
+            for (const record of records) {
+              const status = statuses[record.path];
+              if (status) {
+                record.creationDelivery = status.state === "pending" && dependencies.isOnline?.() === false ? "offline" : status.state;
+                record.creationRefusal = status.reason;
+                record.creationCanDiscard = status.canDiscard;
+              }
+            }
+          }
           return QueryCollectionRecordsResult.parse(receivedCollectionQuery(result, source));
         },
       );
@@ -470,6 +498,15 @@ export function createWorkspaceEngineIpc<
   }
 
   function registerYDoc(): void {
+    registerOperations<typeof engineYDocAdmissionOperations, Event, Operation>({
+      handle: registerHandler,
+      assertTrustedSender,
+      withActiveWorkspace: (event, workspaceId, inactiveMessage, work) =>
+        withRendererWorkspaceOperation(event.sender, workspaceId, inactiveMessage, work),
+    }, engineYDocAdmissionOperations, {
+      waitForEngineYDocAdmission: (payload, { event }) =>
+        engineYDocSessionIpc.waitForAdmission(event.sender, payload),
+    });
     registerHandler(CHANNELS.engineYDocOpen, async (event, payload) => {
       assertTrustedSender(event);
       return engineYDocSessionIpc.open(event.sender, payload);

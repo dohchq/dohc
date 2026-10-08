@@ -131,6 +131,7 @@ export async function startServiceLiveHost(options: {
   const lifetime = liveHostSignal(storage.unavailable, invalidated.signal, options.signal);
   const signal = lifetime.signal;
   const changes = options.frameChanges;
+  const workspaceIds = config.workspaces.map(row => row.workspaceId);
   const scope = Scope.makeUnsafe();
   const consumers = new Map<string, LiveCommittedDelivery>();
   const ordinary = new Map<string, ServiceOrdinaryReplication>();
@@ -165,7 +166,7 @@ export async function startServiceLiveHost(options: {
       await Effect.runPromise(Scope.close(scope,Exit.void));
     });
     invalidated.abort();
-    changes?.notify();
+    changes?.notifyHost(workspaceIds);
     return closing;
   };
   const abort = () => { if (!closing) void close().catch(error => console.error("Service host shutdown failed.", error)); };
@@ -407,7 +408,9 @@ export async function startServiceLiveHost(options: {
     });
   }),Scope.Scope,scope));
   try {
-    return await startup;
+    const result = await startup;
+    changes?.notifyHost(workspaceIds);
+    return result;
   } catch (error) {
     signal.removeEventListener("abort",abort);
     try {await close();}

@@ -359,6 +359,7 @@ async fn cancellation_during_deferred_upload_preserves_acknowledged_prefix() {
     let io_cancelled_upload = Arc::clone(&cancelled_upload);
     let outcome = actor
         .relay_with_io(
+            false,
             push_operation(),
             LeaseRegistry::default(),
             token.clone(),
@@ -396,6 +397,55 @@ async fn cancellation_during_deferred_upload_preserves_acknowledged_prefix() {
     assert!(!relay.blobs.contains(&cancelled_upload));
     finish(&mut store, &mut relay);
     assert_eq!(relay.skipped, 0);
+}
+
+#[tokio::test]
+async fn deferred_push_keeps_authors_only_on_the_native_settlement_lane() {
+    let authors =
+        serde_json::json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"}]);
+    for native_settlements in [false, true] {
+        let (_scratch, path, mut store) = fixture_with_files(1);
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE replication_log SET payload_json=json_set(payload_json,'$.authors',json(?1)) WHERE op_kind='moment.append'", [authors.to_string()]).map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        }).unwrap();
+        drop(store);
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&path, 2_100).unwrap().actor;
+        let relay = Arc::new(Mutex::new(Relay::default()));
+        let io_relay = Arc::clone(&relay);
+        actor
+            .relay_with_io(
+                native_settlements,
+                push_operation(),
+                LeaseRegistry::default(),
+                CancellationToken::new(),
+                None,
+                move |request, _token| {
+                    let relay = Arc::clone(&io_relay);
+                    async move { Ok(relay.lock().unwrap().answer(&request)) }
+                },
+            )
+            .await
+            .unwrap();
+        let expected = if native_settlements {
+            authors.clone()
+        } else {
+            serde_json::json!([{"kind":"unattributed"}])
+        };
+        assert_eq!(
+            relay
+                .lock()
+                .unwrap()
+                .ops
+                .values()
+                .find(|op| op.op_kind == "moment.append")
+                .unwrap()
+                .payload["authors"],
+            expected
+        );
+        supervisor.close(&path).unwrap();
+    }
 }
 
 #[test]

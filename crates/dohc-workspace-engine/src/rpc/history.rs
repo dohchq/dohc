@@ -187,6 +187,9 @@ fn parsed_moment_author(value: Value) -> Value {
     let Some(object) = value.as_object() else {
         return corrupt();
     };
+    if object.get("kind").and_then(Value::as_str) == Some("unattributed") {
+        return if object.len() == 1 { value } else { corrupt() };
+    }
     let bounded_ids = |keys: &[&str]| {
         keys.iter().all(|key| {
             object
@@ -200,6 +203,12 @@ fn parsed_moment_author(value: Value) -> Value {
         .is_none_or(|value| value.as_str().is_some_and(|value| !value.is_empty()));
     if object.get("kind").and_then(Value::as_str) == Some("public") {
         let valid = object.len() == 3 && bounded_ids(&["principalId", "grantId"]);
+        return if valid { value } else { corrupt() };
+    }
+    if object.get("kind").and_then(Value::as_str) == Some("link")
+        && object.contains_key("publicPrincipalId")
+    {
+        let valid = object.len() == 3 && bounded_ids(&["publicPrincipalId", "label"]);
         return if valid { value } else { corrupt() };
     }
     // A direct write names its grant and generation, and either the named
@@ -237,24 +246,13 @@ fn parsed_moment_author(value: Value) -> Value {
         return if valid { value } else { corrupt() };
     }
     if object.get("kind").and_then(Value::as_str) == Some("human") {
-        let name_ok = object.get("humanName").is_none_or(|name| {
-            name.as_str()
-                .is_some_and(|name| !name.is_empty() && name.len() <= 512)
-        });
         let valid = object.len()
             == 2 + usize::from(object.contains_key("onBehalfOf"))
                 + usize::from(object.contains_key("humanName"))
             && bounded_ids(&["humanId"])
-            && principal_ok
-            && name_ok;
-        if !valid {
-            return corrupt();
-        }
-        let mut author = json!({"kind":"human", "humanId":object["humanId"]});
-        if let Some(principal) = object.get("onBehalfOf") {
-            author["onBehalfOf"] = principal.clone();
-        }
-        return author;
+            && (!object.contains_key("humanName") || bounded_ids(&["humanName"]))
+            && principal_ok;
+        return if valid { value } else { corrupt() };
     }
     let kind_ok = object.get("kind").and_then(Value::as_str) == Some("agent");
     let nonempty = |key: &str| {
@@ -491,7 +489,7 @@ mod relay_author_tests {
             json!({"kind":"agent", "agentId":"hosted-agent", "onBehalfOf":"owner", "depth":0});
         assert_eq!(
             parsed_moment_authors(&json!([human, agent]).to_string()),
-            json!([{"kind":"human", "humanId":"owner"}, {"kind":"agent", "agentId":"hosted-agent", "onBehalfOf":"owner"}])
+            json!([{"kind":"human", "humanId":"owner", "humanName":"Owner proof"}, {"kind":"agent", "agentId":"hosted-agent", "onBehalfOf":"owner"}])
         );
         for name in [json!(null), json!(""), json!("x".repeat(513))] {
             assert_eq!(
@@ -630,6 +628,23 @@ mod relay_author_tests {
         ] {
             assert_eq!(
                 parsed_moment_author(&malformed.to_string()),
+                json!({"corrupt":true})
+            );
+        }
+    }
+
+    #[test]
+    fn preserves_live_authors_and_refuses_mixed_shapes() {
+        for author in [
+            json!({"kind":"human", "humanId":"ana", "humanName":"Ana"}),
+            json!({"kind":"unattributed"}),
+            json!({"kind":"link", "publicPrincipalId":"public-ana", "label":"Ana"}),
+        ] {
+            assert_eq!(parsed_moment_author(&author.to_string()), author);
+            let mut mixed = author.clone();
+            mixed["principalId"] = json!("private");
+            assert_eq!(
+                parsed_moment_author(&mixed.to_string()),
                 json!({"corrupt":true})
             );
         }

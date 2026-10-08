@@ -83,6 +83,8 @@ pub(crate) struct Metadata {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "kind")]
 enum MomentAuthor {
+    #[serde(rename = "unattributed")]
+    Unattributed {},
     #[serde(rename = "agent")]
     Agent {
         #[serde(rename = "agentId")]
@@ -144,12 +146,8 @@ enum MomentAuthor {
     /// the server-minted link principal is provenance, never a person.
     #[serde(rename = "link")]
     Link {
-        #[serde(rename = "grantId")]
-        grant_id: String,
-        #[serde(rename = "grantGeneration")]
-        grant_generation: i64,
-        #[serde(rename = "principalId")]
-        principal_id: String,
+        #[serde(flatten)]
+        identity: LinkMomentAuthor,
     },
     #[serde(rename = "automation")]
     Automation {
@@ -163,6 +161,24 @@ enum MomentAuthor {
         )]
         on_behalf_of: Option<String>,
         depth: u32,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged, deny_unknown_fields)]
+enum LinkMomentAuthor {
+    Direct {
+        #[serde(rename = "grantId")]
+        grant_id: String,
+        #[serde(rename = "grantGeneration")]
+        grant_generation: i64,
+        #[serde(rename = "principalId")]
+        principal_id: String,
+    },
+    Live {
+        #[serde(rename = "publicPrincipalId")]
+        public_principal_id: String,
+        label: String,
     },
 }
 
@@ -989,6 +1005,42 @@ fn apply_moment_append(
                     envelope.recorded_at_ms,
                 )
                 .map_err(crate::ydoc_apply::map_domain_hard_error)?;
+                if let Some(facts) = record_facts.as_mut() {
+                    // verify_direct_write_author already checked this relay
+                    // origin and the sole server-derived author together.
+                    facts.shared_author = match payload.authors.as_deref() {
+                        Some(
+                            [
+                                MomentAuthor::Named {
+                                    user_id,
+                                    grant_id,
+                                    grant_generation,
+                                },
+                            ],
+                        ) => Some(dohc_engine_domain::SharedChangeAuthor::Named {
+                            user_id: user_id.clone(),
+                            grant_id: grant_id.clone(),
+                            grant_generation: *grant_generation,
+                        }),
+                        Some(
+                            [
+                                MomentAuthor::Link {
+                                    identity:
+                                        LinkMomentAuthor::Direct {
+                                            grant_id,
+                                            grant_generation,
+                                            principal_id,
+                                        },
+                                },
+                            ],
+                        ) => Some(dohc_engine_domain::SharedChangeAuthor::Link {
+                            grant_id: grant_id.clone(),
+                            grant_generation: *grant_generation,
+                            principal_id: principal_id.clone(),
+                        }),
+                        _ => None,
+                    };
+                }
             }
         }
         upsert_search_row(
@@ -1518,11 +1570,14 @@ fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {
                             author,
                             MomentAuthor::Public { .. }
                                 | MomentAuthor::Named { .. }
-                                | MomentAuthor::Link { .. }
+                                | MomentAuthor::Link {
+                                    identity: LinkMomentAuthor::Direct { .. }
+                                }
                         )
                     }))
         })
         || payload.authors.iter().flatten().any(|author| match author {
+            MomentAuthor::Unattributed {} => false,
             MomentAuthor::Agent {
                 agent_id,
                 on_behalf_of,
@@ -1535,9 +1590,15 @@ fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {
             }
             MomentAuthor::Human {
                 human_id,
+                human_name,
                 on_behalf_of,
-                ..
-            } => human_id.is_empty() || on_behalf_of.as_ref().is_some_and(String::is_empty),
+            } => {
+                human_id.is_empty()
+                    || human_name.as_ref().is_some_and(|name| {
+                        name.is_empty() || name.len() > dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES
+                    })
+                    || on_behalf_of.as_ref().is_some_and(String::is_empty)
+            }
             MomentAuthor::Public {
                 principal_id,
                 grant_id,
@@ -1555,15 +1616,27 @@ fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {
                     || *grant_generation < 1
             }
             MomentAuthor::Link {
-                grant_id,
-                grant_generation,
-                principal_id,
+                identity:
+                    LinkMomentAuthor::Direct {
+                        grant_id,
+                        grant_generation,
+                        principal_id,
+                    },
             } => {
                 [grant_id, principal_id]
                     .iter()
                     .any(|v| v.is_empty() || v.len() > 500)
                     || *grant_generation < 1
             }
+            MomentAuthor::Link {
+                identity:
+                    LinkMomentAuthor::Live {
+                        public_principal_id,
+                        label,
+                    },
+            } => [public_principal_id, label].iter().any(|value| {
+                value.is_empty() || value.len() > dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES
+            }),
             MomentAuthor::Automation {
                 automation_id,
                 on_behalf_of,
@@ -1611,7 +1684,13 @@ fn verify_direct_write_author(
             Some(grant_id.as_str()),
             &["kind", "userId", "grantId", "grantGeneration"],
         ),
-        Some([MomentAuthor::Link { grant_id, .. }]) => (
+        Some(
+            [
+                MomentAuthor::Link {
+                    identity: LinkMomentAuthor::Direct { grant_id, .. },
+                },
+            ],
+        ) => (
             Some(grant_id.as_str()),
             &["kind", "grantId", "grantGeneration", "principalId"],
         ),

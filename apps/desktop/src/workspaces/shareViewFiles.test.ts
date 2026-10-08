@@ -281,6 +281,7 @@ const unusedReconcilePorts: Pick<
   | "pull"
   | "recordRefusals"
   | "markEnded"
+  | "updateUnsavedPaths"
   | "retireTarget"
   | "assertProjectionRoot"
   | "createMount"
@@ -292,6 +293,7 @@ const unusedReconcilePorts: Pick<
   },
   recordRefusals: async () => undefined,
   markEnded: async () => undefined,
+  updateUnsavedPaths: async () => undefined,
   retireTarget: async () => undefined,
   assertProjectionRoot: async () => undefined,
   createMount: async () => undefined,
@@ -299,6 +301,201 @@ const unusedReconcilePorts: Pick<
 };
 
 describe("ShareViewFiles", () => {
+  it.each(["end", "narrow"] as const)("preserves a recipient-created record's unreadable edits before %s", async restriction => {
+    const rootPath = await workspaceRoot();
+    const path = "tasks/Created.md";
+    const text = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\nRecipient draft\n";
+    const registered = { ...target(rootPath), unsavedPaths: undefined as string[] | null | undefined,
+      grantedSelector: { paths: ["tasks"], versionId: null, access: "edit" as "edit" | "view" } };
+    const store = mutableTextStore({ initial: [] });
+    const ports = { ...unusedReconcilePorts, resolveTarget: () => registered, openStore: () => store,
+      markEnded: async (_target: ResolvedShareViewFilesTarget, unsavedPaths?: string[] | null) => {
+        registered.ended = true; registered.unsavedPaths = unsavedPaths;
+      } };
+    const files = createShareViewFiles(ports);
+    const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
+    await withStaleSensitiveWorkspaceOperation(rootPath, lease => files.change(lease, requested,
+      { kind: "create", path, initialText: text }));
+    await writeFile(join(rootPath, path), `${text}Unsent edit\n`);
+    const original = fsPromises.lstat;
+    const inspect = vi.spyOn(fsPromises, "lstat").mockImplementation((...args) => {
+      if (String(args[0]) === join(rootPath, path)) return Promise.reject(Object.assign(new Error("locked"), { code: "EACCES" }));
+      return original(...args);
+    });
+    try {
+      await withStaleSensitiveWorkspaceOperation(rootPath, async lease => {
+        if (restriction === "end") await files.end(lease, requested, () => undefined);
+        else await files.narrow(lease, requested, () => undefined, unsavedPaths => {
+          registered.grantedSelector.access = "view"; registered.unsavedPaths = unsavedPaths;
+        });
+      });
+      expect(registered.unsavedPaths).toEqual([path]);
+      const saved = JSON.parse(JSON.stringify(registered)) as typeof registered;
+      const restarted = createShareViewFiles({ ...ports, resolveTarget: () => saved });
+      await withStaleSensitiveWorkspaceOperation(rootPath, lease => restarted.reconcile(lease, requested, "settle"));
+      expect(await readFile(join(rootPath, path), "utf8")).toBe(`${text}Unsent edit\n`);
+      expect(saved.unsavedPaths).toEqual([path]);
+    } finally { inspect.mockRestore(); }
+  });
+
+  it.each(["end", "narrow"] as const)("captures an on-disk Edit change before %s and keeps it after a later read", async restriction => {
+    const rootPath = await workspaceRoot();
+    const path = "tasks/notes.md";
+    const registered = { ...target(rootPath), grantedSelector: { paths: ["tasks"], versionId: null, access: "edit" as "edit" | "view" } };
+    const store = mutableTextStore({ initial: [{ path, text: "owner version\n" }] });
+    await mkdir(join(rootPath, "tasks"), { recursive: true });
+    await writeFile(join(rootPath, path), "recipient agent edit\n");
+    const markEnded = vi.fn(async () => { registered.ended = true; });
+    const retireTarget = vi.fn(async () => undefined);
+    const pull = vi.fn(unusedReconcilePorts.pull);
+    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => registered,
+      openStore: () => store, markEnded, retireTarget, pull });
+    const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
+    await withStaleSensitiveWorkspaceOperation(rootPath, async lease => {
+      if (restriction === "end") await files.end(lease, requested, () => undefined);
+      else await files.narrow(lease, requested, () => undefined, () => { registered.grantedSelector.access = "view"; });
+    });
+    expect(store.writeTextFile).toHaveBeenCalledWith(expect.objectContaining({ path, text: "recipient agent edit\n", metadata: { origin: "local-file" } }));
+    await withStaleSensitiveWorkspaceOperation(rootPath, lease => files.reconcile(lease, requested, "settle"));
+    expect(await readFile(join(rootPath, path), "utf8")).toBe("recipient agent edit\n");
+    expect(await store.readTextFile({ workspaceId: registered.workspaceId, versionId: "main", path })).toMatchObject({ text: "recipient agent edit\n" });
+    expect(pull).not.toHaveBeenCalled();
+    if (restriction === "end") {
+      expect(markEnded.mock.invocationCallOrder[0]).toBeLessThan(retireTarget.mock.invocationCallOrder[0]!);
+      expect(vi.mocked(store.writeTextFile).mock.invocationCallOrder[0]).toBeLessThan(markEnded.mock.invocationCallOrder[0]!);
+    }
+  });
+  it.each(["end", "narrow"] as const)("publishes %s despite unreadable files and retries them after restart and unlock", async restriction => {
+    const rootPath = await workspaceRoot();
+    const locked = "tasks/locked.md";
+    const good = "tasks/good.md";
+    const registered = { ...target(rootPath), unsavedPaths: undefined as string[] | null | undefined,
+      grantedSelector: { paths: ["tasks"], versionId: null, access: "edit" as "edit" | "view" } };
+    const store = mutableTextStore({ initial: [locked, good].map(path => ({ path, text: "owner version\n" })) });
+    await mkdir(join(rootPath, "tasks"), { recursive: true });
+    for (const path of [locked, good]) await writeFile(join(rootPath, path), "recipient edit\n");
+    // A pending file's inspection failure formerly threw before markEnded.
+    await seedPendingMaterializationPaths(rootPath, [locked]);
+    const original = fsPromises.lstat;
+    const inspect = vi.spyOn(fsPromises, "lstat").mockImplementation((...args) => {
+      if (String(args[0]) === join(rootPath, locked)) return Promise.reject(Object.assign(new Error("locked"), { code: "EACCES" }));
+      return original(...args);
+    });
+    const ports = { ...unusedReconcilePorts, resolveTarget: () => registered, openStore: () => store,
+      markEnded: async (_target: ResolvedShareViewFilesTarget, unsavedPaths?: string[] | null) => {
+        registered.ended = true; registered.unsavedPaths = unsavedPaths;
+      } };
+    const files = createShareViewFiles(ports);
+    const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
+    let saved: typeof registered;
+    try {
+      await withStaleSensitiveWorkspaceOperation(rootPath, async lease => {
+        if (restriction === "end") await files.end(lease, requested, () => undefined);
+        else await files.narrow(lease, requested, () => undefined, unsavedPaths => {
+          registered.grantedSelector.access = "view"; registered.unsavedPaths = unsavedPaths;
+        });
+      });
+      expect(registered.unsavedPaths).toEqual([locked]);
+      expect(store.writeTextFile).toHaveBeenCalledWith(expect.objectContaining({ path: good, text: "recipient edit\n" }));
+      expect(restriction === "end" ? registered.ended : registered.grantedSelector.access === "view").toBe(true);
+      // Reload the persisted record and update/delete/re-add the canonical file.
+      saved = JSON.parse(JSON.stringify(registered)) as typeof registered;
+      const restarted = createShareViewFiles({ ...ports, resolveTarget: () => saved,
+        updateUnsavedPaths: async (_target, paths) => { saved.unsavedPaths = paths; },
+        resolveRelay: async () => ({ baseUrl: "https://relay.example", token: "token" }),
+        pull: async () => ({ fetched: 1, applied: 1, skipped: 0, refusals: [], refusalCount: 0,
+          changedPaths: [{ path: locked, operation: "write", contentKind: "text" }], nextCursor: 1, commitCursor: async () => undefined }) });
+      for (const text of ["new owner version\n", null, "owner re-added\n"]) {
+        if (text === null) await store.deleteTextFile({ workspaceId: saved.workspaceId, versionId: "main", path: locked, metadata: { origin: "local-file" } });
+        else await store.writeTextFile({ workspaceId: saved.workspaceId, versionId: "main", path: locked, text, metadata: { origin: "local-file" } });
+        await withStaleSensitiveWorkspaceOperation(rootPath, lease => restarted.reconcile(lease, requested, "settle"));
+        expect(await readFile(join(rootPath, locked), "utf8")).toBe("recipient edit\n");
+        await withStaleSensitiveWorkspaceOperation(rootPath, lease => restarted.reconcile(lease, requested, "refresh"));
+        expect(await readFile(join(rootPath, locked), "utf8")).toBe("recipient edit\n");
+        expect(saved.unsavedPaths).toEqual([locked]);
+      }
+      } finally { inspect.mockRestore(); }
+    const restarted = createShareViewFiles({ ...ports, resolveTarget: () => saved,
+      updateUnsavedPaths: async (_target, paths) => { saved.unsavedPaths = paths; },
+      resolveRelay: async () => ({ baseUrl: "https://relay.example", token: "token" }),
+      pull: async () => {
+        await store.writeTextFile({ workspaceId: saved.workspaceId, versionId: "main", path: locked,
+          text: "later owner update\n", metadata: { origin: "local-file" } });
+        return { fetched: 1, applied: 1, skipped: 0, refusals: [], refusalCount: 0,
+          changedPaths: [{ path: locked, operation: "write", contentKind: "text" }], nextCursor: 2, commitCursor: async () => undefined };
+      } });
+    await withStaleSensitiveWorkspaceOperation(rootPath, lease => restarted.reconcile(lease, requested, "settle"));
+    expect(saved!.unsavedPaths).toEqual([]);
+    expect(await store.readTextFile({ workspaceId: saved!.workspaceId, versionId: "main", path: locked })).toMatchObject({ text: "recipient edit\n" });
+    await withStaleSensitiveWorkspaceOperation(rootPath, lease => restarted.reconcile(lease, requested, "refresh"));
+    expect(await readFile(join(rootPath, locked), "utf8")).toBe(restriction === "end" ? "recipient edit\n" : "later owner update\n");
+  });
+
+  it("removes a deleted protected path from the persisted exclusions", async () => {
+    const rootPath = await workspaceRoot();
+    const path = "notes.md";
+    const registered = { ...target(rootPath, "view"), unsavedPaths: [path] as string[] | null };
+    await writeFile(join(rootPath, path), "recipient edit\n");
+    await rm(join(rootPath, path));
+    const store = mutableTextStore({ initial: [{ path, text: "owner version\n" }] });
+    const updateUnsavedPaths = vi.fn(async (_target, paths: string[]) => { registered.unsavedPaths = paths; });
+    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => registered, openStore: () => store, updateUnsavedPaths });
+    await withStaleSensitiveWorkspaceOperation(rootPath, lease => files.reconcile(lease,
+      { kind: "standalone", workspaceId: registered.workspaceId }, "settle"));
+    expect(updateUnsavedPaths).toHaveBeenCalledWith(expect.anything(), []);
+    expect(registered.unsavedPaths).toEqual([]);
+    expect(await store.readTextFile({ workspaceId: registered.workspaceId, versionId: "main", path })).toBeNull();
+    expect(await readdir(rootPath)).not.toContain(path);
+  });
+
+  it("ends even if the store fails before capture can enumerate files", async () => {
+    const rootPath = await workspaceRoot();
+    const path = "notes.md";
+    await writeFile(join(rootPath, path), "recipient edit\n");
+    const registered = { ...target(rootPath), unsavedPaths: undefined as string[] | null | undefined };
+    const store = mutableTextStore({ initial: [{ path, text: "owner version\n" }] });
+    vi.mocked(store.listTextFileMetadata).mockRejectedValueOnce(new Error("store unavailable"));
+    const pull = vi.fn(unusedReconcilePorts.pull);
+    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => registered, openStore: () => store, pull,
+      updateUnsavedPaths: async (_target, paths) => { registered.unsavedPaths = paths; },
+      markEnded: async (_target, unsavedPaths) => {
+        registered.ended = true;
+        if (unsavedPaths !== undefined) registered.unsavedPaths = unsavedPaths;
+      } });
+    const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
+    await withStaleSensitiveWorkspaceOperation(rootPath, lease => files.end(lease, requested, () => undefined));
+    expect(registered).toMatchObject({ ended: true, unsavedPaths: null });
+    await withStaleSensitiveWorkspaceOperation(rootPath, lease => files.reconcile(lease, requested, "refresh"));
+    expect(await readFile(join(rootPath, path), "utf8")).toBe("recipient edit\n");
+    expect(registered.unsavedPaths).toEqual([]);
+    expect(store.writeTextFile).toHaveBeenCalledWith(expect.objectContaining({ path, text: "recipient edit\n" }));
+    expect(pull).not.toHaveBeenCalled();
+  });
+
+  it("reports a full capture failure during refresh and retries before pulling", async () => {
+    const rootPath = await workspaceRoot();
+    const path = "notes.md";
+    await writeFile(join(rootPath, path), "recipient edit\n");
+    const registered = { ...target(rootPath, "view"), unsavedPaths: null as string[] | null };
+    const store = mutableTextStore({ initial: [{ path, text: "owner version\n" }] });
+    const pull = vi.fn(async () => ({ fetched: 0, applied: 0, skipped: 0, refusals: [], refusalCount: 0,
+      changedPaths: [], nextCursor: 0, commitCursor: async () => undefined }));
+    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => registered, openStore: () => store,
+      updateUnsavedPaths: async (_target, paths) => { registered.unsavedPaths = paths; }, pull,
+      resolveRelay: async () => ({ baseUrl: "https://relay.example", token: "token" }) });
+    const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
+    vi.mocked(store.listTextFileMetadata).mockRejectedValueOnce(new Error("store unavailable"));
+    const failed = await withStaleSensitiveWorkspaceOperation(rootPath, lease => files.reconcile(lease, requested, "refresh"));
+    expect(failed).toMatchObject({ kind: "refresh", outcome: { ok: false } });
+    expect(registered.unsavedPaths).toBeNull();
+    expect(pull).not.toHaveBeenCalled();
+    const recovered = await withStaleSensitiveWorkspaceOperation(rootPath, lease => files.reconcile(lease, requested, "refresh"));
+    expect(recovered).toMatchObject({ kind: "refresh", outcome: { ok: true, status: "updated" } });
+    expect(registered.unsavedPaths).toEqual([]);
+    expect(pull).toHaveBeenCalledOnce();
+    expect(await readFile(join(rootPath, path), "utf8")).toBe("recipient edit\n");
+  });
+
   it("refuses automation saves on mounted shares", async () => {
     const rootPath = await workspaceRoot();
     const initial = "version: 1\nautomations: []\n";

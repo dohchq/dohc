@@ -1,3 +1,7 @@
+import { parseHostEpoch } from "@dohc/live-session-contract";
+import { createHash } from "node:crypto";
+import { restoreDirectWrites } from "./stopAndRestore";
+import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { mintLocalhostCa } from "../../../../services/share-web/src/testing/localhostCa";
 import { startServerProxy } from "../../e2e/helpers/selfHostOnboarding";
@@ -130,9 +134,18 @@ async function openJoinedDaemonCapture(input: {
   rootPath: string;
   relay: { baseUrl: string; token: string };
   passphrase?: string;
+  holdEditorResync?: boolean;
 }): Promise<LiveDaemonCapture> {
   const workspace = await openLiveDaemonWorkspace(input, { maxRestarts: 0,
     allowInsecureLoopbackForTests: new URL(input.relay.baseUrl).protocol === "http:" });
+  if (input.holdEditorResync) {
+    const client = workspace.nativeClient();
+    const onEvent = client.onEvent.bind(client);
+    // Hold the advisory resync so all updates drain together at lease close.
+    client.onEvent = handler => onEvent(event => {
+      if (event.name !== "ydoc.remoteUpdate") handler(event);
+    });
+  }
   const relay = workspace.relay.bind({
     ...workspace.workspace,
     relay: input.relay,
@@ -510,6 +523,16 @@ it.skipIf(engine.missing).each([
     else expect(markdown).toBe(`---\nid: ${pending.recordId}\n---\n\n${beforeAdoption}`);
     await capture.flush();
     expect((await adapter.listPendingCollectionAdoptions()).adoptions).toEqual([]);
+    const ownerSettlement = (await capture.listMoments({limit: 100})).moments.find(moment => moment.path === path);
+    expect(ownerSettlement?.authors).toEqual([{kind: "unattributed"}]);
+    // Publish owner operations before the peer imports settlement coverage.
+    await pushUntilDrained(relay);
+    expect(await source.sessions.run(source.workspace, async ({client, workspace}) =>
+      new WorkspaceDaemonRequester(client).request("sync.refusalNotices", {workspaceId}, {workspace}))).toEqual({notices: []});
+    peer = await openJoinedDaemonCapture({workspaceId, rootPath: rootB, relay: relayConnection});
+    await pullAndExpect(peer, rootB, path, markdown);
+    const imported = (await peer.capture.listMoments({limit: 100})).moments.find(moment => moment.id === ownerSettlement?.id);
+    expect(imported?.authors).toEqual([{kind: "unattributed"}]);
     if (hasId) {
       await delivery.stop();
       delivery = undefined;
@@ -587,8 +610,8 @@ it.skipIf(engine.missing).each([
       } finally { await formula.close(); }
     }
     await pushUntilDrained(relay);
-    peer = await openJoinedDaemonCapture({workspaceId, rootPath: rootB, relay: relayConnection});
-    await pullAndExpect(peer, rootB, path, markdown);
+    await peer.capture.runRelaySync(materializePage => peer!.relay.pull(materializePage));
+    expect(await readFile(join(rootB, path), "utf8")).toBe(markdown);
     expect(errors).toEqual([]);
     await session.close({settle: false});
   } finally {
@@ -1617,3 +1640,119 @@ it.skipIf(engine.missing)(
   },
   180_000,
 );
+
+
+it.skipIf(engine.missing)("keeps mixed accepted text for Stop and restore on a second owner with a lease", async () => {
+  const workspaceId = "two-daemon-drain-coverage", path = "tasks/one.md";
+  const rootA = await createTestScratch("dohc-drain-owner-");
+  const rootB = await createTestScratch("dohc-drain-peer-");
+  const relayRoot = await createTestScratch("dohc-drain-relay-");
+  const relayServer = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
+  const relayConnection = { baseUrl: relayServer.baseUrl, token: `test:${workspaceId}` };
+  let owner: Awaited<ReturnType<typeof openLiveDaemonWorkspace>> | undefined;
+  let capture: WorkspaceEngineCapture | undefined;
+  let peer: LiveDaemonCapture | undefined;
+  const doc = markdownToYDoc("---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nName: Recipient record\n---\n\nOriginal body.\n");
+  const hash = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
+  try {
+    const profile = selfHostLiveProfile();
+    const configPath = join(rootA, "owner-ingress.json");
+    await writeFile(configPath, JSON.stringify(profile.nativeIngress));
+    owner = await openLiveDaemonWorkspace({ workspaceId, rootPath: rootA }, { maxRestarts: 0,
+      privateOwnerHost: { configPath, client: profile.nativeClient }, allowInsecureLoopbackForTests: true });
+    const source = owner;
+    const relay = source.relay.bind({ ...source.workspace, relay: relayConnection });
+    await relay.claim();
+    await source.chats.ensureGeneralChannel({ workspaceId });
+    await pushUntilDrained(relay);
+    const baselineBytes = Y.encodeStateAsUpdate(doc), baseline = yDocToMarkdown(doc);
+    const binding = { workspaceId, mainVersionId: "main", objectId: "record-one", currentPath: path,
+      lineageClaimId: hash(baselineBytes), selectorPaths: ["tasks"], restoreFenceGeneration: 0 };
+    const client = source.nativeClient();
+    let id = 1000;
+    const { handle, registrationId } = await source.sessions.run(source.workspace, async ({ workspace }) => {
+      const request = (method: string, params: Record<string, unknown>) => client.sendRequest({ id: ++id, method,
+        workspace, params: params as Parameters<typeof client.sendRequest>[0]["params"], deadlineMs: REAL_DAEMON_DEADLINE_MS });
+      await request("versions.ensureMain", { workspaceId });
+      const files = new VersionedLiveAdapter(client, workspace, { workspaceId });
+      await files.writeTextFile({ workspaceId, versionId: "main", path: "tasks/collection.yaml",
+        text: "fields:\n  Name: {type: text}\n  OwnerNote: {type: text}\n", publish: true, metadata: { origin: "api" } });
+      await request("liveApplication.provisionOwner", { relayNamespace: "drain-relay", host: {
+        hostId: "owner-A", hostEpoch: 1, instanceId: "instance", connectionId: "connection" } });
+      const registered = await request("liveApplication.register", { binding });
+      return { handle: workspace, registrationId: (registered.result as { registrationId: number }).registrationId };
+    });
+    const bootstrapped = await client.sendLiveBootstrap({ id: ++id, workspace: handle, registrationId, deadlineMs: REAL_DAEMON_DEADLINE_MS }, {
+      bootstrapId: "recipient-baseline", bootstrapMomentId: "recipient-baseline-moment", baselineMomentRelaySequence: 1,
+      baselineRegisteredAtMs: 100, baselineDigest: binding.lineageClaimId, projectedMarkdownDigest: hash(baseline),
+      projectedMarkdownByteLength: Buffer.byteLength(baseline), baselineBytes,
+    });
+    expect(bootstrapped.result).toMatchObject({ status: "bootstrapped" });
+    capture = createWorkspaceEngineCapture({ ...source.workspace, rustEngineSessions: source.sessions, settleDebounceMs: 60_000 });
+    await writeFile(join(rootA, path), baseline);
+    const hosted = await capture.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
+    await hosted.settleNow();
+    await pushUntilDrained(relay);
+    peer = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: relayConnection, holdEditorResync: true });
+    await peer.capture.runRelaySync(materialize => peer!.relay.pull(materialize));
+    const lease = await peer.capture.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
+    expect(lease.objectId).toBe(binding.objectId);
+    expect(lease.lineageClaimId).toBe(binding.lineageClaimId);
+    await lease.settleNow();
+    try {
+      for (const [cursor, field, value, recipient] of [[1, "OwnerNote", "Owner text", false], [2, "Name", "Recipient text", true]] as const) {
+        const vector = Y.encodeStateVector(doc);
+        patchFrontmatter(doc, new Map([[field, value]]));
+        const updateBytes = Y.encodeStateAsUpdate(doc, vector);
+        const receipt = { deliveryId: `delivery-${cursor}`, updateDigest: hash(updateBytes), journalCursor: cursor, acceptingHostEpoch: parseHostEpoch(1) };
+        const applied = await client.sendLiveApplication({ id: ++id, workspace: handle, registrationId, deadlineMs: REAL_DAEMON_DEADLINE_MS }, {
+          updateBytes, metadata: { accepted: { receipt, binding, authority: recipient
+            ? { principalKind: "named", principalId: "recipient", grantId: "edit-grant", grantGeneration: 1 }
+            : { principalKind: "owner", principalId: workspaceId, grantId: null, grantGeneration: null }, receivedAtMs: 200 + cursor }, firstSeen: [],
+            ...(recipient ? { canonicalVersion: 2, authorSnapshot: [{ kind: "human", humanId: "recipient", humanName: "Recipient" }], firstSeenDeletes: [] } : {}) },
+        });
+        expect(applied.result).toMatchObject({ status: "applied" });
+      }
+      await capture.runRelaySync(materialize => relay.pull(materialize));
+      await pushUntilDrained(relay);
+      await peer.relay.pull(async () => undefined);
+      const parked = new DatabaseSync(join(rootB, SECRET_FILE_STORE_RELATIVE_PATH), { readOnly: true });
+      try {
+        expect((parked.prepare("SELECT count(*) AS n FROM ydoc_deferred_updates").get() as { n: number }).n,
+          JSON.stringify({ operations: parked.prepare("SELECT op_kind,apply_disposition FROM replication_log").all(),
+            documents: parked.prepare("SELECT object_id,lineage_claim_id FROM ydoc_docs").all() })).toBe(2);
+      }
+      finally { parked.close(); }
+    } finally { await lease.close({ settle: false }); }
+    const moments = (await peer.capture.listMoments({ limit: 100 })).moments.filter(moment => moment.path === path);
+    const projected = moments.find(moment => moment.id.startsWith("moment-ydoc-apply-"));
+    expect(projected?.authors).toContainEqual({ kind: "unattributed" });
+    expect(projected?.authors).toContainEqual({ kind: "human", humanId: "recipient", humanName: "Recipient" });
+    // The direct-write ledger's recipient identity is independent of native History.
+    // The desktop creation e2e covers that ledger; here its seed anchors real peer moments.
+    const created: VersionedTextMoment = { id: "direct-recipient-create", workspaceId, versionId: "main", objectId: binding.objectId,
+      path, operation: "write", recordedAtMs: 99, metadata: { origin: "sync" },
+      authors: [{ kind: "named", userId: "recipient", grantId: "edit-grant", grantGeneration: 1 }],
+      payload: { before: null, after: { path, text: baseline } } };
+    const restore = vi.fn(async () => { throw new Error("Mixed text must not be restored"); });
+    const result = await restoreDirectWrites({ assertCurrent() {},
+      moment: async momentId => {
+        if (momentId === created.id) return created;
+        const detail = await peer!.capture.readMoment(momentId);
+        return detail === null ? null : detail.protected ? "protected" : detail.moment;
+      },
+      momentsAfter: async () => moments.map(moment => moment.id), restore,
+      folderEntries: async () => ["one.md"], removeEmptyFolder: async () => undefined,
+      undoRuns: async () => ({ undone: 0, left: 0, missing: 0, keptFields: [], otherKept: 0, errorMessage: null }),
+    }, [{ path, objectId: binding.objectId, momentId: created.id, created: true }]);
+    expect(result).toMatchObject({ restored: [], review: [{ path, reason: "changed-since", changedBy: "An unrecorded author" }] });
+    expect(restore).not.toHaveBeenCalled();
+    expect(await readFile(join(rootB, path), "utf8")).toContain("OwnerNote: Owner text");
+    expect(await readFile(join(rootB, path), "utf8")).toContain("Name: Recipient text");
+    await hosted.close({ settle: false });
+  } finally {
+    doc.destroy();
+    await peer?.close();
+    try { await capture?.stop().catch(() => undefined); } finally { await owner?.close(); await relayServer.stop(); }
+  }
+}, 120_000);

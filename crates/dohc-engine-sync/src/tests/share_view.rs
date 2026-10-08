@@ -767,6 +767,7 @@ fn share_view_replay_keeps_declared_agents_in_list_and_detail_through_replay_and
          "agentRunId":"private-run","principalId":"fabricated-authority","private":{"path":"private/hidden.md"}},
         {"kind":"agent","agentId":"chained-agent 旅行","onBehalfOf":"local:private-person","depth":64},
         {"kind":"human","humanId":"private-human"},
+        {"kind":"unattributed"},
         {"kind":"human","humanId":"person","humanName":"Person"},
         {"kind":"link","publicPrincipalId":"edit-link","label":"Edit link"},
         {"kind":"automation","automationId":"private-automation","depth":1},
@@ -775,6 +776,7 @@ fn share_view_replay_keeps_declared_agents_in_list_and_detail_through_replay_and
     let expected = json!([
         {"kind":"agent","agentId":"trip-agent-hosted","agentName":"Trip helper","onBehalfOf":"opaque-relay-owner"},
         {"kind":"agent","agentId":"chained-agent 旅行","depth":64},
+        {"kind":"unattributed"},
         {"kind":"human","humanId":"person","humanName":"Person"},
         {"kind":"link","publicPrincipalId":"edit-link","label":"Edit link"}
     ]);

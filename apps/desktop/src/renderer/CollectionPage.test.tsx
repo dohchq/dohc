@@ -79,14 +79,16 @@ vi.mock("./collab/useEngineDoc", () => ({
 }));
 
 function engineDocState(
-  partial: Partial<Pick<UseEngineDoc, "available" | "opening" | "doc" | "saveState" | "saveError">>,
+  partial: Partial<Pick<UseEngineDoc, "available" | "opening" | "doc" | "saveState" | "saveError" | "readOnlyWhileEditing" | "deletedWhileEditing">>,
 ): UseEngineDoc {
   return {
     available: false,
     opening: false,
     doc: null,
-    saveState: "saved",
+    saveState: { kind: "saved-here" },
     saveError: null,
+    readOnlyWhileEditing: false,
+    deletedWhileEditing: false,
     ...partial,
   } as UseEngineDoc;
 }
@@ -290,6 +292,8 @@ function pageWithHost(
   onOpenRecord: (recordPath: string) => void = () => undefined,
   view?: {
     readOnly?: boolean;
+    accessEnded?: boolean;
+    writeRefusal?: string;
     activeViewName?: string | null;
     onActiveViewChange?: (viewName: string | null) => void;
     onError?: CollectionPageProps["onError"];
@@ -302,6 +306,8 @@ function pageWithHost(
         workspaceId="ws-1"
         collectionPath="tasks"
         readOnly={view?.readOnly}
+        accessEnded={view?.accessEnded}
+        writeRefusal={view?.writeRefusal}
         activeViewName={view?.activeViewName ?? null}
         onActiveViewChange={view?.onActiveViewChange ?? (() => undefined)}
         onNewRecord={onNewRecord}
@@ -321,6 +327,8 @@ function renderPage(
   onOpenRecord: (recordPath: string) => void = () => undefined,
   view?: {
     readOnly?: boolean;
+    accessEnded?: boolean;
+    writeRefusal?: string;
     activeViewName?: string | null;
     onActiveViewChange?: (viewName: string | null) => void;
     onError?: CollectionPageProps["onError"];
@@ -331,6 +339,106 @@ function renderPage(
 }
 
 describe("CollectionPage", () => {
+  it("keeps draft delivery separate from owner application, retries, and reverses local discard", async () => {
+    const draft = { ...record("rec_aaaaaaaaaaaaaaaaaaaaaaaaaa", "Socks"), creationDelivery: "pending" as const, creationCanDiscard: true };
+    const records = [draft];
+    const api = { ...makeBridge(records), pushShareDirectWrites: vi.fn(async () => undefined),
+      deleteWorkspacePath: vi.fn(async () => { records.splice(0); }), createWorkspaceFile: vi.fn(async () => { records.push(draft); }) };
+    const text = `---\nid: ${draft.id}\nTitle: Socks\n---\nKeep the entire draft.\n`;
+    api.readWorkspaceText.mockResolvedValue({ text, truncated: false, contentHash: hashFor(0) });
+    const onNotice = vi.fn();
+    vi.stubGlobal("dohcDesktop", api);
+    render(pageWithHost(undefined, undefined, { onNotice }));
+    await screen.findByText("Saved on this computer. Waiting to send");
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(api.pushShareDirectWrites).toHaveBeenCalledWith({ workspaceId: "ws-1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Discard draft" }));
+    await waitFor(() => expect(onNotice).toHaveBeenCalled());
+    expect(api.deleteWorkspacePath).toHaveBeenCalledWith({ workspaceId: "ws-1", relativePath: draft.path });
+    act(() => onNotice.mock.calls[0]![1]());
+    await waitFor(() => expect(api.createWorkspaceFile).toHaveBeenCalledWith({ workspaceId: "ws-1", relativePath: draft.path, initialText: text }));
+  });
+
+  it("drops accepted creations from the attention strip", async () => {
+    renderPage(makeBridge([{ ...record("rec-1", "Socks"), creationDelivery: "accepted" }]));
+    await screen.findByText("Socks");
+    expect(screen.queryByTestId("collection-record-drafts")).toBeNull();
+  });
+
+  it("shows the relay refusal reason", async () => {
+    renderPage(makeBridge([{ ...record("rec-1", "Socks"), creationDelivery: "refused", creationRefusal: "This record name is taken." }]));
+    expect(await screen.findByText("This record name is taken.")).toBeTruthy();
+  });
+
+  it("does not offer Discard while the submission outcome is unknown", async () => {
+    renderPage(makeBridge([{ ...record("rec-1", "Socks"), creationDelivery: "pending", creationCanDiscard: false }]));
+    await screen.findByText("Saved on this computer. Waiting to send");
+    expect(screen.queryByRole("button", { name: "Discard draft" })).toBeNull();
+  });
+
+  it("shows the race winner without a creation strip when creation status clears", async () => {
+    const records: CollectionRecord[] = [{ ...record("loser", "Socks"), creationDelivery: "refused", creationRefusal: "This record name is taken." }];
+    const api = makeBridge(records);
+    const onOpenRecord = vi.fn();
+    renderPage(api, undefined, onOpenRecord);
+    await screen.findByText("This record name is taken.");
+    records.splice(0, 1, record("winner", "Socks"));
+    act(() => api.emitWorkspaceActivity({ workspaceId: "ws-1", paths: ["tasks/Socks.md"] }));
+    await waitFor(() => expect(screen.queryByTestId("collection-record-drafts")).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Open Socks" }));
+    expect(onOpenRecord).toHaveBeenCalledWith("tasks/Socks.md");
+    expect(screen.queryByTestId("collection-record-drafts")).toBeNull();
+  });
+
+  it("keeps ended drafts visible and discards a retry response after unmount", async () => {
+    const api = { ...makeBridge([{ ...record("rec-1", "Socks"), creationDelivery: "pending" as const }]),
+      pushShareDirectWrites: vi.fn() };
+    const pending = deferred<void>();
+    api.pushShareDirectWrites.mockReturnValue(pending.promise);
+    const onError = vi.fn();
+    const view = renderPage(api, undefined, undefined, { onError });
+    fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
+    view.unmount();
+    await act(async () => pending.reject(new Error("old workspace")));
+    expect(onError).not.toHaveBeenCalled();
+    renderPage(api, undefined, undefined, { readOnly: true, accessEnded: true });
+    expect(await screen.findByText("Access ended. This draft cannot be sent. It is kept on this computer.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+  });
+
+  it.each(["offline", "refused"] as const)("explains that an ended %s draft cannot be sent", async creationDelivery => {
+    renderPage(makeBridge([{ ...record("rec-1", "Socks"), creationDelivery }]), undefined, undefined, { readOnly: true, accessEnded: true });
+    await screen.findByText("Access ended. This draft cannot be sent. It is kept on this computer.");
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+  });
+
+  it.each([
+    { accessEnded: true, writeRefusal: undefined },
+    { accessEnded: false, writeRefusal: undefined },
+    { accessEnded: false, writeRefusal: "This share must be reopened." },
+  ])("refuses an old draft retry after read-only access: $accessEnded, $writeRefusal", async ({ accessEnded, writeRefusal }) => {
+    const api = { ...makeBridge([{ ...record("rec-1", "Socks"), creationDelivery: "pending" as const }]),
+      pushShareDirectWrites: vi.fn().mockRejectedValueOnce(new Error("offline")) };
+    const onError = vi.fn();
+    const view = renderPage(api, undefined, undefined, { onError });
+    fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    const retry = onError.mock.calls[0]![2];
+    view.rerender(pageWithHost(undefined, undefined, { onError, readOnly: true, accessEnded, writeRefusal }));
+    await act(async () => retry());
+    expect(api.pushShareDirectWrites).toHaveBeenCalledOnce();
+    const message = writeRefusal ?? (accessEnded ? "Your access to this share ended."
+      : "Your access to this share changed. Ask for Edit access, then reopen the share.");
+    expect(onError).toHaveBeenLastCalledWith(message, expect.any(Error));
+  });
+
+  it.each(["View access", "damaged share"])("does not call %s ended access", async () => {
+    renderPage(makeBridge([{ ...record("rec-1", "Socks"), creationDelivery: "pending" }]), undefined, undefined, {readOnly: true});
+    await screen.findByText("This draft cannot be sent with the current share access. It is kept on this computer.");
+    expect(screen.queryByText(/Access ended/)).toBeNull();
+    expect(screen.queryByRole("button", {name: "Try again"})).toBeNull();
+  });
+
   it("keeps View tables readable without record or definition writes", async () => {
     const bridge = makeBridge([record("rec-1", "Shared task")]);
     renderPage(bridge, undefined, undefined, { readOnly: true });
@@ -622,7 +730,7 @@ describe("CollectionPage", () => {
         doc.getMap("frontmatter").set("id", item.id);
         return doc;
       });
-      const saves: UseEngineDoc["saveState"][] = ["saved", "saved"];
+      const saves: UseEngineDoc["saveState"][] = [{ kind: "saved-here" }, { kind: "saved-here" }];
       docMock.current = (input) => {
         const index = records.findIndex(
           (item) => item.path === (input as { path: string }).path,
@@ -640,9 +748,9 @@ describe("CollectionPage", () => {
       }
       for (let index = 0; index < records.length; index += 1) {
         expect(docs[index]!.getMap("frontmatter").get("done")).toBe(true);
-        saves[index] = "saving";
+        saves[index] = { kind: "saving" };
         page.rerender(pageWithHost());
-        saves[index] = "saved";
+        saves[index] = { kind: "saved-here" };
         page.rerender(pageWithHost());
         await act(() => vi.advanceTimersByTimeAsync(50));
       }
@@ -676,9 +784,9 @@ describe("CollectionPage", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
     for (let index = 0; index < 2; index += 1) {
-      docMock.current = engineDocState({ available: true, doc, saveState: "saving" });
+      docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saving" } });
       page.rerender(pageWithHost());
-      docMock.current = engineDocState({ available: true, doc, saveState: "saved" });
+      docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saved-here" } });
       page.rerender(pageWithHost());
     }
     expect(hasPendingCollectionFieldWrites()).toBe(false);
@@ -715,10 +823,10 @@ describe("CollectionPage", () => {
     vi.useFakeTimers();
     fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
-    docMock.current = engineDocState({ available: true, doc, saveState: "saving" });
+    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saving" } });
     page.rerender(pageWithHost());
     // The first write settles; the second writer cannot open its session.
-    docMock.current = engineDocState({ available: false, doc, saveState: "saved" });
+    docMock.current = engineDocState({ available: false, doc, saveState: { kind: "saved-here" } });
     page.rerender(pageWithHost());
     expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta"]);
     expect(collectionWriteFailures()).toHaveLength(1);
@@ -802,9 +910,9 @@ describe("CollectionPage", () => {
     await act(() => vi.advanceTimersByTimeAsync(250));
     expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(2);
 
-    docMock.current = engineDocState({ available: true, doc, saveState: "saving" });
+    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saving" } });
     page.rerender(pageWithHost());
-    docMock.current = engineDocState({ available: true, doc, saveState: "saved" });
+    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saved-here" } });
     page.rerender(pageWithHost());
     expect(hasPendingCollectionFieldWrites()).toBe(false);
     await act(async () => resolveQuery({
@@ -1115,14 +1223,14 @@ describe("collection authoring", () => {
     await waitFor(() =>
       expect(doc.getMap("frontmatter").get("status")).toBe("Later"),
     );
-    docMock.current = engineDocState({ available: true, doc, saveState: "saving" });
+    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saving" } });
     page.rerender(
       <>
         {null}
         <CollectionFieldWriteHost />
       </>,
     );
-    docMock.current = engineDocState({ available: true, doc, saveState: "saved" });
+    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saved-here" } });
     page.rerender(
       <>
         {null}
@@ -1352,7 +1460,7 @@ describe("cell write queue", () => {
         ? engineDocState({
             available: true,
             doc: firstDoc,
-            saveState: "read-only",
+            saveState: { kind: "unknown" }, readOnlyWhileEditing: true,
             saveError: "This workspace is read-only.",
           })
         : engineDocState({ available: true, doc: nextDoc });
@@ -1404,7 +1512,7 @@ describe("cell write queue", () => {
         ? engineDocState({
             available: true,
             doc: firstDoc,
-            saveState: "file-locked",
+            saveState: { kind: "file-locked", reason: "test failure", issueId: null },
           })
         : engineDocState({ available: true, doc: nextDoc });
     };
@@ -1453,7 +1561,7 @@ describe("cell write queue", () => {
       (input as { path: string }).path === "tasks/Plan.md"
         ? engineDocState({ available: true, doc: firstDoc, saveState })
         : engineDocState({ available: true, doc: nextDoc });
-    docMock.current = docFor("saved");
+    docMock.current = docFor({ kind: "saved-here" });
     const bridge = makeBridge(
       [withCheckbox("rec-1", "Plan"), withCheckbox("rec-2", "Ship")],
       CHECKBOX_SCHEMA,
@@ -1486,9 +1594,9 @@ describe("cell write queue", () => {
     page.unmount();
 
     // The pending head settles only now, after the page is gone.
-    docMock.current = docFor("saving");
+    docMock.current = docFor({ kind: "saving" });
     host.rerender(<CollectionFieldWriteHost />);
-    docMock.current = docFor("saved");
+    docMock.current = docFor({ kind: "saved-here" });
     host.rerender(<CollectionFieldWriteHost />);
 
     await waitFor(() =>
@@ -1899,11 +2007,11 @@ describe("CollectionRecordFieldWrite", () => {
     // the staged local-update flush, so the writer must still be waiting.
     expect(props.onSettled).not.toHaveBeenCalled();
 
-    docMock.current = engineDocState({ available: true, doc, saveState: "saving" });
+    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saving" } });
     view.rerender(<CollectionRecordFieldWrite {...props} />);
     expect(props.onSettled).not.toHaveBeenCalled();
 
-    docMock.current = engineDocState({ available: true, doc, saveState: "saved" });
+    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saved-here" } });
     view.rerender(<CollectionRecordFieldWrite {...props} />);
     expect(props.onSettled).toHaveBeenCalledOnce();
     expect(props.onFailed).not.toHaveBeenCalled();
@@ -1919,7 +2027,7 @@ describe("CollectionRecordFieldWrite", () => {
     docMock.current = engineDocState({
       available: true,
       doc,
-      saveState: "error",
+      saveState: { kind: "error", reason: "test failure", issueId: null },
       saveError: "file too large",
     });
     view.rerender(<CollectionRecordFieldWrite {...props} />);
@@ -1940,7 +2048,7 @@ describe("CollectionRecordFieldWrite", () => {
     docMock.current = engineDocState({
       available: true,
       doc,
-      saveState: "file-locked",
+      saveState: { kind: "file-locked", reason: "test failure", issueId: null },
     });
     view.rerender(<CollectionRecordFieldWrite {...props} />);
     // Inside the window the writer waits on main's own retries.
@@ -1949,12 +2057,12 @@ describe("CollectionRecordFieldWrite", () => {
     expect(props.onHeldDurably).not.toHaveBeenCalled();
 
     // A retry's own saving flip must not restart the window.
-    docMock.current = engineDocState({ available: true, doc, saveState: "saving" });
+    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saving" } });
     view.rerender(<CollectionRecordFieldWrite {...props} />);
     docMock.current = engineDocState({
       available: true,
       doc,
-      saveState: "file-locked",
+      saveState: { kind: "file-locked", reason: "test failure", issueId: null },
     });
     view.rerender(<CollectionRecordFieldWrite {...props} />);
     vi.advanceTimersByTime(1);

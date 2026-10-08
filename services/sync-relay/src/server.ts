@@ -860,7 +860,7 @@ export function createSyncRelayHandler({
         return await respondToWorkspaceRegistration(request, actor);
       }
 
-      if (route.route === "shares-list" || route.route === "share") {
+      if (route.route === "shares-list" || route.route === "share" || route.route === "share-access") {
         return await respondToShareInventory(request, route, actor);
       }
 

@@ -20,6 +20,7 @@ import {
   applyCurrentFileOp,
 } from "./currentFiles";
 import { rowToLogRow } from "./rows";
+import { notifyDesktopReadiness } from "../desktopReadinessChanges";
 
 export function appendLogBatch(storage: StorageContext, input: {
     workspaceId: string;
@@ -182,6 +183,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
           // proposal's base resolves to at accept.
           const moment = objectMomentFromMomentPayload(op.payloadJson);
           if (moment) {
+            if (moment.versionId === "main" && moment.path !== null) notifyDesktopReadiness(storage, {workspaceId: input.workspaceId, path: moment.path});
             objectMomentStmt.run(
               input.workspaceId,
               moment.objectId,

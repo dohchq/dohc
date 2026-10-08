@@ -32,7 +32,10 @@
     "./dataset-path": "./src/datasetPath.ts",
     "./workspace-settings": "./src/workspaceSettings.ts",
     "./workspace-settings-values": "./src/workspaceSettingsValues.ts",
-    "./capabilities": "./src/capabilities.ts"
+    "./capabilities": "./src/capabilities.ts",
+    "./save-state": "./src/saveState.ts",
+    "./save-state-schema": "./src/saveStateSchema.ts",
+    "./usage": "./src/usage.ts"
   },
   "scripts": {
     "test": "vitest run",

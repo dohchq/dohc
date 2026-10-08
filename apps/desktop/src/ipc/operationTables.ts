@@ -1,8 +1,10 @@
 import {
   chatDispatchNoticeOperations,
   crashReportOperations,
+  engineYDocAdmissionOperations,
   noticeOperations,
   scheduleHostOperations,
+  sharedViewAccessOperations,
   workspaceSearchOperations,
   workspaceVersionOperations,
 } from "./bridgeContract";
@@ -13,7 +15,9 @@ export const OPERATION_TABLES = [
   workspaceVersionOperations,
   workspaceSearchOperations,
   crashReportOperations,
+  engineYDocAdmissionOperations,
   chatDispatchNoticeOperations,
   scheduleHostOperations,
   noticeOperations,
+  sharedViewAccessOperations,
 ] as const satisfies readonly OperationTable[];

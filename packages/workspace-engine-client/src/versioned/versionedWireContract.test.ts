@@ -47,6 +47,7 @@ describe("versioned result decoder rejection", () => {
       { kind: "human", humanId: "ada", onBehalfOf: "ada" },
       { kind: "agent", agentId: "agent" },
       { corrupt: true },
+      { kind: "unattributed" },
     ];
     expect(decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors })?.authors).toEqual(authors);
     expect(() => decodeVersionedResult(VERSIONED_METHOD.momentsGet, {
@@ -159,6 +160,16 @@ describe("versioned result decoder rejection", () => {
       expect(() =>
         decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors: [malformed] }),
       ).toThrow(ProtocolShapeError);
+    }
+  });
+
+  it("preserves live human and public link author snapshots without accepting mixed identities", () => {
+    for (const author of [
+      { kind: "human", humanId: "ana", humanName: "Ana" },
+      { kind: "link", publicPrincipalId: "public-ana", label: "Ana" },
+    ]) {
+      expect(decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors: [author] })?.authors).toEqual([author]);
+      expect(() => decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors: [{ ...author, principalId: "private" }] })).toThrow(ProtocolShapeError);
     }
   });
 

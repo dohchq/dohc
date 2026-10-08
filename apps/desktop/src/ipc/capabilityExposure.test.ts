@@ -13,6 +13,7 @@ import type { OperationDefinition } from "./operationTable";
 import { OPERATION_TABLES } from "./operationTables";
 import mainIpc from "./ipcExposure.main.json";
 import clipboardIpc from "./ipcExposure.pr1639.json";
+import recipientRecordsIpc from "./ipcExposure.pr1688.json";
 import launchOpenIpc from "./ipcExposure.pr1701.json";
 import mainCli from "./cliExposure.main.json";
 import publicationCli from "./cliExposure.pr1659.json";
@@ -48,11 +49,12 @@ describe("B1 main inventories (a4be19d5b)", () => {
     // Hand-reviewed #1639 removals and #1701 additions, separate from the
     // hashed main baseline.
     const expectedNames = [...mainIpc.names];
+    expectedNames.push("desktop:check-shared-view-access");
     for (const name of clipboardIpc.nameRemovals) {
       expect(expectedNames).toContain(name);
       expectedNames.splice(expectedNames.indexOf(name), 1);
     }
-    for (const name of launchOpenIpc.nameAdditions) {
+    for (const name of [...launchOpenIpc.nameAdditions, ...recipientRecordsIpc.nameAdditions]) {
       expect(expectedNames).not.toContain(name);
       expectedNames.push(name);
     }

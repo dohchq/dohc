@@ -310,6 +310,7 @@ function directWriteReport(value: JsonValue, method: string): DirectWriteReport 
         paths,
         result: "stale",
         stalePath: stringField(write, "stalePath", method),
+        recoveredDraftPath: nullableStringField(write, "recoveredDraftPath", method),
         currentBlobSha256: nullableStringField(write, "currentBlobSha256", method),
       };
     case "refused":

@@ -130,6 +130,18 @@ describe("the automation replica's credential", () => {
     }));
     expect(push.status, await push.clone().text()).toBe(200);
     expect(await push.json()).toMatchObject({ inserted: 1 });
+    // An automation replica retains the client author boundary, including native-shaped moments.
+    for (const author of [{kind: "human", humanId: "recipient", humanName: "Recipient"},
+      {kind: "link", publicPrincipalId: "public-link", label: "Link editor"}, {kind: "unattributed", humanId: "recipient"}]) {
+      const refused = await handler(new Request(`https://relay.test/sync/${WORKSPACE}/log`, {
+        method: "POST", headers: {authorization: `Bearer ${bearer}`, "content-type": "application/json"},
+        body: JSON.stringify({replicationEpoch: "epoch-1", streamIdentity: "stream-1", originId: "server-replica", ops: [
+          {originSeq: 1, opKind: "moment.append", recordedAtMs: 10, payload: {momentId: `moment-ydoc-${"a".repeat(64)}`, authors: [author]}}]}),
+      }));
+      expect(refused.status).toBe(403);
+      expect(await refused.json()).toMatchObject({code: "authorship_mismatch"});
+    }
+    expect(storage.fetchLogCoordinate({workspaceId: WORKSPACE, originId: "server-replica", originSeq: 1})).toBeNull();
     // Waiting to leave, it reads but writes nothing.
     storage.unwantAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
     expect(authorize({}), "a read").toBe("owner");
