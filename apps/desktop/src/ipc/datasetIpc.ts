@@ -1,3 +1,4 @@
+import { datasetBaseFolder } from "@dohc/security-contract/dataset";
 import type { CreationStage, CreationPartial } from "@dohc/cli/creation";
 import { CreatedFileWriteError } from "../workspaces/workspaceFiles";
 import { SourceCreationConflict, type SourceCreationProgress } from "../workspaces/datasetSourceCreation";
@@ -148,7 +149,8 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
           current();
           if (!datasetPath) {
             const definition = approved.revision.definition;
-            datasetPath = definition.schemaPath.slice(0, definition.schemaPath.lastIndexOf("/") + 1) + "dataset.json";
+            const folder = datasetBaseFolder(definition);
+            datasetPath = folder === "." ? "dataset.json" : `${folder}/dataset.json`;
             const files = { [definition.schemaPath]: approved.schemaSql, [definition.operationsPath]: approved.operationSource,
               [datasetPath]: JSON.stringify(definition, null, 2) + "\n" };
             const existing = await dependencies.withAdapter(operation.workspace, adapter => adapter.listTextFileMetadata({ workspaceId: input.workspaceId, versionId: "main" }));

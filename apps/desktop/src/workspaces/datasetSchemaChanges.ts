@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { posix } from "node:path";
-import { datasetColumnFields, parseDatasetDefinition, type DatasetColumnField, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { datasetBaseFolder, datasetColumnFields, parseDatasetDefinition, type DatasetColumnField, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { datasetNumberText, losslessDatasetNumber } from "@dohc/security-contract/dataset-conversion";
 import type { DatasetSchemaChange } from "@dohc/cli/dataset";
 import { generateDatasetSources } from "./datasetGenerator";
@@ -130,7 +130,7 @@ export function generateDatasetSchemaChange(input: { revision: DatasetRevision; 
       summary = `Add ${field.name}`;
     }
   }
-  const base = posix.dirname(original.schemaPath).split(/(?:^|\/)revisions\//)[0]!;
+  const base = datasetBaseFolder(original);
   const directory = posix.join(base, "revisions", `${input.revision.revision + 1}-${randomUUID()}`);
   definition.schemaPath = posix.join(directory, "schema.sql"); definition.operationsPath = posix.join(directory, `operations${posix.extname(original.operationsPath)}`);
   const descriptorPath = posix.join(directory, "revision.json"), migrationPath = posix.join(directory, "migration.sql");

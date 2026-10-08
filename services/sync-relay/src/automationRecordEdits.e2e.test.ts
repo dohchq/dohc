@@ -17,7 +17,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdir, writeFile, readFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, expect, it, onTestFailed, vi } from "vitest";
 import { serveFetchHandler, TokenBucketLimiter } from "@dohc/service-http";
 import {parseAutomationsFile} from "@dohc/workspace-contracts/automations";
 import {definitionHash} from "@dohc/automation-executor/automation-plan";
@@ -89,12 +89,20 @@ async function computer(input: {
   const profile = selfHostLiveProfile();
   const configPath = join(input.root, "owner-ingress.json");
   await writeFile(configPath, JSON.stringify(profile.nativeIngress));
+  let stderrTail = "";
+  let teardownStarted = false;
+  let exitStatus: {code: number | null; signal: NodeJS.Signals | null; duringTeardown: boolean} | undefined;
+  onTestFailed(() => {
+    console.error(`[automation engine] ${JSON.stringify({root: input.root, command: engine.path, exitStatus: exitStatus ?? null})}\n${stderrTail || "(no engine stderr)"}`);
+  });
   const client = await createEngineClient({
     env: {DOHC_ENGINE_OWNER_HOST_CONFIG: configPath}, privateLiveApplication: profile.nativeClient,
     command: engine.require(), authToken: randomBytes(32).toString("base64url"),
     protocolVersion: 2, capabilities: ["blobs"], connectTimeoutMs: DEADLINE_MS,
+    onStderr: text => {stderrTail = (stderrTail + text).slice(-64 * 1024);},
+    onExit: (code, signal) => {exitStatus = {code, signal, duringTeardown: teardownStarted};},
   });
-  cleanup.push(async () => {client.close(); await client.waitForExit();});
+  cleanup.push(async () => {teardownStarted = true; client.close(); await client.waitForExit();});
   let requestId = 0;
   const nextRequestId = () => ++requestId;
   const request = async (method: string, params: { [key: string]: JsonValue }, workspace?: string) =>
@@ -119,6 +127,7 @@ async function computer(input: {
     { relay: { baseUrl: "https://relay.example.test", bearerToken: input.bearerToken }, identity: input.identity, maxPagesPerPull: 8 },
   );
   const closeEngine = async () => {
+    teardownStarted = true;
     lifetime.abort();
     await request("workspace.close", {}, workspace).catch(() => undefined);
     client.close();
