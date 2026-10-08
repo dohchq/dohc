@@ -113,7 +113,7 @@ jobs:
       - name: Desktop release smoke
         run: pnpm smoke:release:desktop
 
-      - name: Build desktop test runtime
+      - name: Prepare desktop test runtime
         run: pnpm --filter @dohc/app-backend-runtime build
 
       - name: Prepare native test engine

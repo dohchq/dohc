@@ -564,7 +564,7 @@ test("desktop releases start only by dispatch, run on self-hosted runners, and p
   assert.match(stepBlock(workflow, "Verify release artifacts"), /verify-desktop-release-artifacts\.mjs/);
   const jobs = topLevelSection(workflow, "jobs");
   const preflight = indentedSection(jobs, 2, "preflight");
-  const runtime = stepBlock(preflight, "Build desktop test runtime");
+  const runtime = stepBlock(preflight, "Prepare desktop test runtime");
   const engine = stepBlock(preflight, "Prepare native test engine");
   const desktopTests = stepBlock(preflight, "Desktop tests");
   assert.match(runtime, /pnpm --filter @dohc\/app-backend-runtime build/);
