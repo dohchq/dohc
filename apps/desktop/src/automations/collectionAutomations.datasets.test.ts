@@ -14,7 +14,7 @@ import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
 import type { JsonValue } from "@dohc/app-backend-runtime";
 import { AUTOMATION_NEVER_STARTED_REFUSAL } from "@dohc/app-backend-runtime/dataset-automation-claims";
-import type { DatasetDefinition } from "@dohc/security-contract/dataset";
+import { datasetBaseFolder, type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { parseAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
 import { VersionedLiveAdapter, type AutomationClaim } from "@dohc/workspace-engine-client";
 import { generateDatasetSchemaChange } from "../workspaces/datasetSchemaChanges";
@@ -3763,6 +3763,8 @@ it.each([1, 2])("keeps timed and message automations at the base after %s field 
     for (let change = 1; change <= changes; change++) {
       const approved = f.host.approvedArtifacts(BUDGET);
       const next = generateDatasetSchemaChange({ ...approved, change: { kind: "renameField", tableId: TABLE, fieldId: FINISHED, name: `Finished ${change}` } });
+      expect(next.descriptorPath).toMatch(/\/revisions\/\d+-[^/]+\/revision\.json$/);
+      expect(datasetBaseFolder(JSON.parse(next.files[next.descriptorPath]!))).toBe("Budget");
       for (const [path, text] of Object.entries(next.files)) {
         await mkdir(join(f.root, dirname(path)), { recursive: true });
         await writeFile(join(f.root, path), text);

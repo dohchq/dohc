@@ -133,7 +133,7 @@ export function generateDatasetSchemaChange(input: { revision: DatasetRevision; 
   const base = datasetBaseFolder(original);
   const directory = posix.join(base, "revisions", `${input.revision.revision + 1}-${randomUUID()}`);
   definition.schemaPath = posix.join(directory, "schema.sql"); definition.operationsPath = posix.join(directory, `operations${posix.extname(original.operationsPath)}`);
-  const descriptorPath = posix.join(directory, "dataset.json"), migrationPath = posix.join(directory, "migration.sql");
+  const descriptorPath = posix.join(directory, "revision.json"), migrationPath = posix.join(directory, "migration.sql");
   const executableChange = change.kind === "addField" || change.kind === "changeField";
   const next = generated && executableChange ? generateDatasetSources(definition) : { definition: parseDatasetDefinition(definition), files: {} as Record<string, string> };
   const operationSource = generated && executableChange ? next.files[definition.operationsPath]! : input.operationSource;
