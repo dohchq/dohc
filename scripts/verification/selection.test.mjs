@@ -808,16 +808,16 @@ test("mixed type and value imports retain runtime resource discovery", () => {
   }
 });
 
-test("real renderer selection activates for isolated changes and rejects native edges", () => {
+test("real renderer selection activates for pure changes and rejects native edges", () => {
   const files = readRendererFiles(root);
   const graph = rendererInputGraph(files);
-  const plan = focusedRendererSelection([`${rendererPath}workbench/quick-open-rank.test.ts`], files, {graph});
+  const plan = focusedRendererSelection([`${rendererPath}workbench/quick-open-rank.ts`], files, {graph});
   assert.ok(plan, "The focused renderer path must remain reachable in this repository.");
   assert.ok(plan.testFiles["@dohc/desktop"].includes("src/renderer/workbench/quick-open-rank.test.ts"));
   assert.equal(plan.proofs.smoke, true);
   assert.equal(plan.proofs.desktop, true, "Every focused renderer plan retains onboarding.");
   assert.equal(plan.needs.postgres, true);
-  for (const component of ["JoinSyncedWorkspace.tsx", "WorkspaceManager.tsx"]) {
+  for (const component of ["CloudLogin.tsx", "JoinSyncedWorkspace.tsx", "WorkspaceManager.tsx"]) {
     const componentPlan = focusedRendererSelection([`${rendererPath}${component}`], files, {graph});
     assert.ok(componentPlan, component);
     assert.equal(componentPlan.proofs.desktop, true, component);
@@ -825,10 +825,18 @@ test("real renderer selection activates for isolated changes and rejects native 
     assert.ok(componentPlan.testFiles["@dohc/desktop"].length < 622, component);
     assert.equal(componentPlan.desktopScripts, false, component);
   }
+  for (const [component, consumers] of [
+    ["Titlebar.tsx", ["src/testPins.coupling.test.tsx", "src/testPins.test.tsx"]],
+    ["settings/SettingsDialog.tsx", ["src/testPins.settings-coupling.test.tsx"]],
+  ]) {
+    const componentPlan = focusedRendererSelection([`${rendererPath}${component}`], files, {graph});
+    assert.ok(componentPlan, component);
+    for (const consumer of consumers) assert.ok(componentPlan.testFiles["@dohc/desktop"].includes(consumer), consumer);
+    assert.equal(componentPlan.proofs.desktop, true, component);
+    assert.equal(componentPlan.needs.postgres, true, component);
+  }
   for (const path of ["collab/engineYDocProvider.ts", "tokens.ts", "workbench/workbenchState.ts", "collab/presenceChannel.ts",
-    "workbench/EngineHistory.tsx", "shareSkipNotice.ts", "workbench/chatFileMentions.ts",
-    "workbench/quick-open-rank.ts", "CloudLogin.tsx", "Titlebar.tsx", "settings/SettingsDialog.tsx",
-    "DesktopWorkspaceShell.endedShare.test.tsx"]) {
+    "workbench/EngineHistory.tsx", "shareSkipNotice.ts", "workbench/chatFileMentions.ts"]) {
     assert.equal(focusedRendererSelection([`${rendererPath}${path}`], files, {graph}), null, path);
   }
 });
