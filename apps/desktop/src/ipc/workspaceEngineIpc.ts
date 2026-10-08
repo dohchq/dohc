@@ -15,7 +15,6 @@ import {
 } from "./bridgeContract";
 import { registerOperations } from "./operationTable";
 import { CHANNELS } from "./channels";
-import { registerOperations } from "./operationTable";
 import { engineMomentDetailForIpc, listEngineMomentsForIpc, type EngineMomentAuthorNames } from "./engineHistoryIpc";
 import { createRunLocator, recordHistoryForIpc, type RecordHistoryAuthors } from "./recordHistoryIpc";
 import { rebuildEngineStoreRequest, type moveEngineStoreAside } from "../workspaces/engineStoreRebuild";
