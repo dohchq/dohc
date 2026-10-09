@@ -1186,6 +1186,7 @@ pub fn apply_committed(
                 tx,
                 &key,
                 &event.update_bytes,
+                true,
                 native_actor.and_then(|(actor, _)| actor.as_deref()),
                 native_actor.and_then(|(_, attribution)| attribution.as_ref()),
                 event.metadata.accepted.received_at_ms,
