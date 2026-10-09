@@ -1522,6 +1522,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut record_facts = Vec::new();
         let mut retryable = Vec::new();
         let mut completed = Vec::new();
+        let recovered =
+            crate::drain_open_document_artifacts(store, cache, workspace_id, leases, faults)
+                .map_err(local)?;
+        for change in recovered.changes {
+            insert_changed_path(&mut changed_paths, change);
+        }
+        record_facts.extend(recovered.record_facts);
         let mut deferred_origins = durable_origins.clone();
         for op in &ordered {
             if op.op_kind != "ydoc.update" || op.payload["isBaseState"] == true {

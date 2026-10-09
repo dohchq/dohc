@@ -37,7 +37,12 @@ fn open_document_claim_check_measurement() {
         .unwrap();
         store.write_with(&NoFaults, |tx| {
             for seq in 1..=gap {
-                tx.execute("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES ('ws','peer',?1,'workspace.init','{}',1,1)", [seq]).map_err(SyncError::persist)?;
+                tx.execute("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES ('ws','peer',?1,'ydoc.update',?2,1,1)", params![seq,base.payload.to_string()]).map_err(SyncError::persist)?;
+            }
+            for origin in ["another", "third"] {
+                for seq in 0..gap {
+                    tx.execute("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES ('ws',?1,?2,'ydoc.update',?3,1,1)", params![origin,seq,base.payload.to_string()]).map_err(SyncError::persist)?;
+                }
             }
             tx.execute("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES ('ws','peer',?1,'ydoc.update',?2,1,1)", params![gap+2,base.payload.to_string()]).map_err(SyncError::persist)?;
             Ok::<_,SyncError>(())

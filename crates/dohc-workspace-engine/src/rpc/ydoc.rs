@@ -100,8 +100,9 @@ impl YdocSession {
         key: DocKey,
         captured: &dohc_engine_collab::live_update_application::ImportedOwnerActivation,
         lease: Lease,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, CollabError> {
+        lease.bind_claim(Some(&captured.source.lineage_claim_id))?;
+        Ok(Self {
             owner_draft: None,
             workspace,
             key,
@@ -117,7 +118,7 @@ impl YdocSession {
             open_head_sha: Some(captured.source.source_digest.clone()),
             owner_seed_source: None,
             _lease: lease,
-        }
+        })
     }
 }
 
@@ -1893,6 +1894,38 @@ mod tests {
     }
 
     use super::*;
+    #[test]
+    fn imported_owner_binds_session_claim() {
+        use dohc_engine_collab::live_update_application::{
+            ImportedOwnerActivation, ImportedOwnerSource,
+        };
+        let claim = "a".repeat(64);
+        let source: ImportedOwnerSource = serde_json::from_value(json!({
+            "version":1,"relayDatabaseNamespace":"relay","workspaceId":"ws","mainVersionId":"main",
+            "objectId":"object","lineageClaimId":claim,"currentPath":"head.md","replicationEpoch":"epoch",
+            "streamIdentity":"stream","committedCursor":1,"baseOriginId":"peer","baseOriginSeq":0,
+            "baseRelaySeq":1,"sourceMomentId":"source","sourceDigest":claim,"sourceByteLength":0,
+            "nativeHeadSequence":0,"fullStateDigest":claim,"fullStateByteLength":0
+        })).unwrap();
+        let captured = ImportedOwnerActivation {
+            activation_id: "activation".into(),
+            source,
+            baseline_bytes: Vec::new(),
+            full_state: Vec::new(),
+            restore_generation: None,
+        };
+        let leases = dohc_engine_collab::LeaseRegistry::new();
+        let key = DocKey::new("ws", "main", "object").unwrap();
+        let session = YdocSession::imported_owner(
+            WorkspaceHandle("handle".into()),
+            key.clone(),
+            &captured,
+            leases.acquire(&key).unwrap(),
+        );
+        assert_eq!(leases.bound_claim(&key).as_deref(), Some(claim.as_str()));
+        drop(session);
+        assert_eq!(leases.bound_claim(&key), None);
+    }
     use crate::EngineService;
     use crate::rpc::error::map_owner_outbox;
     use crate::rpc::request::OperationCancellation;

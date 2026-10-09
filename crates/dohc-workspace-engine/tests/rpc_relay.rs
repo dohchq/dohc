@@ -252,6 +252,22 @@ fn handle_request(state: &Arc<Mutex<RelayState>>, request: TestRequest) -> TestR
                 .expect("workspace blob"),
         );
     }
+    if method == "GET"
+        && let Some((_, coordinate)) = path.split_once("/log/")
+    {
+        let (origin, seq) = coordinate.rsplit_once('/').unwrap();
+        let seq: i64 = seq.parse().unwrap();
+        return TestResponse::json(
+            match state
+                .workspace_ops
+                .iter()
+                .find(|op| op["originId"] == origin && op["originSeq"] == seq)
+            {
+                Some(op) => json!({"status":"present","op":op}),
+                None => json!({"status":"absent"}),
+            },
+        );
+    }
     if path.ends_with("/log") {
         if method == "POST" {
             let body = request.json();
@@ -852,7 +868,13 @@ fn publish_pushed_ops(relay: &FakeRelay, workspace_id: &str, source: &ScratchDir
     let db =
         Connection::open(engine_db_path(source).expect("source db path")).expect("open source db");
     let mut state = relay.state.lock().expect("relay state");
-    let origin_id = state.local_origin_id.clone().expect("source origin id");
+    let origin_id: String = db
+        .query_row(
+            "SELECT origin_id FROM sync_identity WHERE workspace_id=?1",
+            [workspace_id],
+            |row| row.get(0),
+        )
+        .expect("source origin id");
     for op in std::mem::take(&mut state.pushed_workspace_ops) {
         for (field, value) in op["payload"].as_object().into_iter().flatten() {
             let Some(sha256) = value.as_str().filter(|_| field.ends_with("BlobSha256")) else {
@@ -968,6 +990,255 @@ async fn pull_materialize_and_commit(
         )
         .await;
     }
+}
+
+async fn assert_open_document_artifact_recovery(exit: &str, local_edit: bool) {
+    let workspace = "rpc-artifact-recovery";
+    let path = "notes/shared.md";
+    let relay = FakeRelay::start(RelayState::default());
+    let b_scratch = ScratchDir::new().unwrap();
+    let b_transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let b = open_uncaptured_workspace(&b_transport, &b_scratch, &relay, workspace).await;
+    let mut b_id = 1;
+    seed_main(&b_transport, &b, &mut b_id, workspace).await;
+    seed_sync_identity(&b_transport, &b, &mut b_id, workspace).await;
+    call(
+        &b_transport,
+        &b,
+        &mut b_id,
+        "sync.push",
+        json!({"workspaceId":workspace}),
+    )
+    .await;
+    let session = call(
+        &b_transport,
+        &b,
+        &mut b_id,
+        "ydoc.open",
+        json!({"versionId":"main","path":path,"contentKind":"plaintext"}),
+    )
+    .await["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let doc = Ydoc::wire();
+    call(&b_transport, &b, &mut b_id, "ydoc.recordUpdate", json!({"sessionId":session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0,"Before"))})).await;
+    let settled = call(
+        &b_transport,
+        &b,
+        &mut b_id,
+        "ydoc.settle",
+        json!({"sessionId":session}),
+    )
+    .await;
+    journal_editor_settlement(&b_scratch, workspace, settled["momentId"].as_str().unwrap());
+    call(
+        &b_transport,
+        &b,
+        &mut b_id,
+        "sync.push",
+        json!({"workspaceId":workspace}),
+    )
+    .await;
+    publish_pushed_ops(&relay, workspace, &b_scratch);
+
+    let a_scratch = ScratchDir::new().unwrap();
+    let mut a_service = Arc::new(EngineService::new());
+    let mut a_transport = InProcessTransport::new(Arc::clone(&a_service));
+    let mut a = open_uncaptured_workspace(&a_transport, &a_scratch, &relay, workspace).await;
+    let mut a_id = 1;
+    seed_main(&a_transport, &a, &mut a_id, workspace).await;
+    seed_sync_identity(&a_transport, &a, &mut a_id, workspace).await;
+    call(
+        &a_transport,
+        &a,
+        &mut a_id,
+        "sync.claim",
+        json!({"workspaceId":workspace}),
+    )
+    .await;
+    pull_materialize_and_commit(&a_transport, &a, &mut a_id, workspace).await;
+    let session_a = call(
+        &a_transport,
+        &a,
+        &mut a_id,
+        "ydoc.open",
+        json!({"versionId":"main","path":path,"contentKind":"plaintext"}),
+    )
+    .await["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    if local_edit {
+        a_id += 1;
+        let resync = ProtocolEngineService::call(
+            a_service.as_ref(),
+            RequestContext::unbounded().with_capability("blobs"),
+            request(
+                a_id,
+                "ydoc.resync",
+                Some(a.clone()),
+                json!({"sessionId":session_a}),
+            ),
+        )
+        .await
+        .unwrap();
+        let local = Ydoc::wire();
+        local.apply(&resync.blob_egress.unwrap().bytes).unwrap();
+        call(&a_transport, &a, &mut a_id, "ydoc.recordUpdate", json!({"sessionId":session_a,"updateBase64":base64::engine::general_purpose::STANDARD.encode(local.plaintext_insert(0,"Local: "))})).await;
+    }
+    call(&b_transport, &b, &mut b_id, "ydoc.recordUpdate", json!({"sessionId":session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(6," remote"))})).await;
+    let settled = call(
+        &b_transport,
+        &b,
+        &mut b_id,
+        "ydoc.settle",
+        json!({"sessionId":session}),
+    )
+    .await;
+    journal_editor_settlement(&b_scratch, workspace, settled["momentId"].as_str().unwrap());
+    call(
+        &b_transport,
+        &b,
+        &mut b_id,
+        "sync.push",
+        json!({"workspaceId":workspace}),
+    )
+    .await;
+    publish_pushed_ops(&relay, workspace, &b_scratch);
+    pull_materialize_and_commit(&a_transport, &a, &mut a_id, workspace).await;
+    assert_eq!(
+        std::fs::read_to_string(a_scratch.path().join(path)).unwrap(),
+        "Before"
+    );
+    match exit {
+        "evict" => {
+            call(
+                &a_transport,
+                &a,
+                &mut a_id,
+                "ydoc.evict",
+                json!({"sessionId":session_a}),
+            )
+            .await;
+        }
+        "workspace-close" => {
+            call(&a_transport, &a, &mut a_id, "workspace.close", json!({})).await;
+            a = open_uncaptured_workspace(&a_transport, &a_scratch, &relay, workspace).await;
+        }
+        "crash" => {
+            drop(a_transport);
+            drop(a_service);
+            a_service = Arc::new(EngineService::new());
+            a_transport = InProcessTransport::new(Arc::clone(&a_service));
+            a = open_uncaptured_workspace(&a_transport, &a_scratch, &relay, workspace).await;
+        }
+        _ => unreachable!(),
+    }
+    if exit != "evict" && !local_edit {
+        assert_eq!(
+            std::fs::read_to_string(a_scratch.path().join(path)).unwrap(),
+            "Before remote",
+            "workspace open must recover without a pull"
+        );
+    }
+    pull_materialize_and_commit(&a_transport, &a, &mut a_id, workspace).await;
+    let db = Connection::open(engine_db_path(&a_scratch).unwrap()).unwrap();
+    let head: String = db
+        .query_row(
+            "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.path=?1",
+            [path],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let expected = if local_edit {
+        "Before"
+    } else {
+        "Before remote"
+    };
+    assert_eq!(head, expected, "{exit}");
+    let index: String = db
+        .query_row(
+            "SELECT text FROM engine_search_files_fts WHERE path=?1",
+            [path],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(index, expected, "index after {exit}");
+    assert_eq!(
+        std::fs::read_to_string(a_scratch.path().join(path)).unwrap(),
+        expected,
+        "{exit}"
+    );
+    let marks = || {
+        let exists: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='ydoc_pending_artifacts')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        if exists {
+            db.query_row("SELECT COUNT(*) FROM ydoc_pending_artifacts", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+        } else {
+            0
+        }
+    };
+    assert_eq!(marks(), i64::from(local_edit));
+    if local_edit {
+        let reopened = call(
+            &a_transport,
+            &a,
+            &mut a_id,
+            "ydoc.open",
+            json!({"versionId":"main","path":path,"contentKind":"plaintext"}),
+        )
+        .await;
+        call(
+            &a_transport,
+            &a,
+            &mut a_id,
+            "ydoc.settle",
+            json!({"sessionId":reopened["sessionId"]}),
+        )
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(a_scratch.path().join(path)).unwrap(),
+            "Local: Before remote"
+        );
+        assert_eq!(marks(), 0);
+    }
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM conflicts", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM relay_deferred_ops", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn open_document_artifact_recovers_after_evict() {
+    assert_open_document_artifact_recovery("evict", false).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn open_document_artifact_recovers_after_workspace_close() {
+    assert_open_document_artifact_recovery("workspace-close", false).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn open_document_artifact_recovers_after_engine_drop() {
+    assert_open_document_artifact_recovery("crash", false).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn open_document_artifact_keeps_local_unsettled_edits() {
+    assert_open_document_artifact_recovery("evict", true).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1285,22 +1556,83 @@ async fn open_document_settlement_does_not_park_other_device_work() {
         (later_file, record_after, later_message, deferred),
         (1, 1, 1, 0)
     );
-    let state = relay.state.lock().unwrap();
-    let last = state.workspace_ops.last().unwrap();
-    let ack: i64 = db
-        .query_row(
-            "SELECT acked_seq FROM replication_peers WHERE workspace_id=?1 AND origin_id=?2",
-            rusqlite::params![workspace_id, last["originId"].as_str().unwrap()],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(ack, last["originSeq"].as_i64().unwrap());
-    drop(state);
+    {
+        let state = relay.state.lock().unwrap();
+        let last = state.workspace_ops.last().unwrap();
+        let ack: i64 = db
+            .query_row(
+                "SELECT acked_seq FROM replication_peers WHERE workspace_id=?1 AND origin_id=?2",
+                rusqlite::params![workspace_id, last["originId"].as_str().unwrap()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ack, last["originSeq"].as_i64().unwrap());
+    }
     assert_eq!((conflicts, after_deferred), (0, 0));
     assert_eq!(
         std::fs::read_to_string(a_scratch.path().join(path)).unwrap(),
         "A: Starting together. Typed on B."
     );
+
+    let c_scratch = ScratchDir::new().unwrap();
+    let c_transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let c = open_uncaptured_workspace_options(&c_transport, &c_scratch, &relay, workspace_id, true)
+        .await;
+    let mut c_id = 1;
+    seed_main(&c_transport, &c, &mut c_id, workspace_id).await;
+    seed_sync_identity(&c_transport, &c, &mut c_id, workspace_id).await;
+    call(
+        &c_transport,
+        &c,
+        &mut c_id,
+        "sync.claim",
+        json!({"workspaceId":workspace_id}),
+    )
+    .await;
+    pull_materialize_and_commit(&c_transport, &c, &mut c_id, workspace_id).await;
+
+    journal_editor_settlement(
+        &a_scratch,
+        workspace_id,
+        settled.as_ref().unwrap().result["momentId"]
+            .as_str()
+            .unwrap(),
+    );
+    call(
+        &a_transport,
+        &a,
+        &mut a_id,
+        "sync.push",
+        json!({"workspaceId":workspace_id}),
+    )
+    .await;
+    publish_pushed_ops(&relay, workspace_id, &a_scratch);
+    pull_materialize_and_commit(&b_transport, &b, &mut b_id, workspace_id).await;
+    call(
+        &b_transport,
+        &b,
+        &mut b_id,
+        "ydoc.close",
+        json!({"sessionId":b_session}),
+    )
+    .await;
+    pull_materialize_and_commit(&c_transport, &c, &mut c_id, workspace_id).await;
+    for (device, scratch) in [("A", &a_scratch), ("B", &b_scratch), ("C", &c_scratch)] {
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join(path)).unwrap(),
+            "A: Starting together. Typed on B."
+        );
+        let conn = Connection::open(engine_db_path(scratch).unwrap()).unwrap();
+        for table in ["conflicts", "relay_deferred_ops", "ydoc_deferred_updates"] {
+            assert_eq!(
+                conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0,
+                "{device} {table}"
+            );
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

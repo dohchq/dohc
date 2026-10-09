@@ -44,7 +44,7 @@ fn open_document_pull_fixture(later: i64, live: bool) -> (i64, i64, u128) {
             seq,
             "moment.append",
             json!({
-                "momentId":format!("settled-{seq}"), "versionId":"main", "objectId":object, "objectCreatedAtMs":1,
+                "momentId":if seq == 2 { format!("moment-ydoc-{}", "c".repeat(64)) } else { format!("settled-{seq}") }, "versionId":"main", "objectId":object, "objectCreatedAtMs":1,
                 "path":path, "recordedAtMs":2000, "operation":"write", "payloadBeforeBlobSha256":null, "payloadBeforePath":null,
                 "payloadAfterBlobSha256":text_sha, "payloadAfterPath":path, "payloadAfterContentKind":"text",
                 "metadata":{"origin":"sync"}, "beforePresent":"absent"

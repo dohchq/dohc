@@ -3099,7 +3099,42 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_LIVE_SETTLEMENT_PUBLICATION_DDL,
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 39,
+        id: "v2-open-document-artifacts",
+        sql: V2_OPEN_DOCUMENT_ARTIFACTS_DDL,
+        sets_user_version: None,
+    },
 ];
+
+const V2_OPEN_DOCUMENT_ARTIFACTS_DDL: &str = "\
+CREATE TABLE ydoc_pending_artifacts (
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    moment_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    expected_head_moment_id TEXT NOT NULL,
+    envelope_json TEXT NOT NULL CHECK(json_valid(envelope_json)),
+    PRIMARY KEY(workspace_id,version_id,object_id,moment_id),
+    FOREIGN KEY(workspace_id,version_id,object_id)
+      REFERENCES ydoc_docs(workspace_id,version_id,object_id) ON DELETE CASCADE,
+    FOREIGN KEY(workspace_id,moment_id)
+      REFERENCES moments(workspace_id,moment_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX replication_ydoc_origin_document ON replication_log(workspace_id,
+    json_extract(payload_json,'$.versionId'),json_extract(payload_json,'$.objectId'),origin_id,origin_seq)
+    WHERE op_kind='ydoc.update';
+CREATE TRIGGER ydoc_pending_artifacts_settled AFTER UPDATE OF last_settled_sha,settled_update_seq ON ydoc_docs
+WHEN NEW.settled_update_seq=NEW.head_update_seq AND EXISTS (
+    SELECT 1 FROM snapshots s WHERE s.workspace_id=NEW.workspace_id
+      AND s.version_id=NEW.version_id AND s.object_id=NEW.object_id
+      AND s.blob_sha256=NEW.last_settled_sha)
+BEGIN
+    DELETE FROM ydoc_pending_artifacts WHERE workspace_id=NEW.workspace_id
+      AND version_id=NEW.version_id AND object_id=NEW.object_id;
+END;
+";
 
 /// Lowercase-hex sha-256 of the migration DDL — the checksum stored in and
 /// re-verified against the ledger.
@@ -3576,6 +3611,10 @@ mod tests {
             (
                 "v2-live-settlement-publication",
                 "e37325b7a31bbba1c63cfd891cbecd6054809201002ac482c95ab41d54ad8458",
+            ),
+            (
+                "v2-open-document-artifacts",
+                "ac65985d21a679fdd0def5553f47be56b879406e7ba063c77e2b40a2cbb68965",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

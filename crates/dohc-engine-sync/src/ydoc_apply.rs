@@ -657,7 +657,7 @@ pub fn drain_deferred_ydoc_for_key(
     faults: &dyn FaultInjector,
 ) -> Result<YdocDrainResult, SyncError> {
     let (drained, cleanup) =
-        drain_deferred_ydoc(store, cache, key, DeferredDrainMode::All, faults)?;
+        drain_deferred_ydoc(store, cache, key, DeferredDrainMode::All, faults, true)?;
     complete_drain(store, drained, cleanup, faults)
 }
 
@@ -673,7 +673,7 @@ fn drain_deferred_ydoc_in_batch(
     } else {
         DeferredDrainMode::All
     };
-    let (drained, cleanup) = drain_deferred_ydoc(store, cache, key, mode, faults)?;
+    let (drained, cleanup) = drain_deferred_ydoc(store, cache, key, mode, faults, true)?;
     complete_drain(store, drained, cleanup, faults)
 }
 
@@ -704,7 +704,7 @@ pub fn drain_deferred_ydoc_for_key_holding_cleanup(
     key: &DocKey,
     faults: &dyn FaultInjector,
 ) -> Result<(YdocDrainResult, YdocDrainCleanup), SyncError> {
-    drain_deferred_ydoc(store, cache, key, DeferredDrainMode::All, faults)
+    drain_deferred_ydoc(store, cache, key, DeferredDrainMode::All, faults, true)
 }
 
 /// Run the cleanup an immediate drain owes and surface its projection refusal
@@ -778,6 +778,25 @@ pub fn drain_deferred_ydoc_for_live_session(
         key,
         DeferredDrainMode::Live(expected_lineage_claim_id),
         faults,
+        true,
+    )?;
+    complete_drain(store, drained, cleanup, faults)
+}
+
+pub(crate) fn drain_deferred_ydoc_for_artifact(
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    key: &DocKey,
+    claim: &str,
+    faults: &dyn FaultInjector,
+) -> Result<YdocDrainResult, SyncError> {
+    let (drained, cleanup) = drain_deferred_ydoc(
+        store,
+        cache,
+        key,
+        DeferredDrainMode::Live(Some(claim)),
+        faults,
+        false,
     )?;
     complete_drain(store, drained, cleanup, faults)
 }
@@ -842,6 +861,7 @@ fn drain_deferred_ydoc(
     key: &DocKey,
     mode: DeferredDrainMode<'_>,
     faults: &dyn FaultInjector,
+    publish: bool,
 ) -> Result<(YdocDrainResult, YdocDrainCleanup), SyncError> {
     let inactive_refusals = if matches!(mode, DeferredDrainMode::All) {
         drain_inactive_ydoc_updates(store, &key.workspace_id, faults)?
@@ -1251,7 +1271,8 @@ fn drain_deferred_ydoc(
         Some((origin, seq)) => (origin.as_str(), *seq),
         None => ("deferred-drain", payload_recorded_at),
     };
-    if let Some(payload) = last_payload
+    if publish
+        && let Some(payload) = last_payload
         && let Some((projected, projected_kind)) = project_final_drained_doc(
             store,
             cache,
