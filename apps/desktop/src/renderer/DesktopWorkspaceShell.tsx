@@ -262,6 +262,7 @@ import {
   type WorkbenchTab,
 } from "./workbench/workbenchState";
 import type { ChatsPanelTab } from "./workbench/ChatsPanel";
+import type { AboutNotices, AccessReason, AccessSetup } from "./workbench/About";
 import { usePinnedApps } from "./workbench/pinnedApps";
 import { pinnedAppsFor } from "../settings/pinnedApps";
 import { ipcErrorMessage } from "./ipcError";
@@ -918,8 +919,32 @@ export function DesktopWorkspaceShell(props: {
     },
     [reportShellError],
   );
-  const { chatCollaboration, refreshCloudStatus, workspaceSynced } =
+  const { chatCollaboration, refreshCloudStatus, workspaceSynced, cloudStatus } =
     useCloudPresence(workspaceId, reportCloudStatusUnavailable);
+  // About's section reads report through this shell's notices, one row per
+  // section and file.
+  const aboutNotices = useMemo<AboutNotices>(
+    () => ({ report: reportShellFailure, clear: clearIdentity }),
+    [clearIdentity, reportShellFailure],
+  );
+  // What explains an Access answer that covers nothing. Main lists a
+  // workspace's shares only while it syncs and its account is signed in; a
+  // shared view's grant needs the account it was sent to.
+  const accessReason: AccessReason =
+    cloudStatus === null ? "unexplained"
+    : props.workspace.shareView ? (cloudStatus.connected ? "unexplained" : "signed-out")
+    : !cloudStatus.workspaceSynced ? "not-synced"
+    : !cloudStatus.connected ? "signed-out"
+    : cloudStatus.workspaceSyncConnected === false ? "other-account"
+    : "unexplained";
+  const accessSetup = useMemo<AccessSetup>(
+    () => ({
+      reason: accessReason,
+      openSyncSettings: () => openSettings("cloud"),
+      connect: () => setCloudOpen(true),
+    }),
+    [accessReason, openSettings],
+  );
 
   // @-mention roster + agent notifications (Agent Notifications & Mentions).
   // The renderer has no identity source yet, so the user shows as "You" —
@@ -5518,6 +5543,8 @@ export function DesktopWorkspaceShell(props: {
             reportFailureMessage={reportFailureMessage}
             historyRevision={historyRefreshCounter}
             openMoment={openMomentDiffTab}
+            aboutNotices={aboutNotices}
+            accessSetup={accessSetup}
             chatsNavigatorProps={chatsNavigatorProps}
           />
         ) : null}

@@ -16,8 +16,12 @@ import {
   AboutHeader,
   AboutHistory,
   AboutNote,
+  AboutRetry,
   AboutSection,
+  type AboutFile,
+  type AboutNotices,
   type AboutSectionId,
+  type AccessSetup,
 } from "./About";
 import {
   ChatComposer,
@@ -53,7 +57,7 @@ const NO_REACTIONS: ReactionView = { reactions: [], viewerAuthorId: "" };
 // file reads as loading, so a switch never shows the last file's chats.
 type ThreadsState =
   | { status: "loading" }
-  | { status: "unavailable"; key: string; message: string }
+  | { status: "unavailable"; key: string }
   | { status: "ready"; key: string; fileObjectId: string | null; threads: ChatThreadRecord[] };
 
 const SECTIONS_OPEN: Record<AboutSectionId, boolean> = { chats: true, history: true, access: false };
@@ -110,6 +114,10 @@ export function LinkedChatsPanel(props: {
     revision: number;
     onOpenMoment: (momentId: string, filePath: string) => void;
   };
+  // Where a section read that failed reports, and what explains an Access
+  // answer that covers nothing. Both stay the same object between renders.
+  notices: AboutNotices;
+  accessSetup: AccessSetup;
 }) {
   const { workspaceId, filePath } = props;
   const threadsKey = `${workspaceId}\0${filePath ?? ""}`;
@@ -131,9 +139,26 @@ export function LinkedChatsPanel(props: {
   const reactions = useReactions();
   const listRef = useRef<ChatMessageListHandle | null>(null);
 
+  const currentThreadsKey = useRef(threadsKey);
+  currentThreadsKey.current = threadsKey;
+  const { notices } = props;
   const refreshThreads = useCallback(async () => {
     if (!filePath) return;
     const token = ++liveToken.current;
+    const identity = `about-chats:${filePath}`;
+    // The words go to the shell's error hook. Its Try again reads again
+    // only while this file is still the one on screen.
+    const fail = (message: string, cause?: unknown) => {
+      setThreadsState({ status: "unavailable", key: threadsKey });
+      notices.report({
+        identity,
+        message,
+        cause,
+        retry: () => {
+          if (currentThreadsKey.current === threadsKey) void refreshThreads();
+        },
+      });
+    };
     setThreadsState({ status: "loading" });
     let updatingStartedAtMs: number | null = null;
     while (token === liveToken.current) {
@@ -146,11 +171,7 @@ export function LinkedChatsPanel(props: {
           const remainingMs =
             updatingStartedAtMs + THREAD_LOAD_RETRY_DEADLINE_MS - now;
           if (remainingMs <= 0) {
-            setThreadsState({
-              status: "unavailable",
-              key: threadsKey,
-              message: WORKSPACE_UPDATING_MESSAGE,
-            });
+            fail(WORKSPACE_UPDATING_MESSAGE);
             return;
           }
           await new Promise((resolveDelay) =>
@@ -158,6 +179,7 @@ export function LinkedChatsPanel(props: {
           );
           continue;
         }
+        notices.clear(identity);
         setThreadsState({
           status: "ready",
           key: threadsKey,
@@ -167,15 +189,11 @@ export function LinkedChatsPanel(props: {
         return;
       } catch (error) {
         if (token !== liveToken.current) return;
-        setThreadsState({
-          status: "unavailable",
-          key: threadsKey,
-          message: ipcErrorMessage(error, "Could not load Chats for this file."),
-        });
+        fail(ipcErrorMessage(error, "Could not load Chats for this file."), error);
         return;
       }
     }
-  }, [filePath, threadsKey, workspaceId]);
+  }, [filePath, notices, threadsKey, workspaceId]);
 
   // File (or workspace) switch: drop everything stale and reload.
   useEffect(() => {
@@ -426,6 +444,12 @@ export function LinkedChatsPanel(props: {
   }
 
   const threads = "key" in threadsState && threadsState.key === threadsKey ? threadsState : null;
+  // History asks about the file's object id, which this file's chats read
+  // answers. History keeps its place while that read runs or fails.
+  const file: AboutFile =
+    threads === null ? { status: "loading" }
+    : threads.status === "unavailable" ? { status: "failed", retry: () => void refreshThreads() }
+    : { status: "ready", objectId: threads.fileObjectId };
   return (
     <div data-testid="about-panel" className="flex min-h-0 flex-1 flex-col">
       <AboutHeader path={filePath} />
@@ -441,9 +465,7 @@ export function LinkedChatsPanel(props: {
           {threads === null ? (
             <SkeletonRows rows={2} className="px-2 py-1" label="Loading Chats..." />
           ) : threads.status === "unavailable" ? (
-            <AboutNote testId="linked-chats-failed" failed onRetry={() => void refreshThreads()}>
-              {threads.message}
-            </AboutNote>
+            <AboutRetry testId="linked-chats-failed" onRetry={() => void refreshThreads()} />
           ) : (
             <div data-testid="linked-chats-panel">
               {threads.threads.length === 0 ? (
@@ -462,14 +484,16 @@ export function LinkedChatsPanel(props: {
             </div>
           )}
         </AboutSection>
-        {props.history && threads?.status === "ready" && threads.fileObjectId !== null ? (
+        {props.history ? (
           <AboutHistory
             workspaceId={workspaceId}
-            objectId={threads.fileObjectId}
+            path={filePath}
+            file={file}
             revision={props.history.revision}
             expanded={sectionsOpen.history}
             onToggle={toggleSection("history")}
             onOpenMoment={props.history.onOpenMoment}
+            notices={notices}
           />
         ) : null}
         <AboutAccess
@@ -477,6 +501,8 @@ export function LinkedChatsPanel(props: {
           path={filePath}
           expanded={sectionsOpen.access}
           onToggle={toggleSection("access")}
+          notices={notices}
+          setup={props.accessSetup}
         />
       </div>
       {threads?.status !== "ready" ? null : readOnly ? (

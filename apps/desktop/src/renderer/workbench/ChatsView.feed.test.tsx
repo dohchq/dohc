@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ChatsView as ProductionChatsView, type ChatsNav } from "./ChatsView";
 import { LinkedChatsPanel } from "./LinkedChats";
 import { ReactionStoreProvider } from "./reactionStore";
+import type { AboutNotices, AccessSetup } from "./About";
 import {
   ChatsView,
   NOW,
@@ -22,6 +23,9 @@ import {
   shareListing,
 } from "./ChatsView.testHarness";
 import { deferred } from "../../testing/deferred";
+
+const ABOUT_NOTICES: AboutNotices = { report: vi.fn(), clear: vi.fn() };
+const ACCESS_SETUP: AccessSetup = { reason: "unexplained", openSyncSettings: vi.fn(), connect: vi.fn() };
 
 // Like opens the emoji picker; the reaction is written when a choice is
 // picked. jsdom measures every box as empty and the picker dismisses itself
@@ -1098,6 +1102,8 @@ describe("Home and a file's chat share one reaction store", () => {
             filePath="notes/topic.md"
             initialThread={{ id: "thread-1", title: "Thread", createdAtMs: NOW, updatedAtMs: NOW }}
             onError={onError}
+            notices={ABOUT_NOTICES}
+            accessSetup={ACCESS_SETUP}
           />
         </div>
       </ReactionStoreProvider>,

@@ -4,10 +4,14 @@ import {
   AppWindow,
   ChevronDown,
   ChevronRight,
+  CloudOff,
   Eye,
+  EyeOff,
   FileText,
+  FileX,
   History,
   Link2,
+  LogIn,
   MessageSquare,
   Pencil,
   Share2,
@@ -34,6 +38,24 @@ import { historyHiddenWords } from "./HistoryPolicyStates";
 // lands under another.
 
 export type AboutSectionId = "chats" | "history" | "access";
+
+// The shell's error hook. A section read that fails is one Notices row per
+// section and file, with Try again, and a read that succeeds clears it. The
+// section itself shows no error words, only the way to read again.
+export type AboutNotices = {
+  report(failure: { identity: string; message: string; cause?: unknown; retry: () => void }): void;
+  clear(identity: string): void;
+};
+
+// What this computer knows about the workspace's sync and account, which
+// explains an Access answer that covers nothing. Main lists shares only for
+// a workspace that syncs, while the account it syncs with is signed in.
+export type AccessReason = "not-synced" | "signed-out" | "other-account" | "unexplained";
+export type AccessSetup = {
+  reason: AccessReason;
+  openSyncSettings: () => void;
+  connect: () => void;
+};
 
 // A row in a section, inset from the panel's edges like the drawing's rows.
 export const ABOUT_ROW =
@@ -96,27 +118,40 @@ export function AboutSection(props: {
   );
 }
 
-// One line inside a section that is not a row: an empty answer or a failure,
-// with the action that can change it.
+// One line inside a section that is not a row: what an answer means, with
+// the one action that can change it.
 export function AboutNote(props: {
   testId: string;
-  failed?: boolean;
+  icon?: LucideIcon;
   children: ReactNode;
-  onRetry?: () => void;
+  action?: { label: string; run: () => void };
+  reason?: string;
 }) {
+  const Icon = props.icon;
   return (
-    <div data-testid={props.testId} className="flex flex-col items-start gap-2 px-2 py-1">
+    <div data-testid={props.testId} data-reason={props.reason} className="flex flex-col items-start gap-2 px-2 py-1">
       <p className="m-0 flex items-start gap-1.5 text-[12px] leading-4 text-muted">
-        {props.failed ? (
-          <TriangleAlert size={12} aria-hidden className="mt-0.5 shrink-0 text-danger" />
-        ) : null}
+        {Icon ? <Icon size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" /> : null}
         <span>{props.children}</span>
       </p>
-      {props.onRetry ? (
-        <SecondaryButton size="compact" onClick={props.onRetry}>
-          Try again
+      {props.action ? (
+        <SecondaryButton size="compact" onClick={props.action.run}>
+          {props.action.label}
         </SecondaryButton>
       ) : null}
+    </div>
+  );
+}
+
+// A section whose read failed. Its words are in the toast and its Notices
+// row; here the mark says it failed and Try again reads again.
+export function AboutRetry(props: { testId: string; onRetry: () => void }) {
+  return (
+    <div data-testid={props.testId} className="flex items-center gap-2 px-2 py-1">
+      <TriangleAlert size={12} aria-hidden className="shrink-0 text-danger" />
+      <SecondaryButton size="compact" onClick={props.onRetry}>
+        Try again
+      </SecondaryButton>
     </div>
   );
 }
@@ -160,12 +195,59 @@ function LinkMark() {
 type Keyed<View> = { key: string; view: View };
 const LOADING = { status: "loading" } as const;
 
+// A read for the current workspace and file: its answer lands only while it
+// is the newest read, and a failure files one Notices row whose Try again
+// reads again only if that file is still on screen.
+function useSectionRead<View>(key: string, identity: string, notices: AboutNotices) {
+  const [state, setState] = useState<Keyed<View | typeof LOADING>>({ key: "", view: LOADING });
+  const token = useRef(0);
+  const currentKey = useRef(key);
+  currentKey.current = key;
+  const begin = useCallback(() => {
+    const request = ++token.current;
+    const current = () => request === token.current;
+    return {
+      current,
+      settle(view: View) {
+        if (!current()) return;
+        notices.clear(identity);
+        setState({ key, view });
+      },
+      fail(view: View, message: string, cause: unknown, retry: () => void) {
+        if (!current()) return;
+        setState({ key, view });
+        notices.report({
+          identity,
+          message,
+          cause,
+          retry: () => {
+            if (currentKey.current === key) retry();
+          },
+        });
+      },
+    };
+  }, [identity, key, notices]);
+  const cancel = useCallback(() => {
+    token.current += 1;
+  }, []);
+  return { view: state.key === key ? state.view : LOADING, begin, cancel };
+}
+
 // ---- History ----
+
+// The file History asks about. Its object id comes from the file's chats
+// read: loading until that answers, null for a file the engine does not
+// track, and a failed read offers that read's Try again.
+export type AboutFile =
+  | typeof LOADING
+  | { status: "failed"; retry: () => void }
+  | { status: "ready"; objectId: string | null };
 
 export type HistoryView =
   | typeof LOADING
   | { status: "ready"; moments: EngineMomentRecord[]; more: boolean }
-  | { status: "unavailable"; message: string };
+  | { status: "untracked" }
+  | { status: "failed"; retry: () => void };
 
 const HISTORY_ROWS = 5;
 const WORKSPACE_UPDATING_MESSAGE = "Workspace is still updating. Try again.";
@@ -186,53 +268,51 @@ function MomentAuthor(props: { moment: EngineMomentRecord }) {
 
 export function AboutHistory(props: {
   workspaceId: string;
-  objectId: string;
+  path: string;
+  file: AboutFile;
   // Changes when the workspace's history grows, so the rows follow edits.
   revision: number;
   expanded: boolean;
   onToggle: () => void;
   onOpenMoment: (momentId: string, filePath: string) => void;
+  notices: AboutNotices;
 }) {
-  const { workspaceId, objectId } = props;
-  const key = `${workspaceId}\0${objectId}`;
-  const [state, setState] = useState<Keyed<HistoryView>>({ key: "", view: LOADING });
-  const token = useRef(0);
+  const { workspaceId, file } = props;
+  const objectId = file.status === "ready" ? file.objectId : null;
+  const read = useSectionRead<HistoryView>(
+    `${workspaceId}\0${props.path}\0${objectId ?? ""}`,
+    `about-history:${props.path}`,
+    props.notices,
+  );
+  const { begin, cancel } = read;
   const load = useCallback(async () => {
-    const request = ++token.current;
-    const commit = (view: HistoryView) => {
-      if (request === token.current) setState({ key, view });
-    };
+    if (objectId === null) return;
+    const request = begin();
+    const failed = { status: "failed", retry: () => void load() } as const;
     try {
       const response = await bridge().listEngineMoments({ workspaceId, objectId, limit: HISTORY_ROWS });
-      if ("status" in response) {
-        commit({
-          status: "unavailable",
-          message: response.status === "updating" ? WORKSPACE_UPDATING_MESSAGE : historyHiddenWords(response.unreadable),
-        });
+      if (!("status" in response)) {
+        request.settle({ status: "ready", moments: response.moments, more: response.nextBeforeMomentOrder !== null });
         return;
       }
-      commit({ status: "ready", moments: response.moments, more: response.nextBeforeMomentOrder !== null });
+      const message = response.status === "updating" ? WORKSPACE_UPDATING_MESSAGE : historyHiddenWords(response.unreadable);
+      request.fail(failed, message, undefined, failed.retry);
     } catch (error) {
-      commit({ status: "unavailable", message: ipcErrorMessage(error, "Could not load History for this file.") });
+      request.fail(failed, ipcErrorMessage(error, "Could not load History for this file."), error, failed.retry);
     }
-  }, [key, objectId, workspaceId]);
+  }, [begin, objectId, workspaceId]);
   useEffect(() => {
-    if (!props.expanded) return;
+    if (!props.expanded || objectId === null) return;
     void load();
-    return () => {
-      token.current += 1;
-    };
-  }, [load, props.expanded, props.revision]);
+    return cancel;
+  }, [cancel, load, objectId, props.expanded, props.revision]);
 
-  return (
-    <AboutHistoryView
-      view={state.key === key ? state.view : LOADING}
-      expanded={props.expanded}
-      onToggle={props.onToggle}
-      onRetry={() => void load()}
-      onOpenMoment={props.onOpenMoment}
-    />
-  );
+  const view: HistoryView =
+    file.status === "loading" ? LOADING
+    : file.status === "failed" ? { status: "failed", retry: file.retry }
+    : file.objectId === null ? { status: "untracked" }
+    : read.view;
+  return <AboutHistoryView view={view} expanded={props.expanded} onToggle={props.onToggle} onOpenMoment={props.onOpenMoment} />;
 }
 
 // The History section for an answer already in hand. The states page draws it.
@@ -240,7 +320,6 @@ export function AboutHistoryView(props: {
   view: HistoryView;
   expanded: boolean;
   onToggle: () => void;
-  onRetry: () => void;
   onOpenMoment: (momentId: string, filePath: string) => void;
 }) {
   const { view } = props;
@@ -255,10 +334,10 @@ export function AboutHistoryView(props: {
     >
       {view.status === "loading" ? (
         <SkeletonLines rows={2} className="px-2 py-1" />
-      ) : view.status === "unavailable" ? (
-        <AboutNote testId="about-history-failed" failed onRetry={props.onRetry}>
-          {view.message}
-        </AboutNote>
+      ) : view.status === "failed" ? (
+        <AboutRetry testId="about-history-failed" onRetry={view.retry} />
+      ) : view.status === "untracked" ? (
+        <AboutNote testId="about-history-untracked">History does not track this file yet.</AboutNote>
       ) : view.moments.length === 0 ? (
         <AboutNote testId="about-history-empty">History has no changes to this file yet.</AboutNote>
       ) : (
@@ -297,7 +376,7 @@ export function AboutHistoryView(props: {
 export type AccessView =
   | typeof LOADING
   | { status: "ready"; answer: AccessAnswer }
-  | { status: "failed"; message: string };
+  | { status: "failed" };
 
 type AccessRow = AccessAnswer["rows"][number];
 type ShareLevel = NonNullable<Extract<AccessRow, { kind: "share" }>["access"]>;
@@ -323,6 +402,13 @@ const EMPTY_WITHIN: Record<Exclude<AccessAnswer["coverage"]["kind"], "unavailabl
 function emptyWithin(answer: AccessAnswer): string | null {
   const kind = answer.coverage.kind;
   return answer.freshness === "unknown" || kind === "unavailable" ? null : EMPTY_WITHIN[kind];
+}
+
+// The count is who has access now: ended and damaged grants stay listed, but
+// do not count.
+function grantedCount(answer: AccessAnswer): string {
+  const active = answer.rows.filter((row) => row.kind === "collection" || row.status === "active").length;
+  return `${active}${answer.nextCursor ? "+" : ""}`;
 }
 
 function AccessRowView(props: { row: AccessRow }) {
@@ -379,62 +465,47 @@ export function AboutAccess(props: {
   path: string;
   expanded: boolean;
   onToggle: () => void;
+  notices: AboutNotices;
+  setup: AccessSetup;
 }) {
   const { workspaceId, path } = props;
-  const key = `${workspaceId}\0${path}`;
-  const [state, setState] = useState<Keyed<AccessView>>({ key: "", view: LOADING });
-  const token = useRef(0);
-  // Asking main to check again happens when a person opens the section or
-  // tries again, not on every file they pass through with it open.
-  const read = useCallback(
-    async (refresh: boolean) => {
-      const request = ++token.current;
-      const current = () => request === token.current;
+  const read = useSectionRead<AccessView>(`${workspaceId}\0${path}`, `about-access:${path}`, props.notices);
+  const { begin, cancel } = read;
+  // One read: from the start, or the page after `after`. Asking main to
+  // check again happens when a person opens the section or tries again, not
+  // on every file they pass through with it open. Its outcome is the
+  // answer's own freshness, so a refused refresh is not reported apart.
+  const load = useCallback(
+    async (options: { refresh?: boolean; after?: AccessAnswer }) => {
+      const request = begin();
+      const retry = () => void load({ refresh: true });
       try {
-        if (refresh) {
-          // The answer below says how current it is, refreshed or not.
+        if (options.refresh) {
           await bridge().requestAccessRefresh({ workspaceId, reason: "access-expand" }).catch(() => undefined);
-          if (!current()) return;
+          if (!request.current()) return;
         }
+        const cursor = options.after?.nextCursor ?? undefined;
         const answer = await bridge().getObjectAccess({
           workspaceId,
           ref: { kind: "path", path, versionId: null },
+          ...(cursor ? { cursor } : {}),
         });
-        if (current()) setState({ key, view: { status: "ready", answer } });
-      } catch (error) {
-        if (current()) {
-          setState({
-            key,
-            view: { status: "failed", message: ipcErrorMessage(error, "Could not check who has access to this file.") },
-          });
+        // A page cursor belongs to the listing it came from. When that
+        // listing changed, main refuses the cursor, so read from the start.
+        if (options.after && answer.coverage.kind === "unavailable") {
+          if (request.current()) void load({});
+          return;
         }
-      }
-    },
-    [key, path, workspaceId],
-  );
-  const loadMore = useCallback(
-    async (answer: AccessAnswer) => {
-      if (answer.nextCursor === null) return;
-      const request = ++token.current;
-      try {
-        const next = await bridge().getObjectAccess({
-          workspaceId,
-          ref: { kind: "path", path, versionId: null },
-          cursor: answer.nextCursor,
+        request.settle({
+          status: "ready",
+          answer: options.after ? { ...answer, rows: [...options.after.rows, ...answer.rows] } : answer,
         });
-        if (request !== token.current) return;
-        setState({ key, view: { status: "ready", answer: { ...next, rows: [...answer.rows, ...next.rows] } } });
       } catch (error) {
-        if (request !== token.current) return;
-        setState({
-          key,
-          view: { status: "failed", message: ipcErrorMessage(error, "Could not check who has access to this file.") },
-        });
+        request.fail({ status: "failed" }, ipcErrorMessage(error, "Could not check who has access to this file."), error, retry);
       }
     },
-    [key, path, workspaceId],
+    [begin, path, workspaceId],
   );
-  // Opening the section refreshes; a new file while it is open only reads.
   const refreshed = useRef(false);
   useEffect(() => {
     if (!props.expanded) {
@@ -443,21 +514,70 @@ export function AboutAccess(props: {
     }
     const refresh = !refreshed.current;
     refreshed.current = true;
-    void read(refresh);
-    return () => {
-      token.current += 1;
-    };
-  }, [props.expanded, read]);
+    void load({ refresh });
+    return cancel;
+  }, [cancel, load, props.expanded]);
 
   return (
     <AboutAccessView
-      view={state.key === key ? state.view : LOADING}
+      view={read.view}
       expanded={props.expanded}
       onToggle={props.onToggle}
-      onRetry={() => void read(true)}
-      onMore={(answer) => void loadMore(answer)}
+      onRetry={() => void load({ refresh: true })}
+      onMore={(answer) => void load({ after: answer })}
+      setup={props.setup}
     />
   );
+}
+
+// Why an answer covers nothing, in the words and the one action that can
+// change it. Only a cause dohc cannot name offers Try again.
+function AccessUnknown(props: { answer: AccessAnswer; setup: AccessSetup; onRetry: () => void }) {
+  const { answer, setup } = props;
+  if (answer.visibility === "hidden") {
+    return <AboutNote testId="about-access-unknown" reason="hidden" icon={EyeOff}>Shares do not include this file.</AboutNote>;
+  }
+  if (answer.visibility === "missing") {
+    return (
+      <AboutNote testId="about-access-unknown" reason="missing" icon={FileX}>
+        This file is no longer available at this path.
+      </AboutNote>
+    );
+  }
+  switch (setup.reason) {
+    case "not-synced":
+      return (
+        <AboutNote testId="about-access-unknown" reason="not-synced" icon={CloudOff}
+          action={{ label: "Sync and sharing", run: setup.openSyncSettings }}>
+          Shares need sync, and this workspace does not sync.
+        </AboutNote>
+      );
+    case "signed-out":
+      return (
+        <AboutNote testId="about-access-unknown" reason="signed-out" icon={LogIn}
+          action={{ label: "Connect server", run: setup.connect }}>
+          Connect your server to check who has access.
+        </AboutNote>
+      );
+    case "other-account":
+      return (
+        <AboutNote testId="about-access-unknown" reason="other-account" icon={LogIn}
+          action={{ label: "Connect server", run: setup.connect }}>
+          This workspace syncs with another account. Connect that account to check who has access.
+        </AboutNote>
+      );
+    case "unexplained":
+      return (
+        <>
+          <div className="px-2 pb-1">
+            <StateMark testId="about-access-freshness" state={answer.freshness} shown="access-unknown" />
+          </div>
+          <AboutNote testId="about-access-unknown" reason="unexplained" action={{ label: "Try again", run: props.onRetry }}>
+            dohc could not check who has access. This does not mean that no one has access.
+          </AboutNote>
+        </>
+      );
+  }
 }
 
 // The Access section for an answer already in hand. The states page draws it.
@@ -467,6 +587,7 @@ export function AboutAccessView(props: {
   onToggle: () => void;
   onRetry: () => void;
   onMore: (answer: AccessAnswer) => void;
+  setup: AccessSetup;
 }) {
   const { view } = props;
   const empty = view.status === "ready" ? emptyWithin(view.answer) : null;
@@ -475,16 +596,14 @@ export function AboutAccessView(props: {
       id="access"
       icon={Share2}
       label="Access"
-      count={view.status === "ready" && empty !== null ? `${view.answer.rows.length}${view.answer.nextCursor ? "+" : ""}` : undefined}
+      count={view.status === "ready" && empty !== null ? grantedCount(view.answer) : undefined}
       expanded={props.expanded}
       onToggle={props.onToggle}
     >
       {view.status === "loading" ? (
         <SkeletonLines rows={2} className="px-2 py-1" />
       ) : view.status === "failed" ? (
-        <AboutNote testId="about-access-failed" failed onRetry={props.onRetry}>
-          {view.message}
-        </AboutNote>
+        <AboutRetry testId="about-access-failed" onRetry={props.onRetry} />
       ) : (
         <div
           data-testid="about-access-answer"
@@ -492,47 +611,49 @@ export function AboutAccessView(props: {
           data-coverage={view.answer.coverage.kind}
           data-visibility={view.answer.visibility}
         >
-          <div className="flex items-center gap-2 px-2 pb-1">
-            <StateMark
-              testId="about-access-freshness"
-              state={view.answer.freshness}
-              shown={`access-${view.answer.freshness}`}
-            />
-            {view.answer.checkedAtMs !== null ? (
-              <time
-                dateTime={formatChatTime(view.answer.checkedAtMs).iso}
-                title={formatChatTime(view.answer.checkedAtMs).label}
-                className="font-mono text-[11px] text-subtle"
-              >
-                {formatShortTime(view.answer.checkedAtMs)}
-              </time>
-            ) : null}
-          </div>
           {empty === null ? (
-            <AboutNote testId="about-access-unknown" onRetry={props.onRetry}>
-              dohc could not check who has access. This does not mean that no one has access.
-            </AboutNote>
-          ) : view.answer.rows.length === 0 ? (
-            <AboutNote testId="about-access-empty">{empty}</AboutNote>
+            <AccessUnknown answer={view.answer} setup={props.setup} onRetry={props.onRetry} />
           ) : (
             <>
-              <ul className="m-0 list-none p-0">
-                {view.answer.rows.map((row) => (
-                  <li key={row.kind === "share" ? `${row.shareId}\0${row.grantId}\0${row.via}` : row.principal}>
-                    <AccessRowView row={row} />
-                  </li>
-                ))}
-              </ul>
-              {view.answer.nextCursor !== null ? (
-                <button
-                  type="button"
-                  data-testid="about-access-more"
-                  onClick={() => props.onMore(view.answer)}
-                  className={`${ABOUT_ROW_BUTTON} h-7 text-[12px]`}
-                >
-                  Show more
-                </button>
-              ) : null}
+              <div className="flex items-center gap-2 px-2 pb-1">
+                <StateMark
+                  testId="about-access-freshness"
+                  state={view.answer.freshness}
+                  shown={`access-${view.answer.freshness}`}
+                />
+                {view.answer.checkedAtMs !== null ? (
+                  <time
+                    dateTime={formatChatTime(view.answer.checkedAtMs).iso}
+                    title={formatChatTime(view.answer.checkedAtMs).label}
+                    className="font-mono text-[11px] text-subtle"
+                  >
+                    {formatShortTime(view.answer.checkedAtMs)}
+                  </time>
+                ) : null}
+              </div>
+              {view.answer.rows.length === 0 ? (
+                <AboutNote testId="about-access-empty">{empty}</AboutNote>
+              ) : (
+                <>
+                  <ul className="m-0 list-none p-0">
+                    {view.answer.rows.map((row) => (
+                      <li key={row.kind === "share" ? `${row.shareId}\0${row.grantId}\0${row.via}` : row.principal}>
+                        <AccessRowView row={row} />
+                      </li>
+                    ))}
+                  </ul>
+                  {view.answer.nextCursor !== null ? (
+                    <button
+                      type="button"
+                      data-testid="about-access-more"
+                      onClick={() => props.onMore(view.answer)}
+                      className={`${ABOUT_ROW_BUTTON} h-7 text-[12px]`}
+                    >
+                      Show more
+                    </button>
+                  ) : null}
+                </>
+              )}
             </>
           )}
         </div>

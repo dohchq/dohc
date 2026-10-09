@@ -38,6 +38,8 @@ import {
   AboutHeader,
   AboutHistoryView,
   AboutSection,
+  type AccessReason,
+  type AccessSetup,
   type AccessView,
 } from "../workbench/About";
 import { CAPTURE_RECOVERY_TITLE, captureRecoveryMessage } from "../shell/useCaptureRecoveryNotices";
@@ -407,10 +409,14 @@ function AboutPanelSpecimen(props: { children: ReactNode }) {
   return <div className="flex w-[290px] flex-col rounded-lg border border-line bg-panel pb-2">{props.children}</div>;
 }
 
-function AccessSpecimen(props: { view: AccessView; expanded?: boolean }) {
+const accessSetup = (reason: AccessReason): AccessSetup => ({ reason, openSyncSettings: noop, connect: noop });
+const ACCESS_UNEXPLAINED = accessSetup("unexplained");
+
+function AccessSpecimen(props: { view: AccessView; reason?: AccessReason }) {
   return (
     <AboutPanelSpecimen>
-      <AboutAccessView view={props.view} expanded={props.expanded ?? true} onToggle={noop} onRetry={noop} onMore={noop} />
+      <AboutAccessView view={props.view} expanded onToggle={noop} onRetry={noop} onMore={noop}
+        setup={props.reason ? accessSetup(props.reason) : ACCESS_UNEXPLAINED} />
     </AboutPanelSpecimen>
   );
 }
@@ -1260,36 +1266,41 @@ function Pane(props: { theme: "light" | "dark" }) {
               view={{ status: "ready", moments: ABOUT_MOMENTS, more: true }}
               expanded
               onToggle={noop}
-              onRetry={noop}
               onOpenMoment={noop}
             />
-            <AboutAccessView view={{ status: "ready", answer: ABOUT_ACCESS }} expanded onToggle={noop} onRetry={noop} onMore={noop} />
+            <AboutAccessView view={{ status: "ready", answer: ABOUT_ACCESS }} expanded onToggle={noop} onRetry={noop}
+              onMore={noop} setup={ACCESS_UNEXPLAINED} />
           </AboutPanelSpecimen>
         </Specimen>
         <Specimen label="access may be out of date">
           <AccessSpecimen view={{ status: "ready", answer: { ...ABOUT_ACCESS, freshness: "stale" } }} />
         </Specimen>
-        <Specimen label="access unknown">
-          <AccessSpecimen view={{ status: "ready", answer: ABOUT_ACCESS_UNKNOWN }} />
-        </Specimen>
         <Specimen label="no share within its coverage">
           <AccessSpecimen view={{ status: "ready", answer: { ...ABOUT_ACCESS, rows: [] } }} />
         </Specimen>
-        <Specimen label="loading, then a failed read">
+        <Specimen label="unknown: the workspace does not sync">
+          <AccessSpecimen view={{ status: "ready", answer: ABOUT_ACCESS_UNKNOWN }} reason="not-synced" />
+        </Specimen>
+        <Specimen label="unknown: signed out">
+          <AccessSpecimen view={{ status: "ready", answer: ABOUT_ACCESS_UNKNOWN }} reason="signed-out" />
+        </Specimen>
+        <Specimen label="unknown: dohc could not check">
+          <AccessSpecimen view={{ status: "ready", answer: ABOUT_ACCESS_UNKNOWN }} />
+        </Specimen>
+        <Specimen label="loading, then failed reads: words in Notices">
           <AboutPanelSpecimen>
-            <AboutHistoryView view={{ status: "loading" }} expanded onToggle={noop} onRetry={noop} onOpenMoment={noop} />
-            <AboutAccessView
-              view={{ status: "failed", message: "This workspace is no longer open in this window." }}
-              expanded
-              onToggle={noop}
-              onRetry={noop}
-              onMore={noop}
-            />
+            <AboutHistoryView view={{ status: "loading" }} expanded onToggle={noop} onOpenMoment={noop} />
+            <AboutHistoryView view={{ status: "failed", retry: noop }} expanded onToggle={noop} onOpenMoment={noop} />
+            <AboutAccessView view={{ status: "failed" }} expanded onToggle={noop} onRetry={noop} onMore={noop} setup={ACCESS_UNEXPLAINED} />
           </AboutPanelSpecimen>
         </Specimen>
-        <Specimen label="closed, keyboard focus">
+        <Specimen label="keyboard focus on a closed section">
           <div data-force-state="focus focus-visible" data-force-target='[data-testid="about-access-toggle"]'>
-            <AccessSpecimen view={{ status: "loading" }} expanded={false} />
+            <AboutPanelSpecimen>
+              <AboutHistoryView view={{ status: "untracked" }} expanded onToggle={noop} onOpenMoment={noop} />
+              <AboutAccessView view={{ status: "loading" }} expanded={false} onToggle={noop} onRetry={noop} onMore={noop}
+                setup={ACCESS_UNEXPLAINED} />
+            </AboutPanelSpecimen>
           </div>
         </Specimen>
       </Section>

@@ -47,6 +47,9 @@ describe("StateMark", () => {
     // Stale is the last list dohc received, and unknown is no list at all:
     // neither may read as done, and unknown must never read as no access.
     expect((Object.keys(ACCESS_STATE) as AccessStateKey[]).filter((key) => ACCESS_STATE[key].mark === "settled")).toEqual(["access-fresh"]);
+    // A stale list is settled but old: no check runs for it, so it never
+    // takes the ring that says dohc is still working.
+    expect(ACCESS_STATE["access-stale"].mark).toBe("dated");
     expect(ACCESS_STATE["access-unknown"].mark).toBe("attention");
     render(<StateMark testId="mark" state="unknown" shown="access-unknown" />);
     const chip = screen.getByTestId("mark");

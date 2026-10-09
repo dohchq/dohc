@@ -88,5 +88,5 @@ export function useCloudPresence(
 
   const workspaceSynced = cloudStatus?.workspaceSynced === true;
 
-  return { chatCollaboration, refreshCloudStatus, workspaceSynced };
+  return { chatCollaboration, refreshCloudStatus, workspaceSynced, cloudStatus };
 }

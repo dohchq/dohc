@@ -1,18 +1,19 @@
-import { Lock, TriangleAlert } from "lucide-react";
+import { Clock, Lock, TriangleAlert } from "lucide-react";
 import { useId, useLayoutEffect, useRef, useState } from "react";
 import type { SaveState } from "@dohc/workspace-contracts/save-state";
 
 // Save facts and access/view facts share this presentation map.
 //
 // The shape says what kind of state it is before the word is read. Filled
-// means settled, a ring means dohc is still working, a lock means the file
-// is held and no edit is lost, a triangle means the person has to act.
-// Nothing animates, so reduced motion needs no special case.
+// means settled, a clock means settled but old, a ring means dohc is still
+// working, a lock means the file is held and no edit is lost, a triangle
+// means the person has to act. Nothing animates, so reduced motion needs no
+// special case.
 //
 // A `Record` over the union, so a new state is a compile error here until it
 // has a label, and every label is one it can defend from code (see
 // StateMark.test.tsx for what each may claim).
-export type StateMarkKind = "settled" | "working" | "held" | "attention";
+export type StateMarkKind = "settled" | "dated" | "working" | "held" | "attention";
 
 export type StatePresentation = {
   label: string;
@@ -109,15 +110,16 @@ export const SAVE_STATE: Record<SaveStateKey, StatePresentation> = {
 };
 
 // How current a list of who has access is: the access answer's freshness.
-// Only a list main checked within its refresh window is settled. An empty
-// list is never "no access", so unknown says so.
+// A list main checked within its refresh window is settled. A stale list is
+// settled too, but old: no check is running for it. An empty list is never
+// "no access", so unknown says so.
 export type AccessStateKey = "access-fresh" | "access-stale" | "access-unknown";
 
 export const ACCESS_STATE: Record<AccessStateKey, StatePresentation> = {
   "access-fresh": { label: "Checked", mark: "settled" },
   "access-stale": {
     label: "May be out of date",
-    mark: "working",
+    mark: "dated",
     title: "This is the last list of shares dohc received.",
   },
   "access-unknown": {
@@ -139,6 +141,7 @@ export function saveStatePresentationKey(state: SaveState): SaveStateKey | null 
 
 const MARK_TONE: Record<StateMarkKind, string> = {
   settled: "text-subtle",
+  dated: "text-subtle",
   working: "text-subtle",
   held: "text-muted",
   attention: "text-danger",
@@ -148,6 +151,8 @@ function Mark(props: { kind: StateMarkKind }) {
   switch (props.kind) {
     case "settled":
       return <span aria-hidden className="size-2 shrink-0 rounded-full bg-current" />;
+    case "dated":
+      return <Clock size={12} aria-hidden className="shrink-0" />;
     case "working":
       return <span aria-hidden className="size-2 shrink-0 rounded-full border-[1.5px] border-current" />;
     case "held":

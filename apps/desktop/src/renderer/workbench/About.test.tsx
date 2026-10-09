@@ -7,7 +7,7 @@ import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/acc
 import type { EngineMomentRecord, ListEngineMomentsResponse } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import { formatShortTime } from "../time";
-import { AboutAccess, AboutHistory } from "./About";
+import { AboutAccess, AboutHistory, type AboutFile, type AccessReason, type AccessSetup } from "./About";
 
 const bridgeMock = {
   getObjectAccess: vi.fn<(input: { workspaceId: string; ref: unknown; cursor?: string }) => Promise<AccessAnswer>>(),
@@ -15,8 +15,19 @@ const bridgeMock = {
   listEngineMoments: vi.fn<(input: { workspaceId: string; objectId?: string; limit?: number }) => Promise<ListEngineMomentsResponse>>(),
 };
 
+// The shell's error hook: the same object every render, as the shell's is.
+const notices = { report: vi.fn(), clear: vi.fn() };
+const openSyncSettings = vi.fn();
+const connect = vi.fn();
+const SETUPS: Record<AccessReason, AccessSetup> = {
+  "not-synced": { reason: "not-synced", openSyncSettings, connect },
+  "signed-out": { reason: "signed-out", openSyncSettings, connect },
+  "other-account": { reason: "other-account", openSyncSettings, connect },
+  unexplained: { reason: "unexplained", openSyncSettings, connect },
+};
+
 beforeEach(() => {
-  for (const mock of Object.values(bridgeMock)) mock.mockReset();
+  for (const mock of [...Object.values(bridgeMock), notices.report, notices.clear, openSyncSettings, connect]) mock.mockReset();
   bridgeMock.requestAccessRefresh.mockResolvedValue(undefined);
   vi.stubGlobal("dohcDesktop", bridgeMock);
 });
@@ -68,7 +79,7 @@ function share(overrides: Partial<AccessShareRow> = {}): AccessShareRow {
   };
 }
 
-function Access(props: { workspaceId?: string; path?: string; open?: boolean }) {
+function Access(props: { workspaceId?: string; path?: string; open?: boolean; reason?: AccessReason }) {
   const [open, setOpen] = useState(props.open ?? true);
   return (
     <AboutAccess
@@ -76,6 +87,8 @@ function Access(props: { workspaceId?: string; path?: string; open?: boolean }) 
       path={props.path ?? "docs/plan.md"}
       expanded={open}
       onToggle={() => setOpen((current) => !current)}
+      notices={notices}
+      setup={SETUPS[props.reason ?? "unexplained"]}
     />
   );
 }
@@ -99,6 +112,7 @@ describe("About Access", () => {
     expect(bridgeMock.requestAccessRefresh.mock.invocationCallOrder[0]).toBeLessThan(
       bridgeMock.getObjectAccess.mock.invocationCallOrder[0]!,
     );
+    expect(notices.clear).toHaveBeenCalledWith("about-access:docs/plan.md");
   });
 
   it("shows nothing it has not read while the answer loads", async () => {
@@ -113,13 +127,14 @@ describe("About Access", () => {
     expect(screen.getByTestId("about-access-answer")).toBeTruthy();
   });
 
-  it("lists each grant with its person or link and its level, checked and fresh", async () => {
+  it("lists each grant with its person or link and its level, and counts only active grants", async () => {
     bridgeMock.getObjectAccess.mockResolvedValue(
       answer({
         rows: [
           share({ via: "link", grantId: "grant-link", recipientEmail: null, recipientUserId: null, access: "view" }),
           share(),
           share({ grantId: "grant-old", recipientEmail: "kim@example.com", status: "revoked", access: null }),
+          share({ grantId: "grant-gone", recipientEmail: "lee@example.com", status: "removed", access: null }),
         ],
       }),
     );
@@ -130,11 +145,14 @@ describe("About Access", () => {
     expect(screen.getByTestId("about-access-freshness").textContent).toBe("Checked");
     expect(within(result).getByText(formatShortTime(CHECKED_AT))).toBeTruthy();
     const rows = screen.getAllByTestId("about-access-row");
-    expect(rows.map((row) => row.textContent)).toEqual(["Anyone with the link", "Ssam@example.com", "Kkim@example.com" + "ended"]);
+    expect(rows.map((row) => row.textContent)).toEqual([
+      "Anyone with the link", "Ssam@example.com", "Kkim@example.comended", "Llee@example.comended",
+    ]);
     expect(within(rows[0]!).getByRole("img", { name: "View" })).toBeTruthy();
     expect(within(rows[1]!).getByRole("img", { name: "Edit" })).toBeTruthy();
     expect(within(rows[2]!).queryByRole("img")).toBeNull();
-    expect(screen.getByTestId("about-access-count").textContent).toBe("3");
+    // Two grants give access now; the two ended ones stay listed.
+    expect(screen.getByTestId("about-access-count").textContent).toBe("2");
   });
 
   it("says an empty answer covers only what it checked, never that nobody has access", async () => {
@@ -160,7 +178,7 @@ describe("About Access", () => {
     expect(within(row).getByRole("img", { name: "Comment" })).toBeTruthy();
   });
 
-  it("keeps a stale list and says it may be out of date", async () => {
+  it("keeps a stale list and marks it settled but old", async () => {
     bridgeMock.getObjectAccess.mockResolvedValue(answer({ freshness: "stale", rows: [share()] }));
     render(<Access />);
     const result = await screen.findByTestId("about-access-answer");
@@ -168,14 +186,16 @@ describe("About Access", () => {
     const mark = screen.getByTestId("about-access-freshness");
     expect(mark.textContent).toBe("May be out of date");
     expect(mark.getAttribute("data-state")).toBe("stale");
+    expect(mark.querySelector(".lucide-clock")).toBeTruthy();
     expect(screen.getAllByTestId("about-access-row")).toHaveLength(1);
     expect(screen.getByTestId("about-access-count").textContent).toBe("1");
   });
 
-  it("tells unknown apart from no access, and checks again on Try again", async () => {
+  it("tells a cause it cannot name apart from no access, and checks again on Try again", async () => {
     bridgeMock.getObjectAccess.mockResolvedValueOnce(UNKNOWN).mockResolvedValue(answer());
     render(<Access />);
     const unknown = await screen.findByTestId("about-access-unknown");
+    expect(unknown.dataset.reason).toBe("unexplained");
     expect(unknown.textContent).toContain("This does not mean that no one has access.");
     expect(screen.getByTestId("about-access-freshness").textContent).toBe("Unknown");
     expect(screen.queryByTestId("about-access-empty")).toBeNull();
@@ -186,20 +206,72 @@ describe("About Access", () => {
     expect(bridgeMock.requestAccessRefresh).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    ["not-synced", "Shares need sync, and this workspace does not sync.", "Sync and sharing", openSyncSettings],
+    ["signed-out", "Connect your server to check who has access.", "Connect server", connect],
+    ["other-account", "This workspace syncs with another account. Connect that account to check who has access.", "Connect server", connect],
+  ] as const)("says why an answer covers nothing when %s, with the one action that can change it", async (reason, words, label, action) => {
+    bridgeMock.getObjectAccess.mockResolvedValue(UNKNOWN);
+    render(<Access reason={reason} />);
+    const unknown = await screen.findByTestId("about-access-unknown");
+    expect(unknown.dataset.reason).toBe(reason);
+    expect(unknown.textContent).toContain(words);
+    // A cause dohc can name is not a failure: no red mark, and no Try again
+    // that can never succeed.
+    expect(screen.queryByTestId("about-access-freshness")).toBeNull();
+    expect(within(unknown).queryByText("Try again")).toBeNull();
+    expect(screen.queryByTestId("about-access-count")).toBeNull();
+    await userEvent.setup().click(within(unknown).getByText(label));
+    expect(action).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["hidden", "Shares do not include this file."],
+    ["missing", "This file is no longer available at this path."],
+  ] as const)("says what main found for a %s file whatever the account", async (visibility, words) => {
+    bridgeMock.getObjectAccess.mockResolvedValue({ ...UNKNOWN, visibility });
+    render(<Access reason="signed-out" />);
+    const unknown = await screen.findByTestId("about-access-unknown");
+    expect(unknown.dataset.reason).toBe(visibility);
+    expect(unknown.textContent).toBe(words);
+    expect(within(unknown).queryByRole("button")).toBeNull();
+  });
+
   it("still reads when the refresh request fails, and the answer says how current it is", async () => {
     bridgeMock.requestAccessRefresh.mockRejectedValue(new Error("offline"));
     bridgeMock.getObjectAccess.mockResolvedValue(answer({ freshness: "stale" }));
     render(<Access />);
     expect((await screen.findByTestId("about-access-answer")).dataset.freshness).toBe("stale");
+    expect(notices.report).not.toHaveBeenCalled();
   });
 
-  it("shows a failed read with its words and Try again", async () => {
-    bridgeMock.getObjectAccess.mockRejectedValueOnce(new Error("disk is busy")).mockResolvedValue(answer());
+  it("reports a failed read to the shell, shows only Try again, and clears the row once a read answers", async () => {
+    const error = new Error("disk is busy");
+    bridgeMock.getObjectAccess.mockRejectedValueOnce(error).mockResolvedValue(answer());
     render(<Access />);
     const failed = await screen.findByTestId("about-access-failed");
-    expect(failed.textContent).toContain("disk is busy");
+    expect(failed.textContent).toBe("Try again");
+    expect(notices.report).toHaveBeenCalledWith({
+      identity: "about-access:docs/plan.md",
+      message: expect.stringContaining("disk is busy"),
+      cause: error,
+      retry: expect.any(Function),
+    });
     await userEvent.setup().click(within(failed).getByText("Try again"));
     await screen.findByTestId("about-access-empty");
+    expect(notices.clear).toHaveBeenLastCalledWith("about-access:docs/plan.md");
+  });
+
+  it("reads again from the Notices row only while its file is still open", async () => {
+    bridgeMock.getObjectAccess.mockRejectedValueOnce(new Error("disk is busy")).mockResolvedValue(answer());
+    const { rerender } = render(<Access path="docs/plan.md" />);
+    await waitFor(() => expect(notices.report).toHaveBeenCalledTimes(1));
+    const rowRetry = notices.report.mock.calls[0]![0].retry as () => void;
+    rerender(<Access path="docs/other.md" />);
+    await screen.findByTestId("about-access-empty");
+    const calls = bridgeMock.getObjectAccess.mock.calls.length;
+    act(() => rowRetry());
+    expect(bridgeMock.getObjectAccess.mock.calls.length).toBe(calls);
   });
 
   it("never shows workspace A's answer after a switch to workspace B", async () => {
@@ -241,6 +313,21 @@ describe("About Access", () => {
     expect(bridgeMock.getObjectAccess).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: "page-2" }));
     expect(screen.queryByTestId("about-access-more")).toBeNull();
   });
+
+  it("reads from the start when the listing changed under its cursor", async () => {
+    bridgeMock.getObjectAccess
+      .mockResolvedValueOnce(answer({ rows: [share()], nextCursor: "page-2" }))
+      // Main refuses a cursor from an older listing with an unknown answer.
+      .mockResolvedValueOnce({ ...UNKNOWN, visibility: "unknown" })
+      .mockResolvedValueOnce(answer({ rows: [share(), share({ grantId: "grant-new", recipientEmail: "new@example.com" })] }));
+    render(<Access />);
+    await screen.findByTestId("about-access-more");
+    await userEvent.setup().click(screen.getByTestId("about-access-more"));
+    await waitFor(() => expect(screen.getAllByTestId("about-access-row")).toHaveLength(2));
+    expect(screen.getAllByTestId("about-access-row")[1]!.textContent).toContain("new@example.com");
+    expect(bridgeMock.getObjectAccess.mock.calls[2]![0]).not.toHaveProperty("cursor");
+    expect(screen.queryByTestId("about-access-unknown")).toBeNull();
+  });
 });
 
 function moment(overrides: Partial<EngineMomentRecord> = {}): EngineMomentRecord {
@@ -266,16 +353,24 @@ function page(moments: EngineMomentRecord[], more = false): ListEngineMomentsRes
   };
 }
 
-function HistorySection(props: { workspaceId?: string; objectId?: string; revision?: number; onOpenMoment?: (id: string, path: string) => void }) {
+function HistorySection(props: {
+  workspaceId?: string;
+  objectId?: string;
+  file?: AboutFile;
+  revision?: number;
+  onOpenMoment?: (id: string, path: string) => void;
+}) {
   const [open, setOpen] = useState(true);
   return (
     <AboutHistory
       workspaceId={props.workspaceId ?? "workspace-a"}
-      objectId={props.objectId ?? "object-1"}
+      path="docs/plan.md"
+      file={props.file ?? { status: "ready", objectId: props.objectId ?? "object-1" }}
       revision={props.revision ?? 0}
       expanded={open}
       onToggle={() => setOpen((current) => !current)}
       onOpenMoment={props.onOpenMoment ?? (() => undefined)}
+      notices={notices}
     />
   );
 }
@@ -298,6 +393,25 @@ describe("About History", () => {
     expect(onOpenMoment).toHaveBeenCalledWith("moment-1", "docs/plan.md");
   });
 
+  it("keeps its place while the file's read runs, and offers that read's Try again when it fails", async () => {
+    const { rerender } = render(<HistorySection file={{ status: "loading" }} />);
+    expect(screen.getByTestId("about-history-toggle")).toBeTruthy();
+    expect(screen.queryByTestId("about-history-count")).toBeNull();
+    const retry = vi.fn();
+    rerender(<HistorySection file={{ status: "failed", retry }} />);
+    await userEvent.setup().click(within(screen.getByTestId("about-history-failed")).getByText("Try again"));
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(bridgeMock.listEngineMoments).not.toHaveBeenCalled();
+    // The file's own read reports its failure; History adds no second row.
+    expect(notices.report).not.toHaveBeenCalled();
+  });
+
+  it("says History does not track a file with no object id", () => {
+    render(<HistorySection file={{ status: "ready", objectId: null }} />);
+    expect(screen.getByTestId("about-history-untracked").textContent).toBe("History does not track this file yet.");
+    expect(bridgeMock.listEngineMoments).not.toHaveBeenCalled();
+  });
+
   it("shows loading lines, then says when the file has no changes", async () => {
     const pending = deferred<ListEngineMomentsResponse>();
     bridgeMock.listEngineMoments.mockReturnValue(pending.promise);
@@ -309,19 +423,29 @@ describe("About History", () => {
     expect(screen.getByTestId("about-history-count").textContent).toBe("0");
   });
 
-  it("shows a failed read with Try again", async () => {
-    bridgeMock.listEngineMoments.mockRejectedValueOnce(new Error("engine stopped")).mockResolvedValue(page([moment()]));
+  it("reports a failed read to the shell and reads again on Try again", async () => {
+    const error = new Error("engine stopped");
+    bridgeMock.listEngineMoments.mockRejectedValueOnce(error).mockResolvedValue(page([moment()]));
     render(<HistorySection />);
     const failed = await screen.findByTestId("about-history-failed");
-    expect(failed.textContent).toContain("engine stopped");
+    expect(failed.textContent).toBe("Try again");
+    expect(notices.report).toHaveBeenCalledWith({
+      identity: "about-history:docs/plan.md",
+      message: expect.stringContaining("engine stopped"),
+      cause: error,
+      retry: expect.any(Function),
+    });
     await userEvent.setup().click(within(failed).getByText("Try again"));
     expect(await screen.findAllByTestId("about-history-open")).toHaveLength(1);
+    expect(notices.clear).toHaveBeenLastCalledWith("about-history:docs/plan.md");
   });
 
-  it("says History is still updating instead of showing no changes", async () => {
+  it("reports that History is still updating instead of showing no changes", async () => {
     bridgeMock.listEngineMoments.mockResolvedValue({ status: "updating" });
     render(<HistorySection />);
-    expect((await screen.findByTestId("about-history-failed")).textContent).toContain("Workspace is still updating. Try again.");
+    await screen.findByTestId("about-history-failed");
+    expect(screen.queryByTestId("about-history-empty")).toBeNull();
+    expect(notices.report).toHaveBeenCalledWith(expect.objectContaining({ message: "Workspace is still updating. Try again." }));
   });
 
   it("never shows another file's changes after a switch", async () => {
