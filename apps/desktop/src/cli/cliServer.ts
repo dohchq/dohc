@@ -1,4 +1,5 @@
 import { creationPartialMessage } from "@dohc/cli/creation";
+import { atomicReplaceFileSync } from "../atomicReplaceFile";
 import { cliUsageInvocation, type CliUsageInvocation } from "../usage/cliUsage";
 import { nameSlug } from "@dohc/workspace-contracts/names";
 import { SHARED_AUTOMATION_HISTORY_REASON } from "@dohc/workspace-contracts/automation-controls";
@@ -80,7 +81,6 @@ import {
 import {
   mkdirSync,
   readFileSync,
-  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -1715,12 +1715,10 @@ class RunMessageLinkRecoveryQueue {
           }),
         ),
       ];
-      const temporaryPath = `${path}.${process.pid}.tmp`;
-      writeFileSync(temporaryPath, `${JSON.stringify(stored)}\n`, {
+      atomicReplaceFileSync(path, (temporaryPath) => writeFileSync(temporaryPath, `${JSON.stringify(stored)}\n`, {
         encoding: "utf8",
         mode: 0o600,
-      });
-      renameSync(temporaryPath, path);
+      }));
       return true;
     } catch (error) {
       try {

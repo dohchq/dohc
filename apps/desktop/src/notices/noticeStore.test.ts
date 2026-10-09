@@ -1,6 +1,11 @@
-import { mkdir, readdir, readFile, rmdir } from "node:fs/promises";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, writeFile: vi.fn(actual.writeFile) };
+});
 import { TokenBucketLimiter } from "@dohc/service-http";
 import {
   claimWorkspace,
@@ -495,12 +500,20 @@ describe("notices on one person's computers", () => {
       await laptop.store.sync();
       const name = (await readdir(laptop.directory)).find((entry) => entry.endsWith(".json"))!;
       const where = signedIn ? "account" : "local";
-      // A folder where the save writes its temporary file makes the save fail.
-      await mkdir(join(laptop.directory, `${name}.tmp`));
-      await expect(laptop.store.postNotice(notice({ noticeId: "second", title: "Second" }))).rejects.toThrow();
-      expect(await titles(laptop)).toEqual([`${where}:First`]);
-
-      await rmdir(join(laptop.directory, `${name}.tmp`));
+      const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+      vi.mocked(writeFile).mockImplementation(async (...args) => {
+        if (String(args[0]).startsWith(join(laptop.directory, `${name}.tmp-`))) {
+          throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+        }
+        await actual.writeFile(...args);
+      });
+      try {
+        await expect(laptop.store.postNotice(notice({ noticeId: "second", title: "Second" }))).rejects.toThrow("disk full");
+        expect(await titles(laptop)).toEqual([`${where}:First`]);
+        expect((await readdir(laptop.directory)).filter((entry) => entry.includes(".tmp-"))).toEqual([]);
+      } finally {
+        vi.mocked(writeFile).mockReset();
+      }
       await laptop.store.postNotice(notice({ noticeId: "second", title: "Second" }));
       // dohc runs one store per profile; let this one's background sync finish before the next opens.
       await laptop.store.sync();

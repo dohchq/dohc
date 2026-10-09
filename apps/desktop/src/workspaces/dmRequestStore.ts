@@ -1,4 +1,5 @@
-import { readFileSync, renameSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { atomicReplaceFileSync } from "../atomicReplaceFile";
 
 // Declined DM requests are account-wide because received relay grants are
 // account-wide. The file lives in stateDir, not in a workspace registry.
@@ -36,13 +37,11 @@ function readSet(file: string): ReadResult {
 
 function writeSet(file: string, declined: ReadonlySet<string>): boolean {
   try {
-    const tmp = `${file}.tmp-${process.pid}`;
-    writeFileSync(
+    atomicReplaceFileSync(file, (tmp) => writeFileSync(
       tmp,
       `${JSON.stringify({ declined: [...declined].sort() }, null, 2)}\n`,
       { mode: 0o600 },
-    );
-    renameSync(tmp, file);
+    ));
     return true;
   } catch {
     return false;

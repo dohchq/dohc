@@ -1,6 +1,7 @@
+import { renameSync } from "node:fs";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RegistryEntry } from "./registryStore";
 import {
   provedNeverShared,
@@ -10,6 +11,11 @@ import {
   recordSynced,
 } from "./syncHistory";
 import { createTestScratch } from "./testTemp";
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, renameSync: vi.fn(actual.renameSync) };
+});
 
 const selector = { paths: ["Trip"], versionId: null, access: "view" as const };
 const channel = {
@@ -31,6 +37,31 @@ beforeEach(async () => {
 });
 
 describe("a workspace proved never shared", () => {
+  it("records sync after transient Windows destination locks", async () => {
+    await recordNeverSynced(root);
+    const locked = Object.assign(new Error("destination locked"), { code: "EPERM" });
+    const rename = vi.mocked(renameSync);
+    rename.mockClear();
+    rename.mockImplementationOnce(() => { throw locked; });
+    rename.mockImplementationOnce(() => { throw locked; });
+    const wait = vi.spyOn(Atomics, "wait").mockReturnValue("timed-out");
+    const descriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...descriptor, value: "win32" });
+    try {
+      recordSynced(root);
+      expect(rename).toHaveBeenCalledTimes(3);
+      expect(wait).toHaveBeenCalledTimes(2);
+      expect(await readSyncHistory(root)).toBe("synced");
+      expect(await readdir(join(root, ".dohc"))).toEqual(["sync-history.json"]);
+    } finally {
+      Object.defineProperty(process, "platform", descriptor);
+      wait.mockRestore();
+      rename.mockReset();
+      const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+      rename.mockImplementation(actual.renameSync);
+    }
+  });
+
   it("is a new workspace that never synced, whose engine applied nothing from another computer", async () => {
     await recordNeverSynced(root);
     expect(await provedNeverShared(entry, none)).toBe(true);

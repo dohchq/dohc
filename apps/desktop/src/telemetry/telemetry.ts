@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { z } from "zod";
+import { atomicReplaceFileSync } from "../atomicReplaceFile";
 import type { CodeLocation } from "../crashReports/crashReport";
 import type { ReportKinds } from "../ipc/bridgeContract";
 import { CHANNELS } from "../ipc/channels";
@@ -344,8 +345,7 @@ function readState(path: string): ReportingState {
 
 function writeState(path: string, state: ReportingState): void {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(`${path}.tmp`, JSON.stringify(state), { mode: 0o600 });
-  renameSync(`${path}.tmp`, path);
+  atomicReplaceFileSync(path, (temporary) => writeFileSync(temporary, JSON.stringify(state), { mode: 0o600 }));
 }
 
 /**
