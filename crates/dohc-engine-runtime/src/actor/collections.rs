@@ -387,6 +387,16 @@ fn file_conflict(error: &RuntimeError) -> bool {
     )
 }
 
+fn permanent_referrer(error: &RuntimeError) -> bool {
+    matches!(
+        error,
+        RuntimeError::Materialize(dohc_engine_files::MaterializeError::SymlinkTarget)
+            | RuntimeError::Domain(DomainError::InvalidInput {
+                reason: "collection relation referrer does not have a rich-document lineage"
+            })
+    )
+}
+
 fn adoption_pending(error: &RuntimeError) -> bool {
     matches!(
         error,
@@ -1089,13 +1099,140 @@ mod collection_adoption_update_tests {
         ] {
             assert!(!adoption_pending(&error));
             assert!(!file_conflict(&error));
+            assert!(!permanent_referrer(&error));
         }
         let stale = RuntimeError::Domain(DomainError::ConflictStaleTarget);
         assert!(adoption_pending(&stale));
+        assert!(!permanent_referrer(&RuntimeError::Domain(
+            DomainError::InvalidInput {
+                reason: "collection record does not have a rich-document lineage"
+            }
+        )));
         assert!(
-            !file_conflict(&stale),
+            !file_conflict(&stale) && !permanent_referrer(&stale),
             "relation cleanup must propagate and re-arm stale targets"
         );
+    }
+
+    #[test]
+    fn relation_cleanup_skips_a_symlink_referrer_without_blocking_siblings() {
+        let (scratch, mut store, mut cache) = fixture();
+        seed_relation_referrers(&mut store, &mut cache, scratch.path());
+        let target = scratch.path().join("symlink-target.md");
+        let path = scratch.path().join("tasks/a.md");
+        let original = std::fs::read_to_string(&path).unwrap();
+        std::fs::rename(&path, &target).unwrap();
+        if !dohc_engine_testkit::try_make_file_symlink(&target, &path).unwrap() {
+            eprintln!("file symlink privilege unavailable; skipping symlink referrer test");
+            return;
+        }
+        assert_relation_cleanup_skips_only_broken_referrer(&mut store, &mut cache, scratch.path());
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read_to_string(target).unwrap(), original);
+        assert!(
+            reconcile(&mut store, &mut cache, scratch.path())
+                .unwrap()
+                .changed_paths
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn relation_cleanup_skips_a_non_richdoc_referrer_without_blocking_siblings() {
+        let (scratch, mut store, mut cache) = fixture();
+        let key = seed_relation_referrers(&mut store, &mut cache, scratch.path());
+        store
+            .write_with(&dohc_engine_storage::NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE ydoc_docs SET content_kind='plaintext' WHERE object_id=?1",
+                    [&key.object_id],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+        cache.clear();
+        let original = std::fs::read_to_string(scratch.path().join("tasks/a.md")).unwrap();
+        assert_relation_cleanup_skips_only_broken_referrer(&mut store, &mut cache, scratch.path());
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("tasks/a.md")).unwrap(),
+            original
+        );
+        assert_relation_referrer_is_retried(&mut store, &mut cache, scratch.path());
+    }
+
+    fn seed_relation_referrers(
+        store: &mut EngineStore,
+        cache: &mut WriterDocCache,
+        root: &std::path::Path,
+    ) -> DocKey {
+        capture(
+            store,
+            "tasks/collection.yaml",
+            "fields:\n  related:\n    type: relation\n    collection: tasks\n    many: false\n",
+            3,
+        );
+        let mut broken_key = None;
+        for (path, id) in [
+            ("tasks/a.md", "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            ("tasks/z.md", "rec_cccccccccccccccccccccccccc"),
+        ] {
+            let text =
+                format!("---\nid: {id}\nrelated: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\nSource\n");
+            let key = seed(store, cache, path, &text);
+            std::fs::write(root.join(path), text).unwrap();
+            if path == "tasks/a.md" {
+                broken_key = Some(key);
+            }
+        }
+        broken_key.unwrap()
+    }
+
+    fn assert_relation_cleanup_skips_only_broken_referrer(
+        store: &mut EngineStore,
+        cache: &mut WriterDocCache,
+        root: &std::path::Path,
+    ) {
+        let result =
+            reconcile(store, cache, root).expect("broken referrer must not abort the pass");
+        assert!(result.changed_paths.contains(&"tasks/z.md".to_owned()));
+        let healthy = std::fs::read_to_string(root.join("tasks/z.md")).unwrap();
+        assert!(
+            !healthy.contains("related:"),
+            "healthy referrer must reconcile"
+        );
+    }
+
+    fn assert_relation_referrer_is_retried(
+        store: &mut EngineStore,
+        cache: &mut WriterDocCache,
+        root: &std::path::Path,
+    ) {
+        for _ in 0..2 {
+            let candidates = store
+                .write_with(&dohc_engine_storage::NoFaults, |tx| {
+                    reconcile_collections_in_tx(tx, "workspace", "main")
+                })
+                .unwrap();
+            let TxnOutcome::Committed(candidates) = candidates else {
+                panic!("candidate enumeration must commit");
+            };
+            assert_eq!(candidates.relation_cleanups.len(), 1);
+            assert_eq!(
+                candidates.relation_cleanups[0].source_file_path,
+                "tasks/a.md"
+            );
+            assert!(
+                reconcile(store, cache, root)
+                    .unwrap()
+                    .changed_paths
+                    .is_empty()
+            );
+        }
     }
 
     #[test]
@@ -1781,7 +1918,7 @@ fn reconcile_collections_on_store(
             Ok(CollectionRelationCleanupExecution::LeaseHeld) => {
                 lease_held = true;
             }
-            Err(error) if file_conflict(&error) => {}
+            Err(error) if file_conflict(&error) || permanent_referrer(&error) => {}
             Err(error) => return Err(error),
         }
     }
