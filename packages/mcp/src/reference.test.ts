@@ -6,6 +6,7 @@ import { executeCli } from "@dohc/cli";
 import { CLI_COMMANDS } from "@dohc/cli/args";
 import { cliResultSchemas } from "@dohc/cli/protocol";
 import {
+  ACCESS_RESULTS,
   APP_CHANNEL_REQUESTS,
   APP_RESPONSE_RESULTS,
   APP_RESULTS,
@@ -52,10 +53,27 @@ describe("CLI, MCP, and app channel reference", () => {
   it("documents every CLI socket verb, as a command or through an MCP tool", () => {
     const documented = new Set<string>([
       ...Object.keys(CLI_COMMANDS.chat!.verbs),
+      ...Object.values(ACCESS_RESULTS),
       "dataset", "appPublication", "ownerAppResponses", "fileWrite", "fileMove", "fileDelete",
       ...Object.values(MCP_RETURNS).flatMap((returns) => typeof returns === "string" ? [] : [returns.cli]),
     ]);
     expect(Object.keys(cliResultSchemas).filter((verb) => !documented.has(verb))).toEqual([]);
+  });
+
+  it("documents both Access commands with their socket results and observation limits", async () => {
+    expect(Object.keys(ACCESS_RESULTS).sort()).toEqual(Object.keys(CLI_COMMANDS.access!.verbs).sort());
+    const page = await renderReference();
+    const section = page.split("### `dohc access`")[1]!.split("\n### ")[0]!;
+    for (const [name, socketVerb] of Object.entries(ACCESS_RESULTS)) {
+      expect(section).toContain(`#### \`dohc access ${name}\``);
+      expect(section).toContain(`Uses socket verb \`${socketVerb}\`.`);
+    }
+    expect(section).toContain("only the allowlisted AccessAnswer fields");
+    expect(section).toContain("never return credentials, bearer URLs, invitation URLs, share codes, or links");
+    expect(section).toContain("the CLI never refreshes share inventories");
+    expect(section).toContain("`freshness` is `fresh`, `stale`, or `unknown`");
+    expect(section).toContain("`checkedAtMs`");
+    expect(section).toContain("`coverage`");
   });
 
   it("parses an example of every chat verb, using every flag the verb declares", async () => {
