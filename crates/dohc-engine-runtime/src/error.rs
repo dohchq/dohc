@@ -146,7 +146,7 @@ impl RuntimeError {
             RuntimeError::Sync(err) => err.code(),
             RuntimeError::Relay(_) => "relay-failed",
             RuntimeError::Search(err) => err.code(),
-            RuntimeError::Materialize(_) => "materialize-failed",
+            RuntimeError::Materialize(error) => error.code(),
             RuntimeError::ActiveVersionMaterializationIncomplete { .. } => "materialize-failed",
             RuntimeError::YdocArtifactAssetsPending => "ydoc-artifact-assets-pending",
             RuntimeError::YdocArtifactAssetsInvalid => "ydoc-artifact-assets-invalid",
@@ -159,6 +159,28 @@ impl RuntimeError {
             RuntimeError::WorkerPanicked => "worker-panicked",
             RuntimeError::Cancelled => "cancelled",
             RuntimeError::OperationCrashed => "operation-crashed",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RuntimeError;
+    use dohc_engine_files::MaterializeError;
+
+    #[test]
+    fn conditional_restore_delete_materialization_codes_preserve_reason() {
+        for error in [
+            MaterializeError::SymlinkTarget,
+            MaterializeError::RecoveryUnavailable,
+            MaterializeError::FileLocked,
+            MaterializeError::Io {
+                path: "record.md".into(),
+                kind: std::io::ErrorKind::PermissionDenied,
+            },
+        ] {
+            let code = error.code();
+            assert_eq!(RuntimeError::Materialize(error).code(), code);
         }
     }
 }

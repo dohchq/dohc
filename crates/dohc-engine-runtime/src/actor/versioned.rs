@@ -1303,6 +1303,7 @@ fn checked_delete_on_store(
         input.now_ms,
         faults,
         false,
+        result.deduped,
     )?;
     Ok(result)
 }
@@ -1319,9 +1320,10 @@ pub(super) fn publish_checked_delete_on_store(
     now_ms: i64,
     faults: &dyn FaultInjector,
     recovery: bool,
+    request_retry: bool,
 ) -> Result<(), RuntimeError> {
     use dohc_engine_files::{
-        DurabilityPolicy, JobOutcome, MaterializeOptions, StdBackoff, StdReplacer, materialize_one,
+        DurabilityPolicy, JobOutcome, MaterializeOptions, StdBackoff, StdReplacer,
     };
     let Some(job) = store.load_materialization_job(job_id)? else {
         return Ok(());
@@ -1332,6 +1334,12 @@ pub(super) fn publish_checked_delete_on_store(
             .ok_or(DomainError::InvalidInput {
                 reason: "not a checked delete job",
             })?;
+    if (recovery || request_retry)
+        && job.status == JobStatus::Pending
+        && dohc_engine_files::workspace_recovery_unavailable(root)
+    {
+        return Err(dohc_engine_files::MaterializeError::RecoveryUnavailable.into());
+    }
     if recovery
         && job.status == JobStatus::Pending
         && !matches!(
@@ -1344,15 +1352,39 @@ pub(super) fn publish_checked_delete_on_store(
         )
     {
         let discarded = store.write_with(faults, |tx| {
-            finish_checked_delete_effects_in_tx(tx, workspace_id, moment_id, false)
+            let repair_job = enqueue_discarded_delete_projection_in_tx(
+                tx,
+                root,
+                workspace_id,
+                moment_id,
+                now_ms,
+            )?;
+            finish_checked_delete_effects_in_tx(tx, workspace_id, moment_id, false)?;
+            Ok::<_, RuntimeError>(repair_job)
         })?;
         return match discarded {
-            TxnOutcome::Committed(_) => Ok(()),
+            TxnOutcome::Committed(repair_job) => {
+                if let Some(job_id) = repair_job {
+                    materialize_expected_job(
+                        store,
+                        root,
+                        workspace_id,
+                        &job_id,
+                        self_writes,
+                        now_ms,
+                        faults,
+                    );
+                }
+                Ok(())
+            }
             TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
         };
     }
     self_writes.record(workspace_id, &job.target_path, &job.content_sha256);
-    let canonical = if job.status == JobStatus::Pending {
+    // A disk receipt can outlive a failed finish commit. Retries must check
+    // the current snapshot even when the file has already been removed.
+    let check_snapshot = matches!(job.status, JobStatus::Pending | JobStatus::Complete);
+    let canonical = if check_snapshot {
         store
             .write_with(&dohc_engine_storage::NoFaults, |tx| {
                 let version_id: String = tx
@@ -1390,12 +1422,24 @@ pub(super) fn publish_checked_delete_on_store(
         Ok(())
     };
     let outcome = match canonical {
+        Err(error)
+            if job.status == JobStatus::Complete
+                && !matches!(
+                    error,
+                    RuntimeError::Domain(
+                        DomainError::WritePreconditionFailed { .. } | DomainError::InvalidVersion
+                    )
+                ) =>
+        {
+            self_writes.retract(workspace_id, &job.target_path, &job.content_sha256);
+            return Err(error);
+        }
         Err(error) => Err(error),
         Ok(()) => match job.status {
             JobStatus::Complete => Ok(JobOutcome::AlreadyMaterialized),
             JobStatus::Conflict => Ok(JobOutcome::Conflict),
             JobStatus::Cancelled => Ok(JobOutcome::Superseded),
-            JobStatus::Pending => materialize_one(
+            JobStatus::Pending => dohc_engine_files::materialize::materialize_one_ordinary(
                 store,
                 root,
                 &job,
@@ -1420,35 +1464,136 @@ pub(super) fn publish_checked_delete_on_store(
     if !applied {
         self_writes.retract(workspace_id, &job.target_path, &job.content_sha256);
     }
+    if (recovery || request_retry)
+        && matches!(
+            outcome,
+            Err(RuntimeError::Materialize(
+                dohc_engine_files::MaterializeError::RecoveryUnavailable
+                    | dohc_engine_files::MaterializeError::SymlinkTarget
+            ))
+        )
+    {
+        // The file may still be in inaccessible staging. Keep its job and
+        // unjournaled moment together for the next recovery attempt.
+        return outcome.map(|_| ());
+    }
     let finalized = store.write_with(faults, |tx| {
-        finish_checked_delete_effects_in_tx(tx, workspace_id, moment_id, applied)
+        let repair_job = if applied {
+            None
+        } else {
+            enqueue_discarded_delete_projection_in_tx(tx, root, workspace_id, moment_id, now_ms)?
+        };
+        let asset_jobs = finish_checked_delete_effects_in_tx(tx, workspace_id, moment_id, applied)?;
+        Ok::<_, RuntimeError>((asset_jobs, repair_job))
     })?;
     match finalized {
         TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
-        TxnOutcome::Committed(asset_jobs) => materialize_scene_asset_deletes(
-            store,
-            root,
-            workspace_id,
-            &asset_jobs,
-            self_writes,
-            faults,
-            None,
-        )?,
+        TxnOutcome::Committed((asset_jobs, repair_job)) => {
+            if let Some(job_id) = repair_job {
+                materialize_expected_job(
+                    store,
+                    root,
+                    workspace_id,
+                    &job_id,
+                    self_writes,
+                    now_ms,
+                    faults,
+                );
+            }
+            materialize_scene_asset_deletes(
+                store,
+                root,
+                workspace_id,
+                &asset_jobs,
+                self_writes,
+                faults,
+                None,
+            )?;
+        }
     }
     match outcome {
         Ok(_) if applied => Ok(()),
         Err(error) => Err(error),
-        Ok(JobOutcome::Conflict | JobOutcome::Superseded) => {
-            Err(DomainError::WritePreconditionFailed {
-                current_sha256: None,
-            }
-            .into())
-        }
-        Ok(_) => Err(DomainError::InvalidInput {
-            reason: "dohc could not remove this file. It may be open in another app.",
+        Ok(_) => Err(DomainError::WritePreconditionFailed {
+            current_sha256: None,
         }
         .into()),
     }
+}
+
+fn enqueue_discarded_delete_projection_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    root: &std::path::Path,
+    workspace_id: &str,
+    moment_id: &str,
+    now_ms: i64,
+) -> Result<Option<String>, RuntimeError> {
+    use dohc_engine_files::{ProjectionTargetKind, ProjectionTargetState, probe_projection_target};
+    use dohc_engine_storage::{
+        MaterializationJobSpec, MaterializationOperation, put_binary_blob, upsert_projection_job,
+    };
+
+    let (version_id, path): (String, String) = tx
+        .query_row(
+            "SELECT version_id, path FROM moments WHERE workspace_id=?1 AND moment_id=?2",
+            params![workspace_id, moment_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(StorageError::corrupt_public)?;
+    match ensure_publication_version(tx, workspace_id, &version_id) {
+        Err(RuntimeError::Domain(DomainError::InvalidVersion)) => return Ok(None),
+        result => result?,
+    }
+    if !matches!(
+        probe_projection_target(root, &path, ProjectionTargetKind::Plaintext),
+        ProjectionTargetState::Absent
+    ) {
+        return Ok(None);
+    }
+    let snapshot: Option<(String, Option<String>, i64)> = tx
+        .query_row(
+            "SELECT CASE s.content_kind WHEN 'binary' THEN s.binary_sha256 ELSE s.blob_sha256 END, \
+         b.text, s.updated_at_ms FROM snapshots s LEFT JOIN blobs b ON b.sha256=s.blob_sha256 \
+         WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.path=?3",
+            params![workspace_id, version_id, path],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(StorageError::corrupt_public)?;
+    let Some((content_sha256, text, target_generation)) = snapshot else {
+        return Ok(None);
+    };
+    if let Some(text) = text {
+        let stored_sha256 = put_binary_blob(tx, text.as_bytes())?;
+        if stored_sha256 != content_sha256 {
+            return Err(DomainError::StateCorrupt {
+                reason: "current snapshot content does not match its digest",
+            }
+            .into());
+        }
+    }
+    let job_id = super::versions::switch_projection_job_id(
+        workspace_id,
+        &version_id,
+        &path,
+        MaterializationOperation::Write,
+        &content_sha256,
+        false,
+    );
+    upsert_projection_job(
+        tx,
+        &MaterializationJobSpec {
+            job_id: job_id.clone(),
+            workspace_id: workspace_id.into(),
+            target_path: path,
+            content_sha256,
+            preimage: Preimage::Absent,
+            target_generation,
+            now_ms,
+        },
+        MaterializationOperation::Write,
+    )?;
+    Ok(Some(job_id))
 }
 
 fn finish_checked_delete_effects_in_tx(
@@ -3182,6 +3327,942 @@ mod doc_cache_reset_tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn conditional_restore_delete_blocked_recovery_keeps_staged_moment() {
+        use std::os::windows::fs::OpenOptionsExt;
+        for binary in [false, true] {
+            let (root, mut store, input, expected) = checked_delete_fixture(binary);
+            let crash = dohc_engine_testkit::ScriptedFaults::crash_at(
+                FaultPoint::MaterializeAfterRenameBeforeComplete,
+            );
+            assert!(matches!(
+                checked_delete_on_store(
+                    &mut store,
+                    &input,
+                    Some("document"),
+                    &expected,
+                    &root,
+                    &(),
+                    crash.as_ref()
+                ),
+                Err(RuntimeError::OperationCrashed)
+            ));
+            let staging = root.join(".dohc/engine/displaced");
+            let staged = std::fs::read_dir(&staging)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            let locked = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .custom_flags(0x02000000)
+                .open(&staging)
+                .unwrap();
+            assert!(std::fs::read_dir(&staging).is_err());
+            drop(store);
+            let mut store =
+                EngineStore::open(&dohc_engine_testkit::engine_db_path(&root).unwrap(), 4).unwrap();
+            for _ in 0..2 {
+                super::super::materialization::replay_pending_materializations(
+                    &mut store,
+                    &root,
+                    super::super::materialization::MaterializationReplayScope {
+                        workspace_id: "workspace",
+                        self_writes: None,
+                        progress: None,
+                    },
+                    4,
+                    &NoFaults,
+                    None,
+                    false,
+                )
+                .unwrap();
+                assert!(dohc_engine_files::workspace_recovery_unavailable(&root));
+                assert_eq!(
+                    store
+                        .load_materialization_job("restore-delete-mat_restore-delete")
+                        .unwrap()
+                        .expect("blocked recovery must retain the job")
+                        .status,
+                    JobStatus::Pending
+                );
+                let moments: i64 = store
+                    .read_with(|c| {
+                        c.query_row(
+                            "SELECT count(*) FROM moments WHERE moment_id='restore-delete'",
+                            [],
+                            |r| r.get(0),
+                        )
+                    })
+                    .unwrap();
+                assert_eq!(moments, 1, "blocked recovery must retain the staged moment");
+            }
+            drop(locked);
+            assert_eq!(hex_sha256(&std::fs::read(&staged).unwrap()), expected);
+            super::super::materialization::replay_pending_materializations(
+                &mut store,
+                &root,
+                super::super::materialization::MaterializationReplayScope {
+                    workspace_id: "workspace",
+                    self_writes: None,
+                    progress: None,
+                },
+                5,
+                &NoFaults,
+                None,
+                false,
+            )
+            .unwrap();
+            assert!(!dohc_engine_files::workspace_recovery_unavailable(&root));
+            assert!(!root.join("record.md").exists());
+            assert!(!staged.exists());
+            assert!(
+                store
+                    .load_materialization_job("restore-delete-mat_restore-delete")
+                    .unwrap()
+                    .is_none()
+            );
+            let deletes: i64 = store
+                .read_with(|c| {
+                    c.query_row(
+                        "SELECT count(*) FROM moments WHERE operation='delete'",
+                        [],
+                        |r| r.get(0),
+                    )
+                })
+                .unwrap();
+            assert_eq!(deletes, 1);
+        }
+    }
+
+    fn crash_checked_delete(
+        root: &std::path::Path,
+        store: &mut EngineStore,
+        input: &DeleteTextFile,
+        expected: &str,
+        point: FaultPoint,
+    ) {
+        let crash = dohc_engine_testkit::ScriptedFaults::crash_at(point);
+        assert!(matches!(
+            checked_delete_on_store(
+                store,
+                input,
+                Some("document"),
+                expected,
+                root,
+                &(),
+                crash.as_ref()
+            ),
+            Err(RuntimeError::OperationCrashed)
+        ));
+    }
+
+    fn checked_delete_replay(store: &mut EngineStore, root: &std::path::Path) {
+        super::super::materialization::replay_pending_materializations(
+            store,
+            root,
+            super::super::materialization::MaterializationReplayScope {
+                workspace_id: "workspace",
+                self_writes: None,
+                progress: None,
+            },
+            5,
+            &NoFaults,
+            None,
+            false,
+        )
+        .unwrap();
+    }
+
+    fn create_checked_delete_version(store: &mut EngineStore) {
+        let mut versioned = VersionedTextStore::new(store);
+        versioned
+            .create_named_version(
+                &dohc_engine_domain::CreateNamedVersion {
+                    workspace_id: "workspace".into(),
+                    new_version_id: "other".into(),
+                    name: "Other".into(),
+                    from_version_id: "main".into(),
+                    now_ms: 4,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+    }
+
+    fn change_checked_delete_content(
+        store: &mut EngineStore,
+        root: &std::path::Path,
+        binary: bool,
+    ) {
+        if binary {
+            versioned_binary_write_on_store(
+                store,
+                &WriteBinary {
+                    workspace_id: "workspace".into(),
+                    version_id: "main".into(),
+                    object_id: "document".into(),
+                    path: "record.md".into(),
+                    bytes: b"Owner bytes KEEP".to_vec(),
+                    moment_id: "owner-edit".into(),
+                    metadata_origin: "user".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 4,
+                    request_id: None,
+                },
+                root,
+                &(),
+                &NoFaults,
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        } else {
+            versioned_text_write_with_publication_on_store(
+                store,
+                &WriteText {
+                    workspace_id: "workspace".into(),
+                    version_id: "main".into(),
+                    object_id: "document".into(),
+                    path: "record.md".into(),
+                    text: "Owner bytes KEEP".into(),
+                    moment_id: "owner-edit".into(),
+                    metadata_origin: "user".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 4,
+                    request_id: None,
+                },
+                Some(root),
+                None,
+                Some(&WriteConditions::default()),
+                &NoFaults,
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        }
+    }
+
+    fn assert_checked_delete_capture_keeps_file(store: &mut EngineStore, root: &std::path::Path) {
+        let absent = super::super::capture::confirm_absent_on_disk(
+            store,
+            Some(root),
+            "workspace",
+            "record.md",
+            6,
+        );
+        if absent.is_ok() {
+            let version = VersionedTextStore::new(store)
+                .get_active_version("workspace")
+                .unwrap();
+            VersionedTextStore::new(store)
+                .capture_retire(
+                    &dohc_engine_domain::CaptureRetire {
+                        workspace_id: "workspace".into(),
+                        version_id: version.version_id,
+                        path: "record.md".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        now_ms: 6,
+                        request_id: None,
+                        only_if_text_head: false,
+                        only_if_capture_origin: false,
+                        allow_ydoc_origin: true,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            checked_delete_count(store),
+            0,
+            "capture must not record an unintended delete"
+        );
+        assert!(matches!(
+            absent,
+            Err(RuntimeError::Sync(
+                dohc_engine_sync::SyncError::RetryableState {
+                    reason: "path-present-on-disk"
+                }
+            ))
+        ));
+    }
+
+    fn checked_delete_count(store: &EngineStore) -> i64 {
+        store
+            .read_with(|c| {
+                c.query_row(
+                    "SELECT count(*) FROM moments WHERE operation='delete'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn conditional_restore_delete_complete_recheck_error_keeps_receipt() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        for binary in [false, true] {
+            for failure in ["commit", "finish"] {
+                let (root, mut store, input, expected) = checked_delete_fixture(binary);
+                crash_checked_delete(
+                    &root,
+                    &mut store,
+                    &input,
+                    &expected,
+                    FaultPoint::MaterializeAfterKnownCopyDeletion,
+                );
+                if failure == "commit" {
+                    let armed = Arc::new(AtomicBool::new(true));
+                    store
+                        .read_with(|conn| {
+                            conn.commit_hook(Some(move || armed.swap(false, Ordering::SeqCst)))
+                                .unwrap();
+                            Ok::<_, StorageError>(())
+                        })
+                        .unwrap();
+                } else {
+                    store.read_with(|conn| conn.execute_batch("CREATE TRIGGER fail_finish_check BEFORE DELETE ON snapshots BEGIN SELECT RAISE(FAIL, 'transient finish failure'); END")).unwrap();
+                }
+                let error = publish_checked_delete_on_store(
+                    &mut store,
+                    &root,
+                    "workspace",
+                    "restore-delete-mat_restore-delete",
+                    &(),
+                    4,
+                    &NoFaults,
+                    true,
+                    false,
+                )
+                .unwrap_err();
+                if failure == "commit" {
+                    assert!(matches!(error, RuntimeError::Storage(_)), "{error:?}");
+                }
+                assert_eq!(
+                    store
+                        .load_materialization_job("restore-delete-mat_restore-delete")
+                        .unwrap()
+                        .expect("failed recheck must retain receipt")
+                        .status,
+                    JobStatus::Complete
+                );
+                assert_eq!(checked_delete_count(&store), 1);
+                store
+                    .read_with(|conn| {
+                        conn.commit_hook(None::<fn() -> bool>).unwrap();
+                        conn.execute_batch("DROP TRIGGER IF EXISTS fail_finish_check")
+                    })
+                    .unwrap();
+                checked_delete_replay(&mut store, &root);
+                checked_delete_replay(&mut store, &root);
+                assert_eq!(checked_delete_count(&store), 1);
+                assert!(
+                    store
+                        .load_materialization_job("restore-delete-mat_restore-delete")
+                        .unwrap()
+                        .is_none()
+                );
+                assert!(
+                    VersionedTextStore::new(&mut store)
+                        .read_text("workspace", "main", "record.md")
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn conditional_restore_delete_complete_version_switch_discards_publication() {
+        for binary in [false, true] {
+            let (root, mut store, input, expected) = checked_delete_fixture(binary);
+            crash_checked_delete(
+                &root,
+                &mut store,
+                &input,
+                &expected,
+                FaultPoint::MaterializeAfterKnownCopyDeletion,
+            );
+            create_checked_delete_version(&mut store);
+            let switched = super::super::versions::switch_active_version_on_store(
+                &mut store,
+                "workspace",
+                "other",
+                &root,
+                &(),
+                4,
+                &NoFaults,
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .unwrap();
+            assert_eq!(switched.version_id, "other");
+            assert_checked_delete_absent(&store);
+            let snapshots: i64 = store
+                .read_with(|c| {
+                    c.query_row(
+                        "SELECT count(*) FROM snapshots WHERE object_id='document'",
+                        [],
+                        |r| r.get(0),
+                    )
+                })
+                .unwrap();
+            assert_eq!(snapshots, 2);
+            checked_delete_replay(&mut store, &root);
+            assert_eq!(
+                hex_sha256(&std::fs::read(root.join("record.md")).unwrap()),
+                expected
+            );
+            assert_eq!(checked_delete_count(&store), 0);
+        }
+    }
+
+    #[test]
+    fn conditional_restore_delete_pending_discard_restores_current_snapshot_before_capture() {
+        checked_delete_discard_restores_current_snapshot(
+            FaultPoint::MaterializeAfterRenameBeforeComplete,
+        );
+    }
+
+    #[test]
+    fn conditional_restore_delete_complete_discard_restores_current_snapshot_before_capture() {
+        checked_delete_discard_restores_current_snapshot(
+            FaultPoint::MaterializeAfterKnownCopyDeletion,
+        );
+    }
+
+    fn checked_delete_discard_restores_current_snapshot(point: FaultPoint) {
+        #[derive(Default)]
+        struct RecordedWrites(std::sync::Mutex<Vec<String>>);
+        impl SelfWriteRecorder for RecordedWrites {
+            fn record(&self, _: &str, _: &str, sha: &str) {
+                self.0.lock().unwrap().push(sha.into());
+            }
+            fn retract(&self, _: &str, _: &str, sha: &str) {
+                self.0.lock().unwrap().retain(|entry| entry != sha);
+            }
+        }
+        for binary in [false, true] {
+            for crash_finish in [false, true] {
+                let (root, mut store, input, expected) = checked_delete_fixture(binary);
+                crash_checked_delete(&root, &mut store, &input, &expected, point);
+                change_checked_delete_content(&mut store, &root, binary);
+                dohc_engine_files::recover_displacements(
+                    &store,
+                    &root,
+                    Some("workspace"),
+                    &dohc_engine_files::MaterializeOptions {
+                        policy: dohc_engine_files::DurabilityPolicy::per_os(),
+                        replacer: &dohc_engine_files::StdReplacer,
+                        backoff: &dohc_engine_files::NoBackoff,
+                        now_ms: 5,
+                        faults: &NoFaults,
+                    },
+                )
+                .unwrap();
+                let writes = RecordedWrites::default();
+                let crash = dohc_engine_testkit::ScriptedFaults::crash_at(
+                    FaultPoint::StorageAfterCommitBeforeAck,
+                );
+                let faults: &dyn FaultInjector = if crash_finish {
+                    crash.as_ref()
+                } else {
+                    &NoFaults
+                };
+                let result = publish_checked_delete_on_store(
+                    &mut store,
+                    &root,
+                    "workspace",
+                    "restore-delete-mat_restore-delete",
+                    &writes,
+                    5,
+                    faults,
+                    true,
+                    false,
+                );
+                if crash_finish {
+                    assert!(
+                        matches!(result, Err(RuntimeError::OperationCrashed)),
+                        "{result:?}"
+                    );
+                    let repair = store
+                        .list_pending_materialization_jobs()
+                        .unwrap()
+                        .into_iter()
+                        .find(|job| job.job_id.starts_with("version-switch-mat_"))
+                        .expect("discard must commit a replacement write");
+                    assert_eq!(repair.preimage, Preimage::Absent);
+                    assert_eq!(repair.content_sha256, hex_sha256(b"Owner bytes KEEP"));
+                } else {
+                    assert!(result.is_err());
+                    assert_eq!(
+                        std::fs::read(root.join("record.md")).unwrap(),
+                        b"Owner bytes KEEP"
+                    );
+                }
+                super::super::materialization::replay_pending_materializations(
+                    &mut store,
+                    &root,
+                    super::super::materialization::MaterializationReplayScope {
+                        workspace_id: "workspace",
+                        self_writes: Some(&writes),
+                        progress: None,
+                    },
+                    6,
+                    &NoFaults,
+                    None,
+                    false,
+                )
+                .unwrap();
+                assert_eq!(
+                    std::fs::read(root.join("record.md")).unwrap(),
+                    b"Owner bytes KEEP"
+                );
+                assert_checked_delete_capture_keeps_file(&mut store, &root);
+                assert!(
+                    store
+                        .list_kept_displacements("workspace")
+                        .unwrap()
+                        .is_empty()
+                );
+                assert!(
+                    writes
+                        .0
+                        .lock()
+                        .unwrap()
+                        .contains(&hex_sha256(b"Owner bytes KEEP"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn conditional_restore_delete_unreadable_staging_defers_before_checks_portably() {
+        for binary in [false, true] {
+            for change in ["content", "version", "unchanged"] {
+                for request_retry in [false, true] {
+                    let (root, mut store, input, expected) = checked_delete_fixture(binary);
+                    crash_checked_delete(
+                        &root,
+                        &mut store,
+                        &input,
+                        &expected,
+                        FaultPoint::MaterializeAfterRenameBeforeComplete,
+                    );
+                    let staging = root.join(".dohc/engine/displaced");
+                    let held = root.join(".dohc/engine/held-displaced");
+                    std::fs::rename(&staging, &held).unwrap();
+                    std::fs::write(&staging, b"staging is unavailable").unwrap();
+                    checked_delete_replay(&mut store, &root);
+                    assert!(dohc_engine_files::workspace_recovery_unavailable(&root));
+                    if change == "content" {
+                        change_checked_delete_content(&mut store, &root, binary);
+                    } else if change == "version" {
+                        create_checked_delete_version(&mut store);
+                        let switched = super::super::versions::switch_active_version_on_store(
+                            &mut store,
+                            "workspace",
+                            "other",
+                            &root,
+                            &(),
+                            4,
+                            &NoFaults,
+                            &CancellationToken::new(),
+                        )
+                        .unwrap();
+                        assert_eq!(switched.version_id, "other");
+                        assert_eq!(
+                            hex_sha256(&std::fs::read(root.join("record.md")).unwrap()),
+                            expected
+                        );
+                    }
+                    for _ in 0..2 {
+                        let result = if request_retry {
+                            checked_delete_on_store(
+                                &mut store,
+                                &input,
+                                Some("document"),
+                                &expected,
+                                &root,
+                                &(),
+                                &NoFaults,
+                            )
+                            .map(|_| ())
+                        } else {
+                            publish_checked_delete_on_store(
+                                &mut store,
+                                &root,
+                                "workspace",
+                                "restore-delete-mat_restore-delete",
+                                &(),
+                                4,
+                                &NoFaults,
+                                true,
+                                false,
+                            )
+                        };
+                        assert!(
+                            matches!(
+                                result,
+                                Err(RuntimeError::Materialize(
+                                    dohc_engine_files::MaterializeError::RecoveryUnavailable
+                                ))
+                            ),
+                            "{result:?}"
+                        );
+                        assert_eq!(
+                            store
+                                .load_materialization_job("restore-delete-mat_restore-delete")
+                                .unwrap()
+                                .expect("unreadable staging must keep job")
+                                .status,
+                            JobStatus::Pending
+                        );
+                        assert_eq!(checked_delete_count(&store), 1);
+                    }
+                    let staged = std::fs::read_dir(&held)
+                        .unwrap()
+                        .next()
+                        .unwrap()
+                        .unwrap()
+                        .path();
+                    assert_eq!(hex_sha256(&std::fs::read(&staged).unwrap()), expected);
+                    std::fs::remove_file(&staging).unwrap();
+                    std::fs::rename(&held, &staging).unwrap();
+                    checked_delete_replay(&mut store, &root);
+                    checked_delete_replay(&mut store, &root);
+                    assert_eq!(
+                        checked_delete_count(&store),
+                        i64::from(change == "unchanged")
+                    );
+                    assert!(
+                        store
+                            .load_materialization_job("restore-delete-mat_restore-delete")
+                            .unwrap()
+                            .is_none()
+                    );
+                    assert!(store.list_unsettled_displacements().unwrap().is_empty());
+                    assert!(
+                        store
+                            .list_kept_displacements("workspace")
+                            .unwrap()
+                            .is_empty()
+                    );
+                    assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 0);
+                    assert!(!dohc_engine_files::workspace_recovery_unavailable(&root));
+                    if change == "unchanged" {
+                        assert!(!root.join("record.md").exists());
+                    } else {
+                        assert_checked_delete_capture_keeps_file(&mut store, &root);
+                        let version = if change == "version" { "other" } else { "main" };
+                        let snapshot = VersionedTextStore::new(&mut store)
+                            .list_snapshot_metadata("workspace", version, None, 10)
+                            .unwrap()
+                            .into_iter()
+                            .find(|snapshot| snapshot.path == "record.md")
+                            .expect("refused deletion keeps the current snapshot");
+                        let hash = if change == "content" {
+                            hex_sha256(b"Owner bytes KEEP")
+                        } else {
+                            expected.clone()
+                        };
+                        assert_eq!(snapshot.sha256, hash);
+                        assert_eq!(
+                            hex_sha256(&std::fs::read(root.join("record.md")).unwrap()),
+                            hash
+                        );
+                        let versioned = VersionedTextStore::new(&mut store);
+                        let preserved = if binary {
+                            versioned
+                                .read_binary_blob("workspace", &expected)
+                                .unwrap()
+                                .and_then(|blob| blob.bytes)
+                        } else {
+                            versioned
+                                .read_text_blob("workspace", &expected)
+                                .unwrap()
+                                .and_then(|blob| blob.text.map(String::into_bytes))
+                        };
+                        assert_eq!(hex_sha256(&preserved.unwrap()), expected);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn conditional_restore_delete_fresh_unreadable_staging_discards_without_touching_file() {
+        let (root, mut store, input, expected) = checked_delete_fixture(false);
+        let before = checked_delete_state(&store);
+        std::fs::write(root.join(".dohc/engine/displaced"), b"unreadable staging").unwrap();
+        checked_delete_replay(&mut store, &root);
+        assert!(dohc_engine_files::workspace_recovery_unavailable(&root));
+        let error = checked_delete_on_store(
+            &mut store,
+            &input,
+            Some("document"),
+            &expected,
+            &root,
+            &(),
+            &NoFaults,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                RuntimeError::Materialize(dohc_engine_files::MaterializeError::RecoveryUnavailable)
+            ),
+            "{error:?}"
+        );
+        assert_checked_delete_absent(&store);
+        assert_eq!(checked_delete_state(&store), before);
+        assert_eq!(
+            hex_sha256(&std::fs::read(root.join("record.md")).unwrap()),
+            expected
+        );
+    }
+
+    #[test]
+    fn conditional_restore_delete_symlink_block_reports_reason() {
+        struct LateAlias(PathBuf);
+        impl SelfWriteRecorder for LateAlias {
+            fn record(&self, _: &str, _: &str, _: &str) {
+                let real = self.0.join("real");
+                std::fs::create_dir(&real).unwrap();
+                std::fs::rename(self.0.join("record.md"), real.join("record.md")).unwrap();
+                assert!(
+                    dohc_engine_testkit::try_make_dir_alias(&real, &self.0.join("record.md"))
+                        .unwrap()
+                );
+            }
+            fn retract(&self, _: &str, _: &str, _: &str) {}
+        }
+        for binary in [false, true] {
+            let (root, mut store, input, expected) = checked_delete_fixture(binary);
+            let before = checked_delete_state(&store);
+            let error = checked_delete_on_store(
+                &mut store,
+                &input,
+                Some("document"),
+                &expected,
+                &root,
+                &LateAlias(root.to_path_buf()),
+                &NoFaults,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    RuntimeError::Materialize(dohc_engine_files::MaterializeError::SymlinkTarget)
+                ),
+                "{error:?}"
+            );
+            assert_eq!(checked_delete_state(&store), before);
+            assert_checked_delete_absent(&store);
+            assert_eq!(
+                hex_sha256(&std::fs::read(root.join("real/record.md")).unwrap()),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn conditional_restore_delete_finish_storage_error_rechecks_snapshot() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        for binary in [false, true] {
+            for (state, request_retry) in [
+                ("captured", false),
+                ("changed", false),
+                ("unchanged", false),
+                ("captured", true),
+                ("changed", true),
+                ("unchanged", true),
+            ] {
+                let (root, mut store, input, expected) = checked_delete_fixture(binary);
+                let commits = Arc::new(AtomicUsize::new(0));
+                let hook_commits = commits.clone();
+                store
+                    .read_with(|conn| {
+                        // Preparation, finish preview and disk receipt commit first.
+                        // Fail the final transaction after the staged copy is unlinked.
+                        conn.commit_hook(Some(move || {
+                            hook_commits.fetch_add(1, Ordering::SeqCst) == 3
+                        }))
+                        .unwrap();
+                        Ok::<_, StorageError>(())
+                    })
+                    .unwrap();
+                let result = checked_delete_on_store(
+                    &mut store,
+                    &input,
+                    Some("document"),
+                    &expected,
+                    &root,
+                    &(),
+                    &NoFaults,
+                );
+                assert!(
+                    matches!(result, Err(RuntimeError::Storage(_))),
+                    "{result:?}"
+                );
+                assert_eq!(commits.load(Ordering::SeqCst), 4);
+                store
+                    .read_with(|conn| {
+                        conn.commit_hook(None::<fn() -> bool>).unwrap();
+                        Ok::<_, StorageError>(())
+                    })
+                    .unwrap();
+                assert!(!root.join("record.md").exists());
+                assert_eq!(
+                    store
+                        .load_materialization_job("restore-delete-mat_restore-delete")
+                        .unwrap()
+                        .unwrap()
+                        .status,
+                    JobStatus::Complete
+                );
+                assert_eq!(
+                    std::fs::read_dir(root.join(".dohc/engine/displaced"))
+                        .unwrap()
+                        .count(),
+                    0
+                );
+                store.write_with(&NoFaults, |tx| {
+                    if state == "captured" {
+                        let retired = dohc_engine_domain::capture_retire_in_tx(tx, &dohc_engine_domain::CaptureRetire {
+                            workspace_id: "workspace".into(), version_id: "main".into(), path: "record.md".into(),
+                            metadata_summary: None, metadata_correlation_id: None, now_ms: 4, request_id: None,
+                            only_if_text_head: false, only_if_capture_origin: false, allow_ydoc_origin: true,
+                        })?;
+                        assert!(retired.retired.is_some());
+                    } else if state == "changed" {
+                        let hash = dohc_engine_storage::put_binary_blob(tx, b"Owner bytes KEEP")?;
+                        tx.execute("INSERT INTO blobs(sha256,byte_length,text) VALUES(?1,16,'Owner bytes KEEP')", [&hash]).map_err(StorageError::persist_public)?;
+                        tx.execute("UPDATE snapshots SET blob_sha256=CASE content_kind WHEN 'text' THEN ?1 ELSE NULL END,binary_sha256=CASE content_kind WHEN 'binary' THEN ?1 ELSE NULL END", [hash]).map_err(StorageError::persist_public)?;
+                    }
+                    Ok::<_, RuntimeError>(())
+                }).unwrap();
+                drop(store);
+                let mut store =
+                    EngineStore::open(&dohc_engine_testkit::engine_db_path(&root).unwrap(), 4)
+                        .unwrap();
+                if request_retry {
+                    let retried = checked_delete_on_store(
+                        &mut store,
+                        &input,
+                        Some("document"),
+                        &expected,
+                        &root,
+                        &(),
+                        &NoFaults,
+                    );
+                    if state == "unchanged" {
+                        assert!(retried.unwrap().deduped);
+                    } else {
+                        assert!(
+                            matches!(
+                                retried,
+                                Err(RuntimeError::Domain(
+                                    DomainError::WritePreconditionFailed { .. }
+                                ))
+                            ),
+                            "{retried:?}"
+                        );
+                    }
+                }
+                for _ in 0..2 {
+                    super::super::materialization::replay_pending_materializations(
+                        &mut store,
+                        &root,
+                        super::super::materialization::MaterializationReplayScope {
+                            workspace_id: "workspace",
+                            self_writes: None,
+                            progress: None,
+                        },
+                        4,
+                        &NoFaults,
+                        None,
+                        false,
+                    )
+                    .unwrap();
+                }
+                let deletes: i64 = store
+                    .read_with(|c| {
+                        c.query_row(
+                            "SELECT count(*) FROM moments WHERE operation='delete'",
+                            [],
+                            |r| r.get(0),
+                        )
+                    })
+                    .unwrap();
+                assert_eq!(
+                    deletes,
+                    i64::from(state != "changed"),
+                    "replay must publish exactly one valid deletion: {state}"
+                );
+                let snapshots: i64 = store
+                    .read_with(|c| c.query_row("SELECT count(*) FROM snapshots", [], |r| r.get(0)))
+                    .unwrap();
+                assert_eq!(snapshots, i64::from(state == "changed"));
+                assert!(
+                    store
+                        .load_materialization_job("restore-delete-mat_restore-delete")
+                        .unwrap()
+                        .is_none()
+                );
+                if state == "unchanged" {
+                    assert!(
+                        checked_delete_on_store(
+                            &mut store,
+                            &input,
+                            Some("document"),
+                            &expected,
+                            &root,
+                            &(),
+                            &NoFaults,
+                        )
+                        .unwrap()
+                        .deduped
+                    );
+                    let retired = VersionedTextStore::new(&mut store)
+                        .capture_retire(
+                            &dohc_engine_domain::CaptureRetire {
+                                workspace_id: "workspace".into(),
+                                version_id: "main".into(),
+                                path: "record.md".into(),
+                                metadata_summary: None,
+                                metadata_correlation_id: None,
+                                now_ms: 5,
+                                request_id: None,
+                                only_if_text_head: false,
+                                only_if_capture_origin: false,
+                                allow_ydoc_origin: true,
+                            },
+                            &NoFaults,
+                        )
+                        .unwrap();
+                    assert!(
+                        retired.retired.is_none(),
+                        "capture must not record another delete"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn conditional_restore_delete_crash_replay_finishes_or_discards_text_and_binary() {
         struct Crash(FaultPoint);
         impl FaultInjector for Crash {
@@ -3396,7 +4477,8 @@ mod doc_cache_reset_tests {
                     &(),
                     4,
                     &NoFaults,
-                    false
+                    false,
+                    false,
                 )
                 .is_err()
             );
@@ -3494,6 +4576,7 @@ mod doc_cache_reset_tests {
                 5,
                 &NoFaults,
                 true,
+                false,
             )
             .unwrap();
             assert_checked_delete_absent(&store);
