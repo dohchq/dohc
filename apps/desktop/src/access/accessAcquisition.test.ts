@@ -26,9 +26,9 @@ function harness() {
     remove: () => { saved = null; }, file: () => "/unused" };
   const listReceived = vi.fn(async (): Promise<unknown> => inventory), onLive = vi.fn(async () => undefined);
   const received = createReceivedShareAcquisition({ store, scope: () => scope, list: listReceived, onLive, logError: vi.fn(), nowMs: Date.now, wallNowMs: Date.now });
-  const acquisition = createAccessAcquisition({ roster: id => rosters.requestRefresh(id), received: () => received.refresh(), context: () => context });
+  const acquisition = createAccessAcquisition({ roster: id => rosters.requestRefresh(id), received: () => received.refresh() });
   const owner = createAccessOwner({ resolve: async (_w: string, ref) => ({ ref, visibility: "visible" }), roster: () => rosters.observation("w"),
-    received: () => received.observation(), account: () => ({ userId: scope.userId, relayUrl: scope.relayUrl }), scope: () => scope.userId,
+    received: () => received.observation(), account: () => ({ userId: scope.userId, email: "recipient@test.dev", relayUrl: scope.relayUrl, generation: scope.generation }), scope: () => scope.userId,
     assertCurrent: () => undefined, permissions: async () => { throw Error("unused"); }, refresh: () => acquisition.request("w") });
   return { owner, rosters, received, acquisition, listRoster, listReceived, onLive, store,
     switchAccount() { scope = { ...scope, userId: "other", generation: 2 }; context = {}; received.credentialsChanged(scope); } };
@@ -36,7 +36,7 @@ function harness() {
 it("feeds both observations once, preserves cached reads, and paces repeated surface requests", async () => {
   const h = harness();
   try {
-    await h.owner.refresh("w");
+    await Promise.all([h.owner.refresh("w"), h.owner.refresh("w")]);
     for (const lane of ["granted", "received"] as const) expect(h.owner.sharing("w", { lane })).toMatchObject({ freshness: "fresh", checkedAtMs: 100_000 });
     await h.owner.refresh("w");
     expect(h.listRoster).toHaveBeenCalledOnce(); expect(h.listReceived).toHaveBeenCalledOnce();

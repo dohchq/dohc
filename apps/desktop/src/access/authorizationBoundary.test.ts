@@ -6,7 +6,10 @@ import { expect, it } from "vitest";
 const root = resolve(import.meta.dirname, "../../../.."), require = createRequire(resolve(root, "apps/desktop/package.json"));
 const forbidden = /\/access\/[^/]+\.ts$|\/workspaces\/receivedShareStore\.ts$/;
 const entries = ["services/sync-relay/src/shareAuthorization.ts", "services/sync-relay/src/shareFilter.ts",
-  "packages/app-backend-runtime/src/dataset-host.ts", "apps/desktop/src/workspaces/localDatasetHost.ts", "apps/desktop/src/workspaces/remoteDataset.ts"];
+  "packages/app-backend-runtime/src/dataset-host.ts", "apps/desktop/src/workspaces/localDatasetHost.ts", "apps/desktop/src/workspaces/remoteDataset.ts",
+  "apps/desktop/src/cli/cliServer.ts", "packages/mcp/src/server.ts", "apps/desktop/src/workspaces/shareWriteGate.ts",
+  "apps/desktop/src/workspaces/receivedShareEngineAccess.ts", "apps/desktop/src/workspaces/shareViewInfo.ts",
+  "apps/desktop/src/workspaces/shareViewFilesTarget.ts"];
 function imports(file: string, source: string): string[] {
   const specifiers = [
     ...source.matchAll(/(?:import|export)\s+(?!type\b)[^;]*?\sfrom\s+["']([^"']+)["']/g),
@@ -17,7 +20,11 @@ function imports(file: string, source: string): string[] {
     const specifier = match[1]!;
     if (specifier.startsWith(".")) {
       const target = resolve(dirname(file), specifier);
-      return [target, `${target}.ts`, `${target}.tsx`, `${target}/index.ts`].filter(path => existsSync(path) && statSync(path).isFile()).slice(0, 1);
+      const candidates = specifier.endsWith(".js") ? [target.slice(0, -3) + ".ts", target.slice(0, -3) + ".tsx", target]
+        : [target, `${target}.ts`, `${target}.tsx`, `${target}/index.ts`];
+      const found = candidates.find(path => existsSync(path) && statSync(path).isFile());
+      if (!found) throw new Error(`Unresolved relative import ${specifier} in ${file}`);
+      return [found];
     }
     if (specifier.startsWith("@dohc/")) { try { return [require.resolve(specifier)]; } catch { throw new Error(`Unresolved import ${specifier}`); } }
     return [];
@@ -44,4 +51,12 @@ it.each(["access/accessQuery", "workspaces/receivedShareStore"])("detects an ind
 it.each(['import "../access/accessOwner";', 'import("../access/accessOwner")', 'require("../access/accessOwner")'])("detects runtime dependencies through %s", source => {
   const entry = resolve(root, "apps/desktop/src/workspaces/remoteDataset.ts");
   expect(violations(new Map([[entry, source]]))).toHaveLength(1);
+});
+it("walks through .js imports to deeper TypeScript authorization dependencies", () => {
+  const deep = resolve(root, "packages/app-backend-runtime/src/dataset-read-result.ts");
+  expect(violations(new Map([[deep, 'import "../../../apps/desktop/src/access/accessQuery.js";']]))).toHaveLength(1);
+});
+it("refuses to skip an unresolved relative runtime import", () => {
+  const entry = resolve(root, "packages/app-backend-runtime/src/dataset-host.ts");
+  expect(() => violations(new Map([[entry, 'import "./missing-authority.js";']]))).toThrow("Unresolved relative import");
 });

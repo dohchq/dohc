@@ -1,24 +1,27 @@
 import { expect, it, vi } from "vitest";
-import { createAccessAcquisition, createAccessOwner } from "./accessOwner";
+import { accessCliQueries, createAccessAcquisition, createAccessOwner, type ResolvedAccessObject } from "./accessOwner";
 import { unknownAccess } from "./accessQuery";
 import { hasAccessChat, resolveAccessObject } from "./accessObjectResolution";
 import { deferred } from "../testing/deferred";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { AccessObjectRef } from "@dohc/workspace-contracts/access";
+import { parseReceivedInventory, type ReceivedObservation } from "../workspaces/receivedShareStore";
 
 const datasetId = "00000000-0000-4000-8000-000000000001", operationId = "00000000-0000-4000-8000-000000000002";
 const path = { kind: "path" as const, path: "Notes/a.md", versionId: null };
 function harness() {
   let scope = "one";
-  const resolve = vi.fn(async (_workspace: string, ref: AccessObjectRef) => ({ ref, visibility: "visible" as const }));
+  let generation = 1;
+  const resolve = vi.fn(async (_workspace: string, ref: AccessObjectRef): Promise<ResolvedAccessObject> => ({ ref, visibility: "visible" }));
   const permissions = vi.fn(async () => ({ permissions: [{ kind: "data", principal: "recipient", current: true,
     metadata: { revision: 1, revisionSha256: "a".repeat(64), operationIds: [operationId], discover: true } }], nextCursor: null }));
-  const refresh = vi.fn(async () => undefined);
-  const owner = createAccessOwner({ resolve, permissions, refresh, account: () => ({ userId: "recipient", relayUrl: "relay" }),
+  const refresh = vi.fn(async (): Promise<void> => undefined);
+  const received = vi.fn((): ReceivedObservation => ({ inventory: null, checkedAtMs: null, freshness: "unknown" }));
+  const scopePort = vi.fn(() => scope);
+  const owner = createAccessOwner({ resolve, permissions, refresh, account: () => ({ userId: "recipient", email: "recipient@test.dev", relayUrl: "relay", generation }),
     roster: () => ({ listing: null, checkedAtMs: null, freshness: "unknown" }),
-    received: () => ({ inventory: null, checkedAtMs: null, freshness: "unknown" }),
-    scope: () => scope, assertCurrent: () => undefined, nowMs: () => 42 });
-  return { owner, permissions, resolve, refresh, change: () => { scope = "two"; } };
+    received, scope: scopePort, assertCurrent: () => undefined, nowMs: () => 42 });
+  return { owner, permissions, resolve, refresh, received, scopePort, change: () => { scope = "two"; generation++; } };
 }
 it("reads live Collection capabilities without turning them into file grants", async () => {
   const h = harness(); const ref = { kind: "collection" as const, datasetId };
@@ -47,12 +50,12 @@ it("binds Collection cursors to the object and workspace/account scope", async (
   expect(await h.owner.object("w", { ref: { kind: "collection", datasetId }, cursor: first.nextCursor! })).toMatchObject({ freshness: "unknown" });
   expect(h.permissions).toHaveBeenCalledTimes(2);
 });
-it("coalesces one surface acquisition feeding both existing paced owners", async () => {
+it("passes concurrent surface requests to the existing coalescing owners", async () => {
   const waiting = deferred<void>(), roster = vi.fn(() => waiting.promise), received = vi.fn(() => waiting.promise);
-  const acquisition = createAccessAcquisition({ roster, received, context: () => "scope" });
+  const acquisition = createAccessAcquisition({ roster, received });
   const first = acquisition.request("w"), second = acquisition.request("w");
-  expect(first).toBe(second); expect(roster).toHaveBeenCalledExactlyOnceWith("w"); expect(received).toHaveBeenCalledOnce();
-  waiting.resolve(); await first;
+  expect(roster).toHaveBeenCalledTimes(2); expect(received).toHaveBeenCalledTimes(2);
+  waiting.resolve(); await Promise.all([first, second]);
 });
 it("resolves current aliases after rename and reports missing objects", async () => {
   const workspace = { workspaceId: "w", rootPath: "/w" } as RegistryEntry;
@@ -64,10 +67,10 @@ it("resolves current aliases after rename and reports missing objects", async ()
 });
 it("resolves mount coordinates to the source share and version, never the host's grants", async () => {
   const workspace = { workspaceId: "w", rootPath: "/w", shareMounts: [{ shareId: "received", label: "friend", relayUrl: "relay",
-    granterEmail: null, grantedSelector: { paths: ["Notes"], versionId: "snapshot", access: "view" } }] } as RegistryEntry;
+    granterEmail: null, recipientEmail: "recipient@test.dev", grantedSelector: { paths: ["Notes"], versionId: "snapshot", access: "view" } }] } as RegistryEntry;
   const ref = { ...path, path: "shared-with-me/friend/Notes/a.md" };
   const ports = { filePathForObjectId: async () => null, locatePath: async (path: string) => ({ path, exists: true }), hasChat: async () => false };
-  expect(await resolveAccessObject(workspace, ref, ports)).toMatchObject({ ref: { path: "Notes/a.md", versionId: "snapshot" }, shareId: "received", relayUrl: "relay" });
+  expect(await resolveAccessObject(workspace, ref, ports)).toMatchObject({ ref: { path: "Notes/a.md", versionId: "snapshot" }, shareId: "received", relayUrl: "relay", recipientEmail: "recipient@test.dev" });
   expect(await resolveAccessObject(workspace, { ...path, path: "shared-with-me/friend" }, ports)).toMatchObject({ shareRoot: true, shareId: "received", visibility: "visible" });
   expect(await resolveAccessObject(workspace, { ...path, path: "Notes/.env" }, ports)).toMatchObject({ visibility: "hidden" });
 });
@@ -90,9 +93,51 @@ it("withholds received projection paths outside the pinned selector", async () =
   expect(await resolveAccessObject(workspace, { ...path, path: "Private/a.md" }, ports)).toMatchObject({ visibility: "hidden" });
 });
 it("resolves channel wire identities independently of the store's local ids", async () => {
-  const store = { listChannels: vi.fn(async () => [{ id: "local-uuid" }] as never),
+  const store = { listChannelsPage: vi.fn(async () => ({ channels: [{ id: "local-uuid" }], nextCursor: null }) as never),
     getChannelWireId: vi.fn(async () => "origin-wire-id") };
   expect(await hasAccessChat("w", "origin-wire-id", store)).toBe(true);
   expect(store.getChannelWireId).toHaveBeenCalledWith({ workspaceId: "w", channelId: "local-uuid" });
   expect(await hasAccessChat("w", "local-uuid", store)).toBe(false);
+});
+it.each([undefined, null, "other@test.dev"])("returns unknown for a mount account pin %s", async recipientEmail => {
+  const h = harness();
+  const workspace = { workspaceId: "w", rootPath: "/w", shareMounts: [{ shareId: "received", label: "friend", relayUrl: "relay",
+    granterEmail: null, recipientEmail, grantedSelector: { paths: ["Notes"], versionId: null, access: "view" } }] } as RegistryEntry;
+  const ports = { filePathForObjectId: async () => null, locatePath: async (path: string) => ({ path, exists: true }), hasChat: async () => false };
+  h.resolve.mockImplementation((_w, ref) => resolveAccessObject(workspace, ref, ports));
+  for (const path of ["shared-with-me/friend", "shared-with-me/friend/Notes/a.md"]) {
+    expect(await h.owner.object("w", { ref: { kind: "path", path, versionId: null } })).toMatchObject({ freshness: "unknown", coverage: { complete: false }, rows: [] });
+  }
+  expect(h.received).not.toHaveBeenCalled();
+});
+it.each([undefined, "another-account"])("returns unknown for a share-view account pin %s", async recipientUserId => {
+  const h = harness();
+  h.resolve.mockResolvedValue({ ref: path, visibility: "visible", shareId: "received", relayUrl: "relay", recipientUserId });
+  expect(await h.owner.object("w", { ref: path })).toMatchObject({ freshness: "unknown", coverage: { complete: false }, rows: [] });
+  expect(h.received).not.toHaveBeenCalled();
+});
+it("answers only the pinned recipient's own share for a matching mount account", async () => {
+  const h = harness();
+  const inventory = parseReceivedInventory({ received: [{ shareId: "received", grantId: "own", granterUserId: "owner", granterEmail: null,
+    selector: { paths: ["Notes"], versionId: null }, access: "view", generation: 1, createdAtMs: 1, genericChatWritable: false }], removed: [] })!;
+  h.received.mockReturnValue({ inventory, checkedAtMs: 42, freshness: "fresh" });
+  h.resolve.mockResolvedValue({ ref: path, visibility: "visible", shareId: "received", relayUrl: "relay", recipientEmail: "RECIPIENT@test.dev" });
+  expect(await h.owner.object("w", { ref: path })).toMatchObject({ freshness: "fresh", coverage: { complete: true, kind: "received-own-grant" },
+    rows: [{ shareId: "received", grantId: "own", recipientUserId: "recipient" }] });
+});
+it("uses one scope capture and rejects a credential generation change during resolution", async () => {
+  const h = harness(), waiting = deferred<ResolvedAccessObject>();
+  h.resolve.mockReturnValue(waiting.promise);
+  const result = h.owner.object("w", { ref: path });
+  h.change(); waiting.resolve({ ref: path, visibility: "visible" });
+  expect(await result).toMatchObject({ freshness: "unknown" });
+  expect(h.scopePort).toHaveBeenCalledOnce();
+});
+it("answers CLI object and Sharing reads from observations without waiting for refresh", async () => {
+  const h = harness(), never = deferred<void>();
+  h.refresh.mockReturnValue(never.promise);
+  const cli = accessCliQueries(h.owner, work => Promise.resolve(work("w")));
+  expect(await cli.object({ ref: path })).toMatchObject({ freshness: "unknown", checkedAtMs: null });
+  expect(await cli.sharing({ lane: "received" })).toMatchObject({ freshness: "unknown", checkedAtMs: null });
+  expect(h.refresh).not.toHaveBeenCalled();
 });

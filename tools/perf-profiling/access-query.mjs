@@ -20,9 +20,9 @@ const scratch = await mkdtemp(join(artifacts, 'query-bundle-'));
 try {
   const { build } = createRequire(join(root, 'apps/desktop/package.json'))('esbuild');
   const outfile = join(scratch, 'query.mjs');
-  await build({ stdin: { contents: 'export { createAccessQuery } from "./apps/desktop/src/access/accessQuery"; export { AccessAnswer } from "./packages/workspace-contracts/src/access";',
+  await build({ stdin: { contents: 'export { createAccessQuery } from "./apps/desktop/src/access/accessQuery"; export { createAccessOwner } from "./apps/desktop/src/access/accessOwner"; export { hasAccessChat, locateAccessVersionPath, resolveAccessObject } from "./apps/desktop/src/access/accessObjectResolution"; export { AccessAnswer } from "./packages/workspace-contracts/src/access";',
     resolveDir: root }, bundle: true, platform: 'node', format: 'esm', outfile, logLevel: 'silent' });
-  const { createAccessQuery, AccessAnswer } = await import(pathToFileURL(outfile).href);
+  const { createAccessQuery, createAccessOwner, hasAccessChat, locateAccessVersionPath, resolveAccessObject, AccessAnswer } = await import(pathToFileURL(outfile).href);
   const groups = Math.max(1, Math.ceil(values.grants / 100));
   const listing = { grants: Array.from({ length: values.grants }, (_, n) => ({ shareId: `share-${String(n).padStart(8, '0')}`, grantId: `grant-${String(n).padStart(8, '0')}`,
     granterUserId: 'owner', granterEmail: 'owner@example.test', recipientUserId: `recipient-${n}`, recipientEmail: null, subjectName: null, sharerName: null,
@@ -38,11 +38,51 @@ try {
     const answer = ask(file); samples.push(performance.now() - started); rows += answer.rows.length;
     if (answer.freshness !== 'fresh' || !answer.coverage.complete || answer.rows.length === 0) throw new Error('Unusable fixture answer.');
   }
-  samples.sort((a, b) => a - b);
-  const percentile = p => samples[Math.min(samples.length - 1, Math.ceil(p * samples.length) - 1)];
-  const report = { ...values, rowsPerQuery: rows / values.runs, buildMs, cached: { p50Ms: percentile(.5), p95Ms: percentile(.95), p99Ms: percentile(.99), maxMs: samples.at(-1) },
-    budgetP95Ms: 20, pass: percentile(.95) <= 20, node: process.version, logicalCpus: cpus().length, freeMemoryBytes: freemem(), totalMemoryBytes: totalmem(),
-    rssBytes: process.memoryUsage().rss, includesResultSchemaParsing: true, measurement: 'Cached in-process queries; host is not claimed idle.' };
+  const statistics = samples => {
+    samples.sort((a, b) => a - b);
+    const percentile = p => samples[Math.min(samples.length - 1, Math.ceil(p * samples.length) - 1)];
+    return { p50Ms: percentile(.5), p95Ms: percentile(.95), p99Ms: percentile(.99), maxMs: samples.at(-1) };
+  };
+  const workspace = { workspaceId: 'fixture', rootPath: '/fixture' };
+  const binaryFiles = Array.from({ length: values.files }, (_, file) => ({ path: `folder-${file % groups}/file-${file}.png`, contentKind: 'binary' }));
+  const binaryListing = { ...listing, grants: listing.grants.map(row => ({ ...row, selector: { ...row.selector, versionId: 'draft' } })) };
+  const channelCount = Math.max(100, values.files), pageChannels = Array.from({ length: 100 }, (_, n) => ({ id: `local-${n}` }));
+  let wireLookups = 0;
+  const chatStore = { listChannelsPage: async ({ limit }) => {
+    if (limit !== 100) throw Error('Unbounded channel page.');
+    return { channels: pageChannels, nextCursor: channelCount > 100 ? 'more' : null };
+  }, getChannelWireId: async ({ channelId }) => { wireLookups++; return channelId === 'local-99' ? 'origin-wire' : `wire-${channelId}`; } };
+  const chatListing = { ...listing, grants: listing.grants.map((row, n) => ({ ...row,
+    selector: { kind: 'chat', channelWireId: n % groups === 0 ? 'origin-wire' : `grant-wire-${n % groups}` }, access: 'read-only' })) };
+  const owner = listing => createAccessOwner({
+    resolve: (_workspace, ref) => resolveAccessObject(workspace, ref, {
+      filePathForObjectId: async () => null,
+      locatePath: (path, versionId) => locateAccessVersionPath('fixture', path, versionId, { listTextFileMetadata: async () => binaryFiles }),
+      hasChat: wire => hasAccessChat('fixture', wire, chatStore),
+    }), roster: () => ({ listing, checkedAtMs: 1, freshness: 'fresh' }), received: () => ({ inventory: null, checkedAtMs: null, freshness: 'unknown' }),
+    account: () => ({ userId: 'owner', email: 'owner@example.test', relayUrl: 'relay', generation: 1 }), scope: () => 'fixture', assertCurrent() {},
+    permissions: async () => { throw Error('Unused Collection fixture.'); }, refresh: async () => { throw Error('Benchmark reads must not refresh.'); },
+  });
+  const binaryOwner = owner(binaryListing), chatOwner = owner(chatListing);
+  const binaryAsk = file => binaryOwner.object(workspace, { ref: { kind: 'path', path: binaryFiles[file].path, versionId: 'draft' } });
+  const chatAsk = () => chatOwner.object(workspace, { ref: { kind: 'chat', channelWireId: 'origin-wire' } });
+  await binaryAsk(0); await chatAsk(); wireLookups = 0;
+  const binarySamples = [], chatSamples = [];
+  for (let run = 0; run < values.runs; run++) {
+    for (const [ask, timings] of [[() => binaryAsk((run * 7919) % values.files), binarySamples], [chatAsk, chatSamples]]) {
+      const started = performance.now(), answer = AccessAnswer.parse(await ask());
+      timings.push(performance.now() - started);
+      if (answer.freshness !== 'fresh' || answer.visibility !== 'visible' || !answer.coverage.complete || answer.rows.length === 0) throw Error('Unusable resolved fixture answer.');
+    }
+  }
+  const cached = statistics(samples), binaryResolution = statistics(binarySamples), chatResolution = statistics(chatSamples);
+  const report = { ...values, rowsPerQuery: rows / values.runs, buildMs, cached, binaryResolution, chatResolution,
+    binaryMetadataRows: binaryFiles.length, chatFixtureChannels: channelCount, chatInventoryGrants: chatListing.grants.length,
+    maxChatRowsPerQuery: 100, wireLookupsPerChatQuery: wireLookups / values.runs,
+    budgetP95Ms: 20, pass: [cached, binaryResolution, chatResolution].every(result => result.p95Ms <= 20),
+    node: process.version, logicalCpus: cpus().length, freeMemoryBytes: freemem(), totalMemoryBytes: totalmem(),
+    rssBytes: process.memoryUsage().rss, includesResultSchemaParsing: true,
+    measurement: 'In-process query and production resolution paths with fixture metadata/chat ports; excludes daemon IPC. Host is not claimed idle.' };
   console.log(JSON.stringify(report, null, 2));
   if (!report.pass) process.exitCode = 1;
 } finally { await rm(scratch, { recursive: true, force: true }); }

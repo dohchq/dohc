@@ -87,8 +87,8 @@ import { createOpenPathFailures } from "./window/openPathFailures";
 import { runInWorkspaceAuthorityLane } from "./workspaces/workspaceAuthorityLane";
 import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
-import { createAccessAcquisition, createAccessOwner } from "./access/accessOwner";
-import { hasAccessChat, resolveAccessObject } from "./access/accessObjectResolution";
+import { accessCliQueries, createAccessAcquisition, createAccessOwner } from "./access/accessOwner";
+import { hasAccessChat, locateAccessVersionPath, resolveAccessObject } from "./access/accessObjectResolution";
 import { accessOperations } from "./ipc/accessOperations";
 import { assertResolvedWorkspacePath } from "./workspaces/workspaceRealPath";
 import {
@@ -1512,7 +1512,6 @@ const shareRosters = createShareRosters({
 const accessAcquisition = createAccessAcquisition({
   roster: workspaceId => shareRosters.requestRefresh(workspaceId),
   received: () => receivedShareAcquisition.refresh(),
-  context: rosterContext,
 });
 const accessScopeIds = new WeakMap<object, string>();
 type AccessWorkspaceOperation = { workspace: RegistryEntry & { attachmentId: symbol }; signal: AbortSignal; assertCurrent(): void };
@@ -1524,7 +1523,8 @@ const accessOwner = createAccessOwner<AccessWorkspaceOperation>({
     return id;
   },
   assertCurrent: operation => operation.assertCurrent(),
-  account: () => cachedCredentials?.relayUrl ? { userId: cachedCredentials.userId, relayUrl: cachedCredentials.relayUrl } : null,
+  account: () => cachedCredentials?.relayUrl ? { userId: cachedCredentials.userId, email: cachedCredentials.email,
+    relayUrl: cachedCredentials.relayUrl, generation: credentialCacheGeneration } : null,
   roster: ({ workspace }) => {
     if (workspace.shareView || !workspace.remote || cachedCredentials?.userId !== workspace.remote.ownerUserId ||
         cachedCredentials.relayUrl !== workspace.remote.serverUrl) return { listing: null, checkedAtMs: null, freshness: "unknown" };
@@ -1547,10 +1547,8 @@ const accessOwner = createAccessOwner<AccessWorkspaceOperation>({
       },
       locatePath: async (path, versionId) => {
         if (versionId !== null && versionId !== "main") {
-          return withEngineAdapter(receivedShareEngine.workspaceForRegistered(workspace), async adapter => {
-            const files = await adapter.listTextFileMetadata({ workspaceId: workspace.workspaceId, versionId });
-            return { path, exists: files.some(file => file.path === path || file.path.startsWith(`${path}/`)) };
-          });
+          return withEngineAdapter(receivedShareEngine.workspaceForRegistered(workspace), adapter =>
+            locateAccessVersionPath(workspace.workspaceId, path, versionId, adapter));
         }
         try {
           const located = await assertResolvedWorkspacePath({ rootPath: workspace.rootPath, absolutePath: join(workspace.rootPath, path),
@@ -4464,16 +4462,7 @@ const chatWrites = createChatWrites({
 let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null) => Promise<OwnerAppPublicationResult>) | undefined;
 let ownerAppResponsesForCli:((input:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>)|undefined;
 const { startDesktopCliServer } = createDesktopCliServer({
-  access: workspaceId => ({
-    object: input => withPhysicalWorkspaceOperation(workspaceId, async operation => {
-      await accessOwner.refresh(operation);
-      return accessOwner.object(operation, input);
-    }),
-    sharing: input => withPhysicalWorkspaceOperation(workspaceId, async operation => {
-      await accessOwner.refresh(operation);
-      return accessOwner.sharing(operation, input);
-    }),
-  }),
+  access: workspaceId => accessCliQueries(accessOwner, work => withPhysicalWorkspaceOperation(workspaceId, work)),
   recordSuccess: invocation => usageStore?.recordSuccess(invocation),
   dataset: (input, agent) => {
     if (!datasetForCli) throw new Error("Collections are not ready. Try again.");

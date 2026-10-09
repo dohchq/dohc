@@ -5,12 +5,23 @@ import { classifyResolvedShareProjectionPath } from "../workspaces/shareMounts";
 import { recordedShareSelector } from "../workspaces/shareViewRecords";
 import type { ResolvedAccessObject } from "./accessOwner";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
+import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+
+export async function locateAccessVersionPath(workspaceId: string, path: string, versionId: string,
+  adapter: Pick<VersionedLiveAdapter, "listTextFileMetadata">): Promise<{ path: string; exists: boolean }> {
+  const files = await adapter.listTextFileMetadata({ workspaceId, versionId });
+  return { path, exists: files.some(file => file.path === path || file.path.startsWith(`${path}/`)) };
+}
 
 export async function hasAccessChat(workspaceId: string, channelWireId: string,
-  store: Pick<DesktopLinkedChatStore, "listChannels" | "getChannelWireId">): Promise<boolean> {
-  for (const channel of await store.listChannels({ workspaceId })) {
-    if (await store.getChannelWireId({ workspaceId, channelId: channel.id }) === channelWireId) return true;
+  store: Pick<DesktopLinkedChatStore, "listChannelsPage" | "getChannelWireId">): Promise<boolean> {
+  const page = await store.listChannelsPage({ workspaceId, limit: 100 });
+  if (page.channels.length > 100) throw new Error("Chat resolution exceeded its page bound.");
+  for (let start = 0; start < page.channels.length; start += 8) {
+    const ids = await Promise.all(page.channels.slice(start, start + 8).map(channel => store.getChannelWireId({ workspaceId, channelId: channel.id })));
+    if (ids.includes(channelWireId)) return true;
   }
+  if (page.nextCursor) throw new Error("Chat resolution needs more than one page.");
   return false;
 }
 
@@ -48,10 +59,10 @@ export async function resolveAccessObject(workspace: RegistryEntry, ref: AccessO
     const pin = recordedShareSelector(projection.mount.grantedSelector);
     if (!pin) return { ref: pathRef, visibility: "unknown" };
     if (projection.path === "") return { ref: pathRef, visibility: "visible", shareRoot: true,
-      shareId: projection.mount.shareId, relayUrl: projection.mount.relayUrl, ended: projection.mount.ended };
+      shareId: projection.mount.shareId, relayUrl: projection.mount.relayUrl, recipientEmail: projection.mount.recipientEmail ?? null, ended: projection.mount.ended };
     if (!isShareablePath(projection.path) || visibleSharePath(pin, projection.path) === null) return { ref: pathRef, visibility: "hidden" };
     return { ref: { ...pathRef, path: projection.path, versionId: pin.versionId }, visibility: "visible",
-      shareId: projection.mount.shareId, relayUrl: projection.mount.relayUrl, ended: projection.mount.ended };
+      shareId: projection.mount.shareId, relayUrl: projection.mount.relayUrl, recipientEmail: projection.mount.recipientEmail ?? null, ended: projection.mount.ended };
   }
   return { ref: pathRef, visibility: isShareablePath(pathRef.path) ? "visible" : "hidden" };
 }

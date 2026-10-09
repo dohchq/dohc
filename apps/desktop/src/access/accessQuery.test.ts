@@ -96,3 +96,18 @@ it("pages the account's full received inventory but confines an object's answer 
   const first = query.answer(base);
   expect(query.answer({ ...base, recipientUserId: "other-account", cursor: first.nextCursor! }).freshness).toBe("unknown");
 });
+it("excludes revoked named grants, former automation writers and ended links from object matching", () => {
+  const revoked = grant("former", { status: "revoked", access: "edit" });
+  const plain = grant("plain", { status: "revoked" });
+  const { selector: _selector, access: _access, ...ended } = plain;
+  const source = readStoredRoster({ grants: [grant("active")], formerGrants: [{ grant: revoked, automationsGeneration: 1 }], endedGrants: [ended],
+    links: [{ grant: grant("ended-link", { recipientUserId: null, recipientEmail: null }), ended: true, automationsGeneration: 1 }] })!;
+  const query = createAccessQuery();
+  expect(query.answer(input(source)).rows).toMatchObject([{ shareId: "active" }]);
+  const sharing = query.answer({ ...input(source), ref: null });
+  expect(sharing.rows.map(row => row.kind === "share" ? [row.shareId, row.status] : [])).toEqual([
+    ["active", "active"], ["ended-link", "revoked"], ["former", "revoked"], ["plain", "revoked"]]);
+  const index = createAccessIndex([row("active", { selector: { kind: "chat", channelWireId: "channel" }, access: "read-only" }),
+    row("revoked", { status: "revoked", selector: { kind: "chat", channelWireId: "channel" }, access: "read-only" })]);
+  expect(index.forChat("channel").map(row => row.shareId)).toEqual(["active"]);
+});

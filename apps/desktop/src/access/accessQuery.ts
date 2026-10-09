@@ -11,6 +11,16 @@ const digest = (value: string) => createHash("sha256").update(value).digest("hex
 const key = (row: AccessShareRow) => `${row.shareId}\0${row.grantId}\0${row.via}`;
 const version = (id: string | null) => id ?? "main";
 
+export function encodeAccessCursor(query: string, after: string): string {
+  return Buffer.from(JSON.stringify({ version: 1, query, after })).toString("base64url");
+}
+export function decodeAccessCursor(cursor: string, query: string): string | null {
+  try {
+    const decoded = Cursor.parse(JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")));
+    return decoded.query === query ? decoded.after : null;
+  } catch { return null; }
+}
+
 export function unknownAccess(ref: AccessObjectRef | null, visibility: AccessAnswer["visibility"] = "unknown"): AccessAnswer {
   return { ref, rows: [], visibility, coverage: { kind: "unavailable", complete: false, observation: "interval" },
     checkedAtMs: null, freshness: "unknown", nextCursor: null };
@@ -19,17 +29,15 @@ export function unknownAccess(ref: AccessObjectRef | null, visibility: AccessAns
 export function accessPage<Row>(rows: readonly Row[], rowKey: (row: Row) => string, query: string, cursor?: string): { rows: Row[]; nextCursor: string | null } | null {
   let after = "";
   if (cursor !== undefined) {
-    try {
-      const decoded = Cursor.parse(JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")));
-      if (decoded.query !== query) return null;
-      after = decoded.after;
-    } catch { return null; }
+    const decoded = decodeAccessCursor(cursor, query);
+    if (decoded === null) return null;
+    after = decoded;
   }
   let lo = 0, hi = rows.length;
   while (lo < hi) { const mid = (lo + hi) >>> 1; if (rowKey(rows[mid]!) <= after) lo = mid + 1; else hi = mid; }
   const selected = rows.slice(lo, lo + 100);
   return { rows: selected, nextCursor: lo + selected.length < rows.length
-    ? Buffer.from(JSON.stringify({ version: 1, query, after: rowKey(selected.at(-1)!) })).toString("base64url") : null };
+    ? encodeAccessCursor(query, rowKey(selected.at(-1)!)) : null };
 }
 
 /** A parsed observation owns one index. Queries walk slash-delimited ancestors, not all grants. */
@@ -42,7 +50,7 @@ export function createAccessIndex(input: readonly AccessShareRow[]) {
   }
   for (const row of rows) {
     const selector = row.selector;
-    if (!selector || row.status === "damaged" || row.status === "removed") continue;
+    if (!selector || row.status !== "active") continue;
     if (selector.kind === "chat" || selector.kind === "group") add(chats, selector.channelWireId, row);
     if (selector.kind === "chat" || selector.kind === "group" && row.fileScope !== "served") continue;
     if (selector.paths.length === 0) add(whole, version(selector.versionId), row);
@@ -84,7 +92,7 @@ function grantedRows(listing: RosterListing): AccessShareRow[] {
     if (!rows.has(key(row))) rows.set(key(row), row);
   };
   for (const grant of listing.grants) add(grant, linkShares.has(grant.shareId) ? "dependent" : "named");
-  for (const link of listing.links) add(link.grant, "link");
+  for (const link of listing.links) add({ ...link.grant, status: link.ended ? "revoked" : link.grant.status }, "link");
   for (const former of listing.formerGrants) add(former.grant, linkShares.has(former.grant.shareId) ? "dependent" : "named");
   for (const ended of listing.endedGrants) add({ ...ended, selector: null, access: null }, "named");
   return [...rows.values()];
