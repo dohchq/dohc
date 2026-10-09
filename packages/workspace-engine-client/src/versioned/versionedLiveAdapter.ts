@@ -1596,6 +1596,10 @@ export class VersionedLiveAdapter {
     return this.workspaceRequest(WORKSPACE_METHOD.watcherStatus, {});
   }
 
+  async clearCaptureRecovery(momentId: string): Promise<void> {
+    await this.workspaceRequest(WORKSPACE_METHOD.captureClearRecovery, { momentId });
+  }
+
   async listKeptCopies(): Promise<KeptCopiesListResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.keptCopiesList, {});
   }

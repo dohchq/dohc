@@ -33,9 +33,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * makes the whole listing unusable: a partial read must not resume anything.
  */
 export function readReceivedShareListing(listing: unknown): ReceivedShareListing | null {
-  if (!isRecord(listing)) return null;
-  const receivedRows = listing.received ?? [];
-  const removedRows = listing.removed ?? [];
+  if (!isRecord(listing) || "nextCursor" in listing || ("ok" in listing && listing.ok !== true)) return null;
+  const receivedRows = listing.received;
+  const removedRows = listing.removed;
   if (!Array.isArray(receivedRows) || !Array.isArray(removedRows)) return null;
   const received = new Set<string>();
   for (const row of receivedRows) {

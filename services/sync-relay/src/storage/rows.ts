@@ -1,3 +1,4 @@
+import {parseSettlementAuthors} from "./hostedSettlement";
 import { parseLiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
 import {
   type ObjectMomentRow,
@@ -206,8 +207,9 @@ export function rowToLogRow(row: Record<string, unknown>): SyncRelayLogRow {
     payloadJson: String(row.payload_json),
     recordedAtMs: Number(row.recorded_at_ms),
     relaySeq: Number(row.relay_seq),
+    ...(row.settlement_admission_json == null ? {} : {settlementAdmission:JSON.parse(String(row.settlement_admission_json)) as import("./hostedSettlement").SettlementAdmission}),
     ...(row.admitted_author_snapshot_json == null ? {} : {
-      admittedAuthorSnapshot: parseLiveAuthorSnapshot(JSON.parse(String(row.admitted_author_snapshot_json))),
+      admittedAuthorSnapshot: parseSettlementAuthors(JSON.parse(String(row.admitted_author_snapshot_json))),
     }),
   };
 }

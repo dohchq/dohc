@@ -39,8 +39,18 @@ function liveDeliveryLabel(
   return reason ? "Live editing paused" : "Live editing retrying";
 }
 
-export function WorkspaceSyncStatus({ syncStatus }: {
+// A file that couldn't save outranks every state but those that stop sync
+// for the whole workspace, which keep the title bar.
+function saveFailedLabel(syncStatus: SyncStatusResult | null, failedSaves: number): string | null {
+  if (failedSaves === 0 || syncStatus?.updateRequired) return null;
+  if (syncStatus?.state === "conflict" || syncStatus?.state === "sync-failed") return null;
+  return `Couldn't save ${failedSaves} ${failedSaves === 1 ? "file" : "files"}`;
+}
+
+export function WorkspaceSyncStatus({ syncStatus, failedSaves }: {
   syncStatus: SyncStatusResult | null;
+  // Files in this workspace whose save failed.
+  failedSaves: number;
 }) {
   const state = syncStatus?.state;
   const conflictCount = state === "conflict" ? syncStatus?.conflictCount ?? 0 : 0;
@@ -55,11 +65,12 @@ export function WorkspaceSyncStatus({ syncStatus }: {
   const label = stateLabel
     ? `${stateLabel}${conflictCount > 0 ? ` (${conflictCount})` : ""}`
     : "Checking status";
-  const shownLabel = syncStatus?.updateRequired
+  const saveFailed = saveFailedLabel(syncStatus, failedSaves);
+  const shownLabel = saveFailed ?? (syncStatus?.updateRequired
     ? UPDATE_REQUIRED_LABEL[syncStatus.updateRequired]
     : state === "syncing" && syncStatus?.claimingIdentity
       ? "Setting up sync…"
-      : label;
+      : label);
   // Absent means this workspace has nothing to say about live delivery, so
   // the title bar says nothing either.
   const liveDelivery = syncStatus?.ownerLiveDelivery;
@@ -70,13 +81,16 @@ export function WorkspaceSyncStatus({ syncStatus }: {
     <>
       <span
         data-testid="sync-status"
-        data-state={state ?? "unknown"}
+        data-state={saveFailed ? "save-failed" : state ?? "unknown"}
         role="status"
         aria-label={shownLabel}
         title={shownLabel}
         className="flex shrink-0 items-center gap-1.5 text-[11px] text-muted"
       >
-        <span aria-hidden className={`inline-block size-1.5 rounded-full ${state ? SYNC_DOT[state] : "bg-subtle"}`} />
+        <span
+          aria-hidden
+          className={`inline-block size-1.5 rounded-full ${saveFailed ? "bg-danger" : state ? SYNC_DOT[state] : "bg-subtle"}`}
+        />
         <span>{shownLabel}</span>
       </span>
       {liveDelivery && liveLabel ? (

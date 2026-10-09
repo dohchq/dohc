@@ -470,7 +470,7 @@ it.skipIf(engine.missing).each([
     const document = (await discovery())[0]!;
     const config = {...profile.owner, nativeConfigPath, nativeClient: profile.nativeClient, relayUrl: proxy.origin, documents: [document]};
     const pass = (signal: AbortSignal) => source.sessions.run(source.workspace, async ({client, workspace}) =>
-      runNativeOwnerDeliveryPass({client: source.nativeClient(), workspaceHandle: workspace, document, config, signal, bearer: relayConnection.token, assertCurrent() {}}));
+      runNativeOwnerDeliveryPass({client: source.nativeClient(), workspaceHandle: workspace, document, config, signal, bearer: relayConnection.token, accountId: undefined, assertCurrent() {}}));
     expect(["empty", "acknowledged"]).toContain(await pass(AbortSignal.timeout(60_000)));
     const session = await capture.openYDocSession({path, contentKind: "richdoc", onRemoteUpdate: () => undefined});
     const beforeAdoption = await readFile(join(rootA, path), "utf8");
@@ -516,6 +516,11 @@ it.skipIf(engine.missing).each([
     }, {timeout: 120_000})
       .toEqual({pending: 0, settled: true, errors: []});
     await capture.flush();
+    // Adoption can finish before the owner's field edit is accepted and materialized.
+    if (hasId) await expect.poll(async () => {
+      await adapter.flushCapture();
+      return readFile(join(rootA, path), "utf8");
+    }, {timeout: 120_000}).toContain("Name: Manual");
     const markdown = await readFile(join(rootA, path), "utf8");
     if (hasId) expect(markdown).toContain("Name: Manual");
     expect(markdown).toContain(`id: ${pending.recordId}`);
@@ -524,15 +529,42 @@ it.skipIf(engine.missing).each([
     await capture.flush();
     expect((await adapter.listPendingCollectionAdoptions()).adoptions).toEqual([]);
     const ownerSettlement = (await capture.listMoments({limit: 100})).moments.find(moment => moment.path === path);
-    expect(ownerSettlement?.authors).toEqual([{kind: "unattributed"}]);
+    expect(ownerSettlement).toBeDefined();
+    expect(ownerSettlement!.authors).toBeUndefined();
+    const publicationDb = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH), {readOnly: true});
+    try {
+      expect(publicationDb.prepare("SELECT admission_json,authors_json FROM live_settlement_publication_admissions WHERE workspace_id=? AND moment_id=?")
+        .get(workspaceId, ownerSettlement!.id)).toMatchObject({
+          admission_json: expect.stringContaining('"status":"accepted"'), authors_json: "[]",
+        });
+    } finally {publicationDb.close();}
     // Publish owner operations before the peer imports settlement coverage.
     await pushUntilDrained(relay);
+    const refusedDb = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH), {readOnly: true});
+    const seedRefusals: Array<{originId: string; originSeq: number}> = [];
+    try {
+      const refused = refusedDb.prepare("SELECT p.origin_id,p.origin_seq,p.authors_json,r.payload_json FROM live_settlement_publication_admissions p JOIN replication_log r USING(workspace_id,origin_id,origin_seq) WHERE p.workspace_id=? AND json_extract(p.admission_json,'$.status')='refused'").all(workspaceId);
+      expect(refused).toHaveLength(hasId ? 0 : 1);
+      for (const row of refused) {
+        const payload = JSON.parse(String(row.payload_json));
+        // The unchanged seed has no journal interval. The later adoption does.
+        expect(payload.settlementReference.record).toMatchObject({previousCursor: 0, terminalCursor: 0, applicationCount: 0});
+        expect(payload.payloadBeforeBlobSha256).toBe(payload.payloadAfterBlobSha256);
+        expect(payload.authors).toBeUndefined();
+        expect(row.authors_json).toBeNull();
+        seedRefusals.push({originId: String(row.origin_id), originSeq: Number(row.origin_seq)});
+      }
+    } finally {refusedDb.close();}
     expect(await source.sessions.run(source.workspace, async ({client, workspace}) =>
-      new WorkspaceDaemonRequester(client).request("sync.refusalNotices", {workspaceId}, {workspace}))).toEqual({notices: []});
+      new WorkspaceDaemonRequester(client).request("sync.refusalNotices", {workspaceId}, {workspace}))).toEqual({
+        notices: seedRefusals.map(coordinate => expect.objectContaining({...coordinate,
+          document: expect.objectContaining({path}), refusalCoordinates: [coordinate]})),
+      });
     peer = await openJoinedDaemonCapture({workspaceId, rootPath: rootB, relay: relayConnection});
     await pullAndExpect(peer, rootB, path, markdown);
     const imported = (await peer.capture.listMoments({limit: 100})).moments.find(moment => moment.id === ownerSettlement?.id);
-    expect(imported?.authors).toEqual([{kind: "unattributed"}]);
+    expect(imported).toBeDefined();
+    expect(imported!.authors).toBeUndefined();
     if (hasId) {
       await delivery.stop();
       delivery = undefined;
@@ -609,9 +641,17 @@ it.skipIf(engine.missing).each([
         });
       } finally { await formula.close(); }
     }
-    await pushUntilDrained(relay);
-    await peer.capture.runRelaySync(materializePage => peer!.relay.pull(materializePage));
-    expect(await readFile(join(rootB, path), "utf8")).toBe(markdown);
+    await expect.poll(async () => {
+      await capture!.flush();
+      await pushUntilDrained(relay);
+      await peer!.capture.runRelaySync(materializePage => peer!.relay.pull(materializePage));
+      return readFile(join(rootB, path), "utf8");
+    }, {timeout: 120_000}).toBe(markdown);
+    expect(await source.sessions.run(source.workspace, async ({client, workspace}) =>
+      new WorkspaceDaemonRequester(client).request("sync.refusalNotices", {workspaceId}, {workspace}))).toEqual({
+        notices: seedRefusals.map(coordinate => expect.objectContaining({...coordinate,
+          document: expect.objectContaining({path}), refusalCoordinates: [coordinate]})),
+      });
     expect(errors).toEqual([]);
     await session.close({settle: false});
   } finally {
@@ -810,6 +850,7 @@ it.skipIf(engine.missing).each(["new", "legacy", "accepted"] as const)(
         expect(rows.length).toBeGreaterThan(0);
         for (const row of rows) {
           const payload = JSON.parse(row.payload_json);
+          expect(payload.attributionUnavailable).toBeUndefined();
           expect(payload.authors).toEqual(queueStyle !== "new" && payload.path === record.path
             ? [{ kind: "agent", agentId: "signed-out-agent", onBehalfOf: "local:123" }, { kind: "automation", automationId: "signed-out-rule", onBehalfOf: "local:456", depth: 1 }]
             : undefined);
@@ -878,6 +919,7 @@ it.skipIf(engine.missing)(
         ).get(workspaceId, restoredMomentId) as { payload_json: string } | undefined;
         expect(JSON.parse(sent!.payload_json)).toMatchObject({ metadata: { origin: "restore" } });
         expect(JSON.parse(sent!.payload_json).authors).toBeUndefined();
+        expect(JSON.parse(sent!.payload_json).attributionUnavailable).toBeUndefined();
         expect(sent!.payload_json).not.toContain(person.humanId);
       } finally {
         relayDb.close();

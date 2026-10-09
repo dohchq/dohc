@@ -3851,10 +3851,15 @@ pub fn index_historical_record_owner_moment_in_tx(
 ) -> Result<(), StorageError> {
     let moment = tx
         .query_row(
-            "SELECT m.version_id,m.object_id,m.path,b.text FROM moments m \
+            concat!(
+                "SELECT m.version_id,m.object_id,m.path,b.text FROM moments m \
              JOIN blobs b ON b.sha256=m.after_blob_sha256 \
              WHERE m.workspace_id=?1 AND m.moment_order=?2 \
-               AND m.after_content_kind='text'",
+               AND m.after_content_kind='text' \
+               AND ",
+                crate::exclude_capture_recovery_sql!("m"),
+                ""
+            ),
             params![workspace_id, moment_order],
             |row| {
                 Ok((
@@ -3924,13 +3929,16 @@ fn ensure_historical_record_owners_backfilled(
     }
 
     let mut statement = tx
-        .prepare(
+        .prepare(concat!(
             "SELECT m.moment_order,m.object_id,m.path,b.text FROM moments m \
              JOIN blobs b ON b.sha256=m.after_blob_sha256 \
              WHERE m.workspace_id=?1 AND m.version_id=?2 \
                AND m.after_content_kind='text' AND lower(substr(m.path,-3))='.md' \
-             ORDER BY m.moment_order",
-        )
+               AND ",
+            crate::exclude_capture_recovery_sql!("m"),
+            " \
+             ORDER BY m.moment_order"
+        ))
         .map_err(crate::DomainError::sql_corrupt)?;
     let moments = statement
         .query_map(params![workspace_id, version_id], |row| {
@@ -6881,6 +6889,7 @@ mod tests {
                  CREATE TABLE moments(\
                    workspace_id TEXT NOT NULL,version_id TEXT NOT NULL,object_id TEXT NOT NULL,\
                    path TEXT NOT NULL,after_blob_sha256 TEXT,after_content_kind TEXT NOT NULL,\
+                   metadata_origin TEXT NOT NULL DEFAULT 'user',\
                    moment_order INTEGER NOT NULL,PRIMARY KEY(workspace_id,moment_order)\
                  );\
                  CREATE TABLE collection_historical_record_owners(\
@@ -6904,11 +6913,28 @@ mod tests {
             )
             .expect("create and seed owner index database");
 
+        for (order, origin) in [(4, "capture-recovery"), (5, "capture-recovery-cleared")] {
+            connection.execute(
+                "INSERT INTO moments(workspace_id,version_id,object_id,path,after_blob_sha256,after_content_kind,moment_order,metadata_origin)
+                 VALUES ('workspace','version','recovery-object','tasks/recovery.md','first','text',?1,?2)",
+                rusqlite::params![order, origin],
+            ).expect("seed an inert recovery moment");
+        }
+
         ensure_historical_record_owners_backfilled(&connection, "workspace", "version")
             .expect("backfill historical owners");
         let first = load_historical_record_owners(&connection, "workspace", "version")
             .expect("read first backfill");
         assert!(first[FIRST_ID].contains("first-object"));
+        assert!(!first[FIRST_ID].contains("recovery-object"));
+        for order in [4, 5] {
+            index_historical_record_owner_moment_in_tx(&connection, "workspace", order)
+                .expect("skip incremental recovery indexing");
+        }
+        assert!(
+            !load_historical_record_owners(&connection, "workspace", "version").unwrap()[FIRST_ID]
+                .contains("recovery-object")
+        );
 
         connection
             .execute(

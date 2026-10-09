@@ -5,8 +5,8 @@ import { WorkspaceSyncStatus } from "./WorkspaceSyncStatus";
 import type { SyncStatusResult } from "../../ipc/bridgeContract";
 
 afterEach(cleanup);
-function renderStatus(props: { syncStatus: SyncStatusResult | null }) {
-  return render(<WorkspaceSyncStatus {...props} />);
+function renderStatus(props: { syncStatus: SyncStatusResult | null; failedSaves?: number }) {
+  return render(<WorkspaceSyncStatus failedSaves={0} {...props} />);
 }
 
 // A clean workspace whose only news is owner live delivery. A fresh object
@@ -48,9 +48,9 @@ describe("sync status surface", () => {
     const { rerender } = renderStatus({ syncStatus: { ...syncState("syncing"), claimingIdentity: true } });
     expect(screen.getByTestId("sync-status").textContent).toBe("Setting up sync…");
     expect(screen.getByTestId("sync-status").getAttribute("data-state")).toBe("syncing");
-    rerender(<WorkspaceSyncStatus syncStatus={{ ...syncState("sync-failed"), claimingIdentity: true }} />);
+    rerender(<WorkspaceSyncStatus syncStatus={{ ...syncState("sync-failed"), claimingIdentity: true }} failedSaves={0} />);
     expect(screen.getByTestId("sync-status").textContent).toBe("Sync failed");
-    rerender(<WorkspaceSyncStatus syncStatus={syncState("syncing")} />);
+    rerender(<WorkspaceSyncStatus syncStatus={syncState("syncing")} failedSaves={0} />);
     expect(screen.getByTestId("sync-status").textContent).toBe("Syncing…");
   });
 
@@ -78,6 +78,7 @@ describe("sync status surface", () => {
     rerender(
       <WorkspaceSyncStatus
         syncStatus={syncState("sync-failed", { cause: "unknown", detail: "Error: refused", sinceMs: 1, attempts: 1 })}
+        failedSaves={0}
       />,
     );
     expect(screen.getByTestId("sync-status").textContent).toBe("Sync failed");
@@ -98,6 +99,38 @@ describe("sync status surface", () => {
     expect(status.getAttribute("data-state")).toBe("synced");
     expect(screen.getByText("Local · saved").classList.contains("sr-only")).toBe(false);
     expect(status.textContent).not.toContain("(");
+  });
+
+  // A file whose save failed: the title bar must not say saved over it.
+  it("names the files that couldn't save instead of saved, and says saved again once they clear", () => {
+    const dot = () => screen.getByTestId("sync-status").querySelector("[aria-hidden]")!;
+    const { rerender } = renderStatus({ syncStatus: syncState("synced"), failedSaves: 1 });
+    const status = screen.getByTestId("sync-status");
+    expect(status.textContent).toBe("Couldn't save 1 file");
+    expect(status.getAttribute("aria-label")).toBe("Couldn't save 1 file");
+    expect(status.getAttribute("data-state")).toBe("save-failed");
+    expect(dot().className).toContain("bg-danger");
+    expect(status.textContent).not.toContain("saved");
+
+    // It stays through a sync pass, so the mark does not flicker to Syncing.
+    rerender(<WorkspaceSyncStatus syncStatus={syncState("syncing")} failedSaves={2} />);
+    expect(status.textContent).toBe("Couldn't save 2 files");
+
+    rerender(<WorkspaceSyncStatus syncStatus={syncState("synced")} failedSaves={0} />);
+    expect(status.textContent).toBe("Local · saved");
+    expect(status.getAttribute("data-state")).toBe("synced");
+    expect(dot().className).toContain("bg-success");
+  });
+
+  it("leaves conflicts, failed syncs and required updates ahead of a failed save", () => {
+    const { rerender } = renderStatus({ syncStatus: { ...syncState("conflict"), conflictCount: 1 }, failedSaves: 1 });
+    const status = screen.getByTestId("sync-status");
+    expect(status.textContent).toBe("Conflict (1)");
+    expect(status.getAttribute("data-state")).toBe("conflict");
+    rerender(<WorkspaceSyncStatus syncStatus={syncState("sync-failed")} failedSaves={1} />);
+    expect(status.textContent).toBe("Sync failed");
+    rerender(<WorkspaceSyncStatus syncStatus={{ ...syncState("cloud-disconnected"), updateRequired: "app" }} failedSaves={1} />);
+    expect(status.textContent).toBe("Update dohc to sync");
   });
 
   it("appends the conflict COUNT only in the conflict state", () => {

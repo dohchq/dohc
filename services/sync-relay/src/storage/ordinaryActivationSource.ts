@@ -34,6 +34,7 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
   const entryLimit=Math.min(bounds.maxEntriesPerDrain,MAX_OLD_SUFFIX_ENTRIES+2);
   const selected=`FROM sync_relay_log INDEXED BY idx_sync_relay_log_document_page WHERE workspace_id=? AND relay_seq>=? AND relay_seq<=?
       AND json_extract(payload_json,'$.versionId')=? AND json_extract(payload_json,'$.objectId')=?
+      AND COALESCE(json_extract(settlement_admission_json,'$.status'),'')<>'refused'
     ORDER BY relay_seq LIMIT ?`;
   const params=[document.workspaceId,source.baseRelaySeq,source.committedCursor,document.mainVersionId,document.objectId,entryLimit+1];
   const size=storage.db.prepare(`SELECT count(*) AS entries,COALESCE(sum(bytes),0) AS bytes FROM

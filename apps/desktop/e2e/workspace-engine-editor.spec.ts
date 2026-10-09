@@ -2,6 +2,8 @@ import { expect, test } from "@playwright/test";
 import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
+import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
+import { activityPin } from "../src/testPins";
 import {
   momentTextsForPath,
   replicationOpKindCount,
@@ -42,6 +44,58 @@ async function openEngineDoc(page: import("@playwright/test").Page, path: string
   // pre-open local editor.
   await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0, { timeout: 15_000 });
   await expect(page.getByTestId("markdown-editor")).toBeVisible();
+}
+
+// The kept typing's notice: its toast, then its row in Notices.
+function recoveryToast(page: import("@playwright/test").Page) {
+  return page.getByTestId("workspace-shell-notice").filter({hasText: "Typing kept in History"});
+}
+
+async function restoreRestartTyping(desktop: Awaited<ReturnType<typeof launchDesktopApp>>, rootPath: string, workspaceId: string, path: string, human: string, external: string, open: "notice" | "history") {
+  const {page, app} = desktop;
+  let recoveryId = "";
+  await expect.poll(async () => {
+    const status = await page.evaluate(async workspaceId => {
+      const api = (window as unknown as {dohcDesktop: DohcDesktopBridge}).dohcDesktop;
+      return api.getCaptureRecoveryStatus({workspaceId});
+    }, workspaceId);
+    recoveryId = status.captureRecoveries.find(recovery => recovery.path === path)?.momentId ?? "";
+    return recoveryId;
+  }, {timeout: 30_000}).not.toBe("");
+  const detail = await page.evaluate(async input => (window as unknown as {dohcDesktop: DohcDesktopBridge}).dohcDesktop.readEngineMoment(input), {workspaceId, momentId: recoveryId});
+  expect(detail.moment?.beforeText).toContain(human);
+  expect(detail.moment?.afterText).toContain(external);
+  await expect.poll(() => momentTextsForPath(rootPath, path)).toEqual(expect.arrayContaining([expect.stringContaining(external)]));
+  const orders = withEngineDb(rootPath, db => db.prepare("SELECT r.moment_order AS recoveryOrder,c.moment_order AS captureOrder FROM moments r JOIN moments c ON c.moment_id=r.metadata_correlation_id WHERE r.moment_id=?").get(recoveryId) as {recoveryOrder: number; captureOrder: number});
+  if (!orders) throw new Error("recovery must link to its committed outside capture");
+  expect(orders.captureOrder).toBeLessThan(orders.recoveryOrder);
+  expect(await readFile(join(rootPath,path), "utf8")).toContain(external);
+  if (open === "notice") {
+    const toast = recoveryToast(page);
+    await expect(toast).toContainText(`The file "${path}" changed outside dohc. Your typing is in History. Open the recovery change and choose Restore.`, {timeout: 30_000});
+    await toast.getByTestId("workspace-shell-error-action").click();
+    await expect(page.getByTestId(activityPin("history"))).toHaveAttribute("aria-current", "page");
+    await expect(page.getByTestId("engine-moment-diff-page")).toHaveAttribute("data-moment-id", recoveryId);
+    await expect(page.getByTestId("engine-diff-source")).toHaveText("Typing kept");
+  } else {
+    await openHistoryView(page);
+    await page.locator(`[data-testid="engine-moment-open"][data-moment-id="${recoveryId}"]`).click();
+  }
+  await expect(page.getByTestId("engine-diff-lines")).toContainText(human);
+  // A shared live file's way back: Copy your version copies the kept file whole.
+  await page.getByTestId("engine-diff-copy-typing").click();
+  // Windows hands clipboard text back with CRLF line endings.
+  await expect.poll(async () => (await app.evaluate(({clipboard}) => clipboard.readText())).replace(/\r\n/g, "\n")).toBe(detail.moment?.beforeText);
+  await page.getByTestId("engine-diff-restore-file").click();
+  await page.getByTestId("engine-diff-confirm-restore").click();
+  await expect(page.getByTestId("engine-diff-restore-status")).toContainText("Restored the earlier state");
+  await expect.poll(() => readFile(join(rootPath,path), "utf8")).toContain(human);
+  await expect.poll(() => page.evaluate(async workspaceId => (window as unknown as {dohcDesktop: DohcDesktopBridge}).dohcDesktop.getCaptureRecoveryStatus({workspaceId}), workspaceId)).toEqual({captureRecoveries: []});
+  // The restore cleared the recovery, so its notice goes too.
+  await expect(recoveryToast(page)).toHaveCount(0);
+  await page.getByTestId("notice-center-toggle").click();
+  await expect(page.locator("[data-notice-row]").filter({hasText: "Typing kept in History"})).toHaveCount(0);
+  await page.getByTestId("notice-center-toggle").click();
 }
 
 test("rich doc edits through the engine Y.Doc: settle lands on .md + engine.db, only ydoc.update journals, reopen resumes", async () => {
@@ -221,12 +275,8 @@ test("an external edit to an open document remains recoverable after overlapping
     desktop = await launchDesktopApp({workspace: temp});
     await openWorkspaceFromFirstRun(desktop.page, temp);
     await waitForWorkspaceFile(desktop.page, workspace.workspaceId, path);
-    await expect(desktop.page.getByTestId("markdown-editor")).toContainText(human);
-    await expect(desktop.page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "error");
-    expect(await readFile(join(temp.rootPath, path), "utf8")).toContain(external);
-    await desktop.page.getByTestId("markdown-source-toggle").click();
-    await desktop.page.getByTestId("markdown-source-copy").click();
-    await expect.poll(() => desktop!.app.evaluate(({clipboard}) => clipboard.readText())).toContain(human);
+    await expect(desktop.page.getByTestId("markdown-editor")).toContainText(external);
+    await restoreRestartTyping(desktop, temp.rootPath, workspace.workspaceId, path, human, external, "notice");
     await quitDesktop(desktop);
   } finally {await cleanupDesktopWorkspace(desktop, temp);}
 });
@@ -261,26 +311,18 @@ test("kept typing survives capture before the renderer reopens after restart", a
     desktop = await launchDesktopApp({workspace: { ...temp, baseDir: join(temp.baseDir, "fresh-profile") }});
     await openWorkspaceFromFirstRun(desktop.page, temp);
     await expect(desktop.page.getByTestId("markdown-editor")).toHaveCount(0);
-    // This existing read runs capture.flush before looking up the file. A
-    // kept dirty lineage may refuse convergence; either outcome proves the
-    // capture attempt completed before an editor can hold the document lease.
-    const captureOutcome = await desktop.page.evaluate(async ({ workspaceId, path }) => {
+    // This existing read flushes capture before an editor can hold a lease.
+    await desktop.page.evaluate(async ({ workspaceId, path }) => {
       const api = (window as unknown as { dohcDesktop: {
         listChatFileMentions(input: { workspaceId: string; path: string }): Promise<unknown>;
       } }).dohcDesktop;
-      try { await api.listChatFileMentions({ workspaceId, path }); return null; }
-      catch (error) { return error instanceof Error ? error.message : String(error); }
+      await api.listChatFileMentions({ workspaceId, path });
     }, { workspaceId: workspace.workspaceId, path });
-    if (captureOutcome !== null) expect(captureOutcome).toContain("did not settle");
     await expect(desktop.page.getByTestId("markdown-editor")).toHaveCount(0);
     await openEngineDoc(desktop.page, path);
     await waitForWorkspaceFile(desktop.page, workspace.workspaceId, path);
-    await expect(desktop.page.getByTestId("markdown-editor")).toContainText(human);
-    await expect(desktop.page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "error");
-    expect(await readFile(join(temp.rootPath, path), "utf8")).toContain(external);
-    await desktop.page.getByTestId("markdown-source-toggle").click();
-    await desktop.page.getByTestId("markdown-source-copy").click();
-    await expect.poll(() => desktop!.app.evaluate(({clipboard}) => clipboard.readText())).toContain(human);
+    await expect(desktop.page.getByTestId("markdown-editor")).toContainText(external);
+    await restoreRestartTyping(desktop, temp.rootPath, workspace.workspaceId, path, human, external, "history");
     await quitDesktop(desktop);
   } finally {await cleanupDesktopWorkspace(desktop, temp);}
 });

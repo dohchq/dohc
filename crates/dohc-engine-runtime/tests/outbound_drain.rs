@@ -76,6 +76,8 @@ struct LoggedOp {
 impl LoggedOp {
     fn envelope(&self, workspace_id: &str) -> ReplicationEnvelope {
         ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: workspace_id.to_owned(),
             origin_id: self.origin_id.clone(),
             origin_seq: self.origin_seq,

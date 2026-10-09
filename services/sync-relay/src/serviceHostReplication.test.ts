@@ -27,7 +27,7 @@ async function fixture(provenance?: "native-settlements") {
   return {...f, post};
 }
 
-it("publishes the native mixed live-update, audit, and authored settlement batch beyond its neutral cursor", async () => {
+it("publishes the native mixed batch beyond its cursor while refusing unproved authors", async () => {
   const f = await fixture("native-settlements");
   f.storage.appendLogBatch({workspaceId: scope.workspaceId, originId: "native-service", ops: [0, 1, 2].map(originSeq => parseLogOp({
     originSeq, opKind: "moment.append", recordedAtMs: 1, payload: {},
@@ -39,23 +39,38 @@ it("publishes the native mixed live-update, audit, and authored settlement batch
     }
   }
   const response = await f.post(nativeAuthoredSettlement);
-  expect({status: response.status, body: await response.json()}).toEqual({status: 200,
-    body: {ok: true, accepted: 10, inserted: 10, skipped: 0, currentMaxOriginSeq: 12}});
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ok: true, accepted: 10, inserted: 10, skipped: 0, currentMaxOriginSeq: 12});
   for (const op of nativeAuthoredSettlement) {
     const row = f.storage.fetchLogCoordinate({workspaceId: scope.workspaceId, originId: "native-service", originSeq: op.originSeq});
     expect(row?.opKind).toBe(op.opKind);
-    expect(JSON.parse(row!.payloadJson)).toEqual(op.payload);
+    if (op.opKind === "moment.append" && Object.hasOwn(op.payload, "authors")) {
+      const {authors: _authors, ...expected} = op.payload as Record<string, unknown>;
+      expect(JSON.parse(row!.payloadJson)).toEqual(expected);
+      expect(row?.settlementAdmission?.status).toBe("refused");
+      expect(row?.admittedAuthorSnapshot).toBeUndefined();
+    } else expect(JSON.parse(row!.payloadJson)).toEqual(op.payload);
   }
 });
 
-it("requires the service-only provenance option even for an authenticated service replica", async () => {
+it("consumes unproved authored settlements on the client route without granting attribution", async () => {
   const f = await fixture();
+  f.storage.appendLogBatch({workspaceId: scope.workspaceId, originId: "native-service", ops: [0, 1, 2].map(originSeq => parseLogOp({originSeq, opKind: "moment.append", recordedAtMs: 1, payload: {}}))});
+  for (const op of nativeAuthoredSettlement) {
+    for (const sha256 of referencedBlobShas(op.opKind, JSON.stringify(op.payload), {workspaceId: scope.workspaceId, recordedAtMs: op.recordedAtMs})) {
+      f.storage.putBlob({workspaceId: scope.workspaceId, sha256, content: new Uint8Array([0]), createdAtMs: 1});
+    }
+  }
   const response = await f.post(nativeAuthoredSettlement);
-  expect(response.status).toBe(403);
-  expect(await response.json()).toMatchObject({code: "authorship_mismatch"});
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({currentMaxOriginSeq: 12});
+  for (const op of nativeAuthoredSettlement.filter(op => op.opKind === "moment.append")) {
+    const row = f.storage.fetchLogCoordinate({workspaceId: scope.workspaceId, originId: "native-service", originSeq: op.originSeq});
+    expect(JSON.parse(row!.payloadJson)).not.toHaveProperty("authors");
+  }
 });
 
-it("preserves multiple human, public link, and agent authors through service publication", async () => {
+it("refuses unproved mixed service authors without stalling the next coordinate", async () => {
   const f = await fixture("native-settlements");
   const authors = [
     {kind: "human", humanId: "recipient", humanName: "Recipient"},
@@ -65,10 +80,18 @@ it("preserves multiple human, public link, and agent authors through service pub
     {kind: "agent", agentId: "agent", onBehalfOf: "owner", depth: 1},
   ];
   const response = await f.post([{originSeq: 0, opKind: "moment.append", recordedAtMs: 1,
-    payload: {momentId: `moment-ydoc-${"a".repeat(64)}`, authors}}]);
+    payload: {momentId: `moment-ydoc-${"a".repeat(64)}`, authors}},
+    {originSeq: 1, opKind: "moment.append", recordedAtMs: 2, payload: {momentId: "ordinary", authors: [{kind: "unattributed"}]}}]);
   expect(response.status).toBe(200);
   const row = f.storage.fetchLogCoordinate({workspaceId: scope.workspaceId, originId: "native-service", originSeq: 0});
-  expect(JSON.parse(row!.payloadJson).authors).toEqual(authors);
+  expect(JSON.parse(row!.payloadJson)).not.toHaveProperty("authors");
+  expect(row?.settlementAdmission).toMatchObject({status: "refused"});
+  expect(row?.admittedAuthorSnapshot).toBeUndefined();
+  const next = f.storage.fetchLogCoordinate({workspaceId: scope.workspaceId, originId: "native-service", originSeq: 1});
+  expect(JSON.parse(next!.payloadJson).authors).toEqual([{kind: "unattributed"}]);
+  const retry = await f.post([{originSeq: 2, opKind: "moment.append", recordedAtMs: 3, payload: {momentId: "next"}}]);
+  expect(retry.status).toBe(200);
+  expect(await retry.json()).toMatchObject({currentMaxOriginSeq: 2});
 });
 
 it("keeps chat validation and origin reservations on the trusted service route", async () => {

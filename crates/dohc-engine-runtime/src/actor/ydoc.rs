@@ -2202,6 +2202,7 @@ fn record_file_holds_head(
     live_audit: Option<&dohc_engine_collab::live_update_application::LiveSettlementAudit>,
     current: &dohc_engine_domain::TextSnapshot,
     source_state_vector_sha256: &str,
+    publication_state_bytes: Option<&[u8]>,
     now_ms: i64,
 ) -> Result<bool, RuntimeError> {
     let (head, settled, pending_empty, last_sha): (i64, Option<i64>, bool, Option<String>) = store.read_with(|conn| {
@@ -2254,6 +2255,14 @@ fn record_file_holds_head(
             .map_err(StorageError::persist_public)?;
         }
         if let Some(audit) = live_audit {
+            let capture = audit.prepare_publication_state_in_tx(tx)?;
+            let state = match &capture {
+                dohc_engine_collab::live_update_application::LiveSettlementPublicationState::New => Some(
+                    publication_state_bytes.ok_or(StorageError::StateCorrupt { source: None })?,
+                ),
+                dohc_engine_collab::live_update_application::LiveSettlementPublicationState::Retained(bytes) => Some(bytes.as_slice()),
+                dohc_engine_collab::live_update_application::LiveSettlementPublicationState::Unavailable => None,
+            };
             let id = audit.record_in_tx(
                 tx,
                 &current.latest_moment_id,
@@ -2261,6 +2270,9 @@ fn record_file_holds_head(
                 source_state_vector_sha256,
                 now_ms,
             )?;
+            if let Some(state) = state {
+            audit.record_publication_state_in_tx(tx, &id, state)?;
+            }
             dohc_engine_sync::journal_live_settlement_in_tx(
                 tx,
                 &audit.binding().workspace_id,
@@ -2390,7 +2402,7 @@ fn restore_live_settlement_marker(
     }
     let outcome=store.write_with(faults,|tx| -> Result<(),RuntimeError> {
         if !audit.covers_projection_in(tx,moment,markdown)? {return Err(DomainError::ConflictStaleTarget.into());}
-        let matches:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM snapshots s JOIN moments m ON m.workspace_id=s.workspace_id AND m.version_id=s.version_id AND m.object_id=s.object_id AND m.moment_id=s.latest_moment_id WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.path=?4 AND s.latest_moment_id=?5 AND s.blob_sha256=?6 AND m.moment_order=?7) AND NOT EXISTS(SELECT 1 FROM materialization_jobs WHERE (workspace_id=?1 OR workspace_id='') AND target_path=?4 AND status='complete' AND job_id NOT LIKE 'version-switch-%' AND target_generation>?7)",params![b.workspace_id,b.main_version_id,b.object_id,b.current_path,moment,markdown,job.target_generation],|row|row.get(0)).map_err(StorageError::persist_public)?;
+        let matches:bool=tx.query_row(concat!("SELECT EXISTS(SELECT 1 FROM snapshots s JOIN moments m ON ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=s.workspace_id AND m.version_id=s.version_id AND m.object_id=s.object_id AND m.moment_id=s.latest_moment_id WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.path=?4 AND s.latest_moment_id=?5 AND s.blob_sha256=?6 AND m.moment_order=?7) AND NOT EXISTS(SELECT 1 FROM materialization_jobs WHERE (workspace_id=?1 OR workspace_id='') AND target_path=?4 AND status='complete' AND job_id NOT LIKE 'version-switch-%' AND target_generation>?7)"),params![b.workspace_id,b.main_version_id,b.object_id,b.current_path,moment,markdown,job.target_generation],|row|row.get(0)).map_err(StorageError::persist_public)?;
         if !matches || !permitted_disk() {return Err(DomainError::ConflictStaleTarget.into());}
         let changed=tx.execute("UPDATE materialization_jobs SET status='pending',completed_at_ms=NULL WHERE job_id=?1 AND workspace_id=?2 AND target_path=?3 AND content_sha256=?4 AND target_generation=?5 AND status IN ('conflict','complete')",params![job.job_id,b.workspace_id,b.current_path,markdown,job.target_generation]).map_err(StorageError::persist_public)?;
         if changed!=1 {return Err(DomainError::ConflictStaleTarget.into());}
@@ -2594,6 +2606,7 @@ pub(super) fn ydoc_settle_on_store(
     if doc.has_pending_dependencies() {
         return Err(dohc_engine_collab::CollabError::MissingDependencies.into());
     }
+    let publication_state_bytes = live_audit.map(|_| doc.encode_full_state());
     let projection = project_ydoc_on_store(store, key, doc, content_kind)?;
     // The in-band cap bounds only what the RESPONSE can carry as one wire
     // string — it must never gate the settle itself. Materialization writes
@@ -2810,6 +2823,7 @@ pub(super) fn ydoc_settle_on_store(
             live_audit,
             &current,
             &projection.source_state_vector_sha256,
+            publication_state_bytes.as_deref(),
             now_ms,
         )?;
         return Ok(YdocSettleOutcome::Settled(Box::new(YdocSettlement {
@@ -2855,6 +2869,7 @@ pub(super) fn ydoc_settle_on_store(
             None,
             &current,
             &projection.source_state_vector_sha256,
+            publication_state_bytes.as_deref(),
             now_ms,
         )?;
         return Ok(YdocSettleOutcome::Settled(Box::new(YdocSettlement {
@@ -3000,6 +3015,14 @@ pub(super) fn ydoc_settle_on_store(
             dohc_engine_domain::DomainError::Storage(StorageError::persist_public(error))
         })?;
         if let Some(audit) = live_audit {
+            let capture = audit.prepare_publication_state_in_tx(tx)?;
+            let state = match &capture {
+                dohc_engine_collab::live_update_application::LiveSettlementPublicationState::New => Some(
+                    publication_state_bytes.as_deref().ok_or(StorageError::StateCorrupt { source: None })?,
+                ),
+                dohc_engine_collab::live_update_application::LiveSettlementPublicationState::Retained(bytes) => Some(bytes.as_slice()),
+                dohc_engine_collab::live_update_application::LiveSettlementPublicationState::Unavailable => None,
+            };
             let id = audit.record_in_tx(
                 tx,
                 &result.moment.moment_id,
@@ -3007,6 +3030,9 @@ pub(super) fn ydoc_settle_on_store(
                 &source_state_vector_sha256,
                 now_ms,
             )?;
+            if let Some(state) = state {
+            audit.record_publication_state_in_tx(tx, &id, state)?;
+            }
             dohc_engine_sync::journal_live_settlement_in_tx(
                 tx,
                 &audit.binding().workspace_id,

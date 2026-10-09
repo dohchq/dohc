@@ -94,6 +94,8 @@ async fn settle_with_parked_remote_update(queued: bool) {
         let lineage_claim_id = dohc_engine_storage::hex_sha256(&base);
         let base_sha = store.put_binary_blob(&base).expect("base update blob");
         let base_envelope = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: WS.to_owned(),
             origin_id: "identity-refusal-peer".to_owned(),
             origin_seq: 0,
@@ -121,6 +123,8 @@ async fn settle_with_parked_remote_update(queued: bool) {
         let remote = doc.plaintext_insert(6, " remote");
         let remote_sha = store.put_binary_blob(&remote).expect("remote update blob");
         let envelope = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: WS.to_owned(),
             origin_id: "identity-refusal-peer".to_owned(),
             origin_seq: 1,

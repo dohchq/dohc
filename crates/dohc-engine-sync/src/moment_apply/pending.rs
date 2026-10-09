@@ -116,6 +116,8 @@ pub(crate) fn drain_and_claim(
             // owner editor does not defer. It waits only once the owner is unbound.
             let deferred = leases.is_live(&key) && !is_bound_owner(tx, &key);
             ready.push((ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: workspace_id.to_owned(),
                 origin_id: row.get(0).map_err(SyncError::corrupt)?,
                 origin_seq: row.get(1).map_err(SyncError::corrupt)?,

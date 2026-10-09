@@ -114,8 +114,9 @@ export function setWorkspaceShareRoster(
   workspaceId: string,
   listing: RosterListing,
   pulledAfter: boolean,
+  listedAtMs: number,
 ): void {
-  store().setShareRoster(workspaceId, listing, pulledAfter);
+  store().setShareRoster(workspaceId, listing, pulledAfter, listedAtMs);
 }
 
 // A pull from the relay started after the stored listing. See

@@ -240,6 +240,46 @@ pub fn reserved_in(conn: &Connection, key: &DocKey) -> Result<Authors, CollabErr
     Ok(authors)
 }
 
+/// History recovery keeps native authors too. Accepted settlement deliberately
+/// excludes the owner's private tail; its outbox retains compacted provenance.
+pub fn recovery_in(conn: &Connection, key: &DocKey) -> Result<Authors, CollabError> {
+    let mut authors = reserved_in(conn, key)?;
+    let mut statement = conn
+        .prepare(
+            "SELECT e.native_source_json FROM owner_ydoc_outbox_entries e
+         JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id
+         JOIN ydoc_docs d ON d.workspace_id=o.workspace_id AND d.version_id=o.main_version_id
+           AND d.object_id=o.object_id AND d.lineage_claim_id=o.lineage_claim_id
+         WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3
+           AND e.pending=1 AND e.native_source_json IS NOT NULL",
+        )
+        .map_err(sql)?;
+    let sources = statement
+        .query_map(
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(sql)?;
+    for source in sources {
+        let source: crate::owner_outbox::OwnerOutboxSource =
+            serde_json::from_str(&source.map_err(sql)?)
+                .map_err(|_| corrupt("recovery native source is invalid"))?;
+        if let Some(native) = source.native() {
+            if let Some((actor, attribution)) = native
+                .native_author()
+                .map_err(|_| corrupt("recovery native author is invalid"))?
+            {
+                if let Some(json) =
+                    dohc_engine_domain::moment_author_json(actor.as_deref(), attribution.as_ref())
+                {
+                    authors.union_json(&json)?;
+                }
+            }
+        }
+    }
+    Ok(authors)
+}
+
 /// One author entry within the size a moment can hold.
 fn entry(json: &str) -> Result<Authors, CollabError> {
     let mut incoming = Authors::default();

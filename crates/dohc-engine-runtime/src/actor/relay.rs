@@ -653,6 +653,8 @@ mod deferred_relay_tests {
             after_seq: -1,
             ops: (0..dohc_engine_sync::MAX_PUSH_OPS_PER_BATCH)
                 .map(|origin_seq| dohc_engine_sync::ReplicationEnvelope {
+                    settlement_admission: None,
+                    admitted_author_snapshot: None,
                     workspace_id: "workspace".to_owned(),
                     origin_id: "origin".to_owned(),
                     origin_seq: i64::try_from(origin_seq).expect("sequence"),
@@ -666,6 +668,7 @@ mod deferred_relay_tests {
         transport.complete(
             RelayIoRequest::Push(request.clone()),
             Ok(RelayIoResponse::Push(PushResponse {
+                settlement_refusals: Vec::new(),
                 accepted: request.ops.len(),
                 inserted: request.ops.len(),
                 skipped: 0,
@@ -676,6 +679,7 @@ mod deferred_relay_tests {
         assert_eq!(
             transport.push(request).expect("consume completed push"),
             PushResponse {
+                settlement_refusals: Vec::new(),
                 accepted: dohc_engine_sync::MAX_PUSH_OPS_PER_BATCH,
                 inserted: dohc_engine_sync::MAX_PUSH_OPS_PER_BATCH,
                 skipped: 0,

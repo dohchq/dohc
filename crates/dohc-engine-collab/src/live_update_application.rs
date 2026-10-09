@@ -64,7 +64,9 @@ pub use restore_fence::{
 };
 pub use restore_fence::{NativeRestoreFence, NativeRestoreFenceReceipt, RestoreDeliveryOrigin};
 pub use restore_resume::{NativeRestoreResume, NativeRestoreResumeReceipt};
-pub use settlement::{with_settlement, LiveSettlementAudit, LiveSettlementResult};
+pub use settlement::{
+    with_settlement, LiveSettlementAudit, LiveSettlementPublicationState, LiveSettlementResult,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApplicationError {

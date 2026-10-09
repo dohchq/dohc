@@ -65,6 +65,7 @@ fn document(payload: &Value) -> Option<RefusalDocument> {
         .or(payload["transition"]["current"]["objectId"].as_str())?;
     let lineage = payload["lineageClaimId"]
         .as_str()
+        .or(payload["settlementReference"]["record"]["binding"]["lineageClaimId"].as_str())
         .or(payload["lineageTransition"]["successor"]["lineageClaimId"].as_str())?;
     let path = payload["path"].as_str().or_else(|| {
         payload["transition"]["result"]["pathRef"]
@@ -327,6 +328,8 @@ mod tests {
         seq: i64,
     ) {
         let envelope = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: workspace.into(),
             origin_id: "peer".into(),
             origin_seq: seq,

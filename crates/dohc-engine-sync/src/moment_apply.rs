@@ -89,6 +89,8 @@ enum MomentAuthor {
     Agent {
         #[serde(rename = "agentId")]
         agent_id: String,
+        #[serde(rename = "agentName", skip_serializing_if = "Option::is_none")]
+        agent_name: Option<String>,
         #[serde(
             rename = "onBehalfOf",
             default,
@@ -341,12 +343,40 @@ pub fn apply_moment_envelope_detailed(
     envelope.validate()?;
     let search_policy = search_policy_for_store(store);
     apply_envelope_with(store, envelope, faults, |tx, envelope| {
-        let payload: MomentAppendPayload =
-            Deserialize::deserialize(&envelope.payload).map_err(|_| SyncError::InvalidInput {
+        let mut payload: MomentAppendPayload = Deserialize::deserialize(&envelope.payload)
+            .map_err(|_| SyncError::InvalidInput {
                 reason: "moment.append payload is malformed",
             })?;
+        if matches!(
+            envelope.settlement_admission,
+            Some(crate::SettlementAdmission::Accepted { .. })
+        ) {
+            // The authenticated snapshot is stored by admission refresh.
+            // Ordinary client author shapes grant no authority to that snapshot.
+            crate::settlement_publication::admitted_moment_authors(envelope)?.ok_or(
+                SyncError::InvalidInput {
+                    reason: "accepted settlement has no authors",
+                },
+            )?;
+            payload.authors = None;
+        }
         validate_payload_bounds(&payload)?;
         validate_payload(&payload)?;
+        if payload.authors.iter().flatten().any(|author| {
+            matches!(
+                author,
+                MomentAuthor::Human {
+                    human_name: Some(_),
+                    ..
+                } | MomentAuthor::Link {
+                    identity: LinkMomentAuthor::Live { .. }
+                }
+            )
+        }) {
+            return Err(SyncError::InvalidInput {
+                reason: "hosted moment authors require relay settlement admission",
+            });
+        }
         if payload
             .authors
             .iter()
@@ -2506,11 +2536,16 @@ fn local_branch_root(
     base_moment_id: Option<&str>,
 ) -> Result<Option<String>, SyncError> {
     tx.query_row(
-        "SELECT moment_id FROM moments \
+        concat!(
+            "SELECT moment_id FROM moments \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
            AND before_latest_moment_id IS ?4 \
            AND (sync_record_only IS NULL OR sync_record_only=0) \
-         ORDER BY moment_order LIMIT 1",
+           AND ",
+            dohc_engine_domain::exclude_capture_recovery_sql!(),
+            " \
+         ORDER BY moment_order LIMIT 1"
+        ),
         params![workspace_id, version_id, object_id, base_moment_id],
         |row| row.get(0),
     )

@@ -4412,6 +4412,8 @@ mod tests {
 
     fn imported_envelope(seq: i64, kind: &str, payload: Value) -> ReplicationEnvelope {
         ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "ws".to_owned(),
             origin_id: "peer".to_owned(),
             origin_seq: seq,
@@ -4547,6 +4549,8 @@ mod tests {
             scene_conflict_store(&current_text, &incoming_text, Some(&predecessor_update));
         copy_resolution_roots(&store, &mut receiver, &built);
         let replicated = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "ws".to_owned(),
             origin_id: "resolution-peer".to_owned(),
             origin_seq: 0,
@@ -4619,6 +4623,8 @@ mod tests {
 
         copy_resolution_roots(&store, &mut receiver, &reinstall);
         let replayed_reinstall = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "ws".to_owned(),
             origin_id: "resolution-peer".to_owned(),
             origin_seq: 1,
@@ -5311,6 +5317,8 @@ mod tests {
             .lineage_claim_id
             .expect("active lineage claim");
         let update = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "ws".to_owned(),
             origin_id: "dependency-peer".to_owned(),
             origin_seq: 0,
@@ -5575,6 +5583,8 @@ mod tests {
             let update = old.doc.plaintext_insert(0, &"x".repeat(9 * 1024 * 1024));
             let sha = store.put_binary_blob(&update).unwrap();
             let op = ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: "ws".into(),
                 origin_id: "byte-budget".into(),
                 origin_seq: seq,
@@ -5644,6 +5654,8 @@ mod tests {
         {
             let sha = store.put_binary_blob(&update).unwrap();
             let op = ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: "ws".into(),
                 origin_id: origin.into(),
                 origin_seq: 0,
@@ -5710,6 +5722,8 @@ mod tests {
                 let sha = store.put_binary_blob(&update).unwrap();
                 let seq = batch * 257 + index;
                 let op = ReplicationEnvelope {
+                    settlement_admission: None,
+                    admitted_author_snapshot: None,
                     workspace_id: "ws".into(),
                     origin_id: "batch-archive".into(),
                     origin_seq: seq,
@@ -5806,6 +5820,8 @@ mod tests {
         for (seq, bytes) in [oversized, poison].into_iter().enumerate() {
             let sha = store.put_binary_blob(&bytes).unwrap();
             let op = ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: "ws".into(),
                 origin_id: "archive-rejections".into(),
                 origin_seq: seq as i64,
@@ -5859,6 +5875,8 @@ mod tests {
             let update = old.doc.plaintext_insert(0, &"x".repeat(size));
             let sha = store.put_binary_blob(&update).unwrap();
             let op = |seq, sha: String| ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: "ws".to_owned(),
                 origin_id: "late-archive".to_owned(),
                 origin_seq: seq,

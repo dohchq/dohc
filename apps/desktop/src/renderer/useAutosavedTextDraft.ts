@@ -3,6 +3,7 @@ import { registerPendingEditorDraft } from "./pendingEditorDrafts";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { bridge } from "./bridge";
 import { captureOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
+import { reportTextSave } from "./shell/useDocumentSaveNotices";
 import type { SharedLocalDocument } from "./sharedLocalDocument";
 
 export const AUTOSAVE_DEBOUNCE_MS = 800;
@@ -137,6 +138,21 @@ export function useAutosavedTextDraft(props: {
     disabledRef.current === true ||
     props.switchUnresyncedRef.current === true ||
     staleBaseline.current;
+  // What a write did to the file it wrote, for the shell's save notices.
+  // Their Try again saves the newest draft only while this editor still
+  // shows that file and can write it.
+  const saveNowRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  const reportSave = (failure: { cause?: unknown } | null) => {
+    const written = props.localBuffer;
+    reportTextSave(props.workspaceId, props.path, failure && {
+      ...failure,
+      retry: () => {
+        if (unmounted.current || activeLocalBuffer.current !== written || writesBlocked()) return false;
+        void saveNowRef.current();
+        return true;
+      },
+    });
+  };
 
   useEffect(() => {
     if (
@@ -456,6 +472,7 @@ export function useAutosavedTextDraft(props: {
       unsavedDraft.current = false;
       if (!unmounted.current) setSaveState(SAVING);
       let issuedText: string | null = null;
+      let answered = false;
       try {
         const writing = props.localBuffer.write(
           localSource.current,
@@ -471,6 +488,8 @@ export function useAutosavedTextDraft(props: {
         );
         if (options.releaseUnusedDraft) props.localBuffer.releaseUnusedDraft();
         const result = await writing;
+        answered = true;
+        reportSave(result.status === "no-baseline" ? {} : null);
         if (activeLocalBuffer.current !== props.localBuffer) {
           if (result.status === "conflict" || result.status === "no-baseline") {
             captureOrphanedDraft(props.workspaceId, props.path, result.body);
@@ -537,6 +556,9 @@ export function useAutosavedTextDraft(props: {
           setSaveState(SAVED_HERE);
         }
       } catch (error) {
+        // A write that rejected is a failed save. A throw after the write
+        // answered comes from handling that answer, which is reported above.
+        if (!answered) reportSave({ cause: error });
         if (activeLocalBuffer.current !== props.localBuffer) {
           if (issuedText !== null) {
             captureOrphanedDraft(props.workspaceId, props.path, issuedText);
@@ -570,6 +592,7 @@ export function useAutosavedTextDraft(props: {
   async function saveNow(): Promise<void> {
     await writeDraftNow();
   }
+  saveNowRef.current = saveNow;
 
   function scheduleSave(next: string) {
     // A busy renderer can deliver an edit before the effect above accepts the

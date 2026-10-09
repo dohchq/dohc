@@ -221,7 +221,8 @@ fn backfill_moments_and_conflict_bundles(
 
 // Unary + removes the correlated keys' TEXT affinity, allowing SQLite to
 // use all columns of the JSON expression indexes.
-const COVERED_HEADS_SQL: &str = "SELECT s.latest_moment_id,s.version_id,s.object_id,s.blob_sha256,d.content_kind, \
+const COVERED_HEADS_SQL: &str = concat!(
+    "SELECT s.latest_moment_id,s.version_id,s.object_id,s.blob_sha256,d.content_kind, \
                      d.head_update_seq,d.head_snapshot_seq FROM snapshots s JOIN ydoc_docs d \
                      ON d.workspace_id=s.workspace_id AND d.version_id=s.version_id \
                        AND d.object_id=s.object_id \
@@ -229,7 +230,9 @@ const COVERED_HEADS_SQL: &str = "SELECT s.latest_moment_id,s.version_id,s.object
                      AND h.version_id=s.version_id AND h.object_id=s.object_id \
                      AND h.moment_id=s.latest_moment_id \
                      AND h.payload_after_blob_sha256=s.blob_sha256 AND h.payload_after_path=s.path \
-                   WHERE s.workspace_id=?1 AND s.content_kind='text' \
+                   WHERE s.workspace_id=?1 AND s.content_kind='text' AND ",
+    dohc_engine_domain::exclude_capture_recovery_sql!("h"),
+    " \
                      AND d.lineage_claim_status != 'unclaimed' \
                      AND d.lineage_parent_claim_id IS NULL AND d.base_origin_id = ( \
                        SELECT origin_id FROM sync_identity WHERE workspace_id=?1) \
@@ -280,7 +283,8 @@ const COVERED_HEADS_SQL: &str = "SELECT s.latest_moment_id,s.version_id,s.object
                      AND NOT EXISTS (SELECT 1 FROM ydoc_deferred_updates u \
                        WHERE u.workspace_id=d.workspace_id AND u.version_id=d.version_id \
                          AND u.object_id=d.object_id) \
-                     ORDER BY h.moment_order";
+                     ORDER BY h.moment_order"
+);
 
 /// Export an object's first file artifact only after this origin has journaled
 /// its base. Durable coverage and the strict peer projection must both agree
@@ -385,9 +389,11 @@ fn backfill_moments_between(
     // so covered heads have their own strict projection proof.
     let moment_ids: Vec<String> = {
         let mut statement = tx
-            .prepare(
+            .prepare(concat!(
                 "SELECT m.moment_id FROM moments m \
-                 WHERE m.workspace_id=?1 \
+                 WHERE m.workspace_id=?1 AND ",
+                dohc_engine_domain::exclude_capture_recovery_sql!("m"),
+                " \
                    AND ((m.metadata_origin != 'ydoc' OR EXISTS ( \
                      SELECT 1 FROM ydoc_docs p \
                      WHERE p.workspace_id=m.workspace_id AND p.version_id=m.version_id \
@@ -412,8 +418,8 @@ fn backfill_moments_between(
                    AND NOT EXISTS (SELECT 1 FROM ydoc_deferred_updates d \
                      WHERE d.workspace_id=m.workspace_id AND d.version_id=m.version_id \
                        AND d.object_id=m.object_id) \
-                 ORDER BY m.moment_order",
-            )
+                 ORDER BY m.moment_order"
+            ))
             .map_err(SyncError::corrupt)?;
         statement
             .query_map(
@@ -933,6 +939,8 @@ mod tests {
             10,
         );
         let refused = crate::ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "ws".to_owned(),
             origin_id: "peer".to_owned(),
             origin_seq: 0,
@@ -978,6 +986,8 @@ mod tests {
             10,
         );
         let refused = crate::ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "ws".to_owned(),
             origin_id: "peer".to_owned(),
             origin_seq: 0,
@@ -1301,6 +1311,8 @@ mod tests {
             )
             .expect("named version");
         let refused = crate::ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "ws".to_owned(),
             origin_id: "peer".to_owned(),
             origin_seq: 0,
@@ -1404,6 +1416,8 @@ mod tests {
             &mut peer,
             &mut dohc_engine_collab::WriterDocCache::new(),
             &crate::ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: "ws".to_owned(),
                 origin_id: "peer".to_owned(),
                 origin_seq: 0,
@@ -1541,6 +1555,8 @@ mod tests {
             &mut local,
             &mut dohc_engine_collab::WriterDocCache::new(),
             &crate::ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: "ws".to_owned(),
                 origin_id: "peer".to_owned(),
                 origin_seq: 0,
@@ -2091,6 +2107,66 @@ mod tests {
             crate::read_replication_acked_seq(&peer, "ws", "local").expect("ack"),
             1
         );
+    }
+
+    #[test]
+    fn saved_file_and_covered_head_exports_mark_unproven_hosted_authors_across_epochs() {
+        for retained in [false, true] {
+            let (_scratch, _, mut store) = open_store();
+            seed_main(&mut store);
+            if retained {
+                seed_retained_artifact(&mut store);
+            } else {
+                write_text(
+                    &mut store,
+                    "main",
+                    "seed-object",
+                    "seed-moment",
+                    "saved text",
+                    "capture",
+                    10,
+                );
+            }
+            let authors=serde_json::json!([{"kind":"human","humanId":"hosted-reader","humanName":"Reader"},{"kind":"agent","agentId":"agent","onBehalfOf":"hosted-reader"}]).to_string();
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "UPDATE moments SET author_json=?1 WHERE moment_id='seed-moment'",
+                        [&authors],
+                    )
+                    .map_err(SyncError::persist)?;
+                    Ok::<_, SyncError>(())
+                })
+                .unwrap();
+            enroll(&mut store).unwrap();
+            let assert_marked = |store: &EngineStore| {
+                let moments: Vec<_> = local_ops(store)
+                    .into_iter()
+                    .filter(|(kind, _)| kind == "moment.append")
+                    .collect();
+                assert!(!moments.is_empty());
+                for (_, payload) in moments {
+                    assert!(payload.get("authors").is_none());
+                    assert!(payload.get("settlementReference").is_none());
+                    assert_eq!(payload["metadata"]["summary"], "Attribution unavailable");
+                    assert_eq!(
+                        payload["attributionUnavailable"]["settlementId"],
+                        "unavailable"
+                    );
+                }
+                assert!(!crate::list_refusal_notices(store, "ws").unwrap().is_empty());
+            };
+            assert_marked(&store);
+            store.write_with(&NoFaults,|tx| {
+                tx.execute("DELETE FROM sync_relay_cursors WHERE workspace_id='ws'",[]).map_err(SyncError::persist)?;
+                tx.execute("DELETE FROM sync_relay_push_state WHERE workspace_id='ws'",[]).map_err(SyncError::persist)?;
+                tx.execute("UPDATE sync_identity SET replication_epoch='next-epoch',stream_identity='next-stream' WHERE workspace_id='ws'",[]).map_err(SyncError::persist)?;
+                tx.execute("UPDATE moments SET author_json=?1 WHERE moment_id='seed-moment'",[&authors]).map_err(SyncError::persist)?;
+                Ok::<_,SyncError>(())
+            }).unwrap();
+            enroll(&mut store).unwrap();
+            assert_marked(&store);
+        }
     }
 
     #[test]
@@ -3070,6 +3146,8 @@ mod tests {
                 peer,
                 &mut dohc_engine_collab::WriterDocCache::new(),
                 &crate::ReplicationEnvelope {
+                    settlement_admission: None,
+                    admitted_author_snapshot: None,
                     workspace_id: "ws".to_owned(),
                     origin_id: "source".to_owned(),
                     origin_seq: origin_seq as i64,
@@ -3358,6 +3436,8 @@ mod tests {
         crate::apply_version_envelope(
             &mut peer,
             &crate::ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: "ws".to_owned(),
                 origin_id: "peer".to_owned(),
                 origin_seq: 0,
@@ -3373,6 +3453,8 @@ mod tests {
             &mut peer,
             &mut dohc_engine_collab::WriterDocCache::new(),
             &crate::ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: "ws".to_owned(),
                 origin_id: "peer".to_owned(),
                 origin_seq: 1,
@@ -3660,6 +3742,8 @@ mod tests {
         let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         let imported = crate::ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "ws".to_owned(),
             origin_id: "peer".to_owned(),
             origin_seq: 0,

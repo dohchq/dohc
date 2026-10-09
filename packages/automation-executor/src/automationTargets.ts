@@ -1,4 +1,4 @@
-import { posix } from "node:path";
+import { datasetBaseFolder } from "@dohc/security-contract/dataset";
 import type { DatasetRevision } from "@dohc/security-contract/dataset";
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import type { ReachCollection, ReachDatasetGrants } from "./automationReach";
@@ -44,7 +44,7 @@ export function createAutomationTargets(dependencies: AutomationTargetDependenci
       const datasetId = value.datasetId;
       const resolved = await dependencies.withHost((host): TargetResolution => {
         const approved = host.revision(datasetId);
-        if (approved.datasetId !== datasetId || approved.definition.datasetId !== datasetId || posix.dirname(approved.definition.schemaPath) !== path) {
+        if (approved.datasetId !== datasetId || approved.definition.datasetId !== datasetId || datasetBaseFolder(approved.definition) !== path) {
           return problem("descriptor-mismatch", `${path}/dataset.json does not match its approved rules. Restore the matching file, then try again.`);
         }
         return { kind: "dataset", collection, approved, generated: host.generated(datasetId), grants: host.dataGrants(datasetId) };

@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Plus, X } from "lucide-react";
 import { COLLECTION_SCHEMA_FILENAME, type CollectionSchema } from "@dohc/workspace-contracts/collection";
 import type { CollectionRef } from "@dohc/workspace-contracts/collection-data";
-import { parseDatasetDefinition, type DatasetDefinition } from "@dohc/security-contract/dataset";
+import { datasetBaseFolder, parseDatasetDefinition, type DatasetDefinition } from "@dohc/security-contract/dataset";
 import type { AppBackendJson } from "@dohc/security-contract/app-backend";
 import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
@@ -102,7 +102,8 @@ function ScopedNewCollectionDialog(props: NewCollectionDialogProps) {
         const result = await bridge().dataset({ action: "create", workspaceId: props.workspaceId, definition: plan.definition });
         if (!alive.current) return;
         if (result.kind !== "approved" || result.revision.datasetId !== plan.definition.datasetId) throw new Error("dohc created a different Collection than the one you asked for. Try again.");
-        props.onCreated({ kind: "transactional", datasetPath: plan.definition.schemaPath.slice(0, plan.definition.schemaPath.lastIndexOf("/") + 1) + "dataset.json", tableId: plan.definition.tables[0]!.tableId });
+        const base = datasetBaseFolder(result.revision.definition);
+        props.onCreated({ kind: "transactional", datasetPath: base === "." ? "dataset.json" : `${base}/dataset.json`, tableId: plan.definition.tables[0]!.tableId });
       } else {
         const result = await bridge().createWorkspaceFile({ workspaceId: props.workspaceId, relativePath: `${plan.folder}/${COLLECTION_SCHEMA_FILENAME}`, initialText: serializeCollectionSchema(plan.schema) });
         if (!alive.current) return;

@@ -1,3 +1,4 @@
+import { datasetBaseFolder } from "@dohc/security-contract/dataset";
 import type { RunSource } from "./automationRecordBackend";
 import { coordinateSourceRun } from "./automationStepRun";
 import { isDeepStrictEqual } from "node:util";
@@ -310,7 +311,7 @@ export async function datasetRecordExists(
   recordId: DatasetRecordId,
 ): Promise<boolean> {
   const approved = host.revision(datasetId);
-  const { trigger } = datasetStepsOf(automation, { definition: approved.definition, generated: true, sourceCollection: approved.definition.schemaPath.slice(0, approved.definition.schemaPath.lastIndexOf("/")) });
+  const { trigger } = datasetStepsOf(automation, { definition: approved.definition, generated: true, sourceCollection: datasetBaseFolder(approved.definition) });
   if (trigger?.read == null) return false;
   const rules = { datasetId, revision: approved.revision, revisionSha256: approved.revisionSha256 };
   return (await readDatasetRecord((operationId, input) => host.invokeAsOwner({ ...rules, operationId, input, idempotencyKey: READ_KEY }), trigger.read, trigger.table, recordId)) !== null;

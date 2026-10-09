@@ -31,7 +31,7 @@ export interface ServerOwnerDelivery {
   workspaceIds(): string[];
   hasRefusals(workspaceId: string): boolean | undefined;
   connect(workspace: RegistryEntry, signal: AbortSignal): Promise<{
-    bearer: string; relayUrl: string; signal: AbortSignal;
+    bearer: string; accountId: string; relayUrl: string; signal: AbortSignal;
     assertCurrent(): void;
     refusals(attempt: AbortSignal): Promise<void>;
     documents(signal: AbortSignal): Promise<unknown>;
@@ -56,7 +56,7 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   onWorkspaceOpened?(workspaceId: string): void;
   onRefusalsChanged?: () => void;
   serverOwnerDelivery?: ServerOwnerDelivery;
-  ownerDeliveryCredentials?(): {bearer: string; relayUrl: string; signal: AbortSignal} | null;
+  ownerDeliveryCredentials?(): {bearer: string; accountId: string; relayUrl: string; signal: AbortSignal} | null;
   existingOwnerFor?: ExistingOwnerDeviceConfig["ownerFor"];
   findWorkspace(workspaceId: string): RegistryEntry | null;
   app: Pick<App, "isPackaged" | "getAppPath">;
@@ -187,7 +187,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                 assertCurrent();
                 return native.runNativeOwnerDeliveryPass({client, workspaceHandle: binding.workspace,
                   document, config: {...profile, relayUrl: session.relayUrl, documents},
-                  signal, bearer: session.bearer, assertCurrent});
+                  signal, bearer: session.bearer, accountId: session.accountId, assertCurrent});
               });
               check();
               if (result === "retry" || result === "frozen") failures.add(document.binding.currentPath);
@@ -227,7 +227,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               };
               assertCurrent();
               const result = await native.runNativeOwnerDeliveryPass({client, workspaceHandle: binding.workspace,
-                document, config, signal, bearer: credentials.bearer, assertCurrent});
+                document, config, signal, bearer: credentials.bearer, accountId: credentials.accountId, assertCurrent});
               assertCurrent();
               if (result === "acknowledged" || result === "frozen") notifyRenderer({workspaceId: document.binding.workspaceId});
               return result;
