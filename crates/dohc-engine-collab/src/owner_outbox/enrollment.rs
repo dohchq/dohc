@@ -284,7 +284,14 @@ pub fn enroll_in_tx(
                 &checkpoint,
                 now_ms,
             )?;
-            index_frontmatter_in_tx(tx, &input.binding, &host, None, None, now_ms)?;
+            index_frontmatter_in_tx(
+                tx,
+                &input.binding,
+                &host,
+                Some(OWNER_DRAFT_QUARANTINE_ACTOR),
+                None,
+                now_ms,
+            )?;
             return Ok(draft);
         }
         let draft = advance_generation_in_tx(
@@ -297,7 +304,14 @@ pub fn enroll_in_tx(
             checkpoint,
             now_ms,
         )?;
-        index_frontmatter_in_tx(tx, &input.binding, &host, None, None, now_ms)?;
+        index_frontmatter_in_tx(
+            tx,
+            &input.binding,
+            &host,
+            Some(OWNER_DRAFT_QUARANTINE_ACTOR),
+            None,
+            now_ms,
+        )?;
         return Ok(draft);
     }
     host.apply(&local_bytes).map_err(collab)?;

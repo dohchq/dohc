@@ -257,19 +257,20 @@ fn apply_ordered_in_tx(
     if let Some(before) = indexed_before {
         // Equal checkpoint fields can still replace a pending map entry.
         // With no active drafts, replay returns without reading any entries.
-        if draft::apply_pending_in(
+        match draft::apply_pending_in(
             tx,
             b,
             &visible,
             observed.limits.max_pending_bytes,
             draft::PendingReplay::Checkpoint,
-        )
-        .is_ok()
-        {
-            index_frontmatter_from_in_tx(tx, b, &before, &visible, None, None, now_ms)?;
+        ) {
+            Ok(()) => {
+                index_frontmatter_from_in_tx(tx, b, &before, &visible, None, None, now_ms)?;
+            }
+            Err(OwnerOutboxError::Storage(error)) => return Err(error.into()),
+            // Replay-state errors preserve the index; storage errors abort the transaction.
+            Err(_) => {}
         }
-        // Indexing replay is best effort; a frozen or unreplayable draft must
-        // not roll back accepted state or invent changes to its indexed fields.
     }
     // A frame another computer wrote is a change from elsewhere; this
     // owner's own accepted draft is not. A sync can carry either, so it

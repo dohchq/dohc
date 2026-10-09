@@ -1912,8 +1912,20 @@ enum PendingFieldSettlement {
     Direct,
     Replay,
     Quarantined,
+    QuarantinedRefusal,
+    StorageFailure,
     Oversize,
     ReplayFailure,
+}
+
+#[test]
+fn observed_owner_quarantine_refusal_then_settlement_keeps_checkpoint_history() {
+    pending_field_settlement_case(PendingFieldSettlement::QuarantinedRefusal);
+}
+
+#[test]
+fn observed_owner_settlement_replay_storage_error_rolls_back_the_moment() {
+    pending_field_settlement_case(PendingFieldSettlement::StorageFailure);
 }
 
 #[test]
@@ -2010,7 +2022,30 @@ fn pending_field_settlement_case(case: PendingFieldSettlement) {
         })
         .unwrap();
     assert_pending_status(&owner);
-    if case == PendingFieldSettlement::Quarantined {
+    if matches!(
+        case,
+        PendingFieldSettlement::Quarantined | PendingFieldSettlement::QuarantinedRefusal
+    ) {
+        if case == PendingFieldSettlement::QuarantinedRefusal {
+            // Refuse a body-only entry while an independent field edit survives.
+            // It must not bring the frozen field edit back into the index.
+            let independent = Ydoc::wire();
+            independent.apply(&host.encode_full_state()).unwrap();
+            owner
+                .store
+                .write_with(&NoFaults, |tx| {
+                    append_draft_in_tx(
+                        tx,
+                        "ws",
+                        &owner.observed.binding,
+                        owner.observed.revision,
+                        "pending-body".into(),
+                        independent.richdoc_append_paragraph("in-flight body"),
+                        13,
+                    )
+                })
+                .unwrap();
+        }
         let descriptor = owner
             .store
             .read_with(|conn| {
@@ -2035,6 +2070,32 @@ fn pending_field_settlement_case(case: PendingFieldSettlement) {
             .unwrap();
         }
         assert_quarantined_status(&owner);
+        if case == PendingFieldSettlement::QuarantinedRefusal {
+            let outbox = descriptor.outbox_id.unwrap();
+            let queued =
+                dohc_engine_collab::owner_outbox::read_pending(&owner.store, "ws", &outbox)
+                    .unwrap();
+            let entry = queued
+                .entries
+                .iter()
+                .find(|entry| entry.append_key == "pending-body")
+                .unwrap();
+            let refusal = dohc_engine_collab::owner_outbox::OwnerOutboxRefuseInput {
+                outbox_id: outbox,
+                delivery_id: entry.delivery_id.clone(),
+                update_digest: entry.update_digest.clone(),
+                reason: "access-revoked".into(),
+            };
+            for _ in 0..2 {
+                owner
+                    .store
+                    .write_with(&NoFaults, |tx| {
+                        dohc_engine_collab::owner_outbox::refuse_entry_in_tx(tx, "ws", &refusal, 21)
+                    })
+                    .unwrap();
+            }
+            assert_quarantined_status(&owner);
+        }
     }
     if case == PendingFieldSettlement::Oversize {
         let vector = host.encode_state_vector();
@@ -2093,6 +2154,53 @@ fn pending_field_settlement_case(case: PendingFieldSettlement) {
             &settled,
         ),
     );
+    if case == PendingFieldSettlement::StorageFailure {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let denied = Arc::new(AtomicBool::new(false));
+        let captured = denied.clone();
+        let before = snapshot(&owner.store, "object");
+        let moments = owner.store.table_row_count("moments").unwrap();
+        let log = owner.store.table_row_count("replication_log").unwrap();
+        owner
+            .store
+            .read_with(|conn| {
+                conn.authorizer(Some(move |ctx: AuthContext<'_>| {
+                    if matches!(
+                        ctx.action,
+                        AuthAction::Read {
+                            table_name: "owner_ydoc_outbox_entries",
+                            column_name: "byte_length"
+                        }
+                    ) && !captured.swap(true, Ordering::SeqCst)
+                    {
+                        Authorization::Deny
+                    } else {
+                        Authorization::Allow
+                    }
+                }))
+            })
+            .unwrap();
+        let result = crate::apply_moment_envelope_detailed(
+            &mut owner.store,
+            &settlement,
+            &NoFaults,
+            &crate::AlwaysLive,
+        );
+        owner
+            .store
+            .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+            .unwrap();
+        assert!(denied.load(Ordering::SeqCst));
+        assert!(matches!(result, Err(SyncError::Storage(_))));
+        assert_eq!(snapshot(&owner.store, "object"), before);
+        assert_eq!(owner.store.table_row_count("moments").unwrap(), moments);
+        assert_eq!(owner.store.table_row_count("replication_log").unwrap(), log);
+        assert_pending_status(&owner);
+    }
     let result = crate::apply_moment_envelope_detailed(
         &mut owner.store,
         &settlement,
@@ -2122,7 +2230,9 @@ fn pending_field_settlement_case(case: PendingFieldSettlement) {
         assert_eq!(drained.changes.len(), 1);
     }
     match case {
-        PendingFieldSettlement::Quarantined => assert_quarantined_status(&owner),
+        PendingFieldSettlement::Quarantined | PendingFieldSettlement::QuarantinedRefusal => {
+            assert_quarantined_status(&owner)
+        }
         PendingFieldSettlement::ReplayFailure => assert_retained_status(&owner),
         PendingFieldSettlement::Oversize => {
             owner.store.read_with(|conn| {
@@ -2142,6 +2252,7 @@ fn pending_field_settlement_case(case: PendingFieldSettlement) {
     if matches!(
         case,
         PendingFieldSettlement::Quarantined
+            | PendingFieldSettlement::QuarantinedRefusal
             | PendingFieldSettlement::Oversize
             | PendingFieldSettlement::ReplayFailure
     ) {

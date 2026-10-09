@@ -1002,18 +1002,17 @@ fn apply_moment_append(
                         .map_err(SyncError::corrupt)?;
                         let visible = dohc_engine_collab::load_doc_in(tx, &key)
                             .map_err(SyncError::corrupt)?;
-                        frontmatter = if dohc_engine_collab::owner_outbox::draft::apply_pending_to_checkpoint_in(
+                        frontmatter = match dohc_engine_collab::owner_outbox::draft::apply_pending_to_checkpoint_in(
                             tx,
                             &owner.binding,
                             &visible,
-                        )
-                        .is_ok()
-                        {
-                            visible.frontmatter_json()
-                        } else {
-                            // Replay is only for indexing. Keep the current fields
-                            // instead of failing the page or attributing a revert.
-                            indexed_fields.clone()
+                        ) {
+                            Ok(()) => visible.frontmatter_json(),
+                            Err(dohc_engine_collab::OwnerOutboxError::Storage(error)) => {
+                                return Err(error.into());
+                            }
+                            // Replay-state errors must not invent an indexed change.
+                            Err(_) => indexed_fields.clone(),
                         };
                     }
                     indexed.unwrap_or_else(empty)

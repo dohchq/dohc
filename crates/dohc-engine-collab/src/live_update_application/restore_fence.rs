@@ -316,10 +316,31 @@ impl ApplicationOwner {
             if changed != 1 { return Err(ApplicationError::Corrupt); }
             let mut observed = b.clone();
             observed.restore_fence_generation = input.new_fence;
-            tx.execute(
-                "UPDATE owner_ydoc_outboxes SET state='quarantined',quarantine_reason='restore-fenced',observed_binding_json=?5 WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?6 AND state!='quarantined'",
-                params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,serde_json::to_string(&observed).map_err(|_| ApplicationError::Corrupt)?,b.restore_fence_generation],
-            ).map_err(write_sql)?;
+            let outboxes = {
+                let mut stmt = tx.prepare(
+                    "SELECT outbox_id FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5 AND state!='quarantined'",
+                ).map_err(read_sql)?;
+                let rows = stmt.query_map(
+                    params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.restore_fence_generation],
+                    |row| row.get::<_, String>(0),
+                ).map_err(read_sql)?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(read_sql)?
+            };
+            for outbox_id in outboxes {
+                crate::owner_outbox::quarantine_in_tx(
+                    tx,
+                    &b.workspace_id,
+                    &crate::owner_outbox::OwnerOutboxQuarantineInput {
+                        outbox_id,
+                        reason: "restore-fenced".into(),
+                        observed_binding: Some(observed.clone()),
+                    },
+                    now_ms,
+                ).map_err(|error| match error {
+                    crate::OwnerOutboxError::Storage(error) => ApplicationError::Storage(error),
+                    _ => ApplicationError::Corrupt,
+                })?;
+            }
             Ok(receipt)
         })?;
         for current in &self.current {

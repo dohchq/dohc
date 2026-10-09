@@ -1403,3 +1403,111 @@ fn assert_checkpoint_revert_history(store: &EngineStore) {
         assert_eq!(rows[1].3, None);
     }
 }
+
+#[test]
+fn collection_generation_drop_records_the_quarantine_actor() {
+    let (_dir, mut store, observed, checkpoint, _) = collection_fixture();
+    let enrollment = input(&store, &observed, checkpoint.clone());
+    enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    let next = next_generation(&observed);
+    let transition = successor_input(&store, &next, checkpoint);
+    enroll(&mut store, &transition, &observed.limits).unwrap();
+    assert_visible_fields(
+        &store,
+        &next,
+        serde_json::json!({"title":"Original","status":"open"}),
+    );
+    let history = field_history(&store);
+    assert_eq!(history.len(), 4);
+    assert!(history[2..]
+        .iter()
+        .all(|row| row.3.as_deref() == Some("owner-draft-quarantine")));
+}
+
+#[test]
+fn accepted_collection_replay_storage_error_rolls_back_the_frame() {
+    use crate::owner_outbox::accepted::{apply_frame_in_tx, OwnerAcceptedFrameInput};
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    let (_dir, mut store, observed, checkpoint, _) = collection_fixture();
+    let enrollment = input(&store, &observed, checkpoint.clone());
+    enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    let history = field_history(&store);
+    let before = store
+        .read_with(|conn| super::super::draft::read_observed_in(conn, &observed.binding))
+        .unwrap()
+        .unwrap();
+    let host = Ydoc::wire();
+    host.apply(&checkpoint).unwrap();
+    let frame = OwnerAcceptedFrameInput {
+        binding: observed.binding.clone(),
+        relay_database_namespace: "relay".into(),
+        expected_revision: before.revision,
+        expected_native_head_sequence: before.native_head_sequence,
+        previous_accepted_cursor: before.accepted_cursor,
+        journal_cursor: before.accepted_cursor + 1,
+        update_bytes: host.frontmatter_set("priority", "high").unwrap(),
+    };
+    let denied = Arc::new(AtomicBool::new(false));
+    let captured = denied.clone();
+    let result = store.write_with(&NoFaults, |tx| {
+        tx.authorizer(Some(move |ctx: AuthContext<'_>| {
+            if matches!(
+                ctx.action,
+                AuthAction::Read {
+                    table_name: "owner_ydoc_outbox_entries",
+                    column_name: "byte_length"
+                }
+            ) && !captured.swap(true, Ordering::SeqCst)
+            {
+                Authorization::Deny
+            } else {
+                Authorization::Allow
+            }
+        }))
+        .unwrap();
+        let result = apply_frame_in_tx(tx, "workspace", &frame, 20);
+        tx.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .unwrap();
+        result
+    });
+    assert!(denied.load(Ordering::SeqCst));
+    assert!(matches!(result, Err(OwnerOutboxError::Storage(_))));
+    let after = store
+        .read_with(|conn| super::super::draft::read_observed_in(conn, &observed.binding))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            after.revision,
+            after.accepted_cursor,
+            after.native_head_sequence,
+            after.checkpoint_digest
+        ),
+        (
+            before.revision,
+            before.accepted_cursor,
+            before.native_head_sequence,
+            before.checkpoint_digest
+        )
+    );
+    assert_eq!(field_history(&store), history);
+    assert_eq!(
+        store.table_row_count("ydoc_owner_applied_frames").unwrap(),
+        0
+    );
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Edited title","status":"done"}),
+    );
+    accept_field_frame(&mut store, &observed.binding, frame.update_bytes);
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Edited title","status":"done","priority":"high"}),
+    );
+}

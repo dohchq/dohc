@@ -379,7 +379,7 @@ pub fn refuse_entry_in_tx(
     tx.execute("UPDATE owner_ydoc_outbox_entries SET pending=0,terminal_blob_digest=update_blob_digest,update_blob_digest=NULL,terminal_reason=?3 WHERE outbox_id=?1 AND delivery_id=?2 AND pending=1", params![input.outbox_id,input.delivery_id,input.reason]).map_err(write_sql)?;
     let visible = draft::refuse_dependent_entries_in_tx(tx, &input.outbox_id, &checkpoint_digest)?;
     refresh_pending_in_tx(tx, &input.outbox_id)?;
-    if observed.is_some() {
+    if observed.is_some() && parent.state != OwnerOutboxState::Quarantined {
         index_frontmatter_in_tx(
             tx,
             &parent.binding,
@@ -1306,6 +1306,19 @@ pub fn quarantine(
     input: OwnerOutboxQuarantineInput,
     now_ms: i64,
 ) -> Result<(), OwnerOutboxError> {
+    let outcome = store.write_with(&NoFaults, |tx| {
+        quarantine_in_tx(tx, workspace_id, &input, now_ms)
+    })?;
+    committed(outcome)
+}
+
+/// Quarantine and its visible-field rollback share the caller's transaction.
+pub(crate) fn quarantine_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    input: &OwnerOutboxQuarantineInput,
+    now_ms: i64,
+) -> Result<(), OwnerOutboxError> {
     if !(0..=9_007_199_254_740_991).contains(&now_ms) {
         return Err(OwnerOutboxError::InvalidInput("invalid quarantine time"));
     }
@@ -1316,46 +1329,44 @@ pub fn quarantine(
     )?;
     let observed_binding = input
         .observed_binding
+        .clone()
         .map(|binding| binding.normalized().map_err(OwnerOutboxError::InvalidInput))
         .transpose()?;
     let observed_binding_json = observed_binding.as_ref().map(binding_json).transpose()?;
-    let outcome = store.write_with(&NoFaults, |tx| {
-        let parent = read_parent(tx, &input.outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
-        require_workspace(workspace_id, &parent.binding.workspace_id)?;
-        if parent.state != OwnerOutboxState::Quarantined {
-            // Only the current observed generation owns the draft field index.
-            let checkpoint: Option<String> = tx
-                .query_row(
-                    "SELECT checkpoint_digest FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND binding_json=?5",
-                    params![parent.binding.workspace_id, parent.binding.main_version_id, parent.binding.object_id, parent.binding.lineage_claim_id, binding_json(&parent.binding)?],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(read_sql)?;
-            if let Some(checkpoint) = checkpoint {
-                let native = crate::Ydoc::wire();
-                native
-                    .apply(&draft::bounded_blob(tx, &checkpoint)?)
-                    .map_err(draft::collab)?;
-                index_frontmatter_in_tx(
-                    tx,
-                    &parent.binding,
-                    &native,
-                    Some(OWNER_DRAFT_QUARANTINE_ACTOR),
-                    None,
-                    now_ms,
-                )?;
-            }
+    let parent = read_parent(tx, &input.outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
+    require_workspace(workspace_id, &parent.binding.workspace_id)?;
+    if parent.state != OwnerOutboxState::Quarantined {
+        // Only the current observed generation owns the draft field index.
+        let checkpoint: Option<String> = tx
+            .query_row(
+                "SELECT checkpoint_digest FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND binding_json=?5",
+                params![parent.binding.workspace_id, parent.binding.main_version_id, parent.binding.object_id, parent.binding.lineage_claim_id, binding_json(&parent.binding)?],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(read_sql)?;
+        if let Some(checkpoint) = checkpoint {
+            let native = crate::Ydoc::wire();
+            native
+                .apply(&draft::bounded_blob(tx, &checkpoint)?)
+                .map_err(draft::collab)?;
+            index_frontmatter_in_tx(
+                tx,
+                &parent.binding,
+                &native,
+                Some(OWNER_DRAFT_QUARANTINE_ACTOR),
+                None,
+                now_ms,
+            )?;
         }
-        tx.execute(
-            "UPDATE owner_ydoc_outboxes SET state='quarantined',quarantine_reason=?2,\
-             observed_binding_json=?3 WHERE outbox_id=?1",
-            params![input.outbox_id, input.reason, observed_binding_json],
-        )
-        .map_err(write_sql)?;
-        Ok::<(), OwnerOutboxError>(())
-    })?;
-    committed(outcome)
+    }
+    tx.execute(
+        "UPDATE owner_ydoc_outboxes SET state='quarantined',quarantine_reason=?2,\
+         observed_binding_json=?3 WHERE outbox_id=?1",
+        params![input.outbox_id, input.reason, observed_binding_json],
+    )
+    .map_err(write_sql)?;
+    Ok(())
 }
 
 fn read_parent(conn: &Connection, outbox_id: &str) -> Result<Option<ParentRow>, OwnerOutboxError> {
