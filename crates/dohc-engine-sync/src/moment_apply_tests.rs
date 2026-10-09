@@ -1907,7 +1907,41 @@ fn assert_pending_status(owner: &RestoreOwner) {
     }).unwrap();
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PendingFieldSettlement {
+    Direct,
+    Replay,
+    Quarantined,
+    Oversize,
+    ReplayFailure,
+}
+
+#[test]
+fn observed_owner_quarantine_then_settlement_preserves_history_actor() {
+    pending_field_settlement_case(PendingFieldSettlement::Quarantined);
+}
+
+#[test]
+fn observed_owner_oversize_checkpoint_and_drafts_do_not_fail_settlement() {
+    pending_field_settlement_case(PendingFieldSettlement::Oversize);
+}
+
+#[test]
+fn observed_owner_indexing_replay_failure_does_not_stop_frames_or_settlement() {
+    pending_field_settlement_case(PendingFieldSettlement::ReplayFailure);
+}
+
 fn pending_field_settlement(replay: bool) {
+    pending_field_settlement_case(if replay {
+        PendingFieldSettlement::Replay
+    } else {
+        PendingFieldSettlement::Direct
+    });
+}
+
+fn pending_field_settlement_case(case: PendingFieldSettlement) {
+    let replay = case == PendingFieldSettlement::Replay;
+
     use dohc_engine_collab::owner_outbox::draft::append_draft_in_tx;
     let fixture: Value = serde_json::from_str(include_str!(
         "../../dohc-engine-collab/tests/owner-source/owner-source-seed.json"
@@ -1945,7 +1979,22 @@ fn pending_field_settlement(replay: bool) {
     );
     let draft = Ydoc::wire();
     draft.apply(&host.encode_full_state()).unwrap();
-    let pending = draft.frontmatter_set("status", "done").unwrap();
+    let vector = draft.encode_state_vector();
+    draft.frontmatter_set("status", "done").unwrap();
+    if case == PendingFieldSettlement::Oversize {
+        draft.richdoc_append_paragraph(&"pending body ".repeat(170_000));
+        owner.observed.limits.max_pending_bytes = 3_000_000;
+        owner
+            .store
+            .read_with(|conn| {
+                conn.execute(
+                    "UPDATE ydoc_owner_bindings SET max_pending_bytes=3000000",
+                    [],
+                )
+            })
+            .unwrap();
+    }
+    let pending = draft.diff(&vector).unwrap();
     owner
         .store
         .write_with(&NoFaults, |tx| {
@@ -1961,9 +2010,64 @@ fn pending_field_settlement(replay: bool) {
         })
         .unwrap();
     assert_pending_status(&owner);
+    if case == PendingFieldSettlement::Quarantined {
+        let descriptor = owner
+            .store
+            .read_with(|conn| {
+                dohc_engine_collab::owner_outbox::draft::descriptor_for_key_in(
+                    conn,
+                    &DocKey::new("ws", "main", "object").unwrap(),
+                )
+            })
+            .unwrap()
+            .unwrap();
+        for _ in 0..2 {
+            dohc_engine_collab::owner_outbox::quarantine(
+                &mut owner.store,
+                "ws",
+                dohc_engine_collab::owner_outbox::OwnerOutboxQuarantineInput {
+                    outbox_id: descriptor.outbox_id.clone().unwrap(),
+                    reason: "restore-fenced".into(),
+                    observed_binding: None,
+                },
+                20,
+            )
+            .unwrap();
+        }
+        assert_quarantined_status(&owner);
+    }
+    if case == PendingFieldSettlement::Oversize {
+        let vector = host.encode_state_vector();
+        // Deleted CRDT payload stays in the checkpoint, but the settled text is small.
+        host.richdoc_append_paragraph(&"x".repeat(19 * 1024 * 1024));
+        host.rewrite_content_to_markdown_for_fold(YdocContentKind::Richdoc, &text)
+            .unwrap();
+        assert!(host.encode_full_state().len() < dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES);
+        apply_test_owner_frame(&mut owner, host.diff(&vector).unwrap(), 2);
+        let visible = Ydoc::wire();
+        visible.apply(&host.encode_full_state()).unwrap();
+        visible.apply(&pending).unwrap();
+        assert!(
+            visible.encode_full_state().len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES
+        );
+    }
+    if case == PendingFieldSettlement::ReplayFailure {
+        // A retained entry can no longer be replayed. Indexing must not roll back sync.
+        owner.store.read_with(|conn| conn.execute("UPDATE owner_ydoc_outbox_entries SET byte_length=byte_length+1 WHERE pending=1", [])).unwrap();
+        apply_test_owner_frame(
+            &mut owner,
+            host.frontmatter_set("status", "remote").unwrap(),
+            2,
+        );
+        assert_retained_status(&owner);
+    }
     let later_frame = replay.then(|| host.richdoc_append_paragraph("settled before its frame"));
     let settled = host.project(YdocContentKind::Richdoc).unwrap().content;
-    let cursor = if replay { 2 } else { 1 };
+    let cursor = if replay {
+        2
+    } else {
+        owner.observed.accepted_cursor
+    };
     let id = format!("moment-ydoc-{}", "b".repeat(64));
     hydrate_texts(&mut owner.store, &[&settled]);
     retain_restore_audit(
@@ -2017,14 +2121,69 @@ fn pending_field_settlement(replay: bool) {
         assert!(drained.record_facts.is_empty());
         assert_eq!(drained.changes.len(), 1);
     }
-    assert_pending_status(&owner);
+    match case {
+        PendingFieldSettlement::Quarantined => assert_quarantined_status(&owner),
+        PendingFieldSettlement::ReplayFailure => assert_retained_status(&owner),
+        PendingFieldSettlement::Oversize => {
+            owner.store.read_with(|conn| {
+                let visible = dohc_engine_collab::load_doc_in(conn, &DocKey::new("ws", "main", "object").unwrap()).unwrap();
+                dohc_engine_collab::owner_outbox::draft::apply_pending_to_checkpoint_in(conn, &owner.observed.binding, &visible).unwrap();
+                let indexed = dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(conn, "ws", "main", "object").unwrap().unwrap();
+                assert_eq!(indexed["status"], visible.frontmatter_json()["status"]);
+                Ok::<_, rusqlite::Error>(())
+            }).unwrap();
+        }
+        _ => assert_pending_status(&owner),
+    }
     assert_eq!(
         snapshot(&owner.store, "object").unwrap().2,
         text_sha(&settled)
     );
+    if matches!(
+        case,
+        PendingFieldSettlement::Quarantined
+            | PendingFieldSettlement::Oversize
+            | PendingFieldSettlement::ReplayFailure
+    ) {
+        return;
+    }
     let accepted_cursor = owner.observed.accepted_cursor + 1;
     apply_test_owner_frame(&mut owner, pending, accepted_cursor);
     assert_pending_status(&owner);
+}
+
+fn assert_quarantined_status(owner: &RestoreOwner) {
+    owner.store.read_with(|conn| {
+        let indexed = dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(conn, "ws", "main", "object").unwrap().unwrap();
+        assert_eq!(indexed["status"], json!("open"));
+        let mut stmt = conn.prepare("SELECT previous_value_json,next_value_json,author_origin_id FROM collection_field_history WHERE field_name='status' ORDER BY history_id")?;
+        let history = stmt.query_map([], |r| Ok((r.get::<_, Option<String>>(0)?,r.get::<_, Option<String>>(1)?,r.get::<_, Option<String>>(2)?)))?.collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(history, vec![(Some("\"open\"".into()), Some("\"done\"".into()), None), (Some("\"done\"".into()), Some("\"open\"".into()), Some("owner-draft-quarantine".into()))]);
+        assert!(matches!(dohc_engine_collab::owner_outbox::draft::open_draft_in(conn, &owner.observed.binding, owner.observed.revision), Err(dohc_engine_collab::OwnerOutboxError::Frozen)));
+        Ok::<_, rusqlite::Error>(())
+    }).unwrap();
+}
+
+fn assert_retained_status(owner: &RestoreOwner) {
+    owner
+        .store
+        .read_with(|conn| {
+            let indexed =
+                dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
+                    conn, "ws", "main", "object",
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(indexed["status"], json!("done"));
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM collection_field_history WHERE field_name='status'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(count, 1);
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
 }
 
 /// The host's state once a restore that appends `paragraph` is accepted.

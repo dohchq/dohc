@@ -611,13 +611,14 @@ impl ActorHandle {
         &self,
         workspace_id: String,
         input: OwnerOutboxQuarantineInput,
+        now_ms: i64,
         token: CancellationToken,
     ) -> Result<Result<(), OwnerOutboxError>, RuntimeError> {
         self.run(move |store, _cache| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                Ok(quarantine_owner_outbox(store, &workspace_id, input))
+                Ok(quarantine_owner_outbox(store, &workspace_id, input, now_ms))
             }
         })
         .await

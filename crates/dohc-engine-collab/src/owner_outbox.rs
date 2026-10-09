@@ -36,6 +36,7 @@ pub fn has_adopted_owner_in(
 }
 
 const OWNER_DRAFT_REFUSAL_ACTOR: &str = "owner-draft-refusal";
+const OWNER_DRAFT_QUARANTINE_ACTOR: &str = "owner-draft-quarantine";
 
 /// Diff the visible owner fields against their current Collection index.
 pub(super) fn index_frontmatter_in_tx(
@@ -1303,7 +1304,11 @@ pub fn quarantine(
     store: &mut EngineStore,
     workspace_id: &str,
     input: OwnerOutboxQuarantineInput,
+    now_ms: i64,
 ) -> Result<(), OwnerOutboxError> {
+    if !(0..=9_007_199_254_740_991).contains(&now_ms) {
+        return Err(OwnerOutboxError::InvalidInput("invalid quarantine time"));
+    }
     validate_identifier(&input.outbox_id, "outbox id must be non-empty and bounded")?;
     validate_identifier(
         &input.reason,
@@ -1317,6 +1322,31 @@ pub fn quarantine(
     let outcome = store.write_with(&NoFaults, |tx| {
         let parent = read_parent(tx, &input.outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
         require_workspace(workspace_id, &parent.binding.workspace_id)?;
+        if parent.state != OwnerOutboxState::Quarantined {
+            // Only the current observed generation owns the draft field index.
+            let checkpoint: Option<String> = tx
+                .query_row(
+                    "SELECT checkpoint_digest FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND binding_json=?5",
+                    params![parent.binding.workspace_id, parent.binding.main_version_id, parent.binding.object_id, parent.binding.lineage_claim_id, binding_json(&parent.binding)?],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(read_sql)?;
+            if let Some(checkpoint) = checkpoint {
+                let native = crate::Ydoc::wire();
+                native
+                    .apply(&draft::bounded_blob(tx, &checkpoint)?)
+                    .map_err(draft::collab)?;
+                index_frontmatter_in_tx(
+                    tx,
+                    &parent.binding,
+                    &native,
+                    Some(OWNER_DRAFT_QUARANTINE_ACTOR),
+                    None,
+                    now_ms,
+                )?;
+            }
+        }
         tx.execute(
             "UPDATE owner_ydoc_outboxes SET state='quarantined',quarantine_reason=?2,\
              observed_binding_json=?3 WHERE outbox_id=?1",
@@ -1767,6 +1797,7 @@ mod tests {
                             reason: "binding changed".to_owned(),
                             observed_binding: None,
                         },
+                        20,
                     )
                     .expect("quarantine during read");
                 }
@@ -2163,6 +2194,7 @@ mod tests {
                 reason: "restore-fence-mismatch".to_owned(),
                 observed_binding: Some(binding()),
             },
+            20,
         )
         .expect("quarantine");
         let pending = read_pending(&store, "workspace-1", &outbox).expect("pending");

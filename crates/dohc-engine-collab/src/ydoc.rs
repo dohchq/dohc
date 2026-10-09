@@ -383,7 +383,7 @@ impl Ydoc {
         Self::from_doc(doc)
     }
 
-    fn with_client_id(client_id: u64) -> Self {
+    pub(crate) fn with_client_id(client_id: u64) -> Self {
         let doc = Doc::with_options(Options {
             client_id: yrs::ClientID::new(client_id),
             offset_kind: yrs::OffsetKind::Utf16,

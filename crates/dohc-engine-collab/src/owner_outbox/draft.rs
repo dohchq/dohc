@@ -682,6 +682,9 @@ pub(super) fn apply_pending_in(
                 PendingReplay::Checkpoint => Ok(()),
             };
         }
+        if replay == PendingReplay::Checkpoint && parent.pending_bytes == 0 {
+            return Ok(());
+        }
         let mut stmt = conn.prepare("SELECT update_digest,byte_length FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 ORDER BY sequence").map_err(read_sql)?;
         let rows = stmt
             .query_map([parent.outbox_id], |r| {
@@ -710,9 +713,7 @@ pub(super) fn apply_pending_in(
     if doc.has_pending_dependencies() {
         return Err(OwnerOutboxError::ParentMismatch);
     }
-    if replay == PendingReplay::Checkpoint {
-        bounded(doc)?;
-    }
+    // Indexing reads fields only; it does not persist the merged document.
     Ok(())
 }
 

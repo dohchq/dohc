@@ -134,7 +134,7 @@ fn collection_fixture() -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u
     ))
     .unwrap();
     let original: Vec<u8> = serde_json::from_value(fixture["bytes"].clone()).unwrap();
-    let local = Ydoc::wire();
+    let local = Ydoc::with_client_id(1);
     local.apply(&original).unwrap();
     local
         .frontmatter_set("id", "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa")
@@ -785,6 +785,7 @@ fn explicit_recovery_keeps_old_writes_refused_and_installs_only_the_host_checkpo
             reason: "stale-binding".into(),
             observed_binding: None,
         },
+        20,
     )
     .unwrap();
     assert!(matches!(
@@ -901,6 +902,7 @@ fn recovery_rebinds_current_coordinates_without_rewriting_the_old_delivery_paren
             reason: "binding-changed".into(),
             observed_binding: None,
         },
+        20,
     )
     .unwrap();
     let mut next = observed.binding.clone();
@@ -992,6 +994,7 @@ fn recovery_rebinds_current_coordinates_without_rewriting_the_old_delivery_paren
             reason: "binding-changed".into(),
             observed_binding: None,
         },
+        20,
     )
     .unwrap();
     store
@@ -1266,8 +1269,14 @@ fn accepted_collection_frames_advance_while_local_work_is_quarantined() {
             reason: "restore-fenced".into(),
             observed_binding: None,
         },
+        20,
     )
     .unwrap();
+    let history = field_history(&store);
+    assert_eq!(history.len(), 4);
+    assert!(history[2..]
+        .iter()
+        .all(|row| row.3.as_deref() == Some("owner-draft-quarantine")));
     let host = Ydoc::wire();
     host.apply(&checkpoint).unwrap();
     accept_field_frame(
@@ -1275,11 +1284,17 @@ fn accepted_collection_frames_advance_while_local_work_is_quarantined() {
         &observed.binding,
         host.richdoc_append_paragraph("accepted body"),
     );
+    assert_eq!(field_history(&store), history);
     accept_field_frame(
         &mut store,
         &observed.binding,
         host.frontmatter_set("priority", "high").unwrap(),
     );
+    let after = field_history(&store);
+    assert_eq!(after[..4], history);
+    assert_eq!(after.len(), 5);
+    assert_eq!(after[4].0, "priority");
+    assert_eq!(after[4].3, None);
     store
         .read_with(|conn| {
             let indexed =
@@ -1313,4 +1328,78 @@ fn accepted_collection_frames_advance_while_local_work_is_quarantined() {
     let pending = super::super::read_pending(&store, "workspace", &outbox).unwrap();
     assert_eq!(pending.entries.len(), 1);
     assert_eq!(pending.state, super::super::OwnerOutboxState::Quarantined);
+}
+#[test]
+fn accepted_collection_catch_up_reindexes_drafts_when_checkpoint_fields_are_unchanged() {
+    use crate::owner_outbox::accepted::{apply_sync_in_tx, OwnerAcceptedFrameInput};
+    let (_dir, mut store, observed, checkpoint, _) = collection_fixture();
+    let enrollment = input(&store, &observed, checkpoint.clone());
+    let enrolled = enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    let pending =
+        super::super::read_pending(&store, "workspace", enrolled.outbox_id.as_ref().unwrap())
+            .unwrap();
+    let host = Ydoc::with_client_id(9);
+    host.apply(&checkpoint).unwrap();
+    let before = host.frontmatter_json();
+    // Catch-up contains the accepted draft followed by the collaborator's undo.
+    host.apply(&pending.entries[0].update).unwrap();
+    host.frontmatter_set("status", "open").unwrap();
+    host.frontmatter_set("title", "Original").unwrap();
+    assert_eq!(before, host.frontmatter_json());
+    let frame = OwnerAcceptedFrameInput {
+        binding: observed.binding.clone(),
+        relay_database_namespace: "relay".into(),
+        expected_revision: enrolled.revision,
+        expected_native_head_sequence: enrolled.native_head_sequence,
+        previous_accepted_cursor: enrolled.accepted_cursor,
+        journal_cursor: enrolled.accepted_cursor + 2,
+        update_bytes: host.encode_full_state(),
+    };
+    store
+        .write_with(&NoFaults, |tx| {
+            apply_sync_in_tx(tx, "workspace", &frame, &host.encode_state_vector(), 20)
+        })
+        .unwrap();
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Original", "status":"open"}),
+    );
+    assert_checkpoint_revert_history(&store);
+}
+
+#[test]
+fn accepted_collection_fold_reindexes_drafts_when_checkpoint_fields_are_unchanged() {
+    let (_dir, mut store, observed, checkpoint, _) = collection_fixture();
+    let enrollment = input(&store, &observed, checkpoint.clone());
+    enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    let host = Ydoc::with_client_id(9);
+    host.apply(&checkpoint).unwrap();
+    let before = host.frontmatter_json();
+    let text = host.project(crate::ContentKind::Richdoc).unwrap().content;
+    let fold = host
+        .rewrite_content_to_markdown_for_fold(crate::ContentKind::Richdoc, &text)
+        .unwrap();
+    assert_eq!(before, host.frontmatter_json());
+    accept_field_frame(&mut store, &observed.binding, fold);
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Original", "status":"open"}),
+    );
+    assert_checkpoint_revert_history(&store);
+}
+
+fn assert_checkpoint_revert_history(store: &EngineStore) {
+    let history = field_history(store);
+    assert_eq!(history.len(), 4);
+    for field in ["title", "status"] {
+        let rows: Vec<_> = history.iter().filter(|row| row.0 == field).collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].3.as_deref(), Some("person"));
+        assert_eq!(rows[1].1, rows[0].2);
+        assert_eq!(rows[1].2, rows[0].1);
+        // Applied frames do not carry actor attribution.
+        assert_eq!(rows[1].3, None);
+    }
 }

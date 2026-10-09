@@ -991,7 +991,9 @@ fn apply_moment_append(
                         &payload.object_id,
                     )
                     .map_err(crate::ydoc_apply::map_domain_hard_error)?;
-                    if indexed.is_some() && owner.pending_bytes > 0 {
+                    if let Some(indexed_fields) =
+                        indexed.as_ref().filter(|_| owner.pending_bytes > 0)
+                    {
                         let key = DocKey::new(
                             &envelope.workspace_id,
                             &payload.version_id,
@@ -1000,13 +1002,19 @@ fn apply_moment_append(
                         .map_err(SyncError::corrupt)?;
                         let visible = dohc_engine_collab::load_doc_in(tx, &key)
                             .map_err(SyncError::corrupt)?;
-                        dohc_engine_collab::owner_outbox::draft::apply_pending_to_checkpoint_in(
+                        frontmatter = if dohc_engine_collab::owner_outbox::draft::apply_pending_to_checkpoint_in(
                             tx,
                             &owner.binding,
                             &visible,
                         )
-                        .map_err(SyncError::corrupt)?;
-                        frontmatter = visible.frontmatter_json();
+                        .is_ok()
+                        {
+                            visible.frontmatter_json()
+                        } else {
+                            // Replay is only for indexing. Keep the current fields
+                            // instead of failing the page or attributing a revert.
+                            indexed_fields.clone()
+                        };
                     }
                     indexed.unwrap_or_else(empty)
                 } else {
