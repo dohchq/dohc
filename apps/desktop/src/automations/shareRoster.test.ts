@@ -8,6 +8,7 @@ import { readSyncHistory, recordNeverSynced, recordSynced } from "../workspaces/
 import { createTestScratch } from "../workspaces/testTemp";
 import {
   listRosterGrants,
+  listEndedLinkHolders,
   readStoredRoster,
   type ListedGrant,
   type ListedLink,
@@ -16,6 +17,7 @@ import {
 } from "@dohc/automation-executor/roster-listing";
 import {
   createShareRosters,
+  createHistoryLabels,
   reachRosterFor,
   rosterAuthorLabel,
   rosterPersonLabel,
@@ -88,6 +90,96 @@ async function listed(shares: unknown, links: unknown[] = []): Promise<RosterLis
 }
 
 describe("roster from the relay's listings", () => {
+  it("loads missing History names once per inventory without fetching known names or changing the roster", async () => {
+    const roster = await listed({ granted: [row()] });
+    const before = JSON.stringify(roster);
+    let inventory = 1;
+    const hold = deferred<Awaited<ReturnType<typeof listEndedLinkHolders>>>();
+    const listHolders = vi.fn(() => hold.promise);
+    const names = createHistoryLabels({ snapshot: () => ({ roster, owner: true, context: "window", inventory }), listHolders });
+    await names.prepare(WORKSPACE, [{ userId: "u-ana", grantId: "g-1" }]);
+    expect(listHolders).not.toHaveBeenCalled();
+    const author = { userId: "u-ben", grantId: "g-dep" };
+    const first = names.prepare(WORKSPACE, [author]);
+    const second = names.prepare(WORKSPACE, [author]);
+    expect(listHolders).toHaveBeenCalledTimes(1);
+    hold.resolve([{ ...author, recipientUserId: author.userId, recipientEmail: "Ben", status: "revoked" }]);
+    await Promise.all([first, second]);
+    expect(names.author(WORKSPACE, author)).toBe("Ben (label chosen by link holder)");
+    await names.prepare(WORKSPACE, [author]);
+    expect(listHolders).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(roster)).toBe(before);
+    inventory++;
+    await names.prepare(WORKSPACE, [author]);
+    expect(listHolders).toHaveBeenCalledTimes(2);
+    names.invalidate(WORKSPACE);
+    await names.prepare(WORKSPACE, [author]);
+    expect(listHolders).toHaveBeenCalledTimes(3);
+  });
+
+  it("isolates History caches and discards responses after account or attachment changes", async () => {
+    const roster = await listed({ granted: [] });
+    const hold = deferred<Awaited<ReturnType<typeof listEndedLinkHolders>>>();
+    let context = "first-account";
+    const listHolders = vi.fn(() => hold.promise);
+    const names = createHistoryLabels({ snapshot: () => ({ roster, owner: true, context, inventory: 1 }), listHolders });
+    const author = { userId: "u-ben", grantId: "g-dep" };
+    const pending = names.prepare(WORKSPACE, [author]);
+    context = "next-account";
+    hold.resolve([{ ...author, recipientUserId: author.userId, recipientEmail: "Ben", status: "revoked" }]);
+    await pending;
+    expect(names.author(WORKSPACE, author)).toBe("Someone you shared with");
+    await names.prepare("another-workspace", [author]);
+    expect(names.author("another-workspace", author)).toBe("Ben (label chosen by link holder)");
+    expect(names.author(WORKSPACE, author)).toBe("Someone you shared with");
+  });
+
+  it("keeps holder data owner-only and retries unavailable History lookups", async () => {
+    const roster = await listed({ granted: [] });
+    let owner = false;
+    const listHolders = vi.fn(async () => null);
+    const names = createHistoryLabels({ snapshot: () => ({ roster, owner, context: "window", inventory: 1 }), listHolders });
+    const author = { userId: "u-ben", grantId: "g-dep" };
+    await names.prepare(WORKSPACE, [author]);
+    expect(listHolders).not.toHaveBeenCalled();
+    owner = true;
+    await names.prepare(WORKSPACE, [author]);
+    await names.prepare(WORKSPACE, [author]);
+    expect(listHolders).toHaveBeenCalledTimes(2);
+    expect(names.author(WORKSPACE, author)).toBe("Someone you shared with");
+  });
+  it("marks an active link holder's History label as their own choice", async () => {
+    const listing = await listed({ granted: [] }, [link()]);
+    expect(rosterAuthorLabel(listing, { userId: "u-ben", grantId: "g-dep" })).toBe("ben@dohc.test (Edit; label chosen by link holder)");
+    expect(rosterPersonLabel(listing, "u-ben")).toBe("ben@dohc.test (label chosen by link holder)");
+  });
+  it.each([null, 3])("names an ended link holder in History without current access (automations generation %s)", async (automationsGeneration) => {
+    const listing = await listed({ granted: [] });
+    const get = relay({
+      "/sync/ws-trip/shares/links?history=true": { status: 200, body: {
+        endedLinks: [link({ status: "revoked", automationsGeneration,
+          dependents: [{ grantId: "g-dep", recipientUserId: "u-ben", recipientEmail: "Ben", access: "edit", generation: 2, status: "revoked" }] })],
+      } },
+    });
+    const names = createHistoryLabels({ snapshot: () => ({ roster: listing, owner: true, context: "window", inventory: 1 }),
+      listHolders: () => listEndedLinkHolders(WORKSPACE, get) });
+    expect(get).not.toHaveBeenCalled();
+    expect(listing.grants).toEqual([]);
+    expect(reachRosterFor({ entry: { workspaceId: WORKSPACE, rootPath: "/trip", kind: "personal", mode: "local-first", remote },
+      localUserId: null, localPersonId: null, history: null, latest: listing, next: "" }))
+      .toMatchObject({ kind: "owner", grants: [], formerEditors: [] });
+    const history = await listEngineMomentsForIpc(async () => ({
+      moments: [{ id: "m-ended", workspaceId: WORKSPACE, versionId: "main", objectId: "o-1", path: "Trip/a.md", recordedAtMs: 1,
+        operation: "write", metadata: { origin: "sync" }, momentOrder: 0, protected: false,
+        authors: [{ kind: "named", userId: "u-ben", grantId: "g-dep", grantGeneration: 1 }] }],
+      nextBeforeMomentOrder: null, latestMomentOrder: 0, activeVersionId: "main", protectedTruncated: false,
+    }), { agent: () => undefined, person: () => undefined, automation: () => null,
+      prepare: authors => names.prepare(WORKSPACE, authors.filter(author => author.kind === "named")), named: author => names.author(WORKSPACE, author) });
+    expect(history).toMatchObject({ moments: [{ namedAuthor: { label: "Ben (label chosen by link holder)" } }] });
+    expect(names.person(WORKSPACE, "u-ben")).toBe("Ben (label chosen by link holder)");
+    expect(listing.grants !== null && listing.endedGrants).toEqual([]);
+    expect(get).toHaveBeenCalledTimes(1);
+  });
   it("keeps the owner's active grants on this workspace, and only the person of a revoked one", async () => {
     const group = { kind: "group", channelWireId: "wire-trip", paths: ["Trip"], versionId: null };
     const listing = await listed({

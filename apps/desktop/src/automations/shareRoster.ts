@@ -8,6 +8,7 @@ import {
   type ListedGrant,
   type RosterAnswer,
   type RosterListing,
+  type EndedLinkHolder,
 } from "@dohc/automation-executor/roster-listing";
 
 // The share roster: the grants the owner gave on one workspace, as the relay
@@ -437,7 +438,9 @@ export function rosterAuthorLabel(
   if (listing === null || listing.grants === null) return "Someone you shared with";
   const grant = listing.grants.find((candidate) => candidate.grantId === author.grantId);
   if (grant?.recipientEmail && (grant.recipientUserId === null || grant.recipientUserId === author.userId)) {
-    return `${grant.recipientEmail} (${ACCESS_WORDS[grant.access]})`;
+    return listing.links.some(link => link.grant.shareId === grant.shareId)
+      ? `${grant.recipientEmail} (${ACCESS_WORDS[grant.access]}; label chosen by link holder)`
+      : `${grant.recipientEmail} (${ACCESS_WORDS[grant.access]})`;
   }
   return rosterPersonLabel(listing, author.userId);
 }
@@ -445,8 +448,69 @@ export function rosterAuthorLabel(
 /** A Button presser's name, including people whose grants have ended. */
 export function rosterPersonLabel(listing: RosterListing | null, userId: string): string {
   if (listing === null || listing.grants === null) return "Someone you shared with";
-  const email = [...listing.grants, ...listing.formerGrants.map((former) => former.grant), ...listing.endedGrants].find(
+  const grant = [...listing.grants, ...listing.formerGrants.map((former) => former.grant), ...listing.endedGrants].find(
     (candidate) => candidate.recipientUserId === userId && candidate.recipientEmail !== null,
-  )?.recipientEmail;
-  return email ?? "Someone you shared with";
+  );
+  if (!grant?.recipientEmail) return "Someone you shared with";
+  return listing.grants.includes(grant as ListedGrant) && listing.links.some(link => link.grant.shareId === grant.shareId)
+    ? `${grant.recipientEmail} (label chosen by link holder)` : grant.recipientEmail;
+}
+
+/** History's window-lifetime cache. No holder data is written into the reach roster. */
+export function createHistoryLabels(dependencies: {
+  snapshot(workspaceId: string): { roster: RosterListing | null; owner: boolean; context: unknown; inventory: unknown };
+  listHolders(workspaceId: string): Promise<EndedLinkHolder[] | null>;
+}) {
+  type Snapshot = ReturnType<typeof dependencies.snapshot>;
+  type Cache = { snapshot: Snapshot; grants: Map<string, EndedLinkHolder>; people: Map<string, EndedLinkHolder>; loaded: boolean; running: Promise<void> | null };
+  const caches = new Map<string, Cache>();
+  const same = (left: Snapshot, right: Snapshot) => left.context === right.context && left.inventory === right.inventory;
+  const current = (workspaceId: string, snapshot: Snapshot) => {
+    const cache = caches.get(workspaceId);
+    return cache && same(cache.snapshot, snapshot) ? cache : undefined;
+  };
+  function cachedLabel(workspaceId: string, userId: string, grantId?: string): string {
+    const snapshot = dependencies.snapshot(workspaceId);
+    const cache = snapshot.owner ? current(workspaceId, snapshot) : undefined;
+    const holder = grantId === undefined ? cache?.people.get(userId) : cache?.grants.get(grantId);
+    return holder?.recipientUserId === userId && holder.recipientEmail
+      ? `${holder.recipientEmail} (label chosen by link holder)` : "Someone you shared with";
+  }
+  return {
+    invalidate(workspaceId: string | null): void {
+      if (workspaceId === null) caches.clear(); else caches.delete(workspaceId);
+    },
+    async prepare(workspaceId: string, principals: readonly { userId: string; grantId?: string }[]): Promise<void> {
+      const snapshot = dependencies.snapshot(workspaceId);
+      if (!snapshot.owner || !principals.some(person => (person.grantId === undefined
+        ? rosterPersonLabel(snapshot.roster, person.userId) : rosterAuthorLabel(snapshot.roster, { userId: person.userId, grantId: person.grantId })) === "Someone you shared with")) return;
+      let cache = current(workspaceId, snapshot);
+      if (!cache) {
+        cache = { snapshot, grants: new Map(), people: new Map(), loaded: false, running: null };
+        caches.set(workspaceId, cache);
+      }
+      if (cache.loaded) return;
+      const target = cache;
+      if (!target.running) target.running = (async () => {
+        let holders: EndedLinkHolder[] | null;
+        try { holders = await dependencies.listHolders(workspaceId); } catch { holders = null; }
+        if (holders === null || caches.get(workspaceId) !== target || !same(snapshot, dependencies.snapshot(workspaceId))) return;
+        for (const holder of holders) {
+          if (!holder.recipientUserId || !holder.recipientEmail) continue;
+          target.grants.set(holder.grantId, holder);
+          if (!target.people.has(holder.recipientUserId)) target.people.set(holder.recipientUserId, holder);
+        }
+        target.loaded = true;
+      })().finally(() => { target.running = null; });
+      await target.running;
+    },
+    author(workspaceId: string, author: { userId: string; grantId: string }): string {
+      const known = rosterAuthorLabel(dependencies.snapshot(workspaceId).roster, author);
+      return known !== "Someone you shared with" ? known : cachedLabel(workspaceId, author.userId, author.grantId);
+    },
+    person(workspaceId: string, userId: string): string {
+      const known = rosterPersonLabel(dependencies.snapshot(workspaceId).roster, userId);
+      return known !== "Someone you shared with" ? known : cachedLabel(workspaceId, userId);
+    },
+  };
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {checkAutomationReach, type ReachStep} from "./automationReach";
-import { listRosterGrants, ownerRoster, readStoredRoster } from "./rosterListing";
+import { listRosterGrants, listEndedLinkHolders, ownerRoster, readStoredRoster } from "./rosterListing";
 
 const WORKSPACE = "ws-trip";
 
@@ -40,6 +40,51 @@ const unusable = { kind: "answered", listing: { grants: null, problem: { kind: "
 const serverDown = { status: 503, body: null };
 
 describe("listing from the relay", () => {
+  it("keeps reach requests and saved data identical to base despite ended-holder cursors", async () => {
+    const get = relay({
+      "/sync/shares?workspaceId=ws-trip": { status: 200, body: { granted: [row()] } },
+      "/sync/ws-trip/shares/links": { status: 200, body: { links: [link()], endedLinks: [], nextEndedHolderCursor: "history-only" } },
+      "/sync/ws-trip/shares/links?endedHolderCursor=history-only": { status: 200, body: { links: [], endedLinks: [] } },
+    });
+    const answer = await listRosterGrants(WORKSPACE, get);
+    expect(get.mock.calls.map(([path]) => path)).toEqual(["/sync/shares?workspaceId=ws-trip", "/sync/ws-trip/shares/links"]);
+    expect(answer).toEqual({ kind: "answered", listing: {
+      grants: [{ ...facts, grantId: "g-1", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", selector: { paths: ["Trip"], versionId: null }, access: "edit" },
+        { ...facts, grantId: "g-dep", recipientUserId: "u-ben", recipientEmail: "ben@dohc.test", selector: { paths: ["Trip"], versionId: null }, access: "edit" }],
+      links: [{ grant: { ...facts, grantId: "g-link", recipientUserId: null, recipientEmail: null, selector: { paths: ["Trip"], versionId: null }, access: "edit" }, ended: false, automationsGeneration: null }],
+      formerGrants: [], endedGrants: [],
+    } });
+  });
+  it("pages ended holders of active and ended links into History alone", async () => {
+    const ended = (id: string, status: string) => link({ status,
+      dependents: [{ grantId: id, recipientUserId: id, recipientEmail: id, access: "edit", generation: 2, status: "revoked" }] });
+    const get = relay({
+      "/sync/ws-trip/shares/links?history=true": { status: 200, body: { endedLinks: [ended("first", "active")], nextEndedHolderCursor: "page 2" } },
+      "/sync/ws-trip/shares/links?history=true&endedHolderCursor=page%202": { status: 200, body: { endedLinks: [ended("last", "revoked")] } },
+    });
+    const holders = await listEndedLinkHolders(WORKSPACE, get);
+    expect(holders?.map(grant => grant.grantId)).toEqual(["first", "last"]);
+    expect(get.mock.calls.map(([path]) => path)).toEqual(["/sync/ws-trip/shares/links?history=true", "/sync/ws-trip/shares/links?history=true&endedHolderCursor=page%202"]);
+  });
+
+  it("rejects active holders injected into a history page", async () => {
+    const get = relay({
+      "/sync/ws-trip/shares/links?history=true": { status: 200, body: { endedLinks: [link({ dependents: [{ grantId: "active", recipientUserId: "active", recipientEmail: "Ben", access: "edit", generation: 1, status: "active" }] })] } },
+    });
+    expect(await listEndedLinkHolders(WORKSPACE, get)).toBeNull();
+  });
+
+  it("rejects looping and unavailable ended-holder pages", async () => {
+    const first = {
+      "/sync/ws-trip/shares/links?history=true": { status: 200, body: { endedLinks: [], nextEndedHolderCursor: "again" } },
+    };
+    expect(await listEndedLinkHolders(WORKSPACE, relay({ ...first,
+      "/sync/ws-trip/shares/links?history=true&endedHolderCursor=again": { status: 200, body: { endedLinks: [], nextEndedHolderCursor: "again" } },
+    }))).toBeNull();
+    expect(await listEndedLinkHolders(WORKSPACE, relay({ ...first,
+      "/sync/ws-trip/shares/links?history=true&endedHolderCursor=again": serverDown,
+    }))).toBeNull();
+  });
   const noLinks = { "/sync/ws-trip/shares/links": { status: 200, body: { links: [], formerGrants: [] } } };
 
   it("pages through share links", async () => {

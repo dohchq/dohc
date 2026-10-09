@@ -10,7 +10,7 @@ export interface RecordHistoryAuthors {
   /** An agent, by the person it acted for: this computer's agent by name, any other as "Agent". */
   agent(onBehalfOf: string | null): string;
   /** Null for the workspace owner, whose ordinary automation rows need no extra label. */
-  person(userId: string): string | null;
+  person(userId: string): string | null | Promise<string | null>;
   /** An automation's name in its Collection's automations.yaml now, or null. */
   automationName(automationId: string): string | null;
   /** Whether the person can open the run without asking the server. */
@@ -56,7 +56,7 @@ export function createRunLocator(dependencies: {
 /**
  * A page of record history as the record's History shows it. Each automation
  * run is looked up once, however many of the page's changes it made. The
- * page never waits on the server.
+ * Run availability uses the local cache; author labels may need a History lookup.
  */
 export async function recordHistoryForIpc(
   page: Pick<CollectionGetRecordResult, "history" | "nextBeforeHistoryId">,
@@ -75,7 +75,7 @@ export async function recordHistoryForIpc(
     if (entry.actorKind === "agent") return { kind: "agent", name: authors.agent(entry.onBehalfOf) };
     if (entry.actorKind !== "automation") return null;
     const run = entry.automationRun;
-    const person = entry.onBehalfOf === null ? null : authors.person(entry.onBehalfOf);
+    const person = entry.onBehalfOf === null ? null : await authors.person(entry.onBehalfOf);
     return {
       kind: "automation",
       automationId: actor,

@@ -197,7 +197,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string) {
     automationAuthor: (_workspaceId, automationId) => ({ name: automationId, collection: "Tasks" }),
     automationRunOnThisComputer, serverRuns, signedInAccount: () => session.account,
     notifyRenderer: notify,
-    namedAuthorLabels: () => () => "Someone you shared with",
+    namedAuthorLabels: () => ({ named: () => "Someone you shared with" }),
     automationPersonName: (_workspaceId, userId) => userId === "person-local" ? null : userId,
     retryOwnerLiveDelivery, retryCloudSync,
     requireWorkspace, assertWritableWorkspace: writable, syncStatusWithOwnedProjection: syncProjection,

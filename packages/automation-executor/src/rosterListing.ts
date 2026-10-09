@@ -11,6 +11,42 @@ import type { FormerEditor, ReachRoster, RosterGrant, RosterProblem } from "./au
 // check.
 const MAX_INVENTORY_PAGES = 50;
 
+const EndedHolder = z.object({
+  grantId: z.string().min(1).max(256), recipientUserId: z.string().min(1).max(256).nullable(),
+  recipientEmail: z.string().min(1).max(320).nullable(), status: z.literal("revoked"),
+});
+export type EndedLinkHolder = z.infer<typeof EndedHolder>;
+const EndedHolderPage = z.object({
+  endedLinks: z.array(z.object({ dependents: z.array(EndedHolder).max(1000) })).max(1000),
+  nextEndedHolderCursor: z.string().min(1).max(1024).optional(),
+});
+
+/** Owner-only History attribution, fetched separately from the reach roster. */
+export async function listEndedLinkHolders(
+  workspaceId: string, get: (path: string) => Promise<{ status: number; body: unknown }>,
+): Promise<EndedLinkHolder[] | null> {
+  const holders: EndedLinkHolder[] = [];
+  const cursors = new Set<string>();
+  let cursor: string | undefined;
+  for (let page = 0; page < MAX_INVENTORY_PAGES; page += 1) {
+    let response: { status: number; body: unknown };
+    try {
+      response = await get(`/sync/${encodeURIComponent(workspaceId)}/shares/links?history=true${cursor === undefined ? "" : `&endedHolderCursor=${encodeURIComponent(cursor)}`}`);
+    } catch { return null; }
+    if (response.status < 200 || response.status >= 300) return null;
+    const parsed = EndedHolderPage.safeParse(response.body);
+    if (!parsed.success) return null;
+    const found = parsed.data.endedLinks.flatMap(link => link.dependents);
+    if (found.length > 1000) return null;
+    holders.push(...found);
+    cursor = parsed.data.nextEndedHolderCursor;
+    if (cursor === undefined) return holders;
+    if (cursors.has(cursor)) return null;
+    cursors.add(cursor);
+  }
+  return null;
+}
+
 const ID = z.string().min(1).max(256);
 const PATHS = z.array(z.string().refine(isShareablePath)).max(MAX_SHARE_PATHS);
 const VERSION_ID = z.string().refine(isValidShareVersionId);

@@ -16,6 +16,7 @@ import {
   type SyncRelayLinkInventoryCursor,
   type SyncRelayLinkInventoryPage,
   type SyncRelayLinkInventoryRow,
+  type SyncRelayEndedLinkHolderPage,
   type SyncRelayIndependentGrantInventoryCursor,
   type SyncRelayIndependentGrantInventoryPage,
 } from "./types";
@@ -931,6 +932,48 @@ export function listLinkGrantsByWorkspace(
           : null,
     };
   }
+
+// Owner-only attribution. These rows never enter an access inventory.
+export function listEndedLinkHoldersByWorkspace(
+  storage: StorageContext, workspaceId: string, cursor?: SyncRelayGrantedInventoryCursor,
+): SyncRelayEndedLinkHolderPage {
+  const rows = storage.db.prepare(`
+    SELECT dependent.*, s.workspace_id, s.granter_user_id, s.selector_json,
+           s.created_at_ms AS share_created_at_ms,
+           link.grant_id AS link_grant_id, link.access AS link_access,
+           link.generation AS link_generation, link.status AS link_status,
+           link.created_at_ms AS link_created_at_ms, link.revoked_at_ms AS link_revoked_at_ms
+    FROM sync_relay_share_grants dependent
+    JOIN sync_relay_share_grants link ON link.grant_id = dependent.parent_grant_id AND link.principal_kind = 'link'
+    JOIN sync_relay_shares s ON s.share_id = link.share_id AND s.share_id = dependent.share_id
+    WHERE s.workspace_id = ? AND dependent.status = 'revoked'
+      ${cursor ? "AND dependent.grant_id > ?" : ""}
+    ORDER BY dependent.grant_id
+    LIMIT ${LINK_INVENTORY_PAGE_SIZE + 1}
+  `).all(workspaceId, ...(cursor ? [cursor.grantId] : []));
+  const links = new Map<string, SyncRelayLinkInventoryRow>();
+  const page = rows.slice(0, LINK_INVENTORY_PAGE_SIZE);
+  for (const row of page) {
+    const grantId = String(row.link_grant_id);
+    let link = links.get(grantId);
+    if (!link) {
+      link = {
+        share: rowToShareRow({ ...row, created_at_ms: row.share_created_at_ms }),
+        grant: rowToShareGrantRow({
+          grant_id: grantId, share_id: row.share_id, principal_kind: "link",
+          principal_user_id: null, principal_email: null, access: row.link_access,
+          generation: row.link_generation, status: row.link_status,
+          created_at_ms: row.link_created_at_ms, revoked_at_ms: row.link_revoked_at_ms, parent_grant_id: null,
+        }),
+        dependents: [], lastUsedAtMs: null, urlIssuedAtMs: null, automationsGeneration: null,
+      };
+      links.set(grantId, link);
+    }
+    link.dependents.push(rowToShareGrantRow(row));
+  }
+  return { links: [...links.values()], nextCursor: rows.length > LINK_INVENTORY_PAGE_SIZE
+    ? { grantId: String(page.at(-1)!.grant_id) } : null };
+}
 
 export function listActiveIndependentShareGrants(storage: StorageContext, input: {
     workspaceId: string;

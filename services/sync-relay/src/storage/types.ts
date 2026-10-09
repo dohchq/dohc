@@ -411,6 +411,11 @@ export interface SyncRelayLinkInventoryPage {
   nextCursor: SyncRelayLinkInventoryCursor | null;
 }
 
+export interface SyncRelayEndedLinkHolderPage {
+  links: SyncRelayLinkInventoryRow[];
+  nextCursor: SyncRelayGrantedInventoryCursor | null;
+}
+
 export interface SyncRelayIndependentGrantInventoryCursor {
   shareId: string;
   grantCreatedAtMs: number;
@@ -1009,6 +1014,7 @@ export interface SyncRelayStorage {
     workspaceId: string,
     cursor?: SyncRelayLinkInventoryCursor,
   ): SyncRelayLinkInventoryPage;
+  listEndedLinkHoldersByWorkspace(workspaceId: string, cursor?: SyncRelayGrantedInventoryCursor): SyncRelayEndedLinkHolderPage;
   listActiveIndependentShareGrants(input: {
     workspaceId: string;
     shareIds: readonly string[];

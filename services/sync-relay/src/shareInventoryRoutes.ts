@@ -29,6 +29,7 @@ export function createShareInventoryRoutes(
     | "findChannelCreateKind"
     | "workspaceIsOwnedBy"
     | "listLinkGrantsByWorkspace"
+    | "listEndedLinkHoldersByWorkspace"
     | "listActiveIndependentShareGrants"
   >,
   nowMs: () => number,
@@ -170,6 +171,8 @@ export function createShareInventoryRoutes(
     const url = new URL(request.url);
     if (
       url.searchParams.getAll("cursor").length > 1 ||
+      url.searchParams.getAll("endedHolderCursor").length > 1 ||
+      url.searchParams.getAll("history").length > 1 ||
       url.searchParams.getAll("independentGrantCursor").length > 1
     ) {
       throw badRequest("cursor is invalid");
@@ -180,6 +183,18 @@ export function createShareInventoryRoutes(
     const independentGrantCursor = independentGrantInventoryCursor.decode(
       url.searchParams.get("independentGrantCursor"),
     );
+    const endedHolderCursor = endedHolderInventoryCursor.decode(url.searchParams.get("endedHolderCursor"));
+    const history = url.searchParams.get("history");
+    if (history !== null && history !== "true") throw badRequest("history is invalid");
+    if (endedHolderCursor && history === null || history !== null && (linkCursor || independentGrantCursor)) throw badRequest("cursor is invalid");
+    if (history === "true") {
+      const endedPage = storage.listEndedLinkHoldersByWorkspace(workspaceId, endedHolderCursor);
+      const endedLinks = await Promise.all(endedPage.links.map(linkInventorySummary));
+      if (!storage.workspaceIsOwnedBy(workspaceId, actor.userId)) throw notFound();
+      return jsonResponse({ ok: true, endedLinks,
+        ...(endedPage.nextCursor ? { nextEndedHolderCursor: endedHolderInventoryCursor.encode(endedPage.nextCursor) } : {}),
+      });
+    }
     const page = storage.listLinkGrantsByWorkspace(
       workspaceId,
       linkCursor,
@@ -226,6 +241,7 @@ const linkInventoryCursor = cursorCodec<SyncRelayLinkInventoryCursor>(
   { shareCreatedAtMs: "ms", shareId: "id", linkCreatedAtMs: "ms", grantId: "id" },
   "cursor",
 );
+const endedHolderInventoryCursor = cursorCodec<SyncRelayGrantedInventoryCursor>({ grantId: "id" }, "endedHolderCursor");
 const independentGrantInventoryCursor = cursorCodec<SyncRelayIndependentGrantInventoryCursor>(
   { shareId: "id", grantCreatedAtMs: "ms", grantId: "id" },
   "independentGrantCursor",
