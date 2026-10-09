@@ -10,6 +10,12 @@ fn relay_base_repair_unpushed_benchmark() {
     let expected_lookups = std::env::var("DOHC_BASE_REPAIR_EXPECTED_LOOKUPS")
         .map(|value| value.parse::<usize>().expect("lookup count"))
         .unwrap_or(400);
+    let expected_probes = std::env::var("DOHC_BASE_REPAIR_EXPECTED_PROBES")
+        .map(|value| value.parse::<usize>().expect("probe count"))
+        .unwrap_or(1);
+    let expected_remaining = std::env::var("DOHC_BASE_REPAIR_EXPECTED_REMAINING")
+        .map(|value| value.parse::<i64>().expect("remaining candidate count"))
+        .unwrap_or(600);
     let mut elapsed_us = Vec::with_capacity(samples);
     let mut lookup_counts = Vec::with_capacity(samples);
     let mut probe_counts = Vec::with_capacity(samples);
@@ -68,19 +74,20 @@ fn relay_base_repair_unpushed_benchmark() {
         let identity = read_sync_identity(&engine, "ws").unwrap().unwrap();
         let started = std::time::Instant::now();
         client
-            .repair_pending_ydoc_base_orders(
-                &mut engine,
-                "ws",
-                &identity,
-                &NoFaults,
-                &NoLiveLeases,
-                2_000,
-            )
+            .repair_pending_ydoc_base_orders(&mut engine, "ws", &identity, &NoFaults)
             .expect("repair fixture");
         let elapsed = started.elapsed().as_micros();
         let probes = client.transport().pushes.lock().unwrap().len();
-        assert_eq!(probes, 1);
-        assert!(client.transport().pushes.lock().unwrap()[0].ops.is_empty());
+        assert_eq!(probes, expected_probes);
+        assert!(
+            client
+                .transport()
+                .pushes
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|push| push.ops.is_empty())
+        );
         let lookups = client.transport().coordinate_lookups.lock().unwrap().len();
         assert_eq!(lookups, expected_lookups);
         let remaining: i64 = engine
@@ -92,13 +99,21 @@ fn relay_base_repair_unpushed_benchmark() {
                 )
             })
             .unwrap();
-        assert_eq!(remaining, 600);
+        assert_eq!(remaining, expected_remaining);
         if sample > 0 {
             elapsed_us.push(elapsed);
             lookup_counts.push(lookups);
             probe_counts.push(probes);
-            probe_us
-                .push(client.transport().origin_max_probe_elapsed.lock().unwrap()[0].as_micros());
+            probe_us.push(
+                client
+                    .transport()
+                    .origin_max_probe_elapsed
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(std::time::Duration::as_micros)
+                    .sum::<u128>(),
+            );
         }
     }
     let mut sorted = elapsed_us.clone();
@@ -113,8 +128,9 @@ fn relay_base_repair_unpushed_benchmark() {
         json!({
             "benchmark": "relay_base_repair_unpushed",
             "transport": "in-process PagedRelay, immediate Absent responses",
-            "timed": "repair phase only: SQLite reads, conditional origin-max probe, coordinate lookups, 400 absence commits",
+            "timed": "repair phase only: SQLite reads, conditional origin-max probe, coordinate lookups, absence commits",
             "candidates": 1000, "own_unpushed": 600,
+            "remaining_candidates": expected_remaining, "absence_commits": 1000 - expected_remaining,
             "lookup_counts": lookup_counts, "probe_counts": probe_counts, "probe_samples_us": probe_us, "samples_us": elapsed_us,
             "median_us": median,
         })

@@ -480,6 +480,7 @@ struct PagedRelay {
     coordinate_lookups: Mutex<Vec<(String, i64)>>,
     pushes: Mutex<Vec<PushRequest>>,
     download_batches: Mutex<Vec<BlobDownloadBatchRequest>>,
+    push_conflicts: Mutex<usize>,
 }
 
 impl PagedRelay {
@@ -501,6 +502,7 @@ impl PagedRelay {
             coordinate_lookups: Mutex::new(Vec::new()),
             pushes: Mutex::new(Vec::new()),
             download_batches: Mutex::new(Vec::new()),
+            push_conflicts: Mutex::new(0),
         }
     }
 
@@ -536,6 +538,21 @@ impl RelayTransport for PagedRelay {
         let accepted = req.ops.len();
         self.pushes.lock().unwrap().push(req.clone());
         let mut coordinates = self.coordinates.lock().expect("coordinate responses");
+        // Check the whole batch before inserting, as the relay does for a cloned origin.
+        for op in &req.ops {
+            if let Some(
+                LogCoordinateResponse::Present(existing)
+                | LogCoordinateResponse::PresentBelowEpochFloor(existing),
+            ) = coordinates.get(&(op.origin_id.clone(), op.origin_seq))
+                && (existing.workspace_id != op.workspace_id
+                    || existing.op_kind != op.op_kind
+                    || existing.payload != op.payload
+                    || existing.recorded_at_ms != op.recorded_at_ms)
+            {
+                *self.push_conflicts.lock().unwrap() += 1;
+                return Err(RelayError::Conflict);
+            }
+        }
         let mut inserted = 0;
         for op in req.ops {
             let mut pulled = op;
@@ -543,7 +560,10 @@ impl RelayTransport for PagedRelay {
             let coordinate = (pulled.origin_id.clone(), pulled.origin_seq);
             if !matches!(
                 coordinates.get(&coordinate),
-                Some(LogCoordinateResponse::Present(_))
+                Some(
+                    LogCoordinateResponse::Present(_)
+                        | LogCoordinateResponse::PresentBelowEpochFloor(_)
+                )
             ) {
                 coordinates.insert(coordinate, LogCoordinateResponse::Present(pulled));
                 inserted += 1;
