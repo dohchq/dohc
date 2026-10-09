@@ -24,7 +24,8 @@ const SYNCED: AccessFacts = { cloud: { connected: true, workspaceSynced: true, w
 const NOT_SYNCED: AccessFacts = { cloud: { connected: true, workspaceSynced: false, workspaceSyncConnected: false }, shareView: false };
 const SIGNED_OUT: AccessFacts = { cloud: { connected: false, workspaceSynced: true, workspaceSyncConnected: false }, shareView: false };
 const OTHER_ACCOUNT: AccessFacts = { cloud: { connected: true, workspaceSynced: true, workspaceSyncConnected: false }, shareView: false };
-const CHECKING: AccessFacts = { cloud: null, shareView: false };
+const CHECKING: AccessFacts = { cloud: "checking", shareView: false };
+const UNREADABLE: AccessFacts = { cloud: "unreadable", shareView: false };
 
 beforeEach(() => {
   for (const mock of [...Object.values(bridgeMock), notices.report, notices.clear, openSyncSettings, connect]) mock.mockReset();
@@ -109,7 +110,7 @@ describe("the cause of an Access answer that covers nothing", () => {
     expect(accessReasonFor(CHECKING, "docs/plan.md")).toBe("checking");
     expect(accessReasonFor(NOT_SYNCED, "docs/plan.md")).toBe("not-synced");
     // Not syncing comes first: signing in would not give it a list.
-    expect(accessReasonFor({ ...NOT_SYNCED, cloud: { ...NOT_SYNCED.cloud!, connected: false } }, "docs/plan.md")).toBe("not-synced");
+    expect(accessReasonFor({ ...NOT_SYNCED, cloud: { connected: false, workspaceSynced: false, workspaceSyncConnected: false } }, "docs/plan.md")).toBe("not-synced");
     expect(accessReasonFor(SIGNED_OUT, "docs/plan.md")).toBe("signed-out");
     expect(accessReasonFor(OTHER_ACCOUNT, "docs/plan.md")).toBe("other-account");
     expect(accessReasonFor(SYNCED, "docs/plan.md")).toBe("unexplained");
@@ -124,6 +125,11 @@ describe("the cause of an Access answer that covers nothing", () => {
     // server; the renderer cannot tell that from a list not yet received.
     expect(accessReasonFor({ ...NOT_SYNCED, shareView: true }, "notes.md")).toBe("unexplained");
     expect(accessReasonFor({ ...CHECKING, shareView: true }, "notes.md")).toBe("checking");
+  });
+
+  it("names nothing once the server connection could not be read: the shell reports that failure", () => {
+    expect(accessReasonFor(UNREADABLE, "docs/plan.md")).toBe("unexplained");
+    expect(accessReasonFor({ ...UNREADABLE, shareView: true }, "notes.md")).toBe("unexplained");
   });
 });
 
@@ -230,7 +236,9 @@ describe("About Access", () => {
     render(<Access />);
     const unknown = await screen.findByTestId("about-access-unknown");
     expect(unknown.dataset.reason).toBe("unexplained");
-    expect(unknown.textContent).toContain("This does not mean that no one has access.");
+    expect(unknown.textContent).toContain(
+      "Access information is unavailable for this file. This does not mean that no one has access.",
+    );
     expect(screen.getByTestId("about-access-freshness").textContent).toBe("Unknown");
     expect(screen.queryByTestId("about-access-empty")).toBeNull();
     expect(screen.queryByTestId("about-access-count")).toBeNull();
@@ -290,7 +298,6 @@ describe("About Access", () => {
       message: expect.stringContaining("disk is busy"),
       cause: error,
       retry: expect.any(Function),
-      repeat: false,
     });
     await userEvent.setup().click(within(failed).getByText("Try again"));
     await screen.findByTestId("about-access-empty");
@@ -312,21 +319,21 @@ describe("About Access", () => {
     rerender(<Access path="docs/other.md" />);
     await waitFor(() => expect(notices.report).toHaveBeenCalledTimes(2));
     expect(notices.clear).toHaveBeenCalledWith("about-access:docs/plan.md");
-    // Each file files its own first row; neither replaces the other.
-    expect(notices.report.mock.calls.map(([failure]) => [failure.identity, failure.repeat])).toEqual([
-      ["about-access:docs/plan.md", false], ["about-access:docs/other.md", false],
+    // Each file files its own row, cleared before the next file reports.
+    expect(notices.report.mock.calls.map(([failure]) => failure.identity)).toEqual([
+      "about-access:docs/plan.md", "about-access:docs/other.md",
     ]);
     unmount();
     expect(notices.clear).toHaveBeenLastCalledWith("about-access:docs/other.md");
   });
 
-  it("replaces its row without a second toast when the same file fails again", async () => {
+  it("ends a row when the read key changes, even for the same path", async () => {
     bridgeMock.getObjectAccess.mockRejectedValue(new Error("disk is busy"));
-    render(<Access />);
-    const failed = await screen.findByTestId("about-access-failed");
-    await userEvent.setup().click(within(failed).getByText("Try again"));
-    await waitFor(() => expect(notices.report).toHaveBeenCalledTimes(2));
-    expect(notices.report.mock.calls.map(([failure]) => failure.repeat)).toEqual([false, true]);
+    const { rerender } = render(<Access workspaceId="workspace-a" path="docs/plan.md" />);
+    await waitFor(() => expect(notices.report).toHaveBeenCalledTimes(1));
+    const clears = notices.clear.mock.calls.length;
+    rerender(<Access workspaceId="workspace-b" path="docs/plan.md" />);
+    expect(notices.clear.mock.calls.slice(clears).map(([identity]) => identity)).toContain("about-access:docs/plan.md");
   });
 
   it("neither reports nor clears when workspace A's read fails after the switch to B", async () => {
@@ -347,16 +354,38 @@ describe("About Access", () => {
     expect(screen.queryByTestId("about-access-failed")).toBeNull();
   });
 
-  it("claims nothing while the server connection is read, then refreshes once it is", async () => {
+  it("claims nothing and asks no refresh while the server connection is read, then refreshes once it is", async () => {
     bridgeMock.getObjectAccess.mockResolvedValue(UNKNOWN);
     const { rerender } = render(<Access facts={CHECKING} />);
     await waitFor(() => expect(bridgeMock.getObjectAccess).toHaveBeenCalledTimes(1));
     await act(async () => undefined);
     expect(screen.queryByTestId("about-access-unknown")).toBeNull();
     expect(screen.queryByTestId("about-access-freshness")).toBeNull();
+    expect(bridgeMock.requestAccessRefresh).not.toHaveBeenCalled();
     rerender(<Access facts={SIGNED_OUT} />);
     expect((await screen.findByTestId("about-access-unknown")).dataset.reason).toBe("signed-out");
+    expect(bridgeMock.requestAccessRefresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes once per sign-in, though the status is read twice through checking", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValue(answer());
+    const { rerender } = render(<Access facts={SIGNED_OUT} />);
+    await screen.findByTestId("about-access-empty");
+    expect(bridgeMock.requestAccessRefresh).toHaveBeenCalledTimes(1);
+    // The session changes: "changing", then "ready", each read from scratch.
+    for (const facts of [CHECKING, SYNCED, CHECKING, SYNCED]) {
+      rerender(<Access facts={facts} />);
+      await act(async () => undefined);
+    }
     expect(bridgeMock.requestAccessRefresh).toHaveBeenCalledTimes(2);
+  });
+
+  it("names no cause, and stops loading, once the server connection could not be read", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValue(UNKNOWN);
+    render(<Access facts={UNREADABLE} />);
+    const unknown = await screen.findByTestId("about-access-unknown");
+    expect(unknown.dataset.reason).toBe("unexplained");
+    expect(within(unknown).getByText("Try again")).toBeTruthy();
   });
 
   it("refreshes and reads again when Connect server changes the connection", async () => {
@@ -529,7 +558,6 @@ describe("About History", () => {
       message: expect.stringContaining("engine stopped"),
       cause: error,
       retry: expect.any(Function),
-      repeat: false,
     });
     await userEvent.setup().click(within(failed).getByText("Try again"));
     expect(await screen.findAllByTestId("about-history-open")).toHaveLength(1);
@@ -559,13 +587,16 @@ describe("About History", () => {
     expect(notices.report).not.toHaveBeenCalled();
   });
 
-  it("files a repeat, not a second toast, when History fails again as it grows", async () => {
+  it("keeps its row while History fails again as it grows, so the shell replaces it", async () => {
     bridgeMock.listEngineMoments.mockRejectedValue(new Error("engine stopped"));
     const { rerender } = render(<HistorySection revision={1} />);
     await waitFor(() => expect(notices.report).toHaveBeenCalledTimes(1));
+    const clears = notices.clear.mock.calls.length;
     rerender(<HistorySection revision={2} />);
     await waitFor(() => expect(notices.report).toHaveBeenCalledTimes(2));
-    expect(notices.report.mock.calls.map(([failure]) => failure.repeat)).toEqual([false, true]);
+    // The same file and read key: the row stays, and the second report
+    // replaces it, keeping its toast (useShellError's `repeat`).
+    expect(notices.clear.mock.calls.length).toBe(clears);
   });
 
   it("never shows another file's changes after a switch", async () => {

@@ -125,7 +125,7 @@ export const ACCESS_STATE: Record<AccessStateKey, StatePresentation> = {
   "access-unknown": {
     label: "Unknown",
     mark: "attention",
-    title: "dohc could not check who has access. This does not mean that no one has access.",
+    title: "Access information is unavailable for this file. This does not mean that no one has access.",
   },
 };
 

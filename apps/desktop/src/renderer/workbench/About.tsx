@@ -43,10 +43,10 @@ export type AboutSectionId = "chats" | "history" | "access";
 // The shell's error hook. A section read that fails is one Notices row per
 // section and file, with Try again. A read that succeeds clears it, and so
 // does the file leaving About. The section itself shows no error words, only
-// the way to read again. `repeat` says the section already filed a row for
-// this file, so the new one replaces it without a second toast.
+// the way to read again. A read that fails again while its row is there
+// replaces the row without a second toast; with the row gone, it toasts.
 export type AboutNotices = {
-  report(failure: { identity: string; message: string; cause?: unknown; retry: () => void; repeat: boolean }): void;
+  report(failure: { identity: string; message: string; cause?: unknown; retry: () => void }): void;
   clear(identity: string): void;
 };
 
@@ -60,9 +60,10 @@ export type AccessSetup = {
 };
 
 // What this computer knows about the workspace's server connection, from the
-// shell's cloud status: null while it is read, or when it could not be.
+// shell's cloud status: "checking" while it is read, and "unreadable" once
+// reading it failed, which the shell reports on its own.
 export type AccessFacts = {
-  cloud: { connected: boolean; workspaceSynced: boolean; workspaceSyncConnected: boolean } | null;
+  cloud: { connected: boolean; workspaceSynced: boolean; workspaceSyncConnected: boolean } | "checking" | "unreadable";
   shareView: boolean;
 };
 export type AccessContext = {
@@ -80,7 +81,8 @@ export type AccessContext = {
 // or the list has not arrived. The renderer cannot tell those apart.
 export function accessReasonFor(facts: AccessFacts, path: string): AccessReason {
   const { cloud } = facts;
-  if (cloud === null) return "checking";
+  if (cloud === "checking") return "checking";
+  if (cloud === "unreadable") return "unexplained";
   if (facts.shareView || isSharedWithMePath(path)) return cloud.connected ? "unexplained" : "signed-out";
   if (!cloud.workspaceSynced) return "not-synced";
   if (!cloud.connected) return "signed-out";
@@ -235,9 +237,6 @@ function useSectionRead<View>(key: string, identity: string, notices: AboutNotic
   const token = useRef(0);
   const currentKey = useRef(key);
   currentKey.current = key;
-  // Whether this file has a row filed, so a read that fails again replaces
-  // it without a second toast.
-  const filed = useRef(false);
   const begin = useCallback(() => {
     const request = ++token.current;
     const current = () => request === token.current && currentKey.current === key;
@@ -245,26 +244,24 @@ function useSectionRead<View>(key: string, identity: string, notices: AboutNotic
       current,
       settle(view: View) {
         if (!current()) return;
-        filed.current = false;
         notices.clear(identity);
         setState({ key, view });
       },
       fail(view: View, message: string, cause: unknown, retry: () => void) {
         if (!current()) return;
         setState({ key, view });
-        notices.report({ identity, message, cause, retry, repeat: filed.current });
-        filed.current = true;
+        notices.report({ identity, message, cause, retry });
       },
     };
   }, [identity, key, notices]);
   const cancel = useCallback(() => {
     token.current += 1;
   }, []);
+  // A new read key, even for the same path, ends the last one's row.
   useEffect(() => () => {
     token.current += 1;
-    filed.current = false;
     notices.clear(identity);
-  }, [identity, notices]);
+  }, [identity, key, notices]);
   return { view: state.key === key ? state.view : LOADING, begin, cancel };
 }
 
@@ -519,8 +516,10 @@ export function AboutAccess(props: {
   const { facts, openSyncSettings, connect } = props.context;
   const reason = accessReasonFor(facts, path);
   // The server connection the last refresh was asked under. A new one, such
-  // as a Connect server that signed in, refreshes and reads again.
-  const connection = facts.cloud === null ? "checking"
+  // as a Connect server that signed in, refreshes and reads again. A session
+  // change reads the status twice, passing through "checking" each time, so
+  // only a connection that was read counts.
+  const connection = typeof facts.cloud === "string" ? facts.cloud
     : `${facts.cloud.connected}:${facts.cloud.workspaceSynced}:${facts.cloud.workspaceSyncConnected}`;
   const read = useSectionRead<AccessView>(`${workspaceId}\0${path}`, `about-access:${path}`, props.notices);
   const { begin, cancel } = read;
@@ -565,8 +564,9 @@ export function AboutAccess(props: {
       refreshedUnder.current = null;
       return;
     }
-    const refresh = refreshedUnder.current !== connection;
-    refreshedUnder.current = connection;
+    const checking = connection === "checking";
+    const refresh = !checking && refreshedUnder.current !== connection;
+    if (!checking) refreshedUnder.current = connection;
     void load({ refresh });
     return cancel;
   }, [cancel, connection, load, props.expanded]);
@@ -631,7 +631,7 @@ function AccessUnknown(props: { answer: AccessAnswer; setup: AccessSetup; onRetr
             <StateMark testId="about-access-freshness" state={answer.freshness} shown="access-unknown" />
           </div>
           <AboutNote testId="about-access-unknown" reason="unexplained" action={{ label: "Try again", run: props.onRetry }}>
-            dohc could not check who has access. This does not mean that no one has access.
+            Access information is unavailable for this file. This does not mean that no one has access.
           </AboutNote>
         </>
       );

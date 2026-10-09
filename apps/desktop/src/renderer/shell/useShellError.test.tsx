@@ -303,11 +303,37 @@ describe("useShellError", () => {
     act(() => result.current.hideShellError(result.current.shellErrors[0]!.id));
     act(() => result.current.reportShellFailure({ message: "Could not load History.", identity: "about-history:a.md", repeat: true }));
     expect(result.current.shellErrors.map((error) => error.seen)).toEqual([true]);
-    // Another file's first failure is a toast of its own.
-    act(() => result.current.reportShellFailure({ message: "Could not load History.", identity: "about-history:b.md" }));
+    // Another file's first failure is a toast of its own, repeat or not.
+    act(() => result.current.reportShellFailure({ message: "Could not load History.", identity: "about-history:b.md", repeat: true }));
     expect(result.current.shellErrors.map((error) => [error.identity, error.seen])).toEqual([
       ["about-history:a.md", true], ["about-history:b.md", false],
     ]);
+  });
+
+  it("toasts a repeat again once Try again or Dismiss has removed its row", () => {
+    const retry = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const report = () => result.current.reportShellFailure({
+      message: "Could not load History.", identity: "about-history:a.md", retry, repeat: true,
+    });
+    act(report);
+    act(() => result.current.hideShellError(result.current.shellErrors[0]!.id));
+    // Try again removes the row, then reads; the read fails again.
+    act(() => result.current.retryShellError(result.current.shellErrors[0]!.id));
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(result.current.shellErrors).toEqual([]);
+    act(report);
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);
+    // Dismissed, then failing again: a toast, not a quiet row.
+    act(() => result.current.dismissShellError(result.current.shellErrors[0]!.id));
+    act(report);
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);
+  });
+
+  it("still files a sync failure that asks for no toast quietly when it has no predecessor", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    act(() => result.current.reportSyncFailure({ message: "Sync stopped.", detail: "relay", toast: false }, vi.fn()));
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([true]);
   });
 
   it("shows words instead of Electron's prefix, a class name or a code, and keeps them for Copy", () => {

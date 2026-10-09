@@ -141,8 +141,6 @@ export function LinkedChatsPanel(props: {
 
   const currentThreadsKey = useRef(threadsKey);
   currentThreadsKey.current = threadsKey;
-  // Whether this file's chats read has a Notices row filed.
-  const chatsFiled = useRef(false);
   const { notices } = props;
   const refreshThreads = useCallback(async () => {
     if (!filePath) return;
@@ -153,8 +151,7 @@ export function LinkedChatsPanel(props: {
     // leaves About, so its Try again always reads this file.
     const fail = (message: string, cause?: unknown) => {
       setThreadsState({ status: "unavailable", key: threadsKey });
-      notices.report({ identity, message, cause, retry: () => void refreshThreads(), repeat: chatsFiled.current });
-      chatsFiled.current = true;
+      notices.report({ identity, message, cause, retry: () => void refreshThreads() });
     };
     setThreadsState({ status: "loading" });
     let updatingStartedAtMs: number | null = null;
@@ -176,7 +173,6 @@ export function LinkedChatsPanel(props: {
           );
           continue;
         }
-        chatsFiled.current = false;
         notices.clear(identity);
         setThreadsState({
           status: "ready",
@@ -208,7 +204,6 @@ export function LinkedChatsPanel(props: {
     void refreshThreads();
     return () => {
       liveToken.current += 1;
-      chatsFiled.current = false;
       notices.clear(`about-chats:${filePath}`);
     };
   }, [filePath, notices, refreshThreads]);

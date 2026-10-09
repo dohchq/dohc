@@ -919,12 +919,13 @@ export function DesktopWorkspaceShell(props: {
     },
     [reportShellError],
   );
-  const { chatCollaboration, refreshCloudStatus, workspaceSynced, cloudStatus } =
+  const { chatCollaboration, refreshCloudStatus, workspaceSynced, cloudStatus, cloudStatusUnreadable } =
     useCloudPresence(workspaceId, reportCloudStatusUnavailable);
   // About's section reads report through this shell's notices, one row per
-  // section and file.
+  // section and file. Each may fail again, so each is a repeat: it keeps a
+  // row's toast while the row is there, and toasts again once it is gone.
   const aboutNotices = useMemo<AboutNotices>(
-    () => ({ report: reportShellFailure, clear: clearIdentity }),
+    () => ({ report: (failure) => reportShellFailure({ ...failure, repeat: true }), clear: clearIdentity }),
     [clearIdentity, reportShellFailure],
   );
   // What can explain an Access answer that covers nothing. About derives the
@@ -936,17 +937,17 @@ export function DesktopWorkspaceShell(props: {
   const accessContext = useMemo<AccessContext>(
     () => ({
       facts: {
-        cloud: cloudConnected === undefined ? null : {
+        cloud: cloudConnected !== undefined ? {
           connected: cloudConnected,
           workspaceSynced: cloudWorkspaceSynced,
           workspaceSyncConnected: cloudWorkspaceSyncConnected,
-        },
+        } : cloudStatusUnreadable ? "unreadable" : "checking",
         shareView: isShareView,
       },
       openSyncSettings: () => openSettings("cloud"),
       connect: () => setCloudOpen(true),
     }),
-    [cloudConnected, cloudWorkspaceSyncConnected, cloudWorkspaceSynced, isShareView, openSettings],
+    [cloudConnected, cloudStatusUnreadable, cloudWorkspaceSyncConnected, cloudWorkspaceSynced, isShareView, openSettings],
   );
 
   // @-mention roster + agent notifications (Agent Notifications & Mentions).

@@ -143,7 +143,6 @@ describe("LinkedChatsPanel startup", () => {
       message: "offline",
       cause: error,
       retry: expect.any(Function),
-      repeat: false,
     });
     expect(screen.queryByText("offline")).toBeNull();
     expect(within(screen.getByTestId("linked-chats-failed")).getByText("Try again")).toBeTruthy();
@@ -292,13 +291,15 @@ describe("LinkedChatsPanel startup", () => {
     expect(notices.clear.mock.calls.slice(before).map(([identity]) => identity)).toContain("about-chats:docs/other.md");
   });
 
-  it("replaces its row without a second toast when the same file fails again", async () => {
+  it("reports the same file failing again under the same identity, so the shell replaces its row", async () => {
     bridgeMock.listFileChats.mockRejectedValue(new Error("offline"));
     render(<LinkedChatsPanel workspaceId="workspace-1" filePath="docs/plan.md" onError={() => undefined} />);
     const retry = await screen.findByText("Try again");
     await act(async () => retry.click());
     await waitFor(() => expect(notices.report).toHaveBeenCalledTimes(2));
-    expect(notices.report.mock.calls.map(([failure]) => failure.repeat)).toEqual([false, true]);
+    expect(notices.report.mock.calls.map(([failure]) => failure.identity)).toEqual([
+      "about-chats:docs/plan.md", "about-chats:docs/plan.md",
+    ]);
   });
 
   it("neither reports nor clears when an old file's read fails after the switch", async () => {

@@ -25,7 +25,7 @@ import {
 import { deferred } from "../../testing/deferred";
 
 const ABOUT_NOTICES: AboutNotices = { report: vi.fn(), clear: vi.fn() };
-const ACCESS_CONTEXT: AccessContext = { facts: { cloud: null, shareView: false }, openSyncSettings: vi.fn(), connect: vi.fn() };
+const ACCESS_CONTEXT: AccessContext = { facts: { cloud: "checking", shareView: false }, openSyncSettings: vi.fn(), connect: vi.fn() };
 
 // Like opens the emoji picker; the reaction is written when a choice is
 // picked. jsdom measures every box as empty and the picker dismisses itself

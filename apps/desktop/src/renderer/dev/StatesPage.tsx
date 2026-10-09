@@ -1284,7 +1284,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="unknown: signed out">
           <AccessSpecimen view={{ status: "ready", answer: ABOUT_ACCESS_UNKNOWN }} reason="signed-out" />
         </Specimen>
-        <Specimen label="unknown: dohc could not check">
+        <Specimen label="unknown: no cause dohc can name">
           <AccessSpecimen view={{ status: "ready", answer: ABOUT_ACCESS_UNKNOWN }} />
         </Specimen>
         <Specimen label="loading, then failed reads: words in Notices">
