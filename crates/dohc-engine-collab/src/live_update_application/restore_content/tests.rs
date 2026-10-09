@@ -3419,9 +3419,7 @@ fn resume_commit_boundaries_leave_a_stop_or_one_historical_receipt() {
     }
 }
 
-#[test]
-fn restore_fence_quarantines_observed_collection_drafts_with_history() {
-    use crate::owner_outbox::draft;
+fn observed_collection_restore_fixture() -> Fixture {
     use dohc_engine_domain::{VersionedTextStore, WriteText};
     let doc = Ydoc::wire();
     let fixtures: Value = serde_json::from_str(include_str!(
@@ -3487,6 +3485,13 @@ fn restore_fence_quarantines_observed_collection_drafts_with_history() {
             f.binding.clone(),
         )
         .unwrap();
+    f
+}
+
+#[test]
+fn restore_fence_quarantines_observed_collection_drafts_with_history() {
+    use crate::owner_outbox::draft;
+    let mut f = observed_collection_restore_fixture();
     let pending = Ydoc::wire();
     pending.apply(&f.doc.encode_full_state()).unwrap();
     let update = pending.frontmatter_set("status", "done").unwrap();
@@ -3525,6 +3530,75 @@ fn restore_fence_quarantines_observed_collection_drafts_with_history() {
         assert_eq!(history, vec![
             (Some(serde_json::json!("open").to_string()), Some(serde_json::json!("done").to_string()), None),
             (Some(serde_json::json!("done").to_string()), Some(serde_json::json!("open").to_string()), Some("owner-draft-quarantine".into())),
+        ]);
+        Ok::<_, rusqlite::Error>(())
+    }).unwrap();
+}
+
+#[test]
+fn restore_fence_keeps_host_progress_when_its_observed_checkpoint_is_stale() {
+    use crate::owner_outbox::draft;
+    let mut f = observed_collection_restore_fixture();
+    let pending = Ydoc::wire();
+    pending.apply(&f.doc.encode_full_state()).unwrap();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            draft::append_draft_in_tx(
+                tx,
+                "workspace",
+                &f.binding,
+                1,
+                "pending-body".into(),
+                pending.richdoc_append_paragraph("pending body"),
+                4,
+            )
+        })
+        .unwrap();
+    let update = f.doc.frontmatter_set("status", "review").unwrap();
+    f.accept(update, 1);
+    f.store
+        .read_with(|conn| {
+            let (observed_head, checkpoint_digest): (i64, String) = conn.query_row(
+                "SELECT native_head_sequence, checkpoint_digest FROM ydoc_owner_bindings",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let key = DocKey::new("workspace", "main", "object").unwrap();
+            let marker = crate::read_marker_in(conn, &key).unwrap().unwrap();
+            assert_ne!(observed_head, marker.head_update_seq);
+            let checkpoint = Ydoc::wire();
+            checkpoint
+                .apply(
+                    &dohc_engine_storage::get_binary_blob(conn, &checkpoint_digest)
+                        .unwrap()
+                        .unwrap(),
+                )
+                .unwrap();
+            assert_eq!(checkpoint.frontmatter_json()["status"], "open");
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+    let operation = f.fence_input();
+    for now in [50, 51] {
+        f.owner
+            .fence_restore(
+                &mut f.store,
+                operation.clone(),
+                f.host.clone(),
+                now,
+                &NoFaults,
+            )
+            .unwrap();
+    }
+    f.store.read_with(|conn| {
+        let indexed = dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(conn, "workspace", "main", "object").unwrap().unwrap();
+        assert_eq!(indexed["status"], "review");
+        let state: String = conn.query_row("SELECT state FROM owner_ydoc_outboxes", [], |r| r.get(0))?;
+        assert_eq!(state, "quarantined");
+        let mut stmt = conn.prepare("SELECT previous_value_json,next_value_json,author_origin_id FROM collection_field_history WHERE field_name='status' ORDER BY history_id")?;
+        let history = stmt.query_map([], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?)))?.collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(history, vec![
+            (Some(serde_json::json!("open").to_string()), Some(serde_json::json!("review").to_string()), None),
         ]);
         Ok::<_, rusqlite::Error>(())
     }).unwrap();

@@ -1511,3 +1511,127 @@ fn accepted_collection_replay_storage_error_rolls_back_the_frame() {
         serde_json::json!({"title":"Edited title","status":"done","priority":"high"}),
     );
 }
+
+#[test]
+fn collection_generation_without_drafts_credits_owner_checkpoint_progress() {
+    collection_owner_checkpoint_progress(false, false);
+}
+
+#[test]
+fn collection_generation_separates_dropped_drafts_from_owner_checkpoint_progress() {
+    collection_owner_checkpoint_progress(true, false);
+}
+
+#[test]
+fn collection_recovery_credits_owner_progress_after_quarantine() {
+    collection_owner_checkpoint_progress(true, true);
+}
+
+fn collection_owner_checkpoint_progress(with_drafts: bool, recovery: bool) {
+    let (_dir, mut store, observed, checkpoint, local) = collection_fixture();
+    let old_checkpoint = if with_drafts {
+        checkpoint
+    } else {
+        bounded(&local).unwrap()
+    };
+    let enrollment = input(&store, &observed, old_checkpoint.clone());
+    let enrolled = enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    assert_eq!(enrolled.pending_bytes > 0, with_drafts);
+    if !with_drafts {
+        assert!(enrolled.outbox_id.is_none());
+    }
+    if recovery {
+        super::super::quarantine(
+            &mut store,
+            "workspace",
+            super::super::OwnerOutboxQuarantineInput {
+                outbox_id: enrolled.outbox_id.unwrap(),
+                reason: "restore-fenced".into(),
+                observed_binding: None,
+            },
+            11,
+        )
+        .unwrap();
+    }
+    let before = field_history(&store);
+    let remote_before = remote_changes(&store);
+    let host = Ydoc::wire();
+    host.apply(&old_checkpoint).unwrap();
+    let owner_title = if with_drafts {
+        "Owner title"
+    } else {
+        "Original"
+    };
+    host.frontmatter_set("title", owner_title).unwrap();
+    host.frontmatter_set("status", "archived").unwrap();
+    let next = if recovery {
+        observed.binding.clone()
+    } else {
+        next_generation(&observed)
+    };
+    let checkpoint = bounded(&host).unwrap();
+    let mut transition = if recovery {
+        let captured = match store
+            .read_with(|conn| prepare_in(conn, &next, "relay", true))
+            .unwrap()
+        {
+            OwnerEnrollmentPreparation::Capture { captured } => captured,
+            _ => panic!("recovery needs a fresh authenticated cut"),
+        };
+        OwnerEnrollmentInput {
+            binding: next.clone(),
+            relay_database_namespace: "relay".into(),
+            captured,
+            journal_cursor: 12,
+            checkpoint,
+            host_vector: host.encode_state_vector(),
+            recovery: true,
+        }
+    } else {
+        successor_input(&store, &next, checkpoint)
+    };
+    transition.recovery = recovery;
+    transition.journal_cursor = 12;
+    enroll(&mut store, &transition, &observed.limits).unwrap();
+    assert_visible_fields(
+        &store,
+        &next,
+        serde_json::json!({"title":owner_title,"status":"archived"}),
+    );
+    assert_eq!(remote_changes(&store), remote_before + 1);
+    let history = field_history(&store);
+    assert_eq!(&history[..before.len()], &before);
+    let mut expected = Vec::new();
+    if with_drafts && !recovery {
+        expected.push((
+            "status".into(),
+            Some(serde_json::json!("done").to_string()),
+            Some(serde_json::json!("open").to_string()),
+            Some("owner-draft-quarantine".into()),
+        ));
+        expected.push((
+            "title".into(),
+            Some(serde_json::json!("Edited title").to_string()),
+            Some(serde_json::json!("Original").to_string()),
+            Some("owner-draft-quarantine".into()),
+        ));
+    }
+    let (old_title, old_status) = if with_drafts {
+        ("Original", "open")
+    } else {
+        ("Edited title", "done")
+    };
+    expected.push((
+        "status".into(),
+        Some(serde_json::json!(old_status).to_string()),
+        Some(serde_json::json!("archived").to_string()),
+        None,
+    ));
+    expected.push((
+        "title".into(),
+        Some(serde_json::json!(old_title).to_string()),
+        Some(serde_json::json!(owner_title).to_string()),
+        None,
+    ));
+    assert_eq!(&history[before.len()..], &expected);
+}

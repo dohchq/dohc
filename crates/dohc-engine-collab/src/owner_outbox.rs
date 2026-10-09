@@ -1337,19 +1337,17 @@ pub(crate) fn quarantine_in_tx(
     require_workspace(workspace_id, &parent.binding.workspace_id)?;
     if parent.state != OwnerOutboxState::Quarantined {
         // Only the current observed generation owns the draft field index.
-        let checkpoint: Option<String> = tx
+        let current_observation: bool = tx
             .query_row(
-                "SELECT checkpoint_digest FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND binding_json=?5",
+                "SELECT EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND binding_json=?5)",
                 params![parent.binding.workspace_id, parent.binding.main_version_id, parent.binding.object_id, parent.binding.lineage_claim_id, binding_json(&parent.binding)?],
                 |row| row.get(0),
             )
-            .optional()
             .map_err(read_sql)?;
-        if let Some(checkpoint) = checkpoint {
-            let native = crate::Ydoc::wire();
-            native
-                .apply(&draft::bounded_blob(tx, &checkpoint)?)
-                .map_err(draft::collab)?;
+        if current_observation {
+            // A host can advance native state without updating its retained observation.
+            let native =
+                crate::load_doc_in(tx, &draft::key(&parent.binding)?).map_err(draft::collab)?;
             index_frontmatter_in_tx(
                 tx,
                 &parent.binding,

@@ -284,14 +284,7 @@ pub fn enroll_in_tx(
                 &checkpoint,
                 now_ms,
             )?;
-            index_frontmatter_in_tx(
-                tx,
-                &input.binding,
-                &host,
-                Some(OWNER_DRAFT_QUARANTINE_ACTOR),
-                None,
-                now_ms,
-            )?;
+            index_frontmatter_in_tx(tx, &input.binding, &host, None, None, now_ms)?;
             return Ok(draft);
         }
         let draft = advance_generation_in_tx(
@@ -304,14 +297,7 @@ pub fn enroll_in_tx(
             checkpoint,
             now_ms,
         )?;
-        index_frontmatter_in_tx(
-            tx,
-            &input.binding,
-            &host,
-            Some(OWNER_DRAFT_QUARANTINE_ACTOR),
-            None,
-            now_ms,
-        )?;
+        index_frontmatter_in_tx(tx, &input.binding, &host, None, None, now_ms)?;
         return Ok(draft);
     }
     host.apply(&local_bytes).map_err(collab)?;
@@ -458,10 +444,36 @@ fn advance_generation_in_tx(
             now_ms,
         )?;
     }
-    tx.execute(
-        "UPDATE owner_ydoc_outboxes SET state='quarantined',quarantine_reason='restore-fenced',observed_binding_json=?6 WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5 AND state!='quarantined'",
-        params![old.workspace_id,old.main_version_id,old.object_id,old.lineage_claim_id,old.restore_fence_generation,binding_json(&input.binding)?],
-    ).map_err(write_sql)?;
+    let outboxes = {
+        let mut stmt = tx.prepare(
+            "SELECT outbox_id FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5 AND state!='quarantined'",
+        ).map_err(read_sql)?;
+        let rows = stmt
+            .query_map(
+                params![
+                    old.workspace_id,
+                    old.main_version_id,
+                    old.object_id,
+                    old.lineage_claim_id,
+                    old.restore_fence_generation
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(read_sql)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(read_sql)?
+    };
+    for outbox_id in outboxes {
+        quarantine_in_tx(
+            tx,
+            workspace,
+            &OwnerOutboxQuarantineInput {
+                outbox_id,
+                reason: "restore-fenced".into(),
+                observed_binding: Some(input.binding.clone()),
+            },
+            now_ms,
+        )?;
+    }
     let key = key(&input.binding)?;
     let checkpoint_digest = hex_sha256(&checkpoint);
     put_binary_blob_with_sha(tx, &checkpoint, &checkpoint_digest)?;
