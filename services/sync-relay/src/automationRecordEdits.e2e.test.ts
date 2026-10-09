@@ -894,9 +894,10 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
   const recipientHost = captureNamedLiveFrameHost({...common, ticket: ticket!, actor: liveBrowserActor(viewer), trustedAccount: {accountId: "reader", name: "Reader"}});
   await edit(recipientHost, "RecipientNote", {kind: "account", accountId: "reader"});
   const recipientMoment = (await moments())[0]!;
-  // The hosting computer credits the owner snapshot's account holder and the
-  // recipient once, by the grant the relay accepted the edit under. The relay
-  // admits, and devices import, each snapshot's account holder instead.
+  // Until publication, the hosting computer credits the owner snapshot's
+  // account holder and the recipient once, by the grant the relay accepted the
+  // edit under. The relay admits each snapshot's account holder instead, and
+  // publication replaces the host's credit with those authors.
   const ownerCredit = authors === "recipient-only" ? [] : [{kind: "human", humanId: "owner", humanName: "Owner"}];
   const localAuthors = [...ownerCredit, {kind: "named", userId: "reader", grantId: "native-grant", grantGeneration: 1}];
   const admittedAuthors = [...ownerCredit, {kind: "human", humanId: "reader", humanName: "Reader"}];
@@ -933,8 +934,10 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
   const peerMoment = await peerHistory.getMoment({workspaceId: WORKSPACE, momentId: recipientMoment.momentId});
   expect(peerMoment).toMatchObject({syncRecordOnly: true, authors: expect.arrayContaining(admittedAuthors)});
   expect(peerMoment?.authors).toHaveLength(admittedAuthors.length);
-  expect((await moments()).find(moment => moment.momentId === recipientMoment.momentId)?.authors)
-    .toEqual(recipientMoment.authors);
+  // Publication refreshed the hosting computer's moment to the admitted authors.
+  const refreshedAuthors = (await moments()).find(moment => moment.momentId === recipientMoment.momentId)?.authors;
+  expect(refreshedAuthors).toEqual(expect.arrayContaining(admittedAuthors));
+  expect(refreshedAuthors).toHaveLength(admittedAuthors.length);
   expect(await readFile(join(peer.root, "Tasks/one.md"), "utf8")).toContain("RecipientNote: Keep this text");
   await session.close({settle: false});
   const restore = async (side: typeof owner) => {

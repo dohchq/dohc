@@ -395,11 +395,9 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
       expect(JSON.parse(String(rows[0]!.settlement_admission_json))).toEqual({status: "accepted", settlementId: settlement.record.settlementId});
       expect(JSON.parse(String(rows[0]!.admitted_author_snapshot_json))).toEqual(admitted);
     }, {timeout: 30000});
-    // None of these edits sent recording context. The service's private History
-    // keeps the recipient's grant authority beside the unattributed gap. The
-    // relay admits no author for content that declared none, so devices store
-    // no credit for the moment.
-    const baselineAuthors = [{kind: "named", userId: namedUser.id, grantId: "grant", grantGeneration: 1}, {kind: "unattributed"}];
+    // None of these edits sent recording context. The relay admits no author
+    // for content that declared none, so publication leaves no credit for the
+    // moment on the service or any device.
     await publication(baselineSettlement, []);
     for (let page = 0; page < 8; page++) {
       const pulled = await rpc("sync.pull", {workspaceId: "workspace"}); expect(pulled.refusals ?? []).toEqual([]);
@@ -440,7 +438,6 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     // Declared work: one isolated interval per case, each settled and
     // published by the service under its own derived credential.
     const human = {kind: "human", humanId: namedUser.id, humanName: "Unnamed"};
-    const named = {kind: "named", userId: namedUser.id, grantId: "grant", grantGeneration: 1};
     const agent = {kind: "agent", agentId: "proof-agent", agentName: "Proof agent", onBehalfOf: namedUser.id, depth: 2};
     const automation = {kind: "automation", automationId: "proof-automation", onBehalfOf: ownerUser.id, depth: 1};
     // Admission keeps the nested declaration; History stores the flat author.
@@ -503,13 +500,13 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     const automationSettlement = await settlementOf(automationAck, agentAck.journalCursor, automationMarkdown);
     await publication(automationSettlement, [automationAdmitted]);
 
-    // The service credits each interval in its own History, naming the
-    // recipient once by the grant the relay accepted the edit under. Owner
-    // devices import the relay-admitted authors in History's flat form: the
-    // snapshot person and the declared agent, never the grant authority.
+    // Publication credits each interval with the relay-admitted authors in
+    // History's flat form: the snapshot person and the declared agent, never
+    // the grant authority. The service keeps the same credit that owner
+    // devices import.
     const declaredCredit = [
-      {momentId: agentSettlement.record.momentId, host: [agent, named], imported: [agent, human]},
-      {momentId: automationSettlement.record.momentId, host: [automation], imported: [automation]},
+      {momentId: agentSettlement.record.momentId, imported: [agent, human]},
+      {momentId: automationSettlement.record.momentId, imported: [automation]},
     ] as const;
     const expectAuthors = (actual: unknown, expected: readonly unknown[]) => {
       expect(actual).toHaveLength(expected.length);
@@ -564,27 +561,26 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     expect(await momentAuthors(peerRpc, settledMomentId)).toBeNull();
     peer.close(); await peer.waitForExit(); peer = undefined;
     results.declaredAuthors = {
-      agent: {receipt: agentAck, settlement: agentSettlement, admitted: [human, agent], imported: [agent, human], hostCredited: [agent, named]},
-      automation: {receipt: automationAck, settlement: automationSettlement, admitted: [automationAdmitted], imported: [automation], hostCredited: [automation]},
+      agent: {receipt: agentAck, settlement: agentSettlement, admitted: [human, agent], imported: [agent, human]},
+      automation: {receipt: automationAck, settlement: automationSettlement, admitted: [automationAdmitted], imported: [automation]},
     };
     await supervisor!.close(); supervisor = undefined; active = undefined;
     const engine = new DatabaseSync(join(workspace, ".dohc/engine/engine.db"), {readOnly: true});
     try {results.persistedApplications = engine.prepare("SELECT delivery_id,update_digest FROM live_device_update_applications ORDER BY journal_cursor").all();
       expect(results.persistedApplications).toEqual(expect.arrayContaining([{delivery_id: ack.deliveryId, update_digest: ack.updateDigest}]));
-      // The service's raw History keeps the grant authority it credited. The
-      // owner and the fresh peer hold exactly the relay-admitted authors, and
-      // no author for the baseline moment that admitted none.
+      // Publication replaced the service's private credit with the
+      // relay-admitted authors. The service, the owner and the fresh peer hold
+      // exactly those authors, and no author for the baseline moment that
+      // admitted none.
       const authorJson = (database: DatabaseSync, momentId = settledMomentId) => (database.prepare("SELECT author_json FROM moments WHERE moment_id=?").get(momentId) as {author_json: string | null} | undefined)?.author_json;
       const ownerEngine = new DatabaseSync(join(ownerRoot, ".dohc/engine/engine.db"), {readOnly: true});
       const peerEngine = new DatabaseSync(join(root, "peer", ".dohc/engine/engine.db"), {readOnly: true});
       try {
         const host = authorJson(engine), owned = authorJson(ownerEngine);
         Object.assign(results.ownerSettledAuthors as object, {hostRaw: host, ownerRaw: owned});
-        expect(JSON.parse(host ?? "null")).toEqual(baselineAuthors);
-        for (const database of [ownerEngine, peerEngine]) expect(authorJson(database)).toBeNull();
-        for (const {momentId, host: credited, imported: carried} of declaredCredit) {
-          expect(JSON.parse(authorJson(engine, momentId) ?? "null")).toEqual(credited);
-          for (const database of [ownerEngine, peerEngine]) expectAuthors(JSON.parse(authorJson(database, momentId) ?? "null"), carried);
+        for (const database of [engine, ownerEngine, peerEngine]) expect(authorJson(database)).toBeNull();
+        for (const {momentId, imported} of declaredCredit) {
+          for (const database of [engine, ownerEngine, peerEngine]) expectAuthors(JSON.parse(authorJson(database, momentId) ?? "null"), imported);
         }
       } finally {ownerEngine.close(); peerEngine.close();}
     } finally {engine.close();}

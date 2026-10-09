@@ -166,10 +166,9 @@ fn adopted_settlement_preserves_unattributed_owner_and_recipient_contributions()
         .unwrap();
         let (authors, text): (String, String) = f.store.read_with(|conn| conn.query_row("SELECT m.author_json,b.text FROM moments m JOIN blobs b ON b.sha256=m.after_blob_sha256 WHERE m.moment_id=?1", [&settlement.moment_id], |row| Ok((row.get(0)?, row.get(1)?)))).unwrap();
         let authors: Value = serde_json::from_str(&authors).unwrap();
-        assert_eq!(authors[0]["humanId"], "recipient");
-        // The relay's authority names the recipient beside their snapshot.
+        // The relay's authority names the recipient once, in place of their
+        // snapshot.
         let mut expected = vec![
-            serde_json::json!({"kind":"human","humanId":"recipient","humanName":"Recipient"}),
             serde_json::json!({"kind":"named","userId":"recipient","grantId":"grant","grantGeneration":1}),
         ];
         if contributor != "recipient-only" {

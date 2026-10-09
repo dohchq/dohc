@@ -2032,10 +2032,12 @@ fn ordinary_audit_evidence_cannot_credit_an_imported_moment() {
             ]),
         );
         let host = settle_interval(&mut f, 3, &moment_id);
-        // This device's raw History keeps every claim it admitted.
+        // This device's raw History keeps every claim it admitted. The named
+        // grant stands in for the claimed person's snapshot; the owner and
+        // their agent keep theirs.
         assert_eq!(
             kinds(&host),
-            ["agent", "human", "human", "link", "named", "unattributed"]
+            ["agent", "human", "link", "named", "unattributed"]
         );
         let mut ops = operations(&f.store);
         crate::outbound::repair_queued_moment_authors(
