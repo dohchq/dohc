@@ -13,9 +13,8 @@ afterEach(() => vi.useRealTimers());
 
 function fixture() {
   const push = vi.fn<(workspaceId: string) => Promise<PushShareDirectWritesResult>>(async () => REFUSED);
-  let shown = true;
-  const report = vi.fn<(workspaceId: string, result: PushShareDirectWritesResult) => boolean>(() => shown);
-  return { push, report, queue: createShareDirectWriteQueue({ push, report }), hide: (value: boolean) => { shown = !value; } };
+  const report = vi.fn<(workspaceId: string, result: PushShareDirectWritesResult) => void>();
+  return { push, report, queue: createShareDirectWriteQueue({ push, report }) };
 }
 
 it("pushes once per view after a burst of saves settles, and reports it", async () => {
@@ -63,42 +62,68 @@ it("runs one push per view at a time, and one more after it for a request during
   await vi.advanceTimersByTimeAsync(DIRECT_WRITE_PUSH_DELAY_MS);
   expect(f.push).toHaveBeenCalledTimes(1);
   finish(NOTHING);
-  await expect(opened).resolves.toEqual(NOTHING);
+  await expect(opened).resolves.toBeUndefined();
   await vi.waitFor(() => expect(f.push).toHaveBeenCalledTimes(2));
 });
 
 it("sends a save waiting for its delay with a push on open", async () => {
   const f = fixture();
   f.queue.edited("a");
-  await expect(f.queue.pushNow("a")).resolves.toEqual(REFUSED);
+  await expect(f.queue.pushNow("a")).resolves.toBeUndefined();
   await vi.advanceTimersByTimeAsync(DIRECT_WRITE_PUSH_DELAY_MS);
   expect(f.push).toHaveBeenCalledTimes(1);
 });
 
-it("holds an answer no window showed until the view opens again", async () => {
+it("reports a push joined by a draft retry even when its caller ignores the result", async () => {
   const f = fixture();
-  f.hide(true);
+  let finish!: (result: PushShareDirectWritesResult) => void;
+  f.push.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
   f.queue.edited("a");
   await vi.advanceTimersByTimeAsync(DIRECT_WRITE_PUSH_DELAY_MS);
-  expect(f.report).toHaveBeenCalledTimes(1);
-  f.hide(false);
+  const opened = f.queue.pushNow("a");
   f.push.mockResolvedValueOnce(NOTHING);
-  await expect(f.queue.pushNow("a")).resolves.toEqual(NOTHING);
-  expect(f.report.mock.calls).toEqual([["a", REFUSED], ["a", REFUSED]]);
-  // Shown once, it is not held again.
+  finish(REFUSED);
+  await opened;
+  await vi.waitFor(() => expect(f.push).toHaveBeenCalledTimes(2));
+  expect(f.report).toHaveBeenCalledExactlyOnceWith("a", REFUSED);
+});
+
+it("reports a background push once when several delayed saves join it", async () => {
+  const f = fixture();
+  let finish!: (result: PushShareDirectWritesResult) => void;
+  f.push.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  for (let save = 0; save < 3; save += 1) {
+    f.queue.edited("a");
+    await vi.advanceTimersByTimeAsync(DIRECT_WRITE_PUSH_DELAY_MS);
+  }
   f.push.mockResolvedValueOnce(NOTHING);
-  await f.queue.pushNow("a");
-  expect(f.report).toHaveBeenCalledTimes(2);
+  finish(REFUSED);
+  await vi.waitFor(() => expect(f.push).toHaveBeenCalledTimes(2));
+  expect(f.report).toHaveBeenCalledExactlyOnceWith("a", REFUSED);
+});
+
+it("reports each push once and gives concurrent callers only completion", async () => {
+  const f = fixture();
+  let finish!: (result: PushShareDirectWritesResult) => void;
+  f.push.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const first = f.queue.pushNow("a"), second = f.queue.pushNow("a");
+  f.push.mockResolvedValueOnce(NOTHING);
+  finish(REFUSED);
+  await expect(first).resolves.toBeUndefined();
+  await expect(second).resolves.toBeUndefined();
+  expect(f.report).toHaveBeenCalledExactlyOnceWith("a", REFUSED);
 });
 
 it("asks again after an ended share's answer, and turns a thrown push into a failure", async () => {
   const f = fixture();
   f.push.mockRejectedValueOnce(new Error("offline"));
-  await expect(f.queue.pushNow("a")).resolves.toEqual({ status: "failed", writes: [], errorMessage: "offline", lasting: false });
+  await expect(f.queue.pushNow("a")).resolves.toBeUndefined();
+  expect(f.report).toHaveBeenLastCalledWith("a", { status: "failed", writes: [], errorMessage: "offline", lasting: false });
   f.push.mockResolvedValueOnce({ status: "unavailable" });
-  await expect(f.queue.pushNow("a")).resolves.toEqual({ status: "unavailable" });
+  await expect(f.queue.pushNow("a")).resolves.toBeUndefined();
+  expect(f.report).toHaveBeenLastCalledWith("a", { status: "unavailable" });
   f.push.mockResolvedValueOnce(NOTHING);
-  await expect(f.queue.pushNow("a")).resolves.toEqual(NOTHING);
+  await expect(f.queue.pushNow("a")).resolves.toBeUndefined();
   expect(f.push).toHaveBeenCalledTimes(3);
-  expect(f.report).not.toHaveBeenCalled();
+  expect(f.report).toHaveBeenCalledTimes(2);
 });

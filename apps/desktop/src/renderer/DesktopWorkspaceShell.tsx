@@ -1454,6 +1454,8 @@ export function DesktopWorkspaceShell(props: {
   // main's registry summary. This gates the versions surface and collections,
   // and restore, from the same fact.
   const shareView = props.workspace.shareView ?? null;
+  const shareViewRef = useRef(shareView);
+  shareViewRef.current = shareView;
   const [needsReopenFor, setNeedsReopenFor] = useState<NonNullable<Workspace["shareView"]> | null>(null);
   const shareViewDamaged = !!shareView?.damaged || (!!shareView && needsReopenFor === shareView);
   // A registry update replaces this snapshot, including when access returns.
@@ -3031,7 +3033,7 @@ export function DesktopWorkspaceShell(props: {
       const execute = async (recordId?: string): Promise<void> => {
         if (workspaceSelection.current !== selection) return;
         if (shareView && !shareViewWritableRef.current) {
-          const message = shareViewEndedRef.current ? "Your access to this share ended." : shareWriteRefusalRef.current;
+          const message = shareWriteRefusalRef.current;
           reportShellError(message, new Error(message));
           return;
         }
@@ -4015,8 +4017,12 @@ export function DesktopWorkspaceShell(props: {
         });
       }
       if (outcome.status === "ended") {
+        shareViewEndedRef.current = true;
+        shareViewWritableRef.current = false;
+        shareWriteRefusalRef.current = "Your access to this share ended.";
+        setCollectionFieldWriteAccess(workspaceId, shareWriteRefusalRef.current);
         setShareExclusions({ workspaceId, paths: [] });
-        setEndedFor(shareView);
+        setEndedFor(shareViewRef.current);
       } else {
         setShareExclusions({ workspaceId, paths: outcome.unjournalablePaths });
       }
@@ -4117,7 +4123,7 @@ export function DesktopWorkspaceShell(props: {
   const sendShareChanges = useCallback(async () => {
     if (workspaceAdmission.superseded) return;
     if (!shareViewWritableRef.current) {
-      const message = shareViewEndedRef.current ? "Your access to this share ended." : shareWriteRefusalRef.current;
+      const message = shareWriteRefusalRef.current;
       reportShellError(message, new Error(message));
       return;
     }
@@ -4168,6 +4174,7 @@ export function DesktopWorkspaceShell(props: {
   }, [workspaceId, workspaceAdmission, reloadMyShareChanges]);
   useShareDirectWrites({
     workspaceId,
+    sharedView: !!shareView,
     enabled: shareViewWritable,
     ready: workspaceIsReady,
     ownerName: shareGranterName,
