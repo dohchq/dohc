@@ -28,6 +28,7 @@ import {
   OwnerLiveDocumentActionPayload,
   DesktopUserSettingsResult,
   ShareDirectWritesPushedEvent,
+  shareDirectWriteDeliveryOperations,
   EngineYDocLineageReplacementEvent,
   EngineYDocRemoteUpdateEvent,
   EngineYDocOwnerHandoff,
@@ -105,6 +106,7 @@ async function invokeParsed<Schema extends z.ZodType>(
 const rendererDocumentId = crypto.randomUUID();
 
 const bridge: DohcDesktopBridge = {
+  ...operationBridge(shareDirectWriteDeliveryOperations, invoke),
   ...operationBridge(accessOperations, invoke),
   platform: process.platform,
   devTools: devToolsGranted(process.argv),
@@ -467,12 +469,18 @@ const bridge: DohcDesktopBridge = {
   pushShareDirectWrites: (payload) =>
     ipcRenderer.invoke(CHANNELS.pushShareDirectWrites, payload),
   onShareDirectWritesPushed: (listener, workspaceId) => {
-    const unsubscribe = onEvent(CHANNELS.shareDirectWritesPushed, ShareDirectWritesPushedEvent, listener);
     const subscriptionId = crypto.randomUUID();
+    const identity = { workspaceId, rendererDocumentId, subscriptionId };
+    const unsubscribe = onEvent(CHANNELS.shareDirectWritesPushed, ShareDirectWritesPushedEvent, event => {
+      if (event.workspaceId !== workspaceId) return;
+      const update = (action: "claim" | "acknowledge" | "release") => bridge.updateShareDirectWriteDelivery({
+        ...identity, action, answerId: event.answerId,
+      });
+      listener(event, { claim: () => update("claim"), acknowledge: () => update("acknowledge"), release: () => update("release") });
+    });
     const update = (listening: boolean) => {
-      void ipcRenderer.invoke(CHANNELS.shareDirectWritesPushed, {
-        workspaceId, rendererDocumentId, subscriptionId, listening,
-      }).catch(error => console.error("[desktop] direct-write subscription failed:", error));
+      void bridge.updateShareDirectWriteDelivery({ ...identity, action: "listen", listening })
+        .catch(error => console.error("[desktop] direct-write subscription failed:", error));
     };
     update(true);
     return () => { unsubscribe(); update(false); };

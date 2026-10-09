@@ -1443,9 +1443,9 @@ export function DesktopWorkspaceShell(props: {
   const shareHadEditRef = useRef(shareView?.access === "edit");
   if (shareViewWritable) shareHadEditRef.current = true;
   const shareReopenMessage = "This share must be reopened. Choose Forget in the workspace menu, then open the share code again. Forget keeps your files.";
-  const shareWriteRefusal = shareViewDamaged ? !shareView?.recipientUserId || needsReopenFor === shareView ? shareReopenMessage
+  const shareWriteRefusal = shareViewEnded ? "Your access to this share ended."
+    : shareViewDamaged ? !shareView?.recipientUserId || needsReopenFor === shareView ? shareReopenMessage
       : "dohc can't read what this share grants. Open the share again to restore it."
-    : shareViewEnded ? "Your access to this share ended."
     : shareHadEditRef.current ? "Your access to this share changed. Ask for Edit access, then reopen the share."
     : "This share does not have Edit access.";
   const shareWriteRefusalRef = useRef(shareWriteRefusal);
@@ -3988,6 +3988,10 @@ export function DesktopWorkspaceShell(props: {
         });
       }
       if (outcome.status === "ended") {
+        shareViewEndedRef.current = true;
+        shareViewWritableRef.current = false;
+        shareWriteRefusalRef.current = "Your access to this share ended.";
+        setCollectionFieldWriteAccess(workspaceId, shareWriteRefusalRef.current);
         setShareExclusions({ workspaceId, paths: [] });
         setEndedFor(shareViewRef.current);
       } else {
@@ -4141,6 +4145,7 @@ export function DesktopWorkspaceShell(props: {
   }, [workspaceId, workspaceAdmission, reloadMyShareChanges]);
   useShareDirectWrites({
     workspaceId,
+    sharedView: !!shareView,
     enabled: shareViewWritable,
     ready: workspaceIsReady,
     ownerName: shareGranterName,

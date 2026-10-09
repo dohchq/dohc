@@ -2,7 +2,6 @@ import type { PushShareDirectWritesResult } from "../ipc/bridgeContract";
 
 // How long saves settle before a push. A burst of saves makes one push.
 export const DIRECT_WRITE_PUSH_DELAY_MS = 800;
-const MAX_HELD_ANSWERS = 8;
 
 /**
  * Main's queue of direct pushes (ADR 0013), one lane per share view. A save
@@ -13,32 +12,24 @@ const MAX_HELD_ANSWERS = 8;
 export function createShareDirectWriteQueue(dependencies: {
   push(workspaceId: string): Promise<PushShareDirectWritesResult>;
   /**
-   * A push that no window asked for finished; windows on the view show it.
-   * Answers false when no renderer has subscribed for the view.
+   * Every push uses this feedback lane. Delivery holds answers until shown.
    */
-  report(workspaceId: string, result: PushShareDirectWritesResult): boolean;
+  report(workspaceId: string, result: PushShareDirectWritesResult): void;
   /** Refresh definition delivery status when a push has writes or cannot finish. */
   settled?(workspaceId: string): void;
   delayMs?: number;
 }) {
   const delayMs = dependencies.delayMs ?? DIRECT_WRITE_PUSH_DELAY_MS;
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
-  const running = new Map<string, Promise<PushShareDirectWritesResult>>();
-  const answeredToCaller = new WeakSet<Promise<PushShareDirectWritesResult>>();
-  const backgroundReports = new WeakSet<Promise<PushShareDirectWritesResult>>();
+  const running = new Map<string, Promise<void>>();
   const again = new Set<string>();
-  // Answers no window has shown yet, per view, until one opens it.
-  const held = new Map<string, PushShareDirectWritesResult[]>();
 
   function report(workspaceId: string, result: PushShareDirectWritesResult): void {
     if (result.status === "pushed" && result.writes.every((write) => write.result === "written")) return;
-    if (dependencies.report(workspaceId, result)) return;
-    const waiting = held.get(workspaceId) ?? [];
-    // The newest few are enough to say what went wrong.
-    held.set(workspaceId, [...waiting, result].slice(-MAX_HELD_ANSWERS));
+    dependencies.report(workspaceId, result);
   }
 
-  async function pushOnce(workspaceId: string): Promise<PushShareDirectWritesResult> {
+  async function pushOnce(workspaceId: string): Promise<void> {
     let result: PushShareDirectWritesResult;
     try {
       result = await dependencies.push(workspaceId);
@@ -51,10 +42,10 @@ export function createShareDirectWriteQueue(dependencies: {
       };
     }
     if (result.status !== "pushed" || result.writes.length > 0) dependencies.settled?.(workspaceId);
-    return result;
+    report(workspaceId, result);
   }
 
-  function run(workspaceId: string): Promise<PushShareDirectWritesResult> {
+  function run(workspaceId: string): Promise<void> {
     const current = running.get(workspaceId);
     if (current) {
       again.add(workspaceId);
@@ -63,20 +54,11 @@ export function createShareDirectWriteQueue(dependencies: {
     const pushed = pushOnce(workspaceId).finally(() => {
       running.delete(workspaceId);
       if (again.delete(workspaceId)) {
-        runAndReport(workspaceId);
+        void run(workspaceId);
       }
     });
     running.set(workspaceId, pushed);
     return pushed;
-  }
-
-  function runAndReport(workspaceId: string): void {
-    const pushed = run(workspaceId);
-    if (backgroundReports.has(pushed)) return;
-    backgroundReports.add(pushed);
-    void pushed.then(result => {
-      if (!answeredToCaller.has(pushed)) report(workspaceId, result);
-    });
   }
 
   return {
@@ -88,27 +70,18 @@ export function createShareDirectWriteQueue(dependencies: {
       if (timer !== undefined) clearTimeout(timer);
       timers.set(workspaceId, setTimeout(() => {
         timers.delete(workspaceId);
-        runAndReport(workspaceId);
+        void run(workspaceId);
       }, delayMs));
     },
     /**
-     * Pushes now, as a view does when it opens, and answers the caller. A
-     * save waiting for its delay goes with it, and answers held while no
-     * window showed the view are shown again.
+     * Pushes now and answers only completion. Feedback always uses report,
+     * including when a draft retry joins a background push.
      */
-    pushNow(workspaceId: string): Promise<PushShareDirectWritesResult> {
+    pushNow(workspaceId: string): Promise<void> {
       const timer = timers.get(workspaceId);
       if (timer !== undefined) clearTimeout(timer);
       timers.delete(workspaceId);
-      const waiting = held.get(workspaceId) ?? [];
-      held.delete(workspaceId);
-      for (const result of waiting) report(workspaceId, result);
-      const pushed = run(workspaceId);
-      // A joined push has one answer owner. run schedules another pass for
-      // the joining request, whose new answers go through the background lane.
-      if (answeredToCaller.has(pushed)) return pushed.then(() => ({ status: "pushed", writes: [] }));
-      answeredToCaller.add(pushed);
-      return pushed;
+      return run(workspaceId);
     },
   };
 }

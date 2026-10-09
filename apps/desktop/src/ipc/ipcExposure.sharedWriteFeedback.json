@@ -1,0 +1,5 @@
+{
+  "sourceCommit": "6d1c9455e7835155ebfde5cc7c241da0b76a408c",
+  "nameAdditions": ["desktop:update-share-direct-write-delivery"],
+  "capabilityAdditions": ["share.direct.writes.feedback"]
+}

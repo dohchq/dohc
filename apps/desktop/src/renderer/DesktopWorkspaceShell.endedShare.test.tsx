@@ -120,7 +120,7 @@ describe("ended Edit Collection shares", () => {
     expect(screen.getByTestId("shared-view-banner").textContent).toContain("This share was ended");
   });
 
-  it.each(["record creation", "Send"] as const)("uses the shell's reopen refusal for retained %s after a damaged share also ends", async action => {
+  it.each(["record creation", "Send"] as const)("uses the shell's ended refusal for retained %s after a damaged share also ends", async action => {
     const shellRefusal = vi.spyOn(recordFieldWrites, "setCollectionFieldWriteAccess");
     const bridge = collectionBridge();
     bridge.createCollectionRecord.mockResolvedValueOnce({
@@ -140,7 +140,7 @@ describe("ended Edit Collection shares", () => {
       fireEvent.click(screen.getByTestId("notice-center-toggle"));
       fireEvent.click(within(screen.getByTestId("notice-center")).getByRole("button", { name: "Try again" }));
     } else await act(async () => send());
-    const message = "This share must be reopened. Choose Forget in the workspace menu, then open the share code again. Forget keeps your files.";
+    const message = "Your access to this share ended.";
     expect(screen.getByTestId("workspace-shell-error").textContent).toContain(message);
     expect(shellRefusal).toHaveBeenLastCalledWith(EDIT_SHARE.workspaceId, message);
     expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(action === "record creation" ? 1 : 0);
@@ -554,17 +554,17 @@ describe("ended Edit Collection shares", () => {
     expect(screen.getByTestId("shared-view-banner").textContent).not.toContain(ENDED_SENTENCE);
   });
 
-  it.each(["push response", "push event"] as const)("reports an unavailable %s arriving after the same share ends", async (arrival) => {
+  it.each(["open push", "background push"] as const)("reports an unavailable %s through the feedback lane after the same share ends", async (arrival) => {
     const bridge = collectionBridge();
     const push = deferred<Awaited<ReturnType<typeof bridge.pushShareDirectWrites>>>();
-    if (arrival === "push response") bridge.pushShareDirectWrites.mockImplementationOnce(() => push.promise);
+    if (arrival === "open push") bridge.pushShareDirectWrites.mockImplementationOnce(() => push.promise);
     vi.stubGlobal("dohcDesktop", bridge);
     const view = render(shell(bridge, EDIT_SHARE));
     await waitFor(() => expect(bridge.pushShareDirectWrites).toHaveBeenCalledOnce());
     view.rerender(shell(bridge, ENDED_SHARE));
     await act(async () => {
-      if (arrival === "push response") push.resolve({ status: "unavailable" });
-      else bridge.emitShareDirectWritesPushed({ workspaceId: EDIT_SHARE.workspaceId, result: { status: "unavailable" } });
+      if (arrival === "open push") push.resolve();
+      bridge.emitShareDirectWritesPushed({ workspaceId: EDIT_SHARE.workspaceId, result: { status: "unavailable" } });
     });
     const message = "Your access to this share ended. Your unsent Collection changes stay in this workspace. Ask granter@dohc.test to share it again.";
     await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain(message));

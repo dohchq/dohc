@@ -1,5 +1,5 @@
-import { useEffect, useRef } from "react";
-import type { DirectWriteRow, PushShareDirectWritesResult } from "../../ipc/bridgeContract";
+import { useEffect, useReducer, useRef } from "react";
+import type { DirectWriteRow, PushShareDirectWritesResult, ShareDirectWriteAnswerDelivery } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 
 export type DirectWriteNoticeKind =
@@ -30,6 +30,7 @@ export interface DirectWriteNotice {
 // view also pushes when it opens: changes from before this session go then.
 export function useShareDirectWrites(input: {
   workspaceId: string;
+  sharedView: boolean;
   // An Edit share view that has not ended and whose grant is readable.
   enabled: boolean;
   ready: boolean;
@@ -42,8 +43,11 @@ export function useShareDirectWrites(input: {
   const latest = useRef(input);
   latest.current = input;
   const pushOnOpen = useRef<(() => Promise<void>) | null>(null);
+  const acknowledgments = useRef<Array<{ delivery: ShareDirectWriteAnswerDelivery; isCurrent(): boolean }>>([]);
+  const [shownRevision, didShow] = useReducer((revision: number) => revision + 1, 0);
 
   useEffect(() => {
+    if (!input.sharedView || !input.ready) return;
     const workspaceId = input.workspaceId;
     let disposed = false;
     const isCurrent = () => !disposed && latest.current.workspaceId === workspaceId;
@@ -54,116 +58,145 @@ export function useShareDirectWrites(input: {
         await report({ status: "unavailable" });
         return;
       }
-      let result: PushShareDirectWritesResult;
       try {
-        result = await bridge().pushShareDirectWrites({ workspaceId });
+        await bridge().pushShareDirectWrites({ workspaceId });
       } catch (error) {
-        result = {
+        await report({
           status: "failed",
           writes: [],
           errorMessage: error instanceof Error ? error.message : String(error),
           lasting: false,
-        };
+        });
       }
-      if (isCurrent()) await report(result);
     };
 
-    const report = async (result: PushShareDirectWritesResult): Promise<void> => {
-      if (!isCurrent()) return;
-      if (result.status === "unavailable" && !latest.current.ready) return;
-      const { ownerName, showNotice, refreshShareView, sendShareChanges } = latest.current;
-      const reportAccess = (access: ShareViewRefresh): boolean => {
-        if (!isCurrent() || (access !== "ended" && access !== "changed")) return false;
-        latest.current.showNotice({
-          kind: "direct-write-unavailable",
-          message: access === "ended"
-            ? `Your access to this share ended. Your unsent Collection changes stay in this workspace. Ask ${ownerName} to share it again.`
-            : `Your access to this share changed. Your unsent Collection changes stay in this workspace. Ask ${ownerName} for Edit access, then reopen the share.`,
-          retry: null,
-          send: null,
-        });
-        return true;
-      };
-      const needsCheck = result.status === "unavailable" || result.status === "failed" ||
-        result.writes.some(write => write.result === "refused");
-      if (needsCheck) {
-        const access = await latest.current.checkShareAccess().catch((): ShareViewRefresh => "stale");
-        if (!isCurrent() || reportAccess(access)) return;
-      }
-      const sendAsProposal = { label: "Send as proposal", run: () => {
-        if (!isCurrent()) return;
-        if (!latest.current.enabled) void report({ status: "unavailable" });
-        else void sendShareChanges();
-      } };
-      if (needsCheck && (result.status === "unavailable" || !latest.current.enabled)) {
-        // Any 404 on the way to the relay reads as unavailable, so only the
-        // access check can say the share ended. It then shows it ended.
-        latest.current.showNotice({
-          kind: "direct-write-failed",
-          message: `dohc could not send your Collection changes to ${ownerName}.`,
-          retry: latest.current.enabled ? () => void push() : null,
-          send: null,
-        });
-        return;
-      }
-      const stale = result.writes.filter((write) => write.result === "stale");
-      const refused = result.writes.filter(
-        (write): write is Extract<DirectWriteRow, { result: "refused" }> => write.result === "refused",
-      );
-      if (stale.length > 0) {
-        // Bring in the owner's version, so the person sees what changed.
-        void refreshShareView().catch(() => undefined);
-        const draft = stale.length === 1 ? stale[0]!.recoveredDraftPath : null;
-        showNotice({
-          kind: "direct-write-stale",
-          message: draft ? `${writeLabel(stale[0]!)} is taken. Your text draft is kept in ${draft} on this computer. Use New record to create another record.`
-            : `${writesLabel(stale)} changed before your change reached ${ownerName}. Check the new version, or send yours as a proposal.`,
-          retry: draft ? null : () => void push(),
-          send: sendAsProposal,
-        });
-      }
-      const lasting = result.status === "failed" && result.lasting;
-      // A lasting failure shares the refused row, so it carries the refusal too.
-      const refusal = refused.length > 0 ? refusalSentence(refused) : "";
-      if (refused.length > 0 && !lasting) {
-        showNotice({
-          kind: "direct-write-refused",
-          message: `${refusal} Send ${refused.length === 1 ? "it" : "them"} as a proposal.`,
-          retry: () => void push(),
-          send: sendAsProposal,
-        });
-      }
-      if (result.status !== "failed") return;
-      showNotice(lasting
-        ? {
-            kind: "direct-write-refused",
-            message: `${refusal ? `${refusal} ` : ""}${ownerName}'s share doesn't take your Collection changes directly. Send them as a proposal.`,
-            retry: () => void push(),
-            send: sendAsProposal,
-          }
-        : {
-            kind: "direct-write-failed",
-            message: `dohc could not send your Collection changes to ${ownerName}.${result.errorMessage ? ` ${result.errorMessage}` : ""}`,
-            retry: () => void push(),
+    const report = async (result: PushShareDirectWritesResult, delivery?: ShareDirectWriteAnswerDelivery): Promise<void> => {
+      if (!isCurrent() || !latest.current.ready) return;
+      const { ownerName, refreshShareView, sendShareChanges } = latest.current;
+      const notices: DirectWriteNotice[] = [];
+      const showNotice = (notice: DirectWriteNotice) => { notices.push(notice); };
+      let refresh = false;
+      try {
+        const reportAccess = (access: ShareViewRefresh): boolean => {
+          if (!isCurrent() || (access !== "ended" && access !== "changed")) return false;
+          showNotice({
+            kind: "direct-write-unavailable",
+            message: access === "ended"
+              ? `Your access to this share ended. Your unsent Collection changes stay in this workspace. Ask ${ownerName} to share it again.`
+              : `Your access to this share changed. Your unsent Collection changes stay in this workspace. Ask ${ownerName} for Edit access, then reopen the share.`,
+            retry: null,
             send: null,
           });
+          return true;
+        };
+        const needsCheck = result.status === "unavailable" || result.status === "failed" ||
+          result.writes.some(write => write.result === "refused");
+        if (needsCheck) {
+          const access = await latest.current.checkShareAccess().catch((): ShareViewRefresh => "stale");
+          if (!isCurrent() || reportAccess(access)) return;
+        }
+        const sendAsProposal = { label: "Send as proposal", run: () => {
+          if (!isCurrent()) return;
+          if (!latest.current.enabled) void report({ status: "unavailable" });
+          else void sendShareChanges();
+        } };
+        if (needsCheck && (result.status === "unavailable" || !latest.current.enabled)) {
+          // Any 404 on the way to the relay reads as unavailable, so only the
+          // access check can say the share ended. It then shows it ended.
+          showNotice({
+            kind: "direct-write-failed",
+            message: `dohc could not send your Collection changes to ${ownerName}.`,
+            retry: latest.current.enabled ? () => void push() : null,
+            send: null,
+          });
+          return;
+        }
+        const stale = result.writes.filter((write) => write.result === "stale");
+        const refused = result.writes.filter(
+          (write): write is Extract<DirectWriteRow, { result: "refused" }> => write.result === "refused",
+        );
+        if (stale.length > 0) {
+          // Bring in the owner's version, so the person sees what changed.
+          refresh = true;
+          const draft = stale.length === 1 ? stale[0]!.recoveredDraftPath : null;
+          showNotice({
+            kind: "direct-write-stale",
+            message: draft ? `${writeLabel(stale[0]!)} is taken. Your text draft is kept in ${draft} on this computer. Use New record to create another record.`
+              : `${writesLabel(stale)} changed before your change reached ${ownerName}. Check the new version, or send yours as a proposal.`,
+            retry: draft ? null : () => void push(),
+            send: sendAsProposal,
+          });
+        }
+        const lasting = result.status === "failed" && result.lasting;
+        // A lasting failure shares the refused row, so it carries the refusal too.
+        const refusal = refused.length > 0 ? refusalSentence(refused) : "";
+        if (refused.length > 0 && !lasting) {
+          showNotice({
+            kind: "direct-write-refused",
+            message: `${refusal} Send ${refused.length === 1 ? "it" : "them"} as a proposal.`,
+            retry: () => void push(),
+            send: sendAsProposal,
+          });
+        }
+        if (result.status !== "failed") return;
+        showNotice(lasting
+          ? {
+              kind: "direct-write-refused",
+              message: `${refusal ? `${refusal} ` : ""}${ownerName}'s share doesn't take your Collection changes directly. Send them as a proposal.`,
+              retry: () => void push(),
+              send: sendAsProposal,
+            }
+          : {
+              kind: "direct-write-failed",
+              message: `dohc could not send your Collection changes to ${ownerName}.${result.errorMessage ? ` ${result.errorMessage}` : ""}`,
+              retry: () => void push(),
+              send: null,
+            });
+      } finally {
+        if (notices.length && isCurrent() && latest.current.ready) {
+          const claimed = delivery ? await delivery.claim() : true;
+          if (claimed) {
+            if (!isCurrent() || !latest.current.ready) await delivery?.release();
+            else {
+              for (const notice of notices) latest.current.showNotice(notice);
+              if (refresh) void refreshShareView().catch(() => undefined);
+              if (delivery) {
+                acknowledgments.current.push({ delivery, isCurrent });
+                didShow();
+              }
+            }
+          }
+        }
+      }
     };
 
     pushOnOpen.current = push;
-    const unsubscribe = bridge().onShareDirectWritesPushed((event) => {
-      if (event.workspaceId === workspaceId) void report(event.result);
+    const inFlight = new Set<string>();
+    const unsubscribe = bridge().onShareDirectWritesPushed((event, delivery) => {
+      if (event.workspaceId !== workspaceId || inFlight.has(event.answerId)) return;
+      inFlight.add(event.answerId);
+      void report(event.result, delivery).catch(error => console.error("[desktop] direct-write feedback failed:", error))
+        .finally(() => inFlight.delete(event.answerId));
     }, workspaceId);
     return () => {
       disposed = true;
       pushOnOpen.current = null;
       unsubscribe();
     };
-  }, [input.workspaceId]);
+  }, [input.workspaceId, input.sharedView, input.ready]);
 
   useEffect(() => {
     // Anything a closed view left unsent goes once this workspace is ready.
-    if (input.enabled && input.ready) void pushOnOpen.current?.();
-  }, [input.enabled, input.ready, input.workspaceId]);
+    if (input.sharedView && input.enabled && input.ready) void pushOnOpen.current?.();
+  }, [input.sharedView, input.enabled, input.ready, input.workspaceId]);
+
+  useEffect(() => {
+    // The toast and Notice commit in the same render before this acknowledgment.
+    for (const { delivery, isCurrent } of acknowledgments.current.splice(0)) {
+      void (isCurrent() && latest.current.ready ? delivery.acknowledge() : delivery.release())
+        .catch(error => console.error("[desktop] direct-write acknowledgment failed:", error));
+    }
+  }, [shownRevision, input.workspaceId, input.ready]);
 }
 
 // Why the relay refused: its reason alone, which already starts with the

@@ -68,6 +68,7 @@ import { createChatScopeCapability } from "./ipc/chatScope";
 import { registerChatsIpcHandlers } from "./ipc/chatsIpc";
 import { workspaceVersionHandlers } from "./ipc/workspaceVersionsIpc";
 import { registerShareProposalsIpcHandlers } from "./ipc/shareProposalsIpc";
+import { createShareDirectWriteDelivery } from "./ipc/shareDirectWriteDelivery";
 import { registerSharedViewsIpcHandlers } from "./ipc/sharedViewsIpc";
 import { registerCloudIpcHandlers } from "./ipc/cloudIpc";
 import { registerSharedChannelsIpcHandlers } from "./ipc/sharedChannelsIpc";
@@ -128,8 +129,6 @@ import {
   DesktopUserSettingsResult,
   SyncStatusResult,
   RebuildEngineStoreResult,
-  type PushShareDirectWritesResult,
-  ShareDirectWritesSubscription,
   WorkspaceSummary,
   UpdateStateEvent,
   ShareHandoffStatus,
@@ -765,23 +764,11 @@ function notifyWorkspaceWindows(workspaceId: string, channel: string): void {
   }
 }
 
-const shareDirectWriteListeners = new WeakMap<WebContents, ShareDirectWritesSubscription>();
-
-// Count delivery only to a subscribed document on this workspace.
-function notifyShareDirectWritesPushed(workspaceId: string, result: PushShareDirectWritesResult): boolean {
-  let shown = false;
-  for (const win of BrowserWindow.getAllWindows()) {
-    const session = rendererWorkspaceSessions.current(win.webContents);
-    const listener = shareDirectWriteListeners.get(win.webContents);
-    if (session?.workspaceId !== workspaceId || listener?.workspaceId !== workspaceId ||
-      listener.rendererDocumentId !== session.rendererDocumentId) {
-      continue;
-    }
-    win.webContents.send(CHANNELS.shareDirectWritesPushed, { workspaceId, result });
-    shown = true;
-  }
-  return shown;
-}
+const shareDirectWriteDelivery = createShareDirectWriteDelivery<WebContents>({
+  targets: () => BrowserWindow.getAllWindows().map(window => window.webContents),
+  currentSession: sender => rendererWorkspaceSessions.current(sender),
+  isSharedView: workspaceId => shareViewIsPresent(findWorkspace(workspaceId)?.shareView),
+});
 
 // Main's queue of direct pushes, once the IPC handlers are registered.
 let shareDirectWrites: { shareViewEdited(workspaceId: string): void; recordCreated(workspaceId: string): void } | null = null;
@@ -5642,14 +5629,7 @@ async function currentDiagnostics(): Promise<string> {
 }
 
 function registerIpcHandlers(): void {
-  handleIpc(CHANNELS.shareDirectWritesPushed, (event, payload) => {
-    assertTrustedSender(event);
-    const input = ShareDirectWritesSubscription.parse(payload);
-    if (input.listening) shareDirectWriteListeners.set(event.sender, input);
-    else if (shareDirectWriteListeners.get(event.sender)?.subscriptionId === input.subscriptionId) {
-      shareDirectWriteListeners.delete(event.sender);
-    }
-  });
+  shareDirectWriteDelivery.register(operationBoundary);
   registerOperations(operationBoundary, accessOperations, {
     getObjectAccess: (input, { operation }) => accessOwner.object(operation!, input),
     listSharingAccess: (input, { operation }) => accessOwner.sharing(operation!, input),
@@ -6349,7 +6329,7 @@ function registerIpcHandlers(): void {
         get workspace() { return canonicalWorkspaceFor(lease); },
         assertCurrent: () => lease.assertCurrent(),
       })),
-    reportDirectWrites: notifyShareDirectWritesPushed,
+    reportDirectWrites: shareDirectWriteDelivery.report,
     automationDefinitionsChanged: workspaceId => {
       notifyCollectionAutomationsChanged(workspaceId);
       notifyRenderer({ workspaceId });
