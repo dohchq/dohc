@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./actor-identity": "./src/actorIdentity.ts",
+    "./access": "./src/access.ts",
     "./automation-schedule": "./src/automationSchedule.ts",
     "./automations": "./src/automations.ts",
     "./automation-controls": "./src/automationControls.ts",

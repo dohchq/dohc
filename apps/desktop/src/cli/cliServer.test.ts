@@ -490,6 +490,27 @@ describe("CLI socket server", () => {
     await rm(tempRoot, { recursive: true, force: true });
   });
 
+  it("confines Access to the registered workspace and schema-parses every answer without secret fields", async () => {
+    const secret = { credentials: "secret", bearerUrl: "secret", invitationUrl: "secret", shareCode: "secret" };
+    const answer = { ...secret, ref: { kind: "path", path: "Notes/a.md", versionId: null }, rows: [], visibility: "visible",
+      coverage: { kind: "granted", complete: true, observation: "interval", ...secret }, checkedAtMs: 1, freshness: "stale", nextCursor: null };
+    const object = vi.fn(async () => answer as never), sharing = vi.fn(async () => ({ ...answer, ref: null }) as never);
+    context.access = { object, sharing }; context.readOnly = true;
+    const response = await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessObject",
+      args: { cwd: workspaceRoot, actor: "agent", ref: { kind: "path", path: "Notes/a.md" } } });
+    expect(response).toMatchObject({ ok: true, result: { freshness: "stale", coverage: { complete: true } } });
+    expect(JSON.stringify(response)).not.toContain("secret");
+    expect(object).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ref: { kind: "path", path: "Notes/a.md", versionId: null } }));
+    for (const args of [
+      { cwd: workspaceRoot, actor: "agent", lane: "received", workspaceId: "other" },
+      { cwd: workspaceRoot, actor: "agent", ref: { kind: "path", path: "a.md", workspaceId: "other" } },
+    ]) expect(await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessSharing", args })).toMatchObject({ ok: false });
+    expect(sharing).not.toHaveBeenCalled();
+    expect(await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessObject",
+      args: { cwd: workspaceRoot, actor: "agent", ref: { kind: "path", path: "../outside.md" } } })).toMatchObject({ ok: false });
+    expect(object).toHaveBeenCalledOnce();
+  });
+
   it("labels success without changing token admission, read-only authority, actor gates or results", async () => {
     const recordSuccess = vi.fn();
     serverOptions.recordSuccess = recordSuccess;

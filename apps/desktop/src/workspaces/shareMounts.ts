@@ -225,7 +225,7 @@ export type ResolvedShareProjectionPath<Mount> =
       path: string;
     };
 
-function classifyResolvedShareProjectionPath<Mount>(
+export function classifyResolvedShareProjectionPath<Mount>(
   normalizedPath: string,
   mounts: readonly Mount[],
 ): ResolvedShareProjectionPath<Mount> {

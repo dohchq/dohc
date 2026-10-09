@@ -257,10 +257,11 @@ describe("account received observations", () => {
     const h = harness(); const a = h.acquisition();
     const raw: Record<string, unknown>[] = Array.from({ length: 1_501 }, (_, i) => ({ ...row(`s-${i}`), token: "secret",
       shareCode: "secret", browserInvitationUrl: "secret", grants: [row("other")] }));
-    raw[0] = { ...raw[0], selector: { kind: "group", paths: ["Group"], versionId: null, channelWireId: "wire" }, access: "read-only" };
+    raw[0] = { ...raw[0], selector: { kind: "group", paths: ["Group"], versionId: null, channelWireId: "wire" }, access: "read-only", fileScope: "served" };
     raw[1] = { ...raw[1], selector: { kind: "chat", channelWireId: "wire" }, access: "read-write" };
     h.list.mockResolvedValue({ received: raw, removed: [] }); await a.refresh();
     expect(a.observation().inventory?.received).toHaveLength(1_501);
+    expect(a.observation().inventory?.received[0]).toHaveProperty("fileScope", "served");
     const persisted = readFileSync(h.store.file(h.scope()), "utf8");
     expect(persisted).not.toContain("secret"); expect(persisted).not.toContain('"grants"');
     expect(parseReceivedInventory({ received: [{ ...row(), selector: { paths: [".dohc/credentials"], versionId: null } }], removed: [] })).toBeNull();

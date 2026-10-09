@@ -275,6 +275,10 @@ function historyPolicyUnreadable(refusal: HistoryPolicyRefusal) {
 }
 
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
+  access?: {
+    object(input: import("zod").infer<typeof import("@dohc/workspace-contracts/access").ObjectAccessInput>): Promise<import("@dohc/workspace-contracts/access").AccessAnswer>;
+    sharing(input: import("zod").infer<typeof import("@dohc/workspace-contracts/access").SharingAccessInput>): Promise<import("@dohc/workspace-contracts/access").AccessAnswer>;
+  };
   // `agent` is the agent this socket's write is, or null for the person.
   dataset?(request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null): Promise<import("@dohc/cli/dataset").DatasetResult>;
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
@@ -2136,6 +2140,13 @@ async function dispatch(
   options: CliServerOptions,
   completion: { replayed: boolean },
 ): Promise<unknown> {
+  if (request.verb === "accessObject") {
+    const ref = request.args.ref;
+    if (ref.kind !== "path") return dispatchWorkspace(request, context, options, completion);
+    const paths = await callerPaths(context, request.args.cwd);
+    const rebased = { ...request, args: { ...request.args, ref: { ...ref, path: paths.rebase(ref.path, "read") } } };
+    return dispatchWorkspace(rebased, context, options, completion);
+  }
   const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "fileWrite", "fileMove", "fileDelete", "appPublication"]);
   if (!pathVerbs.has(request.verb)) {
     validateRequestPathSpellings(request);
@@ -2259,6 +2270,12 @@ async function dispatchWorkspace(
     throw new CliCommandError("--choose needs --resolve <message>");
   }
   switch (request.verb) {
+    case "accessObject":
+      if (!context.access) throw new CliCommandError("Access observations are unavailable.");
+      return context.access.object(request.args);
+    case "accessSharing":
+      if (!context.access) throw new CliCommandError("Access observations are unavailable.");
+      return context.access.sharing(request.args);
     case "appPublication": {
       if (request.args.request.workspaceId !== context.workspaceId || context.readOnly || !context.appPublication) throw new CliCommandError("App publication requires the owning workspace.");
       if (options.agentRunDepth(context.workspaceId) > 0) throw new CliCommandError("Automations cannot use app publication.");

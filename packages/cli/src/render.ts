@@ -258,6 +258,9 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
   options: { grepFilesWithMatches?: boolean; grepContext?: number; momentSide?: "before" | "after" } = {},
 ): string {
   switch (verb) {
+    case "accessObject":
+    case "accessSharing":
+      return JSON.stringify(result, null, 2);
     case "automationList":
     case "automationSwitch":
       return JSON.stringify(result, null, 2);
