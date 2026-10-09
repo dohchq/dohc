@@ -475,6 +475,7 @@ struct PagedRelay {
     blobs: BTreeMap<String, Vec<u8>>,
     coordinates: Mutex<BTreeMap<(String, i64), LogCoordinateResponse>>,
     pulls: Mutex<Vec<(i64, usize)>>,
+    coordinate_lookups: Mutex<Vec<(String, i64)>>,
     download_batches: Mutex<Vec<BlobDownloadBatchRequest>>,
 }
 
@@ -492,6 +493,7 @@ impl PagedRelay {
             blobs: BTreeMap::new(),
             coordinates: Mutex::new(BTreeMap::new()),
             pulls: Mutex::new(Vec::new()),
+            coordinate_lookups: Mutex::new(Vec::new()),
             download_batches: Mutex::new(Vec::new()),
         }
     }
@@ -527,19 +529,24 @@ impl RelayTransport for PagedRelay {
         let accepted = req.ops.len();
         let current_max_origin_seq = req.ops.last().map_or(req.after_seq, |op| op.origin_seq);
         let mut coordinates = self.coordinates.lock().expect("coordinate responses");
+        let mut inserted = 0;
         for op in req.ops {
             let mut pulled = op;
             pulled.relay_seq = Some(100 + pulled.origin_seq);
-            coordinates.insert(
-                (pulled.origin_id.clone(), pulled.origin_seq),
-                LogCoordinateResponse::Present(pulled),
-            );
+            let coordinate = (pulled.origin_id.clone(), pulled.origin_seq);
+            if !matches!(
+                coordinates.get(&coordinate),
+                Some(LogCoordinateResponse::Present(_))
+            ) {
+                coordinates.insert(coordinate, LogCoordinateResponse::Present(pulled));
+                inserted += 1;
+            }
         }
         Ok(PushResponse {
             settlement_refusals: Vec::new(),
             accepted,
-            inserted: accepted,
-            skipped: 0,
+            inserted,
+            skipped: accepted - inserted,
             current_max_origin_seq,
         })
     }
@@ -559,6 +566,10 @@ impl RelayTransport for PagedRelay {
         &self,
         req: LogCoordinateRequest,
     ) -> Result<LogCoordinateResponse, RelayError> {
+        self.coordinate_lookups
+            .lock()
+            .expect("coordinate lookups")
+            .push((req.origin_id.clone(), req.origin_seq));
         self.coordinates
             .lock()
             .expect("coordinate responses")

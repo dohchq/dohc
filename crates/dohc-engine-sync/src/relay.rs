@@ -706,7 +706,7 @@ struct PendingBaseRelayRepair {
 }
 
 type BaseRelayRepairKey = (String, String, String);
-type BaseRelayRepairCandidate = (PendingBaseRelayRepair, Option<i64>, bool);
+type BaseRelayRepairCandidate = (PendingBaseRelayRepair, Option<i64>);
 
 struct PendingDeferredRelayRepair {
     origin_id: String,
@@ -753,6 +753,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         identity: &crate::journal::SyncIdentity,
         faults: &dyn FaultInjector,
     ) -> Result<(), RelayError> {
+        let local_pushed_seq =
+            read_pushed_seq(store, workspace_id, &identity.origin_id).map_err(local)?;
         let rows = store
             .read_with(|conn| {
                 let mut statement = conn
@@ -822,7 +824,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             })
             .map_err(local)?;
 
-        let mut repairs = Vec::with_capacity(rows.len());
+        let mut coordinate_groups: BTreeMap<BaseRelayRepairKey, Vec<_>> = BTreeMap::new();
         for (
             version_id,
             object_id,
@@ -834,33 +836,49 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             recorded_at_ms,
         ) in rows
         {
+            coordinate_groups
+                .entry((version_id, object_id, lineage_claim_id))
+                .or_default()
+                .push((origin_id, origin_seq, op_kind, payload_json, recorded_at_ms));
+        }
+        let mut pending_groups = Vec::with_capacity(coordinate_groups.len());
+        for ((version_id, object_id, lineage_claim_id), coordinates) in coordinate_groups {
+            if coordinates.iter().any(|(origin_id, origin_seq, ..)| {
+                origin_id == &identity.origin_id && *origin_seq > local_pushed_seq
+            }) {
+                continue;
+            }
             let key =
                 dohc_engine_collab::DocKey::new(workspace_id.to_owned(), version_id, object_id)
                     .map_err(|error| local(SyncError::corrupt(error)))?;
-            let payload = serde_json::from_str(&payload_json)
-                .map_err(|error| local(SyncError::corrupt(error)))?;
-            if op_kind != "ydoc.update"
-                || !crate::ydoc_apply::is_exact_repairable_ydoc_base_claim(
-                    &payload,
-                    &key,
-                    &lineage_claim_id,
-                )
-            {
-                continue;
+            let mut repairs = Vec::with_capacity(coordinates.len());
+            for (origin_id, origin_seq, op_kind, payload_json, recorded_at_ms) in coordinates {
+                let payload = serde_json::from_str(&payload_json)
+                    .map_err(|error| local(SyncError::corrupt(error)))?;
+                if op_kind != "ydoc.update"
+                    || !crate::ydoc_apply::is_exact_repairable_ydoc_base_claim(
+                        &payload,
+                        &key,
+                        &lineage_claim_id,
+                    )
+                {
+                    continue;
+                }
+                repairs.push(PendingBaseRelayRepair {
+                    key: key.clone(),
+                    lineage_claim_id: lineage_claim_id.clone(),
+                    origin_id,
+                    origin_seq,
+                    op_kind,
+                    payload,
+                    recorded_at_ms,
+                });
             }
-            repairs.push(PendingBaseRelayRepair {
-                key,
-                lineage_claim_id,
-                origin_id,
-                origin_seq,
-                op_kind,
-                payload,
-                recorded_at_ms,
-            });
+            if !repairs.is_empty() {
+                pending_groups.push(repairs);
+            }
         }
 
-        let local_pushed_seq =
-            read_pushed_seq(store, workspace_id, &identity.origin_id).map_err(local)?;
         let deferred = store
             .read_with(|conn| {
                 let mut statement = conn
@@ -875,19 +893,31 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                           WHERE deferred.workspace_id=?1
                             AND deferred.relay_seq IS NULL
                             AND log.op_kind='ydoc.update'
+                            AND NOT EXISTS (
+                                SELECT 1 FROM ydoc_deferred_updates AS unpushed
+                                 WHERE unpushed.workspace_id=deferred.workspace_id
+                                   AND unpushed.version_id=deferred.version_id
+                                   AND unpushed.object_id=deferred.object_id
+                                   AND unpushed.lineage_claim_id IS deferred.lineage_claim_id
+                                   AND unpushed.origin_id=?2
+                                   AND unpushed.origin_seq>?3
+                            )
                           ORDER BY deferred.origin_id,deferred.origin_seq",
                     )
                     .map_err(SyncError::corrupt)?;
                 let rows = statement
-                    .query_map([workspace_id], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, i64>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, String>(3)?,
-                            row.get::<_, i64>(4)?,
-                        ))
-                    })
+                    .query_map(
+                        params![workspace_id, identity.origin_id, local_pushed_seq],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, i64>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, String>(3)?,
+                                row.get::<_, i64>(4)?,
+                            ))
+                        },
+                    )
                     .map_err(SyncError::corrupt)?;
                 rows.collect::<Result<Vec<_>, _>>()
                     .map_err(SyncError::corrupt)
@@ -925,77 +955,57 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     }
                     Some(op.relay_seq.ok_or(RelayError::InvalidResponse)?)
                 }
-                LogCoordinateResponse::Absent
-                    if repair.origin_id == identity.origin_id
-                        && local_pushed_seq < repair.origin_seq =>
-                {
-                    None
-                }
                 LogCoordinateResponse::Absent => None,
             };
             if let Some(relay_seq) = relay_seq {
                 deferred_repairs.push((repair.origin_id, repair.origin_seq, relay_seq));
             }
         }
-        let mut grouped: BTreeMap<BaseRelayRepairKey, Vec<BaseRelayRepairCandidate>> =
-            BTreeMap::new();
-        for repair in repairs {
-            let response = self.transport.lookup_log_coordinate(LogCoordinateRequest {
-                workspace_id: workspace_id.to_owned(),
-                replication_epoch: identity.replication_epoch.clone(),
-                stream_identity: identity.stream_identity.clone(),
-                origin_id: repair.origin_id.clone(),
-                origin_seq: repair.origin_seq,
-            })?;
-            let (relay_seq, unresolved_local_coordinate) = match response {
-                LogCoordinateResponse::Present(op)
-                | LogCoordinateResponse::PresentBelowEpochFloor(op) => {
-                    if op.validate().is_err()
-                        || op.workspace_id != workspace_id
-                        || op.origin_id != repair.origin_id
-                        || op.origin_seq != repair.origin_seq
-                        || op.op_kind != repair.op_kind
-                        || op.payload != repair.payload
-                        || op.recorded_at_ms != repair.recorded_at_ms
-                        || !crate::ydoc_apply::is_exact_repairable_ydoc_base_claim(
-                            &op.payload,
-                            &repair.key,
-                            &repair.lineage_claim_id,
-                        )
-                    {
-                        return Err(RelayError::InvalidResponse);
+        let mut grouped = Vec::with_capacity(pending_groups.len());
+        for repairs in pending_groups {
+            let mut candidates: Vec<BaseRelayRepairCandidate> = Vec::with_capacity(repairs.len());
+            for repair in repairs {
+                let response = self.transport.lookup_log_coordinate(LogCoordinateRequest {
+                    workspace_id: workspace_id.to_owned(),
+                    replication_epoch: identity.replication_epoch.clone(),
+                    stream_identity: identity.stream_identity.clone(),
+                    origin_id: repair.origin_id.clone(),
+                    origin_seq: repair.origin_seq,
+                })?;
+                let relay_seq = match response {
+                    LogCoordinateResponse::Present(op)
+                    | LogCoordinateResponse::PresentBelowEpochFloor(op) => {
+                        if op.validate().is_err()
+                            || op.workspace_id != workspace_id
+                            || op.origin_id != repair.origin_id
+                            || op.origin_seq != repair.origin_seq
+                            || op.op_kind != repair.op_kind
+                            || op.payload != repair.payload
+                            || op.recorded_at_ms != repair.recorded_at_ms
+                            || !crate::ydoc_apply::is_exact_repairable_ydoc_base_claim(
+                                &op.payload,
+                                &repair.key,
+                                &repair.lineage_claim_id,
+                            )
+                        {
+                            return Err(RelayError::InvalidResponse);
+                        }
+                        Some(op.relay_seq.ok_or(RelayError::InvalidResponse)?)
                     }
-                    (
-                        Some(op.relay_seq.ok_or(RelayError::InvalidResponse)?),
-                        false,
-                    )
-                }
-                LogCoordinateResponse::Absent
-                    if repair.origin_id == identity.origin_id
-                        && local_pushed_seq < repair.origin_seq =>
-                {
-                    (None, true)
-                }
-                LogCoordinateResponse::Absent => (None, false),
-            };
-            grouped
-                .entry((
-                    repair.key.version_id.clone(),
-                    repair.key.object_id.clone(),
-                    repair.lineage_claim_id.clone(),
-                ))
-                .or_default()
-                .push((repair, relay_seq, unresolved_local_coordinate));
+                    LogCoordinateResponse::Absent => None,
+                };
+                candidates.push((repair, relay_seq));
+            }
+            grouped.push(candidates);
         }
 
-        for candidates in grouped.into_values() {
+        for candidates in grouped {
             let resolved = candidates
                 .iter()
-                .filter_map(|(repair, relay_seq, _)| relay_seq.map(|relay_seq| (repair, relay_seq)))
+                .filter_map(|(repair, relay_seq)| relay_seq.map(|relay_seq| (repair, relay_seq)))
                 .min_by_key(|(_, relay_seq)| *relay_seq);
             let (chosen, relay_seq) = match resolved {
                 Some((repair, relay_seq)) => (repair, Some(relay_seq)),
-                None if candidates.iter().any(|(_, _, unresolved)| *unresolved) => continue,
                 None => (&candidates[0].0, None),
             };
             match store
@@ -1508,7 +1518,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 .filter(|op| !fetched_coordinates.contains(&(op.origin_id.clone(), op.origin_seq)))
                 .cloned(),
         );
+        #[cfg(test)]
+        let repair_started = std::time::Instant::now();
         self.repair_pending_ydoc_base_orders(store, workspace_id, &identity, faults)?;
+        #[cfg(test)]
+        BASE_REPAIR_DURATION.with(|duration| duration.set(repair_started.elapsed()));
         preflight_collisions(store, workspace_id, &identity.origin_id, &ops)?;
         self.hydrate_missing_blobs(store, workspace_id, &identity, &ops, faults)?;
         let ordered = merge_by_origin(ops);
@@ -3507,6 +3521,14 @@ pub(crate) fn canonical_json_bytes(value: &serde_json::Value) -> Result<Vec<u8>,
 #[cfg(test)]
 thread_local! {
     static CANONICAL_JSON_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static BASE_REPAIR_DURATION: std::cell::Cell<std::time::Duration> = const {
+        std::cell::Cell::new(std::time::Duration::ZERO)
+    };
+}
+
+#[cfg(test)]
+pub(crate) fn take_base_repair_duration() -> std::time::Duration {
+    BASE_REPAIR_DURATION.with(|duration| duration.replace(std::time::Duration::ZERO))
 }
 
 #[cfg(test)]

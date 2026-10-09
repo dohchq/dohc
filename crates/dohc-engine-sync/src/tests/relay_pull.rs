@@ -1215,26 +1215,20 @@ fn invalid_pull_page_leaves_legacy_base_repair_and_pull_state_unchanged() {
     );
 }
 
-#[test]
-fn local_unpushed_absence_stays_pending_until_push_makes_the_coordinate_present() {
-    let (_scratch, _path, mut engine) = open_store();
-    seed_identity(&mut engine);
-    VersionedTextStore::new(&mut engine)
-        .ensure_main_version("ws", "main", 1_000, &NoFaults)
-        .expect("main version");
-    seed_text_head(
-        &mut engine,
-        "object-local-pending",
-        "notes/local-pending.md",
-        "local base",
-    );
-    let key =
-        dohc_engine_collab::DocKey::new("ws", "main", "object-local-pending").expect("doc key");
+pub(super) fn seed_base_repair_candidate(
+    engine: &mut EngineStore,
+    object_id: &str,
+    origin_id: &str,
+    origin_seq: i64,
+) -> ReplicationEnvelope {
+    let path = format!("notes/{object_id}.md");
+    seed_text_head(engine, object_id, &path, "local base");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", object_id).expect("doc key");
     let doc = dohc_engine_collab::Ydoc::wire();
     doc.plaintext_insert(0, "local base");
     let base = doc.encode_full_state();
     let claim_id = match dohc_engine_collab::claim_base(
-        &mut engine,
+        engine,
         &key,
         dohc_engine_collab::ContentKind::Plaintext,
         &base,
@@ -1251,7 +1245,7 @@ fn local_unpushed_absence_stays_pending_until_push_makes_the_coordinate_present(
     let payload = json!({
         "versionId": "main",
         "objectId": key.object_id,
-        "path": "notes/local-pending.md",
+        "path": &path,
         "contentKind": "plaintext",
         "updateBlobSha256": &claim_id,
         "lineageClaimId": &claim_id,
@@ -1263,21 +1257,60 @@ fn local_unpushed_absence_stays_pending_until_push_makes_the_coordinate_present(
                 "INSERT INTO replication_log (
                      workspace_id,origin_id,origin_seq,op_kind,payload_json,
                      recorded_at_ms,imported,apply_disposition
-                 ) VALUES ('ws','local',1,'ydoc.update',?1,1100,0,'applied')",
-                [payload.to_string()],
+                 ) VALUES ('ws',?1,?2,'ydoc.update',?3,1100,?4,'applied')",
+                params![
+                    origin_id,
+                    origin_seq,
+                    payload.to_string(),
+                    i64::from(origin_id != "local")
+                ],
             )
             .map_err(SyncError::persist)?;
             tx.execute(
                 "INSERT INTO ydoc_base_relay_candidates (
                      workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq
-                 ) VALUES ('ws','main',?1,?2,'local',1)",
-                params![key.object_id, claim_id],
+                 ) VALUES ('ws','main',?1,?2,?3,?4)",
+                params![key.object_id, claim_id, origin_id, origin_seq],
             )
             .map_err(SyncError::persist)?;
             Ok::<_, SyncError>(())
         })
         .expect("seed local pending coordinate");
-    let relay = PagedRelay::new([(
+    ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
+        workspace_id: "ws".to_owned(),
+        origin_id: origin_id.to_owned(),
+        origin_seq,
+        op_kind: "ydoc.update".to_owned(),
+        payload,
+        recorded_at_ms: 1_100,
+        relay_seq: Some(7),
+    }
+}
+
+fn base_repair_state(engine: &EngineStore, object_id: &str) -> (Option<i64>, i64, i64) {
+    engine
+        .read_with(|conn| {
+            let marker = conn.query_row(
+                "SELECT base_relay_seq,base_relay_confirmed_absent FROM ydoc_docs
+             WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
+                [object_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let count = conn.query_row(
+                "SELECT COUNT(*) FROM ydoc_base_relay_candidates
+             WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
+                [object_id],
+                |row| row.get(0),
+            )?;
+            Ok::<_, rusqlite::Error>((marker.0, marker.1, count))
+        })
+        .expect("base repair state")
+}
+
+pub(super) fn empty_base_repair_relay() -> PagedRelay {
+    PagedRelay::new([(
         0,
         PullResponse {
             ops: Vec::new(),
@@ -1285,71 +1318,307 @@ fn local_unpushed_absence_stays_pending_until_push_makes_the_coordinate_present(
             has_more: false,
         },
     )])
-    .with_coordinate("local", 1, LogCoordinateResponse::Absent);
-    let client = RelaySyncClient::new(relay);
+}
 
+fn pull_base_repair(client: &RelaySyncClient<PagedRelay>, engine: &mut EngineStore) {
     client
         .pull_chat_workspace(
-            &mut engine,
+            engine,
             &mut dohc_engine_collab::WriterDocCache::new(),
             "ws",
             &NoFaults,
             &NoLiveLeases,
             1_200,
         )
-        .expect("pull before push");
-    let pending = engine
-        .read_with(|conn| {
-            let marker = conn.query_row(
-                "SELECT base_relay_seq,base_relay_confirmed_absent
-                   FROM ydoc_docs
-                  WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
-                [&key.object_id],
-                |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)?)),
-            )?;
-            let candidates = conn.query_row(
-                "SELECT COUNT(*) FROM ydoc_base_relay_candidates
-                  WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
-                [&key.object_id],
-                |row| row.get::<_, i64>(0),
-            )?;
-            Ok::<_, rusqlite::Error>((marker.0, marker.1, candidates))
-        })
-        .expect("pending marker");
-    assert_eq!(pending, (None, 0, 1));
+        .expect("pull base repair");
+}
 
+#[test]
+fn local_unpushed_absence_stays_pending_until_push_makes_the_coordinate_present() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    seed_base_repair_candidate(&mut engine, "local-pending", "local", 1);
+    let client = RelaySyncClient::new(empty_base_repair_relay());
+    pull_base_repair(&client, &mut engine);
+    assert_eq!(base_repair_state(&engine, "local-pending"), (None, 0, 1));
+    assert!(
+        client
+            .transport()
+            .coordinate_lookups
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
     client
-        .push_workspace(&mut engine, "ws", &NoFaults, &crate::NoLiveLeases, 1_300, 0)
+        .push_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_300, 0)
         .expect("push local coordinate");
-    client
-        .pull_chat_workspace(
-            &mut engine,
-            &mut dohc_engine_collab::WriterDocCache::new(),
-            "ws",
-            &NoFaults,
-            &NoLiveLeases,
-            1_400,
-        )
-        .expect("repair after push");
-    let repaired = engine
-        .read_with(|conn| {
-            let marker = conn.query_row(
-                "SELECT base_relay_seq,base_relay_confirmed_absent
-                   FROM ydoc_docs
-                  WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
-                [&key.object_id],
-                |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)?)),
-            )?;
-            let candidates = conn.query_row(
-                "SELECT COUNT(*) FROM ydoc_base_relay_candidates
-                  WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
-                [&key.object_id],
-                |row| row.get::<_, i64>(0),
-            )?;
-            Ok::<_, rusqlite::Error>((marker.0, marker.1, candidates))
+    pull_base_repair(&client, &mut engine);
+    assert_eq!(
+        base_repair_state(&engine, "local-pending"),
+        (Some(101), 0, 0)
+    );
+    assert_eq!(
+        *client.transport().coordinate_lookups.lock().unwrap(),
+        [("local".to_owned(), 1)]
+    );
+}
+
+#[test]
+fn base_repair_defers_remote_commit_until_idempotent_repush_advances_local_cursor() {
+    let (_scratch, path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    seed_base_repair_candidate(&mut engine, "crash-pending", "local", 1);
+    let client = RelaySyncClient::new(empty_base_repair_relay());
+    let faults = ScriptedFaults::crash_at(FaultPoint::SyncAfterPushBeforeCursorPersist);
+    assert_eq!(
+        client
+            .push_workspace(&mut engine, "ws", faults.as_ref(), &NoLiveLeases, 1_300, 0)
+            .expect("push crash"),
+        SyncPassOutcome::CrashedAfterRemoteCommit
+    );
+    drop(engine);
+    let mut engine = EngineStore::open(&path, 1_400).expect("reopen");
+    assert_eq!(read_pushed_seq(&engine, "ws", "local").unwrap(), -1);
+    // A retry must retain the relay sequence assigned by the committed push.
+    let original = {
+        let coordinates = client.transport().coordinates.lock().unwrap();
+        let LogCoordinateResponse::Present(op) = coordinates.get(&("local".to_owned(), 1)).unwrap()
+        else {
+            panic!("remote commit must exist")
+        };
+        assert_eq!(op.relay_seq, Some(101));
+        op.clone()
+    };
+    pull_base_repair(&client, &mut engine);
+    assert_eq!(base_repair_state(&engine, "crash-pending"), (None, 0, 1));
+    assert!(
+        client
+            .transport()
+            .coordinate_lookups
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(matches!(
+        client
+            .push_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_500, 0)
+            .expect("idempotent repush"),
+        SyncPassOutcome::Complete {
+            pushed: 0,
+            applied: 0,
+            ..
+        }
+    ));
+    assert_eq!(read_pushed_seq(&engine, "ws", "local").unwrap(), 1);
+    assert_eq!(
+        client
+            .transport()
+            .coordinates
+            .lock()
+            .unwrap()
+            .get(&("local".to_owned(), 1)),
+        Some(&LogCoordinateResponse::Present(original))
+    );
+    pull_base_repair(&client, &mut engine);
+    assert_eq!(
+        base_repair_state(&engine, "crash-pending"),
+        (Some(101), 0, 0)
+    );
+    assert_eq!(
+        client.transport().coordinate_lookups.lock().unwrap().len(),
+        1
+    );
+}
+
+#[test]
+fn base_repair_still_confirms_absent_for_own_pushed_and_foreign_coordinates() {
+    for origin in ["local", "peer"] {
+        let (_scratch, _path, mut engine) = open_store();
+        seed_identity(&mut engine);
+        seed_replication_version(&mut engine, "main", "main");
+        seed_base_repair_candidate(&mut engine, "absent", origin, 1);
+        if origin == "local" {
+            crate::cursor::write_pushed_seq(
+                &mut engine,
+                "ws",
+                "local",
+                1,
+                &NoFaults,
+                &NoLiveLeases,
+                1_200,
+            )
+            .expect("acknowledged cursor");
+        }
+        let client = RelaySyncClient::new(empty_base_repair_relay().with_coordinate(
+            origin,
+            1,
+            LogCoordinateResponse::Absent,
+        ));
+        pull_base_repair(&client, &mut engine);
+        assert_eq!(base_repair_state(&engine, "absent"), (None, 1, 0));
+        assert_eq!(
+            *client.transport().coordinate_lookups.lock().unwrap(),
+            [(origin.to_owned(), 1)]
+        );
+    }
+}
+
+#[test]
+fn base_repair_defers_mixed_group_without_lookups_or_writes() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let mut peer = seed_base_repair_candidate(&mut engine, "mixed", "local", 1);
+    peer.origin_id = "a-peer".to_owned();
+    peer.origin_seq = 0;
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO replication_log (workspace_id,origin_id,origin_seq,
+            op_kind,payload_json,recorded_at_ms,imported,apply_disposition)
+            VALUES ('ws','a-peer',0,'ydoc.update',?1,1100,1,'applied')",
+                [peer.payload.to_string()],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO ydoc_base_relay_candidates
+            (workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq)
+            VALUES ('ws','main','mixed',?1,'a-peer',0)",
+                [peer.payload["lineageClaimId"].as_str().unwrap()],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
         })
-        .expect("repaired marker");
-    assert_eq!(repaired, (Some(101), 0, 0));
+        .unwrap();
+    let client = RelaySyncClient::new(
+        empty_base_repair_relay()
+            .with_coordinate("a-peer", 0, LogCoordinateResponse::Present(peer))
+            .with_coordinate("local", 1, LogCoordinateResponse::Absent),
+    );
+    let revision = engine
+        .read_with(|conn| Ok::<_, rusqlite::Error>(conn.total_changes()))
+        .unwrap();
+    pull_base_repair(&client, &mut engine);
+    assert_eq!(base_repair_state(&engine, "mixed"), (None, 0, 2));
+    assert!(
+        client
+            .transport()
+            .coordinate_lookups
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        engine
+            .read_with(|conn| Ok::<_, rusqlite::Error>(conn.total_changes()))
+            .unwrap(),
+        revision
+    );
+}
+
+#[test]
+fn base_repair_defers_own_unpushed_deferred_update_without_lookup() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let op = seed_base_repair_candidate(&mut engine, "deferred", "local", 1);
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM ydoc_base_relay_candidates", [])
+                .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO ydoc_deferred_updates
+            (workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq,recorded_at_ms)
+            VALUES ('ws','main','deferred',?1,'local',1,1100)",
+                [op.payload["lineageClaimId"].as_str().unwrap()],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let client = RelaySyncClient::new(empty_base_repair_relay());
+    pull_base_repair(&client, &mut engine);
+    assert!(
+        client
+            .transport()
+            .coordinate_lookups
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+    let relay_seq: Option<i64> = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT relay_seq FROM ydoc_deferred_updates WHERE origin_id='local'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(relay_seq, None);
+}
+
+#[test]
+fn base_repair_defers_mixed_deferred_group_without_lookups_or_writes() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let mut peer = seed_base_repair_candidate(&mut engine, "mixed-deferred", "local", 1);
+    peer.origin_id = "a-peer".to_owned();
+    peer.origin_seq = 0;
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM ydoc_base_relay_candidates", [])
+                .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO replication_log (workspace_id,origin_id,origin_seq,
+            op_kind,payload_json,recorded_at_ms,imported,apply_disposition)
+            VALUES ('ws','a-peer',0,'ydoc.update',?1,1100,1,'applied')",
+                [peer.payload.to_string()],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO ydoc_deferred_updates
+            (workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq,recorded_at_ms)
+            VALUES ('ws','main','mixed-deferred',?1,'local',1,1100),
+                   ('ws','main','mixed-deferred',?1,'a-peer',0,1100)",
+                [peer.payload["lineageClaimId"].as_str().unwrap()],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let client = RelaySyncClient::new(empty_base_repair_relay().with_coordinate(
+        "a-peer",
+        0,
+        LogCoordinateResponse::Present(peer),
+    ));
+    let changes = engine
+        .read_with(|conn| Ok::<_, SyncError>(conn.total_changes()))
+        .unwrap();
+    pull_base_repair(&client, &mut engine);
+    assert!(
+        client
+            .transport()
+            .coordinate_lookups
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+    engine
+        .read_with(|conn| {
+            assert_eq!(conn.total_changes(), changes);
+            let pending: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM ydoc_deferred_updates WHERE relay_seq IS NULL",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(pending, 2);
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
 }
 
 #[test]
