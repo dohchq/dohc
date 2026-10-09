@@ -16,7 +16,7 @@ import * as Y from "yjs";
 import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
-import { DaemonRefusalError, VersionedLiveAdapter, WorkspaceDaemonRequester, type AutomationClaim } from "@dohc/workspace-engine-client";
+import { DaemonRefusalError, isTransientEngineRefusal, openEngineYdocProviderSession, YdocAdapterError, VersionedLiveAdapter, WorkspaceDaemonRequester, type AutomationClaim } from "@dohc/workspace-engine-client";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { collectionRecordWrites } from "@dohc/automation-executor/collection-record-edits";
 import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
@@ -412,6 +412,14 @@ it.skipIf(engine.missing).each([
   let delivery: ReturnType<typeof startServerOwnerDelivery> | undefined;
   let peer: LiveDaemonCapture | undefined;
   const errors: string[] = [];
+  let sessionNeedsReopen = false;
+  const recordError = (context: string, error: unknown) => {
+    if (error instanceof YdocAdapterError && error.code === "resync-needed") {
+      sessionNeedsReopen = true;
+    } else if (!isTransientEngineRefusal(error)) {
+      errors.push(`${context}: ${String(error)}`);
+    }
+  };
   const path = "tasks/pending.md", recordId = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
   try {
     relayServer = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain,
@@ -435,7 +443,9 @@ it.skipIf(engine.missing).each([
     await adapter.writeTextFile({workspaceId, versionId: "main", path, text: hasId ? `---\nid: ${recordId}\n---\n\n${body}` : body,
       publish: true, metadata: {origin: "api"}, author: {kind: "human", humanId: "local-person"}});
     capture = createWorkspaceEngineCapture({...source.workspace, rustEngineSessions: source.sessions, settleDebounceMs: 60_000,
-      onError: (context, error) => errors.push(`${context}: ${String(error)}`)});
+      openRustYDocProviderSession: options => openEngineYdocProviderSession({...options,
+        onResyncNeeded: error => { recordError("session resync", error); options.onResyncNeeded?.(error); }}),
+      onError: recordError});
     const seeded = await capture.openYDocSession({path, contentKind: "richdoc", onRemoteUpdate: () => undefined});
     if (hasId) await seeded.applyDecidedLocalUpdate(doc => {
       const scratch = new Y.Doc();
@@ -472,7 +482,11 @@ it.skipIf(engine.missing).each([
     const pass = (signal: AbortSignal) => source.sessions.run(source.workspace, async ({client, workspace}) =>
       runNativeOwnerDeliveryPass({client: source.nativeClient(), workspaceHandle: workspace, document, config, signal, bearer: relayConnection.token, accountId: undefined, assertCurrent() {}}));
     expect(["empty", "acknowledged"]).toContain(await pass(AbortSignal.timeout(60_000)));
-    const session = await capture.openYDocSession({path, contentKind: "richdoc", onRemoteUpdate: () => undefined});
+    sessionNeedsReopen = false;
+    let saveState: string | undefined;
+    const openSession = () => capture!.openYDocSession({path, contentKind: "richdoc", onRemoteUpdate: () => undefined,
+      onSaveState: state => { saveState = state; }});
+    let session = await openSession();
     const beforeAdoption = await readFile(join(rootA, path), "utf8");
     if (!hasId) expect(session.doc.getMap("meta").has("dohcMarkdownSource")).toBe(name === "id-less non-canonical");
     await adapter.writeTextFile({workspaceId, versionId: "main", path: "tasks/collection.yaml", text: "fields:\n  Name:\n    type: text\n",
@@ -493,14 +507,17 @@ it.skipIf(engine.missing).each([
         } finally {scratch.destroy();}
       }, undefined, {actorOriginId: "local-person", attribution: {actorKind: "human"}, idempotencyKey: "native-name"});
     } else {
-      await expect(capture.flush()).rejects.toThrow("did not settle");
+      await capture.flush();
       expect(session.doc.getMap("frontmatter").get("id")).toBe(pending.recordId);
       expect((await adapter.listPendingCollectionAdoptions()).adoptions).toEqual([pending]);
-      await expect(capture.flush()).rejects.toThrow("did not settle");
+      await capture.flush();
       expect((await adapter.listPendingCollectionAdoptions()).adoptions).toEqual([pending]);
     }
     await expect(session.settleNow()).rejects.toMatchObject({name: "YdocOwnerDraftPendingError"});
     expect((await adapter.listPendingCollectionAdoptions()).adoptions).toHaveLength(1);
+    await capture.flush();
+    expect(await adapter.flushCapture()).toMatchObject({settled: true});
+    expect(saveState).toBe("pending-share");
     capture.start();
     delivery = startServerOwnerDelivery({workspaceIds: () => [workspaceId], attemptTimeoutMs: 60_000, retryDelayMs: 250,
       async runPass(_workspaceId, _index, signal) {
@@ -508,19 +525,35 @@ it.skipIf(engine.missing).each([
         await capture!.runRelaySync(materializePage => relay.pull(materializePage));
         return {documentCount: 1, acknowledged: result === "acknowledged"};
       },
-      onError: error => { errors.push(String(error)); }});
+      onError: error => recordError("owner delivery", error)});
+    const reopenIfNeeded = async () => {
+      if (!sessionNeedsReopen) return;
+      sessionNeedsReopen = false;
+      try {
+        await session.close({settle: false});
+        session = await openSession();
+      } catch (error) {
+        sessionNeedsReopen = true;
+        recordError("session reopen", error);
+        throw error;
+      }
+    };
     await expect.poll(async () => {
-      expect(errors).toEqual([]);
-      return { pending: (await adapter.listPendingCollectionAdoptions()).adoptions.length,
-        settled: (await adapter.flushCapture()).settled, errors };
+      await reopenIfNeeded();
+      const pending = (await adapter.listPendingCollectionAdoptions()).adoptions.length;
+      const {settled} = await adapter.flushCapture();
+      return {pending, settled: settled && !sessionNeedsReopen};
     }, {timeout: 120_000})
-      .toEqual({pending: 0, settled: true, errors: []});
+      .toEqual({pending: 0, settled: true});
+    await reopenIfNeeded();
+    expect(errors).toEqual([]);
     await capture.flush();
     // Adoption can finish before the owner's field edit is accepted and materialized.
     if (hasId) await expect.poll(async () => {
       await adapter.flushCapture();
       return readFile(join(rootA, path), "utf8");
     }, {timeout: 120_000}).toContain("Name: Manual");
+    await reopenIfNeeded();
     const markdown = await readFile(join(rootA, path), "utf8");
     if (hasId) expect(markdown).toContain("Name: Manual");
     expect(markdown).toContain(`id: ${pending.recordId}`);

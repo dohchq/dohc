@@ -255,25 +255,40 @@ async fn lease_blocked_collection_adoption_retries_after_release_without_a_file_
     let key = DocKey::new(WORKSPACE_ID, "main", &object_id).expect("record key");
     let lease = leases.acquire(&key).expect("hold record lease");
 
-    let files = FilesActor::spawn_async(scratch.path().to_path_buf(), ScanBounds::default())
+    let seed = manifest_seed(scratch.path(), &actor, WORKSPACE_ID)
         .await
-        .expect("files actor");
+        .unwrap()
+        .into_scan_seed();
+    let files = FilesActor::spawn_async_with_manifest(
+        scratch.path().to_path_buf(),
+        ScanBounds::default(),
+        seed,
+    )
+    .await
+    .expect("files actor");
     let files = FilesActorCloseGuard::new(files);
     let status = Arc::new(DriverStatus::default());
     let self_writes = SelfWriteSuppression::default();
     status.request_collection_reconcile();
-    let first_root = bind_capture_root(scratch.path()).expect("bind first run root");
+    let first_run =
+        reconcile_if_dirty_bound(scratch.path(), &files.handle(), CancellationToken::new())
+            .await
+            .expect("capture recorded files while adoption is held");
     let first_clean = apply_bound_run_with_handle(
         collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
         &files.handle(),
-        RootBoundRun {
-            captured_root: first_root,
-            run: ReconcileRun::Converged,
-        },
+        first_run,
         &CancellationToken::new(),
     )
     .await;
-    assert!(!first_clean, "the held lease makes this pass retryable");
+    assert!(
+        first_clean,
+        "recorded content with a deferred adoption is settled"
+    );
+    assert!(
+        !status.degraded(),
+        "waiting on a session is not degraded capture"
+    );
     assert!(
         status.collection_reconcile_pending(),
         "a held lease must leave another collection pass scheduled"
@@ -284,15 +299,42 @@ async fn lease_blocked_collection_adoption_retries_after_release_without_a_file_
         "Alpha task\n"
     );
 
+    let new_path = "new.md";
+    std::fs::write(scratch.path().join(new_path), b"Not recorded yet.\n").unwrap();
+    let new_key = DocKey::new(
+        WORKSPACE_ID,
+        "main",
+        dohc_engine_domain::derive_capture_object_id(WORKSPACE_ID, "main", new_path),
+    )
+    .unwrap();
+    let new_lease = leases.acquire(&new_key).unwrap();
+    files.handle().request_rescan();
+    let unsettled_run =
+        reconcile_if_dirty_bound(scratch.path(), &files.handle(), CancellationToken::new())
+            .await
+            .unwrap();
+    assert!(
+        !apply_bound_run_with_handle(
+            collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
+            &files.handle(),
+            unsettled_run,
+            &CancellationToken::new(),
+        )
+        .await,
+        "a deferred adoption must not hide an uncaptured new file"
+    );
+    assert!(status.collection_reconcile_pending());
+
+    drop(new_lease);
     drop(lease);
-    let second_root = bind_capture_root(scratch.path()).expect("bind second run root");
+    let second_run =
+        reconcile_if_dirty_bound(scratch.path(), &files.handle(), CancellationToken::new())
+            .await
+            .expect("retry capture after release");
     let second_clean = apply_bound_run_with_handle(
         collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
         &files.handle(),
-        RootBoundRun {
-            captured_root: second_root,
-            run: ReconcileRun::Converged,
-        },
+        second_run,
         &CancellationToken::new(),
     )
     .await;
@@ -374,7 +416,11 @@ async fn lease_blocked_collection_candidate_does_not_starve_other_adoptions() {
         &CancellationToken::new(),
     )
     .await;
-    assert!(!first_clean, "the held lease keeps its retry scheduled");
+    assert!(
+        first_clean,
+        "a deferred adoption does not fail a converged pass"
+    );
+    assert!(!status.degraded());
     assert!(status.collection_reconcile_pending());
     assert_eq!(
         std::fs::read_to_string(collection_dir.join("alpha.md"))

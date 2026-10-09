@@ -2473,6 +2473,15 @@ fn reconcile_provenance() -> CaptureProvenance {
     }
 }
 
+fn collection_reconcile_deferred(error: &RuntimeError) -> bool {
+    matches!(
+        error,
+        RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState {
+            reason: "collection-reconciliation-lease-held",
+        })
+    )
+}
+
 /// One unique correlation id per capture pass (TS ``${prefix}-${createId()}``
 /// parity): pid + wall ms + a process counter — unique enough for grouping
 /// consecutive moments, which is all history uses it for.
@@ -2601,6 +2610,12 @@ async fn apply_bound_run_with_handle(
                     Ok((paths, claims)) => {
                         crate::events::emit_automation_claimed(&events, workspace_id, &claims);
                         paths
+                    }
+                    Err(error) if collection_reconcile_deferred(&error) => {
+                        // A live session can be waiting for owner delivery. Its
+                        // adoption stays pending, but recorded files are settled.
+                        status.request_collection_reconcile();
+                        Vec::new()
                     }
                     Err(_) => {
                         status.request_collection_reconcile();
@@ -2777,6 +2792,10 @@ async fn apply_bound_run_with_handle(
     crate::events::emit_automation_claimed(&events, workspace_id, &automation_claims);
     let collection_paths = match collection_result {
         Some(Ok(paths)) => paths,
+        Some(Err(error)) if collection_reconcile_deferred(&error) => {
+            status.request_collection_reconcile();
+            Vec::new()
+        }
         Some(Err(_)) => {
             status.request_collection_reconcile();
             result.degraded = true;
