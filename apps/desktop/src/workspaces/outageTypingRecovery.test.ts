@@ -1,4 +1,5 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
@@ -6,6 +7,25 @@ import { createTestScratch } from "./testTemp";
 import { hasRetainedLiveDraft } from "./liveDraftRecovery";
 import { typingRecoveryFailure, typingRecoveryStateVectorSha256, writeTypingCheckpoint, readTypingCheckpoints, retireTypingCheckpoint, importTypingCheckpoints, flushTypingCheckpoints, flushTypingCheckpointsSync, writeTypingCheckpointSync, registerTypingCheckpoint, type OutageTypingCheckpoint } from "./outageTypingRecovery";
 const checkpoint: OutageTypingCheckpoint = {version: 2, checkpointId: "session-checkpoint", workspaceId: "workspace", versionId: "main", objectId: "object", path: "note.md", expectedClaimId: "claim", expectedStateVectorSha256: "a".repeat(64), expectedDiskSha256: "b".repeat(64), text: "typing", updateBase64: "AAA=", admittedBaseBase64: "AAA=", updates: [{requestId: "original", updateBase64: "AAA=", actorOriginId: "person", attribution: {actorKind: "human", onBehalfOf: "person", depth: 0}}]};
+vi.mock("node:fs", async original => {
+ const actual=await original<typeof import("node:fs")>();
+ return {...actual,rmSync:vi.fn(actual.rmSync)};
+});
+it("logs retirement failure after a committed import without reporting recovery failure", async () => {
+ const directory=await createTestScratch("typing-cleanup-failure-");await writeTypingCheckpoint(directory,checkpoint);
+ const failure=vi.fn(),refresh=vi.fn();const warning=vi.spyOn(console,"warn").mockImplementation(()=>{});
+ const locked=Object.assign(Error("checkpoint is locked"),{code:"EPERM"});
+ vi.mocked(rmSync).mockImplementationOnce(()=>{throw locked;});
+ try {
+  await importTypingCheckpoints(directory,"workspace",async()=>({committed:true,outcome:"replayed",momentId:null}),failure,refresh);
+  expect(refresh).toHaveBeenCalledExactlyOnceWith("note.md",checkpoint.checkpointId);
+  expect(failure).not.toHaveBeenCalled();
+  expect(warning).toHaveBeenCalledExactlyOnceWith("[desktop] typing recovery checkpoint cleanup failed","note.md",locked);
+  expect(await readTypingCheckpoints(directory,"workspace")).toHaveLength(1);
+  await importTypingCheckpoints(directory,"workspace",async()=>({committed:true,outcome:"covered",momentId:null}),failure,refresh);
+  expect(await readTypingCheckpoints(directory,"workspace")).toEqual([]);expect(failure).not.toHaveBeenCalled();
+ } finally {warning.mockRestore();}
+});
 it("persists originals and admitted base before exit and replaces the same record during outage edits", async () => {
  const directory = await createTestScratch("typing-checkpoint-");
  await writeTypingCheckpoint(directory, checkpoint);

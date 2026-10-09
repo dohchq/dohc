@@ -9,8 +9,9 @@ const dismissedTypingNotices = new Set<string>();
 export function useTypingRecoveryNotices(input: {
   workspaceId: string;
   ready: boolean;
-} & Pick<ReturnType<typeof useShellError>, "reportShellFailure" | "clearKind" | "clearIdentity">) {
-  const {workspaceId, ready, reportShellFailure, clearKind, clearIdentity} = input;
+  openHistory: () => void;
+} & Pick<ReturnType<typeof useShellError>, "reportShellFailure" | "showSuccessNotice" | "showWarningNotice" | "clearKind" | "clearIdentity">) {
+  const {workspaceId, ready, openHistory, reportShellFailure, showSuccessNotice, showWarningNotice, clearKind, clearIdentity} = input;
   const [discarding, setDiscarding] = useState<{workspaceId: string; path: string; run: () => void} | null>(null);
   useEffect(() => setDiscarding(null), [workspaceId, ready]);
   useEffect(() => {
@@ -43,9 +44,10 @@ export function useTypingRecoveryNotices(input: {
                 if (cancelled) return;
                 if (result.outcome === "missing" || result.outcome === "imported") {
                   clearIdentity(identity!);
-                  reportShellFailure(result.outcome === "imported"
-                    ? {message: "dohc recovered this kept typing. Look in the file or History.", tone: "success"}
-                    : {message: "This kept copy is no longer on this computer.", tone: "warning"});
+                  if (result.outcome === "imported") {
+                    showSuccessNotice(`dohc recovered your typing in "${failure.path}".`, undefined, undefined,
+                      {label: "Open History", run: () => {if (!cancelled) openHistory();}});
+                  } else showWarningNotice("This kept copy is no longer on this computer.");
                 }
                 void refresh();
               } catch (error) {
@@ -77,7 +79,7 @@ export function useTypingRecoveryNotices(input: {
     });
     void refresh();
     return () => {cancelled = true; unsubscribe();};
-  }, [workspaceId, ready, reportShellFailure, clearKind, clearIdentity]);
+  }, [workspaceId, ready, openHistory, reportShellFailure, showSuccessNotice, showWarningNotice, clearKind, clearIdentity]);
   return discarding && discarding.workspaceId === workspaceId && ready ? (
     <ConfirmDialog intent="danger" title="Discard your typing?" confirmLabel="Discard your typing"
       testId="typing-discard-dialog" cancelTestId="typing-discard-cancel" confirmTestId="typing-discard-confirm"

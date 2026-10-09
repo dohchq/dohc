@@ -85,9 +85,11 @@ export async function importTypingCheckpoints(directory: string, workspaceId: st
       const {version: _version, checkpointId: _checkpointId, workspaceId: _workspace, updateBase64: _update, ...input} = row.checkpoint;
       const result = await importer(input);
       if (result.committed !== true) throw new Error("Recovery was not committed.");
-      refresh(row.checkpoint.path, row.checkpoint.checkpointId);
-      await retireTypingCheckpoint(row);
-    } catch (error) { failure({...typingRecoveryFailure("import",row.checkpoint.path,error), checkpointId: row.checkpoint.checkpointId}); }
+    } catch (error) { failure({...typingRecoveryFailure("import",row.checkpoint.path,error), checkpointId: row.checkpoint.checkpointId}); continue; }
+    refresh(row.checkpoint.path, row.checkpoint.checkpointId);
+    await retireTypingCheckpoint(row).catch(error => {
+      console.warn("[desktop] typing recovery checkpoint cleanup failed", row.checkpoint.path, error);
+    });
   }
 }
 

@@ -402,3 +402,22 @@ it("toasts a first preserved report and retains the toast identity and seen stat
  act(()=>result.current.hideShellError(first.id));act(report);
  expect(result.current.shellErrors).toHaveLength(1);expect(result.current.shellErrors[0]).toMatchObject({id:first.id,atMs:first.atMs,seen:true});
 });
+
+it("toasts a changed reason even when the prior preserved toast was closed", () => {
+ const {result}=renderHook(()=>useShellError("typing-new-reason"));
+ act(()=>result.current.reportShellFailure({identity:"typing-import:one",kind:"typing-import",message:IMPORT_FAILURE_MESSAGE,toast:"preserve"}));
+ const first=result.current.shellErrors[0]!;
+ act(()=>result.current.hideShellError(first.id));
+ act(()=>result.current.reportShellFailure({identity:"typing-import:one",kind:"typing-import",message:"This file is no longer in History.",toast:"preserve"}));
+ expect(result.current.shellErrors).toHaveLength(1);
+ expect(result.current.shellErrors[0]).toMatchObject({message:"This file is no longer in History.",seen:false});
+ expect(result.current.shellErrors[0]!.id).not.toBe(first.id);
+});
+
+it("gives a success Notice its Open History action without reporting a failure", () => {
+ const open=vi.fn();const {result}=renderHook(()=>useShellError("typing-recovered"));
+ act(()=>result.current.showSuccessNotice('dohc recovered your typing in "note.md".',undefined,undefined,{label:"Open History",run:open}));
+ const row=result.current.shellErrors[0]!;
+ expect(row).toMatchObject({tone:"success",retry:null,seen:false,action:{label:"Open History"}});
+ act(()=>result.current.runShellErrorAction(row.id));expect(open).toHaveBeenCalledOnce();
+});

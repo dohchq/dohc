@@ -125,7 +125,7 @@ export function useShellError(workspaceId: string) {
   // the same kind, so a read that keeps failing is one row, not a pile.
   // `seen` files the row without a toast; "keep" gives it the seen state of
   // the row of its kind it replaces, so an open toast stays open.
-  // "preserve" also keeps its identity and toasts when no prior row exists.
+  // "preserve" keeps an unchanged message's toast, and toasts a new message.
   const push = useCallback(
     (error: Omit<ShellError, "id" | "atMs" | "seen">, seen: boolean | "keep" | "preserve" = false) => {
       nextId.current += 1;
@@ -141,12 +141,13 @@ export function useShellError(workspaceId: string) {
             ? error.identity === existing.identity
             : existing.message === message || (error.kind !== undefined && existing.kind === error.kind);
         const replaced = current.find(matches);
+        const preserved = seen === "preserve" && replaced?.message === message ? replaced : undefined;
         const next: ShellError = {
           ...error,
           message,
-          id: seen === "preserve" ? (replaced?.id ?? id) : id,
-          atMs: seen === "preserve" ? (replaced?.atMs ?? atMs) : atMs,
-          seen: seen === "preserve" ? (replaced?.seen ?? false) : seen === "keep" ? (replaced?.seen ?? true) : seen,
+          id: preserved?.id ?? id,
+          atMs: preserved?.atMs ?? atMs,
+          seen: seen === "preserve" ? (preserved?.seen ?? false) : seen === "keep" ? (replaced?.seen ?? true) : seen,
         };
         return [
           ...current.filter((existing) => !matches(existing)),
@@ -278,7 +279,6 @@ export function useShellError(workspaceId: string) {
   const reportShellFailure = useCallback(
     (failure: {
       title?: string;
-      tone?: ShellError["tone"];
       toast?: "preserve";
       message: string;
       cause?: unknown;
@@ -296,7 +296,6 @@ export function useShellError(workspaceId: string) {
         ...(cause ? [["Cause", cause] as const] : []),
       ];
       push({
-        ...(failure.tone ? {tone: failure.tone} : {}),
         ...(failure.title ? { title: failure.title } : {}),
         message: shown.words ?? UNKNOWN_ERROR_WORDS,
         retry: failure.retry ?? null,
@@ -464,17 +463,20 @@ export function useShellError(workspaceId: string) {
   // A kind makes a newer message replace the row of an older one, such as
   // one import's result replacing the last import's.
   const showSuccessNotice = useCallback(
-    (message: string, undo?: () => void, kind?: ShellErrorKind) => {
+    (message: string, undo?: () => void, kind?: ShellErrorKind, action?: ShellError["action"]) => {
       push({
         message,
         retry: null,
         tone: "success",
         ...(kind ? { kind } : {}),
-        ...(undo ? { action: { label: "Undo", run: undo, ends: true } } : {}),
+        ...(action ? { action } : undo ? { action: { label: "Undo", run: undo, ends: true } } : {}),
       });
     },
     [push],
   );
+  const showWarningNotice = useCallback((message: string) => {
+    push({message, retry: null, tone: "warning"});
+  }, [push]);
   // The one-time notice about the reports this launch sends, with the way
   // to turn them off. It stays until the person closes it.
   const showReportsNotice = useCallback((reports: ReportKinds, openPrivacy: () => void) => {
@@ -629,6 +631,7 @@ export function useShellError(workspaceId: string) {
     showSettingsFileNotice,
     showDirectWriteNotice,
     showSuccessNotice,
+    showWarningNotice,
     showReportsNotice,
     showKeptCopies,
     showKeptCopySaved,
