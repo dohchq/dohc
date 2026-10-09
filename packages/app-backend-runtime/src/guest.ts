@@ -177,10 +177,11 @@ function run({module, exhausted, room}: QuickJS, db: DatabaseSync, request: Gues
   const deadline = performance.now() + request.limits.evaluationMs;
   let interrupted = false;
   runtime.setInterruptHandler(() => interrupted ||= performance.now() >= deadline);
-  const timeLimit = "App operation took longer than its time limit and stopped. Try again.";
   const memoryLimit = `App operation needed more than its ${request.limits.memoryBytes / MiB} MiB memory limit, so it stopped.`;
   // A guest exception after the memory filled is the memory limit, unless the deadline stopped the guest.
-  const guestFailure = (message: string) => new Error(interrupted ? timeLimit : exhausted() ? memoryLimit : message);
+  const guestFailure = (message: string) => new Error(interrupted
+    ? `App operation took longer than its ${request.limits.evaluationMs / 1000}-second time limit, so it stopped.`
+    : exhausted() ? memoryLimit : message);
   runtime.removeModuleLoader();
   const vm = runtime.newContext();
   let statements = 0;
@@ -214,7 +215,7 @@ function run({module, exhausted, room}: QuickJS, db: DatabaseSync, request: Gues
       if (++statements > request.limits.statements) throw new Error("App database operation limit exceeded.");
       if (performance.now() >= deadline) {
         interrupted = true;
-        throw new Error(timeLimit);
+        throw guestFailure("App database operation limit exceeded.");
       }
       if (vm.typeof(sqlValue) !== "string" || vm.typeof(paramsValue) !== "string") throw new Error("Invalid database arguments.");
       const sql = boundedText(vm.getString(sqlValue), request.limits.sourceBytes, "SQL statement");
