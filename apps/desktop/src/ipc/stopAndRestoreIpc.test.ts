@@ -423,7 +423,7 @@ describe("stop and restore in main", () => {
   });
 
   it.each(["local undo", "sync before local undo", "sync after local undo"] as const)(
-    "keeps a Zod error's own message from %s", async source => {
+    "shows a readable sentence for a Zod error from %s", async source => {
       const parsed = z.string().safeParse(42);
       if (parsed.success) throw new Error("The test expected a validation failure.");
       const error = parsed.error;
@@ -443,7 +443,7 @@ describe("stop and restore in main", () => {
       });
       await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({
         runsUndone: source === "sync after local undo" ? 2 : 1,
-        unfinished: { step: "runs", message: error.message },
+        unfinished: { step: "runs", message: "dohc could not finish undoing these runs." },
       });
       expect(undoRunsOf).toHaveBeenCalledTimes(source === "sync before local undo" ? 0 : 1);
     },

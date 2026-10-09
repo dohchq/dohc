@@ -28,6 +28,7 @@ import { automationButtonsFor, disposeAutomationButtons, resetAutomationButtonsF
 import { deferred } from "../testing/deferred";
 import {
   beginCollectionWriteOperation,
+  enqueueCollectionFieldWrite,
   CollectionFieldWriteHost,
   collectionWriteFailures,
   CollectionRecordFieldWrite,
@@ -36,6 +37,7 @@ import {
   hasPendingCollectionFieldWrites,
   resetCollectionFieldWritesForTests,
   retryCollectionFieldWrite,
+  setCollectionFieldWriteAccess,
 } from "./collections/recordFieldWrites";
 import { beginCollectionLineageOperation } from "./collections/collectionLineageGate";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
@@ -1385,6 +1387,25 @@ const CHECKBOX_SCHEMA: CollectionSchema = {
 };
 
 describe("cell write queue", () => {
+  it("shows current access refusal in the status line and clears a discarded failure after reopening", async () => {
+    docMock.current = engineDocState({ opening: true });
+    renderPage(makeBridge([record("rec-1", "Plan")]));
+    await screen.findByText("Plan");
+    act(() => {
+      enqueueCollectionFieldWrite("ws-1", "tasks", { recordId: "rec-1", recordPath: "tasks/Plan.md", field: "title", value: "Changed" });
+      setCollectionFieldWriteAccess("ws-1", "This share must be reopened.");
+    });
+    expect(screen.getByTestId("collection-write-error").textContent).toBe("This share must be reopened.");
+    act(() => setCollectionFieldWriteAccess("ws-1", "Your access to this share changed."));
+    expect(screen.getByTestId("collection-write-error").textContent).toBe("Your access to this share changed.");
+    act(() => setCollectionFieldWriteAccess("ws-1", null));
+    expect(screen.getByTestId("collection-write-error").textContent).toBe("dohc did not save this change.");
+    expect(screen.getByTestId("collection-write-retry")).toHaveProperty("disabled", false);
+    fireEvent.click(screen.getByTestId("collection-write-discard"));
+    expect(screen.queryByTestId("collection-write-error")).toBeNull();
+    expect(collectionWriteFailures()).toEqual([]);
+  });
+
   it("clears a discarded failure and keeps processing later edits", async () => {
     // The session settles without a doc (conflict, deletion, engine off):
     // the head write fails with no detail.
@@ -1408,7 +1429,7 @@ describe("cell write queue", () => {
 
     fireEvent.click(screen.getByRole("checkbox"));
     const error = await screen.findByTestId("collection-write-error");
-    expect(error.textContent).toBe("dohc could not save this change.");
+    expect(error.textContent).toBe("dohc did not save this change.");
 
     fireEvent.click(screen.getByTestId("collection-write-discard"));
     expect(screen.queryByTestId("collection-write-error")).toBeNull();

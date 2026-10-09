@@ -201,7 +201,9 @@ export function registerStopAndRestoreIpc<
       }
     } catch (error) {
       // What it undid before it stopped is reported with why it stopped.
-      throw new UndoRunsStopped(error instanceof Error ? error.message : String(error), total());
+      throw new UndoRunsStopped(error instanceof z.ZodError
+        ? "dohc could not finish undoing these runs."
+        : error instanceof Error ? error.message : String(error), total());
     }
     return total();
   }
