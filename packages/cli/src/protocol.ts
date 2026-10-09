@@ -4,6 +4,7 @@ import {
   FIELD_VALUE_REASON_CODES,
 } from "@dohc/workspace-contracts/collection";
 import { z } from "zod";
+import { AccessAnswer, ObjectAccessInput, SharingAccessInput } from "@dohc/workspace-contracts/access";
 import { WORKSPACE_POLICY_PATHS } from "@dohc/security-contract/effective-policy";
 import type { AutomationDefinitionList, AutomationSwitchResult } from "@dohc/workspace-contracts/automation-controls";
 import { CreationPartial } from "./creation";
@@ -380,6 +381,8 @@ const automationPressArgsSchema = z
   .strict();
 
 export const cliRequestSchema = z.discriminatedUnion("verb", [
+  z.object({ ...requestBase, verb: z.literal("accessObject"), args: ObjectAccessInput.extend(argsBase).strict() }).strict(),
+  z.object({ ...requestBase, verb: z.literal("accessSharing"), args: SharingAccessInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("automationButtons"), args: z.object({ ...argsBase, collectionPath: collectionPathArg, table: z.string().min(1).max(256).optional() }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("dataset"), args: z.object({ ...argsBase, request: DatasetRequest }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("appPublication"), args: z.object({ ...argsBase, request: OwnerAppPublicationRequest }).strict() }).strict(),
@@ -500,6 +503,8 @@ export const APP_RESPONSE_CAPABILITIES = {
 } as const satisfies Record<OwnerAppResponsesRequest["action"], CapabilityId>;
 
 export const CLI_CAPABILITIES = {
+  accessObject: ["access.object.read"],
+  accessSharing: ["access.sharing.read"],
   groups: ["group.list"],
   threads: ["chat.threads.list"],
   inbox: ["chat.inbox.read"],
@@ -1322,6 +1327,8 @@ const automationPressResultSchema = z.union([
 ]);
 
 export const cliResultSchemas = {
+  accessObject: AccessAnswer,
+  accessSharing: AccessAnswer,
   automationList: z.discriminatedUnion("ok", [
     z.object({ ok: z.literal(true), definitions: z.custom<AutomationDefinitionList>(value => value !== null && typeof value === "object" && "file" in value && "canSwitch" in value && "contentHash" in value) }).strict(),
     z.object({ ok: z.literal(false), reason: z.string() }).strict(),

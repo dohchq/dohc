@@ -9,6 +9,16 @@ import {
 const token = "a".repeat(64);
 const argsBase = { cwd: "C:/ws", actor: "agent" as const };
 
+it("parses Access answers through the field allowlist and refuses caller workspace selectors", () => {
+  const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessSharing", args: { ...argsBase, lane: "received" } };
+  expect(cliRequestSchema.safeParse(request).success).toBe(true);
+  expect(cliRequestSchema.safeParse({ ...request, args: { ...request.args, workspaceId: "other" } }).success).toBe(false);
+  expect(cliRequestSchema.safeParse({ ...request, args: { ...request.args, accountId: "other" } }).success).toBe(false);
+  const answer = parseCliResult("accessSharing", { ref: null, rows: [], visibility: "visible", freshness: "stale", checkedAtMs: 7,
+    nextCursor: null, coverage: { kind: "received-account", complete: true, observation: "interval" }, bearerUrl: "secret" });
+  expect(answer).not.toHaveProperty("bearerUrl");
+});
+
 it("accepts only CLI and MCP counting labels, with an optional label on the strict envelope", () => {
   const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "groups", args: argsBase };
   expect(cliRequestSchema.parse(request)).not.toHaveProperty("door");
