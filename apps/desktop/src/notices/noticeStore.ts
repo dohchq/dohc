@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { atomicReplaceFile } from "../atomicReplaceFile";
+import { mkdir, readFile, rename } from "node:fs/promises";
+import { atomicWriteFile, type DurableFileOperations } from "../atomicReplaceFile";
 import { join } from "node:path";
 import { z } from "zod";
 import { NoticeNotSentError } from "@dohc/automation-executor/automation-chat";
@@ -285,19 +285,56 @@ export function createNoticeStore(deps: {
   dismissRefusal?(workspaceId: string, noticeId: string, refusalCoordinates: RefusalCoordinate[]): Promise<void>;
   nowMs?: () => number;
   outboxPostLimit?: number;
+  fileOperations?: DurableFileOperations;
 }): NoticeStore {
   const nowMs = deps.nowMs ?? Date.now;
   const outboxPostLimit = deps.outboxPostLimit ?? NOTICE_LIST_ROW_LIMIT;
   let localFile: LocalFile | null = null;
   const accountFiles = new Map<string, AccountFile>();
 
-  // Every read and write of the files runs in this queue, one at a time.
-  // Relay calls run outside it.
-  let queue: Promise<unknown> = Promise.resolve();
+  // Queued work shares one durable save per file. Results and relay calls
+  // wait for the batch to reach disk; later work cannot see unsaved state.
+  const pending: Array<{ run(): Promise<() => void>; reject(error: unknown): void }> = [];
+  const saves = new Map<string, string>();
+  let draining = false;
   function locked<T>(work: () => Promise<T>): Promise<T> {
-    const run = queue.then(work);
-    queue = run.catch(() => undefined);
-    return run;
+    return new Promise<T>((resolve, reject) => {
+      pending.push({ run: async () => {
+        try {
+          const result = await work();
+          return () => resolve(result);
+        } catch (error) {
+          return () => reject(error);
+        }
+      }, reject });
+      if (!draining) {
+        draining = true;
+        queueMicrotask(() => { void drain(); });
+      }
+    });
+  }
+
+  async function drain(): Promise<void> {
+    while (pending.length > 0) {
+      const batch = pending.splice(0);
+      const settled: Array<() => void> = [];
+      for (const job of batch) settled.push(await job.run());
+      try {
+        if (saves.size > 0) await mkdir(deps.directory, { recursive: true });
+        for (const [name, data] of saves) {
+          await atomicWriteFile(join(deps.directory, name), data, deps.fileOperations);
+        }
+        for (const settle of settled) settle();
+      } catch (error) {
+        // Reload from disk after any failed save, including a partial batch.
+        localFile = null;
+        accountFiles.clear();
+        for (const job of batch) job.reject(error);
+      } finally {
+        saves.clear();
+      }
+    }
+    draining = false;
   }
 
   const accountFileName = (account: NoticeAccount) =>
@@ -328,9 +365,7 @@ export function createNoticeStore(deps: {
   }
 
   async function save(name: string, value: LocalFile | AccountFile): Promise<void> {
-    await mkdir(deps.directory, { recursive: true });
-    const path = join(deps.directory, name);
-    await atomicReplaceFile(path, (temporary) => writeFile(temporary, JSON.stringify(value), { mode: 0o600 }));
+    saves.set(name, JSON.stringify(value));
   }
 
   async function loadLocal(): Promise<LocalFile> {
@@ -341,8 +376,7 @@ export function createNoticeStore(deps: {
     return localFile;
   }
 
-  // The cache takes a file only once it is saved. A caller that must not
-  // change the cache on a failed save changes a copy and saves that.
+  // The queue owns staged cache changes until its durable batch completes.
   async function saveLocal(file: LocalFile): Promise<void> {
     await save("local.json", file);
     localFile = file;
