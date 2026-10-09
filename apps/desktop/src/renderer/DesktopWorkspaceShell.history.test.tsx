@@ -538,8 +538,7 @@ describe("history page", () => {
 
     const left = await screen.findByRole("region", { name: "Editor group 1" });
     const right = screen.getByRole("region", { name: "Editor group 2" });
-    const content = (await within(right).findByTestId("view-text-editor"))
-      .querySelector(".cm-content") as HTMLElement;
+    const content = await within(right).findByRole("textbox");
     await user.click(content);
     await user.keyboard("{End} changed");
     await waitFor(() => expect(within(right).getByTestId("tab-dirty")).toBeTruthy());
