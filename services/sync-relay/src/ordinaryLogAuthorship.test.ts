@@ -14,6 +14,24 @@ const context = {kind: "account", accountId: "alice"};
 const snapshot: LiveAuthorSnapshot = [{kind: "human", humanId: "alice", humanName: "Alice"}];
 
 describe("ordinary admitted authorship", () => {
+  it("binds a recipient's logged agent to the recipient and preserves exact replay bytes", async () => {
+    const storage = await testStorage();
+    const payload = {authorContext: {kind: "account", accountId: "recipient",
+      agent: {agentId: "writer", agentName: "Writer", onBehalfOf: "owner", depth: 1}}};
+    const ops = [update(payload)];
+    const expected = [{kind: "human", humanId: "recipient", humanName: "Recipient"},
+      {kind: "agent", ...payload.authorContext.agent, onBehalfOf: "recipient"}];
+    storage.claimWorkspace({workspaceId: "workspace", ownerUserId: "owner", createdAtMs: 1});
+    const admitted = await parseAuthenticatedLogOps(ops, "recipient", () => "Recipient");
+    expect(admitted[0]?.admittedAuthorSnapshot).toEqual(expected);
+    expect(admitted[0]?.payloadJson).toBe(stableJsonStringify(payload));
+    expect(storage.appendLogBatch({workspaceId: "workspace", originId: "recipient-device", ops: admitted}).inserted).toBe(1);
+    const retry = await parseAuthenticatedLogOps(ops, "recipient", () => "Renamed recipient");
+    expect(storage.appendLogBatch({workspaceId: "workspace", originId: "recipient-device", ops: retry})).toMatchObject({inserted: 0, skipped: 1});
+    expect(storage.fetchLogCoordinate({workspaceId: "workspace", originId: "recipient-device", originSeq: 0}))
+      .toMatchObject({payloadJson: stableJsonStringify(payload), admittedAuthorSnapshot: expected});
+  });
+
   it("uses the authenticated account and trusted name while retaining declared agent fields and payload bytes", async () => {
     const payload = {authorContext: {...context, agent: {agentId: "codex", agentName: "Codex", onBehalfOf: "alice", depth: 1}},
       attribution: {humanId: "forged", humanName: "Forged"}};

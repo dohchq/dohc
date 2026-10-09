@@ -35,6 +35,67 @@ pub fn has_adopted_owner_in(
         .map_err(|error| crate::CollabError::Storage(StorageError::corrupt_public(error)))
 }
 
+const OWNER_DRAFT_REFUSAL_ACTOR: &str = "owner-draft-refusal";
+const OWNER_DRAFT_QUARANTINE_ACTOR: &str = "owner-draft-quarantine";
+
+/// Diff the visible owner fields against their current Collection index.
+pub(super) fn index_frontmatter_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    binding: &LiveObjectBinding,
+    visible: &crate::Ydoc,
+    actor: Option<&str>,
+    attribution: Option<&dohc_engine_domain::ChangeAttribution>,
+    now_ms: i64,
+) -> Result<(), OwnerOutboxError> {
+    let before = dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
+        tx,
+        &binding.workspace_id,
+        &binding.main_version_id,
+        &binding.object_id,
+    )
+    .map_err(index_error)?;
+    if let Some(before) = before {
+        index_frontmatter_from_in_tx(tx, binding, &before, visible, actor, attribution, now_ms)?;
+    }
+    Ok(())
+}
+
+pub(super) fn index_frontmatter_from_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    binding: &LiveObjectBinding,
+    before: &serde_json::Value,
+    visible: &crate::Ydoc,
+    actor: Option<&str>,
+    attribution: Option<&dohc_engine_domain::ChangeAttribution>,
+    now_ms: i64,
+) -> Result<(), OwnerOutboxError> {
+    let after = visible.frontmatter_json();
+    dohc_engine_domain::index_collection_frontmatter_apply_in_tx(
+        tx,
+        &binding.workspace_id,
+        &binding.main_version_id,
+        &binding.object_id,
+        before,
+        &after,
+        before,
+        &after,
+        None,
+        actor,
+        attribution,
+        None,
+        now_ms,
+    )
+    .map_err(index_error)?;
+    Ok(())
+}
+
+fn index_error(error: dohc_engine_domain::DomainError) -> OwnerOutboxError {
+    match error {
+        dohc_engine_domain::DomainError::Storage(error) => OwnerOutboxError::Storage(error),
+        _ => OwnerOutboxError::Corrupt,
+    }
+}
+
 /// Where a live frame was accepted, as far as its receiver can tell.
 #[derive(Debug, Clone, Copy)]
 pub enum AcceptedAs<'a> {
@@ -281,12 +342,16 @@ pub fn refuse_entry_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace: &str,
     input: &OwnerOutboxRefuseInput,
+    now_ms: i64,
 ) -> Result<LiveObjectBinding, OwnerOutboxError> {
     validate_identifier(&input.outbox_id, "invalid outbox id")?;
     validate_identifier(&input.delivery_id, "invalid delivery id")?;
     validate_identifier(&input.reason, "invalid refusal reason")?;
     if input.reason.len() > 256 {
         return Err(OwnerOutboxError::InvalidInput("invalid refusal reason"));
+    }
+    if !(0..=9_007_199_254_740_991).contains(&now_ms) {
+        return Err(OwnerOutboxError::InvalidInput("invalid refusal time"));
     }
     validate_digest(&input.update_digest)?;
     let parent = read_parent(tx, &input.outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
@@ -307,13 +372,23 @@ pub fn refuse_entry_in_tx(
             Err(OwnerOutboxError::ReceiptMismatch)
         };
     }
-    let checkpoint_digest = match observed {
-        Some(observed) => observed.checkpoint_digest,
+    let checkpoint_digest = match &observed {
+        Some(observed) => observed.checkpoint_digest.clone(),
         None => native_refusal_checkpoint_in_tx(tx, &parent.binding, input)?,
     };
     tx.execute("UPDATE owner_ydoc_outbox_entries SET pending=0,terminal_blob_digest=update_blob_digest,update_blob_digest=NULL,terminal_reason=?3 WHERE outbox_id=?1 AND delivery_id=?2 AND pending=1", params![input.outbox_id,input.delivery_id,input.reason]).map_err(write_sql)?;
-    draft::refuse_dependent_entries_in_tx(tx, &input.outbox_id, &checkpoint_digest)?;
+    let visible = draft::refuse_dependent_entries_in_tx(tx, &input.outbox_id, &checkpoint_digest)?;
     refresh_pending_in_tx(tx, &input.outbox_id)?;
+    if observed.is_some() && parent.state != OwnerOutboxState::Quarantined {
+        index_frontmatter_in_tx(
+            tx,
+            &parent.binding,
+            &visible,
+            Some(OWNER_DRAFT_REFUSAL_ACTOR),
+            None,
+            now_ms,
+        )?;
+    }
     Ok(parent.binding)
 }
 
@@ -1229,7 +1304,24 @@ pub fn quarantine(
     store: &mut EngineStore,
     workspace_id: &str,
     input: OwnerOutboxQuarantineInput,
+    now_ms: i64,
 ) -> Result<(), OwnerOutboxError> {
+    let outcome = store.write_with(&NoFaults, |tx| {
+        quarantine_in_tx(tx, workspace_id, &input, now_ms)
+    })?;
+    committed(outcome)
+}
+
+/// Quarantine and its visible-field rollback share the caller's transaction.
+pub(crate) fn quarantine_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    input: &OwnerOutboxQuarantineInput,
+    now_ms: i64,
+) -> Result<(), OwnerOutboxError> {
+    if !(0..=9_007_199_254_740_991).contains(&now_ms) {
+        return Err(OwnerOutboxError::InvalidInput("invalid quarantine time"));
+    }
     validate_identifier(&input.outbox_id, "outbox id must be non-empty and bounded")?;
     validate_identifier(
         &input.reason,
@@ -1237,21 +1329,42 @@ pub fn quarantine(
     )?;
     let observed_binding = input
         .observed_binding
+        .clone()
         .map(|binding| binding.normalized().map_err(OwnerOutboxError::InvalidInput))
         .transpose()?;
     let observed_binding_json = observed_binding.as_ref().map(binding_json).transpose()?;
-    let outcome = store.write_with(&NoFaults, |tx| {
-        let parent = read_parent(tx, &input.outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
-        require_workspace(workspace_id, &parent.binding.workspace_id)?;
-        tx.execute(
-            "UPDATE owner_ydoc_outboxes SET state='quarantined',quarantine_reason=?2,\
-             observed_binding_json=?3 WHERE outbox_id=?1",
-            params![input.outbox_id, input.reason, observed_binding_json],
-        )
-        .map_err(write_sql)?;
-        Ok::<(), OwnerOutboxError>(())
-    })?;
-    committed(outcome)
+    let parent = read_parent(tx, &input.outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
+    require_workspace(workspace_id, &parent.binding.workspace_id)?;
+    if parent.state != OwnerOutboxState::Quarantined {
+        // Only the current observed generation owns the draft field index.
+        let current_observation: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND binding_json=?5)",
+                params![parent.binding.workspace_id, parent.binding.main_version_id, parent.binding.object_id, parent.binding.lineage_claim_id, binding_json(&parent.binding)?],
+                |row| row.get(0),
+            )
+            .map_err(read_sql)?;
+        if current_observation {
+            // A host can advance native state without updating its retained observation.
+            let native =
+                crate::load_doc_in(tx, &draft::key(&parent.binding)?).map_err(draft::collab)?;
+            index_frontmatter_in_tx(
+                tx,
+                &parent.binding,
+                &native,
+                Some(OWNER_DRAFT_QUARANTINE_ACTOR),
+                None,
+                now_ms,
+            )?;
+        }
+    }
+    tx.execute(
+        "UPDATE owner_ydoc_outboxes SET state='quarantined',quarantine_reason=?2,\
+         observed_binding_json=?3 WHERE outbox_id=?1",
+        params![input.outbox_id, input.reason, observed_binding_json],
+    )
+    .map_err(write_sql)?;
+    Ok(())
 }
 
 fn read_parent(conn: &Connection, outbox_id: &str) -> Result<Option<ParentRow>, OwnerOutboxError> {
@@ -1693,6 +1806,7 @@ mod tests {
                             reason: "binding changed".to_owned(),
                             observed_binding: None,
                         },
+                        20,
                     )
                     .expect("quarantine during read");
                 }
@@ -2089,6 +2203,7 @@ mod tests {
                 reason: "restore-fence-mismatch".to_owned(),
                 observed_binding: Some(binding()),
             },
+            20,
         )
         .expect("quarantine");
         let pending = read_pending(&store, "workspace-1", &outbox).expect("pending");

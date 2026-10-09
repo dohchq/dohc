@@ -204,15 +204,34 @@ fn adopted_settlement_preserves_unattributed_owner_and_recipient_contributions()
     }
 }
 fn native_tail_edit(f: &mut Fixture, source: &str, now: i64) -> owner_outbox::OwnerOutboxEntry {
+    native_tail_edit_for(f, source, now, Some("owner"))
+}
+
+fn native_tail_edit_for(
+    f: &mut Fixture,
+    source: &str,
+    now: i64,
+    local_person: Option<&str>,
+) -> owner_outbox::OwnerOutboxEntry {
     let update = f
         .doc
         .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, source)
         .unwrap();
+    native_tail_record_at_depth(f, update, now, local_person, 1)
+}
+
+fn native_tail_record_at_depth(
+    f: &mut Fixture,
+    update: Vec<u8>,
+    now: i64,
+    local_person: Option<&str>,
+    depth: u32,
+) -> owner_outbox::OwnerOutboxEntry {
     let key = f.key.clone();
     let attribution = dohc_engine_domain::ChangeAttribution {
         actor_kind: dohc_engine_domain::ChangeActorKind::Agent,
-        on_behalf_of: Some("owner".into()),
-        depth: 1,
+        on_behalf_of: local_person.map(str::to_owned),
+        depth,
         run: None,
     };
     crate::record_local_update(
@@ -259,13 +278,13 @@ fn native_tail_edit(f: &mut Fixture, source: &str, now: i64) -> owner_outbox::Ow
         .clone()
 }
 
-fn native_tail_apply(
-    f: &mut Fixture,
+fn native_tail_event(
+    f: &Fixture,
     bytes: Vec<u8>,
     delivery: String,
     cursor: i64,
-) -> LiveUpdateHostApplicationAck {
-    // The relay accepts this owner's own delivery as its entry declared it.
+) -> AdmittedLiveUpdate {
+    // The relay binds the declared agent to the authenticated owner.
     let declared: Option<Option<String>> = f
         .store
         .read_with(|conn| {
@@ -280,7 +299,7 @@ fn native_tail_apply(
     let agent_declaration: Option<AgentDeclaration> = declared
         .flatten()
         .map(|json| serde_json::from_str(&json).unwrap());
-    let event = AdmittedLiveUpdate {
+    AdmittedLiveUpdate {
         metadata: AdmittedLiveUpdateMetadata {
             accepted: RelayAcceptedLiveUpdate {
                 receipt: LiveUpdateReceipt {
@@ -300,14 +319,28 @@ fn native_tail_apply(
             author_snapshot: Some(
                 (agent_declaration)
                     .into_iter()
-                    .map(crate::live_update_application::LiveAuthorEntry::from)
+                    .map(|declaration| {
+                        crate::live_update_application::LiveAuthorEntry::from(AgentDeclaration {
+                            on_behalf_of: Some("owner".into()),
+                            ..declaration
+                        })
+                    })
                     .collect(),
             ),
             first_seen_deletes: Some(vec![]),
             checkpoint_coverage: None,
         },
         update_bytes: bytes.clone(),
-    };
+    }
+}
+
+fn native_tail_apply(
+    f: &mut Fixture,
+    bytes: Vec<u8>,
+    delivery: String,
+    cursor: i64,
+) -> LiveUpdateHostApplicationAck {
+    let event = native_tail_event(f, bytes.clone(), delivery, cursor);
     let ApplicationResult::Applied(ack, _) = apply_committed(
         &mut f.store,
         &mut WriterDocCache::new(),
@@ -387,6 +420,234 @@ fn native_tail_inventory(store: &EngineStore) -> Value {
         let entries=q.query_map([],|r|Ok(serde_json::json!([r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,i64>(6)?,r.get::<_,i64>(7)?,r.get::<_,i64>(8)?,r.get::<_,Option<String>>(9)?]))).unwrap().collect::<Result<Vec<_>,_>>()?;
         Ok::<_,rusqlite::Error>(serde_json::json!(entries))
     }).unwrap()
+}
+
+#[test]
+fn relay_bound_owner_agent_draft_applies_and_restores_with_local_or_absent_person() {
+    for local_person in [Some("installation-person"), None] {
+        let mut f = Fixture::new();
+        f.adopt().unwrap();
+        let first = native_tail_edit_for(&mut f, "first agent edit", 11, local_person);
+        let ack = native_tail_apply(&mut f, first.update.clone(), first.delivery_id.clone(), 7);
+        assert!(
+            native_tail_apply(&mut f, first.update.clone(), first.delivery_id, 7)
+                .application_replayed
+        );
+        assert_eq!(ack.local_ydoc_sequence, 1);
+        let second = native_tail_edit_for(&mut f, "next agent edit", 12, local_person);
+        let ack = native_tail_apply(&mut f, second.update, second.delivery_id, 8);
+        assert_eq!(ack.local_ydoc_sequence, 2);
+        let terminal = LiveUpdateReceipt {
+            delivery_id: ack.delivery_id,
+            update_digest: ack.update_digest,
+            journal_cursor: ack.journal_cursor,
+            accepting_host_epoch: ack.accepting_host_epoch,
+        };
+        let input = native_tail_input(&mut f, Some(terminal), ack.local_ydoc_sequence);
+        let proposal = native_tail_prepare(&mut f, input).unwrap();
+        assert_eq!(proposal.receipt().native_sources.len(), 2);
+        for source in &proposal.receipt().native_sources {
+            assert!(source.accepted_receipt.is_some());
+            assert_eq!(
+                source
+                    .source
+                    .native()
+                    .unwrap()
+                    .agent_declaration()
+                    .unwrap()
+                    .unwrap()
+                    .on_behalf_of
+                    .as_deref(),
+                local_person
+            );
+        }
+    }
+}
+
+#[test]
+fn relay_bound_owner_agent_draft_applies_and_restores_after_same_client_depth_change() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let baseline = f.doc.state_vector();
+    let update = f.doc.richdoc_append_paragraph("first agent edit");
+    let first = native_tail_record_at_depth(&mut f, update, 11, Some("owner"), 1);
+    let first_vector = f.doc.state_vector();
+    let clients: Vec<_> = first_vector
+        .iter()
+        .filter_map(|(&client, &clock)| (clock > baseline.get(&client)).then_some(client))
+        .collect();
+    assert_eq!(clients.len(), 1);
+    let client = clients[0];
+    let first_event = native_tail_event(&f, first.update, first.delivery_id, 7);
+    let stored_snapshot = first_event.metadata.author_snapshot.clone();
+    assert!(matches!(
+        apply_committed(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            &f.handle,
+            first_event,
+            &NoFaults,
+            100_000_000,
+            |_, _, _, _| Ok(())
+        ),
+        Ok(ApplicationResult::Applied(..))
+    ));
+
+    let update = f.doc.richdoc_append_paragraph("next agent edit");
+    let second = native_tail_record_at_depth(&mut f, update, 12, Some("owner"), 2);
+    let second_vector = f.doc.state_vector();
+    assert_eq!(second_vector.len(), first_vector.len());
+    assert!(second_vector.get(&client) > first_vector.get(&client));
+    assert!(second_vector
+        .iter()
+        .all(|(&id, &clock)| id == client || clock == first_vector.get(&id)));
+    let mut event = native_tail_event(&f, second.update, second.delivery_id, 8);
+    assert_eq!(event.metadata.admitted_declaration().unwrap().depth, 2);
+    // The relay keeps the first snapshot for this client's unchanged identity.
+    event.metadata.author_snapshot = stored_snapshot;
+    assert_eq!(event.metadata.admitted_declaration().unwrap().depth, 1);
+    let before = native_tail_inventory(&f.store);
+    for authority in [
+        ServerDerivedLiveUpdateAuthority::Named {
+            principal_id: "recipient".into(),
+            grant_id: "grant".into(),
+            grant_generation: 1,
+        },
+        ServerDerivedLiveUpdateAuthority::Link {
+            principal_id: "recipient-link".into(),
+            grant_id: "grant".into(),
+            grant_generation: 1,
+        },
+    ] {
+        let mut other = event.clone();
+        other.metadata.accepted.authority = authority;
+        let LiveAuthorEntry::Agent { on_behalf_of, .. } =
+            &mut other.metadata.author_snapshot.as_mut().unwrap()[0]
+        else {
+            panic!("expected agent")
+        };
+        *on_behalf_of = Some("recipient".into());
+        assert!(matches!(
+            apply_committed(
+                &mut f.store,
+                &mut WriterDocCache::new(),
+                &f.handle,
+                other,
+                &NoFaults,
+                100_000_000,
+                |_, _, _, _| Ok(())
+            ),
+            Err(ApplicationError::Conflict)
+        ));
+        assert_eq!(native_tail_inventory(&f.store), before);
+        assert_eq!(
+            f.store
+                .table_row_count("live_device_update_applications")
+                .unwrap(),
+            1
+        );
+    }
+    let ApplicationResult::Applied(ack, _) = apply_committed(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &f.handle,
+        event,
+        &NoFaults,
+        100_000_000,
+        |_, _, _, _| Ok(()),
+    )
+    .unwrap() else {
+        panic!("application refused")
+    };
+    assert_eq!(ack.local_ydoc_sequence, 2);
+    let terminal = LiveUpdateReceipt {
+        delivery_id: ack.delivery_id,
+        update_digest: ack.update_digest,
+        journal_cursor: ack.journal_cursor,
+        accepting_host_epoch: ack.accepting_host_epoch,
+    };
+    let input = native_tail_input(&mut f, Some(terminal), ack.local_ydoc_sequence);
+    let proposal = native_tail_prepare(&mut f, input).unwrap();
+    let sources = &proposal.receipt().native_sources;
+    assert_eq!(sources.len(), 2);
+    for (source, depth) in sources.iter().zip([1, 2]) {
+        assert!(source.accepted_receipt.is_some());
+        assert_eq!(
+            source
+                .source
+                .native()
+                .unwrap()
+                .agent_declaration()
+                .unwrap()
+                .unwrap()
+                .depth,
+            depth
+        );
+    }
+}
+
+#[test]
+fn relay_bound_owner_agent_draft_refuses_other_principals_and_changed_agents() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let source = native_tail_edit_for(&mut f, "agent edit", 11, Some("installation-person"));
+    let original = native_tail_event(&f, source.update, source.delivery_id, 7);
+    let before = native_tail_inventory(&f.store);
+    for variant in ["named", "link", "wrong-person", "missing-person", "agent"] {
+        let mut event = original.clone();
+        let LiveAuthorEntry::Agent {
+            agent_id,
+            on_behalf_of,
+            ..
+        } = &mut event.metadata.author_snapshot.as_mut().unwrap()[0]
+        else {
+            panic!("expected agent")
+        };
+        match variant {
+            "named" => {
+                event.metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Named {
+                    principal_id: "recipient".into(),
+                    grant_id: "grant".into(),
+                    grant_generation: 1,
+                };
+                *on_behalf_of = Some("recipient".into());
+            }
+            "link" => {
+                event.metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Link {
+                    principal_id: "private-link".into(),
+                    grant_id: "grant".into(),
+                    grant_generation: 1,
+                };
+                *on_behalf_of = Some("public-link".into());
+            }
+            "wrong-person" => *on_behalf_of = Some("recipient".into()),
+            "missing-person" => *on_behalf_of = None,
+            "agent" => *agent_id = "other-agent".into(),
+            _ => unreachable!(),
+        }
+        assert!(
+            matches!(
+                apply_committed(
+                    &mut f.store,
+                    &mut WriterDocCache::new(),
+                    &f.handle,
+                    event,
+                    &NoFaults,
+                    100_000_000,
+                    |_, _, _, _| Ok(())
+                ),
+                Err(ApplicationError::Conflict)
+            ),
+            "{variant}"
+        );
+        assert_eq!(native_tail_inventory(&f.store), before);
+        assert_eq!(
+            f.store
+                .table_row_count("live_device_update_applications")
+                .unwrap(),
+            0
+        );
+    }
 }
 
 #[test]
@@ -1138,7 +1399,7 @@ fn native_restore_keeps_enrolled_owner_drafts_as_truthful_sources() {
             f.store
                 .write_with(&NoFaults, |tx| {
                     durable::record_authorized_update_in_tx(
-                        tx, &key, &update, None, None, false, 11,
+                        tx, &key, &update, true, None, None, false, 11,
                     )
                 })
                 .unwrap();
@@ -1292,7 +1553,7 @@ fn native_restore_tail_accepts_trusted_deduped_pre_adoption_source_as_overlappin
         .store
         .write_with(&NoFaults, |tx| {
             let outcome = durable::record_authorized_update_in_tx(
-                tx, &key, &original, None, None, false, 11,
+                tx, &key, &original, true, None, None, false, 11,
             )?;
             owner_outbox::append_adopted_local_update_in_tx(
                 tx,

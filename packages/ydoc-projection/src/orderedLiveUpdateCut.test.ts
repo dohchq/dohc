@@ -820,22 +820,31 @@ function descendants(node: ts.Node): ts.Node[] {
 
 function parsedSources(
   paths: readonly string[],
-  override?: { path: string; text: string },
+  overrides: ReadonlyMap<string, string> = new Map(),
 ): Map<string, ts.SourceFile> {
+  const normalize = (path: string): string => path.replaceAll('\\', '/').toLowerCase()
+  const configPath = fileURLToPath(new URL('../tsconfig.json', import.meta.url))
+  const files = new Map(paths.map(path => [
+    normalize(path), overrides.get(path) ?? readFileSync(path, 'utf8'),
+  ]))
+  // These proofs use syntax only. Do not load the package's dependency graph.
+  files.set(normalize(configPath), JSON.stringify({
+    compilerOptions: { target: 'ES2022', noResolve: true, noLib: true, types: [] },
+    files: paths,
+  }))
   const api = new TypeScriptApi({
     cwd: fileURLToPath(new URL('..', import.meta.url)),
-    fs: override === undefined ? undefined : {
-      readFile: path => path.replaceAll('\\', '/').toLowerCase() === override.path.replaceAll('\\', '/').toLowerCase()
-        ? override.text
-        : undefined,
+    fs: {
+      readFile: path => files.get(normalize(path)) ?? null,
+      fileExists: path => files.has(normalize(path)),
     },
   })
   let snapshot: ReturnType<TypeScriptApi['updateSnapshot']> | undefined
   try {
-    snapshot = api.updateSnapshot({ openFiles: [...paths] })
+    snapshot = api.updateSnapshot({ openProjects: [configPath] })
+    const project = snapshot.getProject(configPath)
     const result = new Map<string, ts.SourceFile>()
     for (const path of paths) {
-      const project = snapshot.getDefaultProjectForFile(path)
       const source = project?.program.getSourceFile(path)
       if (source === undefined) throw new Error(`TypeScript did not parse ${path}`)
       result.set(path, source)
@@ -2665,13 +2674,24 @@ describe('validateOrderedLiveUpdateCut', () => {
     const source = readFileSync(ORDERED_CUT_SOURCE, 'utf8')
     const start = source.indexOf('function addProjectedContribution(')
     const insertion = source.indexOf('  return next', start)
-    for (const write of [
+    expect(start).toBeGreaterThan(-1)
+    expect(insertion).toBeGreaterThan(start)
+    const variants = [
       'next.structVisits += 1', 'next.structVisits -= 1',
       'next.structVisits++', '--next.structVisits',
-    ]) {
-      const text = source.slice(0, insertion) + `  ${write}\n` + source.slice(insertion)
-      const ast = parsedSources([ORDERED_CUT_SOURCE], { path: ORDERED_CUT_SOURCE, text })
-        .get(ORDERED_CUT_SOURCE)!
+    ].map((write, index) => ({
+      path: ORDERED_CUT_SOURCE.replace(/\.ts$/, `.write-${index}.ts`),
+      text: source.slice(0, insertion) + `  ${write}\n` + source.slice(insertion),
+      write,
+    }))
+    const sources = new Map([
+      [ORDERED_CUT_SOURCE, source],
+      ...variants.map(({ path, text }) => [path, text] as const),
+    ])
+    const asts = parsedSources([...sources.keys()], sources)
+    expect(() => assertProjectedWrites(asts.get(ORDERED_CUT_SOURCE)!)).not.toThrow()
+    for (const { path, write } of variants) {
+      const ast = asts.get(path)!
       expect(ast.getText(ast)).toContain(write)
       expect(() => assertProjectedWrites(ast), write).toThrow()
     }

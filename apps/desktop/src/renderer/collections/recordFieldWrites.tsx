@@ -142,8 +142,7 @@ export function CollectionRecordFieldWrite({
       workspaceId,
       collectionPath,
       mutate: (schema) => {
-        const refusal = accessRefusals.get(workspaceId);
-        if (refusal) throw new Error(refusal);
+        if (accessRefusals.has(workspaceId)) throw new Error(WRITE_NOT_SAVED_MESSAGE);
         selectionChanged = selectionChangedSinceEdit(docState.doc?.getMap(FRONTMATTER_FIELD).get(change.field), change.previousValues, change.value);
         if (selectionChanged) throw new Error(CHANGED_SELECTION_MESSAGE);
         const next = addSelectOption(schema, change.field, createOption);
@@ -250,7 +249,7 @@ export function CollectionRecordFieldWrite({
   useEffect(() => {
     if (!applied.current) return;
     if (docState.deletedWhileEditing || docState.readOnlyWhileEditing) {
-      onFailed(docState.saveError ? `dohc could not save this change. ${docState.saveError}` : null);
+      onFailed(docState.saveError ? `${WRITE_NOT_SAVED_MESSAGE} ${docState.saveError}` : null);
       return;
     }
     switch (docState.saveState.kind) {
@@ -288,7 +287,7 @@ export function CollectionRecordFieldWrite({
       case "changed-on-disk":
         onFailed(
           docState.saveError
-            ? `dohc could not save this change. ${docState.saveError}`
+            ? `${WRITE_NOT_SAVED_MESSAGE} ${docState.saveError}`
             : null,
         );
         return;
@@ -385,6 +384,7 @@ function retainSchemaMutation(workspaceId: string): () => void {
 // next step once the operation finishes.
 const PAUSED_REFUSAL_MESSAGE =
   "dohc did not save this change because a file operation was in progress.";
+const WRITE_NOT_SAVED_MESSAGE = "dohc did not save this change.";
 const STALE_LINEAGE_MESSAGE =
   "This workspace changed versions or restored earlier work. Copy your unsaved value before discarding it.";
 const SUPERSEDED_MESSAGE =
@@ -459,9 +459,9 @@ export function setCollectionFieldWriteAccess(workspaceId: string, refusal: stri
     const blocked = queue.filter(write => write.workspaceId === workspaceId && write.id !== appliedWrite?.id);
     for (const write of blocked) {
       schemaPreparations.get(write.id)?.abort();
-      retainFailure(write, refusal);
+      retainFailure(write, WRITE_NOT_SAVED_MESSAGE);
       const key = keyFor(workspaceId, write.collectionPath);
-      statuses.set(key, { ...(statuses.get(key) ?? EMPTY_STATUS), error: refusal, waiting: null });
+      statuses.set(key, { ...(statuses.get(key) ?? EMPTY_STATUS), error: WRITE_NOT_SAVED_MESSAGE, waiting: null });
     }
     queue = queue.filter(write => write.workspaceId !== workspaceId || write.id === appliedWrite?.id);
   }
@@ -529,9 +529,9 @@ export function enqueueCollectionFieldWrite(
   const current = statuses.get(key) ?? EMPTY_STATUS;
   const write = { id: nextWriteId, workspaceId, collectionPath, change, createOption, lineage, onIndexed, onDiscarded };
   if (accessRefusals.has(workspaceId) || pausedWorkspaces.has(workspaceId) || lineage !== collectionWriteLineage(workspaceId)) {
-    const message = accessRefusals.get(workspaceId) ?? (lineage !== collectionWriteLineage(workspaceId)
+    const message = lineage !== collectionWriteLineage(workspaceId)
       ? STALE_LINEAGE_MESSAGE
-      : PAUSED_REFUSAL_MESSAGE);
+      : pausedWorkspaces.has(workspaceId) ? PAUSED_REFUSAL_MESSAGE : WRITE_NOT_SAVED_MESSAGE;
     retainFailure(write, message);
     statuses.set(key, { ...current, error: message });
     trimStatuses();
@@ -583,7 +583,7 @@ function failCollectionFieldWrite(id: number, message: string | null, recoveryOn
   if (head?.id !== id) return;
   if (appliedWrite?.id === id) appliedWrite = null;
   queue = queue.slice(1);
-  const line = accessRefusals.get(head.workspaceId) ?? message ?? "dohc could not save this change.";
+  const line = message ?? WRITE_NOT_SAVED_MESSAGE;
   retainFailure(head, line, recoveryOnly);
   const key = keyFor(head.workspaceId, head.collectionPath);
   const current = statuses.get(key) ?? EMPTY_STATUS;
@@ -840,10 +840,19 @@ export function useCollectionWriteStatus(
   workspaceId: string,
   collectionPath: string,
 ): CollectionWriteStatus {
-  return useSyncExternalStore(
+  const status = useSyncExternalStore(
     subscribe,
     () => statuses.get(keyFor(workspaceId, collectionPath)) ?? EMPTY_STATUS,
   );
+  const accessRefusal = useSyncExternalStore(subscribe, () => accessRefusals.get(workspaceId) ?? null);
+  // Saved holds use this line too; access explains only a retryable failure.
+  const hasRetryableFailure = useSyncExternalStore(subscribe, () => {
+    const error = statuses.get(keyFor(workspaceId, collectionPath))?.error ?? null;
+    return error !== null && failures.some(failure => failure.workspaceId === workspaceId &&
+      failure.collectionPath === collectionPath && failure.message === error &&
+      !failure.recoveryOnly && !failure.superseded && failure.lineage === collectionWriteLineage(workspaceId));
+  });
+  return accessRefusal === null || status.error === null || !hasRetryableFailure ? status : { ...status, error: accessRefusal };
 }
 
 // Test seam: the queue is module state, so suites that enqueue writes reset
@@ -893,7 +902,7 @@ function CollectionWriteFailureRow({
         {failure.change.field} in {file}
       </span>
       <span className="text-[12px] text-ink">
-        {stale ? STALE_LINEAGE_MESSAGE : failure.superseded ? SUPERSEDED_MESSAGE : accessRefusal ?? failure.message}
+        {stale ? STALE_LINEAGE_MESSAGE : failure.superseded ? SUPERSEDED_MESSAGE : failure.recoveryOnly ? failure.message : accessRefusal ?? failure.message}
       </span>
       <textarea
         aria-label="Unsaved collection value"

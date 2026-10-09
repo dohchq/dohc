@@ -290,6 +290,13 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         RuntimeError::Sync(error) => map_sync_code(error),
         RuntimeError::Relay(error) => map_relay_code(error),
         RuntimeError::Search(error) => map_search_code(error),
+        materialize @ RuntimeError::Materialize(_) => {
+            eprintln!(
+                "engine: materialization refusal: {}",
+                error_chain(&materialize)
+            );
+            return WireError::new(ErrorCode::Internal, materialize.code());
+        }
         other => {
             // The wire carries a constant message. The cause goes to stderr,
             // which the desktop copies into its log.
@@ -537,6 +544,24 @@ pub(super) fn workspace_unavailable() -> WireError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn conditional_restore_delete_materialization_reason_reaches_rpc() {
+        for error in [
+            dohc_engine_files::MaterializeError::SymlinkTarget,
+            dohc_engine_files::MaterializeError::RecoveryUnavailable,
+            dohc_engine_files::MaterializeError::Io {
+                path: "record.md".into(),
+                kind: std::io::ErrorKind::PermissionDenied,
+            },
+        ] {
+            let code = error.code();
+            let wire = super::map_runtime(dohc_engine_runtime::RuntimeError::Materialize(error));
+            assert_eq!(wire.code, dohc_engine_protocol::ErrorCode::Internal);
+            assert_eq!(wire.message, code);
+            assert!(!wire.message.contains("record.md"));
+        }
+    }
+
     #[test]
     fn collection_lease_refusal_has_its_own_retryable_wire_code() {
         let error = super::map_runtime(dohc_engine_runtime::RuntimeError::Sync(

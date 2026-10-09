@@ -127,7 +127,7 @@ function publication(
         agent: {
           agentId,
           agentName: "Trip",
-          onBehalfOf: "reader",
+          onBehalfOf: "owner",
           depth: 2,
         },
       },
