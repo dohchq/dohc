@@ -9,13 +9,14 @@ import { useShareDirectWrites, type DirectWriteNotice } from "./renderer/shell/u
 import { deferred } from "./testing/deferred";
 import { useShellError } from "./renderer/shell/useShellError";
 import { RendererWorkspaceSessionOwner } from "./window/rendererWorkspaceSessionOwner";
+import { decideNavigation } from "./security/electronSecurity";
 
 const REFUSED = { status: "pushed" as const, writes: [{ result: "refused" as const, paths: ["tasks/automations.yaml"], reason: "" }] };
 type Input = ShareDirectWriteDeliveryPayload;
 type Listen = Extract<Input, { action: "listen" }>;
 type Callback = (event: ShareDirectWritesPushedEvent, delivery: ShareDirectWriteAnswerDelivery) => void;
 type Navigation = (details: { isSameDocument: boolean; isMainFrame: boolean }) => void;
-type Sender = { send(channel: string, event: ShareDirectWritesPushedEvent): void; once(event: "destroyed", callback: () => void): void; on(event: "did-start-navigation", callback: Navigation): void };
+type Sender = { send(channel: string, event: ShareDirectWritesPushedEvent): void; once(event: "destroyed", callback: () => void): void; on(event: "did-start-navigation" | "did-navigate", callback: Navigation): void };
 
 function harness(onAcknowledge?: () => void) {
   const order: string[] = [];
@@ -36,7 +37,7 @@ function harness(onAcknowledge?: () => void) {
   function windowFor(workspaceId = "a") {
     const events: ShareDirectWritesPushedEvent[] = [];
     let callback: Callback | null = null, destroy!: () => void;
-    let navigation: Navigation | undefined;
+    const navigation = new Map<string, Navigation>();
     let listening!: Listen;
     let deferUnsubscribe = false;
     const unsubscriptions: Array<() => Promise<boolean>> = [];
@@ -54,7 +55,7 @@ function harness(onAcknowledge?: () => void) {
         });
       },
       once: (_event: "destroyed", listener: () => void) => { destroy = listener; },
-      on: (_event: "did-start-navigation", listener: Navigation) => { navigation = listener; },
+      on: (event: "did-start-navigation" | "did-navigate", listener: Navigation) => { navigation.set(event, listener); },
     };
     const rendererDocumentId = crypto.randomUUID();
     sessions.set(sender, { workspaceId, rendererDocumentId });
@@ -74,7 +75,11 @@ function harness(onAcknowledge?: () => void) {
       },
     } as unknown as DohcDesktopBridge;
     return { sender, api, events, identity: () => listening, destroy: () => { sessions.delete(sender); destroy(); },
-      navigate: (isSameDocument = false, isMainFrame = true) => navigation?.({ isSameDocument, isMainFrame }),
+      navigate: (isSameDocument = false, isMainFrame = true, cancelled = false) => {
+        const details = { isSameDocument, isMainFrame };
+        navigation.get("did-start-navigation")?.(details);
+        if (!cancelled && isMainFrame && !isSameDocument) navigation.get("did-navigate")?.(details);
+      },
       deferUnsubscribe: () => { deferUnsubscribe = true; }, flushUnsubscribe: () => Promise.all(unsubscriptions.splice(0).map(run => run())),
       move: (workspaceId: string, document: string = rendererDocumentId) => sessions.set(sender, { workspaceId, rendererDocumentId: document }) };
   }
@@ -222,7 +227,7 @@ it("replays the previous workspace when a listener replaces a claimed answer's w
   expect(await f.operation(b.sender, { ...b.identity(), action: "claim", answerId })).toBe(true);
 });
 
-it("replays an unshown claim when its renderer reloads without a new subscription", async () => {
+it("replays an unshown claim after committed cross-document navigation", async () => {
   const f = harness(), a = f.addWindow(), b = f.addWindow();
   a.api.onShareDirectWritesPushed(() => {}, "a"); b.api.onShareDirectWritesPushed(() => {}, "a");
   f.delivery.report("a", REFUSED);
@@ -236,7 +241,7 @@ it("replays an unshown claim when its renderer reloads without a new subscriptio
   expect(await f.operation(b.sender, { ...b.identity(), action: "claim", answerId })).toBe(true);
 });
 
-it("replays an unshown claim on session retirement into an owner workspace", async () => {
+it.each(["reload", "crash", "owner workspace"] as const)("replays an unshown claim on session retirement for %s", async reason => {
   const events: ShareDirectWritesPushedEvent[][] = [[], []];
   const senders = events.map((rows, id) => ({ id, isDestroyed: () => false,
     send: (_channel: string, event: ShareDirectWritesPushedEvent) => rows.push(event), once: () => {}, on: () => {} }));
@@ -257,10 +262,30 @@ it("replays an unshown claim on session retirement into an owner workspace", asy
   delivery.report("a", REFUSED);
   const answerId = events[0]![0]!.answerId;
   expect(delivery.update(senders[0]!, { ...listeners[0]!, action: "claim", answerId })).toBe(true);
-  await sessions.open(senders[0]!, { workspaceId: "owner", attachmentId: Symbol("owner") }, listeners[0]!.rendererDocumentId);
+  if (reason === "reload") expect(await sessions.retireForReload(senders[0]!, listeners[0]!.rendererDocumentId)).toBe(true);
+  else if (reason === "crash") await sessions.retireAfterCrash(senders[0]!);
+  else await sessions.open(senders[0]!, { workspaceId: "owner", attachmentId: Symbol("owner") }, listeners[0]!.rendererDocumentId);
   expect(events[1]!.map(event => event.answerId)).toEqual([answerId, answerId]);
   expect(delivery.update(senders[0]!, { ...listeners[0]!, action: "acknowledge", answerId })).toBe(false);
   expect(delivery.update(senders[1]!, { ...listeners[1]!, action: "claim", answerId })).toBe(true);
+});
+
+it.each(["https://example.com/outside", "file:///C:/outside.txt"])("keeps a denied navigation to %s subscribed and acknowledges its claim once", async url => {
+  const f = harness(), a = f.addWindow(), b = f.addWindow();
+  a.api.onShareDirectWritesPushed(() => {}, "a"); b.api.onShareDirectWritesPushed(() => {}, "a");
+  f.delivery.report("a", REFUSED);
+  const answerId = a.events[0]!.answerId;
+  expect(await f.operation(a.sender, { ...a.identity(), action: "claim", answerId })).toBe(true);
+  const policy = { httpOrigins: ["http://localhost:5173"], fileUrlPrefix: "file:///C:/desktop/renderer/" };
+  const decision = decideNavigation(url, policy);
+  expect(decision.action).toBe("deny");
+  a.navigate(false, true, decision.action === "deny");
+  expect(await f.operation(a.sender, { ...a.identity(), action: "acknowledge", answerId })).toBe(true);
+  expect(await f.operation(a.sender, { ...a.identity(), action: "acknowledge", answerId })).toBe(false);
+  expect(b.events.map(event => event.answerId)).toEqual([answerId]);
+  f.delivery.report("a", REFUSED);
+  expect(a.events).toHaveLength(2);
+  expect(a.events[1]!.answerId).not.toBe(answerId);
 });
 
 it.each(["readiness", "workspace"] as const)("acknowledges a committed Notice before %s cleanup can replay it", async transition => {

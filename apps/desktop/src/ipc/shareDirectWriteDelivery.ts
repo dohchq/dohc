@@ -8,7 +8,7 @@ type Listener = Extract<ShareDirectWriteDeliveryPayload, { action: "listen" }>;
 interface Target {
   send(channel: string, event: ShareDirectWritesPushedEvent): void;
   once(event: "destroyed", callback: () => void): unknown;
-  on(event: "did-start-navigation", callback: (details: { isSameDocument: boolean; isMainFrame: boolean }) => void): unknown;
+  on(event: "did-navigate", callback: () => void): unknown;
 }
 
 export function createShareDirectWriteDelivery<Sender extends Target>(dependencies: {
@@ -79,9 +79,7 @@ export function createShareDirectWriteDelivery<Sender extends Target>(dependenci
       if (!observed.has(sender)) {
         observed.add(sender);
         sender.once("destroyed", () => retireSender(sender));
-        sender.on("did-start-navigation", details => {
-          if (details.isMainFrame && !details.isSameDocument) retireSender(sender);
-        });
+        sender.on("did-navigate", () => retireSender(sender));
       }
       replay(input.workspaceId);
       return true;
