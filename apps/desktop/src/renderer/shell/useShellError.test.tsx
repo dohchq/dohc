@@ -2,6 +2,7 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { StrictMode, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { CHECKPOINT_FAILURE_MESSAGE, IMPORT_FAILURE_MESSAGE } from "../../workspaces/typingRecoveryWords";
 import { ipcErrorMessage } from "../ipcError";
 import { useShellError } from "./useShellError";
 import { shareCaptureNoticeState } from "../../workspaces/shareCaptureNotice";
@@ -376,4 +377,12 @@ it("retries unavailable recovery through the supplied action", () => {
   act(() => result.current.retryShellError(result.current.shellErrors[0].id));
   expect(retry).toHaveBeenCalledOnce();
   expect(result.current.shellErrors).toEqual([]);
+});
+
+it.each([["typing-checkpoint", CHECKPOINT_FAILURE_MESSAGE], ["typing-import", IMPORT_FAILURE_MESSAGE]] as const)("files one %s Notice with retry and copy details", (kind, message) => {
+ const retry = vi.fn(); const {result} = renderHook(() => useShellError("workspace"));
+ act(() => {result.current.reportShellFailure({kind, message, details: [["Reason", "disk or author refusal"]], retry}); result.current.reportShellFailure({kind, message, details: [["Reason", "retry refused"]], retry});});
+ expect(result.current.shellErrors).toHaveLength(1); const row = result.current.shellErrors[0]!;
+ expect(row).toMatchObject({kind, message, seen: false, retry}); expect(row.details).toEqual([["Reason", "retry refused"]]);
+ act(() => result.current.retryShellError(row.id)); expect(retry).toHaveBeenCalledOnce();
 });

@@ -3552,9 +3552,8 @@ describe("ui-state merge-on-load", () => {
     renderShell(bridge);
 
     await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1));
-    // Notifications subscribes immediately; the listing refresh listener is
-    // the second live subscription and waits for workspace readiness.
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
+    // Both the listing refresh and typing recovery subscribe after readiness.
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
     vi.useFakeTimers();
     try {
       act(() => {

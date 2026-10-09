@@ -16,6 +16,7 @@ import clipboardIpc from "./ipcExposure.pr1639.json";
 import recipientRecordsIpc from "./ipcExposure.pr1688.json";
 import launchOpenIpc from "./ipcExposure.pr1701.json";
 import restartCaptureIpc from "./ipcExposure.pr1719.json";
+import earlyQuitIpc from "./ipcExposure.earlyQuit.json";
 import liveDraftRecoveryIpc from "./ipcExposure.pr1747.json";
 import reportsIpc from "./ipcExposure.reports.json";
 import saveRetryIpc from "./ipcExposure.saveRetry.json";
@@ -59,7 +60,7 @@ describe("B1 main inventories (a4be19d5b)", () => {
       expect(expectedNames).toContain(name);
       expectedNames.splice(expectedNames.indexOf(name), 1);
     }
-    for (const name of [...launchOpenIpc.nameAdditions, ...recipientRecordsIpc.nameAdditions, ...liveDraftRecoveryIpc.nameAdditions, ...restartCaptureIpc.nameAdditions, ...reportsIpc.nameAdditions, ...saveRetryIpc.nameAdditions]) {
+    for (const name of [...launchOpenIpc.nameAdditions, ...recipientRecordsIpc.nameAdditions, ...liveDraftRecoveryIpc.nameAdditions, ...restartCaptureIpc.nameAdditions, ...reportsIpc.nameAdditions, ...saveRetryIpc.nameAdditions, ...earlyQuitIpc.nameAdditions]) {
       expect(expectedNames).not.toContain(name);
       expectedNames.push(name);
     }

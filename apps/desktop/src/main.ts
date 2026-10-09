@@ -1,3 +1,4 @@
+import { hasUnresolvedTypingCheckpoints, flushTypingCheckpoints, writeTypingCheckpoint, readTypingCheckpoints, retireTypingCheckpoint, importTypingCheckpoints, type TypingRecoveryFailure } from "./workspaces/outageTypingRecovery";
 import { liveDraftRecoveryOperations } from "./ipc/bridgeContract";
 import { SharedDocumentWaitingError } from "./ipc/sharedDocumentOpenState";
 import { net } from "electron";
@@ -8,7 +9,7 @@ import {ownerShareLabels, refreshOwnerShareLabels, createOwnerShareLabelRefresh}
 import { describeAutomationDataset } from "./workspaces/automationDatasetDescription";
 import { invalidateDatasetAddresses } from "./workspaces/datasetAddress";
 import { createChatDispatchNotices } from "./agents/chatDispatchNotices";
-import { hasRetainedLiveDraft, removeLiveDraftCopies, preserveLiveDraft, preserveUnsentLiveDraft, removeWorkspaceLiveDrafts } from "./workspaces/liveDraftRecovery";
+import { hasWorkspaceLiveDrafts, hasRetainedLiveDraft, removeLiveDraftCopies, preserveLiveDraft, preserveUnsentLiveDraft, removeWorkspaceLiveDrafts } from "./workspaces/liveDraftRecovery";
 import { createPhysicalWorkspaceRemoval, createWorkspaceForget } from "./workspaces/physicalWorkspaceRemoval";
 import { createNamedDesktopLiveCapture } from "./workspaces/namedDesktopLive";
 import {
@@ -1880,6 +1881,14 @@ const removePhysicalWorkspace = createPhysicalWorkspaceRemoval({
   retireBinding: (binding, retirement) => workspaceAuthorities.retireBinding(binding, retirement),
   findWorkspace,
   removeWorkspace,
+  confirmDraftRemoval: async workspaceId => {
+    await flushTypingCheckpoints(workspaceId);
+    if (!(await hasWorkspaceLiveDrafts(join(stateDir(), "live-draft-recovery"), workspaceId))) return true;
+    const answer = await dialog.showMessageBox({type: "warning", title: "Remove this workspace?",
+      message: "This workspace has typing waiting to recover.", detail: "Removing the workspace deletes its recovery copies. This cannot be undone.",
+      buttons: ["Go back", "Remove workspace"], defaultId: 0, cancelId: 0});
+    return answer.response === 1;
+  },
   removeDrafts: workspaceId => removeWorkspaceLiveDrafts(join(stateDir(), "live-draft-recovery"), workspaceId),
   onError: (workspaceId, error) => console.warn(`[desktop] Could not remove recovery records for workspace "${workspaceId}":`, error),
 });
@@ -2179,6 +2188,47 @@ function engineForWorkspace(
   });
 }
 
+function beforeQuitWithTypingRecovery(event: {preventDefault(): void}): void {
+    if (!desktopWindows.workspaceWindows.allLive().length && hasUnresolvedTypingCheckpoints() && !typingQuitApproved) {
+      event.preventDefault();
+      void flushTypingCheckpoints().then(() => {typingQuitApproved = true; app.quit();}, async () => {
+        const answer = await dialog.showMessageBox({type: "warning", title: "Quit without your typing?",
+          message: "dohc could not keep your typing on this computer.", detail: "Your typing is lost when dohc quits.",
+          buttons: ["Go back", "Quit anyway"], defaultId: 0, cancelId: 0});
+        if (answer.response === 1) {typingQuitApproved = true; app.quit();}
+      });
+      return;
+    }
+    quitGuard.beforeQuit(event);
+}
+
+let typingQuitApproved = false;
+const typingRecoveryFailures = new Map<string, Map<string, TypingRecoveryFailure>>();
+const typingRecoveryImports = new Map<symbol, Promise<void>>();
+function reportTypingRecoveryFailure(workspaceId: string, failure: TypingRecoveryFailure): void {
+  let failures = typingRecoveryFailures.get(workspaceId);
+  if (!failures) {failures = new Map(); typingRecoveryFailures.set(workspaceId, failures);}
+  failures.set(failure.kind + ":" + failure.path, failure);
+  notifyRenderer({workspaceId});
+}
+function recoverOutageTyping(workspace: CreatedWorkspace & {attachmentId: symbol}): Promise<void> {
+  const current = () => workspaceAuthorities.isCurrentAttachment(workspace.workspaceId, workspace.attachmentId);
+  const existing = typingRecoveryImports.get(workspace.attachmentId);
+  if (existing) return existing;
+  const pending = importTypingCheckpoints(join(stateDir(), "live-draft-recovery"), workspace.workspaceId,
+    async input => {
+      if (!current()) throw new Error("Workspace changed before typing recovery.");
+      const result = await requireEngineSessions().withRetryBudget(120_000, () => requireEngineSessions().run(workspace, async binding => new VersionedLiveAdapter(binding.client, binding.workspace, {workspaceId: workspace.workspaceId}).importRecovery(input), {retryTransportErrors: true}));
+      if (!current()) throw new Error("Workspace changed during typing recovery.");
+      return result;
+    },
+    failure => {if (current()) reportTypingRecoveryFailure(workspace.workspaceId, failure);},
+    path => {if (current()) {typingRecoveryFailures.get(workspace.workspaceId)?.delete("import:" + path); notifyRenderer({workspaceId: workspace.workspaceId});}},
+  ).catch(error => {if (current()) reportTypingRecoveryFailure(workspace.workspaceId, {kind: "import", path: "", detail: String(error)});}).finally(() => typingRecoveryImports.delete(workspace.attachmentId));
+  typingRecoveryImports.set(workspace.attachmentId, pending);
+  return pending;
+}
+
 const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
   cloudStateFor: (workspaceId) => {
     const remote = findWorkspace(workspaceId)?.remote;
@@ -2205,6 +2255,22 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
       requireEngineSessions(),
       {
         ...testCaptureSeams(),
+        waitForTypingRecovery: () => recoverOutageTyping(workspace),
+        writeTypingCheckpoint: async checkpoint => {
+          try {
+            await writeTypingCheckpoint(join(stateDir(), "live-draft-recovery"), checkpoint);
+            typingRecoveryFailures.get(workspace.workspaceId)?.delete("checkpoint:" + checkpoint.path);
+            notifyRenderer({workspaceId: workspace.workspaceId});
+          } catch (error) {
+            reportTypingRecoveryFailure(workspace.workspaceId, {kind: "checkpoint", path: checkpoint.path, detail: String(error)});
+            throw error;
+          }
+        },
+        retireTypingCheckpoint: async checkpoint => {
+          for (const row of await readTypingCheckpoints(join(stateDir(), "live-draft-recovery"), workspace.workspaceId)) {
+            if (row.checkpoint.objectId === checkpoint.objectId && row.content === JSON.stringify(checkpoint)) await retireTypingCheckpoint(row);
+          }
+        },
         preserveUnsentState: draft => preserveUnsentLiveDraft(
           join(stateDir(), "live-draft-recovery"), workspace.workspaceId, draft,
         ),
@@ -3020,6 +3086,7 @@ async function ensureWorkspaceActivityOpenBody(
     }
   }
   await options.whileEngineStoreLockHeld?.();
+  void recoverOutageTyping(workspace);
   return status;
 }
 
@@ -4641,6 +4708,8 @@ const { refreshDispatchTray, refreshSystemThemeDesktopIcons, dispatchKeepsRunnin
 
 const desktopEngine = createDesktopEngine({
   onWorkspaceOpened: workspaceId => {
+    const workspace = findWorkspace(workspaceId);
+    if (workspace) void withWorkspaceAttachment({workspaceId}, lease => recoverOutageTyping(canonicalWorkspaceFor(lease)));
     void noticeStore().refreshRefusals(workspaceId).catch(error => {
       console.warn("[notices] could not refresh workspace sync refusals after open", error);
     });
@@ -5275,7 +5344,8 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     updateAfterWindowLoadFailure: () => updateAfterFailure("window-load"),
   },
   launch: { finished: finishLaunch },
-  beforeQuit: (event) => { quitGuard.beforeQuit(event); },
+  beforeQuit: beforeQuitWithTypingRecovery,
+  beforeQuitWithoutWindows: beforeQuitWithTypingRecovery,
   shutdown: {
     budgetMs: WILL_QUIT_BUDGET_MS,
     deadlineExitCode: resolveShutdownDeadlineExitCode({
@@ -5292,11 +5362,14 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     },
     stopSearch: () => workspaceSearchOwner.dispose(),
     stopSitePreviews: stopAllSitePreviews,
-    settleYDocs: () => settleYDocsAfterFileObservation(
+    settleYDocs: async () => {
+      await flushTypingCheckpoints();
+      await settleYDocsAfterFileObservation(
       workspaceAuthorities.workspaceIds().map(workspaceId =>
         workspaceAuthorities.withAuthority(workspaceId, lease => workspaceActivity.drainObservations(lease.state.activity))),
       closeAllEngineYDocSessions,
-    ),
+      );
+    },
     stopAgentIntegration: () => agentIntegration.stopAll(),
     flushReports: () => telemetry.flush(),
     closeWorkspaces: async () => {
@@ -6215,6 +6288,13 @@ function registerIpcHandlers(): void {
   inspectNamedForCli = buttonsIpc.inspectNamed;
 
   registerOperations(operationBoundary, liveDraftRecoveryOperations, {
+    typingRecovery: async (input, {operation}) => {
+      operation.assertCurrent();
+      if (input.action !== "read") await flushTypingCheckpoints(operation.workspace.workspaceId);
+      if (input.action === "retry") await recoverOutageTyping(operation.workspace);
+      operation.assertCurrent();
+      return [...(typingRecoveryFailures.get(operation.workspace.workspaceId)?.values() ?? [])];
+    },
     discardLiveDraftRecovery: async (input, {event, operation}) => {
       operation.assertCurrent();
       if (desktopWindows.workspaceWindows.allLive().some(window => window.webContents !== event.sender && rendererWorkspaceSessions.current(window.webContents)?.workspaceId === input.workspaceId)) throw new Error("Close the other window for this workspace, then dismiss this draft again.");

@@ -21,7 +21,7 @@ export function captureForWorkspace(
   },
   hooks: WorkspaceCaptureHooks,
   rustEngineSessions: EngineWorkspaceSessions,
-  captureOptions: Pick<WorkspaceEngineCaptureOptions, "settleDebounceMs" | "openSettleGate" | "preserveUnsentState" | "hasRetainedLiveDraft"> = {},
+  captureOptions: Pick<WorkspaceEngineCaptureOptions, "settleDebounceMs" | "openSettleGate" | "preserveUnsentState" | "hasRetainedLiveDraft" | "writeTypingCheckpoint" | "retireTypingCheckpoint" | "waitForTypingRecovery"> = {},
 ): WorkspaceCaptureDecision {
   // A shared view never gets a recorder: it is fed exclusively by
   // the share's filtered pull, and a watcher would re-journal materialized

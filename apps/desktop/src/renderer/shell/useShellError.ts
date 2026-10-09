@@ -19,6 +19,8 @@ export interface KeptCopyNotice {
 
 export type SettingsFileKind = "user-settings-file" | "workspace-settings-file";
 export type ShellErrorKind =
+  | "typing-checkpoint"
+  | "typing-import"
   | "live-edit-refused"
   | "chat-no-runner"
   | "chat-budget-paused"

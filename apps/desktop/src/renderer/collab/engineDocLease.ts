@@ -1206,6 +1206,7 @@ function createEngineDocSession(
           const bound = await bindEngineYDoc(transport, undefined, {
             onDeliveryFailure: captureDeliveryFailure,
             onDeliveryPendingChange,
+            checkpointForExit: async () => {await bridge().typingRecovery({workspaceId, action: "flush"});},
             onDocumentReplacementStarted: () => {
               replacementPending = true;
               replacementSaveState = null;

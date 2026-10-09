@@ -127,5 +127,6 @@
   "share.capture.notice.dismiss",
   "document.save.retry",
   "capture.recovery.read",
-  "capture.recovery.clear"
+  "capture.recovery.clear",
+  "document.typing.recovery"
 ]

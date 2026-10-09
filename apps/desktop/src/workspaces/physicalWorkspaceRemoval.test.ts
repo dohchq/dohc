@@ -4,7 +4,7 @@ import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
 import { createJoinedWorkspaceRunner } from "./createJoinedWorkspace";
 import type { RegistryEntry } from "./registryStore";
 
-function harness(registeredInitially = true) {
+function harness(registeredInitially = true, confirmDraftRemoval?: (workspaceId: string) => Promise<boolean>) {
   const workspace: RegistryEntry = {workspaceId: "workspace", rootPath: "root", kind: "personal", mode: "local-first"};
   let registered: RegistryEntry | null = registeredInitially ? workspace : null;
   const owner = createWorkspaceAuthorityOwner({
@@ -20,7 +20,7 @@ function harness(registeredInitially = true) {
   const remove = createPhysicalWorkspaceRemoval({
     retireBinding: (binding, retirement) => owner.retireBinding(binding, retirement),
     findWorkspace: () => registered,
-    removeWorkspace, removeDrafts, onError,
+    removeWorkspace, removeDrafts, onError, confirmDraftRemoval,
   });
   const forget = createWorkspaceForget({
     remove: workspaceId => remove(owner.currentBinding(workspaceId)),
@@ -87,4 +87,10 @@ it("reports a draft cleanup failure during failed-join rollback without replacin
   expect(h.onError).toHaveBeenCalledExactlyOnceWith(h.workspace.workspaceId, cleanupError);
   expect(logError).toHaveBeenCalledOnce();
   expect(logError.mock.calls[0]?.[1]).toBe(joinError);
+});
+
+it("warns before removing unresolved typing and leaves its registry and copies when cancelled", async () => {
+ const confirm = vi.fn(async () => false); const h = harness(true, confirm);
+ await expect(h.forget("workspace")).rejects.toThrow("Workspace removal cancelled.");
+ expect(confirm).toHaveBeenCalledExactlyOnceWith("workspace"); expect(h.removeWorkspace).not.toHaveBeenCalled(); expect(h.removeDrafts).not.toHaveBeenCalled(); expect(h.current()).toEqual(h.workspace);
 });

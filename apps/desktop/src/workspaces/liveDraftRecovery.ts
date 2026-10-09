@@ -102,6 +102,10 @@ export async function preserveUnsentLiveDraft(directory: string, workspaceId: st
   } finally { snapshot.destroy(); }
 }
 
+export async function hasWorkspaceLiveDrafts(directory: string, workspaceId: string): Promise<boolean> {
+  return (await recoveryRecords(directory)).some(row => row.record.workspaceId === workspaceId);
+}
+
 export async function removeWorkspaceLiveDrafts(directory: string, workspaceId: string): Promise<void> {
   for (const row of await recoveryRecords(directory)) {
     if (row.record.workspaceId === workspaceId && !activeTemporaryDrafts.has(row.file)) {

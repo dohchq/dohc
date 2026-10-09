@@ -1,3 +1,4 @@
+import { registerYDocDelivery } from "../pendingYDocDeliveries";
 import type { SharedDocumentOpenState } from "../../ipc/sharedDocumentOpenState";
 // WS-G2-C-2 — the ENGINE Y.Doc provider (renderer half of the bridge).
 //
@@ -170,6 +171,7 @@ interface EngineYDocBindOptions {
   // the batch queue or an unacknowledged delivery. Keep the owner informed
   // until every accepted local update has been acknowledged.
   onDeliveryPendingChange?: (pending: boolean) => void;
+  checkpointForExit?: () => Promise<void>;
   // Starts before delivery and recovery await the replacement acknowledgement.
   onDocumentReplacementStarted?: () => void;
   // Runs after the losing mirror stops shipping updates and before main
@@ -466,6 +468,15 @@ export async function bindEngineYDoc(
     return flushStagedUpdates();
   };
 
+  let drainRevision = 0;
+  let drainedRevision = 0;
+  const unregisterDelivery = registerYDocDelivery({pending: () => deliveryPending || drainedRevision !== drainRevision, flush: async () => {
+    const revision = drainRevision;
+    await flushPendingLocalUpdates();
+    await options.checkpointForExit?.();
+    drainedRevision = revision;
+  }});
+
   const flushStagedUpdates = (): Promise<void> => {
     if (scheduledFlush !== null) {
       batchScheduler.cancel(scheduledFlush);
@@ -517,6 +528,7 @@ export async function bindEngineYDoc(
   const onUpdate = (update: Uint8Array, origin: unknown): void => {
     if (destroyed) return;
     if (origin === ENGINE_SOURCED_ORIGIN) return;
+    drainRevision += 1;
     if (localUpdatesRefused) return;
     const nextBytes = retainedBytes + update.byteLength;
     const nextRecords = retainedRecords + 1;
@@ -694,6 +706,7 @@ export async function bindEngineYDoc(
         await flushPendingLocalUpdates();
         await transport.close().catch(() => undefined);
         unsubscribeReplacement();
+        unregisterDelivery();
         doc.destroy();
         for (const retired of retiredDocs) retired.destroy();
         retiredDocs.clear();

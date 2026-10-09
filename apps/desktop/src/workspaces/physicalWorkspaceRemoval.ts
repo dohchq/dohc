@@ -5,12 +5,14 @@ export function createPhysicalWorkspaceRemoval<Workspace extends {workspaceId: s
   findWorkspace(workspaceId: string): Workspace | null;
   removeWorkspace(workspaceId: string): void;
   removeDrafts(workspaceId: string): Promise<void>;
+  confirmDraftRemoval?(workspaceId: string): Promise<boolean>;
   onError(workspaceId: string, error: unknown): void;
 }) {
   return async function removePhysicalWorkspace(
     binding: WorkspaceAuthorityBinding<Workspace>,
     beforeRegistryRemoval: () => void | Promise<void> = () => undefined,
   ): Promise<void> {
+    if (dependencies.confirmDraftRemoval && !(await dependencies.confirmDraftRemoval(binding.workspaceId))) throw new Error("Workspace removal cancelled.");
     await dependencies.retireBinding(binding, {
       finalize: beforeRegistryRemoval,
       removeBinding: () => {
