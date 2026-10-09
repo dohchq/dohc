@@ -894,14 +894,14 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
   const recipientHost = captureNamedLiveFrameHost({...common, ticket: ticket!, actor: liveBrowserActor(viewer), trustedAccount: {accountId: "reader", name: "Reader"}});
   await edit(recipientHost, "RecipientNote", {kind: "account", accountId: "reader"});
   const recipientMoment = (await moments())[0]!;
-  // Each admitted snapshot's account holder, and the recipient the relay accepted the edit from.
-  const expectedAuthors = [
-    ...authors === "recipient-only" ? [] : [{kind: "human", humanId: "owner", humanName: "Owner"}],
-    {kind: "human", humanId: "reader", humanName: "Reader"},
-    {kind: "named", userId: "reader", grantId: "native-grant", grantGeneration: 1},
-  ];
-  expect(recipientMoment.authors).toEqual(expect.arrayContaining(expectedAuthors));
-  expect(recipientMoment.authors).toHaveLength(expectedAuthors.length);
+  // The hosting computer credits the owner snapshot's account holder and the
+  // recipient once, by the grant the relay accepted the edit under. The relay
+  // admits, and devices import, each snapshot's account holder instead.
+  const ownerCredit = authors === "recipient-only" ? [] : [{kind: "human", humanId: "owner", humanName: "Owner"}];
+  const localAuthors = [...ownerCredit, {kind: "named", userId: "reader", grantId: "native-grant", grantGeneration: 1}];
+  const admittedAuthors = [...ownerCredit, {kind: "human", humanId: "reader", humanName: "Reader"}];
+  expect(recipientMoment.authors).toEqual(expect.arrayContaining(localAuthors));
+  expect(recipientMoment.authors).toHaveLength(localAuthors.length);
   await owner.sync();
   // A later operation proves that no refused batch blocks the owner's log.
   await owner.request("versionedText.write", {versionId: "main", path: "after.txt", text: "After recipient settlement", origin: "api", publish: true}, owner.workspace);
@@ -913,8 +913,8 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
   expect(JSON.parse(published.payloadJson).authors).toBeUndefined();
   expect(JSON.parse(published.payloadJson).settlementReference).toBeDefined();
   expect(published.settlementAdmission).toMatchObject({status: "accepted"});
-  expect(published.admittedAuthorSnapshot).toEqual(expect.arrayContaining(expectedAuthors));
-  expect(published.admittedAuthorSnapshot).toHaveLength(expectedAuthors.length);
+  expect(published.admittedAuthorSnapshot).toEqual(expect.arrayContaining(admittedAuthors));
+  expect(published.admittedAuthorSnapshot).toHaveLength(admittedAuthors.length);
   const ownerDatabase = new DatabaseSync(join(owner.root, ".dohc/engine/engine.db"), {readOnly: true});
   try {
     expect(ownerDatabase.prepare("SELECT COUNT(*) AS total FROM replication_pending_refusals WHERE workspace_id=?").get(WORKSPACE)?.total).toBe(0);
@@ -927,12 +927,12 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
   // The peer imports the relay's verified authors and its retained audit
   // evidence adds no credit to the moment.
   const importedAuthors = imported.find(moment => moment.momentId === recipientMoment.momentId)?.authors;
-  expect(importedAuthors).toEqual(expect.arrayContaining(expectedAuthors));
-  expect(importedAuthors).toHaveLength(expectedAuthors.length);
+  expect(importedAuthors).toEqual(expect.arrayContaining(admittedAuthors));
+  expect(importedAuthors).toHaveLength(admittedAuthors.length);
   const peerHistory = new VersionedLiveAdapter(peer.client, peer.workspace, {workspaceId: WORKSPACE});
   const peerMoment = await peerHistory.getMoment({workspaceId: WORKSPACE, momentId: recipientMoment.momentId});
-  expect(peerMoment).toMatchObject({syncRecordOnly: true, authors: expect.arrayContaining(expectedAuthors)});
-  expect(peerMoment?.authors).toHaveLength(expectedAuthors.length);
+  expect(peerMoment).toMatchObject({syncRecordOnly: true, authors: expect.arrayContaining(admittedAuthors)});
+  expect(peerMoment?.authors).toHaveLength(admittedAuthors.length);
   expect((await moments()).find(moment => moment.momentId === recipientMoment.momentId)?.authors)
     .toEqual(recipientMoment.authors);
   expect(await readFile(join(peer.root, "Tasks/one.md"), "utf8")).toContain("RecipientNote: Keep this text");

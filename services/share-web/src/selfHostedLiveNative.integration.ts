@@ -503,11 +503,12 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     const automationSettlement = await settlementOf(automationAck, agentAck.journalCursor, automationMarkdown);
     await publication(automationSettlement, [automationAdmitted]);
 
-    // The service credits each interval in its own History. Owner devices
-    // import the relay-admitted authors in History's flat form: the snapshot
-    // person and the declared agent, never the grant authority.
+    // The service credits each interval in its own History, naming the
+    // recipient once by the grant the relay accepted the edit under. Owner
+    // devices import the relay-admitted authors in History's flat form: the
+    // snapshot person and the declared agent, never the grant authority.
     const declaredCredit = [
-      {momentId: agentSettlement.record.momentId, host: [agent, human, named], imported: [agent, human]},
+      {momentId: agentSettlement.record.momentId, host: [agent, named], imported: [agent, human]},
       {momentId: automationSettlement.record.momentId, host: [automation], imported: [automation]},
     ] as const;
     const expectAuthors = (actual: unknown, expected: readonly unknown[]) => {
@@ -563,7 +564,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     expect(await momentAuthors(peerRpc, settledMomentId)).toBeNull();
     peer.close(); await peer.waitForExit(); peer = undefined;
     results.declaredAuthors = {
-      agent: {receipt: agentAck, settlement: agentSettlement, admitted: [human, agent], imported: [agent, human], hostCredited: [agent, human, named]},
+      agent: {receipt: agentAck, settlement: agentSettlement, admitted: [human, agent], imported: [agent, human], hostCredited: [agent, named]},
       automation: {receipt: automationAck, settlement: automationSettlement, admitted: [automationAdmitted], imported: [automation], hostCredited: [automation]},
     };
     await supervisor!.close(); supervisor = undefined; active = undefined;
