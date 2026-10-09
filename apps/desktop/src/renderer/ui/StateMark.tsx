@@ -108,6 +108,27 @@ export const SAVE_STATE: Record<SaveStateKey, StatePresentation> = {
   },
 };
 
+// How current a list of who has access is: the access answer's freshness.
+// Only a list main checked within its refresh window is settled. An empty
+// list is never "no access", so unknown says so.
+export type AccessStateKey = "access-fresh" | "access-stale" | "access-unknown";
+
+export const ACCESS_STATE: Record<AccessStateKey, StatePresentation> = {
+  "access-fresh": { label: "Checked", mark: "settled" },
+  "access-stale": {
+    label: "May be out of date",
+    mark: "working",
+    title: "This is the last list of shares dohc received.",
+  },
+  "access-unknown": {
+    label: "Unknown",
+    mark: "attention",
+    title: "dohc could not check who has access. This does not mean that no one has access.",
+  },
+};
+
+const PRESENTATIONS: Record<SaveStateKey | AccessStateKey, StatePresentation> = { ...SAVE_STATE, ...ACCESS_STATE };
+
 export function saveStatePresentationKey(state: SaveState): SaveStateKey | null {
   switch (state.kind) {
     case "saved-here": return "saved";
@@ -148,14 +169,14 @@ function Mark(props: { kind: StateMarkKind }) {
  * is not a tab stop and keeps its title. */
 export function StateMark(props: {
   state: string | SaveState;
-  shown: SaveStateKey | SaveState;
+  shown: SaveStateKey | AccessStateKey | SaveState;
   title?: string;
   testId: string;
   className?: string;
   truncate?: boolean;
 }) {
   const shownKey = typeof props.shown === "string" ? props.shown : saveStatePresentationKey(props.shown);
-  const presentation = shownKey === null ? null : SAVE_STATE[shownKey];
+  const presentation = shownKey === null ? null : PRESENTATIONS[shownKey];
   const title = props.title ?? presentation?.title;
   const { label, cut } = useCutShort(presentation?.label ?? "", props.truncate === true);
   const [open, setOpen] = useState(false);

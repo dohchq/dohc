@@ -1,8 +1,9 @@
+import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
-import { AlertTriangle, Bot, CheckCircle2, Globe2, MoreHorizontal, SearchX } from "lucide-react";
+import { AlertTriangle, Bot, CheckCircle2, Globe2, MessageSquare, MoreHorizontal, SearchX } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import type { EngineMomentRecord, HistoryPolicyUnreadableResult, SyncStatusResult } from "../../ipc/bridgeContract";
+import type { ChatThreadRecord, EngineMomentRecord, HistoryPolicyUnreadableResult, SyncStatusResult } from "../../ipc/bridgeContract";
 import { readError, withErrorWords } from "../../ipc/errorWords";
 import { DocumentMenu } from "../DocumentMenu";
 import { FrontmatterAsWritten } from "../FrontmatterAsWritten";
@@ -31,6 +32,14 @@ import { HistoryHiddenState, HistoryUntrackedState } from "../workbench/HistoryP
 import { TreeRow, type VisibleRow } from "../workbench/Explorer";
 import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
 import { MomentRow } from "../workbench/EngineHistory";
+import {
+  AboutAccessView,
+  AboutChatRow,
+  AboutHeader,
+  AboutHistoryView,
+  AboutSection,
+  type AccessView,
+} from "../workbench/About";
 import { CAPTURE_RECOVERY_TITLE, captureRecoveryMessage } from "../shell/useCaptureRecoveryNotices";
 import { WorkspaceSyncStatus } from "../workbench/WorkspaceSyncStatus";
 import { closeStatesPage } from "./statesRoute";
@@ -337,6 +346,74 @@ const RECOVERY_MOMENT: EngineMomentRecord = {
   origin: "capture-recovery",
   momentOrder: 7,
 };
+
+// The About tab on the drawing's document: who wrote what, who has it.
+const ABOUT_PATH = "notes/product-plan.md";
+const ABOUT_THREADS: ChatThreadRecord[] = [
+  { id: "thread-scope", title: "Launch scope", createdAtMs: new Date(2026, 6, 6, 14, 5).getTime(), updatedAtMs: new Date(2026, 6, 8, 9, 12).getTime() },
+  { id: "thread-pricing", title: "Pricing questions", createdAtMs: new Date(2026, 6, 2, 11, 0).getTime(), updatedAtMs: new Date(2026, 6, 7, 16, 40).getTime() },
+];
+const aboutMoment = (moment: Partial<EngineMomentRecord> & { id: string; recordedAtMs: number; momentOrder: number }): EngineMomentRecord => ({
+  versionId: "main",
+  path: ABOUT_PATH,
+  operation: "write",
+  origin: "ydoc",
+  ...moment,
+});
+const ABOUT_MOMENTS: EngineMomentRecord[] = [
+  aboutMoment({ id: "about-agent", recordedAtMs: new Date(2026, 6, 8, 9, 30).getTime(), momentOrder: 9, agentAuthorName: "Nova", summary: "Tightened the launch list" }),
+  aboutMoment({ id: "about-person", recordedAtMs: new Date(2026, 6, 8, 8, 55).getTime(), momentOrder: 8, namedAuthor: { userId: "sam", label: "Sam Rivera" } }),
+  aboutMoment({ id: "about-local", recordedAtMs: new Date(2026, 6, 7, 17, 20).getTime(), momentOrder: 6, origin: "local-file" }),
+];
+const aboutGrant = (grant: Partial<AccessShareRow> & { grantId: string }): AccessShareRow => ({
+  kind: "share",
+  shareId: "share-plan",
+  via: "named",
+  granterUserId: "ice",
+  granterEmail: "ice@example.com",
+  recipientUserId: null,
+  recipientEmail: null,
+  subjectName: null,
+  sharerName: null,
+  selector: { paths: ["notes"], versionId: null },
+  access: "edit",
+  status: "active",
+  generation: 1,
+  ...grant,
+});
+const ABOUT_ACCESS: AccessAnswer = {
+  ref: { kind: "path", path: ABOUT_PATH, versionId: null },
+  rows: [
+    aboutGrant({ grantId: "grant-sam", recipientUserId: "sam", recipientEmail: "sam@example.com" }),
+    aboutGrant({ grantId: "grant-link", via: "link", access: "view" }),
+    aboutGrant({ grantId: "grant-kim", recipientUserId: "kim", recipientEmail: "kim@example.com", status: "revoked", access: null }),
+  ],
+  visibility: "visible",
+  coverage: { kind: "granted", complete: true, observation: "interval" },
+  checkedAtMs: new Date(2026, 6, 8, 9, 40).getTime(),
+  freshness: "fresh",
+  nextCursor: null,
+};
+const ABOUT_ACCESS_UNKNOWN: AccessAnswer = {
+  ...ABOUT_ACCESS,
+  rows: [],
+  coverage: { kind: "unavailable", complete: false, observation: "interval" },
+  checkedAtMs: null,
+  freshness: "unknown",
+};
+
+// The About tab at the drawing's 290px, on the chrome.
+function AboutPanelSpecimen(props: { children: ReactNode }) {
+  return <div className="flex w-[290px] flex-col rounded-lg border border-line bg-panel pb-2">{props.children}</div>;
+}
+
+function AccessSpecimen(props: { view: AccessView; expanded?: boolean }) {
+  return (
+    <AboutPanelSpecimen>
+      <AboutAccessView view={props.view} expanded={props.expanded ?? true} onToggle={noop} onRetry={noop} onMore={noop} />
+    </AboutPanelSpecimen>
+  );
+}
 
 function notice(id: string, tone: "danger" | "success") {
   return {
@@ -1162,6 +1239,58 @@ function Pane(props: { theme: "light" | "dark" }) {
               <MomentRow moment={RECOVERY_MOMENT} onOpenMoment={noop} />
             </li>
           </ul>
+        </Specimen>
+      </Section>
+
+      {/* Last, so the parts above keep their places. */}
+      <Section part="about" title="About">
+        <Specimen label="a document: chats, history, access checked">
+          <AboutPanelSpecimen>
+            <AboutHeader path={ABOUT_PATH} />
+            <AboutSection id="chats" icon={MessageSquare} label="Chats" count="2" expanded onToggle={noop}>
+              <ul className="m-0 list-none p-0">
+                {ABOUT_THREADS.map((thread) => (
+                  <li key={thread.id}>
+                    <AboutChatRow thread={thread} onOpen={noop} />
+                  </li>
+                ))}
+              </ul>
+            </AboutSection>
+            <AboutHistoryView
+              view={{ status: "ready", moments: ABOUT_MOMENTS, more: true }}
+              expanded
+              onToggle={noop}
+              onRetry={noop}
+              onOpenMoment={noop}
+            />
+            <AboutAccessView view={{ status: "ready", answer: ABOUT_ACCESS }} expanded onToggle={noop} onRetry={noop} onMore={noop} />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="access may be out of date">
+          <AccessSpecimen view={{ status: "ready", answer: { ...ABOUT_ACCESS, freshness: "stale" } }} />
+        </Specimen>
+        <Specimen label="access unknown">
+          <AccessSpecimen view={{ status: "ready", answer: ABOUT_ACCESS_UNKNOWN }} />
+        </Specimen>
+        <Specimen label="no share within its coverage">
+          <AccessSpecimen view={{ status: "ready", answer: { ...ABOUT_ACCESS, rows: [] } }} />
+        </Specimen>
+        <Specimen label="loading, then a failed read">
+          <AboutPanelSpecimen>
+            <AboutHistoryView view={{ status: "loading" }} expanded onToggle={noop} onRetry={noop} onOpenMoment={noop} />
+            <AboutAccessView
+              view={{ status: "failed", message: "This workspace is no longer open in this window." }}
+              expanded
+              onToggle={noop}
+              onRetry={noop}
+              onMore={noop}
+            />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="closed, keyboard focus">
+          <div data-force-state="focus focus-visible" data-force-target='[data-testid="about-access-toggle"]'>
+            <AccessSpecimen view={{ status: "loading" }} expanded={false} />
+          </div>
         </Specimen>
       </Section>
     </section>

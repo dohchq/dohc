@@ -1,0 +1,351 @@
+// @vitest-environment jsdom
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { useState } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
+import type { EngineMomentRecord, ListEngineMomentsResponse } from "../../ipc/bridgeContract";
+import { deferred } from "../../testing/deferred";
+import { formatShortTime } from "../time";
+import { AboutAccess, AboutHistory } from "./About";
+
+const bridgeMock = {
+  getObjectAccess: vi.fn<(input: { workspaceId: string; ref: unknown; cursor?: string }) => Promise<AccessAnswer>>(),
+  requestAccessRefresh: vi.fn<(input: { workspaceId: string; reason: string }) => Promise<void>>(),
+  listEngineMoments: vi.fn<(input: { workspaceId: string; objectId?: string; limit?: number }) => Promise<ListEngineMomentsResponse>>(),
+};
+
+beforeEach(() => {
+  for (const mock of Object.values(bridgeMock)) mock.mockReset();
+  bridgeMock.requestAccessRefresh.mockResolvedValue(undefined);
+  vi.stubGlobal("dohcDesktop", bridgeMock);
+});
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
+const CHECKED_AT = Date.UTC(2026, 9, 9, 9, 30);
+
+function answer(overrides: Partial<AccessAnswer> = {}): AccessAnswer {
+  return {
+    ref: { kind: "path", path: "docs/plan.md", versionId: null },
+    rows: [],
+    visibility: "visible",
+    coverage: { kind: "granted", complete: true, observation: "interval" },
+    checkedAtMs: CHECKED_AT,
+    freshness: "fresh",
+    nextCursor: null,
+    ...overrides,
+  };
+}
+
+// What main answers when it has no observation to read: no coverage at all.
+const UNKNOWN = answer({
+  coverage: { kind: "unavailable", complete: false, observation: "interval" },
+  checkedAtMs: null,
+  freshness: "unknown",
+});
+
+function share(overrides: Partial<AccessShareRow> = {}): AccessShareRow {
+  return {
+    kind: "share",
+    shareId: "share-1",
+    grantId: "grant-1",
+    via: "named",
+    granterUserId: "owner",
+    granterEmail: "owner@example.com",
+    recipientUserId: "sam",
+    recipientEmail: "sam@example.com",
+    subjectName: null,
+    sharerName: null,
+    selector: { paths: ["docs"], versionId: null },
+    access: "edit",
+    status: "active",
+    generation: 1,
+    ...overrides,
+  };
+}
+
+function Access(props: { workspaceId?: string; path?: string; open?: boolean }) {
+  const [open, setOpen] = useState(props.open ?? true);
+  return (
+    <AboutAccess
+      workspaceId={props.workspaceId ?? "workspace-a"}
+      path={props.path ?? "docs/plan.md"}
+      expanded={open}
+      onToggle={() => setOpen((current) => !current)}
+    />
+  );
+}
+
+describe("About Access", () => {
+  it("asks nothing while closed, then refreshes and reads when opened", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValue(answer({ rows: [share()] }));
+    render(<Access open={false} />);
+    expect(bridgeMock.requestAccessRefresh).not.toHaveBeenCalled();
+    expect(bridgeMock.getObjectAccess).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("about-access-count")).toBeNull();
+
+    await userEvent.setup().click(screen.getByTestId("about-access-toggle"));
+    expect(screen.getByTestId("about-access-toggle").getAttribute("aria-expanded")).toBe("true");
+    await screen.findByTestId("about-access-answer");
+    expect(bridgeMock.requestAccessRefresh).toHaveBeenCalledWith({ workspaceId: "workspace-a", reason: "access-expand" });
+    expect(bridgeMock.getObjectAccess).toHaveBeenCalledWith({
+      workspaceId: "workspace-a",
+      ref: { kind: "path", path: "docs/plan.md", versionId: null },
+    });
+    expect(bridgeMock.requestAccessRefresh.mock.invocationCallOrder[0]).toBeLessThan(
+      bridgeMock.getObjectAccess.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("shows nothing it has not read while the answer loads", async () => {
+    const pending = deferred<AccessAnswer>();
+    bridgeMock.getObjectAccess.mockReturnValue(pending.promise);
+    render(<Access />);
+    await waitFor(() => expect(bridgeMock.getObjectAccess).toHaveBeenCalled());
+    expect(screen.queryByTestId("about-access-answer")).toBeNull();
+    expect(screen.queryByTestId("about-access-empty")).toBeNull();
+    expect(screen.queryByTestId("about-access-count")).toBeNull();
+    await act(async () => pending.resolve(answer()));
+    expect(screen.getByTestId("about-access-answer")).toBeTruthy();
+  });
+
+  it("lists each grant with its person or link and its level, checked and fresh", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValue(
+      answer({
+        rows: [
+          share({ via: "link", grantId: "grant-link", recipientEmail: null, recipientUserId: null, access: "view" }),
+          share(),
+          share({ grantId: "grant-old", recipientEmail: "kim@example.com", status: "revoked", access: null }),
+        ],
+      }),
+    );
+    render(<Access />);
+    const result = await screen.findByTestId("about-access-answer");
+    expect(result.dataset.freshness).toBe("fresh");
+    expect(result.dataset.coverage).toBe("granted");
+    expect(screen.getByTestId("about-access-freshness").textContent).toBe("Checked");
+    expect(within(result).getByText(formatShortTime(CHECKED_AT))).toBeTruthy();
+    const rows = screen.getAllByTestId("about-access-row");
+    expect(rows.map((row) => row.textContent)).toEqual(["Anyone with the link", "Ssam@example.com", "Kkim@example.com" + "ended"]);
+    expect(within(rows[0]!).getByRole("img", { name: "View" })).toBeTruthy();
+    expect(within(rows[1]!).getByRole("img", { name: "Edit" })).toBeTruthy();
+    expect(within(rows[2]!).queryByRole("img")).toBeNull();
+    expect(screen.getByTestId("about-access-count").textContent).toBe("3");
+  });
+
+  it("says an empty answer covers only what it checked, never that nobody has access", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValue(answer());
+    render(<Access />);
+    expect((await screen.findByTestId("about-access-empty")).textContent).toBe(
+      "No share from this workspace includes this file.",
+    );
+    expect(screen.getByTestId("about-access-count").textContent).toBe("0");
+  });
+
+  it("names a received file's own grant within its coverage", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValue(
+      answer({
+        coverage: { kind: "received-own-grant", complete: true, observation: "interval" },
+        rows: [share({ via: "received", sharerName: "Ice de Vera", access: "comment" })],
+      }),
+    );
+    render(<Access />);
+    const row = await screen.findByTestId("about-access-row");
+    expect(row.textContent).toContain("You");
+    expect(row.getAttribute("title")).toBe("Shared by Ice de Vera");
+    expect(within(row).getByRole("img", { name: "Comment" })).toBeTruthy();
+  });
+
+  it("keeps a stale list and says it may be out of date", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValue(answer({ freshness: "stale", rows: [share()] }));
+    render(<Access />);
+    const result = await screen.findByTestId("about-access-answer");
+    expect(result.dataset.freshness).toBe("stale");
+    const mark = screen.getByTestId("about-access-freshness");
+    expect(mark.textContent).toBe("May be out of date");
+    expect(mark.getAttribute("data-state")).toBe("stale");
+    expect(screen.getAllByTestId("about-access-row")).toHaveLength(1);
+    expect(screen.getByTestId("about-access-count").textContent).toBe("1");
+  });
+
+  it("tells unknown apart from no access, and checks again on Try again", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValueOnce(UNKNOWN).mockResolvedValue(answer());
+    render(<Access />);
+    const unknown = await screen.findByTestId("about-access-unknown");
+    expect(unknown.textContent).toContain("This does not mean that no one has access.");
+    expect(screen.getByTestId("about-access-freshness").textContent).toBe("Unknown");
+    expect(screen.queryByTestId("about-access-empty")).toBeNull();
+    expect(screen.queryByTestId("about-access-count")).toBeNull();
+
+    await userEvent.setup().click(within(unknown).getByText("Try again"));
+    await screen.findByTestId("about-access-empty");
+    expect(bridgeMock.requestAccessRefresh).toHaveBeenCalledTimes(2);
+  });
+
+  it("still reads when the refresh request fails, and the answer says how current it is", async () => {
+    bridgeMock.requestAccessRefresh.mockRejectedValue(new Error("offline"));
+    bridgeMock.getObjectAccess.mockResolvedValue(answer({ freshness: "stale" }));
+    render(<Access />);
+    expect((await screen.findByTestId("about-access-answer")).dataset.freshness).toBe("stale");
+  });
+
+  it("shows a failed read with its words and Try again", async () => {
+    bridgeMock.getObjectAccess.mockRejectedValueOnce(new Error("disk is busy")).mockResolvedValue(answer());
+    render(<Access />);
+    const failed = await screen.findByTestId("about-access-failed");
+    expect(failed.textContent).toContain("disk is busy");
+    await userEvent.setup().click(within(failed).getByText("Try again"));
+    await screen.findByTestId("about-access-empty");
+  });
+
+  it("never shows workspace A's answer after a switch to workspace B", async () => {
+    const forA = deferred<AccessAnswer>();
+    bridgeMock.getObjectAccess.mockImplementation(({ workspaceId }) =>
+      workspaceId === "workspace-a" ? forA.promise : Promise.resolve(answer({ rows: [share({ recipientEmail: "b@example.com" })] })),
+    );
+    const { rerender } = render(<Access workspaceId="workspace-a" />);
+    await waitFor(() => expect(bridgeMock.getObjectAccess).toHaveBeenCalledTimes(1));
+    rerender(<Access workspaceId="workspace-b" />);
+    expect((await screen.findByTestId("about-access-row")).textContent).toContain("b@example.com");
+
+    await act(async () => forA.resolve(answer({ rows: [share({ recipientEmail: "a@example.com" })] })));
+    expect(screen.getAllByTestId("about-access-row").map((row) => row.textContent)).toEqual(["Bb@example.com"]);
+  });
+
+  it("reads a newly opened file without asking main to refresh again", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValue(answer());
+    const { rerender } = render(<Access path="docs/plan.md" />);
+    await screen.findByTestId("about-access-empty");
+    rerender(<Access path="docs/other.md" />);
+    await waitFor(() =>
+      expect(bridgeMock.getObjectAccess).toHaveBeenLastCalledWith({
+        workspaceId: "workspace-a",
+        ref: { kind: "path", path: "docs/other.md", versionId: null },
+      }),
+    );
+    expect(bridgeMock.requestAccessRefresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads the next page from the answer's cursor", async () => {
+    bridgeMock.getObjectAccess
+      .mockResolvedValueOnce(answer({ rows: [share()], nextCursor: "page-2" }))
+      .mockResolvedValueOnce(answer({ rows: [share({ grantId: "grant-2", recipientEmail: "kim@example.com" })] }));
+    render(<Access />);
+    expect((await screen.findByTestId("about-access-count")).textContent).toBe("1+");
+    await userEvent.setup().click(screen.getByTestId("about-access-more"));
+    await waitFor(() => expect(screen.getAllByTestId("about-access-row")).toHaveLength(2));
+    expect(bridgeMock.getObjectAccess).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: "page-2" }));
+    expect(screen.queryByTestId("about-access-more")).toBeNull();
+  });
+});
+
+function moment(overrides: Partial<EngineMomentRecord> = {}): EngineMomentRecord {
+  return {
+    id: "moment-1",
+    versionId: "main",
+    path: "docs/plan.md",
+    recordedAtMs: Date.UTC(2026, 9, 9, 10, 0),
+    operation: "write",
+    origin: "ydoc",
+    momentOrder: 4,
+    ...overrides,
+  };
+}
+
+function page(moments: EngineMomentRecord[], more = false): ListEngineMomentsResponse {
+  return {
+    moments,
+    nextBeforeMomentOrder: more ? 1 : null,
+    latestMomentOrder: 4,
+    activeVersionId: "main",
+    protectedTruncated: false,
+  };
+}
+
+function HistorySection(props: { workspaceId?: string; objectId?: string; revision?: number; onOpenMoment?: (id: string, path: string) => void }) {
+  const [open, setOpen] = useState(true);
+  return (
+    <AboutHistory
+      workspaceId={props.workspaceId ?? "workspace-a"}
+      objectId={props.objectId ?? "object-1"}
+      revision={props.revision ?? 0}
+      expanded={open}
+      onToggle={() => setOpen((current) => !current)}
+      onOpenMoment={props.onOpenMoment ?? (() => undefined)}
+    />
+  );
+}
+
+describe("About History", () => {
+  it("reads the file's newest changes by its object id and opens one", async () => {
+    bridgeMock.listEngineMoments.mockResolvedValue(
+      page([moment({ agentAuthorName: "Nova", summary: "Tightened the plan" }), moment({ id: "moment-2" })], true),
+    );
+    const onOpenMoment = vi.fn();
+    render(<HistorySection onOpenMoment={onOpenMoment} />);
+    const rows = await screen.findAllByTestId("about-history-open");
+    expect(bridgeMock.listEngineMoments).toHaveBeenCalledWith({ workspaceId: "workspace-a", objectId: "object-1", limit: 5 });
+    expect(rows[0]!.textContent).toContain("Tightened the plan");
+    expect(rows[0]!.getAttribute("title")).toBe("Nova");
+    expect(rows[1]!.textContent).toContain("Edited plan.md");
+    expect(rows[1]!.getAttribute("title")).toBe("Live edit");
+    expect(screen.getByTestId("about-history-count").textContent).toBe("2+");
+    await userEvent.setup().click(rows[0]!);
+    expect(onOpenMoment).toHaveBeenCalledWith("moment-1", "docs/plan.md");
+  });
+
+  it("shows loading lines, then says when the file has no changes", async () => {
+    const pending = deferred<ListEngineMomentsResponse>();
+    bridgeMock.listEngineMoments.mockReturnValue(pending.promise);
+    render(<HistorySection />);
+    expect(screen.queryByTestId("about-history-empty")).toBeNull();
+    expect(screen.queryByTestId("about-history-count")).toBeNull();
+    await act(async () => pending.resolve(page([])));
+    expect(screen.getByTestId("about-history-empty").textContent).toBe("History has no changes to this file yet.");
+    expect(screen.getByTestId("about-history-count").textContent).toBe("0");
+  });
+
+  it("shows a failed read with Try again", async () => {
+    bridgeMock.listEngineMoments.mockRejectedValueOnce(new Error("engine stopped")).mockResolvedValue(page([moment()]));
+    render(<HistorySection />);
+    const failed = await screen.findByTestId("about-history-failed");
+    expect(failed.textContent).toContain("engine stopped");
+    await userEvent.setup().click(within(failed).getByText("Try again"));
+    expect(await screen.findAllByTestId("about-history-open")).toHaveLength(1);
+  });
+
+  it("says History is still updating instead of showing no changes", async () => {
+    bridgeMock.listEngineMoments.mockResolvedValue({ status: "updating" });
+    render(<HistorySection />);
+    expect((await screen.findByTestId("about-history-failed")).textContent).toContain("Workspace is still updating. Try again.");
+  });
+
+  it("never shows another file's changes after a switch", async () => {
+    const forFirst = deferred<ListEngineMomentsResponse>();
+    bridgeMock.listEngineMoments.mockImplementation(({ objectId }) =>
+      objectId === "object-1" ? forFirst.promise : Promise.resolve(page([moment({ id: "moment-b", summary: "Second file" })])),
+    );
+    const { rerender } = render(<HistorySection objectId="object-1" />);
+    await waitFor(() => expect(bridgeMock.listEngineMoments).toHaveBeenCalledTimes(1));
+    rerender(<HistorySection objectId="object-2" />);
+    expect((await screen.findByTestId("about-history-open")).textContent).toContain("Second file");
+    await act(async () => forFirst.resolve(page([moment({ summary: "First file" })])));
+    expect(screen.getAllByTestId("about-history-open").map((row) => row.dataset.momentId)).toEqual(["moment-b"]);
+  });
+
+  it("keeps its rows while it reads again after History grows", async () => {
+    bridgeMock.listEngineMoments.mockResolvedValueOnce(page([moment({ summary: "Older" })]));
+    const { rerender } = render(<HistorySection revision={1} />);
+    await screen.findByTestId("about-history-open");
+    const next = deferred<ListEngineMomentsResponse>();
+    bridgeMock.listEngineMoments.mockReturnValueOnce(next.promise);
+    rerender(<HistorySection revision={2} />);
+    expect(screen.getByTestId("about-history-open").textContent).toContain("Older");
+    await act(async () => next.resolve(page([moment({ id: "moment-new", summary: "Newer" }), moment({ summary: "Older" })])));
+    expect(screen.getAllByTestId("about-history-open")).toHaveLength(2);
+  });
+});

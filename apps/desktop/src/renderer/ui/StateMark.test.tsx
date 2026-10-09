@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SettingsSaveState } from "../settings/SettingsDialog";
-import { SAVE_STATE, StateMark, type SaveStateKey, type StatePresentation } from "./StateMark";
+import { ACCESS_STATE, SAVE_STATE, StateMark, type AccessStateKey, type SaveStateKey, type StatePresentation } from "./StateMark";
 
 afterEach(cleanup);
 
@@ -41,6 +41,18 @@ describe("StateMark", () => {
     for (const key of claimsSaved) {
       if (key !== "saved") expect(SAVE_STATE[key].mark).toBe("working");
     }
+  });
+
+  it("settles an access list only when main checked it within its window", () => {
+    // Stale is the last list dohc received, and unknown is no list at all:
+    // neither may read as done, and unknown must never read as no access.
+    expect((Object.keys(ACCESS_STATE) as AccessStateKey[]).filter((key) => ACCESS_STATE[key].mark === "settled")).toEqual(["access-fresh"]);
+    expect(ACCESS_STATE["access-unknown"].mark).toBe("attention");
+    render(<StateMark testId="mark" state="unknown" shown="access-unknown" />);
+    const chip = screen.getByTestId("mark");
+    expect(chip.getAttribute("data-state")).toBe("unknown");
+    expect(chip.textContent).toBe("Unknown");
+    expect(chip.getAttribute("title")).toContain("This does not mean that no one has access.");
   });
 
   it("renders every state with its mark, its label, and the stored state", () => {
