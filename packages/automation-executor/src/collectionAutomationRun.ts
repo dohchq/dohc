@@ -150,6 +150,8 @@ export interface CollectionAutomationRunDependencies {
   collectionIdOf(path: string): string | null;
   /** Where the document Collection with this id is now, or null when this workspace has none. */
   collectionPathOf(collectionId: string): string | null;
+  /** Whether the Collection index is still being read, so missing paths can be temporary. */
+  isIndexReading?(): boolean;
   /** A code file a step runs, as text; null when it does not exist. */
   readCode(path: string): Promise<{ text: string; truncated: boolean } | null>;
   /** The name a formula's `person` shows for the person who pressed a button. */
