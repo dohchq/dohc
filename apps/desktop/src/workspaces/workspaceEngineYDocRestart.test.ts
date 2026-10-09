@@ -1,4 +1,4 @@
-import { flushTypingCheckpoints, readTypingCheckpoints, retireTypingCheckpoint, writeTypingCheckpoint } from "./outageTypingRecovery";
+import { flushTypingCheckpoints, isTypingSessionUnresolved, readTypingCheckpoints, retireTypingCheckpoint, writeTypingCheckpoint } from "./outageTypingRecovery";
 import * as Y from "yjs";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -8355,4 +8355,35 @@ it("warns before quit when drawing edits cannot enter a text checkpoint",async()
  onTestFinished(async()=>{state.daemonAlive=true;await capture.stop();renderer.destroy();});
  state.daemonAlive=false;typeInto(renderer,session,"DRAWING_OUTAGE");await expect(session.settleNow()).rejects.toThrow();
  await expect(flushTypingCheckpoints(workspaceId)).rejects.toThrow("Drawing changes cannot be kept during an engine outage.");expect(failure).toHaveBeenCalledWith("note.md",expect.any(Error));
+});
+
+it("publishes unresolved typing before a gated replacement opens", async () => {
+  const workspaceId = "outage-gated-notification";
+  const {rootPath, sessions, openProvider, state} = await daemonDeathCapture("outage-gated-notification-", workspaceId);
+  let notifyDeath!: (error: unknown) => void;
+  let entered!: () => void;
+  const replacementEntered = new Promise<void>(resolve => {entered = resolve;});
+  let release!: () => void;
+  const replacementGate = new Promise<void>(resolve => {release = resolve;});
+  let opens = 0;
+  const capture = createWorkspaceEngineCapture({workspaceId, rootPath, rustEngineSessions: sessions,
+    openRustYDocProviderSession: async options => {
+      if (++opens > 1) {entered(); await replacementGate;}
+      notifyDeath = options.onSessionError!;
+      return {...await openProvider(options), objectId: "object", versionId: "main"};
+    }, onError: () => undefined, writeTypingCheckpoint: async () => undefined});
+  const renderer = new Y.Doc();
+  onTestFinished(async () => {release(); state.daemonAlive = true; await capture.stop(); renderer.destroy();});
+  const states: boolean[] = [];
+  const session = await capture.openYDocSession({path: "note.md", onRemoteUpdate: () => undefined,
+    onSaveState: () => states.push(isTypingSessionUnresolved(workspaceId, "note.md"))});
+  Y.applyUpdate(renderer, session.initialUpdate);
+  typeInto(renderer, session, "admitted ");
+  await session.settleNow();
+  expect(isTypingSessionUnresolved(workspaceId, "note.md")).toBe(false);
+  notifyDeath(Object.assign(new Error("The engine client is closed: transport closed."), {code: "transport-error"}));
+  await replacementEntered;
+  typeInto(renderer, session, "GATED_TYPING");
+  expect(isTypingSessionUnresolved(workspaceId, "note.md")).toBe(true);
+  expect(states.at(-1)).toBe(true);
 });

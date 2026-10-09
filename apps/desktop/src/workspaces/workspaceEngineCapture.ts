@@ -2161,6 +2161,7 @@ export function createWorkspaceEngineCapture(
     contentKind?: YdocContentKind;
     onDead: () => void;
     onAlive: () => void;
+    onTypingUnresolved?: () => void;
     onObjectChanged: () => void;
     onRemoteUpdate: (update: Uint8Array, localAcknowledgement?: boolean) => void;
     onLineageReplaced: (update: Uint8Array, recoveredPaths: string[]) => void;
@@ -2288,7 +2289,10 @@ export function createWorkspaceEngineCapture(
     };
     const checkpointUnresolved = (): void => {
       if (!options.writeTypingCheckpoint) return;
-      if (!checkpointBase && recordedStateVector) checkpointBase = {claim: canonicalLineageClaimId, vector: new Uint8Array(recordedStateVector), base: Y.encodeStateAsUpdate(recordedDoc), disk: diskHeadSha256};
+      if (!checkpointBase && recordedStateVector) {
+        checkpointBase = {claim: canonicalLineageClaimId, vector: new Uint8Array(recordedStateVector), base: Y.encodeStateAsUpdate(recordedDoc), disk: diskHeadSha256};
+        input.onTypingUnresolved?.();
+      }
       void flushCheckpoint().catch(error => onError("Typing checkpoint", error));
     };
     const checkpointEdited = (): void => {
@@ -4441,6 +4445,7 @@ export function createWorkspaceEngineCapture(
           versionId,
           path: input.path,
           ...(input.contentKind ? { contentKind: input.contentKind } : {}),
+          onTypingUnresolved: () => reportSaveState("settling", 0, "status"),
           onDead: () => {
             if (
               entry !== null &&
