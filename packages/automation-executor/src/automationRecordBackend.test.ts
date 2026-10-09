@@ -178,7 +178,7 @@ async function fixture(sourceDataset = false, targetDataset = true) {
     withHost: async (work) => hooks.hostDown ? null : work(host), cachedRoster: async () => currentRoster, checkReach: async () => false,
     evaluator: evaluator.forWorkspace("workspace"), store: { ...store, appendEffect: async (run, applied) => { if (hooks.crashAppend) { hooks.crashAppend = false; throw new Error("crash before journal append"); } await store.appendEffect(run, applied); } },
     nowMs: () => 1000, personName: (id) => id, readCode: async () => null, readMessageBody: async () => null,
-    chat: { directory: async () => null, write: async () => {} }, postNotice: async () => {}, recipientVerdicts: async () => [],
+    chat: { hasMessage: async () => false, directory: async () => null, write: async () => {} }, postNotice: async () => {}, recipientVerdicts: async () => [],
   };
   const claim = { automationId: sourceDataset ? "collection:Source-dataset#test" : "collection:Source#test", claimId: "claim", createdAtMs: 1000, run: 1, depth: 0 };
   const held: DatasetRunClaim | { source: "document"; claim: AutomationClaim } = sourceDataset ? { source: "dataset", claim: { ...claim, workspaceId: "workspace", datasetId: "Source-dataset", hostEpoch: "epoch", revision: 1,

@@ -44,7 +44,7 @@ function chatStore(options: { refuse?: Error; sent?: Sent[] } = {}) {
     },
     getMessage: async ({ messageId }) => {
       const sent = options.sent?.find((row) => row.id === messageId);
-      if (!sent) throw new Error("chat-message-not-found");
+      if (!sent) throw new Error("message-not-found");
       return sent as Awaited<ReturnType<ReplicaChatStore["getMessage"]>>;
     },
     findThreadChannelId: async ({ threadId }) => threadId === "thread-auto-1" ? "channel-planning" : "channel-other",

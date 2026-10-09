@@ -247,10 +247,6 @@ export async function runSteps(
   // A step that failed before anything was saved changed nothing.
   if (outcome.kind !== "done" && !outcome.saved) return outcome.outcome;
   run.durableEffects = durableEffects;
-  // A failed resume can leave later receipts whose engine writes were lost.
-  // Retain them for Try again, but History and Undo must not call them landed.
-  run.applied = run.applied.map((effect, index) => index >= durableEffects && effect.writes.some(engineWrite)
-    ? { ...effect, unconfirmed: true } : effect);
   if (outcome.kind === "done") {
     run.outcome = { state: "done" };
   } else if (outcome.outcome.kind === "failed") {
@@ -415,7 +411,7 @@ async function walkSteps(
     if (effectIndex <= durableEffects) return null;
     // Every message and notice is checked under this roster before it is sent.
     const unsent = { ...step, effects: step.effects.filter((_effect, part) => first + part >= firstUnrecorded) };
-    const messages = await checkPlannedMessages(dependencies, { automationId: ctx.claim.automationId, automation, collection: input.collection, roster: input.roster }, [unsent], ctx.chat);
+    const messages = wasSaved ? { chat: ctx.chat } : await checkPlannedMessages(dependencies, { automationId: ctx.claim.automationId, automation, collection: input.collection, roster: input.roster }, [unsent], ctx.chat);
     if ("outcome" in messages) return messages.outcome;
     for (const [part, effect] of step.effects.entries()) {
       const index = first + part;

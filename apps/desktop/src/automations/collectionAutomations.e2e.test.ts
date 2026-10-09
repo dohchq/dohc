@@ -16,6 +16,9 @@ import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
 import { waitForPathMoments } from "../workspaces/waitForPathMoments";
 import { createWorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 import { createAutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
+import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
+import { applyDocumentEffect, newRun, type CollectionAutomationRunDependencies } from "@dohc/automation-executor/collection-automation-run";
+import { derivedRecordId } from "@dohc/automation-executor/record-ids";
 import { collectionAutomationId, localIsoTime } from "@dohc/automation-executor/automation-plan";
 import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
 import { CollectionAutomations, type CollectionAutomationEngine } from "@dohc/automation-executor/collection-automations";
@@ -81,7 +84,7 @@ async function harness(automations: string, run: (context: {
   const executor = new CollectionAutomations({
     withEngine,
     // These automations never post.
-    chat: { directory: async () => null, write: async () => { throw new Error("No chat in this test."); } },
+    chat: { hasMessage: async () => false, directory: async () => null, write: async () => { throw new Error("No chat in this test."); } },
     groupHost: async () => null,
     groupRelayRecord: async () => ({ generation: 0, handover: null }),
     reachRelayRecord: async () => ({ generation: 0, reach: null, everShared: false }),
@@ -299,4 +302,49 @@ it.skipIf(engine.missing)(
     });
   },
   120_000,
+);
+
+it.skipIf(engine.missing).each(["deleted", "moved"] as const)(
+  "skips replay of a %s creation through the native engine and desktop facade",
+  async change => {
+    await harness("  - id: idle\n    name: Idle\n    when: {field-changed: Status, to: Never}\n    do: [{set: {Finished on: never}}]\n", async ctx => {
+      const parsed = parseAutomationsFile("version: 1\nautomations:\n  - id: replay\n    name: Replay\n    when: record-added\n    do: [{add-record: {Status: New}}]\n");
+      if (parsed.status !== "read" || parsed.entries[0]?.status !== "valid") throw Error("invalid automation");
+      const automation = parsed.entries[0].automation;
+      const signal = new AbortController().signal;
+      const run = newRun({ claimId: "creation-replay", automationId: "collection:Tasks#replay" }, automation, "key", 1);
+      const author = { kind: "automation" as const, automationId: run.automationId, depth: 1, run: { claimId: run.claimId, automationName: automation.name } };
+      const store = createAutomationRunStore(ctx.root, resolveWorkspaceMetadataDir);
+      const dependencies = { store, withRecordWrites: async (_signal: AbortSignal, work: Parameters<CollectionAutomationRunDependencies["withRecordWrites"]>[1]) =>
+        work(collectionRecordWrites(ctx.recordContext(ctx.person, signal))) } as CollectionAutomationRunDependencies;
+      const effect = { kind: "add" as const, collectionPath: "Tasks", name: "made", recordId: derivedRecordId(run.claimId), fields: [] };
+      run.steps = [{ ordinal: 0, effects: [effect] }];
+      await store.save(run);
+      const context = { run, author, signal, ordinal: 0, automationName: automation.name, depth: 1, chat: null };
+      expect(await applyDocumentEffect(dependencies, context, effect, "fresh")).toMatchObject([{ kind: "created", path: "Tasks/made.md" }]);
+      if (change === "deleted") {
+        const trash = await createTestScratch("dohc-replay-trash-");
+        await deleteWorkspacePathByHand({ workspace: ctx.workspace, assertCurrent: () => undefined }, "Tasks/made.md", ctx.person, {
+          capture: ctx.capture, requestId: "replay-delete", markDeleted: () => undefined,
+          trashItem: target => rename(target, join(trash, "made.md")),
+        });
+      } else {
+        await ctx.withEngine(adapter => adapter.renameTextFile({ workspaceId: ctx.workspace.workspaceId, versionId: "main", fromPath: "Tasks/made.md", toPath: "moved.md", metadata: { origin: "api" } }));
+        await rename(join(ctx.root, "Tasks/made.md"), join(ctx.root, "moved.md"));
+        // A rebased plan can present the same key under a different target path.
+        effect.name = "rebased";
+      }
+      await ctx.capture.flush();
+      // Wait for the projection of the native path change before replaying.
+      for (let attempt = 0; ; attempt++) {
+        const records = (await ctx.withEngine(adapter => adapter.queryCollectionRecords({ collectionPath: "Tasks" }))).records;
+        if (!records.some(record => record.id === effect.recordId)) break;
+        if (attempt === 1000) throw Error("record deletion/move was not projected");
+      }
+      const result = await applyDocumentEffect(dependencies, context, effect, "may-have-landed");
+      expect(result).toMatchObject([{ kind: "skipped", reason: "The record was already created, then moved or deleted." }]);
+      expect((await ctx.withEngine(adapter => adapter.queryCollectionRecords({ collectionPath: "Tasks" }))).records.map(record => record.path)).toEqual(["Tasks/one.md"]);
+      await expect(stat(join(ctx.root, "Tasks", `${effect.name}.md`))).rejects.toThrow();
+    });
+  }, 120_000,
 );

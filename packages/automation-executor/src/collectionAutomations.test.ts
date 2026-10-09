@@ -10,7 +10,7 @@ import { SHARED_BUTTON_DENIED } from "./buttonPresser";
 import type { RelayButtonAuthority } from "@dohc/workspace-contracts/relay";
 import { createTestScratch, testMetadataDir } from "./testScratch";
 
-it("leaves unconfirmed receipts out of History, including created records", async () => {
+it("labels unconfirmed receipts in History, including created records", async () => {
   const store = createAutomationRunStore(await createTestScratch("dohc-history-unconfirmed-"), testMetadataDir);
   const evaluator = createAutomationFormulaEvaluator();
   const text = "version: 1\nautomations:\n  - id: change\n    name: Change\n    when: record-added\n    do: [{set: {A: 1}}]\n";
@@ -27,7 +27,7 @@ it("leaves unconfirmed receipts out of History, including created records", asyn
   ];
   state.applied = [
     { ordinal: 0, writes: [{ kind: "field", recordId: "record", path: "Tasks/one.md", field: "A", before: 0, after: 1 }] },
-    { ordinal: 1, unconfirmed: true, writes: [{ kind: "created", recordId: "lost", path: "Tasks/lost.md" }] },
+    { ordinal: 1, writes: [{ kind: "created", recordId: "lost", path: "Tasks/lost.md" }] },
   ];
   state.durableEffects = 1;
   state.created = [{ ordinal: 1, planned: "lost", recordId: "lost", path: "Tasks/lost.md" }];
@@ -44,14 +44,15 @@ it("leaves unconfirmed receipts out of History, including created records", asyn
     evaluator: evaluator.forWorkspace("workspace"), store, personName: id => id, withDatasetHost: async () => null, groupHost: async () => null,
     groupRelayRecord: async () => ({ generation: 0, handover: null }), reachRelayRecord: async () => ({ generation: 0, reach: null, everShared: false }),
     groupMessagesSkipped: async () => {}, requestHost: async () => {}, readMessageBody: async () => null,
-    chat: { directory: async () => null, write: async () => {} }, postNotice: async () => {}, mayRetryPress: async () => false,
+    chat: { hasMessage: async () => false, directory: async () => null, write: async () => {} }, postNotice: async () => {}, mayRetryPress: async () => false,
     onPressSettled: () => {}, onPressWaiting: () => {}, onRunsChanged: () => {}, reportFailure: async () => {}, withdrawFailure: async () => {},
     onSwitchedOff: () => {}, onHoldsChanged: () => {}, onAutomationsChanged: () => {}, onError: (_where, error) => { throw error; },
   });
   try {
     await executor.open();
     const history = await executor.run(claim.automationId, claim.claimId);
-    expect(history?.steps).toEqual([{ step: 1, writes: state.applied[0]!.writes }]);
+    expect(history?.steps).toEqual([{ step: 1, writes: state.applied[0]!.writes },
+      { step: 2, writes: [{ ...state.applied[1]!.writes[0]!, unconfirmed: true }] }]);
   } finally { await executor.dispose(); await evaluator.close(); }
 });
 
@@ -94,7 +95,7 @@ it("persists unchanged reach verdicts after the first save fails", async () => {
     groupRelayRecord: async () => ({ generation: 0, handover: null }),
     reachRelayRecord: async () => ({ generation: 0, reach: null, everShared: false }),
     groupMessagesSkipped: async () => undefined, requestHost: async () => undefined, readMessageBody: async () => "",
-    chat: { directory: async () => null, write: async () => { throw Error("Unexpected chat"); } }, postNotice: async () => undefined,
+    chat: { hasMessage: async () => false, directory: async () => null, write: async () => { throw Error("Unexpected chat"); } }, postNotice: async () => undefined,
     mayRetryPress: async () => false, onPressSettled: () => undefined, onPressWaiting: () => undefined,
     onRunsChanged: () => undefined, reportFailure: async () => undefined, withdrawFailure: async () => undefined,
     onSwitchedOff: () => undefined, onHoldsChanged: () => undefined, onAutomationsChanged: () => undefined, onError: errors,
@@ -158,7 +159,7 @@ it("keeps private reach reasons out of a recipient's direct press and retry", as
     groupRelayRecord: async () => ({ generation: 0, handover: null }),
     reachRelayRecord: async () => ({ generation: 0, reach: null, everShared: false }),
     groupMessagesSkipped: async () => undefined, requestHost: async () => undefined, readMessageBody: async () => "",
-    chat: { directory: async () => null, write: async () => { throw Error("Unexpected chat"); } }, postNotice: async () => undefined,
+    chat: { hasMessage: async () => false, directory: async () => null, write: async () => { throw Error("Unexpected chat"); } }, postNotice: async () => undefined,
     mayRetryPress: async () => true, onPressSettled: () => undefined, onPressWaiting: () => undefined,
     onRunsChanged: () => undefined, reportFailure: async () => undefined, withdrawFailure: async () => undefined,
     onSwitchedOff: () => undefined, onHoldsChanged: () => undefined, onAutomationsChanged: () => undefined, onError: errors,

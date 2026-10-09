@@ -266,6 +266,7 @@ function RunRow(props: {
           {run.writes.map((write, index) => (
             <li key={index} className="break-words font-mono text-[11px] leading-snug text-muted">
               {writeText(write)}
+              {write.unconfirmed ? " · Not confirmed" : null}
               {write.kind === "field" && settlementText(write.sharedFileUpdateState) ? ` · ${settlementText(write.sharedFileUpdateState)}` : null}
             </li>
           ))}

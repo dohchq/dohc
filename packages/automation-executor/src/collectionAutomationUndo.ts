@@ -1,4 +1,4 @@
-import { confirmedEffects, confirmedCreations } from "./automationRunStore";
+import { effectConfirmed } from "./automationRunStore";
 import { posix } from "node:path";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -93,11 +93,11 @@ export function documentUndoChanges(runs: readonly StoredRun[]): { added: Map<st
   for (const run of [...runs].sort((left, right) => left.startedAtMs - right.startedAtMs)) {
     // A record is listed as created before its fields are written, so one a
     // run stopped after creating is still found.
-    for (const created of confirmedCreations(run)) added.set(created.recordId, created.path);
-    for (const { writes } of confirmedEffects(run)) {
+    for (const created of run.created) added.set(created.recordId, created.path);
+    for (const [index, { writes }] of run.applied.entries()) {
       for (const write of writes) {
         if (write.kind === "created") added.set(write.recordId, write.path);
-        if (write.kind === "field") wrote(write.recordId, write.path, write.field, { before: write.before, after: write.after, sure: true });
+        if (write.kind === "field") wrote(write.recordId, write.path, write.field, { before: write.before, after: write.after, sure: effectConfirmed(run, index) });
       }
     }
     const unrecorded = unrecordedEffect(run)?.effect;
@@ -125,7 +125,10 @@ function wayBack(writes: readonly FieldWrite[]): { to: JsonValue; from: JsonValu
   let value = last.before;
   for (let index = writes.length - 2; index >= 0; index -= 1) {
     const earlier = writes[index]!;
-    if (isDeepStrictEqual(earlier.after, value)) value = earlier.before;
+    if (isDeepStrictEqual(earlier.after, value)) {
+      if (!earlier.sure) from.push(earlier.after, earlier.before);
+      value = earlier.before;
+    }
     // An unrecorded write the next one did not find never landed.
     else if (!earlier.sure && isDeepStrictEqual(earlier.before, value)) continue;
     else break;

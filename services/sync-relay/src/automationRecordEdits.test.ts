@@ -5,7 +5,7 @@ import { VersionedTextStoreError, type VersionRecord } from "@dohc/workspace-con
 import { DaemonRefusalError, type EngineYdocProviderSession } from "@dohc/workspace-engine-client";
 import type {EngineClient} from "@dohc/workspace-engine-client/daemon";
 import {YdocLoopbackEngine} from "@dohc/workspace-engine-client/testing";
-import { createCollectionRecord, setCollectionRecordFields } from "@dohc/automation-executor/collection-record-edits";
+import { AutomationCreationSkipped, createCollectionRecord, setCollectionRecordFields } from "@dohc/automation-executor/collection-record-edits";
 import { derivedRecordId } from "@dohc/automation-executor/record-ids";
 import { replicaRecordEditContext, replicaRecordEngine, type ReplicaRecordEngine } from "./automationRecordEdits";
 
@@ -288,4 +288,11 @@ it("checks recipient authority before both ordinary record updates and creations
   await expect(context.createFile("Tasks/two.md", "New record", AUTOMATION)).rejects.toThrow("not accepted");
   expect(f.writes).toHaveLength(0);
   expect(checked).toEqual(["Tasks/one.md", "Tasks/two.md"]);
+});
+
+it("turns a native deduped creation into a skipped effect without waiting for adoption", async () => {
+  const fake = replicaEngine();
+  fake.engine.adapter.writeTextFile = async () => ({ deduped: true } as Awaited<ReturnType<ReplicaRecordEngine["adapter"]["writeTextFile"]>>);
+  const context = replicaRecordEditContext(replica(), fake.engine, new AbortController().signal);
+  await expect(context.createFile("Tasks/made.md", "text", AUTOMATION)).rejects.toBeInstanceOf(AutomationCreationSkipped);
 });

@@ -1,6 +1,5 @@
 import { rebaseRun } from "./collectionAutomationRun";
 import type { UndoKeptField, UndoWrite } from "./automationRunStore";
-import { confirmedEffects, confirmedCreations } from "./automationRunStore";
 import type { AutomationTargets } from "./automationTargets";
 import type { ReachStep } from "./automationReach";
 
@@ -30,8 +29,8 @@ export async function undoAutomationRuns(
   const targets = new Map<string, Target>();
   const touch = (key: string, target: Target) => { targets.delete(key); targets.set(key, target); };
   for (const run of [...runs].sort((a, b) => a.startedAtMs - b.startedAtMs)) {
-    for (const created of confirmedCreations(run)) touch("document:" + created.recordId, { kind: "document", recordId: created.recordId });
-    for (const { writes } of confirmedEffects(run)) for (const write of writes) {
+    for (const created of run.created) touch("document:" + created.recordId, { kind: "document", recordId: created.recordId });
+    for (const { writes } of run.applied) for (const write of writes) {
       if (write.kind === "field" || write.kind === "created") touch("document:" + write.recordId, { kind: "document", recordId: write.recordId });
       else if (write.kind === "dataset-edit" || write.kind === "dataset-created") {
         const target: Target = { kind: "dataset", datasetId: write.rules.datasetId, tableId: write.tableId, recordId: write.recordId };
@@ -99,8 +98,7 @@ export async function automationUndoReach(
 ): Promise<ReachStep[]> {
   const paths = new Map<string, { datasetId: string | null; operations: Set<string> }>();
   for (const run of runs) {
-    const started = run.steps.flatMap((step) => step.effects).slice(0, run.applied.length + 1)
-      .filter((_effect, index) => !run.applied[index]?.unconfirmed);
+    const started = run.steps.flatMap((step) => step.effects).slice(0, run.applied.length + 1);
     for (const effect of started) {
       if (effect.kind === "set" || effect.kind === "add") {
         const path = effect.kind === "set" ? effect.target.collectionPath : effect.collectionPath;
@@ -136,7 +134,7 @@ export async function automationUndoReach(
       continue;
     }
     if (target.kind !== "dataset" || target.approved.datasetId !== expected.datasetId) throw new Error(DATASET_UNDO_RULES_CHANGED);
-    for (const write of runs.flatMap((run) => confirmedEffects(run).flatMap((entry) => entry.writes))) {
+    for (const write of runs.flatMap((run) => run.applied.flatMap((entry) => entry.writes))) {
       if (!("rules" in write) || write.rules.datasetId !== expected.datasetId) continue;
       if (write.kind === "dataset-action" && write.reverseOperationId !== undefined) expected.operations.add(write.reverseOperationId);
     }

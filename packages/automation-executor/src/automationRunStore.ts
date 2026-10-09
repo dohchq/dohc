@@ -236,7 +236,6 @@ export const WriteSchema = z.union([
 // Effect application time excludes the progress append. The count is per
 // completed effect, including effects whose fields were kept or skipped.
 const AppliedSchema = z.object({
-  unconfirmed: z.literal(true).optional(),
   ordinal: z.number().int().nonnegative(),
   writes: z.array(WriteSchema),
   writeMs: z.number().nonnegative().optional(),
@@ -343,7 +342,7 @@ const ExpirySchema = z.object({
  * field someone else had changed since the plan (kept as they left it), or a
  * record it could no longer find.
  */
-export type RunWrite = z.infer<typeof WriteSchema>;
+export type RunWrite = z.infer<typeof WriteSchema> & { unconfirmed?: true };
 /** A planned effect on a dataset record, through one of its approved operations. */
 export type DatasetEffect = Extract<z.infer<typeof EffectSchema>, { kind: "dataset-edit" | "dataset-create" | "dataset-action" }>;
 export type DatasetReplan = z.infer<typeof ReplanSchema>;
@@ -371,14 +370,8 @@ export interface StoredStep {
 }
 
 /** Receipts a finished run can describe as landed, for History and Undo. */
-export function confirmedEffects(run: StoredRun): StoredRun["applied"] {
-  return run.applied.filter(effect => !effect.unconfirmed);
-}
-
-export function confirmedCreations(run: StoredRun): StoredRun["created"] {
-  const unconfirmed = new Set(run.applied.filter(effect => effect.unconfirmed).flatMap(effect =>
-    effect.writes.flatMap(write => write.kind === "created" ? [write.recordId] : [])));
-  return run.created.filter(created => !unconfirmed.has(created.recordId));
+export function effectConfirmed(run: StoredRun, index: number): boolean {
+  return index < run.durableEffects;
 }
 
 /** One run of one claim under one definition of its automation. */
@@ -401,7 +394,7 @@ export interface StoredRun {
   finishedAtMs: number | null;
   /** The steps planned so far, in the order they ran, each saved before its first effect. */
   steps: StoredStep[];
-  /** Effect receipts in step order. Unconfirmed receipts stay only for replay. */
+  /** Effect receipts in step order. The watermark confirms their durability. */
   applied: Array<z.infer<typeof AppliedSchema>>;
   /**
    * Records the run created, each under the id its plan gave it and the id

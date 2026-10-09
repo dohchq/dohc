@@ -55,6 +55,29 @@ struct DurabilityState {
 #[derive(Clone, Default)]
 pub(super) struct DurabilityQueue(Arc<Mutex<DurabilityState>>);
 
+struct DurabilityDriver(Option<DurabilityQueue>);
+
+impl DurabilityDriver {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for DurabilityDriver {
+    fn drop(&mut self) {
+        if let Some(queue) = self.0.take() {
+            let mut state = lock(&queue.0);
+            state.running = false;
+            for request in std::mem::take(&mut state.pending) {
+                let _ = request.reply.send(Err(WireError::new(
+                    ErrorCode::Internal,
+                    "automation durability worker stopped",
+                )));
+            }
+        }
+    }
+}
+
 impl DurabilityQueue {
     fn submit(
         &self,
@@ -101,6 +124,7 @@ impl DurabilityQueue {
         if !state.running {
             state.running = true;
             let queue = self.clone();
+            let mut driver = DurabilityDriver(Some(queue.clone()));
             tokio::spawn(async move {
                 loop {
                     let requests = std::mem::take(&mut lock(&queue.0).pending);
@@ -124,6 +148,7 @@ impl DurabilityQueue {
                     let mut state = lock(&queue.0);
                     if state.pending.is_empty() {
                         state.running = false;
+                        driver.disarm();
                         break;
                     }
                 }
@@ -213,6 +238,38 @@ mod durability_tests {
             .unwrap();
         follower.await.unwrap().unwrap();
         assert!(!lock(&queue.0).running);
+    }
+
+    #[tokio::test]
+    async fn durability_queue_panic_releases_followers_and_allows_a_new_driver() {
+        let queue = DurabilityQueue::default();
+        let (started, begin) = oneshot::channel();
+        let (finish, done) = oneshot::channel::<()>();
+        let mut started = Some(started);
+        let mut done = Some(done);
+        let first = queue.submit_with(None, CancellationToken::new(), move |_| {
+            let started = started.take().unwrap();
+            let done = done.take().unwrap();
+            async move {
+                started.send(()).unwrap();
+                done.await.unwrap();
+                panic!("injected driver panic");
+            }
+        });
+        begin.await.unwrap();
+        let (send, mut batches) = tokio::sync::mpsc::unbounded_channel();
+        let follower = enqueue(&queue, send.clone(), "follower", CancellationToken::new());
+        finish.send(()).unwrap();
+        assert!(first.await.is_err());
+        assert_eq!(
+            follower.await.unwrap().unwrap_err().code,
+            ErrorCode::Internal
+        );
+        assert!(!lock(&queue.0).running);
+        let next = enqueue(&queue, send, "next", CancellationToken::new());
+        let (_, finish) = batches.recv().await.unwrap();
+        finish.send(Ok(vec![Ok(())])).unwrap();
+        next.await.unwrap().unwrap();
     }
 
     #[tokio::test]

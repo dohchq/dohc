@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import type { RunContext } from "./automationPlan";
 import { newRun, type CollectionAutomationRunDependencies } from "./collectionAutomationRun";
-import { confirmedEffects, confirmedCreations, type AutomationRunStore, type RunWrite, type StoredRun } from "./automationRunStore";
+import { effectConfirmed, type AutomationRunStore, type RunWrite, type StoredRun } from "./automationRunStore";
 import { runSteps, type EffectMode, type StepBackend } from "./automationStepRun";
 import { documentUndoChanges } from "./collectionAutomationUndo";
 
@@ -34,7 +34,7 @@ automations:
     store, nowMs: () => 2,
     makeDurable: async () => { log.push("makeDurable"); if (barrierFails) throw Error("unavailable"); },
     evaluator: { evaluate: async () => { throw Error("saved steps must not evaluate"); }, runCode: async () => { throw Error("saved steps must not evaluate"); } },
-    chat: { directory: async () => null, write: async () => { throw Error("unexpected chat"); } },
+    chat: { hasMessage: async () => false, directory: async () => null, write: async () => { throw Error("unexpected chat"); } },
     recipientVerdicts: async () => [], readCode: async () => null,
   };
   const backend: StepBackend = {
@@ -57,17 +57,15 @@ automations:
 }
 
 describe("durable replay boundaries", () => {
-  it("marks unvisited engine receipts unconfirmed when replay fails", async () => {
+  it("derives unvisited engine receipts from the mark and keeps them available to Undo", async () => {
     const f = fixture(3);
     f.run.applied = f.run.steps.map(step => ({ ordinal: step.ordinal, writes: [{ kind: "created", recordId: `r${step.ordinal}`, path: `Tasks/${step.ordinal}.md` }] }));
     f.run.created = f.run.steps.map(step => ({ ordinal: step.ordinal, planned: `r${step.ordinal}`, recordId: `r${step.ordinal}`, path: `Tasks/${step.ordinal}.md` }));
     f.run.durableEffects = 1;
     f.backend.apply = async () => ({ outcome: { kind: "failed", error: "reach changed", timedOut: false } });
     await expect(f.execute()).resolves.toMatchObject({ kind: "failed" });
-    expect(f.run.applied.map(effect => effect.unconfirmed ?? false)).toEqual([false, true, true]);
-    expect(confirmedEffects(f.run)).toHaveLength(1);
-    expect(confirmedCreations(f.run).map(created => created.recordId)).toEqual(["r0"]);
-    expect([...documentUndoChanges([f.run]).added.keys()]).toEqual(["r0"]);
+    expect(f.run.applied.map((_effect, index) => effectConfirmed(f.run, index))).toEqual([true, false, false]);
+    expect([...documentUndoChanges([f.run]).added.keys()]).toEqual(["r0", "r1", "r2"]);
     expect(f.saves.at(-1)?.outcome?.state).toBe("failed");
     expect(f.log).not.toContain("makeDurable");
   });

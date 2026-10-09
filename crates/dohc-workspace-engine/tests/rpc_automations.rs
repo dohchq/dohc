@@ -2080,13 +2080,8 @@ fn make_durable_barrier_cost() {
     let mut samples = Vec::new();
     for index in 0..260 {
         let start = std::time::Instant::now();
-        dohc_engine_domain::make_automation_writes_durable(
-            &mut store,
-            WORKSPACE_ID,
-            None,
-            &NoFaults,
-        )
-        .unwrap();
+        dohc_engine_domain::make_automation_writes_durable(&mut store, WORKSPACE_ID, &NoFaults)
+            .unwrap();
         if index >= 10 {
             samples.push(start.elapsed().as_secs_f64() * 1000.0);
         }

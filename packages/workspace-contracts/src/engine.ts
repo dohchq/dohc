@@ -458,6 +458,7 @@ interface VersionedTextMomentPayload {
 }
 
 interface VersionedTextWriteResult {
+  deduped?: boolean;
   materialized?: boolean;
   materializeOutcome?: "applied" | "skipped" | "conflict" | "superseded" | "error";
   object: FileObjectRecord;

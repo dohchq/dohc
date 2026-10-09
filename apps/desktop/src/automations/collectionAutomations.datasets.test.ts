@@ -590,7 +590,7 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
     requestHost: async () => undefined,
     readMessageBody: async () => { throw new Error("These test messages carry their whole body."); },
     postNotice: async (notice) => { notices.push(notice); wake(); },
-    chat: {
+    chat: { hasMessage: async () => false,
       directory: async (current) => chatDirectoryOf([TEAM], current),
       write: async (_signal, message) => { await options.onMessage?.(message); messages.push(message); wake(); },
     },

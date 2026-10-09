@@ -52,6 +52,10 @@ const RECORD_NOT_FOUND = "collection-record-not-found";
 // Collection reconcile.
 const ADOPTION_DEADLINE_MS = 15_000;
 
+export class AutomationCreationSkipped extends Error {
+  constructor() { super("The record was already created, then moved or deleted."); }
+}
+
 /** The engine adapter subset the seam reads through. VersionedLiveAdapter satisfies it. */
 export interface CollectionRecordEditAdapter {
   sharedFileUpdateStates(writes: readonly SharedFileUpdate[]): Promise<SharedFileUpdateState[]>;
@@ -498,6 +502,7 @@ export async function createCollectionRecord(
     return { path, recordId, ...(Object.keys(kept).length > 0 ? { kept } : {}) };
   } catch (error) {
     // A transport or lease can fail after the write landed.
+    if (error instanceof AutomationCreationSkipped) throw error;
     const diskId = await fileRecordId(context, path).catch(() => null);
     if (!durable && diskId !== requestedId) throw error;
     if (diskId !== null && ["write", "capture", "index"].includes(failedStage)) recordId = diskId;

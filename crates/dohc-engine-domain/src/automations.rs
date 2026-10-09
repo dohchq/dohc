@@ -3859,21 +3859,9 @@ pub fn list_automation_schedule_marks(
 pub fn make_automation_writes_durable(
     store: &mut EngineStore,
     workspace_id: &str,
-    claim_id: Option<&str>,
     faults: &dyn FaultInjector,
 ) -> Result<(), DomainError> {
     committed(store.write_durable_with(faults, |tx| {
-        if let Some(claim_id) = claim_id {
-            let claim_id = normalize_automation_identifier(claim_id, "Automation claim id is invalid.")?;
-            let claim = claim_by_id(tx, workspace_id, &claim_id)?.ok_or(DomainError::InvalidInput {
-                reason: "Automation claim not found.",
-            })?;
-            if claim.state != AutomationClaimState::Running {
-                return Err(DomainError::InvalidInput {
-                    reason: "Automation claim is not running.",
-                });
-            }
-        }
         let rows = tx.execute(
             "INSERT INTO engine_requests (request_id, payload_hash, result_seq, committed_at, kind) \
              VALUES (?1, '', -1, 0, 'automation-durability') \

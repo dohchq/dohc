@@ -159,8 +159,8 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
     if (!await resolves(...savedRules)) return { outcome: failed(RULES_CHANGED_ERROR) };
   }
   const readable = new Set<string>();
-  // Replayed messages use their saved destination and effect id. New sends
-  // still check their own reach against the current roster before writing.
+  // Existing messages need no new permission. Unsent saved messages check
+  // their own reach against the current roster immediately before sending.
   if (current !== null) inventory.reach = inventory.reach.filter(step =>
     step.kind !== "post" && step.kind !== "notify" && step.kind !== "personal");
   const verdicts = checkAutomationReach(roster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path), steps: inventory.reach });
@@ -686,9 +686,8 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
       return null;
     },
     async apply(run, effect, place, chat) {
-      if (place.recorded && (effect.kind === "message" || effect.kind === "wake")) {
-        engineWriteAttempted = true;
-        return applyChatEffect(deps, { run, signal, automationName: automation.name, depth: claim.depth + 1, chat, replay: true }, effect);
+      if (current !== null && (effect.kind === "message" || effect.kind === "wake") && await deps.chat.hasMessage(effect.messageId)) {
+        return [{ kind: "message", messageId: effect.messageId, name: effect.kind === "message" ? effect.name : "your agent" }];
       }
       await authorizeCode(savedCodeTargets({ ordinal: place.ordinal, effects: [effect] }));
       const datasetEffect = effect.kind === "dataset-edit" || effect.kind === "dataset-create" || effect.kind === "dataset-action";
@@ -713,7 +712,13 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
         return result ?? { outcome: { kind: "wait", reason: "engine" } };
       }
       if (effect.kind === "message" || effect.kind === "notice" || effect.kind === "wake") {
-        if (currentRoster !== null) {
+        if (current !== null && currentRoster !== null) {
+          const reach: ReachStep[] = effect.kind === "message"
+            ? [{ kind: "post", group: { channelWireId: effect.channelWireId, name: effect.name } }]
+            : effect.kind === "notice"
+              ? [{ kind: "notify", person: { userId: effect.notice.recipientUserId, name: effect.name } }]
+              : [{ kind: "personal", person: { userId: effect.person, name: deps.personName(effect.person) } }];
+          if (await deps.checkReach?.(reach, currentRoster)) return { outcome: { kind: "wait", reason: "held" } };
           const checked = await checkPlannedMessages(deps, { automationId: claim.automationId, automation, collection, roster: currentRoster }, [{ ordinal: place.ordinal, effects: [effect] }], chat);
           if ("outcome" in checked) return checked;
           chat = checked.chat;

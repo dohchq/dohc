@@ -995,6 +995,7 @@ export function createCaptureLiveStores(
       );
       return {
         materialized: raw.materialized,
+        deduped: raw.deduped,
         materializeOutcome: raw.materializeOutcome,
         object: raw.object,
         snapshot: snapshotFromWire(raw.snapshot, input.metadata),
@@ -1045,6 +1046,7 @@ export function createCaptureLiveStores(
       };
       return {
         materialized: raw.materialized,
+        deduped: raw.deduped,
         materializeOutcome: raw.materializeOutcome,
         object: raw.object,
         snapshot: snapshotFromWire(value, input.metadata),

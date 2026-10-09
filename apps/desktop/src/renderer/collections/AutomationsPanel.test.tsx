@@ -2788,6 +2788,17 @@ describe("an automation's runs", () => {
     expect(row.textContent).toContain("Sent a message to Trip");
   });
 
+  it("shows unconfirmed changes and keeps Undo available", async () => {
+    makeBridge(read([summary(stamp)]), [run({ state: "failed", writes: [{ kind: "field", recordId: "rec_1",
+      path: "Tasks/Plan.md", field: "Status", before: "Doing", after: "Done", unconfirmed: true }] })]);
+    render(<AutomationRuns workspaceId="ws-1" automationId="collection:Tasks#stamp" refreshKey={0}
+      onRetry={vi.fn()} onError={vi.fn()} onNotice={vi.fn()} />);
+    const row = await screen.findByTestId("automation-run-atc_1");
+    expect(within(row).getByRole("button", { name: "Undo" })).toBeDefined();
+    await userEvent.click(within(row).getByRole("button", { name: "Show 1 change" }));
+    expect(row.textContent).toContain("Not confirmed");
+  });
+
   it("keeps Undo available for a locally saved run and clears its pending note after settlement", async () => {
     const saved = run({ trigger: {kind: "button", recordId: "rec_1", by: "human", sharedAuthor: null, depth: 0}, sharedSettlementPending: true,
       writes: [{kind: "field", recordId: "rec_1", path: "Tasks/Plan.md", field: "Note", before: "a", after: "b"}] });

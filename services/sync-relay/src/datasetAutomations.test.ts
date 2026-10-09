@@ -259,7 +259,7 @@ async function executorFor(f: Awaited<ReturnType<typeof fixture>>, button = fals
     holdUnprovenWithoutHistory: async () => serverCopy !== undefined && f.storage.automationWorkspaceInfo("w")!.everShared,
     groupRelayRecord: async () => ({ generation: 0, handover: null }), reachRelayRecord: async () => ({ generation: 0, reach: null, everShared: false }),
     groupMessagesSkipped: async () => undefined, requestHost: async () => undefined, readMessageBody: async () => "",
-    chat: { directory: async () => null, write: async () => { throw Error("Unexpected chat"); } }, postNotice: async () => undefined,
+    chat: { hasMessage: async () => false, directory: async () => null, write: async () => { throw Error("Unexpected chat"); } }, postNotice: async () => undefined,
     mayRetryPress: async () => false, onPressSettled: () => undefined, onPressWaiting: event => { waiting.push(event.reason); },
     onRunsChanged: () => undefined, reportFailure: async () => undefined, withdrawFailure: async () => undefined, onSwitchedOff: () => undefined, onHoldsChanged: () => undefined, onAutomationsChanged: () => undefined,
     onError: (context, error) => {errorContexts.push(context); errors.push(error);},

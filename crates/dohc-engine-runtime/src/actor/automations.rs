@@ -173,7 +173,6 @@ impl ActorHandle {
                 dohc_engine_domain::make_automation_writes_durable(
                     store,
                     &workspace_id,
-                    None,
                     faults.as_ref(),
                 )?;
             }

@@ -1,4 +1,5 @@
 import type {AutomationDeclaration} from "@dohc/live-session-contract/live-authorship";
+import {AutomationCreationSkipped} from "@dohc/automation-executor/collection-record-edits";
 import {createHash} from "node:crypto";
 import {posix} from "node:path";
 import type {
@@ -97,7 +98,8 @@ export function replicaRecordEditContext(
         ...(author.onBehalfOf === undefined ? {} : {onBehalfOf: author.onBehalfOf}), depth: author.depth, run: author.run}}, signal);
       const versionId = await activeVersion();
       signal.throwIfAborted();
-      await adapter.writeTextFile({
+      let result;
+      try { result = await adapter.writeTextFile({
         workspaceId,
         versionId,
         path,
@@ -109,7 +111,12 @@ export function replicaRecordEditContext(
         requestId: `automation-create:${createHash("sha256").update(text).digest("hex")}`,
         metadata: {origin: "api", summary: `Added ${posix.basename(path)}`},
         author: {kind: "automation", automationId: author.automationId, onBehalfOf: author.onBehalfOf, depth: author.depth},
-      });
+      }); }
+      catch (error) {
+        if (isIdempotencyKeyReuseRefusal(error)) throw new AutomationCreationSkipped();
+        throw error;
+      }
+      if (result.deduped) throw new AutomationCreationSkipped();
       return path;
     },
     async readText(path) {

@@ -656,6 +656,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       evaluator: evaluator.forWorkspace(workspaceId),
       store: runStore,
       chat: {
+        hasMessage: chat.hasMessage,
         directory: chat.directory,
         write: async (signal, message, run) => {
           try {

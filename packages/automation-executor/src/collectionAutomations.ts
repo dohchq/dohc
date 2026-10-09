@@ -1,4 +1,4 @@
-import { confirmedEffects, confirmedCreations } from "./automationRunStore";
+import { effectConfirmed } from "./automationRunStore";
 import { datasetBaseFolder } from "@dohc/security-contract/dataset";
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
@@ -791,7 +791,7 @@ type DatasetUndoChecked =
 
 function documentUndoKept(runs: readonly StoredRun[]) {
   const datasetRecords = new Set(runs.flatMap((run) => [
-    ...confirmedEffects(run).flatMap(({ writes }) => writes.flatMap((write) => write.kind === "dataset-edit"
+    ...run.applied.flatMap(({ writes }) => writes.flatMap((write) => write.kind === "dataset-edit"
       ? [JSON.stringify([write.rules.datasetId, write.tableId, write.recordId])] : [])),
     ...run.steps.flatMap(({ effects }) => effects.flatMap((effect) => effect.kind === "dataset-edit"
       ? [JSON.stringify([effect.rules.datasetId, effect.tableId, effect.target.recordId])] : [])),
@@ -809,13 +809,14 @@ const BUSY_CLAIM_REFUSAL = "dohc is already changing this run. Try again in a mo
  * from `created`, once.
  */
 function stepWritesOf(runs: readonly StoredRun[]): Array<{ ordinal: number; write: RunWrite }> {
-  const writes = runs.flatMap((run) => confirmedEffects(run).flatMap((effect) => effect.writes.map((write) => ({ ordinal: effect.ordinal, write }))));
+  const writes = runs.flatMap((run) => run.applied.flatMap((effect, index) => effect.writes.map((write) => ({ ordinal: effect.ordinal,
+    write: effectConfirmed(run, index) ? write : { ...write, unconfirmed: true as const } }))));
   const listed = new Set(writes.flatMap(({ write }) => (write.kind === "created" ? [write.recordId] : [])));
   for (const run of runs) {
-    for (const created of confirmedCreations(run)) {
+    for (const created of run.created) {
       if (listed.has(created.recordId)) continue;
       listed.add(created.recordId);
-      writes.push({ ordinal: created.ordinal, write: { kind: "created", recordId: created.recordId, path: created.path } });
+      writes.push({ ordinal: created.ordinal, write: { kind: "created", recordId: created.recordId, path: created.path, unconfirmed: true } });
     }
   }
   return writes;
@@ -2523,7 +2524,7 @@ export class CollectionAutomations {
     const wanted = new Map<string, SharedFileUpdate>();
     for (const { stored } of entries) for (const run of stored) {
       for (const status of run.sharedSettlements ?? []) known.set(key(status.draft), status.state);
-      for (const draft of [...confirmedEffects(run).flatMap(step => step.writes.flatMap(write =>
+      for (const draft of [...run.applied.flatMap(step => step.writes.flatMap(write =>
         write.kind === "field" && write.sharedFileUpdate ? [write.sharedFileUpdate] : [])),
         ...(run.undoWrites ?? []).map(write => write.draft)]) wanted.set(key(draft), draft);
     }
@@ -2540,7 +2541,7 @@ export class CollectionAutomations {
     for (const { stored, row } of entries) {
       for (const run of stored) {
         const terminal = new Map((run.sharedSettlements ?? []).map(status => [key(status.draft), status]));
-        const drafts = [...confirmedEffects(run).flatMap(step => step.writes.flatMap(write =>
+        const drafts = [...run.applied.flatMap(step => step.writes.flatMap(write =>
           write.kind === "field" && write.sharedFileUpdate ? [write.sharedFileUpdate] : [])),
           ...(run.undoWrites ?? []).map(write => write.draft)];
         for (const draft of drafts) {

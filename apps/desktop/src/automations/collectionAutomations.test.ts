@@ -612,7 +612,7 @@ async function world(options: {
     onAutomationsChanged: () => { automationsChanged += 1; wake(); },
     groupList: async () => (options.channels ?? []).flatMap((channel) =>
       (channel.kind === "channel" ? [{ name: channel.name, slug: channel.slug }] : [])),
-    chat: {
+    chat: { hasMessage: async () => false,
       directory: async (current, needs) => {
         directoryNeeds.push(needs);
         return chatDirectoryOf(options.channels ?? [], current);
@@ -3041,7 +3041,7 @@ describe("Collection automations", () => {
     expect(claim.state).toBe("failed");
     const added = [...w.records.values()].find((record) => record.collection === "Log")!;
     const [run] = (await w.executor.runs("collection:Tasks#log")).runs;
-    expect(run!.writes).toEqual([{ kind: "created", recordId: added.id, path: added.path }]);
+    expect(run!.writes).toEqual([{ kind: "created", recordId: added.id, path: added.path, unconfirmed: true }]);
   });
 
   it("moves a record to the trash that a run created before it stopped setting its fields", async () => {
@@ -4012,7 +4012,7 @@ describe("Collection automations that post", () => {
       { userId: "user-ana", name: "ana@dohc.test", you: false, dmStopped: null, noticeStopped: "ana@dohc.test cannot view Tasks." },
     ] });
     // Without the engine a run waits, and so does the list.
-    const engineless = w.makeExecutor({ chat: { directory: async () => null, write: async () => undefined } });
+    const engineless = w.makeExecutor({ chat: { hasMessage: async () => false, directory: async () => null, write: async () => undefined } });
     await engineless.open();
     await expect(engineless.peopleFor("Tasks")).resolves.toEqual({ status: "waiting", reason: "dohc could not read this workspace's chats." });
     const asked = w.directoryNeeds.length;
@@ -4489,7 +4489,7 @@ describe("Collection automations that wake your agent", () => {
     const w = await world({ automations: { Tasks: ask } });
     const writes: AutomationChatMessage[] = [];
     const executor = w.makeExecutor({
-      chat: {
+      chat: { hasMessage: async () => false,
         directory: async (roster) => chatDirectoryOf([], roster),
         write: async (_signal, message) => {
           writes.push(message);

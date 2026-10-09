@@ -501,7 +501,7 @@ export interface WorkspaceEngineCapture {
     content: string | Uint8Array,
     author: MomentWriteAuthor,
     options?: { createOnly?: boolean; signal?: AbortSignal; expectedContentHash?: string; requestId?: string; correlationId?: string; beforeWrite?: (resolvedAbsolutePath: string) => Promise<void> },
-  ): Promise<{ resolvedAbsolutePath: string; materializeOutcome: string | undefined }>;
+  ): Promise<{ resolvedAbsolutePath: string; materializeOutcome: string | undefined; deduped?: boolean }>;
   // WS-G2-C-2 editor binding: open a live engine Y.Doc session for one rich
   // file through this capture's Rust workspace sessions. The session journals
   // editor edits as ydoc.update ops and, on each debounced settle, projects the
@@ -5571,7 +5571,7 @@ export function createWorkspaceEngineCapture(
           const result = typeof decoded === "string"
             ? await engine.writeTextFile({ ...input, text: decoded, publish: true })
             : await engine.writeBinaryFile({ ...input, bytes: decoded });
-          return { resolvedAbsolutePath: resolvedAbsolute, materializeOutcome: result.materializeOutcome };
+          return { resolvedAbsolutePath: resolvedAbsolute, materializeOutcome: result.materializeOutcome, ...(result.deduped ? { deduped: true } : {}) };
         } catch (error) {
           if (error instanceof VersionedTextStoreError && error.code === "write-precondition-failed") {
             throw new AuthoredTextChangedError(path);

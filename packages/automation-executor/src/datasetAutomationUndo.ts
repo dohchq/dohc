@@ -1,4 +1,4 @@
-import { confirmedEffects } from "./automationRunStore";
+import { effectConfirmed } from "./automationRunStore";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { UndoKeptField } from "./automationRunStore";
@@ -68,7 +68,7 @@ type Rules = Edit["rules"];
 /** The runs' writes, oldest first. */
 function writesOf(runs: readonly StoredRun[]): RunWrite[] {
   return [...runs].sort((left, right) => left.startedAtMs - right.startedAtMs)
-    .flatMap((run) => confirmedEffects(run).flatMap((effect) => effect.writes));
+    .flatMap((run) => run.applied.flatMap((effect) => effect.writes));
 }
 
 /**
@@ -80,8 +80,8 @@ function writesOf(runs: readonly StoredRun[]): RunWrite[] {
  */
 function editsOf(runs: readonly StoredRun[]): Array<{ edit: Edit; sure: boolean; hidden: ReadonlySet<string> }> {
   return [...runs].sort((left, right) => left.startedAtMs - right.startedAtMs).flatMap((run) => {
-    const recorded = confirmedEffects(run).flatMap((effect) => effect.writes)
-      .flatMap((write) => (write.kind === "dataset-edit" ? [{ edit: write, sure: true, hidden: new Set<string>() }] : []));
+    const recorded = run.applied.flatMap((effect, index) => effect.writes
+      .flatMap((write) => (write.kind === "dataset-edit" ? [{ edit: write, sure: effectConfirmed(run, index), hidden: new Set<string>() }] : [])));
     const unrecorded = unrecordedEffect(run)?.effect;
     if (unrecorded?.kind !== "dataset-edit") return recorded;
     const replan = run.replans.filter((entry) => entry.effect === run.applied.length).at(-1);
@@ -409,9 +409,11 @@ function fieldChange(fieldId: string, writes: readonly FieldWrite[]): FieldChang
   // A value before an edit its run could not read is not known, so the
   // chain stops there and the field stays.
   let known = last.known;
+  const after = last.sure ? [last.after] : [last.after, last.before];
   for (let index = writes.length - 2; known && index >= 0; index -= 1) {
     const earlier = writes[index]!;
     if (isDeepStrictEqual(earlier.after, value)) {
+      if (!earlier.sure && earlier.known) after.push(earlier.after, earlier.before);
       value = earlier.before;
       reversible &&= earlier.reversible;
       known = earlier.known;
@@ -422,7 +424,6 @@ function fieldChange(fieldId: string, writes: readonly FieldWrite[]): FieldChang
       break;
     }
   }
-  const after = last.sure ? [last.after] : [last.after, last.before];
   if (!known) return { fieldId, before: value, after, reversible: false, last: last.edit, sure: last.sure };
   return { fieldId, before: value, after: after.filter((candidate) => !isDeepStrictEqual(candidate, value)), reversible, last: last.edit, sure: last.sure };
 }

@@ -1,4 +1,5 @@
 import type { RunSource } from "./automationRecordBackend";
+import { AutomationCreationSkipped } from "./collectionRecordEdits";
 import { coordinateSourceRun } from "./automationStepRun";
 import { posix } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -199,6 +200,8 @@ interface RecipientReach {
 
 /** Where an automation's posts and direct messages go, and how they are written. */
 export interface AutomationChatDependencies {
+  /** Whether this effect's message already exists. Only called while resuming. */
+  hasMessage(messageId: string): Promise<boolean>;
   /** What `needs` names under this roster; null when the engine is unavailable. */
   directory(roster: Exclude<ReachRoster, { kind: "unknown" }>, needs: ChatNeeds): Promise<ChatDirectory | null>;
   /**
@@ -580,7 +583,8 @@ export async function applyDocumentEffect(
         run.created = [...run.created.filter(existing => existing.planned !== effect.recordId), entry];
       }
     };
-    const created = await dependencies.withRecordWrites(signal, (edit) =>
+    let created;
+    try { created = await dependencies.withRecordWrites(signal, (edit) =>
       edit.create({
         collectionPath: effect.collectionPath,
         name: effect.name,
@@ -588,7 +592,12 @@ export async function applyDocumentEffect(
         recordId: known?.recordId ?? effect.recordId,
         onPartial: remember,
       }),
-    );
+    ); }
+    catch (error) {
+      if (error instanceof AutomationCreationSkipped) return [{ kind: "skipped", recordId: known?.recordId ?? effect.recordId,
+        path: known?.path ?? `${effect.collectionPath}/${effect.name}.md`, reason: error.message }];
+      throw error;
+    }
     await remember(created);
     const fields = effect.fields.map(({ field, value }) => ({ field, before: null, after: value }));
     const writes: RunWrite[] = [{ kind: "created", recordId: created.recordId, path: created.path }];
@@ -616,14 +625,14 @@ export async function applyDocumentEffect(
  */
 export async function applyChatEffect(
   dependencies: Pick<CollectionAutomationRunDependencies, "chat" | "postNotice">,
-  context: { run: StoredRun; signal: AbortSignal; automationName: string; depth: number; chat: ChatDirectory | null; replay?: boolean },
+  context: { run: StoredRun; signal: AbortSignal; automationName: string; depth: number; chat: ChatDirectory | null },
   effect: Extract<PlannedEffect, { kind: "message" | "wake" | "notice" }>,
 ): Promise<RunWrite[]> {
   const { run, signal } = context;
   if (effect.kind === "message") {
     // A saved direct message goes only where the plan meant: the same
     // conversation, still with exactly that person.
-    if (!context.replay && effect.to.kind === "direct-message") {
+    if (effect.to.kind === "direct-message") {
       const now = context.chat?.directMessage(effect.to.userId);
       if (!now || "problem" in now || now.threadId !== effect.to.threadId) {
         throw new Error(`The people in ${effect.name} changed since this run began, so dohc did not send its message.`);
