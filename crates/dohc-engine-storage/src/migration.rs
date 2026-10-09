@@ -3105,7 +3105,80 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_OPEN_DOCUMENT_ARTIFACTS_DDL,
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 40,
+        id: "v2-ended-document-recovery",
+        sql: V2_ENDED_DOCUMENT_RECOVERY_DDL,
+        sets_user_version: None,
+    },
 ];
+
+const V2_ENDED_DOCUMENT_RECOVERY_DDL: &str = "\
+ALTER TABLE ydoc_docs ADD COLUMN last_local_update_seq INTEGER NOT NULL DEFAULT 0;
+UPDATE ydoc_docs SET last_local_update_seq=head_update_seq
+    WHERE head_update_seq>COALESCE(settled_update_seq,0);
+DROP TRIGGER ydoc_pending_artifacts_settled;
+ALTER TABLE ydoc_pending_artifacts RENAME TO ydoc_pending_artifacts_old;
+CREATE TABLE ydoc_pending_artifacts (
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    moment_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    last_attempt_state TEXT,
+    PRIMARY KEY(workspace_id,version_id,object_id),
+    FOREIGN KEY(workspace_id,version_id,object_id)
+      REFERENCES ydoc_docs(workspace_id,version_id,object_id) ON DELETE CASCADE,
+    FOREIGN KEY(workspace_id,moment_id)
+      REFERENCES moments(workspace_id,moment_id) ON DELETE CASCADE
+) STRICT;
+INSERT INTO ydoc_pending_artifacts(workspace_id,version_id,object_id,moment_id,origin_id,origin_seq,lineage_claim_id)
+SELECT workspace_id,version_id,object_id,moment_id,
+    json_extract(envelope_json,'$.originId'),json_extract(envelope_json,'$.originSeq'),lineage_claim_id
+FROM ydoc_pending_artifacts_old p WHERE rowid=(SELECT MAX(rowid) FROM ydoc_pending_artifacts_old q
+    WHERE q.workspace_id=p.workspace_id AND q.version_id=p.version_id AND q.object_id=p.object_id);
+DROP TABLE ydoc_pending_artifacts_old;
+CREATE TRIGGER ydoc_pending_artifacts_settled AFTER UPDATE OF last_settled_sha,settled_update_seq ON ydoc_docs
+WHEN NEW.settled_update_seq=NEW.head_update_seq AND EXISTS (
+    SELECT 1 FROM snapshots s WHERE s.workspace_id=NEW.workspace_id
+      AND s.version_id=NEW.version_id AND s.object_id=NEW.object_id
+      AND s.blob_sha256=NEW.last_settled_sha)
+BEGIN
+    DELETE FROM replication_pending_refusals WHERE workspace_id=NEW.workspace_id
+      AND reason_message='dohc could not write this document''s changes to its file. Open the document and try saving again.'
+      AND (origin_id,origin_seq) IN (SELECT origin_id,origin_seq FROM ydoc_pending_artifacts
+        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id);
+    DELETE FROM ydoc_pending_artifacts WHERE workspace_id=NEW.workspace_id
+      AND version_id=NEW.version_id AND object_id=NEW.object_id;
+END;
+CREATE TRIGGER ydoc_local_tail_retired AFTER UPDATE OF head_update_seq ON ydoc_docs
+WHEN NEW.head_update_seq<OLD.head_update_seq
+BEGIN
+    UPDATE ydoc_docs SET last_local_update_seq=0 WHERE workspace_id=NEW.workspace_id
+      AND version_id=NEW.version_id AND object_id=NEW.object_id;
+END;
+CREATE TRIGGER ydoc_recovery_mark_advanced BEFORE UPDATE OF origin_id,origin_seq ON ydoc_pending_artifacts
+WHEN OLD.last_attempt_state IS NOT NULL
+BEGIN
+    DELETE FROM replication_pending_refusals WHERE workspace_id=OLD.workspace_id
+      AND origin_id=OLD.origin_id AND origin_seq=OLD.origin_seq
+      AND reason_message='dohc could not write this document''s changes to its file. Open the document and try saving again.';
+END;
+CREATE TRIGGER ydoc_recovery_text_repaired AFTER UPDATE OF text ON blobs
+BEGIN
+    UPDATE ydoc_pending_artifacts SET last_attempt_state=NULL WHERE last_attempt_state IS NOT NULL
+      AND EXISTS(SELECT 1 FROM snapshots s WHERE s.workspace_id=ydoc_pending_artifacts.workspace_id
+        AND s.version_id=ydoc_pending_artifacts.version_id AND s.object_id=ydoc_pending_artifacts.object_id
+        AND s.blob_sha256=NEW.sha256);
+END;
+CREATE TRIGGER ydoc_recovery_blob_repaired AFTER UPDATE OF bytes ON binary_blobs
+BEGIN
+    UPDATE ydoc_pending_artifacts SET last_attempt_state=NULL WHERE last_attempt_state IS NOT NULL;
+END;
+
+";
 
 const V2_OPEN_DOCUMENT_ARTIFACTS_DDL: &str = "\
 CREATE TABLE ydoc_pending_artifacts (
@@ -3615,6 +3688,10 @@ mod tests {
             (
                 "v2-open-document-artifacts",
                 "ac65985d21a679fdd0def5553f47be56b879406e7ba063c77e2b40a2cbb68965",
+            ),
+            (
+                "v2-ended-document-recovery",
+                "8e60cfa251c941ba817f712f60ba96fcb1299f55e7baeaf5eeb7b1c8dac3aa7d",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -4860,6 +4937,54 @@ mod tests {
                 FaultAction::Continue
             }
         }
+    }
+
+    #[test]
+    fn ended_document_recovery_upgrade_coalesces_marks_and_preserves_settlement_guard() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-ended-document-recovery");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main'); INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','main',0); INSERT INTO file_objects VALUES ('ws','doc',0); INSERT INTO blobs(sha256,byte_length,text) VALUES ('old',3,'old'),('new',3,'new'); INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,regime,lineage_claim_status,head_update_seq,head_snapshot_seq,settled_update_seq,updated_at_ms) VALUES ('ws','main','doc','plaintext','local-only','unclaimed',2,0,1,0); INSERT INTO snapshots(workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES ('ws','main','doc','doc.md','old',0,'m0','sync');").unwrap();
+        for seq in 1..=2 {
+            conn.execute("INSERT INTO moments(workspace_id,moment_order,moment_id,version_id,object_id,path,recorded_at_ms,operation,after_blob_sha256,before_present,metadata_origin) VALUES ('ws',?1,'m'||?1,'main','doc','doc.md',1,'write','new',0,'sync')",[seq]).unwrap();
+            conn.execute("INSERT INTO ydoc_pending_artifacts VALUES ('ws','main','doc','m'||?1,'claim','m0',?2)",rusqlite::params![seq,format!(r#"{{"originId":"peer","originSeq":{seq}}}"#)]).unwrap();
+        }
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let row:(i64,String,String,i64,i64)=conn.query_row("SELECT (SELECT COUNT(*) FROM ydoc_pending_artifacts),p.moment_id,p.origin_id,p.origin_seq,d.last_local_update_seq FROM ydoc_pending_artifacts p JOIN ydoc_docs d USING(workspace_id,version_id,object_id)",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).unwrap();
+        assert_eq!(row, (1, "m2".into(), "peer".into(), 2, 2));
+        conn.execute(
+            "UPDATE ydoc_docs SET settled_update_seq=2,last_settled_sha='new'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM ydoc_pending_artifacts", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        conn.execute("UPDATE snapshots SET blob_sha256='new'", [])
+            .unwrap();
+        conn.execute("UPDATE ydoc_docs SET last_settled_sha='new'", [])
+            .unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM ydoc_pending_artifacts", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        conn.execute(
+            "UPDATE ydoc_docs SET head_update_seq=0,settled_update_seq=NULL",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            conn.query_row("SELECT last_local_update_seq FROM ydoc_docs", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
     }
 
     #[test]

@@ -241,6 +241,7 @@ fn deferred_ydoc_projection_over_the_text_cap_is_persisted_and_returned() {
         head, "seed",
         "the oversized projection must not replace the head"
     );
+    assert_durable_update_refusals_after_dismissal(&mut engine);
 }
 
 #[test]
@@ -1443,6 +1444,11 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
             (0, 2, 0),
             "the refused clock and its dependent descendant must both enter the causal lineage"
         );
+        let disposition:String=engine.read_with(|conn|conn.query_row("SELECT apply_disposition FROM replication_log WHERE workspace_id='ws' AND origin_id=?1 AND origin_seq=0",[&queued_origin],|r|r.get(0))).unwrap();
+        assert_eq!(
+            disposition, "refused",
+            "lineage cleanup must not undo the durable refusal"
+        );
     }
 }
 
@@ -1952,6 +1958,7 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
         0,
         "retaining the invalid marker wedges every later drain"
     );
+    assert_durable_update_refusals_after_dismissal(&mut engine);
 }
 
 #[test]
@@ -2074,6 +2081,7 @@ fn ydoc_prebase_path_mismatch_is_refused_but_retains_causal_bytes() {
         (0, 1, 0),
         "dropping refused CRDT bytes loses clocks needed by dependent descendants"
     );
+    assert_durable_update_refusals_after_dismissal(&mut engine);
 }
 
 #[test]
@@ -2426,4 +2434,136 @@ fn a_deferred_base_preserves_local_only_rows_in_a_conflict() {
         seed_source, None,
         "the lineage replacement must clear the seed-source witness (#815)"
     );
+}
+
+fn assert_durable_update_refusals_after_dismissal(engine: &mut EngineStore) {
+    let notices = crate::list_refusal_notices(engine, "ws").unwrap();
+    assert!(!notices.is_empty());
+    for notice in notices {
+        crate::dismiss_refusal_notice(
+            engine,
+            "ws",
+            &notice.notice_id,
+            &notice.refusal_coordinates,
+            &NoFaults,
+        )
+        .unwrap();
+        for coordinate in notice.refusal_coordinates {
+            let disposition: String = engine.read_with(|conn| conn.query_row(
+                "SELECT apply_disposition FROM replication_log WHERE workspace_id='ws' AND origin_id=?1 AND origin_seq=?2",
+                rusqlite::params![coordinate.origin_id, coordinate.origin_seq], |row| row.get(0))).unwrap();
+            assert_eq!(
+                disposition, "refused",
+                "refusal must survive notice dismissal"
+            );
+        }
+    }
+}
+
+#[test]
+fn parked_inactive_invalid_update_keeps_refused_disposition_after_dismissal() {
+    assert_parked_inactive_refusal(true);
+}
+
+#[test]
+fn parked_inactive_oversized_update_keeps_refused_disposition_after_dismissal() {
+    assert_parked_inactive_refusal(false);
+}
+
+fn assert_parked_inactive_refusal(collision: bool) {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let source = dohc_engine_collab::Ydoc::wire();
+    source.plaintext_insert(0, "a");
+    let old_bytes = source.encode_full_state();
+    let old_sha = engine.put_binary_blob(&old_bytes).unwrap();
+    let base = envelope(
+        "base-peer",
+        0,
+        "ydoc.update",
+        json!({"versionId":"main","objectId":"inactive-refusal","path":"inactive.md","contentKind":"plaintext","updateBlobSha256":old_sha,"lineageClaimId":old_sha,"isBaseState":true}),
+    );
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut Default::default(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "inactive-refusal").unwrap();
+    let vector_sha = dohc_engine_storage::hex_sha256(&source.encode_state_vector());
+    engine
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_collab::archive_active_lineage_in_tx(
+                tx,
+                &key,
+                &old_sha,
+                &vector_sha,
+                Some(&dohc_engine_storage::hex_sha256(b"a")),
+                2,
+            )
+        })
+        .unwrap();
+    let replacement = dohc_engine_collab::Ydoc::wire();
+    replacement.plaintext_insert(0, "a");
+    let replacement_sha = engine
+        .put_binary_blob(&replacement.encode_full_state())
+        .unwrap();
+    let mut replacement_base = base.clone();
+    replacement_base.origin_id = "replacement-peer".into();
+    replacement_base.payload["updateBlobSha256"] = json!(replacement_sha);
+    replacement_base.payload["lineageClaimId"] = json!(replacement_sha);
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut Default::default(),
+        &replacement_base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    let bytes = if collision {
+        let marker = b"plainText";
+        let content_at = old_bytes
+            .windows(marker.len())
+            .position(|bytes| bytes == marker)
+            .unwrap()
+            + marker.len()
+            + 1;
+        let mut bytes = old_bytes.clone();
+        assert_eq!(bytes[content_at], b'a');
+        bytes[content_at] = b'b';
+        bytes
+    } else {
+        source.plaintext_insert(0, &"x".repeat(MAX_TEXT_BYTES))
+    };
+    let update_sha = engine.put_binary_blob(&bytes).unwrap();
+    let mut delta = envelope(
+        "late-peer",
+        0,
+        "ydoc.update",
+        json!({"versionId":"main","objectId":"inactive-refusal","path":"inactive.md","contentKind":"plaintext","updateBlobSha256":update_sha,"lineageClaimId":old_sha,"isBaseState":false}),
+    );
+    delta.relay_seq = Some(110);
+    let parked = apply_ydoc_envelope(
+        &mut engine,
+        &mut Default::default(),
+        &delta,
+        &NoFaults,
+        &crate::ydoc_apply::AlwaysLive,
+    )
+    .unwrap();
+    assert!(matches!(
+        parked.primary,
+        ApplyDisposition::Applied(YdocApplyResult { deferred: true, .. })
+    ));
+    let drained =
+        crate::drain_deferred_ydoc_for_key(&mut engine, &mut Default::default(), &key, &NoFaults)
+            .unwrap();
+    assert_eq!(
+        drained.refusals.len(),
+        1,
+        "collision={collision}: {drained:?}"
+    );
+    assert_durable_update_refusals_after_dismissal(&mut engine);
 }

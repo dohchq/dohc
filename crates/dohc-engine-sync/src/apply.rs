@@ -467,6 +467,12 @@ pub(crate) fn persist_refusal(
         ],
     )
     .map_err(SyncError::persist)?;
+    if refusal.op_kind == "ydoc.update" {
+        tx.execute(
+            "UPDATE replication_log SET apply_disposition='refused' WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+            params![refusal.workspace_id,refusal.origin_id,refusal.origin_seq],
+        ).map_err(SyncError::persist)?;
+    }
     Ok(())
 }
 

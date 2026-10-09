@@ -130,7 +130,11 @@ fn open_document_pull_admits_settlement_and_same_origin_later_files() {
 #[ignore = "manual before/after pull measurement"]
 fn open_document_pull_measurement() {
     for live in [true, false] {
-        for sample in 0..5 {
+        for sample in 0..std::env::var("OPENHOLD_SAMPLES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5)
+        {
             let (others, deferred, micros) = open_document_pull_fixture(1000, live);
             println!(
                 "OPENHOLD pull live={live} sample={sample} applied_later={others} deferred={deferred} micros={micros}"
@@ -6028,5 +6032,118 @@ fn deferred_relay_suffixes_and_new_origins_keep_their_place_in_the_cycle() {
             &NoFaults,
         )
         .unwrap();
+    }
+}
+
+#[test]
+#[ignore = "manual partial-index insert measurement"]
+fn ydoc_update_index_insert_measurement() {
+    for local in [true, false] {
+        for live in [true, false] {
+            for indexed in [true, false, false, true] {
+                let (_scratch, _path, mut store) = open_store();
+                seed_identity(&mut store);
+                VersionedTextStore::new(&mut store)
+                    .ensure_main_version("ws", "main", 1, &NoFaults)
+                    .unwrap();
+                let key = dohc_engine_collab::DocKey::new("ws", "main", "measured").unwrap();
+                let doc = dohc_engine_collab::Ydoc::wire();
+                doc.plaintext_insert(0, "base");
+                let sha = store.put_binary_blob(&doc.encode_full_state()).unwrap();
+                let base = envelope(
+                    "peer",
+                    0,
+                    "ydoc.update",
+                    json!({"versionId":"main","objectId":"measured","path":"measured.md","contentKind":"plaintext","updateBlobSha256":sha,"lineageClaimId":sha,"isBaseState":true}),
+                );
+                let mut cache = Default::default();
+                apply_ydoc_envelope(&mut store, &mut cache, &base, &NoFaults, &NoLiveLeases)
+                    .unwrap();
+                store.write_with(&NoFaults,|tx| {
+                    for origin in ["history-a","history-b","history-c"] {
+                        for seq in 0..3334 {
+                            tx.execute("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES ('ws',?1,?2,'ydoc.update',?3,1,1)",params![origin,seq,base.payload.to_string()]).unwrap();
+                        }
+                    }
+                    if !indexed { tx.execute_batch("DROP INDEX replication_ydoc_origin_document").unwrap(); }
+                    Ok::<_,SyncError>(())
+                }).unwrap();
+                let leases = dohc_engine_collab::LeaseRegistry::new();
+                let held = live.then(|| leases.acquire(&key).unwrap());
+                if let Some(held) = &held {
+                    held.bind_claim(Some(&sha)).unwrap();
+                }
+                let mut samples = Vec::new();
+                let mut inserts = Vec::new();
+                for seq in 1..=110 {
+                    let update = doc.plaintext_insert((seq + 3) as u32, "x");
+                    let mut op = base.clone();
+                    op.origin_seq = seq;
+                    op.payload["isBaseState"] = json!(false);
+                    // Hydration is outside the timed remote apply, as in a pull.
+                    if !local {
+                        op.payload["updateBlobSha256"] =
+                            json!(store.put_binary_blob(&update).unwrap());
+                    }
+                    let started = std::time::Instant::now();
+                    if local {
+                        dohc_engine_collab::record_local_update(
+                            &mut store,
+                            &mut cache,
+                            &key,
+                            &update,
+                            Default::default(),
+                            &NoFaults,
+                            seq + 2,
+                            |tx, _, update_sha| {
+                                op.payload["updateBlobSha256"] = json!(update_sha);
+                                let journal = std::time::Instant::now();
+                                crate::journal_local_op_in_tx(
+                                    tx,
+                                    "ws",
+                                    "ydoc.update",
+                                    &op.payload,
+                                    seq + 2,
+                                )
+                                .unwrap();
+                                inserts.push(journal.elapsed().as_nanos());
+                                Ok(())
+                            },
+                        )
+                        .unwrap();
+                    } else {
+                        apply_ydoc_envelope(&mut store, &mut cache, &op, &NoFaults, &leases)
+                            .unwrap();
+                    }
+                    if seq > 10 {
+                        samples.push(started.elapsed().as_nanos());
+                    }
+                }
+                samples.sort_unstable();
+                inserts = inserts.into_iter().skip(10).collect();
+                inserts.sort_unstable();
+                println!(
+                    "OPENHOLD index local={local} live={live} indexed={indexed} n=100 p50_ns={} p95_ns={} journal_p50_ns={} journal_p95_ns={}",
+                    samples[49],
+                    samples[94],
+                    inserts.get(49).copied().unwrap_or(0),
+                    inserts.get(94).copied().unwrap_or(0)
+                );
+                // Isolate the journal insert from remote projection and local replay costs.
+                let payload = base.payload.to_string();
+                store.write_with(&NoFaults,|tx| {
+                    let mut timings=Vec::new();
+                    let mut statement=tx.prepare_cached("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported,apply_disposition) VALUES ('ws','insert-only',?1,'ydoc.update',?2,1,?3,'applied')").unwrap();
+                    for seq in 0..1010 {
+                        let start=std::time::Instant::now();
+                        statement.execute(params![seq,payload,i64::from(!local)]).unwrap();
+                        if seq>=10 { timings.push(start.elapsed().as_nanos()); }
+                    }
+                    timings.sort_unstable();
+                    println!("OPENHOLD insert local={local} live={live} indexed={indexed} n=1000 p50_ns={} p95_ns={}",timings[499],timings[949]);
+                    Ok::<_,SyncError>(())
+                }).unwrap();
+            }
+        }
     }
 }

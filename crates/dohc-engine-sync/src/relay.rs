@@ -1529,6 +1529,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             insert_changed_path(&mut changed_paths, change);
         }
         record_facts.extend(recovered.record_facts);
+        refusals.extend(recovered.refusals);
+        sharing_declined.extend(recovered.sharing_declined);
+        conflicts_opened += recovered.conflicts_opened;
         let mut deferred_origins = durable_origins.clone();
         for op in &ordered {
             if op.op_kind != "ydoc.update" || op.payload["isBaseState"] == true {

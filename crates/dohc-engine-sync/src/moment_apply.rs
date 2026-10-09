@@ -36,8 +36,6 @@ pub(crate) struct MomentAppendPayload {
     #[serde(default)]
     conflict_effect_index: Option<usize>,
     moment_id: String,
-    #[serde(default)]
-    lineage_claim_id: Option<String>,
     version_id: String,
     object_id: String,
     object_created_at_ms: Option<i64>,
@@ -679,12 +677,8 @@ fn apply_moment_append(
             .as_ref()
             .is_some_and(|snapshot| snapshot.digest == payload.payload_after_blob_sha256)
             || if content_held {
-                live_claim.is_some_and(|claim| {
+                live_claim.is_some_and(|_| {
                     is_ydoc_settlement_moment_id(&payload.moment_id)
-                        && payload
-                            .lineage_claim_id
-                            .as_deref()
-                            .is_none_or(|named| named == claim)
                         && after_kind == ContentKind::Text
                         && payload.path == payload.payload_after_path
                         && payload
@@ -708,7 +702,7 @@ fn apply_moment_append(
                 .as_ref()
                 .is_some_and(|head| head.digest != payload.payload_after_blob_sha256)
         {
-            open_artifacts::enqueue(tx, envelope, payload, claim, local.as_ref())?;
+            open_artifacts::enqueue(tx, envelope, payload, claim)?;
         }
         return Ok(MomentApplyResult {
             conflicts_opened: 0,
@@ -1941,7 +1935,6 @@ fn valid_replicated_origin(origin: &str) -> bool {
 fn validate_every_path_field(payload: &MomentAppendPayload) -> Result<(), SyncError> {
     let MomentAppendPayload {
         moment_id: _,
-        lineage_claim_id: _,
         version_id: _,
         object_id: _,
         object_created_at_ms: _,
@@ -2202,7 +2195,7 @@ fn require_binary_blob(tx: &Transaction<'_>, sha: &str) -> Result<i64, SyncError
 }
 
 fn select_snapshot_by_object(
-    tx: &Transaction<'_>,
+    tx: &rusqlite::Connection,
     workspace_id: &str,
     version_id: &str,
     object_id: &str,

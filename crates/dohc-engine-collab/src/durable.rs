@@ -678,6 +678,12 @@ where
                 &mut probe,
             )?;
             if !outcome.deduped {
+                if !is_seed {
+                    tx.execute(
+                        "UPDATE ydoc_docs SET last_local_update_seq=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                        rusqlite::params![key.workspace_id,key.version_id,key.object_id,outcome.seq],
+                    ).map_err(map_sql)?;
+                }
                 pending_after_append = Some(outcome.seq - marker.head_snapshot_seq);
                 // The seed's provenance commits with the seed append: the
                 // marker now records which captured head this lineage's

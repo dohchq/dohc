@@ -993,6 +993,15 @@ async fn pull_materialize_and_commit(
 }
 
 async fn assert_open_document_artifact_recovery(exit: &str, local_edit: bool) {
+    assert_open_document_artifact_recovery_inner(exit, local_edit, false, false).await;
+}
+
+async fn assert_open_document_artifact_recovery_inner(
+    exit: &str,
+    local_edit: bool,
+    tail: bool,
+    broken: bool,
+) {
     let workspace = "rpc-artifact-recovery";
     let path = "notes/shared.md";
     let relay = FakeRelay::start(RelayState::default());
@@ -1097,6 +1106,9 @@ async fn assert_open_document_artifact_recovery(exit: &str, local_edit: bool) {
     )
     .await;
     journal_editor_settlement(&b_scratch, workspace, settled["momentId"].as_str().unwrap());
+    if tail {
+        call(&b_transport, &b, &mut b_id, "ydoc.recordUpdate", json!({"sessionId":session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(13," tail"))})).await;
+    }
     call(
         &b_transport,
         &b,
@@ -1111,6 +1123,48 @@ async fn assert_open_document_artifact_recovery(exit: &str, local_edit: bool) {
         std::fs::read_to_string(a_scratch.path().join(path)).unwrap(),
         "Before"
     );
+    let c_scratch = ScratchDir::new().unwrap();
+    let c_transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let c = open_uncaptured_workspace(&c_transport, &c_scratch, &relay, workspace).await;
+    let mut c_id = 1;
+    seed_main(&c_transport, &c, &mut c_id, workspace).await;
+    seed_sync_identity(&c_transport, &c, &mut c_id, workspace).await;
+    call(
+        &c_transport,
+        &c,
+        &mut c_id,
+        "sync.claim",
+        json!({"workspaceId":workspace}),
+    )
+    .await;
+    pull_materialize_and_commit(&c_transport, &c, &mut c_id, workspace).await;
+    let remote_text = std::fs::read_to_string(c_scratch.path().join(path)).unwrap();
+    assert_eq!(
+        remote_text,
+        if tail {
+            "Before remote tail"
+        } else {
+            "Before remote"
+        }
+    );
+    let repaired_blobs = if broken {
+        let db = Connection::open(engine_db_path(&a_scratch).unwrap()).unwrap();
+        let saved=db.prepare("SELECT sha256,bytes FROM binary_blobs WHERE sha256 IN (SELECT json_extract(l.payload_json,'$.updateBlobSha256') FROM ydoc_deferred_updates d JOIN replication_log l USING(workspace_id,origin_id,origin_seq))").unwrap().query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?))).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
+        db.execute("UPDATE binary_blobs SET bytes=zeroblob(byte_length) WHERE sha256 IN (SELECT json_extract(l.payload_json,'$.updateBlobSha256') FROM ydoc_deferred_updates d JOIN replication_log l USING(workspace_id,origin_id,origin_seq))",[]).unwrap();
+        call(&b_transport,&b,&mut b_id,"versionedText.write",json!({"versionId":"main","objectId":"healthy","path":"healthy.md","text":"Healthy file","momentId":"healthy-moment","origin":"api","nowMs":210})).await;
+        call(
+            &b_transport,
+            &b,
+            &mut b_id,
+            "sync.push",
+            json!({"workspaceId":workspace}),
+        )
+        .await;
+        publish_pushed_ops(&relay, workspace, &b_scratch);
+        saved
+    } else {
+        Vec::new()
+    };
     match exit {
         "evict" => {
             call(
@@ -1135,10 +1189,10 @@ async fn assert_open_document_artifact_recovery(exit: &str, local_edit: bool) {
         }
         _ => unreachable!(),
     }
-    if exit != "evict" && !local_edit {
+    if exit != "evict" && !local_edit && !broken {
         assert_eq!(
             std::fs::read_to_string(a_scratch.path().join(path)).unwrap(),
-            "Before remote",
+            remote_text,
             "workspace open must recover without a pull"
         );
     }
@@ -1151,12 +1205,34 @@ async fn assert_open_document_artifact_recovery(exit: &str, local_edit: bool) {
             |r| r.get(0),
         )
         .unwrap();
-    let expected = if local_edit {
+    let expected = if local_edit || broken {
         "Before"
     } else {
-        "Before remote"
+        remote_text.as_str()
     };
     assert_eq!(head, expected, "{exit}");
+    if !local_edit && !broken {
+        let c_db = Connection::open(engine_db_path(&c_scratch).unwrap()).unwrap();
+        let snapshot = |conn: &Connection| {
+            conn.query_row(
+                "SELECT latest_moment_id,blob_sha256,path FROM snapshots WHERE path=?1",
+                [path],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            snapshot(&db),
+            snapshot(&c_db),
+            "head matches the never-opened device after {exit}"
+        );
+    }
     let index: String = db
         .query_row(
             "SELECT text FROM engine_search_files_fts WHERE path=?1",
@@ -1187,7 +1263,7 @@ async fn assert_open_document_artifact_recovery(exit: &str, local_edit: bool) {
             0
         }
     };
-    assert_eq!(marks(), i64::from(local_edit));
+    assert_eq!(marks(), i64::from(local_edit || broken));
     if local_edit {
         let reopened = call(
             &a_transport,
@@ -1210,6 +1286,107 @@ async fn assert_open_document_artifact_recovery(exit: &str, local_edit: bool) {
             "Local: Before remote"
         );
         assert_eq!(marks(), 0);
+    }
+    if broken {
+        let notices = call(
+            &a_transport,
+            &a,
+            &mut a_id,
+            "sync.refusalNotices",
+            json!({"workspaceId":workspace}),
+        )
+        .await;
+        assert!(
+            !notices["notices"].as_array().unwrap().is_empty(),
+            "{notices:?}"
+        );
+        let parked: i64 = db
+            .query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(parked > 0);
+        assert_eq!(
+            std::fs::read_to_string(a_scratch.path().join("healthy.md")).unwrap(),
+            "Healthy file"
+        );
+        assert_eq!(notices["notices"][0]["document"]["path"], path);
+        let attempted: String = db
+            .query_row(
+                "SELECT last_attempt_state FROM ydoc_pending_artifacts",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        pull_materialize_and_commit(&a_transport, &a, &mut a_id, workspace).await;
+        assert_eq!(marks(), 1);
+        assert_eq!(
+            db.query_row(
+                "SELECT last_attempt_state FROM ydoc_pending_artifacts",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            attempted
+        );
+        for (sha, bytes) in repaired_blobs {
+            db.execute(
+                "UPDATE binary_blobs SET bytes=?2 WHERE sha256=?1",
+                rusqlite::params![sha, bytes],
+            )
+            .unwrap();
+        }
+        pull_materialize_and_commit(&a_transport, &a, &mut a_id, workspace).await;
+        assert_eq!(marks(), 0);
+        assert_eq!(
+            std::fs::read_to_string(a_scratch.path().join(path)).unwrap(),
+            remote_text
+        );
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        let notices = call(
+            &a_transport,
+            &a,
+            &mut a_id,
+            "sync.refusalNotices",
+            json!({"workspaceId":workspace}),
+        )
+        .await;
+        assert!(notices["notices"].as_array().unwrap().is_empty());
+    } else if tail {
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        let settled = call(
+            &b_transport,
+            &b,
+            &mut b_id,
+            "ydoc.settle",
+            json!({"sessionId":session}),
+        )
+        .await;
+        journal_editor_settlement(&b_scratch, workspace, settled["momentId"].as_str().unwrap());
+        call(
+            &b_transport,
+            &b,
+            &mut b_id,
+            "sync.push",
+            json!({"workspaceId":workspace}),
+        )
+        .await;
+        publish_pushed_ops(&relay, workspace, &b_scratch);
+        pull_materialize_and_commit(&a_transport, &a, &mut a_id, workspace).await;
+        assert_eq!(
+            std::fs::read_to_string(a_scratch.path().join(path)).unwrap(),
+            remote_text
+        );
     }
     assert_eq!(
         db.query_row("SELECT COUNT(*) FROM conflicts", [], |r| r.get::<_, i64>(0))
@@ -3766,4 +3943,25 @@ async fn refusal_notices_list_and_dismiss_without_a_relay() {
         }
         call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ended_session_recovers_typing_after_settlement_evict() {
+    assert_open_document_artifact_recovery_inner("evict", false, true, false).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ended_session_recovers_typing_after_settlement_workspace_close() {
+    assert_open_document_artifact_recovery_inner("workspace-close", false, true, false).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ended_session_recovers_typing_after_settlement_crash() {
+    assert_open_document_artifact_recovery_inner("crash", false, true, false).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ended_session_failure_does_not_block_pull() {
+    assert_open_document_artifact_recovery_inner("evict", false, false, true).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ended_session_failure_does_not_block_workspace_open() {
+    assert_open_document_artifact_recovery_inner("workspace-close", false, false, true).await;
 }

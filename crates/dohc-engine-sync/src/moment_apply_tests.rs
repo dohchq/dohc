@@ -4646,9 +4646,6 @@ fn assert_open_document_exclusion(case: &str) {
     if case == "bare-write" {
         op.payload["momentId"] = json!("bare-write");
     }
-    if case == "payload-claim" {
-        op.payload["lineageClaimId"] = json!("f".repeat(64));
-    }
     if case == "dismissed-refusal" {
         store
             .read_with(|conn| conn.execute("DELETE FROM replication_pending_refusals", []))
@@ -6744,10 +6741,6 @@ fn moment_append_rejects_an_empty_binary_digest_as_storage_corruption_even_if_hy
 #[test]
 fn open_document_bare_write_still_holds() {
     assert_open_document_exclusion("bare-write");
-}
-#[test]
-fn open_document_mismatched_payload_claim_still_holds() {
-    assert_open_document_exclusion("payload-claim");
 }
 #[test]
 fn open_document_dismissed_refusal_still_holds() {
