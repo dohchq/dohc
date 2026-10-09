@@ -9,11 +9,12 @@ const moment = (authors: unknown) => ({
   metadata: { origin: "user", summary: "private summary", correlationId: "private correlation" },
 });
 
-function page(payload: Record<string, unknown>, audience: "authenticated" | "accountless" = "authenticated") {
+function page(payload: Record<string, unknown>, audience: "authenticated" | "accountless" = "authenticated",
+  admittedAuthorSnapshot?: import("./storage").SyncRelayLogRow["admittedAuthorSnapshot"]) {
   const storage: Pick<Parameters<typeof createShareReadQueries>[0], "fetchLogPage" | "hasRefusedSettlement"> = {
     hasRefusedSettlement: () => false,
     fetchLogPage: () => ({ rows: [{ workspaceId: "workspace", originId: "owner-origin", originSeq: 0,
-      relaySeq: 1, opKind: "moment.append", payloadJson: JSON.stringify(payload), recordedAtMs: 1 }], nextCursor: 1, hasMore: false }),
+      relaySeq: 1, opKind: "moment.append", payloadJson: JSON.stringify(payload), recordedAtMs: 1, ...(admittedAuthorSnapshot === undefined ? {} : {admittedAuthorSnapshot}) }], nextCursor: 1, hasMore: false }),
   };
   // Selected file moments use only fetchLogPage; the other query surfaces are outside this fixture.
   const queries = createShareReadQueries(storage as unknown as Parameters<typeof createShareReadQueries>[0], 500);
@@ -21,33 +22,42 @@ function page(payload: Record<string, unknown>, audience: "authenticated" | "acc
 }
 
 describe("authenticated selected moment declarations", () => {
-  it("keeps unattributed coverage alongside a public recipient author", () => {
-    const authors = [{kind: "human", humanId: "recipient", humanName: "Recipient"}, {kind: "unattributed"}];
-    const served = page(moment([...authors, {kind: "unattributed", humanId: "forged"}])).ops[0]!.payload as Record<string, unknown>;
-    expect(served.authors).toEqual(authors);
+  it("does not publish client-declared people or an agent's onBehalfOf without relay proof", () => {
+    const served = page(moment([
+      {kind: "human", humanId: "claimed-person", humanName: "Claimed person"},
+      {kind: "link", publicPrincipalId: "claimed-public-id", label: "Claimed link"},
+      {kind: "agent", agentId: "declared-agent", onBehalfOf: "claimed-person"},
+    ]));
+    expect((served.ops[0]!.payload as Record<string, unknown>).authors).toEqual([{kind: "unattributed"}]);
+    const body = JSON.stringify(served);
+    for (const excluded of ["claimed-person", "claimed-public-id", "onBehalfOf", "declared-agent"]) expect(body).not.toContain(excluded);
+  });
+  it("uses relay snapshots and ignores people in the owner's payload", () => {
+    const authors = [{kind: "human" as const, humanId: "recipient", humanName: "Recipient"},
+      {kind: "agent" as const, agentId: "assistant", onBehalfOf: "recipient"}];
+    const served = page(moment([{kind: "human", humanId: "forged", humanName: "Forged"}]), "authenticated", authors);
+    expect((served.ops[0]!.payload as Record<string, unknown>).authors).toEqual(authors);
+    expect(JSON.stringify(served)).not.toContain("forged");
   });
 
-  it("rebuilds only declared agents after filtering, while the default and accountless payloads stay minimal", () => {
-    const payload = moment([
-      { kind: "agent", agentId: "trip-agent 旅行", onBehalfOf: "opaque-relay-owner", depth: 0,
-        agentRunId: "private run", displayName: "private display", principalId: "fabricated authority", private: { path: "private/hidden.md" } },
-      { kind: "agent", agentId: "chained-agent", onBehalfOf: "local:private-person", depth: 64 },
-      { kind: "agent", agentId: "no-principal" },
-      { kind: "human", humanId: "private human" },
-      { kind: "named", userId: "fabricated user", grantId: "fabricated grant" },
-      { kind: "automation", automationId: "private automation", depth: 1 },
-    ]);
-    const served = page(payload).ops[0]!.payload as Record<string, unknown>;
-    expect(served.authors).toEqual([
-      { kind: "agent", agentId: "trip-agent 旅行", onBehalfOf: "opaque-relay-owner" },
-      { kind: "agent", agentId: "chained-agent", depth: 64 },
-      { kind: "agent", agentId: "no-principal" },
-    ]);
-    expect(served.metadata).toEqual({ origin: "sync" });
-    const serialized = JSON.stringify(served);
-    for (const excluded of ["private", "fabricated", "agentRunId", "displayName", "correlationId", "local:", "humanId", "automationId", "grantId"]) {
-      expect(serialized).not.toContain(excluded);
+  it("serves an agent only with the relay-minted principal in the same list", () => {
+    const link = {kind: "link" as const, publicPrincipalId: "public-link", label: "Unverified name"};
+    const agent = {kind: "agent" as const, agentId: "assistant", onBehalfOf: "public-link", depth: 2};
+    expect((page(moment(undefined), "authenticated", [link, agent]).ops[0]!.payload as Record<string, unknown>).authors)
+      .toEqual([link, agent]);
+    for (const snapshot of [[agent], [{...agent, onBehalfOf: undefined}]]) {
+      expect((page(moment(undefined), "authenticated", snapshot).ops[0]!.payload as Record<string, unknown>).authors)
+        .toEqual([{kind: "unattributed"}]);
     }
+    expect((page(moment(undefined), "authenticated", [link, {...agent, onBehalfOf: "another-person"}]).ops[0]!.payload as Record<string, unknown>).authors)
+      .toEqual([link, {kind: "unattributed"}]);
+    expect(page(moment(undefined), "accountless", [link, agent]).ops[0]!.payload).not.toHaveProperty("authors");
+  });
+
+  it("leaves ordinary declarations unattributed and the accountless payload minimal", () => {
+    const payload = moment([{kind: "agent", agentId: "claimed", onBehalfOf: "claimed-person"},
+      {kind: "automation", automationId: "claimed-automation"}]);
+    expect((page(payload).ops[0]!.payload as Record<string, unknown>).authors).toEqual([{kind: "unattributed"}]);
     const minimal = filterOpForShare(selector, "moment.append", JSON.stringify(payload));
     expect(minimal.allowed).toBe(true);
     if (!minimal.allowed) throw new Error("Fixture moment was not selected.");
@@ -66,31 +76,12 @@ describe("authenticated selected moment declarations", () => {
     }
   });
 
-  it("drops malformed optional declarations without dropping the selected file", () => {
-    const invalid = [
-      { agentId: "" }, { agentId: 1 }, { agentId: "é".repeat(257) }, { agentId: "bad\u0085id" },
-      { agentId: "\ud800" }, { agentId: "agent", onBehalfOf: "" },
-      { agentId: "agent", onBehalfOf: "bad\nprincipal" }, { agentId: "agent", onBehalfOf: 1 },
-      ...[-1, 1.5, 65, null, "1"].map(depth => ({ agentId: "agent", depth })),
-    ];
-    const served = page(moment([...invalid.map(author => ({ kind: "agent", ...author })),
-      { kind: "agent", agentId: "é".repeat(256), onBehalfOf: "owner", depth: 1 },
-    ])).ops[0]!.payload as Record<string, unknown>;
-    expect(served.authors).toEqual([{ kind: "agent", agentId: "é".repeat(256), onBehalfOf: "owner", depth: 1 }]);
-    for (const authors of [null, {}, [], [{ kind: "agent", agentId: "", depth: 0 }]]) {
+  it("keeps selected content unattributed regardless of malformed or oversized declarations", () => {
+    for (const authors of [null, {}, [], [{kind: "agent", agentId: ""}],
+      Array(1025).fill({kind: "agent", agentId: "x".repeat(512)})]) {
       const ops = page(moment(authors)).ops;
       expect(ops).toHaveLength(1);
-      expect(ops[0]!.payload).not.toHaveProperty("authors");
-    }
-  });
-
-  it("bounds the projected author count and canonical JSON bytes", () => {
-    const author = { kind: "agent", agentId: "agent" };
-    expect((page(moment(Array(1_024).fill(author))).ops[0]!.payload as { authors: unknown[] }).authors).toHaveLength(1_024);
-    for (const authors of [Array(1_025).fill(author), Array(257).fill({ kind: "agent", agentId: "x".repeat(512) })]) {
-      const ops = page(moment(authors)).ops;
-      expect(ops).toHaveLength(1);
-      expect(ops[0]!.payload).not.toHaveProperty("authors");
+      expect(ops[0]!.payload).toMatchObject({authors: [{kind: "unattributed"}]});
     }
   });
 
@@ -119,7 +110,7 @@ it("serves only relay-admitted settlement authors, keeps owner bytes, and advanc
  const served=queries.filteredLogPage("workspace",selector,0,10,"authenticated");
  expect(served.ops.map(op=>op.relaySeq)).toEqual([1,3]);expect(served.nextCursor).toBe(3);
  expect(served.ops[0]!.payload).toMatchObject({authors});expect(served.ops[0]).not.toHaveProperty("admittedAuthorSnapshot");expect(served.ops[0]).not.toHaveProperty("settlementAdmission");
- expect(served.ops[0]!.payload).not.toHaveProperty("settlementReference");expect(served.ops[1]!.payload).not.toHaveProperty("authors");expect(served.ops[1]!.payload).toMatchObject({metadata:{origin:"sync",summary:"Attribution unavailable"}});
+ expect(served.ops[0]!.payload).not.toHaveProperty("settlementReference");expect(served.ops[1]!.payload).toMatchObject({authors: [{kind:"unattributed"}]});expect(served.ops[1]!.payload).toMatchObject({metadata:{origin:"sync",summary:"Attribution unavailable"}});
  expect(rows[0]!.payloadJson).toBe(payloadJson);expect(JSON.parse(payloadJson)).not.toHaveProperty("authors");
  const accountless=queries.filteredLogPage("workspace",selector,0,10,"accountless");expect(accountless.ops.map(op=>op.relaySeq)).toEqual([1,3]);expect(accountless.ops[0]!.payload).not.toHaveProperty("authors");
 });

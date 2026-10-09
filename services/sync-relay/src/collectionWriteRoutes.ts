@@ -8,6 +8,7 @@ import { hashLinkProfileSecret, isPublicLinkAccess, type ValidatedLinkCapability
 import { readStreamedBytes } from "./relayBytes";
 import { parseString } from "./requestInputs";
 import { grantEditsCollection, namedCollectionEditGrant } from "./collectionEditGrant";
+import { accountDisplayName } from "./discussionRoutes";
 import { collectionEditSelector, filterCollectionWriteForShare, MAX_COLLECTION_WRITE_BYTES, MAX_NEW_COLLECTION_RECORDS, pathVisibleThroughShare } from "./shareFilter";
 import { CollectionWriteStaleError, type CommitCollectionWriteInput, type SyncRelayStorage } from "./storage";
 
@@ -52,6 +53,7 @@ export function createCollectionWriteRoutes(input: {
   newId: () => string;
   claimPendingShares: (userId: string) => Promise<void>;
   discussionActivity: Pick<DiscussionActivityHub, "wake">;
+  lookupUserDisplayName?: (userId: string) => Promise<string | null> | string | null;
 }) {
   const { storage } = input;
   // Preflights have their own bounded budget and cannot spend write tokens.
@@ -89,7 +91,8 @@ export function createCollectionWriteRoutes(input: {
       shareId: share.shareId,
       grantId: grant.grantId,
       grantGeneration: grant.generation,
-      writer: { kind: "named", userId: actorUserId },
+      writer: { kind: "named", userId: actorUserId,
+        humanName: await accountDisplayName(input.lookupUserDisplayName, actorUserId) ?? "Unnamed" },
       submitId,
       rawChanges: body.changes,
       write: decision.write,

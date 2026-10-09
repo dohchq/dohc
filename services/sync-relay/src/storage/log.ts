@@ -7,6 +7,7 @@ import {
   type AppendLogBatchResult,
   type FetchLogPageResult,
   type SyncRelayLogRow,
+  type SqliteDb,
 } from "./types";
 import { SyncRelayConflictError, SyncRelayBlobMissingError } from "./errors";
 import { referencedBlobShas, versionIdFromVersionCreatePayload } from "./blobReferences";
@@ -21,6 +22,15 @@ import {
 } from "./currentFiles";
 import { rowToLogRow } from "./rows";
 import { notifyDesktopReadiness } from "../desktopReadinessChanges";
+
+const LOG_AUTHOR_SNAPSHOT_SQL = `COALESCE(admitted_author_snapshot_json,
+  CASE WHEN origin_id LIKE 'relay:collection-file:%' THEN (
+    SELECT writes.admitted_author_snapshot_json FROM sync_relay_collection_writes AS writes
+    WHERE writes.workspace_id = sync_relay_log.workspace_id AND writes.origin_id = sync_relay_log.origin_id
+      AND writes.first_origin_seq <= sync_relay_log.origin_seq AND writes.last_origin_seq >= sync_relay_log.origin_seq
+    ORDER BY writes.first_origin_seq DESC LIMIT 1
+  ) END) AS admitted_author_snapshot_json`;
+const logPageStatements = new WeakMap<SqliteDb, ReturnType<SqliteDb["prepare"]>>();
 
 export function appendLogBatch(storage: StorageContext, input: {
     workspaceId: string;
@@ -243,15 +253,18 @@ export function fetchLogPage(storage: StorageContext, input: {
     sinceRelaySeq: number;
     limit: number;
   }): FetchLogPageResult {
-    const rows = storage.db
-      .prepare(
-        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json
+    let statement = logPageStatements.get(storage.db);
+    if (!statement) {
+      statement = storage.db.prepare(
+        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, ${LOG_AUTHOR_SNAPSHOT_SQL}, settlement_admission_json
          FROM sync_relay_log
          WHERE workspace_id = ? AND relay_seq > ?
          ORDER BY relay_seq
          LIMIT ?`,
-      )
-      .all(input.workspaceId, input.sinceRelaySeq, input.limit + 1);
+      );
+      logPageStatements.set(storage.db, statement);
+    }
+    const rows = statement.all(input.workspaceId, input.sinceRelaySeq, input.limit + 1);
     const pageRows = rows.slice(0, input.limit).map(rowToLogRow);
     const last = pageRows[pageRows.length - 1];
     return {
@@ -270,7 +283,7 @@ export function fetchLogPageDescending(storage: StorageContext, input: {
       input.beforeRelaySeq === null
         ? storage.db
             .prepare(
-              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json
+              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, ${LOG_AUTHOR_SNAPSHOT_SQL}, settlement_admission_json
                FROM sync_relay_log
                WHERE workspace_id = ?
                ORDER BY relay_seq DESC
@@ -279,7 +292,7 @@ export function fetchLogPageDescending(storage: StorageContext, input: {
             .all(input.workspaceId, input.limit)
         : storage.db
             .prepare(
-              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json
+              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, ${LOG_AUTHOR_SNAPSHOT_SQL}, settlement_admission_json
                FROM sync_relay_log
                WHERE workspace_id = ? AND relay_seq < ?
                ORDER BY relay_seq DESC
@@ -296,7 +309,7 @@ export function fetchLogCoordinate(storage: StorageContext, input: {
   }): SyncRelayLogRow | null {
     const row = storage.db
       .prepare(
-        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json
+        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, ${LOG_AUTHOR_SNAPSHOT_SQL}, settlement_admission_json
          FROM sync_relay_log
          WHERE workspace_id = ? AND origin_id = ? AND origin_seq = ?`,
       )

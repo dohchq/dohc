@@ -1,6 +1,7 @@
 import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
-import {parseLiveAuthorSnapshot} from "@dohc/live-session-contract";
+import { createHash } from "node:crypto";
+import { COLLECTION_FILE_ORIGIN_PREFIX } from "./relayLogInputs";
 import {
   filterOpForShare,
   groupChannelIsOrdinary,
@@ -245,13 +246,7 @@ export function createShareReadQueries(
             : null;
         if (payload === null) continue;
         if (audience === "authenticated" && row.opKind === "moment.append") {
-          const authors = row.settlementAdmission?.status === "accepted"
-            ? row.admittedAuthorSnapshot?.map(author => author.kind === "automation" ? {
-              kind: "automation", automationId: author.automationId, depth: author.attribution.depth,
-              ...(author.attribution.onBehalfOf === undefined ? {} : {onBehalfOf: author.attribution.onBehalfOf}),
-            } : author)
-            : admittedMomentAuthors(row.payloadJson);
-          if (authors) (payload as Record<string, unknown>).authors = authors;
+          (payload as Record<string, unknown>).authors = sharedMomentAuthors(row.admittedAuthorSnapshot);
           const original = JSON.parse(row.payloadJson) as Record<string, unknown>;
           const mark = original.attributionUnavailable;
           if (mark && typeof mark === "object" && !Array.isArray(mark)) {
@@ -266,12 +261,14 @@ export function createShareReadQueries(
         }
         ops.push({
           relaySeq: row.relaySeq,
-          ...(audience === "authenticated" ? { originId: row.originId } : {}),
+          ...(audience === "authenticated" ? { originId: row.originId.startsWith(COLLECTION_FILE_ORIGIN_PREFIX)
+            ? `${COLLECTION_FILE_ORIGIN_PREFIX}${createHash("sha256").update(JSON.stringify([workspaceId, row.originId])).digest("hex")}`
+            : row.originId } : {}),
           originSeq: row.originSeq,
           opKind: row.opKind,
           payload,
           recordedAtMs: row.recordedAtMs,
-          ...(row.admittedAuthorSnapshot === undefined || row.opKind === "moment.append" ? {} : {admittedAuthorSnapshot: row.admittedAuthorSnapshot}),
+          ...(audience === "accountless" || row.admittedAuthorSnapshot === undefined || row.opKind === "moment.append" ? {} : {admittedAuthorSnapshot: row.admittedAuthorSnapshot}),
         });
         if (ops.length === limit) {
           return {
@@ -463,36 +460,20 @@ export function createShareReadQueries(
   };
 }
 
-// The native moment-author budgets in dohc-engine-domain/src/store.rs.
-const MAX_SHARED_MOMENT_AUTHORS = 1_024;
-const MAX_SHARED_AUTHOR_JSON_BYTES = 128 * 1024;
-
-/** Author summaries from the selected durable moment, projected through the same shared shape. */
-function admittedMomentAuthors(payloadJson: string): Array<Record<string, unknown>> | null {
-  const raw = (JSON.parse(payloadJson) as Record<string, unknown>).authors;
-  if (!Array.isArray(raw) || raw.length > MAX_SHARED_MOMENT_AUTHORS) return null;
-  const authors: Array<Record<string, unknown>> = [];
-  for (const value of raw) {
-    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
-    const author = value as Record<string, unknown>;
-    if (author.kind === "unattributed" && Object.keys(author).length === 1) {
-      authors.push({kind: "unattributed"});
-      continue;
+/** Only relay-minted snapshots can name people or bind an agent to them. */
+function sharedMomentAuthors(snapshot: SyncRelayLogRow["admittedAuthorSnapshot"]): Array<Record<string, unknown>> {
+  if (!snapshot?.length) return [{kind: "unattributed"}];
+  const principals = new Set(snapshot.flatMap(author => author.kind === "human" ? [author.humanId]
+    : author.kind === "link" ? [author.publicPrincipalId] : []));
+  return snapshot.map(author => {
+    if (author.kind === "agent" && (!author.onBehalfOf || !principals.has(author.onBehalfOf))) {
+      return {kind: "unattributed"};
     }
-    if (author.kind !== "human" && author.kind !== "link" && author.kind !== "agent") continue;
-    if (author.kind === "human" && (typeof author.humanName !== "string" || String(author.humanId).startsWith("local:"))) continue;
-    const publicAuthor = author.kind === "agent" ? {kind: "agent", agentId: author.agentId,
-      ...(author.agentName === undefined ? {} : {agentName: author.agentName}),
-      ...(author.onBehalfOf === undefined || String(author.onBehalfOf).startsWith("local:") ? {} : {onBehalfOf: author.onBehalfOf}),
-      ...(author.depth === undefined || author.depth === 0 ? {} : {depth: author.depth})} : author;
-    try {
-      if (Object.values(publicAuthor).some(field => typeof field === "string" && /\p{Cc}/u.test(field))) continue;
-      authors.push({...parseLiveAuthorSnapshot([publicAuthor])[0]!});
-    }
-    catch { /* Optional malformed provenance does not discard an authorized file change. */ }
-  }
-  return authors.length > 0 && Buffer.byteLength(JSON.stringify(authors), "utf8") <= MAX_SHARED_AUTHOR_JSON_BYTES
-    ? authors : null;
+    if (author.kind === "automation") return {kind: "automation", automationId: author.automationId,
+      depth: author.attribution.depth,
+      ...(author.attribution.onBehalfOf === undefined ? {} : {onBehalfOf: author.attribution.onBehalfOf})};
+    return {...author};
+  });
 }
 
 // The objects whose after-content in an admitted row is `sha256`: the moment's

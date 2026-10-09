@@ -112,6 +112,77 @@ async function relay(
   return { h, storage, shareId, grantId, owner };
 }
 
+it("shares a named direct-write snapshot with a co-editor, without private authority", async () => {
+  const lookup = vi.fn((_id: string) => "Recipient name");
+  const r = await relay({overrides: {lookupUserDisplayName: lookup}});
+  const coShare = await createShare(r.h, OWNER, WORKSPACE, {recipientUserId: "coeditor", paths: ["trip"], access: "edit"});
+  await upload(r, SCHEMA_TWO);
+  lookup.mockClear();
+  expect((await write(r, [edit(`${PACKING}/collection.yaml`, SCHEMA, SCHEMA_TWO)])).status).toBe(200);
+  const response = await r.h(request("coeditor", `/sync/shares/${coShare}/log?since=0`));
+  expect(response.status).toBe(200);
+  const body = await response.text();
+  for (const secret of [r.grantId, "grantId", "grantGeneration", "@dohc.test", "principalId"]) expect.soft(body).not.toContain(secret);
+  const ops = JSON.parse(body).ops as Array<{payload: Record<string, unknown>}>;
+  expect.soft(ops.at(-1)?.payload.authors).toEqual([{kind: "human", humanId: RECIPIENT, humanName: "Recipient name"}]);
+  expect(lookup.mock.calls.filter(([id]) => id === RECIPIENT)).toHaveLength(1);
+});
+
+it("stores one bounded, quota-counted public snapshot per batch and keeps it after a rename and retry", async () => {
+  let name = "Recipient name";
+  const lookup = vi.fn((_id: string) => name);
+  const r = await relay({overrides: {lookupUserDisplayName: lookup}});
+  const folder = "trip/new";
+  const coShare = await createShare(r.h, OWNER, WORKSPACE, {recipientUserId: "coeditor", paths: [folder], access: "edit"});
+  const one = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\nOne\n";
+  const two = "---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\nTwo\n";
+  const changes = [create(`${folder}/collection.yaml`, SCHEMA), create(`${folder}/One.md`, one), create(`${folder}/Two.md`, two)];
+  await upload(r, SCHEMA, one, two);
+  const beforeDb = inspectDatabase(storagePath(r.storage));
+  const beforeUsage = Number(beforeDb.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id=?").get(WORKSPACE)!.usage_bytes);
+  beforeDb.close();
+  lookup.mockClear();
+  expect((await write(r, changes)).status).toBe(200);
+  expect(lookup).toHaveBeenCalledExactlyOnceWith(RECIPIENT);
+  const db = inspectDatabase(storagePath(r.storage));
+  const rows = db.prepare("SELECT * FROM sync_relay_collection_writes").all();
+  expect(rows).toHaveLength(1);
+  const row = rows[0]!;
+  expect(row).toHaveProperty("admitted_author_snapshot_json");
+  const snapshotJson = String(row.admitted_author_snapshot_json);
+  const snapshot = JSON.parse(snapshotJson);
+  expect(snapshot).toEqual([{kind: "human", humanId: RECIPIENT, humanName: "Recipient name"}]);
+  expect(snapshot.length).toBeLessThanOrEqual(2);
+  expect(Buffer.byteLength(JSON.stringify(snapshot[0]))).toBeLessThanOrEqual(4096);
+  expect(row.storage_bytes).toBe(Buffer.byteLength(String(row.paths_json)) + Buffer.byteLength(String(row.receipt_json)) +
+    Buffer.byteLength(r.grantId) + Buffer.byteLength(RECIPIENT) + Buffer.byteLength(String(row.origin_id)) + Buffer.byteLength(snapshotJson) + 256);
+  expect(db.prepare("SELECT admitted_author_snapshot_json FROM sync_relay_log WHERE origin_id=?").all(row.origin_id))
+    .toEqual(Array(3).fill({admitted_author_snapshot_json: null}));
+  const plan = db.prepare(`EXPLAIN QUERY PLAN SELECT admitted_author_snapshot_json FROM sync_relay_collection_writes
+    WHERE workspace_id=? AND origin_id=? AND first_origin_seq<=? AND last_origin_seq>=?
+    ORDER BY first_origin_seq DESC LIMIT 1`).all(WORKSPACE, row.origin_id, 1, 1);
+  expect(JSON.stringify(plan)).toContain("idx_sync_relay_collection_writes_origin_seq");
+  const usage = db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id=?").get(WORKSPACE);
+  const logBytes = Number(db.prepare("SELECT SUM(length(CAST(payload_json AS BLOB))) AS bytes FROM sync_relay_log WHERE origin_id=?").get(row.origin_id)!.bytes);
+  expect(Number(usage!.usage_bytes) - beforeUsage).toBe(Number(row.storage_bytes) + logBytes);
+  db.close();
+  name = "Renamed recipient";
+  expect(await json(await write(r, changes))).toMatchObject({created: false});
+  const again = inspectDatabase(storagePath(r.storage));
+  expect(again.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id=?").get(WORKSPACE)).toEqual(usage);
+  expect(again.prepare("SELECT admitted_author_snapshot_json FROM sync_relay_collection_writes").get()?.admitted_author_snapshot_json).toBe(snapshotJson);
+  again.close();
+  const path = storagePath(r.storage);
+  closeTestStorage(r.storage);
+  const reopened = reopenTestStorage(path);
+  const h = testHandler(reopened);
+  const response = await h(request("coeditor", `/sync/shares/${coShare}/log?since=0`));
+  expect(response.status).toBe(200);
+  const ops = (await json(response)).ops as Array<{payload: Record<string, unknown>}>;
+  expect(ops).toHaveLength(3);
+  for (const op of ops) expect(op.payload.authors).toEqual(snapshot);
+});
+
 // The owner's own log and blobs. A write to a path the owner already has
 // states the content it replaces, as the owner's engine does.
 class Owner {
@@ -1093,7 +1164,7 @@ describe("the owner's read of a grant's direct writes", () => {
     const usage = () => db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id = ?").get(WORKSPACE);
     const quota = usage();
     db.exec(`
-      DELETE FROM sync_relay_migrations WHERE migration_id = 'collection-write-authors-v1';
+      DELETE FROM sync_relay_migrations WHERE migration_id IN ('collection-write-authors-v1', 'collection-write-public-authors-v1');
       ALTER TABLE sync_relay_collection_writes RENAME TO current_ledger;
       CREATE TABLE sync_relay_collection_writes (
         grant_id TEXT NOT NULL,
@@ -1144,6 +1215,7 @@ describe("the owner's read of a grant's direct writes", () => {
       "SELECT name FROM sqlite_master WHERE name LIKE '%collection_writes%' ORDER BY name",
     ).all().map((row) => row.name)).toEqual([
       "idx_sync_relay_collection_writes_grant_seq",
+      "idx_sync_relay_collection_writes_origin_seq",
       "sqlite_autoindex_sync_relay_collection_writes_1",
       "sync_relay_collection_writes",
       "sync_relay_collection_writes_usage_delete",
@@ -1251,6 +1323,74 @@ describe("the direct-write decision", () => {
 // An Edit share link writes the same files through its own route (ADR 0013),
 // with its content in the request and its authority from the capability.
 describe("direct writes through an Edit share link", () => {
+  it("shares a link direct-write public snapshot without private authority", async () => {
+    const r = await linkRelay();
+    const path = `${PACKING}/collection.yaml`;
+    expect((await linkWrite(r, [linkEdit(path, SCHEMA, SCHEMA_TWO)])).status).toBe(200);
+    const db = inspectDatabase(storagePath(r.storage));
+    const principal = db.prepare("SELECT principal_id FROM sync_relay_link_principals WHERE grant_id=?").get(LINK_GRANT)!;
+    const mapping = db.prepare("SELECT public_principal_id FROM sync_relay_app_public_principals WHERE grant_id=? AND principal_id=?")
+      .get(LINK_GRANT, principal.principal_id);
+    db.prepare("UPDATE sync_relay_link_principals SET display_name='Renamed link holder' WHERE principal_id=?").run(principal.principal_id);
+    db.close();
+    const coShare = await createShare(r.h, OWNER, WORKSPACE, {recipientUserId: "coeditor", paths: ["trip"], access: "edit"});
+    const response = await r.h(request("coeditor", `/sync/shares/${coShare}/log?since=0`));
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    for (const secret of [LINK_GRANT, r.grantId, "grantGeneration", "grant_generation", "grantId", "@dohc.test", String(principal.principal_id), TOKEN, PROFILE]) {
+      expect.soft(body).not.toContain(secret);
+    }
+    expect.soft(mapping).toBeDefined();
+    const ops = JSON.parse(body).ops as Array<{payload: Record<string, unknown>}>;
+    expect.soft(ops.at(-1)?.payload.authors).toEqual([{kind: "link", publicPrincipalId: mapping?.public_principal_id, label: "Anonymous"}]);
+    const accountless = await r.h(linkRequest(TOKEN, "/sync/link/log?since=0"));
+    expect(accountless.status).toBe(200);
+    const accountlessBody = await accountless.text();
+    for (const excluded of ['"authors"', 'admittedAuthorSnapshot', LINK_GRANT, String(principal.principal_id), TOKEN, PROFILE]) {
+      expect(accountlessBody).not.toContain(excluded);
+    }
+  });
+
+  it.skipIf(!process.env.SHARE_AUTHOR_PERF_OUTPUT)("measures direct-write routes and share reads", async () => {
+    const {writeFile} = await import("node:fs/promises");
+    let clock = CLOCK;
+    const r = await linkRelay({overrides: {nowMs: () => clock, lookupUserDisplayName: () => "Recipient"}});
+    sql(r, "UPDATE sync_relay_link_sessions SET expires_at_ms=10000000");
+    const coShare = await createShare(r.h, OWNER, WORKSPACE, {recipientUserId: "coeditor", paths: ["trip"], access: "edit"});
+    await upload(r, SCHEMA, SCHEMA_TWO);
+    let before = SCHEMA;
+    const samples: Record<string, number[]> = {namedWrite: [], linkWrite: [], shareRead: []};
+    for (const lane of ["namedWrite", "linkWrite"] as const) {
+      for (let i = 0; i < 280; i++) {
+        clock += 3000;
+        const after = before === SCHEMA ? SCHEMA_TWO : SCHEMA;
+        const cursor = r.storage.fetchLogPageDescending({workspaceId: WORKSPACE, beforeRelaySeq: null, limit: 1})[0]!.relaySeq;
+        const start = performance.now();
+        const response = lane === "namedWrite"
+          ? await write(r, [edit(`${PACKING}/collection.yaml`, before, after)], {submitId: `perf-${lane}-${i}`})
+          : await linkWrite(r, [linkEdit(`${PACKING}/collection.yaml`, before, after)], {submitId: `perf-${lane}-${i}`});
+        await response.text();
+        const elapsed = performance.now() - start;
+        expect(response.status).toBe(200);
+        if (i >= 40) samples[lane]!.push(elapsed);
+        const readStart = performance.now();
+        const read = await r.h(request("coeditor", `/sync/shares/${coShare}/log?since=${cursor}&limit=10`));
+        const body = await read.text();
+        const readElapsed = performance.now() - readStart;
+        expect(read.status).toBe(200);
+        expect(JSON.parse(body).ops).toHaveLength(1);
+        if (i >= 40) samples.shareRead!.push(readElapsed);
+        before = after;
+      }
+    }
+    const results = Object.fromEntries(Object.entries(samples).map(([lane, values]) => {
+      const sorted = [...values].sort((a, b) => a - b);
+      return [lane, {requests: values.length, medianMs: sorted[Math.floor(sorted.length / 2)], p95Ms: sorted[Math.ceil(sorted.length * 0.95) - 1], samplesMs: values}];
+    }));
+    await writeFile(process.env.SHARE_AUTHOR_PERF_OUTPUT!, JSON.stringify(results, null, 2));
+    console.log(JSON.stringify(Object.fromEntries(Object.entries(results).map(([lane, result]) => [lane, {...result, samplesMs: undefined}]))));
+  });
+
   it("creates a record with link-principal provenance and obeys the owner's pause control", async () => {
     const r = await linkRelay();
     const path = `${PACKING}/One.md`;
@@ -1363,9 +1503,8 @@ describe("direct writes through an Edit share link", () => {
     expect((await linkWrite(r, [linkCreate(`${PACKING}/automations.yaml`, automations(STAMP))])).status).toBe(200);
     const [row] = ledger(r);
     const read = async () => await json(await r.h(request(OWNER, `/sync/${WORKSPACE}/collection-writes/${LINK_GRANT}`)));
-    expect(await read()).not.toHaveProperty("writes.0.files.0.publicPrincipalId");
-    sql(r, `INSERT INTO sync_relay_app_public_principals(workspace_id,grant_id,principal_id,public_principal_id,storage_bytes)
-      VALUES('${WORKSPACE}','${LINK_GRANT}','${row!.principal_id}','public-ana',256)`);
+    expect(await read()).toMatchObject({writes: [{files: [{publicPrincipalId: expect.stringMatching(/^public_/)}]}]});
+    sql(r, "UPDATE sync_relay_app_public_principals SET public_principal_id='public-ana'");
     expect(await read()).toMatchObject({ writes: [{ files: [{ publicPrincipalId: "public-ana" }] }] });
     sql(r, "PRAGMA foreign_keys=OFF; UPDATE sync_relay_app_public_principals SET principal_id='different-participant'");
     expect(await read()).not.toHaveProperty("writes.0.files.0.publicPrincipalId");

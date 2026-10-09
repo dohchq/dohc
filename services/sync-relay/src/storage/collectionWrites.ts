@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { parseLiveAuthorSnapshot, parseLiveUpdateIdentifier } from "@dohc/live-session-contract";
 import { datasetBaseFolder, DATASET_METADATA_MAX_BYTES, parseDatasetDefinition, parseDatasetRevision } from "@dohc/security-contract/dataset";
 import {
   MAX_AUTOMATIONS_FILE_BYTES,
@@ -34,6 +35,7 @@ import {
   type LinkEnrollment,
 } from "./linkEnrollment";
 import { appendLogBatchInTransaction, maxOriginSeq } from "./log";
+import { ensureLiveLinkPublicPrincipal } from "./liveAuthorSnapshot";
 import type { SqliteDb } from "./types";
 import { assertWorkspaceQuota } from "./workspaces";
 
@@ -103,7 +105,19 @@ export function initializeCollectionWriteSchema(db: SqliteDb): void {
     db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)")
       .run(COLLECTION_WRITE_AUTHORS_MIGRATION, Date.now());
   }
+  const publicAuthorsMigration = "collection-write-public-authors-v1";
+  if (!db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(publicAuthorsMigration)) {
+    db.exec(`ALTER TABLE sync_relay_collection_writes ADD COLUMN admitted_author_snapshot_json TEXT
+      CHECK (admitted_author_snapshot_json IS NULL OR (json_valid(admitted_author_snapshot_json)
+        AND json_type(admitted_author_snapshot_json) = 'array'
+        AND json_array_length(admitted_author_snapshot_json) BETWEEN 1 AND 2
+        AND length(CAST(admitted_author_snapshot_json AS BLOB)) <= 8195))`);
+    db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)")
+      .run(publicAuthorsMigration, Date.now());
+  }
   db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_sync_relay_collection_writes_origin_seq
+      ON sync_relay_collection_writes(workspace_id, origin_id, first_origin_seq DESC);
     CREATE INDEX IF NOT EXISTS idx_sync_relay_collection_writes_grant_seq
       ON sync_relay_collection_writes(grant_id, first_origin_seq);
     CREATE TRIGGER IF NOT EXISTS sync_relay_collection_writes_usage_insert
@@ -141,7 +155,7 @@ export class CollectionWriteStaleError extends RelayError {
  * write from its capability and profile, never from anything it claims.
  */
 export type CollectionWriter =
-  | { kind: "named"; userId: string }
+  | { kind: "named"; userId: string; humanName?: string }
   | {
       kind: "link";
       capabilityHash: string;
@@ -247,6 +261,14 @@ export function commitCollectionWrite(
     const author: DirectWriteMomentAuthor = current.kind === "named"
       ? { kind: "named", userId: current.userId, grantId: input.grantId, grantGeneration: input.grantGeneration }
       : { kind: "link", grantId: input.grantId, grantGeneration: input.grantGeneration, principalId: principalId! };
+    let humanName = writer.kind === "named" ? writer.humanName ?? "Unnamed" : "Unnamed";
+    try { parseLiveUpdateIdentifier(humanName); } catch { humanName = "Unnamed"; }
+    const admittedAuthorSnapshot = parseLiveAuthorSnapshot(current.kind === "named"
+      ? [{kind: "human", humanId: current.userId, humanName}]
+      : [{kind: "link", publicPrincipalId: ensureLiveLinkPublicPrincipal(storage, {
+          principalKind: "link", principalId: principalId!, grantId: input.grantId, grantGeneration: input.grantGeneration,
+        }), label: storage.getLinkPrincipal(principalId!)!.displayName ?? "Anonymous"}]);
+    const snapshotJson = JSON.stringify(admittedAuthorSnapshot);
     const originId = `${COLLECTION_FILE_ORIGIN_PREFIX}${input.grantId}`;
     const firstOriginSeq = maxOriginSeq(storage, workspaceId, originId) + 1;
     const ops = changesOf(decision.write).map((change, index) => ({
@@ -261,19 +283,20 @@ export function commitCollectionWrite(
     const receiptJson = JSON.stringify(receipt);
     const authorId = author.kind === "named" ? author.userId : author.principalId;
     const storageBytes = Buffer.byteLength(pathsJson) + Buffer.byteLength(receiptJson) +
-      Buffer.byteLength(input.grantId) + Buffer.byteLength(authorId) + Buffer.byteLength(originId) + 256;
+      Buffer.byteLength(input.grantId) + Buffer.byteLength(authorId) + Buffer.byteLength(originId) +
+      Buffer.byteLength(snapshotJson) + 256;
     // The ledger row goes first, so the append's quota check counts it.
     storage.db.prepare(
       `INSERT INTO sync_relay_collection_writes (
          grant_id, submit_id, workspace_id, share_id, grant_generation, author_kind, user_id, principal_id,
          payload_sha256, origin_id, first_origin_seq, last_origin_seq, paths_json, receipt_json, created_at_ms,
-         storage_bytes
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         storage_bytes, admitted_author_snapshot_json
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       input.grantId, input.submitId, workspaceId, input.shareId, input.grantGeneration, author.kind,
       author.kind === "named" ? author.userId : null, author.kind === "link" ? author.principalId : null,
       payloadSha256, originId, firstOriginSeq, firstOriginSeq + ops.length - 1, pathsJson, receiptJson,
-      input.nowMs, storageBytes,
+      input.nowMs, storageBytes, snapshotJson,
     );
     appendLogBatchInTransaction(storage, { workspaceId, originId, ops });
     return { receipt, created: true };
