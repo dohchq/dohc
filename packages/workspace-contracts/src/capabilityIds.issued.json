@@ -117,6 +117,7 @@
   "workspace.open.retry",
   "workspace.open.failures.take",
   "share.access.read",
+  "share.view.refresh",
   "document.shared.admission.wait",
   "diagnostics.read",
   "diagnostics.save",

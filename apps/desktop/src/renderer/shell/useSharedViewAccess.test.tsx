@@ -3,34 +3,42 @@ import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { CheckSharedViewAccessResult, DohcDesktopBridge } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
+import { createAutomationButtons, resetAutomationButtonsForTests } from "../collections/useAutomationButtons";
 import { useSharedViewAccess } from "./useSharedViewAccess";
 
 const check = vi.fn<DohcDesktopBridge["checkSharedViewAccess"]>();
 let visible = true;
 const verified = vi.fn();
+const pull = vi.fn<() => Promise<void>>();
+const persistent = vi.fn();
+let credentialsChanged: Parameters<DohcDesktopBridge["onCloudSessionChanged"]>[0];
 beforeEach(() => {
   vi.useFakeTimers();
   visible = true;
   vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visible ? "visible" : "hidden");
   check.mockReset().mockResolvedValue({ status: "current", access: "edit" });
   verified.mockReset();
-  window.dohcDesktop = { checkSharedViewAccess: check } as unknown as DohcDesktopBridge;
+  pull.mockReset().mockResolvedValue();
+  persistent.mockReset();
+  vi.spyOn(Math, "random").mockReturnValue(0.5);
+  window.dohcDesktop = { checkSharedViewAccess: check, onCloudSessionChanged: (listener: typeof credentialsChanged) => { credentialsChanged = listener; return () => undefined; } } as unknown as DohcDesktopBridge;
 });
-afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); delete window.dohcDesktop; });
+afterEach(() => { cleanup(); resetAutomationButtonsForTests(); vi.useRealTimers(); vi.restoreAllMocks(); delete window.dohcDesktop; });
 const flush = () => act(async () => { await Promise.resolve(); });
 function setup() {
   return renderHook(({ workspaceId, admission }) => useSharedViewAccess({
-    workspaceId, admission, enabled: true, onVerified: verified,
+    workspaceId, admission, enabled: true, onVerified: verified, pull, onPersistentFailure: persistent,
   }), { initialProps: { workspaceId: "A", admission: { superseded: false } } });
 }
 
-it("discovers ended access at the next five-second check", async () => {
+it("pulls every thirty seconds without a second access request", async () => {
   setup(); await flush();
-  check.mockResolvedValue({ status: "ended" });
-  await act(() => vi.advanceTimersByTimeAsync(4_999));
+  pull.mockClear();
+  await act(() => vi.advanceTimersByTimeAsync(29_999));
   expect(check).toHaveBeenCalledTimes(1);
   await act(() => vi.advanceTimersByTimeAsync(1));
-  expect(verified).toHaveBeenLastCalledWith({ status: "ended" });
+  expect(pull).toHaveBeenCalledTimes(1);
+  expect(check).toHaveBeenCalledTimes(1);
 });
 
 it("never overlaps deferred requests and rechecks a focus event after that request", async () => {
@@ -78,7 +86,7 @@ it("keeps offline separate from ended and discards answers on close", async () =
   expect(verified).not.toHaveBeenCalled();
   const response = deferred<CheckSharedViewAccessResult>();
   check.mockReturnValueOnce(response.promise);
-  await act(() => vi.advanceTimersByTimeAsync(5_000));
+  act(() => window.dispatchEvent(new Event("focus")));
   hook.unmount();
   await act(async () => { response.resolve({ status: "ended" }); });
   expect(verified).not.toHaveBeenCalled();
@@ -97,7 +105,7 @@ it("discards an answer after workspace admission is superseded", async () => {
 
 it("rechecks immediately when workspace relay sync recovers", async () => {
   const admission = { superseded: false };
-  const hook = renderHook(({ relayFailed }) => useSharedViewAccess({ workspaceId: "A", admission, enabled: true, relayFailed, onVerified: verified }),
+  const hook = renderHook(({ relayFailed }) => useSharedViewAccess({ workspaceId: "A", admission, enabled: true, relayFailed, onVerified: verified, pull, onPersistentFailure: persistent }),
     { initialProps: { relayFailed: false } });
   await flush();
   hook.rerender({ relayFailed: true }); await flush();
@@ -106,13 +114,129 @@ it("rechecks immediately when workspace relay sync recovers", async () => {
   expect(check).toHaveBeenCalledTimes(2);
   hook.rerender({ relayFailed: false }); await flush();
   expect(check).toHaveBeenCalledTimes(2);
+  expect(pull).toHaveBeenCalledTimes(2);
 });
 
 it("does not interpret another workspace's healthy sync as recovery", async () => {
-  const hook = renderHook(({ workspaceId, admission, relayFailed }) => useSharedViewAccess({ workspaceId, admission, enabled: true, relayFailed, onVerified: verified }),
+  const hook = renderHook(({ workspaceId, admission, relayFailed }) => useSharedViewAccess({ workspaceId, admission, enabled: true, relayFailed, onVerified: verified, pull, onPersistentFailure: persistent }),
     { initialProps: { workspaceId: "A", admission: { superseded: false }, relayFailed: true } });
   await flush();
   hook.rerender({ workspaceId: "B", admission: { superseded: false }, relayFailed: false }); await flush();
   expect(check).toHaveBeenCalledTimes(2);
   expect(check).toHaveBeenLastCalledWith({ workspaceId: "B" });
+});
+
+
+it("backs off 30, 60, 120, 240, 480, 600 seconds and reports the third failure once", async () => {
+  pull.mockRejectedValue(new Error("offline"));
+  setup(); await flush();
+  for (const [index, delay] of [30, 60, 120, 240, 480, 600, 600].entries()) {
+    await act(() => vi.advanceTimersByTimeAsync(delay * 1000 - 1));
+    expect(pull).toHaveBeenCalledTimes(index + 1);
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    expect(pull).toHaveBeenCalledTimes(index + 2);
+  }
+  expect(persistent).toHaveBeenCalledTimes(1);
+});
+
+it.each(["focus", "online"])("resets failure backoff on %s and resets it on success", async event => {
+  pull.mockRejectedValue(new Error("offline"));
+  setup(); await flush();
+  await act(() => vi.advanceTimersByTimeAsync(30_000));
+  act(() => window.dispatchEvent(new Event(event))); await flush();
+  expect(pull).toHaveBeenCalledTimes(3);
+  pull.mockResolvedValue();
+  await act(() => vi.advanceTimersByTimeAsync(30_000));
+  expect(pull).toHaveBeenCalledTimes(4);
+  await act(() => vi.advanceTimersByTimeAsync(30_000));
+  expect(pull).toHaveBeenCalledTimes(5);
+});
+
+it.each([0, 1])("jitters a failure by twenty percent (random %s)", async random => {
+  vi.mocked(Math.random).mockReturnValue(random);
+  pull.mockRejectedValue(new Error("offline"));
+  setup(); await flush();
+  const delay = random === 0 ? 24_000 : 36_000;
+  await act(() => vi.advanceTimersByTimeAsync(delay - 1));
+  expect(pull).toHaveBeenCalledTimes(1);
+  await act(() => vi.advanceTimersByTimeAsync(1));
+  expect(pull).toHaveBeenCalledTimes(2);
+});
+
+it("pauses a 401 until credentials change, including focus, online and explicit requests", async () => {
+  pull.mockRejectedValue(Object.assign(new Error("sign in"), { errorKind: "unauthorized" }));
+  const hook = setup(); await flush();
+  await act(() => vi.advanceTimersByTimeAsync(3_600_000));
+  for (const event of ["focus", "online"]) act(() => window.dispatchEvent(new Event(event)));
+  await act(async () => { await hook.result.current(); await hook.result.current.pull(); });
+  expect(pull).toHaveBeenCalledTimes(1);
+  expect(check).toHaveBeenCalledTimes(1);
+  pull.mockResolvedValue();
+  act(() => credentialsChanged({ phase: "changing", sessionKey: "account" }));
+  await flush(); expect(pull).toHaveBeenCalledTimes(1);
+  act(() => credentialsChanged({ phase: "ready", sessionKey: "account" }));
+  await flush(); expect(pull).toHaveBeenCalledTimes(2);
+});
+
+it("has one queued pull while a pull is in flight and drops that queue while hidden", async () => {
+  const pending = deferred<void>();
+  pull.mockReturnValueOnce(pending.promise);
+  const hook = setup(); await flush();
+  act(() => { void hook.result.current.pull(); void hook.result.current.pull(); void hook.result.current.pull(); });
+  expect(pull).toHaveBeenCalledTimes(1);
+  await act(async () => pending.resolve());
+  expect(pull).toHaveBeenCalledTimes(2);
+  const next = deferred<void>(); pull.mockReturnValueOnce(next.promise);
+  act(() => { void hook.result.current.pull(); void hook.result.current.pull(); });
+  visible = false;
+  act(() => document.dispatchEvent(new Event("visibilitychange")));
+  await act(async () => next.resolve());
+  await act(() => vi.advanceTimersByTimeAsync(3_600_000));
+  expect(pull).toHaveBeenCalledTimes(3);
+});
+
+it("drops a stale pull failure after a workspace switch", async () => {
+  const pending = deferred<void>(); pull.mockReturnValueOnce(pending.promise);
+  const hook = setup(); await flush();
+  hook.rerender({ workspaceId: "B", admission: { superseded: false } }); await flush();
+  await act(async () => pending.reject(Object.assign(new Error("old"), { errorKind: "unauthorized" })));
+  expect(persistent).not.toHaveBeenCalled();
+  await act(() => vi.advanceTimersByTimeAsync(30_000));
+  expect(pull).toHaveBeenCalledTimes(3);
+});
+
+it("makes 120 pull requests per idle visible hour, with no periodic access requests", async () => {
+  setup(); await flush(); pull.mockClear(); check.mockClear();
+  await act(() => vi.advanceTimersByTimeAsync(3_600_000));
+  expect(pull).toHaveBeenCalledTimes(120);
+  expect(check).not.toHaveBeenCalled();
+});
+
+
+it.each(["relayed", "settled"])("pulls after this window's own Button completes (%s), and ignores other workspaces", async completion => {
+  window.dohcDesktop = { ...window.dohcDesktop,
+    onAutomationRunSettled: () => () => undefined,
+    onAutomationRunWaiting: () => () => undefined,
+    onCollectionAutomationsChanged: () => () => undefined,
+    pressAutomationButton: async () => completion === "relayed" ? { busy: false, relayed: true } :
+      { busy: false, claimId: "press", settled: { claimId: "press", outcome: "done", effects: [] } },
+  } as unknown as DohcDesktopBridge;
+  setup(); await flush();
+  const other = createAutomationButtons({ workspaceId: "B", of: { collectionPath: "tasks" } });
+  await act(async () => other.press("Finish", { id: "row", label: "task" }));
+  expect(pull).toHaveBeenCalledTimes(1);
+  const buttons = createAutomationButtons({ workspaceId: "A", of: { collectionPath: "tasks" } });
+  await act(async () => buttons.press("Finish", { id: "row", label: "task" }));
+  expect(pull).toHaveBeenCalledTimes(2);
+  buttons.close(); other.close();
+});
+
+
+it("does not postpone background pulls when a write requests an access check", async () => {
+  const hook = setup(); await flush(); pull.mockClear();
+  for (let index = 0; index < 3; index++) {
+    await act(() => vi.advanceTimersByTimeAsync(20_000));
+    await act(async () => { await hook.result.current(); });
+  }
+  expect(pull).toHaveBeenCalledTimes(2);
 });

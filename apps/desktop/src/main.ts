@@ -347,7 +347,7 @@ import { createShareSkipRecorder } from "./workspaces/shareSkipRecorder";
 import { SharedChannelReadOnlyError, type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import { type ShareAccess } from "@dohc/security-contract/share-selector";
 import {
-  fetchShareViewInfo, fetchShareViewAccess, fetchShareAutomationSwitchable,
+  fetchShareViewInfo, fetchShareViewAccess, probeShareViewLog, fetchShareAutomationSwitchable,
 } from "./workspaces/shareViewInfo";
 import { installWorkspaceDataKey } from "./workspaces/workspaceDataKey";
 import { enrollWorkspaceKeyEnvelope } from "./workspaces/workspaceKeyEnvelopeEnrollment";
@@ -6358,12 +6358,13 @@ function registerIpcHandlers(): void {
     assertTrustedSender, withRendererWorkspaceOperation, loadAndCacheCurrentCredentials,
     warmCredentialCache, currentCredentials: () => cachedCredentials,
     currentCredentialGeneration: () => credentialCacheGeneration,
+    currentRendererSession: sender => rendererWorkspaceSessions.current(sender),
     onSenderClosed: (sender, close) => {
       sender.once("destroyed", close);
       return () => { sender.removeListener("destroyed", close); };
     },
     engineDaemonStartup: () => desktopEngine.startup,
-    fetchShareViewInfo, fetchShareViewAccess, usableRoot, readdir, mkdir, createJoinedWorkspace,
+    fetchShareViewInfo, fetchShareViewAccess, probeShareViewLog, usableRoot, readdir, mkdir, createJoinedWorkspace,
     setWorkspaceShareView, refreshNativeWorkspaceSurfaces, workspaceAuthorities,
     canonicalWorkspaceFor, withStaleSensitiveWorkspaceOperation, shareViewFiles,
     receivedShareEngine, openWorkspaceActivity, requireWorkspace, notifyRenderer,

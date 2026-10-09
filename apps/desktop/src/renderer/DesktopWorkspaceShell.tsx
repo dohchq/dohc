@@ -1511,11 +1511,16 @@ export function DesktopWorkspaceShell(props: {
     engineHistoryToken,
     null,
   );
+  const refreshShareViewRef = useRef<(trigger?: "manual" | "background") => Promise<ShareViewRefresh>>(async () => "current");
+  const shareRefreshFlight = useRef<{ admission: typeof workspaceAdmission; promise: Promise<ShareViewRefresh>; trigger: "manual" | "background"; followUp?: Promise<ShareViewRefresh> } | null>(null);
   const checkShareAccess = useSharedViewAccess({
     workspaceId,
     enabled: workspaceIsReady && !!shareView && !shareViewDamaged && !shareViewEnded,
     admission: workspaceAdmission,
     relayFailed: captureDecidedFor !== workspaceId || syncStatus === null ? undefined : !!syncStatus.syncFailure,
+    pull: () => refreshShareViewRef.current("background"),
+    onPersistentFailure: error => reportShellError("Couldn't refresh the shared view.", error,
+      () => { if (!workspaceAdmission.superseded) void refreshShareViewRef.current(); }),
     onVerified: result => {
       if (!shareView) return;
       if (result.status === "ended" || result.status === "needs-reopen" || result.access && result.access !== "edit") {
@@ -1861,7 +1866,7 @@ export function DesktopWorkspaceShell(props: {
   );
   // Set once refreshShareView exists below; a failed import's Try again
   // calls it.
-  const refreshShareViewRef = useRef<() => Promise<ShareViewRefresh>>(async () => "current");
+
   // One import seam for the dialog flow and the OS drag-in flow (the latter
   // passes the preload-resolved absolute paths; see the trust-delta note on
   // ImportWorkspaceFilesPayload). targetDir aims the import at a folder ("" /
@@ -3944,97 +3949,114 @@ export function DesktopWorkspaceShell(props: {
     show: (reports) => showReportsNotice(reports, () => openSettings("privacy")),
   });
 
-  const refreshShareView = useCallback(async (): Promise<ShareViewRefresh> => {
-    if (!shareView) return "current";
-    if (!workspaceIsReady || workspaceAdmission.superseded || shareViewDamaged) return "stale";
-    if (shareViewEnded) return "ended";
-    const token = ++shareRefreshToken.current;
-    const isCurrent = () => !workspaceAdmission.superseded && token === shareRefreshToken.current;
-    setShareRefreshing(true);
-    const repaintAfterChange = async () => {
-      await refreshFiles();
-      if (!isCurrent()) return;
-      setVersionEpoch((epoch) => epoch + 1);
-    };
-    const bestEffortRepaint = async () => {
-      try {
-        await repaintAfterChange();
-      } catch (repaintError) {
-        console.error(
-          "[desktop] repaint after shared-view refresh failed:",
-          repaintError,
-        );
+  const refreshShareView = useCallback((trigger: "manual" | "background" = "manual"): Promise<ShareViewRefresh> => {
+    const active = shareRefreshFlight.current;
+    if (active?.admission === workspaceAdmission) {
+      if (trigger !== active.trigger) {
+        active.followUp ??= active.promise.catch(() => "stale" as const).then(() =>
+          workspaceAdmission.superseded ? "stale" : refreshShareViewRef.current(trigger));
+        return active.followUp;
       }
-    };
-    try {
-      const outcome = await bridge().refreshSharedView({ workspaceId });
-      if (!isCurrent()) return "stale";
-      if (!outcome.ok || outcome.refusedOps > 0) void checkShareAccess();
-      if (!outcome.ok) {
-        if (outcome.changedPaths > 0) await bestEffortRepaint();
-        if (!isCurrent()) return "stale";
-        reportShellError(
-          "Couldn't refresh the shared view.",
-          new Error(`Couldn't refresh the shared view. ${outcome.errorMessage}`),
-        );
-        return "stale";
-      }
-      if (outcome.collisionRecordQuarantined) {
-        reportShellFailure({
-          message:
-            "dohc could not read this share's collision record, so it set the record aside. A refresh may overwrite local files that collided.",
-        });
-      }
-      if (outcome.status === "ended") {
-        setShareExclusions({ workspaceId, paths: [] });
-        setEndedFor(shareView);
-      } else {
-        setShareExclusions({ workspaceId, paths: outcome.unjournalablePaths });
-      }
-      if (outcome.changedPaths > 0) {
-        await repaintAfterChange();
-      }
-      if (!isCurrent()) return "stale";
-      return outcome.status === "ended" ? "ended" : "current";
-    } catch (error) {
-      if (!isCurrent()) return "stale";
-      void checkShareAccess();
-      // A store only a newer dohc opens stops the whole workspace, and the
-      // stop state already says so. A toast would repeat it.
-      const status = await bridge()
-        .getSyncStatus({ workspaceId })
-        .catch(() => null);
-      if (!isCurrent()) return "stale";
-      if (
-        status?.engineStoreRefused != null &&
-        engineStoreRefusalRecovery(status.engineStoreRefused) === "update"
-      ) {
-        return "stale";
-      }
-      reportShellError("Couldn't refresh the shared view.", error);
-      return "stale";
-    } finally {
-      // After the listing and after a FAILURE, deliberately. Refusals are
-      // recorded page by page before each cursor commit, so a refresh that
-      // died on a later page still left durable evidence behind — reading it
-      // only on the success path would keep that invisible until a lucky
-      // refresh or a remount. Start this after the listing, but do not let a
-      // slow registry read keep the Refresh control disabled.
-      if (isCurrent()) {
-        setShareRefreshing(false);
-        void reloadShareSkipped().catch(() => undefined);
-      }
+      return active.promise;
     }
+    const refresh = async (): Promise<ShareViewRefresh> => {
+      const background = trigger === "background";
+      if (!shareView) return "current";
+      if (!workspaceIsReady || workspaceAdmission.superseded || shareViewDamaged) return "stale";
+      if (shareViewEnded) return "ended";
+      const token = ++shareRefreshToken.current;
+      const isCurrent = () => !workspaceAdmission.superseded && token === shareRefreshToken.current;
+      let readShareRecords = true;
+      if (!background) setShareRefreshing(true);
+      const repaintAfterChange = async () => {
+        await refreshFiles();
+        if (!isCurrent()) return;
+        setVersionEpoch((epoch) => epoch + 1);
+      };
+      const bestEffortRepaint = async () => {
+        try {
+          await repaintAfterChange();
+        } catch (repaintError) {
+          console.error(
+            "[desktop] repaint after shared-view refresh failed:",
+            repaintError,
+          );
+        }
+      };
+      try {
+        const outcome = await bridge().refreshSharedView({ workspaceId, trigger });
+        if (!isCurrent()) return "stale";
+        readShareRecords = !outcome.probed;
+        if ((!background && !outcome.ok) || outcome.ok && outcome.refusedOps > 0) void checkShareAccess();
+        if (!outcome.ok) {
+          if (outcome.changedPaths > 0) await bestEffortRepaint();
+          if (!isCurrent()) return "stale";
+          if (background) throw Object.assign(new Error(outcome.errorMessage), { errorKind: outcome.errorKind });
+          reportShellError(
+            "Couldn't refresh the shared view.",
+            new Error(`Couldn't refresh the shared view. ${outcome.errorMessage}`),
+          );
+          return "stale";
+        }
+        if (outcome.probed) return "current";
+        if (outcome.collisionRecordQuarantined) {
+          reportShellFailure({
+            message:
+              "dohc could not read this share's collision record, so it set the record aside. A refresh may overwrite local files that collided.",
+          });
+        }
+        if (outcome.status === "ended") {
+          setShareExclusions({ workspaceId, paths: [] });
+          setEndedFor(shareView);
+        } else {
+          setShareExclusions({ workspaceId, paths: outcome.unjournalablePaths });
+        }
+        if (outcome.changedPaths > 0) {
+          await repaintAfterChange();
+        }
+        if (!isCurrent()) return "stale";
+        return outcome.status === "ended" ? "ended" : "current";
+      } catch (error) {
+        if (!isCurrent()) return "stale";
+        if (background) throw error;
+        void checkShareAccess();
+        // A store only a newer dohc opens stops the whole workspace, and the
+        // stop state already says so. A toast would repeat it.
+        const status = await bridge()
+          .getSyncStatus({ workspaceId })
+          .catch(() => null);
+        if (!isCurrent()) return "stale";
+        if (
+          status?.engineStoreRefused != null &&
+          engineStoreRefusalRecovery(status.engineStoreRefused) === "update"
+        ) {
+          return "stale";
+        }
+        reportShellError("Couldn't refresh the shared view.", error);
+        return "stale";
+      } finally {
+        // After the listing and after a FAILURE, deliberately. Refusals are
+        // recorded page by page before each cursor commit, so a refresh that
+        // died on a later page still left durable evidence behind — reading it
+        // only on the success path would keep that invisible until a lucky
+        // refresh or a remount. Start this after the listing, but do not let a
+        // slow registry read keep the Refresh control disabled.
+        if (isCurrent()) {
+          if (!background) {
+            setShareRefreshing(false);
+          }
+          if (readShareRecords) void reloadShareSkipped().catch(() => undefined);
+        }
+      }
+    };
+    const promise = refresh().finally(() => {
+      if (shareRefreshFlight.current?.promise === promise) shareRefreshFlight.current = null;
+    });
+    shareRefreshFlight.current = { admission: workspaceAdmission, promise, trigger };
+    return promise;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shareView, shareViewEnded, shareViewDamaged, workspaceId, workspaceIsReady, workspaceAdmission, reloadShareSkipped]);
   refreshShareViewRef.current = refreshShareView;
-  useEffect(() => {
-    // One automatic refresh when a shared view opens; afterwards on demand.
-    if (workspaceIsReady && shareView && !shareViewEnded && !shareViewDamaged) {
-      void refreshShareView();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceId, workspaceIsReady]);
 
   // ---- The recipient's own submitted changes ----
   // A submission exists only from Send changes: there is no draft at the
@@ -4102,6 +4124,7 @@ export function DesktopWorkspaceShell(props: {
     const bestEffortRepaint = async () => {
       try {
         await refreshFiles();
+        if (workspaceAdmission.superseded || token !== myShareChangeToken.current) return;
         setVersionEpoch((epoch) => epoch + 1);
       } catch (repaintError) {
         console.error("[desktop] repaint after send changes failed:", repaintError);
@@ -4109,9 +4132,10 @@ export function DesktopWorkspaceShell(props: {
     };
     try {
       const result = await bridge().submitShareChanges({ workspaceId });
-      if (token !== myShareChangeToken.current) return;
+      if (workspaceAdmission.superseded || token !== myShareChangeToken.current) return;
       if (!result.ok) {
         if (result.capturedLocalChanges > 0) await bestEffortRepaint();
+        if (workspaceAdmission.superseded || token !== myShareChangeToken.current) return;
         reportShellError(
           "Couldn't send your changes.",
           new Error(result.errorMessage),
@@ -4119,6 +4143,7 @@ export function DesktopWorkspaceShell(props: {
         return;
       }
       if (result.capturedLocalChanges > 0) await bestEffortRepaint();
+      if (workspaceAdmission.superseded || token !== myShareChangeToken.current) return;
       setShareChangesEmpty(result.submitted === 0);
       setShareChangesSkipped(
         result.skippedOutsideShare > 0 || result.morePending
@@ -4128,12 +4153,14 @@ export function DesktopWorkspaceShell(props: {
             }
           : null,
       );
+      if (!workspaceAdmission.superseded) void checkShareAccess.pull();
       owned = await reloadMyShareChanges();
     } catch (error) {
-      if (!workspaceAdmission.superseded) void checkShareAccess();
+      if (workspaceAdmission.superseded) return;
+      void checkShareAccess();
       reportShellError("Couldn't send your changes.", error);
     } finally {
-      if (owned === myShareChangeToken.current) setShareChangesSubmitting(false);
+      if (!workspaceAdmission.superseded && owned === myShareChangeToken.current) setShareChangesSubmitting(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId, workspaceAdmission, reloadMyShareChanges]);

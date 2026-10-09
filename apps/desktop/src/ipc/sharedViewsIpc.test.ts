@@ -5,7 +5,7 @@ import { claimWorkspace, closeTestStorages, createShare, inspectDatabase, storag
 import { CHANNELS } from "./channels";
 import { sharedViewAccessOperations } from "./bridgeContract";
 import { shareCaptureNoticeState } from "../workspaces/shareCaptureNotice";
-import { fetchShareViewAccess, ShareSelectorInvalidError, type ShareViewInfo } from "../workspaces/shareViewInfo";
+import { fetchShareViewAccess, probeShareViewLog, ShareSelectorInvalidError, type ShareViewInfo } from "../workspaces/shareViewInfo";
 import { SharePinInvalidError } from "../workspaces/shareViewRecords";
 import { buildShareCode } from "../workspaces/syncCode";
 import { deferred } from "../testing/deferred";
@@ -195,7 +195,7 @@ describe("registered received-view handlers", () => {
     const started = deferred<void>();
     const response = deferred<ShareViewInfo>();
     h.fetchInfo.mockImplementationOnce(() => { started.resolve(); return response.promise; });
-    const refreshed = h.invoke(CHANNELS.refreshSharedView, { workspaceId: "existing" });
+    const refreshed = h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" });
     await started.promise;
     if (change === "view") h.fetchAccess.mockResolvedValueOnce("view");
     else h.fetchAccess.mockRejectedValueOnce(new ShareUnavailableError());
@@ -209,7 +209,7 @@ describe("registered received-view handlers", () => {
   it("tells an old received copy to reopen before capture or pull", async () => {
     const h = await harness();
     delete h.workspace.shareView!.recipientUserId;
-    await expect(h.invoke(CHANNELS.refreshSharedView, { workspaceId: "existing" })).rejects.toThrow("This share must be reopened");
+    await expect(h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" })).rejects.toThrow("This share must be reopened");
     expect(h.storeFor).not.toHaveBeenCalled();
     expect(h.reconcile).not.toHaveBeenCalled();
   });
@@ -218,7 +218,7 @@ describe("registered received-view handlers", () => {
     const h = await harness();
     const response = deferred<ShareViewInfo>();
     h.fetchInfo.mockReturnValueOnce(response.promise);
-    const refresh = h.invoke(CHANNELS.refreshSharedView, { workspaceId: "existing" });
+    const refresh = h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" });
     await vi.waitFor(() => expect(h.fetchInfo).toHaveBeenCalledOnce());
     h.fetchAccess.mockResolvedValueOnce("view");
     await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, { workspaceId: "existing" });
@@ -229,11 +229,11 @@ describe("registered received-view handlers", () => {
 
   it("registers open before refresh and rejects untrusted or malformed inputs before work", async () => {
     const h = await harness();
-    expect([...h.handlers.keys()]).toEqual([CHANNELS.openSharedView, CHANNELS.refreshSharedView,
+    expect([...h.handlers.keys()]).toEqual([CHANNELS.openSharedView, sharedViewAccessOperations.refreshSharedView.channel,
       sharedViewAccessOperations.dismissShareCaptureNotice.channel, sharedViewAccessOperations.checkSharedViewAccess.channel]);
     for (const channel of h.handlers.keys()) await expect(h.invoke(channel, null, false)).rejects.toThrow("untrusted");
     await expect(h.invoke(CHANNELS.openSharedView, { rootPath: "", shareCode: "x" })).rejects.toThrow();
-    await expect(h.invoke(CHANNELS.refreshSharedView, { workspaceId: "" })).rejects.toThrow();
+    await expect(h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "" })).rejects.toThrow();
     await expect(h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, { workspaceId: "" })).rejects.toThrow();
     expect(h.fetchAccess).not.toHaveBeenCalled();
     expect(h.load).not.toHaveBeenCalled(); expect(h.startup).not.toHaveBeenCalled();
@@ -322,7 +322,7 @@ describe("registered received-view handlers", () => {
     h.startup.mockImplementation(() => { bootStarted.resolve(); return boot.promise; });
     const statusStarted = deferred(); const capture = deferred<WatcherStatusResult>();
     h.status.mockImplementation(() => { statusStarted.resolve(); return capture.promise; });
-    const result = h.invoke(CHANNELS.refreshSharedView, { workspaceId: "existing" });
+    const result = h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" });
     await bootStarted.promise; expect(h.storeFor).not.toHaveBeenCalled();
     boot.resolve(); await statusStarted.promise;
     expect(h.fetchInfo).not.toHaveBeenCalled(); expect(h.recordIdentity).not.toHaveBeenCalled(); expect(h.reconcile).not.toHaveBeenCalled();
@@ -335,7 +335,7 @@ describe("registered received-view handlers", () => {
   it.each(["renderer", "authority"] as const)("stops refresh when its %s retires during capture readiness", async (kind) => {
     const h = await harness(); const started = deferred(); const held = deferred<WatcherStatusResult>();
     h.status.mockImplementation(() => { started.resolve(); return held.promise; });
-    const result = h.invoke(CHANNELS.refreshSharedView, { workspaceId: "existing" });
+    const result = h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" });
     await started.promise; let drained: Promise<void> | undefined;
     if (kind === "renderer") h.retireRenderer(); else drained = h.authorities.invalidate("existing");
     held.resolve(ready); await expect(result).rejects.toThrow(); await drained;
@@ -345,7 +345,7 @@ describe("registered received-view handlers", () => {
   it("does not widen the pinned grant while updating the relay-derived chat fact", async () => {
     const h = await harness(); const pinned = h.workspace.shareView!.grantedSelector;
     h.fetchInfo.mockResolvedValue({ ...info, subjectName: "Renamed", sharerName: "Ana", selector: { paths: ["everything"], versionId: null, access: "edit" } });
-    await h.invoke(CHANNELS.refreshSharedView, { workspaceId: "existing" });
+    await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" });
     expect(h.workspace.shareView!.grantedSelector).toBe(pinned);
     expect(h.workspace.shareView!.genericChatWritable).toBe(true);
     expect(h.workspace.shareView).toMatchObject({subjectName: "Renamed", sharerName: "Ana"});
@@ -355,21 +355,21 @@ describe("registered received-view handlers", () => {
   it("rejects stale metadata before writing the grant or starting file reconciliation", async () => {
     const h = await harness(); const started = deferred(); const held = deferred<ShareViewInfo>();
     h.fetchInfo.mockImplementation(() => { started.resolve(); return held.promise; });
-    const result = h.invoke(CHANNELS.refreshSharedView, { workspaceId: "existing" });
+    const result = h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" });
     await started.promise; h.retireRenderer(); held.resolve(info);
     await expect(result).rejects.toThrow(); expect(h.setView).not.toHaveBeenCalled(); expect(h.reconcile).not.toHaveBeenCalled(); expect(h.notify).not.toHaveBeenCalled();
   });
 
   it("skips metadata and edit identity on another relay while retaining the local refresh path", async () => {
     const h = await harness(); h.cache.set({ ...credentials, relayUrl: "https://other.example.test" });
-    await expect(h.invoke(CHANNELS.refreshSharedView, { workspaceId: "existing" })).resolves.toEqual(outcome);
+    await expect(h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" })).resolves.toEqual(outcome);
     expect(h.fetchInfo).not.toHaveBeenCalled(); expect(h.recordIdentity).not.toHaveBeenCalled(); expect(h.reconcile).toHaveBeenCalledOnce();
   });
 
   it("does not notify a successor workspace after a held refresh settles", async () => {
     const h = await harness(); const started = deferred(); const held = deferred<Awaited<ReturnType<typeof h.reconcile>>>();
     h.reconcile.mockImplementation(() => { started.resolve(); return held.promise; });
-    const result = h.invoke(CHANNELS.refreshSharedView, { workspaceId: "existing" });
+    const result = h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" });
     await started.promise; h.retireRenderer(); held.resolve({ kind: "refresh", outcome });
     await expect(result).rejects.toThrow("changed workspaces"); expect(h.notify).not.toHaveBeenCalled();
   });
@@ -383,28 +383,108 @@ describe("registered received-view handlers", () => {
     const refusal = (message: string) =>
       Object.assign(new Error(message), { wireError: { code: "INTERNAL", message, retry: "no" } });
     h.status.mockRejectedValueOnce(refusal("migrated-by-newer-build: a newer build ran migration 5 (next)"));
-    await expect(h.invoke(CHANNELS.refreshSharedView, { workspaceId: "existing" })).rejects.toThrow("migrated-by-newer-build");
+    await expect(h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" })).rejects.toThrow("migrated-by-newer-build");
     expect(h.recordRefusal).toHaveBeenCalledWith("existing", "migrated-by-newer-build", "a newer build ran migration 5 (next)");
     expect(h.reconcile).not.toHaveBeenCalled();
 
     h.recordRefusal.mockClear();
     h.status.mockRejectedValueOnce(refusal("foreign-database"));
-    await expect(h.invoke(CHANNELS.refreshSharedView, { workspaceId: "existing" })).rejects.toThrow("foreign-database");
+    await expect(h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" })).rejects.toThrow("foreign-database");
     expect(h.recordRefusal).not.toHaveBeenCalled();
 
-    await expect(h.invoke(CHANNELS.refreshSharedView, { workspaceId: "existing" })).resolves.toEqual(outcome);
+    await expect(h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" })).resolves.toEqual(outcome);
     expect(h.recordRefusal).toHaveBeenCalledWith("existing", null, null);
   });
 
   it("notifies about partial pull work and preserves damaged-pin and ended outcomes", async () => {
     const h = await harness(); h.reconcile.mockResolvedValue({ kind: "refresh", outcome: { ok: false, changedPaths: 3, errorMessage: "later page failed" } });
-    await expect(h.invoke(CHANNELS.refreshSharedView, { workspaceId: "existing" })).resolves.toEqual({ ok: false, changedPaths: 3, errorMessage: "later page failed" });
+    await expect(h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" })).resolves.toEqual({ ok: false, changedPaths: 3, errorMessage: "later page failed" });
     expect(h.notify).toHaveBeenCalledWith({ workspaceId: "existing" }); h.notify.mockClear();
     h.reconcile.mockRejectedValue(new SharePinInvalidError("share"));
-    await expect(h.invoke(CHANNELS.refreshSharedView, { workspaceId: "existing" })).rejects.toThrow("Remove it, then open");
+    await expect(h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" })).rejects.toThrow("Remove it, then open");
     expect(h.notify).toHaveBeenCalledWith({ workspaceId: "existing" });
     h.reconcile.mockResolvedValue({ kind: "refresh", outcome: { ...outcome, status: "ended" } });
-    await expect(h.invoke(CHANNELS.refreshSharedView, { workspaceId: "existing" })).resolves.toMatchObject({ status: "ended" });
+    await expect(h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" })).resolves.toMatchObject({ status: "ended" });
     expect(h.surfaces).toHaveBeenCalled();
+  });
+});
+
+
+describe("background share pulls", () => {
+  const channel = sharedViewAccessOperations.refreshSharedView.channel;
+  const payload = { workspaceId: "existing", trigger: "background" };
+  async function primed() {
+    const h = await harness();
+    await h.invoke(channel, { workspaceId: "existing" });
+    vi.clearAllMocks();
+    return h;
+  }
+  function noLocalWork(h: Awaited<ReturnType<typeof harness>>) {
+    expect(h.workspaceOperation).not.toHaveBeenCalled();
+    expect(h.registryRead).not.toHaveBeenCalled();
+    for (const mock of [h.startup, h.relayFor, h.storeFor, h.status, h.reconcile,
+      h.fetchInfo, h.recordIdentity, h.notify, h.setView, h.recordRefusal, h.surfaces]) expect(mock).not.toHaveBeenCalled();
+  }
+  it("uses one authenticated log request and no engine, registry, file or event work when unchanged", async () => {
+    const h = await primed(); const reads = vi.spyOn(h.registry, "get");
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => Response.json({ ops: [], hasMore: false, nextCursor: 42 }));
+    h.probeLog.mockImplementation(input => probeShareViewLog({ ...input, relay: { ...input.relay, fetch } }));
+    await expect(h.invoke(channel, payload)).resolves.toMatchObject({ ok: true, status: "unchanged", probed: true, nextCursor: 42 });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(fetch).toHaveBeenCalledWith("https://relay.example.test/sync/shares/share/log?since=42",
+      expect.objectContaining({ headers: expect.any(Headers), signal: expect.any(AbortSignal) }));
+    expect(new Headers(fetch.mock.calls[0]![1]!.headers).get("authorization")).toBe("Bearer token");
+    expect(reads).not.toHaveBeenCalled(); noLocalWork(h);
+  });
+  it("runs the full path once for new ops, keeps its committed cursor and skips metadata and identity", async () => {
+    const h = await primed(); h.probeLog.mockResolvedValue({ unchanged: false });
+    h.reconcile.mockResolvedValue({ kind: "refresh", outcome: { ...outcome, nextCursor: 57 } });
+    await expect(h.invoke(channel, payload)).resolves.toMatchObject({ ok: true, nextCursor: 57 });
+    expect(h.reconcile).toHaveBeenCalledOnce(); expect(h.status).toHaveBeenCalledOnce(); expect(h.notify).toHaveBeenCalledOnce();
+    expect(h.fetchInfo).not.toHaveBeenCalled(); expect(h.recordIdentity).not.toHaveBeenCalled();
+    h.probeLog.mockResolvedValue({ unchanged: true }); await h.invoke(channel, payload);
+    expect(h.probeLog).toHaveBeenLastCalledWith(expect.objectContaining({ since: 57 }));
+    expect(h.reconcile).toHaveBeenCalledOnce();
+  });
+  it("does a full refresh without a cached cursor and invalidates it after a failed full path", async () => {
+    const h = await harness(); await h.invoke(channel, payload);
+    expect(h.probeLog).not.toHaveBeenCalled(); expect(h.reconcile).toHaveBeenCalledOnce();
+    expect(h.fetchInfo).not.toHaveBeenCalled(); expect(h.recordIdentity).not.toHaveBeenCalled();
+    h.probeLog.mockResolvedValue({ unchanged: false });
+    h.reconcile.mockResolvedValueOnce({ kind: "refresh", outcome: { ok: false, changedPaths: 0, errorMessage: "failed" } });
+    await h.invoke(channel, payload); h.probeLog.mockClear();
+    await h.invoke(channel, payload); expect(h.probeLog).not.toHaveBeenCalled(); expect(h.reconcile).toHaveBeenCalledTimes(3);
+  });
+  it.each(["workspace", "credentials"])("discards an unchanged probe after %s changes", async change => {
+    const h = await primed(); const held = deferred<{ unchanged: boolean }>(); const started = deferred();
+    h.probeLog.mockImplementation(() => { started.resolve(); return held.promise; });
+    const response = h.invoke(channel, payload); await started.promise;
+    if (change === "workspace") h.retireRenderer(); else h.cache.set({ ...credentials, token: "changed" });
+    held.resolve({ unchanged: true }); await expect(response).rejects.toThrow(); noLocalWork(h);
+  });
+  it("returns typed unauthorized and transient probe failures without touching local work", async () => {
+    const h = await primed(); h.probeLog.mockRejectedValueOnce(new RelayUnauthorizedError());
+    await expect(h.invoke(channel, payload)).resolves.toMatchObject({ ok: false, errorKind: "unauthorized", changedPaths: 0 });
+    h.probeLog.mockRejectedValueOnce(new Error("offline"));
+    await expect(h.invoke(channel, payload)).resolves.toMatchObject({ ok: false, errorKind: "transient", changedPaths: 0 });
+    noLocalWork(h);
+  });
+  it("uses the ended-share full path on removal instead of declaring it unchanged", async () => {
+    const h = await primed(); h.probeLog.mockRejectedValue(new ShareUnavailableError());
+    h.reconcile.mockResolvedValue({ kind: "refresh", outcome: { ...outcome, status: "ended" } });
+    await expect(h.invoke(channel, payload)).resolves.toMatchObject({ status: "ended" });
+    expect(h.reconcile).toHaveBeenCalledOnce(); expect(h.surfaces).toHaveBeenCalledOnce();
+  });
+  it("measures CPU per unchanged main handler probe", async () => {
+    const h = await primed(); const reads = vi.spyOn(h.registry, "get");
+    h.probeLog.mockImplementation(input => probeShareViewLog({ ...input,
+      relay: { ...input.relay, fetch: async () => Response.json({ ops: [], hasMore: false, nextCursor: 42 }) } }));
+    for (let index = 0; index < 100; index++) await h.invoke(channel, payload);
+    const before = process.cpuUsage();
+    const probes = 2000;
+    for (let index = 0; index < probes; index++) await h.invoke(channel, payload);
+    const cpu = process.cpuUsage(before);
+    console.info(`share pull measurement: ${probes} unchanged probes, ${(cpu.user + cpu.system) / probes / 1000} ms CPU/probe, 0 engine calls, 0 registry reads`);
+    expect(reads).not.toHaveBeenCalled(); noLocalWork(h);
   });
 });

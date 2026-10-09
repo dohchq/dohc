@@ -19,6 +19,7 @@ import { existingAncestor } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import {
   ShareUnavailableError,
+  RelayUnauthorizedError,
   type PullShareViewResult,
   type ShareViewChangedPath,
   type ShareViewRefusal,
@@ -58,6 +59,7 @@ export type SharedViewRefreshStatus = "updated" | "unchanged" | "ended";
 
 export interface RefreshSharedViewOutcome {
   status: SharedViewRefreshStatus;
+  nextCursor?: number;
   changedPaths: number;
   excludedPaths: string[];
   unjournalablePaths: UnjournalablePath[];
@@ -75,7 +77,7 @@ export type StandaloneShareViewRefreshOutcome =
       ok: true;
       collisionRecordQuarantined: boolean;
     } & RefreshSharedViewOutcome)
-  | { ok: false; changedPaths: number; errorMessage: string };
+  | { ok: false; changedPaths: number; errorMessage: string; errorKind?: "unauthorized" };
 
 export interface CaptureSharedViewLocalDivergenceOutcome {
   capturedPaths: number;
@@ -148,6 +150,7 @@ function standaloneShareViewFailureOutcome(
     ok: false,
     changedPaths,
     errorMessage: errorMessage(error),
+    ...(error instanceof RelayUnauthorizedError ? { errorKind: "unauthorized" as const } : {}),
   };
 }
 
@@ -2114,6 +2117,7 @@ async function refreshSharedViewOnce(input: {
   }
   return {
     status: pull.changedPaths.length > 0 ? "updated" : "unchanged",
+    nextCursor: pull.nextCursor,
     changedPaths: pull.changedPaths.length,
     excludedPaths,
     unjournalablePaths,

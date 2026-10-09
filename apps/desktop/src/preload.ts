@@ -324,7 +324,6 @@ const bridge: DohcDesktopBridge = {
   leaveSharedChannel: (payload) =>
     ipcRenderer.invoke(CHANNELS.leaveSharedChannel, payload),
   openSharedView: (payload) => ipcRenderer.invoke(CHANNELS.openSharedView, payload),
-  refreshSharedView: (payload) => ipcRenderer.invoke(CHANNELS.refreshSharedView, payload),
   ...operationBridge(sharedViewAccessOperations, invoke),
   dismissShareSkips: (payload) => ipcRenderer.invoke(CHANNELS.dismissShareSkips, payload),
   listCollectionAutomations: (payload) =>

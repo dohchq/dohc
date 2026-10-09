@@ -209,6 +209,27 @@ export async function fetchShareViewAccess(input: {
   return body.access;
 }
 
+export async function probeShareViewLog(input: {
+  relay: SyncRelayConnection;
+  shareId: string;
+  since: number;
+  signal?: AbortSignal;
+}): Promise<{ unchanged: boolean }> {
+  const response = await shareFetch(input.relay,
+    `/sync/shares/${encodeURIComponent(input.shareId)}/log?since=${input.since}`,
+    { signal: input.signal });
+  const body: unknown = await response.json();
+  if (!body || typeof body !== "object" || !("ops" in body) || !Array.isArray(body.ops) ||
+    !("hasMore" in body) || typeof body.hasMore !== "boolean" ||
+    !("nextCursor" in body) || typeof body.nextCursor !== "number" ||
+    !Number.isSafeInteger(body.nextCursor) || body.nextCursor < input.since) {
+    throw new Error("The server did not return a readable share log.");
+  }
+  // This cursor is only a probe. The engine commits the next cursor after
+  // applying changes and recording refusals through the full refresh path.
+  return { unchanged: body.ops.length === 0 && !body.hasMore };
+}
+
 export async function fetchShareAutomationSwitchable(input: {
   relay: SyncRelayConnection;
   shareId: string;

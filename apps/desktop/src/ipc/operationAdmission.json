@@ -35,6 +35,7 @@
   "desktop:mark-notices": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:run-skipped-schedule-now": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:retry-automation-notice": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:refresh-shared-view": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "sharedViewsIpc.currentRendererSession/withRendererWorkspaceOperation" } },
   "desktop:check-shared-view-access": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "sharedViewsIpc.withRendererWorkspaceOperation" } },
   "desktop:take-workspace-path-open-failures": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:retry-workspace-path-open": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },

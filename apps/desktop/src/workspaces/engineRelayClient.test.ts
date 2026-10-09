@@ -1213,6 +1213,7 @@ describe("EngineRelayClient", () => {
 
     expect(outcome).toEqual({
       status: "unchanged",
+      nextCursor: 13,
       changedPaths: 0,
       excludedPaths: [],
       unjournalablePaths: [],
@@ -1599,6 +1600,7 @@ describe("EngineRelayClient", () => {
       }),
     ).resolves.toEqual({
       status: "updated",
+      nextCursor: 14,
       changedPaths: 1,
       excludedPaths: [],
       unjournalablePaths: [],
@@ -1645,6 +1647,7 @@ describe("EngineRelayClient", () => {
       }),
     ).resolves.toEqual({
       status: "unchanged",
+      nextCursor: 13,
       changedPaths: 0,
       excludedPaths: [],
       unjournalablePaths: [],

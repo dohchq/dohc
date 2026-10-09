@@ -23,7 +23,7 @@ export const info: ShareViewInfo = {
   shareId: "share", granterUserId: "granter", granterEmail: "granter@example.test", genericChatWritable: true,
   selector: { paths: ["docs"], versionId: null, access: "edit" }, createdAtMs: 1,
 };
-export const outcome = { ok: true as const, status: "updated" as const, changedPaths: 2, excludedPaths: [], unjournalablePaths: [], collisionRecordQuarantined: false, refusedOps: 1, refusedDetail: "refused path" };
+export const outcome = { ok: true as const, status: "updated" as const, changedPaths: 2, excludedPaths: [], unjournalablePaths: [], collisionRecordQuarantined: false, refusedOps: 1, refusedDetail: "refused path", nextCursor: 42 };
 export const ready: WatcherStatusResult = {
   phase: "ready",
   terminal: false,
@@ -61,6 +61,9 @@ export async function createSharedViewsIpcHarness() {
   const warm = vi.fn<() => Promise<void>>(async () => undefined);
   const startup = vi.fn<() => Promise<void>>(async () => undefined);
   const fetchInfo = vi.fn<Dependencies["fetchShareViewInfo"]>(async () => { steps.push("preflight"); return info; });
+  const probeLog = vi.fn<Dependencies["probeShareViewLog"]>(async () => ({ unchanged: true }));
+  const registryRead = vi.fn((id: string) => registry.get(id)!);
+  const workspaceOperation = vi.fn(withRendererWorkspaceOperation);
   const fetchAccess = vi.fn<Dependencies["fetchShareViewAccess"]>(async () => "edit");
   const readDir = vi.fn(async (_root: string) => [] as string[]);
   const mkdir = vi.fn(async () => { steps.push("mkdir"); });
@@ -101,8 +104,10 @@ export async function createSharedViewsIpcHarness() {
   registerSharedViewsIpcHandlers<string, Event, Operation, Lease>({
     registerHandler: (channel, handler) => { expect(handlers.has(channel)).toBe(false); handlers.set(channel, handler); },
     assertTrustedSender: event => { if (!event.trusted) throw new Error("untrusted"); },
-    withRendererWorkspaceOperation, loadAndCacheCurrentCredentials: load, warmCredentialCache: warm,
+    withRendererWorkspaceOperation: workspaceOperation as Dependencies["withRendererWorkspaceOperation"], loadAndCacheCurrentCredentials: load, warmCredentialCache: warm,
     currentCredentials: () => cache.snapshot().credentials, engineDaemonStartup: startup,
+    currentRendererSession: () => session,
+    probeShareViewLog: probeLog,
     currentCredentialGeneration: () => cache.snapshot().generation,
     onSenderClosed: (_sender, close) => { closed.add(close); return () => { closed.delete(close); }; },
     fetchShareViewInfo: fetchInfo, fetchShareViewAccess: fetchAccess, usableRoot: roots.usableRoot, readdir: readDir, mkdir, createJoinedWorkspace,
@@ -112,7 +117,7 @@ export async function createSharedViewsIpcHarness() {
       return { ...registry.get(lease.binding.workspaceId)!, rootPath: lease.binding.canonicalRootPath, attachmentId: lease.binding.attachmentId };
     },
     withStaleSensitiveWorkspaceOperation, shareViewFiles: { reconcile, end, narrow }, receivedShareEngine: { relayFor, storeFor },
-    openWorkspaceActivity: open, requireWorkspace: id => registry.get(id)!, notifyRenderer: notify,
+    openWorkspaceActivity: open, requireWorkspace: registryRead, notifyRenderer: notify,
     recordShareViewStoreRefusal: recordRefusal,
   });
   const invoke = (channel: string, payload: unknown, trusted = true) =>
@@ -120,5 +125,5 @@ export async function createSharedViewsIpcHarness() {
   const openPayload = { rootPath, shareCode: buildShareCode({ relayUrl: credentials.relayUrl!, shareId: "share" }) };
   return { workspace, registry, authorities, attachmentId, roots, cache, load, warm, startup, fetchInfo, readDir,
     mkdir, createFolder, cleanup, notify, surfaces, setView, recordIdentity, relayFor, status, storeFor, reconcile,
-    open, end, narrow, fetchAccess, closed, recordRefusal, handlers, invoke, openPayload, steps, retireRenderer: () => { rendererCurrent = false; } };
+    probeLog, registryRead, workspaceOperation, open, end, narrow, fetchAccess, closed, recordRefusal, handlers, invoke, openPayload, steps, retireRenderer: () => { rendererCurrent = false; } };
 }
