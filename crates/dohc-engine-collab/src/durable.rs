@@ -3238,9 +3238,13 @@ mod append_compaction_query_tests {
     }
 }
 
-/// Recovery retains each original request's ledger identity across a restart.
+/// Replay uses the same publication guard as an ordinary live append.
+pub fn require_recovery_write_in(tx: &Transaction<'_>, key: &DocKey) -> Result<(), CollabError> {
+    crate::owner_outbox::draft::require_ordinary_write(tx, key)
+}
+
 #[allow(clippy::too_many_arguments)]
-pub fn record_recovery_update_in_tx(
+pub fn recovery_update_is_recorded_in(
     tx: &Transaction<'_>,
     key: &DocKey,
     original_path: &str,
@@ -3248,11 +3252,33 @@ pub fn record_recovery_update_in_tx(
     update: &[u8],
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
-    now_ms: i64,
-) -> Result<AppendOutcome, CollabError> {
+) -> Result<bool, CollabError> {
+    Ok(recovery_request_in(
+        tx,
+        key,
+        original_path,
+        request_id,
+        update,
+        actor_origin_id,
+        attribution,
+    )?
+    .1
+    .is_some())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recovery_request_in(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    original_path: &str,
+    request_id: &str,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+) -> Result<(String, Option<i64>), CollabError> {
     let path_identity = format!("some:{}", crate::hex_sha256(original_path.as_bytes()));
     let update_sha = crate::hex_sha256(update);
-    let restore_generation: Option<i64> = None;
+    let restore_generation = crate::live_update_application::restore_generation(tx, key)?;
     let hash = crate::hex_sha256(format!(
         "ydoc-record-v6{sep}{restore_generation:?}{sep}false{sep}{}{sep}{}{sep}{}{sep}{path_identity}{sep}{}{sep}{}",
         key.workspace_id, key.version_id, key.object_id, update_sha,
@@ -3266,13 +3292,39 @@ pub fn record_recovery_update_in_tx(
         )
         .optional()
         .map_err(map_sql)?;
-    if let Some((prior, seq)) = recorded {
-        if prior != hash {
-            return Err(CollabError::IdempotencyKeyReused);
-        }
+    match recorded {
+        Some((prior, seq)) if prior == hash => Ok((hash, Some(-seq))),
+        Some(_) => Err(CollabError::IdempotencyKeyReused),
+        None => Ok((hash, None)),
+    }
+}
+
+/// Recovery retains each original request's ledger identity across a restart.
+#[allow(clippy::too_many_arguments)]
+pub fn record_recovery_update_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    original_path: &str,
+    request_id: &str,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+    now_ms: i64,
+) -> Result<AppendOutcome, CollabError> {
+    require_recovery_write_in(tx, key)?;
+    let (hash, recorded) = recovery_request_in(
+        tx,
+        key,
+        original_path,
+        request_id,
+        update,
+        actor_origin_id,
+        attribution,
+    )?;
+    if let Some(seq) = recorded {
         return Ok(AppendOutcome {
             settlement_requested: false,
-            seq: -seq,
+            seq,
             deduped: true,
             emit_outbound: false,
             record_facts: None,

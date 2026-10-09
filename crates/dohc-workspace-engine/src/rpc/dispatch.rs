@@ -1171,6 +1171,7 @@ mod tests {
         request.workspace = Some(attached_handle.clone());
         for method in [
             "workspace.open",
+            "capture.importRecovery",
             "ydoc.open",
             "sync.recoverOrigin",
             "sync.probe",
@@ -1317,6 +1318,7 @@ mod tests {
             "automations.subscribe",
             "automations.unsubscribe",
             "automations.watchGroups",
+            "capture.importRecovery",
             "capture.flush",
             "capture.hold",
             "capture.moveFile",

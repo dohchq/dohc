@@ -94,6 +94,7 @@ fn checkpoint(state: &YdocOpenState, doc: &Ydoc, bytes: Vec<u8>) -> RecoveryImpo
             hex_sha256(&base.encode_state_vector())
         },
         expected_disk_sha256: Some(hex_sha256(b"base\n")),
+        admitted_base: state.initial_update.clone(),
         text: doc.plaintext_string(),
         updates: vec![RecoveryUpdate {
             request_id: "outage-update".into(),
@@ -419,7 +420,7 @@ async fn renamed_object_recovers_at_its_current_path() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn deleted_object_refuses_without_discarding_typing() {
+async fn deleted_object_imports_typing_into_history_without_restoring_file() {
     let (scratch, db, supervisor, actor, state, doc, bytes) = setup().await;
     actor
         .versioned_text_delete(
@@ -442,18 +443,92 @@ async fn deleted_object_refuses_without_discarding_typing() {
         )
         .await
         .unwrap();
+    let result = import(&actor, scratch.path(), checkpoint(&state, &doc, bytes))
+        .await
+        .unwrap();
+    assert!(matches!(result, RecoveryImportOutcome::Imported { .. }));
+    let rows = actor.capture_recoveries(WS.into()).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].object_id, state.key.object_id);
+
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(FILE)).unwrap(),
+        "base\n"
+    );
+    supervisor.close(&db).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn committed_without_ack_reconciles_originals_before_replaying_the_rest() {
+    let (scratch, db, supervisor, actor, state, doc, bytes) = setup().await;
+    let original = checkpoint(&state, &doc, bytes.clone());
+    let first = &original.updates[0];
+    let result = actor
+        .ydoc_record_update(
+            state.key.clone(),
+            FILE.into(),
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            bytes.clone(),
+            first.actor_origin_id.clone(),
+            first.attribution.clone(),
+            state.lineage_claim_id.clone(),
+            false,
+            None,
+            Some(first.request_id.clone()),
+            12,
+            ScriptedFaults::crash_at(FaultPoint::StorageAfterCommitBeforeAck),
+            CancellationToken::new(),
+            None,
+        )
+        .await;
+    assert!(result.is_err());
+    let later = doc.plaintext_insert(0, "later outage\n");
+    let mut input = checkpoint(&state, &doc, bytes);
+    input.updates.push(RecoveryUpdate {
+        request_id: "later-original".into(),
+        update: later,
+        actor_origin_id: first.actor_origin_id.clone(),
+        attribution: first.attribution.clone(),
+    });
+    supervisor.close(&db).unwrap();
+    let actor = supervisor.open(&db, 15).unwrap().actor;
+    assert_eq!(
+        import(&actor, scratch.path(), input).await.unwrap(),
+        RecoveryImportOutcome::Replayed
+    );
+    assert!(
+        actor
+            .capture_recoveries(WS.into())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    supervisor.close(&db).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replay_refuses_an_owner_outbox_frozen_by_an_observed_binding() {
+    let (scratch, db, supervisor, actor, state, doc, bytes) = setup().await;
+    {
+        let mut store = EngineStore::open(&db, 15).unwrap();
+        store.write_with(&NoFaults,|tx|->Result<(),StorageError>{let sha=dohc_engine_storage::put_binary_blob(tx,b"fixture").unwrap();tx.execute("INSERT INTO ydoc_owner_bindings(workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,relay_database_namespace,binding_revision,accepted_cursor,native_head_sequence,checkpoint_digest,max_pending_bytes,max_pending_age_ms) VALUES(?1,?2,?3,?4,'{}','relay',1,0,0,?4,1024,1000)",rusqlite::params![WS,"main",state.key.object_id,sha]).unwrap();Ok(())}).unwrap();
+    }
     let error = import(&actor, scratch.path(), checkpoint(&state, &doc, bytes))
         .await
         .unwrap_err();
     assert!(matches!(
         error,
-        dohc_engine_runtime::RuntimeError::RecoveryImportRefused {
-            reason: "object-deleted"
-        }
+        dohc_engine_runtime::RuntimeError::Collab(
+            dohc_engine_collab::CollabError::OwnerOutboxFrozen
+        )
     ));
-    assert_eq!(
-        std::fs::read_to_string(scratch.path().join(FILE)).unwrap(),
-        "base\n"
+    assert!(
+        actor
+            .capture_recoveries(WS.into())
+            .await
+            .unwrap()
+            .is_empty()
     );
     supervisor.close(&db).unwrap();
 }

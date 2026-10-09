@@ -20,6 +20,7 @@ pub struct RecoveryImport {
     pub expected_claim_id: Option<String>,
     pub expected_state_vector_sha256: String,
     pub expected_disk_sha256: Option<String>,
+    pub admitted_base: Vec<u8>,
     pub updates: Vec<RecoveryUpdate>,
     pub text: String,
 }
@@ -63,7 +64,7 @@ impl ActorHandle {
             let mut automation_claims = Vec::new();
             let result = store.write_with(faults.as_ref(), |tx| -> Result<_, RuntimeError> {
                 dohc_engine_domain::validate_addressable_plaintext_path(&input.path)?;
-                if input.updates.len() > 4096 || input.text.len() > 16 * 1024 * 1024 ||
+                if input.admitted_base.len() > 32 * 1024 * 1024 || input.updates.len() > 4096 || input.text.len() > 16 * 1024 * 1024 ||
                     input.updates.iter().map(|u| u.update.len()).sum::<usize>() > 32 * 1024 * 1024 {
                     return Err(refused("checkpoint-too-large"));
                 }
@@ -112,16 +113,27 @@ impl ActorHandle {
                 if let Some(receipt) = receipt {
                     return Ok(if receipt == -1 { RecoveryImportOutcome::Replayed } else { RecoveryImportOutcome::Covered });
                 }
-                // A deleted object has no current snapshot. Keep main's checkpoint
-                // and return a typed refusal rather than forge an after-image.
+                // Deleted objects keep a recovery preimage in their existing History.
                 let snapshot = dohc_engine_domain::store::recovery_snapshot_in(tx,
                     &key.workspace_id, &key.version_id, &key.object_id)?
-                    .ok_or_else(|| refused("object-deleted"))?;
+                    ;
+                let Some(snapshot) = snapshot else {
+                    if !dohc_engine_domain::store::record_deleted_capture_recovery_in_tx(tx, &key.workspace_id, &key.version_id, &key.object_id, &input.text, &moment_id, authors.moment_json().as_deref(), now_ms)? { return Err(refused("object-history-missing")); }
+                    return Ok(RecoveryImportOutcome::Imported {moment_id:moment_id.clone()});
+                };
                 let prepared = dohc_engine_sync::prepare_local_ydoc_lineage_in_tx(tx, key)?;
                 let projection = prepared.projection();
                 let covered = projection.is_some_and(|p| p.content == input.text);
-                let same_lineage = marker.as_ref().is_some_and(|m| m.lineage_claim_id == input.expected_claim_id) &&
-                    projection.is_some_and(|p| p.source_state_vector_sha256 == input.expected_state_vector_sha256);
+                let same_claim = marker.as_ref().is_some_and(|m| m.lineage_claim_id == input.expected_claim_id);
+                let base = dohc_engine_collab::Ydoc::wire();
+                base.apply(&input.admitted_base)?;
+                if hex_sha256(&base.encode_state_vector()) != input.expected_state_vector_sha256 { return Err(refused("invalid-admitted-base")); }
+                if same_claim {
+                    for update in &input.updates {
+                        if dohc_engine_collab::durable::recovery_update_is_recorded_in(tx,key,&input.path,&update.request_id,&update.update,update.actor_origin_id.as_deref(),update.attribution.as_ref())? {base.apply(&update.update)?;}
+                    }
+                }
+                let same_lineage = same_claim && projection.is_some_and(|p| p.source_state_vector_sha256 == hex_sha256(&base.encode_state_vector()));
                 let same_disk = match probe_projection_target(&root, &snapshot.path, ProjectionTargetKind::Plaintext) {
                     ProjectionTargetState::Text { sha256 } => input.expected_disk_sha256.as_deref() == Some(sha256.as_str()),
                     ProjectionTargetState::Absent => input.expected_disk_sha256.is_none(),
@@ -130,6 +142,7 @@ impl ActorHandle {
                 let outcome = if covered {
                     RecoveryImportOutcome::Covered
                 } else if same_lineage && same_disk {
+                    dohc_engine_collab::durable::require_recovery_write_in(tx,key)?;
                     let marker = marker.as_ref().expect("unchanged lineage has a marker");
                     for update in &input.updates {
                         let before = dohc_engine_collab::load_doc_in(tx, key)?;

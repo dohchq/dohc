@@ -139,3 +139,40 @@ pub fn clear_capture_recovery_in(
         .map_err(DomainError::sql_persist)?;
     Ok(())
 }
+
+/// A deleted object's History still holds its identity and delete moment.
+#[allow(clippy::too_many_arguments)]
+pub fn record_deleted_capture_recovery_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    typing: &str,
+    moment_id: &str,
+    author_json: Option<&str>,
+    now_ms: i64,
+) -> Result<bool, DomainError> {
+    use rusqlite::OptionalExtension;
+    let deleted: Option<(String,String)> = tx.query_row(
+        "SELECT path,moment_id FROM moments WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND metadata_origin NOT IN ('capture-recovery','capture-recovery-cleared') ORDER BY moment_order DESC LIMIT 1",
+        params![workspace_id,version_id,object_id], |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(DomainError::sql_corrupt)?;
+    let Some((path, delete_id)) = deleted else {
+        return Ok(false);
+    };
+    let typing_sha = dohc_engine_storage::hex_sha256(typing.as_bytes());
+    tx.execute(
+        "INSERT OR IGNORE INTO blobs(sha256,byte_length,text) VALUES(?1,?2,?3)",
+        params![typing_sha, typing.len() as i64, typing],
+    )
+    .map_err(DomainError::sql_persist)?;
+    let empty_sha = dohc_engine_storage::hex_sha256(b"");
+    tx.execute(
+        "INSERT OR IGNORE INTO blobs(sha256,byte_length,text) VALUES(?1,0,'')",
+        [&empty_sha],
+    )
+    .map_err(DomainError::sql_persist)?;
+    let order = next_moment_order(tx)?;
+    tx.execute("INSERT INTO moments(workspace_id,moment_order,moment_id,version_id,object_id,path,recorded_at_ms,operation,after_blob_sha256,before_present,before_blob_sha256,metadata_origin,metadata_correlation_id,author_json,before_content_kind,payload_before_path,payload_before_content_kind,payload_before_blob_sha256) VALUES(?1,?2,?3,?4,?5,?6,?7,'delete',?12,2,?8,?9,?10,?11,'text',?6,'text',?8)",
+        params![workspace_id,order,moment_id,version_id,object_id,path,now_ms,typing_sha,CAPTURE_RECOVERY_ORIGIN,delete_id,author_json,empty_sha]).map_err(DomainError::sql_persist)?;
+    Ok(true)
+}

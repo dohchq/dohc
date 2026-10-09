@@ -916,6 +916,7 @@ mod tests {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ImportRecoveryParams {
+    admitted_base_base64: String,
     version_id: String,
     object_id: String,
     path: String,
@@ -943,6 +944,20 @@ impl EngineService {
         use dohc_engine_runtime::actor::{RecoveryImport, RecoveryImportOutcome, RecoveryUpdate};
         let input: ImportRecoveryParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
+        if !open.is_local_owner() {
+            return Err(WireError::new(
+                ErrorCode::Forbidden,
+                "capture.importRecovery needs the workspace's owning handle",
+            ));
+        }
+        let admitted_base = base64::engine::general_purpose::STANDARD
+            .decode(input.admitted_base_base64)
+            .map_err(|_| {
+                WireError::new(
+                    ErrorCode::InvalidParams,
+                    "capture-recovery-refused:invalid-admitted-base",
+                )
+            })?;
         let _serial = open.session_ops.lock().await;
         let updates = input
             .updates
@@ -978,6 +993,7 @@ impl EngineService {
                     expected_claim_id: input.expected_claim_id,
                     expected_state_vector_sha256: input.expected_state_vector_sha256,
                     expected_disk_sha256: input.expected_disk_sha256,
+                    admitted_base,
                     updates,
                     text: input.text,
                 },
