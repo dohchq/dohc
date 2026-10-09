@@ -1059,6 +1059,13 @@ export function DesktopWorkspaceShell(props: {
     selectionGeneration: number;
     waitsForFile: boolean;
   } | null>(null);
+  // Both read handlers set this in the same update as the restored workbench,
+  // so the opening surface lifts in the commit that shows the saved layout, or
+  // the defaults after a null or failed read. The read starts only after a
+  // successful open, so this also implies workspaceIsReady. Admission and the
+  // read never wait on it.
+  const workbenchRestored =
+    restoredSurfaceCommit?.selectionGeneration === workspaceSelectionGeneration;
   // The tab paths the stored state restored — the only ones a file listing is
   // allowed to close. Empty until the load applies, and empty forever when the
   // user acted first and the stored tabs were discarded. STATE, not a ref: the
@@ -4971,7 +4978,7 @@ export function DesktopWorkspaceShell(props: {
         />
         <div
           data-testid="workspace-workbench"
-          inert={!workspaceIsReady || storeUpdateRequired ? true : undefined}
+          inert={!workbenchRestored || storeUpdateRequired ? true : undefined}
           className="flex min-w-0 flex-1"
         >
 
@@ -5627,7 +5634,7 @@ export function DesktopWorkspaceShell(props: {
             />
           </div>
         </div>
-      ) : !workspaceIsReady ? (
+      ) : !workbenchRestored ? (
         <div
           data-testid="workspace-preparing"
           role="status"
@@ -5636,7 +5643,9 @@ export function DesktopWorkspaceShell(props: {
         >
           <RefreshCw size={16} aria-hidden className="animate-spin text-subtle" />
           <p className="text-sm font-medium text-ink">Preparing this workspace</p>
-          <p className="text-xs text-muted">
+          {/* The check is over while the saved layout loads. Hidden, not
+              removed, so the heading does not move. */}
+          <p className={`text-xs text-muted ${workspaceIsReady ? "invisible" : ""}`}>
             dohc is checking your existing files before editing starts.
           </p>
         </div>

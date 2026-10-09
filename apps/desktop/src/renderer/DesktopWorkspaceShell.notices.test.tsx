@@ -868,7 +868,8 @@ describe("workspace shell errors", () => {
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
     expect(screen.queryByTestId("workspace-open-failed")).toBeNull();
-    expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(false);
+    // The workbench stays inert until the saved layout has loaded.
+    await waitFor(() => expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(false));
   });
 
   it("says why a workspace did not open in words and keeps the refusal for Copy", async () => {
@@ -902,9 +903,7 @@ describe("workspace shell errors", () => {
     await waitFor(() =>
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
-    expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(
-      false,
-    );
+    await waitFor(() => expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(false));
     expect(
       (await screen.findByTestId("workspace-shell-error")).textContent,
     ).toContain("Could not refresh workspace files. Listing failed");
