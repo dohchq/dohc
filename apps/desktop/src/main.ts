@@ -2217,6 +2217,8 @@ const typingQuitRecovery=createTypingQuitRecovery({
 function beforeQuitWithTypingRecovery(event:{preventDefault():void}):void {typingQuitRecovery.beforeQuit(event);}
 
 const typingRecoveryFailures = new Map<string, Map<string, TypingRecoveryFailure>>();
+const importedTypingCheckpoints = new Set<string>();
+const dismissedTypingCheckpoints = new Set<string>();
 const typingRecoveryImports = new Map<symbol, Promise<void>>();
 function reportTypingRecoveryFailure(workspaceId: string, failure: TypingRecoveryFailure): void {
   let failures = typingRecoveryFailures.get(workspaceId);
@@ -2238,7 +2240,7 @@ function recoverOutageTyping(workspace: CreatedWorkspace & {attachmentId: symbol
       return result;
     },
     failure => {if (current()) reportTypingRecoveryFailure(workspace.workspaceId, failure);},
-    (path, checkpointId) => {if (current()) {typingRecoveryFailures.get(workspace.workspaceId)?.delete("import:" + checkpointId); notifyRenderer({workspaceId: workspace.workspaceId});}},
+    (path, checkpointId) => {importedTypingCheckpoints.add(`${workspace.workspaceId}:${checkpointId}`); if (current()) {typingRecoveryFailures.get(workspace.workspaceId)?.delete("import:" + checkpointId); notifyRenderer({workspaceId: workspace.workspaceId});}},
   );
   })().catch(error => {if (current()) reportTypingRecoveryFailure(workspace.workspaceId, {kind: "import", path: "", detail: String(error)});}).finally(() => typingRecoveryImports.delete(workspace.attachmentId));
   typingRecoveryImports.set(workspace.attachmentId, pending);
@@ -6311,17 +6313,21 @@ function registerIpcHandlers(): void {
   registerOperations(operationBoundary, liveDraftRecoveryOperations, {
     typingRecovery: async (input, {operation}) => {
       operation.assertCurrent();
-      let outcome: "copied" | "discarded" | "missing" | undefined;
-      if (input.action === "copy" || input.action === "discard") {
+      let outcome: "copied" | "discarded" | "missing" | "imported" | undefined;
+      if (input.action === "dismiss") {
+        dismissedTypingCheckpoints.add(`${operation.workspace.workspaceId}:${input.checkpointId}`);
+      } else if (input.action === "copy" || input.action === "discard") {
         outcome = await actOnTypingCopy({directory: join(stateDir(), "live-draft-recovery"),
           workspaceId: operation.workspace.workspaceId, checkpointId: input.checkpointId, action: input.action,
-          assertCurrent: () => operation.assertCurrent(), copyText: text => clipboard.writeText(text)});
+          assertCurrent: () => operation.assertCurrent(), copyText: text => clipboard.writeText(text),
+          wasImported: () => importedTypingCheckpoints.has(`${operation.workspace.workspaceId}:${input.checkpointId}`)});
         if (outcome !== "copied") typingRecoveryFailures.get(operation.workspace.workspaceId)?.delete("import:" + input.checkpointId);
         notifyRenderer({workspaceId: operation.workspace.workspaceId});
       } else if (input.action !== "read") await flushTypingCheckpoints(operation.workspace.workspaceId);
       if (input.action === "retry") await recoverOutageTyping(operation.workspace);
       operation.assertCurrent();
-      return {failures: [...(typingRecoveryFailures.get(operation.workspace.workspaceId)?.values() ?? [])], ...(outcome ? {outcome} : {})};
+      return {failures: [...(typingRecoveryFailures.get(operation.workspace.workspaceId)?.values() ?? [])]
+        .filter(failure => !failure.checkpointId || !dismissedTypingCheckpoints.has(`${operation.workspace.workspaceId}:${failure.checkpointId}`)), ...(outcome ? {outcome} : {})};
     },
     discardLiveDraftRecovery: async (input, {event, operation}) => {
       operation.assertCurrent();

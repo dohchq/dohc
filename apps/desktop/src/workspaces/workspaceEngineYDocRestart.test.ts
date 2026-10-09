@@ -8401,13 +8401,14 @@ it("retires the final synchronous checkpoint after an aborted OS session end", a
  const session=await capture.openYDocSession({path:"note.md",onRemoteUpdate:()=>{}});Y.applyUpdate(renderer,session.initialUpdate);
  state.daemonAlive=false;notifyDeath(Object.assign(Error("The engine client is closed: transport closed."),{code:"transport-error"}));await flushTypingCheckpoints(workspaceId);
  typeInto(renderer,session,"BEFORE_END ");held=true;const pending=flushTypingCheckpoints(workspaceId);await writing;
- typeInto(renderer,session,"FINAL_OS_TYPING");flushTypingCheckpointsSync(workspaceId);release();await pending;
+ typeInto(renderer,session,"QUEUED_OLDER ");const queued=flushTypingCheckpoints(workspaceId);
+ typeInto(renderer,session,"FINAL_OS_TYPING");flushTypingCheckpointsSync(workspaceId);release();await pending;await queued;
  expect((await readTypingCheckpoints(directory,workspaceId))[0]!.checkpoint.text).toContain("FINAL_OS_TYPING");
  state.daemonAlive=true;await session.settleNow();await flushTypingCheckpoints(workspaceId);
  expect(state.diskMarkdown).toContain("FINAL_OS_TYPING");expect(await readTypingCheckpoints(directory,workspaceId)).toEqual([]);
 });
 
-it("waits for every queued checkpoint write even when a newer flush exists", async()=>{
+it("combines queued checkpoint flushes and waits for the newest disk write", async()=>{
  const workspaceId="outage-queued-flush";
  const {rootPath,sessions,openProvider,state}=await daemonDeathCapture("outage-queued-flush-",workspaceId);
  const directory=join(rootPath,"recovery");let notifyDeath!:(error:unknown)=>void;
@@ -8431,8 +8432,32 @@ it("waits for every queued checkpoint write even when a newer flush exists", asy
  typeInto(renderer,session,"OLDER ");olderFlush=flushTypingCheckpoints(workspaceId);
  typeInto(renderer,session,"NEWER");newerFlush=flushTypingCheckpoints(workspaceId);
  let olderDone=false;void olderFlush.then(()=>{olderDone=true;});first.resolve();
- expect(await Promise.race([olderEntered.promise,newerEntered.promise])).toBe("older");
- expect(olderDone).toBe(false);older.resolve();await firstFlush;await olderFlush;await newerEntered.promise;
- expect((await readTypingCheckpoints(directory,workspaceId))[0]!.checkpoint.text).toContain("OLDER");
- newer.resolve();await newerFlush;expect((await readTypingCheckpoints(directory,workspaceId))[0]!.checkpoint.text).toContain("NEWER");
+ expect(await Promise.race([olderEntered.promise,newerEntered.promise])).toBe("newer");
+ expect(olderDone).toBe(false);
+ expect(writes).toBe(2);
+ newer.resolve();await firstFlush;await olderFlush;await newerFlush;expect((await readTypingCheckpoints(directory,workspaceId))[0]!.checkpoint.text).toContain("NEWER");
+});
+
+it("retires the checkpoint actually stored by A when newer B fails", async () => {
+ const workspaceId="outage-newer-write-failed";
+ const {rootPath,sessions,openProvider,state}=await daemonDeathCapture("outage-newer-write-failed-",workspaceId);
+ const directory=join(rootPath,"recovery");let notifyDeath!:(error:unknown)=>void;
+ const gate=Promise.withResolvers<void>();const entered=Promise.withResolvers<void>();
+ const capture=createWorkspaceEngineCapture({workspaceId,rootPath,rustEngineSessions:sessions,
+ openRustYDocProviderSession:async options=>{notifyDeath=options.onSessionError!;return {...await openProvider(options),objectId:"object",versionId:"main"};},onError:()=>{},
+ writeTypingCheckpoint:async checkpoint=>{
+   if(checkpoint.text.includes("FAILED_B"))throw Error("disk full");
+   if(checkpoint.text.includes("STORED_A")){entered.resolve();await gate.promise;}
+   await writeTypingCheckpoint(directory,checkpoint);
+ },
+ retireTypingCheckpoint:async checkpoint=>{for(const row of await readTypingCheckpoints(directory,workspaceId))if(row.content === JSON.stringify(checkpoint))await retireTypingCheckpoint(row);}});
+ const renderer=new Y.Doc();onTestFinished(async()=>{gate.resolve();state.daemonAlive=true;await capture.stop();renderer.destroy();});
+ const session=await capture.openYDocSession({path:"note.md",onRemoteUpdate:()=>{}});Y.applyUpdate(renderer,session.initialUpdate);
+ state.daemonAlive=false;notifyDeath(Object.assign(Error("The engine client is closed: transport closed."),{code:"transport-error"}));await flushTypingCheckpoints(workspaceId);
+ typeInto(renderer,session,"STORED_A ");const first=flushTypingCheckpoints(workspaceId);await entered.promise;
+ typeInto(renderer,session,"FAILED_B");const failed=expect(flushTypingCheckpoints(workspaceId)).rejects.toThrow("disk full");
+ gate.resolve();await first;await failed;
+ const stored=(await readTypingCheckpoints(directory,workspaceId))[0]!.checkpoint.text;expect(stored).toContain("STORED_A");expect(stored).not.toContain("FAILED_B");
+ state.daemonAlive=true;await session.settleNow();await flushTypingCheckpoints(workspaceId);
+ expect(state.diskMarkdown).toContain("FAILED_B");expect(await readTypingCheckpoints(directory,workspaceId)).toEqual([]);
 });

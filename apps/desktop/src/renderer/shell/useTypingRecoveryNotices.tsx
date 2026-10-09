@@ -4,6 +4,8 @@ import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { typingRecoveryMessage } from "../../workspaces/typingRecoveryWords";
 import type { useShellError } from "./useShellError";
 
+const dismissedTypingNotices = new Set<string>();
+
 export function useTypingRecoveryNotices(input: {
   workspaceId: string;
   ready: boolean;
@@ -16,7 +18,6 @@ export function useTypingRecoveryNotices(input: {
     let cancelled = false;
     let request = 0;
     let shown = new Set<string>();
-    const dismissed = new Set<string>();
     const refresh = async (action: "read" | "retry" = "read") => {
       const asked = ++request;
       try {
@@ -31,7 +32,7 @@ export function useTypingRecoveryNotices(input: {
           if (!rows.length) {clearKind(noticeKind); continue;}
           for (const failure of kind === "checkpoint" ? rows.slice(0, 1) : rows) {
             const identity = failure.checkpointId ? `typing-import:${failure.checkpointId}` : undefined;
-            if (identity && dismissed.has(identity)) continue;
+            if (identity && dismissedTypingNotices.has(`${workspaceId}:${identity}`)) continue;
             const requestDiscard = () => {
               if (!cancelled) setDiscarding({workspaceId, path: failure.path, run: () => {void actOnCopy("discard");}});
             };
@@ -40,9 +41,11 @@ export function useTypingRecoveryNotices(input: {
               try {
                 const result = await bridge().typingRecovery({workspaceId, action, checkpointId: failure.checkpointId});
                 if (cancelled) return;
-                if (result.outcome === "missing") {
+                if (result.outcome === "missing" || result.outcome === "imported") {
                   clearIdentity(identity!);
-                  reportShellFailure({message: "This kept copy is no longer on this computer."});
+                  reportShellFailure(result.outcome === "imported"
+                    ? {message: "dohc recovered this kept typing. Look in the file or History.", tone: "success"}
+                    : {message: "This kept copy is no longer on this computer.", tone: "warning"});
                 }
                 void refresh();
               } catch (error) {
@@ -54,10 +57,14 @@ export function useTypingRecoveryNotices(input: {
               message: typingRecoveryMessage(failure),
               details: failure.reason === "drawing-unavailable" ? [["File", failure.path]] : [["File", failure.path], ["Reason", failure.detail]],
               kind: noticeKind,
+              toast: "preserve",
               ...(failure.checkpointId ? {
                 identity,
                 action: {label: "Copy your typing", run: () => {void actOnCopy("copy");}, additional: [{label: "Discard your typing", run: requestDiscard}]},
-                onDismiss: () => {dismissed.add(identity!);},
+                onDismiss: () => {
+                  dismissedTypingNotices.add(`${workspaceId}:${identity}`);
+                  if (!cancelled) void bridge().typingRecovery({workspaceId, action: "dismiss", checkpointId: failure.checkpointId!}).catch(() => undefined);
+                },
               } : {}),
               ...(failure.retryable === false ? {} : {retry: () => {void refresh("retry");}}),
             });

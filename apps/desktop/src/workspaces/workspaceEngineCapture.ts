@@ -1,3 +1,4 @@
+import { createTypingCheckpointWriter } from "./typingCheckpointWriter";
 import { DrawingCheckpointUnavailable, registerTypingCheckpoint, typingRecoveryStateVectorSha256, type OutageTypingCheckpoint } from "./outageTypingRecovery";
 import type { RecordEditSession } from "@dohc/automation-executor/collection-record-edits";
 import { isCaptureRecoveryOrigin } from "@dohc/workspace-contracts/engine";
@@ -2245,11 +2246,9 @@ export function createWorkspaceEngineCapture(
     let checkpointBase: {claim: string | null; vector: Uint8Array; base: Uint8Array; disk: string | null} | null = null;
     let diskHeadSha256: string | null = null;
     let checkpointContentKind: YdocContentKind = input.contentKind ?? "richdoc";
-    let checkpointChain: Promise<void> = Promise.resolve();
     let checkpointTimer: ReturnType<typeof setTimeout> | null = null;
     const checkpointId = randomUUID();
     let lastCheckpoint: OutageTypingCheckpoint | null = null;
-    let checkpointRevision = 0;
     const checkpointSnapshot = (): OutageTypingCheckpoint | null => {
       if (!checkpointBase || !canonicalDoc || !sessionObjectId || !options.writeTypingCheckpoint) return null;
       if (checkpointContentKind === "scene") return null;
@@ -2275,23 +2274,18 @@ export function createWorkspaceEngineCapture(
       if (retired) await options.retireTypingCheckpoint?.(retired);
       if (lastCheckpoint === retired) lastCheckpoint = null;
     };
+    const checkpointWriter = createTypingCheckpointWriter<OutageTypingCheckpoint>({
+      write: snapshot => options.writeTypingCheckpoint!(snapshot),
+      writeSync: options.writeTypingCheckpointSync,
+      retire: retireLastCheckpoint,
+      stored: snapshot => {lastCheckpoint = snapshot;},
+    });
     const flushCheckpoint = (): Promise<void> => {
       if (checkpointTimer !== null) { clearTimeout(checkpointTimer); checkpointTimer = null; }
       if(checkpointBase && checkpointContentKind === "scene" && !checkpointTypingIsDurable()) {const error=new DrawingCheckpointUnavailable(); options.onTypingCheckpointFailure?.(input.path,error); return Promise.reject(error);}
       const snapshot = checkpointSnapshot();
-      if (!snapshot) return checkpointChain;
-      const durable = checkpointTypingIsDurable();
-      const revision = ++checkpointRevision;
-      const pending = checkpointChain.catch(() => undefined).then(async () => {
-        if (durable) {
-          await retireLastCheckpoint();
-          return;
-        }
-        await options.writeTypingCheckpoint!(snapshot);
-        if (revision === checkpointRevision) lastCheckpoint = snapshot;
-      });
-      checkpointChain = pending;
-      return pending;
+      if (!snapshot) return checkpointWriter.wait();
+      return checkpointWriter.flush(checkpointTypingIsDurable() ? null : snapshot);
     };
     const checkpointUnresolved = (): void => {
       if (!options.writeTypingCheckpoint) return;
@@ -2310,7 +2304,7 @@ export function createWorkspaceEngineCapture(
       if(checkpointTimer !== null){clearTimeout(checkpointTimer);checkpointTimer=null;}
       if(checkpointBase && checkpointContentKind === "scene" && !checkpointTypingIsDurable()) throw new DrawingCheckpointUnavailable();
       if(checkpointTypingIsDurable()) return;
-      const snapshot=checkpointSnapshot(); if(snapshot){options.writeTypingCheckpointSync?.(snapshot);checkpointRevision += 1;lastCheckpoint=snapshot;}
+      const snapshot=checkpointSnapshot(); if(snapshot) checkpointWriter.flushSync(snapshot);
     };
     const unregisterCheckpoint = registerTypingCheckpoint(workspaceId,flushCheckpoint,()=>checkpointBase !== null && !checkpointTypingIsDurable(),{checkpointId,path:input.path},flushCheckpointSync,()=>checkpointBase !== null);
     const retireCheckpointIfDurable = (): void => {
@@ -2318,7 +2312,7 @@ export function createWorkspaceEngineCapture(
       options.onTypingCheckpointRecovered?.(input.path);
       if (!dead && current !== null) checkpointBase = null;
       if (checkpointTimer !== null) {clearTimeout(checkpointTimer); checkpointTimer = null;}
-      checkpointChain = checkpointChain.catch(() => undefined).then(retireLastCheckpoint);
+      void checkpointWriter.flush(null).catch(error => onError("Typing checkpoint retirement", error));
     };
     let queuedUpdateBytes = 0;
     let queuedUpdateCount = 0;
@@ -3445,7 +3439,7 @@ export function createWorkspaceEngineCapture(
           }
           closed = true;
           unregisterCheckpoint();
-          await checkpointChain;
+          await checkpointWriter.idle();
           recordedDoc.destroy();
           current = null;
           clearDeadYDocSession(deadSessionToken);

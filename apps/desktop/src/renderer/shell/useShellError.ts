@@ -125,8 +125,9 @@ export function useShellError(workspaceId: string) {
   // the same kind, so a read that keeps failing is one row, not a pile.
   // `seen` files the row without a toast; "keep" gives it the seen state of
   // the row of its kind it replaces, so an open toast stays open.
+  // "preserve" also keeps its identity and toasts when no prior row exists.
   const push = useCallback(
-    (error: Omit<ShellError, "id" | "atMs" | "seen">, seen: boolean | "keep" = false) => {
+    (error: Omit<ShellError, "id" | "atMs" | "seen">, seen: boolean | "keep" | "preserve" = false) => {
       nextId.current += 1;
       const id = `shell-error-${nextId.current}`;
       const atMs = Date.now();
@@ -143,9 +144,9 @@ export function useShellError(workspaceId: string) {
         const next: ShellError = {
           ...error,
           message,
-          id,
-          atMs,
-          seen: seen === "keep" ? (replaced?.seen ?? true) : seen,
+          id: seen === "preserve" ? (replaced?.id ?? id) : id,
+          atMs: seen === "preserve" ? (replaced?.atMs ?? atMs) : atMs,
+          seen: seen === "preserve" ? (replaced?.seen ?? false) : seen === "keep" ? (replaced?.seen ?? true) : seen,
         };
         return [
           ...current.filter((existing) => !matches(existing)),
@@ -277,6 +278,8 @@ export function useShellError(workspaceId: string) {
   const reportShellFailure = useCallback(
     (failure: {
       title?: string;
+      tone?: ShellError["tone"];
+      toast?: "preserve";
       message: string;
       cause?: unknown;
       details?: ReadonlyArray<ErrorDetailField>;
@@ -293,6 +296,7 @@ export function useShellError(workspaceId: string) {
         ...(cause ? [["Cause", cause] as const] : []),
       ];
       push({
+        ...(failure.tone ? {tone: failure.tone} : {}),
         ...(failure.title ? { title: failure.title } : {}),
         message: shown.words ?? UNKNOWN_ERROR_WORDS,
         retry: failure.retry ?? null,
@@ -301,7 +305,7 @@ export function useShellError(workspaceId: string) {
         ...(failure.action ? { action: failure.action } : {}),
         ...(failure.kind ? { kind: failure.kind } : {}),
         ...(failure.identity !== undefined ? { identity: failure.identity } : {}),
-      });
+      }, failure.toast === "preserve" ? "preserve" : false);
     },
     [push],
   );

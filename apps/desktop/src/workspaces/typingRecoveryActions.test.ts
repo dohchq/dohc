@@ -36,3 +36,10 @@ it("does not act on a kept copy after a workspace switch", async () => {
   expect(input.copyText).not.toHaveBeenCalled();
   expect(await readTypingCheckpoints(input.directory, input.workspaceId)).toHaveLength(1);
 });
+
+it("names an imported copy when a committed retry wins just before Copy", async () => {
+  const input = await copyFixture();
+  await actOnTypingCopy({...input, action: "discard"});
+  await expect(actOnTypingCopy({...input, action: "copy", wasImported: () => true})).resolves.toBe("imported");
+  expect(input.copyText).not.toHaveBeenCalled();
+});

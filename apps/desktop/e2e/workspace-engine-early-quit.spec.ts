@@ -112,8 +112,16 @@ for (const mode of ["quit", "last-window", "crash", "crash-reopen-before-import"
         await row.getByRole("button",{name:"Dismiss notice",exact:true}).click();
         await expect(desktop.page.getByTestId("notice-center").getByText(AUTHOR_REFUSED_MESSAGE,{exact:true})).toHaveCount(0);
         expect(await checkpointText(temp.homeDir)).toContain(sentinels[2]!);
+        await expect.poll(()=>desktop!.page.evaluate(async workspaceId =>
+          (window as unknown as {dohcDesktop:DohcDesktopBridge}).dohcDesktop.typingRecovery({workspaceId,action:"read"}),reopened.workspaceId)).toEqual({failures:[]});
+        await desktop.page.reload();await openWorkspaceFromFirstRun(desktop.page,temp);
+        await desktop.page.getByTestId("notice-center-toggle").click();
+        await expect(desktop.page.getByTestId("notice-center").getByText(AUTHOR_REFUSED_MESSAGE,{exact:true})).toHaveCount(0);
         await desktop.close();desktop=null;
         desktop=await launchDesktopApp({workspace:temp});await openWorkspaceFromFirstRun(desktop.page,temp);
+        const typingToast=desktop.page.getByTestId("workspace-shell-error").filter({hasText:AUTHOR_REFUSED_MESSAGE});
+        await expect(typingToast).toBeVisible();
+        await typingToast.getByRole("button",{name:"Dismiss workspace error",exact:true}).click();
         await desktop.page.getByTestId("notice-center-toggle").click();
         await expect(desktop.page.getByTestId("notice-center").getByText(AUTHOR_REFUSED_MESSAGE,{exact:true})).toHaveCount(1);
         expect(await checkpointText(temp.homeDir)).toContain(sentinels[2]!);
@@ -123,6 +131,8 @@ for (const mode of ["quit", "last-window", "crash", "crash-reopen-before-import"
         await desktop.app.evaluate(({clipboard})=>clipboard.writeText("OTHER_CLIPBOARD_TEXT"));
         expect(await checkpointText(temp.homeDir)).toContain(sentinels[2]!);
         await expect(desktop.page.getByTestId("notice-center")).toHaveCount(0);
+        await explorerRow(desktop.page,path).click();await expect(desktop.page.getByTestId("markdown-editor")).toBeVisible();
+        await expect(typingToast).toHaveCount(0);
         await desktop.page.getByTestId("notice-center-toggle").click();
         const discard = desktop.page.getByTestId("notice-center").getByRole("button",{name:"Discard your typing",exact:true});
         await discard.click();

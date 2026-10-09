@@ -85,8 +85,8 @@ export async function importTypingCheckpoints(directory: string, workspaceId: st
       const {version: _version, checkpointId: _checkpointId, workspaceId: _workspace, updateBase64: _update, ...input} = row.checkpoint;
       const result = await importer(input);
       if (result.committed !== true) throw new Error("Recovery was not committed.");
-      await retireTypingCheckpoint(row);
       refresh(row.checkpoint.path, row.checkpoint.checkpointId);
+      await retireTypingCheckpoint(row);
     } catch (error) { failure({...typingRecoveryFailure("import",row.checkpoint.path,error), checkpointId: row.checkpoint.checkpointId}); }
   }
 }
@@ -95,10 +95,9 @@ export function writeTypingCheckpointSync(directory: string, checkpoint: OutageT
  checkpointSchema.parse(checkpoint);
  if(classifyEngineFilePathForRead(checkpoint.path,process.platform).kind !== "tracked") throw new Error("This path cannot enter draft recovery.");
  const file=join(directory,checkpointName(checkpoint));
- fileRevisions.set(file,(fileRevisions.get(file) ?? 0)+1);
  mkdirSync(directory,{recursive:true});
  const temporary=file+"."+randomUUID()+".tmp";
- try {writeFileSync(temporary,JSON.stringify(checkpoint),{encoding:"utf8",flag:"wx",flush:true,mode:0o600});renameSync(temporary,file);}
+ try {writeFileSync(temporary,JSON.stringify(checkpoint),{encoding:"utf8",flag:"wx",flush:true,mode:0o600});renameSync(temporary,file);fileRevisions.set(file,(fileRevisions.get(file) ?? 0)+1);}
  finally {rmSync(temporary,{force:true});}
 }
 type CheckpointOwner = {workspaceId:string;flush:()=>Promise<void>;pending:()=>boolean;identity?:{checkpointId:string;path:string};flushSync?:()=>void;unresolved:()=>boolean};

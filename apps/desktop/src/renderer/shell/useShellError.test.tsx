@@ -393,3 +393,12 @@ it.each([["typing-checkpoint", CHECKPOINT_FAILURE_MESSAGE], ["typing-import", IM
  expect(row).toMatchObject({kind, message, seen: false, retry}); expect(row.details).toEqual([["Reason", "retry refused"]]);
  act(() => result.current.retryShellError(row.id)); expect(retry).toHaveBeenCalledOnce();
 });
+
+it("toasts a first preserved report and retains the toast identity and seen state on refresh",()=>{
+ const {result}=renderHook(()=>useShellError("typing-refresh"));
+ const report=()=>result.current.reportShellFailure({identity:"typing-import:one",kind:"typing-import",message:IMPORT_FAILURE_MESSAGE,toast:"preserve"});
+ act(report);const first=result.current.shellErrors[0]!;expect(first.seen).toBe(false);
+ act(report);expect(result.current.shellErrors[0]).toMatchObject({id:first.id,atMs:first.atMs,seen:false});
+ act(()=>result.current.hideShellError(first.id));act(report);
+ expect(result.current.shellErrors).toHaveLength(1);expect(result.current.shellErrors[0]).toMatchObject({id:first.id,atMs:first.atMs,seen:true});
+});

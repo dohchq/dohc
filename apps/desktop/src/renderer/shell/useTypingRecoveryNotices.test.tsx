@@ -4,10 +4,11 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { TypingRecoveryFailure } from "../../workspaces/outageTypingRecovery";
 import { INVALID_AUTHOR_MESSAGE, AUTHOR_REFUSED_MESSAGE, DRAWING_UNAVAILABLE_MESSAGE, CHECKPOINT_FAILURE_MESSAGE, IMPORT_FAILURE_MESSAGE } from "../../workspaces/typingRecoveryWords";
+import { useShellError } from "./useShellError";
 import { useTypingRecoveryNotices } from "./useTypingRecoveryNotices";
 
 const state = vi.hoisted(() => ({
-  read: vi.fn<(input: {workspaceId: string; action: string}) => Promise<{failures: TypingRecoveryFailure[]; outcome?: "copied" | "discarded" | "missing"}>>(),
+  read: vi.fn<(input: {workspaceId: string; action: string}) => Promise<{failures: TypingRecoveryFailure[]; outcome?: "copied" | "discarded" | "missing" | "imported"}>>(),
   listeners: new Set<(event: {workspaceId?: string}) => void>(),
 }));
 vi.mock("../bridge", () => ({bridge: () => ({
@@ -90,13 +91,13 @@ it("copies each refused record without clearing its row or discarding it", async
  expect(clearIdentity).not.toHaveBeenCalled();
  expect(state.read.mock.calls.some(([input])=>input.action === "discard")).toBe(false);
 });
-it("dismisses only the row and shows the kept copy again on a later mount",async()=>{
- const input={workspaceId:"a",ready:true,reportShellFailure:vi.fn(),clearKind:vi.fn(),clearIdentity:vi.fn()};
+it("keeps a dismissed row closed through activity and remounts in the same run",async()=>{
+ const input={workspaceId:"dismissal-workspace",ready:true,reportShellFailure:vi.fn(),clearKind:vi.fn(),clearIdentity:vi.fn()};
  state.read.mockResolvedValue({failures:[{kind:"import",path:"note.md",detail:"missing",checkpointId:"one",retryable:false}]});
  const hook=renderHook(()=>useTypingRecoveryNotices(input));
  await waitFor(()=>expect(input.reportShellFailure).toHaveBeenCalledOnce());const row=input.reportShellFailure.mock.calls[0]![0];state.read.mockClear();act(()=>row.onDismiss());
- expect(state.read).not.toHaveBeenCalled();activity("a");await waitFor(()=>expect(state.read).toHaveBeenCalledOnce());expect(input.reportShellFailure).toHaveBeenCalledOnce();
- hook.unmount();renderHook(()=>useTypingRecoveryNotices(input));await waitFor(()=>expect(input.reportShellFailure).toHaveBeenCalledTimes(2));
+ expect(state.read).toHaveBeenCalledWith({workspaceId:"dismissal-workspace",action:"dismiss",checkpointId:"one"});activity("dismissal-workspace");await waitFor(()=>expect(state.read).toHaveBeenCalledTimes(2));expect(input.reportShellFailure).toHaveBeenCalledOnce();
+ hook.unmount();renderHook(()=>useTypingRecoveryNotices(input));await waitFor(()=>expect(state.read).toHaveBeenCalledTimes(3));expect(input.reportShellFailure).toHaveBeenCalledOnce();
 });
 
 const refused: TypingRecoveryFailure = {kind:"import",path:"note.md",detail:"invalid-author",reason:"invalid-author",retryable:false,checkpointId:"one"};
@@ -112,10 +113,26 @@ it("asks once before Discard, keeps the copy on Cancel, and cancels on a workspa
 });
 it("reports an already-missing copy truthfully and clears its old row",async()=>{
  const input=options();state.read.mockResolvedValue({failures:[refused]});renderHook(()=>useTypingRecoveryNotices(input));await waitFor(()=>expect(input.reportShellFailure).toHaveBeenCalledOnce());const row=input.reportShellFailure.mock.calls[0]![0];
- state.read.mockResolvedValue({failures:[],outcome:"missing"});act(()=>row.action.run());await waitFor(()=>expect(input.reportShellFailure).toHaveBeenCalledWith({message:"This kept copy is no longer on this computer."}));expect(input.clearIdentity).toHaveBeenCalledWith("typing-import:one");
+ state.read.mockResolvedValue({failures:[],outcome:"missing"});act(()=>row.action.run());await waitFor(()=>expect(input.reportShellFailure).toHaveBeenCalledWith({message:"This kept copy is no longer on this computer.",tone:"warning"}));expect(input.clearIdentity).toHaveBeenCalledWith("typing-import:one");
 });
 it.each(["copy","discard"] as const)("reports a failed %s with the matching words",async action=>{
  const input=options();state.read.mockResolvedValue({failures:[refused]});const user=userEvent.setup();render(<Harness {...input}/>);await waitFor(()=>expect(input.reportShellFailure).toHaveBeenCalledOnce());const row=input.reportShellFailure.mock.calls[0]![0];state.read.mockRejectedValueOnce(Error("action failed"));
  if(action === "copy")act(()=>row.action.run());else{act(()=>row.action.additional[0].run());await user.click(screen.getByTestId("typing-discard-confirm"));}
  await waitFor(()=>expect(input.reportShellFailure).toHaveBeenCalledWith(expect.objectContaining({message:`dohc could not ${action} your typing.`})));
+});
+
+it("names the file and History when recovery imported a copy before Copy",async()=>{
+ const input=options();state.read.mockResolvedValue({failures:[refused]});renderHook(()=>useTypingRecoveryNotices(input));await waitFor(()=>expect(input.reportShellFailure).toHaveBeenCalledOnce());const row=input.reportShellFailure.mock.calls[0]![0];
+ state.read.mockResolvedValue({failures:[],outcome:"imported"});act(()=>row.action.run());await waitFor(()=>expect(input.reportShellFailure).toHaveBeenCalledWith({message:"dohc recovered this kept typing. Look in the file or History.",tone:"success"}));expect(input.clearIdentity).toHaveBeenCalledWith("typing-import:one");
+});
+
+it("keeps a closed toast closed after Copy and document-open activity", async () => {
+ state.read.mockImplementation(async input => ({failures:[refused],...(input.action === "copy" ? {outcome:"copied" as const} : {})}));
+ const {result}=renderHook(()=>{const shell=useShellError("copy-refresh");useTypingRecoveryNotices({workspaceId:"copy-refresh",ready:true,...shell});return shell;});
+ await waitFor(()=>expect(result.current.shellErrors).toHaveLength(1));const first=result.current.shellErrors[0]!;expect(first.seen).toBe(false);
+ act(()=>result.current.hideShellError(first.id));act(()=>result.current.runShellErrorAction(first.id));
+ await waitFor(()=>expect(state.read).toHaveBeenCalledWith({workspaceId:"copy-refresh",action:"copy",checkpointId:"one"}));
+ await waitFor(()=>expect(state.read).toHaveBeenCalledTimes(3));
+ activity("copy-refresh");await waitFor(()=>expect(state.read).toHaveBeenCalledTimes(4));
+ expect(result.current.shellErrors).toHaveLength(1);expect(result.current.shellErrors[0]).toMatchObject({id:first.id,atMs:first.atMs,seen:true});
 });
