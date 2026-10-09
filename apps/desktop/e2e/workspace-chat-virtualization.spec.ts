@@ -10,7 +10,7 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   explorerRow,
-  openFileChatsPanel,
+  openAboutPanel,
   openWorkspaceFromFirstRun,
   seedCloudCredentials,
   seedWorkspaceManifest,
@@ -180,7 +180,7 @@ test("a file linked mention reveals an unmounted historical message", async () =
     const page = desktop.page;
     await waitForWorkspaceFile(page, workspaceId, "topic.md");
     await explorerRow(page, "topic.md").click();
-    await openFileChatsPanel(page);
+    await openAboutPanel(page);
     await page.getByTestId("linked-chat-open").click();
     const rail = page.getByTestId("linked-chat-thread");
     await expectWindowed(rail, "linked-chat", `File message ${messageCount - 1}`);

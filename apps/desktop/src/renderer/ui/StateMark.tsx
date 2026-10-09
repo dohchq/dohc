@@ -1,18 +1,19 @@
-import { Lock, TriangleAlert } from "lucide-react";
+import { Clock, Lock, TriangleAlert } from "lucide-react";
 import { useId, useLayoutEffect, useRef, useState } from "react";
 import type { SaveState } from "@dohc/workspace-contracts/save-state";
 
 // Save facts and access/view facts share this presentation map.
 //
 // The shape says what kind of state it is before the word is read. Filled
-// means settled, a ring means dohc is still working, a lock means the file
-// is held and no edit is lost, a triangle means the person has to act.
-// Nothing animates, so reduced motion needs no special case.
+// means settled, a clock means settled but old, a ring means dohc is still
+// working, a lock means the file is held and no edit is lost, a triangle
+// means the person has to act. Nothing animates, so reduced motion needs no
+// special case.
 //
 // A `Record` over the union, so a new state is a compile error here until it
 // has a label, and every label is one it can defend from code (see
 // StateMark.test.tsx for what each may claim).
-export type StateMarkKind = "settled" | "working" | "held" | "attention";
+export type StateMarkKind = "settled" | "dated" | "working" | "held" | "attention";
 
 export type StatePresentation = {
   label: string;
@@ -108,6 +109,28 @@ export const SAVE_STATE: Record<SaveStateKey, StatePresentation> = {
   },
 };
 
+// How current a list of who has access is: the access answer's freshness.
+// A list main checked within its refresh window is settled. A stale list is
+// settled too, but old: no check is running for it. An empty list is never
+// "no access", so unknown says so.
+export type AccessStateKey = "access-fresh" | "access-stale" | "access-unknown";
+
+export const ACCESS_STATE: Record<AccessStateKey, StatePresentation> = {
+  "access-fresh": { label: "Checked", mark: "settled" },
+  "access-stale": {
+    label: "May be out of date",
+    mark: "dated",
+    title: "This is the last list of shares dohc received.",
+  },
+  "access-unknown": {
+    label: "Unknown",
+    mark: "attention",
+    title: "Access information is unavailable for this file. This does not mean that no one has access.",
+  },
+};
+
+const PRESENTATIONS: Record<SaveStateKey | AccessStateKey, StatePresentation> = { ...SAVE_STATE, ...ACCESS_STATE };
+
 export function saveStatePresentationKey(state: SaveState): SaveStateKey | null {
   switch (state.kind) {
     case "saved-here": return "saved";
@@ -118,6 +141,7 @@ export function saveStatePresentationKey(state: SaveState): SaveStateKey | null 
 
 const MARK_TONE: Record<StateMarkKind, string> = {
   settled: "text-subtle",
+  dated: "text-subtle",
   working: "text-subtle",
   held: "text-muted",
   attention: "text-danger",
@@ -127,6 +151,8 @@ function Mark(props: { kind: StateMarkKind }) {
   switch (props.kind) {
     case "settled":
       return <span aria-hidden className="size-2 shrink-0 rounded-full bg-current" />;
+    case "dated":
+      return <Clock size={12} aria-hidden className="shrink-0" />;
     case "working":
       return <span aria-hidden className="size-2 shrink-0 rounded-full border-[1.5px] border-current" />;
     case "held":
@@ -148,14 +174,14 @@ function Mark(props: { kind: StateMarkKind }) {
  * is not a tab stop and keeps its title. */
 export function StateMark(props: {
   state: string | SaveState;
-  shown: SaveStateKey | SaveState;
+  shown: SaveStateKey | AccessStateKey | SaveState;
   title?: string;
   testId: string;
   className?: string;
   truncate?: boolean;
 }) {
   const shownKey = typeof props.shown === "string" ? props.shown : saveStatePresentationKey(props.shown);
-  const presentation = shownKey === null ? null : SAVE_STATE[shownKey];
+  const presentation = shownKey === null ? null : PRESENTATIONS[shownKey];
   const title = props.title ?? presentation?.title;
   const { label, cut } = useCutShort(presentation?.label ?? "", props.truncate === true);
   const [open, setOpen] = useState(false);

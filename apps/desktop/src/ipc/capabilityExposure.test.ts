@@ -25,6 +25,7 @@ import publicationCli from "./cliExposure.pr1659.json";
 import commentsCli from "./cliExposure.pr1700.json";
 import admission from "./operationAdmission.json";
 import accessExposure from "./accessExposure.delta.json";
+import sharedWriteFeedback from "./ipcExposure.sharedWriteFeedback.json";
 
 const rows: OperationDefinition[] = OPERATION_TABLES.flatMap(table => Object.values(table));
 const publicVerbs = Object.entries(CLI_COMMANDS).flatMap(([group, command]) => Object.keys(command.verbs).map(verb => `${group} ${verb}`));
@@ -53,7 +54,7 @@ function assertAdmission(row: Pick<OperationDefinition, "channel" | "guard" | "s
 describe("B1 main inventories (a4be19d5b)", () => {
   it("preserves every IPC wire name and the 26 enforced table guards", () => {
     // Hand-reviewed #1639 removals and #1701, #1688, #1747, reports, save retry and
-    // capture recovery additions, separate from the hashed main baseline.
+    // capture recovery and shared write feedback additions, separate from the hashed main baseline.
     const expectedNames = [...mainIpc.names];
     expectedNames.push("desktop:check-shared-view-access");
     expectedNames.push("desktop:dismiss-share-capture-notice");
@@ -61,7 +62,7 @@ describe("B1 main inventories (a4be19d5b)", () => {
       expect(expectedNames).toContain(name);
       expectedNames.splice(expectedNames.indexOf(name), 1);
     }
-    for (const name of [...launchOpenIpc.nameAdditions, ...recipientRecordsIpc.nameAdditions, ...liveDraftRecoveryIpc.nameAdditions, ...liveDraftListingIpc.nameAdditions, ...restartCaptureIpc.nameAdditions, ...reportsIpc.nameAdditions, ...saveRetryIpc.nameAdditions, ...accessExposure.nameAdditions]) {
+    for (const name of [...launchOpenIpc.nameAdditions, ...recipientRecordsIpc.nameAdditions, ...liveDraftRecoveryIpc.nameAdditions, ...liveDraftListingIpc.nameAdditions, ...restartCaptureIpc.nameAdditions, ...reportsIpc.nameAdditions, ...saveRetryIpc.nameAdditions, ...accessExposure.nameAdditions, ...sharedWriteFeedback.nameAdditions]) {
       expect(expectedNames).not.toContain(name);
       expectedNames.push(name);
     }

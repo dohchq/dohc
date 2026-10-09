@@ -57,8 +57,8 @@ import type {
   UndoRelaySharePayload,
   SettleShareProposalResult,
   SubmitShareChangesResult,
-  PushShareDirectWritesResult,
   ShareDirectWritesPushedEvent,
+  ShareDirectWriteAnswerDelivery,
   WithdrawShareChangesResult,
   McpConfigResult,
   ReadWorkspaceTextPayload,
@@ -299,7 +299,9 @@ function makeBaseBridge(
   platform: NodeJS.Platform = "linux",
 ) {
   const activityCallbacks = new Set<(event: WorkspaceActivityEvent) => void>();
-  const directWritesPushedCallbacks = new Set<(event: ShareDirectWritesPushedEvent) => void>();
+  const heldDirectAnswers: ShareDirectWritesPushedEvent[] = [];
+  const directAnswerDelivery: ShareDirectWriteAnswerDelivery = { claim: async () => true, acknowledge: async () => true, release: async () => true };
+  const directWritesPushedCallbacks = new Set<(event: ShareDirectWritesPushedEvent, delivery: ShareDirectWriteAnswerDelivery) => void>();
   const crashReportCallbacks = new Set<() => void>();
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
   let menuCallback: ((command: MenuCommand) => void) | null = null;
@@ -574,14 +576,17 @@ function makeBaseBridge(
       async (): Promise<WithdrawShareChangesResult> => ({ state: "withdrawn" }),
     ),
     pushShareDirectWrites: vi.fn(
-      async (): Promise<PushShareDirectWritesResult> => ({ status: "pushed", writes: [] }),
+      async (): Promise<void> => undefined,
     ),
-    emitShareDirectWritesPushed: (event: ShareDirectWritesPushedEvent) => {
-      for (const callback of [...directWritesPushedCallbacks]) callback(event);
+    emitShareDirectWritesPushed: (input: Omit<ShareDirectWritesPushedEvent, "answerId"> & { answerId?: string }) => {
+      const event = { ...input, answerId: input.answerId ?? crypto.randomUUID() };
+      if (!directWritesPushedCallbacks.size) heldDirectAnswers.push(event);
+      for (const callback of [...directWritesPushedCallbacks]) callback(event, directAnswerDelivery);
     },
     onShareDirectWritesPushed: vi.fn(
-      (listener: (event: ShareDirectWritesPushedEvent) => void) => {
+      (listener: (event: ShareDirectWritesPushedEvent, delivery: ShareDirectWriteAnswerDelivery) => void) => {
         directWritesPushedCallbacks.add(listener);
+        for (const event of heldDirectAnswers.splice(0)) listener(event, directAnswerDelivery);
         return () => directWritesPushedCallbacks.delete(listener);
       },
     ),

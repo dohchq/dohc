@@ -67,10 +67,9 @@ export function registerShareProposalsIpcHandlers<
   /** Main's own operation on a workspace, whichever workspace its windows show. */
   withWorkspaceAuthority<Result>(workspaceId: string, work: (operation: WorkspaceOperation) => Promise<Result>): Promise<Result>;
   /**
-   * A direct push no window asked for finished: windows on the share view
-   * show it. False when no window shows the view.
+   * Delivers every direct push's feedback, retaining answers until shown.
    */
-  reportDirectWrites(workspaceId: string, result: PushShareDirectWritesResult): boolean;
+  reportDirectWrites(workspaceId: string, result: PushShareDirectWritesResult): void;
   warmCredentialCache(): Promise<void>;
   currentCredentials(): CloudCredentials | null;
   currentCredentialGeneration(): number;
@@ -608,16 +607,8 @@ export function registerShareProposalsIpcHandlers<
       async (operation) => {
         requireShareViewProposalScope(operation.workspace.shareView);
         const workspaceId = operation.workspace.workspaceId;
-        const result = await directWrites.pushNow(workspaceId);
-        try {
-          operation.assertCurrent();
-        } catch (error) {
-          // The window left the view while the push ran, so its answer goes
-          // where a background push's goes: to a window on the view, or held.
-          directWrites.report(workspaceId, result);
-          throw error;
-        }
-        return result;
+        await directWrites.pushNow(workspaceId);
+        operation.assertCurrent();
       },
     );
   });
@@ -679,6 +670,6 @@ export function registerShareProposalsIpcHandlers<
   });
 
   return { shareViewEdited: directWrites.edited, recordCreated: workspaceId => {
-    void directWrites.pushNow(workspaceId).then(result => directWrites.report(workspaceId, result));
+    void directWrites.pushNow(workspaceId);
   } };
 }

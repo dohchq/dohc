@@ -15,7 +15,7 @@ describe("shared desktop pins", () => {
     render(<>
       <Titlebar chatsSidebar={{ visible: true, onToggle: noop }} primarySidebar={{ visible: true, onToggle: noop }} onQuickOpen={noop} />
       <ActivityBar views={["explorer", "search", "graph", "sites", "history"]} activeView="search" sidebarVisible hasConflict={false} searchResultCount={3} onSelectView={noop} onOpenSettings={noop} onOpenCloud={noop} />
-      <ChatsPanel width={320} onWidthChange={noop} onCollapse={noop} tabs={["all", "file"]} tab="all" onTabChange={noop}>Chats</ChatsPanel>
+      <ChatsPanel width={320} onWidthChange={noop} onCollapse={noop} tabs={["all", "about"]} tab="all" onTabChange={noop}>Chats</ChatsPanel>
       <SidePanel title="Explorer" width={320} onWidthChange={noop}>Files</SidePanel>
     </>);
     for (const id of [desktopPins.titlebar, desktopPins.titlebarChatsSidebar, desktopPins.activityBar, desktopPins.chatsPanel, desktopPins.chatsPanelCollapse, desktopPins.sidePanel]) {
@@ -24,7 +24,7 @@ describe("shared desktop pins", () => {
     for (const view of ["explorer", "search", "graph", "sites", "history", "cloud", "settings"]) {
       expect(screen.getByTestId(activityPin(view)).getAttribute("data-testid")).toBe("activity-" + view);
     }
-    for (const tab of ["all", "file"]) {
+    for (const tab of ["all", "about"]) {
       expect(screen.getByTestId(chatsPanelTabPin(tab)).getAttribute("data-testid")).toBe("chats-panel-tab-" + tab);
     }
   });

@@ -1,13 +1,18 @@
-import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clearDeclinedDm,
   declineDm,
   readDeclinedDms,
 } from "./dmRequestStore";
 import { createTestScratch } from "./testTemp";
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, writeFileSync: vi.fn(actual.writeFileSync) };
+});
 
 let dir = "";
 const file = () => join(dir, "dohc-dm-requests.json");
@@ -16,6 +21,7 @@ beforeEach(async () => {
   dir = await createTestScratch("dohc-dm-request-");
 });
 afterEach(async () => {
+  vi.mocked(writeFileSync).mockReset();
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -72,14 +78,13 @@ describe("dmRequestStore", () => {
   it("reports failure when an atomic write cannot reach disk", () => {
     const target = file();
     expect(declineDm(target, "share-A")).toBe(true);
-    const tmp = `${target}.tmp-${process.pid}`;
-    mkdirSync(tmp);
-    try {
-      expect(declineDm(target, "share-B")).toBe(false);
-      expect(clearDeclinedDm(target, "share-A")).toBe(false);
-      expect(readDeclinedDms(target)).toEqual(new Set(["share-A"]));
-    } finally {
-      rmSync(tmp, { recursive: true, force: true });
-    }
+    const failure = Object.assign(new Error("disk full"), { code: "ENOSPC" });
+    vi.mocked(writeFileSync)
+      .mockImplementationOnce(() => { throw failure; })
+      .mockImplementationOnce(() => { throw failure; });
+    expect(declineDm(target, "share-B")).toBe(false);
+    expect(clearDeclinedDm(target, "share-A")).toBe(false);
+    expect(readDeclinedDms(target)).toEqual(new Set(["share-A"]));
+    expect(readdirSync(dir)).toEqual(["dohc-dm-requests.json"]);
   });
 });

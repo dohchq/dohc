@@ -68,6 +68,7 @@ import { createChatScopeCapability } from "./ipc/chatScope";
 import { registerChatsIpcHandlers } from "./ipc/chatsIpc";
 import { workspaceVersionHandlers } from "./ipc/workspaceVersionsIpc";
 import { registerShareProposalsIpcHandlers } from "./ipc/shareProposalsIpc";
+import { createShareDirectWriteDelivery } from "./ipc/shareDirectWriteDelivery";
 import { registerSharedViewsIpcHandlers } from "./ipc/sharedViewsIpc";
 import { registerCloudIpcHandlers } from "./ipc/cloudIpc";
 import { registerSharedChannelsIpcHandlers } from "./ipc/sharedChannelsIpc";
@@ -128,7 +129,6 @@ import {
   DesktopUserSettingsResult,
   SyncStatusResult,
   RebuildEngineStoreResult,
-  type PushShareDirectWritesResult,
   WorkspaceSummary,
   UpdateStateEvent,
   ShareHandoffStatus,
@@ -764,23 +764,11 @@ function notifyWorkspaceWindows(workspaceId: string, channel: string): void {
   }
 }
 
-// A direct push main ran after a save in a share view finished: the windows
-// on that view show its stale and refused writes. False when no window
-// shows the view; the push queue then holds the answer until one does.
-function notifyShareDirectWritesPushed(workspaceId: string, result: PushShareDirectWritesResult): boolean {
-  let shown = false;
-  for (const win of BrowserWindow.getAllWindows()) {
-    if (
-      rendererWorkspaceSessions.current(win.webContents)?.workspaceId !==
-      workspaceId
-    ) {
-      continue;
-    }
-    win.webContents.send(CHANNELS.shareDirectWritesPushed, { workspaceId, result });
-    shown = true;
-  }
-  return shown;
-}
+const shareDirectWriteDelivery = createShareDirectWriteDelivery<WebContents>({
+  targets: () => BrowserWindow.getAllWindows().map(window => window.webContents),
+  currentSession: sender => rendererWorkspaceSessions.current(sender),
+  isSharedView: workspaceId => shareViewIsPresent(findWorkspace(workspaceId)?.shareView),
+});
 
 // Main's queue of direct pushes, once the IPC handlers are registered.
 let shareDirectWrites: { shareViewEdited(workspaceId: string): void; recordCreated(workspaceId: string): void } | null = null;
@@ -5096,30 +5084,38 @@ const workspaceSearchOwner = new WorkspaceSearchOwner<
   logError: (message, error) => console.error(`[desktop] ${message}`, error),
 });
 
+const rendererWorkspaceRetirement = createDesktopRendererWorkspaceRetirement<WebContents>({
+  engineYDoc: engineYDocSessionIpc,
+  sitePreviews,
+  workspaceSearch: workspaceSearchOwner,
+  presencePolls: {
+    disposeSender: (senderId) => {
+      presencePollRegistry.disposeSender(senderId);
+      relayShareDiscussionActivityPolls.disposeSender(senderId);
+    },
+  },
+  presenceMutations: presenceMutationOwner,
+  onCleanupError: (owner, scope, error) => {
+    const identity =
+      scope.kind === "sender"
+        ? `sender ${scope.senderId}`
+        : `workspace "${scope.workspaceId}"`;
+    console.warn(
+      `[desktop] failed to retire ${owner} for ${identity}`,
+      error,
+    );
+  },
+});
+
 const rendererWorkspaceSessions: RendererWorkspaceSessionOwner<WebContents> =
   new RendererWorkspaceSessionOwner<WebContents>({
-    retirement: createDesktopRendererWorkspaceRetirement<WebContents>({
-      engineYDoc: engineYDocSessionIpc,
-      sitePreviews,
-      workspaceSearch: workspaceSearchOwner,
-      presencePolls: {
-        disposeSender: (senderId) => {
-          presencePollRegistry.disposeSender(senderId);
-          relayShareDiscussionActivityPolls.disposeSender(senderId);
-        },
+    retirement: {
+      ...rendererWorkspaceRetirement,
+      retireSender: session => {
+        shareDirectWriteDelivery.retireSender(session.sender);
+        return rendererWorkspaceRetirement.retireSender(session);
       },
-      presenceMutations: presenceMutationOwner,
-      onCleanupError: (owner, scope, error) => {
-        const identity =
-          scope.kind === "sender"
-            ? `sender ${scope.senderId}`
-            : `workspace "${scope.workspaceId}"`;
-        console.warn(
-          `[desktop] failed to retire ${owner} for ${identity}`,
-          error,
-        );
-      },
-    }),
+    },
     onCleanupError: (scope, error) => {
       console.warn(
         "[desktop] renderer workspace retirement failed",
@@ -5641,6 +5637,7 @@ async function currentDiagnostics(): Promise<string> {
 }
 
 function registerIpcHandlers(): void {
+  shareDirectWriteDelivery.register(operationBoundary);
   registerOperations(operationBoundary, accessOperations, {
     getObjectAccess: (input, { operation }) => accessOwner.object(operation!, input),
     listSharingAccess: (input, { operation }) => accessOwner.sharing(operation!, input),
@@ -6344,7 +6341,7 @@ function registerIpcHandlers(): void {
         get workspace() { return canonicalWorkspaceFor(lease); },
         assertCurrent: () => lease.assertCurrent(),
       })),
-    reportDirectWrites: notifyShareDirectWritesPushed,
+    reportDirectWrites: shareDirectWriteDelivery.report,
     automationDefinitionsChanged: workspaceId => {
       notifyCollectionAutomationsChanged(workspaceId);
       notifyRenderer({ workspaceId });

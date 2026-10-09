@@ -1,6 +1,7 @@
 import { createDatasetReplica, type DatasetReplicaSource } from "@dohc/app-backend-runtime/replica";
 import { describeApprovedDataset, parseDatasetRevision, parseDatasetDescription, type DatasetDescription } from "@dohc/security-contract/dataset";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
+import { atomicReplaceFile } from "../atomicReplaceFile";
 import { lstat, open, readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
@@ -50,12 +51,16 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
       const describeRemote = (datasetId: string, metadata?: { includeArchived?: boolean }) => enqueueMetadata(async () => {
         authorize(); const dataset = await remoteDescribe(datasetId,metadata); authorize();
         if ("archived" in dataset && dataset.archived === true) {
-          const value = markerSchema.parse({binding,dataset,savedAtMs:Date.now()}), temporary = `${markerPath}.${randomUUID()}`;
+          const value = markerSchema.parse({binding,dataset,savedAtMs:Date.now()});
+          let temporary: string | undefined;
           try {
-            const file = await open(temporary,"wx",0o600);
-            try { await file.writeFile(JSON.stringify(value)); await file.sync(); } finally { await file.close(); }
-            authorize(); await rename(temporary,markerPath); archived=value;
-          } finally { await rm(temporary,{force:true}); }
+            await atomicReplaceFile(markerPath, async (path) => {
+              temporary = path;
+              const file = await open(path,"wx",0o600);
+              try { await file.writeFile(JSON.stringify(value)); await file.sync(); } finally { await file.close(); }
+            }, { rename: async (source, target) => { authorize(); await rename(source, target); } });
+            archived=value;
+          } finally { if (temporary) await rm(temporary,{force:true}); }
         } else if (archived) await clearArchive();
         authorize(); return dataset;
       });
