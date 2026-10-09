@@ -134,11 +134,17 @@ async function computer(input: {
     await client.waitForExit();
   };
   cleanup.push(closeEngine);
+  // Like automationReplicas, queue complete passes from every caller.
+  let syncChain: Promise<void> = Promise.resolve();
   return {
     root: input.root, nextRequestId, client, workspace, lifetime: lifetime.signal, request,
     async sync() {
-      for (let more = true; more;) more = (await replication.push()).hasMore;
-      for (let more = true; more;) more = (await replication.pull()).hasMore;
+      const run = syncChain.then(async () => {
+        for (let more = true; more;) more = (await replication.push()).hasMore;
+        for (let more = true; more;) more = (await replication.pull()).hasMore;
+      });
+      syncChain = run.catch(() => undefined);
+      await run;
     },
     record: async (recordId: string) =>
       await request("collections.getRecord", { collectionPath: "Tasks", recordId, historyLimit: 10 }, workspace) as unknown as CollectionGetRecordResult,
