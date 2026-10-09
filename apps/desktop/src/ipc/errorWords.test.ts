@@ -61,6 +61,14 @@ describe("error words", () => {
   );
 
   it.each([
+    "The shared file session changed.",
+    "The shared file session changed. Open the Collection again.",
+    "The shared file session changed. Read the automations again.",
+  ])("rechecks share access for %s across IPC", message => {
+    expect(shouldRecheckShareAccess(acrossIpc(new Error(message)))).toBe(true);
+  });
+
+  it.each([
     new Error("tasks/Untitled.md already exists. Choose another record name."),
     new Error("network/Untitled.md already exists. Choose another record name."),
     new Error("This Collection does not have a current document schema."),

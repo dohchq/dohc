@@ -270,7 +270,12 @@ export function registerStopAndRestoreIpc<
         if (!await stillPending()) break;
         const again = pass > 0;
         let server: Awaited<ReturnType<ServerRuns["restore"]>>;
-        try { server = await dependencies.serverRuns.restore(workspaceId, definitions, again, retentionId); }
+        try {
+          server = await dependencies.serverRuns.restore(workspaceId, definitions, again, retentionId).catch((error: unknown) => {
+            if (error instanceof z.ZodError) throw new Error("Your server runs a different version of dohc. Update it, then try again.");
+            throw error;
+          });
+        }
         finally {
           // A retain may land after dismissal's release. Queue its release again, including on a lost response.
           if (!await stillPending()) {
@@ -291,7 +296,7 @@ export function registerStopAndRestoreIpc<
     } catch (error) {
       // What it undid before it stopped is reported with why it stopped.
       throw new UndoRunsStopped(error instanceof z.ZodError
-        ? "Your server runs a different version of dohc. Update it, then try again."
+        ? "dohc could not finish undoing these runs."
         : error instanceof Error ? error.message : String(error), total());
     } finally {
       activeUndos.delete(retentionId);

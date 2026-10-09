@@ -795,7 +795,7 @@ pub(super) fn reconcile_active_plaintext_projection_on_store(
     clippy::too_many_arguments,
     reason = "switch ordering, disk root, suppression, faults, and cancellation are independent"
 )]
-fn switch_active_version_on_store(
+pub(super) fn switch_active_version_on_store(
     store: &mut EngineStore,
     workspace_id: &str,
     version_id: &str,

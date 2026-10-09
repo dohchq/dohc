@@ -1,4 +1,5 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { atomicReplaceFile } from "../atomicReplaceFile";
 import { dirname } from "node:path";
 import type { NoticeRef } from "../ipc/bridgeContract";
 
@@ -45,8 +46,7 @@ export function createRunNowIntents(file: string) {
   };
   const write = async (intents: RunNowIntent[]) => {
     await mkdir(dirname(file), { recursive: true });
-    await writeFile(`${file}.tmp`, `${JSON.stringify(intents)}\n`);
-    await rename(`${file}.tmp`, file);
+    await atomicReplaceFile(file, (temporary) => writeFile(temporary, `${JSON.stringify(intents)}\n`));
   };
   const same = (left: NoticeRef, right: NoticeRef) => left.store === right.store && left.noticeId === right.noticeId;
 

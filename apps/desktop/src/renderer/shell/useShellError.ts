@@ -122,9 +122,11 @@ export function useShellError(workspaceId: string) {
   // A new error replaces an older one that says the same thing, or one of
   // the same kind, so a read that keeps failing is one row, not a pile.
   // `seen` files the row without a toast; "keep" gives it the seen state of
-  // the row of its kind it replaces, so an open toast stays open.
+  // the row of its kind it replaces, so an open toast stays open, and files
+  // it quietly when there is none. "repeat" keeps the replaced row's toast
+  // state too, but with no row to replace it is a new failure and toasts.
   const push = useCallback(
-    (error: Omit<ShellError, "id" | "atMs" | "seen">, seen: boolean | "keep" = false) => {
+    (error: Omit<ShellError, "id" | "atMs" | "seen">, seen: boolean | "keep" | "repeat" = false) => {
       nextId.current += 1;
       const id = `shell-error-${nextId.current}`;
       const atMs = Date.now();
@@ -143,7 +145,7 @@ export function useShellError(workspaceId: string) {
           message,
           id,
           atMs,
-          seen: seen === "keep" ? (replaced?.seen ?? true) : seen,
+          seen: seen === "keep" ? (replaced?.seen ?? true) : seen === "repeat" ? (replaced?.seen ?? false) : seen,
         };
         return [
           ...current.filter((existing) => !matches(existing)),
@@ -271,7 +273,9 @@ export function useShellError(workspaceId: string) {
   // the words. Text that arrives raw is read into words the same way. A kind
   // makes a newer message replace the row of an older one, such as one
   // import's result replacing the last; an identity does the same for one
-  // thing, such as one folder.
+  // thing, such as one folder. `repeat` is a read that may fail again: a row
+  // still there is replaced and keeps its toast, open or closed. With no row,
+  // because Try again or Dismiss removed it, the failure toasts again.
   const reportShellFailure = useCallback(
     (failure: {
       title?: string;
@@ -282,6 +286,7 @@ export function useShellError(workspaceId: string) {
       onDismiss?: () => void;
       kind?: ShellErrorKind;
       identity?: string;
+      repeat?: boolean;
     }) => {
       const shown = readError(failure.message);
       const cause = failure.cause === undefined ? shown.cause : readError(failure.cause).cause;
@@ -297,7 +302,7 @@ export function useShellError(workspaceId: string) {
         ...(failure.onDismiss ? { onDismiss: failure.onDismiss } : {}),
         ...(failure.kind ? { kind: failure.kind } : {}),
         ...(failure.identity !== undefined ? { identity: failure.identity } : {}),
-      });
+      }, failure.repeat ? "repeat" : false);
     },
     [push],
   );

@@ -4,7 +4,7 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   explorerRow,
-  openFileChatsPanel,
+  openAboutPanel,
   openHistoryView,
   openWorkspaceFromFirstRun,
   revealExplorerPath,
@@ -143,7 +143,7 @@ test("an MCP chat reply reaches the file rail as \"Agent\"", async () => {
     // Create the chat and ask a question as the human user.
     await revealExplorerPath(page, "notes/topic.md");
     await explorerRow(page, "notes/topic.md").click();
-    await openFileChatsPanel(page);
+    await openAboutPanel(page);
     await page.getByTestId("linked-chat-new").click();
     const titleInput = page.getByTestId("linked-chat-new-title");
     await titleInput.fill("Agent question");

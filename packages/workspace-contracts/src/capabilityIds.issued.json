@@ -131,6 +131,7 @@
   "access.object.read",
   "access.sharing.read",
   "access.refresh",
+  "share.direct.writes.feedback",
   "share.restore.pending.read",
   "share.restore.pending.dismiss"
 ]

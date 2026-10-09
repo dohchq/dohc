@@ -119,6 +119,34 @@ describe("engine history reads", () => {
 });
 
 describe("engine restore", () => {
+  it.each([
+    ["symlink-target", "dohc could not remove this file because its path contains a link. Check the file's path."],
+    ["recovery-unavailable", "dohc could not remove this file. Check folder access, then try again."],
+    ["file-locked", "dohc could not remove this file. It may be open in another app."],
+    ["materialize-io", "dohc could not remove this file."],
+  ])("reports the %s reason when a guarded delete fails", async (code, message) => {
+    const root = await createTestScratch("dohc-engine-restore-");
+    await write(root, "new.md", "recipient text\n");
+    const loopback = new VersionedLoopbackEngine();
+    const engine = capture(root, loopback);
+    engine.start();
+    try {
+      await engine.flush();
+      const created = (await engine.listMoments()).moments[0]!;
+      const send = loopback.sendRequest.bind(loopback);
+      vi.spyOn(loopback, "sendRequest").mockImplementation(async request => {
+        if (request.method === VERSIONED_METHOD.textDelete) {
+          throw { wireError: { code: code === "file-locked" ? "OVERLOADED" : "INTERNAL", message: code, retry: code === "file-locked" ? "afterBackoff" : "no" } };
+        }
+        return send(request);
+      });
+      await expect(engine.restoreFileToBeforeMoment(created.id, RESTORER, { expectedHeadMomentId: created.id }))
+        .rejects.toMatchObject({ name: "RestoreLocalChangesError", message });
+      expect(await readText(root, "new.md")).toBe("recipient text\n");
+      expect((await engine.listMoments()).moments.some(moment => moment.operation === "delete")).toBe(false);
+    } finally { await engine.stop(); }
+  });
+
   it("guarded Undo recreates a removed record with its original identity and History", async () => {
     const root = await createTestScratch("dohc-engine-undo-");
     await write(root, "new.md", "recipient text\n");

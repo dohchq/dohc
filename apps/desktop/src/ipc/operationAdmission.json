@@ -43,5 +43,6 @@
   "desktop:pending-stop-and-restores": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:dismiss-stop-and-restore": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:dismiss-share-capture-notice": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
-  "desktop:engine-ydoc-retry-save": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "engineYDocSessionIpc.retrySave" } }
+  "desktop:engine-ydoc-retry-save": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "engineYDocSessionIpc.retrySave" } },
+  "desktop:update-share-direct-write-delivery": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "shareDirectWriteDelivery.sessionWorkspaceAndDocumentMatch" } }
 }
