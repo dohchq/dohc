@@ -91,6 +91,7 @@ impl EngineService {
                 | "automations.subscribe"
                 | "automations.unsubscribe"
                 | "automations.claimNext"
+                | "automations.makeDurable"
                 | "automations.settle"
                 | "automations.release"
                 | "automations.retry"
@@ -942,6 +943,10 @@ impl EngineService {
                 self.automations_prune_history(&ctx, request.workspace, request.params)
                     .await?
             }
+            "automations.makeDurable" => {
+                self.automations_make_durable(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "automations.settle" => {
                 self.automations_settle(&ctx, request.workspace, request.params)
                     .await?
@@ -1309,6 +1314,7 @@ mod tests {
             "automations.retry",
             "automations.runNow",
             "automations.scheduleMarks",
+            "automations.makeDurable",
             "automations.settle",
             "automations.subscribe",
             "automations.unsubscribe",

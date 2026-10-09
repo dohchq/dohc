@@ -195,6 +195,7 @@ async function world(options: {
   };
 
   const engine: CollectionAutomationEngine = {
+    makeAutomationWritesDurable: async () => {},
     sharedFileUpdateStates: async writes => writes.map(() => "settled"),
     workspaceId: "ws",
     listVersions: async () => [{ id: "main" }],
@@ -2737,7 +2738,7 @@ describe("Collection automations", () => {
     const note = run!.applied.flatMap(({ writes }) => writes).find((write) => write.kind === "field" && write.field === "Note");
     if (note?.kind !== "field") throw new Error("expected the run to write Note");
     await w.baseStore.save({
-      ...run!, keySeed: `${run!.keySeed}-again`, startedAtMs: run!.startedAtMs + 1, undo: null, undoKept: [], created: [],
+      ...run!, keySeed: `${run!.keySeed}-again`, startedAtMs: run!.startedAtMs + 1, undo: null, undoKept: [], created: [], durableEffects: 1,
       applied: [{ ordinal: 0, writes: [{ ...note, before: "done", after: "again" }] }],
     });
     // Both keep Note, which counts once.

@@ -136,6 +136,8 @@ export interface CollectionRecordWrites {
 }
 
 export interface CollectionAutomationRunDependencies {
+  /** Sync earlier writes in this workspace's engine before saving run completion. */
+  makeDurable(claimId?: string): Promise<void>;
   checkPresser?(): Promise<void>;
   authorizeDataset?(datasetId: string, operationId: string): Promise<import("./buttonPresser").DatasetOperationCeiling>;
   withHost?: import("./datasetAutomationRun").DatasetAutomationRunDependencies["withHost"];
@@ -321,7 +323,8 @@ export async function savedRunOf(
 /** A new run's record, before anything of it is saved. */
 export function newRun(claim: Pick<AutomationClaim, "automationId" | "claimId">, automation: Automation, keySeed: string, nowMs: number): StoredRun {
   return {
-    version: 9,
+    version: 10,
+    durableEffects: 0,
     claimId: claim.claimId,
     automationId: claim.automationId,
     definitionHash: definitionHash(automation),

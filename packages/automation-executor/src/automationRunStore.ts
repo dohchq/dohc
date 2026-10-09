@@ -289,7 +289,8 @@ const UndoCallSchema = z.union([
     idempotencyKey: z.string(),
   }),
 ]);
-// Version 9 locates fields kept by Undo, including dataset records. It plans
+// Version 10 records the effects covered by the engine durability barrier.
+// It locates fields kept by Undo, including dataset records. It plans
 // and saves each step beside the run's state, names each Collection by its
 // id, records when the run ended, qualifies formula-visible fields by
 // dataset and table, and keeps the deletes an Undo may use on each record
@@ -297,7 +298,8 @@ const UndoCallSchema = z.union([
 // cannot be read, and the claim fails instead of starting over or reading
 // bare field ids as current reach.
 const StoredRunSchema = z.object({
-  version: z.literal(9),
+  version: z.literal(10),
+  durableEffects: z.number().int().nonnegative().default(0),
   claimId: z.string().min(1),
   automationId: z.string().min(1),
   definitionHash: z.string().min(1),
@@ -369,7 +371,9 @@ export interface StoredStep {
 
 /** One run of one claim under one definition of its automation. */
 export interface StoredRun {
-  version: 9;
+  version: 10;
+  /** Recorded effects whose writes survived the engine durability barrier. */
+  durableEffects: number;
   claimId: string;
   /** The engine automation id, "collection:<collection id>#<id>". */
   automationId: string;
@@ -927,6 +931,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     // Steps run in order, and an effect lands only after its step was saved.
     const planned = run.steps.reduce((count, step) => count + step.effects.length, 0);
     if (run.steps.some((step, index) => index > 0 && step.ordinal <= run.steps[index - 1]!.ordinal)) return null;
+    if (run.durableEffects > run.applied.length) return null;
     if (run.applied.length > planned || run.replans.some((replan) => replan.effect >= planned)) return null;
     return run;
   };

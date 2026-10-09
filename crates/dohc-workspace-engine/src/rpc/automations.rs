@@ -163,6 +163,13 @@ struct AutomationClaimNextParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutomationMakeDurableParams {
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    claim_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AutomationSettleParams {
     claim_id: String,
     state: String,
@@ -652,6 +659,29 @@ impl EngineService {
         )
         .await?;
         Ok(json!({ "pruned": pruned.pruned, "more": pruned.more }))
+    }
+
+    pub(super) async fn automations_make_durable(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: AutomationMakeDurableParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        Self::read_under_ctx(
+            &cancellation,
+            "automations.makeDurable",
+            open.actor.automation_make_durable(
+                open.workspace_id.clone(),
+                params.claim_id,
+                Arc::new(NoFaults),
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(json!({}))
     }
 
     pub(super) async fn automations_settle(

@@ -51,6 +51,7 @@ export const WORKSPACE_METHOD = {
   automationsListClaims: "automations.listClaims",
   automationsGetClaim: "automations.getClaim",
   automationsPruneHistory: "automations.pruneHistory",
+  automationsMakeDurable: "automations.makeDurable",
   automationsSettle: "automations.settle",
   automationsRetry: "automations.retry",
   automationsRelease: "automations.release",
@@ -265,6 +266,8 @@ export type AutomationClaimNextParams = WorkspaceJsonObject & {
   automationIdPrefix: string;
 };
 
+export type AutomationMakeDurableParams = WorkspaceJsonObject & { claimId?: string };
+
 export type AutomationSettleParams = WorkspaceJsonObject & {
   claimId: string;
   state: "done" | "failed";
@@ -459,6 +462,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.automationsListClaims]: AutomationListClaimsParams;
   [WORKSPACE_METHOD.automationsGetClaim]: AutomationGetClaimParams;
   [WORKSPACE_METHOD.automationsPruneHistory]: AutomationPruneHistoryParams;
+  [WORKSPACE_METHOD.automationsMakeDurable]: AutomationMakeDurableParams;
   [WORKSPACE_METHOD.automationsSettle]: AutomationSettleParams;
   [WORKSPACE_METHOD.automationsRetry]: AutomationRetryParams;
   [WORKSPACE_METHOD.automationsRelease]: AutomationReleaseParams;
@@ -1368,6 +1372,7 @@ const WorkspaceResultSchemas = {
     pruned: Schema.Int,
     more: Schema.Boolean,
   }),
+  [WORKSPACE_METHOD.automationsMakeDurable]: mutableStruct({}),
   [WORKSPACE_METHOD.automationsSettle]: AutomationClaimSummarySchema,
   [WORKSPACE_METHOD.automationsRetry]: AutomationClaimSummarySchema,
   [WORKSPACE_METHOD.automationsRelease]: AutomationClaimSummarySchema,

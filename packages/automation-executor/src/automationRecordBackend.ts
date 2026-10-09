@@ -68,7 +68,7 @@ import { resolveAutomationInventory, type AutomationInventory } from "./automati
 import type { AutomationTarget } from "./automationTargets";
 
 export type RecordRunDependencies = Pick<CollectionAutomationRunDependencies,
-  "targets" | "evaluator" | "store" | "nowMs" | "personName" | "chat" | "postNotice" | "recipientVerdicts" | "readMessageBody" | "readCode"
+  "makeDurable" | "targets" | "evaluator" | "store" | "nowMs" | "personName" | "chat" | "postNotice" | "recipientVerdicts" | "readMessageBody" | "readCode"
 > & Partial<Pick<CollectionAutomationRunDependencies,
   "withReads" | "withRecordWrites" | "collectionIdOf" | "collectionPathOf" | "isIndexReading" | "checkReach" | "localPersonId" | "checkPresser" | "authorizeDataset"
 >> & Partial<Pick<DatasetAutomationRunDependencies, "withHost" | "cachedRoster">>;
@@ -424,7 +424,26 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
       throw error;
     }
   };
+  let engineWriteAttempted = false;
+  const documentDeps = {
+    ...deps,
+    withRecordWrites: deps.withRecordWrites === undefined ? undefined : <T>(writeSignal: AbortSignal, work: (writes: import("./collectionAutomationRun").CollectionRecordWrites) => Promise<T>) =>
+      deps.withRecordWrites!(writeSignal, (writes) => work({
+        setFields: async (input) => {
+          try {
+            const result = await writes.setFields(input);
+            if (Object.keys(result.replaced).length > 0 || Object.keys(result.sharedFileUpdates ?? {}).length > 0) engineWriteAttempted = true;
+            return result;
+          } catch (error) {
+            engineWriteAttempted = true;
+            throw error;
+          }
+        },
+        create: (input) => { engineWriteAttempted = true; return writes.create(input); },
+      })),
+  };
   const backend: StepBackend = {
+    needsDurability: () => engineWriteAttempted,
     async step(work) {
       await checkNow(true);
       const priorCodeReach = new Map(codeReach);
@@ -683,12 +702,13 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
         return result ?? { outcome: { kind: "wait", reason: "engine" } };
       }
       if (effect.kind === "message" || effect.kind === "notice" || effect.kind === "wake") {
+        if (effect.kind === "message") engineWriteAttempted = true;
         return applyChatEffect(deps, { run, signal, automationName: automation.name, depth: claim.depth + 1, chat }, effect);
       }
       if (!deps.withRecordWrites || !deps.withReads || !deps.collectionPathOf || !deps.collectionIdOf) {
         throw new Error("The workspace engine is unavailable.");
       }
-      return applyDocumentEffect(deps as CollectionAutomationRunDependencies, { run, author, signal, ordinal: place.ordinal, automationName: automation.name, depth: claim.depth + 1, chat }, effect, place.mode);
+      return applyDocumentEffect(documentDeps as CollectionAutomationRunDependencies, { run, author, signal, ordinal: place.ordinal, automationName: automation.name, depth: claim.depth + 1, chat }, effect, place.mode);
     },
   };
   return { backend, ctx, state, resuming: current !== null };

@@ -627,13 +627,7 @@ pub(crate) fn open_displacements(
     if specs.is_empty() {
         return Ok(Vec::new());
     }
-    const SYNCHRONOUS_FULL: i64 = 2;
-    let session: i64 = conn
-        .pragma_query_value(None, "synchronous", |row| row.get(0))
-        .map_err(StorageError::corrupt)?;
-    conn.pragma_update(None, "synchronous", SYNCHRONOUS_FULL)
-        .map_err(StorageError::persist)?;
-    let inserted = (|| {
+    crate::durability::with_full_synchronous(conn, |conn| {
         let tx = conn
             .unchecked_transaction()
             .map_err(StorageError::persist)?;
@@ -659,13 +653,7 @@ pub(crate) fn open_displacements(
         }
         tx.commit().map_err(StorageError::persist)?;
         Ok::<_, StorageError>(ids)
-    })();
-    let restored = conn
-        .pragma_update(None, "synchronous", session)
-        .map_err(StorageError::persist);
-    let displacement_id = inserted?;
-    restored?;
-    Ok(displacement_id)
+    })
 }
 
 /// Record a staged file that stays where it is as a `kept` row, in an

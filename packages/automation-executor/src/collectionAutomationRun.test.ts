@@ -174,6 +174,7 @@ function workspace(docs: readonly Doc[], fault: Fault | null = null, files = new
       },
     }),
     dependencies: (store: AutomationRunStore): CollectionAutomationRunDependencies => ({
+      makeDurable: async () => {},
       withReads: async (work) => await work(reads),
       withRecordWrites: async (_signal, work) => await work(writes),
       // Each Collection's id is its name here; none moves unless a test moves it.
@@ -742,4 +743,19 @@ describe("a saved run's Collections", () => {
     expect(run!.collections).toEqual([{ collectionId: "Tasks", path: "Tasks" }, { collectionId: "Log", path: "Log" }]);
     expect(run!.finishedAtMs).toBe(1_000);
   });
+});
+
+
+it("skips the engine barrier when planned fields already hold their value", async () => {
+  const space = workspace([task("rec_t", { Note: "saved" })]);
+  const store = await scratchStore();
+  const dependencies = space.dependencies(store);
+  let barriers = 0;
+  dependencies.makeDurable = async () => { barriers++; };
+  const signal = new AbortController().signal;
+  await expect(runCollectionAutomation(dependencies, { claim: added(),
+    automation: automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {Note: saved}}]"),
+    collection: { path: "Tasks", name: "Tasks" }, roster: {kind: "owner", ownerUserId: null, grants: []}, signal, stopped: signal }))
+    .resolves.toEqual({ kind: "done" });
+  expect(barriers).toBe(0);
 });

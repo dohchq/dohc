@@ -168,6 +168,7 @@ async function executorFor(f: Awaited<ReturnType<typeof fixture>>, button = fals
       }
       return { busy: false, claim };
     },
+    makeAutomationWritesDurable: async () => {},
     claimNextAutomation: async () => { const claim = claims.find(value => value.state === "pending"); if (!claim) return null; claim.state = "running"; claim.attempts++; return structuredClone(claim); },
     settleAutomationClaim: async ({ claimId, state, error }: { claimId: string; state: "done" | "failed"; error?: string }) => { Object.assign(claims.find(value => value.claimId === claimId)!, { state, error }); },
     releaseAutomationClaim: async ({ claimId }: { claimId: string }) => { claims.find(value => value.claimId === claimId)!.state = "pending"; },

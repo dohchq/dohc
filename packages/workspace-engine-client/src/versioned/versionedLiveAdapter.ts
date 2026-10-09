@@ -36,6 +36,7 @@ import {
   type AutomationRetryParams,
   type AutomationScheduleMarksResult,
   type AutomationSettleParams,
+  type AutomationMakeDurableParams,
   type AutomationSubscribeParams,
   type AutomationSubscribeResult,
   type AutomationUnsubscribeParams,
@@ -1263,6 +1264,11 @@ export class VersionedLiveAdapter {
     input: AutomationClaimNextParams,
   ): Promise<AutomationClaimNextResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsClaimNext, input);
+  }
+
+  /** Syncs earlier engine writes; the claim may belong to an external ledger. */
+  async makeAutomationWritesDurable(input: AutomationMakeDurableParams = {}): Promise<void> {
+    await this.workspaceRequest(WORKSPACE_METHOD.automationsMakeDurable, input);
   }
 
   /** Settles a running claim as done, or failed with its error text. */

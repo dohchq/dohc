@@ -170,6 +170,7 @@ async function fixture(sourceDataset = false, targetDataset = true) {
     dataGrants: (id) => { const target = [...targets.values()].find((target) => target.kind === "dataset" && target.approved.datasetId === id); if (target?.kind !== "dataset") throw new Error("missing"); return target.grants; },
   };
   const dependencies: CollectionAutomationRunDependencies & DatasetAutomationRunDependencies = {
+    makeDurable: async () => {},
     collectionIdOf: (path) => collectionIds.get(path) ?? null,
     collectionPathOf: (id) => hooks.hideDatasetLocations && id.endsWith("-dataset") ? null : [...collectionIds].find(([, known]) => known === id)?.[0] ?? null,
     targets: { resolve: async (path) => hooks.hostDown && targets.get(path)?.kind === "dataset" ? { kind: "problem", code: "host-unavailable", problem: "Unavailable" } : targets.get(path) ?? { kind: "problem", code: "missing", problem: "Missing" } },

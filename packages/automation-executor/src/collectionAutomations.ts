@@ -224,6 +224,7 @@ export interface CollectionAutomationEngine extends CollectionAutomationReads {
   listVersions(input: { workspaceId: string }): Promise<ReadonlyArray<{ id: string }>>;
   listTextFileMetadata(input: { workspaceId: string; versionId: string }): Promise<ReadonlyArray<{ path: string; objectId: string }>>;
   readTextFile(input: { workspaceId: string; versionId: string; path: string }): Promise<{ text: string | null; contentKind: string; objectId: string } | null>;
+  makeAutomationWritesDurable(input?: { claimId?: string }): Promise<void>;
   settleAutomationClaim(input: { claimId: string; state: "done" | "failed"; error?: string }): Promise<unknown>;
   retryAutomationClaim(input: { claimId: string }): Promise<AutomationClaimSummary>;
   /** One page of an automation's run history, newest first, and the `before` of the next page, or null after the oldest. */
@@ -5279,6 +5280,13 @@ export class CollectionAutomations {
       cachedRoster: () => this.options.cachedRoster(),
       checkReach: async (steps, roster) => {
         return owned === undefined ? false : this.recordVerdicts(roster, [owned], steps);
+      },
+      makeDurable: async (claimId) => {
+        const result = await this.withLiveEngine(async (engine) => {
+          await engine.makeAutomationWritesDurable(claimId === undefined ? {} : { claimId });
+          return true;
+        });
+        if (result === null) throw new AutomationRunWait("The workspace engine is unavailable.");
       },
       withReads: (work) => this.withLiveEngine(work),
       withRecordWrites: this.options.withRecordWrites,

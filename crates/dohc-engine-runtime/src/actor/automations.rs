@@ -135,6 +135,29 @@ impl ActorHandle {
         .await
     }
 
+    pub async fn automation_make_durable(
+        &self,
+        workspace_id: String,
+        claim_id: Option<String>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<(), RuntimeError> {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                dohc_engine_domain::make_automation_writes_durable(
+                    store,
+                    &workspace_id,
+                    claim_id.as_deref(),
+                    faults.as_ref(),
+                )
+                .map_err(RuntimeError::from)
+            }
+        })
+        .await
+    }
+
     pub async fn automation_settle(
         &self,
         workspace_id: String,
