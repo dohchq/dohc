@@ -3,8 +3,8 @@ import { atomicWriteFile, type DurableFileOperations } from "../atomicReplaceFil
 import { dirname } from "node:path";
 
 // The agent runs whose notice is owed: each is added before the run's end
-// is saved and removed once the notice for how it ended is posted. A file
-// keeps them, so a crash between the two cannot lose a notice.
+// is saved and removed once the notice for how it ended is posted.
+// The file lets recovery find runs whose notices have not been posted.
 export interface OwedRunNotices {
   add(workspaceId: string, runId: string): Promise<void>;
   remove(workspaceId: string, runId: string): Promise<void>;
@@ -19,41 +19,31 @@ type Owed = Array<[workspaceId: string, runId: string]>;
 
 export function createOwedRunNotices(path: () => string, fileOperations?: DurableFileOperations): OwedRunNotices {
   let loaded: Promise<Owed> | null = null;
-  const pending: Array<{ update(owed: Owed): Owed | null; resolve(): void; reject(error: unknown): void }> = [];
-  let writing = false;
+  let writes: Promise<unknown> = Promise.resolve();
   const load = () => (loaded ??= read(path()).catch((error: unknown) => {
     loaded = null;
     throw error;
   }));
-  // A change reaches memory only once the file holds it, so a failed write
-  // leaves both as they were and the caller can try again.
+  // Memory changes after a successful save. A failed replacement clears
+  // the cache because the rename may have succeeded before directory sync failed.
   const change = (update: (owed: Owed) => Owed | null): Promise<void> => {
-    return new Promise<void>((resolve, reject) => {
-      pending.push({ update, resolve, reject });
-      if (!writing) {
-        writing = true;
-        queueMicrotask(() => { void drain(); });
-      }
-    });
-  };
-  async function drain(): Promise<void> {
-    while (pending.length > 0) {
-      const batch = pending.splice(0);
+    const next = writes.then(async () => {
+      const owed = await load();
+      const changed = update(owed);
+      if (changed === null) return;
+      const destination = path();
+      await mkdir(dirname(destination), { recursive: true });
       try {
-        const owed = await load();
-        let next = owed;
-        for (const job of batch) next = job.update(next) ?? next;
-        if (next !== owed) {
-          await write(path(), next, fileOperations);
-          owed.splice(0, owed.length, ...next);
-        }
-        for (const job of batch) job.resolve();
+        await atomicWriteFile(destination, JSON.stringify(changed), fileOperations);
       } catch (error) {
-        for (const job of batch) job.reject(error);
+        loaded = null;
+        throw error;
       }
-    }
-    writing = false;
-  }
+      owed.splice(0, owed.length, ...changed);
+    });
+    writes = next.catch(() => undefined);
+    return next;
+  };
   const owes = (workspaceId: string, runId: string) =>
     ([workspace, run]: [string, string]) => workspace === workspaceId && run === runId;
   return {
@@ -94,9 +84,4 @@ async function read(path: string): Promise<Owed> {
   }
   await rename(path, `${path}.damaged`);
   return [];
-}
-
-async function write(path: string, owed: Owed, fileOperations?: DurableFileOperations): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  await atomicWriteFile(path, JSON.stringify(owed), fileOperations);
 }

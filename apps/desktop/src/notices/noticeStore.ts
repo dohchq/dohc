@@ -292,49 +292,13 @@ export function createNoticeStore(deps: {
   let localFile: LocalFile | null = null;
   const accountFiles = new Map<string, AccountFile>();
 
-  // Queued work shares one durable save per file. Results and relay calls
-  // wait for the batch to reach disk; later work cannot see unsaved state.
-  const pending: Array<{ run(): Promise<() => void>; reject(error: unknown): void }> = [];
-  const saves = new Map<string, string>();
-  let draining = false;
+  // File operations run one at a time; relay calls run outside the queue.
+  // Saves sync file data. On Windows, a power cut can still undo the rename.
+  let queue: Promise<unknown> = Promise.resolve();
   function locked<T>(work: () => Promise<T>): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-      pending.push({ run: async () => {
-        try {
-          const result = await work();
-          return () => resolve(result);
-        } catch (error) {
-          return () => reject(error);
-        }
-      }, reject });
-      if (!draining) {
-        draining = true;
-        queueMicrotask(() => { void drain(); });
-      }
-    });
-  }
-
-  async function drain(): Promise<void> {
-    while (pending.length > 0) {
-      const batch = pending.splice(0);
-      const settled: Array<() => void> = [];
-      for (const job of batch) settled.push(await job.run());
-      try {
-        if (saves.size > 0) await mkdir(deps.directory, { recursive: true });
-        for (const [name, data] of saves) {
-          await atomicWriteFile(join(deps.directory, name), data, deps.fileOperations);
-        }
-        for (const settle of settled) settle();
-      } catch (error) {
-        // Reload from disk after any failed save, including a partial batch.
-        localFile = null;
-        accountFiles.clear();
-        for (const job of batch) job.reject(error);
-      } finally {
-        saves.clear();
-      }
-    }
-    draining = false;
+    const run = queue.then(work);
+    queue = run.catch(() => undefined);
+    return run;
   }
 
   const accountFileName = (account: NoticeAccount) =>
@@ -365,7 +329,8 @@ export function createNoticeStore(deps: {
   }
 
   async function save(name: string, value: LocalFile | AccountFile): Promise<void> {
-    saves.set(name, JSON.stringify(value));
+    await mkdir(deps.directory, { recursive: true });
+    await atomicWriteFile(join(deps.directory, name), JSON.stringify(value), deps.fileOperations);
   }
 
   async function loadLocal(): Promise<LocalFile> {
@@ -376,7 +341,8 @@ export function createNoticeStore(deps: {
     return localFile;
   }
 
-  // The queue owns staged cache changes until its durable batch completes.
+  // The cache takes a file only once it is saved. A caller that must not
+  // change the cache on a failed save changes a copy and saves that.
   async function saveLocal(file: LocalFile): Promise<void> {
     await save("local.json", file);
     localFile = file;

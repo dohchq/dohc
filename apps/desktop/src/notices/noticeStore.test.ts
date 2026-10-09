@@ -51,9 +51,8 @@ import {
 afterEach(closeTestStorages);
 
 describe("Notice save durability", () => {
-  it.each(["local", "account"] as const)("syncs and closes before rename and coalesces %s posts and marks", async (where) => {
+  it.each(["local", "account"] as const)("syncs and closes a %s save before rename and caller completion", async (where) => {
     const events: string[] = [];
-    const snapshots: string[] = [];
     let completed = 0;
     let beginSync!: () => void;
     let releaseSync!: () => void;
@@ -66,41 +65,34 @@ describe("Notice save durability", () => {
       open: async (...args) => {
         const handle = await open(...args);
         return {
-          writeFile: async (data) => { snapshots.push(data); events.push("write"); await handle.writeFile(data); },
+          writeFile: async (data) => { events.push("write"); await handle.writeFile(data); },
           sync: async () => { events.push("sync"); beginSync(); await released; await handle.sync(); },
           close: async () => { events.push("close"); await handle.close(); },
         };
       },
       rename: async (...args) => { events.push("rename"); await rename(...args); },
     } });
-    const burst = Promise.all(Array.from({ length: 50 }, (_, i) => laptop.store.postNotice(notice({ noticeId: `burst:${i}` })).then(() => { completed += 1; })));
+    const saved = laptop.store.postNotice(notice()).then(() => { completed += 1; });
     try {
-      await Promise.race([started, burst]);
+      await Promise.race([started, saved]);
       expect(events).toEqual(["write", "sync"]);
       expect(completed).toBe(0);
-      expect(JSON.parse(snapshots[0])[where === "local" ? "rows" : "posts"]).toHaveLength(50);
     } finally {
       releaseSync();
-      await burst;
+      await saved;
       await laptop.store.sync();
     }
-    await laptop.store.sync();
-    // Offline sync passes also save their attempted post before sending.
     const saveEvents = ["write", "sync", "close", "rename"];
-    const checkBurst = () => {
-      expect(events.length / 4).toBeGreaterThanOrEqual(1);
-      expect(events.length / 4).toBeLessThanOrEqual(where === "local" ? 1 : 4);
-      for (let i = 0; i < events.length; i += 4) expect(events.slice(i, i + 4)).toEqual(saveEvents);
-    };
-    checkBurst();
+    expect(events.slice(0, 4)).toEqual(saveEvents);
+    // Account sync also saves the attempted post before sending.
+    for (let i = 4; i < events.length; i += 4) expect(events.slice(i, i + 4)).toEqual(saveEvents);
     events.length = 0;
-    snapshots.length = 0;
-    await Promise.all(Array.from({ length: 50 }, (_, i) => laptop.store.mark([{ store: where, noticeId: `burst:${i}` }], "read", laptop.signedIn?.key ?? null)));
+    await laptop.store.mark([{ store: where, noticeId: "agent-run:1" }], "read", laptop.signedIn?.key ?? null);
     await laptop.store.sync();
-    checkBurst();
-    expect(JSON.parse(snapshots[0])[where === "local" ? "rows" : "marks"]).toHaveLength(50);
+    expect(events.slice(0, 4)).toEqual(saveEvents);
+    for (let i = 4; i < events.length; i += 4) expect(events.slice(i, i + 4)).toEqual(saveEvents);
     const restarted = await computer(laptop.signedIn, { directory: laptop.directory });
-    expect((await restarted.store.list()).notices).toHaveLength(50);
+    expect((await restarted.store.list()).notices).toHaveLength(1);
   });
 
   it.each(["local", "account"] as const)("rejects a failed %s temp sync, preserves the old file, and permits retry", async (where) => {
@@ -122,8 +114,7 @@ describe("Notice save durability", () => {
     const prior = await readFile(join(laptop.directory, name), "utf8");
     close.mockClear();
     fail = true;
-    const failures = await Promise.allSettled(Array.from({ length: 10 }, (_, i) => laptop.store.postNotice(notice({ noticeId: `failed:${i}` }))));
-    expect(failures).toEqual(Array.from({ length: 10 }, () => ({ status: "rejected", reason: error })));
+    await expect(laptop.store.postNotice(notice({ noticeId: "failed:0" }))).rejects.toBe(error);
     expect(close).toHaveBeenCalledOnce();
     expect(await readFile(join(laptop.directory, name), "utf8")).toBe(prior);
     expect(await readdir(laptop.directory)).toEqual([name]);
