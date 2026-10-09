@@ -147,17 +147,6 @@ impl OpenWorkspace {
         }
     }
 
-    pub(super) fn record_collection_reconciliation(&self, lease_held: bool, generation: u64) {
-        let status = lock(&self.capture)
-            .as_ref()
-            .map(|driver| Arc::clone(driver.status()));
-        if let Some(status) = status {
-            status.record_collection_reconciliation(lease_held, generation);
-        } else if lease_held {
-            self.request_collection_reconcile();
-        }
-    }
-
     /// Signal the background tasks to stop without removing their handles. A version
     /// fence that already owns the apply gate can still finish against the
     /// driver; teardown takes the handle only after acquiring that gate.
@@ -486,8 +475,8 @@ impl EngineService {
     /// workspace with capture asks its driver, whose next pass reconciles
     /// after it applies what it scanned. One that keeps its Collections itself
     /// reconciles now, under the gate a capture pass holds, and wakes the
-    /// executors for committed claims. Without a driver, a held lease also
-    /// fails the request, so the caller retries until reconciliation finishes.
+    /// executors for committed claims. Workspaces that reconcile here have no
+    /// capture driver. A held lease fails the request so the caller retries.
     pub(super) async fn collections_changed(
         &self,
         ctx: &RequestContext,
@@ -535,13 +524,10 @@ impl EngineService {
             &reconciliation.automation_claims,
         );
         if reconciliation.lease_held {
-            if lock(&open.capture).is_none() {
-                return Err(WireError::new(
-                    ErrorCode::Overloaded,
-                    "collection reconciliation waits for a document lease",
-                ));
-            }
-            open.request_collection_reconcile();
+            return Err(WireError::new(
+                ErrorCode::Overloaded,
+                "collection reconciliation waits for a document lease",
+            ));
         }
         Ok(())
     }

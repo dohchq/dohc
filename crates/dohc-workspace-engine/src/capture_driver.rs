@@ -907,11 +907,7 @@ impl DriverStatus {
     pub(crate) fn request_collection_reconcile(&self) {
         self.update(|bits| bits | STATUS_COLLECTION_RECONCILE_PENDING);
     }
-    pub(crate) fn record_collection_reconciliation(
-        &self,
-        lease_held: bool,
-        release_generation: u64,
-    ) {
+    fn record_collection_reconciliation(&self, lease_held: bool, release_generation: u64) {
         self.collection_release_generation
             .store(release_generation, Ordering::Relaxed);
         self.collection_lease_held

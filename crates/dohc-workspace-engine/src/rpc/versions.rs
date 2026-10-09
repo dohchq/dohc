@@ -712,7 +712,6 @@ impl EngineService {
                         )
                         .await
                         .map_err(map_runtime)?;
-                    let release_generation = capture_leases.release_generation(&open.workspace_id);
                     match open
                         .actor
                         .reconcile_collections(
@@ -728,10 +727,9 @@ impl EngineService {
                         .await
                     {
                         Ok(reconciliation) => {
-                            capture_status.record_collection_reconciliation(
-                                reconciliation.lease_held,
-                                release_generation,
-                            );
+                            if reconciliation.lease_held {
+                                capture_status.request_collection_reconcile();
+                            }
                         }
                         Err(error) => {
                             // The switch is durable. The capture driver already retries
