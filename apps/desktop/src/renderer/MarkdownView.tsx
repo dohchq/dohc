@@ -45,10 +45,11 @@ import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 import type { DocumentGoneCause } from "./collab/engineDocLease";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
+import { frontmatterBlockFor } from "@dohc/ydoc-projection/frontmatter";
 import {
-  frontmatterBlockFor,
+  frontmatterMapValues,
   writtenFrontmatterKeys,
-} from "@dohc/ydoc-projection/frontmatter";
+} from "@dohc/ydoc-projection/frontmatter-map";
 import {
   markdownEditorBody,
   mergeMarkdownEditorBody,
@@ -755,14 +756,12 @@ export function MarkdownView(props: {
     if (!displayDoc) {
       return mergeMarkdownEditorBody(latestDraft.current, body);
     }
-    const liveMeta = Object.fromEntries(
-      displayDoc.getMap(ENGINE_FRONTMATTER_FIELD).entries(),
-    ) as Record<string, unknown>;
+    const frontmatter = displayDoc.getMap(ENGINE_FRONTMATTER_FIELD);
     // The frontmatter text the settle keeps, so a copy matches the file.
     const meta = displayDoc.getMap("meta");
-    const written = writtenFrontmatterKeys(displayDoc.getMap(ENGINE_FRONTMATTER_FIELD), meta);
+    const written = writtenFrontmatterKeys(frontmatter, meta);
     const block = frontmatterBlockFor(
-      orderFrontmatter(liveMeta),
+      orderFrontmatter(frontmatterMapValues(frontmatter)),
       meta.get("dohcFrontmatterSource"),
       body,
       "\n",

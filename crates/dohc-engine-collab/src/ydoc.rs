@@ -2013,10 +2013,13 @@ const HTML_ELEMENTS: &str =
 /// autolink. The projector escapes each of them where the document holds
 /// text, so a source that spells one where its projection escapes it means
 /// something else. A plain `&`, `<` or `>` resolves to itself, as the
-/// projector's `&amp;`, `&lt;` and `&gt;` do.
+/// projector's `&amp;`, `&lt;` and `&gt;` do, and inside raw HTML the
+/// projector wrote as text, a decimal reference it writes there resolves to
+/// its character, as the importer reads it. See [`encoded_tag_span`].
 fn read_text(text: &str, place: TextPlace) -> (String, Vec<String>) {
     let mut resolved = String::with_capacity(text.len());
     let mut syntax = Vec::new();
+    let tag = encoded_tag_span(text);
     if matches!(place, TextPlace::Block | TextPlace::Item) {
         // A list item's text starts a paragraph too, so a link reference
         // definition can open it.
@@ -2046,6 +2049,14 @@ fn read_text(text: &str, place: TextPlace) -> (String, Vec<String>) {
                 continue;
             }
             '&' => {
+                let at = text.len() - rest.len();
+                let in_tag = tag.is_some_and(|(start, end)| start <= at && at < end);
+                if let Some((decoded, length)) = in_tag.then(|| projected_reference(rest)).flatten()
+                {
+                    resolved.push(decoded);
+                    rest = &rest[length..];
+                    continue;
+                }
                 let name_end = rest[1..]
                     .find(|c: char| !(c.is_ascii_alphanumeric() || c == '#'))
                     .map_or(rest.len(), |end| end + 1);
@@ -2531,26 +2542,65 @@ fn parse_table_row_heights(line: &str) -> Option<Vec<(usize, i64)>> {
 
 /// Undoes one layer of the projector's entity encoding in one pass, so the
 /// text the projector wrote as `&amp;lt;` comes back as `&lt;`, never `<`.
+/// Inside an encoded tag, from the first `&lt;` that opens one to the last
+/// `&gt;`, that layer includes the decimal references the projector writes
+/// for punctuation and whitespace, which the importer reads there as their
+/// characters. Elsewhere a reference stays the text it spells.
 fn decode_html_entities_once(value: &str) -> String {
+    let tag = encoded_tag_span(value);
+    let in_tag = |at: usize| tag.is_some_and(|(start, end)| start <= at && at < end);
     let mut output = String::with_capacity(value.len());
     let mut rest = value;
     while let Some(ampersand) = rest.find('&') {
         output.push_str(&rest[..ampersand]);
         rest = &rest[ampersand..];
+        let at = value.len() - rest.len();
         let (decoded, encoded_len) = if rest.starts_with("&amp;") {
-            ("&", "&amp;".len())
+            ('&', "&amp;".len())
         } else if rest.starts_with("&lt;") {
-            ("<", "&lt;".len())
+            ('<', "&lt;".len())
         } else if rest.starts_with("&gt;") {
-            (">", "&gt;".len())
+            ('>', "&gt;".len())
         } else {
-            ("&", 1)
+            in_tag(at)
+                .then(|| projected_reference(rest))
+                .flatten()
+                .unwrap_or(('&', 1))
         };
-        output.push_str(decoded);
+        output.push(decoded);
         rest = &rest[encoded_len..];
     }
     output.push_str(rest);
     output
+}
+
+/// Where `value` holds raw HTML the projector wrote as text: from the first
+/// `&lt;` that opens a tag to the end of the last `&gt;`. The projector writes
+/// decimal references inside it, and the importer reads them there as their
+/// characters. A real tag, as raw HTML in a source, bounds no such span.
+fn encoded_tag_span(value: &str) -> Option<(usize, usize)> {
+    let opens_tag = |next: char| next.is_ascii_alphabetic() || matches!(next, '!' | '/' | '?');
+    let start = value
+        .match_indices("&lt;")
+        .map(|(at, _)| at)
+        .find(|at| value[at + "&lt;".len()..].starts_with(opens_tag))?;
+    let end = value.rfind("&gt;").map(|at| at + "&gt;".len())?;
+    (start < end).then_some((start, end))
+}
+
+/// The character and length of a decimal reference the projector writes at
+/// the start of `value`: one to ASCII punctuation, a tab, a newline, a carriage
+/// return, a space, or a no-break space, spelled without leading zeros.
+fn projected_reference(value: &str) -> Option<(char, usize)> {
+    let digits = value.strip_prefix("&#")?;
+    let length = digits.bytes().take_while(u8::is_ascii_digit).count();
+    if !(1..=3).contains(&length) || digits.starts_with('0') || !digits[length..].starts_with(';') {
+        return None;
+    }
+    let code: u32 = digits[..length].parse().ok()?;
+    let character = char::from_u32(code)?;
+    (character.is_ascii_punctuation() || matches!(code, 9 | 10 | 13 | 32 | 160))
+        .then_some((character, length + 3))
 }
 
 /// Splits one GFM table row, such as `| a | b |` or `a | b`, into trimmed
@@ -3159,6 +3209,12 @@ fn projection_out_json<T: ReadTxn>(
 thread_local! {
     static PROJECTION_TEXT_BYTES_COPIED: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+    static TEXT_RUN_BYTES_CLONED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static RAW_HTML_REFERENCES_RECORDED: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    static INLINE_PARTS_MATERIALIZED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static EMPTY_LINK_READER_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static LITERAL_LINKS_WRITTEN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn append_admitted_projection_text(target: &mut String, text: &str) {
@@ -3696,10 +3752,23 @@ enum MarkdownNode {
     Fragment(Vec<MarkdownNode>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
+#[cfg_attr(not(test), derive(Clone))]
 struct TextRun {
     text: String,
     marks: Vec<MarkdownMark>,
+}
+
+// Tests count the text each clone copies.
+#[cfg(test)]
+impl Clone for TextRun {
+    fn clone(&self) -> Self {
+        TEXT_RUN_BYTES_CLONED.with(|count| count.set(count.get() + self.text.len()));
+        Self {
+            text: self.text.clone(),
+            marks: self.marks.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3752,6 +3821,10 @@ struct RenderContext<'a> {
     parent_attrs: &'a BTreeMap<String, Value>,
     previous: Option<&'a MarkdownNode>,
     index: usize,
+    /// Whether the node sits in a table cell, where the projector writes a
+    /// `<br>` as a real tag. The importer reads a real tag as raw HTML, so
+    /// such a `<br>` bounds no raw HTML span.
+    table_cell: bool,
 }
 
 fn markdown_node<T: ReadTxn>(
@@ -3941,7 +4014,7 @@ fn push_mark(
 
 fn markdown_document(children: &[MarkdownNode]) -> ProjectionResult<String> {
     let attrs = BTreeMap::new();
-    let rendered = render_nodes(children, "doc", &attrs, "\n\n")?;
+    let rendered = render_nodes(children, "doc", &attrs, "\n\n", false)?;
     if markdown_output_is_empty(&rendered) {
         Ok(String::new())
     } else {
@@ -3954,7 +4027,15 @@ fn markdown_output_is_empty(markdown: &str) -> bool {
     trim_js(&without_entities).is_empty()
 }
 
-fn escape_markdown_block_syntax(markdown: &str, mut starts_line: bool) -> ProjectionResult<String> {
+/// With `definition`, for a definition in a table cell, the `[` that starts
+/// `markdown` is written as `&#91;`, the reference later lines already use,
+/// which the importer reads back as text, not as an escape. See
+/// [`definition_paragraph`].
+fn escape_markdown_block_syntax(
+    markdown: &str,
+    mut starts_line: bool,
+    mut definition: bool,
+) -> ProjectionResult<String> {
     let mut output = ProjectionBuffer::new();
     let markdown = markdown.replace('\r', "&#13;");
     for line in markdown.split_inclusive('\n') {
@@ -3965,12 +4046,16 @@ fn escape_markdown_block_syntax(markdown: &str, mut starts_line: bool) -> Projec
                 output.push_str(&body[1..])?;
             } else if let Some((index, escape_next)) = leading_markdown_block_escape_index(body) {
                 output.push_str(&body[..index])?;
-                output.push('\\')?;
-                if escape_next {
+                if definition && index == 0 && body.starts_with('[') {
+                    output.push_str("&#91;")?;
+                    output.push_str(&body[1..])?;
+                } else if escape_next {
+                    output.push('\\')?;
                     output.push_str(&body[index..index + 1])?;
                     output.push('\\')?;
                     output.push_str(&body[index + 1..])?;
                 } else {
+                    output.push('\\')?;
                     output.push_str(&body[index..])?;
                 }
             } else {
@@ -3979,6 +4064,7 @@ fn escape_markdown_block_syntax(markdown: &str, mut starts_line: bool) -> Projec
         } else {
             output.push_str(body)?;
         }
+        definition = false;
         if line.ends_with('\n') {
             output.push('\n')?;
             starts_line = true;
@@ -4065,7 +4151,9 @@ fn leading_markdown_block_escape_index(markdown: &str) -> Option<(usize, bool)> 
     if rest.starts_with(b"![") {
         return Some((indent + 1, false));
     }
-    if rest.starts_with(b"[") {
+    // A link with no text starts no definition, and the importer reads it as
+    // text.
+    if rest.starts_with(b"[") && !rest.starts_with(b"[](") {
         return Some((indent, false));
     }
     let digits = rest.iter().take_while(|byte| byte.is_ascii_digit()).count();
@@ -4080,11 +4168,769 @@ fn leading_markdown_block_escape_index(markdown: &str) -> Option<(usize, bool)> 
     None
 }
 
+// The importer keeps a link reference definition and a link with no text as
+// the text the file holds, and reads them with marked 17's own rules. The
+// projector finds them by the same rules: it writes an empty link as it is,
+// and a definition as one tag span, whose exact bytes the importer reads back
+// as the same text. The importer's tests pin marked's readings of the cases
+// `marked_literal_source_readings` repeats here, and compare the importer's
+// own copy of `EmptyLinks` with marked on generated text.
+
+/// A run of bare destination text, which every candidate whose destination
+/// starts in it shares: where it stops, its last two `)`, and what the rule
+/// reads after it, each found once.
+struct BareRun {
+    start: usize,
+    stop: usize,
+    close: Option<usize>,
+    previous_close: Option<usize>,
+    tail: Option<Option<usize>>,
+    /// The trimmed end and closing backslashes before the stop and before
+    /// the last `)`.
+    shapes: Vec<(usize, (usize, usize))>,
+    walk: Option<ParenthesisWalk>,
+}
+
+/// marked's `findClosingBracket` for each candidate whose destination starts
+/// in a run, in candidate order: its start, its first unmatched `)` or
+/// `u32::MAX`, and its depth, and the depth at the run's stop and last `)`.
+/// Indexes fit `u32` because the projection admits at most
+/// `MAX_PROJECTION_BYTES` of text.
+struct ParenthesisWalk {
+    candidates: Vec<(u32, u32, i32)>,
+    stop_depth: i32,
+    close_depth: i32,
+    next: usize,
+}
+
+/// A title's scan from a start: the first delimiter no backslash escapes or
+/// the end, the close after it, and the last escaped delimiter whose close
+/// succeeds, with that close.
+#[derive(Clone, Copy)]
+struct TitleScan {
+    start: usize,
+    end: usize,
+    close: Option<usize>,
+    escaped: Option<(usize, usize)>,
+}
+
+/// marked's inline `link` rule and `Tokenizer.link` checks for a link with
+/// no text, read at each `[](` in order. After `[](` the rule is `\s*`, a
+/// destination `<(?:\\.|[^\n<>\\])+>` or `[^ \t\n\x00-\x1f]*`, an optional
+/// title after `[ \t]+(?:\n[ \t]*)?` or `\n[ \t]*`, then `\s*\)`. Its regex
+/// tries the longest choices first, so each step names the first choice
+/// that succeeds. Indexes are bytes.
+///
+/// The reader keeps no table of the text. Each candidate scans its own
+/// leading whitespace, and an angle destination stops at the next `<`. Work
+/// that candidates share sits in memos that only move forward: the bare run,
+/// and each delimiter's title scan for each of three streams of title starts
+/// that only grow. A run whose destinations hold `)` is walked once. So the
+/// work is linear in the text, and the storage is a few words plus twelve
+/// bytes for each candidate in one run, and four more while it is walked.
+struct EmptyLinks<'a> {
+    text: &'a str,
+    run: Option<BareRun>,
+    titles: [Option<TitleScan>; 9],
+}
+
+/// The bytes the reader of links with no text examines, which its tests
+/// count.
+fn read_steps(steps: usize) {
+    #[cfg(test)]
+    EMPTY_LINK_READER_STEPS.with(|count| count.set(count.get() + steps));
+    #[cfg(not(test))]
+    let _ = steps;
+}
+
+impl<'a> EmptyLinks<'a> {
+    fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            run: None,
+            titles: [None; 9],
+        }
+    }
+
+    /// Past the whitespace from an index.
+    fn solid(&self, index: usize) -> usize {
+        let spaces = split_leading_js_whitespace(&self.text[index..]).0.len();
+        read_steps(spaces + 1);
+        index + spaces
+    }
+
+    /// `\s*\)` from an index: the end of the `)`.
+    fn close_at(&self, index: usize) -> Option<usize> {
+        let at = self.solid(index);
+        (self.text.as_bytes().get(at) == Some(&b')')).then_some(at + 1)
+    }
+
+    fn tab_end(&self, index: usize) -> usize {
+        let tabs = self.text.as_bytes()[index..]
+            .iter()
+            .take_while(|byte| matches!(byte, b' ' | b'\t'))
+            .count();
+        read_steps(tabs + 1);
+        index + tabs
+    }
+
+    fn trim_end(&self, index: usize) -> usize {
+        let end = trim_js_end(&self.text[..index]).len();
+        read_steps(index - end + 1);
+        end
+    }
+
+    /// Where an angle destination's characters stop.
+    fn angled(&self, index: usize) -> usize {
+        let text = self.text;
+        let mut at = index;
+        while let Some(character) = text[at..].chars().next() {
+            match character {
+                '\\' => match text[at + 1..].chars().next() {
+                    Some(next) if !matches!(next, '\n' | '\r' | '\u{2028}' | '\u{2029}') => {
+                        at += 1 + next.len_utf8();
+                    }
+                    _ => break,
+                },
+                '\n' | '<' | '>' => break,
+                _ => at += character.len_utf8(),
+            }
+        }
+        read_steps(at - index + 1);
+        at
+    }
+
+    /// A title's scan is fixed from its start: an escaped delimiter is
+    /// skipped whole, and the first other delimiter ends it. Backtracking can
+    /// end it at an escaped delimiter instead, the last one first. Each of
+    /// three streams keeps its last scan, and its starts only grow.
+    fn title(&mut self, at: usize, stream: usize) -> Option<usize> {
+        let text = self.text;
+        let bytes = text.as_bytes();
+        let (slot, delimiter) = match bytes.get(at) {
+            Some(b'"') => (0, b'"'),
+            Some(b'\'') => (1, b'\''),
+            Some(b'(') => (2, b')'),
+            _ => return None,
+        };
+        let key = stream * 3 + slot;
+        let from = at + 1;
+        let known = self.titles[key].filter(|scan| scan.start <= from && from <= scan.end);
+        let scan = match known {
+            Some(scan) => scan,
+            None => {
+                let mut scan = TitleScan {
+                    start: from,
+                    end: bytes.len(),
+                    close: None,
+                    escaped: None,
+                };
+                let mut index = from;
+                while index < bytes.len() {
+                    if bytes[index] == b'\\' && bytes.get(index + 1) == Some(&delimiter) {
+                        if let Some(close) = self.close_at(index + 2) {
+                            scan.escaped = Some((index + 1, close));
+                        }
+                        index += 2;
+                    } else if bytes[index] == delimiter {
+                        scan.end = index;
+                        scan.close = self.close_at(index + 1);
+                        break;
+                    } else {
+                        index += 1;
+                    }
+                }
+                read_steps(index - from + 1);
+                self.titles[key] = Some(scan);
+                scan
+            }
+        };
+        scan.close.or(scan
+            .escaped
+            .filter(|(escaped, _)| *escaped > from)
+            .map(|(_, close)| close))
+    }
+
+    /// After a destination: the end of the title and `)`, or of `)` alone.
+    fn tail(&mut self, end: usize, stream: usize) -> Option<usize> {
+        let spaced = self.tab_end(end);
+        let at = if self.text.as_bytes().get(spaced) == Some(&b'\n') {
+            Some(self.tab_end(spaced + 1))
+        } else {
+            (spaced > end).then_some(spaced)
+        };
+        match at.and_then(|at| self.title(at, stream)) {
+            Some(close) => Some(close),
+            None => self.close_at(end),
+        }
+    }
+
+    /// The bare run from a candidate's destination start, read once for
+    /// every candidate in it.
+    fn bare_run(&mut self, solid: usize) -> &BareRun {
+        let run = match self.run.take() {
+            Some(run) if run.start <= solid && solid <= run.stop => run,
+            _ => {
+                let bytes = self.text.as_bytes();
+                let (mut close, mut previous_close) = (None, None);
+                let mut stop = solid;
+                while stop < bytes.len() && !matches!(bytes[stop], b' ' | 0..=0x1f) {
+                    if bytes[stop] == b')' {
+                        previous_close = close;
+                        close = Some(stop);
+                    }
+                    stop += 1;
+                }
+                read_steps(stop - solid + 1);
+                BareRun {
+                    start: solid,
+                    stop,
+                    close,
+                    previous_close,
+                    tail: None,
+                    shapes: Vec::new(),
+                    walk: None,
+                }
+            }
+        };
+        self.run.insert(run)
+    }
+
+    /// One walk over a run: each candidate's first unmatched `)`, skipping a
+    /// backslash and the character after it, by a stack of the candidates
+    /// still open.
+    fn walk(&self, run: &BareRun) -> ParenthesisWalk {
+        let bytes = self.text.as_bytes();
+        let position = |index: usize| index as u32;
+        let mut candidates = vec![(position(run.start), u32::MAX, 0i32)];
+        let mut open = vec![0u32];
+        let close = run.close.unwrap_or(usize::MAX);
+        let (mut depth, mut close_depth) = (0i32, 0i32);
+        let mut index = run.start;
+        while index < run.stop {
+            let step = if bytes[index] == b'\\' { 2 } else { 1 };
+            if index <= close && close < index + step {
+                close_depth = depth;
+            }
+            match bytes[index] {
+                b'(' => {
+                    depth += 1;
+                    if index >= 2 && &bytes[index - 2..index] == b"[]" {
+                        let solid = self.solid(index + 1);
+                        if solid < run.stop {
+                            candidates.push((position(solid), u32::MAX, depth));
+                            open.push(position(candidates.len() - 1));
+                        }
+                    }
+                }
+                b')' => {
+                    depth -= 1;
+                    while let Some(&at) = open.last() {
+                        let candidate = &mut candidates[at as usize];
+                        if candidate.2 <= depth {
+                            break;
+                        }
+                        candidate.1 = position(index);
+                        open.pop();
+                    }
+                }
+                _ => {}
+            }
+            index += step;
+        }
+        read_steps(run.stop - run.start + 1);
+        ParenthesisWalk {
+            candidates,
+            stop_depth: depth,
+            close_depth,
+            next: 0,
+        }
+    }
+
+    /// marked's checks on the destination from `from` to `to`: in angles it
+    /// ends with an unescaped `>`, and with unbalanced parentheses the link
+    /// ends at the first unmatched `)`. marked keeps the link's first
+    /// `4 + index` UTF-16 units, counted from `[](` even after leading
+    /// whitespace, then trims it.
+    fn checked(
+        &mut self,
+        link: usize,
+        solid: usize,
+        from: usize,
+        to: usize,
+        end: usize,
+    ) -> Option<usize> {
+        if to <= solid {
+            return Some(end);
+        }
+        let text = self.text;
+        let bytes = text.as_bytes();
+        let known = self.run.as_ref().and_then(|run| {
+            run.shapes
+                .iter()
+                .find(|(at, _)| *at == to)
+                .map(|(_, shape)| *shape)
+        });
+        let (stop, slashes) = match known {
+            Some(shape) => shape,
+            None => {
+                let stop = self.trim_end(to);
+                let slashes = bytes[..stop - 1]
+                    .iter()
+                    .rev()
+                    .take_while(|byte| **byte == b'\\')
+                    .count();
+                read_steps(slashes + 1);
+                if let Some(run) = self
+                    .run
+                    .as_mut()
+                    .filter(|run| to == run.stop || Some(to) == run.close)
+                {
+                    run.shapes.push((to, (stop, slashes)));
+                }
+                (stop, slashes)
+            }
+        };
+        if bytes[solid] == b'<' {
+            let backslashes = slashes.min(stop - 1 - solid);
+            return (bytes[stop - 1] == b'>' && backslashes % 2 == 0).then_some(end);
+        }
+        // A bare destination ends at its run's stop or last `)`.
+        let run = self.run.as_ref()?;
+        let close = if to == run.stop {
+            run.close
+        } else {
+            run.previous_close
+        };
+        if close.is_none_or(|close| close < from) {
+            return Some(end);
+        }
+        if run.walk.is_none() {
+            let walk = self.walk(run);
+            self.run.as_mut()?.walk = Some(walk);
+        }
+        let run = self.run.as_mut()?;
+        let at_stop = to == run.stop;
+        let walk = run.walk.as_mut()?;
+        while walk
+            .candidates
+            .get(walk.next)
+            .is_some_and(|candidate| (candidate.0 as usize) < solid)
+        {
+            walk.next += 1;
+        }
+        let (_, lower, depth) = *walk.candidates.get(walk.next)?;
+        let end_depth = if at_stop {
+            walk.stop_depth
+        } else {
+            walk.close_depth
+        };
+        let lower = lower as usize;
+        if lower < to {
+            let units = 4 + text[from..lower].encode_utf16().count();
+            let mut kept = link;
+            let mut counted = 0;
+            for character in text[link..].chars() {
+                counted += character.len_utf16();
+                if counted > units {
+                    break;
+                }
+                kept += character.len_utf8();
+            }
+            read_steps(lower - from + kept - link);
+            return Some(self.trim_end(kept));
+        }
+        (end_depth <= depth).then_some(end)
+    }
+
+    /// The end of the link with no text at `link`, a `[](`.
+    fn read(&mut self, link: usize) -> Option<usize> {
+        let text = self.text;
+        let bytes = text.as_bytes();
+        let after = link + 3;
+        let solid = self.solid(after);
+        // Carried back from the position after each whitespace one: where its
+        // bare destination stops and what follows, where spaces and tabs end,
+        // and where they end after the nearest newline.
+        let (mut stop, mut tailed) = (solid, None);
+        let mut tabs = solid;
+        let mut newline = None;
+        let starts = std::iter::once(solid).chain(
+            text[after..solid]
+                .char_indices()
+                .rev()
+                .map(|(at, _)| after + at),
+        );
+        for from in starts {
+            read_steps(1);
+            if from == solid {
+                if bytes.get(from) == Some(&b'<') {
+                    let close = self.angled(from + 1);
+                    if close > from + 1 && bytes.get(close) == Some(&b'>') {
+                        if let Some(end) = self.tail(close + 1, 2) {
+                            return self.checked(link, solid, from, close + 1, end);
+                        }
+                    }
+                }
+                let (run_stop, run_tail) = {
+                    let run = self.bare_run(solid);
+                    (run.stop, run.tail)
+                };
+                stop = run_stop;
+                tailed = match run_tail {
+                    Some(tail) => tail,
+                    None => {
+                        let tail = self.tail(stop, 0);
+                        if let Some(run) = self.run.as_mut() {
+                            run.tail = Some(tail);
+                        }
+                        tail
+                    }
+                };
+            } else {
+                let following = tabs;
+                if !matches!(bytes[from], b' ' | b'\t') {
+                    tabs = from;
+                }
+                if bytes[from] == b'\n' {
+                    newline = Some(following);
+                }
+                if matches!(bytes[from], b' ' | 0..=0x1f) {
+                    stop = from;
+                    let at = if bytes.get(tabs) == Some(&b'\n') {
+                        newline
+                    } else {
+                        (tabs > from).then_some(tabs)
+                    };
+                    tailed = match at.and_then(|at| self.title(at, 1)) {
+                        Some(close) => Some(close),
+                        None => (bytes.get(solid) == Some(&b')')).then_some(solid + 1),
+                    };
+                }
+            }
+            if let Some(end) = tailed {
+                return self.checked(link, solid, from, stop, end);
+            }
+            // A shorter bare destination can end where `\s*\)` succeeds.
+            // Whitespace that reaches a `)` would already have closed the link
+            // at the stop, so that is the run's last `)`.
+            let close = if stop >= solid {
+                self.run.as_ref().and_then(|run| run.close)
+            } else {
+                None
+            };
+            if let Some(close) = close.filter(|close| *close >= from) {
+                return self.checked(link, solid, from, close, close + 1);
+            }
+        }
+        None
+    }
+}
+
+/// Where a `"…"`, `'…'`, or `(…)` definition title at `at` can end, in the
+/// order the pattern `open(?:\\close?|[^close\\])*close` tries them.
+fn quoted_title_ends(text: &str, at: usize) -> Vec<usize> {
+    let close = match text[at..].chars().next() {
+        Some('"') => '"',
+        Some('\'') => '\'',
+        Some('(') => ')',
+        _ => return Vec::new(),
+    };
+    let mut escaped = Vec::new();
+    let mut last = None;
+    let mut index = at + 1;
+    while let Some(character) = text[index..].chars().next() {
+        if character == '\\' {
+            if text[index + 1..].starts_with(close) {
+                escaped.push(index + 2);
+                index += 2;
+            } else {
+                index += 1;
+            }
+        } else if character == close {
+            last = Some(index + 1);
+            break;
+        } else {
+            index += character.len_utf8();
+        }
+    }
+    last.into_iter().chain(escaped.into_iter().rev()).collect()
+}
+
+/// The byte length of the link reference definition that `text` starts with,
+/// as marked's block `def` rule reads it.
+fn definition_len(text: &str) -> Option<usize> {
+    let indent = text
+        .bytes()
+        .take(4)
+        .take_while(|byte| *byte == b' ')
+        .count();
+    if indent > 3 {
+        return None;
+    }
+    let label = text[indent..].strip_prefix('[')?;
+    // `(?!\s*\])(?:\\[\s\S]|[^\[\]\\])+` and `\]:`.
+    if split_leading_js_whitespace(label).1.starts_with(']') {
+        return None;
+    }
+    let mut at = 0;
+    loop {
+        match label[at..].chars().next()? {
+            '\\' => at += 1 + label[at + 1..].chars().next()?.len_utf8(),
+            '[' => return None,
+            ']' => break,
+            character => at += character.len_utf8(),
+        }
+    }
+    let mut at = indent + 1 + at;
+    if !text[at..].starts_with("]:") {
+        return None;
+    }
+    at += 2;
+    at += text[at..].len() - text[at..].trim_start_matches(' ').len();
+    if text[at..].starts_with('\n') {
+        at += 1;
+        at += text[at..].len() - text[at..].trim_start_matches([' ', '\t']).len();
+    }
+    // `[^<\s][^\s]*`, longest first, or `<.*?>`, shortest first, each end
+    // tried as it is reached.
+    if let Some(inner) = text[at..].strip_prefix('<') {
+        return inner
+            .char_indices()
+            .take_while(|(_, character)| {
+                !matches!(character, '\n' | '\r' | '\u{2028}' | '\u{2029}')
+            })
+            .filter(|(_, character)| *character == '>')
+            .find_map(|(index, _)| definition_tail(text, at + 1 + index + 1));
+    }
+    let first = text[at..]
+        .chars()
+        .next()
+        .filter(|c| !is_js_whitespace(*c))?;
+    let start = at + first.len_utf8();
+    let end = text[start..]
+        .char_indices()
+        .find(|(_, character)| is_js_whitespace(*character))
+        .map_or(text.len(), |(index, _)| start + index);
+    text[start..end]
+        .char_indices()
+        .map(|(index, _)| start + index)
+        .chain([end])
+        .rev()
+        .find_map(|end| definition_tail(text, end))
+}
+
+/// The end of a definition's optional title and line end after its
+/// destination.
+fn definition_tail(text: &str, destination_end: usize) -> Option<usize> {
+    // ` *(?:\n+|$)`.
+    let line_end = |at: usize| {
+        let after = at + text[at..].len() - text[at..].trim_start_matches(' ').len();
+        let newlines = text[after..].len() - text[after..].trim_start_matches('\n').len();
+        (newlines > 0 || after == text.len()).then_some(after + newlines)
+    };
+    // `(?: +(?:\n[ \t]*)?| *\n[ \t]*)` before the title.
+    let spaced = destination_end + text[destination_end..].len()
+        - text[destination_end..].trim_start_matches(' ').len();
+    let title = if text[spaced..].starts_with('\n') {
+        let after = spaced + 1;
+        Some(after + text[after..].len() - text[after..].trim_start_matches([' ', '\t']).len())
+    } else {
+        (spaced > destination_end).then_some(spaced)
+    };
+    let title_ends = match title.and_then(|at| text[at..].chars().next().map(|c| (at, c))) {
+        Some((at, '"')) => quoted_title_ends(text, at),
+        // `'[^'\n]*(?:\n[^'\n]+)*\n?'`, which can end only one way.
+        Some((at, '\'')) => {
+            let line =
+                |from: usize| from + text[from..].find(['\'', '\n']).unwrap_or(text.len() - from);
+            let mut index = line(at + 1);
+            while text[index..].starts_with('\n')
+                && !text[index + 1..].starts_with(['\'', '\n'])
+                && index + 1 < text.len()
+            {
+                index = line(index + 1);
+            }
+            if text[index..].starts_with('\n') {
+                index += 1;
+            }
+            text[index..]
+                .starts_with('\'')
+                .then_some(index + 1)
+                .into_iter()
+                .collect()
+        }
+        // `\([^()]*\)`.
+        Some((at, '(')) => text[at + 1..]
+            .find(['(', ')'])
+            .filter(|index| text[at + 1 + index..].starts_with(')'))
+            .map(|index| at + 1 + index + 1)
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
+    };
+    title_ends
+        .into_iter()
+        .find_map(line_end)
+        .or_else(|| line_end(destination_end))
+}
+
+/// The text the importer keeps for a definition: its lines without leading
+/// whitespace, and without trailing whitespace.
+fn definition_text(raw: &str) -> String {
+    trim_js_end(raw)
+        .split('\n')
+        .map(|line| split_leading_js_whitespace(line).1)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Whether a paragraph's plain text is the one definition marked reads in
+/// it, as the importer keeps a definition. It is written as one tag span, or
+/// in a table cell with its `[` as `&#91;`; see [`escape_markdown_block_syntax`].
+fn definition_paragraph(text: &str) -> bool {
+    definition_len(text).is_some_and(|len| definition_text(&text[..len]) == text)
+}
+
+/// Whether a link with no text holds a line that would end the paragraph it
+/// is in, written as it is: after at most three spaces, a character that can
+/// open a block or a table's delimiter row, `1.` or `1)`, or nothing but
+/// spaces. A `\r` counts too: marked reads it as a newline, and the `&#13;`
+/// that keeps it one would stay a reference in a link written as it is. It
+/// errs toward yes, since such a link is written as references, which read
+/// back the same. A highlighted link's `=` is written as `\=`, which opens no
+/// block. The importer's `opensBlock` decides the same way, after its
+/// highlight escape.
+fn opens_block(link: &str, highlighted: bool) -> bool {
+    link.contains('\r')
+        || link.match_indices('\n').any(|(at, _)| {
+            let line = link[at + 1..].split('\n').next().unwrap_or_default();
+            let rest = line.trim_start_matches(' ');
+            rest.is_empty()
+                || (line.len() - rest.len() <= 3
+                    && (rest
+                        .starts_with(['#', '$', '>', '*', '+', '-', '_', '`', '~', '<', '|', ':'])
+                        || (!highlighted && rest.starts_with('='))
+                        || rest.starts_with("1.")
+                        || rest.starts_with("1)")))
+        })
+}
+
+/// `text[from..to]`, part of a link with no text, written as references as
+/// the importer's `writtenDefinition` writes them: each ASCII punctuation
+/// character but `!`, `/`, and `?` as a decimal reference, `&`, `<`, and `>`
+/// as entities, `\r` and NBSP as references, a space that ends a line and a
+/// newline that ends an empty one as references too. A highlight's `=` stays
+/// `\=`, which the highlight reads. The importer reads exactly these bytes
+/// back as the link's text.
+fn written_as_references(
+    text: &str,
+    from: usize,
+    to: usize,
+    highlighted: bool,
+) -> ProjectionResult<String> {
+    let mut written =
+        ProjectionBuffer::with_capacity(written_as_references_len(text, from, to, highlighted))?;
+    for piece in written_references(text, from, to, highlighted) {
+        match piece {
+            Written::Text(value) => written.push_str(value)?,
+            Written::Reference(code) => {
+                written.push_str("&#")?;
+                let mut digits = [0u8; 10];
+                let mut at = digits.len();
+                let mut value = code;
+                loop {
+                    at -= 1;
+                    digits[at] = b'0' + (value % 10) as u8;
+                    value /= 10;
+                    if value == 0 {
+                        break;
+                    }
+                }
+                written.push_str(std::str::from_utf8(&digits[at..]).unwrap_or_default())?;
+                written.push(';')?;
+            }
+            Written::Character(character) => written.push(character)?,
+        }
+    }
+    Ok(written.into_string())
+}
+
+/// The bytes `written_as_references` writes for `text[from..to]`.
+fn written_as_references_len(text: &str, from: usize, to: usize, highlighted: bool) -> usize {
+    written_references(text, from, to, highlighted)
+        .map(|piece| match piece {
+            Written::Text(value) => value.len(),
+            Written::Reference(code) => code.checked_ilog10().unwrap_or(0) as usize + 4,
+            Written::Character(character) => character.len_utf8(),
+        })
+        .sum()
+}
+
+/// What `written_as_references` writes for one character.
+enum Written {
+    Text(&'static str),
+    Reference(u32),
+    Character(char),
+}
+
+fn written_references(
+    text: &str,
+    from: usize,
+    to: usize,
+    highlighted: bool,
+) -> impl Iterator<Item = Written> + '_ {
+    text[from..to]
+        .char_indices()
+        .map(move |(index, character)| {
+            let at = from + index;
+            let next = text[at + character.len_utf8()..].chars().next();
+            let previous = text[..at].chars().next_back();
+            match character {
+                '=' if highlighted => Written::Text("\\="),
+                '&' => Written::Text("&amp;"),
+                '<' => Written::Text("&lt;"),
+                '>' => Written::Text("&gt;"),
+                ' ' if next == Some('\n') => Written::Reference(32),
+                '\n' if previous == Some('\n') => Written::Reference(10),
+                '\r' | '\u{a0}' => Written::Reference(u32::from(character)),
+                _ if character.is_ascii_punctuation() && !matches!(character, '!' | '/' | '?') => {
+                    Written::Reference(u32::from(character))
+                }
+                _ => Written::Character(character),
+            }
+        })
+}
+
+/// Where `text` holds a link with no text, as byte ranges.
+fn empty_link_ranges(text: &str) -> Vec<(usize, usize)> {
+    let Some(first) = text.find("[](") else {
+        return Vec::new();
+    };
+    let mut links = EmptyLinks::new(text);
+    let mut ranges = Vec::new();
+    let mut at = first;
+    loop {
+        let next = match links.read(at) {
+            Some(end) => {
+                ranges.push((at, end));
+                end
+            }
+            None => at + 1,
+        };
+        match text[next..].find("[](") {
+            Some(index) => at = next + index,
+            None => return ranges,
+        }
+    }
+}
+
 fn render_nodes(
     nodes: &[MarkdownNode],
     parent_tag: &str,
     parent_attrs: &BTreeMap<String, Value>,
     separator: &str,
+    table_cell: bool,
 ) -> ProjectionResult<String> {
     let mut output = ProjectionBuffer::new();
     for (index, node) in nodes.iter().enumerate() {
@@ -4098,6 +4944,7 @@ fn render_nodes(
                 parent_attrs,
                 previous: index.checked_sub(1).map(|previous| &nodes[previous]),
                 index,
+                table_cell,
             },
         )?;
         output.push_str(&rendered)?;
@@ -4106,17 +4953,24 @@ fn render_nodes(
 }
 
 fn render_node(node: &MarkdownNode, context: RenderContext<'_>) -> ProjectionResult<String> {
+    let table_cell = context.table_cell;
     match node {
-        MarkdownNode::Text(_) => render_inline(std::slice::from_ref(node), false, false),
-        MarkdownNode::Fragment(children) => {
-            render_nodes(children, context.parent_tag, context.parent_attrs, "")
+        MarkdownNode::Text(_) => {
+            render_inline(std::slice::from_ref(node), false, false, table_cell)
         }
+        MarkdownNode::Fragment(children) => render_nodes(
+            children,
+            context.parent_tag,
+            context.parent_attrs,
+            "",
+            table_cell,
+        ),
         MarkdownNode::Element {
             tag,
             attrs,
             children,
         } => match tag.as_str() {
-            "doc" => render_nodes(children, tag, attrs, "\n\n"),
+            "doc" => render_nodes(children, tag, attrs, "\n\n", table_cell),
             "paragraph" => {
                 if children.is_empty() {
                     if context.previous.is_some_and(is_empty_paragraph) {
@@ -4125,7 +4979,7 @@ fn render_node(node: &MarkdownNode, context: RenderContext<'_>) -> ProjectionRes
                         Ok(String::new())
                     }
                 } else {
-                    render_inline(children, false, true)
+                    render_inline(children, false, true, table_cell)
                 }
             }
             "heading" => {
@@ -4138,7 +4992,7 @@ fn render_node(node: &MarkdownNode, context: RenderContext<'_>) -> ProjectionRes
                     // out-of-range positive levels and can itself fail; level
                     // six is the closest safe schema-valid projection.
                     let level = attr_i64(attrs, "level").unwrap_or(1).clamp(1, 6) as usize;
-                    let inline = render_inline(children, false, false)?;
+                    let inline = render_inline(children, false, false, table_cell)?;
                     let mut output = ProjectionBuffer::with_capacity(level + 1 + inline.len())?;
                     output.push_repeat('#', level)?;
                     output.push(' ')?;
@@ -4146,8 +5000,10 @@ fn render_node(node: &MarkdownNode, context: RenderContext<'_>) -> ProjectionRes
                     Ok(output.into_string())
                 }
             }
-            "blockquote" => render_prefixed_blocks(children, tag, attrs, ">", None),
-            "bulletList" | "orderedList" | "taskList" => render_nodes(children, tag, attrs, "\n"),
+            "blockquote" => render_prefixed_blocks(children, tag, attrs, ">", None, table_cell),
+            "bulletList" | "orderedList" | "taskList" => {
+                render_nodes(children, tag, attrs, "\n", table_cell)
+            }
             "listItem" => render_list_item(children, &context, None),
             "taskItem" => {
                 let checked = attr_bool(attrs, "checked").unwrap_or(false);
@@ -4164,15 +5020,19 @@ fn render_node(node: &MarkdownNode, context: RenderContext<'_>) -> ProjectionRes
             )),
             "wikilink" => render_wikilink(attrs),
             "inlineAtom" => render_inline_atom(attrs),
-            "callout" => render_callout(attrs, children),
+            "callout" => render_callout(attrs, children, table_cell),
             "mathInline" => ensure_projection_string(format!("${}$", attr_js_string(attrs, "tex"))),
             "mathBlock" => {
                 ensure_projection_string(format!("$${}$$", attr_js_string(attrs, "tex")))
             }
             "table" => render_table(children),
-            "tableRow" | "tableCell" | "tableHeader" => render_nodes(children, tag, attrs, ""),
-            _ if context.parent_tag == "paragraph" => render_inline(children, false, true),
-            _ => render_nodes(children, tag, attrs, ""),
+            "tableRow" | "tableCell" | "tableHeader" => {
+                render_nodes(children, tag, attrs, "", table_cell)
+            }
+            _ if context.parent_tag == "paragraph" => {
+                render_inline(children, false, true, table_cell)
+            }
+            _ => render_nodes(children, tag, attrs, "", table_cell),
         },
     }
 }
@@ -4191,6 +5051,7 @@ fn render_prefixed_blocks(
     parent_attrs: &BTreeMap<String, Value>,
     prefix: &str,
     header: Option<&str>,
+    table_cell: bool,
 ) -> ProjectionResult<String> {
     let separator = format!("\n{prefix}\n");
     let mut body = ProjectionBuffer::new();
@@ -4202,6 +5063,7 @@ fn render_prefixed_blocks(
                 parent_attrs,
                 previous: index.checked_sub(1).map(|previous| &children[previous]),
                 index,
+                table_cell,
             },
         )?;
         if index != 0 {
@@ -4275,6 +5137,7 @@ fn render_list_item(
             parent_attrs: &BTreeMap::new(),
             previous: None,
             index: 0,
+            table_cell: context.table_cell,
         },
     )?;
     let mut output = ProjectionBuffer::new();
@@ -4292,6 +5155,7 @@ fn render_list_item(
                     Some(&nested[index - 1])
                 },
                 index: index + 1,
+                table_cell: context.table_cell,
             },
         )?;
         let mut indented = ProjectionBuffer::new();
@@ -4529,6 +5393,7 @@ fn render_inline_atom(attrs: &BTreeMap<String, Value>) -> ProjectionResult<Strin
 fn render_callout(
     attrs: &BTreeMap<String, Value>,
     children: &[MarkdownNode],
+    table_cell: bool,
 ) -> ProjectionResult<String> {
     let callout_type = attrs
         .get("calloutType")
@@ -4555,6 +5420,7 @@ fn render_callout(
                 parent_attrs: attrs,
                 previous: index.checked_sub(1).map(|previous| &children[previous]),
                 index,
+                table_cell,
             },
         )?;
         has_body |= !trim_js(&rendered).is_empty();
@@ -4803,6 +5669,7 @@ fn render_table_cell_block(
             parent_attrs,
             previous: index.checked_sub(1).map(|previous| &siblings[previous]),
             index,
+            table_cell: true,
         },
     )
 }
@@ -4861,6 +5728,7 @@ fn render_inline(
     nodes: &[MarkdownNode],
     code_context: bool,
     escape_block_syntax: bool,
+    table_cell: bool,
 ) -> ProjectionResult<String> {
     enum SourceInlinePart<'a> {
         Text(&'a TextRun),
@@ -4887,10 +5755,372 @@ fn render_inline(
         }
     }
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone)]
     struct InlineReplacement {
-        text: &'static str,
+        text: std::borrow::Cow<'static, str>,
         preserve_marks: bool,
+        /// The bytes it replaces.
+        width: usize,
+    }
+
+    type InlineReplacements = BTreeMap<usize, BTreeMap<usize, InlineReplacement>>;
+
+    // Splits each text part at its replaced bytes, which become literal
+    // Markdown parts. A replacement's own text moves into its part.
+    fn apply_inline_replacements<'a>(
+        parts: Vec<InlinePart<'a>>,
+        mut replacements: InlineReplacements,
+    ) -> Vec<InlinePart<'a>> {
+        // Each part this makes owns a new string.
+        fn materialize<'a>(parts: &mut Vec<InlinePart<'a>>, part: InlinePart<'a>) {
+            #[cfg(test)]
+            INLINE_PARTS_MATERIALIZED.with(|count| count.set(count.get() + 1));
+            parts.push(part);
+        }
+        let mut escaped_parts = Vec::new();
+        for (part_index, part) in parts.into_iter().enumerate() {
+            let Some(part_replacements) = replacements.remove(&part_index) else {
+                escaped_parts.push(part);
+                continue;
+            };
+            let InlinePart::Text {
+                run,
+                literal_markdown,
+            } = part
+            else {
+                unreachable!();
+            };
+            let mut cursor = 0usize;
+            for (offset, replacement) in part_replacements {
+                if offset > cursor {
+                    materialize(
+                        &mut escaped_parts,
+                        InlinePart::Text {
+                            run: TextRun {
+                                text: run.text[cursor..offset].to_string(),
+                                marks: run.marks.clone(),
+                            },
+                            literal_markdown,
+                        },
+                    );
+                }
+                cursor = offset + replacement.width;
+                materialize(
+                    &mut escaped_parts,
+                    InlinePart::Text {
+                        run: TextRun {
+                            text: replacement.text.into_owned(),
+                            marks: if replacement.preserve_marks {
+                                run.marks.clone()
+                            } else {
+                                Vec::new()
+                            },
+                        },
+                        literal_markdown: true,
+                    },
+                );
+            }
+            if cursor < run.text.len() {
+                let mut text = run;
+                text.text = text.text[cursor..].to_string();
+                materialize(
+                    &mut escaped_parts,
+                    InlinePart::Text {
+                        run: text,
+                        literal_markdown,
+                    },
+                );
+            }
+        }
+        escaped_parts
+    }
+
+    // Raw HTML the document holds as text stays text. The projector writes its
+    // `<`, `>`, and `&` as entities, so the syntax between them would read again
+    // when the file reopens. In the block's tag span, from its first tag to its
+    // last `>` across marks, every other ASCII punctuation character but the
+    // `!`, `/`, and `?` that open a tag is written as a decimal reference the
+    // importer reads back as that character, and so is a space that ends a line.
+    // An empty line would end the paragraph, so its newline is one too. A line
+    // of spaces or tabs already starts or ends with one. A highlight's `=` keeps
+    // its own `\=` escape. Code is not part of the span, and in a table cell
+    // neither is the `<br>` the projector writes as a real tag, which the
+    // importer reads as raw HTML.
+    //
+    // The importer keeps a link with no text as the text the file holds, so
+    // its `<` and `>` bound no span. Outside the span the projector writes its
+    // `&`, `<`, and `>` as they are, and each line its title starts, which no
+    // block opener or indent escape then reads. A part's links, with the text
+    // between two of them that holds no newline, `&`, `<`, or `>`, are one
+    // literal part, written as the later passes write the rest: a `\r` as a
+    // reference where they escape block syntax, a highlight's `=` as `\=`.
+    // Inside the span a link's `[` is a reference, so it reads back as the
+    // span's other text does.
+    //
+    // A definition the importer keeps whole holds no link of its own. Outside
+    // a table cell all of it is the span, and its NBSP is a reference too, so
+    // the importer reads exactly those bytes back as the definition.
+    fn raw_html_replacements(
+        parts: &[InlinePart<'_>],
+        table_cell: bool,
+        definition: bool,
+        escape_block_syntax: bool,
+    ) -> ProjectionResult<InlineReplacements> {
+        let texts: Vec<&str> = parts
+            .iter()
+            .map(|part| match part {
+                InlinePart::Text {
+                    run,
+                    literal_markdown: false,
+                } => run.text.as_str(),
+                _ => "",
+            })
+            .collect();
+        let highlighted_part = |part_index: usize| {
+            matches!(
+                &parts[part_index],
+                InlinePart::Text { run, .. } if has_mark(&run.marks, MarkKind::Highlight)
+            )
+        };
+        // A link with a line that would end its paragraph, as it will be
+        // written, is written as references, so it holds no syntax and bounds
+        // no span.
+        type Ranges = Vec<(usize, usize)>;
+        let (empty_links, text_links): (Vec<Ranges>, Vec<Ranges>) = texts
+            .iter()
+            .enumerate()
+            .map(|(part_index, text)| {
+                if definition {
+                    (Vec::new(), Vec::new())
+                } else {
+                    let highlighted = highlighted_part(part_index);
+                    empty_link_ranges(text)
+                        .into_iter()
+                        .partition(|&(from, to)| !opens_block(&text[from..to], highlighted))
+                }
+            })
+            .unzip();
+        let mut joined = texts.concat();
+        if table_cell {
+            joined = joined.replace(
+                GFM_TABLE_CELL_BLOCK_SEPARATOR,
+                &"\0".repeat(GFM_TABLE_CELL_BLOCK_SEPARATOR.len()),
+            );
+        }
+        let mut bounds = joined.into_bytes();
+        let mut offset = 0usize;
+        for (text, (written, as_references)) in
+            texts.iter().zip(empty_links.iter().zip(&text_links))
+        {
+            for &(from, to) in written.iter().chain(as_references) {
+                for byte in &mut bounds[offset + from..offset + to] {
+                    if matches!(*byte, b'<' | b'>') {
+                        *byte = 0;
+                    }
+                }
+            }
+            offset += text.len();
+        }
+        let bytes = bounds.as_slice();
+        let opens_tag = |pair: &[u8]| {
+            pair[0] == b'<'
+                && (pair[1].is_ascii_alphabetic() || matches!(pair[1], b'!' | b'/' | b'?'))
+        };
+        let whole_definition = definition && !table_cell;
+        let span = if whole_definition {
+            Some((0, bytes.len()))
+        } else {
+            let start = bytes.windows(2).position(opens_tag);
+            let end = bytes
+                .iter()
+                .rposition(|byte| *byte == b'>')
+                .map(|at| at + 1);
+            start.zip(end)
+        };
+        let in_span =
+            |from: usize, to: usize| span.is_some_and(|(start, end)| from < end && start < to);
+        // The stretches written as literal parts: those that hold a newline,
+        // `&`, `<`, or `>`.
+        let mut stretches = Vec::new();
+        let mut offset = 0usize;
+        for (part_index, (text, ranges)) in texts.iter().zip(&empty_links).enumerate() {
+            let link = text.as_bytes();
+            let mut write = |(from, to): (usize, usize)| {
+                if link[from..to]
+                    .iter()
+                    .any(|byte| matches!(byte, b'\n' | b'&' | b'<' | b'>'))
+                {
+                    stretches.push((part_index, from, to));
+                }
+            };
+            let mut stretch: Option<(usize, usize)> = None;
+            for &(from, to) in ranges {
+                // A link inside the span reads back as the span does.
+                if in_span(offset + from, offset + to) {
+                    continue;
+                }
+                stretch = match stretch {
+                    Some((start, end))
+                        if !in_span(offset + end, offset + from)
+                            && !link[end..from]
+                                .iter()
+                                .any(|byte| matches!(byte, b'\n' | b'&' | b'<' | b'>')) =>
+                    {
+                        Some((start, to))
+                    }
+                    Some(done) => {
+                        write(done);
+                        Some((from, to))
+                    }
+                    None => Some((from, to)),
+                };
+            }
+            if let Some(done) = stretch {
+                write(done);
+            }
+            offset += text.len();
+        }
+        let text_links = &text_links;
+        let encoded_bytes = |(start, end): (usize, usize)| {
+            let mut offset = 0usize;
+            parts
+                .iter()
+                .zip(&texts)
+                .enumerate()
+                .flat_map(move |(part_index, (part, text))| {
+                    let from = start.saturating_sub(offset);
+                    let to = end.saturating_sub(offset).min(text.len());
+                    let part_start = offset;
+                    offset += text.len();
+                    let highlighted = matches!(
+                        part,
+                        InlinePart::Text { run, .. } if has_mark(&run.marks, MarkKind::Highlight)
+                    );
+                    let text = text.as_bytes();
+                    let links = &text_links[part_index];
+                    (from..to).filter_map(move |at| {
+                        let byte = text[at];
+                        let next = links.partition_point(|&(_, to)| to <= at);
+                        if links.get(next).is_some_and(|&(from, _)| from <= at) {
+                            return None;
+                        }
+                        if whole_definition && text[at..].starts_with("\u{a0}".as_bytes()) {
+                            return Some((part_index, at, 160u32, 2));
+                        }
+                        let encoded = match byte {
+                            b'!' | b'&' | b'/' | b'<' | b'>' | b'?' => false,
+                            b'=' => !highlighted,
+                            // The space's newline can start the next part.
+                            b' ' => {
+                                part_start + at + 1 < end && bytes[part_start + at + 1] == b'\n'
+                            }
+                            b'\n' => part_start + at > 0 && bytes[part_start + at - 1] == b'\n',
+                            _ => byte.is_ascii_punctuation(),
+                        };
+                        encoded.then_some((part_index, at, u32::from(byte), 1))
+                    })
+                })
+        };
+        // The output holds every byte of the text, and each literal link and
+        // reference writes at least the bytes it replaces, so their encoded
+        // length is admitted before any of them is written. The span writes
+        // no byte of a link written as references.
+        let reference_len = |code: u32| if code < 100 { 5 } else { 6 };
+        let mut projected = bytes.len();
+        for &(part_index, from, to) in &stretches {
+            let link = &texts[part_index].as_bytes()[from..to];
+            let count = |wanted: u8| link.iter().filter(|&&byte| byte == wanted).count();
+            let returns = if escape_block_syntax {
+                count(b'\r') * 4
+            } else {
+                0
+            };
+            let equals = if highlighted_part(part_index) {
+                count(b'=')
+            } else {
+                0
+            };
+            projected = checked_projection_len(projected, returns + equals)?;
+        }
+        for (part_index, (text, ranges)) in texts.iter().zip(text_links).enumerate() {
+            let highlighted = highlighted_part(part_index);
+            for &(from, to) in ranges {
+                let written = written_as_references_len(text, from, to, highlighted);
+                projected = checked_projection_len(projected, written - (to - from))?;
+            }
+        }
+        if let Some(span) = span {
+            for (_, _, code, width) in encoded_bytes(span) {
+                projected = checked_projection_len(projected, reference_len(code) - width)?;
+            }
+        }
+        let mut replacements = InlineReplacements::new();
+        for (part_index, from, to) in stretches {
+            let text = texts[part_index];
+            let highlighted = highlighted_part(part_index);
+            let mut written = ProjectionBuffer::with_capacity(to - from)?;
+            for character in text[from..to].chars() {
+                match character {
+                    '\r' if escape_block_syntax => written.push_str("&#13;")?,
+                    '=' if highlighted => written.push_str("\\=")?,
+                    _ => written.push(character)?,
+                }
+            }
+            #[cfg(test)]
+            LITERAL_LINKS_WRITTEN.with(|count| count.set(count.get() + 1));
+            replacements.entry(part_index).or_default().insert(
+                from,
+                InlineReplacement {
+                    text: written.into_string().into(),
+                    preserve_marks: true,
+                    width: to - from,
+                },
+            );
+        }
+        // A link written as references is written whole, the way the importer
+        // reads it back, so the span writes none of it. Each line it keeps is
+        // one part, and the newline between two stays a line break.
+        for (part_index, (text, ranges)) in texts.iter().zip(text_links).enumerate() {
+            let highlighted = highlighted_part(part_index);
+            let link = text.as_bytes();
+            for &(from, to) in ranges {
+                let mut start = from;
+                for at in from..=to {
+                    if at < to && !(link[at] == b'\n' && link[at - 1] != b'\n') {
+                        continue;
+                    }
+                    if at > start {
+                        #[cfg(test)]
+                        LITERAL_LINKS_WRITTEN.with(|count| count.set(count.get() + 1));
+                        replacements.entry(part_index).or_default().insert(
+                            start,
+                            InlineReplacement {
+                                text: written_as_references(text, start, at, highlighted)?.into(),
+                                preserve_marks: true,
+                                width: at - start,
+                            },
+                        );
+                    }
+                    start = at + 1;
+                }
+            }
+        }
+        let Some(span) = span else {
+            return Ok(replacements);
+        };
+        for (part_index, at, code, width) in encoded_bytes(span) {
+            #[cfg(test)]
+            RAW_HTML_REFERENCES_RECORDED.with(|count| count.set(count.get() + 1));
+            replacements.entry(part_index).or_default().insert(
+                at,
+                InlineReplacement {
+                    text: format!("&#{code};").into(),
+                    preserve_marks: true,
+                    width,
+                },
+            );
+        }
+        Ok(replacements)
     }
 
     fn encoded_block_punctuation(byte: u8) -> &'static str {
@@ -4915,7 +6145,7 @@ fn render_inline(
         line: &[u8],
         positions: &[(usize, usize)],
         line_break: Option<(usize, usize)>,
-        replacements: &mut BTreeMap<usize, BTreeMap<usize, InlineReplacement>>,
+        replacements: &mut InlineReplacements,
     ) {
         let Ok(line_text) = std::str::from_utf8(line) else {
             return;
@@ -4925,12 +6155,14 @@ fn render_inline(
             return;
         };
         let count = if escape_next { 2 } else { 1 };
+        // The line break keeps its marks, so a mark across it stays one.
         if let Some((part_index, offset)) = line_break {
             replacements.entry(part_index).or_default().insert(
                 offset,
                 InlineReplacement {
-                    text: "\n",
-                    preserve_marks: false,
+                    text: "\n".into(),
+                    preserve_marks: true,
+                    width: 1,
                 },
             );
         }
@@ -4941,8 +6173,9 @@ fn render_inline(
             replacements.entry(part_index).or_default().insert(
                 offset,
                 InlineReplacement {
-                    text: encoded_block_punctuation(byte),
+                    text: encoded_block_punctuation(byte).into(),
                     preserve_marks: true,
+                    width: 1,
                 },
             );
         }
@@ -4950,6 +6183,21 @@ fn render_inline(
 
     let mut source_parts = Vec::new();
     flatten(nodes, &mut source_parts);
+    let definition = escape_block_syntax
+        && matches!(
+            source_parts.first(),
+            Some(SourceInlinePart::Text(run)) if run.text.starts_with('[')
+        )
+        && {
+            let mut text = String::new();
+            source_parts.iter().all(|part| match part {
+                SourceInlinePart::Text(run) if run.marks.is_empty() => {
+                    text.push_str(&run.text);
+                    true
+                }
+                _ => false,
+            }) && definition_paragraph(&text)
+        };
     let mut parts = Vec::with_capacity(source_parts.len());
     let mut source_index = 0usize;
     while source_index < source_parts.len() {
@@ -4995,8 +6243,15 @@ fn render_inline(
         source_index = end;
     }
 
+    if !code_context {
+        let raw_html = raw_html_replacements(&parts, table_cell, definition, escape_block_syntax)?;
+        if !raw_html.is_empty() {
+            parts = apply_inline_replacements(parts, raw_html);
+        }
+    }
+
     if escape_block_syntax {
-        let mut replacements: BTreeMap<usize, BTreeMap<usize, InlineReplacement>> = BTreeMap::new();
+        let mut replacements = InlineReplacements::new();
         let mut captures_line = false;
         let mut line = Vec::new();
         let mut positions = Vec::new();
@@ -5026,8 +6281,9 @@ fn render_inline(
                     replacements.entry(part_index).or_default().insert(
                         offset,
                         InlineReplacement {
-                            text: "&#13;",
+                            text: "&#13;".into(),
                             preserve_marks: true,
+                            width: 1,
                         },
                     );
                     if captures_line {
@@ -5113,8 +6369,9 @@ fn render_inline(
                             replacements.entry(index_part).or_default().insert(
                                 index_offset,
                                 InlineReplacement {
-                                    text: replacement,
+                                    text: replacement.into(),
                                     preserve_marks: false,
+                                    width: 1,
                                 },
                             );
                         }
@@ -5134,52 +6391,7 @@ fn render_inline(
         }
 
         if !replacements.is_empty() {
-            let mut escaped_parts = Vec::new();
-            for (part_index, part) in std::mem::take(&mut parts).into_iter().enumerate() {
-                let Some(part_replacements) = replacements.get(&part_index) else {
-                    escaped_parts.push(part);
-                    continue;
-                };
-                let InlinePart::Text {
-                    run,
-                    literal_markdown,
-                } = part
-                else {
-                    unreachable!();
-                };
-                let mut cursor = 0usize;
-                for (&offset, &replacement) in part_replacements {
-                    if offset > cursor {
-                        let mut text = run.clone();
-                        text.text = run.text[cursor..offset].to_string();
-                        escaped_parts.push(InlinePart::Text {
-                            run: text,
-                            literal_markdown,
-                        });
-                    }
-                    escaped_parts.push(InlinePart::Text {
-                        run: TextRun {
-                            text: replacement.text.to_string(),
-                            marks: if replacement.preserve_marks {
-                                run.marks.clone()
-                            } else {
-                                Vec::new()
-                            },
-                        },
-                        literal_markdown: true,
-                    });
-                    cursor = offset + 1;
-                }
-                if cursor < run.text.len() {
-                    let mut text = run;
-                    text.text = text.text[cursor..].to_string();
-                    escaped_parts.push(InlinePart::Text {
-                        run: text,
-                        literal_markdown,
-                    });
-                }
-            }
-            parts = escaped_parts;
+            parts = apply_inline_replacements(parts, replacements);
         }
     }
 
@@ -5214,7 +6426,8 @@ fn render_inline(
             }
             let text = text.into_string();
             let encoded = encode_html_entities(&text)?;
-            let escaped = escape_markdown_block_syntax(&encoded, starts_line)?;
+            let escaped =
+                escape_markdown_block_syntax(&encoded, starts_line, definition && run_start == 0)?;
             let InlinePart::Text {
                 run,
                 literal_markdown,
@@ -5243,6 +6456,7 @@ fn render_inline(
                         parent_attrs: &BTreeMap::new(),
                         previous: None,
                         index: part_index,
+                        table_cell,
                     },
                 )?;
                 let starts_line = rendered.ends_with('\n');
@@ -5288,6 +6502,7 @@ fn render_inline(
                             parent_attrs: &BTreeMap::new(),
                             previous: None,
                             index,
+                            table_cell,
                         },
                     )?
                 };
@@ -6115,11 +7330,13 @@ mod projection_tests {
     #[test]
     fn block_opener_escaping_encodes_cr_and_starts_lines_only_after_lf() {
         assert_eq!(
-            escape_markdown_block_syntax("before\r---\rnext", true).expect("small projection"),
+            escape_markdown_block_syntax("before\r---\rnext", true, false)
+                .expect("small projection"),
             "before&#13;---&#13;next"
         );
         assert_eq!(
-            escape_markdown_block_syntax("before\r\n---\r\nnext", true).expect("small projection"),
+            escape_markdown_block_syntax("before\r\n---\r\nnext", true, false)
+                .expect("small projection"),
             "before&#13;\n---&#13;\nnext"
         );
     }
@@ -7131,6 +8348,1057 @@ mod projection_tests {
         );
     }
 
+    // Raw HTML the live document holds as text settles as inert text. The
+    // importer's test of the same document (RAW_HTML_SETTLED in
+    // packages/ydoc-projection/src/import-export.test.ts) reads these bytes
+    // back as the same document, and the cross-engine fixture
+    // richdocProjection-raw-html-literal-text pins them against the
+    // TypeScript projector.
+    #[test]
+    fn raw_html_text_settles_as_inert_text_the_importer_reopens() {
+        const SETTLED: &str = concat!(
+            "Lit &lt;span title&#61;&#34;q &#39;é&#39; &amp;&#35;92&#59;&#34;&gt;&#92;&#42; ",
+            "&#123;&#123;atom&#58;a&#125;&#125; https&#58;//in&#46;example/a&#95;b ",
+            "www&#46;in&#46;example a&#64;b&#46;co &lt;https&#58;//auto&#46;example&gt; ",
+            "&amp;&#35;123&#59;**x**&#42; &#32;\nnext&lt;/span&gt; and ",
+            "[out](https://out.example) end {{atom:rate 150}} ü.",
+            "\n\n",
+            "==&lt;b&gt;a\\=b &#92;&#42;c&lt;/b&gt;==",
+            "\n\n",
+            "code `<b>*x*</b>`",
+            "\n\n",
+            "&lt;!&#45;&#45; &#36;x&#36; &#61;&#61;y&#61;&#61; &#45;&#45;&gt; $z$.",
+            "\n\n",
+            "&lt;b&gt;x&lt;/b&gt; &amp;&#35;123&#59; &amp;&#35;92&#59; &lt;i&gt;y&lt;/i&gt;",
+            "\n\n",
+            "&lt;!&#45;&#45; a&#58; b&#44;\n&#10; \t\n&#123;&#123;atom&#58;a&#125;&#125; ",
+            "&#92;&#42; https&#58;//in&#46;example &#42;y&#42; &#45;&#45;&gt; **real**.",
+            "\n\n",
+            "**&lt;pre&gt;one\n  &#32;**\ntwo&lt;/pre&gt; and **real**.",
+        );
+        fn mark(name: &str, value: Value) -> Attrs {
+            Attrs::from([(name.into(), json_to_any(&value))])
+        }
+        fn push_runs<F: XmlFragment>(
+            txn: &mut yrs::TransactionMut<'_>,
+            paragraph: &F,
+            runs: Vec<(&str, Attrs)>,
+        ) {
+            let text = paragraph.push_back(txn, XmlTextPrelim::new(""));
+            for (value, attrs) in runs {
+                let at = text.len(&*txn);
+                text.insert_with_attributes(txn, at, value, attrs);
+            }
+        }
+
+        let source = Ydoc::wire();
+        let body = source.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        {
+            let mut txn = source.doc.transact_mut();
+            let [first, second, third, fourth, fifth, sixth, seventh] = std::array::from_fn(|_| {
+                body.push_back(
+                    &mut txn,
+                    XmlElementPrelim::new("paragraph", std::iter::empty::<XmlIn>()),
+                )
+            });
+            push_runs(
+                &mut txn,
+                &first,
+                vec![
+                    (
+                        "Lit <span title=\"q 'é' &#92;\">\\* {{atom:a}} https://in.example/a_b \
+                         www.in.example a@b.co <https://auto.example> &#123;",
+                        Attrs::new(),
+                    ),
+                    ("x", mark("bold", json!({}))),
+                    ("*  \nnext</span> and ", Attrs::new()),
+                    (
+                        "out",
+                        mark(
+                            "link",
+                            json!({
+                                "href": "https://out.example",
+                                "target": "_blank",
+                                "rel": "noopener noreferrer nofollow",
+                                "class": null,
+                                "title": null,
+                            }),
+                        ),
+                    ),
+                    (" end ", Attrs::new()),
+                ],
+            );
+            first.push_back(
+                &mut txn,
+                xml_element(
+                    "inlineAtom",
+                    &[
+                        ("atomId", "rate"),
+                        ("params", "150"),
+                        ("source", "atom:rate 150"),
+                    ],
+                    std::iter::empty::<XmlIn>(),
+                ),
+            );
+            push_runs(&mut txn, &first, vec![(" ü.", Attrs::new())]);
+            push_runs(
+                &mut txn,
+                &second,
+                vec![("<b>a=b \\*c</b>", mark("highlight", json!({})))],
+            );
+            push_runs(
+                &mut txn,
+                &third,
+                vec![
+                    ("code ", Attrs::new()),
+                    ("<b>*x*</b>", mark("code", json!({}))),
+                ],
+            );
+            push_runs(
+                &mut txn,
+                &fourth,
+                vec![("<!-- $x$ ==y== --> ", Attrs::new())],
+            );
+            fourth.push_back(
+                &mut txn,
+                xml_element("mathInline", &[("tex", "z")], std::iter::empty::<XmlIn>()),
+            );
+            push_runs(&mut txn, &fourth, vec![(".", Attrs::new())]);
+            push_runs(
+                &mut txn,
+                &fifth,
+                vec![("<b>x</b> &#123; &#92; <i>y</i>", Attrs::new())],
+            );
+            push_runs(
+                &mut txn,
+                &sixth,
+                vec![
+                    (
+                        "<!-- a: b,\n\n \t\n{{atom:a}} \\* https://in.example *y* --> ",
+                        Attrs::new(),
+                    ),
+                    ("real", mark("bold", json!({}))),
+                    (".", Attrs::new()),
+                ],
+            );
+            // A line of spaces whose newline starts the next, unmarked run.
+            push_runs(
+                &mut txn,
+                &seventh,
+                vec![
+                    ("<pre>one\n   ", mark("bold", json!({}))),
+                    ("\ntwo</pre> and ", Attrs::new()),
+                    ("real", mark("bold", json!({}))),
+                    (".", Attrs::new()),
+                ],
+            );
+        }
+        let settled = Ydoc::wire();
+        settled
+            .apply(&source.encode_full_state())
+            .expect("test update is valid");
+        assert_eq!(
+            settled
+                .project(ContentKind::Richdoc)
+                .expect("projection")
+                .content,
+            SETTLED
+        );
+    }
+
+    // The fold reads a cell's references as the importer does: inside an
+    // encoded tag, where the projector writes them, as their characters, and
+    // elsewhere, between two real tags too, as the text they spell.
+    #[test]
+    fn table_cell_fold_reads_references_only_inside_an_encoded_tag() {
+        assert_eq!(
+            decode_html_entities_once("&#123; &#92; &amp;#123;"),
+            "&#123; &#92; &#123;"
+        );
+        assert_eq!(
+            decode_html_entities_once("<b>x</b> &#123; &#92; <i>y</i>"),
+            "<b>x</b> &#123; &#92; <i>y</i>"
+        );
+        assert_eq!(
+            decode_html_entities_once("a<br>&#123;<br>b"),
+            "a<br>&#123;<br>b"
+        );
+        assert_eq!(
+            decode_html_entities_once("&#123; &lt;b&gt;&#123;&#92;&#59;&lt;/b&gt; &#92;"),
+            "&#123; <b>{\\;</b> &#92;"
+        );
+    }
+
+    // A table cell's `<br>` is a real tag in the file, which the importer reads
+    // as raw HTML, so it bounds no raw HTML span: the cell's literal reference
+    // before the `<b>` stays the text it spells. The importer's test of the same
+    // cell is "saves a table cell holding a real <br> beside raw HTML as the
+    // same document" in packages/ydoc-projection/src/import-export.test.ts.
+    #[test]
+    fn a_table_cell_br_bounds_no_raw_html_span() {
+        let doc = remote_doc_with_body([xml_element(
+            "table",
+            &[],
+            [
+                xml_element(
+                    "tableRow",
+                    &[],
+                    [xml_element("tableHeader", &[], [paragraph("H")])],
+                ),
+                xml_element(
+                    "tableRow",
+                    &[("height", "84")],
+                    [xml_element(
+                        "tableCell",
+                        &[],
+                        [paragraph("a<br>b &#124; <b>*x*</b>")],
+                    )],
+                ),
+            ],
+        )]);
+        let projected = doc
+            .project(ContentKind::Richdoc)
+            .expect("projection")
+            .content;
+        assert!(
+            projected.contains("| a<br>b &amp;#124; &lt;b&gt;&#42;x&#42;&lt;/b&gt; |"),
+            "{projected}"
+        );
+        // The fold reads the cell back to the same text, and so the same bytes.
+        let folded = Ydoc::wire();
+        folded
+            .rewrite_content_to_markdown(ContentKind::Richdoc, &projected)
+            .expect("richdoc rewrite");
+        assert_eq!(
+            folded
+                .project(ContentKind::Richdoc)
+                .expect("projection")
+                .content,
+            projected
+        );
+        let body = serde_json::to_string(&folded.canonical_content()["body"]).expect("body json");
+        assert!(body.contains("a<br>b &#124; <b>*x*</b>"), "{body}");
+    }
+
+    // A nested block in a table cell is still in the cell, so its real `<br>`
+    // bounds no raw HTML span either.
+    #[test]
+    fn a_nested_block_in_a_table_cell_keeps_the_cell_context() {
+        let doc = remote_doc_with_body([xml_element(
+            "table",
+            &[],
+            [
+                xml_element(
+                    "tableRow",
+                    &[],
+                    [xml_element("tableHeader", &[], [paragraph("H")])],
+                ),
+                xml_element(
+                    "tableRow",
+                    &[],
+                    [xml_element(
+                        "tableCell",
+                        &[],
+                        [xml_element(
+                            "callout",
+                            &[("calloutType", "note"), ("fold", ""), ("title", "")],
+                            [paragraph("a<br>b &#124; <b>*x*</b>")],
+                        )],
+                    )],
+                ),
+            ],
+        )]);
+        let projected = doc
+            .project(ContentKind::Richdoc)
+            .expect("projection")
+            .content;
+        assert!(
+            projected.contains("a<br>b &amp;#124; &lt;b&gt;&#42;x&#42;&lt;/b&gt;"),
+            "{projected}"
+        );
+    }
+
+    // Each punctuation character in a raw HTML span becomes its own reference,
+    // and the text between two references is copied alone, not with the run.
+    #[test]
+    fn dense_raw_html_punctuation_copies_the_run_once() {
+        const PAIRS: usize = 4096;
+        let text = format!("<b>{}</b>", "x*".repeat(PAIRS));
+        let doc = remote_doc_with_body([paragraph(text.as_str())]);
+        TEXT_RUN_BYTES_CLONED.with(|count| count.set(0));
+        RAW_HTML_REFERENCES_RECORDED.with(|count| count.set(0));
+        assert_eq!(
+            doc.project_richdoc().unwrap(),
+            format!("&lt;b&gt;{}&lt;/b&gt;", "x&#42;".repeat(PAIRS))
+        );
+        RAW_HTML_REFERENCES_RECORDED.with(|count| assert_eq!(count.get(), PAIRS));
+        TEXT_RUN_BYTES_CLONED.with(|count| assert_eq!(count.get(), text.len()));
+    }
+
+    // A part's links with no text, and the text between them that holds no
+    // newline, `&`, `<`, or `>`, become one literal part when they hold a
+    // byte a later pass would rewrite. So a dense link, or a run of links,
+    // makes one part and one string, not one for each character or link.
+    // The counter counts the parts the projector actually makes.
+    #[test]
+    fn empty_links_become_one_literal_part() {
+        const COUNT: usize = 1 << 16;
+        let ampersands = "&".repeat(COUNT);
+        let mixed = "&a<b>=\u{a0}".repeat(COUNT);
+        let adjacent = "[](&)".repeat(COUNT);
+        let spaced = "[](<>) ".repeat(COUNT);
+        let plain = "[]()".repeat(COUNT);
+        for (text, parts, expected) in [
+            (
+                format!("[](u \"{ampersands}\")"),
+                1,
+                format!("[](u \"{ampersands}\")"),
+            ),
+            (
+                format!("[](u \"{mixed}\")"),
+                1,
+                format!("[](u \"{mixed}\")"),
+            ),
+            (
+                format!("x [](u \"{ampersands}\") &"),
+                3,
+                format!("x [](u \"{ampersands}\") &amp;"),
+            ),
+            (adjacent.clone(), 1, adjacent.clone()),
+            (format!("{spaced}x"), 2, format!("{spaced}x")),
+            (plain.clone(), 0, plain.clone()),
+            ("[](u \"&\n&\")".to_owned(), 1, "[](u \"&\n&\")".to_owned()),
+            // A `\r` sends the link through written references.
+            (
+                "[](u \"&\r&\")".to_owned(),
+                1,
+                "&#91;&#93;&#40;u &#34;&amp;&#13;&amp;&#34;&#41;".to_owned(),
+            ),
+            (
+                "<b>x</b> [](u \"&\")".to_owned(),
+                2,
+                "&lt;b&gt;x&lt;/b&gt; [](u \"&\")".to_owned(),
+            ),
+        ] {
+            let doc = remote_doc_with_body([paragraph(text.as_str())]);
+            TEXT_RUN_BYTES_CLONED.with(|count| count.set(0));
+            INLINE_PARTS_MATERIALIZED.with(|count| count.set(0));
+            assert_eq!(doc.project_richdoc().unwrap(), expected);
+            INLINE_PARTS_MATERIALIZED.with(|count| assert_eq!(count.get(), parts, "{text:.40}"));
+            TEXT_RUN_BYTES_CLONED.with(|count| assert_eq!(count.get(), text.len()));
+        }
+    }
+
+    // A link with no text keeps each line its title starts: no block opener,
+    // indent, or reference escape reads it. The Markdown after it still
+    // reads as Markdown, and a highlight's `=` keeps its escape.
+    #[test]
+    fn empty_link_lines_are_written_as_they_are() {
+        for (text, expected) in [
+            ("[](u \"a\n2. b\")", "[](u \"a\n2. b\")"),
+            ("[](u \"a\n[x] b\")", "[](u \"a\n[x] b\")"),
+            ("[](u \"x\n    y\")", "[](u \"x\n    y\")"),
+            (
+                "x [](u \"a\n2. b\") y\n2. not",
+                "x [](u \"a\n2. b\") y\n2&#46; not",
+            ),
+            // A line that would end the paragraph: the link is written as
+            // references, as the importer's `writtenDefinition` writes them,
+            // which the importer reads back as the same text.
+            (
+                "[](u \"a\n# b\")",
+                "&#91;&#93;&#40;u &#34;a\n&#35; b&#34;&#41;",
+            ),
+            (
+                "[](u \"a\n- b\")",
+                "&#91;&#93;&#40;u &#34;a\n&#45; b&#34;&#41;",
+            ),
+            (
+                "[](u \"a\n> b\")",
+                "&#91;&#93;&#40;u &#34;a\n&gt; b&#34;&#41;",
+            ),
+            // An unhighlighted `=` is written as it is, so it could open a
+            // block.
+            (
+                "[](u \"a\n=b\")",
+                "&#91;&#93;&#40;u &#34;a\n&#61;b&#34;&#41;",
+            ),
+            (
+                "x [](u \"a\n# b\") y\n2. not",
+                "x &#91;&#93;&#40;u &#34;a\n&#35; b&#34;&#41; y\n2&#46; not",
+            ),
+            (
+                "[](u \"*b*\n# b\")",
+                "&#91;&#93;&#40;u &#34;&#42;b&#42;\n&#35; b&#34;&#41;",
+            ),
+            (
+                "[](u \"`b`\n# b\")",
+                "&#91;&#93;&#40;u &#34;&#96;b&#96;\n&#35; b&#34;&#41;",
+            ),
+            (
+                "[](u \"&#59;\n# b\")",
+                "&#91;&#93;&#40;u &#34;&amp;&#35;59&#59;\n&#35; b&#34;&#41;",
+            ),
+            (
+                "[](https://e.example \"t\n# b\")",
+                "&#91;&#93;&#40;https&#58;//e&#46;example &#34;t\n&#35; b&#34;&#41;",
+            ),
+            (
+                "[](u \"a\\\"b \\* c\n# b\")",
+                "&#91;&#93;&#40;u &#34;a&#92;&#34;b &#92;&#42; c\n&#35; b&#34;&#41;",
+            ),
+            (
+                "[](u \"a  \n# b\")",
+                "&#91;&#93;&#40;u &#34;a &#32;\n&#35; b&#34;&#41;",
+            ),
+            (
+                "[](u \"{{atom:a}} \u{a0}x\n# b\")",
+                "&#91;&#93;&#40;u &#34;&#123;&#123;atom&#58;a&#125;&#125; &#160;x\n&#35; b&#34;&#41;",
+            ),
+            // A closed math line, and a `\r`, which marked reads as a newline.
+            (
+                "[](u \"a\n$$b$$\nc\")",
+                "&#91;&#93;&#40;u &#34;a\n&#36;&#36;b&#36;&#36;\nc&#34;&#41;",
+            ),
+            (
+                "[](u \"a\n$$\nx\n$$\nc\")",
+                "&#91;&#93;&#40;u &#34;a\n&#36;&#36;\nx\n&#36;&#36;\nc&#34;&#41;",
+            ),
+            ("[](u \"a\rb\")", "&#91;&#93;&#40;u &#34;a&#13;b&#34;&#41;"),
+            (
+                "x [](u \"a\rb\") y\n2. not",
+                "x &#91;&#93;&#40;u &#34;a&#13;b&#34;&#41; y\n2&#46; not",
+            ),
+        ] {
+            let doc = remote_doc_with_body([paragraph(text)]);
+            assert_eq!(doc.project_richdoc().unwrap(), expected);
+        }
+        // A mark across a line break stays one mark.
+        for (runs, expected) in [
+            (
+                vec![("[](u \"a\n# b\")", "bold")],
+                "**&#91;&#93;&#40;u &#34;a\n&#35; b&#34;&#41;**",
+            ),
+            (
+                vec![
+                    ("before ", ""),
+                    ("[](u \"a\n# b\")", "bold"),
+                    (" after\n2. outside", ""),
+                ],
+                "before **&#91;&#93;&#40;u &#34;a\n&#35; b&#34;&#41;** after\n2&#46; outside",
+            ),
+            (
+                vec![("[](u \"a=b\n# c\")", "highlight")],
+                "==&#91;&#93;&#40;u &#34;a\\=b\n&#35; c&#34;&#41;==",
+            ),
+            // Another mark leaves `=` as it is, so the line still could open
+            // a block.
+            (
+                vec![("[](u \"a\n=b\")", "bold")],
+                "**&#91;&#93;&#40;u &#34;a\n&#61;b&#34;&#41;**",
+            ),
+            (
+                vec![("before\n# heading text", "italic")],
+                "*before\n&#35; heading text*",
+            ),
+            (
+                vec![("[](u \"a\rb\")", "bold"), (" ", ""), ("y", "italic")],
+                "**&#91;&#93;&#40;u &#34;a&#13;b&#34;&#41;** *y*",
+            ),
+            (
+                vec![("[](u \"a\n$$b$$\nc\") ", ""), ("y", "italic")],
+                "&#91;&#93;&#40;u &#34;a\n&#36;&#36;b&#36;&#36;\nc&#34;&#41; *y*",
+            ),
+        ] {
+            let source = Ydoc::wire();
+            let body = source.doc.get_or_insert_xml_fragment(ROOT_BODY);
+            {
+                let mut txn = source.doc.transact_mut();
+                let paragraph = body.push_back(
+                    &mut txn,
+                    XmlElementPrelim::new("paragraph", std::iter::empty::<XmlIn>()),
+                );
+                let text = paragraph.push_back(&mut txn, XmlTextPrelim::new(""));
+                for (value, mark) in runs {
+                    let attrs = if mark.is_empty() {
+                        Attrs::new()
+                    } else {
+                        Attrs::from([(mark.into(), json_to_any(&json!({})))])
+                    };
+                    let at = text.len(&txn);
+                    text.insert_with_attributes(&mut txn, at, value, attrs);
+                }
+            }
+            let remote = Ydoc::wire();
+            remote
+                .apply(&source.encode_full_state())
+                .expect("valid update");
+            assert_eq!(remote.project_richdoc().unwrap(), expected);
+        }
+        // `opens_block` errs toward yes, as the importer's `opensBlock` does.
+        for (link, opens) in [
+            ("[](u \"a\n# b\")", true),
+            ("[](u \"a\n   - b\")", true),
+            ("[](u \"a\n1) b\")", true),
+            ("[](u \"a\n> [!note] t\")", true),
+            ("[](u \"a\n  \nb\")", true),
+            ("[](u \"a\n<div>\")", true),
+            ("[](u \"a\n:-:\")", true),
+            ("[](u \"a\n$$b$$\nc\")", true),
+            ("[](u \"a\n   $$b$$\nc\")", true),
+            ("[](u \"a\n$$\nx\n$$\nc\")", true),
+            ("[](u \"a\rb\")", true),
+            ("[](u \"a\n=b\")", true),
+            ("[](u \"a\n   ===\")", true),
+            ("[](u \"a\n2. b\")", false),
+            ("[](u \"a\n    # b\")", false),
+            ("[](u \"a\n    = b\")", false),
+            ("[](u \"a\n[x] b\")", false),
+            ("[](u \"a\na. b\")", false),
+            ("[](u \"a\n\tb\")", false),
+            ("[](u \"a b\")", false),
+        ] {
+            assert_eq!(opens_block(link, false), opens, "{link:?}");
+        }
+        // A highlight writes its `=` as `\=`, which opens no block, but its
+        // other openers, empty lines, and `\r` still do.
+        for (link, opens) in [
+            ("[](u \"a\n=b\")", false),
+            ("[](u \"&=\n=\")", false),
+            ("[](u \"a\n   ===\")", false),
+            ("[](u \"a\n# b\")", true),
+            ("[](u \"a=b\n# c\")", true),
+            ("[](u \"a\n  \n=\")", true),
+            ("[](u \"a=\rb\")", true),
+            ("[](u \"a\n    # b\")", false),
+        ] {
+            assert_eq!(opens_block(link, true), opens, "{link:?}");
+        }
+        // A link written as references makes one part for each line it keeps,
+        // however many characters it writes as references.
+        let dense = format!(
+            "[](u \"{}\n# {}\")",
+            "*".repeat(1 << 16),
+            "`".repeat(1 << 16)
+        );
+        let doc = remote_doc_with_body([paragraph(dense.as_str())]);
+        INLINE_PARTS_MATERIALIZED.with(|count| count.set(0));
+        assert_eq!(
+            doc.project_richdoc().unwrap(),
+            format!(
+                "&#91;&#93;&#40;u &#34;{}\n&#35; {}&#34;&#41;",
+                "&#42;".repeat(1 << 16),
+                "&#96;".repeat(1 << 16),
+            )
+        );
+        // One part for each line the link keeps, and the newline between.
+        INLINE_PARTS_MATERIALIZED.with(|count| assert_eq!(count.get(), 3));
+        let source = Ydoc::wire();
+        let body = source.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        {
+            let mut txn = source.doc.transact_mut();
+            let paragraph = body.push_back(
+                &mut txn,
+                XmlElementPrelim::new("paragraph", std::iter::empty::<XmlIn>()),
+            );
+            let text = paragraph.push_back(&mut txn, XmlTextPrelim::new(""));
+            let highlight = Attrs::from([("highlight".into(), json_to_any(&json!({})))]);
+            text.insert_with_attributes(&mut txn, 0, "[](u \"&=\n=\")", highlight);
+        }
+        let remote = Ydoc::wire();
+        remote
+            .apply(&source.encode_full_state())
+            .expect("valid update");
+        // A highlighted link whose line starts with `=` keeps its source
+        // spelling, `&` too, with each `=` written as `\=`, in one part.
+        INLINE_PARTS_MATERIALIZED.with(|count| count.set(0));
+        assert_eq!(remote.project_richdoc().unwrap(), "==[](u \"&\\=\n\\=\")==");
+        INLINE_PARTS_MATERIALIZED.with(|count| assert_eq!(count.get(), 1));
+    }
+
+    // The reader of links with no text examines each byte a bounded number of
+    // times, whether its candidates fail or succeed, with no close after them,
+    // one, or two.
+    #[test]
+    fn empty_link_reader_work_is_linear() {
+        let steps = |text: &str| {
+            EMPTY_LINK_READER_STEPS.with(|count| count.set(0));
+            empty_link_ranges(text);
+            EMPTY_LINK_READER_STEPS.with(std::cell::Cell::get)
+        };
+        for unit in [
+            "[](",
+            "[](<",
+            "[](u \"",
+            "[](a)",
+            "[](u \"t\") ",
+            "[](a)b)",
+            "[](a b c",
+        ] {
+            for close in ["", ")", "))"] {
+                let small = steps(&format!("{}{close}", unit.repeat(1024)));
+                let large = steps(&format!("{}{close}", unit.repeat(2048)));
+                assert!(small > 0, "{unit:?}{close:?}");
+                assert!(
+                    large * 10 < small * 22,
+                    "{unit:?}{close:?}: {small} -> {large}"
+                );
+            }
+        }
+    }
+
+    // The fixture generator has marked 17.0.6 read a shared corpus of links
+    // with no text and definitions, which the importer reads too. Ranges and
+    // lengths here are UTF-8 bytes. A text whose marked range ends between the
+    // two halves of a UTF-16 surrogate pair has no UTF-8 ranges: no byte
+    // boundary holds half a character. The importer checks its UTF-16 ranges;
+    // this corpus is every other text.
+    #[test]
+    fn readers_agree_with_marked_on_the_shared_corpus() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/markedOracle.json"
+        );
+        let oracle: Value = serde_json::from_slice(&std::fs::read(path).expect("generated oracle"))
+            .expect("oracle json");
+        let expected = &oracle["expected"];
+        assert_eq!(expected["marked"], "17.0.6");
+        let links = expected["emptyLinks"].as_array().expect("links");
+        let (checked, excluded): (Vec<&Value>, Vec<&Value>) =
+            links.iter().partition(|case| !case["utf8"].is_null());
+        assert!(checked.len() > 800);
+        for case in &excluded {
+            assert!(case["utf8Excluded"].is_string(), "{case}");
+        }
+        for case in checked {
+            let text = case["text"].as_str().expect("text");
+            let ranges: Vec<(usize, usize)> = case["utf8"]
+                .as_array()
+                .expect("ranges")
+                .iter()
+                .map(|range| {
+                    let at = |index: usize| range[index].as_u64().expect("offset") as usize;
+                    (at(0), at(1))
+                })
+                .collect();
+            assert_eq!(empty_link_ranges(text), ranges, "{text:?}");
+        }
+        let definitions = expected["definitions"].as_array().expect("definitions");
+        assert!(definitions.len() > 400);
+        for case in definitions {
+            let text = case["text"].as_str().expect("text");
+            let length = case["utf8"].as_u64().map(|length| length as usize);
+            assert_eq!(definition_len(text), length, "{text:?}");
+        }
+    }
+
+    // A definition's NBSP and `\r` are references like its punctuation, as
+    // the importer requires, and other Unicode is written as it is.
+    #[test]
+    fn definition_whitespace_is_written_as_references() {
+        for (text, expected) in [
+            (
+                "[x]: u \"a\u{a0}b\"",
+                "&#91;x&#93;&#58; u &#34;a&#160;b&#34;",
+            ),
+            ("[x]: u \"a\rb\"", "&#91;x&#93;&#58; u &#34;a&#13;b&#34;"),
+            (
+                "[x]: https://e.example/日本 \"😀 é\"",
+                "&#91;x&#93;&#58; https&#58;//e&#46;example/日本 &#34;😀 é&#34;",
+            ),
+        ] {
+            let doc = remote_doc_with_body([paragraph(text)]);
+            assert_eq!(doc.project_richdoc().unwrap(), expected);
+        }
+    }
+
+    // Text the reader admits can still encode past the output limit. The
+    // projector refuses it before it records any of the span's references.
+    #[test]
+    fn raw_html_punctuation_past_the_output_limit_is_refused_before_recording() {
+        let text = format!("<b>{}</b>", "*".repeat(MAX_PROJECTION_BYTES / 4));
+        let doc = remote_doc_with_body([paragraph(text.as_str())]);
+        RAW_HTML_REFERENCES_RECORDED.with(|count| count.set(0));
+        assert!(matches!(
+            doc.project_richdoc(),
+            Err(CollabError::ProjectionTooLarge {
+                actual,
+                max: MAX_PROJECTION_BYTES
+            }) if actual > MAX_PROJECTION_BYTES
+        ));
+        RAW_HTML_REFERENCES_RECORDED.with(|count| assert_eq!(count.get(), 0));
+    }
+
+    // A link with no text written as references can encode past the output
+    // limit across its lines while each line stays under it. The projector
+    // refuses it before it writes any line. One that encodes to exactly the
+    // limit is written whole.
+    #[test]
+    fn literal_links_past_the_output_limit_are_refused_before_writing() {
+        let lines = |count: usize, length: usize, tail: usize| {
+            format!(
+                "[](u \"{}# {}\")",
+                format!("{}\n", "*".repeat(length)).repeat(count),
+                "b".repeat(tail)
+            )
+        };
+        let refused = |text: &str| {
+            let doc = remote_doc_with_body([paragraph(text)]);
+            LITERAL_LINKS_WRITTEN.with(|count| count.set(0));
+            RAW_HTML_REFERENCES_RECORDED.with(|count| count.set(0));
+            assert!(matches!(
+                doc.project_richdoc(),
+                Err(CollabError::ProjectionTooLarge {
+                    actual,
+                    max: MAX_PROJECTION_BYTES
+                }) if actual > MAX_PROJECTION_BYTES
+            ));
+            LITERAL_LINKS_WRITTEN.with(|count| assert_eq!(count.get(), 0));
+            RAW_HTML_REFERENCES_RECORDED.with(|count| assert_eq!(count.get(), 0));
+        };
+        // Four lines of 2^20 `*`, each about 5 MiB written.
+        refused(&lines(4, 1 << 20, 1));
+        // Four lines of `length` `*` write 20 bytes for each `*` they hold
+        // and 43 bytes besides, and each further `b` writes one byte more.
+        let length = (MAX_PROJECTION_BYTES - 43) / 20;
+        let tail = 1 + MAX_PROJECTION_BYTES - 43 - 20 * length;
+        let doc = remote_doc_with_body([paragraph(lines(4, length, tail).as_str())]);
+        LITERAL_LINKS_WRITTEN.with(|count| count.set(0));
+        let projected = doc.project_richdoc().unwrap();
+        assert_eq!(projected.len(), MAX_PROJECTION_BYTES);
+        assert_eq!(
+            projected,
+            format!(
+                "&#91;&#93;&#40;u &#34;{}&#35; {}&#34;&#41;",
+                format!("{}\n", "&#42;".repeat(length)).repeat(4),
+                "b".repeat(tail)
+            )
+        );
+        // Each line the link keeps.
+        LITERAL_LINKS_WRITTEN.with(|count| assert_eq!(count.get(), 5));
+        refused(&lines(4, length, tail + 1));
+    }
+
+    // The engine's reader resolves the references the projector writes inside
+    // raw HTML it wrote as text, as the importer reads them. A literal
+    // reference elsewhere, between two raw tags too, still reads as the text
+    // it spells, and a reference to a character a reader may not see is still
+    // syntax, inside raw HTML too.
+    #[test]
+    fn the_reader_resolves_projected_references_only_inside_raw_html_text() {
+        let read = |text: &str| read_text(text, TextPlace::Inline);
+        let resolved = |text: &str, syntax: &[&str]| {
+            (
+                text.to_owned(),
+                syntax
+                    .iter()
+                    .map(|entry| (*entry).to_owned())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(
+            read("&lt;x&gt;&#92;&#123;&#58;&#32;y&lt;/x&gt;"),
+            resolved("<x>\\{: y</x>", &[])
+        );
+        assert_eq!(
+            read("&lt;x&gt;&amp;&#35;123&#59;&lt;/x&gt;"),
+            resolved("<x>&#123;</x>", &[])
+        );
+        assert_eq!(
+            read("<x>a</x> &#123; <y>b</y>"),
+            resolved("<x>a</x> &#123; <y>b</y>", &["at 9: reference #123"])
+        );
+        assert_eq!(
+            read("&lt;!&#45;&#45; a\n&#10;b &#45;&#45;&gt;"),
+            resolved("<!-- a\n\nb -->", &[])
+        );
+        assert_eq!(
+            read("&#123; and &lt;x&gt;"),
+            resolved("&#123; and <x>", &["at 0: reference #123"])
+        );
+        assert_eq!(
+            read("&#10; and &lt;x&gt;"),
+            resolved("&#10; and <x>", &["at 0: reference #10"])
+        );
+        assert_eq!(
+            read("&lt;x&gt;&#8203;&lt;/x&gt;"),
+            resolved("<x>&#8203;</x>", &["at 3: reference #8203"])
+        );
+    }
+
+    // A `<` or `>` a file holds as text opens and closes no encoded tag span,
+    // so a reference beside it reads as the text it spells, as the importer
+    // reads it (import-export.test.ts, "keeps the spelling of a reference").
+    // The fold keeps that text, which projects as the importer's save of it.
+    // A renderer decodes the source's reference, so the source still does not
+    // read as its projection, while the same text without one does.
+    #[test]
+    fn a_reference_beside_text_angles_keeps_its_spelling() {
+        let read = |text: &str| read_text(text, TextPlace::Block);
+        let resolved = |text: &str, syntax: &[&str]| {
+            (
+                text.to_owned(),
+                syntax
+                    .iter()
+                    .map(|entry| (*entry).to_owned())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        for (source, projection, text, at) in [
+            (
+                "Map<K, &#59; V>",
+                "Map&lt;K&#44; &amp;&#35;59&#59; V&gt;",
+                "Map<K, &#59; V>",
+                7,
+            ),
+            (
+                "a <b, &#59; c> d",
+                "a &lt;b&#44; &amp;&#35;59&#59; c&gt; d",
+                "a <b, &#59; c> d",
+                6,
+            ),
+            (
+                "&lt;b&gt;x&lt;/b&gt; &#59; 3 > 2",
+                "&lt;b&gt;x&lt;/b&gt; &amp;&#35;59&#59; 3 &gt; 2",
+                "<b>x</b> &#59; 3 > 2",
+                9,
+            ),
+        ] {
+            let reference = format!("at {at}: reference #59");
+            assert_eq!(read(source), resolved(text, &[reference.as_str()]));
+            assert_eq!(read(projection), resolved(text, &[]));
+            assert!(!markdown_reads_alike(
+                source,
+                projection,
+                MarkdownReading::Source
+            ));
+        }
+
+        let folded = Ydoc::wire();
+        folded
+            .rewrite_content_to_markdown(ContentKind::Richdoc, "Map<K, &#59; V>")
+            .expect("richdoc rewrite");
+        assert_eq!(
+            folded
+                .project(ContentKind::Richdoc)
+                .expect("projection")
+                .content,
+            "Map&lt;K&#44; &amp;&#35;59&#59; V&gt;"
+        );
+        assert!(markdown_reads_alike(
+            "Map<K, V>",
+            "Map&lt;K&#44; V&gt;",
+            MarkdownReading::Source
+        ));
+    }
+
+    /// marked 17's readings of links with no text and of definitions, which
+    /// `markedReadings` in packages/ydoc-projection/src/import-export.test.ts
+    /// pins against marked itself.
+    #[test]
+    fn marked_literal_source_readings() {
+        for (source, raw) in [
+            (
+                "[](https://e.example \"Map<K, &#59; V>\") tail",
+                Some("[](https://e.example \"Map<K, &#59; V>\")"),
+            ),
+            (
+                "[](<https://e.example/&#59;>) tail",
+                Some("[](<https://e.example/&#59;>)"),
+            ),
+            ("[](u \"a)b\") tail", Some("[](u \"a)b\")")),
+            ("[](a(b)c) tail", Some("[](a(b)c)")),
+            ("[](a)b)", Some("[](a)")),
+            ("[](a b)", None),
+            ("[](<a b> 't')", Some("[](<a b> 't')")),
+            ("[](<a) x>)", Some("[](<a) x>)")),
+            ("[](  u \n  \"t\"  ) tail", Some("[](  u \n  \"t\"  )")),
+            ("[](u (t)) tail", Some("[](u (t))")),
+            ("[](u \"a\\\"b\" \"c\")", None),
+            ("[](u \"a\\\"b)", None),
+            ("[](u \"a\\\" ) \"x\")", Some("[](u \"a\\\" )")),
+            ("[]()", Some("[]()")),
+            ("[](\\)) tail", Some("[](\\))")),
+            ("[](a\\)b)", Some("[](a\\)b)")),
+            ("[](<a\\>)", None),
+            ("[](<a\\\\>)", Some("[](<a\\\\>)")),
+            ("[](u 'a\\'b')", Some("[](u 'a\\'b')")),
+            ("[](u\n\"t\"\n)", Some("[](u\n\"t\"\n)")),
+            ("[](u \"t\"x)", None),
+            ("[](a\u{a0}b)", Some("[](a\u{a0}b)")),
+            ("[](\u{a0}u)", Some("[](\u{a0}u)")),
+            ("[](\u{a0}a)b)", Some("[](\u{a0}a")),
+            ("[](a)b) \"t\")", Some("[](a)")),
+            ("[](a(b)", Some("[](a(b)")),
+            ("[](<>)", Some("[](<>)")),
+            ("[](u (a(b)) x", Some("[](u (a(b))")),
+            ("[](u\t\n\t\"t\")", Some("[](u\t\n\t\"t\")")),
+            ("[](u\n\n\"t\")", None),
+            ("[]((a)", Some("[]((a)")),
+            ("[]( (a)b)", Some("[]( (a)b)")),
+            ("[](a\\(b\\)c \"x\\\"y\")", Some("[](a\\(b\\)c \"x\\\"y\")")),
+            ("[](<a(b)> \"title\")", Some("[](<a(b)> \"title\")")),
+            (
+                "[](u (title with ( characters))",
+                Some("[](u (title with ( characters))"),
+            ),
+            ("[](u \"a\\\")\\\")", Some("[](u \"a\\\")\\\")")),
+        ] {
+            assert_eq!(
+                EmptyLinks::new(source).read(0).map(|end| &source[..end]),
+                raw,
+                "{source:?}"
+            );
+        }
+        for (source, raw) in [
+            (
+                "[a]: <https://e.example/?q=&#59;>",
+                Some("[a]: <https://e.example/?q=&#59;>"),
+            ),
+            (
+                "[x]: https://h.example \"kept\"",
+                Some("[x]: https://h.example \"kept\""),
+            ),
+            (
+                "[x]:\nhttps://e.example\n\"t\"",
+                Some("[x]:\nhttps://e.example\n\"t\""),
+            ),
+            ("[x]: u\nmore", Some("[x]: u\n")),
+            ("[label]: not a definition", None),
+            ("[^1]: Footnote body.", None),
+            ("[x]: u 'a\nb'", Some("[x]: u 'a\nb'")),
+            ("[x]: u (t)", Some("[x]: u (t)")),
+            ("   [x]: u", Some("   [x]: u")),
+            ("    [x]: u", None),
+            ("[ ]: u", None),
+            ("[x\\]]: u", Some("[x\\]]: u")),
+            ("[x]: <a b> \"t\"", Some("[x]: <a b> \"t\"")),
+            (
+                "[x]: <https://e.example/a b> \"t\"",
+                Some("[x]: <https://e.example/a b> \"t\""),
+            ),
+            ("[x]: u \"a\\\"b\"", Some("[x]: u \"a\\\"b\"")),
+            ("[x]: <a>b>", Some("[x]: <a>b>")),
+            ("[x]: u \"t\" x", None),
+            ("[x]: u\n\n", Some("[x]: u\n\n")),
+            ("[x]:", None),
+            ("[x]: u 't'\n\nnext", Some("[x]: u 't'\n\n")),
+            ("[x]: u \"t\"   ", Some("[x]: u \"t\"   ")),
+            ("[x]: u 'a\n\nb'", None),
+            ("[x]:\n  \tu", Some("[x]:\n  \tu")),
+            ("[x [y]]: u", None),
+            ("[x]: u  \n  \"t\"", Some("[x]: u  \n  \"t\"")),
+        ] {
+            assert_eq!(
+                definition_len(source).map(|len| &source[..len]),
+                raw,
+                "{source:?}"
+            );
+        }
+    }
+
+    /// The importer keeps a link with no text and a definition as the text
+    /// the file holds. The projector writes an empty link as it is, and
+    /// starts a definition with `&#91;`, so a destination in angles is
+    /// tag-span text. Inside a tag span an empty link reads as the span's
+    /// other text does. Any other `[` keeps its `\[` escape. The importer's
+    /// tests expect these bytes.
+    #[test]
+    fn literal_link_source_projects_as_written() {
+        assert_eq!(
+            leading_markdown_block_escape_index("[](https://h.example)"),
+            None
+        );
+        assert_eq!(
+            leading_markdown_block_escape_index("[x]: https://h.example"),
+            Some((0, false))
+        );
+        assert_eq!(
+            empty_link_ranges("a [](x) b [](y \"z\") c [](<w>)"),
+            vec![(2, 7), (10, 19), (22, 29)]
+        );
+        for (source, ranges) in [
+            ("[](".repeat(4000), 0),
+            ("[](<".repeat(4000), 0),
+            (format!("{})", "[](".repeat(4000)), 1),
+            (format!("{}))", "[](".repeat(4000)), 1),
+            (format!("[](u \"{}", "[](u \"".repeat(4000)), 0),
+            ("[](a)".repeat(4000), 4000),
+            ("[](u \"t\") ".repeat(4000), 4000),
+            (format!("[](u {}", "x".repeat(16000)), 0),
+            (format!("[](a){}", " x".repeat(8000)), 1),
+        ] {
+            assert_eq!(empty_link_ranges(&source).len(), ranges);
+        }
+        for (text, projection) in [
+            (
+                "[](https://e.example \"Map<K, &#59; V>\")",
+                "[](https://e.example \"Map<K, &#59; V>\")",
+            ),
+            (
+                "[](<https://e.example/&#59;>)",
+                "[](<https://e.example/&#59;>)",
+            ),
+            (
+                "See [](https://e.example \"a &amp; b &lt;i&gt; &quot;q&quot;\")",
+                "See [](https://e.example \"a &amp; b &lt;i&gt; &quot;q&quot;\")",
+            ),
+            (
+                "before\n[](https://h.example \"kept\")",
+                "before\n[](https://h.example \"kept\")",
+            ),
+            (
+                "<b> [](https://e.example \"Map<K, &#59; V>\") x</b>",
+                "&lt;b&gt; &#91;&#93;&#40;https&#58;//e&#46;example &#34;Map&lt;K&#44; \
+                 &amp;&#35;59&#59; V&gt;&#34;&#41; x&lt;/b&gt;",
+            ),
+            (
+                "[a]: <https://e.example/?q=&#59;>",
+                "&#91;a&#93;&#58; &lt;https&#58;//e&#46;example/?q&#61;&amp;&#35;59&#59;&gt;",
+            ),
+            (
+                "[x]: <a b> \"t\"",
+                "&#91;x&#93;&#58; &lt;a b&gt; &#34;t&#34;",
+            ),
+            (
+                "[x]: <https://e.example/a b> \"t\"",
+                "&#91;x&#93;&#58; &lt;https&#58;//e&#46;example/a b&gt; &#34;t&#34;",
+            ),
+            (
+                "[x]: https://h.example \"kept\"",
+                "&#91;x&#93;&#58; https&#58;//h&#46;example &#34;kept&#34;",
+            ),
+            (
+                "[x]: https://e.example \"Map<K, &#59; V>\"",
+                "&#91;x&#93;&#58; https&#58;//e&#46;example &#34;Map&lt;K&#44; \
+                 &amp;&#35;59&#59; V&gt;&#34;",
+            ),
+            (
+                "[x]: u \"[](v '&amp; <b>')\"",
+                "&#91;x&#93;&#58; u &#34;&#91;&#93;&#40;v &#39;&amp;amp&#59; \
+                 &lt;b&gt;&#39;&#41;&#34;",
+            ),
+            (
+                "[x]:\nhttps://e.example\n\"t\"",
+                "&#91;x&#93;&#58;\nhttps&#58;//e&#46;example\n&#34;t&#34;",
+            ),
+            ("[label]: not a definition", "\\[label]: not a definition"),
+            ("[^1]: Footnote body.", "\\[^1]: Footnote body."),
+        ] {
+            let folded = Ydoc::wire();
+            folded
+                .rewrite_content_to_markdown(ContentKind::Richdoc, text)
+                .expect("richdoc rewrite");
+            assert_eq!(
+                folded
+                    .project(ContentKind::Richdoc)
+                    .expect("projection")
+                    .content,
+                projection
+            );
+        }
+    }
+
     #[test]
     fn resolution_fold_keeps_other_tables_and_comments_as_text() {
         for chosen in [
@@ -7351,6 +9619,9 @@ mod projection_tests {
             "| a |\n|---|\n| x &lt;br&gt; y |\n",
             // A tag without attributes and another name stays text.
             "a <x> b </x-y>\n",
+            // Its content is raw HTML to the importer, which the projector
+            // writes with references that read back as the same text.
+            "a <x>{{atom:a}} https://e.example/a_b www.e.example a@b.co</x>\n",
             // Two lists, which the projector separates with a blank line,
             // then a table.
             "* a\n\n- b\n\n| x |\n|---|\n| y |\n",

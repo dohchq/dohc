@@ -2,10 +2,9 @@ import { useFocusReturn } from "./ui/focusReturn";
 import {
   frontmatterEditsRefused,
   markdownFrontmatterEditsRefused,
-  setFrontmatterValue,
-  patchFrontmatter,
   FRONTMATTER_EDIT_REFUSED_MESSAGE,
 } from "@dohc/ydoc-projection/frontmatter";
+import { patchFrontmatter, setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter-map";
 import { modalFocusableElements, switchModalRegion, trapModalTabKey } from "./modalFocus";
 import { Smile } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";

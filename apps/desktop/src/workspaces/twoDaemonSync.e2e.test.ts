@@ -13,7 +13,7 @@ import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { buildRelay } from "../../../../services/sync-relay/scripts/build.mjs";
 import { stableJsonStringify } from "../../../../services/sync-relay/src/canonicalJson";
 import * as Y from "yjs";
-import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter";
+import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
 import { DaemonRefusalError, openEngineYdocProviderSession, YdocAdapterError, YdocOwnerDraftPendingError, VersionedLiveAdapter, WorkspaceDaemonRequester, type AutomationClaim } from "@dohc/workspace-engine-client";

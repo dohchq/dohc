@@ -452,9 +452,43 @@ struct CaptureBatchSharedContext {
     capture: CaptureIngestBatchContext,
     has_ydoc_state: Option<bool>,
     journals_file_moments: Option<bool>,
+    /// The item just ingested recovered a sibling file, whose moment took
+    /// the order after the item's own.
+    recovered_sibling: bool,
+}
+
+impl CaptureBatchSharedContext {
+    fn new(tx: &Transaction<'_>, first: &CaptureIngest) -> Result<Self, RuntimeError> {
+        Ok(Self {
+            capture: CaptureIngestBatchContext::new(tx, &first.workspace_id, &first.version_id)?,
+            has_ydoc_state: None,
+            journals_file_moments: None,
+            recovered_sibling: false,
+        })
+    }
+
+    /// After an item that recovered a sibling, the batch's reserved moment
+    /// order is behind the table. Read the high-water mark again before the
+    /// next item, so it does not propose the order the sibling took. An item
+    /// rolled back took its sibling with it; reading again then costs one
+    /// query and changes nothing.
+    fn settle_item(
+        &mut self,
+        tx: &Transaction<'_>,
+        first: &CaptureIngest,
+    ) -> Result<(), RuntimeError> {
+        if std::mem::take(&mut self.recovered_sibling) {
+            self.capture =
+                CaptureIngestBatchContext::new(tx, &first.workspace_id, &first.version_id)?;
+        }
+        Ok(())
+    }
 }
 
 struct PreparedCaptureRecovery {
+    /// The admitted object the lineage was read for. Capture may resolve the
+    /// path to a different, disambiguated object.
+    object_id: String,
     lineage: dohc_engine_sync::PreparedLocalYdocLineage,
     preserve: bool,
     authors: Option<String>,
@@ -467,6 +501,7 @@ fn prepare_capture_recovery_in(
 ) -> Result<PreparedCaptureRecovery, RuntimeError> {
     let key = DocKey::new(&input.workspace_id, &input.version_id, object_id)?;
     let mut prepared = PreparedCaptureRecovery {
+        object_id: object_id.to_owned(),
         lineage: dohc_engine_sync::prepare_local_ydoc_lineage_in_tx(tx, &key)?,
         preserve: false,
         authors: None,
@@ -557,6 +592,9 @@ fn capture_ingest_in_tx(
     if let Some(batch) = batch.as_deref_mut() {
         batch.capture.commit_result(&result)?;
     }
+    // A lineage read for an object the path no longer resolves to belongs to
+    // another file.
+    let recovery = recovery.filter(|prepared| prepared.object_id == result.snapshot.object_id);
     if let Some(prepared) = recovery.as_ref().filter(|prepared| prepared.preserve) {
         let projection = prepared
             .lineage
@@ -597,8 +635,8 @@ fn capture_ingest_in_tx(
                 path: &result.snapshot.path,
                 text: &result.snapshot.text,
             };
-            match recovery {
-                Some(prepared) => dohc_engine_sync::reconcile_prepared_local_resulting_head_in_tx(
+            let reconciled = match recovery {
+                Some(prepared) => dohc_engine_sync::reconcile_prepared_local_head_in_tx(
                     tx,
                     prepared.lineage,
                     resulting,
@@ -606,7 +644,8 @@ fn capture_ingest_in_tx(
                     attribution.as_ref(),
                     input.now_ms,
                 )?,
-                None => dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                // Capture resolved the path to a new object, not the one admitted.
+                None => dohc_engine_sync::reconcile_local_head_in_tx(
                     tx,
                     &input.workspace_id,
                     &input.version_id,
@@ -616,7 +655,11 @@ fn capture_ingest_in_tx(
                     attribution.as_ref(),
                     input.now_ms,
                 )?,
+            };
+            if let Some(batch) = batch.as_deref_mut() {
+                batch.recovered_sibling = reconciled.recovered_sibling;
             }
+            reconciled.facts
         } else {
             // No Y.Doc lineage exists in this version, so the file alone
             // carries the write.
@@ -784,13 +827,10 @@ fn capture_ingest_batch_all_or_none_in_tx(
         reason: "capture batch is empty",
     })?;
     let mut results = Vec::with_capacity(inputs.len());
-    let mut batch = CaptureBatchSharedContext {
-        capture: CaptureIngestBatchContext::new(tx, &first.workspace_id, &first.version_id)?,
-        has_ydoc_state: None,
-        journals_file_moments: None,
-    };
+    let mut batch = CaptureBatchSharedContext::new(tx, first)?;
     for input in inputs {
         let result = capture_ingest_in_tx(tx, input, indexing, leases, Some(&mut batch))?;
+        batch.settle_item(tx, first)?;
         results.push(result);
     }
     Ok(results)
@@ -806,11 +846,7 @@ fn capture_ingest_batch_with_item_savepoints_in_tx(
         reason: "capture batch is empty",
     })?;
     let mut results = Vec::with_capacity(inputs.len());
-    let mut batch = CaptureBatchSharedContext {
-        capture: CaptureIngestBatchContext::new(tx, &first.workspace_id, &first.version_id)?,
-        has_ydoc_state: None,
-        journals_file_moments: None,
-    };
+    let mut batch = CaptureBatchSharedContext::new(tx, first)?;
     for input in inputs {
         let prior_capture = batch.capture.clone();
         tx.execute_batch("SAVEPOINT dohc_capture_batch_item")
@@ -831,6 +867,7 @@ fn capture_ingest_batch_with_item_savepoints_in_tx(
                 results.push(Err(error));
             }
         }
+        batch.settle_item(tx, first)?;
     }
     Ok(results)
 }

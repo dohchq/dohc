@@ -7,7 +7,8 @@ import { TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
 import { NodeSelection } from "@tiptap/pm/state";
 import type { Dispatch, SetStateAction } from "react";
-import { DohcTaskItem, dohcMarkdownExtensions } from "./extensions";
+import { DohcTaskItem } from "@dohc/ydoc-projection/markdown-extensions";
+import { desktopMarkdownExtensions } from "./extensions";
 import { makeBlockExitPlugin } from "./blockExit";
 import { makeCodeBlockContinuationPlugin } from "./codeBlockChrome";
 import { makeCalloutChromePlugin } from "./calloutChrome";
@@ -58,7 +59,7 @@ function makeEditor(markdown: string): Editor {
     element,
     extensions: [
       StarterKit.configure({ trailingNode: false }),
-      ...dohcMarkdownExtensions,
+      ...desktopMarkdownExtensions,
       TaskList,
       DohcTaskItem,
       TableKit.configure({ table: { resizable: true } }),

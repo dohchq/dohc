@@ -18,6 +18,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod capture;
 pub mod db_scan;
 pub mod faults;
 pub mod fixtures;

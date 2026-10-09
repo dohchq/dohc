@@ -1,8 +1,78 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
 import vectors from '../../../crates/dohc-engine-collab/tests/live-bootstrap-fixtures/frontmatter-edits.json'
-import { frontmatterAsWritten, leadingFrontmatter, patchFrontmatter, setFrontmatterValue, writeMarkdownFrontmatter, loadMarkdownFrontmatter } from './frontmatter.js'
+import { leadingFrontmatter, writeMarkdownFrontmatter, loadMarkdownFrontmatter } from './frontmatter.js'
+import {
+  frontmatterAsWritten,
+  frontmatterMapValues,
+  patchFrontmatter,
+  setFrontmatterValue,
+  writtenFrontmatterKeys,
+} from './frontmatter-map.js'
 import { markdownToYDoc, yDocToMarkdown } from './import-export.js'
+
+// The canonical writer keeps `hostile`, `literal`, and `mixed` in shared Y
+// types and `exact` as a Yjs Any bigint. The block is canonical, so a
+// document keeps no text for it.
+const SHARED_BLOCK = [
+  '---',
+  'exact: 9007199254740993',
+  'hostile:', '  __proto__: nested-value', '  constructor: own',
+  'literal:', '  - constructor: hostile-constructor', '  - $dohcBigInt: 9007199254740993',
+  'mixed:', '  - constructor: hostile-constructor', '  - 9007199254740993',
+  'status: draft',
+  '---', '', '',
+].join('\n')
+// The same values with a comment, so a document keeps the text as written.
+const KEPT_SHARED_BLOCK = SHARED_BLOCK.replace('---\n', '---\n# Keep this note\n')
+
+/** The document as a replica receives it over the Yjs wire. */
+function received(markdown: string): Y.Doc {
+  const written = markdownToYDoc(markdown)
+  const doc = new Y.Doc()
+  try { Y.applyUpdate(doc, Y.encodeStateAsUpdate(written)) } finally { written.destroy() }
+  return doc
+}
+
+// Every value kind the canonical writer keeps: maps and arrays with a
+// `__proto__` or `constructor` key, exact integers, and a literal key spelled
+// like the integer's marker, in shared Y types or as Yjs Any.
+const MOVED_BLOCK = [
+  '---',
+  'deep:', '  inner:', '    __proto__: nested-proto', '    exact: 9007199254740993',
+  'exact: 9007199254740993',
+  'hostile:', '  __proto__: nested-value', '  constructor: own',
+  'literal:', '  - constructor: hostile-constructor', '  - $dohcBigInt: 9007199254740993',
+  'marker:', '  $dohcBigInt: 9007199254740993', '  constructor: own',
+  'mixed:', '  - constructor: hostile-constructor', '  - 9007199254740993',
+  'nested:', '  exact: 9007199254740993',
+  'settings:', '  pinned: true',
+  'status: draft',
+  '---', '', '',
+].join('\n')
+const MOVED_KEYS = ['deep', 'exact', 'hostile', 'literal', 'marker', 'mixed', 'nested', 'settings', 'status']
+
+/** Another replica of the document, through the Yjs wire. */
+function replica(doc: Y.Doc): Y.Doc {
+  const copy = new Y.Doc()
+  Y.applyUpdate(copy, Y.encodeStateAsUpdate(doc))
+  return copy
+}
+
+/** The frontmatter keys an action changes, including changes inside a shared value. */
+function changedKeys(doc: Y.Doc, action: () => void): Set<string> {
+  const frontmatter = doc.getMap<unknown>('frontmatter')
+  const changed = new Set<string>()
+  const observe = (events: Array<Y.YEvent<Y.AbstractType<unknown>>>) => {
+    for (const event of events) {
+      if (event.target !== frontmatter) changed.add(String(event.path[0]))
+      else if (event instanceof Y.YMapEvent) for (const key of event.keysChanged) changed.add(key)
+    }
+  }
+  frontmatter.observeDeep(observe)
+  try { action() } finally { frontmatter.unobserveDeep(observe) }
+  return changed
+}
 
 const refusal = "dohc can't change one property in this file without rewriting the others. Edit the file's text instead."
 describe('shared frontmatter edit candidates', () => {
@@ -50,6 +120,140 @@ describe('shared frontmatter edit candidates', () => {
         expect(yDocToMarkdown(doc)).toBe(vector.expected)
         expect(writeMarkdownFrontmatter(vector.markdown, values)).toBe(vector.expected)
       }
+    } finally { doc.destroy() }
+  })
+})
+
+describe('shared frontmatter values a patch writes', () => {
+  // A rename removes the old key and writes the value read from it under the
+  // new one. The value arrives decoded, with null-prototype maps.
+  it.each(MOVED_KEYS)('moves %s to a new key as the canonical writer keeps it', key => {
+    const doc = received(`${MOVED_BLOCK}Body`)
+    const frontmatter = doc.getMap<unknown>('frontmatter')
+    let copy: Y.Doc | undefined
+    try {
+      expect(doc.getMap('meta').get('dohcFrontmatterSource')).toBeUndefined()
+      const value = frontmatterMapValues(frontmatter)[key]
+      const shared = frontmatter.get(key) instanceof Y.AbstractType
+      const others = MOVED_KEYS.filter(other => other !== key)
+      const unchanged = new Map(others.map(other => [other, frontmatter.get(other)] as const))
+
+      expect(changedKeys(doc, () => patchFrontmatter(doc, new Map([[`${key}2`, value]]), [key])))
+        .toEqual(new Set([key, `${key}2`]))
+      for (const other of others) expect(frontmatter.get(other), other).toBe(unchanged.get(other))
+
+      copy = replica(doc)
+      const moved = copy.getMap<unknown>('frontmatter')
+      expect(moved.has(key)).toBe(false)
+      expect(moved.get(`${key}2`) instanceof Y.AbstractType, 'stored as the canonical writer stores it').toBe(shared)
+      expect(frontmatterMapValues(moved)[`${key}2`]).toEqual(value)
+      expect(yDocToMarkdown(copy)).toBe(`${MOVED_BLOCK.replace(`\n${key}:`, `\n${key}2:`)}Body`)
+    } finally {
+      copy?.destroy()
+      doc.destroy()
+    }
+  })
+
+  // Yjs dispatches a plain value through `value.constructor`, and lib0's
+  // decoder assigns `__proto__` through its setter.
+  it.each<[string, unknown, string]>([
+    ['a constructor key', JSON.parse('{"constructor":"own","pinned":true}'), 'value:\n  constructor: own\n  pinned: true\n'],
+    ['a nested __proto__ key', JSON.parse('{"inner":{"__proto__":"nested-proto"}}'), 'value:\n  inner:\n    __proto__: nested-proto\n'],
+    ['a __proto__ key in a list', JSON.parse('[{"__proto__":"listed"}]'), 'value:\n  - __proto__: listed\n'],
+    [
+      'a literal marker key beside a constructor key',
+      [{ constructor: 'own' }, { $dohcBigInt: 9007199254740993n }],
+      'value:\n  - constructor: own\n  - $dohcBigInt: 9007199254740993\n',
+    ],
+  ])('writes a value with %s that another replica reads back', (_name, value, entry) => {
+    const doc = markdownToYDoc('---\nstatus: draft\n---\n\nBody')
+    let copy: Y.Doc | undefined
+    try {
+      setFrontmatterValue(doc, 'value', value)
+      copy = replica(doc)
+      expect(frontmatterMapValues(copy.getMap('frontmatter')).value).toEqual(value)
+      expect(yDocToMarkdown(copy)).toBe(`---\nstatus: draft\n${entry}---\n\nBody`)
+    } finally {
+      copy?.destroy()
+      doc.destroy()
+    }
+  })
+
+  it('keeps the kept text and the source items of the keys a move leaves alone', () => {
+    const doc = received(`${KEPT_SHARED_BLOCK}Body`)
+    const frontmatter = doc.getMap<unknown>('frontmatter')
+    const meta = doc.getMap<unknown>('meta')
+    let copy: Y.Doc | undefined
+    try {
+      const written = writtenFrontmatterKeys(frontmatter, meta)
+      expect(written.has('hostile')).toBe(true)
+      const hostile = frontmatterMapValues(frontmatter).hostile
+
+      expect(changedKeys(doc, () => patchFrontmatter(doc, new Map([['hostile2', hostile]]), ['hostile'])))
+        .toEqual(new Set(['hostile', 'hostile2']))
+      expect(writtenFrontmatterKeys(frontmatter, meta)).toEqual(new Set([...written].filter(key => key !== 'hostile')))
+
+      // Until a settle records new text, the file still holds the old block.
+      expect(frontmatterAsWritten(doc, false)).toBe(KEPT_SHARED_BLOCK)
+      const entry = 'hostile:\n  __proto__: nested-value\n  constructor: own\n'
+      const settled = KEPT_SHARED_BLOCK
+        .replace(entry, '')
+        .replace('status: draft\n', `status: draft\n${entry.replace('hostile:', 'hostile2:')}`)
+      expect(frontmatterAsWritten(doc, true)).toBe(settled)
+      copy = replica(doc)
+      expect(yDocToMarkdown(copy)).toBe(`${settled}Body`)
+    } finally {
+      copy?.destroy()
+      doc.destroy()
+    }
+  })
+
+  // Building a shared value can fail after every check passes. The patch
+  // builds every value before its first write, including the removal.
+  it('writes nothing when a value cannot be built', () => {
+    const doc = received(`${KEPT_SHARED_BLOCK}Body`)
+    const frontmatter = doc.getMap<unknown>('frontmatter')
+    const meta = doc.getMap<unknown>('meta')
+    const set = Y.Map.prototype.set
+    // Only a detached map, one a value is being built in, refuses the write.
+    const building = vi.spyOn(Y.Map.prototype, 'set').mockImplementation(function (this: Y.Map<unknown>, key: string, value: unknown) {
+      if (this.doc === null) throw new Error('could not build the value')
+      return set.call(this, key, value)
+    })
+    try {
+      const before = Y.encodeStateAsUpdate(doc)
+      const source = meta.toJSON()
+      const written = writtenFrontmatterKeys(frontmatter, meta)
+      const patch = new Map<string, unknown>([['status', 'ready'], ['hostile2', frontmatterMapValues(frontmatter).hostile]])
+
+      expect(() => patchFrontmatter(doc, patch, ['hostile'])).toThrow('could not build the value')
+      expect(building).toHaveBeenCalled()
+      expect(Y.encodeStateAsUpdate(doc)).toEqual(before)
+      expect(meta.toJSON()).toEqual(source)
+      expect(writtenFrontmatterKeys(frontmatter, meta)).toEqual(written)
+      expect(frontmatterAsWritten(doc, true)).toBe(KEPT_SHARED_BLOCK)
+    } finally {
+      building.mockRestore()
+      doc.destroy()
+    }
+  })
+
+  // Yjs keeps whatever a transaction wrote before it threw, so every check
+  // must run before the first write, including the removal.
+  it.each<[string, string, Map<string, unknown>]>([
+    ['rewrites an alias', 'a: &v .nan\nb: *v\n', new Map([['b', '.nan']])],
+    ['holds an integer outside int64', '', new Map([['big', { constructor: 'own', value: 2n ** 63n }]])],
+  ])('refuses a move beside a value that %s before any write', (_name, extra, values) => {
+    const doc = received(`${MOVED_BLOCK.replace('status: draft\n', `status: draft\n${extra}`)}Body`)
+    const frontmatter = doc.getMap<unknown>('frontmatter')
+    try {
+      const hostile = frontmatter.get('hostile')
+      const before = Y.encodeStateAsUpdate(doc)
+      const patch = new Map<string, unknown>([...values,['hostile2', frontmatterMapValues(frontmatter).hostile]])
+
+      expect(() => patchFrontmatter(doc, patch, ['hostile'])).toThrow(refusal)
+      expect(Y.encodeStateAsUpdate(doc)).toEqual(before)
+      expect(frontmatter.get('hostile')).toBe(hostile)
     } finally { doc.destroy() }
   })
 })
@@ -271,6 +475,73 @@ describe('frontmatterAsWritten', () => {
       const second = frontmatterAsWritten(doc, true)
       expect(second).toBe('---\n# keep me\nstatus: ready\nowner: sam\n---\n\n')
       expect(yDocToMarkdown(doc)).toBe(`${second}Body`)
+    } finally { doc.destroy() }
+  })
+
+  it('writes values kept in shared types, and an edit beside them changes only its key', () => {
+    const doc = received(`${SHARED_BLOCK}Body`)
+    try {
+      const frontmatter = doc.getMap<unknown>('frontmatter')
+      expect(frontmatter.get('hostile')).toBeInstanceOf(Y.Map)
+      expect(frontmatter.get('literal')).toBeInstanceOf(Y.Array)
+      expect(frontmatter.get('mixed')).toBeInstanceOf(Y.Array)
+      expect(frontmatter.get('exact')).toBe(9007199254740993n)
+      expect(frontmatterAsWritten(doc, false)).toBe(SHARED_BLOCK)
+      expect(frontmatterAsWritten(doc, true)).toBe(SHARED_BLOCK)
+
+      const shared = ['hostile', 'literal', 'mixed'].map(key => frontmatter.get(key))
+      expect(changedKeys(doc, () => setFrontmatterValue(doc, 'status', 'ready'))).toEqual(new Set(['status']))
+      expect(['hostile', 'literal', 'mixed'].map(key => frontmatter.get(key))).toEqual(shared)
+      expect(frontmatter.get('exact')).toBe(9007199254740993n)
+
+      const ready = SHARED_BLOCK.replace('status: draft', 'status: ready')
+      expect(frontmatterAsWritten(doc, false)).toBe(ready)
+      expect(frontmatterAsWritten(doc, true)).toBe(ready)
+      expect(yDocToMarkdown(doc)).toBe(`${ready}Body`)
+    } finally { doc.destroy() }
+  })
+
+  it('keeps the text of values kept in shared types through a settled edit beside them', () => {
+    const doc = received(`${KEPT_SHARED_BLOCK}Body`)
+    try {
+      expect(frontmatterAsWritten(doc, false)).toBe(KEPT_SHARED_BLOCK)
+      expect(frontmatterAsWritten(doc, true)).toBe(KEPT_SHARED_BLOCK)
+
+      expect(changedKeys(doc, () => setFrontmatterValue(doc, 'status', 'ready'))).toEqual(new Set(['status']))
+      // Until a settle records new text, the file still holds the old block.
+      expect(frontmatterAsWritten(doc, false)).toBe(KEPT_SHARED_BLOCK)
+      const settled = KEPT_SHARED_BLOCK.replace('status: draft', 'status: ready')
+      expect(frontmatterAsWritten(doc, true)).toBe(settled)
+      expect(yDocToMarkdown(doc)).toBe(`${settled}Body`)
+    } finally { doc.destroy() }
+  })
+
+  // A bigint set straight on the map is a native Yjs Any value, not one the
+  // Markdown writer produced.
+  it('writes a native Any bigint and keeps it through an edit beside it', () => {
+    const source = markdownToYDoc('---\n# note\nstatus: draft\n---\n\nBody')
+    source.getMap('frontmatter').set('native', 9007199254740993n)
+    const doc = new Y.Doc()
+    try {
+      Y.applyUpdate(doc, Y.encodeStateAsUpdate(source))
+      expect(doc.getMap('frontmatter').get('native')).toBe(9007199254740993n)
+      expect(frontmatterAsWritten(doc, true)).toBe('---\n# note\nstatus: draft\nnative: 9007199254740993\n---\n\n')
+
+      expect(changedKeys(doc, () => setFrontmatterValue(doc, 'status', 'ready'))).toEqual(new Set(['status']))
+      expect(doc.getMap('frontmatter').get('native')).toBe(9007199254740993n)
+      expect(frontmatterAsWritten(doc, true)).toBe('---\n# note\nstatus: ready\nnative: 9007199254740993\n---\n\n')
+    } finally {
+      source.destroy()
+      doc.destroy()
+    }
+  })
+
+  it('still refuses an edit that would rewrite an alias beside shared values', () => {
+    const doc = received(`${SHARED_BLOCK.replace('status: draft\n', 'a: &v .nan\nb: *v\n')}Body`)
+    try {
+      const before = Y.encodeStateAsUpdate(doc)
+      expect(() => setFrontmatterValue(doc, 'b', '.nan')).toThrow(refusal)
+      expect(Y.encodeStateAsUpdate(doc)).toEqual(before)
     } finally { doc.destroy() }
   })
 })
