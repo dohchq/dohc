@@ -69,7 +69,7 @@ describe("CLI, MCP, and app channel reference", () => {
       expect(section).toContain(`Uses socket verb \`${socketVerb}\`.`);
     }
     expect(section).toContain("only the allowlisted AccessAnswer fields");
-    expect(section).toContain("never return credentials, bearer URLs, invitation URLs, share codes, or links");
+    expect(section).toContain("never return credentials, bearer URLs, invitation URLs, share codes, or link URLs");
     expect(section).toContain("the CLI never refreshes share inventories");
     expect(section).toContain("`freshness` is `fresh`, `stale`, or `unknown`");
     expect(section).toContain("`checkedAtMs`");
