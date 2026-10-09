@@ -724,6 +724,99 @@ describe("the automation replicas", () => {
     expect(engine.methods().filter(method => method === "workspace.open")).toHaveLength(3);
   });
 
+  it.each([false, true])("backs off pre-step open failures after a push failure (owner retry: %s)", async (ownerRetry) => {
+    vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
+    vi.setSystemTime(0);
+    cleanup.push(async () => { vi.useRealTimers(); });
+    const { storage } = await relay();
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    const engine = fakeEngine();
+    let refuse = false;
+    refuseOpens(engine, () => refuse);
+    engine.failPush(true);
+    const passes = passEnds();
+    let started = 0, completed = 0;
+    const errors: number[] = [];
+    const running = await start(storage, { wanted: () => { started += 1; return [WORKSPACE]; },
+      onError: () => errors.push(Date.now()), onReconciled: () => { completed += 1; passes.onReconciled(); } });
+    const failed = passes.next();
+    await vi.advanceTimersByTimeAsync(0);
+    await failed;
+    expect(running.replica(WORKSPACE)).toBeUndefined();
+    expect(errors).toEqual([0]);
+    // Drain the push failure's ordinary wake before the retry becomes due.
+    const wake = passes.next();
+    await vi.advanceTimersByTimeAsync(100);
+    await wake;
+    engine.failPush(false);
+    refuse = true;
+    const before = completed, errorsBefore = errors.length;
+    const refused = passes.next();
+    if (ownerRetry) running.reconcile(WORKSPACE);
+    await vi.advanceTimersByTimeAsync(ownerRetry ? 100 : 1_900);
+    await refused;
+    const refusedAt = Date.now();
+    expect(errors.at(-1)).toBe(refusedAt);
+    const extra = passes.next();
+    await vi.advanceTimersByTimeAsync(3_000);
+    // Finish a pass that fake time started but whose real folder work is still running.
+    if (started > before + 1) await extra;
+    expect({ passes: completed - before, onError: errors.length - errorsBefore }).toEqual({ passes: 1, onError: 1 });
+    expect(running.failedSyncs().get(WORKSPACE)).toEqual(new Error("the engine refused this workspace"));
+    await vi.advanceTimersByTimeAsync(999);
+    expect(errors.slice(errorsBefore)).toEqual([refusedAt]);
+    const retry = passes.next();
+    await vi.advanceTimersByTimeAsync(1);
+    await retry;
+    expect(errors.slice(errorsBefore)).toEqual([refusedAt, refusedAt + 4_000]);
+    const later = passes.next();
+    await vi.advanceTimersByTimeAsync(8_000);
+    await later;
+    expect(errors.slice(errorsBefore)).toEqual([refusedAt, refusedAt + 4_000, refusedAt + 12_000]);
+    expect(engine.methods().filter(method => method === "sync.push")).toHaveLength(1);
+  });
+
+  it("backs off join failures for an open replica with a due retry", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
+    vi.setSystemTime(0);
+    cleanup.push(async () => { vi.useRealTimers(); });
+    const { storage } = await relay();
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    const engine = fakeEngine();
+    const passes = passEnds();
+    let completed = 0;
+    const errors: number[] = [];
+    const running = await start(storage, { wanted: () => [WORKSPACE], onError: () => errors.push(Date.now()),
+      onReconciled: () => { completed += 1; passes.onReconciled(); } });
+    const opened = passes.next();
+    await vi.advanceTimersByTimeAsync(0);
+    await opened;
+    const replica = running.replica(WORKSPACE)!;
+    engine.failPush(true);
+    await expect(replica.sync()).rejects.toThrow("replica cannot push");
+    const wake = passes.next();
+    await vi.advanceTimersByTimeAsync(100);
+    await wake;
+    const join = vi.spyOn(storage, "joinAutomationWorkspace").mockImplementation(() => { throw new Error("the join failed"); });
+    cleanup.push(async () => { join.mockRestore(); });
+    const before = completed;
+    const failed = passes.next();
+    await vi.advanceTimersByTimeAsync(1_900);
+    await failed;
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect({ passes: completed - before, onError: errors.length }).toEqual({ passes: 1, onError: 1 });
+    expect(errors).toEqual([2_000]);
+    expect(running.replica(WORKSPACE)).toBe(replica);
+    expect(running.failedSyncs().get(WORKSPACE)).toEqual(new Error("the join failed"));
+    await vi.advanceTimersByTimeAsync(999);
+    expect(errors).toEqual([2_000]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(errors).toEqual([2_000, 6_000]);
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(errors).toEqual([2_000, 6_000, 14_000]);
+    expect(engine.methods().filter(method => method === "sync.push")).toHaveLength(2);
+  });
+
   it("refreshes live checkpoints before syncing and still syncs when that lane fails", async () => {
     const {storage} = await relay();
     const engine = fakeEngine();

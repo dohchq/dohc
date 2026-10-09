@@ -300,6 +300,12 @@ export async function startAutomationReplicas(options: {
       return true;
     } catch (error) {
       if (signal.aborted) throw error;
+      const retry = syncRetries.get(workspaceId);
+      const now = performance.now();
+      if (retry && retry.at <= now) {
+        retry.delay = Math.min(retry.delay * 2, RETRY_MAX_MS);
+        retry.at = now + retry.delay;
+      }
       failedSyncs.set(workspaceId, error);
       observe(() => options.onError?.(error, workspaceId));
       return false;
