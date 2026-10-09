@@ -787,6 +787,24 @@ impl Fixture {
         received_at_ms: i64,
         agent_declaration: Option<AgentDeclaration>,
     ) -> (LiveUpdateReceipt, ApplicationResult) {
+        self.apply_declared_with_content(
+            cursor,
+            bytes,
+            authority,
+            received_at_ms,
+            (agent_declaration, vec![]),
+        )
+        .await
+    }
+    async fn apply_declared_with_content(
+        &self,
+        cursor: i64,
+        bytes: Vec<u8>,
+        authority: ServerDerivedLiveUpdateAuthority,
+        received_at_ms: i64,
+        authorship: (Option<AgentDeclaration>, Vec<LiveUpdateStructRange>),
+    ) -> (LiveUpdateReceipt, ApplicationResult) {
+        let (agent_declaration, first_seen) = authorship;
         self.doc.apply(&bytes).unwrap();
         let receipt = LiveUpdateReceipt {
             delivery_id: format!("delivery-{cursor}"),
@@ -802,7 +820,7 @@ impl Fixture {
                     authority,
                     received_at_ms,
                 },
-                first_seen: vec![],
+                first_seen,
                 canonical_version: Some(2),
                 author_snapshot: Some(
                     (agent_declaration)
@@ -1017,6 +1035,25 @@ fn delete_last_block(doc: &Ydoc) -> Vec<u8> {
 /// edit with no new structs. The next interval names only its own.
 #[tokio::test]
 async fn live_settlement_names_declared_agents_of_its_exact_interval() {
+    fn paragraph(doc: &Ydoc, text: &str) -> (Vec<u8>, Vec<LiveUpdateStructRange>) {
+        use yrs::updates::decoder::Decode;
+        let before = yrs::StateVector::decode_v1(&doc.encode_state_vector()).unwrap();
+        let bytes = doc.richdoc_append_paragraph(text);
+        let after = yrs::StateVector::decode_v1(&doc.encode_state_vector()).unwrap();
+        let mut ranges: Vec<_> = after
+            .iter()
+            .filter_map(|(client, clock)| {
+                let start = before.get(client);
+                (*clock > start).then_some(LiveUpdateStructRange {
+                    client_id: client.get() as i64,
+                    start_clock: i64::from(start),
+                    end_clock: i64::from(*clock),
+                })
+            })
+            .collect();
+        ranges.sort_by_key(|range| range.client_id);
+        (bytes, ranges)
+    }
     let f = Fixture::new().await;
     f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
     let added = f.doc.richdoc_append_paragraph("Agent paragraph");
@@ -1030,20 +1067,26 @@ async fn live_settlement_names_declared_agents_of_its_exact_interval() {
         )
         .await;
     assert!(matches!(result, ApplicationResult::Applied(..)));
-    f.apply(4, f.doc.richdoc_append_paragraph("Owner paragraph"))
+    let (bytes, ranges) = paragraph(&f.doc, "Owner paragraph");
+    let (_, result) = f
+        .apply_declared_with_content(4, bytes, owner_authority(), 2, (None, ranges))
         .await;
-    let terminal = f
-        .apply_as(
+    assert!(matches!(result, ApplicationResult::Applied(..)));
+    let (bytes, ranges) = paragraph(&f.doc, "Friend paragraph");
+    let (terminal, result) = f
+        .apply_declared_with_content(
             5,
-            f.doc.richdoc_append_paragraph("Friend paragraph"),
+            bytes,
             ServerDerivedLiveUpdateAuthority::Named {
                 principal_id: "friend".into(),
                 grant_id: "grant".into(),
                 grant_generation: 1,
             },
             2,
+            (None, ranges),
         )
         .await;
+    assert!(matches!(result, ApplicationResult::Applied(..)));
     f.settle(Some(terminal), 100, Arc::new(NoFaults))
         .await
         .unwrap();

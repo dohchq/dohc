@@ -214,6 +214,7 @@ fn apply_ordered_in_tx(
         &input.update_bytes,
         None,
         None,
+        false,
         now_ms,
     )
     .map_err(collab)?;

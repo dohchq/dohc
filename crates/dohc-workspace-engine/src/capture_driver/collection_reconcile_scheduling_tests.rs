@@ -84,7 +84,9 @@ async fn seed_plain_richdoc_lineage(actor: &ActorHandle, path: &str, markdown: &
             None,
             state.lineage_claim_id,
             true,
-            state.owner_seed_source,
+            Some(dohc_engine_runtime::YdocSeed {
+                source: state.owner_seed_source,
+            }),
             None,
             wall_now_ms(),
             Arc::new(NoFaults),

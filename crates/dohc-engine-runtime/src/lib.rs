@@ -37,7 +37,7 @@ pub use actor::{
     PostCommitMaterializeOutcome, RelayConfiguration, RelayOperation, RelayOperationOutcome,
     RollbackExecutionResult, SelfWriteRecorder, ShareViewIdentityRecord, SharingDeclined,
     TextWriteExecutionResult, WorkspaceActor, WorkspaceRootGuard, WriteConditions, YdocAppend,
-    YdocCloseSessionOutcome, YdocOpenState, YdocSettleOutcome, YdocSettlement,
+    YdocCloseSessionOutcome, YdocOpenState, YdocSeed, YdocSettleOutcome, YdocSettlement,
 };
 pub use error::RuntimeError;
 pub use identity::EngineDbIdentity;

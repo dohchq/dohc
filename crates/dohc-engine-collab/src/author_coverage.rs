@@ -135,6 +135,7 @@ pub fn accepted_only_in(conn: &Connection, key: &DocKey) -> Result<bool, CollabE
 
 /// Read only authors above the settled boundary, including rows a fold already
 /// consumed and authors that accepted deliveries admitted.
+/// `through` bounds native rows; pending coverage, including the marker, is interval-wide.
 pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Authors, CollabError> {
     let (boundary, pending): (Option<i64>, String) = conn
         .query_row(
@@ -327,6 +328,23 @@ pub fn check_admission_in(
     if accepted_only_in(conn, key)? {
         entry(&json)?;
         return Ok(false);
+    }
+    if actorless {
+        let pending: String = conn
+            .query_row(
+                "SELECT pending_authors_json FROM ydoc_docs \
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                params![key.workspace_id, key.version_id, key.object_id],
+                |row| row.get(0),
+            )
+            .map_err(sql)?;
+        let mut admitted = Authors::default();
+        admitted.union_json(&pending)?;
+        // The first marker admission already checked capacity and requested
+        // settlement if due. Repeated actorless edits add no identity or bytes.
+        if admitted.0.contains_key("unattributed") {
+            return Ok(false);
+        }
     }
     let mut covered = reserved_in(conn, key)?;
     let bytes = admit(&mut covered, &json)?;

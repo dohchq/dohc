@@ -966,13 +966,14 @@ impl Fixture {
         self.accept(bytes, cursor)
     }
     fn accept(&mut self, bytes: Vec<u8>, cursor: i64) -> NativeRestorePoint {
-        self.accept_declared(bytes, cursor, None)
+        self.accept_declared(bytes, cursor, None, vec![])
     }
     fn accept_declared(
         &mut self,
         bytes: Vec<u8>,
         cursor: i64,
         agent_declaration: Option<AgentDeclaration>,
+        first_seen: Vec<LiveUpdateStructRange>,
     ) -> NativeRestorePoint {
         let receipt = LiveUpdateReceipt {
             delivery_id: format!("event-{cursor}"),
@@ -990,7 +991,7 @@ impl Fixture {
                     },
                     received_at_ms: cursor,
                 },
-                first_seen: vec![],
+                first_seen,
                 canonical_version: Some(2),
                 author_snapshot: Some(
                     (agent_declaration)
@@ -2610,6 +2611,24 @@ fn adoption_origin_stamp_keeps_sqlite_json_bytes_and_is_bounded_before_serializi
 /// and reopen change nothing.
 #[test]
 fn interval_keeps_declared_agents_through_dedupe_compaction_and_reopen() {
+    fn paragraph(doc: &Ydoc, text: &str) -> (Vec<u8>, Vec<LiveUpdateStructRange>) {
+        let before = doc.state_vector();
+        let bytes = doc.richdoc_append_paragraph(text);
+        let mut ranges: Vec<_> = doc
+            .state_vector()
+            .iter()
+            .filter_map(|(client, clock)| {
+                let start = before.get(client);
+                (*clock > start).then_some(LiveUpdateStructRange {
+                    client_id: client.get() as i64,
+                    start_clock: i64::from(start),
+                    end_clock: i64::from(*clock),
+                })
+            })
+            .collect();
+        ranges.sort_by_key(|range| range.client_id);
+        (bytes, ranges)
+    }
     let agent = |agent_id: &str, depth| {
         Some(AgentDeclaration {
             agent_id: agent_id.into(),
@@ -2626,11 +2645,11 @@ fn interval_keeps_declared_agents_through_dedupe_compaction_and_reopen() {
         serde_json::from_str::<Value>(&authors.json()).unwrap()
     };
     let mut f = Fixture::new("Original");
-    let first = f.doc.richdoc_append_paragraph("Agent edit");
-    f.accept_declared(first.clone(), 3, agent("trip-agent", 0));
-    let person = f.doc.richdoc_append_paragraph("Person edit");
-    f.accept_declared(person, 5, None);
-    f.accept_declared(first, 7, agent("review-agent", 2));
+    let (first, first_seen) = paragraph(&f.doc, "Agent edit");
+    f.accept_declared(first.clone(), 3, agent("trip-agent", 0), first_seen);
+    let (person, first_seen) = paragraph(&f.doc, "Person edit");
+    f.accept_declared(person, 5, None, first_seen);
+    f.accept_declared(first, 7, agent("review-agent", 2), vec![]);
     assert_eq!(
         f.store
             .read_with(|conn| conn.query_row(

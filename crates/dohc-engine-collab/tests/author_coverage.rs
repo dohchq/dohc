@@ -159,6 +159,36 @@ fn interval_actorless_seed_adds_no_marker() {
 }
 
 #[test]
+fn repeated_actorless_admission_does_not_scan_interval_rows() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    let mut ts = fresh_store("actorless-admission-no-scan");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1);
+    record_actorless(&mut ts, &key, &Ydoc::wire().plaintext_insert(0, "x"), false);
+    ts.store
+        .write_with(&NoFaults, |tx| {
+            tx.authorizer(Some(|context: AuthContext<'_>| match context.action {
+                AuthAction::Read {
+                    table_name: "ydoc_updates",
+                    ..
+                } => Authorization::Deny,
+                _ => Authorization::Allow,
+            }))
+            .unwrap();
+            let result = author_coverage::check_admission_in(tx, &key, None, None);
+            tx.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+                .unwrap();
+            assert!(!result.expect("the pending marker makes an interval scan unnecessary"));
+            Ok::<_, CollabError>(())
+        })
+        .unwrap();
+    assert_eq!(
+        interval_authors(&ts, &key, i64::MAX),
+        serde_json::json!([{"kind":"unattributed"}])
+    );
+}
+
+#[test]
 fn actorless_admission_counts_the_marker_and_refuses_before_appending() {
     let mut ts = fresh_store("actorless-capacity");
     let key = test_key();

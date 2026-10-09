@@ -56,7 +56,22 @@ fn adopted_settlement_preserves_unattributed_owner_and_recipient_contributions()
             } else {
                 contributor
             };
+            let before = f.doc.state_vector();
             let bytes = f.doc.richdoc_append_paragraph(text);
+            let mut first_seen: Vec<_> = f
+                .doc
+                .state_vector()
+                .iter()
+                .filter_map(|(client, clock)| {
+                    let start = before.get(client);
+                    (*clock > start).then_some(LiveUpdateStructRange {
+                        client_id: client.get() as i64,
+                        start_clock: i64::from(start),
+                        end_clock: i64::from(*clock),
+                    })
+                })
+                .collect();
+            first_seen.sort_by_key(|range| range.client_id);
             let event = AdmittedLiveUpdate {
                 metadata: AdmittedLiveUpdateMetadata {
                     accepted: RelayAcceptedLiveUpdate {
@@ -80,7 +95,7 @@ fn adopted_settlement_preserves_unattributed_owner_and_recipient_contributions()
                         },
                         received_at_ms: cursor,
                     },
-                    first_seen: vec![],
+                    first_seen,
                     canonical_version: Some(2),
                     author_snapshot: Some(if cursor == 1 {
                         vec![LiveAuthorEntry::Human {
@@ -1122,7 +1137,9 @@ fn native_restore_keeps_enrolled_owner_drafts_as_truthful_sources() {
             let key = f.key.clone();
             f.store
                 .write_with(&NoFaults, |tx| {
-                    durable::record_authorized_update_in_tx(tx, &key, &update, None, None, 11)
+                    durable::record_authorized_update_in_tx(
+                        tx, &key, &update, None, None, false, 11,
+                    )
                 })
                 .unwrap();
             (None, 0)
@@ -1274,8 +1291,9 @@ fn native_restore_tail_accepts_trusted_deduped_pre_adoption_source_as_overlappin
     let appended = f
         .store
         .write_with(&NoFaults, |tx| {
-            let outcome =
-                durable::record_authorized_update_in_tx(tx, &key, &original, None, None, 11)?;
+            let outcome = durable::record_authorized_update_in_tx(
+                tx, &key, &original, None, None, false, 11,
+            )?;
             owner_outbox::append_adopted_local_update_in_tx(
                 tx,
                 &key,

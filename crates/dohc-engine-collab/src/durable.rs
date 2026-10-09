@@ -2171,16 +2171,18 @@ pub fn record_update_in_tx(
     if crate::owner_outbox::has_adopted_owner_in(tx, key)? {
         return Err(CollabError::OwnerOutboxFrozen);
     }
-    record_authorized_update_in_tx(tx, key, update, actor_origin_id, attribution, now_ms)
+    record_authorized_update_in_tx(tx, key, update, actor_origin_id, attribution, false, now_ms)
 }
 
 /// The receipt application owner has checked its full binding in this transaction.
+/// `authors_admitted` skips native admission when accepted snapshot coverage owns it.
 pub(crate) fn record_authorized_update_in_tx(
     tx: &Transaction<'_>,
     key: &DocKey,
     update: &[u8],
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
+    authors_admitted: bool,
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
     validate_update_bytes(update)?;
@@ -2194,32 +2196,7 @@ pub(crate) fn record_authorized_update_in_tx(
         &sha,
         actor_origin_id,
         attribution,
-        false,
-        now_ms,
-    )
-}
-
-/// Accepted delivery authors have already passed coverage admission in this transaction.
-pub(crate) fn record_accepted_update_in_tx(
-    tx: &Transaction<'_>,
-    key: &DocKey,
-    update: &[u8],
-    actor_origin_id: Option<&str>,
-    attribution: Option<&ChangeAttribution>,
-    now_ms: i64,
-) -> Result<AppendOutcome, CollabError> {
-    validate_update_bytes(update)?;
-    let marker = read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
-    let sha = crate::hex_sha256(update);
-    append_local_update(
-        tx,
-        key,
-        &marker,
-        update,
-        &sha,
-        actor_origin_id,
-        attribution,
-        true,
+        authors_admitted,
         now_ms,
     )
 }
