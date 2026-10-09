@@ -82,7 +82,6 @@ type MutationMetadata = JsonObject & {
   workspaceId?: string;
   origin?: VersionedOrigin;
   author?: WriteAuthor;
-  requestId?: string;
   nowMs?: number;
   summary?: string;
   correlationId?: string;

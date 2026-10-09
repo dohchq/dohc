@@ -70,8 +70,6 @@ struct VersionedTextWriteParams {
     #[serde(default)]
     author: Option<Value>,
     #[serde(default)]
-    request_id: Option<String>,
-    #[serde(default)]
     now_ms: Option<i64>,
 }
 
@@ -105,8 +103,6 @@ struct VersionedTextWriteBlobParams {
     #[serde(default)]
     author: Option<Value>,
     #[serde(default)]
-    request_id: Option<String>,
-    #[serde(default)]
     now_ms: Option<i64>,
 }
 
@@ -138,8 +134,6 @@ struct VersionedBinaryWriteParams {
     #[serde(default)]
     moment_id: Option<String>,
     #[serde(default)]
-    request_id: Option<String>,
-    #[serde(default)]
     now_ms: Option<i64>,
 }
 
@@ -170,8 +164,6 @@ struct VersionedBinaryWriteBlobParams {
     #[serde(default)]
     moment_id: Option<String>,
     #[serde(default)]
-    request_id: Option<String>,
-    #[serde(default)]
     now_ms: Option<i64>,
 }
 
@@ -191,8 +183,6 @@ struct VersionedTextRenameParams {
     correlation_id: Option<String>,
     #[serde(default)]
     author: Option<Value>,
-    #[serde(default)]
-    request_id: Option<String>,
     #[serde(default)]
     now_ms: Option<i64>,
     /// The `capture.hold` this rename records under; refused once it ended.
@@ -235,8 +225,6 @@ struct VersionedTextDeleteParams {
     #[serde(default)]
     author: Option<Value>,
     #[serde(default)]
-    request_id: Option<String>,
-    #[serde(default)]
     now_ms: Option<i64>,
     /// The `capture.hold` this delete records under; refused once it ended.
     #[serde(default)]
@@ -255,8 +243,6 @@ struct VersionedTextRollbackParams {
     origin: Option<String>,
     #[serde(default)]
     author: Option<Value>,
-    #[serde(default)]
-    request_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -285,8 +271,6 @@ struct VersionedTextMergeParams {
     correlation_id: Option<String>,
     #[serde(default)]
     author: Option<Value>,
-    #[serde(default)]
-    request_id: Option<String>,
     #[serde(default)]
     now_ms: Option<i64>,
 }
@@ -356,26 +340,34 @@ impl EngineService {
     pub(super) async fn versioned_text_write(
         &self,
         ctx: &RequestContext,
-        request: &Request,
-        params: Value,
+        request: Request,
     ) -> Result<Value, WireError> {
-        let params: VersionedTextWriteParams = parse(params)?;
+        let params: VersionedTextWriteParams = parse(request.params)?;
         if params.text.len() > MAX_DESKTOP_CAPTURE_TEXT_BYTES {
             return Err(WireError::new(
                 ErrorCode::InvalidParams,
                 "content-exceeds-inband-cap",
             ));
         }
-        self.publish_text(ctx, request, params).await
+        self.publish_text(
+            ctx,
+            request.workspace.as_ref(),
+            request.id,
+            request.idempotency_key,
+            params,
+        )
+        .await
     }
 
     async fn publish_text(
         &self,
         ctx: &RequestContext,
-        request: &Request,
+        handle: Option<&WorkspaceHandle>,
+        wire_request_id: u64,
+        request_id: Option<String>,
         params: VersionedTextWriteParams,
     ) -> Result<Value, WireError> {
-        let open = self.open(request.workspace.as_ref())?;
+        let open = self.open(handle)?;
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let path = params.path.clone();
         let text = params.text;
@@ -388,14 +380,11 @@ impl EngineService {
             .await?;
         self.ensure_path_not_leased(&open, &params.version_id, &path)
             .await?;
-        let request_id = params
-            .request_id
-            .or_else(|| request.idempotency_key.clone());
         let object_id = params.object_id.unwrap_or_else(|| {
-            self.generated_rpc_id("object", request.id, request_id.as_deref(), &path)
+            self.generated_rpc_id("object", wire_request_id, request_id.as_deref(), &path)
         });
         let moment_id = params.moment_id.unwrap_or_else(|| {
-            self.generated_rpc_id("moment", request.id, request_id.as_deref(), &path)
+            self.generated_rpc_id("moment", wire_request_id, request_id.as_deref(), &path)
         });
         let input = WriteText {
             workspace_id: open.workspace_id.clone(),
@@ -481,10 +470,9 @@ impl EngineService {
     pub(super) async fn versioned_text_write_blob(
         &self,
         ctx: &RequestContext,
-        request: &Request,
-        params: Value,
+        request: Request,
     ) -> Result<Value, WireError> {
-        let parsed: VersionedTextWriteBlobParams = parse(params)?;
+        let parsed: VersionedTextWriteBlobParams = parse(request.params)?;
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&parsed.bytes_base64)
             .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-input"))?;
@@ -501,7 +489,9 @@ impl EngineService {
             .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-utf8"))?;
         self.publish_text(
             ctx,
-            request,
+            request.workspace.as_ref(),
+            request.id,
+            request.idempotency_key,
             VersionedTextWriteParams {
                 workspace_id: parsed.workspace_id,
                 version_id: parsed.version_id,
@@ -517,7 +507,6 @@ impl EngineService {
                 summary: parsed.summary,
                 correlation_id: parsed.correlation_id,
                 author: parsed.author,
-                request_id: parsed.request_id,
                 now_ms: parsed.now_ms,
             },
         )
@@ -527,10 +516,9 @@ impl EngineService {
     pub(super) async fn versioned_binary_write(
         &self,
         ctx: &RequestContext,
-        request: &Request,
-        params: Value,
+        request: Request,
     ) -> Result<Value, WireError> {
-        let params: VersionedBinaryWriteParams = parse(params)?;
+        let params: VersionedBinaryWriteParams = parse(request.params)?;
         let open = self.open(request.workspace.as_ref())?;
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let path = params.path.clone();
@@ -556,9 +544,7 @@ impl EngineService {
             .await?;
         self.ensure_path_not_leased(&open, &params.version_id, &path)
             .await?;
-        let request_id = params
-            .request_id
-            .or_else(|| request.idempotency_key.clone());
+        let request_id = request.idempotency_key;
         let object_id = params.object_id.unwrap_or_else(|| {
             self.generated_rpc_id("object", request.id, request_id.as_deref(), &path)
         });
@@ -618,10 +604,9 @@ impl EngineService {
     pub(super) async fn versioned_binary_write_blob(
         &self,
         ctx: &RequestContext,
-        request: &Request,
-        params: Value,
+        request: Request,
     ) -> Result<Value, WireError> {
-        let params: VersionedBinaryWriteBlobParams = parse(params)?;
+        let params: VersionedBinaryWriteBlobParams = parse(request.params)?;
         let open = self.open(request.workspace.as_ref())?;
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         if params.sha256.len() != 64 || !params.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -669,9 +654,7 @@ impl EngineService {
             .await?;
         self.ensure_path_not_leased(&open, &params.version_id, &path)
             .await?;
-        let request_id = params
-            .request_id
-            .or_else(|| request.idempotency_key.clone());
+        let request_id = request.idempotency_key;
         let object_id = params.object_id.unwrap_or_else(|| {
             self.generated_rpc_id("object", request.id, request_id.as_deref(), &path)
         });
@@ -731,10 +714,9 @@ impl EngineService {
     pub(super) async fn versioned_text_check_move(
         &self,
         ctx: &RequestContext,
-        request: &Request,
-        params: Value,
+        request: Request,
     ) -> Result<Value, WireError> {
-        let params: VersionedTextCheckMoveParams = parse(params)?;
+        let params: VersionedTextCheckMoveParams = parse(request.params)?;
         validated_author(params.author.as_ref())?;
         let open = self.open(request.workspace.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
@@ -754,10 +736,9 @@ impl EngineService {
     pub(super) async fn versioned_text_rename(
         &self,
         ctx: &RequestContext,
-        request: &Request,
-        params: Value,
+        request: Request,
     ) -> Result<Value, WireError> {
-        let params: VersionedTextRenameParams = parse(params)?;
+        let params: VersionedTextRenameParams = parse(request.params)?;
         let open = self.open(request.workspace.as_ref())?;
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let from_path = params.from_path.clone();
@@ -774,9 +755,7 @@ impl EngineService {
             .await?;
         self.ensure_path_not_leased(&open, &params.version_id, &to_path)
             .await?;
-        let request_id = params
-            .request_id
-            .or_else(|| request.idempotency_key.clone());
+        let request_id = request.idempotency_key;
         let moment_id =
             self.generated_rpc_id("moment", request.id, request_id.as_deref(), &to_path);
         let result = open
@@ -825,10 +804,9 @@ impl EngineService {
     pub(super) async fn versioned_text_delete(
         &self,
         ctx: &RequestContext,
-        request: &Request,
-        params: Value,
+        request: Request,
     ) -> Result<Value, WireError> {
-        let params: VersionedTextDeleteParams = parse(params)?;
+        let params: VersionedTextDeleteParams = parse(request.params)?;
         let open = self.open(request.workspace.as_ref())?;
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let path = params.path.clone();
@@ -842,9 +820,7 @@ impl EngineService {
         require_capture_hold(&open, params.capture_hold_id.as_deref())?;
         self.ensure_path_not_leased(&open, &params.version_id, &path)
             .await?;
-        let request_id = params
-            .request_id
-            .or_else(|| request.idempotency_key.clone());
+        let request_id = request.idempotency_key;
         let moment_id = self.generated_rpc_id("moment", request.id, request_id.as_deref(), &path);
         let result = open
             .actor
@@ -888,10 +864,9 @@ impl EngineService {
     pub(super) async fn versioned_text_rollback(
         &self,
         ctx: &RequestContext,
-        request: &Request,
-        params: Value,
+        request: Request,
     ) -> Result<Value, WireError> {
-        let params: VersionedTextRollbackParams = parse(params)?;
+        let params: VersionedTextRollbackParams = parse(request.params)?;
         let open = self.open(request.workspace.as_ref())?;
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let path = validate_addressable_plaintext_path(&params.path)
@@ -926,9 +901,6 @@ impl EngineService {
             self.ensure_path_not_leased(&open, &params.version_id, &before.path)
                 .await?;
         }
-        let request_id = params
-            .request_id
-            .or_else(|| request.idempotency_key.clone());
         let result = open
             .actor
             .versioned_text_rollback(
@@ -937,7 +909,7 @@ impl EngineService {
                     version_id: params.version_id,
                     path,
                     mutation_moment_id: params.mutation_moment_id,
-                    request_id,
+                    request_id: request.idempotency_key,
                     metadata_origin: origin,
                     author_json,
                 },
@@ -990,10 +962,9 @@ impl EngineService {
     pub(super) async fn versioned_text_merge(
         &self,
         ctx: &RequestContext,
-        request: &Request,
-        params: Value,
+        request: Request,
     ) -> Result<Value, WireError> {
-        let params: VersionedTextMergeParams = parse(params)?;
+        let params: VersionedTextMergeParams = parse(request.params)?;
         let open = self.open(request.workspace.as_ref())?;
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let path = params.path.clone();
@@ -1006,9 +977,7 @@ impl EngineService {
             .await?;
         self.ensure_path_not_leased(&open, &params.target_version_id, &path)
             .await?;
-        let request_id = params
-            .request_id
-            .or_else(|| request.idempotency_key.clone());
+        let request_id = request.idempotency_key;
         let object_id = self.generated_rpc_id("object", request.id, request_id.as_deref(), &path);
         let moment_id = self.generated_rpc_id("moment", request.id, request_id.as_deref(), &path);
         let conflict_id =
@@ -1173,19 +1142,11 @@ mod tests {
         .expect("request fits transport limits");
         if method == "versionedText.writeBlob" {
             service
-                .versioned_text_write_blob(
-                    &RequestContext::unbounded(),
-                    &request,
-                    request.params.clone(),
-                )
+                .versioned_text_write_blob(&RequestContext::unbounded(), request)
                 .await
         } else {
             service
-                .versioned_text_write(
-                    &RequestContext::unbounded(),
-                    &request,
-                    request.params.clone(),
-                )
+                .versioned_text_write(&RequestContext::unbounded(), request)
                 .await
         }
     }
@@ -1213,11 +1174,7 @@ mod tests {
                 params,
             };
             let removed = service
-                .versioned_text_delete(
-                    &RequestContext::unbounded(),
-                    &request,
-                    request.params.clone(),
-                )
+                .versioned_text_delete(&RequestContext::unbounded(), request)
                 .await
                 .unwrap();
             assert!(!scratch.path().join("record.md").exists());
@@ -1308,10 +1265,10 @@ mod tests {
                 deadline_ms: None,
                 idempotency_key: None,
                 progress: false,
-                params: params.clone(),
+                params,
             };
             let result = service
-                .versioned_text_write(&RequestContext::unbounded(), &request, params)
+                .versioned_text_write(&RequestContext::unbounded(), request)
                 .await
                 .unwrap();
             assert_eq!(result["materializeOutcome"], "skipped");
@@ -1528,11 +1485,7 @@ mod tests {
             }),
         };
         let result = service
-            .versioned_binary_write(
-                &RequestContext::unbounded(),
-                &request,
-                request.params.clone(),
-            )
+            .versioned_binary_write(&RequestContext::unbounded(), request)
             .await
             .expect("binary write");
         let sha256 = result["snapshot"]["sha256"]

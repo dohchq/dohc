@@ -2,7 +2,7 @@ import { ProtocolShapeError } from "../wireSchema";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { EngineRequestError } from "../daemon/engineClient";
-import type { Request, Response } from "../protocol";
+import type { JsonValue, Request, Response } from "../protocol";
 import {
   DaemonProtocolError,
   DaemonRefusalError,
@@ -474,6 +474,60 @@ describe("VersionedLiveAdapter", () => {
     expect(await applied("published", checked.moment.momentId)).toBe(false);
     expect(await applied("missing", published.moment.momentId)).toBe(false);
     await expect(applied("", published.moment.momentId)).rejects.toThrow();
+  });
+
+  it("seeds a delete's moment from its envelope key and replays only that payload", async () => {
+    const loopback = new VersionedLoopbackEngine();
+    const adapter = new VersionedLiveAdapter({
+      sendRequest: (request) => loopback.sendRequest(request), close: () => undefined,
+    }, WORKSPACE, { workspaceId: WORKSPACE });
+    await adapter.ensureMainVersion({ workspaceId: WORKSPACE });
+    for (const path of ["gone.md", "keep.md"]) {
+      await adapter.writeTextFile({ workspaceId: WORKSPACE, versionId: "main", path, text: path, metadata: { origin: "api" } });
+    }
+    const input = { workspaceId: WORKSPACE, versionId: "main", path: "gone.md", requestId: "undo", metadata: { origin: "api" as const } };
+    const first = await adapter.deleteTextFile(input);
+    const replay = await adapter.deleteTextFile(input);
+    expect(first.moment.momentId).toBe("moment-9d2c5f198351202686a63750833ad3570ce3a554f83c63262b085071d2612002");
+    expect(replay.deduped).toBe(true);
+    expect(replay.moment.momentId).toBe(first.moment.momentId);
+    await expect(adapter.deleteTextFile({ ...input, path: "keep.md" })).rejects.toThrow("idempotency-key-reuse-mismatch");
+    const deletes = loopback.requests.filter(request => request.method === VERSIONED_METHOD.textDelete);
+    expect(deletes.map(request => request.idempotencyKey)).toEqual(["undo", "undo", "undo"]);
+  });
+
+  it("refuses a body requestId beside the envelope key on every versioned mutation", async () => {
+    const loopback = new VersionedLoopbackEngine();
+    const adapter = new VersionedLiveAdapter({
+      sendRequest: (request) => loopback.sendRequest(request), close: () => undefined,
+    }, WORKSPACE, { workspaceId: WORKSPACE });
+    await adapter.ensureMainVersion({ workspaceId: WORKSPACE });
+    const seeded = await adapter.writeTextFile({ workspaceId: WORKSPACE, versionId: "main", path: "seed.md", text: "seed", metadata: { origin: "api" } });
+    const before = (await adapter.listMoments({ workspaceId: WORKSPACE })).moments.length;
+    const bytes = Buffer.from("body");
+    const blob = { sha256: createHash("sha256").update(bytes).digest("hex"), bytesBase64: bytes.toString("base64") };
+    const cases: Array<[VersionedMethod, { [key: string]: JsonValue }]> = [
+      [VERSIONED_METHOD.textWrite, { versionId: "main", path: "body.md", text: "body", origin: "api" }],
+      [VERSIONED_METHOD.textWriteBlob, { versionId: "main", path: "body.md", ...blob, origin: "api" }],
+      [VERSIONED_METHOD.binaryWrite, { versionId: "main", path: "body.bin", bytes: [1, 2], origin: "api" }],
+      [VERSIONED_METHOD.binaryWriteBlob, { versionId: "main", path: "body.bin", ...blob, origin: "api" }],
+      [VERSIONED_METHOD.textRename, { versionId: "main", fromPath: "seed.md", toPath: "moved.md", origin: "api" }],
+      [VERSIONED_METHOD.textDelete, { versionId: "main", path: "seed.md", origin: "api" }],
+      [VERSIONED_METHOD.textRollback, { versionId: "main", path: "seed.md", mutationMomentId: seeded.moment.momentId, origin: "restore" }],
+      [VERSIONED_METHOD.versionsMerge, { path: "seed.md", sourceVersionId: "main", targetVersionId: "main", origin: "api" }],
+    ];
+    let id = 100;
+    for (const [method, params] of cases) {
+      for (const bodyKey of ["body-key", "other-key"]) {
+        await expect(loopback.sendRequest({
+          id: id++, method, workspace: WORKSPACE, idempotencyKey: "body-key", params: { ...params, requestId: bodyKey },
+        })).rejects.toThrow("invalid parameters");
+      }
+    }
+    expect((await adapter.listMoments({ workspaceId: WORKSPACE })).moments).toHaveLength(before);
+    // The refusals recorded nothing under the key they named.
+    const written = await adapter.writeTextFile({ workspaceId: WORKSPACE, versionId: "main", path: "body.md", text: "body", requestId: "body-key", metadata: { origin: "api" } });
+    expect(written.deduped).toBe(false);
   });
 
   it("requires a workspace binding before the adapter can issue requests", () => {
@@ -1376,7 +1430,9 @@ describe("VersionedLiveAdapter", () => {
       expect(requests.at(-1)).toMatchObject({
         method: entry.method,
         params: entry.metadata,
+        idempotencyKey: expect.any(String),
       });
+      expect(requests.at(-1)?.params).not.toHaveProperty("requestId");
     }
   });
 

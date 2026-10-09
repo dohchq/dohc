@@ -215,8 +215,9 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     const opened = await owner.sendRequest({id: requestId++, method: "workspace.open", params: {rootDir: ownerRoot, workspaceId: "workspace", captureMode: "none",
       relay: {baseUrl: relayUrl, bearerToken: bearer, allowInsecureLoopbackForTests: true}}, deadlineMs: 30000});
     let handle = (opened.result as {workspace: string}).workspace;
-    async function rpc(method: string, params: Record<string, any>) {
-      try {return (await owner!.sendRequest({id: requestId++, workspace: handle, method, params, deadlineMs: 30000})).result as Record<string, any>;}
+    async function rpc(method: string, params: Record<string, any>, idempotencyKey?: string) {
+      try {return (await owner!.sendRequest({id: requestId++, workspace: handle, method, params, deadlineMs: 30000,
+        ...(idempotencyKey === undefined ? {} : {idempotencyKey})})).result as Record<string, any>;}
       catch (cause) {throw new Error(`Service proof source RPC failed: ${method}`, {cause});}
     }
     results.claim = await rpc("sync.claim", {workspaceId: "workspace"});
@@ -235,7 +236,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
       throw new Error("Owner push exceeded its eight-page bound.");
     }
     results.ownerEnrollmentPush = await push();
-    const written = await rpc("versionedText.write", {workspaceId: "workspace", versionId: mainVersionId, path: "docs/a.md", text: "Hello", origin: "api", requestId: randomUUID()});
+    const written = await rpc("versionedText.write", {workspaceId: "workspace", versionId: mainVersionId, path: "docs/a.md", text: "Hello", origin: "api"}, randomUUID());
     const objectId = written.object.id as string;
     expect(typeof objectId).toBe("string");
     const editor = await rpc("ydoc.open", {versionId: mainVersionId, path: "docs/a.md", expectedObjectId: objectId, contentKind: "richdoc"});

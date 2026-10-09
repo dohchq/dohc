@@ -2601,11 +2601,7 @@ mod tests {
             )
             .unwrap();
             let checked = service
-                .versioned_text_check_move(
-                    &RequestContext::unbounded(),
-                    &request,
-                    request.params.clone(),
-                )
+                .versioned_text_check_move(&RequestContext::unbounded(), request)
                 .await;
             if path == "note" {
                 assert!(checked.is_ok(), "a sibling prefix remains movable");
@@ -2617,11 +2613,7 @@ mod tests {
             "params":{"versionId":"main","fromPath":"notes/owner.md","toPath":"moved.md","origin":"local-file"}})).unwrap();
         assert_eq!(
             service
-                .versioned_text_rename(
-                    &RequestContext::unbounded(),
-                    &request,
-                    request.params.clone()
-                )
+                .versioned_text_rename(&RequestContext::unbounded(), request)
                 .await
                 .unwrap_err()
                 .message,
@@ -2638,11 +2630,7 @@ mod tests {
             "params":{"versionId":"main","path":"notes/owner.md","origin":"restore","expectedSha256":dohc_engine_storage::hex_sha256(&bytes)}})).unwrap();
         assert_eq!(
             service
-                .versioned_text_delete(
-                    &RequestContext::unbounded(),
-                    &request,
-                    request.params.clone()
-                )
+                .versioned_text_delete(&RequestContext::unbounded(), request)
                 .await
                 .unwrap_err()
                 .message,
