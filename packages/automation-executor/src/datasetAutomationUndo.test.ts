@@ -147,7 +147,7 @@ describe("undo of a dataset run", () => {
     ({ kind: "dataset-created", rules, operationId: CREATE, tableId, recordId, version: 1, deletes });
   const runOf = (keySeed: string, startedAtMs: number, writes: RunWrite[]): StoredRun => ({ ...run(EDIT), keySeed, startedAtMs, applied: [{ ordinal: 0, writes }] });
 
-  it.each(["dataset", "shared"] as const)("%s Undo includes all ten crash receipts after replay stops at effect 3", async kind => {
+  it.each(["dataset", "shared"] as const)("%s Undo after replay stops at effect 3 reverts recorded edits only from their last value", async kind => {
     for (const value of ["3", "10", "someone else"]) {
       const records = { a: { version: value === "10" ? 11 : 12, values: { [STATUS]: value } } };
       const { host } = recordsHost(records);

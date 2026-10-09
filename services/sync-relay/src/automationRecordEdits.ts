@@ -126,7 +126,8 @@ export function replicaRecordEditContext(
       return {text: read.text, truncated: false};
     },
     withAdapter: async (work) => replica.signal.aborted ? null : await work(adapter),
-    // The engine adopted each record before its create returned.
+    // No change notices here. A new record is adopted before its create returns;
+    // a deduped one adopted later makes the run wait out its adoption deadline and resume on retry.
     onRecordsChanged: () => () => undefined,
     signal,
   };
