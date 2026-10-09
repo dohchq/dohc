@@ -86,7 +86,7 @@ export const DEFINITION_CHANGED_ERROR =
 export const UNREADABLE_RUN_ERROR =
   "dohc could not read this run's saved progress in .dohc/automations, so it did not run again. Move that folder aside, then try again.";
 export const UNDONE_RUN_ERROR = "You undid this run, so dohc does not run it again.";
-export const UNFINISHED_UNDO_ERROR = "dohc has not finished undoing this run. Try again in run history to finish Undo.";
+export const UNFINISHED_UNDO_ERROR = "dohc has not finished undoing this run.";
 export const LOST_COLLECTION_ERROR = "A Collection this run changes is no longer in this workspace, so the run stopped.";
 export const RULES_CHANGED_ERROR = "Collection rules changed after this run started.";
 
@@ -120,6 +120,7 @@ export interface CollectionRecordWrites {
     author: ChangeAuthor;
     /** Names the write for the engine's idempotency check, one key per field under this prefix. */
     idempotencyKeyPrefix?: string;
+    preserveCompletedFields?: boolean;
     /**
      * The value each field should hold before the write. A field holding
      * something else changed since the plan: the write keeps it and reports
@@ -324,7 +325,7 @@ export async function savedRunOf(
 /** A new run's record, before anything of it is saved. */
 export function newRun(claim: Pick<AutomationClaim, "automationId" | "claimId">, automation: Automation, keySeed: string, nowMs: number): StoredRun {
   return {
-    version: 10,
+    version: 11,
     claimId: claim.claimId,
     automationId: claim.automationId,
     definitionHash: definitionHash(automation),
@@ -343,7 +344,6 @@ export function newRun(claim: Pick<AutomationClaim, "automationId" | "claimId">,
     rules: null,
     superseded: false,
     undo: null,
-    undoCompletedFields: [],
     undoKept: [],
     settled: false,
     outcome: null,

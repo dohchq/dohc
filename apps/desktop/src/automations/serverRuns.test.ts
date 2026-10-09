@@ -25,5 +25,5 @@ it("carries kept field paths and names from the owner's server", async () => {
   ];
   const pass = { undone: 1, left: 0, reverted: 0, missing: 0, keptFields, otherKept: 0, errorMessage: null };
   const server = createServerRuns(async () => ({ status: 200, body: { ok: true, ...pass }, asker: { account: "owner", current: () => true } }));
-  await expect(server.restore("ws", [], false)).resolves.toEqual(pass);
+  await expect(server.restore("ws", [], false, "restore-test")).resolves.toEqual(pass);
 });

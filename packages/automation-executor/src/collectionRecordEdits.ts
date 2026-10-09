@@ -122,6 +122,8 @@ export interface SetCollectionRecordFieldsInput {
   allowPendingSharedSettlement?: boolean;
   /** A creation key already recorded by the engine must not seed the field again. */
   preserveCompletedSeeds?: boolean;
+  /** Undo treats an existing field key as a completed reversal, even after a later edit. */
+  preserveCompletedFields?: boolean;
   /** Creation reports the stage that could not finish. */
   onStage?(stage: CreationStage): void;
   /** Finish a prior journaled update even when its values already match. */
@@ -375,12 +377,13 @@ export async function setCollectionRecordFields(
         }
         return written;
       }).catch(async error => {
-        if (!input.preserveCompletedSeeds || idempotencyKey === undefined || !isIdempotencyKeyReuseRefusal(error)) throw error;
-        // This typed refusal proves the creation key already landed. The session
-        // restores canonical state before rejecting; no new seed was recorded.
+        if ((!input.preserveCompletedSeeds && !input.preserveCompletedFields) || idempotencyKey === undefined || !isIdempotencyKeyReuseRefusal(error)) throw error;
+        // This typed refusal proves the chosen key already landed. The session
+        // restores canonical state before rejecting; no new write was recorded.
         if (fieldArmed) armed -= 1;
         delete replaced[field];
         decidedFields.delete(field);
+        if (input.preserveCompletedFields) return false;
         return session.applyDecidedLocalUpdate(doc => {
           const current = doc.getMap(FRONTMATTER_FIELD).get(field);
           kept[field] = (current instanceof Y.AbstractType ? current.toJSON() : current) ?? null;

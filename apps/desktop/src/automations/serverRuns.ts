@@ -54,7 +54,7 @@ const Run = z.object({
   chainStopped: z.boolean(),
   neverStarted: z.boolean(),
   undone: z.boolean(),
-  undoUnfinished: z.boolean().optional(),
+  undoUnfinished: z.boolean(),
 });
 const Retry = z.discriminatedUnion("status", [
   z.object({ status: z.literal("queued"), press: z.boolean() }),
@@ -145,8 +145,9 @@ export function createServerRuns(send: (workspaceId: string, request: ServerRequ
       workspaceId: string,
       definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>,
       again: boolean,
+      retentionId: string,
     ): Promise<{ undone: number; left: number; reverted: number; missing: number; keptFields: KeptAutomationField[]; otherKept: number; sharedReversals?: z.infer<typeof SharedReversalsSchema>; errorMessage: string | null }> {
-      const answer = await ask(workspaceId, { method: "POST", action: "restore", body: { definitions, again } },
+      const answer = await ask(workspaceId, { method: "POST", action: "restore", body: { definitions, again, retentionId } },
         z.object({ undone: Count, left: Count, reverted: Count, missing: Count, keptFields: z.array(KeptAutomationFieldShape), otherKept: Count, sharedReversals: SharedReversalsSchema.optional(), errorMessage: z.string().nullable() }));
       return answer ?? { undone: 0, left: 0, reverted: 0, missing: 0, keptFields: [], otherKept: 0, errorMessage: null };
     },

@@ -537,7 +537,7 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
   for (const side of [owner, recipient]) expect(await readFile(join(side.root, "Tasks/one.md"), "utf8")).toContain("Status: Doing");
   expect(await sharedValue(firstGrant)).toBe("Doing");
   const restoredClaim = await press(firstGrant.shareId, "button-native-before-stop");
-  expect(await running.runs.restore(scope, [{collectionPath: "Tasks", id: "mark", definitionHash: hash}], false)).toMatchObject({undone: 1, left: 0, errorMessage: null});
+  expect(await running.runs.restore(scope, [{collectionPath: "Tasks", id: "mark", definitionHash: hash}], false, "restore-test")).toMatchObject({undone: 1, left: 0, errorMessage: null});
   await vi.waitFor(async () => expect((await running.runs.get(scope, markId, restoredClaim))?.undone).toBe(true), {timeout: DEADLINE_MS});
   await consumer.settle(document); await owner.sync(); await recipient.sync();
   for (const side of [owner, recipient]) expect(await readFile(join(side.root, "Tasks/one.md"), "utf8")).toContain("Status: Doing");
@@ -587,7 +587,7 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
     localPerson: async () => ({kind: "human", humanId: "owner"}), queuePull: () => undefined,
     syncNow: async () => {await owner.sync(); await copy.sync();}, deletePath: async () => undefined,
     notifyRenderer: () => undefined, assertOriginalWorkspace: () => undefined,
-    serverRuns: {restore: (_workspaceId, definitions, again) => running.runs.restore(scope, definitions, again)},
+    serverRuns: {restore: (_workspaceId, definitions, again, retentionId) => running.runs.restore(scope, definitions, again, retentionId)},
     requireEngineCapture: async () => ({capture: {
       readMoment,
       listObjectMomentsAfter: async (objectId, momentId) => {

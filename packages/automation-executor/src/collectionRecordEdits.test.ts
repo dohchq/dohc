@@ -34,6 +34,24 @@ const AUTOMATION = {
   run: { claimId: "claim-7", automationName: "Stamp the finish date" },
 } as const;
 
+it("uses the engine journal to skip an Undo field after a crash and another Undo", async () => {
+  const root = await createTestScratch("dohc-undo-journal-");
+  const {session, log} = fakeSession();
+  const context = contextFor(root, session);
+  const key = "automation-undo/test-run";
+  log.doc.getMap("frontmatter").set("status", "done");
+  const input = {recordPath: "tasks/one.md", fields: {status: "todo"}, expectedBefore: {status: "done"},
+    author: {kind: "user", userId: "owner"} as const, idempotencyKeyPrefix: key, preserveCompletedFields: true};
+  const fail = vi.spyOn(session, "settleNow").mockRejectedValueOnce(new Error("Interrupted after journal"));
+  await expect(setCollectionRecordFields(context, input)).rejects.toThrow("Interrupted after journal");
+  expect(log.doc.getMap("frontmatter").get("status")).toBe("todo");
+  log.doc.getMap("frontmatter").set("status", "done");
+  await expect(setCollectionRecordFields(context, input)).resolves.toMatchObject({replaced: {}, kept: {}});
+  expect(log.doc.getMap("frontmatter").get("status")).toBe("done");
+  expect(log.journaled).toHaveLength(1);
+  fail.mockRestore();
+});
+
 it.each(["write-refused", "conflict-stale-target", "Saved locally. The shared file update is pending."])("does not accept other settlement errors as a completed automation effect (%s)", async message => {
   const root = await createTestScratch("dohc-automation-settle-refusal-");
   const error = new Error(message);

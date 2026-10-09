@@ -41,6 +41,7 @@
   "desktop:engine-ydoc-wait-admission": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "engineYDocSessionIpc.waitForAdmission" } },
   "desktop:discard-live-draft-recovery": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:pending-stop-and-restores": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:dismiss-stop-and-restore": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:dismiss-share-capture-notice": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:engine-ydoc-retry-save": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "engineYDocSessionIpc.retrySave" } }
 }

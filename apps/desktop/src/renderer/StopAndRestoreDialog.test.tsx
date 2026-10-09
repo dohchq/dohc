@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { PendingStopAndRestoresResult, StopAndRestoreResult, UndoStopAndRestorePayload, UndoStopAndRestoreResult } from "../ipc/bridgeContract";
 import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
@@ -10,6 +10,37 @@ const KEPT = { id: "f".repeat(32), path: "trip/Tasks/Untitled.md", field: "Finis
 const WORKSPACE = "workspace";
 const ANA = { target: { kind: "person", userId: "user_ana" }, label: "ana@example.com (Edit)" } as const;
 const LINK = { target: { kind: "link", grantId: "grant-link" }, label: "Edit link" } as const;
+
+it("dismisses unfinished progress through the workspace operation and keeps the files-step wording", async () => {
+  const dismissStopAndRestore = vi.fn(async () => {});
+  const result = {status: "restored" as const, restored: [], review: [], runsUndone: 0, runsLeft: 0,
+    keptFields: [], fieldsMissing: 0, runChangesKept: 0, wroteAutomations: false, sendsMessages: false, unfinished: {step: "files" as const, message: "Interrupted"}};
+  window.dohcDesktop = {dismissStopAndRestore, pendingStopAndRestores: async () => [{target: ANA.target, label: ANA.label, result, receipts: [], filesUndone: true}]} as unknown as typeof window.dohcDesktop;
+  const onError = vi.fn();
+  const h = renderHook(() => useStopAndRestore(WORKSPACE, {ready: true, onError}));
+  await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+  expect(onError.mock.calls[0]![0]).toBe("dohc stopped before restoring every file.");
+  await act(async () => {expect(await h.result.current.dismiss(onError.mock.calls[0]![3])).toBe(true);});
+  expect(dismissStopAndRestore).toHaveBeenCalledWith({workspaceId: WORKSPACE, target: ANA.target});
+  expect(h.result.current.receipts.shown(WORKSPACE, ANA.target)).toBeNull();
+});
+
+it("recovers saved totals once and preserves a newer in-memory outcome across workspace switches", async () => {
+  const result: Extract<StopAndRestoreResult, {status: "restored"}> = {status: "restored", restored: [], review: [], runsUndone: 2, runsLeft: 0,
+    keptFields: [], fieldsMissing: 0, runChangesKept: 0, wroteAutomations: true, sendsMessages: false, unfinished: {step: "runs", message: "Conflict"}};
+  const pending = vi.fn(async () => [{target: ANA.target, label: ANA.label, result, receipts: [], filesUndone: false}]);
+  window.dohcDesktop = {pendingStopAndRestores: pending} as unknown as typeof window.dohcDesktop;
+  const onError = vi.fn();
+  const h = renderHook(({workspaceId, ready}) => useStopAndRestore(workspaceId, {ready, onError}), {initialProps: {workspaceId: WORKSPACE, ready: true}});
+  await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+  act(() => h.result.current.receipts.show(WORKSPACE, ANA.target, {result: {...result, runsUndone: 3}, undone: true}));
+  h.rerender({workspaceId: "other", ready: false});
+  h.rerender({workspaceId: WORKSPACE, ready: true});
+  await waitFor(() => expect(pending).toHaveBeenCalledTimes(2));
+  await act(async () => {});
+  expect(h.result.current.receipts.runs(WORKSPACE, ANA.target).runsUndone).toBe(2);
+  expect(h.result.current.receipts.shown(WORKSPACE, ANA.target)?.result.runsUndone).toBe(3);
+});
 
 it.each(["pending", "not-accepted"] as const)("reports %s shared reversals with the matching run count", async state => {
   const draft = {outboxId: "outbox", appendKey: "reverse/Status", nativeHeadSequence: 2,
@@ -111,10 +142,10 @@ it("recovers unfinished runs after relaunch and opens Try again from the Notice"
     keptFields: [], fieldsMissing: 0, runChangesKept: 0, wroteAutomations: true, sendsMessages: false,
     unfinished: {step: "runs", message: "Resolve the conflict."}};
   const f = fixture([new Error("Still blocked")], ANA, [{target: ANA.target, label: ANA.label, result, receipts: [], filesUndone: true}]);
-  await waitFor(() => expect(f.props.onError).toHaveBeenCalledWith("dohc has not finished undoing runs. Try again to finish.",
+  await waitFor(() => expect(f.props.onError).toHaveBeenCalledWith("dohc has not finished undoing runs.",
     expect.any(Error), expect.any(Function), expect.any(String)));
   act(() => f.props.onError.mock.calls[0]![2]());
-  expect(await screen.findByText("dohc has not finished undoing runs. Try again to finish.")).toBeTruthy();
+  expect(await screen.findByText("dohc has not finished undoing runs.")).toBeTruthy();
   expect(screen.getByRole("button", {name: "Try again"})).toBeTruthy();
   expect(f.undoStopAndRestore).not.toHaveBeenCalled();
 });
@@ -497,10 +528,10 @@ it("after Undo of the files, keeps Try again and the Notice for unfinished runs"
   fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
   const identity = await waitFor(() => f.props.onError.mock.calls[0]![3]);
   fireEvent.click(screen.getByTestId("stop-and-restore-undo"));
-  expect(await screen.findByText("dohc has not finished undoing runs. Try again to finish.")).toBeTruthy();
+  expect(await screen.findByText("dohc has not finished undoing runs.")).toBeTruthy();
   expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
   expect(f.props.onSettled).not.toHaveBeenCalledWith(identity);
-  expect(f.props.onError).toHaveBeenLastCalledWith("dohc has not finished undoing runs. Try again to finish.", expect.any(Error), expect.any(Function), identity);
+  expect(f.props.onError).toHaveBeenLastCalledWith("dohc has not finished undoing runs.", expect.any(Error), expect.any(Function), identity);
 });
 
 it("keeps what an earlier try showed when a retry stops before it reads their changes", async () => {
@@ -522,11 +553,31 @@ it("keeps what an earlier try showed when a retry stops before it reads their ch
   expect(await screen.findByText("dohc has not finished restoring files.")).toBeTruthy();
   expect(screen.getByText("Stopped ana@example.com's access and restored 1 file.")).toBeTruthy();
   expect(screen.getByText("Undid 1 run of automations ana@example.com changed.")).toBeTruthy();
-  expect(screen.getByText("dohc has not finished undoing runs.")).toBeTruthy();
+  expect(screen.queryByText("dohc has not finished undoing runs.")).toBeNull();
   expect(screen.getByText("1 field kept a later value.")).toBeTruthy();
   expect(screen.getByText("Messages and notices from automations ana@example.com changed stay sent.")).toBeTruthy();
   expect(screen.getByText("trip/packing/collection.yaml")).toBeTruthy();
   expect(f.props.onError.mock.calls[1]![0]).toBe("Stopped ana@example.com's access. dohc has not finished restoring their changes.");
+});
+
+it("offers Undo for fresh files after an earlier unfinished restore's files were undone", async () => {
+  const result = {status: "restored" as const, review: [], runsLeft: 0, keptFields: [], fieldsMissing: 0,
+    runChangesKept: 0, wroteAutomations: true, sendsMessages: false};
+  const f = fixture([
+    {...result, restored: [{path: "trip/old.md", restoredMomentId: "old"}], runsUndone: 2,
+      unfinished: {step: "runs", message: "Interrupted"}},
+    {...result, restored: [{path: "trip/new.md", restoredMomentId: "new"}], runsUndone: 1, unfinished: null},
+  ]);
+  fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
+  fireEvent.click(await screen.findByTestId("stop-and-restore-undo"));
+  await waitFor(() => expect(screen.queryByTestId("stop-and-restore-undo")).toBeNull());
+  act(() => {f.shell().close();});
+  act(() => {f.shell().open(ANA);});
+  fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
+  expect(await screen.findByText("Stopped ana@example.com's access and restored 1 file.")).toBeTruthy();
+  expect(screen.getByText("Undid 1 run of automations ana@example.com changed.")).toBeTruthy();
+  expect(screen.getByTestId("stop-and-restore-undo")).toBeTruthy();
+  expect(f.shell().receipts.get(WORKSPACE, ANA.target)).toEqual([{path: "trip/new.md", restoredMomentId: "new"}]);
 });
 
 it("does not say runs are unfinished after an earlier try finished them, when a later try stops at the files", async () => {

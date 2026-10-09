@@ -111,7 +111,7 @@ function fakeExecutor(
     },
     runs: async (automationId, before) => {
       asked.push(["runs", automationId, before]);
-      return { runs: [{ claimId: "claim-1", state: "failed", error: "boom", createdAtMs: 1, updatedAtMs: 2, trigger: { kind: "changed", recordId: "record", by: "human", depth: 0, sharedAuthor: null }, writes: [], definitionChanged: false, neverStarted: false, chainStopped: false, undone: false }], next: null };
+      return { runs: [{ claimId: "claim-1", state: "failed", error: "boom", createdAtMs: 1, updatedAtMs: 2, trigger: { kind: "changed", recordId: "record", by: "human", depth: 0, sharedAuthor: null }, writes: [], definitionChanged: false, neverStarted: false, chainStopped: false, undoUnfinished: false, undone: false }], next: null };
     },
     listedRun: async (automationId, claimId) => {
       asked.push(["get", automationId, claimId]);
@@ -125,7 +125,9 @@ function fakeExecutor(
       asked.push(["undo", input]);
       return { status: "undone", reverted: 1, removed: 0, kept: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 0, actionsReversed: 0, deleted: 0, keptChanged: 0, gone: 0 };
     },
-    undoRunsOf: async (definitions, _trash, again) => {
+    removePendingRestore: async id => { asked.push(["releaseRestore", id]); },
+    undoRunsOf: async (definitions, _trash, again, retentionId) => {
+      expect(retentionId).toBe("desktop:restore-test");
       asked.push(["restore", definitions, again]);
       return { undone: definitions.length, left: 0, reverted: 1, missing: 0, keptFields: [], otherKept: 0, errorMessage: null };
     },
@@ -1099,7 +1101,7 @@ describe("the owner's routes to the server's runs", () => {
     expect(await call(OWNER, "undo", { automationId: PRESSED, claimId: "claim-1", deletes: null }))
       .toMatchObject({ status: 200, body: { ok: true, status: "undone", reverted: 1 } });
     const definitions = [{ collectionPath: "Budget", id: "pay", definitionHash: "0123456789abcdef" }];
-    expect(await call(OWNER, "restore", { definitions, again: false })).toMatchObject({ status: 200, body: { ok: true, undone: 1, left: 0, reverted: 1 } });
+    expect(await call(OWNER, "restore", { definitions, again: false, retentionId: "restore-test" })).toMatchObject({ status: 200, body: { ok: true, undone: 1, left: 0, reverted: 1 } });
     expect(await call(OWNER, "holds")).toMatchObject({ status: 200, body: { ok: true, holds: [HELD] } });
     const allow = { automationId: PRESSED, definitionHash: HELD.definitionHash, step: "0", seq: 7 };
     expect(await call(OWNER, "allow", allow)).toMatchObject({ status: 200, body: { ok: true, status: "confirmed" } });
@@ -1119,6 +1121,9 @@ describe("the owner's routes to the server's runs", () => {
       ["allow", allow],
       ["allow", { ...allow, seq: 6 }],
     ]);
+    expect(await call(OWNER, "restore", {definitions: [], again: false, retentionId: "restore-test"}))
+      .toMatchObject({status: 200, body: {ok: true, undone: 0, errorMessage: null}});
+    expect(fake.asked.at(-1)).toEqual(["releaseRestore", "desktop:restore-test"]);
   });
 
   it("forwards page cursors, old-run lookups, and confirmed deletes through the owner's copy", async () => {
@@ -1262,7 +1267,7 @@ describe("the owner's routes to the server's runs", () => {
     const fake = await s.openReplica();
     s.sync.mockRejectedValue(new Error("The relay refused the pull."));
     expect((await call(OWNER, "undo", { automationId: PRESSED, claimId: "claim-1", deletes: null })).status).toBe(500);
-    expect((await call(OWNER, "restore", { definitions: [{ collectionPath: "Budget", id: "pay", definitionHash: "0123456789abcdef" }], again: false })).status).toBe(500);
+    expect((await call(OWNER, "restore", { definitions: [{ collectionPath: "Budget", id: "pay", definitionHash: "0123456789abcdef" }], again: false, retentionId: "restore-test" })).status).toBe(500);
     expect(fake.asked).toEqual([]);
   });
 

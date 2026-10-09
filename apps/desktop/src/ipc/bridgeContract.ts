@@ -5002,6 +5002,14 @@ export const PendingStopAndRestoresResult = z.array(z.object({
 }));
 export type PendingStopAndRestoresResult = z.infer<typeof PendingStopAndRestoresResult>;
 export const stopAndRestoreRecoveryOperations = {
+  dismissStopAndRestore: {
+    capabilityId: "share.restore.pending.dismiss",
+    channel: "desktop:dismiss-stop-and-restore",
+    payload: z.object({workspaceId: WORKSPACE_ID, target: StopAndRestoreTarget}).strict(),
+    guard: "active-workspace",
+    scope: "workspace",
+    inactiveMessage: "This window changed workspaces.",
+  },
   pendingStopAndRestores: {
     capabilityId: "share.restore.pending.read",
     channel: "desktop:pending-stop-and-restores",

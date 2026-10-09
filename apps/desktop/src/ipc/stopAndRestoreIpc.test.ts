@@ -63,9 +63,11 @@ function fixture(options: {
   syncNow?: () => Promise<void>;
   ledgerError?: () => Error | null;
   runStore?: ReturnType<typeof createAutomationRunStore>;
+  runStoreError?: Error;
 } = {}) {
   const handlers = new Map<string, (event: { sender: string }, payload: unknown) => unknown>();
   const calls: Array<{ path: string; method: string }> = [];
+  const releases: string[] = [];
   // The account main has settled on; a test signs in as someone else mid-request.
   const account = { person: OWNER };
   const granted = options.granted ?? [
@@ -83,6 +85,7 @@ function fixture(options: {
   const links = options.links ?? [[]];
   let conflicts = options.revokeConflicts ?? 0;
   const bodies: unknown[] = [];
+  const pendingEntries = new Map<string, Parameters<CollectionAutomations["savePendingRestore"]>[0]>();
   const relayJson = vi.fn(async (_credentials: string, path: string, init?: RequestInit): Promise<unknown> => {
     calls.push({ path, method: init?.method ?? "GET" });
     if (typeof init?.body === "string") bodies.push(JSON.parse(init.body));
@@ -98,6 +101,12 @@ function fixture(options: {
     if (read) {
       const pages = ledger[decodeURIComponent(read[1]!)] ?? [{ writes: [], nextAfterOriginSeq: null }];
       return pages[Number(read[2]) + 1];
+    }
+    if (init?.method === "POST" && path.endsWith("/revoke")) {
+      for (const value of granted) {
+        const row = value as {grantId: string; revokedAtMs: number | null};
+        if (path.includes(`/grants/${row.grantId}/`)) row.revokedAtMs = 3;
+      }
     }
     return {};
   });
@@ -149,9 +158,20 @@ function fixture(options: {
       workspace: { workspaceId: WORKSPACE_ID, rootPath: options.rootPath ?? "/missing-root" },
       state: { collectionAutomations: { undoRunsOf: options.undoRunsOf,
         retainRunsForRestore: async () => undefined,
-        pendingRestores: () => options.runStore?.pendingRestores() ?? Promise.resolve([]),
-        savePendingRestore: (entry: Parameters<CollectionAutomations["savePendingRestore"]>[0]) => options.runStore?.savePendingRestore(entry) ?? Promise.resolve(),
-        removePendingRestore: (id: string) => options.runStore?.removePendingRestore(id) ?? Promise.resolve(),
+        pendingRestores: () => options.runStoreError ? Promise.reject(options.runStoreError) : options.runStore?.pendingRestores() ?? Promise.resolve(structuredClone([...pendingEntries.values()])),
+        savePendingRestore: async (entry: Parameters<CollectionAutomations["savePendingRestore"]>[0]) => {
+          if (options.runStore) await options.runStore.savePendingRestore(entry);
+          else pendingEntries.set(entry.id, structuredClone(entry));
+        },
+        recordRestoreReceipt: async (id: string, receipt: {path: string; restoredMomentId: string}) => {
+          if (options.runStore) await options.runStore.recordRestoreReceipt(id, receipt);
+          else pendingEntries.get(id)?.session?.receipts.push(receipt);
+        },
+        undoRestoreReceipt: async (id: string, momentId: string) => {
+          if (options.runStore) await options.runStore.undoRestoreReceipt(id, momentId);
+          else {const session = pendingEntries.get(id)?.session; if (session) session.receipts = session.receipts.filter(file => file.restoredMomentId !== momentId);}
+        },
+        removePendingRestore: async (id: string) => {if (options.runStore) await options.runStore.removePendingRestore(id); else pendingEntries.delete(id);},
       } as unknown as CollectionAutomations },
       assertCurrent: () => undefined,
     }),
@@ -167,11 +187,14 @@ function fixture(options: {
     notifyRenderer: () => undefined,
     assertOriginalWorkspace: () => undefined,
     syncNow: async () => { await options.syncNow?.(); },
-    serverRuns: { restore: async (_workspaceId, definitions, again) => (await options.serverRestore?.(definitions, again)) ?? NOTHING },
+    serverRuns: { restore: async (_workspaceId, definitions, again, retentionId) => {
+      if (definitions.length === 0) {releases.push(retentionId); return NOTHING;}
+      return (await options.serverRestore?.(definitions, again)) ?? NOTHING;
+    } },
   });
   const call = (channel: string, payload: Record<string, unknown>) =>
     handlers.get(channel)!({ sender: "window" }, { workspaceId: WORKSPACE_ID, ...payload });
-  return { call, calls, bodies, capture, queuePull, sharesChanged, account };
+  return { call, calls, bodies, capture, queuePull, sharesChanged, account, releases };
 }
 
 async function capturedFiles(paths: string[]) {
@@ -201,6 +224,35 @@ async function capturedFiles(paths: string[]) {
 }
 
 describe("stop and restore in main", () => {
+  it.each(["dismiss", "missing-share"] as const)("releases both hosts' retained claims on %s", async action => {
+    const root = await createTestScratch("dohc-restore-release-");
+    const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
+    const store = createAutomationRunStore(root, resolver);
+    const target = {kind: "person" as const, userId: "user_ana"};
+    await store.savePendingRestore({id: "restore-test", claims: ["older"], session: {grants: ["grant-edit"], target,
+      label: "Ana", definitions: [], filesUndone: true, receipts: [], result: {status: "waiting"}}});
+    const f = fixture({rootPath: root, runStore: store, granted: []});
+    if (action === "dismiss") await f.call(stopAndRestoreRecoveryOperations.dismissStopAndRestore.channel, {target});
+    else await expect(f.call(CHANNELS.stopAndRestore, {target})).rejects.toThrow("This person no longer has a share");
+    expect(f.releases).toEqual(["restore-test"]);
+    expect(await createAutomationRunStore(root, resolver).pendingRestores()).toEqual([]);
+  });
+  it.each(["person", "link"] as const)("stops %s access before reading a broken run store", async kind => {
+    const f = fixture({runStoreError: new Error("Unreadable progress"), links: [[{shareId: "link-share", grantId: "grant-link", status: "active", dependents: []}]]});
+    const target = kind === "person" ? {kind, userId: "user_ana"} : {kind, grantId: "grant-link"};
+    await expect(f.call(CHANNELS.stopAndRestore, {target})).rejects.toThrow("Access stopped. dohc could not read unfinished Stop and restore progress.");
+    expect(f.calls.some(call => call.method === "POST" && call.path.endsWith("/revoke"))).toBe(true);
+  });
+  it("starts fresh when new access exists after an unfinished restore's files were undone", async () => {
+    const root = await createTestScratch("dohc-restore-new-access-");
+    const store = createAutomationRunStore(root, async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;});
+    const target = {kind: "person" as const, userId: "user_ana"};
+    await store.savePendingRestore({id: "person:user_ana", claims: [], session: {grants: ["grant-old"], target, label: "Ana", definitions: [], filesUndone: true,
+      receipts: [], result: {status: "waiting"}}});
+    const f = fixture({rootPath: root, runStore: store});
+    await f.call(CHANNELS.stopAndRestore, {target});
+    expect(f.capture.restoreFileToBeforeMoment).toHaveBeenCalledTimes(1);
+  });
   it("recovers an unfinished restore after restart and finishes runs after Undo of the files", async () => {
     const root = await createTestScratch("dohc-restore-restart-");
     const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
@@ -219,7 +271,8 @@ describe("stop and restore in main", () => {
     });
     const outcome = await first.call(CHANNELS.stopAndRestore, {target}) as {restored: {restoredMomentId: string}[]};
     const resumedRuns = vi.fn(async () => NOTHING);
-    const restarted = fixture({rootPath: root, runStore: createAutomationRunStore(root, resolver), undoRunsOf: resumedRuns});
+    const restarted = fixture({rootPath: root, runStore: createAutomationRunStore(root, resolver), undoRunsOf: resumedRuns,
+      granted: [grant({revokedAtMs: 3}), grant({grantId: "grant-view", shareId: "share-2", access: "view"}), grant({grantId: "grant-old", shareId: "share-3", revokedAtMs: 5})]});
     const saved = await restarted.call(stopAndRestoreRecoveryOperations.pendingStopAndRestores.channel, {}) as unknown[];
     expect(saved).toHaveLength(1);
     await restarted.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: outcome.restored.map(file => file.restoredMomentId)});
@@ -449,7 +502,7 @@ describe("stop and restore in main", () => {
     const server = createServerRuns(async () => ({
       status: 200, body: { ok: true, ...NOTHING, keptFields: 1 }, asker: { account: "owner", current: () => true },
     }));
-    const f = fixture({ ...automationsFile(), serverRestore: async (definitions, again) => server.restore(WORKSPACE_ID, definitions, again) });
+    const f = fixture({ ...automationsFile(), serverRestore: async (definitions, again) => server.restore(WORKSPACE_ID, definitions, again, "restore-test") });
     await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({
       unfinished: { step: "runs", message: "Your server runs a different version of dohc. Update it, then try again." },
     });
@@ -588,7 +641,7 @@ describe("stop and restore in main", () => {
     });
     expect(f.capture.restoreFileToBeforeMoment).not.toHaveBeenCalled();
     await expect(fixture().call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_nobody" } }))
-      .rejects.toThrow("dohc found no share of this workspace with this person.");
+      .rejects.toThrow("This person no longer has a share of this workspace.");
   });
 
   it("sends a file the engine finds changed at restore to review", async () => {
@@ -692,7 +745,7 @@ describe("stop and restore in main", () => {
 
   it("refuses a link this workspace does not have", async () => {
     const f = fixture({ links: [[link({ grantId: "grant-other" })]] });
-    await expect(f.call(CHANNELS.stopAndRestore, byLink)).rejects.toThrow("dohc found no share link of this workspace with this id.");
+    await expect(f.call(CHANNELS.stopAndRestore, byLink)).rejects.toThrow("This share link no longer exists.");
     expect(f.calls.filter((call) => call.method === "POST")).toEqual([]);
   });
 

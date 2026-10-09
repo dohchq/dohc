@@ -9,6 +9,7 @@ import { parseAutomationsFile, type Automation } from "@dohc/workspace-contracts
 import type { CollectionQueryFilter, CollectionRecord } from "@dohc/workspace-contracts/collection";
 import type { AutomationClaim, AutomationClaimMessage, AutomationGroupHandover, AutomationGroupRelayRecord, ChangeAttributionWire } from "@dohc/workspace-engine-client";
 import type { RelayAutomationHost, RelayButtonAuthority } from "@dohc/workspace-contracts/relay";
+import { DaemonRefusalError } from "@dohc/workspace-engine-client";
 import { derivedRecordId } from "@dohc/automation-executor/record-ids";
 import { AutomationRunWait } from "@dohc/automation-executor/button-presser";
 import { AUTOMATION_SWITCHED_OFF_BODY } from "@dohc/automation-executor/automation-failed-notice";
@@ -40,7 +41,7 @@ import {
   DIRECT_MESSAGE_TO_YOU,
   type CollectionAutomationPeople,
 } from "@dohc/automation-executor/collection-automations";
-import { DEADLINE_ERROR, DEFINITION_CHANGED_ERROR, GROUP_CHANGED_ERROR, LOST_COLLECTION_ERROR, UNDONE_RUN_ERROR, UNFINISHED_UNDO_ERROR, UNREADABLE_RUN_ERROR } from "@dohc/automation-executor/collection-automation-run";
+import { newRun, DEADLINE_ERROR, DEFINITION_CHANGED_ERROR, GROUP_CHANGED_ERROR, LOST_COLLECTION_ERROR, UNDONE_RUN_ERROR, UNFINISHED_UNDO_ERROR, UNREADABLE_RUN_ERROR } from "@dohc/automation-executor/collection-automation-run";
 import {
   AutomationChatSessionWait,
   automationMessageId,
@@ -447,7 +448,7 @@ async function world(options: {
           const bytes = Buffer.from(update).toString("base64");
           if (key !== undefined && journal.has(key)) {
             // The engine's rule: the same key with other bytes is refused.
-            if (journal.get(key) !== bytes) throw new Error("idempotency-key-reuse-mismatch");
+            if (journal.get(key) !== bytes) throw new DaemonRefusalError({code: "INVALID_PARAMS", message: "idempotency-key-reuse-mismatch", retry: "no"}, undefined);
             armed?.();
             return;
           }
@@ -751,6 +752,35 @@ async function world(options: {
 }
 
 const TASKS = "collection:Tasks#bump";
+
+it.each([false, true])("bounds restore retention in a 10001-claim history (all unfinished: %s)", async allUnfinished => {
+  const w = await world({collections: ["Tasks", "Log"], automations: {Tasks: BUMP}});
+  const record = w.addRecord("Tasks", "retention", {Count: 2});
+  for (let index = 0; index < 10001; index++) w.claim(TASKS, record).state = "done";
+  let definition!: Automation;
+  const executor = w.makeExecutor({store: {...w.baseStore, runsOf: async (_automationId, claimId) => {
+    const run = newRun(w.claims.get(claimId)!, definition, "retention", 1);
+    run.undo = allUnfinished || claimId === "atc_claim10001" ? null : "done";
+    if (!allUnfinished && claimId === "atc_claim1") {
+      run.undo = null;
+      run.definitionHash = "another-definition";
+    }
+    return {runs: [run], unreadable: false};
+  }}});
+  await executor.open();
+  const listed = await executor.automationsIn("Tasks");
+  if (listed.status !== "read" || !listed.automations[0]?.valid) throw Error("No definition");
+  definition = listed.automations[0].automation;
+  const definitions = [{collectionPath: "Tasks", id: "bump", definitionHash: definitionHash(definition)}];
+  if (allUnfinished) {
+    await expect(executor.retainRunsForRestore(definitions, "retention-test")).rejects.toThrow("cannot undo more than 10,000");
+    expect(await w.baseStore.pendingRestores()).toEqual([]);
+  } else {
+    await executor.retainRunsForRestore(definitions, "retention-test");
+    expect((await w.baseStore.pendingRestores())[0]?.claims).toEqual(["atc_claim10001"]);
+  }
+  await executor.dispose();
+});
 
 // The definition hash the executor lists for one automation, as a presser's window sees it.
 // The host module's holds as the executor sees them: a handover waits on each.
@@ -2921,7 +2951,7 @@ describe("Collection automations", () => {
     if (conflict) {
       other.conflicted = true;
       // The pass stops at the newer run, after it put the shared record back, and leaves the older run as it is.
-      await expect(executor.undoRunsOf(definitions, async () => undefined)).resolves.toMatchObject({
+      await expect(executor.undoRunsOf(definitions, async () => undefined, false, "retained-restore")).resolves.toMatchObject({
         undone: 0, errorMessage: "Tasks/other.md has a sync conflict. Resolve the conflict, then try again.",
       });
       expect(w.fieldsOf(shared).Note).toBe("one");
@@ -2933,7 +2963,7 @@ describe("Collection automations", () => {
         expect((await w.baseStore.runsOf("collection:Tasks#stamp", older.claimId)).runs).toHaveLength(1);
         expect((await executor.listedRun("collection:Tasks#later", newer.claimId))?.undoUnfinished).toBe(true);
         expect(await executor.retry({automationId: "collection:Tasks#later", claimId: newer.claimId, startOver: false})).toMatchObject({
-          status: "refused", reason: "dohc has not finished undoing this run. Try again in run history to finish Undo.",
+          status: "refused", reason: "dohc has not finished undoing this run.",
         });
         await executor.undo({automationId: "collection:Tasks#stamp", claimId: older.claimId, deletes: null}, async () => undefined);
         expect(w.fieldsOf(shared).Note).toBe("two");
@@ -2943,7 +2973,7 @@ describe("Collection automations", () => {
       }
       other.conflicted = false;
     }
-    await expect(executor.undoRunsOf(definitions, async () => undefined)).resolves.toMatchObject({ undone: intervenes ? 1 : 2, errorMessage: null });
+    await expect(executor.undoRunsOf(definitions, async () => undefined, false, "retained-restore")).resolves.toMatchObject({ undone: intervenes ? 1 : 2, errorMessage: null });
     expect(w.fieldsOf(other).Note).toBe("x");
     expect(w.fieldsOf(shared).Note).toBe("two");
     await executor.dispose();

@@ -481,7 +481,7 @@ describe("workspace engine IPC registrations", () => {
     const serverRun = {
       claimId: "claim-server", state: "done", error: null, createdAtMs: 1, updatedAtMs: 2,
       trigger: { sharedAuthor: null, kind: "changed", recordId: "rec_a", by: "human", depth: 0 },
-      writes: [], definitionChanged: false, chainStopped: false, neverStarted: false, undone: false,
+      writes: [], definitionChanged: false, chainStopped: false, neverStarted: false, undone: false, undoUnfinished: false,
     };
     h.relay.mockImplementation(async (_workspaceId, request) => {
       const claimId = request.method === "GET" ? request.query?.claimId : undefined;
@@ -538,7 +538,7 @@ describe("workspace engine IPC registrations", () => {
     const serverRun = {
       claimId: "claim-server", state: "done", error: null, createdAtMs: 1, updatedAtMs: 2,
       trigger: { sharedAuthor: null, kind: "changed", recordId: "rec_a", by: "human", depth: 0 },
-      writes: [], definitionChanged: false, chainStopped: false, neverStarted: false, undone: false,
+      writes: [], definitionChanged: false, chainStopped: false, neverStarted: false, undone: false, undoUnfinished: false,
     };
     const shown = { status: 200, body: { ok: true, run: serverRun } };
     const locate = () => h.invoke(CHANNELS.locateRecordHistoryRun, { workspaceId: "workspace", automationId: stamp, claimId: "claim-server" });

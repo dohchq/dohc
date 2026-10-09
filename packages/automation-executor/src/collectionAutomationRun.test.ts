@@ -42,6 +42,19 @@ type Doc = { id: string; path: string; collection: string; values: Record<string
 
 class Crash extends Error {}
 
+it("undoes an older run of the same claim after only the newer definition was restored", async () => {
+  const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {Count: 2}}]");
+  const space = workspace([task("rec_t", {Count: 3})]);
+  const write = (before: number, after: number) => ({kind: "field" as const, recordId: "rec_t", path: "Tasks/rec_t.md", field: "Count", before, after});
+  const older = {...newRun(added(), definition, "run-x", 1), applied: [{ordinal: 0, writes: [write(1, 2)]}]};
+  const newer = {...newRun(added(2), definition, "run-y", 2), applied: [{ordinal: 0, writes: [write(2, 3)]}]};
+  await undoCollectionAutomationRuns(space.undo([]), [newer], new AbortController().signal);
+  newer.undo = "done";
+  await undoCollectionAutomationRuns(space.undo([]), [older, newer], new AbortController().signal);
+  expect(space.records.get("rec_t")!.values.Count).toBe(1);
+  expect(new Set(space.keys.keys()).size).toBe(2);
+});
+
 it("does not replay a completed field reversal after another claim's Undo and restart", async () => {
   const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {Count: 2}}]");
   const space = workspace([task("rec_t", { Count: 2 }), task("rec_other", { Count: 2 })]);
@@ -56,20 +69,13 @@ it("does not replay a completed field reversal after another claim's Undo and re
   await store.save(newer);
   let blocked = true;
   const deps = {...space.undo([]),
-    withRecordWrites: async <T>(signal: AbortSignal, work: (writes: CollectionRecordWrites) => Promise<T>) => space.undo([]).withRecordWrites(signal, writes => work({...writes,
-      setFields: input => writes.setFields({...input, idempotencyKeyPrefix: undefined}),
-    })),
     withReads: async <T>(work: (reads: CollectionAutomationReads) => Promise<T>) => space.undo([]).withReads(reads => work({...reads,
       getCollectionRecord: async input => {
         const result = await reads.getCollectionRecord(input);
         return {...result, record: {...result.record, conflicted: blocked && input.recordId === "rec_other"}};
       },
     })),
-    recordCompletedField: async (recordId: string, field: string) => {
-      const undoCompletedFields = [...(newer.undoCompletedFields ?? []), {recordId, field}];
-      await store.updateState(newer, {undoCompletedFields});
-      newer.undoCompletedFields = undoCompletedFields;
-    },
+
   };
   await expect(undoCollectionAutomationRuns(deps, [newer], new AbortController().signal)).rejects.toThrow("sync conflict");
   expect(space.records.get("rec_t")!.values.Count).toBe(1);
@@ -83,23 +89,69 @@ it("does not replay a completed field reversal after another claim's Undo and re
   expect(space.records.get("rec_other")!.values.Count).toBe(1);
 });
 
+it.each(["started", "done"] as const)("retries a refused shared field without replaying a completed field on the same record (%s)", async undo => {
+  const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {Count: 2, Note: 2}}]");
+  const space = workspace([task("rec_t", {Count: 2, Note: 2})]);
+  const run = {...newRun(added(), definition, "mixed-reversal", 1), applied: [{ordinal: 0, writes: ["Count", "Note"].map(field =>
+    ({kind: "field" as const, recordId: "rec_t", path: "Tasks/rec_t.md", field, before: 1, after: 2}))}]};
+  const signal = new AbortController().signal;
+  const base = space.undo([]);
+  const reversed = await undoCollectionAutomationRuns({...base,
+    withRecordWrites: <T>(signal: AbortSignal, work: (edit: CollectionRecordWrites) => Promise<T>) => base.withRecordWrites(signal, edit => work({...edit,
+      setFields: async input => ({...await edit.setFields(input), sharedFileUpdates: {Note: {
+        outboxId: "outbox", appendKey: `${input.idempotencyKeyPrefix}/Note`, nativeHeadSequence: 1,
+        binding: {workspaceId: "workspace", mainVersionId: "main", objectId: "rec_t", lineageClaimId: "a".repeat(64),
+          currentPath: "Tasks/rec_t.md", selectorPaths: ["Tasks"], restoreFenceGeneration: 0},
+      }}}),
+    })),
+  }, [run], signal);
+  run.undo = undo;
+  run.undoWrites = reversed.undoWrites;
+  run.sharedSettlements = reversed.undoWrites.map(write => ({draft: write.draft, state: "not-accepted"}));
+  // Another Undo changed Count; the shared host refused Note's reversal.
+  space.records.get("rec_t")!.values = {Count: 2, Note: 2};
+  await undoCollectionAutomationRuns(base, [run], signal);
+  expect(space.records.get("rec_t")!.values).toEqual({Count: 2, Note: 1});
+});
+
+it.each([0, 1])("keeps the Undo key scope when only run %s saved completion before restart", async completed => {
+  const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {Count: 2}}]");
+  const space = workspace([task("rec_t", {Count: 3})]);
+  const make = (seed: string, before: number, after: number): StoredRun => ({...newRun(added(), definition, seed, before),
+    undo: "started", undoScope: "joint-undo", steps: [{ordinal: 0, effects: [{kind: "set", target: {recordId: "rec_t",
+      path: "Tasks/rec_t.md", collectionPath: "Tasks"}, fields: [{field: "Count", before, after}]}]}],
+    applied: [{ordinal: 0, writes: [{kind: "field", recordId: "rec_t", path: "Tasks/rec_t.md", field: "Count", before, after}]}]});
+  const runs = [make("run-x", 1, 2), make("run-y", 2, 3)];
+  const signal = new AbortController().signal;
+  await undoCollectionAutomationRuns(space.undo([]), runs, signal);
+  expect(space.records.get("rec_t")!.values.Count).toBe(1);
+  space.records.get("rec_t")!.values.Count = 3;
+  runs[completed]!.undo = "done";
+  const store = await scratchStore();
+  for (const run of runs) await store.save(run);
+  const recovered = (await store.runsOf(runs[0]!.automationId, runs[0]!.claimId)).runs;
+  expect(recovered.every(run => run.undoScope === "joint-undo")).toBe(true);
+  await undoCollectionAutomationRuns(space.undo([]), recovered, signal);
+  expect(space.records.get("rec_t")!.values.Count).toBe(3);
+});
+
 it("describes an unfinished Undo without claiming the run was undone", async () => {
   const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {Count: 2}}]");
   const store = await scratchStore();
   await store.save({...newRun(added(), definition, "partial", 1), undo: "started"});
   expect(await savedRunOf(store, added(), definition)).toMatchObject({outcome: {
-    error: "dohc has not finished undoing this run. Try again in run history to finish Undo.",
+    error: "dohc has not finished undoing this run.",
   }});
 });
 
-it("stops before the next record reversal when saving completed field progress fails", async () => {
+it("stops before the next record reversal when the engine journal fails", async () => {
   const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {Count: 2}}]");
   const space = workspace([task("rec_t", {Count: 2}), task("rec_other", {Count: 2})]);
   const run = {...newRun(added(), definition, "progress", 1), applied: [{ordinal: 0, writes: ["rec_t", "rec_other"].map(recordId =>
     ({kind: "field" as const, recordId, path: `Tasks/${recordId}.md`, field: "Count", before: 1, after: 2}))}]};
-  await expect(undoCollectionAutomationRuns({...space.undo([]), recordCompletedField: async () => {throw new Error("Disk full");}},
+  await expect(undoCollectionAutomationRuns({...space.undo([]), withRecordWrites: async () => {throw new Error("Disk full");}},
     [run], new AbortController().signal)).rejects.toThrow("Disk full");
-  expect(space.records.get("rec_t")!.values.Count).toBe(1);
+  expect(space.records.get("rec_t")!.values.Count).toBe(2);
   expect(space.records.get("rec_other")!.values.Count).toBe(2);
 });
 
@@ -174,17 +226,16 @@ function workspace(docs: readonly Doc[], fault: Fault | null = null, files = new
     },
   };
   const writes: CollectionRecordWrites = {
-    setFields: ({ recordPath, fields, expectedBefore, idempotencyKeyPrefix }) => durable(async () => {
+    setFields: ({ recordPath, fields, expectedBefore, idempotencyKeyPrefix, preserveCompletedFields }) => durable(async () => {
       const doc = [...records.values()].find((candidate) => candidate.path === recordPath);
       if (!doc) throw new Error(`${recordPath} is gone.`);
       const replaced: Record<string, unknown> = {};
       const kept: Record<string, unknown> = {};
       for (const [field, value] of Object.entries(fields)) {
-        // A person's write, such as Undo's, carries no key.
         const key = idempotencyKeyPrefix === undefined ? null : `${idempotencyKeyPrefix}/${field}`;
         if (key !== null && keys.has(key)) {
           // A replay of a landed write: the engine answers it and writes nothing.
-          if (JSON.stringify(keys.get(key)) !== JSON.stringify(value)) throw new Error(`The key ${key} came back with other content.`);
+          if (!preserveCompletedFields && JSON.stringify(keys.get(key)) !== JSON.stringify(value)) throw new Error(`The key ${key} came back with other content.`);
           continue;
         }
         const current = doc.values[field] ?? null;

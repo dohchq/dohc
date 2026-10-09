@@ -74,6 +74,7 @@ export function useStopAndRestore(workspaceId: string, recovery?: {
   const receipts = useRef(new Map<string, Receipt[]>());
   const runs = useRef(new Map<string, RunTotals>());
   const shown = useRef(new Map<string, Shown>());
+  const initialized = useRef(new Set<string>());
   const key = useRef(0);
   const retry = useCallback((forWorkspace: string, target: StopTarget, start: StopAndRestoreStart) => {
     key.current += 1;
@@ -86,6 +87,7 @@ export function useStopAndRestore(workspaceId: string, recovery?: {
     return {
       get: (forWorkspace: string, target: StopAndRestoreTarget): Receipt[] => receipts.current.get(id(forWorkspace, target)) ?? [],
       set: (forWorkspace: string, target: StopAndRestoreTarget, list: Receipt[]): void => {
+        initialized.current.add(id(forWorkspace, target));
         receipts.current.set(id(forWorkspace, target), list);
       },
       /**
@@ -95,6 +97,7 @@ export function useStopAndRestore(workspaceId: string, recovery?: {
       runs: (forWorkspace: string, target: StopAndRestoreTarget): RunTotals =>
         runs.current.get(id(forWorkspace, target)) ?? { runsUndone: 0, fieldsMissing: 0, otherKept: 0 },
       addRuns: (forWorkspace: string, target: StopAndRestoreTarget, more: RunTotals): RunTotals => {
+        initialized.current.add(id(forWorkspace, target));
         const before = runs.current.get(id(forWorkspace, target)) ?? { runsUndone: 0, fieldsMissing: 0, otherKept: 0 };
         const after = {
           runsUndone: before.runsUndone + more.runsUndone,
@@ -106,7 +109,24 @@ export function useStopAndRestore(workspaceId: string, recovery?: {
       },
       shown: (forWorkspace: string, target: StopAndRestoreTarget): Shown | null => shown.current.get(id(forWorkspace, target)) ?? null,
       show: (forWorkspace: string, target: StopAndRestoreTarget, value: Shown): void => {
+        initialized.current.add(id(forWorkspace, target));
         shown.current.set(id(forWorkspace, target), value);
+      },
+      recover: (forWorkspace: string, target: StopAndRestoreTarget, list: Receipt[], value: Shown | null): boolean => {
+        const key = id(forWorkspace, target);
+        if (initialized.current.has(key)) return false;
+        initialized.current.add(key);
+        receipts.current.set(key, list);
+        if (value) {
+          shown.current.set(key, value);
+          runs.current.set(key, {runsUndone: value.result.runsUndone, fieldsMissing: value.result.fieldsMissing, otherKept: otherKept(value.result)});
+        }
+        return true;
+      },
+      forget: (forWorkspace: string, target: StopAndRestoreTarget): void => {
+        const key = id(forWorkspace, target);
+        initialized.current.add(key);
+        receipts.current.delete(key); runs.current.delete(key); shown.current.delete(key);
       },
     };
   }, []);
@@ -121,15 +141,11 @@ export function useStopAndRestore(workspaceId: string, recovery?: {
         if (!current) return;
         for (const entry of pending) {
           const target = {target: entry.target, label: entry.label};
-          store.set(workspaceId, entry.target, entry.receipts);
-          if (entry.result.status === "restored") {
-            store.show(workspaceId, entry.target, {result: entry.result, undone: entry.filesUndone});
-            store.addRuns(workspaceId, entry.target, {runsUndone: entry.result.runsUndone,
-              fieldsMissing: entry.result.fieldsMissing, otherKept: otherKept(entry.result)});
-          }
-          const message = entry.filesUndone
-            ? "dohc has not finished undoing runs. Try again to finish."
-            : "dohc has not finished Stop and restore. Try again to finish.";
+          if (!store.recover(workspaceId, entry.target, entry.receipts, entry.result.status === "restored"
+            ? {result: entry.result, undone: entry.filesUndone} : null)) continue;
+          const message = entry.result.status === "restored" && entry.result.unfinished?.step === "runs"
+            ? "dohc has not finished undoing runs."
+            : "dohc stopped before restoring every file.";
           recoveryRef.current?.onError(message, new Error(message), () => retry(workspaceId, target, "stop"),
             `stop-and-restore:${JSON.stringify([workspaceId, keyOf(entry.target)])}`);
         }
@@ -146,6 +162,20 @@ export function useStopAndRestore(workspaceId: string, recovery?: {
     open,
     retry,
     close,
+    dismiss: async (identity: string): Promise<boolean> => {
+      if (!identity.startsWith("stop-and-restore:")) return false;
+      let parsed: unknown;
+      try { parsed = JSON.parse(identity.slice("stop-and-restore:".length)); } catch { return false; }
+      if (!Array.isArray(parsed) || parsed.length !== 2 || parsed[0] !== workspaceId || typeof parsed[1] !== "string") return false;
+      const key = parsed[1];
+      const target: StopAndRestoreTarget | null = key.startsWith("person:") ? {kind: "person", userId: key.slice(7)}
+        : key.startsWith("link:") ? {kind: "link", grantId: key.slice(5)} : null;
+      if (target === null) return false;
+      await bridge().dismissStopAndRestore({workspaceId, target});
+      store.forget(workspaceId, target);
+      setSession(current => current?.workspaceId === workspaceId && keyOf(current.target.target) === key ? null : current);
+      return true;
+    },
     receipts: store,
   };
 }
@@ -278,6 +308,10 @@ export function StopAndRestoreDialog({
       if (request.isCurrent(token)) setState((current) => ({ kind: "waiting", targets: listedTargets(current) }));
       return;
     }
+    // A retry after file Undo restores no files. New receipts belong to a
+    // fresh Stop and restore after access was granted again.
+    const resumedFileUndo = filesUndone && result.restored.length === 0;
+    if (filesUndone && !resumedFileUndo) receipts.forget(workspaceId, chosen.target);
     // Kept even when the dialog closed meanwhile, so a later try shows them.
     receipts.set(workspaceId, chosen.target, [...receipts.get(workspaceId, chosen.target), ...result.restored]);
     // Each try reports every field its runs keep now, but counts missing fields and other changes only for the runs it undid.
@@ -300,7 +334,7 @@ export function StopAndRestoreDialog({
           sendsMessages: (carried?.sendsMessages ?? false) || result.sendsMessages,
         }),
       },
-      undone: filesUndone,
+      undone: resumedFileUndo,
     };
     receipts.show(workspaceId, chosen.target, outcome);
     onRestored();
@@ -349,7 +383,9 @@ export function StopAndRestoreDialog({
       onError("dohc could not undo the restore.", new Error(result.errorMessage), () => onRetry(workspaceId, chosen, "undo"), identity);
     } else {
       if (outcome.result.unfinished !== null) {
-        const message = "dohc has not finished undoing runs. Try again to finish.";
+        const message = outcome.result.unfinished.step === "runs"
+          ? "dohc has not finished undoing runs."
+          : "dohc stopped before restoring every file.";
         onError(message, new Error(message), () => onRetry(workspaceId, chosen, "stop"), identity);
       } else onSettled(identity);
     }
@@ -488,10 +524,9 @@ function Outcome({ words, result, undone, onOpenFile, onOpenCollection }: {
         {result.sharedReversals?.some(write => write.state === "not-accepted") ? (
           <p className="m-0 text-[13px] text-muted">Reversals saved on this computer. The shared host did not accept them. Try Undo again in Run History.</p>
         ) : null}
-      {result.unfinished !== null && result.wroteAutomations ? (
+      {result.unfinished?.step === "runs" && result.wroteAutomations ? (
         <p className="m-0 text-[13px] text-ink">
-          dohc has not finished undoing runs{result.runsUndone > 0 ? "" : ` of ${words.automations}`}.
-          {undone ? " Try again to finish." : ""}
+          {`dohc has not finished undoing runs${result.runsUndone > 0 ? "" : ` of ${words.automations}`}.`}
         </p>
       ) : null}
       {result.runsLeft > 0 ? (

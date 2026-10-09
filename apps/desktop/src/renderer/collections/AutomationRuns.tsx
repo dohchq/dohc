@@ -126,7 +126,7 @@ function settlementText(state: "pending" | "settled" | "not-accepted" | "absent"
 }
 
 function runSummary(run: Run): string {
-  if (run.undoUnfinished) return "dohc has not finished undoing this run.";
+  if (run.undoUnfinished) return "Undo unfinished";
   if (run.undoSettlementNotAccepted) return "Reversal not accepted";
   if (run.undoSettlementPending) return "Reversal pending";
   if (run.sharedSettlementNotAccepted) return "Update not accepted";

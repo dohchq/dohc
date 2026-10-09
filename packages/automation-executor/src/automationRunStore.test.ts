@@ -14,15 +14,35 @@ const setA = { kind: "set" as const, target: { recordId: "rec_a", collectionPath
 
 function run(claimId: string, state: "done" | "failed" | null, atMs: number, settled = state === "done"): StoredRun {
   return {
-    version: 10, claimId, automationId: AUTOMATION, definitionHash: "0123456789abcdef", keySeed: "0123456789abcdef",
+    version: 11, claimId, automationId: AUTOMATION, definitionHash: "0123456789abcdef", keySeed: "0123456789abcdef",
     startedAtMs: atMs, finishedAtMs: state === null ? null : atMs, steps: [{ ordinal: 0, effects: [setA, setA] }],
     applied: [{ ordinal: 0, writes: [{ kind: "field", recordId: "rec_a", path: "Tasks/a.md", field: "__proto__", before: 1, after: 2 }] }],
-    created: [], replans: [], undoRequests: [], undoCalls: [], undoCovers: [], readableFields: null, collections: [], rules: null, superseded: false, undo: null, undoKept: [], undoCompletedFields: [], settled,
+    created: [], replans: [], undoRequests: [], undoCalls: [], undoCovers: [], readableFields: null, collections: [], rules: null, superseded: false, undo: null, undoKept: [], settled,
     outcome: state === null ? null : state === "done" ? { state } : { state, error: "No.", run: 1, step: 0 },
   };
 }
 
 describe("the automation run store", () => {
+  it("appends restore and Undo receipts durably without repeating earlier receipts", async () => {
+    const root = await createTestScratch("dohc-restore-lines-");
+    const store = createAutomationRunStore(root, testMetadataDir);
+    await store.savePendingRestore({id: "restore", claims: [], session: {grants: ["grant"], target: {kind: "person", userId: "ana"},
+      label: "Ana", definitions: [], filesUndone: false, receipts: [], result: {status: "waiting"}}});
+    for (let index = 0; index < 20; index++) await store.recordRestoreReceipt("restore", {path: `Tasks/${index}.md`, restoredMomentId: `moment-${index}`});
+    await store.undoRestoreReceipt("restore", "moment-0");
+    const path = join(root, ".dohc", "automations", "restoring.json");
+    const lines = (await readFile(path, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+    expect(lines).toHaveLength(22);
+    expect(lines.filter(line => line.kind === "receipt").every(line => !Object.hasOwn(line, "entry"))).toBe(true);
+    await appendFile(path, '{"kind":"receipt"');
+    const restarted = createAutomationRunStore(root, testMetadataDir);
+    expect((await restarted.pendingRestores())[0]?.session?.receipts).toHaveLength(19);
+    await restarted.recordRestoreReceipt("restore", {path: "Tasks/last.md", restoredMomentId: "last"});
+    expect((await createAutomationRunStore(root, testMetadataDir).pendingRestores())[0]?.session?.receipts).toHaveLength(20);
+    await restarted.removePendingRestore("restore");
+    expect(await readFile(path, "utf8")).toBe("");
+    expect(await createAutomationRunStore(root, testMetadataDir).pendingRestores()).toEqual([]);
+  });
   it("retains older claims needed by an unfinished restore across restart and expiry", async () => {
     const root = await createTestScratch("dohc-restore-retention-");
     const store = createAutomationRunStore(root, testMetadataDir);
@@ -105,14 +125,14 @@ describe("the automation run store", () => {
     await store.updateState(saved, {sharedSettlements});
     await store.save({...saved, sharedSettlements: [{draft, state: "not-accepted"}]});
     const undoWrites = [{recordId: "rec_a", field: "A", draft: {...draft, appendKey: "undo/A"}}];
-    await store.updateState(saved, {undoWrites});
+    await store.recordUndoWrite(saved, undoWrites[0]!);
     const restarted = createAutomationRunStore(root, testMetadataDir);
     const loaded = (await restarted.runsOf(AUTOMATION, "settlement")).runs[0]!;
     expect(loaded).toMatchObject({sharedSettlements, undoWrites});
     await restarted.updateState(loaded, {sharedSettlements: [{draft: undoWrites[0]!.draft, state: "not-accepted"}]});
     expect((await restarted.runsOf(AUTOMATION, "settlement")).runs[0]?.sharedSettlements).toHaveLength(2);
   });
-  it("saves version 10 and refuses version 9 without a compatibility reader", async () => {
+  it("saves version 11 and refuses version 10 without a compatibility reader", async () => {
     const root = await createTestScratch("dohc-automation-runs-");
     const store = createAutomationRunStore(root, testMetadataDir);
     await store.save({ ...run("atc_one", "done", 1), undoKept: [{ recordId: "rec_a", field: "A", path: "Tasks/a.md", fieldName: "A", datasetRecordId: null }] });
@@ -120,8 +140,8 @@ describe("the automation run store", () => {
     const headerName = (await readdir(folder)).find((file) => file.endsWith(".json"))!;
     const headerPath = join(folder, headerName);
     const header = JSON.parse((await readFile(headerPath, "utf8")).split("\n")[0]!);
-    expect(header.version).toBe(10);
-    header.version = 9;
+    expect(header.version).toBe(11);
+    header.version = 10;
     header.undoKept = [{ recordId: "rec_a", field: "A" }];
     await writeFile(headerPath, JSON.stringify(header));
     await expect(store.runsOf(AUTOMATION, "atc_one")).resolves.toEqual({ runs: [], unreadable: true });
@@ -360,7 +380,7 @@ describe("the automation run store", () => {
     const files = await readdir(join(folder, automationFolder!));
     const planOf = (claimId: string) => join(folder, automationFolder!, files.find((file) => file.endsWith(".json") && file.startsWith(hashOf(claimId)))!);
     const text = await readFile(planOf("atc_older"), "utf8");
-    await writeFile(planOf("atc_older"), text.replace('"version":10', '"version":9'));
+    await writeFile(planOf("atc_older"), text.replace('"version":11', '"version":9'));
     await writeFile(planOf("atc_damaged"), "{ torn");
     const later = Date.now() + 31 * 24 * 60 * 60 * 1000;
     await expect(store.expire(Date.now(), async () => "gone", null)).resolves.toBeNull();
