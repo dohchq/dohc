@@ -38,8 +38,12 @@ function storedKeys(): string[] {
   return result;
 }
 function remove(key: string): void { try { localStorage.removeItem(key); } catch { /* Refused storage remains unavailable. */ } }
+function removeIfCurrent(key: string | undefined, raw: string | undefined): void {
+  try {if (key !== undefined && raw !== undefined && localStorage.getItem(key) === raw) remove(key);}
+  catch { /* Preserve a copy whose bytes cannot be checked. */ }
+}
 
-export function loadStoredDrafts(nowMs: number): readonly StoredOrphanedDraft[] {
+export function loadStoredDrafts(nowMs: number, options: {bindHandles?: boolean} = {}): readonly StoredOrphanedDraft[] {
   const result: StoredOrphanedDraft[] = [];
   const used = new Set<number>();
   const recoveries = new Set<string>();
@@ -75,9 +79,11 @@ export function loadStoredDrafts(nowMs: number): readonly StoredOrphanedDraft[] 
         } catch { /* Keep refused repairs visible and at risk. */ }
       }
       const restored = { ...row, id, capturedAtMs };
-      keys.set(id, key);
-      if (durableRaw !== undefined) expected.set(id, durableRaw);
-      else expected.delete(id);
+      if (options.bindHandles !== false) {
+        keys.set(id, key);
+        if (durableRaw !== undefined) expected.set(id, durableRaw);
+        else expected.delete(id);
+      }
       result.push(restored);
     }
   } catch { /* Storage can be unavailable; capture will retain work in memory. */ }
@@ -98,9 +104,13 @@ export function storeDraft(draft: StoredOrphanedDraft): boolean {
 }
 export function replaceStoredDraft(draft: StoredOrphanedDraft): boolean {
   const key = keys.get(draft.id);
+  const raw = expected.get(draft.id);
   // Restored keys may also be in another window. Refine into this window's own copy.
-  return key !== undefined && ownedKeys.has(key) && isStoredDraftCurrent(draft.id)
-    ? write(draft, key) : storeDraft(draft);
+  if (key !== undefined && ownedKeys.has(key) && isStoredDraftCurrent(draft.id)) return write(draft, key);
+  if (!storeDraft(draft)) return false;
+  removeIfCurrent(key, raw);
+  if (key) ownedKeys.delete(key);
+  return true;
 }
 export function isStoredDraftCurrent(id: number): boolean {
   const key = keys.get(id), raw = expected.get(id);
@@ -121,8 +131,8 @@ export function forgetStoredDraft(id: number): void {
           copy.recovery.objectId === row.recovery.objectId && copy.recovery.updateBase64 === row.recovery.updateBase64) remove(copyKey);
       }
     }
-    if (key !== undefined && raw !== undefined && localStorage.getItem(key) === raw) remove(key);
   } catch { /* Preserve copies whose identity cannot be checked. */ }
+  removeIfCurrent(key, raw);
   if (key) ownedKeys.delete(key);
   keys.delete(id); expected.delete(id);
 }

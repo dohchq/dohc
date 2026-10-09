@@ -257,11 +257,52 @@ it("keeps both windows' refinements of a loaded record in separate saved copies"
   const a = draftsFor(first.useOrphanedDrafts, "workspace", "a.txt")[0]!;
   const b = draftsFor(second.useOrphanedDrafts, "workspace", "a.txt")[0]!;
   first.replaceOrphanedDraft("workspace", "a.txt", a.id, "first newer typing", {objectId: returnedDraft.objectId, updateBase64: "AAE="});
+  expect(second.atRiskOrphanedDraftIds()).toEqual([b.id]);
   second.replaceOrphanedDraft("workspace", "a.txt", b.id, "second newer typing", {objectId: returnedDraft.objectId, updateBase64: "AAI="});
   expect(first.atRiskOrphanedDraftIds()).toEqual([]);
   expect(second.atRiskOrphanedDraftIds()).toEqual([]);
   const restarted = await relaunch();
-  expect(draftsFor(restarted.useOrphanedDrafts, "workspace", "a.txt").map(row => row.text).sort()).toEqual([returnedDraft.text, "first newer typing", "second newer typing"].sort());
+  expect(draftsFor(restarted.useOrphanedDrafts, "workspace", "a.txt").map(row => row.text).sort()).toEqual(["first newer typing", "second newer typing"].sort());
+  restarted.resetOrphanedDrafts(); resetOrphanedDrafts(); localStorage.clear();
+});
+
+it("keeps one row after a restored copy adopts its record ID and restarts", async () => {
+  resetOrphanedDrafts(); localStorage.clear();
+  vi.stubGlobal("dohcDesktop", {platform: "linux", listLiveDraftRecovery: vi.fn(async () => [returnedDraft])});
+  captureOrphanedDraft("workspace", "a.txt", returnedDraft.text, {objectId: returnedDraft.objectId, updateBase64: returnedDraft.updateBase64});
+  const next = await relaunch();
+  await next.loadLiveDraftRecovery("workspace", () => true);
+  const restarted = await relaunch();
+  const rows = draftsFor(restarted.useOrphanedDrafts, "workspace", "a.txt");
+  expect(rows).toHaveLength(1);
+  expect(rows[0]!.recovery?.recordId).toBe(returnedDraft.recordId);
+  restarted.resetOrphanedDrafts(); resetOrphanedDrafts(); localStorage.clear();
+});
+
+it("keeps only newer text after a restored row without a record ID is refined", async () => {
+  resetOrphanedDrafts(); localStorage.clear();
+  captureOrphanedDraft("workspace", "a.txt", "older typing");
+  const next = await relaunch();
+  const id = draftsFor(next.useOrphanedDrafts, "workspace", "a.txt")[0]!.id;
+  next.replaceOrphanedDraft("workspace", "a.txt", id, "newer typing");
+  const restarted = await relaunch();
+  expect(draftsFor(restarted.useOrphanedDrafts, "workspace", "a.txt").map(row => row.text)).toEqual(["newer typing"]);
+  restarted.resetOrphanedDrafts(); resetOrphanedDrafts(); localStorage.clear();
+});
+
+it("dismisses the right saved copy after Stop and restore reads paths with another window's colliding ID", async () => {
+  resetOrphanedDrafts(); localStorage.clear();
+  captureOrphanedDraft("workspace", "a.txt", "older typing");
+  const next = await relaunch();
+  const id = draftsFor(next.useOrphanedDrafts, "workspace", "a.txt")[0]!.id;
+  // Another renderer can allocate the same numeric handle after this one restored.
+  localStorage.setItem(`${ORPHANED_DRAFT_STORAGE_PREFIX}other-window`, JSON.stringify({version: 1, id, workspaceId: "other", path: "b.txt", text: "other window typing", capturedAtMs: Date.now()}));
+  next.replaceOrphanedDraft("workspace", "a.txt", id, "newer typing");
+  expect(next.retainedOrphanedDraftPaths("workspace")).toEqual(["a.txt"]);
+  await next.dismissOrphanedDraft("workspace", "a.txt", id);
+  const restarted = await relaunch();
+  expect(draftsFor(restarted.useOrphanedDrafts, "workspace", "a.txt")).toEqual([]);
+  expect(draftsFor(restarted.useOrphanedDrafts, "other", "b.txt").map(row => row.text)).toEqual(["other window typing"]);
   restarted.resetOrphanedDrafts(); resetOrphanedDrafts(); localStorage.clear();
 });
 

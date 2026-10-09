@@ -141,6 +141,38 @@ it("reports a projection import failure without treating the valid record as abs
   } finally {vi.doUnmock("@dohc/ydoc-projection"); vi.resetModules();}
 });
 
+it.each(["richdoc", "scene"] as const)("skips one %s record whose projection throws without hiding other drafts or failing dismiss", async kind => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-recovery-projection-")); directories.push(directory);
+  const draft = {path: "a.txt", objectId: "object", contentKind: "plaintext" as const, text: "seen", update: new Uint8Array([0, 0])};
+  await preserveLiveDraft(directory, "workspace", draft);
+  await preserveLiveDraft(directory, "workspace", {...draft, text: "survivor"});
+  const bad = new Y.Doc();
+  bad.getText("badContent").insert(0, "invalid projection");
+  try {
+    const update = Y.encodeStateAsUpdate(bad);
+    await preserveLiveDraft(directory, "workspace", kind === "scene"
+      ? {path: "a.txt", objectId: "object", contentKind: "scene", update}
+      : {path: "a.txt", objectId: "object", remoteWorkspaceId: "owner", update});
+  } finally {bad.destroy();}
+  const scene = await vi.importActual<typeof import("@dohc/excalidraw-scene")>("@dohc/excalidraw-scene");
+  const markdown = await vi.importActual<typeof import("@dohc/ydoc-projection")>("@dohc/ydoc-projection");
+  const project = () => {throw new Error("invalid document content");};
+  vi.resetModules();
+  if (kind === "scene") vi.doMock("@dohc/excalidraw-scene", () => ({...scene, exportPortableScene: project}));
+  else vi.doMock("@dohc/ydoc-projection", () => ({...markdown, yDocToMarkdown: project}));
+  try {
+    const recovery = await import("./liveDraftRecovery");
+    const records = await recovery.listLiveDraftRecovery(directory, "workspace");
+    expect(records.map(record => record.text).sort()).toEqual(["seen", "survivor"]);
+    const seen = records.find(record => record.text === "seen")!;
+    const after = await recovery.removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(draft.update), Date.now(), "a.txt", seen.recordId);
+    expect(after.map(record => record.text)).toEqual(["survivor"]);
+    await recovery.removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(draft.update), Date.now(), "a.txt", after[0]!.recordId);
+    expect(await recovery.hasRetainedLiveDraft(directory, "workspace", "a.txt", "object")).toBe(false);
+    expect(await readdir(directory)).toHaveLength(1);
+  } finally {vi.doUnmock("@dohc/excalidraw-scene"); vi.doUnmock("@dohc/ydoc-projection"); vi.resetModules();}
+});
+
 it("skips a record removed during the scan", async () => {
   const directory = await mkdtemp(join(tmpdir(), "dohc-recovery-removed-")); directories.push(directory);
   await preserveLiveDraft(directory, "workspace", {path: "a.txt", objectId: "object", contentKind: "plaintext", text: "already removed", update: new Uint8Array([0, 0])});

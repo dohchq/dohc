@@ -72,9 +72,10 @@ async function readableRecoveryRecords(rows: readonly RecoveryRow[], workspaceId
       const doc = new Y.Doc();
       try {
         try {Y.applyUpdate(doc, Buffer.from(parsed.data.updateBase64, "base64"));} catch {continue;}
-        text = record.contentKind === "scene"
-          ? (await import("@dohc/excalidraw-scene")).exportPortableScene(doc)
-          : (await import("@dohc/ydoc-projection")).yDocToMarkdown(doc);
+        const project = record.contentKind === "scene"
+          ? (await import("@dohc/excalidraw-scene")).exportPortableScene
+          : (await import("@dohc/ydoc-projection")).yDocToMarkdown;
+        try {text = project(doc);} catch {continue;}
       } finally { doc.destroy(); }
     }
     result.push({...parsed.data, text});

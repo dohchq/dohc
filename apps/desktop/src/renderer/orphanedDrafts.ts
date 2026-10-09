@@ -355,7 +355,7 @@ export function useOrphanedDrafts(
 // can report savable-dirty, but recovery is knowable for every tab.
 export function retainedOrphanedDraftPaths(workspaceId: string): string[] {
   const paths = [...drafts.keys()].map(key => JSON.parse(key) as [string, string]).filter(([id]) => id === workspaceId).map(([, path]) => path);
-  return [...new Set([...paths, ...loadStoredDrafts(Date.now()).filter(draft => draft.workspaceId === workspaceId).map(draft => draft.path)])];
+  return [...new Set([...paths, ...loadStoredDrafts(Date.now(), {bindHandles: false}).filter(draft => draft.workspaceId === workspaceId).map(draft => draft.path)])];
 }
 
 export function useOrphanedDraftPaths(workspaceId: string): ReadonlySet<string> {
