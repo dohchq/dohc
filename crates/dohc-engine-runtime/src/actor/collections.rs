@@ -1637,6 +1637,8 @@ fn cleanup_collection_relation_on_store(
 /// What one collection reconciliation changed.
 #[derive(Debug, Default)]
 pub struct CollectionReconciliation {
+    /// An adoption candidate or relation-cleanup source still has a live lease.
+    pub lease_held: bool,
     /// Workspace paths the reconciliation rewrote: record id adoptions and
     /// relation cleanups.
     pub changed_paths: Vec<String>,
@@ -1785,14 +1787,8 @@ fn reconcile_collections_on_store(
             Err(error) => return Err(error),
         }
     }
-    if lease_held {
-        return Err(RuntimeError::Sync(
-            dohc_engine_sync::SyncError::RetryableState {
-                reason: "collection-reconciliation-lease-held",
-            },
-        ));
-    }
     Ok(CollectionReconciliation {
+        lease_held,
         changed_paths,
         automation_claims,
     })

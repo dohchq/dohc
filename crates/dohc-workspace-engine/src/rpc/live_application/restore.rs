@@ -336,6 +336,9 @@ impl EngineService {
                                 host.open.request_collection_reconcile();
                                 map_runtime(error)
                             })?;
+                        if reconciliation.lease_held {
+                            host.open.request_collection_reconcile();
+                        }
                         crate::events::emit_automation_claimed(
                             &reconcile_events,
                             &host.open.workspace_id,

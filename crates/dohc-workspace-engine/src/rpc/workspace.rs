@@ -518,6 +518,9 @@ impl EngineService {
             )
             .await
             .map_err(map_runtime)?;
+        if reconciliation.lease_held {
+            open.request_collection_reconcile();
+        }
         crate::events::emit_automation_claimed(
             &self.events,
             &open.workspace_id,

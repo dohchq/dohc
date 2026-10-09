@@ -38,7 +38,7 @@ use dohc_engine_files::{
     IngestReason, ManifestEntry, PoolGauge, ReconcilePlan, ReconcileRun, ScanBounds,
     ScanGeneration, ScanManifest, apply_reconcile_plan_cancellable,
 };
-use dohc_engine_runtime::{ActorHandle, NoFaults, RuntimeError};
+use dohc_engine_runtime::{ActorHandle, CollectionReconciliation, NoFaults, RuntimeError};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -712,6 +712,8 @@ impl ScanGauge {
 #[derive(Default)]
 pub(crate) struct DriverStatus {
     bits: std::sync::atomic::AtomicU8,
+    collection_lease_held: std::sync::atomic::AtomicBool,
+    collection_release_generation: std::sync::atomic::AtomicU64,
 }
 
 /// The files layer (actor + watcher + loop) is up and driving.
@@ -904,6 +906,21 @@ impl DriverStatus {
     }
     pub(crate) fn request_collection_reconcile(&self) {
         self.update(|bits| bits | STATUS_COLLECTION_RECONCILE_PENDING);
+    }
+    fn record_collection_reconciliation(&self, lease_held: bool, release_generation: u64) {
+        self.collection_release_generation
+            .store(release_generation, Ordering::Relaxed);
+        self.collection_lease_held
+            .store(lease_held, Ordering::Release);
+    }
+    fn offer_collection_reconcile_after_release(&self, leases: &LeaseRegistry, workspace_id: &str) {
+        if self.collection_lease_held.load(Ordering::Acquire)
+            && leases.release_generation(workspace_id)
+                != self.collection_release_generation.load(Ordering::Relaxed)
+        {
+            self.collection_lease_held.store(false, Ordering::Release);
+            self.request_collection_reconcile();
+        }
     }
     #[cfg(test)]
     fn collection_reconcile_pending(&self) -> bool {
@@ -2458,7 +2475,7 @@ struct CaptureThreadOutcome {
     plan: ReconcilePlan,
     result: CaptureApplyResult,
     policy_held: bool,
-    collections: Option<Result<Vec<String>, RuntimeError>>,
+    collections: Option<Result<CollectionReconciliation, RuntimeError>>,
     /// Automation claims the captures and the reconciliation committed.
     automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
 }
@@ -2471,15 +2488,6 @@ fn reconcile_provenance() -> CaptureProvenance {
         summary: Some("Reconciled offline edits".to_owned()),
         correlation_id: Some(pass_correlation_id("reconcile")),
     }
-}
-
-fn collection_reconcile_deferred(error: &RuntimeError) -> bool {
-    matches!(
-        error,
-        RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState {
-            reason: "collection-reconciliation-lease-held",
-        })
-    )
 }
 
 /// One unique correlation id per capture pass (TS ``${prefix}-${createId()}``
@@ -2553,6 +2561,7 @@ async fn apply_bound_run_with_handle(
     } = context;
     let now_ms = wall_now_ms();
     let RootBoundRun { captured_root, run } = run;
+    status.offer_collection_reconcile_after_release(leases, workspace_id);
     let (plan, collection_reconcile_requested) = match run {
         ReconcileRun::Completed(plan) => {
             let requested = status.take_collection_reconcile_request()
@@ -2561,6 +2570,8 @@ async fn apply_bound_run_with_handle(
         }
         ReconcileRun::Converged => {
             let adopted_paths = if status.take_collection_reconcile_request() {
+                // Read before the attempt so a release racing it still wakes a retry.
+                let release_generation = leases.release_generation(workspace_id);
                 let result = match actor.active_version_id(workspace_id.to_owned()).await {
                     Ok(version_id) => {
                         let collection_actor = actor.clone();
@@ -2603,19 +2614,17 @@ async fn apply_bound_run_with_handle(
                     }
                     Err(RuntimeError::Domain(
                         dohc_engine_domain::DomainError::WorkspaceNotFound,
-                    )) => Ok((Vec::new(), Vec::new())),
+                    )) => Ok((CollectionReconciliation::default(), Vec::new())),
                     Err(error) => Err(error),
                 };
                 match result {
-                    Ok((paths, claims)) => {
+                    Ok((reconciliation, claims)) => {
+                        status.record_collection_reconciliation(
+                            reconciliation.lease_held,
+                            release_generation,
+                        );
                         crate::events::emit_automation_claimed(&events, workspace_id, &claims);
-                        paths
-                    }
-                    Err(error) if collection_reconcile_deferred(&error) => {
-                        // A live session can be waiting for owner delivery. Its
-                        // adoption stays pending, but recorded files are settled.
-                        status.request_collection_reconcile();
-                        Vec::new()
+                        reconciliation.changed_paths
                     }
                     Err(_) => {
                         status.request_collection_reconcile();
@@ -2715,6 +2724,7 @@ async fn apply_bound_run_with_handle(
     // history group with NULL correlation ids.
     let retire_provenance = provenance.clone();
     let apply_provenance = provenance;
+    let collection_release_generation = leases.release_generation(workspace_id);
     let apply_thread = std::thread::Builder::new()
         .name("dohc-capture-apply".to_owned())
         .spawn(move || {
@@ -2791,10 +2801,12 @@ async fn apply_bound_run_with_handle(
     // executors now.
     crate::events::emit_automation_claimed(&events, workspace_id, &automation_claims);
     let collection_paths = match collection_result {
-        Some(Ok(paths)) => paths,
-        Some(Err(error)) if collection_reconcile_deferred(&error) => {
-            status.request_collection_reconcile();
-            Vec::new()
+        Some(Ok(reconciliation)) => {
+            status.record_collection_reconciliation(
+                reconciliation.lease_held,
+                collection_release_generation,
+            );
+            reconciliation.changed_paths
         }
         Some(Err(_)) => {
             status.request_collection_reconcile();

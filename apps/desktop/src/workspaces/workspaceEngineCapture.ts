@@ -3776,7 +3776,6 @@ export function createWorkspaceEngineCapture(
     const workspace = { workspaceId, rootPath, attachmentId };
     let cursor: CollectionPendingAdoptionCursor | null = null;
     let found = false;
-    let deferred = false;
     let reconcileReady = false;
     const pendingAdoptionKeys = new Set<string>();
     do {
@@ -3800,17 +3799,14 @@ export function createWorkspaceEngineCapture(
               live.publicSession?.objectId !== adoption.objectId ||
               live.publicSession.contentKind !== "richdoc"
             ) {
-              deferred = true;
               continue;
             }
             if (live.closing || live.status === "failing-close" || live.publicSession === null) {
-              deferred = true;
               continue;
             }
             const borrowed = borrowRecordSession(live);
             try {
-              const status = await live.session.adoptCollectionRecord?.();
-              if (status !== "settled") deferred = true;
+              await live.session.adoptCollectionRecord?.();
             } finally {
               await borrowed.close();
             }
@@ -3863,16 +3859,14 @@ export function createWorkspaceEngineCapture(
           reconcileReady = true;
         } catch (error) {
           if (error instanceof YdocOwnerDraftPendingError) {
-            deferred = true;
             continue;
           }
           // Every unconfirmed eviction — busy, cancelled while queued, or any
           // other failure — leaves the daemon session live and its lease
           // held. Deleting the only handle here would leak that lease:
-          // reconciliation then fails with collection-reconciliation-lease-
-          // held, and later drains can only open another provider into the
-          // same lease. Retain until eviction is confirmed; a daemon restart
-          // is the one case the handle goes stale, and the binding check
+          // adoption then keeps waiting, and later drains can only open
+          // another provider into the same lease. Retain until eviction is
+          // confirmed. A daemon restart makes the handle stale; the binding check
           // above replaces it then. The not-pending sweep below releases it
           // once the adoption clears.
           if (retained !== undefined) {
@@ -3881,7 +3875,6 @@ export function createWorkspaceEngineCapture(
             pendingCollectionAdoptionProviders.delete(adoptionKey);
           }
           if (isTransientEngineRefusal(error)) {
-            deferred = true;
             continue;
           }
           onError(`collection adoption of ${adoption.filePath}`, error);
@@ -3891,13 +3884,7 @@ export function createWorkspaceEngineCapture(
     } while (cursor !== null);
     await releaseRetainedCollectionAdoptionProviders(pendingAdoptionKeys);
     if (!found || !reconcileReady) return;
-    try {
-      await engine.reconcileCapture?.();
-    } catch (error) {
-      if ((deferred || pendingCollectionAdoptionProviders.size > 0) &&
-          error instanceof DaemonRefusalError && error.wireCode === "COLLECTION_RECONCILIATION_LEASE_HELD") return;
-      throw error;
-    }
+    await engine.reconcileCapture?.();
   }
 
   async function releaseRetainedCollectionAdoptionProviders(
