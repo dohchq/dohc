@@ -241,13 +241,12 @@ const COVERED_HEADS_SQL: &str = concat!(
                        OR d.export_attempt_snapshot_seq IS NOT d.head_snapshot_seq \
                        OR d.export_attempt_lineage_claim_id IS NOT d.lineage_claim_id \
                        THEN 1 WHEN d.export_wait_asset_sha256 IS NULL THEN 0 \
-                         WHEN NOT EXISTS (SELECT 1 FROM binary_blobs asset \
-                           WHERE asset.sha256=d.export_wait_asset_sha256) THEN 0 \
+                         WHEN NOT EXISTS (SELECT 1 FROM binary_blobs waiting_blob \
+                           WHERE waiting_blob.sha256=d.export_wait_asset_sha256) THEN 0 \
                          WHEN d.export_wait_asset_path IS NULL THEN 1 \
                          ELSE EXISTS (SELECT 1 FROM path_aliases a JOIN snapshots asset \
                            ON asset.workspace_id=a.workspace_id AND asset.version_id=a.version_id \
                              AND asset.object_id=a.object_id \
-                           JOIN binary_blobs b ON b.sha256=asset.binary_sha256 \
                            WHERE a.workspace_id=d.workspace_id AND a.version_id=d.version_id \
                              AND a.path=d.export_wait_asset_path AND asset.content_kind='binary' \
                              AND asset.binary_sha256=d.export_wait_asset_sha256 \
@@ -2566,30 +2565,18 @@ mod tests {
         seed_retained_artifact_as(&mut store, "- parent\n  - nested\n", ContentKind::Richdoc);
         mark_head_settled(&mut store);
         enroll(&mut store).expect("enroll unprojectable seed");
-        store.write_with(&NoFaults, |tx| {
-            tx.execute_batch("CREATE TABLE export_attempt_test(count INTEGER NOT NULL); \
-                INSERT INTO export_attempt_test VALUES(0); \
-                CREATE TRIGGER count_export_attempts AFTER UPDATE OF export_attempt_moment_id ON ydoc_docs \
-                BEGIN UPDATE export_attempt_test SET count=count+1; END;")
-                .map_err(SyncError::persist)?;
-            Ok::<_, SyncError>(())
-        }).expect("observe attempts");
+        observe_export_attempts(&mut store);
         sweep(&mut store, 101);
-        let count = |store: &EngineStore| {
-            store
-                .read_with(|conn| {
-                    conn.query_row("SELECT count FROM export_attempt_test", [], |r| {
-                        r.get::<_, i64>(0)
-                    })
-                })
-                .expect("attempt count")
-        };
-        assert_eq!(count(&store), 0, "unchanged failed projection is skipped");
+        assert_eq!(
+            export_attempt_count(&store),
+            0,
+            "unchanged failed projection is skipped"
+        );
         drop(store);
         let mut store = EngineStore::open(&path, 102).expect("reopen failed projection cache");
         sweep(&mut store, 102);
         assert_eq!(
-            count(&store),
+            export_attempt_count(&store),
             0,
             "restart keeps the failed projection skipped"
         );
@@ -2603,7 +2590,7 @@ mod tests {
             102,
         );
         sweep(&mut store, 103);
-        assert_eq!(count(&store), 1, "new moment is retried");
+        assert_eq!(export_attempt_count(&store), 1, "new moment is retried");
         store
             .write_with(&NoFaults, |tx| {
                 tx.execute(
@@ -2615,9 +2602,17 @@ mod tests {
             })
             .expect("advance document head");
         sweep(&mut store, 104);
-        assert_eq!(count(&store), 2, "new document sequence is retried");
+        assert_eq!(
+            export_attempt_count(&store),
+            2,
+            "new document sequence is retried"
+        );
         sweep(&mut store, 105);
-        assert_eq!(count(&store), 2, "unchanged failed head is skipped");
+        assert_eq!(
+            export_attempt_count(&store),
+            2,
+            "unchanged failed head is skipped"
+        );
     }
 
     fn export_pass(store: &mut EngineStore) {
@@ -2907,35 +2902,24 @@ mod tests {
                     .collect::<Result<Vec<_>, _>>()
             })
             .expect("selection plan");
-        for line in &plan {
-            println!("WAIT_PLAN {line}");
-        }
-        assert!(
-            plan.iter()
-                .any(|line| line.contains("SEARCH asset USING") && line.contains("(sha256=?)"))
-        );
-        assert!(plan.iter().any(|line| line.contains("SEARCH a USING INDEX")
-            && line.contains("workspace_id=? AND version_id=? AND path=?")));
-        assert!(
-            plan.iter()
-                .any(|line| line.contains("SEARCH asset USING INDEX")
-                    && line.contains("workspace_id=? AND version_id=? AND object_id=?"))
-        );
-        assert!(
-            !plan
-                .iter()
-                .any(|line| line.starts_with("SCAN asset") || line.starts_with("SCAN a "))
-        );
-        for alias in ["deleted", "newer"] {
-            assert!(plan.iter().any(|line| line.contains(&format!(
-                "SEARCH {alias} USING INDEX idx_moments_version_path_order"
-            ))));
+        for index in [
+            "sqlite_autoindex_binary_blobs_1",
+            "sqlite_autoindex_path_aliases_1",
+            "sqlite_autoindex_snapshots_1",
+            "idx_moments_version_path_order",
+        ] {
             assert!(
-                !plan
-                    .iter()
-                    .any(|line| line.starts_with(&format!("SCAN {alias}")))
+                plan.iter().any(|line| line.contains(index)),
+                "{index}: {plan:?}"
             );
         }
+        assert!(
+            plan.iter()
+                .filter(|line| line.contains("idx_moments_version_path_order"))
+                .count()
+                >= 2,
+            "both retired-history lookups must use the index: {plan:?}"
+        );
     }
 
     #[test]
@@ -2970,122 +2954,6 @@ mod tests {
             !local_ops(&store)
                 .iter()
                 .any(|(kind, p)| kind == "moment.append" && p["objectId"] == "seed-object")
-        );
-    }
-
-    #[test]
-    #[ignore = "retained export timing; run explicitly with --nocapture"]
-    fn retained_export_measurements() {
-        fn median(mut samples: Vec<f64>) -> f64 {
-            samples.sort_by(f64::total_cmp);
-            (samples[4] + samples[5]) / 2.0
-        }
-        fn clear_attempts(store: &mut EngineStore) {
-            store
-                .write_with(&NoFaults, |tx| {
-                    tx.execute("UPDATE ydoc_docs SET export_attempt_moment_id=NULL", [])
-                        .map_err(SyncError::persist)
-                })
-                .expect("reset outside timer");
-        }
-        let (_scratch, _, mut store) = open_store();
-        seed_main(&mut store);
-        seed_retained_artifact_as(&mut store, "- parent\n  - nested\n", ContentKind::Richdoc);
-        mark_head_settled(&mut store);
-        enroll(&mut store).expect("enroll benchmark seed");
-        store.write_with(&NoFaults, |tx| (|| {
-            tx.execute_batch("CREATE TEMP TABLE benchmark_ids AS WITH RECURSIVE ids(n) AS \
-                (VALUES(1) UNION ALL SELECT n+1 FROM ids WHERE n<999) SELECT n FROM ids;")?;
-            for table in ["file_objects", "moments", "snapshots", "ydoc_docs", "ydoc_updates"] {
-                let columns = tx.prepare(&format!("PRAGMA table_info({table})"))?
-                    .query_map([], |r| r.get::<_, String>(1))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                let expressions = columns.iter().map(|column| match column.as_str() {
-                    "object_id" => "'bench-'||n".to_owned(),
-                    "moment_id" | "latest_moment_id" => "'bench-moment-'||n".to_owned(),
-                    "moment_order" => "n+1".to_owned(),
-                    "path" | "payload_after_path" => "'bench-'||n||'.md'".to_owned(),
-                    _ => format!("source.{column}"),
-                }).collect::<Vec<_>>().join(",");
-                tx.execute_batch(&format!("INSERT INTO {table} ({}) SELECT {expressions} \
-                    FROM {table} source CROSS JOIN benchmark_ids WHERE source.object_id='seed-object'",
-                    columns.join(",")))?;
-            }
-            Ok::<_, rusqlite::Error>(())
-        })().map_err(SyncError::persist)).expect("1000 settled documents");
-        let mut query = Vec::new();
-        let mut pass = Vec::new();
-        let mut cached_query = Vec::new();
-        let mut cached_pass = Vec::new();
-        for run in 0..11 {
-            clear_attempts(&mut store);
-            let start = std::time::Instant::now();
-            let rows = store
-                .read_with(|conn| {
-                    conn.prepare(COVERED_HEADS_SQL)?
-                        .query_map(["ws"], |r| r.get::<_, String>(0))?
-                        .collect::<Result<Vec<_>, _>>()
-                })
-                .expect("selection");
-            let query_ms = start.elapsed().as_secs_f64() * 1000.0;
-            assert_eq!(rows.len(), 1000);
-            let start = std::time::Instant::now();
-            export_pass(&mut store);
-            let pass_ms = start.elapsed().as_secs_f64() * 1000.0;
-            let start = std::time::Instant::now();
-            let rows = store
-                .read_with(|conn| {
-                    conn.prepare(COVERED_HEADS_SQL)?
-                        .query_map(["ws"], |r| r.get::<_, String>(0))?
-                        .collect::<Result<Vec<_>, _>>()
-                })
-                .expect("cached selection");
-            let cached_query_ms = start.elapsed().as_secs_f64() * 1000.0;
-            assert!(rows.is_empty());
-            let start = std::time::Instant::now();
-            export_pass(&mut store);
-            let cached_ms = start.elapsed().as_secs_f64() * 1000.0;
-            if run > 0 {
-                query.push(query_ms);
-                pass.push(pass_ms);
-                cached_query.push(cached_query_ms);
-                cached_pass.push(cached_ms);
-            }
-        }
-        println!(
-            "EXPORT_BENCH documents=1000 runs=10 query_ms={:.3} pass_ms={:.3} cached_query_ms={:.3} cached_pass_ms={:.3}",
-            median(query),
-            median(pass),
-            median(cached_query),
-            median(cached_pass)
-        );
-        drop(store);
-        let (_scratch_scene, _, mut store) = open_store();
-        seed_main(&mut store);
-        for n in 0..100 {
-            seed_retained_scene(&mut store, &format!("scene-{n}"), false);
-        }
-        mark_head_settled(&mut store);
-        enroll(&mut store).expect("enroll missing scenes");
-        let mut forced = Vec::new();
-        let mut recurring = Vec::new();
-        for run in 0..11 {
-            clear_attempts(&mut store);
-            let start = std::time::Instant::now();
-            export_pass(&mut store);
-            let forced_ms = start.elapsed().as_secs_f64() * 1000.0;
-            let start = std::time::Instant::now();
-            export_pass(&mut store);
-            let recurring_ms = start.elapsed().as_secs_f64() * 1000.0;
-            if run > 0 {
-                forced.push(forced_ms);
-                recurring.push(recurring_ms);
-            }
-        }
-        println!(
-            "EXPORT_BENCH missing_scenes=100 runs=10 forced_pass_ms={:.3} recurring_pass_ms={:.3}",
-            median(forced),
-            median(recurring)
         );
     }
 

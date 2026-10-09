@@ -3617,6 +3617,7 @@ macro_rules! retired_scene_asset_sql {
             " AND deleted.path=",
             $path,
             " \
+           AND deleted.path GLOB 'assets/excalidraw/*' \
            AND deleted.operation='delete' AND COALESCE(deleted.sync_record_only,0)=0 \
            AND deleted.before_present=2 AND deleted.before_content_kind='binary' \
            AND deleted.before_binary_sha256=",
@@ -3647,6 +3648,7 @@ macro_rules! retired_scene_asset_sql {
            AND NOT EXISTS (SELECT 1 FROM moments newer \
              WHERE newer.workspace_id=deleted.workspace_id \
                AND newer.version_id=deleted.version_id AND newer.path=deleted.path \
+               AND newer.path GLOB 'assets/excalidraw/*' \
                AND COALESCE(newer.sync_record_only,0)=0 \
                AND ",
             dohc_engine_domain::exclude_capture_recovery_sql!("newer"),

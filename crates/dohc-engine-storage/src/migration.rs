@@ -3102,7 +3102,7 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     Migration {
         ordinal: 39,
         id: "v2-retained-export-attempt-lineage",
-        sql: "ALTER TABLE ydoc_docs ADD COLUMN export_attempt_lineage_claim_id TEXT; ALTER TABLE ydoc_docs ADD COLUMN export_wait_asset_sha256 TEXT; ALTER TABLE ydoc_docs ADD COLUMN export_wait_asset_path TEXT CHECK (export_wait_asset_path IS NULL OR export_wait_asset_sha256 IS NOT NULL); CREATE INDEX idx_moments_version_path_order ON moments(workspace_id,version_id,path,moment_order DESC);",
+        sql: "ALTER TABLE ydoc_docs ADD COLUMN export_attempt_lineage_claim_id TEXT; ALTER TABLE ydoc_docs ADD COLUMN export_wait_asset_sha256 TEXT; ALTER TABLE ydoc_docs ADD COLUMN export_wait_asset_path TEXT CHECK (export_wait_asset_path IS NULL OR export_wait_asset_sha256 IS NOT NULL); CREATE INDEX idx_moments_version_path_order ON moments(workspace_id,version_id,path,moment_order DESC) WHERE path GLOB 'assets/excalidraw/*';",
         sets_user_version: None,
     },
 ];
@@ -3585,7 +3585,7 @@ mod tests {
             ),
             (
                 "v2-retained-export-attempt-lineage",
-                "04cde406f436365d8c6e57e91eaffa4d7ee7cc6fa3c97020b8189c90d66cf83c",
+                "e971935dc8d67177407762aab1adae46e2c7def69762f4e0764239a28a5feed8",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
