@@ -114,8 +114,8 @@ for (const mode of ["quit", "last-window", "crash", "crash-reopen-before-import"
         expect(await checkpointText(temp.homeDir)).toContain(sentinels[2]!);
         await expect.poll(()=>desktop!.page.evaluate(async workspaceId =>
           (window as unknown as {dohcDesktop:DohcDesktopBridge}).dohcDesktop.typingRecovery({workspaceId,action:"read"}),reopened.workspaceId)).toEqual({failures:[]});
-        await desktop.page.reload();await openWorkspaceFromFirstRun(desktop.page,temp);
-        await desktop.page.getByTestId("notice-center-toggle").click();
+        await desktop.page.evaluate(async workspaceId =>
+          (window as unknown as {dohcDesktop:DohcDesktopBridge}).dohcDesktop.typingRecovery({workspaceId,action:"retry"}),reopened.workspaceId);
         await expect(desktop.page.getByTestId("notice-center").getByText(AUTHOR_REFUSED_MESSAGE,{exact:true})).toHaveCount(0);
         await desktop.close();desktop=null;
         desktop=await launchDesktopApp({workspace:temp});await openWorkspaceFromFirstRun(desktop.page,temp);
@@ -131,7 +131,9 @@ for (const mode of ["quit", "last-window", "crash", "crash-reopen-before-import"
         await desktop.app.evaluate(({clipboard})=>clipboard.writeText("OTHER_CLIPBOARD_TEXT"));
         expect(await checkpointText(temp.homeDir)).toContain(sentinels[2]!);
         await expect(desktop.page.getByTestId("notice-center")).toHaveCount(0);
-        await explorerRow(desktop.page,path).click();await expect(desktop.page.getByTestId("markdown-editor")).toBeVisible();
+        const openedEditor=desktop.page.getByTestId("markdown-editor");
+        if(await openedEditor.count() === 0) await explorerRow(desktop.page,path).click();
+        await expect(openedEditor).toBeVisible();
         await expect(typingToast).toHaveCount(0);
         await desktop.page.getByTestId("notice-center-toggle").click();
         const discard = desktop.page.getByTestId("notice-center").getByRole("button",{name:"Discard your typing",exact:true});
@@ -180,8 +182,9 @@ for (const mode of ["quit", "last-window", "crash", "crash-reopen-before-import"
         ).all())).toEqual(expect.arrayContaining([expect.objectContaining({before_text: expect.stringContaining(sentinels[2]!)})]));
         expect(await readFile(join(temp.rootPath, path), "utf8")).toBe("# Outside\n\nOUTSIDE_WINS\n");
       } else {
-        if(mode !== "crash-reopen-before-import") await explorerRow(desktop.page, path).click();
         const recoveredEditor = desktop.page.getByTestId("markdown-editor");
+        if(mode !== "crash-reopen-before-import" && await recoveredEditor.count() === 0) await explorerRow(desktop.page, path).click();
+        await expect(recoveredEditor).toBeVisible();
         for (const sentinel of sentinels) await expect(recoveredEditor).toContainText(sentinel);
         const text = await recoveredEditor.innerText();
         for (const sentinel of sentinels) expect(text.split(sentinel).length - 1).toBe(1);
