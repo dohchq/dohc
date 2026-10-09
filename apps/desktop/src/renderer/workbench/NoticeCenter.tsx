@@ -324,6 +324,7 @@ export function WorkspaceErrorToast(props: {
         {error.title ? <span className="block font-medium">{error.title}</span> : null}
         <span className={error.title ? "block mt-0.5 text-muted" : undefined}>{error.message}</span>
       </span>
+      {(error.actionLabel && props.onAction) || (error.additionalActionLabels?.length && props.onAction) || (error.canRetry && props.onRetry) ? <div className="flex shrink-0 flex-col gap-1">
       {error.actionLabel && props.onAction ? (
         <button
           type="button"
@@ -351,6 +352,7 @@ export function WorkspaceErrorToast(props: {
           Try again
         </button>
       ) : null}
+      </div> : null}
       {error.filePaths === undefined || error.filePaths.length > 0 ? <CopyButton
         key={error.id}
         iconOnly

@@ -122,6 +122,8 @@ for (const mode of ["quit", "last-window", "crash", "crash-reopen-before-import"
         expect(await checkpointText(temp.homeDir)).toContain(sentinels[2]!);
         await desktop.app.evaluate(({clipboard})=>clipboard.writeText("OTHER_CLIPBOARD_TEXT"));
         expect(await checkpointText(temp.homeDir)).toContain(sentinels[2]!);
+        await expect(desktop.page.getByTestId("notice-center")).toHaveCount(0);
+        await desktop.page.getByTestId("notice-center-toggle").click();
         const discard = desktop.page.getByTestId("notice-center").getByRole("button",{name:"Discard your typing",exact:true});
         await discard.click();
         await expect(desktop.page.getByTestId("typing-discard-dialog")).toContainText("This cannot be undone.");
@@ -134,6 +136,7 @@ for (const mode of ["quit", "last-window", "crash", "crash-reopen-before-import"
         await desktop.page.keyboard.press("Escape");
         await expect(desktop.page.getByTestId("typing-discard-dialog")).toHaveCount(0);
         expect(await checkpointText(temp.homeDir)).toContain(sentinels[2]!);
+        await desktop.page.getByTestId("notice-center-toggle").click();
         await discard.click();
         await desktop.page.getByTestId("typing-discard-confirm").click();
         await expect.poll(()=>checkpointText(temp.homeDir)).toBe("");
