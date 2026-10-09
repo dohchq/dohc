@@ -2914,12 +2914,16 @@ mod tests {
             );
         }
         assert!(
-            plan.iter()
-                .filter(|line| line.contains("idx_moments_version_path_order"))
-                .count()
-                >= 2,
-            "both retired-history lookups must use the index: {plan:?}"
+            !plan.iter().any(|line| line.starts_with("SCAN ")),
+            "unexpected scan in retained export selection: {plan:?}"
         );
+        for alias in ["deleted", "newer"] {
+            let search = format!("SEARCH {alias} USING INDEX idx_moments_version_path_order ");
+            assert!(
+                plan.iter().any(|line| line.starts_with(&search)),
+                "{alias} must search the partial index: {plan:?}"
+            );
+        }
     }
 
     #[test]

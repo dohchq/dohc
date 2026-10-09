@@ -3616,6 +3616,7 @@ macro_rules! retired_scene_asset_sql {
             $version,
             " AND deleted.path=",
             $path,
+            // Repeat the partial-index predicate; all scene asset refs have this prefix, so results are unchanged.
             " \
            AND deleted.path GLOB 'assets/excalidraw/*' \
            AND deleted.operation='delete' AND COALESCE(deleted.sync_record_only,0)=0 \
@@ -3647,8 +3648,9 @@ macro_rules! retired_scene_asset_sql {
             " \
            AND NOT EXISTS (SELECT 1 FROM moments newer \
              WHERE newer.workspace_id=deleted.workspace_id \
-               AND newer.version_id=deleted.version_id AND newer.path=deleted.path \
-               AND newer.path GLOB 'assets/excalidraw/*' \
+               AND newer.version_id=deleted.version_id AND newer.path=deleted.path ",
+            // Repeat the partial-index predicate; all scene asset refs have this prefix, so results are unchanged.
+            "AND newer.path GLOB 'assets/excalidraw/*' \
                AND COALESCE(newer.sync_record_only,0)=0 \
                AND ",
             dohc_engine_domain::exclude_capture_recovery_sql!("newer"),
