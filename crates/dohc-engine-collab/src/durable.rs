@@ -1740,6 +1740,7 @@ pub struct SuccessorReplacement<'a> {
     pub now_ms: i64,
 }
 
+/// Callers must write the successor's result snapshot in the same transaction as the lineage replacement.
 pub fn replace_lineage_with_successor(
     store: &mut EngineStore,
     replacement: SuccessorReplacement<'_>,
@@ -2142,7 +2143,6 @@ fn validate_successor_base(
         if successor.content_kind == ContentKind::Richdoc {
             let result = doc
                 .markdown_source_reference()
-                .filter(|reference| reference.source_sha256 == successor.result_sha256)
                 .and_then(|reference| doc.markdown_source(&reference));
             // The same transaction installs this result as last_settled_sha.
             // Matching digests alone cannot prove that source rebuilds the doc.

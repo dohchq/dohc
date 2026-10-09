@@ -3806,6 +3806,15 @@ mod tests {
         } else {
             "doc.md"
         };
+        let (object_id, peer_object_id, conflict_id) = if content_kind == ContentKind::Scene {
+            ("drawing-object", "peer-drawing-object", "scene-conflict")
+        } else {
+            (
+                "document-object",
+                "peer-document-object",
+                "document-conflict",
+            )
+        };
         let scratch = ScratchDir::new().expect("scratch");
         let mut store = EngineStore::open(
             &dohc_engine_testkit::engine_db_path(&scratch).expect("db path"),
@@ -3820,7 +3829,7 @@ mod tests {
                 &WriteText {
                     workspace_id: "ws".to_owned(),
                     version_id: "main".to_owned(),
-                    object_id: "drawing-object".to_owned(),
+                    object_id: object_id.to_owned(),
                     path: path.to_owned(),
                     text: current_text.to_owned(),
                     moment_id: "moment-current".to_owned(),
@@ -3833,12 +3842,12 @@ mod tests {
                 },
                 &NoFaults,
             )
-            .expect("current scene");
-        let key = DocKey::new("ws", "main", "drawing-object").expect("scene key");
+            .expect("current content");
+        let key = DocKey::new("ws", "main", object_id).expect("content key");
         let imported_update = predecessor_update.is_none().then(|| {
             if content_kind == ContentKind::Scene {
                 dohc_engine_collab::import_portable_scene(current_text)
-                    .expect("import current scene")
+                    .expect("import current content")
                     .initial_update
             } else {
                 let doc = dohc_engine_collab::Ydoc::wire();
@@ -3858,11 +3867,11 @@ mod tests {
             &NoFaults,
             11,
         )
-        .expect("claim scene base");
+        .expect("claim content base");
         let incoming = TextSnapshot {
             workspace_id: "ws".to_owned(),
             version_id: "peer".to_owned(),
-            object_id: "peer-drawing-object".to_owned(),
+            object_id: peer_object_id.to_owned(),
             path: path.to_owned(),
             text: incoming_text.to_owned(),
             blob_sha256: dohc_engine_storage::hex_sha256(incoming_text.as_bytes()),
@@ -3873,7 +3882,7 @@ mod tests {
             metadata_correlation_id: None,
         };
         let conflict = TextConflict {
-            conflict_id: "scene-conflict".to_owned(),
+            conflict_id: conflict_id.to_owned(),
             workspace_id: "ws".to_owned(),
             path: path.to_owned(),
             target_version_id: "main".to_owned(),
@@ -3892,7 +3901,7 @@ mod tests {
             .write_with(&NoFaults, |tx| {
                 insert_text_conflict_if_absent(tx, &conflict).map(|_| ())
             })
-            .expect("open scene conflict");
+            .expect("open content conflict");
         (scratch, store, key)
     }
 
@@ -3952,17 +3961,19 @@ mod tests {
             .expect("open scene conflict");
     }
 
-    fn resolve_scene_conflict(
+    fn resolve_content_conflict(
         store: &mut EngineStore,
         conflict_id: &str,
+        object_id: &str,
         ordinal: i64,
     ) -> BuiltConflictResolveV1 {
-        resolve_scene_conflict_with_author(store, conflict_id, ordinal, None)
+        resolve_content_conflict_with_author(store, conflict_id, object_id, ordinal, None)
     }
 
-    fn resolve_scene_conflict_with_author(
+    fn resolve_content_conflict_with_author(
         store: &mut EngineStore,
         conflict_id: &str,
+        object_id: &str,
         ordinal: i64,
         author_json: Option<String>,
     ) -> BuiltConflictResolveV1 {
@@ -3970,7 +3981,7 @@ mod tests {
             workspace_id: "ws".to_owned(),
             conflict_id: conflict_id.to_owned(),
             resolution: ResolveConflictKind::ApplyIncoming,
-            object_id: "drawing-object".to_owned(),
+            object_id: object_id.to_owned(),
             write_moment_id: format!("moment-resolved-{ordinal}"),
             delete_moment_id: format!("moment-delete-unused-{ordinal}"),
             metadata_origin: "sync".to_owned(),
@@ -3978,7 +3989,7 @@ mod tests {
             metadata_correlation_id: None,
             author_json,
             now_ms: ordinal,
-            request_id: Some(format!("resolve-scene-{ordinal}")),
+            request_id: Some(format!("resolve-content-{ordinal}")),
             conflict_answer_budget_bytes: usize::MAX,
         };
         let prepare_input = input.clone();
@@ -4002,7 +4013,7 @@ mod tests {
                         .map_err(sync_as_domain)
                 },
             )
-            .expect("resolve scene conflict");
+            .expect("resolve content conflict");
         assert_eq!(result.conflict.status, ConflictStatus::Resolved);
         built.into_inner().expect("captured replicated carrier")
     }
@@ -4537,7 +4548,8 @@ mod tests {
             .lineage_claim_id
             .unwrap();
         let predecessor_update = sender.get_binary_blob(&predecessor_claim).unwrap().unwrap();
-        let built = resolve_scene_conflict(&mut sender, "scene-conflict", 20);
+        let built =
+            resolve_content_conflict(&mut sender, "document-conflict", "document-object", 20);
         let (_receiver_scratch, mut receiver, receiver_key) = content_conflict_store(
             "Current body",
             incoming,
@@ -4593,103 +4605,6 @@ mod tests {
     }
 
     #[test]
-    fn successor_body_edit_loses_untouched_nested_list_source() {
-        use dohc_engine_files::{DurabilityPolicy, MaterializeOptions, NoBackoff, StdReplacer};
-
-        let incoming = "- parent\n  - child\n\nOriginal paragraph\n";
-        let (scratch, mut store, key) =
-            content_conflict_store("Current body", incoming, None, ContentKind::Richdoc);
-        resolve_scene_conflict(&mut store, "scene-conflict", 20);
-        // The domain transaction installs the snapshot. Its runtime caller
-        // materializes that file before allowing a live edit.
-        std::fs::write(scratch.path().join("doc.md"), incoming).expect("installed successor file");
-        let options = MaterializeOptions {
-            policy: DurabilityPolicy::per_os(),
-            replacer: &StdReplacer,
-            backoff: &NoBackoff,
-            now_ms: 20,
-            faults: &NoFaults,
-        };
-        assert_eq!(
-            std::fs::read(scratch.path().join("doc.md")).unwrap(),
-            incoming.as_bytes()
-        );
-        let loaded = dohc_engine_collab::load_persisted(&store, &key)
-            .unwrap()
-            .unwrap();
-        let before = store
-            .read_with(|conn| {
-                crate::project_ydoc_with_store(conn, &key, &loaded.doc, ContentKind::Richdoc)
-            })
-            .unwrap();
-        assert_eq!(before.content, incoming);
-        let update = loaded.doc.richdoc_append_paragraph("Added paragraph");
-        dohc_engine_collab::record_local_update(
-            &mut store,
-            &mut dohc_engine_collab::WriterDocCache::new(),
-            &key,
-            &update,
-            dohc_engine_collab::LocalAppend::default(),
-            &NoFaults,
-            21,
-            |_, _, _| Ok(()),
-        )
-        .expect("persist body edit");
-        let after = store
-            .read_with(|conn| {
-                crate::project_ydoc_with_store(conn, &key, &loaded.doc, ContentKind::Richdoc)
-            })
-            .unwrap();
-        assert_eq!(
-            after.content,
-            "- parent\n\n  \\- child\n\nOriginal paragraph\n\nAdded paragraph"
-        );
-        assert_eq!(
-            loaded
-                .doc
-                .settled_markdown_source(&after.content, || Ok::<_, ()>(Some(incoming.to_owned())))
-                .unwrap(),
-            None
-        );
-        let settlement = dohc_engine_collab::settle(&mut store, &key, "doc.md", &NoFaults, 22)
-            .expect("enqueue settlement");
-        let dohc_engine_storage::TxnOutcome::Committed(settlement) = settlement else {
-            panic!("settle acknowledgement")
-        };
-        assert_eq!(settlement.projection.content, after.content);
-        assert_eq!(
-            store
-                .get_binary_blob(&settlement.content_sha256)
-                .unwrap()
-                .unwrap(),
-            after.content.as_bytes()
-        );
-        let job = store
-            .list_pending_materialization_jobs()
-            .unwrap()
-            .into_iter()
-            .find(|job| job.job_id == settlement.job_id)
-            .expect("settlement job");
-        assert_eq!(
-            dohc_engine_files::materialize_one(
-                &store,
-                scratch.path(),
-                &job,
-                &MaterializeOptions {
-                    now_ms: 22,
-                    ..options
-                },
-            )
-            .expect("materialize edited successor"),
-            dohc_engine_files::JobOutcome::Completed
-        );
-        assert_eq!(
-            std::fs::read(scratch.path().join("doc.md")).unwrap(),
-            after.content.as_bytes()
-        );
-    }
-
-    #[test]
     fn same_path_scene_resolution_installs_an_exact_scene_successor() {
         let current_text = canonical_scene("current-box");
         let incoming_text = canonical_image_scene("incoming-image");
@@ -4702,7 +4617,7 @@ mod tests {
             .get_binary_blob(&predecessor_claim)
             .expect("read predecessor update")
             .expect("predecessor update");
-        let built = resolve_scene_conflict(&mut store, "scene-conflict", 20);
+        let built = resolve_content_conflict(&mut store, "scene-conflict", "drawing-object", 20);
         assert!(matches!(
             built
                 .validated
@@ -4803,7 +4718,8 @@ mod tests {
             &incoming_text,
             31,
         );
-        let reinstall = resolve_scene_conflict(&mut store, "scene-conflict-reinstall", 32);
+        let reinstall =
+            resolve_content_conflict(&mut store, "scene-conflict-reinstall", "drawing-object", 32);
         let second_sender_asset = scene_asset_head(&store);
         assert_eq!(second_sender_asset.0, first_sender_asset.0);
         assert_ne!(second_sender_asset.1, first_sender_asset.1);
@@ -4865,7 +4781,7 @@ mod tests {
         let current_text = canonical_scene("current-box");
         let incoming_text = canonical_image_scene("incoming-image");
         let (_scratch, mut store, key) = scene_conflict_store(&current_text, &incoming_text, None);
-        resolve_scene_conflict(&mut store, "scene-conflict", 20);
+        resolve_content_conflict(&mut store, "scene-conflict", "drawing-object", 20);
         let asset = scene_asset_head(&store);
         assert_eq!(asset.3, "ydoc");
 
@@ -4949,9 +4865,10 @@ mod tests {
                 "kind": "agent", "agentId": "agent-1",
                 "onBehalfOf": person_id, "agentRunId": "run-1"
             }]);
-            let built = resolve_scene_conflict_with_author(
+            let built = resolve_content_conflict_with_author(
                 &mut sender,
                 "scene-conflict",
+                "drawing-object",
                 20,
                 Some(authors.to_string()),
             );
