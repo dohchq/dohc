@@ -6,7 +6,7 @@ export function mainProcessLogLines(record: (line: string) => void) {
     chunk(text: string) {
       const lines = (remainder + text).split("\n");
       remainder = lines.pop()!;
-      for (const line of lines) record(line.replace(/\r$/, ""));
+      for (const line of lines) record(line + "\n");
     },
     end() {
       if (remainder) record(remainder);
