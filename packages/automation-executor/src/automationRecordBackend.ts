@@ -70,7 +70,7 @@ import type { AutomationTarget } from "./automationTargets";
 export type RecordRunDependencies = Pick<CollectionAutomationRunDependencies,
   "targets" | "evaluator" | "store" | "nowMs" | "personName" | "chat" | "postNotice" | "recipientVerdicts" | "readMessageBody" | "readCode"
 > & Partial<Pick<CollectionAutomationRunDependencies,
-  "withReads" | "withRecordWrites" | "collectionIdOf" | "collectionPathOf" | "checkReach" | "localPersonId" | "checkPresser" | "authorizeDataset"
+  "withReads" | "withRecordWrites" | "collectionIdOf" | "collectionPathOf" | "isIndexReading" | "checkReach" | "localPersonId" | "checkPresser" | "authorizeDataset"
 >> & Partial<Pick<DatasetAutomationRunDependencies, "withHost" | "cachedRoster">>;
 export type RecordRunInput = Omit<CollectionAutomationRunInput, "claim"> & {
   claim: Pick<AutomationClaim, "automationId" | "claimId" | "run" | "depth" | "createdAtMs">;
@@ -96,6 +96,14 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
   { backend: StepBackend; ctx: RunContext; state: StoredRun; resuming: boolean }
 > {
   const { automation, collection, claim, signal, roster } = input;
+  const sourcePath = () => {
+    const id = parseCollectionAutomationId(claim.automationId)?.collectionId ?? null;
+    return id === null ? null : deps.collectionPathOf?.(id) ?? (id === source.datasetId ? collection.path : null);
+  };
+  const checkSourceMoved = () => {
+    const path = sourcePath();
+    if (path !== null && path !== collection.path) throw new AutomationRunWait("The automation's Collection moved.", "moved");
+  };
   try { await deps.checkPresser?.(); }
   catch (error) {
     if (error instanceof AutomationRunWait) throw error;
@@ -362,51 +370,59 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
   }
   if (moved) await deps.store.save(state);
   const checkLocations = () => {
-    const sourceId = parseCollectionAutomationId(claim.automationId)?.collectionId ?? null;
-    const sourcePath = sourceId === null ? null : deps.collectionPathOf?.(sourceId) ?? (sourceId === source.datasetId ? collection.path : null);
-    if (source.kind === "document" && sourcePath === null) throw new Error("This automation's Collection is gone.");
-    if (sourcePath !== collection.path) throw new AutomationRunWait("The automation's Collection moved.", "moved");
+    const path = sourcePath();
+    if (path === null && deps.isIndexReading?.()) throw new AutomationRunWait("The automation's Collection moved.", "moved");
+    if (source.kind === "document" && path === null) throw new Error("This automation's Collection is gone.");
+    if (path !== collection.path) throw new AutomationRunWait("The automation's Collection moved.", "moved");
     for (const target of state.collections) if ((deps.collectionPathOf?.(target.collectionId) ?? (target.collectionId === source.datasetId ? collection.path : null)) !== target.path) throw new AutomationRunWait("A Collection moved while this run was active.", "moved");
   };
   // Refresh grants and descriptor associations before reads and effects. Metadata stays local to this attempt.
   const checkNow = async (recordVerdicts = false) => {
-    await deps.checkPresser?.();
-    checkLocations();
-    const currentRoster = (await deps.cachedRoster?.()) ?? roster;
-    if (currentRoster.kind === "unknown") throw new AutomationRunWait("The workspace roster is unavailable.", "roster");
-    const allReach = [...inventory.reach, ...[...codeReach.values()].map(({ reach }) => reach)];
-    const steps = inventory.datasets.size === 0 ? allReach : await deps.withHost?.((host) => {
-      const grants = new Map<string, ReturnType<typeof host.dataGrants>>();
-      for (const [path, target] of inventory.targets) {
-        if (target.kind !== "dataset") continue;
-        if (!host.resolves(association(path).rules!)) throw new Error(RULES_CHANGED_ERROR);
-        grants.set(target.approved.datasetId, host.dataGrants(target.approved.datasetId));
+    try {
+      await deps.checkPresser?.();
+      checkLocations();
+      const currentRoster = (await deps.cachedRoster?.()) ?? roster;
+      if (currentRoster.kind === "unknown") throw new AutomationRunWait("The workspace roster is unavailable.", "roster");
+      const allReach = [...inventory.reach, ...[...codeReach.values()].map(({ reach }) => reach)];
+      const steps = inventory.datasets.size === 0 ? allReach : await deps.withHost?.((host) => {
+        const grants = new Map<string, ReturnType<typeof host.dataGrants>>();
+        for (const [path, target] of inventory.targets) {
+          if (target.kind !== "dataset") continue;
+          if (!host.resolves(association(path).rules!)) throw new Error(RULES_CHANGED_ERROR);
+          grants.set(target.approved.datasetId, host.dataGrants(target.approved.datasetId));
+        }
+        return allReach.map((step): ReachStep => step.kind === "dataset-operation" || step.kind === "dataset-field"
+          ? { ...step, grants: grants.get(step.datasetId)! } : step);
+      });
+      if (steps == null && inventory.datasets.size > 0) throw new AutomationRunWait("The dataset host is unavailable.");
+      const fresh = { reach: steps ?? allReach };
+      const checks = checkAutomationReach(currentRoster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path), steps: fresh.reach });
+      if (recordVerdicts && await deps.checkReach?.(fresh.reach.slice(0, inventory.reach.length), currentRoster)) throw new AutomationRunWait("The automation is waiting for an editor.", "held");
+      for (const [index, verdict] of checks.entries()) {
+        const step = fresh.reach[index]!;
+        if (!verdict.allowed && (step.kind !== "dataset-field" || visible.has(datasetFieldKey(step.datasetId, step.tableId, step.field.fieldId)))) {
+          throw new Error(index >= inventory.reach.length ? "This automation cannot use the requested Collection or fields." : verdict.reason);
+        }
       }
-      return allReach.map((step): ReachStep => step.kind === "dataset-operation" || step.kind === "dataset-field"
-        ? { ...step, grants: grants.get(step.datasetId)! } : step);
-    });
-    if (steps == null && inventory.datasets.size > 0) throw new AutomationRunWait("The dataset host is unavailable.");
-    const fresh = { reach: steps ?? allReach };
-    const checks = checkAutomationReach(currentRoster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path), steps: fresh.reach });
-    if (recordVerdicts && await deps.checkReach?.(fresh.reach.slice(0, inventory.reach.length), currentRoster)) throw new AutomationRunWait("The automation is waiting for an editor.", "held");
-    for (const [index, verdict] of checks.entries()) {
-      const step = fresh.reach[index]!;
-      if (!verdict.allowed && (step.kind !== "dataset-field" || visible.has(datasetFieldKey(step.datasetId, step.tableId, step.field.fieldId)))) {
-        throw new Error(index >= inventory.reach.length ? "This automation cannot use the requested Collection or fields." : verdict.reason);
-      }
-    }
-    return currentRoster;
+      checkLocations();
+      return currentRoster;
+    } catch (error) { checkLocations(); throw error; }
   };
   const verifyTarget = async (path: string) => {
     const before = inventory.targets.get(path);
     if (before === undefined) throw new Error(RULES_CHANGED_ERROR);
-    const fresh = await (deps.targets.validate ? deps.targets.validate(before) : deps.targets.resolve(path));
-    if (fresh.kind === "problem") {
-      if (fresh.code === "host-unavailable") throw new AutomationRunWait(fresh.problem);
-      throw new Error(fresh.problem);
+    try {
+      const fresh = await (deps.targets.validate ? deps.targets.validate(before) : deps.targets.resolve(path));
+      if (fresh.kind === "problem") {
+        if (fresh.code === "host-unavailable") throw new AutomationRunWait(fresh.problem);
+        throw new Error(fresh.problem);
+      }
+      if (fresh.kind !== before.kind || (fresh.kind === "dataset" && before.kind === "dataset" &&
+        (fresh.approved.datasetId !== before.approved.datasetId || !await resolves(before.approved)))) throw new Error(RULES_CHANGED_ERROR);
+    } catch (error) {
+      if (path === collection.path) checkSourceMoved();
+      throw error;
     }
-    if (fresh.kind !== before.kind || (fresh.kind === "dataset" && before.kind === "dataset" &&
-      (fresh.approved.datasetId !== before.approved.datasetId || !await resolves(before.approved)))) throw new Error(RULES_CHANGED_ERROR);
   };
   const backend: StepBackend = {
     async step(work) {
