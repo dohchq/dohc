@@ -5,8 +5,8 @@ import type {
   EngineWorkspaceBinding,
   EngineWorkspaceRunOptions,
   EngineWorkspace,
-  EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
+import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import {
   isWorkspaceUpdatingRefusal,
   VERSIONED_METHOD,
@@ -21,6 +21,7 @@ import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { describe, expect, it, vi } from "vitest";
 import { createCaptureLiveStores as createAttachedCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
+import { createTestScratch } from "./testTemp";
 
 vi.mock("node:timers/promises", { spy: true });
 
@@ -438,6 +439,59 @@ describe("createCaptureLiveStores", () => {
       }
     },
   );
+
+  it("does not reopen a closed workspace when an expired flush answers unsettled", async () => {
+    const workspace = {
+      workspaceId: WORKSPACE_ID,
+      rootPath: await createTestScratch("dohc-expired-flush-"),
+      attachmentId: Symbol("expired-flush"),
+    };
+    const requests: Request[] = [];
+    const reply = Promise.withResolvers<void>();
+    const started = Promise.withResolvers<void>();
+    const client = clientFor(async request => {
+      requests.push(request);
+      if (request.method === WORKSPACE_METHOD.open) {
+        return { id: request.id, result: { workspace: WORKSPACE_HANDLE } };
+      }
+      if (request.method === WORKSPACE_METHOD.close) {
+        return { id: request.id, result: { closed: true } };
+      }
+      if (request.method === WORKSPACE_METHOD.captureFlush) {
+        started.resolve();
+        await reply.promise;
+        return { id: request.id, result: { settled: false, running: true, degraded: false } };
+      }
+      throw new Error(`Unexpected method: ${request.method}`);
+    });
+    const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+    const { store } = createCaptureLiveStores(workspace, sessions);
+    await sessions.run(workspace, async () => undefined);
+    const runs = vi.spyOn(sessions, "run");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    const flushing = store.flushCapture!().catch(error => error);
+    try {
+      await started.promise;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(await flushing).toEqual(new Error(`Engine capture for ${WORKSPACE_ID} did not settle.`));
+      const closing = store.close!();
+      reply.resolve();
+      await closing;
+      // Drain the abandoned session runs, including a follow-up queued behind close.
+      await Promise.allSettled(runs.mock.results.map(result => result.value));
+      expect(requests.map(request => request.method)).toEqual([
+        WORKSPACE_METHOD.open,
+        WORKSPACE_METHOD.captureFlush,
+        WORKSPACE_METHOD.close,
+      ]);
+    } finally {
+      reply.resolve();
+      await flushing;
+      await sessions.closeAll();
+      runs.mockRestore();
+      vi.useRealTimers();
+    }
+  });
 
   it("leaves no poll or follow-up request after the total deadline", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });

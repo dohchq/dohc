@@ -1434,11 +1434,13 @@ export function createCaptureLiveStores(
         captureWaitSignal?.throwIfAborted();
         if (finished) throw didNotSettle();
       };
-      const request = <T>(operation: (adapter: VersionedLiveAdapter) => Promise<T>) =>
-        runRead(adapter => {
+      const request = <T>(operation: (adapter: VersionedLiveAdapter) => Promise<T>) => {
+        assertActive();
+        return runRead(adapter => {
           assertActive();
           return operation(adapter);
         });
+      };
       const settle = async () => {
         // A manifest rebuild after switching versions needs an unsettled pass.
         // Capture events report path progress or initial readiness, not quiescence.
