@@ -790,3 +790,84 @@ it("re-reads each names revision once, without scanning again on refresh or load
   expect(reads).toHaveLength(8);
   expect(it0.ids()).toEqual(["refreshed", "older", "oldest"]);
 });
+
+it("defers a names event until pending load-more settles, then renames kept rows", async () => {
+  let notify!: (event: { workspaceId: string }) => void;
+  window.dohcDesktop!.onHistoryNamesChanged = listener => { notify = listener; return () => {}; };
+  const it0 = mount();
+  const first = { ...moment("first"), momentOrder: 3, namedAuthor: { userId: "ben", label: "Someone you shared with" } };
+  await committed(it0, { ...page("first", { nextBeforeMomentOrder: 3 }), moments: [first] });
+  const older = it0.loadMore();
+  act(() => notify({ workspaceId: "ws-1" }));
+  expect.soft(reads).toHaveLength(2);
+  expect(it0.hook().loadingMore).toBe(true);
+  await settle(reads[1]!, { ...page("older"), moments: [{ ...moment("older"), momentOrder: 2 }] });
+  await older;
+  expect(reads).toHaveLength(3);
+  await settle(reads[2]!, { ...page("first"), moments: [
+    { ...first, namedAuthor: { userId: "ben", label: "ben@test.example (via share link)" } },
+    { ...moment("older"), momentOrder: 2 },
+  ] });
+  expect(it0.hook().page?.moments[0]?.namedAuthor?.label).toContain("ben@test.example");
+  expect(reads).toHaveLength(3);
+});
+
+it("restarts an interrupted timeline scan after load-more commits", async () => {
+  let notify!: (event: { workspaceId: string }) => void;
+  window.dohcDesktop!.onHistoryNamesChanged = listener => { notify = listener; return () => {}; };
+  const it0 = mount();
+  await committed(it0, page("first", { nextBeforeMomentOrder: 1 }));
+  act(() => notify({ workspaceId: "ws-1" }));
+  const interrupted = reads[1]!;
+  const older = it0.loadMore();
+  await settle(reads[2]!, page("older")); await older;
+  await settle(interrupted, page("first"));
+  expect(reads).toHaveLength(4);
+  await settle(reads[3]!, { ...page("first"), moments: [
+    { ...moment("first"), namedAuthor: { userId: "ben", label: "ben@test.example (via share link)" } },
+    moment("older"),
+  ] });
+  expect(it0.hook().page?.moments[0]?.namedAuthor?.label).toContain("ben@test.example");
+  expect(reads).toHaveLength(4);
+});
+
+it("scans a new names event after A to B to A, even when B has no rows", async () => {
+  let notify!: (event: { workspaceId: string }) => void;
+  window.dohcDesktop!.onHistoryNamesChanged = listener => { notify = listener; return () => {}; };
+  const issue = { current: 0 };
+  const ready = () => {};
+  const view = renderHook(({ workspaceId }) => useHistoryPage(issue, workspaceId, ready), { initialProps: { workspaceId: "A" } });
+  const refresh = async (answer: ListEngineMomentsResult) => {
+    let pending!: Promise<void>;
+    act(() => { pending = view.result.current.refresh(++issue.current); });
+    await settle(reads.at(-1)!, answer); await pending;
+  };
+  await refresh(page("A"));
+  act(() => notify({ workspaceId: "A" }));
+  await settle(reads[1]!, page("A"));
+  view.rerender({ workspaceId: "B" });
+  await refresh({ ...page("B"), moments: [] });
+  act(() => notify({ workspaceId: "B" }));
+  expect(reads).toHaveLength(3);
+  view.rerender({ workspaceId: "A" });
+  await refresh(page("A"));
+  act(() => notify({ workspaceId: "A" }));
+  expect(reads).toHaveLength(5);
+  await settle(reads[4]!, { ...page("A"), moments: [{ ...moment("A"), namedAuthor: { userId: "ben", label: "ben@test.example (via share link)" } }] });
+  expect(view.result.current.page?.moments[0]?.namedAuthor?.label).toContain("ben@test.example");
+});
+
+it.each(["failure", "updating"])("retries a %s naming scan once and consumes only its successful answer", async (outcome) => {
+  let notify!: (event: { workspaceId: string }) => void;
+  window.dohcDesktop!.onHistoryNamesChanged = listener => { notify = listener; return () => {}; };
+  const it0 = mount();
+  await committed(it0, page("first"));
+  act(() => notify({ workspaceId: "ws-1" }));
+  if (outcome === "failure") await fail(reads[1]!, "busy");
+  else await settle(reads[1]!, UPDATING);
+  expect(reads).toHaveLength(3);
+  await settle(reads[2]!, { ...page("first"), moments: [{ ...moment("first"), namedAuthor: { userId: "ben", label: "ben@test.example (via share link)" } }] });
+  expect(it0.hook().page?.moments[0]?.namedAuthor?.label).toContain("ben@test.example");
+  await committed(it0, page("refreshed"));
+  expect(reads).toHaveLength(4);
+});

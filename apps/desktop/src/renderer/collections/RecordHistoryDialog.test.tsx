@@ -401,3 +401,51 @@ it("scans loaded record names once per revision, not after each older page", asy
   await act(async () => notify({ workspaceId: "ws-1" }));
   expect(read.mock.calls.map(([payload]) => payload.beforeHistoryId)).toEqual([undefined, 10, 9, 4, 10, 9, 4]);
 });
+
+it("restarts record naming when Older changes interrupts a scan", async () => {
+  let notify!: (event: { workspaceId: string }) => void;
+  const reads: ReturnType<typeof deferred<GetCollectionRecordHistoryResult>>[] = [];
+  const read = vi.fn(() => { const result = deferred<GetCollectionRecordHistoryResult>(); reads.push(result); return result.promise; });
+  vi.stubGlobal("dohcDesktop", { getCollectionRecordHistory: read, locateRecordHistoryRun: vi.fn(), onHistoryNamesChanged: (listener: typeof notify) => { notify = listener; return () => {}; } });
+  render(dialog());
+  await act(async () => reads[0]!.resolve({ entries: [entry(9, { kind: "automation", automationId: STAMP, name: "Stamp", run: null, person: "Someone you shared with" })], nextBeforeHistoryId: 9 }));
+  act(() => notify({ workspaceId: "ws-1" }));
+  expect(reads).toHaveLength(2);
+  fireEvent.click(screen.getByRole("button", { name: "Older changes" }));
+  await act(async () => reads[2]!.resolve({ entries: [entry(4, null)], nextBeforeHistoryId: null }));
+  await act(async () => reads[1]!.resolve({ entries: [entry(9, null)], nextBeforeHistoryId: 9 }));
+  expect(reads).toHaveLength(4);
+  await act(async () => reads[3]!.resolve({ entries: [entry(9, { kind: "automation", automationId: STAMP, name: "Stamp", run: null, person: "ben@test.example (via share link)" }), entry(4, null)], nextBeforeHistoryId: null }));
+  expect(screen.getByText(/ben@test.example/)).toBeTruthy();
+  expect(reads).toHaveLength(4);
+});
+
+it("scans record names after A to B to A when B has no rows", async () => {
+  let notify!: (event: { workspaceId: string }) => void;
+  const read = vi.fn(async ({ workspaceId }: GetCollectionRecordHistoryPayload) => ({ entries: workspaceId === "B" ? [] : [entry(9, null)], nextBeforeHistoryId: null }));
+  vi.stubGlobal("dohcDesktop", { getCollectionRecordHistory: read, locateRecordHistoryRun: vi.fn(), onHistoryNamesChanged: (listener: typeof notify) => { notify = listener; return () => {}; } });
+  let view!: ReturnType<typeof render>;
+  await act(async () => { view = render(dialog({ workspaceId: "A" })); });
+  await act(async () => notify({ workspaceId: "A" }));
+  expect(read).toHaveBeenCalledTimes(2);
+  await act(async () => view.rerender(dialog({ workspaceId: "B" })));
+  await act(async () => notify({ workspaceId: "B" }));
+  expect(read).toHaveBeenCalledTimes(3);
+  await act(async () => view.rerender(dialog({ workspaceId: "A" })));
+  await act(async () => notify({ workspaceId: "A" }));
+  expect(read).toHaveBeenCalledTimes(5);
+});
+
+it("retries a failed record naming scan once", async () => {
+  let notify!: (event: { workspaceId: string }) => void;
+  const read = vi.fn()
+    .mockResolvedValueOnce({ entries: [entry(9, null)], nextBeforeHistoryId: null })
+    .mockRejectedValueOnce(new Error("busy"))
+    .mockResolvedValue({ entries: [entry(9, { kind: "automation", automationId: STAMP, name: "Stamp", run: null, person: "ben@test.example (via share link)" })], nextBeforeHistoryId: null });
+  vi.stubGlobal("dohcDesktop", { getCollectionRecordHistory: read, locateRecordHistoryRun: vi.fn(), onHistoryNamesChanged: (listener: typeof notify) => { notify = listener; return () => {}; } });
+  render(dialog());
+  await screen.findByTestId("record-history-entry");
+  await act(async () => notify({ workspaceId: "ws-1" }));
+  expect(read).toHaveBeenCalledTimes(3);
+  expect(screen.getByText(/ben@test.example/)).toBeTruthy();
+});
