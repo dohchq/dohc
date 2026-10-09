@@ -27,6 +27,7 @@ import { automationTargetPathProblem, checkAutomationReach, datasetFieldKey, per
 import {
   applyDocumentEffect,
   applyChatEffect,
+  checkPlannedMessages,
   rebaseRun,
   groupChangedOutcome,
   groupMessage,
@@ -40,6 +41,7 @@ import {
   type CollectionAutomationRunInput,
   type CollectionAutomationRunOutcome,
   type CollectionAutomationReads,
+  type CollectionRecordWrites,
 } from "./collectionAutomationRun";
 import {
   applyDatasetEffect,
@@ -157,6 +159,10 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
     if (!await resolves(...savedRules)) return { outcome: failed(RULES_CHANGED_ERROR) };
   }
   const readable = new Set<string>();
+  // Replayed messages use their saved destination and effect id. New sends
+  // still check their own reach against the current roster before writing.
+  if (current !== null) inventory.reach = inventory.reach.filter(step =>
+    step.kind !== "post" && step.kind !== "notify" && step.kind !== "personal");
   const verdicts = checkAutomationReach(roster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path), steps: inventory.reach });
   if (await deps.checkReach?.(inventory.reach, roster)) return { outcome: { kind: "wait", reason: "held" } };
   for (const [index, verdict] of verdicts.entries()) {
@@ -427,7 +433,7 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
   let engineWriteAttempted = false;
   const documentDeps = {
     ...deps,
-    withRecordWrites: deps.withRecordWrites === undefined ? undefined : <T>(writeSignal: AbortSignal, work: (writes: import("./collectionAutomationRun").CollectionRecordWrites) => Promise<T>) =>
+    withRecordWrites: deps.withRecordWrites === undefined ? undefined : <T>(writeSignal: AbortSignal, work: (writes: CollectionRecordWrites) => Promise<T>) =>
       deps.withRecordWrites!(writeSignal, (writes) => work({
         setFields: async (input) => {
           try {
@@ -444,6 +450,7 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
   };
   const backend: StepBackend = {
     needsDurability: () => engineWriteAttempted,
+    madeDurable: () => { engineWriteAttempted = false; },
     async step(work) {
       await checkNow(true);
       const priorCodeReach = new Map(codeReach);
@@ -679,9 +686,13 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
       return null;
     },
     async apply(run, effect, place, chat) {
+      if (place.recorded && (effect.kind === "message" || effect.kind === "wake")) {
+        engineWriteAttempted = true;
+        return applyChatEffect(deps, { run, signal, automationName: automation.name, depth: claim.depth + 1, chat, replay: true }, effect);
+      }
       await authorizeCode(savedCodeTargets({ ordinal: place.ordinal, effects: [effect] }));
       const datasetEffect = effect.kind === "dataset-edit" || effect.kind === "dataset-create" || effect.kind === "dataset-action";
-      if (!datasetEffect || deps.authorizeDataset === undefined) await checkNow();
+      const currentRoster = !datasetEffect || deps.authorizeDataset === undefined ? await checkNow() : null;
       const effectPath = effect.kind === "set" ? effect.target.collectionPath : "collectionPath" in effect ? effect.collectionPath ?? pathOf(place.ordinal) : pathOf(place.ordinal);
       await verifyTarget(effectPath);
       if (effect.kind === "dataset-edit" || effect.kind === "dataset-create" || effect.kind === "dataset-action") {
@@ -702,6 +713,16 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
         return result ?? { outcome: { kind: "wait", reason: "engine" } };
       }
       if (effect.kind === "message" || effect.kind === "notice" || effect.kind === "wake") {
+        if (currentRoster !== null) {
+          const checked = await checkPlannedMessages(deps, { automationId: claim.automationId, automation, collection, roster: currentRoster }, [{ ordinal: place.ordinal, effects: [effect] }], chat);
+          if ("outcome" in checked) return checked;
+          chat = checked.chat;
+          if (effect.kind === "wake") {
+            const [reach] = checkAutomationReach(currentRoster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path),
+              steps: [{ kind: "personal", person: { userId: effect.person, name: deps.personName(effect.person) } }] });
+            if (reach && !reach.allowed) return { outcome: failed(reach.reason) };
+          }
+        }
         if (effect.kind === "message") engineWriteAttempted = true;
         return applyChatEffect(deps, { run, signal, automationName: automation.name, depth: claim.depth + 1, chat }, effect);
       }

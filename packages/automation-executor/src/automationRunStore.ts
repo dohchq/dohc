@@ -236,6 +236,7 @@ export const WriteSchema = z.union([
 // Effect application time excludes the progress append. The count is per
 // completed effect, including effects whose fields were kept or skipped.
 const AppliedSchema = z.object({
+  unconfirmed: z.literal(true).optional(),
   ordinal: z.number().int().nonnegative(),
   writes: z.array(WriteSchema),
   writeMs: z.number().nonnegative().optional(),
@@ -369,6 +370,17 @@ export interface StoredStep {
   collections?: Array<{ collectionId: string; path: string }>;
 }
 
+/** Receipts a finished run can describe as landed, for History and Undo. */
+export function confirmedEffects(run: StoredRun): StoredRun["applied"] {
+  return run.applied.filter(effect => !effect.unconfirmed);
+}
+
+export function confirmedCreations(run: StoredRun): StoredRun["created"] {
+  const unconfirmed = new Set(run.applied.filter(effect => effect.unconfirmed).flatMap(effect =>
+    effect.writes.flatMap(write => write.kind === "created" ? [write.recordId] : [])));
+  return run.created.filter(created => !unconfirmed.has(created.recordId));
+}
+
 /** One run of one claim under one definition of its automation. */
 export interface StoredRun {
   version: 10;
@@ -389,7 +401,7 @@ export interface StoredRun {
   finishedAtMs: number | null;
   /** The steps planned so far, in the order they ran, each saved before its first effect. */
   steps: StoredStep[];
-  /** What each effect that landed did, in step order, one entry per effect. */
+  /** Effect receipts in step order. Unconfirmed receipts stay only for replay. */
   applied: Array<z.infer<typeof AppliedSchema>>;
   /**
    * Records the run created, each under the id its plan gave it and the id

@@ -1,3 +1,4 @@
+import { confirmedEffects } from "./automationRunStore";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { UndoKeptField } from "./automationRunStore";
@@ -67,7 +68,7 @@ type Rules = Edit["rules"];
 /** The runs' writes, oldest first. */
 function writesOf(runs: readonly StoredRun[]): RunWrite[] {
   return [...runs].sort((left, right) => left.startedAtMs - right.startedAtMs)
-    .flatMap((run) => run.applied.flatMap((effect) => effect.writes));
+    .flatMap((run) => confirmedEffects(run).flatMap((effect) => effect.writes));
 }
 
 /**
@@ -79,7 +80,7 @@ function writesOf(runs: readonly StoredRun[]): RunWrite[] {
  */
 function editsOf(runs: readonly StoredRun[]): Array<{ edit: Edit; sure: boolean; hidden: ReadonlySet<string> }> {
   return [...runs].sort((left, right) => left.startedAtMs - right.startedAtMs).flatMap((run) => {
-    const recorded = run.applied.flatMap((effect) => effect.writes)
+    const recorded = confirmedEffects(run).flatMap((effect) => effect.writes)
       .flatMap((write) => (write.kind === "dataset-edit" ? [{ edit: write, sure: true, hidden: new Set<string>() }] : []));
     const unrecorded = unrecordedEffect(run)?.effect;
     if (unrecorded?.kind !== "dataset-edit") return recorded;

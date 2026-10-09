@@ -1903,6 +1903,29 @@ async fn make_durable_requires_a_running_local_claim_and_preserves_recovery_age(
     )
     .await;
     let claim_id = &claim["claimId"];
+    for use_wire_key in [false, true] {
+        id += 1;
+        let marker = format!("\0automation-durability:{WORKSPACE_ID}");
+        let mut collision = request(
+            id,
+            "versionedText.write",
+            Some(handle.clone()),
+            json!({
+                "versionId": "main", "path": "collision.md", "text": "collision", "origin": "api"
+            }),
+        );
+        if use_wire_key {
+            collision.idempotency_key = Some(marker);
+        } else {
+            collision.params["requestId"] = json!(marker);
+        }
+        let error = transport
+            .call(RequestContext::unbounded(), collision)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert_eq!(error.message, "invalid-request-id");
+    }
     for _ in 0..2 {
         assert_eq!(
             call(
@@ -1926,6 +1949,29 @@ async fn make_durable_requires_a_running_local_claim_and_preserves_recovery_age(
     .await;
     assert_eq!(after["claim"]["updatedAtMs"], claim["updatedAtMs"]);
     assert_eq!(after["claim"]["attempts"], claim["attempts"]);
+    id += 2;
+    let (valid, unknown) = tokio::join!(
+        transport.call(
+            RequestContext::unbounded(),
+            request(
+                id - 1,
+                "automations.makeDurable",
+                Some(handle.clone()),
+                json!({"claimId":claim_id})
+            )
+        ),
+        transport.call(
+            RequestContext::unbounded(),
+            request(
+                id,
+                "automations.makeDurable",
+                Some(handle.clone()),
+                json!({"claimId":"unknown"})
+            )
+        ),
+    );
+    valid.unwrap();
+    assert_eq!(unknown.unwrap_err().code, ErrorCode::InvalidParams);
     assert_eq!(
         call_error(
             &transport,
@@ -1967,6 +2013,55 @@ async fn make_durable_requires_a_running_local_claim_and_preserves_recovery_age(
         json!({}),
     )
     .await;
+    call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+    let store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 2).unwrap();
+    store
+        .read_with(|conn| {
+            let seq: i64 = conn.query_row(
+                "SELECT result_seq FROM engine_requests WHERE kind = 'automation-durability'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert!([-1, -2].contains(&seq));
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+}
+
+#[tokio::test]
+async fn make_durable_record_creation_replay_does_not_resurrect_a_deleted_record() {
+    let scratch = ScratchDir::new().unwrap();
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport.call(RequestContext::unbounded(), request(1, "workspace.open", None,
+        json!({"rootDir": scratch.path().to_string_lossy(), "workspaceId": WORKSPACE_ID, "captureMode": "none"}))).await.unwrap();
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).unwrap();
+    let mut id = 1;
+    let create = json!({"versionId": "main", "path": "record.md", "text": "---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n",
+        "origin": "api", "publish": true, "createOnly": true, "requestId": "automation-create:stable"});
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "versionedText.write",
+        create.clone(),
+    )
+    .await;
+    assert!(scratch.path().join("record.md").exists());
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "versionedText.delete",
+        json!({"versionId": "main", "path": "record.md", "origin": "api"}),
+    )
+    .await;
+    // The desktop removes the file after committing its canonical deletion.
+    std::fs::remove_file(scratch.path().join("record.md")).unwrap();
+    assert!(!scratch.path().join("record.md").exists());
+    let replay = call(&transport, &handle, &mut id, "versionedText.write", create).await;
+    assert_eq!(replay["deduped"], true);
+    assert!(!scratch.path().join("record.md").exists());
     call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
 }
 

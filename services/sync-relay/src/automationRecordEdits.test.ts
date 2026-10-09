@@ -186,6 +186,9 @@ describe("an automation's record writes on this server's replica", () => {
     // A file the engine refused names the same request as the first.
     await expect(context.createFile("Tasks/two.md", `---\nid: ${RECORD}\n---\n`, AUTOMATION)).rejects.toThrow("File already exists");
     expect((writes[1] as { requestId: string }).requestId).toBe((writes[0] as { requestId: string }).requestId);
+    // Moving the Collection cannot give a replay a new creation key.
+    await context.createFile("Moved/two.md", `---\nid: ${RECORD}\n---\n`, AUTOMATION);
+    expect((writes[2] as { requestId: string }).requestId).toBe((writes[0] as { requestId: string }).requestId);
   });
 
   it("keeps a cleared creation seed and finishes missing fields after a typed refusal", async () => {

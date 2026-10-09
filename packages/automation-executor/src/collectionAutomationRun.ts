@@ -616,14 +616,14 @@ export async function applyDocumentEffect(
  */
 export async function applyChatEffect(
   dependencies: Pick<CollectionAutomationRunDependencies, "chat" | "postNotice">,
-  context: { run: StoredRun; signal: AbortSignal; automationName: string; depth: number; chat: ChatDirectory | null },
+  context: { run: StoredRun; signal: AbortSignal; automationName: string; depth: number; chat: ChatDirectory | null; replay?: boolean },
   effect: Extract<PlannedEffect, { kind: "message" | "wake" | "notice" }>,
 ): Promise<RunWrite[]> {
   const { run, signal } = context;
   if (effect.kind === "message") {
     // A saved direct message goes only where the plan meant: the same
     // conversation, still with exactly that person.
-    if (effect.to.kind === "direct-message") {
+    if (!context.replay && effect.to.kind === "direct-message") {
       const now = context.chat?.directMessage(effect.to.userId);
       if (!now || "problem" in now || now.threadId !== effect.to.threadId) {
         throw new Error(`The people in ${effect.name} changed since this run began, so dohc did not send its message.`);

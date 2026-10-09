@@ -91,7 +91,6 @@ impl EngineService {
                 | "automations.subscribe"
                 | "automations.unsubscribe"
                 | "automations.claimNext"
-                | "automations.makeDurable"
                 | "automations.settle"
                 | "automations.release"
                 | "automations.retry"
@@ -133,6 +132,7 @@ impl EngineService {
         request: Request,
         input: crate::LiveApplicationInput,
     ) -> Result<ServiceResponse, WireError> {
+        super::request::validate_request_ids(&request)?;
         self.ensure_configured_host_method(&ctx, &request)?;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
         self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
@@ -155,6 +155,7 @@ impl EngineService {
         request: Request,
     ) -> Result<ServiceResponse, WireError> {
         let id = request.id;
+        super::request::validate_request_ids(&request)?;
         self.ensure_admissible_author(&request)?;
         self.ensure_configured_host_method(&ctx, &request)?;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;

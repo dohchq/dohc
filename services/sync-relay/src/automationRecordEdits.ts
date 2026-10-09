@@ -106,7 +106,7 @@ export function replicaRecordEditContext(
         createOnly: true,
         // The same file again is the same request, so a retry after the
         // engine committed it replays the answer instead of refusing.
-        requestId: `automation-create:${createHash("sha256").update(`${path}\0${text}`).digest("hex")}`,
+        requestId: `automation-create:${createHash("sha256").update(text).digest("hex")}`,
         metadata: {origin: "api", summary: `Added ${posix.basename(path)}`},
         author: {kind: "automation", automationId: author.automationId, onBehalfOf: author.onBehalfOf, depth: author.depth},
       });

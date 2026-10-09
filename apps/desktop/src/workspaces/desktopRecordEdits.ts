@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
   runCollectionRecordCreation,
@@ -60,6 +61,7 @@ export function desktopRecordEditContext(host: DesktopRecordEditHost): Collectio
       const named = author.kind === "automation" || author.kind === "agent" ? author : person;
       requirePublishedWrite(path, await capture.writeAuthoredFile(join(workspaceRoot, path), text, named, {
         createOnly: true,
+        ...(named.kind === "automation" ? { requestId: `automation-create:${createHash("sha256").update(text).digest("hex")}` } : {}),
         signal,
       }));
       return path;

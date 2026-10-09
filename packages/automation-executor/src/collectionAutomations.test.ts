@@ -5,9 +5,55 @@ import { createAutomationFormulaEvaluator } from "./automationEvaluatorHost";
 import { createAutomationRunStore } from "./automationRunStore";
 import { CollectionAutomations, type CollectionAutomationEngine } from "./collectionAutomations";
 import { definitionHash } from "./automationPlan";
+import { newRun } from "./collectionAutomationRun";
 import { SHARED_BUTTON_DENIED } from "./buttonPresser";
 import type { RelayButtonAuthority } from "@dohc/workspace-contracts/relay";
 import { createTestScratch, testMetadataDir } from "./testScratch";
+
+it("leaves unconfirmed receipts out of History, including created records", async () => {
+  const store = createAutomationRunStore(await createTestScratch("dohc-history-unconfirmed-"), testMetadataDir);
+  const evaluator = createAutomationFormulaEvaluator();
+  const text = "version: 1\nautomations:\n  - id: change\n    name: Change\n    when: record-added\n    do: [{set: {A: 1}}]\n";
+  const parsed = parseAutomationsFile(text);
+  if (parsed.status !== "read" || parsed.entries[0]?.status !== "valid") throw Error("invalid fixture");
+  const claim = { claimId: "claim", automationId: "collection:Tasks#change", trigger: { historyId: 1 }, recordId: "record", collectionPath: "Tasks", depth: 0,
+    change: { kind: "added", onBehalfOf: null, actorKind: "human", fields: [], fieldsOmitted: 0 }, state: "failed", attempts: 1, run: 1, createdAtMs: 1, updatedAtMs: 2, error: "refused" };
+  const state = newRun(claim, parsed.entries[0].automation, "key", 1);
+  state.outcome = { state: "failed", error: "refused", run: 1, step: 0 };
+  state.finishedAtMs = Date.now();
+  state.steps = [
+    { ordinal: 0, effects: [{ kind: "set", target: { recordId: "record", collectionPath: "Tasks", path: "Tasks/one.md" }, fields: [{ field: "A", before: 0, after: 1 }] }] },
+    { ordinal: 1, effects: [{ kind: "add", recordId: "lost", collectionPath: "Tasks", name: "lost", fields: [] }] },
+  ];
+  state.applied = [
+    { ordinal: 0, writes: [{ kind: "field", recordId: "record", path: "Tasks/one.md", field: "A", before: 0, after: 1 }] },
+    { ordinal: 1, unconfirmed: true, writes: [{ kind: "created", recordId: "lost", path: "Tasks/lost.md" }] },
+  ];
+  state.durableEffects = 1;
+  state.created = [{ ordinal: 1, planned: "lost", recordId: "lost", path: "Tasks/lost.md" }];
+  await store.save(state);
+  const roster = { kind: "owner" as const, ownerUserId: null, grants: [] };
+  const engine = { listCollections: async () => ({ collections: [{ path: "Tasks", objectId: "Tasks", status: "valid", reasons: [] }] }),
+    subscribeAutomation: async () => {}, releaseAutomationGroups: async () => ({ watchedGeneration: 0, handover: { floorMs: 0, automations: [] } }),
+    claimNextAutomation: async () => null, getAutomationClaim: async () => ({ claim }), listAutomationClaims: async () => ({ claims: [], next: null }),
+    listAutomationFailures: async () => ({ failures: [] }), pruneAutomationHistory: async () => ({ pruned: 0, more: false }) } as unknown as CollectionAutomationEngine;
+  const executor = new CollectionAutomations({ withEngine: async work => work(engine),
+    withRecordWrites: async () => { throw Error("unexpected write"); }, withUndoWrites: async () => { throw Error("unexpected undo"); },
+    readText: async path => path === "Tasks/automations.yaml" ? { text, truncated: false, contentHash: "hash" } : null,
+    writeText: async () => ({ status: "conflict" }), pathExists: async () => true, roster: async () => roster, cachedRoster: async () => roster,
+    evaluator: evaluator.forWorkspace("workspace"), store, personName: id => id, withDatasetHost: async () => null, groupHost: async () => null,
+    groupRelayRecord: async () => ({ generation: 0, handover: null }), reachRelayRecord: async () => ({ generation: 0, reach: null, everShared: false }),
+    groupMessagesSkipped: async () => {}, requestHost: async () => {}, readMessageBody: async () => null,
+    chat: { directory: async () => null, write: async () => {} }, postNotice: async () => {}, mayRetryPress: async () => false,
+    onPressSettled: () => {}, onPressWaiting: () => {}, onRunsChanged: () => {}, reportFailure: async () => {}, withdrawFailure: async () => {},
+    onSwitchedOff: () => {}, onHoldsChanged: () => {}, onAutomationsChanged: () => {}, onError: (_where, error) => { throw error; },
+  });
+  try {
+    await executor.open();
+    const history = await executor.run(claim.automationId, claim.claimId);
+    expect(history?.steps).toEqual([{ step: 1, writes: state.applied[0]!.writes }]);
+  } finally { await executor.dispose(); await evaluator.close(); }
+});
 
 it("persists unchanged reach verdicts after the first save fails", async () => {
   const store = createAutomationRunStore(await createTestScratch("dohc-reach-save-"), testMetadataDir);

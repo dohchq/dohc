@@ -13,14 +13,25 @@ where
     let session: i64 = conn
         .pragma_query_value(None, "synchronous", |row| row.get(0))
         .map_err(StorageError::corrupt)?;
-    conn.pragma_update(None, "synchronous", 2)
-        .map_err(StorageError::persist)?;
-    let result = work(conn);
+    let fullfsync: i64 = conn
+        .pragma_query_value(None, "fullfsync", |row| row.get(0))
+        .map_err(StorageError::corrupt)?;
+    let result = (|| {
+        conn.pragma_update(None, "fullfsync", 1)
+            .map_err(StorageError::persist)?;
+        conn.pragma_update(None, "synchronous", 2)
+            .map_err(StorageError::persist)?;
+        work(conn)
+    })();
     let restored = conn
         .pragma_update(None, "synchronous", session)
         .map_err(StorageError::persist);
+    let restored_fullfsync = conn
+        .pragma_update(None, "fullfsync", fullfsync)
+        .map_err(StorageError::persist);
     let value = result?;
     restored?;
+    restored_fullfsync?;
     Ok(value)
 }
 
@@ -36,13 +47,30 @@ mod tests {
             conn.pragma_query_value(None, "synchronous", |row| row.get(0))
                 .map_err(StorageError::corrupt)
         };
-        assert_eq!(with_full_synchronous(&conn, setting).unwrap(), 2);
+        let fullfsync = |conn: &Connection| -> Result<i64, StorageError> {
+            conn.pragma_query_value(None, "fullfsync", |row| row.get(0))
+                .map_err(StorageError::corrupt)
+        };
+        for previous in [0, 1] {
+            conn.pragma_update(None, "fullfsync", previous).unwrap();
+            with_full_synchronous(&conn, |conn| {
+                assert_eq!(setting(conn)?, 2);
+                assert_eq!(fullfsync(conn)?, 1);
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+            assert_eq!(setting(&conn).unwrap(), 1);
+            assert_eq!(fullfsync(&conn).unwrap(), previous);
+        }
+        conn.pragma_update(None, "fullfsync", 0).unwrap();
         assert_eq!(setting(&conn).unwrap(), 1);
         let failed: Result<(), StorageError> = with_full_synchronous(&conn, |conn| {
             assert_eq!(setting(conn)?, 2);
+            assert_eq!(fullfsync(conn)?, 1);
             Err(StorageError::persist(rusqlite::Error::InvalidQuery))
         });
         assert!(failed.is_err());
+        assert_eq!(fullfsync(&conn).unwrap(), 0);
         assert_eq!(setting(&conn).unwrap(), 1);
     }
 }

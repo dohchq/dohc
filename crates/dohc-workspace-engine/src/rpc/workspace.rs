@@ -56,6 +56,7 @@ pub(crate) struct OpenWorkspace {
     pub(super) db_path: PathBuf,
     pub(crate) workspace_id: String,
     pub(super) actor: ActorHandle,
+    pub(super) durability: super::automations::DurabilityQueue,
     pub(super) mode: WorkspaceOpenMode,
     handle_kind: WorkspaceHandleKind,
     pub(super) relay: Option<RelayConfiguration>,
@@ -122,6 +123,7 @@ impl OpenWorkspace {
             db_path: self.db_path.clone(),
             workspace_id: self.workspace_id.clone(),
             actor: self.actor.clone(),
+            durability: self.durability.clone(),
             mode: WorkspaceOpenMode::ReadOnly,
             handle_kind: WorkspaceHandleKind::ReadOnlyAttach { owner },
             relay: self.relay.clone(),
@@ -1077,6 +1079,7 @@ impl EngineService {
                 db_path,
                 workspace_id: params.workspace_id,
                 actor,
+                durability: super::automations::DurabilityQueue::default(),
                 mode: requested_mode,
                 handle_kind: WorkspaceHandleKind::Owner,
                 relay: params

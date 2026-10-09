@@ -1,3 +1,4 @@
+import { confirmedEffects, confirmedCreations } from "./automationRunStore";
 import { posix } from "node:path";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -92,8 +93,8 @@ export function documentUndoChanges(runs: readonly StoredRun[]): { added: Map<st
   for (const run of [...runs].sort((left, right) => left.startedAtMs - right.startedAtMs)) {
     // A record is listed as created before its fields are written, so one a
     // run stopped after creating is still found.
-    for (const created of run.created) added.set(created.recordId, created.path);
-    for (const { writes } of run.applied) {
+    for (const created of confirmedCreations(run)) added.set(created.recordId, created.path);
+    for (const { writes } of confirmedEffects(run)) {
       for (const write of writes) {
         if (write.kind === "created") added.set(write.recordId, write.path);
         if (write.kind === "field") wrote(write.recordId, write.path, write.field, { before: write.before, after: write.after, sure: true });

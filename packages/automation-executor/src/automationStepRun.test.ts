@@ -2,8 +2,9 @@ import { describe, expect, it } from "vitest";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import type { RunContext } from "./automationPlan";
 import { newRun, type CollectionAutomationRunDependencies } from "./collectionAutomationRun";
-import type { AutomationRunStore, RunWrite, StoredRun } from "./automationRunStore";
+import { confirmedEffects, confirmedCreations, type AutomationRunStore, type RunWrite, type StoredRun } from "./automationRunStore";
 import { runSteps, type EffectMode, type StepBackend } from "./automationStepRun";
+import { documentUndoChanges } from "./collectionAutomationUndo";
 
 function fixture(count = 1) {
   const parsed = parseAutomationsFile(`version: 1
@@ -11,7 +12,7 @@ automations:
   - id: change
     name: Change
     when: record-added
-    do: [${Array.from({ length: count }, () => "{set: {A: 1}}").join(", ")}]
+    do: [${Array.from({ length: count > 50 ? 1 : count }, () => "{set: {A: 1}}").join(", ")}]
 `);
   if (parsed.status !== "read" || parsed.entries[0]?.status !== "valid") throw Error("invalid fixture");
   const automation = parsed.entries[0].automation;
@@ -21,6 +22,7 @@ automations:
   const writes: RunWrite[] = [{ kind: "field", recordId: "record", path: "Tasks/one.md", field: "A", before: 0, after: 1 }];
   run.steps = Array.from({ length: count }, (_, ordinal) => ({ ordinal, effects: [{ kind: "set", target: {
     recordId: "record", path: "Tasks/one.md", collectionPath: "Tasks" }, fields: [{ field: "A", before: 0, after: 1 }] }] }));
+  if (count > 50) run.steps = [{ ordinal: 0, effects: run.steps.flatMap(step => step.effects) }];
   const log: string[] = [], modes: EffectMode[] = [], saves: StoredRun[] = [];
   let value = 0, engineWrites = 0, barrierFails = false;
   const keys = new Set<number>();
@@ -53,6 +55,76 @@ automations:
     value: () => value, engineWrites: () => engineWrites,
     loseWrites: () => { value = 0; keys.clear(); }, failBarrier: (failed: boolean) => { barrierFails = failed; } };
 }
+
+describe("durable replay boundaries", () => {
+  it("marks unvisited engine receipts unconfirmed when replay fails", async () => {
+    const f = fixture(3);
+    f.run.applied = f.run.steps.map(step => ({ ordinal: step.ordinal, writes: [{ kind: "created", recordId: `r${step.ordinal}`, path: `Tasks/${step.ordinal}.md` }] }));
+    f.run.created = f.run.steps.map(step => ({ ordinal: step.ordinal, planned: `r${step.ordinal}`, recordId: `r${step.ordinal}`, path: `Tasks/${step.ordinal}.md` }));
+    f.run.durableEffects = 1;
+    f.backend.apply = async () => ({ outcome: { kind: "failed", error: "reach changed", timedOut: false } });
+    await expect(f.execute()).resolves.toMatchObject({ kind: "failed" });
+    expect(f.run.applied.map(effect => effect.unconfirmed ?? false)).toEqual([false, true, true]);
+    expect(confirmedEffects(f.run)).toHaveLength(1);
+    expect(confirmedCreations(f.run).map(created => created.recordId)).toEqual(["r0"]);
+    expect([...documentUndoChanges([f.run]).added.keys()]).toEqual(["r0"]);
+    expect(f.saves.at(-1)?.outcome?.state).toBe("failed");
+    expect(f.log).not.toContain("makeDurable");
+  });
+
+  it.each(["kept", "skipped", "notice", "dataset-edit", "dataset-created", "dataset-action"])("does not replay a recorded %s receipt", async kind => {
+    const f = fixture();
+    f.run.applied = [{ ordinal: 0, writes: [{ kind } as RunWrite] }];
+    await expect(f.execute()).resolves.toEqual({ kind: "done" });
+    expect(f.modes).toEqual([]); expect(f.engineWrites()).toBe(0);
+    expect(f.log).not.toContain("makeDurable");
+  });
+
+  it("replays only written fields of a mixed written/kept effect", async () => {
+    const f = fixture(), effect = f.run.steps[0]!.effects[0]!;
+    if (effect.kind !== "set") throw Error("expected set");
+    effect.fields.push({ field: "B", before: 0, after: 1 });
+    f.run.applied = [{ ordinal: 0, writes: [
+      { kind: "field", recordId: "record", path: "Tasks/one.md", field: "A", before: 0, after: 1 },
+      { kind: "kept", recordId: "record", path: "Tasks/one.md", field: "B", planned: 1, current: 2 },
+    ] }];
+    const apply = f.backend.apply;
+    f.backend.apply = async (...args) => {
+      expect(args[1].kind === "set" && args[1].fields.map(field => field.field)).toEqual(["A"]);
+      return apply(...args);
+    };
+    await f.execute();
+    expect(f.run.applied[0]?.writes.filter(write => write.kind === "kept")).toHaveLength(1);
+  });
+
+  it("marks every 50 engine effects once at least two seconds have elapsed", async () => {
+    const f = fixture(200), apply = f.backend.apply;
+    let now = 0;
+    f.dependencies.nowMs = () => now;
+    f.backend.apply = async (...args) => { now += 50; return apply(...args); };
+    await f.execute();
+    expect(f.saves.map(run => run.durableEffects)).toEqual([50, 100, 150, 200, 200]);
+    expect(f.log.filter(call => call === "makeDurable")).toHaveLength(4);
+  });
+
+  it("keeps a short 200-effect run to one final barrier", async () => {
+    const f = fixture(200);
+    await f.execute();
+    expect(f.log.filter(call => call === "makeDurable")).toHaveLength(1);
+  });
+
+  it("waits after a failed periodic barrier without retrying or publishing progress", async () => {
+    const f = fixture(51), apply = f.backend.apply;
+    let now = 0;
+    f.dependencies.nowMs = () => now;
+    f.backend.apply = async (...args) => { now += 50; return apply(...args); };
+    f.failBarrier(true);
+    await expect(f.execute()).resolves.toEqual({ kind: "wait", reason: "engine" });
+    expect(f.run.durableEffects).toBe(0); expect(f.saves).toEqual([]);
+    expect(f.log.filter(call => call === "makeDurable")).toHaveLength(1);
+    expect(f.modes).toHaveLength(50);
+  });
+});
 
 describe("engine durability before run outcomes", () => {
   it.each(["barrier", "receipt"])("overlaps the final receipt and barrier, with %s finishing first", async (first) => {

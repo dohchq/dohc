@@ -22,8 +22,6 @@ const PATH_HINT_ENRICHMENT_CONCURRENCY = 8;
 export interface DesktopLinkedChatStore extends AwaitableLinkedChatStore {
   ensureOpen(): Promise<void>;
   listChannelsPage(input: { workspaceId: string; limit: number }): Promise<{ channels: ChatChannelSummary[]; nextCursor: string | null }>;
-  /** One message, whole: a Group automation reads a body its claim carried truncated. */
-  getMessage(input: { workspaceId: string; messageId: string }): Promise<{ body: string }>;
 }
 
 export interface DesktopLinkedChatStoreOptions {

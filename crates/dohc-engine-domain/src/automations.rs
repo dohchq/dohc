@@ -3876,8 +3876,8 @@ pub fn make_automation_writes_durable(
         }
         let rows = tx.execute(
             "INSERT INTO engine_requests (request_id, payload_hash, result_seq, committed_at, kind) \
-             VALUES (?1, '', 0, 0, 'automation-durability') \
-             ON CONFLICT(request_id) DO UPDATE SET result_seq = 1 - result_seq \
+             VALUES (?1, '', -1, 0, 'automation-durability') \
+             ON CONFLICT(request_id) DO UPDATE SET result_seq = CASE result_seq WHEN -1 THEN -2 ELSE -1 END \
              WHERE engine_requests.kind = 'automation-durability'",
             params![format!("\0automation-durability:{workspace_id}")],
         ).map_err(DomainError::sql_persist)?;

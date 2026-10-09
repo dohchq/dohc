@@ -80,6 +80,7 @@ export interface StepReads {
 export interface StepBackend {
   /** A write may have landed even if applying its effect failed before recording it. */
   needsDurability?(): boolean;
+  madeDurable?(): void;
   /**
    * Runs one step's reads. Null when the Collection's store is not open;
    * "changed" when a record changed between two of the step's reads of it.
@@ -93,7 +94,7 @@ export interface StepBackend {
   apply(
     run: StoredRun,
     effect: StoredStep["effects"][number],
-    place: { index: number; ordinal: number; part: number; mode: EffectMode },
+    place: { index: number; ordinal: number; part: number; mode: EffectMode; recorded?: boolean },
     chat: ChatDirectory | null,
   ): Promise<RunWrite[] | { outcome: CollectionAutomationRunOutcome }>;
 }
@@ -158,7 +159,24 @@ type Done =
   | { kind: "add"; ordinal: number; ref: RunRef | null }
   | { kind: "code"; value: JsonValue };
 
-type RunProgress = { effects: number; append: Promise<{ error: unknown } | null> | null };
+function engineWrite(write: RunWrite): boolean {
+  return write.kind === "field" || write.kind === "created" || write.kind === "message";
+}
+
+function replayEffect(effect: StoredStep["effects"][number], writes: readonly RunWrite[]): StoredStep["effects"][number] {
+  const fields = new Set(writes.flatMap(write => write.kind === "field" ? [write.field] : []));
+  if (effect.kind === "set") return { ...effect, fields: effect.fields.filter(field => fields.has(field.field)) };
+  if (effect.kind === "add") return { ...effect, fields: effect.fields.filter(field => fields.has(field.field)) };
+  return effect;
+}
+
+type RunProgress = {
+  effects: number;
+  engineEffects: number;
+  syncFailed: boolean;
+  append: Promise<{ error: unknown } | null> | null;
+  checkpoint(): Promise<boolean>;
+};
 
 async function finishEffectAppend(progress: RunProgress): Promise<void> {
   const append = progress.append;
@@ -182,8 +200,33 @@ export async function runSteps(
   /** The run's evaluator time, which every step goes on counting. */
   spent: AutomationTimeSpent,
 ): Promise<CollectionAutomationRunOutcome> {
-  const mark = run.durableEffects ?? 0;
-  const progress: RunProgress = { effects: mark, append: null };
+  const mark = run.durableEffects;
+  let lastDurableAt = dependencies.nowMs();
+  const sync = async () => {
+    const engineWrites = backend.needsDurability?.() || run.applied.slice(run.durableEffects, progress.effects)
+      .some(({ writes }) => writes.some(engineWrite));
+    // The receipt and WAL sync different files. Own both through completion.
+    const [durable, appended] = await Promise.allSettled([
+      (async () => { if (engineWrites) await dependencies.makeDurable(input.engineClaimId); })(),
+      finishEffectAppend(progress),
+    ]);
+    if (appended.status === "rejected") throw appended.reason;
+    if (durable.status === "rejected") { progress.syncFailed = true; return false; }
+    backend.madeDurable?.();
+    return true;
+  };
+  const progress: RunProgress = { effects: mark, engineEffects: 0, syncFailed: false, append: null,
+    async checkpoint() {
+      // Bound crash replay without syncing short runs or every effect.
+      if (progress.engineEffects < 50 || dependencies.nowMs() - lastDurableAt < 2000) return true;
+      if (!await sync()) return false;
+      await dependencies.store.save({ ...run, durableEffects: progress.effects });
+      run.durableEffects = progress.effects;
+      progress.engineEffects = 0;
+      lastDurableAt = dependencies.nowMs();
+      return true;
+    },
+  };
   let outcome: Awaited<ReturnType<typeof walkSteps>>;
   try {
     outcome = await walkSteps(dependencies, backend, input, ctx, run, saved, spent, progress);
@@ -191,17 +234,7 @@ export async function runSteps(
     await finishEffectAppend(progress).catch(() => {});
     throw error;
   }
-  const pending = run.applied.slice(mark, outcome.kind === "wait" ? progress.effects : undefined);
-  const engineWrites = backend.needsDurability?.() || pending.some(({ writes }) =>
-    writes.some((write) => write.kind === "field" || write.kind === "created" || write.kind === "message"));
-  // The final receipt and the engine WAL sync different files. Join both
-  // before publishing a watermark or outcome, even when either one fails.
-  const [durable, appended] = await Promise.allSettled([
-    (async () => { if (engineWrites) await dependencies.makeDurable(input.engineClaimId); })(),
-    finishEffectAppend(progress),
-  ]);
-  if (appended.status === "rejected") throw appended.reason;
-  if (durable.status === "rejected") return { kind: "wait", reason: "engine" };
+  if (progress.syncFailed || !await sync()) return { kind: "wait", reason: "engine" };
   if (outcome.kind === "done" && input.stopped.aborted) outcome = { kind: "wait", reason: "stopped" };
   const durableEffects = progress.effects;
   if (outcome.kind === "wait") {
@@ -214,6 +247,10 @@ export async function runSteps(
   // A step that failed before anything was saved changed nothing.
   if (outcome.kind !== "done" && !outcome.saved) return outcome.outcome;
   run.durableEffects = durableEffects;
+  // A failed resume can leave later receipts whose engine writes were lost.
+  // Retain them for Try again, but History and Undo must not call them landed.
+  run.applied = run.applied.map((effect, index) => index >= durableEffects && effect.writes.some(engineWrite)
+    ? { ...effect, unconfirmed: true } : effect);
   if (outcome.kind === "done") {
     run.outcome = { state: "done" };
   } else if (outcome.outcome.kind === "failed") {
@@ -259,7 +296,7 @@ async function walkSteps(
   const savedSteps = new Map(run.steps.map((step) => [step.ordinal, step]));
   // Only the first effect an earlier attempt left unrecorded may have landed.
   const firstUnrecorded = run.applied.length;
-  const durableEffects = run.durableEffects ?? 0;
+  const durableEffects = run.durableEffects;
   let reused = 0;
   let effectIndex = 0;
   let fieldWrites = run.steps.reduce((count, step) => count + fieldWriteCount(step.effects), 0);
@@ -377,12 +414,18 @@ async function walkSteps(
     }
     if (effectIndex <= durableEffects) return null;
     // Every message and notice is checked under this roster before it is sent.
-    const messages = await checkPlannedMessages(dependencies, { automationId: ctx.claim.automationId, automation, collection: input.collection, roster: input.roster }, [step], ctx.chat);
+    const unsent = { ...step, effects: step.effects.filter((_effect, part) => first + part >= firstUnrecorded) };
+    const messages = await checkPlannedMessages(dependencies, { automationId: ctx.claim.automationId, automation, collection: input.collection, roster: input.roster }, [unsent], ctx.chat);
     if ("outcome" in messages) return messages.outcome;
     for (const [part, effect] of step.effects.entries()) {
       const index = first + part;
       if (index < durableEffects) continue;
       const recorded = index < firstUnrecorded;
+      const receipt = recorded ? run.applied[index]! : null;
+      if (receipt !== null && !receipt.writes.some(engineWrite)) {
+        progress.effects = index + 1;
+        continue;
+      }
       if (input.stopped.aborted) return stopped;
       if (input.signal.aborted) return failed(DEADLINE_ERROR, true);
       // Keep at most one effect without a durable receipt, as resume expects.
@@ -393,9 +436,9 @@ async function walkSteps(
       let writes: RunWrite[];
       const writeStarted = dependencies.nowMs();
       try {
-        const applied = await backend.apply(run, effect, { index, ordinal: step.ordinal, part, mode }, messages.chat);
+        const applied = await backend.apply(run, receipt === null ? effect : replayEffect(effect, receipt.writes), { index, ordinal: step.ordinal, part, mode, recorded }, messages.chat);
         if ("outcome" in applied) return applied.outcome;
-        writes = applied;
+        writes = receipt === null ? applied : [...receipt.writes.filter(write => !engineWrite(write)), ...applied];
       } catch (error) {
         if (error instanceof AutomationRunWait) return { kind: "wait", reason: error.reason };
         if (input.stopped.aborted) return stopped;
@@ -408,6 +451,8 @@ async function walkSteps(
       if (recorded) {
         progress.effects = index + 1;
         run.applied[index] = landed;
+        if (writes.some(engineWrite)) progress.engineEffects++;
+        if (!await progress.checkpoint()) return { kind: "wait", reason: "engine" };
         continue;
       }
       progress.append = store.appendEffect(run, landed).then(() => {
@@ -420,6 +465,8 @@ async function walkSteps(
       }, (error: unknown) => ({ error }));
       run.applied.push(landed);
       progress.effects = index + 1;
+      if (writes.some(engineWrite)) progress.engineEffects++;
+      if (!await progress.checkpoint()) return { kind: "wait", reason: "engine" };
     }
     return null;
   };

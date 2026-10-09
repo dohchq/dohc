@@ -21,6 +21,8 @@ import {
 import { createTestScratch, testMetadataDir } from "./testScratch";
 import { createAutomationTargets } from "./automationTargets";
 import { MAX_FOUND_RECORDS } from "./automationPlan";
+import { chatDirectoryOf } from "./automationChat";
+import { undoAutomationRuns } from "./automationUndo";
 
 // A document Collection's run against an in-memory engine: each step reads
 // what the steps before it wrote, and a run that stops at any durable point
@@ -221,6 +223,46 @@ const task = (id: string, values: Record<string, JsonValue>): Doc => ({ id, path
  * engine hands a crashed claim out again under the same run.
  */
 const scratchStore = async () => createAutomationRunStore(await createTestScratch("dohc-stepwise-"), testMetadataDir);
+
+it("Undo reverses only confirmed fields and leaves an unconfirmed creation alone", async () => {
+  const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {A: 1}}]");
+  const space = workspace([task("rec_t", { A: 1 }), task("lost", { A: 1 })]);
+  const run = newRun(added(), definition, "key", 1);
+  run.outcome = { state: "failed", error: "refused", run: 1, step: 1 };
+  run.durableEffects = 1;
+  run.applied = [
+    { ordinal: 0, writes: [{ kind: "field", recordId: "rec_t", path: "Tasks/rec_t.md", field: "A", before: 0, after: 1 }] },
+    { ordinal: 1, unconfirmed: true, writes: [{ kind: "created", recordId: "lost", path: "Tasks/lost.md" }] },
+  ];
+  run.created = [{ ordinal: 1, planned: "lost", recordId: "lost", path: "Tasks/lost.md" }];
+  const trashed: string[] = [];
+  const result = await undoAutomationRuns(space.undo(trashed), null, { path: "Tasks", name: "Tasks" },
+    async () => ({ kind: "owner", ownerUserId: null, grants: [] }), "atc_one", [run], async () => {}, new AbortController().signal);
+  expect(result.undone.reverted).toBe(1);
+  expect(result.undone.removed).toBe(0);
+  expect(space.records.get("rec_t")?.values.A).toBe(0);
+  expect(space.records.get("lost")?.values.A).toBe(1);
+  expect(trashed).toEqual([]);
+});
+
+it.each([true, false])("replays only recorded messages when the roster and direct-message membership changed, recorded=%s", async recorded => {
+  const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{direct-message: Hello, to: [friend]}]");
+  const space = workspace([task("rec_t", {})]), store = await scratchStore();
+  const run = newRun(added(), definition, `${definitionHash(definition)}-1`, 1);
+  run.steps = [{ ordinal: 0, effects: [{ kind: "message", effectId: "effect", messageId: "message", threadId: "thread", body: "Hello", name: "Friend",
+    to: { kind: "direct-message", userId: "friend", threadId: "thread" }, channelWireId: "dm", byFormula: false }] }];
+  if (recorded) run.applied = [{ ordinal: 0, writes: [{ kind: "message", messageId: "message", name: "Friend" }] }];
+  await store.save(run);
+  const roster = { kind: "owner" as const, ownerUserId: "owner", grants: [{ grantId: "editor", recipientUserId: "editor", recipientEmail: null,
+    files: { paths: ["Tasks"], versionId: null, access: "edit" as const }, channel: null }] };
+  const dependencies = space.dependencies(store);
+  const sent: string[] = [];
+  dependencies.chat = { directory: async () => chatDirectoryOf([], roster), write: async (_signal, effect) => { sent.push(effect.effectId); } };
+  const signal = new AbortController().signal;
+  const outcome = await runCollectionAutomation(dependencies, { claim: added(), automation: definition, collection: { path: "Tasks", name: "Tasks" }, roster, signal, stopped: signal });
+  expect(outcome.kind).toBe(recorded ? "done" : "failed");
+  expect(sent).toEqual(recorded ? ["effect"] : []);
+});
 
 async function runToEnd(
   space: ReturnType<typeof workspace>,
