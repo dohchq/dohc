@@ -2827,7 +2827,7 @@ describe("Collection automations", () => {
     onTestFinished(() => executor.dispose()); await executor.open();
     const listed = await executor.automationsIn("Tasks");
     if(listed.status !== "read" || !listed.automations[0]?.valid) throw Error("No definition");
-    expect(await executor.undoRunsOf([{collectionPath: "Tasks", id: "bump", definitionHash: listed.automations[0].definitionHash}], async () => {})).toMatchObject({undone: 0});
+    expect(await executor.undoRunsOf([{collectionPath: "Tasks", id: "bump", definitionHash: listed.automations[0].definitionHash}], async () => {})).toMatchObject({undone: 0, left: 0});
     expect(updates).not.toHaveBeenCalled();
     expect(w.fieldsOf(task).Count).toBe(2);
   });

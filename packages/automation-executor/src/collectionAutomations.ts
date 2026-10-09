@@ -3676,7 +3676,11 @@ export class CollectionAutomations {
             result.otherKept += undone.kept + undone.keptChanged + undone.irreversible + undone.actions;
           }
         } else if (!again) {
-          result.left += 1;
+          const currentRuns = stored.runs.filter(run => wanted.has(run.definitionHash));
+          const stillPending = currentRuns.some(run => run.undo !== "done") ||
+            sharedReversalsOf(currentRuns).some(write => write.state === "not-accepted");
+          const stillKept = documentUndoKept(currentRuns).length > 0;
+          if (stored.unreadable || stillPending || stillKept) result.left += 1;
         }
       }
     } finally {
