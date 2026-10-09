@@ -175,10 +175,12 @@ function run({module, exhausted, room}: QuickJS, db: DatabaseSync, request: Gues
   const runtime = module.newRuntime();
   runtime.setMaxStackSize(request.limits.stackBytes);
   const deadline = performance.now() + request.limits.evaluationMs;
-  runtime.setInterruptHandler(() => performance.now() >= deadline);
+  let interrupted = false;
+  runtime.setInterruptHandler(() => interrupted ||= performance.now() >= deadline);
+  const timeLimit = "App operation took longer than its time limit and stopped. Try again.";
   const memoryLimit = `App operation needed more than its ${request.limits.memoryBytes / MiB} MiB memory limit, so it stopped.`;
   // A guest exception after the memory filled is the memory limit, unless the deadline stopped the guest.
-  const guestFailure = (message: string) => new Error(exhausted() && performance.now() < deadline ? memoryLimit : message);
+  const guestFailure = (message: string) => new Error(interrupted ? timeLimit : exhausted() ? memoryLimit : message);
   runtime.removeModuleLoader();
   const vm = runtime.newContext();
   let statements = 0;
@@ -209,7 +211,11 @@ function run({module, exhausted, room}: QuickJS, db: DatabaseSync, request: Gues
   const callback = (write: boolean) => vm.newFunction(write ? "execute" : "query", (sqlValue, paramsValue) => {
     try {
       if (options.persistentConnection && !db.isTransaction) throw new Error("The app operation transaction ended.");
-      if (++statements > request.limits.statements || performance.now() >= deadline) throw new Error("App database operation limit exceeded.");
+      if (++statements > request.limits.statements) throw new Error("App database operation limit exceeded.");
+      if (performance.now() >= deadline) {
+        interrupted = true;
+        throw new Error(timeLimit);
+      }
       if (vm.typeof(sqlValue) !== "string" || vm.typeof(paramsValue) !== "string") throw new Error("Invalid database arguments.");
       const sql = boundedText(vm.getString(sqlValue), request.limits.sourceBytes, "SQL statement");
       if (!hasStatement(sql)) throw new Error("SQL statement is empty.");
@@ -288,7 +294,7 @@ function run({module, exhausted, room}: QuickJS, db: DatabaseSync, request: Gues
       };
     })();`;
     const boot = vm.evalCode(bootstrap);
-    if (boot.error) { boot.error.dispose(); throw new Error("App operation context could not be initialized."); }
+    if (boot.error) { boot.error.dispose(); throw guestFailure("App operation context could not be initialized."); }
     boot.value.dispose();
     const invoke = vm.getProp(vm.global, "__invokeOperation");
     const removed = vm.evalCode("delete globalThis.__invokeOperation;");

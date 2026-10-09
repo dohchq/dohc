@@ -152,7 +152,9 @@ export type ChildReply = { ok: true; resultJson: string; database: Uint8Array; c
 export function runtimeLimits(input: Partial<RuntimeLimits> = {}): RuntimeLimits {
   const limits = { ...DEFAULT_LIMITS };
   for (const [key, value] of Object.entries(input)) {
-    if (!(key in limits) || !Number.isSafeInteger(value) || value! < 1 || value! > DEFAULT_LIMITS[key as keyof RuntimeLimits]) {
+    // Evaluation can use the worker's time allowance; its default stays at one second.
+    const maximum = key === "evaluationMs" ? DEFAULT_LIMITS.deadlineMs : DEFAULT_LIMITS[key as keyof RuntimeLimits];
+    if (!(key in limits) || !Number.isSafeInteger(value) || value! < 1 || value! > maximum) {
       throw new Error("Invalid app runtime limit.");
     }
     limits[key as keyof RuntimeLimits] = value!;

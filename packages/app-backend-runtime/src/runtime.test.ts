@@ -27,6 +27,11 @@ function request(overrides: Partial<EvaluateAppOperationInput> = {}): EvaluateAp
 }
 
 describe("app operation runtime", () => {
+  it("allows a larger evaluation budget within the worker deadline limit", async () => {
+    expect((await evaluateAppOperation(request({ operation: "inspect", limits: { evaluationMs: 5000 } }))).result)
+      .toEqual([{ id: "item", remaining: 1 }]);
+    await expect(evaluateAppOperation(request({ limits: { evaluationMs: 8001 } }))).rejects.toThrow("Invalid app runtime limit.");
+  });
   it("validates journaled schema restrictions before returning an activation checkpoint",async()=>{
     await expect(initializeAppDatabase({tables:["items"],journaled:true,schemaSql:"CREATE TABLE items(id INTEGER PRIMARY KEY AUTOINCREMENT);"})).rejects.toThrow("AUTOINCREMENT");
     await expect(initializeAppDatabase({tables:["items"],journaled:true,schemaSql:"CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,ROWID TEXT);"})).rejects.toThrow("Rowid aliases");
@@ -102,7 +107,7 @@ describe("app operation runtime", () => {
   ])("bounds guest execution and serialization: %s", async body => {
     const input = request({source:`globalThis.operations={reserve(){${body}}}`,limits:{evaluationMs:100,memoryBytes:16*1024*1024}});
     // The guest limit must stop it. The worker deadline kill reports "exceeded its deadline" instead.
-    await expect(evaluateAppOperation(input)).rejects.toThrow(/^App operation (?:failed\.|needed more than its 16 MiB memory limit, so it stopped\.)$/);
+    await expect(evaluateAppOperation(input)).rejects.toThrow(/^App operation (?:took longer than its time limit and stopped\. Try again\.|needed more than its 16 MiB memory limit, so it stopped\.)$/);
   });
 
   it("kills a native SQL runaway and accepts a following operation", async () => {

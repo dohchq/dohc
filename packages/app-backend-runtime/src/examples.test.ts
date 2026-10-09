@@ -17,7 +17,8 @@ async function fixture(app = "fundraiser") {
   async function call(operation: string, input: JsonValue = {}, options: Partial<EvaluateAppOperationInput> = {}) {
     const requestId = `request-${++sequence}`;
     const result = await evaluateAppOperation({source, tables, database, operation, input, caller: participant, requestId,
-      nowMs: sequence * 1000, secret: randomBytes(32).toString("base64url"), files: [file], ...options});
+      // Capacity checks exercise the full roster, even when the host is busy.
+      nowMs: sequence * 1000, secret: randomBytes(32).toString("base64url"), files: [file], limits: {evaluationMs: 5000}, ...options});
     database = result.database;
     return result;
   }

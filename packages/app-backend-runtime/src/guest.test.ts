@@ -28,6 +28,29 @@ async function withDatabase(run: (db: DatabaseSync) => Promise<void>): Promise<v
 }
 
 describe("reusable guest evaluator", () => {
+  it.each([
+    { body: "while (true) {}", source: undefined },
+    { body: "return null;", source: "while (true) {}" },
+    { body: "return { toJSON() { while (true) {} } };", source: undefined },
+  ])("names the time limit when the guest interrupts: $body", async ({ body, source }) => {
+    await withDatabase(async db => {
+      const operation = request(body, {
+        limits: { ...DEFAULT_LIMITS, evaluationMs: 100 },
+        ...(source === undefined ? {} : { source }),
+      });
+      await expect(evaluate(db, operation)).rejects.toThrow(
+        "App operation took longer than its time limit and stopped. Try again.",
+      );
+      expect((await evaluate(db, request("return 'next';"))).resultJson).toBe('"next"');
+    });
+  });
+
+  it("keeps a guest exception named interrupted separate from a time limit", async () => {
+    await withDatabase(async db => {
+      await expect(evaluate(db, request("throw new Error('interrupted');"))).rejects.toThrow(/^App operation failed\.$/);
+    });
+  });
+
   it.each(["changes", "total_changes", "last_insert_rowid"])("hides retained %s counters through every authorizer reset", async counter => {
     await withDatabase(async db => {
       const operation = request(`
@@ -175,7 +198,7 @@ describe("guest memory", () => {
       const fill = "let held = []; try { for (;;) held.push(new Uint8Array(1 << 20)); } catch {}";
       // The deadline stops a loop that runs after the operation caught its out-of-memory error.
       await expect(evaluate(db, request(`${fill} while (true) {}`, { limits: { ...DEFAULT_LIMITS, evaluationMs: 100 } }), persistent))
-        .rejects.toThrow(/^App operation failed\.$/);
+        .rejects.toThrow("App operation took longer than its time limit and stopped. Try again.");
       // A host check keeps its own error.
       await expect(evaluate(db, request(`${fill} held = null; return 'x'.repeat(100);`, { limits: { ...DEFAULT_LIMITS, resultBytes: 10 } }), persistent))
         .rejects.toThrow(/^Operation result exceeds the app runtime limit\.$/);
