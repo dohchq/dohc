@@ -12,6 +12,8 @@ fn relay_base_repair_unpushed_benchmark() {
         .unwrap_or(400);
     let mut elapsed_us = Vec::with_capacity(samples);
     let mut lookup_counts = Vec::with_capacity(samples);
+    let mut probe_counts = Vec::with_capacity(samples);
+    let mut probe_us = Vec::with_capacity(samples);
     // Warm code and filesystem caches with a separate store.
     for sample in 0..=samples {
         let (_scratch, _path, mut engine) = open_store();
@@ -63,17 +65,22 @@ fn relay_base_repair_unpushed_benchmark() {
             );
         }
         let client = RelaySyncClient::new(relay);
+        let identity = read_sync_identity(&engine, "ws").unwrap().unwrap();
+        let started = std::time::Instant::now();
         client
-            .pull_chat_workspace(
+            .repair_pending_ydoc_base_orders(
                 &mut engine,
-                &mut dohc_engine_collab::WriterDocCache::new(),
                 "ws",
+                &identity,
                 &NoFaults,
                 &NoLiveLeases,
                 2_000,
             )
-            .expect("pull repair fixture");
-        let elapsed = crate::relay::take_base_repair_duration().as_micros();
+            .expect("repair fixture");
+        let elapsed = started.elapsed().as_micros();
+        let probes = client.transport().pushes.lock().unwrap().len();
+        assert_eq!(probes, 1);
+        assert!(client.transport().pushes.lock().unwrap()[0].ops.is_empty());
         let lookups = client.transport().coordinate_lookups.lock().unwrap().len();
         assert_eq!(lookups, expected_lookups);
         let remaining: i64 = engine
@@ -89,6 +96,9 @@ fn relay_base_repair_unpushed_benchmark() {
         if sample > 0 {
             elapsed_us.push(elapsed);
             lookup_counts.push(lookups);
+            probe_counts.push(probes);
+            probe_us
+                .push(client.transport().origin_max_probe_elapsed.lock().unwrap()[0].as_micros());
         }
     }
     let mut sorted = elapsed_us.clone();
@@ -103,9 +113,9 @@ fn relay_base_repair_unpushed_benchmark() {
         json!({
             "benchmark": "relay_base_repair_unpushed",
             "transport": "in-process PagedRelay, immediate Absent responses",
-            "timed": "repair phase only: SQLite reads, coordinate lookups, 400 absence commits",
+            "timed": "repair phase only: SQLite reads, conditional origin-max probe, coordinate lookups, 400 absence commits",
             "candidates": 1000, "own_unpushed": 600,
-            "lookup_counts": lookup_counts, "samples_us": elapsed_us,
+            "lookup_counts": lookup_counts, "probe_counts": probe_counts, "probe_samples_us": probe_us, "samples_us": elapsed_us,
             "median_us": median,
         })
     );

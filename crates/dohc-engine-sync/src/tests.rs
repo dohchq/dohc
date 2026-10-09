@@ -471,11 +471,14 @@ impl RelayTransport for KeyConflictRelay {
 }
 
 struct PagedRelay {
+    relay_seq_offset: i64,
+    origin_max_probe_elapsed: Mutex<Vec<std::time::Duration>>,
     pages: BTreeMap<i64, PullResponse>,
     blobs: BTreeMap<String, Vec<u8>>,
     coordinates: Mutex<BTreeMap<(String, i64), LogCoordinateResponse>>,
     pulls: Mutex<Vec<(i64, usize)>>,
     coordinate_lookups: Mutex<Vec<(String, i64)>>,
+    pushes: Mutex<Vec<PushRequest>>,
     download_batches: Mutex<Vec<BlobDownloadBatchRequest>>,
 }
 
@@ -490,10 +493,13 @@ impl PagedRelay {
             .collect();
         Self {
             pages,
+            relay_seq_offset: 100,
+            origin_max_probe_elapsed: Mutex::new(Vec::new()),
             blobs: BTreeMap::new(),
             coordinates: Mutex::new(BTreeMap::new()),
             pulls: Mutex::new(Vec::new()),
             coordinate_lookups: Mutex::new(Vec::new()),
+            pushes: Mutex::new(Vec::new()),
             download_batches: Mutex::new(Vec::new()),
         }
     }
@@ -526,13 +532,14 @@ fn assign_fixture_relay_sequences(page: &mut PullResponse) {
 
 impl RelayTransport for PagedRelay {
     fn push(&self, req: PushRequest) -> Result<PushResponse, RelayError> {
+        let started = std::time::Instant::now();
         let accepted = req.ops.len();
-        let current_max_origin_seq = req.ops.last().map_or(req.after_seq, |op| op.origin_seq);
+        self.pushes.lock().unwrap().push(req.clone());
         let mut coordinates = self.coordinates.lock().expect("coordinate responses");
         let mut inserted = 0;
         for op in req.ops {
             let mut pulled = op;
-            pulled.relay_seq = Some(100 + pulled.origin_seq);
+            pulled.relay_seq = Some(self.relay_seq_offset + pulled.origin_seq);
             let coordinate = (pulled.origin_id.clone(), pulled.origin_seq);
             if !matches!(
                 coordinates.get(&coordinate),
@@ -541,6 +548,25 @@ impl RelayTransport for PagedRelay {
                 coordinates.insert(coordinate, LogCoordinateResponse::Present(pulled));
                 inserted += 1;
             }
+        }
+        let current_max_origin_seq = coordinates
+            .iter()
+            .filter_map(|((origin, seq), response)| {
+                (origin == &req.origin_id
+                    && matches!(
+                        response,
+                        LogCoordinateResponse::Present(_)
+                            | LogCoordinateResponse::PresentBelowEpochFloor(_)
+                    ))
+                .then_some(*seq)
+            })
+            .max()
+            .unwrap_or(-1);
+        if accepted == 0 {
+            self.origin_max_probe_elapsed
+                .lock()
+                .unwrap()
+                .push(started.elapsed());
         }
         Ok(PushResponse {
             settlement_refusals: Vec::new(),

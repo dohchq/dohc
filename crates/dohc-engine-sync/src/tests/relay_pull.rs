@@ -1333,6 +1333,213 @@ fn pull_base_repair(client: &RelaySyncClient<PagedRelay>, engine: &mut EngineSto
         .expect("pull base repair");
 }
 
+fn add_base_candidate(engine: &mut EngineStore, op: &ReplicationEnvelope) {
+    engine.write_with(&NoFaults, |tx| {
+        tx.execute("INSERT INTO replication_log (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported,apply_disposition) VALUES ('ws',?1,?2,'ydoc.update',?3,?4,?5,'applied')", params![op.origin_id,op.origin_seq,op.payload.to_string(),op.recorded_at_ms,i64::from(op.origin_id != "local")]).map_err(SyncError::persist)?;
+        tx.execute("INSERT INTO ydoc_base_relay_candidates (workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq) VALUES ('ws','main',?1,?2,?3,?4)", params![op.payload["objectId"].as_str().unwrap(),op.payload["lineageClaimId"].as_str().unwrap(),op.origin_id,op.origin_seq]).map_err(SyncError::persist)?;
+        Ok::<_,SyncError>(())
+    }).unwrap();
+}
+
+fn divergent_repair_base(base: &ReplicationEnvelope) -> (ReplicationEnvelope, Vec<u8>) {
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.plaintext_insert(0, "divergent base");
+    let bytes = doc.encode_full_state();
+    let sha = dohc_engine_storage::hex_sha256(&bytes);
+    let mut op = base.clone();
+    op.origin_id = "divergent".into();
+    op.origin_seq = 0;
+    op.payload["lineageClaimId"] = json!(sha);
+    op.payload["updateBlobSha256"] = json!(sha);
+    (op, bytes)
+}
+
+#[test]
+fn base_repair_crash_commit_survives_empty_publication_push_and_later_lower_base() {
+    let (scratch, mut engine, observed, _checkpoint) = super::owner_publication::fixture();
+    let local = seed_base_repair_candidate(&mut engine, "crash-scope", "local", 1);
+    let owner = envelope(
+        "local",
+        0,
+        "ydoc.update",
+        json!({"versionId":"main","objectId":"owner","path":"owner.md","contentKind":"richdoc","lineageClaimId":observed.binding.lineage_claim_id,"updateBlobSha256":observed.binding.lineage_claim_id,"isBaseState":true}),
+    );
+    engine.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE replication_log SET op_kind='ydoc.update',payload_json=?1,recorded_at_ms=?2,apply_disposition='applied' WHERE workspace_id='ws' AND origin_id='local' AND origin_seq=0", params![owner.payload.to_string(),owner.recorded_at_ms]).map_err(SyncError::persist)?;
+        Ok::<_,SyncError>(())
+    }).unwrap();
+    let mut relay = empty_base_repair_relay();
+    relay.relay_seq_offset = 99;
+    let client = RelaySyncClient::new(relay);
+    assert_eq!(
+        client
+            .push_workspace(
+                &mut engine,
+                "ws",
+                ScriptedFaults::crash_at(FaultPoint::SyncAfterPushBeforeCursorPersist).as_ref(),
+                &NoLiveLeases,
+                1300,
+                1_000_000
+            )
+            .unwrap(),
+        SyncPassOutcome::CrashedAfterRemoteCommit
+    );
+    let path = engine_db_path(scratch.path()).unwrap();
+    drop(engine);
+    let mut engine = EngineStore::open(&path, 1400).unwrap();
+    assert_eq!(read_pushed_seq(&engine, "ws", "local").unwrap(), -1);
+    // The owner's new publication scope blocks the first queued operation.
+    engine.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE ydoc_owner_bindings SET binding_json=json_set(binding_json,'$.currentPath','private/owner.md','$.selectorPaths',json('[\"private/owner.md\"]'))",[]).map_err(SyncError::persist)?;
+        Ok::<_,SyncError>(())
+    }).unwrap();
+    let prefix =
+        crate::owner_publication_prefix(&engine, "ws", &[owner.clone(), local.clone()], 1_000_000)
+            .unwrap();
+    assert_eq!(prefix.allowed_ops, 0);
+    assert!(prefix.pending.is_some());
+    // Use sparse relay sequences to expose the minimum-ordering failure.
+    let own_echo = match client
+        .transport()
+        .coordinates
+        .lock()
+        .unwrap()
+        .get(&("local".into(), 1))
+        .unwrap()
+    {
+        LogCoordinateResponse::Present(op) => op.clone(),
+        other => panic!("missing crash commit: {other:?}"),
+    };
+    assert_eq!(own_echo.relay_seq, Some(100));
+    let mut peer = local.clone();
+    peer.origin_id = "identical-peer".into();
+    peer.origin_seq = 0;
+    let (divergent, bytes) = divergent_repair_base(&local);
+    let relay = PagedRelay::new([
+        (
+            0,
+            PullResponse {
+                ops: vec![owner, own_echo.clone()],
+                next_cursor: 100,
+                has_more: true,
+            },
+        ),
+        (
+            100,
+            PullResponse {
+                ops: vec![peer],
+                next_cursor: 140,
+                has_more: false,
+            },
+        ),
+    ])
+    .with_coordinate("local", 1, LogCoordinateResponse::Present(own_echo));
+    let client = RelaySyncClient::new(relay);
+    let pushed = client
+        .push_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1500, 1_000_000)
+        .unwrap();
+    assert!(matches!(
+        pushed,
+        SyncPassOutcome::Complete { pushed: 0, .. }
+    ));
+    assert!(
+        client.transport().pushes.lock().unwrap().is_empty(),
+        "blocked push must send nothing"
+    );
+    pull_base_repair(&client, &mut engine);
+    assert_eq!(base_repair_state(&engine, "crash-scope"), (Some(100), 0, 0));
+    assert_eq!(read_pushed_seq(&engine, "ws", "local").unwrap(), 1);
+    assert_eq!(
+        client.transport().pushes.lock().unwrap().len(),
+        1,
+        "one recovery probe"
+    );
+    // No cursor acknowledgement yet: the next fetch reveals the older append at 120.
+    let mut relay = PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![divergent],
+            next_cursor: 120,
+            has_more: false,
+        },
+    )]);
+    relay
+        .blobs
+        .insert(dohc_engine_storage::hex_sha256(&bytes), bytes);
+    let client = RelaySyncClient::new(relay);
+    pull_base_repair(&client, &mut engine);
+    assert_eq!(base_repair_state(&engine, "crash-scope").0, Some(100));
+    let lineage: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT lineage_claim_id FROM ydoc_docs WHERE object_id='crash-scope'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(lineage, local.payload["lineageClaimId"].as_str().unwrap());
+    assert!(
+        client.transport().pushes.lock().unwrap().is_empty(),
+        "no prospective deferral, no probe"
+    );
+}
+
+fn proven_minimum_allows_divergent_pull(origin: &str) {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let mut earliest = seed_base_repair_candidate(&mut engine, "proven-min", origin, 1);
+    earliest.relay_seq = Some(100);
+    let mut unsent = earliest.clone();
+    unsent.origin_id = "local".into();
+    unsent.origin_seq = 2;
+    add_base_candidate(&mut engine, &unsent);
+    if origin == "local" {
+        crate::cursor::write_pushed_seq(
+            &mut engine,
+            "ws",
+            "local",
+            1,
+            &NoFaults,
+            &NoLiveLeases,
+            1200,
+        )
+        .unwrap();
+    }
+    let (divergent, bytes) = divergent_repair_base(&earliest);
+    let mut relay = PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![divergent],
+            next_cursor: 120,
+            has_more: false,
+        },
+    )])
+    .with_coordinate(origin, 1, LogCoordinateResponse::Present(earliest));
+    relay
+        .blobs
+        .insert(dohc_engine_storage::hex_sha256(&bytes), bytes);
+    let client = RelaySyncClient::new(relay);
+    pull_base_repair(&client, &mut engine);
+    assert_eq!(base_repair_state(&engine, "proven-min"), (Some(100), 0, 0));
+    assert_eq!(
+        *client.transport().coordinate_lookups.lock().unwrap(),
+        [(origin.to_owned(), 1)]
+    );
+    assert_eq!(client.transport().pushes.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn base_repair_own_pushed_minimum_allows_divergent_pull() {
+    proven_minimum_allows_divergent_pull("local");
+}
+
+#[test]
+fn base_repair_foreign_minimum_allows_divergent_pull() {
+    proven_minimum_allows_divergent_pull("peer");
+}
+
 #[test]
 fn local_unpushed_absence_stays_pending_until_push_makes_the_coordinate_present() {
     let (_scratch, _path, mut engine) = open_store();
@@ -1365,7 +1572,7 @@ fn local_unpushed_absence_stays_pending_until_push_makes_the_coordinate_present(
 }
 
 #[test]
-fn base_repair_defers_remote_commit_until_idempotent_repush_advances_local_cursor() {
+fn base_repair_recovers_remote_commit_before_idempotent_repush() {
     let (_scratch, path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
@@ -1392,14 +1599,25 @@ fn base_repair_defers_remote_commit_until_idempotent_repush_advances_local_curso
         op.clone()
     };
     pull_base_repair(&client, &mut engine);
-    assert_eq!(base_repair_state(&engine, "crash-pending"), (None, 0, 1));
-    assert!(
+    assert_eq!(
+        base_repair_state(&engine, "crash-pending"),
+        (Some(101), 0, 0)
+    );
+    assert_eq!(read_pushed_seq(&engine, "ws", "local").unwrap(), 1);
+    assert_eq!(
+        *client.transport().coordinate_lookups.lock().unwrap(),
+        [("local".to_owned(), 1)]
+    );
+    assert_eq!(
         client
             .transport()
-            .coordinate_lookups
+            .pushes
             .lock()
             .unwrap()
-            .is_empty()
+            .iter()
+            .filter(|req| req.ops.is_empty())
+            .count(),
+        1
     );
     assert!(matches!(
         client
@@ -1433,6 +1651,56 @@ fn base_repair_defers_remote_commit_until_idempotent_repush_advances_local_curso
 }
 
 #[test]
+fn base_repair_rejects_origin_max_probe_outside_local_cursor_range() {
+    for remote_max in [-1, 3] {
+        let (_scratch, _path, mut engine) = open_store();
+        seed_identity(&mut engine);
+        seed_replication_version(&mut engine, "main", "main");
+        let mut op = seed_base_repair_candidate(&mut engine, "probe-range", "local", 2);
+        crate::cursor::write_pushed_seq(
+            &mut engine,
+            "ws",
+            "local",
+            1,
+            &NoFaults,
+            &NoLiveLeases,
+            1200,
+        )
+        .unwrap();
+        let mut relay = empty_base_repair_relay();
+        if remote_max >= 0 {
+            op.origin_seq = remote_max;
+            relay = relay.with_coordinate("local", remote_max, LogCoordinateResponse::Present(op));
+        }
+        let client = RelaySyncClient::new(relay);
+        assert_eq!(
+            client
+                .pull_chat_workspace(
+                    &mut engine,
+                    &mut dohc_engine_collab::WriterDocCache::new(),
+                    "ws",
+                    &NoFaults,
+                    &NoLiveLeases,
+                    1300
+                )
+                .unwrap_err(),
+            RelayError::OriginDiverged
+        );
+        assert_eq!(read_pushed_seq(&engine, "ws", "local").unwrap(), 1);
+        assert_eq!(base_repair_state(&engine, "probe-range"), (None, 0, 1));
+        assert!(
+            client
+                .transport()
+                .coordinate_lookups
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(client.transport().pushes.lock().unwrap().len(), 1);
+    }
+}
+
+#[test]
 fn base_repair_still_confirms_absent_for_own_pushed_and_foreign_coordinates() {
     for origin in ["local", "peer"] {
         let (_scratch, _path, mut engine) = open_store();
@@ -1458,6 +1726,7 @@ fn base_repair_still_confirms_absent_for_own_pushed_and_foreign_coordinates() {
         ));
         pull_base_repair(&client, &mut engine);
         assert_eq!(base_repair_state(&engine, "absent"), (None, 1, 0));
+        assert!(client.transport().pushes.lock().unwrap().is_empty());
         assert_eq!(
             *client.transport().coordinate_lookups.lock().unwrap(),
             [(origin.to_owned(), 1)]
@@ -1465,8 +1734,7 @@ fn base_repair_still_confirms_absent_for_own_pushed_and_foreign_coordinates() {
     }
 }
 
-#[test]
-fn base_repair_defers_mixed_group_without_lookups_or_writes() {
+fn mixed_base_group_repairs_only_when_present(present: bool) {
     let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
@@ -1494,28 +1762,48 @@ fn base_repair_defers_mixed_group_without_lookups_or_writes() {
         .unwrap();
     let client = RelaySyncClient::new(
         empty_base_repair_relay()
-            .with_coordinate("a-peer", 0, LogCoordinateResponse::Present(peer))
+            .with_coordinate(
+                "a-peer",
+                0,
+                if present {
+                    LogCoordinateResponse::Present(peer)
+                } else {
+                    LogCoordinateResponse::Absent
+                },
+            )
             .with_coordinate("local", 1, LogCoordinateResponse::Absent),
     );
     let revision = engine
         .read_with(|conn| Ok::<_, rusqlite::Error>(conn.total_changes()))
         .unwrap();
     pull_base_repair(&client, &mut engine);
-    assert_eq!(base_repair_state(&engine, "mixed"), (None, 0, 2));
-    assert!(
-        client
-            .transport()
-            .coordinate_lookups
-            .lock()
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        base_repair_state(&engine, "mixed"),
+        if present {
+            (Some(7), 0, 0)
+        } else {
+            (None, 0, 2)
+        }
     );
     assert_eq!(
-        engine
-            .read_with(|conn| Ok::<_, rusqlite::Error>(conn.total_changes()))
-            .unwrap(),
-        revision
+        *client.transport().coordinate_lookups.lock().unwrap(),
+        [("a-peer".to_owned(), 0)]
     );
+    assert_eq!(client.transport().pushes.lock().unwrap().len(), 1);
+    let changes = engine
+        .read_with(|conn| Ok::<_, rusqlite::Error>(conn.total_changes()))
+        .unwrap();
+    assert_eq!(changes > revision, present);
+}
+
+#[test]
+fn base_repair_resolves_mixed_group_after_confirming_own_coordinate_is_unsent() {
+    mixed_base_group_repairs_only_when_present(true);
+}
+
+#[test]
+fn base_repair_keeps_mixed_absent_group_pending() {
+    mixed_base_group_repairs_only_when_present(false);
 }
 
 #[test]
@@ -1558,10 +1846,11 @@ fn base_repair_defers_own_unpushed_deferred_update_without_lookup() {
         })
         .unwrap();
     assert_eq!(relay_seq, None);
+    assert_eq!(client.transport().pushes.lock().unwrap().len(), 1);
 }
 
 #[test]
-fn base_repair_defers_mixed_deferred_group_without_lookups_or_writes() {
+fn base_repair_updates_foreign_deferred_coordinate_after_confirming_own_is_unsent() {
     let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
@@ -1599,23 +1888,26 @@ fn base_repair_defers_mixed_deferred_group_without_lookups_or_writes() {
         .read_with(|conn| Ok::<_, SyncError>(conn.total_changes()))
         .unwrap();
     pull_base_repair(&client, &mut engine);
-    assert!(
-        client
-            .transport()
-            .coordinate_lookups
-            .lock()
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        *client.transport().coordinate_lookups.lock().unwrap(),
+        [("a-peer".to_owned(), 0)]
     );
+    assert_eq!(client.transport().pushes.lock().unwrap().len(), 1);
     engine
         .read_with(|conn| {
-            assert_eq!(conn.total_changes(), changes);
+            assert_eq!(conn.total_changes(), changes + 1);
             let pending: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM ydoc_deferred_updates WHERE relay_seq IS NULL",
                 [],
                 |row| row.get(0),
             )?;
-            assert_eq!(pending, 2);
+            assert_eq!(pending, 1);
+            let local: Option<i64> = conn.query_row(
+                "SELECT relay_seq FROM ydoc_deferred_updates WHERE origin_id='local'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(local, None);
             Ok::<_, rusqlite::Error>(())
         })
         .unwrap();
