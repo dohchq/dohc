@@ -110,9 +110,7 @@ fn seed_captured_richdoc_lineage_from_markdown(
                     None,
                     state.lineage_claim_id,
                     true,
-                    Some(dohc_engine_runtime::YdocSeed {
-                        source: state.owner_seed_source,
-                    }),
+                    state.owner_seed_source,
                     None,
                     12,
                     Arc::new(FilesNoFaults),

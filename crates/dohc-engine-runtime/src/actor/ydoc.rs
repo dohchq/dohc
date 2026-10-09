@@ -74,12 +74,6 @@ pub struct YdocOpenState {
 
 pub type ArtifactAssetDescriptor = SceneAsset;
 
-/// Starting state may have no captured file head, as during acknowledged-state recovery.
-#[derive(Debug, Clone)]
-pub struct YdocSeed {
-    pub source: Option<dohc_engine_collab::owner_base_source::OwnerSeedSource>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct YdocSeedMaterialization {
     pub materialized: bool,
@@ -757,7 +751,7 @@ impl ActorHandle {
         attribution: Option<ChangeAttribution>,
         expected_lineage_claim_id: Option<String>,
         require_empty_lineage: bool,
-        seed: Option<YdocSeed>,
+        seed_source: Option<dohc_engine_collab::owner_base_source::OwnerSeedSource>,
         request_id: Option<String>,
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
@@ -777,7 +771,7 @@ impl ActorHandle {
                 attribution,
                 expected_lineage_claim_id,
                 require_empty_lineage,
-                seed,
+                seed_source,
                 request_id,
                 true,
                 now_ms,
@@ -1924,7 +1918,7 @@ pub(super) fn ydoc_record_update_on_store(
     attribution: Option<ChangeAttribution>,
     expected_lineage_claim_id: Option<String>,
     require_empty_lineage: bool,
-    seed: Option<YdocSeed>,
+    seed_source: Option<dohc_engine_collab::owner_base_source::OwnerSeedSource>,
     request_id: Option<String>,
     claim_triggers: bool,
     now_ms: i64,
@@ -1977,10 +1971,9 @@ pub(super) fn ydoc_record_update_on_store(
             ensure_parent_row: true,
             restore_generation,
             require_empty_lineage,
-            is_seed: seed.is_some(),
-            seed_source_sha256: seed
+            is_seed: seed_source.is_some(),
+            seed_source_sha256: seed_source
                 .as_ref()
-                .and_then(|seed| seed.source.as_ref())
                 .map(|source| source.blob_sha256.as_str()),
             request_id: request_id.as_deref(),
         },
@@ -2016,7 +2009,7 @@ pub(super) fn ydoc_record_update_on_store(
                 reason: format!("outbound ydoc.update base origination failed: {error}"),
             })? {
                 dohc_engine_sync::BaseOrigination::Originated { base_snapshot_sha } => {
-                    if let Some(source) = seed.as_ref().and_then(|seed| seed.source.as_ref()) {
+                    if let Some(source) = &seed_source {
                         dohc_engine_collab::owner_base_source::retain_owner_base_source_in_tx(
                             tx,
                             &journal_key,

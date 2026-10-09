@@ -1114,9 +1114,10 @@ impl EngineService {
             params.actor_origin_id = None;
             params.attribution = None;
         }
-        let seed = params.seed.then(|| dohc_engine_runtime::YdocSeed {
-            source: session.owner_seed_source.clone(),
-        });
+        let seed_source = params
+            .seed
+            .then(|| session.owner_seed_source.clone())
+            .flatten();
         if let Some(draft) = &session.owner_draft {
             if draft.binding.current_path != session.path
                 || Some(&draft.binding.lineage_claim_id) != session.lineage_claim_id.as_ref()
@@ -1201,7 +1202,7 @@ impl EngineService {
                         params.attribution,
                         session.lineage_claim_id,
                         require_empty,
-                        seed,
+                        seed_source,
                         idempotency_key,
                         now,
                         Arc::new(NoFaults),

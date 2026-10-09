@@ -340,8 +340,9 @@ pub fn check_admission_in(
             .map_err(sql)?;
         let mut admitted = Authors::default();
         admitted.union_json(&pending)?;
-        // The first marker admission already checked capacity and requested
-        // settlement if due. Repeated actorless edits add no identity or bytes.
+        // Repeated actorless edits add no identity or bytes. Only a new named
+        // identity needs room; its admission checks capacity again, and
+        // AuthorCapacity queues a settlement.
         if admitted.0.contains_key("unattributed") {
             return Ok(false);
         }

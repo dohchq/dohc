@@ -121,7 +121,7 @@ fn plaintext_update(text: &str) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn declared_starting_state_seeds_keep_authorship_empty_with_or_without_a_head() {
+async fn captured_seeds_are_uncredited_but_headless_recovery_keeps_the_marker() {
     for flow in [
         "headless-recovery",
         "created-document",
@@ -203,7 +203,7 @@ async fn declared_starting_state_seeds_keep_authorship_empty_with_or_without_a_h
             .unwrap();
         assert_eq!(
             pending,
-            if flow == "recovered-edit" {
+            if matches!(flow, "headless-recovery" | "recovered-edit") {
                 r#"[{"kind":"unattributed"}]"#
             } else {
                 "[]"
@@ -226,7 +226,7 @@ async fn declared_starting_state_seeds_keep_authorship_empty_with_or_without_a_h
         ).map_err(dohc_engine_storage::StorageError::persist_public)).unwrap();
         assert_eq!(
             settled,
-            if flow == "recovered-edit" {
+            if matches!(flow, "headless-recovery" | "recovered-edit") {
                 r#"[{"kind":"unattributed"}]"#
             } else {
                 "null"
@@ -6237,7 +6237,19 @@ async fn attributed_declared_seed_does_not_credit_opening() {
     let handle =
         open_workspace_with_capture_mode(&transport, &scratch, "seed-authors", 1, Some("none"))
             .await;
+    call(
+        &transport,
+        &handle,
+        10,
+        "versionedText.write",
+        json!({"versionId":"main","path":"seed.txt","text":"seed","origin":"api","publish":true,"requestId":"create-seed-source"}),
+    )
+    .await;
     let opened=call(&transport,&handle,2,"ydoc.open",json!({"versionId":"main","path":"seed.txt","contentKind":"plaintext","seedFromArtifact":false})).await;
+    assert_eq!(
+        opened["head"], "present",
+        "ordinary opening has a captured seed source"
+    );
     let doc = Ydoc::wire();
     call(&transport,&handle,3,"ydoc.recordUpdate",json!({"sessionId":opened["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0,"seed")),"seed":true,"actorOriginId":"opener","attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0}})).await;
     call(
