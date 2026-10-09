@@ -249,7 +249,7 @@ export function CollectionRecordFieldWrite({
   useEffect(() => {
     if (!applied.current) return;
     if (docState.deletedWhileEditing || docState.readOnlyWhileEditing) {
-      onFailed(docState.saveError ? `dohc could not save this change. ${docState.saveError}` : null);
+      onFailed(docState.saveError ? `${WRITE_NOT_SAVED_MESSAGE} ${docState.saveError}` : null);
       return;
     }
     switch (docState.saveState.kind) {
@@ -287,7 +287,7 @@ export function CollectionRecordFieldWrite({
       case "changed-on-disk":
         onFailed(
           docState.saveError
-            ? `dohc could not save this change. ${docState.saveError}`
+            ? `${WRITE_NOT_SAVED_MESSAGE} ${docState.saveError}`
             : null,
         );
         return;
@@ -845,7 +845,11 @@ export function useCollectionWriteStatus(
     () => statuses.get(keyFor(workspaceId, collectionPath)) ?? EMPTY_STATUS,
   );
   const accessRefusal = useSyncExternalStore(subscribe, () => accessRefusals.get(workspaceId) ?? null);
-  return accessRefusal === null ? status : { ...status, error: accessRefusal };
+  const retained = useCollectionWriteFailures();
+  // Saved holds use this line too; access explains only a retained failure.
+  const hasFailedWrite = retained.some(failure => failure.workspaceId === workspaceId &&
+    failure.collectionPath === collectionPath && failure.message === status.error);
+  return accessRefusal === null || status.error === null || !hasFailedWrite ? status : { ...status, error: accessRefusal };
 }
 
 // Test seam: the queue is module state, so suites that enqueue writes reset
@@ -895,7 +899,7 @@ function CollectionWriteFailureRow({
         {failure.change.field} in {file}
       </span>
       <span className="text-[12px] text-ink">
-        {stale ? STALE_LINEAGE_MESSAGE : failure.superseded ? SUPERSEDED_MESSAGE : accessRefusal ?? failure.message}
+        {stale ? STALE_LINEAGE_MESSAGE : failure.superseded ? SUPERSEDED_MESSAGE : failure.recoveryOnly ? failure.message : accessRefusal ?? failure.message}
       </span>
       <textarea
         aria-label="Unsaved collection value"

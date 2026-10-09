@@ -167,7 +167,7 @@ describe("retained failures", () => {
       expect(collectionWriteFailures()).toHaveLength(0);
       docMock.current = engineDocState({ available: true, doc, saveState: { kind: "unknown" }, readOnlyWhileEditing: true, saveError: "forbidden" });
       host.rerender(<CollectionFieldWriteHost />);
-      const ownMessage = "dohc could not save this change. forbidden";
+      const ownMessage = "dohc did not save this change. forbidden";
       expect(collectionWriteFailures()[0]).toMatchObject({ message: ownMessage, change: CHANGE });
       expect(screen.getByTestId("collection-write-failure").textContent).toContain(message);
       expect(screen.getByTestId("collection-write-retry").hasAttribute("disabled")).toBe(true);
@@ -485,6 +485,30 @@ describe("retained failures", () => {
     expect(collectionWriteFailures()).toHaveLength(0);
     expect(hasPendingCollectionFieldWrites()).toBe(false);
     expect(screen.queryByTestId("collection-write-failures")).toBeNull();
+  });
+
+  it("keeps the file-locked retry status when access is refused before or after its report", async () => {
+    vi.useFakeTimers();
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc });
+    const host = render(<CollectionFieldWriteHost />);
+    const status = renderHook(() => useCollectionWriteStatus("ws-1", "tasks"));
+    try {
+      enqueue();
+      act(() => setCollectionFieldWriteAccess("ws-1", "This share must be reopened."));
+      docMock.current = engineDocState({ available: true, doc, saveState: { kind: "file-locked", reason: "test failure", issueId: null } });
+      host.rerender(<CollectionFieldWriteHost />);
+      await act(() => vi.advanceTimersByTimeAsync(FILE_LOCKED_REPORT_MS));
+      const message = "Another program has Plan.md open, so dohc can't update it on disk. This change is saved and dohc retries until the file is free.";
+      expect(collectionWriteFailures()).toEqual([]);
+      expect(hasPendingCollectionFieldWrites()).toBe(false);
+      expect(status.result.current.error).toBe(message);
+      act(() => setCollectionFieldWriteAccess("ws-1", "Your access to this share changed."));
+      expect(status.result.current.error).toBe(message);
+      act(() => setCollectionFieldWriteAccess("ws-1", null));
+      expect(status.result.current.error).toBe(message);
+    } finally { status.unmount(); host.unmount(); doc.destroy(); }
   });
 
   it("does not retry into a replacement record at the old path", async () => {
@@ -872,7 +896,8 @@ describe("abandoned schema preparation", () => {
     for (const refusal of ["This share must be reopened.", "Your access to this share changed.", null]) {
       act(() => setCollectionFieldWriteAccess("ws-1", refusal));
       expect(collectionWriteFailures()[0]?.message).toBe(ownMessage);
-      expect(screen.getByTestId("collection-write-failure").textContent).toContain(refusal ?? ownMessage);
+      expect(screen.getByTestId("collection-write-failure").textContent).toContain(ownMessage);
+      if (refusal !== null) expect(screen.getByTestId("collection-write-failure").textContent).not.toContain(refusal);
       expect(screen.getByTestId("collection-write-retry")).toHaveProperty("disabled", true);
     }
     act(() => retryCollectionFieldWrite(collectionWriteFailures()[0]!.id));
