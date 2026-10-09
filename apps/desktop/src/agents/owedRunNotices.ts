@@ -1,10 +1,10 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { atomicReplaceFile } from "../atomicReplaceFile";
+import { mkdir, readFile, rename } from "node:fs/promises";
+import { atomicWriteFile, type DurableFileOperations } from "../atomicReplaceFile";
 import { dirname } from "node:path";
 
 // The agent runs whose notice is owed: each is added before the run's end
-// is saved and removed once the notice for how it ended is posted. A file
-// keeps them, so a crash between the two cannot lose a notice.
+// is saved and removed once the notice for how it ended is posted.
+// The file lets recovery find runs whose notices have not been posted.
 export interface OwedRunNotices {
   add(workspaceId: string, runId: string): Promise<void>;
   remove(workspaceId: string, runId: string): Promise<void>;
@@ -17,21 +17,28 @@ const OWED_RUN_NOTICES_LIMIT = 1_000;
 
 type Owed = Array<[workspaceId: string, runId: string]>;
 
-export function createOwedRunNotices(path: () => string): OwedRunNotices {
+export function createOwedRunNotices(path: () => string, fileOperations?: DurableFileOperations): OwedRunNotices {
   let loaded: Promise<Owed> | null = null;
   let writes: Promise<unknown> = Promise.resolve();
   const load = () => (loaded ??= read(path()).catch((error: unknown) => {
     loaded = null;
     throw error;
   }));
-  // A change reaches memory only once the file holds it, so a failed write
-  // leaves both as they were and the caller can try again.
+  // Memory changes after a successful save. A failed replacement clears
+  // the cache because the rename may have succeeded before directory sync failed.
   const change = (update: (owed: Owed) => Owed | null): Promise<void> => {
     const next = writes.then(async () => {
       const owed = await load();
       const changed = update(owed);
       if (changed === null) return;
-      await write(path(), changed);
+      const destination = path();
+      await mkdir(dirname(destination), { recursive: true });
+      try {
+        await atomicWriteFile(destination, JSON.stringify(changed), fileOperations);
+      } catch (error) {
+        loaded = null;
+        throw error;
+      }
       owed.splice(0, owed.length, ...changed);
     });
     writes = next.catch(() => undefined);
@@ -77,9 +84,4 @@ async function read(path: string): Promise<Owed> {
   }
   await rename(path, `${path}.damaged`);
   return [];
-}
-
-async function write(path: string, owed: Owed): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  await atomicReplaceFile(path, (temporary) => writeFile(temporary, JSON.stringify(owed), { mode: 0o600 }));
 }
