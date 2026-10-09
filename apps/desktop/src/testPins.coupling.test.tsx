@@ -28,7 +28,7 @@ function renderFrame() {
   render(<>
     <Titlebar chatsSidebar={{ visible: true, onToggle: noop }} />
     <ActivityBar views={["explorer", "search", "graph", "sites", "history"]} activeView="explorer" sidebarVisible hasConflict={false} onSelectView={noop} onOpenSettings={noop} onOpenCloud={noop} />
-    <ChatsPanel width={320} onWidthChange={noop} onCollapse={noop} tabs={["all", "file"]} tab="all" onTabChange={noop}>Chats</ChatsPanel>
+    <ChatsPanel width={320} onWidthChange={noop} onCollapse={noop} tabs={["all", "about"]} tab="all" onTabChange={noop}>Chats</ChatsPanel>
     <SidePanel title="Explorer" width={320} onWidthChange={noop}>Files</SidePanel>
   </>);
 }
@@ -45,7 +45,7 @@ it.each(["explorer", "search", "graph", "sites", "history", "cloud", "settings"]
     expect(screen.getByTestId(activityPin(view))).toBeTruthy();
   },
 );
-it.each(["all", "file"])("couples Chats tab %s to its producer", (tab) => {
+it.each(["all", "about"])("couples Chats tab %s to its producer", (tab) => {
   renderFrame();
   expect(screen.getByTestId(chatsPanelTabPin(tab))).toBeTruthy();
 });

@@ -805,7 +805,10 @@ pub fn materialize_one(
     }
 }
 
-fn materialize_one_ordinary(
+/// Execute an ordinary job, retaining the error that explains a blocked path.
+/// Callers that manage a staged publication need that reason before deciding
+/// whether to retain or discard it.
+pub fn materialize_one_ordinary(
     store: &EngineStore,
     root: &Path,
     job: &MaterializationJob,

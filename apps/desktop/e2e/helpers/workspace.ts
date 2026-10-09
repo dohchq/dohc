@@ -378,14 +378,14 @@ export async function openHistoryView(page: Page): Promise<void> {
 
 // Opens the right-hand Chats panel (idempotent: the panel's visibility
 // persists in ui-state, so a relaunch may restore it already open) and lands
-// on the "This file" tab — the active file's linked chats.
-export async function openFileChatsPanel(page: Page): Promise<void> {
+// on the About tab — the active file's chats, history and access.
+export async function openAboutPanel(page: Page): Promise<void> {
   const panel = page.getByTestId(desktopPins.chatsPanel);
   if (!(await panel.isVisible())) {
     await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
     await expect(panel).toBeVisible();
   }
-  await page.getByTestId(chatsPanelTabPin("file")).click();
+  await page.getByTestId(chatsPanelTabPin("about")).click();
 }
 
 export async function expectVisibleContent(
