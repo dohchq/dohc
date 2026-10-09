@@ -121,7 +121,7 @@ describe("useCaptureRecoveryNotices", () => {
     expect(recoveryRows(h)).toHaveLength(2);
   });
 
-  it.each([false,true])("keeps one existing recovery row when Copy finds a History-only import (deleted=%s)", async deleted => {
+  it.each([false,true])("keeps one existing recovery row when Copy finds a recovery kept only in History, deleted=%s", async deleted => {
     const h=harness([{...RECOVERY,deleted}]);
     await waitFor(()=>expect(recoveryRows(h)).toHaveLength(1));const row=recoveryRows(h)[0]!;
     act(()=>h.result.current.hideShellError(row.id));
