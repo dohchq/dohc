@@ -7,6 +7,7 @@ import type {
 import { defaultWorkspaceMode } from "@dohc/workspace-core";
 import { denyRead, restoreRead } from "@dohc/workspace-fs/testing";
 import { createHash } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -56,6 +57,8 @@ import { deferred } from "../testing/deferred";
 import { createTestScratch } from "./testTemp";
 import { createRelaySyncEngine } from "./relaySyncEngine";
 
+vi.mock("node:timers/promises", { spy: true });
+
 // The person a restore names, as desktop main reads them.
 const RESTORER = { kind: "human", humanId: "local-person" } as const;
 
@@ -91,7 +94,6 @@ const WORKSPACE_ATTACHMENT_ID = Symbol("workspace-engine-capture-test");
 const itNonRoot = process.getuid?.() === 0 ? it.skip : it;
 
 interface CaptureOptions {
-  flushCaptureBudgetMs?: number;
   preserveUnsentState?: WorkspaceEngineCaptureOptions["preserveUnsentState"];
   store?: CaptureVersionedTextStore;
   now?: () => number;
@@ -2475,12 +2477,12 @@ describe("workspaceEngineCapture relay sync materialization", () => {
   });
 
   it("settles daemon capture after relay materialization before committing the cursor", async () => {
+    vi.mocked(delay).mockResolvedValue(undefined);
     const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     const requests: Request[] = [];
     let settled = true;
     const engine = capture(root, {
-      flushCaptureBudgetMs: 100,
       rustEngineSessions: mockLiveSessions(loopback, requests, () => ({
         settled,
         running: true,
@@ -3335,12 +3337,12 @@ describe("workspaceEngineCapture agent attribution", () => {
   });
 
   it("mutation proof: an unsettled flush refuses to clear daemon authorship", async () => {
+    vi.mocked(delay).mockResolvedValue(undefined);
     const root = await createTestScratch("dohc-engine-capture-");
     const requests: Request[] = [];
     const loopback = new VersionedLoopbackEngine();
     let settled = false;
     const engine = capture(root, {
-      flushCaptureBudgetMs: 100,
       rustEngineSessions: mockLiveSessions(loopback, requests, () => ({
         settled,
         running: true,

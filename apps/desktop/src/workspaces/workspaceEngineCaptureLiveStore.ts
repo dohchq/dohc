@@ -44,7 +44,6 @@ import type { ShareUnconfirmedChanges, ShareViewSelector } from "./shareViewInfo
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import {
   EngineWorkspaceSessions,
-  EngineRequestDeadlineError,
   type AttachedEngineWorkspace,
   type EngineWorkspaceBinding,
   type EngineWorkspaceRunOptions,
@@ -53,6 +52,7 @@ import {
 
 // Match the desktop relay pull's 30-second request deadline.
 const FLUSH_SETTLE_BUDGET_MS = 30_000;
+const FLUSH_SETTLE_ATTEMPTS = 50;
 const FLUSH_SETTLE_POLL_MS = 20;
 const ShareDeliveryStatus = z.object({ state: z.enum(["accepted", "pending", "refused"]) });
 
@@ -619,9 +619,7 @@ export function createCaptureLiveStores(
   workspace: AttachedEngineWorkspace | ShareMountEngineWorkspace,
   sessions: EngineWorkspaceSessions,
   captureWaitSignal?: AbortSignal,
-  options: { flushCaptureBudgetMs?: number } = {},
 ): CaptureLiveStores {
-  const flushCaptureBudgetMs = options.flushCaptureBudgetMs ?? FLUSH_SETTLE_BUDGET_MS;
   const adapters = new WeakMap<object, Map<string, VersionedLiveAdapter>>();
   if (workspace.shareMount !== true) {
     sessions.rememberCaptureAuthor(workspace, null);
@@ -1427,29 +1425,26 @@ export function createCaptureLiveStores(
 
     async flushCapture() {
       captureWaitSignal?.throwIfAborted();
-      const deadline = performance.now() + flushCaptureBudgetMs;
+      const deadline = performance.now() + FLUSH_SETTLE_BUDGET_MS;
       let finished = false;
-      let polling: AbortController | undefined;
       const didNotSettle = () => new Error(
         `Engine capture for ${workspace.workspaceId} did not settle.`,
       );
-      const remainingMs = () => {
+      const assertActive = () => {
         captureWaitSignal?.throwIfAborted();
-        // The wire deadline is an integer number of milliseconds.
-        const remaining = Math.floor(deadline - performance.now());
-        if (finished || remaining < 1) throw didNotSettle();
-        return remaining;
+        if (finished) throw didNotSettle();
       };
-      const request = <T>(operation: (adapter: VersionedLiveAdapter, options: { deadlineMs: number }) => Promise<T>) =>
-        runRead(adapter => operation(adapter, { deadlineMs: remainingMs() }));
+      const request = <T>(operation: (adapter: VersionedLiveAdapter) => Promise<T>) =>
+        runRead(adapter => {
+          assertActive();
+          return operation(adapter);
+        });
       const settle = async () => {
         // A manifest rebuild after switching versions needs an unsettled pass.
         // Capture events report path progress or initial readiness, not quiescence.
-        let outcome = await request((adapter, options) => adapter.flushCapture(options));
-        remainingMs();
+        let outcome = await request(adapter => adapter.flushCapture());
         if (!outcome.settled) {
-          const status = await request((adapter, options) => adapter.watcherStatus(options));
-          remainingMs();
+          const status = await request(adapter => adapter.watcherStatus());
           if (status.phase === "starting" || status.phase === "importing") {
             throw new DaemonRefusalError(
               {
@@ -1461,38 +1456,35 @@ export function createCaptureLiveStores(
             );
           }
         }
-        if (outcome.settled) return;
-        polling = new AbortController();
-        const signal = captureWaitSignal
-          ? AbortSignal.any([captureWaitSignal, polling.signal])
-          : polling.signal;
-        while (!outcome.settled) {
-          await delay(Math.min(FLUSH_SETTLE_POLL_MS, remainingMs()), undefined, { signal }).catch(error => {
-            signal.throwIfAborted();
+        for (let attempt = 0; !outcome.settled && attempt < FLUSH_SETTLE_ATTEMPTS; attempt += 1) {
+          assertActive();
+          // Do not leave a poll scheduled beyond the total deadline.
+          await delay(Math.min(FLUSH_SETTLE_POLL_MS, Math.max(0, deadline - performance.now())), undefined, {
+            signal: captureWaitSignal,
+          }).catch(error => {
+            captureWaitSignal?.throwIfAborted();
             throw error;
           });
-          outcome = await request((adapter, options) => adapter.flushCapture(options));
-          remainingMs();
+          outcome = await request(adapter => adapter.flushCapture());
         }
+        if (!outcome.settled) throw didNotSettle();
       };
       // Session binding and recovery also consume the same budget.
       let timer!: ReturnType<typeof setTimeout>;
       const expired = new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(didNotSettle()), remainingMs());
+        timer = setTimeout(() => reject(didNotSettle()), Math.max(0, deadline - performance.now()));
       });
       try {
         await waitForCapture(() => Promise.race([settle(), expired]));
       } catch (error) {
         captureWaitSignal?.throwIfAborted();
-        if (error instanceof EngineRequestDeadlineError ||
-            (error instanceof DaemonRefusalError && error.wireCode === "DEADLINE_EXCEEDED")) {
+        if (error instanceof DaemonRefusalError && error.wireCode === "DEADLINE_EXCEEDED") {
           throw didNotSettle();
         }
         throw error;
       } finally {
         finished = true;
         clearTimeout(timer);
-        polling?.abort();
       }
     },
 

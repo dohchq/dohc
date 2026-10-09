@@ -1,7 +1,6 @@
 import type {
   EngineDaemonClient,
 } from "@dohc/workspace-engine-client/daemon";
-import { EngineRequestDeadlineError } from "@dohc/workspace-engine-client/daemon";
 import type {
   EngineWorkspaceBinding,
   EngineWorkspaceRunOptions,
@@ -43,7 +42,6 @@ function createCaptureLiveStores(
   workspace: EngineWorkspace,
   sessions: EngineWorkspaceSessions,
   signal?: AbortSignal,
-  options?: { flushCaptureBudgetMs?: number },
 ) {
   return createAttachedCaptureLiveStores(
     {
@@ -54,7 +52,6 @@ function createCaptureLiveStores(
     },
     sessions,
     signal,
-    options,
   );
 }
 
@@ -363,7 +360,10 @@ describe("createCaptureLiveStores", () => {
     let now = 0;
     const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
     vi.mocked(delay).mockImplementation(async (ms, value) => { now += ms ?? 0; return value; });
-    const client = clientFor(async (request) => ({
+    const requests: Request[] = [];
+    const client = clientFor(async (request) => {
+      requests.push(request);
+      return {
       id: request.id,
       result:
         request.method === WORKSPACE_METHOD.watcherStatus
@@ -375,7 +375,8 @@ describe("createCaptureLiveStores", () => {
               noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [],
             }
           : { settled: false, running: true, degraded: true },
-    }));
+      };
+    });
     const { store } = createCaptureLiveStores(
       { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
       sessionsFor(client),
@@ -383,7 +384,8 @@ describe("createCaptureLiveStores", () => {
 
     try {
       await expect(store.flushCapture?.()).rejects.toThrow("did not settle");
-      expect(now).toBe(30_000);
+      expect(now).toBe(1_000);
+      expect(requests.filter(request => request.method === WORKSPACE_METHOD.captureFlush)).toHaveLength(51);
     } finally {
       clock.mockRestore();
       vi.mocked(delay).mockRestore();
@@ -391,22 +393,22 @@ describe("createCaptureLiveStores", () => {
   });
 
   it.each(["first flush", "watcher status", "later flush"])(
-    "bounds the whole flush when %s hangs until its request timeout",
+    "bounds the whole flush when %s hangs without a request deadline",
     async (hangingCall) => {
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
       vi.mocked(delay).mockImplementation((ms, value) =>
         new Promise(resolve => setTimeout(() => resolve(value), ms)),
       );
       const requests: Request[] = [];
+      let finish!: () => void;
+      const pending = new Promise<void>(resolve => { finish = resolve; });
       const client = clientFor(async request => {
         requests.push(request);
         const hangs = hangingCall === "first flush" ||
           (hangingCall === "watcher status" && request.method === WORKSPACE_METHOD.watcherStatus) ||
           (hangingCall === "later flush" && requests.length === 3);
         if (hangs) {
-          await new Promise((_resolve, reject) => setTimeout(() => reject(
-            new EngineRequestDeadlineError(request.id, request.method, request.deadlineMs ?? 120_000),
-          ), request.deadlineMs ?? 120_000));
+          await pending;
         }
         return { id: request.id, result: request.method === WORKSPACE_METHOD.watcherStatus
           ? { running: true, degraded: false, terminal: false, phase: "ready",
@@ -422,19 +424,59 @@ describe("createCaptureLiveStores", () => {
         await vi.advanceTimersByTimeAsync(30_000);
         expect(result).toBeInstanceOf(Error);
         expect((result as Error).message).toBe(`Engine capture for ${WORKSPACE_ID} did not settle.`);
-        expect(requests.at(-1)?.deadlineMs).toBe(hangingCall === "later flush" ? 29_980 : 30_000);
+        expect(requests.every(request => request.deadlineMs === undefined)).toBe(true);
         expect(performance.now()).toBe(30_000);
         expect(vi.getTimerCount()).toBe(0);
       } finally {
+        const requestCount = requests.length;
+        finish();
         await vi.runAllTimersAsync();
         await flushing;
+        expect(requests).toHaveLength(requestCount);
         vi.mocked(delay).mockRestore();
         vi.useRealTimers();
       }
     },
   );
 
-  it("shrinks the remaining deadline across capture attempts and status reads", async () => {
+  it("leaves no poll or follow-up request after the total deadline", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    vi.mocked(delay).mockImplementation((ms, value) =>
+      new Promise(resolve => setTimeout(() => resolve(value), ms)),
+    );
+    const requests: Request[] = [];
+    const client = clientFor(async request => {
+      requests.push(request);
+      if (request.method === WORKSPACE_METHOD.captureFlush) {
+        await new Promise<void>(resolve => setTimeout(resolve, 29_990));
+        return { id: request.id, result: { settled: false, running: true, degraded: false } };
+      }
+      return { id: request.id, result: { running: true, degraded: false, terminal: false, phase: "ready",
+        noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [] } };
+    });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
+    );
+    let result: unknown = "pending";
+    const flushing = store.flushCapture!().catch(error => { result = error; });
+    try {
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(result).toBe("pending");
+      await vi.advanceTimersByTimeAsync(1);
+      expect((result as Error).message).toContain("did not settle");
+      expect(requests.map(request => request.method)).toEqual([
+        WORKSPACE_METHOD.captureFlush, WORKSPACE_METHOD.watcherStatus,
+      ]);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      await vi.runAllTimersAsync();
+      await flushing;
+      vi.mocked(delay).mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses the normal request timeout across capture attempts and status reads", async () => {
     let now = 0;
     const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
     vi.mocked(delay).mockImplementation(async (ms, value) => { now += ms ?? 0; return value; });
@@ -453,7 +495,7 @@ describe("createCaptureLiveStores", () => {
     );
     try {
       await store.flushCapture!();
-      expect(requests.map(request => request.deadlineMs)).toEqual([30_000, 29_900, 29_830, 29_510]);
+      expect(requests.map(request => request.deadlineMs)).toEqual([undefined, undefined, undefined, undefined]);
       expect(now).toBe(500);
     } finally {
       clock.mockRestore();
@@ -495,13 +537,9 @@ describe("createCaptureLiveStores", () => {
     expect(requests).toEqual([]);
   });
 
-  it.each(["transport", "daemon"])("keeps the exhausted-flush error for a %s deadline", async source => {
+  it("keeps the exhausted-flush error for a daemon deadline refusal", async () => {
     const clock = vi.spyOn(performance, "now").mockReturnValue(0);
     const client = clientFor(async request => {
-      // Integer wire budgets can expire just before the outer timer fires.
-      if (source === "transport") {
-        throw new EngineRequestDeadlineError(request.id, request.method, request.deadlineMs ?? 120_000);
-      }
       throw { wireError: { code: "DEADLINE_EXCEEDED", message: "deadline exceeded", retry: "afterBackoff" } };
     });
     const { store } = createCaptureLiveStores(
@@ -525,39 +563,26 @@ describe("createCaptureLiveStores", () => {
     try {
       await store.flushCapture!();
       expect(requests.map(request => request.method)).toEqual([WORKSPACE_METHOD.captureFlush]);
-      expect(requests[0]?.deadlineMs).toBe(30_000);
+      expect(requests[0]?.deadlineMs).toBeUndefined();
       expect(performance.now()).toBe(0);
       expect(vi.getTimerCount()).toBe(0);
     } finally { vi.useRealTimers(); }
   });
 
-  it("uses an injected capture flush budget for the request and total deadline", async () => {
+  it("accepts a settled answer before the outer timer fires", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
-    const deadlines: number[] = [];
     const client = clientFor(async request => {
-      deadlines.push(request.deadlineMs!);
-      await new Promise((_resolve, reject) => setTimeout(() => reject(
-        new EngineRequestDeadlineError(request.id, request.method, request.deadlineMs ?? 120_000),
-      ), request.deadlineMs ?? 120_000));
-      throw new Error("unreachable");
+      vi.spyOn(performance, "now").mockReturnValue(30_001);
+      return { id: request.id, result: { settled: true, running: true, degraded: false } };
     });
     const { store } = createCaptureLiveStores(
       { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
-      undefined, { flushCaptureBudgetMs: 1_000 },
     );
-    let result: unknown = "pending";
-    const flushing = store.flushCapture!().catch(error => { result = error; });
     try {
-      await vi.advanceTimersByTimeAsync(999);
-      expect(result).toBe("pending");
-      await vi.advanceTimersByTimeAsync(1);
-      expect((result as Error).message).toBe(`Engine capture for ${WORKSPACE_ID} did not settle.`);
-      expect(deadlines).toEqual([1_000]);
-      expect(performance.now()).toBe(1_000);
+      await store.flushCapture!();
       expect(vi.getTimerCount()).toBe(0);
     } finally {
-      await vi.runAllTimersAsync();
-      await flushing;
+      vi.mocked(performance.now).mockRestore();
       vi.useRealTimers();
     }
   });
@@ -592,16 +617,14 @@ describe("createCaptureLiveStores", () => {
     vi.mocked(delay).mockImplementation((ms, value) =>
       new Promise(resolve => setTimeout(() => resolve(value), ms)),
     );
-    const deadlines: number[] = [];
+    const requests: Request[] = [];
     const client = clientFor(async request => {
+      requests.push(request);
       if (request.method === WORKSPACE_METHOD.watcherStatus) {
         return { id: request.id, result: { running: true, degraded: false, terminal: false, phase: "ready",
           noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [] } };
       }
-      deadlines.push(request.deadlineMs!);
-      const duration = Math.min(6_000, request.deadlineMs ?? 120_000);
-      await new Promise<void>(resolve => setTimeout(resolve, duration));
-      if (duration < 6_000) throw new EngineRequestDeadlineError(request.id, request.method, request.deadlineMs!);
+      await new Promise<void>(resolve => setTimeout(resolve, 6_000));
       return { id: request.id, result: { settled: false, running: true, degraded: false } };
     });
     const { store } = createCaptureLiveStores(
@@ -612,18 +635,21 @@ describe("createCaptureLiveStores", () => {
     try {
       await vi.advanceTimersByTimeAsync(30_000);
       expect((result as Error).message).toBe(`Engine capture for ${WORKSPACE_ID} did not settle.`);
-      expect(deadlines).toEqual([30_000, 23_980, 17_960, 11_940, 5_920]);
+      expect(requests.filter(request => request.method === WORKSPACE_METHOD.captureFlush)).toHaveLength(5);
+      expect(requests.every(request => request.deadlineMs === undefined)).toBe(true);
       expect(performance.now()).toBe(30_000);
-      expect(vi.getTimerCount()).toBe(0);
     } finally {
       await vi.runAllTimersAsync();
       await flushing;
+      expect(vi.getTimerCount()).toBe(0);
+      expect(requests).toHaveLength(6);
       vi.mocked(delay).mockRestore();
       vi.useRealTimers();
     }
   });
 
   it("abandons an in-flight capture flush when shutdown aborts", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
     const controller = new AbortController();
     let entered!: () => void;
     let finish!: () => void;
@@ -641,10 +667,16 @@ describe("createCaptureLiveStores", () => {
     controller.abort();
     try {
       expect(await Promise.race([outcome, pending.then(() => "flush was not abandoned")])).toMatchObject({name: "AbortError"});
-    } finally {finish();}
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      finish();
+      await outcome;
+      vi.useRealTimers();
+    }
   });
 
   it("cancels capture polling between attempts and rejects a flush after shutdown", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
     const controller = new AbortController();
     const requests: Request[] = [];
     const client = clientFor(async request => {
@@ -662,21 +694,26 @@ describe("createCaptureLiveStores", () => {
       { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
       sessionsFor(client), controller.signal,
     );
-    await expect(store.flushCapture?.()).rejects.toMatchObject({ name: "AbortError" });
-    await expect(store.flushCapture?.()).rejects.toBe(controller.signal.reason);
-    expect(requests.map(request => request.method)).toEqual([
-      WORKSPACE_METHOD.captureFlush, WORKSPACE_METHOD.watcherStatus,
-    ]);
+    try {
+      await expect(store.flushCapture?.()).rejects.toMatchObject({ name: "AbortError" });
+      await expect(store.flushCapture?.()).rejects.toBe(controller.signal.reason);
+      expect(requests.map(request => request.method)).toEqual([
+        WORKSPACE_METHOD.captureFlush, WORKSPACE_METHOD.watcherStatus,
+      ]);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
   });
 
   it("preserves the shutdown reason when capture polling aborts during sleep", async () => {
-    const timers = await vi.importActual<typeof import("node:timers/promises")>("node:timers/promises");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
     const controller = new AbortController();
     const requests: Request[] = [];
     let entered!: () => void;
     const started = new Promise<void>(resolve => { entered = resolve; });
-    vi.mocked(delay).mockImplementationOnce((...args) => {
-      const sleeping = timers.setTimeout(...args);
+    vi.mocked(delay).mockImplementationOnce((_ms, _value, options) => {
+      const sleeping = new Promise<never>((_resolve, reject) => {
+        options?.signal?.addEventListener("abort", () => reject(new Error("poll aborted")), { once: true });
+      });
       entered();
       return sleeping;
     });
@@ -700,10 +737,13 @@ describe("createCaptureLiveStores", () => {
     await started;
     controller.abort(SENTINEL);
 
-    expect(await outcome).toBe(SENTINEL);
-    expect(requests.map(request => request.method)).toEqual([
-      WORKSPACE_METHOD.captureFlush, WORKSPACE_METHOD.watcherStatus,
-    ]);
+    try {
+      expect(await outcome).toBe(SENTINEL);
+      expect(requests.map(request => request.method)).toEqual([
+        WORKSPACE_METHOD.captureFlush, WORKSPACE_METHOD.watcherStatus,
+      ]);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
   });
 
   it("classifies an unsettled initial capture before bounded settle polling", async () => {
