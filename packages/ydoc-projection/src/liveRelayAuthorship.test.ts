@@ -125,7 +125,7 @@ it('refuses new structs from a client already bound to another identity', () => 
   expect(f.journalRows()).toEqual(before)
 })
 
-it('admits originals after account and agent renames or depth changes, preserving stored credit', () => {
+it('admits originals after account, agent name, depth, or declared person changes, preserving bound credit', () => {
   const f = setup(), agent = {agentId: 'writer', agentName: 'First name', onBehalfOf: 'owner', depth: 1}
   const context = {kind: 'account' as const, accountId: 'owner', agent}
   const first = f.storage.commitLiveUpdateJournal(authored(f.capture(f.update('first'), 'first'), context))
@@ -133,9 +133,13 @@ it('admits originals after account and agent renames or depth changes, preservin
     {...context, agent: {...agent, agentName: 'New name', depth: 3}}, 'Renamed account'))
   expect(second.result.kind).toBe('accepted')
   expect(second.admitted?.metadata.authorSnapshot).toEqual(first.admitted?.metadata.authorSnapshot)
+  const third = f.storage.commitLiveUpdateJournal(authored(f.capture(f.update('third'), 'changed-person'),
+    {...context, agent: {...agent, onBehalfOf: 'other'}}))
+  expect(third.result.kind).toBe('accepted')
+  expect(third.admitted?.metadata.authorSnapshot).toEqual(first.admitted?.metadata.authorSnapshot)
   const before = f.journalRows()
-  expect(f.storage.commitLiveUpdateJournal(authored(f.capture(f.update('third'), 'changed-identity'),
-    {...context, agent: {...agent, onBehalfOf: 'other'}})).result).toEqual({kind: 'refused', reason: 'provenance-refused'})
+  expect(f.storage.commitLiveUpdateJournal(authored(f.capture(f.update('fourth'), 'changed-agent'),
+    {...context, agent: {...agent, agentId: 'other-agent'}})).result).toEqual({kind: 'refused', reason: 'provenance-refused'})
   expect(f.journalRows()).toEqual(before)
 })
 
@@ -158,7 +162,7 @@ it('admits fresh agent declarations beyond 16 unnamed without forcing an author 
   f.doc.clientID = 40_000
   const other = authored(f.capture(f.update('other-agent'), 'other-agent', bobActor),
     {kind: 'account', accountId: 'reader', agent: {agentId: 'other-agent'}}, 'Bob')
-  expect(f.storage.commitLiveUpdateJournal(other).admitted?.metadata.authorSnapshot).toEqual([...bob, {kind: 'agent', agentId: 'other-agent'}])
+  expect(f.storage.commitLiveUpdateJournal(other).admitted?.metadata.authorSnapshot).toEqual([...bob, {kind: 'agent', agentId: 'other-agent', onBehalfOf: 'reader'}])
   f.doc.clientID = 30_000
   const known = authored(f.capture(f.update('known-agent'), 'known-agent'),
     {kind: 'account', accountId: 'owner', agent: {agentId: 'agent-0-' + '"'.repeat(490), agentName: 'Changed'}})

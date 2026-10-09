@@ -560,7 +560,7 @@ pub struct ShareViewPullOutcome {
 /// Runtime-owned relay seam. The core crate contains no HTTP or async runtime
 /// dependency; production adapters live in separate crates.
 pub trait RelayTransport {
-    /// The credential selects the relay's native settlement route, which attests authors.
+    /// The native replica publishes settlement proofs; the relay derives their authors.
     fn publishes_native_settlements(&self) -> bool {
         false
     }
