@@ -1740,7 +1740,6 @@ pub struct SuccessorReplacement<'a> {
     pub now_ms: i64,
 }
 
-/// Callers must write the successor's result snapshot in the same transaction as the lineage replacement.
 pub fn replace_lineage_with_successor(
     store: &mut EngineStore,
     replacement: SuccessorReplacement<'_>,
@@ -1753,6 +1752,7 @@ pub fn replace_lineage_with_successor(
 }
 
 /// Transaction-composable form of [`replace_lineage_with_successor`].
+/// The caller must write the successor's result snapshot in this transaction.
 pub fn replace_lineage_with_successor_in_tx(
     tx: &Transaction<'_>,
     replacement: SuccessorReplacement<'_>,
@@ -1763,6 +1763,7 @@ pub fn replace_lineage_with_successor_in_tx(
 /// Install a reviewed successor while guarding the receiver's alternate lineage.
 /// The successor retains its author's causal parent. The caller must establish
 /// that the alternate lineage belongs to the same review and its visible edits are preserved.
+/// It must also write the successor's result snapshot in this transaction.
 pub fn replace_reviewed_lineage_with_successor_in_tx(
     tx: &Transaction<'_>,
     replacement: SuccessorReplacement<'_>,
