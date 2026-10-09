@@ -1,4 +1,5 @@
 import type { RecordEditSession } from "@dohc/automation-executor/collection-record-edits";
+import { isCaptureRecoveryOrigin } from "@dohc/workspace-contracts/engine";
 import { errorMessage } from "./workspaceError";
 import type {AppResponseUndoSelection,AppResponseUndoResult} from "./ownerAppResponseModeration";
 import type { WorkspacePolicyPath } from "@dohc/security-contract/effective-policy";
@@ -6327,7 +6328,7 @@ export function createWorkspaceEngineCapture(
         });
         for (const moment of page.moments) {
           if (moment.id === momentId) return after;
-          after.push(moment.id);
+          if (!isCaptureRecoveryOrigin(moment.metadata.origin)) after.push(moment.id);
         }
         if (page.nextBeforeMomentOrder === null) return after;
         beforeMomentOrder = page.nextBeforeMomentOrder;

@@ -1,4 +1,5 @@
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
+import { accessOperations } from "./accessOperations";
 import { SaveStateSchema } from "@dohc/workspace-contracts/save-state-schema";
 import { nameByteLength } from "@dohc/workspace-contracts/names";
 import { LIVE_UPDATE_IDENTIFIER_MAX_BYTES } from "@dohc/live-session-contract/live-update-admission";
@@ -1420,6 +1421,35 @@ export const SyncStatusResult = z.union([
 ]);
 export type SyncStatusResult = z.infer<typeof SyncStatusResult>;
 
+export const CaptureRecoveryStatusResult = z.object({
+  captureRecoveries: z.array(z.object({
+    momentId: z.string(), versionId: z.string(), objectId: z.string(), path: z.string(), captureMomentId: z.string(),
+  })),
+});
+export type CaptureRecoveryStatusResult = z.infer<typeof CaptureRecoveryStatusResult>;
+export const ClearCaptureRecoveryPayload = WorkspaceIdPayload.extend({ momentId: z.string() });
+export type ClearCaptureRecoveryPayload = z.infer<typeof ClearCaptureRecoveryPayload>;
+
+export const captureRecoveryOperations = {
+  getCaptureRecoveryStatus: {
+    capabilityId: "capture.recovery.read",
+    channel: "desktop:get-capture-recovery-status",
+    payload: WorkspaceIdPayload,
+    result: CaptureRecoveryStatusResult,
+    guard: "trusted-sender",
+    scope: "workspace",
+    handlerCheck: { check: "withRendererWorkspaceOperation", reason: "The handler reads only the sending window's active workspace." },
+  },
+  clearCaptureRecovery: {
+    capabilityId: "capture.recovery.clear",
+    channel: "desktop:clear-capture-recovery",
+    payload: ClearCaptureRecoveryPayload,
+    guard: "trusted-sender",
+    scope: "workspace",
+    handlerCheck: { check: "withRendererWorkspaceOperation", reason: "The handler clears recovery only in the sending window's active workspace." },
+  },
+} satisfies OperationTable;
+
 export const ENGINE_STORE_BACKUP_DIR = ".dohc/engine/pre-v2-backup";
 
 export function engineStoreRefusalSentence(cause: EngineStoreRefusal): string {
@@ -1550,7 +1580,7 @@ export const EngineMomentRecord = z.object({
   path: PATH_STRING,
   recordedAtMs: z.number(),
   operation: z.enum(["write", "rename", "delete"]),
-  origin: z.enum(["api", "local-file", "restore", "sync", "unknown", "ydoc"]),
+  origin: z.enum(["api", "local-file", "restore", "sync", "unknown", "ydoc", "capture-recovery", "capture-recovery-cleared"]),
   authors: z.array(EngineMomentAuthor).min(1).optional(),
   // Present only when a dohc-tracked agent run authored the moment; main
   // resolves the configured agent name for local runs. A live author
@@ -6479,7 +6509,9 @@ export const LaunchMarksResult = z.object({
 export type LaunchMarksResult = z.infer<typeof LaunchMarksResult>;
 
 export interface DohcDesktopBridge
-  extends OperationBridge<typeof workspaceVersionOperations>,
+  extends OperationBridge<typeof accessOperations>,
+    OperationBridge<typeof workspaceVersionOperations>,
+    OperationBridge<typeof captureRecoveryOperations>,
     OperationBridge<typeof workspaceSearchOperations>,
     OperationBridge<typeof crashReportOperations>,
     OperationBridge<typeof reportingOperations>,

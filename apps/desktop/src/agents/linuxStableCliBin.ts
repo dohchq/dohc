@@ -1,5 +1,6 @@
-import { createHash, randomUUID } from "node:crypto";
-import { chmod, copyFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { chmod, copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { atomicReplaceFile } from "../atomicReplaceFile";
 import { join } from "node:path";
 import { posixMcpLauncher } from "../../scripts/mcp-launchers.mjs";
 
@@ -8,15 +9,10 @@ async function publishAtomically(
   targetPath: string,
   mode?: number,
 ): Promise<void> {
-  const tempPath = `${targetPath}.tmp-${randomUUID()}`;
-  try {
+  await atomicReplaceFile(targetPath, async (tempPath) => {
     await copyFile(sourcePath, tempPath);
     if (mode !== undefined) await chmod(tempPath, mode);
-    await rename(tempPath, targetPath);
-  } catch (error) {
-    await rm(tempPath, { force: true }).catch(() => undefined);
-    throw error;
-  }
+  });
 }
 
 async function publishContentAtomically(
@@ -24,15 +20,10 @@ async function publishContentAtomically(
   targetPath: string,
   mode?: number,
 ): Promise<void> {
-  const tempPath = `${targetPath}.tmp-${randomUUID()}`;
-  try {
+  await atomicReplaceFile(targetPath, async (tempPath) => {
     await writeFile(tempPath, content);
     if (mode !== undefined) await chmod(tempPath, mode);
-    await rename(tempPath, targetPath);
-  } catch (error) {
-    await rm(tempPath, { force: true }).catch(() => undefined);
-    throw error;
-  }
+  });
 }
 
 async function contentHash(filePath: string): Promise<string> {

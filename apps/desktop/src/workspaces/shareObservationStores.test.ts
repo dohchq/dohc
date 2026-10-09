@@ -16,7 +16,7 @@ vi.mock("node:fs", async original => {
 
 const workspace: RegistryEntry = { workspaceId: "w", rootPath: "/work", kind: "personal", mode: "local-first",
   remote: { serverUrl: "https://relay.test", ownerUserId: "owner" } };
-const grant = { grantId: "g", recipientUserId: "friend", recipientEmail: "friend@test.dev",
+const grant = { shareId: "share", generation: 1, status: "active" as const, granterUserId: "owner", granterEmail: null, subjectName: null, sharerName: null, grantId: "g", recipientUserId: "friend", recipientEmail: "friend@test.dev",
   selector: { paths: ["Notes"], versionId: null }, access: "view" as const };
 const listing = { grants: [grant], links: [], formerGrants: [], endedGrants: [] };
 const row = (shareId = "s") => ({ shareId, grantId: "g", granterUserId: "owner", granterEmail: "owner@test.dev",
@@ -28,6 +28,18 @@ let directory: string;
 beforeEach(async () => { vi.restoreAllMocks(); vi.clearAllMocks(); directory = await createTestScratch("dohc-share-observations-"); });
 
 describe("per-workspace roster storage", () => {
+  it("strips unknown fields on save and rejects old file shapes, including empty rosters", () => {
+    const files = createShareRosterStore(join(directory, "rosters"));
+    const unsafe = { ...listing, token: "secret", grants: [{ ...grant, credentials: "secret", browserInvitationUrl: "secret", shareCode: "secret" }] };
+    const saved = files.save(workspace, unsafe, false, 100);
+    files.markPulled({ ...workspace, shareRoster: { ...saved, ...unsafe } });
+    expect(readFileSync(files.file(workspace), "utf8")).not.toContain("secret");
+    expect(createShareRosterStore(join(directory, "rosters")).read(workspace)?.grants).toEqual([grant]);
+    for (const old of [listing, { ...listing, grants: [] }]) {
+      writeFileSync(files.file(workspace), JSON.stringify({ ...old, version: 1, listedAtMs: 100 }));
+      expect(createShareRosterStore(join(directory, "rosters")).read(workspace)).toBeUndefined();
+    }
+  });
   it("preserves the pull mark through metadata updates without serializing the roster", () => {
     const file = join(directory, "registry.json");
     const store = createRegistryStore(file);
@@ -245,10 +257,11 @@ describe("account received observations", () => {
     const h = harness(); const a = h.acquisition();
     const raw: Record<string, unknown>[] = Array.from({ length: 1_501 }, (_, i) => ({ ...row(`s-${i}`), token: "secret",
       shareCode: "secret", browserInvitationUrl: "secret", grants: [row("other")] }));
-    raw[0] = { ...raw[0], selector: { kind: "group", paths: ["Group"], versionId: null, channelWireId: "wire" }, access: "read-only" };
+    raw[0] = { ...raw[0], selector: { kind: "group", paths: ["Group"], versionId: null, channelWireId: "wire" }, access: "read-only", fileScope: "served" };
     raw[1] = { ...raw[1], selector: { kind: "chat", channelWireId: "wire" }, access: "read-write" };
     h.list.mockResolvedValue({ received: raw, removed: [] }); await a.refresh();
     expect(a.observation().inventory?.received).toHaveLength(1_501);
+    expect(a.observation().inventory?.received[0]).toHaveProperty("fileScope", "served");
     const persisted = readFileSync(h.store.file(h.scope()), "utf8");
     expect(persisted).not.toContain("secret"); expect(persisted).not.toContain('"grants"');
     expect(parseReceivedInventory({ received: [{ ...row(), selector: { paths: [".dohc/credentials"], versionId: null } }], removed: [] })).toBeNull();

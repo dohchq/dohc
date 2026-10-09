@@ -62,7 +62,7 @@ The runner can stay offline between releases.
 Ubuntu on WSL2 can build the Linux x64 AppImage on a Windows PC.
 Register a separate Linux runner inside the distribution with the `self-hosted`, `linux`, and `x64` labels.
 Keep its checkout and dependencies in the Linux filesystem, such as under `/home/<user>/`, rather than `/mnt/c`.
-Use Linux Node 24.14 or newer, pnpm 11.20.0, rustup, and native compiler tools.
+Use Linux Node 24.16 or newer, pnpm 11.20.0, rustup, and native compiler tools.
 Do not reuse Windows `node_modules` or a Windows pnpm executable.
 Install Electron's Linux runtime libraries, `xvfb-run`, and AppImage's FUSE library.
 Confirm these tools are on the runner's noninteractive `PATH` before starting its `run.sh`.

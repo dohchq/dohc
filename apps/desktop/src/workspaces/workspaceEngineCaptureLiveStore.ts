@@ -228,7 +228,8 @@ function momentMetadataFromOrigin(
   supplied?: ActorNeutralWriteMetadata,
 ): MomentMetadata {
   const metadata = metadataFromOrigin(origin, supplied);
-  return origin === "ydoc" ? { ...metadata, origin } : metadata;
+  return origin === "ydoc" || origin === "capture-recovery" || origin === "capture-recovery-cleared"
+    ? { ...metadata, origin } : metadata;
 }
 
 function snapshotFromWire(

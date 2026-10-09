@@ -410,11 +410,11 @@ fn publication_source_before_in_tx(
     {
         source.validate().map_err(SyncError::corrupt)?;
         return tx.query_row(
-            "SELECT m.moment_id,m.version_id,m.object_id,m.path,m.after_blob_sha256,t.byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id
+            concat!("SELECT m.moment_id,m.version_id,m.object_id,m.path,m.after_blob_sha256,t.byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id
              FROM moments m JOIN blobs t ON t.sha256=m.after_blob_sha256
-             WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.path=?4
+             WHERE ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.path=?4
                AND m.moment_id=?5 AND m.after_content_kind='text' AND m.after_blob_sha256=?6
-               AND t.byte_length=?7 AND m.recorded_at_ms=?8 AND m.metadata_origin='sync'",
+               AND t.byte_length=?7 AND m.recorded_at_ms=?8 AND m.metadata_origin='sync'"),
             params![b.workspace_id,b.main_version_id,b.object_id,b.current_path,
                 source.bootstrap_moment_id,source.projected_markdown_digest,
                 source.projected_markdown_byte_length,source.baseline_registered_at_ms],
@@ -441,17 +441,17 @@ fn publication_source_before_in_tx(
     // The next proof starts at its prior accepted cut and names that artifact.
     let skipped: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM live_device_settlements s JOIN live_settlement_attribution_unavailable u ON u.workspace_id=s.workspace_id AND u.settlement_id=s.settlement_id WHERE s.workspace_id=?1 AND s.relay_database_namespace=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor>?6 AND s.terminal_cursor<?7)",params![b.workspace_id,record.relay_database_namespace,b.main_version_id,b.object_id,b.lineage_claim_id,record.previous_cursor,record.terminal_cursor],|r|r.get(0)).map_err(SyncError::corrupt)?;
     if skipped && record.previous_cursor > 0 {
-        return tx.query_row("SELECT m.moment_id,m.version_id,m.object_id,m.path,m.after_blob_sha256,t.byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id FROM live_device_settlements s JOIN live_settlement_publication_states p USING(settlement_id) JOIN moments m ON m.workspace_id=s.workspace_id AND m.moment_id=s.moment_id JOIN blobs t ON t.sha256=s.markdown_digest WHERE s.workspace_id=?1 AND s.relay_database_namespace=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor=?6 AND m.after_blob_sha256=s.markdown_digest",params![b.workspace_id,record.relay_database_namespace,b.main_version_id,b.object_id,b.lineage_claim_id,record.previous_cursor],|row|Ok(crate::outbound::PortableBefore {moment_id:row.get(0)?,version_id:row.get(1)?,object_id:row.get(2)?,path:row.get(3)?,blob_sha256:row.get(4)?,byte_length:row.get(5)?,recorded_at_ms:row.get(6)?,metadata_origin:row.get(7)?,metadata_summary:row.get(8)?,metadata_correlation_id:row.get(9)?})).map(Some).map_err(SyncError::corrupt);
+        return tx.query_row(concat!("SELECT m.moment_id,m.version_id,m.object_id,m.path,m.after_blob_sha256,t.byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id FROM live_device_settlements s JOIN live_settlement_publication_states p USING(settlement_id) JOIN moments m ON ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=s.workspace_id AND m.moment_id=s.moment_id JOIN blobs t ON t.sha256=s.markdown_digest WHERE s.workspace_id=?1 AND s.relay_database_namespace=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor=?6 AND m.after_blob_sha256=s.markdown_digest"),params![b.workspace_id,record.relay_database_namespace,b.main_version_id,b.object_id,b.lineage_claim_id,record.previous_cursor],|row|Ok(crate::outbound::PortableBefore {moment_id:row.get(0)?,version_id:row.get(1)?,object_id:row.get(2)?,path:row.get(3)?,blob_sha256:row.get(4)?,byte_length:row.get(5)?,recorded_at_ms:row.get(6)?,metadata_origin:row.get(7)?,metadata_summary:row.get(8)?,metadata_correlation_id:row.get(9)?})).map(Some).map_err(SyncError::corrupt);
     }
     tx.query_row(
-        "SELECT m.moment_id,m.version_id,m.object_id,m.path,a.source_digest,a.source_byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id
+        concat!("SELECT m.moment_id,m.version_id,m.object_id,m.path,a.source_digest,a.source_byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id
          FROM live_owner_adoptions a
-         JOIN moments m ON m.workspace_id=a.workspace_id AND m.version_id=a.main_version_id AND m.object_id=a.object_id AND m.moment_id=a.source_moment_id
+         JOIN moments m ON ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=a.workspace_id AND m.version_id=a.main_version_id AND m.object_id=a.object_id AND m.moment_id=a.source_moment_id
            AND m.path=?7 AND m.after_content_kind='text' AND m.after_blob_sha256=a.source_digest
          JOIN blobs t ON t.sha256=a.source_digest AND t.byte_length=a.source_byte_length
          WHERE a.relay_database_namespace=?1 AND a.workspace_id=?2 AND a.main_version_id=?3 AND a.object_id=?4 AND a.lineage_claim_id=?5
            AND a.binding_json=?6 AND a.terminal_cursor=?8
-           AND (?10 OR NOT EXISTS(SELECT 1 FROM live_device_settlements s WHERE s.relay_database_namespace=?1 AND s.workspace_id=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor<?9))",
+           AND (?10 OR NOT EXISTS(SELECT 1 FROM live_device_settlements s WHERE s.relay_database_namespace=?1 AND s.workspace_id=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor<?9))"),
         params![record.relay_database_namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,
             serde_json::to_string(b).map_err(SyncError::corrupt)?,b.current_path,record.previous_cursor,record.terminal_cursor,skipped],
         |row| Ok(crate::outbound::PortableBefore {
@@ -526,11 +526,11 @@ fn imported_event_zero_before_in_tx(
     // Base import may reuse an already matching file head rather than create
     // a projection moment. Find that artifact within this exact object.
     tx.query_row(
-        "SELECT m.moment_id,m.version_id,m.object_id,m.path,m.after_blob_sha256,t.byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id
+        concat!("SELECT m.moment_id,m.version_id,m.object_id,m.path,m.after_blob_sha256,t.byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id
          FROM moments m JOIN blobs t ON t.sha256=m.after_blob_sha256
-         WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.path=?4
+         WHERE ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.path=?4
            AND m.after_content_kind='text' AND m.after_blob_sha256=?5 AND t.byte_length=?6
-         ORDER BY m.moment_order LIMIT 1",
+         ORDER BY m.moment_order LIMIT 1"),
         params![b.workspace_id,b.main_version_id,b.object_id,b.current_path,digest,markdown.len() as i64],
         |row| Ok(crate::outbound::PortableBefore {
             moment_id: row.get(0)?, version_id: row.get(1)?, object_id: row.get(2)?,

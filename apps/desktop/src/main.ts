@@ -88,6 +88,10 @@ import { createOpenPathFailures } from "./window/openPathFailures";
 import { runInWorkspaceAuthorityLane } from "./workspaces/workspaceAuthorityLane";
 import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
+import { accessCliQueries, createAccessAcquisition, createAccessOwner } from "./access/accessOwner";
+import { hasAccessChat, locateAccessVersionPath, resolveAccessObject } from "./access/accessObjectResolution";
+import { accessOperations } from "./ipc/accessOperations";
+import { assertResolvedWorkspacePath } from "./workspaces/workspaceRealPath";
 import {
   VersionedLiveAdapter,
   decodeAutomationGroupHandover,
@@ -229,7 +233,7 @@ import {
   readReceivedShareListing,
   reconcileRecipientSharesAfterLookup,
 } from "./workspaces/recipientShareReconciliation";
-import { createReceivedShareAcquisition, createReceivedShareStore } from "./workspaces/receivedShareStore";
+import { createReceivedShareAcquisition, createReceivedShareStore, listReceivedInventory } from "./workspaces/receivedShareStore";
 import { createShareRosters, rosterAuthorLabel, rosterPersonLabel } from "./automations/shareRoster";
 import { listRosterGrants, readStoredRoster } from "@dohc/automation-executor/roster-listing";
 import {
@@ -1399,7 +1403,9 @@ const receivedShareAcquisition = createReceivedShareAcquisition({
   list: async scope => {
     const credentials = cachedCredentials;
     if (!credentials || scope.generation !== credentialCacheGeneration) throw new Error("Server session changed.");
-    return relayShareJsonWithCredentials<unknown>(credentials, "/sync/shares");
+    return listReceivedInventory(path => relayShareJsonWithCredentials<unknown>(credentials, path), () => {
+      if (scope.generation !== credentialCacheGeneration) throw new Error("Server session changed.");
+    });
   },
   onLive: (inventory, _scope, isCurrent) => reconcileReceivedShares(inventory, isCurrent),
   logError: error => console.warn("[desktop] received share observation:", error),
@@ -1501,6 +1507,75 @@ const shareRosters = createShareRosters({
   logError: (workspaceId, error) =>
     console.warn(`[desktop] share roster refresh failed for ${workspaceId}:`, error),
   onListed: (workspaceId) => collectionAutomationsOf(workspaceId)?.rosterChanged(),
+});
+
+const accessAcquisition = createAccessAcquisition({
+  roster: workspaceId => shareRosters.requestRefresh(workspaceId),
+  received: () => receivedShareAcquisition.refresh(),
+});
+const accessScopeIds = new WeakMap<object, string>();
+type AccessWorkspaceOperation = { workspace: RegistryEntry & { attachmentId: symbol }; signal: AbortSignal; assertCurrent(): void };
+const accessOwner = createAccessOwner<AccessWorkspaceOperation>({
+  scope: operation => {
+    const context = rosterContext(operation.workspace.workspaceId) as object;
+    let id = accessScopeIds.get(context);
+    if (!id) { id = randomUUID(); accessScopeIds.set(context, id); }
+    return id;
+  },
+  assertCurrent: operation => operation.assertCurrent(),
+  account: () => cachedCredentials?.relayUrl ? { userId: cachedCredentials.userId, email: cachedCredentials.email,
+    relayUrl: cachedCredentials.relayUrl, generation: credentialCacheGeneration } : null,
+  roster: ({ workspace }) => {
+    if (workspace.shareView || !workspace.remote || cachedCredentials?.userId !== workspace.remote.ownerUserId ||
+        cachedCredentials.relayUrl !== workspace.remote.serverUrl) return { listing: null, checkedAtMs: null, freshness: "unknown" };
+    return shareRosters.observation(workspace.workspaceId);
+  },
+  received: () => receivedShareAcquisition.observation(),
+  refresh: async operation => {
+    await warmCredentialCache().catch(() => undefined);
+    operation.assertCurrent();
+    await accessAcquisition.request(operation.workspace.workspaceId);
+  },
+  resolve: async (operation, ref) => {
+    const workspace = operation.workspace;
+    return resolveAccessObject(workspace, ref, {
+      filePathForObjectId: async objectId => {
+        const index = await engineSearchIndexFor(receivedShareEngine.workspaceForRegistered(workspace));
+        if (!index) throw new Error("File aliases are unavailable.");
+        const file = index.files.find(row => row.objectId === objectId);
+        return file ? { path: file.path, versionId: index.versionId } : null;
+      },
+      locatePath: async (path, versionId) => {
+        if (versionId !== null && versionId !== "main") {
+          return withEngineAdapter(receivedShareEngine.workspaceForRegistered(workspace), adapter =>
+            locateAccessVersionPath(workspace.workspaceId, path, versionId, adapter));
+        }
+        try {
+          const located = await assertResolvedWorkspacePath({ rootPath: workspace.rootPath, absolutePath: join(workspace.rootPath, path),
+            spelled: path, label: "File path", access: "read" });
+          const stat = await lstat(located.resolvedAbsolute).catch(error => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; });
+          return { path: located.relative.replaceAll("\\", "/"), exists: stat !== null };
+        } catch { return null; }
+      },
+      hasChat: async channelWireId => workspace.sharedChannels?.some(channel => channel.channelWireId === channelWireId) === true ||
+        await hasAccessChat(workspace.workspaceId, channelWireId, linkedChatStoreFor(workspace)),
+    });
+  },
+  permissions: async (operation, datasetId, after) => {
+    const { workspace, signal } = operation;
+    const local = await localDatasetHostFor(workspace, signal);
+    const data = createDatasetAuthorityRouter(local, {
+      status: async id => local.transferStatus(id),
+      remote: async targetOrigin => {
+        const remote = await remoteForWorkspace(workspace);
+        operation.assertCurrent();
+        if (!remote.credentials.relayUrl || new URL(remote.credentials.relayUrl).origin !== targetOrigin) throw new Error("Collection host unavailable.");
+        return createRemoteDatasetData({ workspaceId: workspace.workspaceId, ...remote, signal,
+          currentCredentialGeneration: () => credentialCacheGeneration, assertCurrent: () => operation.assertCurrent(), relayJson: relayShareJsonWithCredentials });
+      },
+    });
+    return data.permissions!({ action: "permissions", workspaceId: workspace.workspaceId, datasetId, after, limit: 100 });
+  },
 });
 
 // One formula evaluator for every open workspace. Its worker thread starts
@@ -4378,6 +4453,7 @@ const chatWrites = createChatWrites({
 let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null) => Promise<OwnerAppPublicationResult>) | undefined;
 let ownerAppResponsesForCli:((input:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>)|undefined;
 const { startDesktopCliServer } = createDesktopCliServer({
+  access: workspaceId => accessCliQueries(accessOwner, work => withPhysicalWorkspaceOperation(workspaceId, work)),
   recordSuccess: invocation => usageStore?.recordSuccess(invocation),
   dataset: (input, agent) => {
     if (!datasetForCli) throw new Error("Collections are not ready. Try again.");
@@ -5556,6 +5632,11 @@ async function currentDiagnostics(): Promise<string> {
 }
 
 function registerIpcHandlers(): void {
+  registerOperations(operationBoundary, accessOperations, {
+    getObjectAccess: (input, { operation }) => accessOwner.object(operation!, input),
+    listSharingAccess: (input, { operation }) => accessOwner.sharing(operation!, input),
+    requestAccessRefresh: (_input, { operation }) => accessOwner.refresh(operation!),
+  });
   const windowIpc = createWindowIpc<WebContents, IpcMainInvokeEvent, IpcMainEvent>({
     registerHandler: handleIpc,
     registerEvent: (channel, handler) => ipcMain.on(channel, handler),

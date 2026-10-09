@@ -1,3 +1,4 @@
+import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import {parseLiveAuthorSnapshot} from "@dohc/live-session-contract";
 import {
@@ -10,7 +11,6 @@ import {
   parseShareOpPayloadWithReferencedPaths,
   pathVisibleThroughShare,
   targetVersionId,
-  visibleSharePath,
   type AnyShareSelector,
   type ChatShareChannelKind,
   type ChatShareThreadResolver,

@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { agentExecutableCandidates, parseAgentAuth, probeAgentTools, type AgentProbeDependencies } from "./agentToolProbe";
+import { deferred, type Deferred } from "../testing/deferred";
+import { agentExecutableCandidates, parseAgentAuth, probeAgentTools, type AgentProbeDependencies, type ProbeOutput } from "./agentToolProbe";
 
 function fixture(overrides: Partial<AgentProbeDependencies> = {}): AgentProbeDependencies {
   return { platform: "win32", home: "C:\\Users\\ice", workspaceRoot: "C:\\Workspace", realPath: (path) => path,
     env: { PATH: 'relative;.;"C:\\Tools"', APPDATA: "C:\\Users\\ice\\AppData\\Roaming" }, isExecutable: () => false,
-    run: vi.fn(async () => ({ exitCode: 0, stdout: "1.2.3", stderr: "" })), ...overrides };
+    signal: new AbortController().signal, run: vi.fn(async () => ({ exitCode: 0, stdout: "1.2.3", stderr: "" })), ...overrides };
 }
 
 describe("read-only agent detection", () => {
@@ -13,8 +14,8 @@ describe("read-only agent detection", () => {
     expect(agentExecutableCandidates("claude", deps).slice(0, 4)).toEqual(["C:\\Tools\\claude.COM", "C:\\Tools\\claude.EXE", "C:\\Tools\\claude.BAT", "C:\\Tools\\claude.CMD"]);
     const tools = await probeAgentTools(deps);
     expect(tools[0]).toMatchObject({ executable: "C:\\Tools\\claude.CMD", version: "1.2.3", probe: "detected", auth: "unknown" });
-    expect(deps.run).toHaveBeenNthCalledWith(1, "C:\\Tools\\claude.CMD", ["--version"]);
-    expect(deps.run).toHaveBeenNthCalledWith(2, "C:\\Tools\\claude.CMD", ["auth", "status"]);
+    expect(deps.run).toHaveBeenNthCalledWith(1, "C:\\Tools\\claude.CMD", ["--version"], deps.signal);
+    expect(deps.run).toHaveBeenNthCalledWith(2, "C:\\Tools\\claude.CMD", ["auth", "status"], deps.signal);
     expect(deps.run).toHaveBeenCalledTimes(2);
   });
   it("finds native installs outside PATH and supports POSIX paths", () => {
@@ -46,7 +47,7 @@ describe("read-only agent detection", () => {
       isExecutable: (path) => path === `${unsafe}${slash}${file}` || path === `${safe}${slash}${file}` });
     expect((await probeAgentTools(deps))[0].executable).toBe(`${safe}${slash}${file}`);
     expect(deps.run).toHaveBeenCalledTimes(2);
-    expect(deps.run).toHaveBeenCalledWith(`${safe}${slash}${file}`, ["--version"]);
+    expect(deps.run).toHaveBeenCalledWith(`${safe}${slash}${file}`, ["--version"], deps.signal);
   });
   it.each([
     { platform: "win32" as const, workspaceRoot: "C:\\Workspace", canonicalRoot: "D:\\Project", candidate: "C:\\Tools\\claude.EXE", target: "d:\\PROJECT\\bin\\claude.EXE", path: "C:\\Tools" },
@@ -97,5 +98,116 @@ describe("read-only agent detection", () => {
     const deps = fixture({ isExecutable: (path) => path.endsWith("claude.EXE"), run: vi.fn(async () => ({ exitCode: 1, stdout: "secret error", stderr: "" })) });
     expect((await probeAgentTools(deps))[0]).toMatchObject({ version: null, auth: "unknown", probe: "failed" });
     expect(deps.run).toHaveBeenCalledTimes(1);
+  });
+});
+
+const CLAUDE = "C:\\Tools\\claude.EXE";
+const CODEX = "C:\\Tools\\codex.EXE";
+const failedOutput: ProbeOutput = { exitCode: 1, stdout: "", stderr: "" };
+const turn = () => new Promise<void>((resolve) => { setImmediate(resolve); });
+
+function observe<T>(promise: Promise<T>) {
+  const seen: { outcome?: { value: T } | { error: unknown } } = {};
+  const done = promise.then((value) => { seen.outcome = { value }; }, (error: unknown) => { seen.outcome = { error }; });
+  return { seen, done };
+}
+
+// Each run stays pending until its test settles it, which stands in for subprocess drainage.
+function controlledProbes(executables: readonly string[]) {
+  const controller = new AbortController();
+  const calls: Array<{ executable: string; output: Deferred<ProbeOutput> }> = [];
+  const run = vi.fn((executable: string, _args: readonly string[], _signal: AbortSignal) => {
+    const output = deferred<ProbeOutput>();
+    calls.push({ executable, output });
+    return output.promise;
+  });
+  const deps = fixture({ signal: controller.signal, run, isExecutable: (path) => executables.includes(path) });
+  const drainAll = async (detection: Promise<void>) => {
+    controller.abort();
+    for (const call of calls) call.output.resolve(failedOutput);
+    await detection;
+  };
+  return { controller, calls, run, deps, drainAll };
+}
+
+describe("cancelled agent detection", () => {
+  const reason = new Error("Agent detection was cancelled.");
+
+  it("does not probe when detection is already cancelled", async () => {
+    const probes = controlledProbes([CLAUDE]);
+    probes.controller.abort(reason);
+    await expect(probeAgentTools(probes.deps)).rejects.toBe(reason);
+    expect(probes.run).not.toHaveBeenCalled();
+  });
+
+  it("waits for a cancelled version probe to drain and never starts authentication", async () => {
+    const probes = controlledProbes([CLAUDE]);
+    const detection = observe(probeAgentTools(probes.deps));
+    try {
+      expect(probes.run).toHaveBeenCalledWith(CLAUDE, ["--version"], probes.controller.signal);
+      probes.controller.abort(reason);
+      await turn();
+      expect(detection.seen.outcome).toBeUndefined();
+      probes.calls[0]!.output.reject(reason);
+      await detection.done;
+    } finally {
+      await probes.drainAll(detection.done);
+    }
+    expect(detection.seen.outcome).toEqual({ error: reason });
+    expect(probes.run).toHaveBeenCalledOnce();
+  });
+
+  it("checks cancellation between the version and authentication probes", async () => {
+    const probes = controlledProbes([CLAUDE]);
+    const detection = observe(probeAgentTools(probes.deps));
+    try {
+      probes.calls[0]!.output.resolve({ exitCode: 0, stdout: "2.1.300", stderr: "" });
+      probes.controller.abort(reason);
+      await detection.done;
+    } finally {
+      await probes.drainAll(detection.done);
+    }
+    expect(detection.seen.outcome).toEqual({ error: reason });
+    expect(probes.run).toHaveBeenCalledOnce();
+  });
+
+  it("rejects without partial results after a cancelled authentication probe drains", async () => {
+    const probes = controlledProbes([CLAUDE]);
+    const detection = observe(probeAgentTools(probes.deps));
+    try {
+      probes.calls[0]!.output.resolve({ exitCode: 0, stdout: "2.1.300", stderr: "" });
+      await turn();
+      expect(probes.run).toHaveBeenLastCalledWith(CLAUDE, ["auth", "status"], probes.controller.signal);
+      probes.controller.abort(reason);
+      await turn();
+      expect(detection.seen.outcome).toBeUndefined();
+      probes.calls[1]!.output.resolve({ exitCode: 0, stdout: '{"loggedIn":true}', stderr: "" });
+      await detection.done;
+    } finally {
+      await probes.drainAll(detection.done);
+    }
+    expect(detection.seen.outcome).toEqual({ error: reason });
+    expect(probes.run).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    { first: "fails", outcome: () => new Error("probe failed") },
+    { first: "is cancelled", outcome: () => reason },
+  ])("stays pending after one probe $first until every started probe drains", async ({ outcome }) => {
+    const probes = controlledProbes([CLAUDE, CODEX]);
+    const detection = observe(probeAgentTools(probes.deps));
+    try {
+      expect(probes.calls.map((call) => call.executable)).toEqual([CLAUDE, CODEX]);
+      probes.controller.abort(reason);
+      probes.calls[0]!.output.reject(outcome());
+      await turn();
+      expect(detection.seen.outcome).toBeUndefined();
+      probes.calls[1]!.output.reject(reason);
+      await detection.done;
+    } finally {
+      await probes.drainAll(detection.done);
+    }
+    expect(detection.seen.outcome).toEqual({ error: reason });
+    expect(probes.run).toHaveBeenCalledTimes(2);
   });
 });

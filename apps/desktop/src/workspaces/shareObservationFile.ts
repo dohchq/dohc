@@ -1,5 +1,6 @@
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { createHash, randomUUID } from "node:crypto";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { atomicReplaceFileSync } from "../atomicReplaceFile";
 import { dirname } from "node:path";
 
 export function observationKey(parts: readonly string[]): string {
@@ -14,8 +15,7 @@ export function readObservationFile(file: string): unknown {
 export function writeObservationFile(file: string, value: unknown): void {
   const directory = dirname(file);
   mkdirSync(directory, { recursive: true });
-  const temporary = `${file}.tmp-${process.pid}-${randomUUID()}`;
-  try {
+  atomicReplaceFileSync(file, (temporary) => {
     const fd = openSync(temporary, "wx", 0o600);
     let failed = false;
     try {
@@ -27,14 +27,10 @@ export function writeObservationFile(file: string, value: unknown): void {
     } finally {
       try { closeSync(fd); } catch (error) { if (!failed) throw error; }
     }
-    renameSync(temporary, file);
-    if (process.platform !== "win32") {
-      const directoryFd = openSync(directory, "r");
-      try { fsyncSync(directoryFd); } finally { closeSync(directoryFd); }
-    }
-  } catch (error) {
-    try { unlinkSync(temporary); } catch { /* Preserve the persistence error. */ }
-    throw error;
+  });
+  if (process.platform !== "win32") {
+    const directoryFd = openSync(directory, "r");
+    try { fsyncSync(directoryFd); } finally { closeSync(directoryFd); }
   }
 }
 

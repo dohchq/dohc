@@ -27,7 +27,7 @@ const sharedView = {
   grantedSelector: { paths: [], versionId: null, access: "view" as const },
 };
 
-async function harness(shared = false) {
+async function harness(shared = false, hooks: { disposeState?: () => void } = {}) {
   const rootPath = await createTestScratch("agent-runs-ipc-");
   const registry = createRegistryStore(join(rootPath, "registry.json"));
   const workspace: RegistryEntry = {
@@ -41,6 +41,7 @@ async function harness(shared = false) {
     findWorkspace: registry.find,
     canonicalizeRoot: (root: string) => root,
     createState: () => new AgentIntegrationState(),
+    ...(hooks.disposeState ? { disposeState: hooks.disposeState } : {}),
   });
   const held = authority.acquire(workspace.workspaceId);
   const physical = { ...workspace, attachmentId: held.binding.attachmentId };
@@ -97,7 +98,7 @@ async function harness(shared = false) {
   const shareAccess = vi.fn((_view: unknown) => "view" as const);
   const config = vi.fn((_root: string, _access: unknown) => ({ command: "dohc-mcp", args: ["--workspace", rootPath], workspacePath: rootPath, home: rootPath }));
   const handlers = new Map<string, (event: { sender: Sender }, payload: unknown) => unknown>();
-  const detection = vi.fn(async () => []);
+  const detection = vi.fn(async (_root: string, _signal?: AbortSignal) => []);
   const registrations = createAgentRunsIpc({
     detectAgentTools: detection,
     registerHandler: (channel, handler) => { if (handlers.has(channel)) throw new Error("duplicate registration"); handlers.set(channel, handler); },
@@ -158,11 +159,49 @@ describe("agent run IPC registrations", () => {
     const h = await harness();
     await expect(h.invoke(CHANNELS.detectAgentTools)).resolves.toEqual({ workingDirectory: h.workspace.rootPath, tools: [] });
     expect(h.detection).toHaveBeenCalledOnce();
-    expect(h.detection).toHaveBeenCalledWith(h.workspace.rootPath);
+    expect(h.detection).toHaveBeenCalledWith(h.workspace.rootPath, expect.any(AbortSignal));
     expect(h.activity).not.toHaveBeenCalled();
     await h.switchWorkspace();
     await expect(h.invoke(CHANNELS.detectAgentTools)).rejects.toThrow();
     expect(h.detection).toHaveBeenCalledOnce();
+  });
+
+  it("cancels admitted detection when its authority retires and disposes only after detection drains", async () => {
+    const order: string[] = [];
+    const h = await harness(false, { disposeState: () => { order.push("disposed"); } });
+    const entered = deferred<void>();
+    const drain = deferred<void>();
+    const cancellation = new Error("Agent detection was cancelled.");
+    let removeAbortListener = (): void => undefined;
+    h.detection.mockImplementation((_root, signal) => {
+      if (signal) {
+        const onAbort = (): void => { order.push("cancelled"); };
+        if (signal.aborted) onAbort();
+        else {
+          signal.addEventListener("abort", onAbort, { once: true });
+          removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+        }
+      }
+      entered.resolve();
+      return drain.promise.then(() => {
+        order.push("drained");
+        throw cancellation;
+      });
+    });
+    const outcome = h.invoke(CHANNELS.detectAgentTools).then(() => undefined, (reason: unknown) => reason);
+    let closing: Promise<void> | undefined;
+    try {
+      await entered.promise;
+      closing = h.authority.invalidate(h.workspace.workspaceId);
+      expect([...order]).toEqual(["cancelled"]);
+    } finally {
+      drain.resolve();
+      removeAbortListener();
+      await Promise.allSettled([outcome, ...(closing ? [closing] : [])]);
+    }
+    expect(await outcome).toBe(cancellation);
+    await closing;
+    expect(order).toEqual(["cancelled", "drained", "disposed"]);
   });
 
   it("rejects malformed payloads before workspace or session work", async () => {

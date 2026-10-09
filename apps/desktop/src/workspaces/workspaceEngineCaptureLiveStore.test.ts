@@ -367,7 +367,7 @@ describe("createCaptureLiveStores", () => {
               degraded: false,
               terminal: false,
               phase: "ready",
-              noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [],
+              noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [],
             }
           : { settled: false, running: true, degraded: true },
     }));
@@ -409,7 +409,7 @@ describe("createCaptureLiveStores", () => {
         controller.abort();
         return { id: request.id, result: {
           running: true, degraded: false, terminal: false, phase: "ready",
-          noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [],
+          noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [],
         } };
       }
       return { id: request.id, result: { settled: false, running: true, degraded: false } };
@@ -443,7 +443,7 @@ describe("createCaptureLiveStores", () => {
         result: request.method === WORKSPACE_METHOD.watcherStatus
           ? {
               running: true, degraded: false, terminal: false, phase: "ready",
-              noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [],
+              noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [],
             }
           : { settled: false, running: true, degraded: false },
       };
@@ -475,7 +475,7 @@ describe("createCaptureLiveStores", () => {
                 degraded: false,
                 terminal: false,
                 phase: "importing",
-                noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [],
+                noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [],
               }
             : { settled: false, running: true, degraded: false },
       };
@@ -1971,7 +1971,7 @@ describe("createCaptureLiveStores", () => {
     });
   });
 
-  it("keeps a live settle's origin on history moments and nowhere else", async () => {
+  it("keeps live and recovery origins on history moments and nowhere else", async () => {
     const client = clientFor(async (request) => {
       if (request.method === VERSIONED_METHOD.historyPage) {
         return {
@@ -1987,6 +1987,8 @@ describe("createCaptureLiveStores", () => {
             textMomentPage: {
               moments: [
                 { ...moment, metadataOrigin: "ydoc" },
+                { ...moment, momentId: "recovery", metadataOrigin: "capture-recovery" },
+                { ...moment, momentId: "cleared-recovery", metadataOrigin: "capture-recovery-cleared" },
                 { ...moment, momentOrder: 0, momentId: "captured", metadataOrigin: "capture" },
               ],
               nextBeforeMomentOrder: null,
@@ -2008,7 +2010,7 @@ describe("createCaptureLiveStores", () => {
     const page = await store.listHistoryPage({ workspaceId: WORKSPACE_ID, limit: 200 });
     expect(
       page.textMomentPage.moments.map((entry) => entry.metadata.origin),
-    ).toEqual(["ydoc", "local-file"]);
+    ).toEqual(["ydoc", "capture-recovery", "capture-recovery-cleared", "local-file"]);
     // A snapshot's metadata shares the write type, so no write can carry the
     // live origin forward.
     const read = await store.readTextFile({

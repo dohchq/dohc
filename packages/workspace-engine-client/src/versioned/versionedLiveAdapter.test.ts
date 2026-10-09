@@ -188,6 +188,7 @@ const WORKSPACE_REQUEST_CASES: WorkspaceRequestCase[] = [
   { method: WORKSPACE_METHOD.conflictsOpen, params: { conflict: {} } },
   { method: WORKSPACE_METHOD.conflictsResolve, params: { local: {} } },
   { method: WORKSPACE_METHOD.watcherStatus, params: {} },
+  { method: WORKSPACE_METHOD.captureClearRecovery, params: { momentId: "recovery" } },
   { method: WORKSPACE_METHOD.captureFlush, params: {} },
   { method: WORKSPACE_METHOD.captureSetAuthor, params: { author: null } },
 ];
@@ -365,8 +366,12 @@ const WORKSPACE_DECODER_CASES: Array<{
       degraded: false,
       terminal: false,
       phase: "ready",
-      noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [],
+      noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [],
     },
+  },
+  {
+    method: WORKSPACE_METHOD.captureClearRecovery,
+    valid: { cleared: true },
   },
   {
     method: WORKSPACE_METHOD.captureFlush,

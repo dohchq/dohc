@@ -8,6 +8,10 @@ type VersionedTextConflictId = string;
 
 export const MAX_VERSIONED_BINARY_FILE_BYTES = 5 * 1024 * 1024;
 
+export function isCaptureRecoveryOrigin(origin: string): boolean {
+  return origin === "capture-recovery" || origin === "capture-recovery-cleared";
+}
+
 /**
  * Opaque key-envelope relay contracts.
  *
@@ -104,7 +108,7 @@ export interface ActorNeutralWriteMetadata {
 // updates, so "ydoc" says how the change arrived, not who made it. Writes
 // take ActorNeutralWriteMetadata, so no write can claim it.
 export interface MomentMetadata extends Omit<ActorNeutralWriteMetadata, "origin"> {
-  origin: ActorNeutralWriteOrigin | "ydoc";
+  origin: ActorNeutralWriteOrigin | "ydoc" | "capture-recovery" | "capture-recovery-cleared";
 }
 
 // Optional authorship carried by a MOMENT (never by snapshot metadata, which

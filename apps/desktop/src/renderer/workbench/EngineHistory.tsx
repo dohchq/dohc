@@ -55,6 +55,11 @@ export function engineOriginLabel(origin: EngineMomentRecord["origin"]): string 
       return "dohc";
     case "ydoc":
       return "Live edit";
+    // Typing capture kept when its file changed outside dohc, in the words
+    // of its notice. Dismissing or restoring it leaves the same change.
+    case "capture-recovery":
+    case "capture-recovery-cleared":
+      return "Typing kept";
     default:
       return "Unknown source";
   }
@@ -198,7 +203,8 @@ function formatDay(recordedAtMs: number): { label: string; dateTime: string } {
   };
 }
 
-function MomentRow(props: {
+// One change in the timeline. The states page renders it too.
+export function MomentRow(props: {
   moment: EngineMomentRecord;
   nested?: boolean;
   onOpenMoment: (momentId: string, filePath: string) => void;

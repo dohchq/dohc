@@ -55,6 +55,11 @@ describe("engineOriginLabel", () => {
     expect(engineOriginLabel("ydoc")).toBe("Live edit");
     expect(engineOriginLabel("unknown")).toBe("Unknown source");
   });
+
+  it("names kept typing whether or not its notice is still open", () => {
+    expect(engineOriginLabel("capture-recovery")).toBe("Typing kept");
+    expect(engineOriginLabel("capture-recovery-cleared")).toBe("Typing kept");
+  });
 });
 
 // Agent-authored moments display as "the agent name" — the

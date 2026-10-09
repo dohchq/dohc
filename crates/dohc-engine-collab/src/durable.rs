@@ -2462,13 +2462,18 @@ pub fn local_close_is_covered(
         // and it needs no update when a future job kind is added.
         let job_pending: bool = store.read_with(|conn| {
             conn.query_row(
-                "SELECT EXISTS (SELECT 1 FROM materialization_jobs j \
+                concat!(
+                    "SELECT EXISTS (SELECT 1 FROM materialization_jobs j \
                  WHERE j.target_path = ( \
                      SELECT path FROM moments \
                       WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
+                        AND ",
+                    dohc_engine_domain::exclude_capture_recovery_sql!(),
+                    " \
                       ORDER BY moment_order DESC LIMIT 1) \
                    AND j.status = 'pending' \
-                   AND (j.workspace_id = ?1 OR j.workspace_id = ''))",
+                   AND (j.workspace_id = ?1 OR j.workspace_id = ''))"
+                ),
                 rusqlite::params![key.workspace_id, key.version_id, key.object_id],
                 |row| row.get(0),
             )

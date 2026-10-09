@@ -1,5 +1,6 @@
 import { ExternalLink, FileArchive, FileText, Lock, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { isCaptureRecoveryOrigin } from "@dohc/workspace-contracts/engine";
 import type { EngineMomentDetailRecord, HistoryPolicyUnreadableResult } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { HistoryHiddenState, HistoryUntrackedState } from "./HistoryPolicyStates";
@@ -8,6 +9,7 @@ import { ConfirmDialog } from "../ui/ConfirmDialog";
 import {OwnerRestoreDialog} from "../OwnerRestoreDialog";
 import type { StopTarget } from "../StopAndRestoreDialog";
 import { SectionLabel } from "../ui/controls";
+import { CopyButton } from "../ui/CopyButton";
 import {
   UnifiedDiffLines,
   buildUnifiedDiffLines,
@@ -82,7 +84,7 @@ export function EngineMomentDiffPage({
   onStopAndRestore: (target: StopTarget) => void;
   // A failed restore or undo goes to the shell's toast and Notices row. A
   // later success clears that row.
-  onError: (fallback: string, error: unknown, retry: () => void, identity: string) => void;
+  onError: (fallback: string, error: unknown, retry: () => void, identity: string, path: string) => void;
   onSettled: (identity: string) => void;
   // The shell's latest History answer. Each new one reads this change again,
   // because the rules that decide whether History shows it may have changed.
@@ -250,6 +252,7 @@ export function EngineMomentDiffPage({
         // before the restore, so it runs again as it is.
         kind === "undo" ? () => void runRestore(kind, target, path, token) : () => onReopenRestore(target, path),
         identity,
+        path,
       );
       if (live()) setRestoreState({ status: "idle" });
     } finally {
@@ -396,6 +399,8 @@ export function EngineMomentDiffPage({
       : moment.operation !== "delete" ||
         (restoreState.status === "restored" && restoreState.restored === "text");
   const diffLines: UnifiedDiffLine[] = prepared.lines;
+  // A recovery change's before side is the typing capture kept.
+  const keptTyping = isCaptureRecoveryOrigin(moment.origin) ? prepared.sides.before : undefined;
 
   const restoreFile = async () => {
     if (!canRestore || restoreBusy) return;
@@ -406,6 +411,7 @@ export function EngineMomentDiffPage({
     <section
       ref={pageRef}
       data-testid="engine-moment-diff-page"
+      data-moment-id={moment.id}
       className="flex min-h-0 flex-1 flex-col overflow-hidden bg-bg"
     >
       <header className="flex shrink-0 items-start gap-3 border-b border-line bg-panel px-4 py-3">
@@ -528,6 +534,12 @@ export function EngineMomentDiffPage({
               <span className="shrink-0 font-mono text-[11px] text-subtle">
                 +{counts.added} -{counts.removed}
               </span>
+            ) : null}
+            {/* Kept typing's way back into a file History Restore refuses:
+                the whole file as it was with the typing, to replace the
+                file's text with. */}
+            {keptTyping !== undefined ? (
+              <CopyButton label="Copy your version" testId="engine-diff-copy-typing" getText={() => keptTyping} />
             ) : null}
           </div>
           {isProtected ? (
