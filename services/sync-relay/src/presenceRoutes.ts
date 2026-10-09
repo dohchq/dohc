@@ -1,3 +1,4 @@
+import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { jsonResponse } from "@dohc/service-http";
 import {
   PresenceCapacityError,
@@ -11,7 +12,6 @@ import {
   chatSideOf,
   parseChatThreadTopic,
   targetVersionId,
-  visibleSharePath,
   type ChatShareThreadResolver,
 } from "./shareFilter";
 import type { AuthorizedShareAction } from "./shareAuthorization";

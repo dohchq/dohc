@@ -14,6 +14,7 @@ import * as Y from "yjs";
 import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import type {
   AgentRunStatusResult,
+  CaptureRecoveryStatusResult,
   ReadCrashReportResult,
   ListCollectionAutomationRunsResult,
   ListCollectionAutomationsResult,
@@ -632,6 +633,11 @@ function makeBaseBridge(
     }),
     listKeptCopies: vi.fn(async (): Promise<ListKeptCopiesResult> => ({ keptCopies: [], more: false })),
     saveKeptCopy: vi.fn(async () => ({ status: "gone" as const })),
+    // Typed to the contract: the capture recovery tests swap the answer.
+    getCaptureRecoveryStatus: vi.fn(
+      async (_payload: { workspaceId: string }): Promise<CaptureRecoveryStatusResult> => ({ captureRecoveries: [] }),
+    ),
+    clearCaptureRecovery: vi.fn(async (_payload: { workspaceId: string; momentId: string }): Promise<void> => undefined),
     retryAutomationNotice: vi.fn(
       async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false }),
     ),

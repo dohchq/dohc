@@ -229,7 +229,7 @@ import {
   readReceivedShareListing,
   reconcileRecipientSharesAfterLookup,
 } from "./workspaces/recipientShareReconciliation";
-import { createReceivedShareAcquisition, createReceivedShareStore } from "./workspaces/receivedShareStore";
+import { createReceivedShareAcquisition, createReceivedShareStore, listReceivedInventory } from "./workspaces/receivedShareStore";
 import { createShareRosters, rosterAuthorLabel, rosterPersonLabel } from "./automations/shareRoster";
 import { listRosterGrants, readStoredRoster } from "@dohc/automation-executor/roster-listing";
 import {
@@ -1400,7 +1400,9 @@ const receivedShareAcquisition = createReceivedShareAcquisition({
   list: async scope => {
     const credentials = cachedCredentials;
     if (!credentials || scope.generation !== credentialCacheGeneration) throw new Error("Server session changed.");
-    return relayShareJsonWithCredentials<unknown>(credentials, "/sync/shares");
+    return listReceivedInventory(path => relayShareJsonWithCredentials<unknown>(credentials, path), () => {
+      if (scope.generation !== credentialCacheGeneration) throw new Error("Server session changed.");
+    });
   },
   onLive: (inventory, _scope, isCurrent) => reconcileReceivedShares(inventory, isCurrent),
   logError: error => console.warn("[desktop] received share observation:", error),

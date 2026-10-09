@@ -148,7 +148,7 @@ describe("history diff page", () => {
     expect(screen.getByRole("status")).toBe(status);
     if (failure) {
       expect(status.textContent).toBe("");
-      expect(onError).toHaveBeenCalledWith("dohc could not restore notes/plan.md.", expect.any(Error), expect.any(Function), "history-restore:notes/plan.md");
+      expect(onError).toHaveBeenCalledWith("dohc could not restore notes/plan.md.", expect.any(Error), expect.any(Function), "history-restore:notes/plan.md", "notes/plan.md");
       return;
     }
     expect(onError).not.toHaveBeenCalled();

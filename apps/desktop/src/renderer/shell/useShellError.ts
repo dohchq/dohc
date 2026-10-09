@@ -17,10 +17,24 @@ export interface KeptCopyNotice {
   save: () => void;
 }
 
+// Typing capture kept in History when its file changed outside dohc, as its
+// Notices row reads. `raise` puts the row back, with its toast, in answer to
+// something the person just did.
+export interface CaptureRecoveryNotice {
+  momentId: string;
+  path: string;
+  title: string;
+  message: string;
+  raise: boolean;
+  open: () => void;
+  dismiss: () => void;
+}
+
 export type SettingsFileKind = "user-settings-file" | "workspace-settings-file";
 export type ShellErrorKind =
   | "typing-checkpoint"
   | "typing-import"
+  | "capture-recovery"
   | "live-edit-refused"
   | "chat-no-runner"
   | "chat-budget-paused"
@@ -54,7 +68,8 @@ const shareCaptureNotices = new Map<string, { key: string; dismissed: boolean }>
 // value the user can see owes them a way to ask again (AGENTS.md), so a
 // retry rides with it; errors that are already over carry none.
 export interface ShellError {
-  tone?: "success";
+  // Omitted for a failure. A warning needs the person, though nothing failed.
+  tone?: "success" | "warning";
   // A success toast that stays until it is closed, rather than fading.
   stays?: boolean;
   id: string;
@@ -103,6 +118,8 @@ export function useShellError(workspaceId: string) {
   // stays dismissed until the workspace opens again.
   const shownKeptCopies = useRef(new Set<number>());
   const shownKeptCopiesMore = useRef(false);
+  // Listed kept typing already shown in this workspace.
+  const shownCaptureRecoveries = useRef(new Set<string>());
 
   // A new error replaces an older one that says the same thing, or one of
   // the same kind, so a read that keeps failing is one row, not a pile.
@@ -217,6 +234,7 @@ export function useShellError(workspaceId: string) {
     setShellErrors([]);
     shownKeptCopies.current = new Set();
     shownKeptCopiesMore.current = false;
+    shownCaptureRecoveries.current = new Set();
     filedShareCapture.current = null;
   }, [workspaceId]);
 
@@ -511,6 +529,42 @@ export function useShellError(workspaceId: string) {
         : [...stays, ...added];
     });
   }, []);
+  // One row per kept typing the engine lists. One listed for the first time,
+  // or raised, arrives as a toast and replaces its row. Otherwise its row
+  // stays as it is, or stays dismissed, and one no longer listed goes.
+  const showCaptureRecoveries = useCallback((recoveries: readonly CaptureRecoveryNotice[]) => {
+    const identityOf = (momentId: string) => `capture-recovery:${momentId}`;
+    const listed = new Set(recoveries.map((recovery) => identityOf(recovery.momentId)));
+    for (const momentId of shownCaptureRecoveries.current) {
+      if (!listed.has(identityOf(momentId))) shownCaptureRecoveries.current.delete(momentId);
+    }
+    const atMs = Date.now();
+    const fresh = recoveries.flatMap((recovery): ShellError[] => {
+      if (shownCaptureRecoveries.current.has(recovery.momentId) && !recovery.raise) return [];
+      shownCaptureRecoveries.current.add(recovery.momentId);
+      nextId.current += 1;
+      return [{
+        id: `shell-error-${nextId.current}`,
+        identity: identityOf(recovery.momentId),
+        kind: "capture-recovery",
+        tone: "warning",
+        title: recovery.title,
+        message: recovery.message,
+        details: [["File", recovery.path, recovery.path.length], ["Change id", recovery.momentId]],
+        retry: null,
+        action: { label: "Open History", run: recovery.open },
+        onDismiss: recovery.dismiss,
+        atMs,
+        seen: false,
+      }];
+    });
+    const replaced = new Set(fresh.map((error) => error.identity));
+    setShellErrors((current) => {
+      const stays = current.filter((error) => error.kind !== "capture-recovery" ||
+        (listed.has(error.identity ?? "") && !replaced.has(error.identity)));
+      return fresh.length === 0 && stays.length === current.length ? current : [...stays, ...fresh];
+    });
+  }, []);
   // What a Save copy did: a saved copy's row opens the copy, and a copy
   // that was already gone says so.
   const showKeptCopySaved = useCallback(
@@ -571,6 +625,7 @@ export function useShellError(workspaceId: string) {
     showReportsNotice,
     showKeptCopies,
     showKeptCopySaved,
+    showCaptureRecoveries,
     hideShellError,
     dismissShellError,
     retryShellError,

@@ -1,8 +1,8 @@
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { deferred } from "../testing/deferred";
 import { createRegistryStore, type RegistryEntry } from "../workspaces/registryStore";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { checkAutomationReach, type ReachStep } from "@dohc/automation-executor/automation-reach";
 import { readSyncHistory, recordNeverSynced, recordSynced } from "../workspaces/syncHistory";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -27,9 +27,13 @@ import { listEngineMomentsForIpc } from "../ipc/engineHistoryIpc";
 const WORKSPACE = "ws-trip";
 const remote = { serverUrl: "https://server.dohc.test", ownerUserId: "u-owner" };
 
+const facts = { shareId: "s-1", generation: 1, status: "active" as const, granterUserId: "u-owner",
+  granterEmail: null, subjectName: null, sharerName: null };
+const { granterUserId, granterEmail, ...linkFacts } = facts;
+
 function row(overrides: Record<string, unknown> = {}) {
   return {
-    shareId: "s-1", workspaceId: WORKSPACE, grantId: "g-1", principalKind: "user", generation: 1,
+    ...facts, status: overrides.revokedAtMs ? "revoked" : "active", shareId: "s-1", workspaceId: WORKSPACE, grantId: "g-1", principalKind: "user", generation: 1,
     recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", createdAtMs: 1, revokedAtMs: null,
     selector: { paths: ["Trip"], versionId: null }, access: "edit", automationsGeneration: null, ...overrides,
   };
@@ -37,7 +41,7 @@ function row(overrides: Record<string, unknown> = {}) {
 
 function link(overrides: Record<string, unknown> = {}) {
   return {
-    grantId: "g-link", status: "active", selector: { paths: ["Trip"], versionId: null }, access: "edit", automationsGeneration: null,
+    ...linkFacts, grantId: "g-link", status: "active", selector: { paths: ["Trip"], versionId: null }, access: "edit", automationsGeneration: null,
     dependents: [{ grantId: "g-dep", recipientUserId: "u-ben", recipientEmail: "ben@dohc.test", access: "edit", generation: 1, createdAtMs: 1 }],
     ...overrides,
   };
@@ -46,12 +50,13 @@ function link(overrides: Record<string, unknown> = {}) {
 // A link's own grant, as the listing keeps it.
 function linkGrant(grantId: string, overrides: Record<string, unknown> = {}) {
   return {
-    grant: { grantId, recipientUserId: null, recipientEmail: null, selector: { paths: ["Trip"], versionId: null }, access: "edit" },
+    grant: { ...facts, status: overrides.ended ? "revoked" : "active", grantId, recipientUserId: null, recipientEmail: null, selector: { paths: ["Trip"], versionId: null }, access: "edit" },
     ended: false, automationsGeneration: null, ...overrides,
   } as ListedLink;
 }
 
 const ana: ListedGrant = {
+  ...facts,
   grantId: "g-1", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test",
   selector: { paths: ["Trip"], versionId: null }, access: "edit",
 };
@@ -67,7 +72,8 @@ function relay(pages: Record<string, Page>) {
     const page = pages[path];
     if (page === undefined) throw new Error(`unexpected ${path}`);
     if (page instanceof Error) throw page;
-    return page;
+    return page.body !== null && typeof page.body === "object" && "granted" in page.body
+      ? { ...page, body: { granterUserId, granterEmail, ...page.body } } : page;
   });
 }
 
@@ -101,7 +107,7 @@ describe("roster from the relay's listings", () => {
     expect(listing.grants?.map((grant) => grant.grantId)).toEqual(["g-1", "g-2", "g-3", "g-4", "g-5", "g-6"]);
     // The revoked grant stays only as its person, which reach below never reads.
     expect(listing.grants !== null && listing.endedGrants)
-      .toEqual([{ grantId: "g-revoked", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test" }]);
+      .toEqual([{ ...facts, status: "revoked", grantId: "g-revoked", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test" }]);
     const entry: RegistryEntry = { workspaceId: WORKSPACE, rootPath: "/trip", kind: "personal", mode: "local-first", remote };
     expect(reachRosterFor({ entry, localUserId: null, localPersonId: null, history: null, latest: listing, next: "" })).toEqual({
       kind: "owner", ownerUserId: "u-owner", grants: [
@@ -116,7 +122,7 @@ describe("roster from the relay's listings", () => {
     });
   });
 
-  it("lists each active Edit link as its own grant, and every active link's dependents like named grants", async () => {
+  it("lists each active link as its own grant, and every active link's dependents like named grants", async () => {
     expect(await listed({ granted: [] }, [
       link(),
       link({ grantId: "g-view", access: "view", dependents: [] }),
@@ -125,10 +131,11 @@ describe("roster from the relay's listings", () => {
       link({ grantId: "g-revoked-damaged", status: "revoked", selector: null, access: "unknown" }),
     ])).toEqual({
       grants: [{
-        grantId: "g-dep", recipientUserId: "u-ben", recipientEmail: "ben@dohc.test",
+        ...facts, grantId: "g-dep", recipientUserId: "u-ben", recipientEmail: "ben@dohc.test",
         selector: { paths: ["Trip"], versionId: null }, access: "edit",
       }],
-      links: [linkGrant("g-link")],
+      links: [linkGrant("g-comment", { grant: { ...linkGrant("g-comment").grant, access: "comment" } }),
+        linkGrant("g-link"), linkGrant("g-view", { grant: { ...linkGrant("g-view").grant, access: "view" } })],
       formerGrants: [], endedGrants: [],
     });
   });
@@ -216,10 +223,10 @@ describe("roster from the relay's listings", () => {
       links: [],
       formerGrants: [
         { grant: { ...ana, grantId: "g-narrowed", access: "view" }, automationsGeneration: 1 },
-        { grant: { ...ana, grantId: "g-revoked" }, automationsGeneration: 2 },
+        { grant: { ...ana, status: "revoked", grantId: "g-revoked" }, automationsGeneration: 2 },
       ],
       // A revoked grant that never wrote automations names its person for History only.
-      endedGrants: [{ grantId: "g-revoked-idle", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test" }],
+      endedGrants: [{ ...facts, status: "revoked", grantId: "g-revoked-idle", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test" }],
     });
     // A revoked grant that wrote automations but cannot be read, or says it
     // did and covers no files, fails closed.
@@ -492,6 +499,20 @@ describe("keeping the roster current", () => {
     now += SHARE_ROSTER_FRESH_MS * 5;
     expect(await r.forRun(WORKSPACE)).toEqual(cached);
     expect(list, "a run waited on a relay that already failed").toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the roster version and file bytes when the owner-email acquisition fails", async () => {
+    seed();
+    const before = store.find(WORKSPACE)?.shareRoster;
+    const directory = join(dirname(store.registryFile), "share-rosters");
+    const files = await readdir(directory);
+    const bytes = await Promise.all(files.map(file => readFile(join(directory, file), "utf8")));
+    const get = relay({ "/sync/shares?workspaceId=ws-trip": { status: 500, body: { ok: false } } });
+    const { rosters: r, saveRoster } = rosters(() => listRosterGrants(WORKSPACE, get));
+    expect(await r.forRun(WORKSPACE)).toEqual(cached);
+    expect(saveRoster).not.toHaveBeenCalled();
+    expect(store.find(WORKSPACE)?.shareRoster).toEqual(before);
+    expect(await Promise.all(files.map(file => readFile(join(directory, file), "utf8")))).toEqual(bytes);
   });
 
   it("keeps the cache while this computer sends no pull", async () => {
@@ -824,15 +845,15 @@ describe("a direct write's author in History", () => {
     rosterAuthorLabel(readStoredRoster(saved), author);
 
   const grant = (grantId: string, recipientUserId: string | null, recipientEmail: string | null, access: "view" | "edit") =>
-    ({ grantId, recipientUserId, recipientEmail, selector: { paths: ["trip"], versionId: null }, access }) as ListedGrant;
+    ({ ...facts, grantId, recipientUserId, recipientEmail, selector: { paths: ["trip"], versionId: null }, access }) as ListedGrant;
   const roster = { version: 1, listedAtMs: 0, grants: [grant("g-1", "ana", "ana@example.com", "edit"), grant("g-2", "ben", "ben@example.com", "view")], links: [], formerGrants: [], endedGrants: [] };
 
   it("names a Button presser by active, former, then ended grants, with no opaque-id fallback", () => {
     const listing = { ...roster,
       formerGrants: [{ grant: grant("old", "ana", "old@example.com", "edit"), automationsGeneration: 1 },
         { grant: grant("former", "cy", "cy@example.com", "edit"), automationsGeneration: 1 }],
-      endedGrants: [{ grantId: "ended", recipientUserId: "cy", recipientEmail: "older@example.com" },
-        { grantId: "last", recipientUserId: "dee", recipientEmail: "dee@example.com" }],
+      endedGrants: [{ ...facts, status: "revoked" as const, grantId: "ended", recipientUserId: "cy", recipientEmail: "older@example.com" },
+        { ...facts, status: "revoked" as const, grantId: "last", recipientUserId: "dee", recipientEmail: "dee@example.com" }],
     };
     expect(rosterPersonLabel(listing, "ana")).toBe("ana@example.com");
     expect(rosterPersonLabel(listing, "cy")).toBe("cy@example.com");

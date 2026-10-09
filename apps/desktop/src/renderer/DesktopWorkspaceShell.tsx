@@ -88,6 +88,7 @@ import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useKeptCopyNotices } from "./shell/useKeptCopyNotices";
+import { useCaptureRecoveryNotices } from "./shell/useCaptureRecoveryNotices";
 import { ShellErrorReporter, useShellError } from "./shell/useShellError";
 import { useDocumentSaveNotices } from "./shell/useDocumentSaveNotices";
 import { useReportsNotice } from "./shell/useReportsNotice";
@@ -806,6 +807,7 @@ export function DesktopWorkspaceShell(props: {
     showReportsNotice,
     showKeptCopies,
     showKeptCopySaved,
+    showCaptureRecoveries,
     showDirectWriteNotice,
     dismissShellError,
     retryShellError,
@@ -2086,7 +2088,7 @@ export function DesktopWorkspaceShell(props: {
     },
     [openFile],
   );
-  useDocumentSaveNotices({ workspaceId, report: reportShellFailure, clear: clearIdentity, open: openPathWithHeading });
+  const failedSaves = useDocumentSaveNotices({ workspaceId, report: reportShellFailure, clear: clearIdentity, open: openPathWithHeading });
   // A document too large for live editing. The folder holds only the active
   // version's files, so it opens only when the refusal names that version;
   // otherwise the notice names the version to switch to. The path comes from
@@ -2506,11 +2508,42 @@ export function DesktopWorkspaceShell(props: {
     },
     [refreshFiles, refreshHistory, reportShellError, workspaceId],
   );
-  // One row per file in Notices: a newer failure for the file replaces it.
+  const openHistoryView = useCallback(() => {
+    mutateWb((state) => ({
+      ...setView(state, "history"),
+      sidebarVisible: true,
+    }));
+  }, [mutateWb]);
+  // Open History shows the timeline with the recovery change open beside it.
+  const openCaptureRecovery = useCallback(
+    (momentId: string, path: string) => {
+      openHistoryView();
+      openMomentDiffTab(momentId, path);
+    },
+    [openHistoryView, openMomentDiffTab],
+  );
+  const captureRecoveries = useCaptureRecoveryNotices({
+    workspaceId,
+    workspaceIsReady: workspaceIsReady && !shareView,
+    show: showCaptureRecoveries,
+    reportShellError,
+    openRecovery: openCaptureRecovery,
+  });
+  // A History Restore of kept typing clears it in the engine, so the next
+  // read drops its row.
+  const onHistoryRestored = useCallback(() => {
+    refreshAfterHistoryRestore();
+    void captureRecoveries.refresh();
+  }, [captureRecoveries, refreshAfterHistoryRestore]);
+  // One row per file in Notices: a newer failure for the file replaces it. A
+  // shared live file's refusal goes to its kept typing's row instead, which
+  // then says to replace the file's text with the kept version.
   const reportRestoreError = useCallback(
-    (fallback: string, error: unknown, retry: () => void, identity: string) =>
-      reportShellError(fallback, error, retry, undefined, identity),
-    [reportShellError],
+    (fallback: string, error: unknown, retry: () => void, identity: string, path: string) => {
+      if (captureRecoveries.restoreRefused(path, error)) return;
+      reportShellError(fallback, error, retry, undefined, identity);
+    },
+    [captureRecoveries, reportShellError],
   );
   // Try again on a failed restore opens the change's tab, and that page asks
   // before it restores, with its Undo restore after.
@@ -3073,12 +3106,6 @@ export function DesktopWorkspaceShell(props: {
       reportShellError("Could not refresh workspace files.", error),
     );
   }, [refreshFiles, reportShellError]);
-  const openHistoryView = useCallback(() => {
-    mutateWb((state) => ({
-      ...setView(state, "history"),
-      sidebarVisible: true,
-    }));
-  }, [mutateWb]);
   const checkForDesktopUpdates = useCallback(async () => {
     try {
       const result = await bridge().checkForUpdates();
@@ -3513,6 +3540,8 @@ export function DesktopWorkspaceShell(props: {
           if (!workspaceAdmission.superseded) reportShellError("Could not read Collections.", error);
         });
         void refreshKeptCopies();
+        // Capture records kept typing in the batch that took the outside text.
+        void captureRecoveries.refresh();
       }
     });
     const unsubscribe = bridge().onWorkspaceActivity(
@@ -3548,6 +3577,7 @@ export function DesktopWorkspaceShell(props: {
     refreshCollections,
     refreshDatasets,
     refreshKeptCopies,
+    captureRecoveries,
     hasCommittedListing,
   ]);
 
@@ -4513,7 +4543,7 @@ export function DesktopWorkspaceShell(props: {
         ...(error.title ? { title: error.title } : {}),
         ...(error.kind === "share-capture" ? { filePaths: error.details?.map(detail => String(detail[1])) ?? [], copyLabel: "Copy file paths" } : {}),
         details: error.kind === "share-capture" ? (error.details ?? []).map(detail => String(detail[1])).join("\n") : errorDetails([
-          [error.tone === "success" ? "Notice" : "Error", error.message],
+          [error.tone ? "Notice" : "Error", error.message],
           ...(error.title ? [["Title", error.title] as const] : []),
           ...(error.details ?? []),
           ...reportFacts(),
@@ -4722,6 +4752,7 @@ export function DesktopWorkspaceShell(props: {
         setOpenShare={setOpenShare}
         setQuickOpenOpen={setQuickOpenOpen}
         syncStatus={syncStatus}
+        failedSaves={failedSaves}
         showWorkbenchMenu={showWorkbenchMenu}
         agentActive={agentActive}
         wb={wb}
@@ -5167,7 +5198,7 @@ export function DesktopWorkspaceShell(props: {
                   onOpenFile={openFile}
                   onPathResolved={resolveMomentDiffPath}
                   registerActiveUndo={editorCallbacks?.registerActiveUndo ?? (() => undefined)}
-                  onRestored={refreshAfterHistoryRestore}
+                  onRestored={onHistoryRestored}
                   onStopAndRestore={stopAndRestore.open}
                   onError={reportRestoreError}
                   onSettled={clearIdentity}

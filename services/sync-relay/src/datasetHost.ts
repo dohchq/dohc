@@ -1,3 +1,4 @@
+import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { createDatasetAutomations, createDatasetAutomationAuthority } from "./datasetAutomations";
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -20,7 +21,7 @@ import { requireLinkAppPublication } from "./storage/publications";
 import { readCurrentShareGrant } from "./storage/currentShareGrant";
 import { readLinkEnrollment, linkWriteRefusal } from "./storage/linkEnrollment";
 import { authorizeShareGrantAction, authorizeShareAction } from "./shareAuthorization";
-import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionId, visibleSharePath } from "./shareFilter";
+import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionId } from "./shareFilter";
 import { notFound, relayError } from "./errors";
 import { createDatasetFiles } from "./storage/datasetFiles";
 import { createDatasetRecoveryFiles } from "./storage/datasetRecoveryFiles";

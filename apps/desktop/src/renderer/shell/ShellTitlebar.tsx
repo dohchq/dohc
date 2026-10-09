@@ -14,6 +14,7 @@ export function ShellTitlebar(props: {
   setOpenShare: (share: "blank") => void;
   setQuickOpenOpen: (open: boolean) => void;
   syncStatus: SyncStatusResult | null;
+  failedSaves: number;
   showWorkbenchMenu: (context: "status") => Promise<void>;
   agentActive: boolean;
   wb: WorkbenchState;
@@ -25,6 +26,7 @@ export function ShellTitlebar(props: {
     setOpenShare,
     setQuickOpenOpen,
     syncStatus,
+    failedSaves,
     showWorkbenchMenu,
     agentActive,
     wb,
@@ -39,7 +41,7 @@ export function ShellTitlebar(props: {
       onOpenShare={() => setOpenShare("blank")}
       onManageWorkspaces={props.onManageWorkspaces ? manageWorkspaces : undefined}
       onQuickOpen={() => setQuickOpenOpen(true)}
-      workspaceStatus={<WorkspaceSyncStatus syncStatus={syncStatus} />}
+      workspaceStatus={<WorkspaceSyncStatus syncStatus={syncStatus} failedSaves={failedSaves} />}
       onWorkspaceContextMenu={() => void showWorkbenchMenu("status")}
       agentActive={agentActive}
       primarySidebar={{
