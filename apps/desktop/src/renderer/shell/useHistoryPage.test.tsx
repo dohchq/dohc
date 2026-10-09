@@ -732,3 +732,27 @@ it("never appends an old pagination after a policy refusal hides the page", asyn
   expect(it0.hook().page).toBeNull();
   expect(it0.hook().policyError).toMatchObject({ status: "policy-unreadable" });
 });
+
+
+it("re-reads cached names and ignores a late naming answer after a workspace switch", async () => {
+  let notify!: (event: { workspaceId: string }) => void;
+  window.dohcDesktop!.onHistoryNamesChanged = listener => { notify = listener; return () => {}; };
+  const issue = { current: 0 };
+  const ready = () => {};
+  const view = renderHook(({ workspaceId }) => useHistoryPage(issue, workspaceId, ready), { initialProps: { workspaceId: "ws-1" } });
+  let first!: Promise<void>;
+  act(() => { first = view.result.current.refresh(++issue.current); });
+  await settle(reads[0]!, page("old")); await first;
+  act(() => notify({ workspaceId: "ws-1" }));
+  expect(reads).toHaveLength(2);
+  await settle(reads[1]!, { ...page("old"), moments: [{ ...moment("old"), namedAuthor: { userId: "ben", label: "ben@test.example (via share link)" } }] });
+  expect(view.result.current.page?.moments[0]?.namedAuthor?.label).toContain("via share link");
+  act(() => notify({ workspaceId: "ws-1" }));
+  const late = reads[2]!;
+  view.rerender({ workspaceId: "ws-2" });
+  let next!: Promise<void>;
+  act(() => { next = view.result.current.refresh(++issue.current); });
+  await settle(reads[3]!, page("new")); await next;
+  await settle(late, page("late-old"));
+  expect(view.result.current.page?.moments.map(moment => moment.id)).toEqual(["new"]);
+});

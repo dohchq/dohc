@@ -29,7 +29,7 @@ export function createShareInventoryRoutes(
     | "findChannelCreateKind"
     | "workspaceIsOwnedBy"
     | "listLinkGrantsByWorkspace"
-    | "listEndedLinkHoldersByWorkspace"
+    | "lookupHistoryAccounts"
     | "listActiveIndependentShareGrants"
   >,
   nowMs: () => number,
@@ -43,6 +43,7 @@ export function createShareInventoryRoutes(
   publicEditRelease?: PublicEditRelease,
   senderLabel?: (userId: string, email: string | null) => Promise<string>,
   accessRateLimiter = new TokenBucketLimiter(30, 1, 10_000),
+  lookupUserEmails?: (userIds: readonly string[]) => Promise<ReadonlyMap<string, string>>,
 ) {
   async function receivedSummaries(rows: readonly SyncRelayShareWithGrantRow[], actorUserId: string) {
     const receivedLookups = await Promise.all(rows.map(async fallback => {
@@ -171,8 +172,6 @@ export function createShareInventoryRoutes(
     const url = new URL(request.url);
     if (
       url.searchParams.getAll("cursor").length > 1 ||
-      url.searchParams.getAll("endedHolderCursor").length > 1 ||
-      url.searchParams.getAll("history").length > 1 ||
       url.searchParams.getAll("independentGrantCursor").length > 1
     ) {
       throw badRequest("cursor is invalid");
@@ -183,17 +182,15 @@ export function createShareInventoryRoutes(
     const independentGrantCursor = independentGrantInventoryCursor.decode(
       url.searchParams.get("independentGrantCursor"),
     );
-    const endedHolderCursor = endedHolderInventoryCursor.decode(url.searchParams.get("endedHolderCursor"));
-    const history = url.searchParams.get("history");
-    if (history !== null && history !== "true") throw badRequest("history is invalid");
-    if (endedHolderCursor && history === null || history !== null && (linkCursor || independentGrantCursor)) throw badRequest("cursor is invalid");
-    if (history === "true") {
-      const endedPage = storage.listEndedLinkHoldersByWorkspace(workspaceId, endedHolderCursor);
-      const endedLinks = await Promise.all(endedPage.links.map(linkInventorySummary));
+    const grantIds = [...new Set(url.searchParams.getAll("historyGrantId"))];
+    const userIds = [...new Set(url.searchParams.getAll("historyUserId"))];
+    if (grantIds.length || userIds.length) {
+      if (url.searchParams.getAll("historyGrantId").length + url.searchParams.getAll("historyUserId").length > 200 || [...grantIds, ...userIds].some(id => id.length === 0 || id.length > 256)
+        || linkCursor || independentGrantCursor) throw badRequest("History lookup ids are invalid");
+      const accounts = storage.lookupHistoryAccounts(workspaceId, grantIds, userIds);
+      const emails = accounts.length ? await lookupUserEmails?.([...new Set(accounts.map(account => account.recipientUserId))]) : undefined;
       if (!storage.workspaceIsOwnedBy(workspaceId, actor.userId)) throw notFound();
-      return jsonResponse({ ok: true, endedLinks,
-        ...(endedPage.nextCursor ? { nextEndedHolderCursor: endedHolderInventoryCursor.encode(endedPage.nextCursor) } : {}),
-      });
+      return jsonResponse({ ok: true, holders: accounts.map(account => ({ ...account, recipientEmail: emails?.get(account.recipientUserId) ?? null })) });
     }
     const page = storage.listLinkGrantsByWorkspace(
       workspaceId,
@@ -241,7 +238,6 @@ const linkInventoryCursor = cursorCodec<SyncRelayLinkInventoryCursor>(
   { shareCreatedAtMs: "ms", shareId: "id", linkCreatedAtMs: "ms", grantId: "id" },
   "cursor",
 );
-const endedHolderInventoryCursor = cursorCodec<SyncRelayGrantedInventoryCursor>({ grantId: "id" }, "endedHolderCursor");
 const independentGrantInventoryCursor = cursorCodec<SyncRelayIndependentGrantInventoryCursor>(
   { shareId: "id", grantCreatedAtMs: "ms", grantId: "id" },
   "independentGrantCursor",

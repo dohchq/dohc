@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {checkAutomationReach, type ReachStep} from "./automationReach";
-import { listRosterGrants, listEndedLinkHolders, ownerRoster, readStoredRoster } from "./rosterListing";
+import { listRosterGrants, lookupHistoryAccounts, ownerRoster, readStoredRoster } from "./rosterListing";
 
 const WORKSPACE = "ws-trip";
 
@@ -55,35 +55,19 @@ describe("listing from the relay", () => {
       formerGrants: [], endedGrants: [],
     } });
   });
-  it("pages ended holders of active and ended links into History alone", async () => {
-    const ended = (id: string, status: string) => link({ status,
-      dependents: [{ grantId: id, recipientUserId: id, recipientEmail: id, access: "edit", generation: 2, status: "revoked" }] });
-    const get = relay({
-      "/sync/ws-trip/shares/links?history=true": { status: 200, body: { endedLinks: [ended("first", "active")], nextEndedHolderCursor: "page 2" } },
-      "/sync/ws-trip/shares/links?history=true&endedHolderCursor=page%202": { status: 200, body: { endedLinks: [ended("last", "revoked")] } },
-    });
-    const holders = await listEndedLinkHolders(WORKSPACE, get);
-    expect(holders?.map(grant => grant.grantId)).toEqual(["first", "last"]);
-    expect(get.mock.calls.map(([path]) => path)).toEqual(["/sync/ws-trip/shares/links?history=true", "/sync/ws-trip/shares/links?history=true&endedHolderCursor=page%202"]);
+  it("looks up only requested accounts and grants in one bounded request", async () => {
+    const get = relay({ "/sync/ws-trip/shares/links?historyGrantId=g-dep&historyUserId=u-ben": { status: 200, body: { holders: [{ grantId: "g-dep", recipientUserId: "u-ben", recipientEmail: "ben@test.example", parentGrantId: "g-link" }] } } });
+    expect(await lookupHistoryAccounts(WORKSPACE, get, { grantIds: ["g-dep"], userIds: ["u-ben"] })).toHaveLength(1);
+    expect(get).toHaveBeenCalledTimes(1);
   });
-
-  it("rejects active holders injected into a history page", async () => {
-    const get = relay({
-      "/sync/ws-trip/shares/links?history=true": { status: 200, body: { endedLinks: [link({ dependents: [{ grantId: "active", recipientUserId: "active", recipientEmail: "Ben", access: "edit", generation: 1, status: "active" }] })] } },
-    });
-    expect(await listEndedLinkHolders(WORKSPACE, get)).toBeNull();
+  it("rejects oversized lookups and unsolicited identities", async () => {
+    const get = vi.fn(async () => ({ status: 200, body: { holders: [{ grantId: "other", recipientUserId: "other", recipientEmail: "other@test.example", parentGrantId: "g-link" }] } }));
+    expect(await lookupHistoryAccounts(WORKSPACE, get, { grantIds: Array(201).fill("g"), userIds: [] })).toBeNull();
+    expect(get).not.toHaveBeenCalled();
+    expect(await lookupHistoryAccounts(WORKSPACE, get, { grantIds: ["g-dep"], userIds: [] })).toBeNull();
   });
-
-  it("rejects looping and unavailable ended-holder pages", async () => {
-    const first = {
-      "/sync/ws-trip/shares/links?history=true": { status: 200, body: { endedLinks: [], nextEndedHolderCursor: "again" } },
-    };
-    expect(await listEndedLinkHolders(WORKSPACE, relay({ ...first,
-      "/sync/ws-trip/shares/links?history=true&endedHolderCursor=again": { status: 200, body: { endedLinks: [], nextEndedHolderCursor: "again" } },
-    }))).toBeNull();
-    expect(await listEndedLinkHolders(WORKSPACE, relay({ ...first,
-      "/sync/ws-trip/shares/links?history=true&endedHolderCursor=again": serverDown,
-    }))).toBeNull();
+  it("keeps unavailable lookups out of the roster", async () => {
+    expect(await lookupHistoryAccounts(WORKSPACE, async () => serverDown, { grantIds: ["g-dep"], userIds: [] })).toBeNull();
   });
   const noLinks = { "/sync/ws-trip/shares/links": { status: 200, body: { links: [], formerGrants: [] } } };
 

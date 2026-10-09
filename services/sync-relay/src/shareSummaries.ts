@@ -181,7 +181,6 @@ export function createShareSummaries(
     access: string;
     generation: number;
     createdAtMs: number;
-    status?: string;
   }): Promise<Record<string, unknown>> => {
     let recipientEmail: string | null = null;
     if (lookupUserEmail && grant.principalUserId) {
@@ -198,7 +197,6 @@ export function createShareSummaries(
       access: grant.access,
       generation: grant.generation,
       createdAtMs: grant.createdAtMs,
-      ...(grant.status === "revoked" ? { status: "revoked" } : {}),
     };
   };
 

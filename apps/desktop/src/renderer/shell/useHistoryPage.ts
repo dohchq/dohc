@@ -351,5 +351,38 @@ export function useHistoryPage(
     [issue],
   );
 
+  const [namesRevision, setNamesRevision] = useState({ workspaceId, value: 0 });
+  const namedPage = useRef<{ revision: number; page: HistoryPage } | null>(null);
+  useEffect(() => bridge().onHistoryNamesChanged?.(event => {
+    if (event.workspaceId === workspaceId) setNamesRevision(previous => ({ workspaceId, value: previous.workspaceId === workspaceId ? previous.value + 1 : 1 }));
+  }), [workspaceId]);
+  useEffect(() => {
+      const shown = latestPage.current;
+      if (namesRevision.workspaceId !== workspaceId || !namesRevision.value || shown === null || shown.moments.length === 0 || namedPage.current?.revision === namesRevision.value && namedPage.current.page === shown) return;
+      let liveRequest = true;
+      const watermark = committed.current;
+      const version = committedVersionId.current;
+      const live = () => liveRequest && latestPage.current === shown && committed.current === watermark && committedVersionId.current === version;
+      void (async () => {
+        const named = new Map<string, EngineMomentRecord>();
+        let before = Math.max(...shown.moments.map(moment => moment.momentOrder)) + 1;
+        const last = Math.min(...shown.moments.map(moment => moment.momentOrder));
+        do {
+          const response = await bridge().listEngineMoments({ workspaceId, beforeMomentOrder: before, limit: HISTORY_PAGE_LIMIT });
+          if (!live() || "status" in response || response.activeVersionId !== version) return;
+          for (const moment of response.moments) named.set(moment.id, moment);
+          if (response.nextBeforeMomentOrder === null || response.nextBeforeMomentOrder <= last) break;
+          if (response.nextBeforeMomentOrder >= before) return;
+          before = response.nextBeforeMomentOrder;
+        } while (live());
+        if (!live()) return;
+        const next = { ...shown, moments: shown.moments.map(moment => named.get(moment.id) ?? moment) };
+        latestPage.current = next;
+        namedPage.current = { revision: namesRevision.value, page: next };
+        setPageState(next);
+      })().catch(() => undefined);
+    return () => { liveRequest = false; };
+  }, [workspaceId, owner, page, namesRevision]);
+
   return { page, loadingMore, readState, policyError, ...owner };
 }

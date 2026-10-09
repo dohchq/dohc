@@ -361,3 +361,19 @@ describe("RecordHistoryDialog", () => {
     expect(groups.map((group) => group.changes.map((change) => change.historyId))).toEqual([[5, 4], [3], [2], [1], [0]]);
   });
 });
+
+
+it("updates an automation presser from the background account cache", async () => {
+  let notify!: (event: { workspaceId: string }) => void;
+  let named = false;
+  const read = vi.fn(async () => ({ entries: [entry(1, { kind: "automation" as const, automationId: STAMP, name: "Stamp", run: null, person: named ? "ben@test.example (via share link)" : "Someone you shared with" })], nextBeforeHistoryId: null }));
+  vi.stubGlobal("dohcDesktop", { getCollectionRecordHistory: read, locateRecordHistoryRun: vi.fn(), onHistoryNamesChanged: (listener: typeof notify) => { notify = listener; return () => {}; } });
+  render(dialog());
+  await screen.findByText(/Someone you shared with/);
+  named = true;
+  act(() => notify({ workspaceId: "other-workspace" }));
+  expect(read).toHaveBeenCalledTimes(1);
+  act(() => notify({ workspaceId: "ws-1" }));
+  await screen.findByText(/ben@test.example/);
+  expect(read).toHaveBeenCalledTimes(2);
+});

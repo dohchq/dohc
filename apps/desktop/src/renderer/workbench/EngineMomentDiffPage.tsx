@@ -105,6 +105,9 @@ export function EngineMomentDiffPage({
   >({ status: "loading" });
   // Bumped by Try again on a hidden or untracked page, to read the change again.
   const [readAttempt, setReadAttempt] = useState(0);
+  useEffect(() => bridge().onHistoryNamesChanged?.(event => {
+    if (event.workspaceId === workspaceId) setReadAttempt(attempt => attempt + 1);
+  }), [workspaceId]);
   const [restoreState, setRestoreState] = useState<
     | { status: "idle" }
     | { status: "restoring" }
@@ -164,7 +167,7 @@ export function EngineMomentDiffPage({
         // diff already built for it.
         setState((current) =>
           current.status === "ready" && next !== null && current.moment?.id === next.id
-            ? current
+            ? { ...current, moment: { ...current.moment!, namedAuthor: next.namedAuthor } }
             : { status: "ready", moment: next });
       })
       .catch(() => {

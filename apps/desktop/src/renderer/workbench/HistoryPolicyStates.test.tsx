@@ -363,3 +363,18 @@ describe("a History diff the rules hide", () => {
     expect(screen.getByTestId("engine-diff-restore-status").textContent).toBe("Undid the restore. This was recorded in history.");
   });
 });
+
+
+it("refreshes a diff's account name without waiting on the server", async () => {
+  let notify!: (event: { workspaceId: string }) => void;
+  let named = false;
+  const read = vi.fn(async () => ({ moment: { ...moment(), namedAuthor: { userId: "ben", label: named ? "ben@test.example (via share link)" : "Someone you shared with" } } }));
+  const page = renderPage(read);
+  window.dohcDesktop!.onHistoryNamesChanged = listener => { notify = listener; return () => {}; };
+  // Subscribe on the new workspace, under the same read token used by the diff.
+  page.update({ workspaceId: "ws-names" });
+  await screen.findByText(/Someone you shared with/);
+  named = true;
+  act(() => notify({ workspaceId: "ws-names" }));
+  await screen.findByText(/ben@test.example/);
+});

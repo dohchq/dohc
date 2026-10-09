@@ -234,7 +234,7 @@ import {
 } from "./workspaces/recipientShareReconciliation";
 import { createReceivedShareAcquisition, createReceivedShareStore, listReceivedInventory } from "./workspaces/receivedShareStore";
 import { createShareRosters, createHistoryLabels } from "./automations/shareRoster";
-import { listRosterGrants, listEndedLinkHolders } from "@dohc/automation-executor/roster-listing";
+import { listRosterGrants, lookupHistoryAccounts } from "@dohc/automation-executor/roster-listing";
 import {
   CollectionAutomations,
   type CollectionAutomationsOptions,
@@ -1523,15 +1523,19 @@ function historyLabelsFor(sender: WebContents): ReturnType<typeof createHistoryL
         owner: !sender.isDestroyed() && !!workspace?.remote && !workspace.shareView && cachedCredentials?.userId === workspace.remote.ownerUserId,
         context: rosterContext(workspaceId), inventory: workspace?.shareRoster?.version };
     },
-    listHolders: async (workspaceId) => {
+    ready: workspaceId => {
+      if (!sender.isDestroyed() && rendererWorkspaceSessions.current(sender)?.workspaceId === workspaceId) sender.send(CHANNELS.historyNamesChanged, { workspaceId });
+    },
+    lookupAccounts: async (workspaceId, ids) => {
       const workspace = findWorkspace(workspaceId);
       if (!workspace?.remote || workspace.shareView) return null;
+      await warmCredentialCache();
       const { credentials } = await remoteForWorkspace(workspace);
       if (credentials.userId !== workspace.remote.ownerUserId) return null;
-      return listEndedLinkHolders(workspaceId, async path => {
+      return lookupHistoryAccounts(workspaceId, async path => {
         const response = await relayShareResponseWithCredentials(credentials, path, { method: "GET" });
         return { status: response.status, body: await response.json().catch(() => undefined) };
-      });
+      }, ids);
     },
   });
   if (!sender.isDestroyed()) {
@@ -5765,22 +5769,20 @@ function registerIpcHandlers(): void {
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
     withEngineAdapter, requireEngineCapture, readWorkspaceEnginePolicy, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
     localPersonName: localUserDisplayName, localPerson,
-    automationPersonName: async (workspaceId, userId, sender) => {
+    automationPersonName: (workspaceId, userId, sender) => {
       const workspace = findWorkspace(workspaceId);
       if (userId === (workspace?.remote?.ownerUserId ?? localUserId())) return null;
-      await warmCredentialCache().catch(() => undefined);
       const historyLabels = historyLabelsFor(sender);
-      await historyLabels.prepare(workspaceId, [{ userId }]);
+      historyLabels.prepare(workspaceId, [{ userId }]);
       return historyLabels.person(workspaceId, userId);
     },
     namedAuthorLabels: (workspaceId, sender) => {
       const historyLabels = historyLabelsFor(sender);
       return {
-        prepare: async authors => {
+        prepare: authors => {
           const named = authors.filter(author => author.kind === "named");
           if (named.length === 0) return;
-          await warmCredentialCache().catch(() => undefined);
-          await historyLabels.prepare(workspaceId, named);
+          historyLabels.prepare(workspaceId, named);
         },
         named: author => historyLabels.author(workspaceId, author),
       };

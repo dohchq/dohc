@@ -47,7 +47,7 @@ afterEach(closeTestStorages);
 
 it("lists ended holders only for the owner, without changing recipient or link-holder listings", async () => {
   const storage = await newStorage();
-  const h = handler(storage, { lookupUserEmail: id => id === "holder" ? "Ben" : `${id}@example.test` });
+  const h = handler(storage, { lookupUserEmails: async ids => new Map(ids.map(id => [id, `${id}@example.test`])) });
   await seedFileShare(h, "edit");
   seedStorageLink(storage, { grantId: "history-link", access: "edit" });
   seedStorageLink(storage, { grantId: "unrelated-link", access: "view" });
@@ -62,8 +62,8 @@ it("lists ended holders only for the owner, without changing recipient or link-h
   expect(storage.revokeShareGrant({ shareId: "share-existing", grantId: "history-link", revokedAtMs: 3_000, expectedDependentGrantIds: ["history-holder"] })).toMatchObject({ ok: true });
   const defaultListing = await json(await h(request(OWNER, `/sync/${WORKSPACE}/shares/links`)));
   expect(defaultListing).not.toHaveProperty("endedLinks");
-  const owner = await json(await h(request(OWNER, `/sync/${WORKSPACE}/shares/links?history=true`)));
-  expect(owner.endedLinks).toMatchObject([{ grantId: "history-link", dependents: [{ grantId: "history-holder", recipientUserId: "holder", recipientEmail: "Ben", status: "revoked" }] }]);
+  const owner = await json(await h(request(OWNER, `/sync/${WORKSPACE}/shares/links?historyGrantId=history-holder`)));
+  expect(owner.holders).toEqual([{ grantId: "history-holder", recipientUserId: "holder", recipientEmail: "holder@example.test", parentGrantId: "history-link" }]);
   expect((defaultListing.links as Array<{ dependents: unknown[] }>).flatMap(link => link.dependents)).toEqual([]);
   expect(await json(await h(request(RECIPIENT, "/sync/shares?received=true")))).toEqual(recipientBefore);
   const linkAfter = await linkListing();
@@ -73,50 +73,33 @@ it("lists ended holders only for the owner, without changing recipient or link-h
   const holderListing = await json(await h(request("holder", "/sync/shares?received=true")));
   expect(holderListing).not.toHaveProperty("endedLinks");
   expect(holderListing.received).toEqual([]);
-  expect((await h(request(RECIPIENT, `/sync/${WORKSPACE}/shares/links?history=true`))).status).toBe(404);
-  expect((await h(request("holder", `/sync/${WORKSPACE}/shares/links?history=true`))).status).toBe(404);
+  expect((await h(request(RECIPIENT, `/sync/${WORKSPACE}/shares/links?historyGrantId=history-holder`))).status).toBe(404);
+  expect((await h(request("holder", `/sync/${WORKSPACE}/shares/links?historyGrantId=history-holder`))).status).toBe(404);
   expect(authorizeShareAction({ storage, shareId: "share-existing", actorUserId: "holder", action: "read" }).ok).toBe(false);
 });
 
-it("pages 2001 ended holders of one active link without truncation or current access", async () => {
+it("bounds identity lookups and uses one account query for exact ended dependents", async () => {
   const storage = await newStorage();
-  const h = handler(storage, { lookupUserEmail: id => `${id}@example.test` });
+  const lookupUserEmails = vi.fn(async (ids: readonly string[]) => new Map(ids.map(id => [id, `${id}@example.test`])));
+  const h = handler(storage, { lookupUserEmails });
   await seedFileShare(h, "edit");
-  expect((await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: "other-workspace" })))).status).toBe(200);
-  seedStorageLink(storage, { grantId: "many-holders", access: "edit" });
-  const db = inspectDatabase(storagePath(storage));
-  try {
-    const insert = db.prepare(`INSERT INTO sync_relay_share_grants
-      (grant_id, share_id, principal_kind, principal_user_id, access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id)
-      VALUES (?, 'share-existing', 'user', ?, 'edit', 2, 'revoked', 2001, 3000, 'many-holders')`);
-    db.exec("BEGIN");
-    for (let i = 0; i < 2001; i++) insert.run(`ended-${String(i).padStart(4, "0")}`, `person-${i}`);
-    db.prepare(`INSERT INTO sync_relay_shares (share_id, workspace_id, granter_user_id, selector_json, created_at_ms)
-      VALUES ('other-share', 'other-workspace', 'owner', '{"paths":["docs"],"versionId":null}', 1)`).run();
-    db.prepare(`INSERT INTO sync_relay_share_grants
-      (grant_id, share_id, principal_kind, principal_user_id, access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id)
-      VALUES ('other-link', 'other-share', 'link', NULL, 'edit', 2, 'revoked', 1, 3000, NULL),
-             ('other-holder', 'other-share', 'user', 'other-person', 'edit', 2, 'revoked', 1, 3000, 'other-link')`).run();
-    db.exec("COMMIT");
-  } finally { db.close(); }
-  const ids: string[] = [];
-  const sizes: number[] = [];
-  let cursor: string | undefined;
-  do {
-    const body = await json(await h(request(OWNER, `/sync/${WORKSPACE}/shares/links?history=true${cursor ? `&endedHolderCursor=${encodeURIComponent(cursor)}` : ""}`)));
-    const ended = (body.endedLinks as Array<{ dependents: Array<{ grantId: string; status: string }> }>).flatMap(link => link.dependents);
-    expect(ended.every(holder => holder.status === "revoked")).toBe(true);
-    sizes.push(ended.length); ids.push(...ended.map(holder => holder.grantId));
-    expect(body).not.toHaveProperty("links");
-    cursor = body.nextEndedHolderCursor as string | undefined;
-  } while (cursor);
-  expect(sizes).toEqual([1000, 1000, 1]);
-  expect(ids).toHaveLength(2001);
-  expect(new Set(ids).size).toBe(2001);
-  expect(ids.at(-1)).toBe("ended-2000");
-  expect((await h(request(RECIPIENT, `/sync/${WORKSPACE}/shares/links?endedHolderCursor=bad`))).status).toBe(404);
-  expect((await h(request(OWNER, `/sync/${WORKSPACE}/shares/links?endedHolderCursor=bad`))).status).toBe(400);
-  expect((await h(request(OWNER, `/sync/${WORKSPACE}/shares/links?endedHolderCursor=a&endedHolderCursor=b`))).status).toBe(400);
+  seedStorageLink(storage, { grantId: "history-link", access: "edit" });
+  expect(seedDependentGrant(storage, { shareId: "share-existing", parentGrantId: "history-link", grantId: "history-holder", principalUserId: "holder", createdAtMs: 2001 })).toMatchObject({ ok: true });
+  storage.revokeShareGrant({ shareId: "share-existing", grantId: "history-link", revokedAtMs: 3000, expectedDependentGrantIds: ["history-holder"] });
+  const body = await json(await h(request(OWNER, `/sync/${WORKSPACE}/shares/links?historyGrantId=history-holder&historyUserId=holder`)));
+  expect(body.holders).toEqual([{ grantId: "history-holder", recipientUserId: "holder", parentGrantId: "history-link", recipientEmail: "holder@example.test" }]);
+  expect(lookupUserEmails.mock.calls).toEqual([[["holder"]]]);
+  const named = storage.listSharesGrantedBy(OWNER).find(row => row.grant.principalKind === "user" && row.grant.parentGrantId === null)!;
+  expect(named).toBeDefined();
+  storage.revokeShareGrant({ shareId: named.share.shareId, grantId: named.grant.grantId, revokedAtMs: 3001 });
+  const unrelated = await json(await h(request(OWNER, `/sync/${WORKSPACE}/shares/links?historyGrantId=${named.grant.grantId}`)));
+  expect(unrelated.holders).toEqual([]);
+  await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: OTHER_WORKSPACE })));
+  expect((await json(await h(request(OWNER, `/sync/${OTHER_WORKSPACE}/shares/links?historyGrantId=history-holder`)))).holders).toEqual([]);
+  const tooMany = new URLSearchParams();
+  for (let i = 0; i < 201; i++) tooMany.append("historyGrantId", `holder-${i}`);
+  expect((await h(request(OWNER, `/sync/${WORKSPACE}/shares/links?${tooMany}`))).status).toBe(400);
+  expect((await h(request(RECIPIENT, `/sync/${WORKSPACE}/shares/links?${tooMany}`))).status).toBe(404);
 });
 
 describe("relay exchange key verification", () => {

@@ -66,7 +66,7 @@ export function createWorkspaceEngineIpc<
   localPersonId(): string;
   /** This computer's person as History names them. */
   localPersonName(): string;
-  automationPersonName(workspaceId: string, userId: string, sender: Sender): string | null | Promise<string | null>;
+  automationPersonName(workspaceId: string, userId: string, sender: Sender): string | null;
   /** The person a request is made by, read from main's own account when it arrives. */
   localPerson(): Promise<LocalPersonAuthor>;
   /** An automation author as History shows it, in one workspace. */
@@ -349,7 +349,7 @@ export function createWorkspaceEngineIpc<
           return ReadEngineMomentResult.parse({ status: "untracked", moment: null });
         }
         const names = authorNames(input.workspaceId, event.sender);
-        if (moment && !moment.protected && moment.moment.authors?.length === 1) await names.prepare?.(moment.moment.authors);
+        if (moment && !moment.protected && moment.moment.authors?.length === 1) names.prepare?.(moment.moment.authors);
         return ReadEngineMomentResult.parse({
           moment: moment ? engineMomentDetailForIpc(moment, names) : null,
         });

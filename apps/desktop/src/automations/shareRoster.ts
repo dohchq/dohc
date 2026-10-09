@@ -8,7 +8,7 @@ import {
   type ListedGrant,
   type RosterAnswer,
   type RosterListing,
-  type EndedLinkHolder,
+  type HistoryAccount,
 } from "@dohc/automation-executor/roster-listing";
 
 // The share roster: the grants the owner gave on one workspace, as the relay
@@ -438,9 +438,7 @@ export function rosterAuthorLabel(
   if (listing === null || listing.grants === null) return "Someone you shared with";
   const grant = listing.grants.find((candidate) => candidate.grantId === author.grantId);
   if (grant?.recipientEmail && (grant.recipientUserId === null || grant.recipientUserId === author.userId)) {
-    return listing.links.some(link => link.grant.shareId === grant.shareId)
-      ? `${grant.recipientEmail} (${ACCESS_WORDS[grant.access]}; label chosen by link holder)`
-      : `${grant.recipientEmail} (${ACCESS_WORDS[grant.access]})`;
+    return `${grant.recipientEmail} (${ACCESS_WORDS[grant.access]})`;
   }
   return rosterPersonLabel(listing, author.userId);
 }
@@ -452,57 +450,83 @@ export function rosterPersonLabel(listing: RosterListing | null, userId: string)
     (candidate) => candidate.recipientUserId === userId && candidate.recipientEmail !== null,
   );
   if (!grant?.recipientEmail) return "Someone you shared with";
-  return listing.grants.includes(grant as ListedGrant) && listing.links.some(link => link.grant.shareId === grant.shareId)
-    ? `${grant.recipientEmail} (label chosen by link holder)` : grant.recipientEmail;
+  return grant.recipientEmail;
 }
 
-/** History's window-lifetime cache. No holder data is written into the reach roster. */
+/** History's window-lifetime cache. Reads never wait for account lookups. */
 export function createHistoryLabels(dependencies: {
   snapshot(workspaceId: string): { roster: RosterListing | null; owner: boolean; context: unknown; inventory: unknown };
-  listHolders(workspaceId: string): Promise<EndedLinkHolder[] | null>;
+  lookupAccounts(workspaceId: string, ids: { grantIds: string[]; userIds: string[] }): Promise<HistoryAccount[] | null>;
+  ready?(workspaceId: string): void;
+  nowMs?(): number;
 }) {
   type Snapshot = ReturnType<typeof dependencies.snapshot>;
-  type Cache = { snapshot: Snapshot; grants: Map<string, EndedLinkHolder>; people: Map<string, EndedLinkHolder>; loaded: boolean; running: Promise<void> | null };
+  type Cache = { snapshot: Snapshot; grants: Map<string, HistoryAccount>; people: Map<string, HistoryAccount>;
+    asked: Set<string>; pending: Map<string, { userId: string; grantId?: string }>; running: boolean; retryAt: number };
   const caches = new Map<string, Cache>();
+  const now = dependencies.nowMs ?? (() => performance.now());
+  const key = (person: { userId: string; grantId?: string }) => person.grantId === undefined ? `user:${person.userId}` : `grant:${person.grantId}`;
   const same = (left: Snapshot, right: Snapshot) => left.context === right.context && left.inventory === right.inventory;
   const current = (workspaceId: string, snapshot: Snapshot) => {
     const cache = caches.get(workspaceId);
     return cache && same(cache.snapshot, snapshot) ? cache : undefined;
   };
+  const live = (workspaceId: string, cache: Cache) => caches.get(workspaceId) === cache && same(cache.snapshot, dependencies.snapshot(workspaceId)) && dependencies.snapshot(workspaceId).owner;
   function cachedLabel(workspaceId: string, userId: string, grantId?: string): string {
     const snapshot = dependencies.snapshot(workspaceId);
     const cache = snapshot.owner ? current(workspaceId, snapshot) : undefined;
-    const holder = grantId === undefined ? cache?.people.get(userId) : cache?.grants.get(grantId);
-    return holder?.recipientUserId === userId && holder.recipientEmail
-      ? `${holder.recipientEmail} (label chosen by link holder)` : "Someone you shared with";
+    const account = grantId === undefined ? cache?.people.get(userId) : cache?.grants.get(grantId);
+    return account?.recipientUserId === userId && account.recipientEmail
+      ? `${account.recipientEmail} (via share link)` : "Someone you shared with";
+  }
+  function schedule(workspaceId: string, target: Cache): void {
+    if (target.running || target.pending.size === 0 || now() < target.retryAt) return;
+    target.running = true;
+    // Let the IPC read answer and release its workspace lease before starting I/O.
+    setImmediate(() => { void (async () => {
+      if (!live(workspaceId, target)) return;
+      const batch = [...target.pending.entries()].slice(0, 200);
+      for (const [id] of batch) { target.pending.delete(id); target.asked.add(id); }
+      let accounts: HistoryAccount[] | null;
+      try { accounts = await dependencies.lookupAccounts(workspaceId, {
+        grantIds: batch.flatMap(([, person]) => person.grantId === undefined ? [] : [person.grantId]),
+        userIds: batch.flatMap(([, person]) => person.grantId === undefined ? [person.userId] : []),
+      }); } catch { accounts = null; }
+      if (!live(workspaceId, target)) return;
+      if (accounts === null) { for (const [id] of batch) target.asked.delete(id); target.retryAt = now() + 60_000; target.pending.clear(); return; }
+      for (const [id] of batch) target.asked.add(id);
+      for (const account of accounts) {
+        target.grants.set(account.grantId, account);
+        if (!target.people.has(account.recipientUserId)) target.people.set(account.recipientUserId, account);
+      }
+      if (accounts.some(account => account.recipientEmail)) dependencies.ready?.(workspaceId);
+    })().finally(() => {
+      target.running = false;
+      if (live(workspaceId, target)) schedule(workspaceId, target);
+    }); });
   }
   return {
     invalidate(workspaceId: string | null): void {
       if (workspaceId === null) caches.clear(); else caches.delete(workspaceId);
     },
-    async prepare(workspaceId: string, principals: readonly { userId: string; grantId?: string }[]): Promise<void> {
+    prepare(workspaceId: string, principals: readonly { userId: string; grantId?: string }[]): void {
       const snapshot = dependencies.snapshot(workspaceId);
-      if (!snapshot.owner || !principals.some(person => (person.grantId === undefined
-        ? rosterPersonLabel(snapshot.roster, person.userId) : rosterAuthorLabel(snapshot.roster, { userId: person.userId, grantId: person.grantId })) === "Someone you shared with")) return;
+      if (!snapshot.owner) return;
       let cache = current(workspaceId, snapshot);
+      if (cache && now() < cache.retryAt) return;
+      const missing = principals.filter(person => !cache?.asked.has(key(person)) && !(person.grantId === undefined ? cache?.people.has(person.userId) : cache?.grants.has(person.grantId)) && (person.grantId === undefined
+        ? rosterPersonLabel(snapshot.roster, person.userId) : rosterAuthorLabel(snapshot.roster, { userId: person.userId, grantId: person.grantId })) === "Someone you shared with");
+      if (missing.length === 0) return;
       if (!cache) {
-        cache = { snapshot, grants: new Map(), people: new Map(), loaded: false, running: null };
+        cache = { snapshot, grants: new Map(), people: new Map(), asked: new Set(), pending: new Map(), running: false, retryAt: 0 };
         caches.set(workspaceId, cache);
       }
-      if (cache.loaded) return;
-      const target = cache;
-      if (!target.running) target.running = (async () => {
-        let holders: EndedLinkHolder[] | null;
-        try { holders = await dependencies.listHolders(workspaceId); } catch { holders = null; }
-        if (holders === null || caches.get(workspaceId) !== target || !same(snapshot, dependencies.snapshot(workspaceId))) return;
-        for (const holder of holders) {
-          if (!holder.recipientUserId || !holder.recipientEmail) continue;
-          target.grants.set(holder.grantId, holder);
-          if (!target.people.has(holder.recipientUserId)) target.people.set(holder.recipientUserId, holder);
-        }
-        target.loaded = true;
-      })().finally(() => { target.running = null; });
-      await target.running;
+      if (now() < cache.retryAt) return;
+      for (const person of missing) {
+        const id = key(person);
+        if (!cache.asked.has(id) && (person.grantId === undefined ? !cache.people.has(person.userId) : !cache.grants.has(person.grantId))) cache.pending.set(id, person);
+      }
+      schedule(workspaceId, cache);
     },
     author(workspaceId: string, author: { userId: string; grantId: string }): string {
       const known = rosterAuthorLabel(dependencies.snapshot(workspaceId).roster, author);

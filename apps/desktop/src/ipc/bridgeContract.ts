@@ -6925,6 +6925,7 @@ export interface DohcDesktopBridge
   // each window's active workspace, so a window only hears about its own
   // workspace plus global events. The payload is additive context — a
   // subscriber may ignore it. Returns an unsubscribe function.
+  onHistoryNamesChanged(listener: (event: WorkspaceIdPayload) => void): () => void;
   onWorkspaceActivity(listener: (event: WorkspaceActivityEvent) => void): () => void;
   // Live push: automation runs finished, an Undo put records back, a claim
   // failed, or a retry queued one, so run history and dataset records may

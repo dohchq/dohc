@@ -12,39 +12,28 @@ import type { FormerEditor, ReachRoster, RosterGrant, RosterProblem } from "./au
 const MAX_INVENTORY_PAGES = 50;
 
 const EndedHolder = z.object({
-  grantId: z.string().min(1).max(256), recipientUserId: z.string().min(1).max(256).nullable(),
-  recipientEmail: z.string().min(1).max(320).nullable(), status: z.literal("revoked"),
+  grantId: z.string().min(1).max(256), recipientUserId: z.string().min(1).max(256),
+  recipientEmail: z.string().min(1).max(320).nullable(), parentGrantId: z.string().min(1).max(256),
 });
-export type EndedLinkHolder = z.infer<typeof EndedHolder>;
-const EndedHolderPage = z.object({
-  endedLinks: z.array(z.object({ dependents: z.array(EndedHolder).max(1000) })).max(1000),
-  nextEndedHolderCursor: z.string().min(1).max(1024).optional(),
-});
+export type HistoryAccount = z.infer<typeof EndedHolder>;
+export type HistoryAccountIds = { grantIds: readonly string[]; userIds: readonly string[] };
 
 /** Owner-only History attribution, fetched separately from the reach roster. */
-export async function listEndedLinkHolders(
-  workspaceId: string, get: (path: string) => Promise<{ status: number; body: unknown }>,
-): Promise<EndedLinkHolder[] | null> {
-  const holders: EndedLinkHolder[] = [];
-  const cursors = new Set<string>();
-  let cursor: string | undefined;
-  for (let page = 0; page < MAX_INVENTORY_PAGES; page += 1) {
-    let response: { status: number; body: unknown };
-    try {
-      response = await get(`/sync/${encodeURIComponent(workspaceId)}/shares/links?history=true${cursor === undefined ? "" : `&endedHolderCursor=${encodeURIComponent(cursor)}`}`);
-    } catch { return null; }
-    if (response.status < 200 || response.status >= 300) return null;
-    const parsed = EndedHolderPage.safeParse(response.body);
-    if (!parsed.success) return null;
-    const found = parsed.data.endedLinks.flatMap(link => link.dependents);
-    if (found.length > 1000) return null;
-    holders.push(...found);
-    cursor = parsed.data.nextEndedHolderCursor;
-    if (cursor === undefined) return holders;
-    if (cursors.has(cursor)) return null;
-    cursors.add(cursor);
-  }
-  return null;
+export async function lookupHistoryAccounts(
+  workspaceId: string, get: (path: string) => Promise<{ status: number; body: unknown }>, ids: HistoryAccountIds,
+): Promise<HistoryAccount[] | null> {
+  if (ids.grantIds.length + ids.userIds.length === 0) return [];
+  if (ids.grantIds.length + ids.userIds.length > 200) return null;
+  const query = new URLSearchParams();
+  for (const id of ids.grantIds) query.append("historyGrantId", id);
+  for (const id of ids.userIds) query.append("historyUserId", id);
+  try {
+    const response = await get(`/sync/${encodeURIComponent(workspaceId)}/shares/links?${query}`);
+    if (response.status !== 200) return null;
+    const parsed = z.object({ holders: z.array(EndedHolder).max(200) }).safeParse(response.body);
+    if (!parsed.success || parsed.data.holders.some(holder => !ids.grantIds.includes(holder.grantId) && !ids.userIds.includes(holder.recipientUserId))) return null;
+    return parsed.data.holders;
+  } catch { return null; }
 }
 
 const ID = z.string().min(1).max(256);

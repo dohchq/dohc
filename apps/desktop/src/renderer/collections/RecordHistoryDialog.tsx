@@ -257,6 +257,37 @@ export function RecordHistoryDialog(props: {
     load(null);
   }, [load]);
 
+  const [namesRevision, setNamesRevision] = useState({ workspaceId, value: 0 });
+  const namedPage = useRef<{ revision: number; page: typeof page } | null>(null);
+  useEffect(() => bridge().onHistoryNamesChanged?.(event => {
+    if (event.workspaceId === workspaceId) setNamesRevision(previous => ({ workspaceId, value: previous.workspaceId === workspaceId ? previous.value + 1 : 1 }));
+  }), [workspaceId]);
+  useEffect(() => {
+      let live = true;
+      if (namesRevision.workspaceId !== workspaceId || !namesRevision.value || page === null || loading !== null || page.entries.length === 0 || namedPage.current?.revision === namesRevision.value && namedPage.current.page === page) return;
+      const token = request.next();
+      const shown = page;
+      void (async () => {
+        const authors = new Map<number, RecordHistoryEntry["author"]>();
+        let before = Math.max(...shown.entries.map(entry => entry.historyId)) + 1;
+        const last = Math.min(...shown.entries.map(entry => entry.historyId));
+        do {
+          const result = await bridge().getCollectionRecordHistory({ workspaceId, collectionPath, recordId, beforeHistoryId: before });
+          if (!live || !request.isCurrent(token)) return;
+          for (const entry of result.entries) authors.set(entry.historyId, entry.author);
+          if (result.nextBeforeHistoryId === null || result.nextBeforeHistoryId <= last) break;
+          if (result.nextBeforeHistoryId >= before) return;
+          before = result.nextBeforeHistoryId;
+        } while (live);
+        if (live && request.isCurrent(token)) {
+          const next = { ...shown, entries: shown.entries.map(entry => authors.has(entry.historyId) ? { ...entry, author: authors.get(entry.historyId)! } : entry) };
+          namedPage.current = { revision: namesRevision.value, page: next };
+          setPage(current => current === shown ? next : current);
+        }
+      })().catch(() => undefined);
+    return () => { live = false; };
+  }, [workspaceId, collectionPath, recordId, page, loading, request, namesRevision]);
+
   // Said once the reads and lookups settle, so Try again reads back to every
   // page shown, and said again only for a run newly left unplaced.
   useEffect(() => {
