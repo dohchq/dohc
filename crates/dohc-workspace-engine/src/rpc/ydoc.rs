@@ -87,6 +87,14 @@ pub(crate) struct YdocSession {
 }
 
 impl YdocSession {
+    pub(super) fn set_lineage_claim(&mut self, claim: Option<String>) -> Result<(), CollabError> {
+        if self.lineage_claim_id != claim {
+            self._lease.bind_claim(claim.as_deref())?;
+            self.lineage_claim_id = claim;
+        }
+        Ok(())
+    }
+
     pub(super) fn imported_owner(
         workspace: WorkspaceHandle,
         key: DocKey,
@@ -1030,6 +1038,9 @@ impl EngineService {
                     .collect()
             }),
         };
+        lease
+            .bind_claim(state.lineage_claim_id.as_deref())
+            .map_err(|error| map_runtime(RuntimeError::Collab(error)))?;
         lock(&self.sessions).insert(
             session_id,
             YdocSession {
@@ -1214,7 +1225,9 @@ impl EngineService {
                     && let Some(session) = lock(&sessions).get_mut(&session_id)
                 {
                     session.first_update_pending = false;
-                    session.lineage_claim_id = append.lineage_claim_id.clone();
+                    session
+                        .set_lineage_claim(append.lineage_claim_id.clone())
+                        .map_err(RuntimeError::Collab)?;
                 }
                 let settlement_requested = match &outcome {
                     Ok(append) => append.settlement_requested,
@@ -1747,7 +1760,9 @@ impl EngineService {
             ),
         };
         if let Some(session) = lock(&self.sessions).get_mut(&params.session_id) {
-            session.lineage_claim_id = state.lineage_claim_id.clone();
+            session
+                .set_lineage_claim(state.lineage_claim_id.clone())
+                .map_err(|error| map_runtime(RuntimeError::Collab(error)))?;
             session.owner_draft = owner_draft.clone();
         }
         let initial_update = state.initial_update;

@@ -181,6 +181,11 @@ pub struct YdocLineageReplacement {
 /// an interactive daemon session owns it.
 pub trait LeaseProbe: Send + Sync {
     fn is_live(&self, key: &DocKey) -> bool;
+
+    /// A live session's consumed claim. Unknown bindings hold changed artifacts.
+    fn bound_claim(&self, _key: &DocKey) -> Option<String> {
+        None
+    }
 }
 
 /// Default probe for callers that do not own an interactive session registry.
@@ -207,6 +212,10 @@ impl LeaseProbe for AlwaysLive {
 impl LeaseProbe for dohc_engine_collab::LeaseRegistry {
     fn is_live(&self, key: &DocKey) -> bool {
         self.is_held(key)
+    }
+
+    fn bound_claim(&self, key: &DocKey) -> Option<String> {
+        dohc_engine_collab::LeaseRegistry::bound_claim(self, key)
     }
 }
 

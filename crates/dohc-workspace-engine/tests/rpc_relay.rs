@@ -809,6 +809,16 @@ async fn open_uncaptured_workspace(
     relay: &FakeRelay,
     workspace_id: &str,
 ) -> WorkspaceHandle {
+    open_uncaptured_workspace_options(transport, scratch, relay, workspace_id, false).await
+}
+
+async fn open_uncaptured_workspace_options(
+    transport: &InProcessTransport<EngineService>,
+    scratch: &ScratchDir,
+    relay: &FakeRelay,
+    workspace_id: &str,
+    reconcile_collections: bool,
+) -> WorkspaceHandle {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let opened = transport
         .call(
@@ -821,6 +831,7 @@ async fn open_uncaptured_workspace(
                     "rootDir": scratch.path().to_string_lossy(),
                     "workspaceId": workspace_id,
                     "captureMode": "none",
+                    "reconcileCollections": reconcile_collections,
                     "relay": {
                         "baseUrl": relay.base_url,
                         "bearerToken": BEARER,
@@ -913,6 +924,383 @@ fn resync_requests(
         .filter(|notice| notice.name == "ydoc.remoteUpdate")
         .map(|notice| notice.payload)
         .collect()
+}
+
+// Ordinary editor settlements do not export a companion moment through this
+// uncaptured harness. Use the production exporter to exercise that wire pair.
+fn journal_editor_settlement(scratch: &ScratchDir, workspace: &str, moment: &str) {
+    let mut conn = Connection::open(engine_db_path(scratch).unwrap()).unwrap();
+    let tx = conn.transaction().unwrap();
+    dohc_engine_sync::journal_moment_append_in_tx(&tx, workspace, moment).unwrap();
+    tx.commit().unwrap();
+}
+
+async fn pull_materialize_and_commit(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    id: &mut u64,
+    workspace: &str,
+) {
+    let pull = call(
+        transport,
+        handle,
+        id,
+        "sync.pull",
+        json!({"workspaceId":workspace}),
+    )
+    .await;
+    assert_eq!(pull["hasMore"], false);
+    if pull["pendingCursor"].is_object() {
+        call(
+            transport,
+            handle,
+            id,
+            "sync.materializePendingCursor",
+            json!({"workspaceId":workspace,"pendingCursor":pull["pendingCursor"]}),
+        )
+        .await;
+        call(
+            transport,
+            handle,
+            id,
+            "sync.commitCursor",
+            json!({"workspaceId":workspace,"pendingCursor":pull["pendingCursor"]}),
+        )
+        .await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn open_document_settlement_does_not_park_other_device_work() {
+    let workspace_id = "rpc-relay-openhold";
+    let path = "notes/shared.md";
+    let relay = FakeRelay::start(RelayState::default());
+
+    // Device B is signed in and synced before it starts the document, as a
+    // desktop is. It then starts the document and pushes it.
+    let b_scratch = ScratchDir::new().expect("device B scratch");
+    let b_transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let b = open_uncaptured_workspace_options(&b_transport, &b_scratch, &relay, workspace_id, true)
+        .await;
+    let mut b_id = 1;
+    seed_main(&b_transport, &b, &mut b_id, workspace_id).await;
+    seed_sync_identity(&b_transport, &b, &mut b_id, workspace_id).await;
+    call(
+        &b_transport,
+        &b,
+        &mut b_id,
+        "sync.push",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    let b_session = call(
+        &b_transport,
+        &b,
+        &mut b_id,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": path, "contentKind": "plaintext" }),
+    )
+    .await["sessionId"]
+        .as_str()
+        .expect("device B session id")
+        .to_owned();
+    let b_doc = Ydoc::wire();
+    let record = |update: Vec<u8>| {
+        json!({
+            "sessionId": b_session,
+            "updateBase64": base64::engine::general_purpose::STANDARD.encode(update),
+        })
+    };
+    call(
+        &b_transport,
+        &b,
+        &mut b_id,
+        "ydoc.recordUpdate",
+        record(b_doc.plaintext_insert(0, "Starting together.")),
+    )
+    .await;
+    call(
+        &b_transport,
+        &b,
+        &mut b_id,
+        "sync.push",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    publish_pushed_ops(&relay, workspace_id, &b_scratch);
+
+    let settlement = call(
+        &b_transport,
+        &b,
+        &mut b_id,
+        "ydoc.settle",
+        json!({"sessionId":b_session}),
+    )
+    .await;
+    journal_editor_settlement(
+        &b_scratch,
+        workspace_id,
+        settlement["momentId"].as_str().unwrap(),
+    );
+    call(
+        &b_transport,
+        &b,
+        &mut b_id,
+        "sync.push",
+        json!({"workspaceId":workspace_id}),
+    )
+    .await;
+    publish_pushed_ops(&relay, workspace_id, &b_scratch);
+
+    for (object, path, text, moment) in [
+        (
+            "schema",
+            "tasks/collection.yaml",
+            "fields:\n  title:\n    type: text\n",
+            "schema-moment",
+        ),
+        (
+            "record",
+            "tasks/task.md",
+            "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\ntitle: Before\n---\n",
+            "record-before",
+        ),
+    ] {
+        call(&b_transport, &b, &mut b_id, "versionedText.write", json!({"versionId":"main","objectId":object,"path":path,"text":text,"momentId":moment,"origin":"api","nowMs":150})).await;
+    }
+    call(
+        &b_transport,
+        &b,
+        &mut b_id,
+        "sync.push",
+        json!({"workspaceId":workspace_id}),
+    )
+    .await;
+    publish_pushed_ops(&relay, workspace_id, &b_scratch);
+
+    // Device A pulls the document and opens it in an editor.
+    let a_scratch = ScratchDir::new().expect("device A scratch");
+    let a_service = Arc::new(EngineService::new());
+    let a_transport = InProcessTransport::new(Arc::clone(&a_service));
+    let a = open_uncaptured_workspace_options(&a_transport, &a_scratch, &relay, workspace_id, true)
+        .await;
+    let mut a_id = 1;
+    seed_main(&a_transport, &a, &mut a_id, workspace_id).await;
+    call(
+        &a_transport,
+        &a,
+        &mut a_id,
+        "chats.channels.create",
+        json!({
+            "channelId": "device-a-identity-channel",
+            "name": "Device A",
+            "kind": "channel",
+            "nowMs": 10,
+        }),
+    )
+    .await;
+    call(
+        &a_transport,
+        &a,
+        &mut a_id,
+        "sync.claim",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    pull_materialize_and_commit(&a_transport, &a, &mut a_id, workspace_id).await;
+    let a_session = call(
+        &a_transport,
+        &a,
+        &mut a_id,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": path, "contentKind": "plaintext" }),
+    )
+    .await["sessionId"]
+        .as_str()
+        .expect("device A session id")
+        .to_owned();
+    let mut events = a_service.events().subscribe();
+
+    let a_doc = Ydoc::wire();
+    a_id += 1;
+    let initial = ProtocolEngineService::call(
+        a_service.as_ref(),
+        RequestContext::unbounded().with_capability("blobs"),
+        request(
+            a_id,
+            "ydoc.resync",
+            Some(a.clone()),
+            json!({"sessionId":a_session}),
+        ),
+    )
+    .await
+    .unwrap();
+    a_doc.apply(&initial.blob_egress.unwrap().bytes).unwrap();
+    call(&a_transport, &a, &mut a_id, "ydoc.recordUpdate", json!({"sessionId":a_session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(a_doc.plaintext_insert(0, "A: "))})).await;
+    call(
+        &b_transport,
+        &b,
+        &mut b_id,
+        "ydoc.recordUpdate",
+        record(b_doc.plaintext_insert(18, " Typed on B.")),
+    )
+    .await;
+    let settlement = call(
+        &b_transport,
+        &b,
+        &mut b_id,
+        "ydoc.settle",
+        json!({"sessionId":b_session}),
+    )
+    .await;
+    journal_editor_settlement(
+        &b_scratch,
+        workspace_id,
+        settlement["momentId"].as_str().unwrap(),
+    );
+    call(&b_transport, &b, &mut b_id, "versionedText.write", json!({"versionId":"main","objectId":"other","path":"other.md","text":"Later file","momentId":"other-moment","origin":"api","nowMs":210})).await;
+    call(&b_transport, &b, &mut b_id, "versionedText.write", json!({"versionId":"main","objectId":"record","path":"tasks/task.md","text":"---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\ntitle: After\n---\n","momentId":"record-after","origin":"api","nowMs":215})).await;
+    call(
+        &b_transport,
+        &b,
+        &mut b_id,
+        "chats.channels.create",
+        json!({"channelId":"later-chat","name":"Later chat","kind":"channel","nowMs":220}),
+    )
+    .await;
+    call(&b_transport, &b, &mut b_id, "chats.threads.start", json!({"channelId":"later-chat","threadId":"later-thread","messageId":"later-message","authorKind":"human","authorDisplayName":"B","authorUserId":"b","body":"Later message","needsDecision":false,"nowMs":230})).await;
+    call(
+        &b_transport,
+        &b,
+        &mut b_id,
+        "sync.push",
+        json!({"workspaceId":workspace_id}),
+    )
+    .await;
+    publish_pushed_ops(&relay, workspace_id, &b_scratch);
+    pull_materialize_and_commit(&a_transport, &a, &mut a_id, workspace_id).await;
+    let notice = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let notice = events.recv().await.unwrap();
+            if notice.name == "ydoc.remoteUpdate" {
+                break notice;
+            }
+        }
+    })
+    .await
+    .expect("remote update event");
+    assert_eq!(notice.payload["sessionId"], a_session);
+    assert_eq!(notice.payload["resyncRequired"], true);
+    let db = Connection::open(engine_db_path(&a_scratch).unwrap()).unwrap();
+    let later_file: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM snapshots WHERE path='other.md'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let later_message: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM chat_messages WHERE message_id='later-message'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let record_after: i64 = db.query_row("SELECT COUNT(*) FROM snapshots s JOIN blobs b ON s.blob_sha256=b.sha256 WHERE s.path='tasks/task.md' AND b.text LIKE '%title: After%'", [], |r|r.get(0)).unwrap();
+    let deferred: i64 = db
+        .query_row("SELECT COUNT(*) FROM relay_deferred_ops", [], |r| r.get(0))
+        .unwrap();
+    println!(
+        "OPENHOLD rpc before-close file={later_file} record={record_after} message={later_message} deferred={deferred}"
+    );
+    let record = call(
+        &a_transport,
+        &a,
+        &mut a_id,
+        "collections.getRecord",
+        json!({"collectionPath":"tasks","recordId":"rec_aaaaaaaaaaaaaaaaaaaaaaaaaa","historyLimit":50}),
+    )
+    .await;
+    let title_after = record["record"]["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|field| field["field"] == "title" && field["value"] == "After");
+    a_id += 1;
+    let resync = ProtocolEngineService::call(
+        a_service.as_ref(),
+        RequestContext::unbounded().with_capability("blobs"),
+        request(
+            a_id,
+            "ydoc.resync",
+            Some(a.clone()),
+            json!({"sessionId":a_session}),
+        ),
+    )
+    .await
+    .unwrap();
+    a_doc.apply(&resync.blob_egress.unwrap().bytes).unwrap();
+    assert_eq!(
+        a_doc.plaintext_string(),
+        "A: Starting together. Typed on B."
+    );
+    a_id += 1;
+    let settled = a_transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                a_id,
+                "ydoc.settle",
+                Some(a.clone()),
+                json!({"sessionId":a_session}),
+            ),
+        )
+        .await;
+
+    a_id += 1;
+    let closed = a_transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                a_id,
+                "ydoc.close",
+                Some(a.clone()),
+                json!({"sessionId":a_session}),
+            ),
+        )
+        .await;
+
+    pull_materialize_and_commit(&a_transport, &a, &mut a_id, workspace_id).await;
+    let conflicts: i64 = db
+        .query_row("SELECT COUNT(*) FROM conflicts", [], |r| r.get(0))
+        .unwrap();
+    let after_deferred: i64 = db
+        .query_row("SELECT COUNT(*) FROM relay_deferred_ops", [], |r| r.get(0))
+        .unwrap();
+    println!("OPENHOLD rpc after-close conflicts={conflicts} deferred={after_deferred}");
+    assert!(title_after, "{record:?}");
+    assert!(settled.is_ok(), "{settled:?}");
+    assert!(closed.is_ok(), "{closed:?}");
+    assert_eq!(
+        (later_file, record_after, later_message, deferred),
+        (1, 1, 1, 0)
+    );
+    let state = relay.state.lock().unwrap();
+    let last = state.workspace_ops.last().unwrap();
+    let ack: i64 = db
+        .query_row(
+            "SELECT acked_seq FROM replication_peers WHERE workspace_id=?1 AND origin_id=?2",
+            rusqlite::params![workspace_id, last["originId"].as_str().unwrap()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ack, last["originSeq"].as_i64().unwrap());
+    drop(state);
+    assert_eq!((conflicts, after_deferred), (0, 0));
+    assert_eq!(
+        std::fs::read_to_string(a_scratch.path().join(path)).unwrap(),
+        "A: Starting together. Typed on B."
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

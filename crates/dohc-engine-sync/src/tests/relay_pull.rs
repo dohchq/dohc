@@ -1,5 +1,144 @@
 use super::*;
 
+fn open_document_pull_fixture(later: i64, live: bool) -> (i64, i64, u128) {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1000, &NoFaults)
+        .unwrap();
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "shared").unwrap();
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.plaintext_insert(0, "before");
+    let sha = engine.put_binary_blob(&doc.encode_full_state()).unwrap();
+    let base = envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        json!({"versionId":"main", "objectId":"shared", "path":"shared.md", "contentKind":"plaintext", "updateBlobSha256":sha, "lineageClaimId":sha, "isBaseState":true}),
+    );
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut Default::default(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    let leases = dohc_engine_collab::LeaseRegistry::new();
+    let _held = live.then(|| leases.acquire(&key).unwrap());
+    if let Some(held) = &_held {
+        held.bind_claim(base.payload["lineageClaimId"].as_str())
+            .unwrap();
+    }
+    let bytes = doc.plaintext_insert(6, " settled");
+    let delta_sha = engine.put_binary_blob(&bytes).unwrap();
+    let mut delta = base.clone();
+    delta.origin_seq = 1;
+    delta.payload["updateBlobSha256"] = json!(delta_sha);
+    delta.payload["isBaseState"] = json!(false);
+    let text = "before settled";
+    let text_sha = dohc_engine_storage::hex_sha256(text.as_bytes());
+    let moment = |seq, object: String, path: String| {
+        envelope(
+            "peer",
+            seq,
+            "moment.append",
+            json!({
+                "momentId":format!("settled-{seq}"), "versionId":"main", "objectId":object, "objectCreatedAtMs":1,
+                "path":path, "recordedAtMs":2000, "operation":"write", "payloadBeforeBlobSha256":null, "payloadBeforePath":null,
+                "payloadAfterBlobSha256":text_sha, "payloadAfterPath":path, "payloadAfterContentKind":"text",
+                "metadata":{"origin":"sync"}, "beforePresent":"absent"
+            }),
+        )
+    };
+    let mut ops = vec![delta, moment(2, "shared".into(), "shared.md".into())];
+    ops.extend((0..later).map(|i| moment(i + 3, format!("other-{i}"), format!("other-{i}.md"))));
+    let mut cursor = 0;
+    let total = ops.len();
+    let pages = ops
+        .chunks(500)
+        .map(|chunk| {
+            let start = cursor;
+            cursor += chunk.len() as i64;
+            (
+                start,
+                PullResponse {
+                    ops: chunk.to_vec(),
+                    next_cursor: cursor,
+                    has_more: cursor < total as i64,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut relay = PagedRelay::new(pages);
+    relay.blobs.insert(text_sha, text.as_bytes().to_vec());
+    let client = RelaySyncClient::new(relay);
+    let start = std::time::Instant::now();
+    let mut cache = Default::default();
+    loop {
+        let result = client
+            .pull_chat_workspace(&mut engine, &mut cache, "ws", &NoFaults, &leases, 2100)
+            .unwrap();
+        let SyncPassOutcome::Complete {
+            has_more,
+            pending_cursor: Some(cursor),
+            ..
+        } = result
+        else {
+            panic!("{result:?}");
+        };
+        client
+            .commit_pull_cursor(&mut engine, "ws", &cursor, &NoFaults, &leases, 2100)
+            .unwrap();
+        if !has_more {
+            break;
+        }
+    }
+    let micros = start.elapsed().as_micros();
+    let deferred = engine
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM relay_deferred_ops", [], |r| {
+                r.get::<_, i64>(0)
+            })
+        })
+        .unwrap();
+    let others = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM snapshots WHERE object_id LIKE 'other-%'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+        })
+        .unwrap();
+    if deferred == 0 {
+        assert_eq!(
+            read_replication_acked_seq(&engine, "ws", "peer").unwrap(),
+            later + 2
+        );
+    }
+    (others, deferred, micros)
+}
+
+#[test]
+fn open_document_pull_admits_settlement_and_same_origin_later_files() {
+    let (others, deferred, _) = open_document_pull_fixture(2, true);
+    assert_eq!((others, deferred), (2, 0));
+}
+
+#[test]
+#[ignore = "manual before/after pull measurement"]
+fn open_document_pull_measurement() {
+    for live in [true, false] {
+        for sample in 0..5 {
+            let (others, deferred, micros) = open_document_pull_fixture(1000, live);
+            println!(
+                "OPENHOLD pull live={live} sample={sample} applied_later={others} deferred={deferred} micros={micros}"
+            );
+        }
+    }
+}
+
 #[derive(Default)]
 struct ClaimRelay {
     relay: FakeRelay,
