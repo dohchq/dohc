@@ -4,11 +4,10 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
-  renameSync,
-  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import { atomicReplaceFileSync } from "../atomicReplaceFile";
 import type { RelayAutomationHost } from "@dohc/workspace-contracts/relay";
 import { createShareRosterStore } from "./shareRosterStore";
 import type { ShareRoster } from "../automations/shareRoster";
@@ -439,14 +438,12 @@ export function createRegistryStore(registryFile: string) {
     // flush the directory entry too before publishing the new cache value.
     // Node/libuv cannot fsync directory handles on Windows, where it returns
     // EPERM, so the flushed file plus atomic rename is the strongest Node API.
-    const tmp = `${registryFile}.tmp-${process.pid}`;
     let replaced = false;
     try {
-      writeAndSync(
+      atomicReplaceFileSync(registryFile, (tmp) => writeAndSync(
         tmp,
         Buffer.from(`${JSON.stringify(registry, null, 2)}\n`),
-      );
-      renameSync(tmp, registryFile);
+      ));
       replaced = true;
       if (process.platform !== "win32") {
         fsyncAndClose(openSync(directory, "r"));
@@ -455,14 +452,6 @@ export function createRegistryStore(registryFile: string) {
       // A failed directory sync happens after replacement. Drop the old cache
       // so the next read observes the file that rename made visible.
       if (replaced) cache = null;
-      // A failed write or rename must not leave this process's temp file
-      // behind. Cleanup is best-effort because the persistence error is the
-      // one the caller must receive.
-      try {
-        unlinkSync(tmp);
-      } catch {
-        // Keep the original persistence error.
-      }
       throw error;
     }
     cache = registry;

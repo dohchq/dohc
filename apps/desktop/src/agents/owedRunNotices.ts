@@ -1,4 +1,5 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { atomicReplaceFile } from "../atomicReplaceFile";
 import { dirname } from "node:path";
 
 // The agent runs whose notice is owed: each is added before the run's end
@@ -80,6 +81,5 @@ async function read(path: string): Promise<Owed> {
 
 async function write(path: string, owed: Owed): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(`${path}.tmp`, JSON.stringify(owed), { mode: 0o600 });
-  await rename(`${path}.tmp`, path);
+  await atomicReplaceFile(path, (temporary) => writeFile(temporary, JSON.stringify(owed), { mode: 0o600 }));
 }

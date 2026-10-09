@@ -175,7 +175,7 @@ Use one name for one thing. [`CONTEXT.md`](CONTEXT.md) is the canonical term lis
 
 ## Local development
 
-Use Node 24.14 or newer and pnpm 11.20.0, as pinned in `package.json`.
+Use Node 24.16 or newer and pnpm 11.20.0, as pinned in `package.json`.
 
 - `pnpm dev:desktop` starts the desktop app. `pnpm dev` is an alias.
 - `pnpm dev:site` starts the marketing site.

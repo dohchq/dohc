@@ -6,7 +6,7 @@ COPY crates/ crates/
 COPY vendor/ vendor/
 RUN cargo build --locked --release -p dohc-workspace-engine --bin dohc-workspace-engine
 
-FROM node:24.14.0-bookworm-slim AS build
+FROM node:24.16.0-bookworm-slim AS build
 ENV PNPM_HOME=/pnpm ELECTRON_SKIP_BINARY_DOWNLOAD=1
 ENV PATH=$PNPM_HOME:$PATH
 RUN corepack enable && corepack prepare pnpm@11.20.0 --activate
@@ -32,7 +32,7 @@ RUN mkdir -p /release/services/workspace-api/dist /release/services/sync-relay/d
     printf '{"type":"module"}\n' > /release/package.json
 RUN cd /release && node tools/self-host/app-backend-smoke.mjs
 
-FROM node:24.14.0-bookworm-slim AS runtime
+FROM node:24.16.0-bookworm-slim AS runtime
 ARG DOHC_REVISION=unknown
 LABEL org.opencontainers.image.title="dohc collaboration services" org.opencontainers.image.revision=$DOHC_REVISION
 ENV NODE_ENV=production
