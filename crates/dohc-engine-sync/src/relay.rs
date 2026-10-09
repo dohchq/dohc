@@ -911,6 +911,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         } else {
             local_pushed_seq
         };
+        // A same-device push during reruns can make this maximum stale, as between main's lookup and push.
+        // Today's callers push before pulling.
         let own_relay_bound = local_pushed_seq.max(relay_origin_max);
         let lookup = |origin_id: &str, origin_seq: i64| {
             // The maximum proves absence only. Present coordinates still need content comparison.
@@ -1533,7 +1535,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         );
         preflight_collisions(store, workspace_id, &identity.origin_id, &ops)?;
         self.repair_pending_ydoc_base_orders(store, workspace_id, &identity, faults)?;
-        let mut sharing_declined = Vec::new();
         self.hydrate_missing_blobs(store, workspace_id, &identity, &ops, faults)?;
         let ordered = merge_by_origin(ops);
         let mut applied = 0_usize;
@@ -1541,6 +1542,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut skipped = 0_usize;
         let mut conflicts_opened = 0_i64;
         let mut refusals = Vec::new();
+        let mut sharing_declined = Vec::new();
         let mut changed_paths = BTreeMap::new();
         let mut record_facts = Vec::new();
         let mut retryable = Vec::new();

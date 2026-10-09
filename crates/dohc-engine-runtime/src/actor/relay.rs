@@ -224,8 +224,8 @@ impl DeferredRelayTransport {
             .iter()
             .position(|(completed, _)| same_io_request(completed, &request))
         {
-            // Empty pushes read an origin maximum and must survive operation replay.
-            let release = !matches!(&state.completed[index].0, RelayIoRequest::Push(push) if push.ops.is_empty())
+            // Only the stable repair probe must survive operation replay.
+            let release = !matches!(&state.completed[index].0, RelayIoRequest::Push(push) if push.ops.is_empty() && push.after_seq == -1)
                 && matches!(
                     state.completed[index].0,
                     RelayIoRequest::Push(_)
