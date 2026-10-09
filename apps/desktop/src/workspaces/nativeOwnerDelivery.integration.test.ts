@@ -65,7 +65,7 @@ it("delivers the hosted declaration to the relay under the credential account", 
   expect(deriveLiveAuthorSnapshot({} as StorageContext,
     {principalKind: "owner", principalId: "authenticated-owner", grantId: null, grantGeneration: null}, submitted.authorContext,
     {accountId: "authenticated-owner", name: "Owner"})).toEqual([
-      {kind: "human", humanId: "authenticated-owner", humanName: "Owner"}, {kind: "agent", ...agentDeclaration},
+      {kind: "human", humanId: "authenticated-owner", humanName: "Owner"}, {kind: "agent", ...agentDeclaration, onBehalfOf: "authenticated-owner"},
     ]);
 });
 

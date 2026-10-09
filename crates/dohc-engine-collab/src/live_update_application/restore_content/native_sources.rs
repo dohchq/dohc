@@ -311,7 +311,7 @@ pub(super) fn classify(
             let admitted = accepted_history::accepted_source(conn, held, &delivery_id, budget)?;
             let accepted_receipt = if let Some(metadata) = admitted {
                 // The receipt is this entry's own delivery: the same bytes,
-                // binding, owner authority, and declaration.
+                // binding, owner authority, and bound agent identity.
                 if metadata.accepted.receipt.update_digest != update_digest
                     || !metadata.matches_draft_declaration(declaration.as_ref())
                     || !metadata.matches_automation_declaration(automation.as_ref())
