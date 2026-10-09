@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useRef } from "react";
+import { useEffect, useLayoutEffect, useReducer, useRef } from "react";
 import type { DirectWriteRow, PushShareDirectWritesResult, ShareDirectWriteAnswerDelivery } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 
@@ -43,7 +43,7 @@ export function useShareDirectWrites(input: {
   const latest = useRef(input);
   latest.current = input;
   const pushOnOpen = useRef<(() => Promise<void>) | null>(null);
-  const acknowledgments = useRef<Array<{ delivery: ShareDirectWriteAnswerDelivery; isCurrent(): boolean }>>([]);
+  const acknowledgments = useRef<ShareDirectWriteAnswerDelivery[]>([]);
   const [shownRevision, didShow] = useReducer((revision: number) => revision + 1, 0);
 
   useEffect(() => {
@@ -161,7 +161,7 @@ export function useShareDirectWrites(input: {
               for (const notice of notices) latest.current.showNotice(notice);
               if (refresh) void refreshShareView().catch(() => undefined);
               if (delivery) {
-                acknowledgments.current.push({ delivery, isCurrent });
+                acknowledgments.current.push(delivery);
                 didShow();
               }
             }
@@ -190,13 +190,14 @@ export function useShareDirectWrites(input: {
     if (input.sharedView && input.enabled && input.ready) void pushOnOpen.current?.();
   }, [input.sharedView, input.enabled, input.ready, input.workspaceId]);
 
-  useEffect(() => {
-    // The toast and Notice commit in the same render before this acknowledgment.
-    for (const { delivery, isCurrent } of acknowledgments.current.splice(0)) {
-      void (isCurrent() && latest.current.ready ? delivery.acknowledge() : delivery.release())
+  useLayoutEffect(() => {
+    // A committed Notice is shown even if readiness or workspace changed.
+    // Acknowledge before passive subscription cleanup can release its claim.
+    for (const delivery of acknowledgments.current.splice(0)) {
+      void delivery.acknowledge()
         .catch(error => console.error("[desktop] direct-write acknowledgment failed:", error));
     }
-  }, [shownRevision, input.workspaceId, input.ready]);
+  }, [shownRevision]);
 }
 
 // Why the relay refused: its reason alone, which already starts with the

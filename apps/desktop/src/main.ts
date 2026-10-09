@@ -5084,30 +5084,38 @@ const workspaceSearchOwner = new WorkspaceSearchOwner<
   logError: (message, error) => console.error(`[desktop] ${message}`, error),
 });
 
+const rendererWorkspaceRetirement = createDesktopRendererWorkspaceRetirement<WebContents>({
+  engineYDoc: engineYDocSessionIpc,
+  sitePreviews,
+  workspaceSearch: workspaceSearchOwner,
+  presencePolls: {
+    disposeSender: (senderId) => {
+      presencePollRegistry.disposeSender(senderId);
+      relayShareDiscussionActivityPolls.disposeSender(senderId);
+    },
+  },
+  presenceMutations: presenceMutationOwner,
+  onCleanupError: (owner, scope, error) => {
+    const identity =
+      scope.kind === "sender"
+        ? `sender ${scope.senderId}`
+        : `workspace "${scope.workspaceId}"`;
+    console.warn(
+      `[desktop] failed to retire ${owner} for ${identity}`,
+      error,
+    );
+  },
+});
+
 const rendererWorkspaceSessions: RendererWorkspaceSessionOwner<WebContents> =
   new RendererWorkspaceSessionOwner<WebContents>({
-    retirement: createDesktopRendererWorkspaceRetirement<WebContents>({
-      engineYDoc: engineYDocSessionIpc,
-      sitePreviews,
-      workspaceSearch: workspaceSearchOwner,
-      presencePolls: {
-        disposeSender: (senderId) => {
-          presencePollRegistry.disposeSender(senderId);
-          relayShareDiscussionActivityPolls.disposeSender(senderId);
-        },
+    retirement: {
+      ...rendererWorkspaceRetirement,
+      retireSender: session => {
+        shareDirectWriteDelivery.retireSender(session.sender);
+        return rendererWorkspaceRetirement.retireSender(session);
       },
-      presenceMutations: presenceMutationOwner,
-      onCleanupError: (owner, scope, error) => {
-        const identity =
-          scope.kind === "sender"
-            ? `sender ${scope.senderId}`
-            : `workspace "${scope.workspaceId}"`;
-        console.warn(
-          `[desktop] failed to retire ${owner} for ${identity}`,
-          error,
-        );
-      },
-    }),
+    },
     onCleanupError: (scope, error) => {
       console.warn(
         "[desktop] renderer workspace retirement failed",

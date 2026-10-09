@@ -1,18 +1,21 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, renderHook, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
+import { useState } from "react";
 import { createShareDirectWriteDelivery } from "./ipc/shareDirectWriteDelivery";
 import { shareDirectWriteDeliveryOperations, type DohcDesktopBridge, type ShareDirectWriteAnswerDelivery, type ShareDirectWriteDeliveryPayload, type ShareDirectWritesPushedEvent } from "./ipc/bridgeContract";
 import { createShareDirectWriteQueue } from "./workspaces/shareDirectWriteQueue";
 import { useShareDirectWrites, type DirectWriteNotice } from "./renderer/shell/useShareDirectWrites";
 import { deferred } from "./testing/deferred";
 import { useShellError } from "./renderer/shell/useShellError";
+import { RendererWorkspaceSessionOwner } from "./window/rendererWorkspaceSessionOwner";
 
 const REFUSED = { status: "pushed" as const, writes: [{ result: "refused" as const, paths: ["tasks/automations.yaml"], reason: "" }] };
 type Input = ShareDirectWriteDeliveryPayload;
 type Listen = Extract<Input, { action: "listen" }>;
 type Callback = (event: ShareDirectWritesPushedEvent, delivery: ShareDirectWriteAnswerDelivery) => void;
-type Sender = { send(channel: string, event: ShareDirectWritesPushedEvent): void; once(event: "destroyed", callback: () => void): void };
+type Navigation = (details: { isSameDocument: boolean; isMainFrame: boolean }) => void;
+type Sender = { send(channel: string, event: ShareDirectWritesPushedEvent): void; once(event: "destroyed", callback: () => void): void; on(event: "did-start-navigation", callback: Navigation): void };
 
 function harness(onAcknowledge?: () => void) {
   const order: string[] = [];
@@ -33,6 +36,7 @@ function harness(onAcknowledge?: () => void) {
   function windowFor(workspaceId = "a") {
     const events: ShareDirectWritesPushedEvent[] = [];
     let callback: Callback | null = null, destroy!: () => void;
+    let navigation: Navigation | undefined;
     let listening!: Listen;
     let deferUnsubscribe = false;
     const unsubscriptions: Array<() => Promise<boolean>> = [];
@@ -50,6 +54,7 @@ function harness(onAcknowledge?: () => void) {
         });
       },
       once: (_event: "destroyed", listener: () => void) => { destroy = listener; },
+      on: (_event: "did-start-navigation", listener: Navigation) => { navigation = listener; },
     };
     const rendererDocumentId = crypto.randomUUID();
     sessions.set(sender, { workspaceId, rendererDocumentId });
@@ -69,6 +74,7 @@ function harness(onAcknowledge?: () => void) {
       },
     } as unknown as DohcDesktopBridge;
     return { sender, api, events, identity: () => listening, destroy: () => { sessions.delete(sender); destroy(); },
+      navigate: (isSameDocument = false, isMainFrame = true) => navigation?.({ isSameDocument, isMainFrame }),
       deferUnsubscribe: () => { deferUnsubscribe = true; }, flushUnsubscribe: () => Promise.all(unsubscriptions.splice(0).map(run => run())),
       move: (workspaceId: string, document: string = rendererDocumentId) => sessions.set(sender, { workspaceId, rendererDocumentId: document }) };
   }
@@ -202,4 +208,81 @@ it("replays an unacknowledged answer to a replacement renderer document", async 
   expect(await f.operation(target.sender, replacement)).toBe(true);
   expect(target.events).toHaveLength(2);
   expect(target.events[1]!.answerId).toBe(answerId);
+});
+
+it("replays the previous workspace when a listener replaces a claimed answer's workspace", async () => {
+  const f = harness(), a = f.addWindow(), b = f.addWindow();
+  a.api.onShareDirectWritesPushed(() => {}, "a"); b.api.onShareDirectWritesPushed(() => {}, "a");
+  f.delivery.report("a", REFUSED);
+  const answerId = a.events[0]!.answerId;
+  expect(await f.operation(a.sender, { ...a.identity(), action: "claim", answerId })).toBe(true);
+  a.move("b");
+  a.api.onShareDirectWritesPushed(() => {}, "b");
+  expect(b.events.map(event => event.answerId)).toEqual([answerId, answerId]);
+  expect(await f.operation(b.sender, { ...b.identity(), action: "claim", answerId })).toBe(true);
+});
+
+it("replays an unshown claim when its renderer reloads without a new subscription", async () => {
+  const f = harness(), a = f.addWindow(), b = f.addWindow();
+  a.api.onShareDirectWritesPushed(() => {}, "a"); b.api.onShareDirectWritesPushed(() => {}, "a");
+  f.delivery.report("a", REFUSED);
+  const answerId = a.events[0]!.answerId;
+  expect(await f.operation(a.sender, { ...a.identity(), action: "claim", answerId })).toBe(true);
+  a.navigate(true); a.navigate(false, false);
+  expect(b.events).toHaveLength(1);
+  a.navigate();
+  expect(b.events.map(event => event.answerId)).toEqual([answerId, answerId]);
+  expect(await f.operation(a.sender, { ...a.identity(), action: "claim", answerId })).toBe(false);
+  expect(await f.operation(b.sender, { ...b.identity(), action: "claim", answerId })).toBe(true);
+});
+
+it("replays an unshown claim on session retirement into an owner workspace", async () => {
+  const events: ShareDirectWritesPushedEvent[][] = [[], []];
+  const senders = events.map((rows, id) => ({ id, isDestroyed: () => false,
+    send: (_channel: string, event: ShareDirectWritesPushedEvent) => rows.push(event), once: () => {}, on: () => {} }));
+  const sessions = new RendererWorkspaceSessionOwner<typeof senders[number]>({ retirement: {
+    retireSender: session => {
+      delivery.retireSender(session.sender);
+      return { requiredForAdmission: Promise.resolve(), detachedFromAdmission: Promise.resolve() };
+    },
+    retireWorkspace: async () => {},
+  } });
+  const delivery = createShareDirectWriteDelivery({ targets: () => senders, currentSession: sender => sessions.current(sender), isSharedView: workspaceId => workspaceId !== "owner" });
+  const workspace = { workspaceId: "a", attachmentId: Symbol("a") };
+  const listeners = senders.map((): Listen => ({ action: "listen", listening: true, workspaceId: "a", rendererDocumentId: crypto.randomUUID(), subscriptionId: crypto.randomUUID() }));
+  for (const [index, sender] of senders.entries()) {
+    await sessions.open(sender, workspace, listeners[index]!.rendererDocumentId);
+    expect(delivery.update(sender, listeners[index]!)).toBe(true);
+  }
+  delivery.report("a", REFUSED);
+  const answerId = events[0]![0]!.answerId;
+  expect(delivery.update(senders[0]!, { ...listeners[0]!, action: "claim", answerId })).toBe(true);
+  await sessions.open(senders[0]!, { workspaceId: "owner", attachmentId: Symbol("owner") }, listeners[0]!.rendererDocumentId);
+  expect(events[1]!.map(event => event.answerId)).toEqual([answerId, answerId]);
+  expect(delivery.update(senders[0]!, { ...listeners[0]!, action: "acknowledge", answerId })).toBe(false);
+  expect(delivery.update(senders[1]!, { ...listeners[1]!, action: "claim", answerId })).toBe(true);
+});
+
+it.each(["readiness", "workspace"] as const)("acknowledges a committed Notice before %s cleanup can replay it", async transition => {
+  let atAcknowledgment: string[] = [];
+  const f = harness(() => { atAcknowledgment = [screen.getByTestId("toast").textContent!, screen.getByTestId("notices").textContent!]; });
+  const target = f.addWindow();
+  window.dohcDesktop = target.api;
+  function Probe() {
+    const [changed, setChanged] = useState(false);
+    const shell = useShellError("a");
+    useShareDirectWrites({ ...input([]), ready: !(changed && transition === "readiness"),
+      workspaceId: changed && transition === "workspace" ? "owner" : "a",
+      sharedView: !(changed && transition === "workspace"),
+      showNotice: notice => { shell.showDirectWriteNotice(notice); setChanged(true); } });
+    return <><div data-testid="toast">{shell.shellErrors.at(-1)?.message}</div><div data-testid="notices">{shell.shellErrors.map(row => row.message).join("\n")}</div></>;
+  }
+  render(<Probe />);
+  await act(async () => f.queue.report("a", REFUSED));
+  expect(f.order).toEqual(["acknowledge"]);
+  expect(atAcknowledgment).toEqual([screen.getByTestId("toast").textContent, screen.getByTestId("notices").textContent]);
+  expect(atAcknowledgment[0]).toContain("Send it as a proposal.");
+  const other = f.addWindow();
+  other.api.onShareDirectWritesPushed(() => {}, "a");
+  expect(other.events).toHaveLength(0);
 });

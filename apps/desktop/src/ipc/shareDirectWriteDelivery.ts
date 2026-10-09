@@ -8,6 +8,7 @@ type Listener = Extract<ShareDirectWriteDeliveryPayload, { action: "listen" }>;
 interface Target {
   send(channel: string, event: ShareDirectWritesPushedEvent): void;
   once(event: "destroyed", callback: () => void): unknown;
+  on(event: "did-start-navigation", callback: (details: { isSameDocument: boolean; isMainFrame: boolean }) => void): unknown;
 }
 
 export function createShareDirectWriteDelivery<Sender extends Target>(dependencies: {
@@ -58,27 +59,28 @@ export function createShareDirectWriteDelivery<Sender extends Target>(dependenci
       }
     }
   }
+  function retireSender(sender: Sender): void {
+    const listener = listeners.get(sender);
+    if (!listener) return;
+    listeners.delete(sender);
+    releaseClaims(sender, listener);
+    replay(listener.workspaceId);
+  }
   function update(sender: Sender, input: ShareDirectWriteDeliveryPayload): boolean {
     if (input.action === "listen") {
       if (!input.listening) {
         if (!owns(sender, input)) return false;
-        listeners.delete(sender);
-        releaseClaims(sender, input);
-        replay(input.workspaceId);
+        retireSender(sender);
         return true;
       }
       if (!sessionWorkspaceAndDocumentMatch(sender, input)) return false;
-      const previous = listeners.get(sender);
-      if (previous) releaseClaims(sender, previous);
+      retireSender(sender);
       listeners.set(sender, input);
       if (!observed.has(sender)) {
         observed.add(sender);
-        sender.once("destroyed", () => {
-          const listener = listeners.get(sender);
-          if (!listener) return;
-          listeners.delete(sender);
-          releaseClaims(sender, listener);
-          replay(listener.workspaceId);
+        sender.once("destroyed", () => retireSender(sender));
+        sender.on("did-start-navigation", details => {
+          if (details.isMainFrame && !details.isSameDocument) retireSender(sender);
         });
       }
       replay(input.workspaceId);
@@ -109,6 +111,7 @@ export function createShareDirectWriteDelivery<Sender extends Target>(dependenci
   }
   return {
     update,
+    retireSender,
     report(workspaceId: string, result: PushShareDirectWritesResult): void {
       if (result.status === "pushed" && result.writes.every(write => write.result === "written")) return;
       const answers = held.get(workspaceId) ?? [];
