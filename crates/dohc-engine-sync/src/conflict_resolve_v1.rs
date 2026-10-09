@@ -3787,6 +3787,25 @@ mod tests {
         incoming_text: &str,
         predecessor_update: Option<&[u8]>,
     ) -> (ScratchDir, EngineStore, DocKey) {
+        content_conflict_store(
+            current_text,
+            incoming_text,
+            predecessor_update,
+            ContentKind::Scene,
+        )
+    }
+
+    fn content_conflict_store(
+        current_text: &str,
+        incoming_text: &str,
+        predecessor_update: Option<&[u8]>,
+        content_kind: ContentKind,
+    ) -> (ScratchDir, EngineStore, DocKey) {
+        let path = if content_kind == ContentKind::Scene {
+            "drawing.excalidraw"
+        } else {
+            "doc.md"
+        };
         let scratch = ScratchDir::new().expect("scratch");
         let mut store = EngineStore::open(
             &dohc_engine_testkit::engine_db_path(&scratch).expect("db path"),
@@ -3802,7 +3821,7 @@ mod tests {
                     workspace_id: "ws".to_owned(),
                     version_id: "main".to_owned(),
                     object_id: "drawing-object".to_owned(),
-                    path: "drawing.excalidraw".to_owned(),
+                    path: path.to_owned(),
                     text: current_text.to_owned(),
                     moment_id: "moment-current".to_owned(),
                     metadata_origin: "sync".to_owned(),
@@ -3817,9 +3836,16 @@ mod tests {
             .expect("current scene");
         let key = DocKey::new("ws", "main", "drawing-object").expect("scene key");
         let imported_update = predecessor_update.is_none().then(|| {
-            dohc_engine_collab::import_portable_scene(current_text)
-                .expect("import current scene")
-                .initial_update
+            if content_kind == ContentKind::Scene {
+                dohc_engine_collab::import_portable_scene(current_text)
+                    .expect("import current scene")
+                    .initial_update
+            } else {
+                let doc = dohc_engine_collab::Ydoc::wire();
+                doc.rewrite_content_to_markdown(content_kind, current_text)
+                    .expect("import current text");
+                doc.encode_full_state()
+            }
         });
         let initial_update = predecessor_update
             .or(imported_update.as_deref())
@@ -3827,7 +3853,7 @@ mod tests {
         dohc_engine_collab::claim_base(
             &mut store,
             &key,
-            ContentKind::Scene,
+            content_kind,
             initial_update,
             &NoFaults,
             11,
@@ -3837,7 +3863,7 @@ mod tests {
             workspace_id: "ws".to_owned(),
             version_id: "peer".to_owned(),
             object_id: "peer-drawing-object".to_owned(),
-            path: "drawing.excalidraw".to_owned(),
+            path: path.to_owned(),
             text: incoming_text.to_owned(),
             blob_sha256: dohc_engine_storage::hex_sha256(incoming_text.as_bytes()),
             updated_at_ms: 12,
@@ -3849,7 +3875,7 @@ mod tests {
         let conflict = TextConflict {
             conflict_id: "scene-conflict".to_owned(),
             workspace_id: "ws".to_owned(),
-            path: "drawing.excalidraw".to_owned(),
+            path: path.to_owned(),
             target_version_id: "main".to_owned(),
             source_version_id: "peer".to_owned(),
             created_at_ms: 12,
@@ -3858,9 +3884,9 @@ mod tests {
             chosen_from: ConflictChoice::Current,
             resolution: None,
             metadata: ConflictMetadata::origin("sync"),
-            base: ConflictFileState::text("drawing.excalidraw", None),
-            current: ConflictFileState::text("drawing.excalidraw", Some(current.snapshot)),
-            incoming: ConflictFileState::text("drawing.excalidraw", Some(incoming)),
+            base: ConflictFileState::text(path, None),
+            current: ConflictFileState::text(path, Some(current.snapshot)),
+            incoming: ConflictFileState::text(path, Some(incoming)),
         };
         store
             .write_with(&NoFaults, |tx| {
@@ -4498,6 +4524,169 @@ mod tests {
             effects: Vec::new(),
             lineage_transition: None,
         }
+    }
+
+    #[test]
+    fn incoming_nested_list_resolution_installs_and_replicates_exact_source() {
+        let incoming = "- parent\n  - child\n";
+        let (_scratch, mut sender, key) =
+            content_conflict_store("Current body", incoming, None, ContentKind::Richdoc);
+        let predecessor_claim = dohc_engine_collab::read_marker(&sender, &key)
+            .unwrap()
+            .unwrap()
+            .lineage_claim_id
+            .unwrap();
+        let predecessor_update = sender.get_binary_blob(&predecessor_claim).unwrap().unwrap();
+        let built = resolve_scene_conflict(&mut sender, "scene-conflict", 20);
+        let (_receiver_scratch, mut receiver, receiver_key) = content_conflict_store(
+            "Current body",
+            incoming,
+            Some(&predecessor_update),
+            ContentKind::Richdoc,
+        );
+        copy_resolution_roots(&sender, &mut receiver, &built);
+        let mut envelope = imported_envelope(0, "conflict.resolve", built.value);
+        envelope.recorded_at_ms = 20;
+        let outcome = crate::apply_replication_envelope(
+            &mut receiver,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .expect("import nested-list resolution");
+        assert!(
+            matches!(outcome.primary, crate::ApplyDisposition::Applied(_)),
+            "{outcome:?}"
+        );
+        assert!(outcome.refusals.is_empty(), "{outcome:?}");
+        for (store, key) in [(&sender, &key), (&receiver, &receiver_key)] {
+            let snapshot: String = store.read_with(|conn| conn.query_row(
+                "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3",
+                params![key.workspace_id, key.version_id, key.object_id], |row| row.get(0),
+            ).map_err(SyncError::corrupt)).unwrap();
+            assert_eq!(snapshot.as_bytes(), incoming.as_bytes());
+            let loaded = dohc_engine_collab::load_persisted(store, key)
+                .unwrap()
+                .unwrap();
+            let projected = store
+                .read_with(|conn| {
+                    crate::project_ydoc_with_store(conn, key, &loaded.doc, ContentKind::Richdoc)
+                })
+                .unwrap();
+            assert_eq!(projected.content.as_bytes(), incoming.as_bytes());
+            assert_eq!(
+                dohc_engine_collab::read_last_settled_sha(store, key).unwrap(),
+                Some(dohc_engine_storage::hex_sha256(incoming.as_bytes()))
+            );
+        }
+        assert_eq!(
+            dohc_engine_collab::read_marker(&sender, &key)
+                .unwrap()
+                .unwrap()
+                .lineage_claim_id,
+            dohc_engine_collab::read_marker(&receiver, &receiver_key)
+                .unwrap()
+                .unwrap()
+                .lineage_claim_id
+        );
+    }
+
+    #[test]
+    fn successor_body_edit_loses_untouched_nested_list_source() {
+        use dohc_engine_files::{DurabilityPolicy, MaterializeOptions, NoBackoff, StdReplacer};
+
+        let incoming = "- parent\n  - child\n\nOriginal paragraph\n";
+        let (scratch, mut store, key) =
+            content_conflict_store("Current body", incoming, None, ContentKind::Richdoc);
+        resolve_scene_conflict(&mut store, "scene-conflict", 20);
+        // The domain transaction installs the snapshot. Its runtime caller
+        // materializes that file before allowing a live edit.
+        std::fs::write(scratch.path().join("doc.md"), incoming).expect("installed successor file");
+        let options = MaterializeOptions {
+            policy: DurabilityPolicy::per_os(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 20,
+            faults: &NoFaults,
+        };
+        assert_eq!(
+            std::fs::read(scratch.path().join("doc.md")).unwrap(),
+            incoming.as_bytes()
+        );
+        let loaded = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap();
+        let before = store
+            .read_with(|conn| {
+                crate::project_ydoc_with_store(conn, &key, &loaded.doc, ContentKind::Richdoc)
+            })
+            .unwrap();
+        assert_eq!(before.content, incoming);
+        let update = loaded.doc.richdoc_append_paragraph("Added paragraph");
+        dohc_engine_collab::record_local_update(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &update,
+            dohc_engine_collab::LocalAppend::default(),
+            &NoFaults,
+            21,
+            |_, _, _| Ok(()),
+        )
+        .expect("persist body edit");
+        let after = store
+            .read_with(|conn| {
+                crate::project_ydoc_with_store(conn, &key, &loaded.doc, ContentKind::Richdoc)
+            })
+            .unwrap();
+        assert_eq!(
+            after.content,
+            "- parent\n\n  \\- child\n\nOriginal paragraph\n\nAdded paragraph"
+        );
+        assert_eq!(
+            loaded
+                .doc
+                .settled_markdown_source(&after.content, || Ok::<_, ()>(Some(incoming.to_owned())))
+                .unwrap(),
+            None
+        );
+        let settlement = dohc_engine_collab::settle(&mut store, &key, "doc.md", &NoFaults, 22)
+            .expect("enqueue settlement");
+        let dohc_engine_storage::TxnOutcome::Committed(settlement) = settlement else {
+            panic!("settle acknowledgement")
+        };
+        assert_eq!(settlement.projection.content, after.content);
+        assert_eq!(
+            store
+                .get_binary_blob(&settlement.content_sha256)
+                .unwrap()
+                .unwrap(),
+            after.content.as_bytes()
+        );
+        let job = store
+            .list_pending_materialization_jobs()
+            .unwrap()
+            .into_iter()
+            .find(|job| job.job_id == settlement.job_id)
+            .expect("settlement job");
+        assert_eq!(
+            dohc_engine_files::materialize_one(
+                &store,
+                scratch.path(),
+                &job,
+                &MaterializeOptions {
+                    now_ms: 22,
+                    ..options
+                },
+            )
+            .expect("materialize edited successor"),
+            dohc_engine_files::JobOutcome::Completed
+        );
+        assert_eq!(
+            std::fs::read(scratch.path().join("doc.md")).unwrap(),
+            after.content.as_bytes()
+        );
     }
 
     #[test]
