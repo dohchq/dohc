@@ -207,6 +207,23 @@ fn apply_ordered_in_tx(
         return Err(OwnerOutboxError::ParentMismatch);
     }
     let key = key(b)?;
+    let indexed_before =
+        dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
+            tx,
+            workspace_id,
+            &b.main_version_id,
+            &b.object_id,
+        )
+        .map_err(index_error)?;
+    let checkpoint_fields = if indexed_before.is_some() {
+        let checkpoint = crate::Ydoc::wire();
+        checkpoint
+            .apply(&draft::bounded_blob(tx, &observed.checkpoint_digest)?)
+            .map_err(collab)?;
+        Some(checkpoint.frontmatter_json())
+    } else {
+        None
+    };
     // No ordinary publication callback runs. Frame attribution is unknown here.
     crate::durable::record_authorized_update_in_tx(
         tx,
@@ -246,16 +263,18 @@ fn apply_ordered_in_tx(
         ],
     )
     .map_err(write_sql)?;
-    if dohc_engine_domain::is_collection_record_bound_in_tx(
-        tx,
-        workspace_id,
-        &b.main_version_id,
-        &b.object_id,
-    )
-    .map_err(index_error)?
-    {
-        draft::apply_pending_in(tx, b, &visible, observed.limits.max_pending_bytes)?;
-        index_frontmatter_in_tx(tx, b, &visible, None, None, now_ms)?;
+    if let (Some(before), Some(checkpoint_fields)) = (indexed_before, checkpoint_fields) {
+        // Body-only frames leave the visible fields unchanged, even with drafts.
+        if checkpoint_fields != visible.frontmatter_json() {
+            draft::apply_pending_in(
+                tx,
+                b,
+                &visible,
+                observed.limits.max_pending_bytes,
+                draft::PendingReplay::Checkpoint,
+            )?;
+            index_frontmatter_from_in_tx(tx, b, &before, &visible, None, None, now_ms)?;
+        }
     }
     // A frame another computer wrote is a change from elsewhere; this
     // owner's own accepted draft is not. A sync can carry either, so it

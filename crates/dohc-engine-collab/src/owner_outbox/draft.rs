@@ -584,17 +584,16 @@ pub(super) fn refuse_dependent_entries_in_tx(
             .map_err(read_sql)?;
         entries.collect::<Result<Vec<_>, _>>().map_err(read_sql)?
     };
+    let mut accepted_bytes = bounded_blob(tx, checkpoint_digest)?;
     let mut accepted = Ydoc::wire();
-    accepted
-        .apply(&bounded_blob(tx, checkpoint_digest)?)
-        .map_err(collab)?;
+    accepted.apply(&accepted_bytes).map_err(collab)?;
     for (sequence, digest, length, receipt) in entries {
         let update = bounded_blob(tx, &digest)?;
         if update.len() as i64 != length {
             return Err(OwnerOutboxError::Corrupt);
         }
         let candidate = Ydoc::wire();
-        candidate.apply(&bounded(&accepted)?).map_err(collab)?;
+        candidate.apply(&accepted_bytes).map_err(collab)?;
         candidate.apply(&update).map_err(collab)?;
         if candidate.has_pending_dependencies() {
             if receipt.is_some() {
@@ -602,7 +601,7 @@ pub(super) fn refuse_dependent_entries_in_tx(
             }
             tx.execute("UPDATE owner_ydoc_outbox_entries SET pending=0,terminal_blob_digest=update_blob_digest,update_blob_digest=NULL,terminal_reason='An earlier write was not accepted.' WHERE outbox_id=?1 AND sequence=?2 AND pending=1", params![outbox_id,sequence]).map_err(write_sql)?;
         } else {
-            bounded(&candidate)?;
+            accepted_bytes = bounded(&candidate)?;
             accepted = candidate;
         }
     }
@@ -633,8 +632,37 @@ pub fn open_draft_in(
     let doc = Ydoc::wire();
     doc.apply(&bounded_blob(conn, &observed.checkpoint_digest)?)
         .map_err(collab)?;
-    apply_pending_in(conn, binding, &doc, observed.limits.max_pending_bytes)?;
+    apply_pending_in(
+        conn,
+        binding,
+        &doc,
+        observed.limits.max_pending_bytes,
+        PendingReplay::Draft,
+    )?;
     Ok(OwnerDraft { observed, doc })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PendingReplay {
+    Draft,
+    Checkpoint,
+}
+
+/// Merge active drafts into an accepted checkpoint for Collection indexing.
+/// Quarantined work stays frozen and cannot block accepted state advancing.
+pub fn apply_pending_to_checkpoint_in(
+    conn: &Connection,
+    binding: &LiveObjectBinding,
+    doc: &Ydoc,
+) -> Result<(), OwnerOutboxError> {
+    let observed = read_observed_in(conn, binding)?.ok_or(OwnerOutboxError::NotFound)?;
+    apply_pending_in(
+        conn,
+        binding,
+        doc,
+        observed.limits.max_pending_bytes,
+        PendingReplay::Checkpoint,
+    )
 }
 
 pub(super) fn apply_pending_in(
@@ -642,10 +670,17 @@ pub(super) fn apply_pending_in(
     binding: &LiveObjectBinding,
     doc: &Ydoc,
     max_pending_bytes: i64,
+    replay: PendingReplay,
 ) -> Result<(), OwnerOutboxError> {
     if let Some(parent) = find_parent_for_binding(conn, binding)? {
-        if parent.binding != *binding || parent.state == OwnerOutboxState::Quarantined {
+        if parent.binding != *binding {
             return Err(OwnerOutboxError::Frozen);
+        }
+        if parent.state == OwnerOutboxState::Quarantined {
+            return match replay {
+                PendingReplay::Draft => Err(OwnerOutboxError::Frozen),
+                PendingReplay::Checkpoint => Ok(()),
+            };
         }
         let mut stmt = conn.prepare("SELECT update_digest,byte_length FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 ORDER BY sequence").map_err(read_sql)?;
         let rows = stmt
@@ -667,11 +702,16 @@ pub(super) fn apply_pending_in(
                 return Err(OwnerOutboxError::Corrupt);
             }
             doc.apply(&bytes).map_err(collab)?;
-            bounded(doc)?;
+            if replay == PendingReplay::Draft {
+                bounded(doc)?;
+            }
         }
     }
     if doc.has_pending_dependencies() {
         return Err(OwnerOutboxError::ParentMismatch);
+    }
+    if replay == PendingReplay::Checkpoint {
+        bounded(doc)?;
     }
     Ok(())
 }

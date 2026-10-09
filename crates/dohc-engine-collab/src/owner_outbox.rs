@@ -35,6 +35,8 @@ pub fn has_adopted_owner_in(
         .map_err(|error| crate::CollabError::Storage(StorageError::corrupt_public(error)))
 }
 
+const OWNER_DRAFT_REFUSAL_ACTOR: &str = "owner-draft-refusal";
+
 /// Diff the visible owner fields against their current Collection index.
 pub(super) fn index_frontmatter_in_tx(
     tx: &rusqlite::Transaction<'_>,
@@ -52,24 +54,37 @@ pub(super) fn index_frontmatter_in_tx(
     )
     .map_err(index_error)?;
     if let Some(before) = before {
-        let after = visible.frontmatter_json();
-        dohc_engine_domain::index_collection_frontmatter_apply_in_tx(
-            tx,
-            &binding.workspace_id,
-            &binding.main_version_id,
-            &binding.object_id,
-            &before,
-            &after,
-            &before,
-            &after,
-            None,
-            actor,
-            attribution,
-            None,
-            now_ms,
-        )
-        .map_err(index_error)?;
+        index_frontmatter_from_in_tx(tx, binding, &before, visible, actor, attribution, now_ms)?;
     }
+    Ok(())
+}
+
+pub(super) fn index_frontmatter_from_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    binding: &LiveObjectBinding,
+    before: &serde_json::Value,
+    visible: &crate::Ydoc,
+    actor: Option<&str>,
+    attribution: Option<&dohc_engine_domain::ChangeAttribution>,
+    now_ms: i64,
+) -> Result<(), OwnerOutboxError> {
+    let after = visible.frontmatter_json();
+    dohc_engine_domain::index_collection_frontmatter_apply_in_tx(
+        tx,
+        &binding.workspace_id,
+        &binding.main_version_id,
+        &binding.object_id,
+        before,
+        &after,
+        before,
+        &after,
+        None,
+        actor,
+        attribution,
+        None,
+        now_ms,
+    )
+    .map_err(index_error)?;
     Ok(())
 }
 
@@ -368,7 +383,7 @@ pub fn refuse_entry_in_tx(
             tx,
             &parent.binding,
             &visible,
-            Some("owner-draft-refusal"),
+            Some(OWNER_DRAFT_REFUSAL_ACTOR),
             None,
             now_ms,
         )?;

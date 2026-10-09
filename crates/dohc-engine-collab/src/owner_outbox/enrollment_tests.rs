@@ -1251,3 +1251,66 @@ fn enrollment_folds_unsettled_authors_before_removing_native_update_rows() {
         "History recovery includes the enrollment's folded authors"
     );
 }
+
+#[test]
+fn accepted_collection_frames_advance_while_local_work_is_quarantined() {
+    let (_dir, mut store, observed, checkpoint, _) = collection_fixture();
+    let enrollment = input(&store, &observed, checkpoint.clone());
+    let enrolled = enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    let outbox = enrolled.outbox_id.unwrap();
+    super::super::quarantine(
+        &mut store,
+        "workspace",
+        super::super::OwnerOutboxQuarantineInput {
+            outbox_id: outbox.clone(),
+            reason: "restore-fenced".into(),
+            observed_binding: None,
+        },
+    )
+    .unwrap();
+    let host = Ydoc::wire();
+    host.apply(&checkpoint).unwrap();
+    accept_field_frame(
+        &mut store,
+        &observed.binding,
+        host.richdoc_append_paragraph("accepted body"),
+    );
+    accept_field_frame(
+        &mut store,
+        &observed.binding,
+        host.frontmatter_set("priority", "high").unwrap(),
+    );
+    store
+        .read_with(|conn| {
+            let indexed =
+                dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
+                    conn,
+                    "workspace",
+                    "main",
+                    "object",
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                indexed,
+                serde_json::json!({"title":"Original", "status":"open", "priority":"high"})
+            );
+            let native = crate::load_doc_in(conn, &key(&observed.binding).unwrap()).unwrap();
+            assert_eq!(
+                native.frontmatter_json()["priority"],
+                serde_json::json!("high")
+            );
+            let observed = super::super::draft::read_observed_in(conn, &observed.binding)
+                .unwrap()
+                .unwrap();
+            assert!(matches!(
+                open_draft_in(conn, &observed.binding, observed.revision),
+                Err(OwnerOutboxError::Frozen)
+            ));
+            Ok::<_, OwnerOutboxError>(())
+        })
+        .unwrap();
+    let pending = super::super::read_pending(&store, "workspace", &outbox).unwrap();
+    assert_eq!(pending.entries.len(), 1);
+    assert_eq!(pending.state, super::super::OwnerOutboxState::Quarantined);
+}
