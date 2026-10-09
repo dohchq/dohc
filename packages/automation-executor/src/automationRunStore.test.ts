@@ -23,6 +23,20 @@ function run(claimId: string, state: "done" | "failed" | null, atMs: number, set
 }
 
 describe("the automation run store", () => {
+  it("ignores late retention and session saves after offline dismissal", async () => {
+    const root = await createTestScratch("dohc-restore-dismiss-race-");
+    const store = createAutomationRunStore(root, testMetadataDir);
+    await store.savePendingRestore({id: "restore", claims: ["older"]});
+    await store.savePendingRestore({id: "restore", serverRelease: true, claims: [], session: undefined});
+    const late = {id: "restore", session: {grants: ["grant"], target: {kind: "person" as const, userId: "ana"},
+      label: "Ana", definitions: [], filesUndone: false, receipts: [], result: {status: "waiting"}}};
+    await store.savePendingRestore({id: "restore", claims: ["older"]});
+    await store.savePendingRestore(late);
+    expect(await store.pendingRestores()).toEqual([{id: "restore", serverRelease: true, claims: []}]);
+    await store.removePendingRestore("restore");
+    await store.savePendingRestore(late);
+    expect(await store.pendingRestores()).toEqual([]);
+  });
   it("keeps retained claims when the desktop saves only its restore session", async () => {
     const root = await createTestScratch("dohc-restore-session-");
     const store = createAutomationRunStore(root, testMetadataDir);

@@ -2,6 +2,15 @@ import { describe, expect, it } from "vitest";
 import { createServerRuns } from "./serverRuns";
 
 describe("server automation recovery", () => {
+  it("keeps release queued while the original account cannot send", async () => {
+    let signedIn = false;
+    const server = createServerRuns(async () => signedIn ? {status: 200, body: {ok: true, errorMessage: null},
+      asker: {account: "owner", current: () => true}} : null);
+    // Release must distinguish an unavailable account from a server without this copy.
+    expect(await server.releaseRestore("ws", "release")).toBe(false);
+    signedIn = true;
+    expect(await server.releaseRestore("ws", "release")).toBe(true);
+  });
   it("retains a completed run's pending shared settlement note and unfinished Undo", async () => {
     const run = {claimId: "pending", state: "done", error: null, createdAtMs: 1, updatedAtMs: 2, sharedSettlementPending: true,
       trigger: {kind: "button", recordId: "record", by: "human", sharedAuthor: null, depth: 0},

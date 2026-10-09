@@ -3317,6 +3317,7 @@ export class CollectionAutomations {
     trash: (path: string) => Promise<void>,
     // Stop and restore undoes only the runs under these definitions.
     definitionHashes?: ReadonlySet<string>,
+    preloaded?: Awaited<ReturnType<AutomationRunStore["runsOf"]>>,
   ): Promise<CollectionAutomationUndo> {
     await this.ready();
     const parsed = this.locate(input.automationId);
@@ -3337,7 +3338,7 @@ export class CollectionAutomations {
       if (claim.state !== "done" && claim.state !== "failed") {
         return { status: "refused", reason: "This run has not finished. Undo it once it finishes." };
       }
-      const stored = await this.options.store.runsOf(input.automationId, input.claimId);
+      const stored = preloaded ?? await this.options.store.runsOf(input.automationId, input.claimId);
       const { unreadable } = stored;
       const runs = definitionHashes
         ? stored.runs.filter((run) => definitionHashes.has(run.definitionHash))
@@ -3383,7 +3384,7 @@ export class CollectionAutomations {
       // is undone, Undo tries again only the fields it kept.
       const pending = runs.filter((run) => run.undo !== "done" || sharedReversalsOf([run]).some(write => write.state === "not-accepted"));
       const keptRetry = pending.find(run => run.undo === "started" && run.undoKeptScope !== undefined)?.undoKeptScope;
-      const kept = keptRetry ? runs.filter(run => run.undoKeptScope === keptRetry)
+      const kept = keptRetry ? runs.filter(run => run.undoKeptScope === keptRetry || run.undo === "done" && run.undoKept.length > 0)
         : pending.length === 0 ? runs.filter(run => run.undoKept.length > 0) : [];
       if (runs.length > 0 && pending.length === 0 && kept.length === 0) {
         return { status: "refused", reason: "You already undid this run." };
@@ -3440,7 +3441,7 @@ export class CollectionAutomations {
       // Keep this reversal's receipts with the runs it actually reversed.
       for (const run of [...pending].sort((a, b) => a.startedAtMs - b.startedAtMs)) {
         await this.options.store.updateState(run, { undo: "done", undoKept: keptFields, undoWrites });
-        run.undoWrites = undoWrites;
+        Object.assign(run, {undo: "done", undoKept: keptFields, undoWrites});
       }
       const sharedReversals = sharedReversalsOf(runs);
       if (sharedReversals.length > 0) result.sharedReversals = sharedReversals;
@@ -3481,7 +3482,7 @@ export class CollectionAutomations {
     undone.changedSince += datasetKept.length;
     for (const run of runs) {
       await this.options.store.updateState(run, { undo: "done", undoKept: keptFields, undoWrites });
-      run.undoWrites = undoWrites;
+      Object.assign(run, {undo: "done", undoKept: keptFields, undoWrites});
     }
     const sharedReversals = sharedReversalsOf(runs);
     if (sharedReversals.length > 0) undone.sharedReversals = sharedReversals;
@@ -3587,7 +3588,7 @@ export class CollectionAutomations {
   ) {
     // Every claim of these automations, newest first across them all, so a
     // field two automations wrote in turn goes back in the reverse order.
-    const claims: Array<{ automationId: string; wanted: ReadonlySet<string>; claim: HistoryClaim }> = [];
+    const claims: Array<{ automationId: string; wanted: ReadonlySet<string>; claim: HistoryClaim; stored: Awaited<ReturnType<AutomationRunStore["runsOf"]>> }> = [];
     const reportClaims: typeof claims = [];
     this.restorePlanning += 1;
     let retentionId: string;
@@ -3601,21 +3602,25 @@ export class CollectionAutomations {
         for (const claim of listed) {
           const stored = await this.options.store.runsOf(automationId, claim.claimId);
           const runs = stored.runs.filter(run => wanted.has(run.definitionHash));
-          if (stored.unreadable || runs.length > 0) reportClaims.push({automationId, wanted, claim});
+          if (stored.unreadable || runs.length > 0) reportClaims.push({automationId, wanted, claim, stored});
           if (stored.unreadable || runs.some(run => run.undo !== "done") || documentUndoKept(runs).length > 0 ||
             sharedReversalsOf(runs).some(write => write.state === "pending" || write.state === "not-accepted")) {
-            claims.push({ automationId, wanted, claim });
+            claims.push({ automationId, wanted, claim, stored });
           }
         }
       }
       claims.sort((left, right) => newerFirst(left.claim, right.claim));
       reportClaims.sort((left, right) => newerFirst(left.claim, right.claim));
       retentionId = restoreId ?? `runs:${createHash("sha256").update(JSON.stringify([...hashes].map(([id, wanted]) => [id, [...wanted].sort()]).sort())).digest("hex")}`;
-      const previous = (await this.options.store.pendingRestores()).find(entry => entry.id === retentionId);
+      const restores = await this.options.store.pendingRestores();
+      const previous = restores.find(entry => entry.id === retentionId);
       const retained = await this.options.store.unfinishedUndos();
       if (retained === null) throw new Error("dohc could not read unfinished Undo progress.");
       if (new Set([...retained, ...this.changing, ...claims.map(entry => entry.claim.claimId)]).size > MAX_HISTORY_KEEP) {
-        throw new Error("dohc cannot keep more than 10,000 claims for Undo. Undo some runs in run history.");
+        const next = restores.some(entry => entry.id !== retentionId && entry.claims.length > 0)
+          ? "Finish or dismiss another unfinished Stop and restore."
+          : "Finish an unfinished Undo or undo other runs in run history.";
+        throw new Error(`dohc can keep up to 10,000 runs for Undo. ${next}`);
       }
       if (claims.length > 0 || previous) await this.options.store.savePendingRestore({id: retentionId, claims: claims.map(entry => entry.claim.claimId)});
     } finally {
@@ -3636,8 +3641,7 @@ export class CollectionAutomations {
     // The pass stops at the first claim whose Undo fails, so no older claim
     // is undone over one that stopped part way.
     try {
-      for (const { automationId, wanted, claim } of claims) {
-        const stored = await this.options.store.runsOf(automationId, claim.claimId);
+      for (const { automationId, wanted, claim, stored } of claims) {
         if (stored.unreadable) {
           result.left += 1;
           continue;
@@ -3648,19 +3652,15 @@ export class CollectionAutomations {
         const pending = runs.some((run) => run.undo !== "done") || sharedReversals.some(write => write.state === "not-accepted");
         const kept = documentUndoKept(runs).length > 0;
         if (again ? pending || !kept : !pending && !kept) {
-          result.sharedReversals.push(...sharedReversals);
           continue;
         }
         const target = { automationId, claimId: claim.claimId };
-        let undone = await this.undoClaim({ ...target, deletes: null }, trash, wanted);
+        let undone = await this.undoClaim({ ...target, deletes: null }, trash, wanted, stored);
         // Stop and restore leaves deletions for the person's confirmation in run history.
         if (undone.status === "confirm" && undone.preview.deletes + undone.preview.unchecked === 0) {
-          undone = await this.undoClaim({ ...target, deletes: { token: undone.preview.token, chosen: [] } }, trash, wanted);
+          undone = await this.undoClaim({ ...target, deletes: { token: undone.preview.token, chosen: [] } }, trash, wanted, stored);
         }
         if (undone.status === "undone") {
-          if (undone.sharedReversals?.length) {
-            result.sharedReversals.push(...undone.sharedReversals);
-          }
           if (undone.sharedReversals?.some(write => write.state === "not-accepted")) {
             if (!again) result.left += 1;
           } else if (pending) result.undone += 1;
@@ -3676,8 +3676,8 @@ export class CollectionAutomations {
     } finally {
       if (restoreId === undefined) await this.options.store.removePendingRestore(retentionId);
       const reported = new Map<string, NonNullable<CollectionAutomationUndone["sharedReversals"]>[number]>();
-      for (const { automationId, wanted, claim } of reportClaims) {
-        const runs = (await this.options.store.runsOf(automationId, claim.claimId)).runs.filter(run => wanted.has(run.definitionHash));
+      for (const { wanted, stored } of reportClaims) {
+        const runs = stored.runs.filter(run => wanted.has(run.definitionHash));
         for (const write of sharedReversalsOf(runs)) reported.set(sharedFileUpdateKey(write.draft), write);
         for (const run of runs) {
           for (const { recordId, field, path, fieldName, datasetRecordId } of run.undoKept) {

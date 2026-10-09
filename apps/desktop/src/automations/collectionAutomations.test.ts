@@ -773,7 +773,7 @@ it.each([false, true])("bounds restore retention in a 10001-claim history (all u
   definition = listed.automations[0].automation;
   const definitions = [{collectionPath: "Tasks", id: "bump", definitionHash: definitionHash(definition)}];
   if (allUnfinished) {
-    await expect(executor.retainRunsForRestore(definitions, "retention-test")).rejects.toThrow("cannot keep more than 10,000");
+    await expect(executor.retainRunsForRestore(definitions, "retention-test")).rejects.toThrow("keep up to 10,000 runs");
     expect(await w.baseStore.pendingRestores()).toEqual([]);
   } else {
     await executor.retainRunsForRestore(definitions, "retention-test");
@@ -2754,6 +2754,60 @@ describe("Collection automations", () => {
     expect(((await w.executor.runs("collection:Tasks#stamp")).runs)[0]).toMatchObject({ undone: true });
     await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, deletes: null }, trash))
       .resolves.toEqual({ status: "refused", reason: "You already undid this run." });
+  });
+
+  it("resumes all kept runs when saving their scopes fails in R1 R3 R2 order", async () => {
+    const w = await world({collections: ["Tasks", "Log"], automations: {Tasks: BUMP}});
+    const task = w.addRecord("Tasks", "one", {Count: 4});
+    const claim = w.claim(TASKS, task); claim.state = "done";
+    await w.executor.open(); await w.executor.idle();
+    const listed = await w.executor.automationsIn("Tasks");
+    if(listed.status !== "read" || !listed.automations[0]?.valid) throw Error("No definition");
+    const definition = listed.automations[0].automation;
+    const at = Date.now();
+    const runs = [1, 3, 2].map(before => ({...newRun(claim, definition, `kept-${before}`, at + before),
+      settled: true, outcome: {state: "done" as const}, finishedAtMs: at + before, undo: "done" as const,
+      undoKept: [{recordId: task.id, field: "Count", path: task.path, fieldName: "Count", datasetRecordId: null}],
+      steps: [{ordinal: 0, effects: [{kind: "set" as const, target: {recordId: task.id, path: task.path, collectionPath: "Tasks"},
+        fields: [{field: "Count", before, after: before + 1}]}]}],
+      applied: [{ordinal: 0, writes: [{kind: "field" as const, recordId: task.id, path: task.path, field: "Count", before, after: before + 1}]}]}));
+    for(const run of runs) await w.baseStore.save(run);
+    await w.executor.dispose();
+    let failed = false;
+    const store = {...w.baseStore, runsOf: async () => {
+      const saved = await w.baseStore.runsOf(claim.automationId, claim.claimId);
+      return {runs: runs.map(run => {
+        const found = saved.runs.find(item => item.keySeed === run.keySeed);
+        if(!found) throw Error(`Missing ${run.keySeed}: ${saved.runs.map(item => item.keySeed)}; unreadable ${saved.unreadable}`);
+        return found;
+      }), unreadable: saved.unreadable};
+    },
+      updateState: async (run: StoredRun, state: Parameters<AutomationRunStore["updateState"]>[1]) => {
+        if(run.keySeed === "kept-2" && state.undo === "started" && !failed) {failed = true; throw Error("R2 scope failed");}
+        await w.baseStore.updateState(run, state);
+      }};
+    const executor = w.makeExecutor({store}); onTestFinished(() => executor.dispose());
+    await executor.open();
+    const input = {automationId: claim.automationId, claimId: claim.claimId, deletes: null};
+    await expect(executor.undo(input, async () => {})).rejects.toThrow("R2 scope failed");
+    expect(w.fieldsOf(task).Count).toBe(4);
+    expect(await executor.undo(input, async () => {})).toMatchObject({status: "undone", changedSince: 0});
+    expect(w.fieldsOf(task).Count).toBe(1);
+  });
+
+  it("reads each claim history only once during Stop and restore", async () => {
+    const w = await world({collections: ["Tasks", "Log"], automations: {Tasks: BUMP}});
+    const task = w.addRecord("Tasks", "one", {Count: 1});
+    const claim = w.claim(TASKS, task);
+    await w.executor.open(); await w.settledClaim(claim); await w.executor.dispose();
+    const reads = vi.fn(w.baseStore.runsOf);
+    const executor = w.makeExecutor({store: {...w.baseStore, runsOf: reads}}); onTestFinished(() => executor.dispose());
+    await executor.open();
+    const listed = await executor.automationsIn("Tasks");
+    if(listed.status !== "read" || !listed.automations[0]?.valid) throw Error("No definition");
+    reads.mockClear();
+    expect(await executor.undoRunsOf([{collectionPath: "Tasks", id: "bump", definitionHash: listed.automations[0].definitionHash}], async () => {})).toMatchObject({undone: 1});
+    expect(reads.mock.calls.filter(([, id]) => id === claim.claimId)).toHaveLength(1);
   });
 
   it("gives each requested kept-field Undo a new durable key", async () => {

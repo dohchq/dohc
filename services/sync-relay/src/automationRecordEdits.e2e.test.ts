@@ -587,7 +587,10 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
     localPerson: async () => ({kind: "human", humanId: "owner"}), queuePull: () => undefined,
     syncNow: async () => {await owner.sync(); await copy.sync();}, deletePath: async () => undefined,
     notifyRenderer: () => undefined, assertOriginalWorkspace: () => undefined,
-    serverRuns: {restore: (_workspaceId, definitions, again, retentionId) => running.runs.restore(scope, definitions, again, retentionId)},
+    serverRuns: {
+      restore: (_workspaceId, definitions, again, retentionId) => running.runs.restore(scope, definitions, again, retentionId),
+      releaseRestore: async (_workspaceId, retentionId) => {await running.runs.restore(scope, [], false, retentionId); return true;},
+    },
     requireEngineCapture: async () => ({capture: {
       readMoment,
       listObjectMomentsAfter: async (objectId, momentId) => {

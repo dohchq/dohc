@@ -135,6 +135,18 @@ it.each([0, 1])("keeps the Undo key scope when only run %s saved completion befo
   expect(space.records.get("rec_t")!.values.Count).toBe(3);
 });
 
+it("leaves fields of a completed creation alone after the person restores it from trash", async () => {
+  const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {Count: 2}}]");
+  const space = workspace([task("rec_t", {Count: 2})]);
+  const done = {...newRun(added(), definition, "creation", 1), undo: "done" as const, undoScope: "joint",
+    created: [{ordinal: 0, recordId: "rec_t", planned: "rec_t", path: "Tasks/rec_t.md"}],
+    applied: [{ordinal: 0, writes: [{kind: "field" as const, recordId: "rec_t", path: "Tasks/rec_t.md", field: "Count", before: null, after: 2}]}]};
+  const active = {...newRun(added(), definition, "active", 2), undo: "started" as const, undoScope: "joint"};
+  const result = await undoCollectionAutomationRuns(space.undo([]), [done, active], new AbortController().signal);
+  expect(result.undone).toMatchObject({reverted: 0, removed: 0});
+  expect(space.records.get("rec_t")!.values.Count).toBe(2);
+});
+
 it("keeps the chain target after the older run alone saved Undo completion", async () => {
   const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {Count: 2}}]");
   const space = workspace([task("rec_t", {Count: 1})]);
@@ -167,7 +179,7 @@ it.each(["later-group", "receipt-save"])("recovers shared Undo receipts after %s
           const key = `${input.idempotencyKeyPrefix}/${field}`;
           if (Object.hasOwn(result.replaced, field)) receipts.set(key, {outboxId: "outbox", appendKey: key, nativeHeadSequence: 1,
             binding: {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64), currentPath: "Tasks/rec_t.md", selectorPaths: ["Tasks"], restoreFenceGeneration: 1}});
-          if (Object.hasOwn(result.replaced, field) || input.settleUnchanged) {const receipt = receipts.get(key); if(receipt) updates[field] = receipt;}
+          const receipt = receipts.get(key); if(receipt) updates[field] = receipt;
         }
         return {...result, sharedFileUpdates: updates};
       }}))};

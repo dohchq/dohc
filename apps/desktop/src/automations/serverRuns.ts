@@ -113,6 +113,14 @@ export function createServerRuns(send: (workspaceId: string, request: ServerRequ
   }
 
   return {
+    /** False means the workspace's owner cannot ask yet; keep the durable release queued. */
+    async releaseRestore(workspaceId: string, retentionId: string): Promise<boolean> {
+      const answer = await send(workspaceId, {method: "POST", action: "restore", body: {definitions: [], again: false, retentionId}});
+      if (answer === null || !answer.asker.current()) return false;
+      const result = read(answer, z.object({errorMessage: z.string().nullable()}));
+      if (result?.errorMessage) throw new Error(result.errorMessage);
+      return true;
+    },
     /** One automation's newest runs on the server, or null when it has no copy of the workspace. */
     async runs(workspaceId: string, automationId: string, before?: string): Promise<{ runs: CollectionAutomationRun[]; next: string | null } | null> {
       return ask(workspaceId, { method: "GET", action: "runs", query: { automationId, ...(before === undefined ? {} : { before }) } }, z.object({ runs: z.array(Run), next: z.string().nullable() }));

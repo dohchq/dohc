@@ -897,8 +897,10 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
   const undosFile = async () => join(await base(), "undoing.json");
   let restores: Map<string, PendingRestore> | null | undefined;
   let restoreClaims = new Set<string>();
+  const releasedRestores = new Set<string>();
   const restoresFile = async () => join(await base(), "restoring.json");
   const setRestores = (entries: PendingRestore[]) => {
+    for (const entry of entries) if (entry.serverRelease) releasedRestores.add(entry.id);
     restores = new Map(entries.map(entry => [entry.id, entry]));
     restoreClaims = new Set(entries.flatMap(entry => entry.claims));
   };
@@ -925,6 +927,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
   const changeRestore = (id: string, entry?: PendingRestoreUpdate) => serial(async () => {
     const known = await readRestores();
     if (known === null) throw new Error("dohc could not read unfinished Stop and restore progress. Reopen the workspace, then try again.");
+    if (entry && releasedRestores.has(id) && !entry.serverRelease) return;
     const next = new Map(known);
     if (entry) next.set(id, PendingRestoreSchema.parse({claims: [], ...known.get(id), ...entry}));
     else next.delete(id);

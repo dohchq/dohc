@@ -67,6 +67,8 @@ function fixture(options: {
   runStoreError?: Error;
   retainRunsForRestore?: CollectionAutomations["retainRunsForRestore"];
   releaseError?: () => Error | null;
+  releaseWait?: () => Promise<void>;
+  releaseAllowed?: () => boolean;
 } = {}) {
   const handlers = new Map<string, (event: { sender: string }, payload: unknown) => unknown>();
   const calls: Array<{ path: string; method: string }> = [];
@@ -149,7 +151,7 @@ function fixture(options: {
   };
   const queuePull = vi.fn();
   const sharesChanged = vi.fn();
-  registerStopAndRestoreIpc<string, { sender: string }, { workspaceId: string; rootPath: string }, {
+  const recovery = registerStopAndRestoreIpc<string, { sender: string }, { workspaceId: string; rootPath: string }, {
     workspace: { workspaceId: string; rootPath: string };
     state: { collectionAutomations: CollectionAutomations };
     assertCurrent(): void;
@@ -190,14 +192,18 @@ function fixture(options: {
     notifyRenderer: () => undefined,
     assertOriginalWorkspace: () => undefined,
     syncNow: async () => { await options.syncNow?.(); },
-    serverRuns: { restore: async (_workspaceId, definitions, again, retentionId) => {
-      if (definitions.length === 0) {releases.push(retentionId); const error = options.releaseError?.(); if(error) throw error; return NOTHING;}
+    serverRuns: {releaseRestore: async (_workspaceId, retentionId) => {
+      releases.push(retentionId); await options.releaseWait?.();
+      const error = options.releaseError?.(); if(error) throw error;
+      return options.releaseAllowed?.() ?? true;
+    }, restore: async (_workspaceId, definitions, again, retentionId) => {
+      if (definitions.length === 0) {releases.push(retentionId); await options.releaseWait?.(); const error = options.releaseError?.(); if(error) throw error; return NOTHING;}
       return (await options.serverRestore?.(definitions, again)) ?? NOTHING;
     } },
   });
   const call = (channel: string, payload: Record<string, unknown>) =>
     handlers.get(channel)!({ sender: "window" }, { workspaceId: WORKSPACE_ID, ...payload });
-  return { call, calls, bodies, capture, queuePull, sharesChanged, account, releases };
+  return { call, calls, bodies, capture, queuePull, sharesChanged, account, releases, recovery };
 }
 
 async function capturedFiles(paths: string[]) {
@@ -227,6 +233,43 @@ async function capturedFiles(paths: string[]) {
 }
 
 describe("stop and restore in main", () => {
+  it("retries a queued release when the original account signs in again", async () => {
+    const root = await createTestScratch("dohc-release-account-");
+    const store = createAutomationRunStore(root, async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;});
+    await store.savePendingRestore({id: "queued", claims: [], serverRelease: true});
+    let allowed = false;
+    const f = fixture({rootPath: root, runStore: store, releaseAllowed: () => allowed});
+    expect(await f.call(stopAndRestoreRecoveryOperations.pendingStopAndRestores.channel, {})).toEqual([]);
+    await vi.waitFor(() => expect(f.releases).toHaveLength(1));
+    expect(await store.pendingRestores()).toEqual([{id: "queued", claims: [], serverRelease: true}]);
+    allowed = true; f.recovery.retryServerReleases();
+    await vi.waitFor(async () => expect(await store.pendingRestores()).toEqual([]));
+  });
+  it("lists pending restores and dismisses without waiting for server release", async () => {
+    const root = await createTestScratch("dohc-restore-background-");
+    const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
+    const store = createAutomationRunStore(root, resolver);
+    const target = {kind: "person" as const, userId: "user_ana"};
+    await store.savePendingRestore({id: "queued", claims: [], serverRelease: true});
+    await store.savePendingRestore({id: "live", claims: ["older"], session: {grants: ["grant"], target, label: "Ana",
+      definitions: [], filesUndone: true, receipts: [], result: {status: "waiting"}}});
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => {release = resolve;});
+    const f = fixture({rootPath: root, runStore: store, releaseWait: () => blocked});
+    try {
+      const pending = f.call(stopAndRestoreRecoveryOperations.pendingStopAndRestores.channel, {});
+      const first = await Promise.race([pending, new Promise(resolve => setImmediate(() => resolve("blocked")))]);
+      expect(first).not.toBe("blocked");
+      const dismissed = Promise.resolve(f.call(stopAndRestoreRecoveryOperations.dismissStopAndRestore.channel, {target}));
+      const local = new Promise<void>(resolve => {
+        const save = store.savePendingRestore;
+        vi.spyOn(store, "savePendingRestore").mockImplementation(async entry => {await save(entry); resolve();});
+      });
+      await local;
+      expect(await Promise.race([dismissed.then(() => "dismissed"), new Promise(resolve => setImmediate(() => resolve("blocked")))])).toBe("dismissed");
+      expect(await store.unfinishedUndos()).toEqual(new Set());
+    } finally {release();}
+  });
   it.each([false, true])("uses real retention through session saves with unrelated claims at the cap: %s", async atCap => {
     const root = await createTestScratch("dohc-restore-real-retention-");
     const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
@@ -251,8 +294,14 @@ describe("stop and restore in main", () => {
     const result = await f.call(CHANNELS.stopAndRestore, {target: {kind: "person", userId: "user_ana"}});
     if(atCap) {
       expect(result).toMatchObject({restored: [{restoredMomentId: "back-m-auto"}], unfinished: {step: "runs",
-        message: "Access stopped. dohc could not undo runs. dohc cannot keep more than 10,000 claims for Undo. Undo some runs in run history."}});
+        message: "dohc can keep up to 10,000 runs for Undo. Finish or dismiss another unfinished Stop and restore."}});
       expect(undoRunsOf).not.toHaveBeenCalled();
+      const message = "dohc can keep up to 10,000 runs for Undo. Finish or dismiss another unfinished Stop and restore.";
+      const target = {kind: "person", userId: "user_ana"};
+      const retry = fixture({rootPath: root, runStore: store, undoRunsOf: async () => ({...NOTHING, errorMessage: message}),
+        granted: [grant({revokedAtMs: 3}), grant({grantId: "grant-view", shareId: "share-2", access: "view"}), grant({grantId: "grant-old", shareId: "share-3", revokedAtMs: 5})]});
+      await retry.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: ["back-m-auto"]});
+      expect(await retry.call(CHANNELS.stopAndRestore, {target})).toMatchObject({unfinished: {step: "runs", message}});
       return;
     }
     const restarted = createAutomationRunStore(root, resolver);
@@ -282,8 +331,8 @@ describe("stop and restore in main", () => {
     expect(await restarted.unfinishedUndos()).toEqual(new Set());
     const recovery = fixture({rootPath: root, runStore: restarted});
     expect(await recovery.call(stopAndRestoreRecoveryOperations.pendingStopAndRestores.channel, {})).toEqual([]);
+    await vi.waitFor(async () => expect(await restarted.pendingRestores()).toEqual([]));
     expect(recovery.releases).toHaveLength(1);
-    expect(await restarted.pendingRestores()).toEqual([]);
   });
   it.each(["dismiss", "missing-share"] as const)("releases both hosts' retained claims on %s", async action => {
     const root = await createTestScratch("dohc-restore-release-");
@@ -296,7 +345,7 @@ describe("stop and restore in main", () => {
     if (action === "dismiss") await f.call(stopAndRestoreRecoveryOperations.dismissStopAndRestore.channel, {target});
     else await expect(f.call(CHANNELS.stopAndRestore, {target})).rejects.toThrow("This person no longer has a share");
     expect(f.releases).toEqual(["restore-test"]);
-    expect(await createAutomationRunStore(root, resolver).pendingRestores()).toEqual([]);
+    await vi.waitFor(async () => expect(await createAutomationRunStore(root, resolver).pendingRestores()).toEqual([]));
   });
   it.each(["person", "link"] as const)("stops %s access before reading a broken run store", async kind => {
     const f = fixture({runStoreError: new Error("Unreadable progress"), links: [[{shareId: "link-share", grantId: "grant-link", status: "active", dependents: []}]]});

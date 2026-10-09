@@ -137,8 +137,8 @@ export function registerStopAndRestoreIpc<
   /** Only the original workspace has grants to stop. */
   assertOriginalWorkspace(workspace: Workspace): void;
   /** The owner's self-hosted server's runs. */
-  serverRuns: Pick<ServerRuns, "restore">;
-}): void {
+  serverRuns: Pick<ServerRuns, "restore" | "releaseRestore">;
+}): {retryServerReleases(): void} {
   const { registerHandler, assertTrustedSender, relayJson } = dependencies;
   const ownerRelayShareHandler = createOwnerRelayShareHandler<Sender, Workspace, Operation, Credentials>({
     withWorkspaceOperation: dependencies.withRendererWorkspaceOperation,
@@ -161,18 +161,28 @@ export function registerStopAndRestoreIpc<
   const interrupted = (): Extract<StopAndRestoreResult, {status: "restored"}> => ({status: "restored", restored: [], review: [], runsUndone: 0,
     runsLeft: 0, runChangesKept: 0, wroteAutomations: false, sendsMessages: false, keptFields: [], fieldsMissing: 0,
     unfinished: {step: "files", message: "dohc has not finished restoring files."}});
-  const retryServerReleases = async (workspaceId: string, automations: CollectionAutomations) => {
-    for (const entry of await automations.pendingRestores()) {
-      if (!entry.serverRelease) continue;
-      try {
-        await dependencies.serverRuns.restore(workspaceId, [], false, entry.id);
-        await automations.removePendingRestore(entry.id);
-      } catch { /* Saved without a session or claims; retry when recovery runs again. */ }
-    }
+  const releaseStores = new Map<string, CollectionAutomations>();
+  const releasing = new Set<string>();
+  const retryRequested = new Set<string>();
+  const retryServerReleases = (workspaceId: string, automations: CollectionAutomations) => {
+    releaseStores.set(workspaceId, automations);
+    if (releasing.has(workspaceId)) {retryRequested.add(workspaceId); return;}
+    releasing.add(workspaceId);
+    void (async () => {
+      for (const entry of await automations.pendingRestores()) {
+        if (!entry.serverRelease) continue;
+        try {
+          if (await dependencies.serverRuns.releaseRestore(workspaceId, entry.id)) await automations.removePendingRestore(entry.id);
+        } catch { /* Keep the release queued for the next recovery or sign-in. */ }
+      }
+    })().catch(() => undefined).finally(() => {
+      releasing.delete(workspaceId);
+      if (retryRequested.delete(workspaceId)) retryServerReleases(workspaceId, automations);
+    });
   };
   const releasePending = async (workspaceId: string, automations: CollectionAutomations, entry: PendingRestore) => {
     await automations.savePendingRestore({id: entry.id, claims: [], session: undefined, serverRelease: true});
-    await retryServerReleases(workspaceId, automations);
+    retryServerReleases(workspaceId, automations);
   };
   registerOperations<typeof stopAndRestoreRecoveryOperations, Event, Operation>({
     handle: registerHandler,
@@ -191,7 +201,7 @@ export function registerStopAndRestoreIpc<
     },
     pendingStopAndRestores: async (_input, { operation }) => {
       dependencies.assertOriginalWorkspace(operation.workspace);
-      await retryServerReleases(operation.workspace.workspaceId, operation.state.collectionAutomations);
+      retryServerReleases(operation.workspace.workspaceId, operation.state.collectionAutomations);
       const pending = await operation.state.collectionAutomations.pendingRestores();
       operation.assertCurrent();
       return pending.flatMap(entry => entry.session
@@ -478,7 +488,7 @@ export function registerStopAndRestoreIpc<
           removeEmptyFolder: async (path) => await rmdir(join(root, path)).catch(() => undefined),
           undoRuns: (definitions) => retentionError !== null
             ? Promise.resolve({undone: 0, left: 0, keptFields: [], missing: 0, otherKept: 0,
-              errorMessage: `Access stopped. dohc could not undo runs. ${retentionError}`})
+              errorMessage: retentionError})
             : undoRunsHereAndOnServer(workspaceId, target, definitions, (again) =>
             operation.state.collectionAutomations.undoRunsOf(definitions, async (relativePath) => {
               await dependencies.deletePath(event, { workspaceId, relativePath });
@@ -539,4 +549,7 @@ export function registerStopAndRestoreIpc<
       },
     );
   });
+  return {retryServerReleases: () => {
+    for (const [workspaceId, automations] of releaseStores) retryServerReleases(workspaceId, automations);
+  }};
 }

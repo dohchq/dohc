@@ -98,13 +98,17 @@ export function documentUndoChanges(runs: readonly StoredRun[]): { added: Map<st
       .map(write => JSON.stringify([write.recordId, write.field]))) : null;
     if (refused?.size === 0) continue;
     const scope = run.undoScope ?? fallbackScope;
+    const completedCreations = new Set(run.undo === "done" ? [
+      ...run.created.map(created => created.recordId),
+      ...run.applied.flatMap(step => step.writes.filter(write => write.kind === "created").map(write => write.recordId)),
+    ] : []);
     // A record is listed as created before its fields are written, so one a
     // run stopped after creating is still found.
     if (run.undo !== "done") for (const created of run.created) added.set(created.recordId, created.path);
     for (const { writes } of run.applied) {
       for (const write of writes) {
         if (write.kind === "created" && run.undo !== "done") added.set(write.recordId, write.path);
-        if (write.kind === "field" && (refused === null || refused.has(JSON.stringify([write.recordId, write.field])))) {
+        if (write.kind === "field" && !completedCreations.has(write.recordId) && (refused === null || refused.has(JSON.stringify([write.recordId, write.field])))) {
           wrote(write.recordId, write.path, write.field, { before: write.before, after: write.after, sure: true, scope });
         }
       }
@@ -112,7 +116,7 @@ export function documentUndoChanges(runs: readonly StoredRun[]): { added: Map<st
     const unrecorded = refused === null ? unrecordedEffect(run)?.effect : undefined;
     if (unrecorded?.kind === "add" && !run.created.some((created) => created.planned === unrecorded.recordId)) {
       added.set(unrecorded.recordId, `${unrecorded.collectionPath}/${unrecorded.name}.md`);
-    } else if (unrecorded?.kind === "set") {
+    } else if (unrecorded?.kind === "set" && !completedCreations.has(unrecorded.target.recordId)) {
       for (const { field, before, after } of unrecorded.fields) wrote(unrecorded.target.recordId, unrecorded.target.path, field, { before, after, sure: false, scope });
     }
   }
@@ -239,7 +243,6 @@ export async function undoCollectionAutomationRuns(
               fields: Object.fromEntries(group.map(({ field, to }) => [field, to])),
               expectedBefore: Object.fromEntries(group.map(({ field, from, attempt }) => [field, from[attempt]])),
               preserveCompletedFields: true,
-              settleUnchanged: true,
               idempotencyKeyPrefix: `automation-undo/${createHash("sha256").update(JSON.stringify([
                 group[0]!.scope, record.recordId,
                 refusedReversals.filter(write => write.recordId === record.recordId && fields.has(write.field))

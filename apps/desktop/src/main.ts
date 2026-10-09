@@ -952,6 +952,7 @@ type CloudSessionCredentials = NonNullable<
 >;
 let cachedCredentials: CloudSessionCredentials | null = null;
 let clearButtonInspections: (() => void) | undefined;
+let retryStopAndRestoreReleases: (() => void) | undefined;
 const ownerDatasetCopies = createOwnerDatasetCopyRegistry();
 const namedDatasetPages = createNamedDatasetCacheRegistry({ directory: () => join(stateDir(), "named-dataset-pages") });
 let credentialCacheGeneration = 0;
@@ -991,6 +992,7 @@ const credentialSessionCache =
     notifyNoticesChanged();
     if (snapshot.credentials) void noticeStore().sync();
     if (snapshot.credentials) resumeAutomationSessionWaits();
+    if (settled && snapshot.credentials) retryStopAndRestoreReleases?.();
   });
 async function refreshCredentialCache(): Promise<void> {
   try { await credentialSessionCache.refresh(() => cloudLogin().credentials()); }
@@ -6303,7 +6305,7 @@ function registerIpcHandlers(): void {
     },
   });
 
-  registerStopAndRestoreIpc<
+  retryStopAndRestoreReleases = registerStopAndRestoreIpc<
     WebContents,
     IpcMainInvokeEvent,
     DesktopRendererWorkspaceOperation["workspace"],
@@ -6330,7 +6332,7 @@ function registerIpcHandlers(): void {
       if (shareViewIsPresent(workspace.shareView)) throw new Error("Only the original workspace has shares to stop.");
     },
     serverRuns,
-  });
+  }).retryServerReleases;
 
   shareDirectWrites = registerShareProposalsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
     registerHandler: handleIpc,
