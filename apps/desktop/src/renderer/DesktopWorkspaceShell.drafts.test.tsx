@@ -1959,6 +1959,26 @@ describe("explorer destructive change flush boundaries", () => {
 // distinction between recovery (dot, no save promise) and savable-dirty
 // (dot and the version-switch save-first prompt).
 describe("set-aside draft recovery", () => {
+  it.each(["EBUSY", "EACCES"])("reports a %s draft read failure in Notices and retries discovery", async code => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    const record = {recordId: "a".repeat(64), path: "deleted/gone.md", objectId: "object", text: "Unseen typing", updateBase64: "AAA="};
+    bridge.listLiveDraftRecovery.mockRejectedValueOnce(Object.assign(new Error("temporary read failure"), {code})).mockResolvedValue([record]);
+    renderShell(bridge);
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("dohc could not read set-aside edits.");
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const notices = screen.getByTestId("notice-center");
+    expect(notices.textContent).toContain("dohc could not read set-aside edits.");
+    await user.click(within(notices).getByRole("button", {name: "Try again"}));
+    await waitFor(() => expect(bridge.listLiveDraftRecovery).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await screen.findByTestId("notice-set-aside-edits");
+    expect(bridge.listLiveDraftRecovery).toHaveBeenCalledTimes(2);
+    await user.click(screen.getByTestId("recovery-list-copy"));
+    await waitFor(async () => expect(await navigator.clipboard.readText()).toBe(record.text));
+  });
+
   it("shows main drafts on open and exposes each survivor through Notices Copy and Dismiss", async () => {
     const user = userEvent.setup();
     vi.stubGlobal("crypto", webcrypto);

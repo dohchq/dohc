@@ -194,7 +194,11 @@ export function replaceOrphanedDraft(
   const current = drafts.get(key) ?? EMPTY;
   const captured = current.find((draft) => draft.id === id);
   if (!captured || (captured.text === text && recovery === undefined)) return;
-  const replacement = { ...captured, text, recovery: recovery ?? captured.recovery };
+  let replacementRecovery = recovery ?? captured.recovery;
+  if (recovery === undefined && text !== captured.text && replacementRecovery?.recordId !== undefined) {
+    replacementRecovery = {objectId: replacementRecovery.objectId, updateBase64: replacementRecovery.updateBase64};
+  }
+  const replacement = { ...captured, text, recovery: replacementRecovery };
   drafts.set(
     key,
     current.map((draft) => (draft.id === id ? replacement : draft)),

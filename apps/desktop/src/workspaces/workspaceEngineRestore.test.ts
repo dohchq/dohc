@@ -21,6 +21,11 @@ import { createHash } from "node:crypto";
 import * as Y from "yjs";
 import { hasRetainedLiveDraft, preserveUnsentLiveDraft, removeLiveDraftCopies } from "./liveDraftRecovery";
 
+vi.mock("node:fs/promises", async importOriginal => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {...actual, readFile: vi.fn(actual.readFile)};
+});
+
 // The person a restore names, as desktop main reads them.
 const RESTORER = { kind: "human", humanId: "local-person" } as const;
 
@@ -246,18 +251,29 @@ describe("engine restore", () => {
     } finally { await engine.stop(); }
   });
 
-  it("keeps a file for review when retained draft recovery cannot be inspected", async () => {
+  it.each(["EBUSY", "EACCES", "EMFILE"])("keeps a file for review when retained draft recovery has a %s read failure", async code => {
     const root = await createTestScratch("dohc-engine-restore-");
+    const recovery = await createTestScratch("dohc-engine-recovery-");
     await write(root, "new.md", "recipient text\n");
-    const engine = capture(root, new VersionedLoopbackEngine(), undefined, async () => { throw new Error("access denied"); });
+    const engine = capture(root, new VersionedLoopbackEngine(), undefined,
+      (path, objectId) => hasRetainedLiveDraft(recovery, "engine-restore-test", path, objectId));
+    const doc = new Y.Doc();
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
     engine.start();
     try {
       await engine.flush();
       const created = (await engine.listMoments()).moments[0]!;
+      if (!created.objectId) throw new Error("Expected a file object");
+      doc.getText("plainText").insert(0, "unseen typing");
+      await preserveUnsentLiveDraft(recovery, "engine-restore-test", {path: "new.md", objectId: created.objectId, contentKind: "plaintext", doc});
+      vi.mocked(readFile).mockImplementation((async (path, options) => {
+        if (String(path).startsWith(recovery)) throw Object.assign(new Error("temporary recovery read failure"), {code});
+        return actual.readFile(path, options);
+      }) as typeof readFile);
       await expect(engine.restoreFileToBeforeMoment(created.id, RESTORER, { expectedHeadMomentId: created.id }))
         .rejects.toThrow("Could not check saved drafts on this device. Try again.");
       expect(await readText(root, "new.md")).toBe("recipient text\n");
-    } finally { await engine.stop(); }
+    } finally {vi.mocked(readFile).mockImplementation(actual.readFile); doc.destroy(); await engine.stop();}
   });
 
   it("keeps a recipient-created file with a retained live draft outside History", async () => {

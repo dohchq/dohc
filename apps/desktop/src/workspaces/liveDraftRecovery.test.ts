@@ -34,14 +34,13 @@ it("finds retained drafts by workspace and object or path without blocking unrel
   expect(await hasRetainedLiveDraft(join(directory, "absent"), "workspace", "a.md", "object")).toBe(false);
 });
 
-it.each(["malformed", "incomplete", "unreadable"] as const)("does not block restore with %s recovery state nobody can review", async kind => {
+it.each(["malformed", "incomplete"] as const)("does not block restore with %s recovery state nobody can review", async kind => {
   const directory = await mkdtemp(join(tmpdir(), "dohc-restore-recovery-")); directories.push(directory);
   await writeFile(join(directory, `${"0".repeat(64)}.${kind === "incomplete" ? "tmp" : "json"}`), "{");
-  if (kind === "unreadable") vi.mocked(readFile).mockRejectedValueOnce(Object.assign(new Error("access denied"), {code: "EACCES"}));
   expect(await hasRetainedLiveDraft(directory, "workspace", "a.md", "object")).toBe(false);
 });
 
-it.each(["half-written temp", "invalid path", "non-string update", "untracked path", "invalid CRDT", "unreadable file"])("does not hide other drafts or fail dismissal beside a %s record", async kind => {
+it.each(["half-written temp", "invalid path", "non-string update", "untracked path", "invalid CRDT"])("does not hide other drafts or fail dismissal beside a %s record", async kind => {
   const directory = await mkdtemp(join(tmpdir(), "dohc-bad-recovery-")); directories.push(directory);
   const update = new Uint8Array([0, 0]);
   const draft = {path: "a.txt", objectId: "object", contentKind: "plaintext" as const, text: "seen", update};
@@ -52,13 +51,6 @@ it.each(["half-written temp", "invalid path", "non-string update", "untracked pa
     workspaceId: "workspace", objectId: "object", path: kind === "invalid path" ? 7 : kind === "untracked path" ? ".env" : "a.txt",
     updateBase64: kind === "non-string update" ? 7 : "AAE=",
   }));
-  if (kind === "unreadable file") {
-    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
-    vi.mocked(readFile).mockImplementation((async (path: Parameters<typeof readFile>[0], options: Parameters<typeof readFile>[1]) => {
-      if (path === bad) throw Object.assign(new Error("access denied"), {code: "EACCES"});
-      return actual.readFile(path, options);
-    }) as typeof readFile);
-  }
   const records = await listLiveDraftRecovery(directory, "workspace");
   expect(records.map(record => record.text).sort()).toEqual(["seen", "survivor"]);
   const seen = records.find(record => record.text === "seen")!;
@@ -68,6 +60,31 @@ it.each(["half-written temp", "invalid path", "non-string update", "untracked pa
   await removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(update), Date.now(), "a.txt", after[0]!.recordId);
   expect(await hasRetainedLiveDraft(directory, "workspace", "a.txt", "object")).toBe(false);
   expect(await readdir(directory)).toEqual([bad.slice(directory.length + 1)]);
+});
+
+it.each(["EBUSY", "EACCES", "EMFILE"])("reports %s as a read failure and refuses to prove restore safe", async code => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-recovery-io-")); directories.push(directory);
+  await preserveLiveDraft(directory, "workspace", {path: "a.txt", objectId: "object", contentKind: "plaintext", text: "unseen typing", update: new Uint8Array([0, 0])});
+  const error = Object.assign(new Error("temporary read failure"), {code});
+  vi.mocked(readFile).mockRejectedValue(error);
+  await expect(listLiveDraftRecovery(directory, "workspace")).rejects.toBe(error);
+  await expect(hasRetainedLiveDraft(directory, "workspace", "a.txt", "object")).rejects.toBe(error);
+  await expect(removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(new Uint8Array([0, 0])), Date.now(), "a.txt")).rejects.toBe(error);
+  expect(await readdir(directory)).toHaveLength(1);
+});
+
+it("includes a draft saved after the initial dismiss scan in the reply", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-dismiss-newer-")); directories.push(directory);
+  const draft = {path: "a.txt", objectId: "object", contentKind: "plaintext" as const, text: "seen", update: new Uint8Array([0, 0])};
+  await preserveLiveDraft(directory, "workspace", draft);
+  const seen = (await listLiveDraftRecovery(directory, "workspace"))[0]!;
+  const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+  vi.mocked(rm).mockImplementationOnce(async (path, options) => {
+    await actual.rm(path, options);
+    await preserveLiveDraft(directory, "workspace", {...draft, text: "saved during dismiss"});
+  });
+  await expect(removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(draft.update), Date.now(), "a.txt", seen.recordId))
+    .resolves.toEqual([expect.objectContaining({text: "saved during dismiss"})]);
 });
 
 it("skips an active half-written temporary record until preserve completes", async () => {
@@ -94,7 +111,7 @@ it("skips an active half-written temporary record until preserve completes", asy
   expect((await listLiveDraftRecovery(directory, "workspace")).map(record => record.text)).toEqual(["active copy"]);
 });
 
-it("returns known survivors without a disk read that can fail after deletion", async () => {
+it("falls back to known survivors when a disk read fails after deletion", async () => {
   const directory = await mkdtemp(join(tmpdir(), "dohc-dismiss-reply-")); directories.push(directory);
   const draft = {path: "a.txt", objectId: "object", contentKind: "plaintext" as const, text: "seen", update: new Uint8Array([0, 0])};
   await preserveLiveDraft(directory, "workspace", draft);
@@ -109,6 +126,26 @@ it("returns known survivors without a disk read that can fail after deletion", a
   await expect(removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(draft.update), Date.now(), "a.txt", seen.recordId))
     .resolves.toEqual([expect.objectContaining({text: "survivor"})]);
   expect(await readdir(directory)).toHaveLength(1);
+});
+
+it("reports a projection import failure without treating the valid record as absent", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-recovery-import-")); directories.push(directory);
+  await preserveLiveDraft(directory, "workspace", {path: "a.md", objectId: "object", remoteWorkspaceId: "owner", update: new Uint8Array([0, 0])});
+  const error = new Error("projection import failed");
+  vi.resetModules();
+  vi.doMock("@dohc/ydoc-projection", () => {throw error;});
+  try {
+    const recovery = await import("./liveDraftRecovery");
+    await expect(recovery.listLiveDraftRecovery(directory, "workspace")).rejects.toThrow();
+    await expect(recovery.hasRetainedLiveDraft(directory, "workspace", "a.md", "object")).rejects.toThrow();
+  } finally {vi.doUnmock("@dohc/ydoc-projection"); vi.resetModules();}
+});
+
+it("skips a record removed during the scan", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-recovery-removed-")); directories.push(directory);
+  await preserveLiveDraft(directory, "workspace", {path: "a.txt", objectId: "object", contentKind: "plaintext", text: "already removed", update: new Uint8Array([0, 0])});
+  vi.mocked(readFile).mockRejectedValue(Object.assign(new Error("removed"), {code: "ENOENT"}));
+  await expect(listLiveDraftRecovery(directory, "workspace")).resolves.toEqual([]);
 });
 
 it("ignores another workspace's malformed and temporary records", async () => {

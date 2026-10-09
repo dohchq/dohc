@@ -209,18 +209,59 @@ it("dismisses after a queued list attaches a record ID without reporting a false
   resetOrphanedDrafts(); localStorage.clear();
 });
 
-it.each([false, true])("persists one recovery record when two windows discover it (existing renderer copy: %s)", async existing => {
+it.each([false, true])("keeps separate saved copies but shows one record when two windows discover it (existing renderer copy: %s)", async existing => {
   resetOrphanedDrafts(); localStorage.clear();
   vi.stubGlobal("dohcDesktop", {platform: "linux", listLiveDraftRecovery: vi.fn(async () => [returnedDraft])});
   const first = await relaunch(), second = await relaunch();
   if (existing) first.captureOrphanedDraft("workspace", "a.txt", returnedDraft.text, {objectId: returnedDraft.objectId, updateBase64: returnedDraft.updateBase64});
   await first.loadLiveDraftRecovery("workspace", () => true);
   await second.loadLiveDraftRecovery("workspace", () => true);
-  expect(Object.keys(localStorage).filter(key => key.startsWith(ORPHANED_DRAFT_STORAGE_PREFIX))).toHaveLength(1);
+  expect(Object.keys(localStorage).filter(key => key.startsWith(ORPHANED_DRAFT_STORAGE_PREFIX))).toHaveLength(2);
+  expect(draftsFor(first.useOrphanedDrafts, "workspace", "a.txt")).toHaveLength(1);
+  expect(draftsFor(second.useOrphanedDrafts, "workspace", "a.txt")).toHaveLength(1);
   expect(first.atRiskOrphanedDraftIds()).toEqual([]);
   expect(second.atRiskOrphanedDraftIds()).toEqual([]);
   const restarted = await relaunch();
   expect(draftsFor(restarted.useOrphanedDrafts, "workspace", "a.txt")).toHaveLength(1);
+  vi.stubGlobal("crypto", webcrypto);
+  vi.stubGlobal("dohcDesktop", {platform: "linux", discardLiveDraftRecovery: vi.fn(async () => [])});
+  await restarted.dismissOrphanedDraft("workspace", "a.txt", draftsFor(restarted.useOrphanedDrafts, "workspace", "a.txt")[0]!.id);
+  const dismissed = await relaunch();
+  expect(draftsFor(dismissed.useOrphanedDrafts, "workspace", "a.txt")).toEqual([]);
+  restarted.resetOrphanedDrafts(); resetOrphanedDrafts(); localStorage.clear();
+});
+
+it.each([true, false])("keeps newer typing after attach, refine, restart, list, and dismissal of the older record (new identity: %s)", async newIdentity => {
+  resetOrphanedDrafts(); localStorage.clear(); vi.stubGlobal("crypto", webcrypto);
+  vi.stubGlobal("dohcDesktop", {platform: "linux", listLiveDraftRecovery: vi.fn(async () => [returnedDraft]), discardLiveDraftRecovery: vi.fn(async () => [])});
+  const id = captureOrphanedDraft("workspace", "a.txt", returnedDraft.text, {objectId: returnedDraft.objectId, updateBase64: returnedDraft.updateBase64});
+  await loadLiveDraftRecovery("workspace", () => true);
+  replaceOrphanedDraft("workspace", "a.txt", id, "newer typing", newIdentity ? {objectId: returnedDraft.objectId, updateBase64: "AAE="} : undefined);
+  const next = await relaunch();
+  await next.loadLiveDraftRecovery("workspace", () => true);
+  expect(next.atRiskOrphanedDraftIds()).toEqual([]);
+  const crashed = await relaunch();
+  const rows = draftsFor(crashed.useOrphanedDrafts, "workspace", "a.txt");
+  expect(rows.map(row => row.text).sort()).toEqual([returnedDraft.text, "newer typing"].sort());
+  await crashed.dismissOrphanedDraft("workspace", "a.txt", rows.find(row => row.recovery?.recordId === returnedDraft.recordId)!.id);
+  const restarted = await relaunch();
+  expect(draftsFor(restarted.useOrphanedDrafts, "workspace", "a.txt").map(row => row.text)).toEqual(["newer typing"]);
+  restarted.resetOrphanedDrafts(); resetOrphanedDrafts(); localStorage.clear();
+});
+
+it("keeps both windows' refinements of a loaded record in separate saved copies", async () => {
+  resetOrphanedDrafts(); localStorage.clear();
+  vi.stubGlobal("dohcDesktop", {platform: "linux", listLiveDraftRecovery: vi.fn(async () => [returnedDraft])});
+  await loadLiveDraftRecovery("workspace", () => true);
+  const first = await relaunch(), second = await relaunch();
+  const a = draftsFor(first.useOrphanedDrafts, "workspace", "a.txt")[0]!;
+  const b = draftsFor(second.useOrphanedDrafts, "workspace", "a.txt")[0]!;
+  first.replaceOrphanedDraft("workspace", "a.txt", a.id, "first newer typing", {objectId: returnedDraft.objectId, updateBase64: "AAE="});
+  second.replaceOrphanedDraft("workspace", "a.txt", b.id, "second newer typing", {objectId: returnedDraft.objectId, updateBase64: "AAI="});
+  expect(first.atRiskOrphanedDraftIds()).toEqual([]);
+  expect(second.atRiskOrphanedDraftIds()).toEqual([]);
+  const restarted = await relaunch();
+  expect(draftsFor(restarted.useOrphanedDrafts, "workspace", "a.txt").map(row => row.text).sort()).toEqual([returnedDraft.text, "first newer typing", "second newer typing"].sort());
   restarted.resetOrphanedDrafts(); resetOrphanedDrafts(); localStorage.clear();
 });
 

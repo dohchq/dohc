@@ -11,6 +11,7 @@ type StoredOrphanedDraft = { id: number; workspaceId: string; path: string; text
 // so another window never rewrites an array containing this window's work.
 const keys = new Map<number, string>();
 const expected = new Map<number, string>();
+const ownedKeys = new Set<string>();
 function persistable(path: string): boolean {
   return classifyEngineFilePathForRead(path, bridge().platform).kind === "tracked";
 }
@@ -41,6 +42,7 @@ function remove(key: string): void { try { localStorage.removeItem(key); } catch
 export function loadStoredDrafts(nowMs: number): readonly StoredOrphanedDraft[] {
   const result: StoredOrphanedDraft[] = [];
   const used = new Set<number>();
+  const recoveries = new Set<string>();
   try {
     for (const key of storedKeys()) {
       let row: unknown;
@@ -50,6 +52,11 @@ export function loadStoredDrafts(nowMs: number): readonly StoredOrphanedDraft[] 
       if (!valid(row) || !persistable(row.path)) { remove(key); continue; }
       const capturedAtMs = Number.isFinite(row.capturedAtMs) && row.capturedAtMs > 0 ? row.capturedAtMs : nowMs;
       if (nowMs - capturedAtMs >= ORPHANED_DRAFT_RETENTION_MS) { remove(key); continue; }
+      if (row.recovery?.recordId !== undefined) {
+        const identity = JSON.stringify([row.workspaceId, row.recovery.recordId]);
+        if (recoveries.has(identity)) continue;
+        recoveries.add(identity);
+      }
       let id = row.id;
       if (!Number.isSafeInteger(id) || id <= 0 || id >= Number.MAX_SAFE_INTEGER || used.has(id)) {
         id = 1;
@@ -82,37 +89,18 @@ function write(draft: StoredOrphanedDraft, key: string): boolean {
     const raw = serialize(draft);
     localStorage.setItem(key, raw);
     keys.set(draft.id, key); expected.set(draft.id, raw);
+    ownedKeys.add(key);
     return true;
   } catch { return false; }
 }
 export function storeDraft(draft: StoredOrphanedDraft): boolean {
-  const recordId = draft.recovery?.recordId;
-  if (recordId === undefined) return write(draft, `${ORPHANED_DRAFT_STORAGE_PREFIX}${crypto.randomUUID()}`);
-  if (!persistable(draft.path)) return false;
-  const key = `${ORPHANED_DRAFT_STORAGE_PREFIX}live:${JSON.stringify([draft.workspaceId, recordId])}`;
-  try {
-    const raw = localStorage.getItem(key);
-    if (raw !== null) {
-      const stored: unknown = JSON.parse(raw);
-      if (unsupportedVersion(stored)) return false;
-      if (valid(stored) && stored.workspaceId === draft.workspaceId && stored.text === draft.text &&
-        stored.recovery?.recordId === recordId && stored.recovery.objectId === draft.recovery?.objectId &&
-        stored.recovery.updateBase64 === draft.recovery?.updateBase64) {
-        keys.set(draft.id, key); expected.set(draft.id, raw);
-        return true;
-      }
-    }
-  } catch { return false; }
-  return write(draft, key);
+  return write(draft, `${ORPHANED_DRAFT_STORAGE_PREFIX}${crypto.randomUUID()}`);
 }
 export function replaceStoredDraft(draft: StoredOrphanedDraft): boolean {
-  if (draft.recovery?.recordId !== undefined) {
-    const previousKey = keys.get(draft.id);
-    if (!storeDraft(draft)) return false;
-    if (previousKey !== undefined && previousKey !== keys.get(draft.id)) remove(previousKey);
-    return true;
-  }
-  return write(draft, keys.get(draft.id) ?? `${ORPHANED_DRAFT_STORAGE_PREFIX}${crypto.randomUUID()}`);
+  const key = keys.get(draft.id);
+  // Restored keys may also be in another window. Refine into this window's own copy.
+  return key !== undefined && ownedKeys.has(key) && isStoredDraftCurrent(draft.id)
+    ? write(draft, key) : storeDraft(draft);
 }
 export function isStoredDraftCurrent(id: number): boolean {
   const key = keys.get(id), raw = expected.get(id);
@@ -120,7 +108,22 @@ export function isStoredDraftCurrent(id: number): boolean {
 }
 export function forgetStoredDraft(id: number): void {
   const key = keys.get(id);
-  if (key) remove(key);
+  const raw = expected.get(id);
+  try {
+    const row: unknown = JSON.parse(raw ?? "null");
+    if (valid(row) && row.recovery?.recordId !== undefined) {
+      // Separate windows can save the same reviewed record under separate keys.
+      for (const copyKey of storedKeys()) {
+        let copy: unknown;
+        try {copy = JSON.parse(localStorage.getItem(copyKey) ?? "null");} catch {continue;}
+        if (valid(copy) && !unsupportedVersion(copy) && copy.workspaceId === row.workspaceId &&
+          copy.recovery?.recordId === row.recovery.recordId && copy.text === row.text &&
+          copy.recovery.objectId === row.recovery.objectId && copy.recovery.updateBase64 === row.recovery.updateBase64) remove(copyKey);
+      }
+    }
+    if (key !== undefined && raw !== undefined && localStorage.getItem(key) === raw) remove(key);
+  } catch { /* Preserve copies whose identity cannot be checked. */ }
+  if (key) ownedKeys.delete(key);
   keys.delete(id); expected.delete(id);
 }
 export function remapStoredDraftPaths(workspaceId: string, project: (path: string) => string | null): ReadonlySet<number> {
@@ -153,5 +156,5 @@ export function remapStoredDraftPaths(workspaceId: string, project: (path: strin
 }
 export function clearStoredDrafts(): void {
   try { for (const key of storedKeys()) remove(key); } catch { /* Test reset. */ }
-  keys.clear(); expected.clear();
+  keys.clear(); expected.clear(); ownedKeys.clear();
 }

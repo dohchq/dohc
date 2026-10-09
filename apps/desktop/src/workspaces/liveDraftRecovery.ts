@@ -32,7 +32,10 @@ async function recoveryRecords(directory: string): Promise<RecoveryRow[]> {
       const raw = await readFile(file, "utf8");
       let record: Record<string, unknown>;
       try {const value: unknown = JSON.parse(raw); record = typeof value === "object" && value !== null ? value as Record<string, unknown> : {};}
-      catch {const match = /"workspaceId"\s*:\s*("(?:[^"\\]|\\.)*")/.exec(raw); record = match ? {workspaceId: JSON.parse(match[1]!)} : {};}
+      catch {
+        const match = /"workspaceId"\s*:\s*("(?:[^"\\]|\\.)*")/.exec(raw);
+        try {record = match ? {workspaceId: JSON.parse(match[1]!)} : {};} catch {record = {};}
+      }
       if (name.endsWith(".tmp") && Date.now() - (await stat(file)).mtimeMs >= STALE_TEMPORARY_DRAFT_MS) {
         if (createHash("sha256").update(raw).digest("hex") === name.slice(0, 64) && typeof record.workspaceId === "string" && typeof record.path === "string" && typeof record.objectId === "string" && typeof record.updateBase64 === "string") {
           const recovered = join(directory, `${name.slice(0,64)}.json`);
@@ -44,7 +47,7 @@ async function recoveryRecords(directory: string): Promise<RecoveryRow[]> {
         }
       }
       rows.push({file, record});
-    } catch { /* Preserve unreadable records without hiding recoverable edits. */ }
+    } catch (error) {if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;}
   }
   return rows;
 }
@@ -62,29 +65,26 @@ async function readableRecoveryRecords(rows: readonly RecoveryRow[], workspaceId
   for (const {file, record} of rows) {
     if (record.workspaceId !== workspaceId) continue;
     if (target && record.objectId !== target.objectId && record.path !== target.path) continue;
-    try {
-      if (typeof record.path !== "string" || typeof record.objectId !== "string" || typeof record.updateBase64 !== "string") continue;
-      if (classifyEngineFilePathForRead(record.path, process.platform).kind !== "tracked") continue;
-      let text: string;
-      if (typeof record.text === "string") text = record.text;
-      else {
-        const doc = new Y.Doc();
-        try {
-          Y.applyUpdate(doc, Buffer.from(record.updateBase64, "base64"));
-          text = record.contentKind === "scene"
-            ? (await import("@dohc/excalidraw-scene")).exportPortableScene(doc)
-            : (await import("@dohc/ydoc-projection")).yDocToMarkdown(doc);
-        } finally { doc.destroy(); }
-      }
-      const parsed = LiveDraftRecoveryRecord.safeParse({recordId: basename(file).slice(0, 64), path: record.path, objectId: record.objectId, updateBase64: record.updateBase64, text});
-      if (parsed.success) result.push(parsed.data);
-    } catch { /* This record cannot be reviewed; other edits remain available. */ }
+    const parsed = LiveDraftRecoveryRecord.safeParse({recordId: basename(file).slice(0, 64), path: record.path, objectId: record.objectId, updateBase64: record.updateBase64, text: record.text === undefined ? "" : record.text});
+    if (!parsed.success || classifyEngineFilePathForRead(parsed.data.path, process.platform).kind !== "tracked") continue;
+    let text = parsed.data.text;
+    if (record.text === undefined) {
+      const doc = new Y.Doc();
+      try {
+        try {Y.applyUpdate(doc, Buffer.from(parsed.data.updateBase64, "base64"));} catch {continue;}
+        text = record.contentKind === "scene"
+          ? (await import("@dohc/excalidraw-scene")).exportPortableScene(doc)
+          : (await import("@dohc/ydoc-projection")).yDocToMarkdown(doc);
+      } finally { doc.destroy(); }
+    }
+    result.push({...parsed.data, text});
   }
   return result;
 }
 
 export async function removeLiveDraftCopies(directory: string, workspaceId: string, objectId: string, snapshotSha256: string, throughMs: number, path: string, recordId?: string): Promise<LiveDraftRecoveryRecord[]> {
   const rows = await recoveryRecords(directory);
+  const before = await readableRecoveryRecords(rows, workspaceId, {objectId, path});
   const removed = new Set<string>();
   for (const row of rows) {
     if (row.record.workspaceId !== workspaceId || row.record.objectId !== objectId || typeof row.record.updateBase64 !== "string" || activeTemporaryDrafts.has(row.file)) continue;
@@ -93,10 +93,11 @@ export async function removeLiveDraftCopies(directory: string, workspaceId: stri
     const modified = await stat(row.file).catch((error: NodeJS.ErrnoException) => {if (error.code === "ENOENT") return null; throw error;});
     if (modified && modified.mtimeMs <= throughMs) {
       await rm(row.file, {force: true});
-      removed.add(row.file);
+      removed.add(basename(row.file).slice(0, 64));
     }
   }
-  return readableRecoveryRecords(rows.filter(row => !removed.has(row.file)), workspaceId, {objectId, path});
+  try {return await listLiveDraftRecovery(directory, workspaceId, {objectId, path});}
+  catch {return before.filter(record => !removed.has(record.recordId));}
 }
 
 /** Exact CRDT recovery complements the renderer's user-visible set-aside text. */
