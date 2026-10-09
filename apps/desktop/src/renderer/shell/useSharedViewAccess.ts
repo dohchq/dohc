@@ -28,6 +28,7 @@ export function useSharedViewAccess(input: {
     let epoch = 0;
     let timer: number | undefined;
     let nextPullAt = Date.now() + 30_000;
+    let lastPullAt = -Infinity;
     let inFlight: Promise<CheckSharedViewAccessResult> | null = null;
     let followUp: Promise<CheckSharedViewAccessResult> | null = null;
     let queuedAccess = false;
@@ -48,17 +49,23 @@ export function useSharedViewAccess(input: {
       inFlight = (async (): Promise<CheckSharedViewAccessResult> => {
         let result = unverified();
         try {
-          if (access) {
+          const accessCheck = async () => {
+            if (!access) return;
             result = await bridge().checkSharedViewAccess({ workspaceId: input.workspaceId });
             if (!isCurrent() || startedEpoch !== epoch) return unverified();
             if (result.status !== "unverified") latest.current.onVerified(result);
-          }
-          if (pull && visible() && isCurrent() && startedEpoch === epoch && result.status !== "ended" && result.status !== "needs-reopen") {
+          };
+          const pullShare = async () => {
+            if (!pull) return;
+            lastPullAt = Date.now();
             await latest.current.pull();
             if (!isCurrent() || startedEpoch !== epoch) return unverified();
             failures = 0;
             nextPullAt = Date.now() + 30_000;
-          }
+          };
+          // Access verification must not delay the opening pull.
+          const completed = await Promise.allSettled([accessCheck(), pullShare()]);
+          for (const completion of completed) if (completion.status === "rejected") throw completion.reason;
           return result;
         } catch (error) {
           if (!isCurrent() || startedEpoch !== epoch) return unverified();
@@ -91,8 +98,18 @@ export function useSharedViewAccess(input: {
     };
     run.current = request;
     const onReset = () => { failures = 0; nextPullAt = Date.now() + 30_000; void request(true, true); };
+    const onFocus = () => {
+      if (!isCurrent() || !visible() || paused) return;
+      const recovering = failures > 0;
+      failures = 0;
+      if (Date.now() - lastPullAt < 5_000) {
+        if (recovering) { nextPullAt = Date.now() + 30_000; schedule(); }
+        return;
+      }
+      onReset();
+    };
     const onVisibility = () => { if (visible()) void request(true, true); else clearTimer(); };
-    window.addEventListener("focus", onReset);
+    window.addEventListener("focus", onFocus);
     window.addEventListener("online", onReset);
     document.addEventListener("visibilitychange", onVisibility);
     const stopSession = bridge().onCloudSessionChanged(({ phase }) => {
@@ -106,7 +123,7 @@ export function useSharedViewAccess(input: {
     return () => {
       disposed = true;
       clearTimer();
-      window.removeEventListener("focus", onReset);
+      window.removeEventListener("focus", onFocus);
       window.removeEventListener("online", onReset);
       document.removeEventListener("visibilitychange", onVisibility);
       stopSession();

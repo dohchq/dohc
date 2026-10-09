@@ -66,7 +66,7 @@ it("checks again after an in-flight request when a push caller requests a rechec
   expect(check).toHaveBeenCalledTimes(2);
 });
 
-it("pauses hidden checks and immediately checks visibility and focus", async () => {
+it("pauses hidden checks and coalesces visibility with immediate focus", async () => {
   visible = false;
   setup();
   await act(() => vi.advanceTimersByTimeAsync(15_000));
@@ -77,7 +77,7 @@ it("pauses hidden checks and immediately checks visibility and focus", async () 
     act(() => (event === "visibilitychange" ? document : window).dispatchEvent(new Event(event)));
     await flush();
   }
-  expect(check).toHaveBeenCalledTimes(2);
+  expect(check).toHaveBeenCalledTimes(1);
 });
 
 it("keeps offline separate from ended and discards answers on close", async () => {
@@ -126,7 +126,6 @@ it("does not interpret another workspace's healthy sync as recovery", async () =
   expect(check).toHaveBeenLastCalledWith({ workspaceId: "B" });
 });
 
-
 it("backs off 30, 60, 120, 240, 480, 600 seconds and reports the third failure once", async () => {
   pull.mockRejectedValue(new Error("offline"));
   setup(); await flush();
@@ -143,6 +142,7 @@ it.each(["focus", "online"])("resets failure backoff on %s and resets it on succ
   pull.mockRejectedValue(new Error("offline"));
   setup(); await flush();
   await act(() => vi.advanceTimersByTimeAsync(30_000));
+  await act(() => vi.advanceTimersByTimeAsync(5_000));
   act(() => window.dispatchEvent(new Event(event))); await flush();
   expect(pull).toHaveBeenCalledTimes(3);
   pull.mockResolvedValue();
@@ -212,8 +212,7 @@ it("makes 120 pull requests per idle visible hour, with no periodic access reque
   expect(check).not.toHaveBeenCalled();
 });
 
-
-it.each(["relayed", "settled"])("pulls after this window's own Button completes (%s), and ignores other workspaces", async completion => {
+it.each(["relayed", "settled"])("pulls only after a known Button settlement (%s), and ignores other workspaces", async completion => {
   window.dohcDesktop = { ...window.dohcDesktop,
     onAutomationRunSettled: () => () => undefined,
     onAutomationRunWaiting: () => () => undefined,
@@ -227,10 +226,42 @@ it.each(["relayed", "settled"])("pulls after this window's own Button completes 
   expect(pull).toHaveBeenCalledTimes(1);
   const buttons = createAutomationButtons({ workspaceId: "A", of: { collectionPath: "tasks" } });
   await act(async () => buttons.press("Finish", { id: "row", label: "task" }));
-  expect(pull).toHaveBeenCalledTimes(2);
+  expect(pull).toHaveBeenCalledTimes(completion === "settled" ? 2 : 1);
   buttons.close(); other.close();
 });
 
+it("starts the opening pull before a deferred access check resolves", async () => {
+  const response = deferred<CheckSharedViewAccessResult>();
+  check.mockReturnValueOnce(response.promise);
+  setup(); await flush();
+  expect(pull).toHaveBeenCalledOnce();
+  expect(verified).not.toHaveBeenCalled();
+  await act(async () => response.resolve({ status: "current", access: "edit" }));
+});
+
+it("limits focus requests to one per five seconds since the last pull", async () => {
+  setup(); await flush();
+  for (let second = 1; second <= 10; second++) {
+    await act(() => vi.advanceTimersByTimeAsync(1_000));
+    act(() => window.dispatchEvent(new Event("focus"))); await flush();
+  }
+  expect(pull).toHaveBeenCalledTimes(3);
+  expect(check).toHaveBeenCalledTimes(3);
+});
+
+it("measures an idle visible hour including twelve focus returns with rapid alt-tab bursts", async () => {
+  setup(); await flush(); pull.mockClear(); check.mockClear();
+  for (let focus = 0; focus < 12; focus++) {
+    await act(() => vi.advanceTimersByTimeAsync(focus === 0 ? 175_000 : 305_000));
+    for (let burst = 0; burst < 4; burst++) {
+      act(() => window.dispatchEvent(new Event("focus"))); await flush();
+    }
+  }
+  await act(() => vi.advanceTimersByTimeAsync(70_000));
+  console.info(`idle hour with focus: ${pull.mock.calls.length} pulls, ${check.mock.calls.length} access requests`);
+  expect(pull).toHaveBeenCalledTimes(129);
+  expect(check).toHaveBeenCalledTimes(12);
+});
 
 it("does not postpone background pulls when a write requests an access check", async () => {
   const hook = setup(); await flush(); pull.mockClear();

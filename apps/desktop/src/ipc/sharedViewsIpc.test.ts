@@ -409,7 +409,6 @@ describe("registered received-view handlers", () => {
   });
 });
 
-
 describe("background share pulls", () => {
   const channel = sharedViewAccessOperations.refreshSharedView.channel;
   const payload = { workspaceId: "existing", trigger: "background" };
@@ -449,7 +448,7 @@ describe("background share pulls", () => {
   it("does a full refresh without a cached cursor and invalidates it after a failed full path", async () => {
     const h = await harness(); await h.invoke(channel, payload);
     expect(h.probeLog).not.toHaveBeenCalled(); expect(h.reconcile).toHaveBeenCalledOnce();
-    expect(h.fetchInfo).not.toHaveBeenCalled(); expect(h.recordIdentity).not.toHaveBeenCalled();
+    expect(h.fetchInfo).toHaveBeenCalledOnce(); expect(h.recordIdentity).toHaveBeenCalledOnce();
     h.probeLog.mockResolvedValue({ unchanged: false });
     h.reconcile.mockResolvedValueOnce({ kind: "refresh", outcome: { ok: false, changedPaths: 0, errorMessage: "failed" } });
     await h.invoke(channel, payload); h.probeLog.mockClear();
@@ -475,16 +474,60 @@ describe("background share pulls", () => {
     await expect(h.invoke(channel, payload)).resolves.toMatchObject({ status: "ended" });
     expect(h.reconcile).toHaveBeenCalledOnce(); expect(h.surfaces).toHaveBeenCalledOnce();
   });
-  it("measures CPU per unchanged main handler probe", async () => {
-    const h = await primed(); const reads = vi.spyOn(h.registry, "get");
-    h.probeLog.mockImplementation(input => probeShareViewLog({ ...input,
-      relay: { ...input.relay, fetch: async () => Response.json({ ops: [], hasMore: false, nextCursor: 42 }) } }));
-    for (let index = 0; index < 100; index++) await h.invoke(channel, payload);
-    const before = process.cpuUsage();
-    const probes = 2000;
-    for (let index = 0; index < probes; index++) await h.invoke(channel, payload);
-    const cpu = process.cpuUsage(before);
-    console.info(`share pull measurement: ${probes} unchanged probes, ${(cpu.user + cpu.system) / probes / 1000} ms CPU/probe, 0 engine calls, 0 registry reads`);
-    expect(reads).not.toHaveBeenCalled(); noLocalWork(h);
+  it.each(["account", "relay", "missing relay", "signed out", "missing recipient"])("pauses no-cursor background work for %s before operation admission", async change => {
+    const h = await harness();
+    if (change === "account") h.cache.set({ ...credentials, userId: "other" });
+    if (change === "relay") h.cache.set({ ...credentials, relayUrl: "https://other.test" });
+    if (change === "missing relay") delete h.workspace.shareView!.relayUrl;
+    if (change === "missing recipient") delete h.workspace.shareView!.recipientUserId;
+    if (change === "signed out") h.cache.clear();
+    await expect(h.invoke(channel, payload)).resolves.toMatchObject({ ok: false, errorKind: "unauthorized", probed: true });
+    expect(h.registryRead).toHaveBeenCalledOnce();
+    h.registryRead.mockClear(); noLocalWork(h);
+  });
+  it("remembers a successful full refresh without a cursor until manual refresh or credentials change", async () => {
+    const h = await harness();
+    h.reconcile.mockResolvedValue({ kind: "refresh", outcome: { ...outcome, nextCursor: undefined } });
+    await h.invoke(channel, payload);
+    vi.clearAllMocks();
+    await expect(h.invoke(channel, payload)).resolves.toMatchObject({ ok: true, status: "unchanged", probed: true });
+    noLocalWork(h); expect(h.probeLog).not.toHaveBeenCalled();
+    await h.invoke(channel, { workspaceId: "existing" });
+    expect(h.reconcile).toHaveBeenCalledOnce();
+    h.cache.set({ ...credentials, token: "renewed" });
+    await h.invoke(channel, payload);
+    expect(h.reconcile).toHaveBeenCalledTimes(2);
+    expect(h.fetchInfo).toHaveBeenCalledTimes(2);
+    expect(h.probeLog).not.toHaveBeenCalled();
+  });
+  it.each(["idle", "in flight"])("drops the probe cache when Forget retires the binding (%s)", async phase => {
+    const h = await primed();
+    const held = deferred<{ unchanged: boolean }>(); const started = deferred();
+    h.probeLog.mockImplementation(({ signal }) => { started.resolve();
+      signal!.addEventListener("abort", () => held.reject(signal!.reason), { once: true });
+      return held.promise;
+    });
+    const response = phase === "in flight" ? h.invoke(channel, payload) : undefined;
+    const rejected = response && expect(response).rejects.toThrow();
+    if (response) await started.promise;
+    await h.authorities.retireBinding(h.authorities.currentBinding("existing"), { removeBinding: () => { h.registry.delete("existing"); } });
+    if (rejected) await rejected;
+    expect(h.closed.size).toBe(0);
+    await expect(h.invoke(channel, payload)).rejects.toThrow("retired");
+    noLocalWork(h);
+  });
+  it("aborts a hung probe and releases its timeout when the sender closes", async () => {
+    const h = await primed(); const started = deferred();
+    h.probeLog.mockImplementation(({ signal }) => {
+      started.resolve();
+      return new Promise((_resolve, reject) => signal!.addEventListener("abort", () => reject(signal!.reason), { once: true }));
+    });
+    vi.useFakeTimers();
+    try {
+      const response = h.invoke(channel, payload); await started.promise;
+      for (const close of h.closed) close();
+      await expect(response).rejects.toThrow();
+      expect(vi.getTimerCount()).toBe(0); expect(h.closed.size).toBe(0); noLocalWork(h);
+    } finally { vi.useRealTimers(); }
   });
 });

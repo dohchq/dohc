@@ -1401,7 +1401,6 @@ export function DesktopWorkspaceShell(props: {
     [workspaceId, reportShellError],
   );
 
-
   const { onManageWorkspaces } = props;
   const manageWorkspaces = useCallback(() => {
     void Promise.resolve()
@@ -1866,7 +1865,6 @@ export function DesktopWorkspaceShell(props: {
   );
   // Set once refreshShareView exists below; a failed import's Try again
   // calls it.
-
   // One import seam for the dialog flow and the OS drag-in flow (the latter
   // passes the preload-resolved absolute paths; see the trust-delta note on
   // ImportWorkspaceFilesPayload). targetDir aims the import at a folder ("" /
@@ -3966,7 +3964,7 @@ export function DesktopWorkspaceShell(props: {
       if (shareViewEnded) return "ended";
       const token = ++shareRefreshToken.current;
       const isCurrent = () => !workspaceAdmission.superseded && token === shareRefreshToken.current;
-      let readShareRecords = true;
+      let readShareRecords = !background;
       if (!background) setShareRefreshing(true);
       const repaintAfterChange = async () => {
         await refreshFiles();
@@ -4018,8 +4016,8 @@ export function DesktopWorkspaceShell(props: {
         return outcome.status === "ended" ? "ended" : "current";
       } catch (error) {
         if (!isCurrent()) return "stale";
-        if (background) throw error;
-        void checkShareAccess();
+        if (background) readShareRecords = false;
+        if (!background) void checkShareAccess();
         // A store only a newer dohc opens stops the whole workspace, and the
         // stop state already says so. A toast would repeat it.
         const status = await bridge()
@@ -4032,6 +4030,7 @@ export function DesktopWorkspaceShell(props: {
         ) {
           return "stale";
         }
+        if (background) throw error;
         reportShellError("Couldn't refresh the shared view.", error);
         return "stale";
       } finally {

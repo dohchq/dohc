@@ -264,7 +264,6 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
           // edits, and a failure as that host's one notice, so this window
           // reports nothing and the button is free again.
           finish(key);
-          buttonCompleted(workspaceId);
           return;
         }
         run.claimId = result.claimId;

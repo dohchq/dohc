@@ -215,6 +215,8 @@ export async function probeShareViewLog(input: {
   since: number;
   signal?: AbortSignal;
 }): Promise<{ unchanged: boolean }> {
+  // Standalone share.view.pull reads the whole share log without channelWireId,
+  // including group shares. Only shared-channel pulls pass a channel filter.
   const response = await shareFetch(input.relay,
     `/sync/shares/${encodeURIComponent(input.shareId)}/log?since=${input.since}`,
     { signal: input.signal });
