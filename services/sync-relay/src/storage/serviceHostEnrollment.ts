@@ -1,10 +1,11 @@
+import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import {randomBytes} from "node:crypto";
 import type {StorageContext} from "./context";
 import type {SqliteDb, SyncRelayShareRow} from "./types";
 import {parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
 import {liveDocumentKindForPath} from "@dohc/workspace-contracts/live-documents";
 import {validateUserWritePath} from "@dohc/workspace-core";
-import {effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson, visibleSharePath} from "../shareFilter";
+import {effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson} from "../shareFilter";
 import {parseWorkspaceId} from "../requestInputs";
 import {canonicalLiveSelector, currentLiveDocumentMoment} from "./liveDocumentAuthority";
 import {assertWorkspaceQuota} from "./workspaces";
