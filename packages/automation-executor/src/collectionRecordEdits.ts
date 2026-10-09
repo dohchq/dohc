@@ -56,6 +56,9 @@ export class AutomationCreationSkipped extends Error {
   constructor() { super("The record was already created, then moved or deleted."); }
 }
 
+/** The request committed; its file may still need Collection adoption. */
+export class AutomationCreationCommitted extends Error {}
+
 /** The engine adapter subset the seam reads through. VersionedLiveAdapter satisfies it. */
 export interface CollectionRecordEditAdapter {
   sharedFileUpdateStates(writes: readonly SharedFileUpdate[]): Promise<SharedFileUpdateState[]>;
@@ -618,13 +621,17 @@ async function createRecordFile(
   try {
     return await context.createFile(requestedPath, text, author);
   } catch (error) {
+    const committed = error instanceof AutomationCreationCommitted;
     const collision = error instanceof VersionedTextStoreError
       ? error.code === "target-path-exists"
       : (error as NodeJS.ErrnoException | null)?.code === "EEXIST";
-    if (!collision) throw error;
-    const existing = await fileRecordId(context, requestedPath).catch(
-      () => undefined,
-    );
+    if (!collision && !committed) throw error;
+    const existing = await fileRecordId(context, requestedPath).catch((readError: unknown) => {
+      if (!committed || (readError as NodeJS.ErrnoException | null)?.code === "ENOENT"
+        || (readError instanceof VersionedTextStoreError && readError.code === "file-not-found")) return undefined;
+      throw readError;
+    });
+    if (committed && existing !== recordId) throw new AutomationCreationSkipped();
     // Nothing is there: the create itself failed.
     if (existing === undefined) throw error;
     if (existing === recordId) return requestedPath;

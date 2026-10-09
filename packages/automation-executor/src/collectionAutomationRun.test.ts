@@ -294,6 +294,24 @@ it.each(["document", "shared"] as const)("%s Undo restores all ten retained writ
   expect(space.records.get("rec_t")!.values).toEqual(Object.fromEntries(Object.keys(values).map(field => [field, 0])));
 });
 
+it.each(["document", "shared"] as const)("%s Undo keeps a teammate's intermediate value after a later confirmed write", async kind => {
+  const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {A: Done}}]");
+  for (const current of ["Doing", "Done"]) {
+    const space = workspace([task("rec_t", { A: current })]);
+    const earlier = newRun(added(), definition, "earlier", 1);
+    earlier.applied = [{ ordinal: 0, writes: [{ kind: "field", recordId: "rec_t", path: "Tasks/rec_t.md", field: "A", before: "Todo", after: "Doing" }] }];
+    const later = newRun(added(), definition, "later", 2);
+    later.durableEffects = 1;
+    later.applied = [{ ordinal: 0, writes: [{ kind: "field", recordId: "rec_t", path: "Tasks/rec_t.md", field: "A", before: "Doing", after: "Done" }] }];
+    const signal = new AbortController().signal;
+    const result = kind === "document" ? await undoCollectionAutomationRuns(space.undo([]), [earlier, later], signal)
+      : await undoAutomationRuns(space.undo([]), null, { path: "Tasks", name: "Tasks" },
+        async () => ({ kind: "owner", ownerUserId: null, grants: [] }), "atc_one", [earlier, later], async () => {}, signal);
+    expect(result.undone.reverted).toBe(current === "Done" ? 1 : 0);
+    expect(space.records.get("rec_t")!.values.A).toBe(current === "Done" ? "Todo" : "Doing");
+  }
+});
+
 it("an early preparation refusal leaves crash receipts available to Undo without claiming confirmation", async () => {
   const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {A: 1}}]");
   const space = workspace([task("rec_t", { A: 10 })]), store = await scratchStore();

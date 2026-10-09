@@ -29,7 +29,7 @@ import {
 } from "./automationPlan";
 import { chatNeedsOf, AutomationChatSessionWait, type ChatDirectory } from "./automationChat";
 import type { ReachCollection, ReachRoster } from "./automationReach";
-import { RUN_PLAN_BUDGET_BYTES, type RunWrite, type StoredRun, type StoredStep } from "./automationRunStore";
+import { engineWrite, RUN_PLAN_BUDGET_BYTES, type RunWrite, type StoredRun, type StoredStep } from "./automationRunStore";
 import {
   startRun,
   checkPlannedMessages,
@@ -158,10 +158,6 @@ type Done =
   | { kind: "find"; ordinal: number; refs: readonly RunRef[] }
   | { kind: "add"; ordinal: number; ref: RunRef | null }
   | { kind: "code"; value: JsonValue };
-
-function engineWrite(write: RunWrite): boolean {
-  return write.kind === "field" || write.kind === "created" || write.kind === "message";
-}
 
 function replayEffect(effect: StoredStep["effects"][number], writes: readonly RunWrite[]): StoredStep["effects"][number] {
   const fields = new Set(writes.flatMap(write => write.kind === "field" ? [write.field] : []));
@@ -409,9 +405,9 @@ async function walkSteps(
       delete step.appendCount;
     }
     if (effectIndex <= durableEffects) return null;
-    // Every message and notice is checked under this roster before it is sent.
+    // Check newly planned steps together before sending any message or notice.
     const unsent = { ...step, effects: step.effects.filter((_effect, part) => first + part >= firstUnrecorded) };
-    const messages = wasSaved ? { chat: ctx.chat } : await checkPlannedMessages(dependencies, { automationId: ctx.claim.automationId, automation, collection: input.collection, roster: input.roster }, [unsent], ctx.chat);
+    const messages = fresh || !wasSaved ? await checkPlannedMessages(dependencies, { automationId: ctx.claim.automationId, automation, collection: input.collection, roster: input.roster }, [unsent], ctx.chat) : { chat: ctx.chat };
     if ("outcome" in messages) return messages.outcome;
     for (const [part, effect] of step.effects.entries()) {
       const index = first + part;

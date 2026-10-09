@@ -369,9 +369,14 @@ export interface StoredStep {
   collections?: Array<{ collectionId: string; path: string }>;
 }
 
-/** Receipts a finished run can describe as landed, for History and Undo. */
-export function effectConfirmed(run: StoredRun, index: number): boolean {
-  return index < run.durableEffects;
+/** Writes whose durability depends on the engine WAL barrier. */
+export function engineWrite(write: RunWrite): boolean {
+  return write.kind === "field" || write.kind === "created" || write.kind === "message";
+}
+
+/** Whether History and Undo can trust this recorded write. */
+export function writeConfirmed(run: StoredRun, index: number, write: RunWrite): boolean {
+  return index < run.durableEffects || !engineWrite(write);
 }
 
 /** One run of one claim under one definition of its automation. */

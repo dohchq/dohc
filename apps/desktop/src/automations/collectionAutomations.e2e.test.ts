@@ -1,3 +1,4 @@
+import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -348,3 +349,41 @@ it.skipIf(engine.missing).each(["deleted", "moved"] as const)(
     });
   }, 120_000,
 );
+
+it.skipIf(engine.missing)("finishes a written but unadopted creation on native desktop replay", async () => {
+  await harness("  - id: idle\n    name: Idle\n    when: {field-changed: Status, to: Never}\n    do: [{set: {Finished on: never}}]\n", async ctx => {
+    const parsed = parseAutomationsFile("version: 1\nautomations:\n  - id: replay\n    name: Replay\n    when: record-added\n    do: [{add-record: {Status: New}}]\n");
+    if (parsed.status !== "read" || parsed.entries[0]?.status !== "valid") throw Error("invalid automation");
+    const automation = parsed.entries[0].automation, signal = new AbortController().signal;
+    const run = newRun({ claimId: "unadopted", automationId: "collection:Tasks#replay" }, automation, "key", 1);
+    const author = { kind: "automation" as const, automationId: run.automationId, depth: 1, run: { claimId: run.claimId, automationName: automation.name } };
+    const recordId = derivedRecordId(run.claimId), path = "Tasks/made.md";
+    const db = new DatabaseSync(join(ctx.root, ".dohc/engine/engine.db"));
+    db.exec("PRAGMA busy_timeout=10000");
+    db.exec("CREATE TRIGGER block_adoption BEFORE INSERT ON collection_records WHEN NEW.file_path = 'Tasks/made.md' BEGIN SELECT RAISE(FAIL, 'test adoption failure'); END");
+    const recordContext = ctx.recordContext(ctx.person, signal);
+    let adopting: Promise<void> | undefined;
+    try {
+      await recordContext.createFile(path, `---\nid: ${recordId}\n---\n`, author);
+      expect(await readFile(join(ctx.root, path), "utf8")).toContain(recordId);
+      expect((await ctx.withEngine(adapter => adapter.queryCollectionRecords({ collectionPath: "Tasks" }))).records.some(record => record.id === recordId)).toBe(false);
+      const subscribe = recordContext.onRecordsChanged;
+      recordContext.onRecordsChanged = listener => {
+        const unsubscribe = subscribe(listener);
+        db.exec("DROP TRIGGER block_adoption");
+        adopting = ctx.capture.flush();
+        return unsubscribe;
+      };
+      const store = createAutomationRunStore(ctx.root, resolveWorkspaceMetadataDir);
+      const effect = { kind: "add" as const, collectionPath: "Tasks", name: "made", recordId, fields: [{ field: "Status", value: "New" }] };
+      run.steps = [{ ordinal: 0, effects: [effect] }]; await store.save(run);
+      const dependencies = { store, withRecordWrites: async (_signal: AbortSignal, work: Parameters<CollectionAutomationRunDependencies["withRecordWrites"]>[1]) =>
+        work(collectionRecordWrites(recordContext)) } as CollectionAutomationRunDependencies;
+      const result = await applyDocumentEffect(dependencies, { run, author, signal, ordinal: 0, automationName: automation.name, depth: 1, chat: null }, effect, "may-have-landed");
+      expect(adopting).toBeDefined(); await adopting;
+      expect(result).toMatchObject([{ kind: "created", recordId, path }, { kind: "field", field: "Status", after: "New" }]);
+      expect(run.created).toMatchObject([{ recordId, path }]);
+      expect((await ctx.withEngine(adapter => adapter.getCollectionRecord({ collectionPath: "Tasks", recordId, historyLimit: 1 }))).record.values).toContainEqual(expect.objectContaining({ field: "Status", value: "New" }));
+    } finally { db.exec("DROP TRIGGER IF EXISTS block_adoption"); db.close(); }
+  });
+}, 120_000);

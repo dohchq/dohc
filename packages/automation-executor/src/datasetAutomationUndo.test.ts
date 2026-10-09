@@ -149,7 +149,7 @@ describe("undo of a dataset run", () => {
 
   it.each(["dataset", "shared"] as const)("%s Undo includes all ten crash receipts after replay stops at effect 3", async kind => {
     for (const value of ["3", "10", "someone else"]) {
-      const records = { a: { version: 11, values: { [STATUS]: value } } };
+      const records = { a: { version: value === "10" ? 11 : 12, values: { [STATUS]: value } } };
       const { host } = recordsHost(records);
       const saved = runOf("crash", 1, []);
       saved.durableEffects = 3;
@@ -160,8 +160,8 @@ describe("undo of a dataset run", () => {
         withReads: async () => null, withRecordWrites: async () => { throw Error("unexpected document write"); },
         trash: async () => { throw Error("unexpected trash"); }, collectionPathOf: () => null,
       }, host, collection, async () => OWNER, "claim", [saved], async () => {}, new AbortController().signal)).undone;
-      expect(undone.reverted).toBe(value === "someone else" ? 0 : 1);
-      expect(records.a.values[STATUS]).toBe(value === "someone else" ? value : "0");
+      expect(undone.reverted).toBe(value === "10" ? 1 : 0);
+      expect(records.a.values[STATUS]).toBe(value === "10" ? "0" : value);
     }
   });
   // The executor's order: the reverses and deletes of the confirmed preview are saved with the newest run before any is sent.
@@ -190,6 +190,28 @@ describe("undo of a dataset run", () => {
     const runs = [runOf("h-1", 1, [edit(EDIT, "a", STATUS, "Open", "Paid", 2), edit(LOOSE, "a", STATUS, "Paid", "Closed", 3)])];
     expect(await undo(host, runs)).toEqual({ ...none, irreversible: 1 });
     expect(writes).toEqual([]);
+  });
+
+  it("trusts a recorded FULL dataset edit even past an engine mark of zero", async () => {
+    const recorded = run(EDIT); recorded.durableEffects = 0; recorded.applied[0]!.writes = [recorded.applied[0]!.writes[0]!];
+    const records = { a: { version: 2, values: { [STATUS]: "Closed" } } };
+    const { host, writes } = recordsHost(records);
+    expect(await undo(host, [recorded])).toEqual({ ...none, reverted: 1 });
+    expect(writes).toEqual([{ [STATUS]: "Open" }]);
+  });
+
+  it("keeps a teammate's intermediate value after a later confirmed edit", async () => {
+    const earlier = runOf("h-1", 1, []);
+    earlier.applied = [];
+    earlier.steps = [{ ordinal: 0, effects: [{ kind: "dataset-edit", rules, operationId: EDIT, tableId: TABLE,
+      target: { recordId: "a", version: 1 }, fields: [{ fieldId: STATUS, field: "Status", before: "Todo", after: "Doing" }] }] }];
+    const later = runOf("h-2", 2, [edit(EDIT, "a", STATUS, "Doing", "Done", 3)]);
+    for (const current of ["Doing", "Done"]) {
+      const records = { a: { version: 4, values: { [STATUS]: current } } };
+      const { host, writes } = recordsHost(records);
+      expect(await undo(host, [structuredClone(earlier), structuredClone(later)])).toEqual({ ...none, ...(current === "Done" ? { reverted: 1 } : { changedSince: 1 }) });
+      expect(writes).toEqual(current === "Done" ? [{ [STATUS]: "Todo" }] : []);
+    }
   });
 
   it("puts a field written twice back in one write, so it is never left between the runs' writes", async () => {

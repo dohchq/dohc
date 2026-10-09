@@ -29,6 +29,8 @@ it("labels unconfirmed receipts in History, including created records", async ()
     { ordinal: 0, writes: [{ kind: "field", recordId: "record", path: "Tasks/one.md", field: "A", before: 0, after: 1 }] },
     { ordinal: 1, writes: [{ kind: "created", recordId: "lost", path: "Tasks/lost.md" }] },
   ];
+  state.applied[1]!.writes.push({ kind: "kept", recordId: "record", path: "Tasks/one.md", field: "B", planned: 1, current: 2 },
+    { kind: "skipped", recordId: "missing", path: "Tasks/missing.md", reason: "gone" });
   state.durableEffects = 1;
   state.created = [{ ordinal: 1, planned: "lost", recordId: "lost", path: "Tasks/lost.md" }];
   await store.save(state);
@@ -52,7 +54,7 @@ it("labels unconfirmed receipts in History, including created records", async ()
     await executor.open();
     const history = await executor.run(claim.automationId, claim.claimId);
     expect(history?.steps).toEqual([{ step: 1, writes: state.applied[0]!.writes },
-      { step: 2, writes: [{ ...state.applied[1]!.writes[0]!, unconfirmed: true }] }]);
+      { step: 2, writes: [{ ...state.applied[1]!.writes[0]!, unconfirmed: true }, ...state.applied[1]!.writes.slice(1)] }]);
   } finally { await executor.dispose(); await evaluator.close(); }
 });
 

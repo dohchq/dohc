@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
-  AutomationCreationSkipped,
+  AutomationCreationCommitted,
   runCollectionRecordCreation,
   type CollectionRecordEditAdapter,
   type CollectionRecordEditContext,
@@ -68,10 +68,10 @@ export function desktopRecordEditContext(host: DesktopRecordEditHost): Collectio
         signal,
       }); }
       catch (error) {
-        if (named.kind === "automation" && isIdempotencyKeyReuseRefusal(error)) throw new AutomationCreationSkipped();
+        if (named.kind === "automation" && isIdempotencyKeyReuseRefusal(error)) throw new AutomationCreationCommitted();
         throw error;
       }
-      if (named.kind === "automation" && result.deduped) throw new AutomationCreationSkipped();
+      if (named.kind === "automation" && result.deduped) throw new AutomationCreationCommitted();
       requirePublishedWrite(path, result);
       return path;
     },

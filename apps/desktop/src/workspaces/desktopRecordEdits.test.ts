@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
-import { AutomationCreationSkipped, type RecordEditSession, type RecordUpdateOptions } from "@dohc/automation-executor/collection-record-edits";
+import { AutomationCreationCommitted, type RecordEditSession, type RecordUpdateOptions } from "@dohc/automation-executor/collection-record-edits";
 import { createRecordByHand, desktopRecordEditContext, type DesktopRecordEditHost, type LocalPersonAuthor } from "./desktopRecordEdits";
 import { AuthoredTextChangedError } from "./workspaceEngineCapture";
 import { deferred } from "../testing/deferred";
@@ -164,11 +164,11 @@ it("a hand-made record keeps the person who asked while it waits for its workspa
   expect(writes.map(write => write[2])).toEqual([personNamed("account-alice")]);
 });
 
-it("turns a deduped automation creation into a skipped effect before publication checks", async () => {
+it("marks a deduped creation committed before publication checks", async () => {
   const context = desktopRecordEditContext({ capture: {
     openRecordSession: async () => { throw Error("unused"); },
     writeAuthoredFile: async absolutePath => ({ resolvedAbsolutePath: absolutePath, materializeOutcome: "superseded", deduped: true }),
   }, workspaceRoot: await scratchRoot(), person: personNamed("local"), withAdapter: async () => null,
   onCaptureSettled: () => () => undefined, signal: new AbortController().signal });
-  await expect(context.createFile("Tasks/made.md", "text", automation)).rejects.toBeInstanceOf(AutomationCreationSkipped);
+  await expect(context.createFile("Tasks/made.md", "text", automation)).rejects.toBeInstanceOf(AutomationCreationCommitted);
 });

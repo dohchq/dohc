@@ -2788,6 +2788,16 @@ describe("an automation's runs", () => {
     expect(row.textContent).toContain("Sent a message to Trip");
   });
 
+  it.each(["running", "pending"] as const)("hides the durability warning while a run is %s", async state => {
+    makeBridge(read([summary(stamp)]), [run({ state, writes: [{ kind: "field", recordId: "rec_1",
+      path: "Tasks/Plan.md", field: "Status", before: "Doing", after: "Done", unconfirmed: true }] })]);
+    render(<AutomationRuns workspaceId="ws-1" automationId="collection:Tasks#stamp" refreshKey={0}
+      onRetry={vi.fn()} onError={vi.fn()} onNotice={vi.fn()} />);
+    const row = await screen.findByTestId("automation-run-atc_1");
+    await userEvent.click(within(row).getByRole("button", { name: "Show 1 change" }));
+    expect(row.textContent).not.toContain("May not be saved");
+  });
+
   it("shows unconfirmed changes and keeps Undo available", async () => {
     makeBridge(read([summary(stamp)]), [run({ state: "failed", writes: [{ kind: "field", recordId: "rec_1",
       path: "Tasks/Plan.md", field: "Status", before: "Doing", after: "Done", unconfirmed: true }] })]);
@@ -2796,7 +2806,7 @@ describe("an automation's runs", () => {
     const row = await screen.findByTestId("automation-run-atc_1");
     expect(within(row).getByRole("button", { name: "Undo" })).toBeDefined();
     await userEvent.click(within(row).getByRole("button", { name: "Show 1 change" }));
-    expect(row.textContent).toContain("Not confirmed");
+    expect(row.textContent).toContain("May not be saved");
   });
 
   it("keeps Undo available for a locally saved run and clears its pending note after settlement", async () => {

@@ -1,4 +1,4 @@
-import { effectConfirmed } from "./automationRunStore";
+import { writeConfirmed } from "./automationRunStore";
 import { datasetBaseFolder } from "@dohc/security-contract/dataset";
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
@@ -810,7 +810,7 @@ const BUSY_CLAIM_REFUSAL = "dohc is already changing this run. Try again in a mo
  */
 function stepWritesOf(runs: readonly StoredRun[]): Array<{ ordinal: number; write: RunWrite }> {
   const writes = runs.flatMap((run) => run.applied.flatMap((effect, index) => effect.writes.map((write) => ({ ordinal: effect.ordinal,
-    write: effectConfirmed(run, index) ? write : { ...write, unconfirmed: true as const } }))));
+    write: writeConfirmed(run, index, write) ? write : { ...write, unconfirmed: true as const } }))));
   const listed = new Set(writes.flatMap(({ write }) => (write.kind === "created" ? [write.recordId] : [])));
   for (const run of runs) {
     for (const created of run.created) {

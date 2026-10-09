@@ -1,8 +1,9 @@
+import type { ReachRoster } from "./automationReach";
 import { describe, expect, it } from "vitest";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import type { RunContext } from "./automationPlan";
 import { newRun, type CollectionAutomationRunDependencies } from "./collectionAutomationRun";
-import { effectConfirmed, type AutomationRunStore, type RunWrite, type StoredRun } from "./automationRunStore";
+import { writeConfirmed, type AutomationRunStore, type RunWrite, type StoredRun } from "./automationRunStore";
 import { runSteps, type EffectMode, type StepBackend } from "./automationStepRun";
 import { documentUndoChanges } from "./collectionAutomationUndo";
 
@@ -48,8 +49,8 @@ automations:
   };
   const context: RunContext = { automation, claim, message: null, person: null, chat: null, nowMs: 1, key: { claimId: "claim", hash: "key" } };
   const stopped = new AbortController();
-  const execute = () => runSteps(dependencies, backend, { automation, collection: { path: "Tasks", name: "Tasks" },
-    roster: { kind: "owner", ownerUserId: null, grants: [] }, signal: new AbortController().signal, stopped: stopped.signal,
+  const execute = (roster: Exclude<ReachRoster, { kind: "unknown" }> = { kind: "owner", ownerUserId: null, grants: [] }) => runSteps(dependencies, backend, { automation, collection: { path: "Tasks", name: "Tasks" },
+    roster, signal: new AbortController().signal, stopped: stopped.signal,
     claimRun: 1, engineClaimId: "claim" }, context, run, true, { prepareMs: 0, runMs: 0 });
   return { run, log, modes, saves, backend, dependencies, stopped, execute,
     value: () => value, engineWrites: () => engineWrites,
@@ -64,10 +65,32 @@ describe("durable replay boundaries", () => {
     f.run.durableEffects = 1;
     f.backend.apply = async () => ({ outcome: { kind: "failed", error: "reach changed", timedOut: false } });
     await expect(f.execute()).resolves.toMatchObject({ kind: "failed" });
-    expect(f.run.applied.map((_effect, index) => effectConfirmed(f.run, index))).toEqual([true, false, false]);
+    expect(f.run.applied.map((effect, index) => writeConfirmed(f.run, index, effect.writes[0]!))).toEqual([true, false, false]);
     expect([...documentUndoChanges([f.run]).added.keys()]).toEqual(["r0", "r1", "r2"]);
     expect(f.saves.at(-1)?.outcome?.state).toBe("failed");
     expect(f.log).not.toContain("makeDurable");
+  });
+
+  it("checks a newly planned resumed message step before sending Alice's message when Bob lost reach", async () => {
+    const f = fixture();
+    f.run.steps = [];
+    const effects = ["Alice", "Bob"].map(name => ({ kind: "message" as const, effectId: name, messageId: name, threadId: name,
+      body: "Hello", name, channelWireId: name, to: { kind: "direct-message" as const, userId: name, threadId: name }, byFormula: false }));
+    f.backend.step = (async () => ({ step: { ordinal: 0, effects } })) as StepBackend["step"];
+    f.dependencies.store.appendStep = async () => { f.log.push("appendStep"); };
+    const roster = { kind: "owner" as const, ownerUserId: "owner", grants: [{ grantId: "Alice", recipientUserId: "Alice", recipientEmail: "alice@example.com",
+      files: { paths: ["Tasks"], versionId: null, access: "edit" as const }, channel: { wireId: "Alice", canPost: true } }] };
+    await expect(f.execute(roster)).resolves.toMatchObject({ kind: "failed", error: "alice@example.com cannot post in Bob." });
+    expect(f.modes).toEqual([]);
+    expect(f.run.applied).toEqual([]);
+  });
+
+  it.each(["field", "created", "message", "kept", "skipped", "notice", "dataset-edit", "dataset-created", "dataset-action"] as const)("confirms each recorded %s write according to its storage", kind => {
+    const f = fixture();
+    const write = { kind } as RunWrite;
+    expect(writeConfirmed(f.run, 0, write)).toBe(!["field", "created", "message"].includes(kind));
+    f.run.durableEffects = 1;
+    expect(writeConfirmed(f.run, 0, write)).toBe(true);
   });
 
   it.each(["kept", "skipped", "notice", "dataset-edit", "dataset-created", "dataset-action"])("does not replay a recorded %s receipt", async kind => {

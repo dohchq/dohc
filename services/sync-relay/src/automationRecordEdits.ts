@@ -1,5 +1,6 @@
+import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
 import type {AutomationDeclaration} from "@dohc/live-session-contract/live-authorship";
-import {AutomationCreationSkipped} from "@dohc/automation-executor/collection-record-edits";
+import {AutomationCreationCommitted} from "@dohc/automation-executor/collection-record-edits";
 import {createHash} from "node:crypto";
 import {posix} from "node:path";
 import type {
@@ -113,15 +114,15 @@ export function replicaRecordEditContext(
         author: {kind: "automation", automationId: author.automationId, onBehalfOf: author.onBehalfOf, depth: author.depth},
       }); }
       catch (error) {
-        if (isIdempotencyKeyReuseRefusal(error)) throw new AutomationCreationSkipped();
+        if (isIdempotencyKeyReuseRefusal(error)) throw new AutomationCreationCommitted();
         throw error;
       }
-      if (result.deduped) throw new AutomationCreationSkipped();
+      if (result.deduped) throw new AutomationCreationCommitted();
       return path;
     },
     async readText(path) {
       const read = await adapter.readTextFile({workspaceId, versionId: await activeVersion(), path});
-      if (typeof read?.text !== "string") throw new Error(`${path} is not a text file in this server's copy of the workspace.`);
+      if (typeof read?.text !== "string") throw new VersionedTextStoreError("file-not-found", `${path} is not a text file in this server's copy of the workspace.`);
       return {text: read.text, truncated: false};
     },
     withAdapter: async (work) => replica.signal.aborted ? null : await work(adapter),

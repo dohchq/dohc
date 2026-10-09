@@ -1,4 +1,4 @@
-import { effectConfirmed } from "./automationRunStore";
+import { writeConfirmed } from "./automationRunStore";
 import { posix } from "node:path";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -97,7 +97,7 @@ export function documentUndoChanges(runs: readonly StoredRun[]): { added: Map<st
     for (const [index, { writes }] of run.applied.entries()) {
       for (const write of writes) {
         if (write.kind === "created") added.set(write.recordId, write.path);
-        if (write.kind === "field") wrote(write.recordId, write.path, write.field, { before: write.before, after: write.after, sure: effectConfirmed(run, index) });
+        if (write.kind === "field") wrote(write.recordId, write.path, write.field, { before: write.before, after: write.after, sure: writeConfirmed(run, index, write) });
       }
     }
     const unrecorded = unrecordedEffect(run)?.effect;
@@ -122,11 +122,13 @@ export function documentUndoChanges(runs: readonly StoredRun[]): { added: Map<st
 function wayBack(writes: readonly FieldWrite[]): { to: JsonValue; from: JsonValue[] } {
   const last = writes.at(-1)!;
   const from = last.sure ? [last.after] : [last.after, last.before];
+  let uncertain = !last.sure;
   let value = last.before;
   for (let index = writes.length - 2; index >= 0; index -= 1) {
     const earlier = writes[index]!;
     if (isDeepStrictEqual(earlier.after, value)) {
-      if (!earlier.sure) from.push(earlier.after, earlier.before);
+      uncertain &&= !earlier.sure;
+      if (uncertain) from.push(earlier.after, earlier.before);
       value = earlier.before;
     }
     // An unrecorded write the next one did not find never landed.
