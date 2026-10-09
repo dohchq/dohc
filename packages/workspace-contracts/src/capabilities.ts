@@ -36,6 +36,7 @@ export const CAPABILITIES = {
   "access.sharing.read": capability("Page observed granted and received shares.", {ipc: ["listSharingAccess"], socket: ["accessSharing"], public: ["access sharing"]}),
   "access.refresh": capability("Request paced observations when Sharing opens or Access expands.", {ipc: ["requestAccessRefresh"]}),
   "share.access.read": capability("Check the current user's received share access.", {ipc: ["checkSharedViewAccess"]}),
+  "share.direct.writes.feedback": capability("Subscribe to and acknowledge shared-view write feedback.", {ipc: ["updateShareDirectWriteDelivery"]}),
   "share.capture.notice.dismiss": capability("Dismiss a received share's capture Notice.", {ipc: ["dismissShareCaptureNotice"]}),
   "capture.recovery.read": capability("Read capture recovery status.", {ipc: ["getCaptureRecoveryStatus"]}),
   "capture.recovery.clear": capability("Clear a capture recovery notice persistently.", {ipc: ["clearCaptureRecovery"]}),

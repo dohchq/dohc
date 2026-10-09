@@ -4516,10 +4516,42 @@ export type PushShareDirectWritesResult = z.infer<typeof PushShareDirectWritesRe
 
 // A direct push main ran after a save in this share view finished.
 export const ShareDirectWritesPushedEvent = z.object({
+  answerId: z.uuid(),
   workspaceId: WORKSPACE_ID,
   result: PushShareDirectWritesResult,
 });
 export type ShareDirectWritesPushedEvent = z.infer<typeof ShareDirectWritesPushedEvent>;
+
+const ShareDirectWriteListener = z.object({
+  workspaceId: WORKSPACE_ID,
+  rendererDocumentId: z.uuid(),
+  subscriptionId: z.uuid(),
+});
+export const ShareDirectWriteDeliveryPayload = z.discriminatedUnion("action", [
+  ShareDirectWriteListener.extend({ action: z.literal("listen"), listening: z.boolean() }),
+  ShareDirectWriteListener.extend({ action: z.enum(["claim", "acknowledge", "release"]), answerId: z.uuid() }),
+]);
+export type ShareDirectWriteDeliveryPayload = z.infer<typeof ShareDirectWriteDeliveryPayload>;
+export const shareDirectWriteDeliveryOperations = {
+  updateShareDirectWriteDelivery: {
+    capabilityId: "share.direct.writes.feedback",
+    channel: "desktop:update-share-direct-write-delivery",
+    scope: "workspace",
+    guard: "trusted-sender",
+    payload: ShareDirectWriteDeliveryPayload,
+    result: z.boolean(),
+    handlerCheck: {
+      check: "shareDirectWriteDelivery.sessionWorkspaceAndDocumentMatch",
+      reason: "Listen and claim match main's session workspace and renderer document. Acknowledgment and cleanup require that sender's exact issued subscription and claim.",
+    },
+  },
+} satisfies OperationTable;
+
+export interface ShareDirectWriteAnswerDelivery {
+  claim(): Promise<boolean>;
+  acknowledge(): Promise<boolean>;
+  release(): Promise<boolean>;
+}
 
 export const ListMyShareChangesPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -6509,6 +6541,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof scheduleHostOperations>,
     OperationBridge<typeof chatDispatchNoticeOperations>,
     OperationBridge<typeof sharedViewAccessOperations>,
+    OperationBridge<typeof shareDirectWriteDeliveryOperations>,
     OperationBridge<typeof engineYDocAdmissionOperations>,
     OperationBridge<typeof liveDraftRecoveryOperations>,
     OperationBridge<typeof engineYDocSaveOperations> {
@@ -6792,8 +6825,8 @@ export interface DohcDesktopBridge
   // into the owner's workspace. Every other change waits for Send changes.
   pushShareDirectWrites(
     payload: PushShareDirectWritesPayload,
-  ): Promise<PushShareDirectWritesResult>;
-  onShareDirectWritesPushed(listener: (event: ShareDirectWritesPushedEvent) => void): () => void;
+  ): Promise<void>;
+  onShareDirectWritesPushed(listener: (event: ShareDirectWritesPushedEvent, delivery: ShareDirectWriteAnswerDelivery) => void, workspaceId: string): () => void;
   listMyShareChanges(
     payload: ListMyShareChangesPayload,
   ): Promise<ListMyShareChangesResult>;

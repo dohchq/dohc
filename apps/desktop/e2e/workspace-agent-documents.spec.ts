@@ -15,7 +15,7 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   explorerRow,
-  openFileChatsPanel,
+  openAboutPanel,
   openWorkspaceFromFirstRun,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
@@ -364,7 +364,7 @@ test("an agent creates a document and comments on it where the person reads comm
     await expect(agentCli(temp, "fileChats", { path: "notes/itinerary.md" }))
       .resolves.toMatchObject({ ok: true, threads: [{ id: threadId, title: "Friday plan" }] });
 
-    await openFileChatsPanel(page);
+    await openAboutPanel(page);
     await page.getByTestId("linked-chat-open").click();
     await expect(page.getByTestId("linked-chat-title")).toContainText("Friday plan");
     await expect(page.getByTestId("linked-chat-message-body"))

@@ -294,5 +294,5 @@ export function shouldRecheckShareAccess(error: unknown): boolean {
   if (name === "DaemonRefusalError" && code !== undefined &&
     ["AUTH_FAILED", "FORBIDDEN", "SHARE_UNAVAILABLE", "SHARE_READ_ONLY", "SHARE_OPERATION_REJECTED",
       "SESSION_EXPIRED", "WORKSPACE_UNAVAILABLE", "IDENTITY_NOT_RECOGNIZED"].includes(code)) return true;
-  return /\b(?:unauthorized|forbidden|authorization failed|does not have Edit access|access to this share (?:ended|changed)|share is no longer available|network (?:error|request failed|failure)|fetch failed|failed to fetch|ECONN\w*|ENOTFOUND|ETIMEDOUT)\b|Share request failed \((?:401|403|404)\)/i.test(message);
+  return /\b(?:unauthorized|forbidden|authorization failed|does not have Edit access|access to this share (?:ended|changed)|shared file session changed|share is no longer available|network (?:error|request failed|failure)|fetch failed|failed to fetch|ECONN\w*|ENOTFOUND|ETIMEDOUT)\b|Share request failed \((?:401|403|404)\)/i.test(message);
 }
