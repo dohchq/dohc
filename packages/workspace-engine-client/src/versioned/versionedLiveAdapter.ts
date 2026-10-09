@@ -1592,8 +1592,8 @@ export class VersionedLiveAdapter {
     return { present: true, text: result.text };
   }
 
-  async watcherStatus(): Promise<WatcherStatusResult> {
-    return this.workspaceRequest(WORKSPACE_METHOD.watcherStatus, {});
+  async watcherStatus(options?: { deadlineMs?: number }): Promise<WatcherStatusResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.watcherStatus, {}, options);
   }
 
   async clearCaptureRecovery(momentId: string): Promise<void> {
@@ -1608,8 +1608,8 @@ export class VersionedLiveAdapter {
     return this.workspaceRequest(WORKSPACE_METHOD.keptCopiesSave, { id });
   }
 
-  async flushCapture(): Promise<CaptureFlushResult> {
-    return this.workspaceRequest(WORKSPACE_METHOD.captureFlush, {});
+  async flushCapture(options?: { deadlineMs?: number }): Promise<CaptureFlushResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.captureFlush, {}, options);
   }
 
   async reconcileCapture(): Promise<CaptureFlushResult> {

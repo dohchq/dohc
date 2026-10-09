@@ -435,6 +435,8 @@ it.skipIf(engine.missing).each([
     await adapter.writeTextFile({workspaceId, versionId: "main", path, text: hasId ? `---\nid: ${recordId}\n---\n\n${body}` : body,
       publish: true, metadata: {origin: "api"}, author: {kind: "human", humanId: "local-person"}});
     capture = createWorkspaceEngineCapture({...source.workspace, rustEngineSessions: source.sessions, settleDebounceMs: 60_000,
+      // Keep pending-owner flush failures near the former one-second polling wait.
+      flushCaptureBudgetMs: 1_000,
       onError: (context, error) => errors.push(`${context}: ${String(error)}`)});
     const seeded = await capture.openYDocSession({path, contentKind: "richdoc", onRemoteUpdate: () => undefined});
     if (hasId) await seeded.applyDecidedLocalUpdate(doc => {

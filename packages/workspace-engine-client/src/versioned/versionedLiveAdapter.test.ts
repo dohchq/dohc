@@ -394,6 +394,28 @@ function captureClient(requests: Request[]): MinimalDaemonClient {
 }
 
 describe("VersionedLiveAdapter", () => {
+  it("forwards capture flush and watcher status deadlines to the daemon", async () => {
+    const requests: Request[] = [];
+    const adapter = new VersionedLiveAdapter({
+      sendRequest: async request => {
+        requests.push(request);
+        return { id: request.id, result: request.method === WORKSPACE_METHOD.captureFlush
+          ? { settled: true, running: true, degraded: false }
+          : { running: true, degraded: false, terminal: false, phase: "ready",
+              noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [] } };
+      },
+      close: () => undefined,
+    }, WORKSPACE, { workspaceId: WORKSPACE });
+
+    await adapter.flushCapture({ deadlineMs: 30_000 });
+    await adapter.watcherStatus({ deadlineMs: 29_750 });
+
+    expect(requests.map(({ method, deadlineMs }) => ({ method, deadlineMs }))).toEqual([
+      { method: WORKSPACE_METHOD.captureFlush, deadlineMs: 30_000 },
+      { method: WORKSPACE_METHOD.watcherStatus, deadlineMs: 29_750 },
+    ]);
+  });
+
   it.each(["api", "local-file"] as const)("records %s text without publishing unless explicitly requested", async (origin) => {
     const loopback = new VersionedLoopbackEngine();
     const adapter = new VersionedLiveAdapter({ sendRequest: (request) => loopback.sendRequest(request), close: () => undefined }, WORKSPACE, { workspaceId: WORKSPACE });

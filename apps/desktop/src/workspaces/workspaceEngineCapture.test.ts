@@ -91,6 +91,7 @@ const WORKSPACE_ATTACHMENT_ID = Symbol("workspace-engine-capture-test");
 const itNonRoot = process.getuid?.() === 0 ? it.skip : it;
 
 interface CaptureOptions {
+  flushCaptureBudgetMs?: number;
   preserveUnsentState?: WorkspaceEngineCaptureOptions["preserveUnsentState"];
   store?: CaptureVersionedTextStore;
   now?: () => number;
@@ -2479,6 +2480,7 @@ describe("workspaceEngineCapture relay sync materialization", () => {
     const requests: Request[] = [];
     let settled = true;
     const engine = capture(root, {
+      flushCaptureBudgetMs: 100,
       rustEngineSessions: mockLiveSessions(loopback, requests, () => ({
         settled,
         running: true,
@@ -3338,6 +3340,7 @@ describe("workspaceEngineCapture agent attribution", () => {
     const loopback = new VersionedLoopbackEngine();
     let settled = false;
     const engine = capture(root, {
+      flushCaptureBudgetMs: 100,
       rustEngineSessions: mockLiveSessions(loopback, requests, () => ({
         settled,
         running: true,

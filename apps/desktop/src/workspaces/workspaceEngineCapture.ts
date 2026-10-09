@@ -759,6 +759,8 @@ export interface WorkspaceEngineCaptureOptions {
   // edit waits before its settle (omitted uses the provider's default), and a
   // gate the open-time settle of an unsettled document waits on.
   settleDebounceMs?: number;
+  // Injectable for tests; omitted uses the live store's 30-second flush budget.
+  flushCaptureBudgetMs?: number;
   openSettleGate?: () => Promise<void>;
   onError?: (context: string, error: unknown) => void;
   preserveUnsentState?: (input: { path: string; objectId: string; contentKind: YdocContentKind; doc: Y.Doc }) => Promise<void>;
@@ -1692,6 +1694,7 @@ export function createWorkspaceEngineCapture(
       { workspaceId, rootPath, attachmentId },
       options.rustEngineSessions,
       captureWaitAbort.signal,
+      { flushCaptureBudgetMs: options.flushCaptureBudgetMs },
     );
     return liveStores;
   }
