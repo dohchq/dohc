@@ -33,6 +33,13 @@ export function sameChatDay(a: number, b: number): boolean {
   return x.getFullYear() === y.getFullYear() && x.getMonth() === y.getMonth() && x.getDate() === y.getDate();
 }
 
+const shortDayFormat = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
+
+// A row's short time trail: the time of day for today, else the date.
+export function formatShortTime(atMs: number, now = Date.now()): string {
+  return sameChatDay(atMs, now) ? formatClock(atMs) : shortDayFormat.format(new Date(atMs));
+}
+
 export function formatChatTime(createdAtMs: number): { label: string; iso: string } {
   const createdAt = new Date(createdAtMs);
   return {

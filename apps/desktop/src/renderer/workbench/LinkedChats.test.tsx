@@ -8,12 +8,24 @@ import type { ChatThreadRecord } from "../../ipc/bridgeContract";
 import { deferred, type Deferred } from "../../testing/deferred";
 import { LinkedChatsPanel as ProductionLinkedChatsPanel } from "./LinkedChats";
 import { ReactionStoreProvider } from "./reactionStore";
+import type { AccessContext } from "./About";
+
+// The shell's error hook and Access context, the same objects every render
+// as the shell's are.
+const notices = { report: vi.fn(), clear: vi.fn() };
+const accessContext: AccessContext = {
+  facts: { cloud: { connected: true, workspaceSynced: true, workspaceSyncConnected: true }, shareView: false },
+  openSyncSettings: vi.fn(),
+  connect: vi.fn(),
+};
+
+type PanelProps = ComponentProps<typeof ProductionLinkedChatsPanel>;
 
 // The workspace shell provides the reaction store in production.
-function LinkedChatsPanel(props: ComponentProps<typeof ProductionLinkedChatsPanel>) {
+function LinkedChatsPanel(props: Omit<PanelProps, "notices" | "accessContext"> & Partial<Pick<PanelProps, "notices">>) {
   return (
     <ReactionStoreProvider workspaceId={props.workspaceId}>
-      <ProductionLinkedChatsPanel {...props} />
+      <ProductionLinkedChatsPanel notices={notices} accessContext={accessContext} {...props} />
     </ReactionStoreProvider>
   );
 }
@@ -111,9 +123,10 @@ describe("LinkedChatsPanel startup", () => {
     expect(screen.getByTestId("linked-chats-panel")).toBeTruthy();
   });
 
-  it("shows an ordinary load failure without retrying it", async () => {
+  it("reports an ordinary load failure through the shell once, without retrying it", async () => {
     vi.useFakeTimers();
-    bridgeMock.listFileChats.mockRejectedValue(new Error("offline"));
+    const error = new Error("offline");
+    bridgeMock.listFileChats.mockRejectedValue(error);
 
     render(
       <LinkedChatsPanel
@@ -124,8 +137,15 @@ describe("LinkedChatsPanel startup", () => {
     );
 
     await act(async () => undefined);
-    expect(screen.getByText("offline")).toBeTruthy();
-    expect(screen.getByText("Try again")).toBeTruthy();
+    // The words go to a toast and a Notices row; the section shows Try again.
+    expect(notices.report).toHaveBeenCalledWith({
+      identity: "about-chats:docs/plan.md",
+      message: "offline",
+      cause: error,
+      retry: expect.any(Function),
+    });
+    expect(screen.queryByText("offline")).toBeNull();
+    expect(within(screen.getByTestId("linked-chats-failed")).getByText("Try again")).toBeTruthy();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5_000);
@@ -148,7 +168,7 @@ describe("LinkedChatsPanel startup", () => {
     );
 
     await act(async () => undefined);
-    expect(screen.getByText("Try again")).toBeTruthy();
+    expect(screen.getByTestId("linked-chats-failed")).toBeTruthy();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5_000);
     });
@@ -175,7 +195,10 @@ describe("LinkedChatsPanel startup", () => {
     });
 
     expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(122);
-    expect(screen.getByText("Workspace is still updating. Try again.")).toBeTruthy();
+    expect(notices.report).toHaveBeenCalledWith(expect.objectContaining({
+      identity: "about-chats:docs/plan.md",
+      message: "Workspace is still updating. Try again.",
+    }));
     expect(screen.getByText("Try again")).toBeTruthy();
 
     await act(async () => {
@@ -190,6 +213,8 @@ describe("LinkedChatsPanel startup", () => {
     await act(async () => screen.getByText("Try again").click());
     expect(screen.getByTestId("linked-chats-panel")).toBeTruthy();
     expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(123);
+    // The read that answered clears the row it filed.
+    expect(notices.clear).toHaveBeenLastCalledWith("about-chats:docs/plan.md");
   });
 
   it("cancels an updating retry when the selected file changes", async () => {
@@ -246,6 +271,51 @@ describe("LinkedChatsPanel startup", () => {
     await act(async () => retry.click());
     expect(await screen.findByTestId("linked-chats-panel")).toBeTruthy();
     expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(2);
+  });
+
+  it("takes a file's Notices row with it when the file leaves About, so rows never pile up", async () => {
+    bridgeMock.listFileChats.mockRejectedValue(new Error("offline"));
+    const view = render(
+      <LinkedChatsPanel workspaceId="workspace-1" filePath="docs/plan.md" onError={() => undefined} />,
+    );
+    await waitFor(() => expect(notices.report).toHaveBeenCalledTimes(1));
+    view.rerender(<LinkedChatsPanel workspaceId="workspace-1" filePath="docs/other.md" onError={() => undefined} />);
+    await waitFor(() => expect(notices.report).toHaveBeenCalledTimes(2));
+    expect(notices.clear).toHaveBeenCalledWith("about-chats:docs/plan.md");
+    expect(notices.report.mock.calls.map(([failure]) => failure.identity)).toEqual([
+      "about-chats:docs/plan.md", "about-chats:docs/other.md",
+    ]);
+    // Closing the panel takes the last row too.
+    const before = notices.clear.mock.calls.length;
+    view.unmount();
+    expect(notices.clear.mock.calls.slice(before).map(([identity]) => identity)).toContain("about-chats:docs/other.md");
+  });
+
+  it("reports the same file failing again under the same identity, so the shell replaces its row", async () => {
+    bridgeMock.listFileChats.mockRejectedValue(new Error("offline"));
+    render(<LinkedChatsPanel workspaceId="workspace-1" filePath="docs/plan.md" onError={() => undefined} />);
+    const retry = await screen.findByText("Try again");
+    await act(async () => retry.click());
+    await waitFor(() => expect(notices.report).toHaveBeenCalledTimes(2));
+    expect(notices.report.mock.calls.map(([failure]) => failure.identity)).toEqual([
+      "about-chats:docs/plan.md", "about-chats:docs/plan.md",
+    ]);
+  });
+
+  it("neither reports nor clears when an old file's read fails after the switch", async () => {
+    const forOld = deferred<never>();
+    bridgeMock.listFileChats.mockImplementation(({ path }: { path: string }) =>
+      path === "docs/old.md" ? forOld.promise : Promise.resolve({ fileObjectId: "object-2", threads: [] }));
+    const view = render(<LinkedChatsPanel workspaceId="workspace-1" filePath="docs/old.md" onError={() => undefined} />);
+    view.rerender(<LinkedChatsPanel workspaceId="workspace-1" filePath="docs/new.md" onError={() => undefined} />);
+    await screen.findByTestId("linked-chats-panel");
+    const clears = notices.clear.mock.calls.length;
+    await act(async () => {
+      forOld.reject(new Error("offline"));
+      await forOld.promise.catch(() => undefined);
+    });
+    expect(notices.report).not.toHaveBeenCalled();
+    expect(notices.clear.mock.calls.length).toBe(clears);
   });
 });
 
@@ -782,6 +852,8 @@ describe("LinkedChats reactions through the workspace store", () => {
           filePath="docs/plan.md"
           initialThread={initialThread}
           onError={onError}
+          notices={notices}
+          accessContext={accessContext}
         />
       </div>
     );

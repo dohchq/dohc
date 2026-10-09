@@ -9,6 +9,7 @@ import {
   reportingOperations,
   scheduleHostOperations,
   sharedViewAccessOperations,
+  shareDirectWriteDeliveryOperations,
   workspaceSearchOperations,
   workspaceVersionOperations,
 } from "./bridgeContract";
@@ -30,4 +31,5 @@ export const OPERATION_TABLES = [
   scheduleHostOperations,
   noticeOperations,
   sharedViewAccessOperations,
+  shareDirectWriteDeliveryOperations,
 ] as const satisfies readonly OperationTable[];

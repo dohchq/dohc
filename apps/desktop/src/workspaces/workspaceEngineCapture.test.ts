@@ -7,6 +7,7 @@ import type {
 import { defaultWorkspaceMode } from "@dohc/workspace-core";
 import { denyRead, restoreRead } from "@dohc/workspace-fs/testing";
 import { createHash } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -55,6 +56,8 @@ import { deferred } from "../testing/deferred";
 
 import { createTestScratch } from "./testTemp";
 import { createRelaySyncEngine } from "./relaySyncEngine";
+
+vi.mock("node:timers/promises", { spy: true });
 
 // The person a restore names, as desktop main reads them.
 const RESTORER = { kind: "human", humanId: "local-person" } as const;
@@ -2474,60 +2477,29 @@ describe("workspaceEngineCapture relay sync materialization", () => {
   });
 
   it("settles daemon capture after relay materialization before committing the cursor", async () => {
-    const root = await createTestScratch("dohc-engine-capture-");
-    const loopback = new VersionedLoopbackEngine();
-    const requests: Request[] = [];
-    let settled = true;
-    const engine = capture(root, {
-      rustEngineSessions: mockLiveSessions(loopback, requests, () => ({
-        settled,
-        running: true,
-        degraded: !settled,
-      })),
-    });
-    loopback.seedTextFile({
-      workspace: WORKSPACE_ID,
-      versionId: "main",
-      path: "notes/remote.md",
-      text: "remote machine wrote this\n",
-      origin: "sync",
-    });
-    let flushedWhenCommitted = false;
+    vi.mocked(delay).mockResolvedValue(undefined);
+    try {
+      const root = await createTestScratch("dohc-engine-capture-");
+      const loopback = new VersionedLoopbackEngine();
+      const requests: Request[] = [];
+      let settled = true;
+      const engine = capture(root, {
+        rustEngineSessions: mockLiveSessions(loopback, requests, () => ({
+          settled,
+          running: true,
+          degraded: !settled,
+        })),
+      });
+      loopback.seedTextFile({
+        workspace: WORKSPACE_ID,
+        versionId: "main",
+        path: "notes/remote.md",
+        text: "remote machine wrote this\n",
+        origin: "sync",
+      });
+      let flushedWhenCommitted = false;
 
-    await engine.runRelaySync(async (materializePage) =>
-      await deliverRelayPage(
-        materializePage,
-        {
-          fastForwardedPaths: [
-            {
-              versionId: "main",
-              path: "notes/remote.md",
-              operation: "write" as const,
-              contentKind: "text" as const,
-            },
-          ],
-        },
-        async () => {
-        flushedWhenCommitted = requests.some(
-          (request) => request.method === "capture.reconcile",
-        );
-        },
-      ),
-    );
-
-    expect(flushedWhenCommitted).toBe(true);
-
-    settled = false;
-    loopback.seedTextFile({
-      workspace: WORKSPACE_ID,
-      versionId: "main",
-      path: "notes/remote.md",
-      text: "new remote text\n",
-      origin: "sync",
-    });
-    const commitWhileUnsettled = vi.fn(async () => {});
-    await expect(
-      engine.runRelaySync(async (materializePage) =>
+      await engine.runRelaySync(async (materializePage) =>
         await deliverRelayPage(
           materializePage,
           {
@@ -2540,14 +2512,50 @@ describe("workspaceEngineCapture relay sync materialization", () => {
               },
             ],
           },
-          commitWhileUnsettled,
+          async () => {
+            flushedWhenCommitted = requests.some(
+              (request) => request.method === "capture.reconcile",
+            );
+          },
         ),
-      ),
-    ).rejects.toThrow("did not settle");
-    expect(commitWhileUnsettled).not.toHaveBeenCalled();
+      );
 
-    settled = true;
-    await engine.stop();
+      expect(flushedWhenCommitted).toBe(true);
+
+      settled = false;
+      loopback.seedTextFile({
+        workspace: WORKSPACE_ID,
+        versionId: "main",
+        path: "notes/remote.md",
+        text: "new remote text\n",
+        origin: "sync",
+      });
+      const commitWhileUnsettled = vi.fn(async () => {});
+      await expect(
+        engine.runRelaySync(async (materializePage) =>
+          await deliverRelayPage(
+            materializePage,
+            {
+              fastForwardedPaths: [
+                {
+                  versionId: "main",
+                  path: "notes/remote.md",
+                  operation: "write" as const,
+                  contentKind: "text" as const,
+                },
+              ],
+            },
+            commitWhileUnsettled,
+          ),
+        ),
+      ).rejects.toThrow("did not settle");
+      expect(commitWhileUnsettled).not.toHaveBeenCalled();
+
+      settled = true;
+      await engine.stop();
+    } finally {
+      vi.mocked(delay).mockRestore();
+    }
   });
 
   it("materializes pull-fast-forwarded text to disk", async () => {
@@ -3333,49 +3341,54 @@ describe("workspaceEngineCapture agent attribution", () => {
   });
 
   it("mutation proof: an unsettled flush refuses to clear daemon authorship", async () => {
-    const root = await createTestScratch("dohc-engine-capture-");
-    const requests: Request[] = [];
-    const loopback = new VersionedLoopbackEngine();
-    let settled = false;
-    const engine = capture(root, {
-      rustEngineSessions: mockLiveSessions(loopback, requests, () => ({
-        settled,
-        running: true,
-        degraded: !settled,
-      })),
-    });
+    vi.mocked(delay).mockResolvedValue(undefined);
+    try {
+      const root = await createTestScratch("dohc-engine-capture-");
+      const requests: Request[] = [];
+      const loopback = new VersionedLoopbackEngine();
+      let settled = false;
+      const engine = capture(root, {
+        rustEngineSessions: mockLiveSessions(loopback, requests, () => ({
+          settled,
+          running: true,
+          degraded: !settled,
+        })),
+      });
 
-    await engine.setActiveAgentRun(run);
-    await expect(engine.setActiveAgentRun(null)).rejects.toThrow("did not settle");
-    const methods = requests
-      .filter(
-        (request) =>
-          request.method === "capture.flush" ||
-          request.method === "capture.setAuthor",
-      )
-      .map((request) => request.method);
-    // The guarantee is that authorship is never cleared behind an unsettled
-    // flush — not how many times the flush was asked. flushCapture now polls
-    // for quiescence, as the daemon documents and every Rust consumer does,
-    // so pinning the exact call count would fail on the retries while proving
-    // nothing extra. Pin the guarantee instead: the run was stamped once, the
-    // clear never happened, and nothing but flushes ran in between.
-    expect(methods[0]).toBe("capture.setAuthor");
-    expect(methods.filter((method) => method === "capture.setAuthor")).toEqual([
-      "capture.setAuthor",
-    ]);
-    expect(methods.slice(1).every((method) => method === "capture.flush")).toBe(
-      true,
-    );
-    expect(methods.length).toBeGreaterThan(1);
+      await engine.setActiveAgentRun(run);
+      await expect(engine.setActiveAgentRun(null)).rejects.toThrow("did not settle");
+      const methods = requests
+        .filter(
+          (request) =>
+            request.method === "capture.flush" ||
+            request.method === "capture.setAuthor",
+        )
+        .map((request) => request.method);
+      // The guarantee is that authorship is never cleared behind an unsettled
+      // flush — not how many times the flush was asked. flushCapture now polls
+      // for quiescence, as the daemon documents and every Rust consumer does,
+      // so pinning the exact call count would fail on the retries while proving
+      // nothing extra. Pin the guarantee instead: the run was stamped once, the
+      // clear never happened, and nothing but flushes ran in between.
+      expect(methods[0]).toBe("capture.setAuthor");
+      expect(methods.filter((method) => method === "capture.setAuthor")).toEqual([
+        "capture.setAuthor",
+      ]);
+      expect(methods.slice(1).every((method) => method === "capture.flush")).toBe(
+        true,
+      );
+      expect(methods.length).toBeGreaterThan(1);
 
-    settled = true;
-    await engine.setActiveAgentRun(null);
-    expect(
-      requests.filter((request) => request.method === "capture.setAuthor").at(-1)
-        ?.params,
-    ).toEqual({ author: null });
-    await engine.stop();
+      settled = true;
+      await engine.setActiveAgentRun(null);
+      expect(
+        requests.filter((request) => request.method === "capture.setAuthor").at(-1)
+          ?.params,
+      ).toEqual({ author: null });
+      await engine.stop();
+    } finally {
+      vi.mocked(delay).mockRestore();
+    }
   });
 
 });

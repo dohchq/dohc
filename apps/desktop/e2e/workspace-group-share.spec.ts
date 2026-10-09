@@ -34,7 +34,7 @@ const MEMBER_USER = "e2e-recipient";
 const MEMBER_EMAIL = "e2e-recipient@dohc.test";
 
 // The titlebar control toggles the Chats sidebar, and opening a file moves
-// the sidebar to its "This file" tab. Bring the panel up if it is hidden,
+// the sidebar to its About tab. Bring the panel up if it is hidden,
 // then select the Chats tab.
 async function openChats(page: Page): Promise<void> {
   if (!(await page.getByTestId(desktopPins.chatsPanel).isVisible())) {

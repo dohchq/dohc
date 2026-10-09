@@ -588,10 +588,19 @@ pub(super) fn replay_pending_materializations(
             now_ms,
             faults,
             true,
+            false,
         ) {
             Ok(()) => {}
             Err(RuntimeError::OperationCrashed) => return Err(RuntimeError::OperationCrashed),
-            Err(error) => eprintln!("engine: checked deletion refused during recovery: {error}"),
+            Err(error) => {
+                let disposition = if matches!(store.load_materialization_job(&job_id), Ok(Some(_)))
+                {
+                    "deferred"
+                } else {
+                    "refused"
+                };
+                eprintln!("engine: checked deletion {disposition} during recovery: {error}");
+            }
         }
     }
     let jobs = store.list_pending_materialization_jobs()?;
