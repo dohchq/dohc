@@ -305,6 +305,8 @@ it.skipIf(engine.missing)(
   120_000,
 );
 
+const CREATION_REPLAY_TIMEOUT_MS = 120_000;
+
 it.skipIf(engine.missing).each(["deleted", "moved"] as const)(
   "skips replay of a %s creation through the native engine and desktop facade",
   async change => {
@@ -315,7 +317,7 @@ it.skipIf(engine.missing).each(["deleted", "moved"] as const)(
       const signal = new AbortController().signal;
       const run = newRun({ claimId: "creation-replay", automationId: "collection:Tasks#replay" }, automation, "key", 1);
       const author = { kind: "automation" as const, automationId: run.automationId, depth: 1, run: { claimId: run.claimId, automationName: automation.name } };
-      const store = createAutomationRunStore(ctx.root, resolveWorkspaceMetadataDir);
+      const store = createAutomationRunStore(await createTestScratch("dohc-creation-replay-runs-"), resolveWorkspaceMetadataDir);
       const dependencies = { store, withRecordWrites: async (_signal: AbortSignal, work: Parameters<CollectionAutomationRunDependencies["withRecordWrites"]>[1]) =>
         work(collectionRecordWrites(ctx.recordContext(ctx.person, signal))) } as CollectionAutomationRunDependencies;
       const effect = { kind: "add" as const, collectionPath: "Tasks", name: "made", recordId: derivedRecordId(run.claimId), fields: [] };
@@ -336,18 +338,17 @@ it.skipIf(engine.missing).each(["deleted", "moved"] as const)(
         effect.name = "rebased";
       }
       await ctx.capture.flush();
-      // Wait for the projection of the native path change before replaying.
-      for (let attempt = 0; ; attempt++) {
+      // Flush covers noticed changes; wait for this path change's projection.
+      await expect.poll(async () => {
         const records = (await ctx.withEngine(adapter => adapter.queryCollectionRecords({ collectionPath: "Tasks" }))).records;
-        if (!records.some(record => record.id === effect.recordId)) break;
-        if (attempt === 1000) throw Error("record deletion/move was not projected");
-      }
+        return records.map(record => record.id);
+      }, { timeout: CREATION_REPLAY_TIMEOUT_MS }).not.toContain(effect.recordId);
       const result = await applyDocumentEffect(dependencies, context, effect, "may-have-landed");
       expect(result).toMatchObject([{ kind: "skipped", reason: "The record was already created, then moved or deleted." }]);
       expect((await ctx.withEngine(adapter => adapter.queryCollectionRecords({ collectionPath: "Tasks" }))).records.map(record => record.path)).toEqual(["Tasks/one.md"]);
       await expect(stat(join(ctx.root, "Tasks", `${effect.name}.md`))).rejects.toThrow();
     });
-  }, 120_000,
+  }, CREATION_REPLAY_TIMEOUT_MS,
 );
 
 it.skipIf(engine.missing)("finishes a written but unadopted creation on native desktop replay", async () => {
@@ -374,7 +375,7 @@ it.skipIf(engine.missing)("finishes a written but unadopted creation on native d
         adopting = ctx.capture.flush();
         return unsubscribe;
       };
-      const store = createAutomationRunStore(ctx.root, resolveWorkspaceMetadataDir);
+      const store = createAutomationRunStore(await createTestScratch("dohc-unadopted-replay-runs-"), resolveWorkspaceMetadataDir);
       const effect = { kind: "add" as const, collectionPath: "Tasks", name: "made", recordId, fields: [{ field: "Status", value: "New" }] };
       run.steps = [{ ordinal: 0, effects: [effect] }]; await store.save(run);
       const dependencies = { store, withRecordWrites: async (_signal: AbortSignal, work: Parameters<CollectionAutomationRunDependencies["withRecordWrites"]>[1]) =>
