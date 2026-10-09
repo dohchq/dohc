@@ -113,17 +113,29 @@ impl ActorHandle {
                 if let Some(receipt) = receipt {
                     return Ok(if receipt == -1 { RecoveryImportOutcome::Replayed } else { RecoveryImportOutcome::Covered });
                 }
+                let prepared = dohc_engine_sync::prepare_local_ydoc_lineage_in_tx(tx, key)?;
+                let projection = prepared.projection();
+                let covered = projection.is_some_and(|p| p.content == input.text);
                 // Deleted objects keep a recovery preimage in their existing History.
                 let snapshot = dohc_engine_domain::store::recovery_snapshot_in(tx,
                     &key.workspace_id, &key.version_id, &key.object_id)?
                     ;
                 let Some(snapshot) = snapshot else {
+                    let history_covered: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM (SELECT operation,payload_before_blob_sha256 FROM moments
+                         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
+                         AND metadata_origin NOT IN ('capture-recovery','capture-recovery-cleared')
+                         ORDER BY moment_order DESC LIMIT 1) m WHERE m.operation='delete' AND m.payload_before_blob_sha256=?4)",
+                        params![key.workspace_id,key.version_id,key.object_id,hex_sha256(input.text.as_bytes())], |r|r.get(0))
+                        .map_err(StorageError::corrupt_public)?;
+                    if covered || history_covered {
+                        tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES(?1,?2,-2,?3,'ydoc')",
+                            params![receipt_id,digest,now_ms]).map_err(StorageError::persist_public)?;
+                        return Ok(RecoveryImportOutcome::Covered);
+                    }
                     if !dohc_engine_domain::store::record_deleted_capture_recovery_in_tx(tx, &key.workspace_id, &key.version_id, &key.object_id, &input.text, &moment_id, authors.moment_json().as_deref(), now_ms)? { return Err(refused("object-history-missing")); }
                     return Ok(RecoveryImportOutcome::Imported {moment_id:moment_id.clone()});
                 };
-                let prepared = dohc_engine_sync::prepare_local_ydoc_lineage_in_tx(tx, key)?;
-                let projection = prepared.projection();
-                let covered = projection.is_some_and(|p| p.content == input.text);
                 let same_claim = marker.as_ref().is_some_and(|m| m.lineage_claim_id == input.expected_claim_id);
                 let base = dohc_engine_collab::Ydoc::wire();
                 base.apply(&input.admitted_base)?;

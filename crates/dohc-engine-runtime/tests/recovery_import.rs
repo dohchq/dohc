@@ -422,27 +422,7 @@ async fn renamed_object_recovers_at_its_current_path() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deleted_object_imports_typing_into_history_without_restoring_file() {
     let (scratch, db, supervisor, actor, state, doc, bytes) = setup().await;
-    actor
-        .versioned_text_delete(
-            dohc_engine_domain::DeleteTextFile {
-                workspace_id: WS.into(),
-                version_id: "main".into(),
-                path: FILE.into(),
-                moment_id: "delete".into(),
-                request_id: None,
-                metadata_origin: "human".into(),
-                metadata_summary: None,
-                metadata_correlation_id: None,
-                author_json: None,
-                now_ms: 12,
-            },
-            scratch.path().to_path_buf(),
-            Arc::new(()),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
+    delete(&actor, scratch.path()).await;
     let result = import(&actor, scratch.path(), checkpoint(&state, &doc, bytes))
         .await
         .unwrap();
@@ -450,12 +430,21 @@ async fn deleted_object_imports_typing_into_history_without_restoring_file() {
     let rows = actor.capture_recoveries(WS.into()).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].object_id, state.key.object_id);
+    assert!(rows[0].deleted);
 
     assert_eq!(
         std::fs::read_to_string(scratch.path().join(FILE)).unwrap(),
         "base\n"
     );
     supervisor.close(&db).unwrap();
+    inspect(&db, |store| {
+        store.read_with(|c| {
+      let (operation, before, after, after_path, after_kind): (String,String,String,String,String) = c.query_row(
+        "SELECT m.operation,b.text,a.text,m.payload_after_path,m.payload_after_content_kind FROM moments m JOIN blobs b ON b.sha256=m.payload_before_blob_sha256 JOIN blobs a ON a.sha256=m.payload_after_blob_sha256 WHERE m.metadata_origin='capture-recovery'", [], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).unwrap();
+      assert_eq!(operation,"write"); assert_eq!(before,"outage\nbase\n"); assert_eq!(after,""); assert_eq!(after_path,FILE); assert_eq!(after_kind,"text");
+      Ok::<_,StorageError>(())
+    }).unwrap();
+    });
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -531,4 +520,174 @@ async fn replay_refuses_an_owner_outbox_frozen_by_an_observed_binding() {
             .is_empty()
     );
     supervisor.close(&db).unwrap();
+}
+
+async fn delete(actor: &ActorHandle, root: &Path) {
+    actor
+        .versioned_text_delete(
+            dohc_engine_domain::DeleteTextFile {
+                workspace_id: WS.into(),
+                version_id: "main".into(),
+                path: FILE.into(),
+                moment_id: "delete".into(),
+                request_id: None,
+                metadata_origin: "human".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 12,
+            },
+            root.to_path_buf(),
+            Arc::new(()),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deleted_file_with_already_durable_typing_is_covered_without_a_notice() {
+    let (scratch, db, supervisor, actor, state, doc, bytes) = setup().await;
+    append(&actor, &state.key, bytes.clone()).await;
+    actor
+        .ydoc_settle(
+            scratch.path().to_path_buf(),
+            state.key.clone(),
+            FILE.into(),
+            ContentKind::Plaintext,
+            state.lineage_claim_id.clone(),
+            state.head_blob_sha256.clone(),
+            "covered-delete-session".into(),
+            Arc::new(()),
+            12,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
+    delete(&actor, scratch.path()).await;
+    assert_eq!(
+        import(
+            &actor,
+            scratch.path(),
+            checkpoint(&state, &doc, bytes.clone())
+        )
+        .await
+        .unwrap(),
+        RecoveryImportOutcome::Covered
+    );
+    assert_eq!(
+        import(&actor, scratch.path(), checkpoint(&state, &doc, bytes))
+            .await
+            .unwrap(),
+        RecoveryImportOutcome::Covered
+    );
+    assert!(
+        actor
+            .capture_recoveries(WS.into())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    supervisor.close(&db).unwrap();
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reopening_a_session_before_import_and_replaying_its_original_is_deduplicated() {
+    let (scratch, db, supervisor, _actor, state, doc, bytes) = setup().await;
+    supervisor.close(&db).unwrap();
+    let actor = supervisor.open(&db, 15).unwrap().actor;
+    let reopened = open(&actor).await;
+    assert_eq!(reopened.key, state.key);
+    assert_eq!(
+        import(
+            &actor,
+            scratch.path(),
+            checkpoint(&state, &doc, bytes.clone())
+        )
+        .await
+        .unwrap(),
+        RecoveryImportOutcome::Replayed
+    );
+    let original = checkpoint(&state, &doc, bytes.clone());
+    let update = &original.updates[0];
+    let result = actor
+        .ydoc_record_update(
+            state.key.clone(),
+            FILE.into(),
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            bytes,
+            update.actor_origin_id.clone(),
+            update.attribution.clone(),
+            reopened.lineage_claim_id.clone(),
+            false,
+            None,
+            Some(update.request_id.clone()),
+            21,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(result.outcome.deduped);
+    assert!(
+        actor
+            .capture_recoveries(WS.into())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    supervisor.close(&db).unwrap();
+    inspect(&db, |store| {
+        store
+            .read_with(|c| {
+                assert_eq!(
+                    dohc_engine_collab::load_doc_in(c, &state.key)
+                        .unwrap()
+                        .plaintext_string(),
+                    "outage\nbase\n"
+                );
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deleted_recovery_requires_the_latest_ordinary_moment_to_be_a_delete() {
+    let (_scratch, db, supervisor, _actor, state, _doc, _bytes) = setup().await;
+    supervisor.close(&db).unwrap();
+    inspect(&db, |store| {
+        store
+            .read_with(|c| {
+                let tx = c.unchecked_transaction().unwrap();
+                assert!(
+                    !dohc_engine_domain::store::record_deleted_capture_recovery_in_tx(
+                        &tx,
+                        WS,
+                        "main",
+                        &state.key.object_id,
+                        "typing",
+                        "not-a-delete",
+                        None,
+                        30
+                    )
+                    .unwrap()
+                );
+                assert_eq!(
+                    tx.query_row(
+                        "SELECT COUNT(*) FROM moments WHERE moment_id='not-a-delete'",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                    0
+                );
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+    });
 }
