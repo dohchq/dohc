@@ -16,7 +16,7 @@ import { switchModalRegion } from "../modalFocus";
 
 it("offers Discard as a separate toast action without dismissing the Notice",()=>{
   const action=vi.fn();const hide=vi.fn();render(<WorkspaceErrorToast error={{id:"typing",message:"Kept typing",details:"",atMs:0,canRetry:false,seen:false,actionLabel:"Copy your typing",additionalActionLabels:["Discard your typing"]}} onAction={action} onHide={hide}/>);
-  fireEvent.click(screen.getByRole("button",{name:"Discard your typing",exact:true}));
+  fireEvent.click(screen.getByRole("button",{name:"Discard your typing"}));
   expect(action).toHaveBeenCalledExactlyOnceWith("typing",1);expect(hide).not.toHaveBeenCalled();
 });
 
