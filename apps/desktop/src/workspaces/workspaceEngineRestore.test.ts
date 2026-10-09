@@ -121,9 +121,9 @@ describe("engine history reads", () => {
 describe("engine restore", () => {
   it.each([
     ["symlink-target", "dohc could not remove this file because its path contains a link. Check the file's path."],
-    ["recovery-unavailable", "dohc could not read this workspace's recovery folder. Try again."],
+    ["recovery-unavailable", "dohc could not remove this file. Check folder access, then try again."],
     ["file-locked", "dohc could not remove this file. It may be open in another app."],
-    ["materialize-io", "dohc could not remove this file. Try again."],
+    ["materialize-io", "dohc could not remove this file."],
   ])("reports the %s reason when a guarded delete fails", async (code, message) => {
     const root = await createTestScratch("dohc-engine-restore-");
     await write(root, "new.md", "recipient text\n");
