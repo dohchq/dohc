@@ -77,7 +77,6 @@ const pathSetCache = new Map<
 // warning.
 let storedIds: Set<number> = new Set();
 const recoveryRequests = new Map<string, Promise<void>>();
-let recoveryGeneration = 0;
 
 // A late list or dismiss reply must not reintroduce a record a later dismiss removed.
 function withRecoveryRequest(workspaceId: string, work: () => Promise<void>): Promise<void> {
@@ -91,8 +90,8 @@ function withRecoveryRequest(workspaceId: string, work: () => Promise<void>): Pr
 
 function captureLiveDraftRecovery(workspaceId: string, records: readonly LiveDraftRecoveryRecord[]): void {
   for (const record of records) {
+    if (findWorkspaceDraft(workspaceId, draft => draft.recovery?.recordId === record.recordId)) continue;
     const current = drafts.get(keyFor(workspaceId, record.path)) ?? EMPTY;
-    if (current.some(draft => draft.recovery?.recordId === record.recordId)) continue;
     const recovery = {objectId: record.objectId, updateBase64: record.updateBase64, recordId: record.recordId};
     const existing = current.find(draft => draft.recovery?.recordId === undefined &&
       draft.recovery?.objectId === record.objectId && draft.recovery.updateBase64 === record.updateBase64 && draft.text === record.text);
@@ -101,12 +100,20 @@ function captureLiveDraftRecovery(workspaceId: string, records: readonly LiveDra
   }
 }
 
+function findWorkspaceDraft(workspaceId: string, matches: (draft: OrphanedDraft) => boolean): {path: string; draft: OrphanedDraft} | undefined {
+  for (const [key, kept] of drafts) {
+    const [keyWorkspaceId, path] = JSON.parse(key) as [string, string];
+    if (keyWorkspaceId !== workspaceId) continue;
+    const draft = kept.find(matches);
+    if (draft) return {path, draft};
+  }
+}
+
 export function loadLiveDraftRecovery(workspaceId: string, isCurrent: () => boolean): Promise<void> {
-  const generation = recoveryGeneration;
   return withRecoveryRequest(workspaceId, async () => {
-    if (!isCurrent() || generation !== recoveryGeneration) return;
+    if (!isCurrent()) return;
     const records = await bridge().listLiveDraftRecovery({workspaceId});
-    if (!isCurrent() || generation !== recoveryGeneration) return;
+    if (!isCurrent()) return;
     captureLiveDraftRecovery(workspaceId, records);
   });
 }
@@ -246,21 +253,26 @@ export async function dismissOrphanedDraft(
     const discardedAtMs = Date.now();
     await withRecoveryRequest(workspaceId, async () => {
       const assertCurrent = () => {
-        if (drafts.get(key)?.find(draft => draft.id === id) !== captured) {
+        const current = findWorkspaceDraft(workspaceId, draft => draft.id === id);
+        if (!current || current.draft.text !== captured.text ||
+          current.draft.recovery?.objectId !== recovery.objectId || current.draft.recovery.updateBase64 !== recovery.updateBase64) {
           throw new Error("This draft changed while dohc dismissed it. Review it and try again.");
         }
+        return current;
       };
       assertCurrent();
       const bytes = base64ToBytes(recovery.updateBase64);
       const hash = await crypto.subtle.digest("SHA-256", new Uint8Array(bytes));
-      assertCurrent();
+      const current = assertCurrent();
       const snapshotSha256 = Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, "0")).join("");
       const records = await bridge().discardLiveDraftRecovery({
-        workspaceId, path, objectId: recovery.objectId, snapshotSha256, discardedAtMs, recordId: recovery.recordId,
+        workspaceId, path: current.path, objectId: recovery.objectId, snapshotSha256, discardedAtMs, recordId: current.draft.recovery?.recordId,
       });
-      assertCurrent();
-      retireOrphanedDraft(workspaceId, path, id);
       captureLiveDraftRecovery(workspaceId, records);
+      const latest = assertCurrent();
+      if (!records.some(record => record.recordId === latest.draft.recovery?.recordId)) {
+        retireOrphanedDraft(workspaceId, latest.path, id);
+      }
     });
     return;
   }
@@ -451,7 +463,6 @@ export function orphanedDraftStoreVersionForTests(): number {
 // Test seam: the store is module state, so suites that capture drafts reset
 // it between tests instead of leaking keys into each other.
 export function resetOrphanedDrafts(): void {
-  recoveryGeneration += 1;
   drafts.clear();
   workspaceLabels.clear();
   storedIds = new Set();

@@ -86,9 +86,32 @@ function write(draft: StoredOrphanedDraft, key: string): boolean {
   } catch { return false; }
 }
 export function storeDraft(draft: StoredOrphanedDraft): boolean {
-  return write(draft, `${ORPHANED_DRAFT_STORAGE_PREFIX}${crypto.randomUUID()}`);
+  const recordId = draft.recovery?.recordId;
+  if (recordId === undefined) return write(draft, `${ORPHANED_DRAFT_STORAGE_PREFIX}${crypto.randomUUID()}`);
+  if (!persistable(draft.path)) return false;
+  const key = `${ORPHANED_DRAFT_STORAGE_PREFIX}live:${JSON.stringify([draft.workspaceId, recordId])}`;
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw !== null) {
+      const stored: unknown = JSON.parse(raw);
+      if (unsupportedVersion(stored)) return false;
+      if (valid(stored) && stored.workspaceId === draft.workspaceId && stored.text === draft.text &&
+        stored.recovery?.recordId === recordId && stored.recovery.objectId === draft.recovery?.objectId &&
+        stored.recovery.updateBase64 === draft.recovery?.updateBase64) {
+        keys.set(draft.id, key); expected.set(draft.id, raw);
+        return true;
+      }
+    }
+  } catch { return false; }
+  return write(draft, key);
 }
 export function replaceStoredDraft(draft: StoredOrphanedDraft): boolean {
+  if (draft.recovery?.recordId !== undefined) {
+    const previousKey = keys.get(draft.id);
+    if (!storeDraft(draft)) return false;
+    if (previousKey !== undefined && previousKey !== keys.get(draft.id)) remove(previousKey);
+    return true;
+  }
   return write(draft, keys.get(draft.id) ?? `${ORPHANED_DRAFT_STORAGE_PREFIX}${crypto.randomUUID()}`);
 }
 export function isStoredDraftCurrent(id: number): boolean {

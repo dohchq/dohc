@@ -34,11 +34,81 @@ it("finds retained drafts by workspace and object or path without blocking unrel
   expect(await hasRetainedLiveDraft(join(directory, "absent"), "workspace", "a.md", "object")).toBe(false);
 });
 
-it.each(["malformed", "incomplete", "unreadable"] as const)("refuses to prove a file safe with %s recovery state", async kind => {
+it.each(["malformed", "incomplete", "unreadable"] as const)("does not block restore with %s recovery state nobody can review", async kind => {
   const directory = await mkdtemp(join(tmpdir(), "dohc-restore-recovery-")); directories.push(directory);
   await writeFile(join(directory, `${"0".repeat(64)}.${kind === "incomplete" ? "tmp" : "json"}`), "{");
   if (kind === "unreadable") vi.mocked(readFile).mockRejectedValueOnce(Object.assign(new Error("access denied"), {code: "EACCES"}));
-  await expect(hasRetainedLiveDraft(directory, "workspace", "a.md", "object")).rejects.toThrow();
+  expect(await hasRetainedLiveDraft(directory, "workspace", "a.md", "object")).toBe(false);
+});
+
+it.each(["half-written temp", "invalid path", "non-string update", "untracked path", "invalid CRDT", "unreadable file"])("does not hide other drafts or fail dismissal beside a %s record", async kind => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-bad-recovery-")); directories.push(directory);
+  const update = new Uint8Array([0, 0]);
+  const draft = {path: "a.txt", objectId: "object", contentKind: "plaintext" as const, text: "seen", update};
+  await preserveLiveDraft(directory, "workspace", draft);
+  await preserveLiveDraft(directory, "workspace", {...draft, text: "survivor"});
+  const bad = join(directory, `${"0".repeat(64)}.${kind === "half-written temp" ? "tmp" : "json"}`);
+  await writeFile(bad, kind === "half-written temp" ? '{"workspaceId":"workspace","path":"a.txt",' : JSON.stringify({
+    workspaceId: "workspace", objectId: "object", path: kind === "invalid path" ? 7 : kind === "untracked path" ? ".env" : "a.txt",
+    updateBase64: kind === "non-string update" ? 7 : "AAE=",
+  }));
+  if (kind === "unreadable file") {
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    vi.mocked(readFile).mockImplementation((async (path: Parameters<typeof readFile>[0], options: Parameters<typeof readFile>[1]) => {
+      if (path === bad) throw Object.assign(new Error("access denied"), {code: "EACCES"});
+      return actual.readFile(path, options);
+    }) as typeof readFile);
+  }
+  const records = await listLiveDraftRecovery(directory, "workspace");
+  expect(records.map(record => record.text).sort()).toEqual(["seen", "survivor"]);
+  const seen = records.find(record => record.text === "seen")!;
+  const after = await removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(update), Date.now(), "a.txt", seen.recordId);
+  expect(after.map(record => record.text)).toEqual(["survivor"]);
+  expect(await hasRetainedLiveDraft(directory, "workspace", "a.txt", "object")).toBe(true);
+  await removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(update), Date.now(), "a.txt", after[0]!.recordId);
+  expect(await hasRetainedLiveDraft(directory, "workspace", "a.txt", "object")).toBe(false);
+  expect(await readdir(directory)).toEqual([bad.slice(directory.length + 1)]);
+});
+
+it("skips an active half-written temporary record until preserve completes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-active-recovery-")); directories.push(directory);
+  const draft = {path: "a.txt", objectId: "object", contentKind: "plaintext" as const, text: "seen", update: new Uint8Array([0, 0])};
+  await preserveLiveDraft(directory, "workspace", draft);
+  const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+  let release!: () => void, started!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const writing = new Promise<void>(resolve => { started = resolve; });
+  vi.mocked(writeFile).mockImplementationOnce(async (path, content, options) => {
+    await actual.writeFile(path, '{"workspaceId":"workspace","path":"other.txt",', options);
+    started(); await gate;
+    await actual.writeFile(path, content, {encoding: "utf8"});
+  });
+  const preserving = preserveLiveDraft(directory, "workspace", {...draft, path: "other.txt", objectId: "other", text: "active copy"});
+  try {
+    await writing;
+    const records = await listLiveDraftRecovery(directory, "workspace");
+    expect(records.map(record => record.text)).toEqual(["seen"]);
+    expect(await hasRetainedLiveDraft(directory, "workspace", "other.txt", "other")).toBe(false);
+    await expect(removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(draft.update), Date.now(), "a.txt", records[0]!.recordId)).resolves.toEqual([]);
+  } finally { release(); await preserving; }
+  expect((await listLiveDraftRecovery(directory, "workspace")).map(record => record.text)).toEqual(["active copy"]);
+});
+
+it("returns known survivors without a disk read that can fail after deletion", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-dismiss-reply-")); directories.push(directory);
+  const draft = {path: "a.txt", objectId: "object", contentKind: "plaintext" as const, text: "seen", update: new Uint8Array([0, 0])};
+  await preserveLiveDraft(directory, "workspace", draft);
+  await preserveLiveDraft(directory, "workspace", {...draft, text: "survivor"});
+  const records = await listLiveDraftRecovery(directory, "workspace");
+  const seen = records.find(record => record.text === "seen")!;
+  const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+  vi.mocked(rm).mockImplementationOnce(async (path, options) => {
+    await actual.rm(path, options);
+    vi.mocked(readFile).mockRejectedValue(new Error("reading stopped after delete"));
+  });
+  await expect(removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(draft.update), Date.now(), "a.txt", seen.recordId))
+    .resolves.toEqual([expect.objectContaining({text: "survivor"})]);
+  expect(await readdir(directory)).toHaveLength(1);
 });
 
 it("ignores another workspace's malformed and temporary records", async () => {

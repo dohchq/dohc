@@ -162,7 +162,7 @@ it("ignores an open's late recovery reply after its workspace is superseded", as
   resetOrphanedDrafts(); localStorage.clear();
 });
 
-it("ignores a dismiss reply if the captured draft changed while main was responding", async () => {
+it("keeps a dismiss reply's survivors visible if the captured draft changed while main was responding", async () => {
   resetOrphanedDrafts(); localStorage.clear(); vi.stubGlobal("crypto", webcrypto);
   let resolve!: (records: typeof returnedDraft[]) => void;
   const reply = new Promise<typeof returnedDraft[]>(done => { resolve = done; });
@@ -175,8 +175,53 @@ it("ignores a dismiss reply if the captured draft changed while main was respond
   replaceOrphanedDraft("workspace", "a.txt", id, "new snapshot", {objectId: "object", updateBase64: "AAE="});
   resolve([returnedDraft]);
   await result;
-  expect(draftsFor(useOrphanedDrafts, "workspace", "a.txt").map(row => row.text)).toEqual(["new snapshot"]);
+  expect(draftsFor(useOrphanedDrafts, "workspace", "a.txt").map(row => row.text)).toEqual(["new snapshot", "main-only copy"]);
   resetOrphanedDrafts(); localStorage.clear();
+});
+
+it("does not duplicate a renamed recovery when main lists its original path on the next open", async () => {
+  resetOrphanedDrafts(); localStorage.clear();
+  vi.stubGlobal("dohcDesktop", {platform: "linux", listLiveDraftRecovery: vi.fn(async () => [returnedDraft])});
+  await loadLiveDraftRecovery("workspace", () => true);
+  remapOrphanedDraftPaths("workspace", path => path === "a.txt" ? "renamed.txt" : path);
+  const next = await relaunch();
+  await next.loadLiveDraftRecovery("workspace", () => true);
+  expect(next.retainedOrphanedDraftPaths("workspace")).toEqual(["renamed.txt"]);
+  expect(draftsFor(next.useOrphanedDrafts, "workspace", "renamed.txt")).toHaveLength(1);
+  next.resetOrphanedDrafts(); resetOrphanedDrafts(); localStorage.clear();
+});
+
+it("dismisses after a queued list attaches a record ID without reporting a false change", async () => {
+  resetOrphanedDrafts(); localStorage.clear(); vi.stubGlobal("crypto", webcrypto);
+  let resolve!: (records: typeof returnedDraft[]) => void;
+  const reply = new Promise<typeof returnedDraft[]>(done => { resolve = done; });
+  const list = vi.fn(() => reply), discard = vi.fn(async () => []);
+  vi.stubGlobal("dohcDesktop", {platform: "linux", listLiveDraftRecovery: list, discardLiveDraftRecovery: discard});
+  const id = captureOrphanedDraft("workspace", "a.txt", returnedDraft.text, {objectId: returnedDraft.objectId, updateBase64: returnedDraft.updateBase64});
+  const loading = loadLiveDraftRecovery("workspace", () => true);
+  await vi.waitFor(() => expect(list).toHaveBeenCalledOnce());
+  const dismissing = dismissOrphanedDraft("workspace", "a.txt", id);
+  const dismissed = expect(dismissing).resolves.toBeUndefined();
+  resolve([returnedDraft]);
+  await loading; await dismissed;
+  expect(discard).toHaveBeenCalledWith(expect.objectContaining({recordId: returnedDraft.recordId}));
+  expect(retainedOrphanedDraftPaths("workspace")).toEqual([]);
+  resetOrphanedDrafts(); localStorage.clear();
+});
+
+it.each([false, true])("persists one recovery record when two windows discover it (existing renderer copy: %s)", async existing => {
+  resetOrphanedDrafts(); localStorage.clear();
+  vi.stubGlobal("dohcDesktop", {platform: "linux", listLiveDraftRecovery: vi.fn(async () => [returnedDraft])});
+  const first = await relaunch(), second = await relaunch();
+  if (existing) first.captureOrphanedDraft("workspace", "a.txt", returnedDraft.text, {objectId: returnedDraft.objectId, updateBase64: returnedDraft.updateBase64});
+  await first.loadLiveDraftRecovery("workspace", () => true);
+  await second.loadLiveDraftRecovery("workspace", () => true);
+  expect(Object.keys(localStorage).filter(key => key.startsWith(ORPHANED_DRAFT_STORAGE_PREFIX))).toHaveLength(1);
+  expect(first.atRiskOrphanedDraftIds()).toEqual([]);
+  expect(second.atRiskOrphanedDraftIds()).toEqual([]);
+  const restarted = await relaunch();
+  expect(draftsFor(restarted.useOrphanedDrafts, "workspace", "a.txt")).toHaveLength(1);
+  restarted.resetOrphanedDrafts(); resetOrphanedDrafts(); localStorage.clear();
 });
 
 it("keeps every distinct returned record visible and sends its exact identity on dismiss", async () => {

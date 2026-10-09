@@ -3482,7 +3482,7 @@ export function DesktopWorkspaceShell(props: {
       const recoverDrafts = () => loadLiveDraftRecovery(workspaceId, () => !cancelled && !workspaceAdmission.superseded);
       const reportDraftRecoveryFailure = (error: unknown) => {
         if (!cancelled && !workspaceAdmission.superseded) {
-          reportShellError("Could not read saved drafts.", error, () => { void recoverDrafts().catch(reportDraftRecoveryFailure); });
+          reportShellError("dohc could not read set-aside edits.", error, () => { void recoverDrafts().catch(reportDraftRecoveryFailure); });
         }
       };
       void recoverDrafts().catch(reportDraftRecoveryFailure);
