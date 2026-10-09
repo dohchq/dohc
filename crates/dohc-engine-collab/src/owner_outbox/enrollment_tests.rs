@@ -4,24 +4,32 @@ use dohc_engine_domain::{VersionedTextStore, WriteText};
 use dohc_test_scratch::ScratchDir;
 
 fn fixture() -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u8>) {
-    let dir = ScratchDir::new_named("observed-owner-draft").unwrap();
-    let mut store = EngineStore::open(&dir.join("engine.db"), 0).unwrap();
-    VersionedTextStore::new(&mut store)
-        .ensure_main_version("workspace", "main", 0, &NoFaults)
-        .unwrap();
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
         "../../tests/owner-source/owner-source-seed.json"
     ))
     .unwrap();
     let original: Vec<u8> = serde_json::from_value(fixture["bytes"].clone()).unwrap();
+    fixture_with_source(&original, fixture["markdown"].as_str().unwrap(), "owner.md")
+}
+
+fn fixture_with_source(
+    original: &[u8],
+    markdown: &str,
+    path: &str,
+) -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u8>) {
+    let dir = ScratchDir::new_named("observed-owner-draft").unwrap();
+    let mut store = EngineStore::open(&dir.join("engine.db"), 0).unwrap();
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version("workspace", "main", 0, &NoFaults)
+        .unwrap();
     VersionedTextStore::new(&mut store)
         .write_text(
             &WriteText {
                 workspace_id: "workspace".into(),
                 version_id: "main".into(),
                 object_id: "object".into(),
-                path: "owner.md".into(),
-                text: fixture["markdown"].as_str().unwrap().into(),
+                path: path.into(),
+                text: markdown.into(),
                 moment_id: "original".into(),
                 metadata_origin: "user".into(),
                 metadata_summary: None,
@@ -38,15 +46,14 @@ fn fixture() -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u8>) {
         &mut store,
         &key,
         crate::ContentKind::Richdoc,
-        &original,
+        original,
         &NoFaults,
         2,
     )
     .unwrap();
     store
         .write_with(&NoFaults, |tx| {
-            tx.execute("UPDATE ydoc_docs SET path='owner.md'", [])
-                .unwrap();
+            tx.execute("UPDATE ydoc_docs SET path=?1", [path]).unwrap();
             Ok::<_, OwnerOutboxError>(())
         })
         .unwrap();
@@ -66,9 +73,9 @@ fn fixture() -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u8>) {
             workspace_id: "workspace".into(),
             main_version_id: "main".into(),
             object_id: "object".into(),
-            lineage_claim_id: hex_sha256(&original),
-            current_path: "owner.md".into(),
-            selector_paths: vec!["owner.md".into()],
+            lineage_claim_id: hex_sha256(original),
+            current_path: path.into(),
+            selector_paths: vec![path.into()],
             restore_fence_generation: 0,
         },
         relay_database_namespace: "relay".into(),
@@ -119,6 +126,173 @@ fn remote_changes(store: &EngineStore) -> i64 {
     store
         .read_with(|c| dohc_engine_storage::remote_changes_applied_in(c, "workspace"))
         .unwrap()
+}
+
+#[test]
+fn first_enrollment_preserves_pending_field_history_and_does_not_trigger_reapplication() {
+    use dohc_engine_domain::{AutomationChangeKind, AutomationSubscription};
+
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/owner-source/owner-source-seed.json"
+    ))
+    .unwrap();
+    let original: Vec<u8> = serde_json::from_value(fixture["bytes"].clone()).unwrap();
+    let local = Ydoc::wire();
+    local.apply(&original).unwrap();
+    local
+        .frontmatter_set("id", "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa")
+        .unwrap();
+    local.frontmatter_set("title", "Original").unwrap();
+    local.frontmatter_set("status", "open").unwrap();
+    let markdown = local.project(crate::ContentKind::Richdoc).unwrap().content;
+    let (_dir, mut store, observed, checkpoint) =
+        fixture_with_source(&bounded(&local).unwrap(), &markdown, "tasks/owner.md");
+    VersionedTextStore::new(&mut store)
+        .write_text(
+            &WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "schema".into(),
+                path: "tasks/collection.yaml".into(),
+                text: "fields:\n  title:\n    type: text\n  status:\n    type: text\n".into(),
+                moment_id: "schema".into(),
+                metadata_origin: "user".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_domain::reconcile_collections_in_tx(tx, "workspace", "main")?;
+            dohc_engine_domain::subscribe_automation_in_tx(
+                tx,
+                "workspace",
+                &AutomationSubscription {
+                    automation_id: "collection:tasks#watch".into(),
+                    prefix: "tasks".into(),
+                    kinds: vec![AutomationChangeKind::Changed],
+                    fields: Some(vec!["title".into(), "status".into()]),
+                },
+                2,
+            )
+        })
+        .unwrap();
+    let key = key(&observed.binding).unwrap();
+    let vector = local.encode_state_vector();
+    local.frontmatter_set("title", "Edited title").unwrap();
+    local.frontmatter_set("status", "done").unwrap();
+    let delta = local.diff(&vector).unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            crate::record_update_in_tx(tx, &key, &delta, Some("person"), None, 3)
+        })
+        .unwrap();
+    let history = |store: &EngineStore| {
+        store
+            .read_with(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT field_name,previous_value_json,next_value_json \
+                     FROM collection_field_history WHERE workspace_id='workspace' \
+                       AND version_id='main' AND record_id='rec_aaaaaaaaaaaaaaaaaaaaaaaaaa' \
+                     ORDER BY history_id",
+                )?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    })?
+                    .collect::<Result<Vec<_>, _>>();
+                rows
+            })
+            .unwrap()
+    };
+    let edited_history = history(&store);
+    assert_eq!(
+        edited_history,
+        vec![
+            (
+                "status".into(),
+                Some("\"open\"".into()),
+                Some("\"done\"".into())
+            ),
+            (
+                "title".into(),
+                Some("\"Original\"".into()),
+                Some("\"Edited title\"".into())
+            ),
+        ]
+    );
+    let enrollment = input(&store, &observed, checkpoint);
+    let enrolled = enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    assert!(enrolled.pending_bytes > 0);
+    let enrollment_history = history(&store);
+    let indexed = store
+        .read_with(|conn| {
+            dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
+                conn,
+                "workspace",
+                "main",
+                "object",
+            )
+        })
+        .unwrap();
+    let draft = store
+        .read_with(|conn| open_draft_in(conn, &observed.binding, enrolled.revision))
+        .unwrap();
+    assert_eq!(draft.doc.frontmatter_json(), local.frontmatter_json());
+
+    // Exercise the index/history consumer used by file writes and trigger claims.
+    // Enrollment itself discards its index facts and does not claim automations.
+    let projected = draft
+        .doc
+        .project(crate::ContentKind::Richdoc)
+        .unwrap()
+        .content;
+    store
+        .write_with(&NoFaults, |tx| {
+            if let Some(facts) = dohc_engine_domain::index_collection_record_text_in_tx(
+                tx,
+                "workspace",
+                "main",
+                "object",
+                "tasks/owner.md",
+                &projected,
+                Some("person"),
+                None,
+                11,
+            )? {
+                dohc_engine_domain::claim_automation_triggers_in_tx(tx, "workspace", &facts, 11)?;
+            }
+            Ok::<_, dohc_engine_domain::DomainError>(())
+        })
+        .unwrap();
+    let claims = store.table_row_count("automation_claims").unwrap();
+    assert_eq!(
+        enrollment_history, edited_history,
+        "enrollment must not revert local fields; after draft indexing: {:?}; automation claims: {claims}",
+        history(&store)
+    );
+    assert_eq!(
+        history(&store),
+        edited_history,
+        "reading the draft must not reapply local fields"
+    );
+    assert_eq!(
+        indexed,
+        Some(serde_json::json!({"title": "Edited title", "status": "done"}))
+    );
+    assert_eq!(
+        claims, 0,
+        "unchanged fields must not trigger automation claims"
+    );
 }
 
 /// A host checkpoint holding another computer's edit replaces the native

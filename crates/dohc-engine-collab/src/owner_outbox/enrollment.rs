@@ -305,7 +305,6 @@ pub fn enroll_in_tx(
         index_checkpoint_frontmatter_in_tx(tx, &input.binding, &host.frontmatter_json(), now_ms)?;
         return Ok(draft);
     }
-    let checkpoint_frontmatter = host.frontmatter_json();
     host.apply(&local_bytes).map_err(collab)?;
     let merged = bounded(&host)?;
     if host.has_pending_dependencies() || host.lineage_epoch_tag() != original.lineage_epoch_tag() {
@@ -336,7 +335,7 @@ pub fn enroll_in_tx(
         &input.host_vector,
         now_ms,
     )?;
-    index_checkpoint_frontmatter_in_tx(tx, &input.binding, &checkpoint_frontmatter, now_ms)?;
+    index_checkpoint_frontmatter_in_tx(tx, &input.binding, &host.frontmatter_json(), now_ms)?;
     let observed = ObservedOwnerBinding {
         binding: input.binding.clone(),
         relay_database_namespace: input.relay_database_namespace.clone(),
