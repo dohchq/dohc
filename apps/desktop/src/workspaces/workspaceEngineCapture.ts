@@ -2283,7 +2283,6 @@ export function createWorkspaceEngineCapture(
       const durable = checkpointTypingIsDurable();
       const revision = ++checkpointRevision;
       const pending = checkpointChain.catch(() => undefined).then(async () => {
-        if (revision !== checkpointRevision) return;
         if (durable) {
           await retireLastCheckpoint();
           return;

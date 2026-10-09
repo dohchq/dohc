@@ -16,6 +16,13 @@ const strict = ({ children }: { children: ReactNode }) => (
 );
 
 describe("useShellError", () => {
+  it("routes an additional Notice action independently of its primary action", () => {
+    const first=vi.fn();const discard=vi.fn();const {result}=renderHook(()=>useShellError("workspace"));
+    act(()=>result.current.reportShellFailure({message:"Kept typing",action:{label:"Copy your typing",run:first,additional:[{label:"Discard your typing",run:discard}]}}));
+    const id=result.current.shellErrors[0]!.id;
+    act(()=>result.current.runShellErrorAction(id,1));expect(discard).toHaveBeenCalledOnce();expect(first).not.toHaveBeenCalled();
+    act(()=>result.current.runShellErrorAction(id));expect(first).toHaveBeenCalledOnce();
+  });
   it("hides only the persisted dismissal's matching restriction key", () => {
     const snapshot = { paths: ["tasks/local.yaml"], unchecked: false, checked: 1 };
     const dismissed = { ...snapshot, dismissedKey: shareCaptureNoticeState([], snapshot, false).key };

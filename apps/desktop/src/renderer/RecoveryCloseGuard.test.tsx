@@ -64,7 +64,7 @@ function seedStoredDraft(): void {
 function stubBridge(overrides: Record<string, unknown> = {}): void {
   vi.stubGlobal("dohcDesktop", {
     platform: "linux" as const,
-    typingRecovery: async () => [],
+    typingRecovery: async () => ({failures: []}),
     onExitRound: () => () => undefined,
     answerExitRound: async () => undefined,
     holdQuit: async () => undefined,

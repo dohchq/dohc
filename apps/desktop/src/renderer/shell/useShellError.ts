@@ -82,7 +82,7 @@ export interface ShellError {
   // A step offered beside Try again: one that fixes the cause, such as
   // opening the file it names, or a success notice's Undo. A step that
   // `ends` the notice removes its row when it runs.
-  action?: { label: string; run: () => void; ends?: boolean };
+  action?: { label: string; run: () => void; ends?: boolean; additional?: {label: string; run: () => void}[] };
   onDismiss?: () => void;
   kind?: ShellErrorKind;
   // A kept copy's row: it stays while the engine lists that copy.
@@ -451,8 +451,9 @@ export function useShellError(workspaceId: string) {
   );
   // A settings file's row stays: the file is still wrong until the person
   // saves it. An Undo's row goes, so it runs once.
-  const runShellErrorAction = useCallback((id: string) => {
+  const runShellErrorAction = useCallback((id: string, index = 0) => {
     const target = shellErrorsRef.current.find((error) => error.id === id);
+    if (index > 0) {target?.action?.additional?.[index - 1]?.run(); return;}
     if (target?.action?.ends) setShellErrors((current) => current.filter((error) => error.id !== id));
     target?.action?.run();
   }, []);

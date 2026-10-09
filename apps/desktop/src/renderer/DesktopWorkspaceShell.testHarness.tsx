@@ -305,7 +305,7 @@ function makeBaseBridge(
   let menuCallback: ((command: MenuCommand) => void) | null = null;
   return {
     platform,
-    typingRecovery: vi.fn(async () => []),
+    typingRecovery: vi.fn(async () => ({failures: []})),
     emitWorkspaceActivity: (event: WorkspaceActivityEvent = {}) => {
       for (const callback of [...activityCallbacks]) callback(event);
     },

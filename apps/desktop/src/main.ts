@@ -1,5 +1,6 @@
 import { createTypingQuitRecovery } from "./workspaces/typingQuitRecovery";
 import { writeTypingCheckpointSync, typingRecoveryFailure, hasUnresolvedTypingCheckpoints, flushTypingCheckpoints, writeTypingCheckpoint, readTypingCheckpoints, retireTypingCheckpoint, importTypingCheckpoints, type TypingRecoveryFailure } from "./workspaces/outageTypingRecovery";
+import { actOnTypingCopy } from "./workspaces/typingRecoveryActions";
 import { liveDraftRecoveryOperations } from "./ipc/bridgeContract";
 import { SharedDocumentWaitingError } from "./ipc/sharedDocumentOpenState";
 import { net, clipboard } from "electron";
@@ -2043,23 +2044,39 @@ function testSyncTimingOverrides(): {
 // so the spec can watch the document before and after the write. Ignored
 // outside DOHC_DESKTOP_TEST like every other DOHC_TEST_* seam.
 function testCaptureSeams(): {
-  settleDebounceMs?: number;
-  openSettleGate?: () => Promise<void>;
+  capture: {settleDebounceMs?: number; openSettleGate?: () => Promise<void>};
+  beforeTypingImport?: () => Promise<void>;
+  typingSessionRegistered?: () => Promise<void>;
 } {
-  if (process.env.DOHC_DESKTOP_TEST !== "1" || app.isPackaged) return {};
+  if (process.env.DOHC_DESKTOP_TEST !== "1" || app.isPackaged) return {capture: {}};
   const debounce = Number(process.env.DOHC_TEST_YDOC_SETTLE_DEBOUNCE_MS);
   const gate = process.env.DOHC_TEST_YDOC_OPEN_SETTLE_GATE;
+  const importGate = process.env.DOHC_TEST_TYPING_IMPORT_GATE;
   return {
-    ...(Number.isFinite(debounce) && debounce > 0 ? { settleDebounceMs: debounce } : {}),
-    ...(gate
-      ? {
-          openSettleGate: async () => {
-            while (existsSync(gate)) {
-              await new Promise((resolve) => setTimeout(resolve, 50));
-            }
-          },
-        }
-      : {}),
+    capture: {
+      ...(Number.isFinite(debounce) && debounce > 0 ? { settleDebounceMs: debounce } : {}),
+      ...(gate
+        ? {
+            openSettleGate: async () => {
+              while (existsSync(gate)) {
+                await new Promise((resolve) => setTimeout(resolve, 50));
+              }
+            },
+          }
+        : {}),
+    },
+    ...(importGate ? {
+      beforeTypingImport: async () => {
+        if (!existsSync(importGate)) return;
+        await writeFile(importGate + ".waiting", "waiting");
+        await new Promise<void>((resolve, reject) => {
+          const watcher = watch(dirname(importGate), () => {if (!existsSync(importGate)) {watcher.close(); resolve();}});
+          watcher.on("error", error => {watcher.close(); reject(error);});
+          if (!existsSync(importGate)) {watcher.close(); resolve();}
+        });
+      },
+      typingSessionRegistered: async () => {if (existsSync(importGate)) await writeFile(importGate + ".opened", "registered");},
+    } : {}),
   };
 }
 
@@ -2212,15 +2229,7 @@ function recoverOutageTyping(workspace: CreatedWorkspace & {attachmentId: symbol
   const existing = typingRecoveryImports.get(workspace.attachmentId);
   if (existing) return existing;
   const pending = (async () => {
-    const gate = process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged ? process.env.DOHC_TEST_TYPING_IMPORT_GATE : undefined;
-    if (gate && existsSync(gate)) {
-      await writeFile(gate + ".waiting", "waiting");
-      await new Promise<void>((resolve, reject) => {
-        const watcher = watch(dirname(gate), () => {if (!existsSync(gate)) {watcher.close(); resolve();}});
-        watcher.on("error", reject);
-        if (!existsSync(gate)) {watcher.close(); resolve();}
-      });
-    }
+    await testCaptureSeams().beforeTypingImport?.();
     return importTypingCheckpoints(join(stateDir(), "live-draft-recovery"), workspace.workspaceId,
     async input => {
       if (!current()) throw new Error("Workspace changed before typing recovery.");
@@ -2261,10 +2270,9 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
       hooks,
       requireEngineSessions(),
       {
-        ...testCaptureSeams(),
+        ...testCaptureSeams().capture,
         waitForTypingRecovery: async () => {
-          const gate = process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged ? process.env.DOHC_TEST_TYPING_IMPORT_GATE : undefined;
-          if (gate && existsSync(gate)) await writeFile(gate + ".opened", "registered");
+          await testCaptureSeams().typingSessionRegistered?.();
           await recoverOutageTyping(workspace);
         },
         writeTypingCheckpoint: async checkpoint => {
@@ -6303,19 +6311,17 @@ function registerIpcHandlers(): void {
   registerOperations(operationBoundary, liveDraftRecoveryOperations, {
     typingRecovery: async (input, {operation}) => {
       operation.assertCurrent();
-      if (input.action === "copy" || input.action === "dismiss") {
-        const row = (await readTypingCheckpoints(join(stateDir(), "live-draft-recovery"), operation.workspace.workspaceId)).find(row => row.checkpoint.checkpointId === input.checkpointId);
-        operation.assertCurrent();
-        if (row) {
-          if (input.action === "copy") clipboard.writeText(row.checkpoint.text);
-          await retireTypingCheckpoint(row);
-        }
-        typingRecoveryFailures.get(operation.workspace.workspaceId)?.delete("import:" + input.checkpointId);
+      let outcome: "copied" | "discarded" | "missing" | undefined;
+      if (input.action === "copy" || input.action === "discard") {
+        outcome = await actOnTypingCopy({directory: join(stateDir(), "live-draft-recovery"),
+          workspaceId: operation.workspace.workspaceId, checkpointId: input.checkpointId, action: input.action,
+          assertCurrent: () => operation.assertCurrent(), copyText: text => clipboard.writeText(text)});
+        if (outcome !== "copied") typingRecoveryFailures.get(operation.workspace.workspaceId)?.delete("import:" + input.checkpointId);
         notifyRenderer({workspaceId: operation.workspace.workspaceId});
       } else if (input.action !== "read") await flushTypingCheckpoints(operation.workspace.workspaceId);
       if (input.action === "retry") await recoverOutageTyping(operation.workspace);
       operation.assertCurrent();
-      return [...(typingRecoveryFailures.get(operation.workspace.workspaceId)?.values() ?? [])];
+      return {failures: [...(typingRecoveryFailures.get(operation.workspace.workspaceId)?.values() ?? [])], ...(outcome ? {outcome} : {})};
     },
     discardLiveDraftRecovery: async (input, {event, operation}) => {
       operation.assertCurrent();

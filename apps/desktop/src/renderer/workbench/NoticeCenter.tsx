@@ -69,6 +69,7 @@ export interface WorkspaceErrorNotice {
   canRetry: boolean;
   // A step that fixes the cause, such as opening the file it names.
   actionLabel?: string;
+  additionalActionLabels?: string[];
   seen: boolean;
 }
 
@@ -303,7 +304,7 @@ function toneClass(tone: Notice["tone"]): string {
 // finished. The states page renders it too, so it is its own piece.
 export function WorkspaceErrorToast(props: {
   error: WorkspaceErrorNotice;
-  onAction?: (id: string) => void;
+  onAction?: (id: string, index?: number) => void;
   onRetry?: (id: string) => void;
   onHide?: (id: string) => void;
 }) {
@@ -333,6 +334,13 @@ export function WorkspaceErrorToast(props: {
           {error.actionLabel}
         </button>
       ) : null}
+      {props.onAction ? error.additionalActionLabels?.map((label, index) => (
+        <button type="button" key={label} data-testid="workspace-shell-error-additional-action"
+          onClick={() => props.onAction?.(error.id, index + 1)}
+          className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink">
+          {label}
+        </button>
+      )) : null}
       {error.canRetry && props.onRetry ? (
         <button
           type="button"
@@ -480,7 +488,7 @@ export function NoticeCenter(props: {
   // pushing the workspace around.
   workspaceErrors?: readonly WorkspaceErrorNotice[];
   onRetryWorkspaceError?: (id: string) => void;
-  onWorkspaceErrorAction?: (id: string) => void;
+  onWorkspaceErrorAction?: (id: string, index?: number) => void;
   onHideWorkspaceError?: (id: string) => void;
   onDismissWorkspaceError?: (id: string) => void;
   // Told each time an error's toast comes on screen.
@@ -903,6 +911,9 @@ export function NoticeCenter(props: {
                 onClick: () => props.onWorkspaceErrorAction?.(error.id),
               }]
             : []),
+          ...(props.onWorkspaceErrorAction ? (error.additionalActionLabels ?? []).map((label, index) => ({
+            label, onClick: () => props.onWorkspaceErrorAction?.(error.id, index + 1),
+          })) : []),
           ...(error.canRetry && props.onRetryWorkspaceError
             ? [{
                 label: "Try again",

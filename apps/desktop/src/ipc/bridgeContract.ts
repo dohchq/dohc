@@ -4944,8 +4944,8 @@ export const liveDraftRecoveryOperations = {
   typingRecovery: {
     capabilityId: "document.typing.recovery",
     channel: "desktop:typing-recovery",
-    payload: z.discriminatedUnion("action", [z.object({workspaceId: WORKSPACE_ID, action: z.enum(["read", "flush", "retry"])}).strict(), z.object({workspaceId: WORKSPACE_ID, action: z.enum(["copy", "dismiss"]), checkpointId: z.string().min(1).max(512)}).strict()]),
-    result: z.array(TypingRecoveryFailureSchema),
+    payload: z.discriminatedUnion("action", [z.object({workspaceId: WORKSPACE_ID, action: z.enum(["read", "flush", "retry"])}).strict(), z.object({workspaceId: WORKSPACE_ID, action: z.enum(["copy", "discard"]), checkpointId: z.string().min(1).max(512)}).strict()]),
+    result: z.object({failures: z.array(TypingRecoveryFailureSchema), outcome: z.enum(["copied", "discarded", "missing"]).optional()}).strict(),
     guard: "active-workspace",
     scope: "workspace",
     inactiveMessage: "This window changed workspaces.",

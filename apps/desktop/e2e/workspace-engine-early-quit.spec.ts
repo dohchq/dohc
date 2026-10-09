@@ -108,9 +108,34 @@ for (const mode of ["quit", "last-window", "crash", "crash-reopen-before-import"
       if (mode === "refused-import") {
         await desktop.page.getByTestId("notice-center-toggle").click();
         await expect(desktop.page.getByTestId("notice-center").getByText(AUTHOR_REFUSED_MESSAGE, {exact: true})).toHaveCount(1);
+        const row=desktop.page.getByTestId("notice-center").locator('[data-testid^="notice-shell-error-"]').filter({hasText:AUTHOR_REFUSED_MESSAGE});
+        await row.getByRole("button",{name:"Dismiss notice",exact:true}).click();
+        await expect(desktop.page.getByTestId("notice-center").getByText(AUTHOR_REFUSED_MESSAGE,{exact:true})).toHaveCount(0);
+        expect(await checkpointText(temp.homeDir)).toContain(sentinels[2]!);
+        await desktop.close();desktop=null;
+        desktop=await launchDesktopApp({workspace:temp});await openWorkspaceFromFirstRun(desktop.page,temp);
+        await desktop.page.getByTestId("notice-center-toggle").click();
+        await expect(desktop.page.getByTestId("notice-center").getByText(AUTHOR_REFUSED_MESSAGE,{exact:true})).toHaveCount(1);
         expect(await checkpointText(temp.homeDir)).toContain(sentinels[2]!);
         await desktop.page.getByTestId("notice-center").getByRole("button",{name:"Copy your typing",exact:true}).click();
         await expect.poll(()=>desktop!.app.evaluate(({clipboard})=>clipboard.readText())).toContain(sentinels[2]!);
+        expect(await checkpointText(temp.homeDir)).toContain(sentinels[2]!);
+        await desktop.app.evaluate(({clipboard})=>clipboard.writeText("OTHER_CLIPBOARD_TEXT"));
+        expect(await checkpointText(temp.homeDir)).toContain(sentinels[2]!);
+        const discard = desktop.page.getByTestId("notice-center").getByRole("button",{name:"Discard your typing",exact:true});
+        await discard.click();
+        await expect(desktop.page.getByTestId("typing-discard-dialog")).toContainText("This cannot be undone.");
+        expect(await checkpointText(temp.homeDir)).toContain(sentinels[2]!);
+        for(const theme of ["light","dark"] as const) {
+          await desktop.page.emulateMedia({colorScheme:theme,reducedMotion:"reduce"});
+          await expect(desktop.page.locator("html")).toHaveAttribute("data-theme",theme);
+          await test.info().attach(`typing-discard-${theme}`,{body:await desktop.page.screenshot(),contentType:"image/png"});
+        }
+        await desktop.page.keyboard.press("Escape");
+        await expect(desktop.page.getByTestId("typing-discard-dialog")).toHaveCount(0);
+        expect(await checkpointText(temp.homeDir)).toContain(sentinels[2]!);
+        await discard.click();
+        await desktop.page.getByTestId("typing-discard-confirm").click();
         await expect.poll(()=>checkpointText(temp.homeDir)).toBe("");
         return;
       }

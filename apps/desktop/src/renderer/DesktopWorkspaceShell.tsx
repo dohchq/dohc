@@ -4551,6 +4551,7 @@ export function DesktopWorkspaceShell(props: {
         atMs: error.atMs,
         canRetry: error.retry !== null,
         ...(error.action ? { actionLabel: error.action.label } : {}),
+        ...(error.action?.additional ? { additionalActionLabels: error.action.additional.map(action => action.label) } : {}),
         seen: error.seen,
       })),
     [shellErrors, reportFacts],
@@ -4694,7 +4695,7 @@ export function DesktopWorkspaceShell(props: {
     if (syncStatus?.recoveryUnavailable === undefined) return;
     reportRecoveryUnavailable(syncStatus.recoveryUnavailable, retryFileRecovery, revealRecoveryWorkspace);
   }, [syncStatus?.recoveryUnavailable, reportRecoveryUnavailable, retryFileRecovery, revealRecoveryWorkspace]);
-  useTypingRecoveryNotices({workspaceId, ready: workspaceIsReady, reportShellFailure, clearKind, clearIdentity});
+  const typingRecoveryConfirmation = useTypingRecoveryNotices({workspaceId, ready: workspaceIsReady, reportShellFailure, clearKind, clearIdentity});
   const keptFilesNotice = useKeptFilesNotice({
     workspaceId,
     paths: syncStatus?.keptFiles?.filter(([path]) => !path),
@@ -5676,6 +5677,7 @@ export function DesktopWorkspaceShell(props: {
         </div>
       ) : null}
 
+      {typingRecoveryConfirmation}
       {restartPrompt !== "closed" ? (
         <Overlay
           onClose={() => {
