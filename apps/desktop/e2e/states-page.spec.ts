@@ -55,6 +55,7 @@ const PARTS = [
   "frontmatter-as-written",
   "title-bar-status",
   "capture-recovery",
+  "about",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an
 // hour past it, so the real time that passes between installing and

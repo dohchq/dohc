@@ -1180,9 +1180,9 @@ describe("shared view chats surface", () => {
     expect(await screen.findByTestId("chats-panel")).toBeTruthy();
     expect(screen.getByTestId("titlebar-chats-sidebar")).toBeTruthy();
 
-    // The file tab is the only tab. A workspace-wide listing would be a
+    // About is the only tab. A workspace-wide listing would be a
     // superset to filter, which is the shape #627 came from.
-    expect(screen.getByTestId("chats-panel-tab-file")).toBeTruthy();
+    expect(screen.getByTestId("chats-panel-tab-about")).toBeTruthy();
     expect(screen.queryByTestId("chats-panel-tab-all")).toBeNull();
     expect(screen.queryByTestId("chats-panel-off")).toBeNull();
 
@@ -1197,6 +1197,8 @@ describe("shared view chats surface", () => {
     expect((await screen.findByTestId("linked-chat-readonly-note")).textContent).toBe(
       "Chats are read-only in this shared view.",
     );
+    // A shared view records no History, so About has no History section.
+    expect(screen.queryByTestId("about-history")).toBeNull();
 
     expect(bridge.listChatChannels).not.toHaveBeenCalled();
     expect(bridge.syncDms).not.toHaveBeenCalled();
@@ -1256,10 +1258,10 @@ describe("shared view chats surface", () => {
 
     expect(await screen.findByTestId("chats-panel")).toBeTruthy();
     expect(screen.getByTestId("titlebar-chats-sidebar")).toBeTruthy();
-    // Both tabs. Collapsing every workspace to the share's file-only strip
+    // Both tabs. Collapsing every workspace to the share's About-only strip
     // would keep the share pin above green.
     expect(screen.getByTestId("chats-panel-tab-all")).toBeTruthy();
-    expect(screen.getByTestId("chats-panel-tab-file")).toBeTruthy();
+    expect(screen.getByTestId("chats-panel-tab-about")).toBeTruthy();
     await waitFor(() => expect(bridge.listChatChannels).toHaveBeenCalled());
     expect(screen.queryByTestId("chats-panel-off")).toBeNull();
   });
