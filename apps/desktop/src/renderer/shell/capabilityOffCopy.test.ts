@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
 import type { SyncStatusResult } from "../../ipc/bridgeContract";
-import { chatsOffCopy, historyOffPlaceholderCopy, versionCompareOffCopy } from "./capabilityOffCopy";
+import { chatsOffCopy, fileObservationFailureCopy, historyOffPlaceholderCopy, versionCompareOffCopy } from "./capabilityOffCopy";
+
+describe("file observation failure copy", () => {
+  it("names a failed read and its recovery without claiming history stopped", () => {
+    expect(fileObservationFailureCopy("read-failed")).toBe(
+      "dohc could not read file changes for this workspace. It will try again. Restart dohc if changes stay missing.",
+    );
+    expect(fileObservationFailureCopy("unavailable")).toBe(
+      "dohc could not watch file changes for this workspace. Restart dohc to try again.",
+    );
+  });
+});
 
 describe("refused data store copy", () => {
   it.each([

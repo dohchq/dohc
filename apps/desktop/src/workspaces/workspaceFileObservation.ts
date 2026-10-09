@@ -10,6 +10,11 @@ import {
 import type { ActivityWorkspace } from "./workspaceActivity";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { scopeOf } from "./captureActivityBridge";
+import type { SyncStatusResult } from "../ipc/bridgeContract";
+
+// The budget includes a queued read as well as the final drain.
+const DRAIN_TIMEOUT_MS = 5_000;
+type ObservationFailure = NonNullable<SyncStatusResult["fileObservationFailure"]>;
 
 export interface WorkspaceObservationHandle {
   ready: Promise<void>;
@@ -24,7 +29,7 @@ export interface WorkspaceObservationCallbacks {
   resync(): Promise<void>;
   captured(paths?: readonly string[]): void;
   pulled(paths: readonly string[]): void;
-  degraded(unavailable: boolean): void;
+  degraded(reason: ObservationFailure | null): void;
 }
 
 // Read one cursor at a time. A wake received during a read schedules another
@@ -37,35 +42,38 @@ export function observeWorkspaceFiles(options: {
 }): WorkspaceObservationHandle {
   let cursor: FileObservationCursor | undefined;
   let closing = false;
+  let drainTimedOut = false;
   let dirty = false;
   let chain = Promise.resolve();
   let resolveReady!: () => void;
   const ready = new Promise<void>(resolve => { resolveReady = resolve; });
   let readySeen = false;
   let unavailable = false;
-  // Deduplicate paths already delivered during this pull. Late feed facts
-  // can safely reread consumers; a relay page never waits for a full walk.
+  // Deduplicate facts delivered before a pull page. Activity handles the
+  // opposite order without withholding facts from capture or listings.
   const observedPaths = new Set<string>();
   let pulling = false;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
   let retryMs = 250;
 
-  function degraded(): void {
+  function degraded(reason: ObservationFailure): void {
     unavailable = true;
-    options.callbacks.degraded(true);
+    options.callbacks.degraded(reason);
     resolveReady();
   }
 
   async function apply(changes: FileObservationChanges & { degraded?: boolean }): Promise<void> {
+    if (drainTimedOut) return;
     if (changes.resync && (readySeen || unavailable)) await options.callbacks.resync();
+    if (drainTimedOut) return;
     if (pulling) for (const fact of changes.facts) observedPaths.add(fact.path);
     if (changes.facts.length) options.callbacks.facts(changes.facts);
     cursor = changes.cursor;
     if (changes.ready) {
       unavailable = false;
-      options.callbacks.degraded(false);
+      options.callbacks.degraded(null);
       if (!readySeen) { readySeen = true; resolveReady(); }
-    } else if (changes.degraded) degraded();
+    } else if (changes.degraded) degraded("unavailable");
   }
 
   function enqueue(task: () => Promise<void>): Promise<void> {
@@ -85,7 +93,7 @@ export function observeWorkspaceFiles(options: {
       if (retryTimer) { clearTimeout(retryTimer); retryTimer = undefined; }
     }).catch(() => {
       if (closing) return;
-      degraded();
+      degraded("read-failed");
       // The engine retains wakes, so only failed reads need recovery.
       // Keep dirty until the retry to coalesce wakes during the backoff.
       dirty = true;
@@ -122,10 +130,23 @@ export function observeWorkspaceFiles(options: {
       resolveReady();
       if (retryTimer) clearTimeout(retryTimer);
       unsubscribe();
-      stopped = enqueue(async () => {
+      const drain = enqueue(async () => {
+        if (drainTimedOut) return;
         // Failure leaves the cursor and expected-delete tokens intact.
         await apply(await options.read(cursor, true));
       });
+      let timer: ReturnType<typeof setTimeout>;
+      stopped = Promise.race([
+        drain,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            drainTimedOut = true;
+            const error = new Error(`File observation drain timed out after ${DRAIN_TIMEOUT_MS}ms`);
+            options.onError(error);
+            reject(error);
+          }, DRAIN_TIMEOUT_MS);
+        }),
+      ]).finally(() => clearTimeout(timer));
       return stopped;
     },
   };

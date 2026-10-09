@@ -1,5 +1,11 @@
 import { engineStoreRefusalCopy, type SyncStatusResult } from "../../ipc/bridgeContract";
 
+export function fileObservationFailureCopy(reason: NonNullable<SyncStatusResult["fileObservationFailure"]>): string {
+  return reason === "read-failed"
+    ? "dohc could not read file changes for this workspace. It will try again. Restart dohc if changes stay missing."
+    : "dohc could not watch file changes for this workspace. Restart dohc to try again.";
+}
+
 // What the history-off placeholder may claim. Whether changes are recorded
 // is main's answer (syncStatus, from the open that decided the recorder),
 // and a cause is named only when that status established it. A status that

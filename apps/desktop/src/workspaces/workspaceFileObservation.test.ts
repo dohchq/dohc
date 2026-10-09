@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { observeWorkspaceFiles, type WorkspaceObservationCallbacks } from "./workspaceFileObservation";
-import type { FileObservationChanges } from "@dohc/workspace-engine-client/daemon";
+import { observeWorkspaceFiles, startWorkspaceFileObservation, type WorkspaceObservationCallbacks } from "./workspaceFileObservation";
+import type { EngineDaemonLifecycle, EngineWorkspaceSessions, FileObservationChanges } from "@dohc/workspace-engine-client/daemon";
+import type { Event } from "@dohc/workspace-engine-client";
 import { deferred } from "../testing/deferred";
 
 const answer = (revision: number, extra: Partial<FileObservationChanges> = {}): FileObservationChanges => ({
@@ -27,7 +28,7 @@ describe("workspace file observation", () => {
     await f.handle.ready;
     f.wake();
     await vi.advanceTimersByTimeAsync(0);
-    expect(f.callbacks.degraded).toHaveBeenLastCalledWith(true);
+    expect(f.callbacks.degraded).toHaveBeenLastCalledWith("read-failed");
     expect(read).toHaveBeenCalledTimes(2);
     f.wake();
     await vi.advanceTimersByTimeAsync(249);
@@ -38,7 +39,7 @@ describe("workspace file observation", () => {
     expect(f.callbacks.resync).toHaveBeenCalledOnce();
     expect(f.callbacks.facts).toHaveBeenCalledWith([{ path: "fresh.md", kind: "appeared" }]);
     expect(read.mock.calls[1]?.[0]).toEqual({ generation: "first", revision: 1 });
-    expect(f.callbacks.degraded).toHaveBeenLastCalledWith(false);
+    expect(f.callbacks.degraded).toHaveBeenLastCalledWith(null);
     await vi.advanceTimersByTimeAsync(10_000);
     expect(read).toHaveBeenCalledTimes(4);
     await f.handle.stop();
@@ -50,7 +51,7 @@ describe("workspace file observation", () => {
     const f = fixture(read);
     await vi.advanceTimersByTimeAsync(0);
     await f.handle.ready;
-    expect(f.callbacks.degraded).toHaveBeenCalledWith(true);
+    expect(f.callbacks.degraded).toHaveBeenCalledWith("read-failed");
     await f.handle.stop();
     await vi.advanceTimersByTimeAsync(10_000);
     expect(read).toHaveBeenCalledTimes(2);
@@ -59,7 +60,7 @@ describe("workspace file observation", () => {
   it("resolves readiness for a known degraded feed", async () => {
     const f = fixture(vi.fn().mockResolvedValue({ ...answer(0), ready: false, degraded: true }));
     await f.handle.ready;
-    expect(f.callbacks.degraded).toHaveBeenCalledWith(true);
+    expect(f.callbacks.degraded).toHaveBeenCalledWith("unavailable");
     await f.handle.stop();
   });
 
@@ -141,5 +142,67 @@ describe("workspace file observation", () => {
     await expect(f.handle.stop()).rejects.toThrow("drain unavailable");
     expect(read.mock.calls[1]).toEqual([{ generation: "first", revision: 1 }, true]);
     expect(f.onError).toHaveBeenCalledOnce();
+  });
+
+  it.each(["read", "drain"])("bounds stop while a %s never answers and ignores its late facts", async blocked => {
+    vi.useFakeTimers();
+    const pending = deferred<FileObservationChanges>();
+    const read = vi.fn().mockResolvedValue(answer(3));
+    if (blocked === "read") read.mockReturnValueOnce(pending.promise);
+    else read.mockResolvedValueOnce(answer(1)).mockReturnValueOnce(pending.promise);
+    const f = fixture(read);
+    await vi.advanceTimersByTimeAsync(0);
+    const stopped = f.handle.stop();
+    expect(f.handle.stop()).toBe(stopped);
+    const result = vi.fn();
+    void stopped.then(() => result("resolved"), error => result(error.message));
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(result).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(result).toHaveBeenCalledExactlyOnceWith("File observation drain timed out after 5000ms");
+    pending.resolve(answer(2, { facts: [{ path: "late.md", kind: "changed" }] }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.callbacks.facts).not.toHaveBeenCalled();
+    expect(read).toHaveBeenCalledTimes(blocked === "read" ? 1 : 2);
+    expect(f.onError).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("subscribes to workspace events, forwards truncated capture broadly, and unsubscribes", async () => {
+    const eventHandlers = new Set<(event: Event) => void>();
+    const clientHandlers = new Set<() => void>();
+    const daemon: Pick<EngineDaemonLifecycle, "onEvent" | "onClientChanged"> = {
+      onEvent(handler) { eventHandlers.add(handler); return () => { eventHandlers.delete(handler); }; },
+      onClientChanged(handler) { clientHandlers.add(handler); return () => { clientHandlers.delete(handler); }; },
+    };
+    const emit = (name: string, payload: Event["payload"]) => {
+      for (const handler of eventHandlers) handler({ seq: 1, sessionGeneration: 1, name, payload });
+    };
+    const sendRequest = vi.fn(async (request: { id: number }) => ({ id: request.id, result: answer(1) }));
+    const sessions = {
+      run: async (_workspace: unknown, run: (binding: unknown) => Promise<unknown>) => run({ client: { sendRequest }, workspace: "binding" }),
+      assertCurrentBinding: vi.fn(),
+    } as unknown as EngineWorkspaceSessions;
+    const callbacks: WorkspaceObservationCallbacks = {
+      facts: vi.fn(), resync: vi.fn(async () => {}), captured: vi.fn(), pulled: vi.fn(), degraded: vi.fn(),
+    };
+    const handle = startWorkspaceFileObservation({ workspaceId: "a", rootPath: "/a", attachmentId: Symbol(),
+      kind: "personal", mode: "local-first" }, sessions, daemon, callbacks);
+    await handle.ready;
+    emit("capture.momentRecorded", { workspaceId: "a", paths: ["note.md"], appliedCount: 1, notOwnedCount: 0 });
+    expect(callbacks.captured).toHaveBeenCalledExactlyOnceWith(["note.md"]);
+    emit("capture.momentRecorded", { workspaceId: "b", paths: ["other.md"], appliedCount: 1, notOwnedCount: 0 });
+    expect(callbacks.captured).toHaveBeenCalledOnce();
+    emit("capture.momentRecorded", { workspaceId: "a", paths: ["note.md"], appliedCount: 2, notOwnedCount: 0 });
+    expect(callbacks.captured).toHaveBeenLastCalledWith(undefined);
+    emit("workspace.filesChanged", { workspaceId: "b", cursor: answer(1).cursor });
+    expect(sendRequest).toHaveBeenCalledOnce();
+    emit("workspace.filesChanged", { workspaceId: "a", cursor: answer(1).cursor });
+    await vi.waitFor(() => expect(sendRequest).toHaveBeenCalledTimes(2));
+    for (const handler of clientHandlers) handler();
+    await vi.waitFor(() => expect(sendRequest).toHaveBeenCalledTimes(3));
+    await handle.stop();
+    expect(eventHandlers.size).toBe(0);
+    expect(clientHandlers.size).toBe(0);
   });
 });

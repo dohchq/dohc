@@ -36,7 +36,10 @@ interface WatchedWorkspace {
   // True when building the recorder threw: the cause is a failure,
   // not a capability, and the notice states which.
   historyRecordingUnavailable: boolean;
-  fileObservationUnavailable: boolean;
+  fileObservationFailure: NonNullable<SyncStatusResult["fileObservationFailure"]> | null;
+  // Retain only paths from the latest pull; consume each later echo once.
+  // Starting the next pull drops paths whose facts never arrived.
+  pulledPaths: Set<string>;
   // True when this workspace is a shared view: no recorder by design.
   // Same rule as above — the cause travels with the decision so no consumer
   // has to guess it.
@@ -200,7 +203,8 @@ export function createWorkspaceActivity(
       conflictCount,
       ...(snap?.claimingIdentity ? { claimingIdentity: true } : {}),
       ...(snap?.updateRequired ? { updateRequired: snap.updateRequired } : {}),
-      historyRecordingUnavailable: (w?.historyRecordingUnavailable ?? false) || (w?.fileObservationUnavailable ?? false),
+      historyRecordingUnavailable: w?.historyRecordingUnavailable ?? false,
+      ...(w?.fileObservationFailure ? { fileObservationFailure: w.fileObservationFailure } : {}),
       historyShareView: w?.historyShareView ?? false,
       atomicPlacementUnavailable: w?.atomicPlacementUnavailable ?? false,
       recoveryUnavailable: w?.recoveryUnavailable ?? false,
@@ -290,7 +294,8 @@ export function createWorkspaceActivity(
         engine: null,
         capture: null,
         historyRecordingUnavailable: false,
-        fileObservationUnavailable: false,
+        fileObservationFailure: null,
+        pulledPaths: new Set(),
         historyShareView: false,
         historyCaptureFailure: null,
         historyCaptureDetail: null,
@@ -353,7 +358,17 @@ export function createWorkspaceActivity(
           // Deletion suppression happens before any queued work or close.
           entry.capture?.observeFileEvents(events);
           if (state.entry !== entry) return;
-          options.onWatcherBatch?.(workspace, events);
+          let watcherEvents = events;
+          if (entry.pulledPaths.size) {
+            let remaining: WatcherEvent[] | undefined;
+            for (let i = 0; i < events.length; i++) {
+              const event = events[i]!;
+              if (entry.pulledPaths.delete(event.path)) remaining ??= events.slice(0, i);
+              else remaining?.push(event);
+            }
+            if (remaining) watcherEvents = remaining;
+          }
+          if (watcherEvents.length) options.onWatcherBatch?.(workspace, watcherEvents);
           notify({ workspaceId: workspace.workspaceId, paths: facts.map(fact => fact.path),
             pathSetChanged: facts.some(fact => fact.kind !== "changed") });
         },
@@ -374,11 +389,12 @@ export function createWorkspaceActivity(
         },
         pulled(paths) {
           if (state.entry !== entry) return;
+          for (const path of paths) entry.pulledPaths.add(path);
           options.onWatcherBatch?.(workspace, paths.map(path => ({ path, operation: "update" })));
         },
-        degraded(unavailable) {
-          if (state.entry !== entry || entry.fileObservationUnavailable === unavailable) return;
-          entry.fileObservationUnavailable = unavailable;
+        degraded(reason) {
+          if (state.entry !== entry || entry.fileObservationFailure === reason) return;
+          entry.fileObservationFailure = reason;
           notify({ workspaceId: workspace.workspaceId });
         },
       });
@@ -396,7 +412,7 @@ export function createWorkspaceActivity(
           entry.handle.ready,
           new Promise<void>(resolve => {
             readyTimer = setTimeout(() => {
-              entry.fileObservationUnavailable = true;
+              entry.fileObservationFailure = "unavailable";
               notify({ workspaceId: workspace.workspaceId });
               resolve();
             }, 5_000);
@@ -591,7 +607,10 @@ export function createWorkspaceActivity(
     state.entry?.engine?.queuePull();
   }
 
-  function pullStarting(state: WorkspaceActivityState): void { state.entry?.handle.pullStarting(); }
+  function pullStarting(state: WorkspaceActivityState): void {
+    state.entry?.pulledPaths.clear();
+    state.entry?.handle.pullStarting();
+  }
   function pullFinished(state: WorkspaceActivityState): void { state.entry?.handle.pullFinished(); }
   function handlePulledPaths(state: WorkspaceActivityState, paths: readonly string[]): Promise<void> {
     return state.entry?.handle.pulledPaths(paths) ?? Promise.resolve();

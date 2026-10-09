@@ -3392,6 +3392,16 @@ describe("try-in-version IPC contract", () => {
 });
 
 describe("sync status IPC contract", () => {
+  it("preserves file-read failure separately from history availability", () => {
+    const status = { state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
+      historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 0 };
+    for (const reason of ["read-failed", "unavailable"] as const) {
+      expect(SyncStatusResult.parse({ ...status, fileObservationFailure: reason })).toMatchObject({
+        historyRecordingUnavailable: false, fileObservationFailure: reason,
+      });
+    }
+    expect(SyncStatusResult.safeParse({ ...status, fileObservationFailure: "history-off" }).success).toBe(false);
+  });
   it("refuses a status that cannot say why history is off", () => {
     const status = {
       state: "synced",

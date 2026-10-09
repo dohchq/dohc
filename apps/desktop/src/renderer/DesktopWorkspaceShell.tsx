@@ -69,6 +69,7 @@ import {
 import { runCanonicalDmNavigation } from "./shell/canonicalDmNavigation";
 import {
   chatsOffCopy,
+  fileObservationFailureCopy,
   historyOffPlaceholderCopy,
   versionCompareOffCopy,
 } from "./shell/capabilityOffCopy";
@@ -4653,6 +4654,19 @@ export function DesktopWorkspaceShell(props: {
     report: reportSyncFailure,
     clear: clearSyncFailure,
   });
+  const filedObservationFailure = useRef<{ workspaceId: string; reason: SyncStatusResult["fileObservationFailure"] } | null>(null);
+  const observationFailure = syncStatus?.fileObservationFailure;
+  useEffect(() => {
+    if (syncStatus === null) return;
+    if (filedObservationFailure.current?.workspaceId === workspaceId &&
+      filedObservationFailure.current.reason === observationFailure) return;
+    filedObservationFailure.current = { workspaceId, reason: observationFailure };
+    if (observationFailure) {
+      reportShellFailure({ message: fileObservationFailureCopy(observationFailure), identity: "file-observation" });
+    } else {
+      clearIdentity("file-observation");
+    }
+  }, [syncStatus, observationFailure, workspaceId, reportShellFailure, clearIdentity]);
   useEffect(() => {
     showSyncRefusals((props.sentNotices?.notices ?? []).filter(notice =>
       notice.kind === "sync-refusal" && notice.workspaceId === workspaceId), syncFailureNotice.retry);
