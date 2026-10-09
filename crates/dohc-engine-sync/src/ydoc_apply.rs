@@ -759,7 +759,11 @@ fn complete_drain_cleanup(
             .map_err(SyncError::persist)?;
         }
         if let Some((key, _)) = recovery {
-            crate::moment_apply::open_artifacts::remember_attempt_in_tx(tx, key)?;
+            let waiting: bool = tx.query_row("SELECT settle_prior_update_seq IS NOT NULL FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![key.workspace_id,key.version_id,key.object_id],|row|row.get(0)).map_err(SyncError::corrupt)?;
+            if !waiting {
+                crate::moment_apply::open_artifacts::clear_settled_mark_in_tx(tx,key)?;
+                crate::moment_apply::open_artifacts::remember_attempt_in_tx(tx,key)?;
+            }
         }
         Ok::<_, SyncError>(())
     })?;
@@ -810,7 +814,9 @@ pub(crate) fn drain_deferred_ydoc_for_ended_session(
 ) -> Result<YdocDrainResult, SyncError> {
     let checked = store.write_with(faults, |tx| {
         require_recovery_closed(tx, key, leases)?;
-        require_unfenced_lineage(tx, key)
+        let now_ms: i64 = tx.query_row("SELECT updated_at_ms FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![key.workspace_id,key.version_id,key.object_id],|row|row.get(0)).map_err(SyncError::corrupt)?;
+        dohc_engine_collab::author_coverage::reconcile_in(tx,key,now_ms).map_err(map_collab_hard_error)?;
+        Ok::<_,SyncError>(())
     })?;
     if matches!(checked, TxnOutcome::Crashed { .. }) {
         return Err(SyncError::FaultCrash);
@@ -843,7 +849,8 @@ fn require_recovery_closed(
             reason: "local-document-unsettled",
         });
     }
-    Ok(())
+    dohc_engine_collab::live_update_application::require_restore_open(conn, key)
+        .map_err(map_collab_hard_error)
 }
 
 /// Whether [`drain_deferred_ydoc_for_live_session`] would drain anything into
@@ -977,11 +984,6 @@ fn drain_deferred_ydoc(
             Ok::<_, SyncError>(pending)
         })?;
     if pending.is_empty() {
-        if recovery_leases.is_some() {
-            return Err(SyncError::RetryableState {
-                reason: "no-deferred-document-updates",
-            });
-        }
         return Ok((
             YdocDrainResult {
                 refusals: inactive_refusals,
@@ -1005,6 +1007,9 @@ fn drain_deferred_ydoc(
     })?;
     let materialization_pending = if unresolved {
         let reconciled = store.write_with(faults, |tx| {
+            if let Some(leases) = recovery_leases {
+                require_recovery_closed(tx, key, leases)?;
+            }
             dohc_engine_collab::author_coverage::reconcile_in(tx, key, pending[0].3)
                 .map_err(map_collab_hard_error)
         })?;
@@ -1016,11 +1021,6 @@ fn drain_deferred_ydoc(
         false
     };
     if materialization_pending {
-        if recovery_leases.is_some() {
-            return Err(SyncError::RetryableState {
-                reason: "document-materialization-pending",
-            });
-        }
         // Return to the caller so settlement can replay the pending job.
         // Keep every queued coordinate until its projection can commit.
         return Ok((
@@ -5349,7 +5349,7 @@ fn validate_retryable_ydoc_identity(
     })
 }
 
-fn map_collab_hard_error(error: CollabError) -> SyncError {
+pub(crate) fn map_collab_hard_error(error: CollabError) -> SyncError {
     match error {
         CollabError::OwnerOutboxFrozen => SyncError::LiveDocumentBindingActive,
         CollabError::RestoreFenced => SyncError::RetryableState {

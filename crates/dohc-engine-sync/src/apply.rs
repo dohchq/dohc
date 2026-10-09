@@ -543,7 +543,7 @@ pub(crate) fn read_pending_refusals(
     store.read_with(|conn| {
         let mut stmt = conn.prepare(
             "SELECT origin_id, origin_seq, op_kind, reason_message FROM replication_pending_refusals \
-             WHERE workspace_id=?1 AND COALESCE(report_id,'') != ?2 ORDER BY origin_id, origin_seq",
+             WHERE workspace_id=?1 AND reason_code='invalid-input' AND COALESCE(report_id,'') != ?2 ORDER BY origin_id, origin_seq",
         ).map_err(SyncError::corrupt)?;
         stmt.query_map(params![workspace_id, DIRECT_RPC_REFUSAL_REPORT_ID], |row| {
             Ok(ReplicationRefusal {

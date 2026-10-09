@@ -3071,6 +3071,21 @@ fn updates_after(
 }
 
 pub(crate) fn map_sql(e: rusqlite::Error) -> CollabError {
+    if e.sqlite_error_code().is_some_and(|code| {
+        matches!(
+            code,
+            rusqlite::ErrorCode::SystemIoFailure
+                | rusqlite::ErrorCode::DiskFull
+                | rusqlite::ErrorCode::CannotOpen
+                | rusqlite::ErrorCode::OutOfMemory
+                | rusqlite::ErrorCode::DatabaseBusy
+                | rusqlite::ErrorCode::DatabaseLocked
+                | rusqlite::ErrorCode::PermissionDenied
+                | rusqlite::ErrorCode::ReadOnly
+        )
+    }) {
+        return StorageError::persist_public(e).into();
+    }
     CollabError::Corrupt {
         reason: e.to_string(),
     }
@@ -3087,6 +3102,20 @@ mod successor_validation_tests {
         encode_scene_asset_record, import_portable_scene, scene_asset_ref, SceneAsset,
         SuccessorIdentity, SuccessorIdentityInput,
     };
+
+    #[test]
+    fn document_sql_resource_failures_keep_storage_class() {
+        for code in [5, 6, 10, 13, 14, 7, 3, 8] {
+            let error = map_sql(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                None,
+            ));
+            assert!(
+                matches!(error, CollabError::Storage(_)),
+                "{code}: {error:?}"
+            );
+        }
+    }
 
     #[test]
     fn document_load_sql_failure_keeps_corrupt_lineage_classification() {

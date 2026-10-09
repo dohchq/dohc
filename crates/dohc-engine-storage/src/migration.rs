@@ -4950,6 +4950,52 @@ mod tests {
             .unwrap(),
             ("Existing refusal".into(), "report".into())
         );
+        let ddl:String=conn.query_row("SELECT sql FROM sqlite_master WHERE type='table' AND name='replication_pending_refusals'",[],|r|r.get(0)).unwrap();
+        assert!(ddl.contains("CHECK (origin_seq >= 0)"));
+        assert!(
+            ddl.contains("reason_code IN ('invalid-input','document-artifact-recovery-failed')")
+        );
+        assert!(ddl.contains("PRIMARY KEY(workspace_id,origin_id,origin_seq)"));
+        assert!(ddl.contains("DEFERRABLE INITIALLY DEFERRED"));
+        assert!(ddl.ends_with("STRICT"));
+        let index_columns = conn
+            .prepare("PRAGMA index_info(replication_pending_refusals_by_report)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(2))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(index_columns, ["workspace_id", "report_id"]);
+        let foreign_columns = conn
+            .prepare("PRAGMA foreign_key_list(replication_pending_refusals)")
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(6)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            foreign_columns,
+            ["workspace_id", "origin_id", "origin_seq"].map(|column| (
+                "replication_log".into(),
+                column.into(),
+                column.into(),
+                "CASCADE".into()
+            ))
+        );
+        assert!(
+            conn.execute(
+                "UPDATE replication_pending_refusals SET reason_code='unknown'",
+                []
+            )
+            .is_err()
+        );
         conn.execute_batch("INSERT INTO moments(workspace_id,moment_order,moment_id,version_id,object_id,path,recorded_at_ms,operation,after_blob_sha256,before_present,metadata_origin) VALUES ('ws',1,'m1','main','doc','doc.md',1,'write','new',0,'sync'); INSERT INTO ydoc_pending_artifacts VALUES ('ws','main','doc','m1','peer',0,'claim',NULL);").unwrap();
         conn.execute("UPDATE ydoc_docs SET settled_update_seq=2,last_settled_sha='new' WHERE object_id='doc'", []).unwrap();
         assert_eq!(

@@ -1002,6 +1002,7 @@ async fn assert_open_document_artifact_recovery_inner(
     tail: bool,
     broken: bool,
 ) {
+    let integrated = exit.starts_with("pending-") || exit.starts_with("integrated-");
     let workspace = "rpc-artifact-recovery";
     let path = "notes/shared.md";
     let relay = FakeRelay::start(RelayState::default());
@@ -1105,7 +1106,9 @@ async fn assert_open_document_artifact_recovery_inner(
         json!({"sessionId":session}),
     )
     .await;
-    journal_editor_settlement(&b_scratch, workspace, settled["momentId"].as_str().unwrap());
+    if !integrated {
+        journal_editor_settlement(&b_scratch, workspace, settled["momentId"].as_str().unwrap());
+    }
     if tail {
         call(&b_transport, &b, &mut b_id, "ydoc.recordUpdate", json!({"sessionId":session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(13," tail"))})).await;
     }
@@ -1123,6 +1126,57 @@ async fn assert_open_document_artifact_recovery_inner(
         std::fs::read_to_string(a_scratch.path().join(path)).unwrap(),
         "Before"
     );
+    if integrated {
+        // Drain u1 into the live CRDT and publish the merged local/remote projection.
+        a_id += 1;
+        let resync = ProtocolEngineService::call(
+            a_service.as_ref(),
+            RequestContext::unbounded().with_capability("blobs"),
+            request(
+                a_id,
+                "ydoc.resync",
+                Some(a.clone()),
+                json!({"sessionId":session_a}),
+            ),
+        )
+        .await
+        .unwrap();
+        let merged = Ydoc::wire();
+        merged.apply(&resync.blob_egress.unwrap().bytes).unwrap();
+        assert_eq!(merged.plaintext_string(), "Local: Before remote");
+        let db = Connection::open(engine_db_path(&a_scratch).unwrap()).unwrap();
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert!(
+            db.query_row(
+                "SELECT head_update_seq=settled_update_seq FROM ydoc_docs WHERE path=?1",
+                [path],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap()
+        );
+        journal_editor_settlement(&b_scratch, workspace, settled["momentId"].as_str().unwrap());
+        call(
+            &b_transport,
+            &b,
+            &mut b_id,
+            "sync.push",
+            json!({"workspaceId":workspace}),
+        )
+        .await;
+        publish_pushed_ops(&relay, workspace, &b_scratch);
+        pull_materialize_and_commit(&a_transport, &a, &mut a_id, workspace).await;
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM ydoc_pending_artifacts", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
     let c_scratch = ScratchDir::new().unwrap();
     let c_transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let c = open_uncaptured_workspace(&c_transport, &c_scratch, &relay, workspace).await;
@@ -1168,14 +1222,15 @@ async fn assert_open_document_artifact_recovery_inner(
     let pending_attempt = exit.starts_with("pending-");
     if pending_attempt {
         let db = Connection::open(engine_db_path(&a_scratch).unwrap()).unwrap();
-        // Model the durable queue after a live resync, with its file write still pending.
-        db.execute("DELETE FROM ydoc_deferred_updates", []).unwrap();
+        // The real live resync above integrated u1. Reset its completed write to pending.
         db.execute("UPDATE ydoc_docs SET settle_prior_update_seq=0,settle_seq=(SELECT m.moment_order FROM moments m JOIN snapshots s ON s.latest_moment_id=m.moment_id WHERE s.path=?1)", [path]).unwrap();
         db.execute("INSERT INTO materialization_jobs(job_id,target_path,content_sha256,preimage_present,target_generation,created_at_ms,workspace_id) SELECT 'ydoc-mat_'||latest_moment_id,path,blob_sha256,1,999,0,workspace_id FROM snapshots WHERE path=?1 ON CONFLICT(job_id) DO UPDATE SET status='pending',completed_at_ms=NULL", [path]).unwrap();
     }
     let exit = match exit {
         "pending-pull" => "evict",
-        "pending-open" => "workspace-close",
+        "pending-open" | "integrated-open" => "workspace-close",
+        "integrated-pull" => "evict",
+        "integrated-crash" => "crash",
         other => other,
     };
     match exit {
@@ -1202,14 +1257,50 @@ async fn assert_open_document_artifact_recovery_inner(
         }
         _ => unreachable!(),
     }
-    if pending_attempt {
+    if integrated {
+        if pending_attempt && exit == "evict" {
+            pull_materialize_and_commit(&a_transport, &a, &mut a_id, workspace).await;
+            let db = Connection::open(engine_db_path(&a_scratch).unwrap()).unwrap();
+            assert_eq!(
+                db.query_row(
+                    "SELECT last_attempt_state FROM ydoc_pending_artifacts",
+                    [],
+                    |r| r.get::<_, Option<String>>(0)
+                )
+                .unwrap(),
+                None
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT COUNT(*) FROM replication_pending_refusals",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            call(&a_transport, &a, &mut a_id, "workspace.close", json!({})).await;
+            a = open_uncaptured_workspace(&a_transport, &a_scratch, &relay, workspace).await;
+        }
+        if pending_attempt {
+            let db = Connection::open(engine_db_path(&a_scratch).unwrap()).unwrap();
+            assert_eq!(db.query_row("SELECT j.status FROM materialization_jobs j JOIN snapshots s ON j.job_id='ydoc-mat_'||s.latest_moment_id WHERE s.path=?1",[path],|r|r.get::<_,String>(0)).unwrap(),"complete");
+        }
+        // workspace.open has replayed the pending file job; pull reconciles the attempt.
         pull_materialize_and_commit(&a_transport, &a, &mut a_id, workspace).await;
         let db = Connection::open(engine_db_path(&a_scratch).unwrap()).unwrap();
         assert_eq!(
             db.query_row("SELECT COUNT(*) FROM ydoc_pending_artifacts", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
-            1
+            0,
+            "completed live projection must release the mark"
+        );
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
         );
         assert_eq!(
             db.query_row(
@@ -1220,20 +1311,27 @@ async fn assert_open_document_artifact_recovery_inner(
             .unwrap(),
             0
         );
-        assert_eq!(
-            db.query_row(
-                "SELECT last_attempt_state FROM ydoc_pending_artifacts",
-                [],
-                |r| r.get::<_, Option<String>>(0)
-            )
-            .unwrap(),
-            None
-        );
+        assert_eq!(db.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON s.blob_sha256=b.sha256 WHERE s.path=?1", [path], |r|r.get::<_,String>(0)).unwrap(),"Local: Before remote");
+        if exit == "evict" && !pending_attempt {
+            // Live resync already queued this projection's ordinary file job.
+            // Reopening runs the production materialization replay for that job.
+            call(&a_transport, &a, &mut a_id, "workspace.close", json!({})).await;
+            a = open_uncaptured_workspace(&a_transport, &a_scratch, &relay, workspace).await;
+        }
         assert_eq!(
             std::fs::read_to_string(a_scratch.path().join(path)).unwrap(),
-            "Before"
+            "Local: Before remote"
+        );
+        pull_materialize_and_commit(&a_transport, &a, &mut a_id, workspace).await;
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM ydoc_pending_artifacts", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
         );
         call(&a_transport, &a, &mut a_id, "workspace.close", json!({})).await;
+        call(&b_transport, &b, &mut b_id, "workspace.close", json!({})).await;
+        call(&c_transport, &c, &mut c_id, "workspace.close", json!({})).await;
         return;
     }
     if exit != "evict" && !local_edit && !broken {
@@ -4015,9 +4113,22 @@ async fn ended_session_failure_does_not_block_workspace_open() {
 
 #[tokio::test]
 async fn ended_session_pending_attempt_empty_queue_at_pull() {
-    assert_open_document_artifact_recovery_inner("pending-pull", false, false, false).await;
+    assert_open_document_artifact_recovery_inner("pending-pull", true, false, false).await;
 }
 #[tokio::test]
 async fn ended_session_pending_attempt_empty_queue_at_workspace_open() {
-    assert_open_document_artifact_recovery_inner("pending-open", false, false, false).await;
+    assert_open_document_artifact_recovery_inner("pending-open", true, false, false).await;
+}
+
+#[tokio::test]
+async fn ended_session_integrated_empty_queue_at_pull() {
+    assert_open_document_artifact_recovery_inner("integrated-pull", true, false, false).await;
+}
+#[tokio::test]
+async fn ended_session_integrated_empty_queue_at_workspace_open() {
+    assert_open_document_artifact_recovery_inner("integrated-open", true, false, false).await;
+}
+#[tokio::test]
+async fn ended_session_integrated_empty_queue_after_crash() {
+    assert_open_document_artifact_recovery_inner("integrated-crash", true, false, false).await;
 }

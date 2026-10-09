@@ -2462,15 +2462,15 @@ fn assert_durable_update_refusals_after_dismissal(engine: &mut EngineStore) {
 
 #[test]
 fn parked_inactive_invalid_update_keeps_refused_disposition_after_dismissal() {
-    assert_parked_inactive_refusal(true);
+    assert_parked_inactive_refusal(true, 0);
 }
 
 #[test]
 fn parked_inactive_oversized_update_keeps_refused_disposition_after_dismissal() {
-    assert_parked_inactive_refusal(false);
+    assert_parked_inactive_refusal(false, 0);
 }
 
-fn assert_parked_inactive_refusal(collision: bool) {
+fn assert_parked_inactive_refusal(collision: bool, waiting: u8) {
     let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let source = dohc_engine_collab::Ydoc::wire();
@@ -2557,6 +2557,45 @@ fn assert_parked_inactive_refusal(collision: bool) {
         parked.primary,
         ApplyDisposition::Applied(YdocApplyResult { deferred: true, .. })
     ));
+    if waiting != 0 {
+        if waiting == 2 {
+            let current_delta = replacement.plaintext_insert(1, " tail");
+            let sha = engine.put_binary_blob(&current_delta).unwrap();
+            let mut active = delta.clone();
+            active.origin_id = "current-peer".into();
+            active.relay_seq = Some(111);
+            active.payload["lineageClaimId"] = json!(replacement_sha);
+            active.payload["updateBlobSha256"] = json!(sha);
+            apply_ydoc_envelope(
+                &mut engine,
+                &mut Default::default(),
+                &active,
+                &NoFaults,
+                &crate::ydoc_apply::AlwaysLive,
+            )
+            .unwrap();
+        }
+        engine.write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE ydoc_docs SET settle_prior_update_seq=0,settle_seq=(SELECT m.moment_order FROM moments m JOIN snapshots s ON s.latest_moment_id=m.moment_id WHERE s.object_id='inactive-refusal')", []).unwrap();
+            tx.execute("INSERT INTO materialization_jobs(job_id,target_path,content_sha256,preimage_present,target_generation,created_at_ms,workspace_id) SELECT 'ydoc-mat_'||latest_moment_id,path,blob_sha256,1,999,0,workspace_id FROM snapshots WHERE object_id='inactive-refusal' ON CONFLICT(job_id) DO UPDATE SET status='pending',completed_at_ms=NULL", []).unwrap();
+            Ok::<_,SyncError>(())
+        }).unwrap();
+        let drained = crate::ydoc_apply::drain_deferred_ydoc_for_ended_session(
+            &mut engine,
+            &mut Default::default(),
+            &key,
+            &NoLiveLeases,
+            &NoFaults,
+        )
+        .unwrap();
+        assert_eq!(
+            drained.refusals.len(),
+            1,
+            "waiting must return committed inactive refusals"
+        );
+        assert_eq!(drained.drained, 0);
+        return;
+    }
     let drained =
         crate::drain_deferred_ydoc_for_key(&mut engine, &mut Default::default(), &key, &NoFaults)
             .unwrap();
@@ -2566,4 +2605,13 @@ fn assert_parked_inactive_refusal(collision: bool) {
         "collision={collision}: {drained:?}"
     );
     assert_durable_update_refusals_after_dismissal(&mut engine);
+}
+
+#[test]
+fn ydoc_drain_waiting_empty_queue_returns_inactive_refusals() {
+    assert_parked_inactive_refusal(true, 1);
+}
+#[test]
+fn ydoc_drain_waiting_nonempty_queue_returns_inactive_refusals() {
+    assert_parked_inactive_refusal(true, 2);
 }

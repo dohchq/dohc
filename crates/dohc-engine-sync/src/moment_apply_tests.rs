@@ -6751,7 +6751,7 @@ fn open_document_parked_successor_still_holds() {
     assert_open_document_exclusion("parked-successor");
 }
 
-fn ended_recovery_fixture() -> (ScratchDir, EngineStore, DocKey, Ydoc, String) {
+pub(crate) fn ended_recovery_fixture() -> (ScratchDir, EngineStore, DocKey, Ydoc, String) {
     let (scratch, mut store) = test_store();
     let key = DocKey::new("ws", "main", "object").unwrap();
     let doc = Ydoc::wire();
@@ -7099,4 +7099,43 @@ fn ended_recovery_retries_inserted_durable_update_blob() {
     );
     let remaining:i64=store.read_with(|conn|conn.query_row("SELECT (SELECT COUNT(*) FROM ydoc_pending_artifacts)+(SELECT COUNT(*) FROM ydoc_deferred_updates)+(SELECT COUNT(*) FROM replication_pending_refusals)", [], |r|r.get(0))).unwrap();
     assert_eq!(remaining, 0);
+}
+
+#[test]
+fn ended_recovery_notice_is_not_an_operation_refusal() {
+    let (_scratch, mut store, _, _, _) = ended_recovery_fixture();
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE replication_log SET payload_json='{}' WHERE origin_seq=1",
+                [],
+            )
+            .unwrap();
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    recover_ended(&mut store).unwrap();
+    assert_eq!(
+        crate::refusal_notices::list_refusal_notices(&store, "ws")
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        crate::apply::read_pending_refusals(&store, "ws")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn ended_recovery_restore_fence_waits_without_notice_or_fingerprint() {
+    let (_scratch, mut store, _, _, _) = ended_recovery_fixture();
+    store.write_with(&NoFaults, |tx| {
+        tx.execute("INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES ('ws','main','object','relay','restore','{}','{}')",[]).unwrap();
+        Ok::<_,SyncError>(())
+    }).unwrap();
+    recover_ended(&mut store).unwrap();
+    let result:(i64,Option<String>,i64)=store.read_with(|conn| conn.query_row("SELECT (SELECT COUNT(*) FROM replication_pending_refusals),last_attempt_state,(SELECT COUNT(*) FROM ydoc_deferred_updates) FROM ydoc_pending_artifacts",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))).unwrap();
+    assert_eq!(result, (0, None, 1));
 }
