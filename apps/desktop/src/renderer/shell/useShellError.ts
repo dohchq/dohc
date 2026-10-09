@@ -282,6 +282,7 @@ export function useShellError(workspaceId: string) {
       details?: ReadonlyArray<ErrorDetailField>;
       retry?: (() => void) | null;
       onDismiss?: () => void;
+      action?: ShellError["action"];
       kind?: ShellErrorKind;
       identity?: string;
     }) => {
@@ -297,6 +298,7 @@ export function useShellError(workspaceId: string) {
         retry: failure.retry ?? null,
         ...(details.length ? { details } : {}),
         ...(failure.onDismiss ? { onDismiss: failure.onDismiss } : {}),
+        ...(failure.action ? { action: failure.action } : {}),
         ...(failure.kind ? { kind: failure.kind } : {}),
         ...(failure.identity !== undefined ? { identity: failure.identity } : {}),
       });

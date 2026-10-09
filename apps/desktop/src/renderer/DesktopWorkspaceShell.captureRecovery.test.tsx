@@ -12,7 +12,7 @@ import { DesktopWorkspaceShell, OTHER_WORKSPACE, WORKSPACE, makeBridge, renderSh
 
 const PATH = "notes/plan.md";
 const RECOVERY = {
-  momentId: "moment-capture-recovery-a", versionId: "main", objectId: "object-plan", path: PATH, captureMomentId: "capture-a",
+  momentId: "moment-capture-recovery-a", versionId: "main", objectId: "object-plan", path: PATH, captureMomentId: "capture-a", deleted: false,
 };
 const RECOVERY_MOMENT: EngineMomentRecord = {
   id: RECOVERY.momentId, versionId: "main", path: PATH, recordedAtMs: 100, operation: "write", origin: "capture-recovery", momentOrder: 2,

@@ -2249,6 +2249,7 @@ export function createWorkspaceEngineCapture(
     let checkpointTimer: ReturnType<typeof setTimeout> | null = null;
     const checkpointId = randomUUID();
     let lastCheckpoint: OutageTypingCheckpoint | null = null;
+    let checkpointRevision = 0;
     const checkpointSnapshot = (): OutageTypingCheckpoint | null => {
       if (!checkpointBase || !canonicalDoc || !sessionObjectId || !options.writeTypingCheckpoint) return null;
       if (checkpointContentKind === "scene") return null;
@@ -2269,20 +2270,26 @@ export function createWorkspaceEngineCapture(
     const checkpointTypingIsDurable = (): boolean => canonicalDoc !== null &&
       pendingRecords.size === 0 && queuedOriginals.size === 0 &&
       Buffer.from(Y.encodeStateAsUpdate(canonicalDoc)).equals(Buffer.from(Y.encodeStateAsUpdate(recordedDoc)));
+    const retireLastCheckpoint = async (): Promise<void> => {
+      const retired = lastCheckpoint;
+      if (retired) await options.retireTypingCheckpoint?.(retired);
+      if (lastCheckpoint === retired) lastCheckpoint = null;
+    };
     const flushCheckpoint = (): Promise<void> => {
       if (checkpointTimer !== null) { clearTimeout(checkpointTimer); checkpointTimer = null; }
       if(checkpointBase && checkpointContentKind === "scene" && !checkpointTypingIsDurable()) {const error=new DrawingCheckpointUnavailable(); options.onTypingCheckpointFailure?.(input.path,error); return Promise.reject(error);}
       const snapshot = checkpointSnapshot();
       if (!snapshot) return checkpointChain;
       const durable = checkpointTypingIsDurable();
+      const revision = ++checkpointRevision;
       const pending = checkpointChain.catch(() => undefined).then(async () => {
+        if (revision !== checkpointRevision) return;
         if (durable) {
-          if (lastCheckpoint) await options.retireTypingCheckpoint?.(lastCheckpoint);
-          lastCheckpoint = null;
+          await retireLastCheckpoint();
           return;
         }
         await options.writeTypingCheckpoint!(snapshot);
-        lastCheckpoint = snapshot;
+        if (revision === checkpointRevision) lastCheckpoint = snapshot;
       });
       checkpointChain = pending;
       return pending;
@@ -2304,15 +2311,15 @@ export function createWorkspaceEngineCapture(
       if(checkpointTimer !== null){clearTimeout(checkpointTimer);checkpointTimer=null;}
       if(checkpointBase && checkpointContentKind === "scene" && !checkpointTypingIsDurable()) throw new DrawingCheckpointUnavailable();
       if(checkpointTypingIsDurable()) return;
-      const snapshot=checkpointSnapshot(); if(snapshot){options.writeTypingCheckpointSync?.(snapshot);lastCheckpoint=snapshot;}
+      const snapshot=checkpointSnapshot(); if(snapshot){options.writeTypingCheckpointSync?.(snapshot);checkpointRevision += 1;lastCheckpoint=snapshot;}
     };
-    const unregisterCheckpoint = registerTypingCheckpoint(workspaceId,flushCheckpoint,()=>checkpointBase !== null && !checkpointTypingIsDurable(),{versionId:input.versionId,path:input.path,objectId:()=>sessionObjectId},flushCheckpointSync,()=>checkpointBase !== null);
+    const unregisterCheckpoint = registerTypingCheckpoint(workspaceId,flushCheckpoint,()=>checkpointBase !== null && !checkpointTypingIsDurable(),{checkpointId,path:input.path},flushCheckpointSync,()=>checkpointBase !== null);
     const retireCheckpointIfDurable = (): void => {
       if (!checkpointBase || !checkpointTypingIsDurable()) return;
       options.onTypingCheckpointRecovered?.(input.path);
       if (!dead && current !== null) checkpointBase = null;
       if (checkpointTimer !== null) {clearTimeout(checkpointTimer); checkpointTimer = null;}
-      checkpointChain = checkpointChain.catch(() => undefined).then(async () => {if (lastCheckpoint) await options.retireTypingCheckpoint?.(lastCheckpoint); lastCheckpoint = null;});
+      checkpointChain = checkpointChain.catch(() => undefined).then(retireLastCheckpoint);
     };
     let queuedUpdateBytes = 0;
     let queuedUpdateCount = 0;

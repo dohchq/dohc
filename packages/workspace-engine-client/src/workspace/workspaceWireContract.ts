@@ -1272,6 +1272,7 @@ const WorkspaceResultSchemas = {
       objectId: Schema.NonEmptyString,
       path: Schema.NonEmptyString,
       captureMomentId: Schema.NonEmptyString,
+      deleted: Schema.Boolean,
     }))),
   }),
   [WORKSPACE_METHOD.captureClearRecovery]: mutableStruct({ cleared: Schema.Boolean }),

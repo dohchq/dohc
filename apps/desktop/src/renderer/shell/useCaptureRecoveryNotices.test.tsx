@@ -18,7 +18,7 @@ afterEach(() => {
 
 type Recovery = CaptureRecoveryStatusResult["captureRecoveries"][number];
 const RECOVERY: Recovery = {
-  momentId: "moment-capture-recovery-a", versionId: "main", objectId: "object-a", path: "notes/rich.md", captureMomentId: "capture-a",
+  momentId: "moment-capture-recovery-a", versionId: "main", objectId: "object-a", path: "notes/rich.md", captureMomentId: "capture-a", deleted: false,
 };
 // What main sends when History Restore refuses a file whose live binding is
 // active: the engine's refusal, as the capture layer words it.
@@ -222,4 +222,8 @@ describe("useCaptureRecoveryNotices", () => {
     await act(async () => answers[1]!.resolve({ captureRecoveries: [{ ...RECOVERY, momentId: "moment-capture-recovery-b" }] }));
     expect(recoveryRows(h).map((row) => row.identity)).toEqual(["capture-recovery:moment-capture-recovery-b"]);
   });
+});
+
+it("names deletion and the recovery Restore that recreates the file", () => {
+ expect(captureRecoveryMessage("notes/deleted.md",false,true)).toBe('The file "notes/deleted.md" was deleted. Your typing is in History. Open the recovery change and choose Restore to recreate the file.');
 });

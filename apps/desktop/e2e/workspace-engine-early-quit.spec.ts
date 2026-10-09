@@ -15,7 +15,7 @@ async function checkpointText(home: string): Promise<string> {
   return (await Promise.all(names.filter(n => n.endsWith(".json")).map(n => readFile(join(directory, n), "utf8")))).join(" ");
 }
 
-for (const mode of ["quit", "last-window", "crash", "outside-edit", "deleted-file", "write-failure", "refused-import"] as const) {
+for (const mode of ["quit", "last-window", "crash", "crash-reopen-before-import", "outside-edit", "deleted-file", "write-failure", "refused-import"] as const) {
   test("outage typing survives " + mode + " before replacement publication", async () => {
     test.setTimeout(120_000);
     const temp = await createTempWorkspace();
@@ -23,6 +23,7 @@ for (const mode of ["quit", "last-window", "crash", "outside-edit", "deleted-fil
     const path = "note.md";
     const gate = join(temp.baseDir, "publication.gate");
     const recovery = join(temp.homeDir, "live-draft-recovery");
+    const importGate = join(temp.baseDir, "typing-import.gate");
     try {
       await writeWorkspaceFiles(temp, [{path, contents: "# Note\n\nAnchor.\n"}]);
       await writeFile(gate, "gate");
@@ -71,13 +72,13 @@ for (const mode of ["quit", "last-window", "crash", "outside-edit", "deleted-fil
       // Electron owns the unload veto; Playwright only observes the dialog.
       page.on("dialog", () => undefined);
       const exited = new Promise<void>(resolve => app.process().once("exit", () => resolve()));
-      if (mode === "crash") await hardKillAppTree(app.process().pid!);
+      if (mode === "crash" || mode === "crash-reopen-before-import") await hardKillAppTree(app.process().pid!);
       else if (mode === "last-window") {
         const window = await app.browserWindow(page);
         await window.evaluate(window => {setImmediate(() => window.close());});
       } else await app.evaluate(({app}) => app.quit());
       await exited;
-      if (mode === "crash") await expect(desktop.close()).rejects.toThrow(/Electron exited with (status|signal)/);
+      if (mode === "crash" || mode === "crash-reopen-before-import") await expect(desktop.close()).rejects.toThrow(/Electron exited with (status|signal)/);
       else await desktop.close();
       desktop = null;
       await rm(gate, {force: true});
@@ -92,24 +93,39 @@ for (const mode of ["quit", "last-window", "crash", "outside-edit", "deleted-fil
         checkpoint.updates[0].attribution = {actorKind: "human", onBehalfOf: "local-person", depth: 0};
         await writeFile(file, JSON.stringify(checkpoint));
       }
-      desktop = await launchDesktopApp({workspace: temp});
+      if (mode === "crash-reopen-before-import") await writeFile(importGate,"held");
+      desktop = await launchDesktopApp({workspace: temp, env: mode === "crash-reopen-before-import" ? {DOHC_TEST_TYPING_IMPORT_GATE:importGate} : {}});
       const reopened = await openWorkspaceFromFirstRun(desktop.page, temp);
       if (mode !== "deleted-file") await waitForWorkspaceFile(desktop.page, reopened.workspaceId, path);
+      if (mode === "crash-reopen-before-import") {
+        await expect.poll(()=>access(importGate+".waiting").then(()=>true,()=>false)).toBe(true);
+        await explorerRow(desktop.page,path).click();
+        await expect.poll(()=>access(importGate+".opened").then(()=>true,()=>false)).toBe(true);
+        expect(await checkpointText(temp.homeDir)).toContain(sentinels[2]!);
+        await rm(importGate);
+      }
       await test.info().attach("reopened-lineage", {body: JSON.stringify(await withEngineDb(temp.rootPath, db => ({docs: db.prepare("SELECT * FROM ydoc_docs").all(), moments: db.prepare("SELECT moment_id, metadata_origin FROM moments").all()}))), contentType: "application/json"});
       if (mode === "refused-import") {
         await desktop.page.getByTestId("notice-center-toggle").click();
         await expect(desktop.page.getByTestId("notice-center").getByText(AUTHOR_REFUSED_MESSAGE, {exact: true})).toHaveCount(1);
         expect(await checkpointText(temp.homeDir)).toContain(sentinels[2]!);
+        await desktop.page.getByTestId("notice-center").getByRole("button",{name:"Copy your typing",exact:true}).click();
+        await expect.poll(()=>desktop!.app.evaluate(({clipboard})=>clipboard.readText())).toContain(sentinels[2]!);
+        await expect.poll(()=>checkpointText(temp.homeDir)).toBe("");
         return;
       }
       if (mode === "deleted-file") {
         const recoveryStatus = () => desktop!.page.evaluate(async workspaceId =>
           (window as unknown as {dohcDesktop: DohcDesktopBridge}).dohcDesktop.getCaptureRecoveryStatus({workspaceId}), reopened.workspaceId);
         await expect.poll(async () => (await recoveryStatus()).captureRecoveries.length).toBe(1);
-        const momentId = (await recoveryStatus()).captureRecoveries[0]!.momentId;
+        const record = (await recoveryStatus()).captureRecoveries[0]!;
+        expect(record.deleted).toBe(true);
+        const momentId = record.momentId;
+        await expect(desktop.page.getByTestId("workspace-shell-notice").filter({hasText:`The file "${path}" was deleted.`})).toHaveCount(1);
         await expect.poll(() => checkpointText(temp.homeDir)).toBe("");
         await expect(access(join(temp.rootPath, path))).rejects.toThrow();
         await openHistoryView(desktop.page);
+        await expect(desktop.page.getByTestId("engine-history-list").getByText("Typing kept",{exact:true})).toHaveCount(1);
         await desktop.page.locator(`[data-testid="engine-moment-open"][data-moment-id="${momentId}"]`).click();
         await expect(desktop.page.getByTestId("engine-diff-lines")).toContainText(sentinels[2]!);
         await desktop.page.getByTestId("engine-diff-copy-typing").click();
@@ -118,13 +134,15 @@ for (const mode of ["quit", "last-window", "crash", "outside-edit", "deleted-fil
         await desktop.page.getByTestId("engine-diff-confirm-restore").click();
         await expect(desktop.page.getByTestId("engine-diff-restore-status")).toContainText("Restored the earlier state");
         await expect.poll(() => readFile(join(temp.rootPath, path), "utf8")).toContain(sentinels[2]!);
+        const restored = await readFile(join(temp.rootPath,path),"utf8");
+        for(const sentinel of sentinels) expect(restored.split(sentinel).length-1).toBe(1);
       } else if (mode === "outside-edit") {
         await expect.poll(() => withEngineDb(temp.rootPath, db => db.prepare(
           "SELECT b.text AS before_text FROM moments m JOIN blobs b ON b.sha256=m.payload_before_blob_sha256 WHERE m.metadata_origin='capture-recovery'"
         ).all())).toEqual(expect.arrayContaining([expect.objectContaining({before_text: expect.stringContaining(sentinels[2]!)})]));
         expect(await readFile(join(temp.rootPath, path), "utf8")).toBe("# Outside\n\nOUTSIDE_WINS\n");
       } else {
-        await explorerRow(desktop.page, path).click();
+        if(mode !== "crash-reopen-before-import") await explorerRow(desktop.page, path).click();
         const recoveredEditor = desktop.page.getByTestId("markdown-editor");
         for (const sentinel of sentinels) await expect(recoveredEditor).toContainText(sentinel);
         const text = await recoveredEditor.innerText();
@@ -136,6 +154,7 @@ for (const mode of ["quit", "last-window", "crash", "outside-edit", "deleted-fil
       await expect.poll(() => checkpointText(temp.homeDir)).toBe("");
     } finally {
       await rm(gate, {force: true});
+      await rm(importGate, {force:true});
       await cleanupDesktopWorkspace(desktop, temp);
     }
   });

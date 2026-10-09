@@ -249,7 +249,7 @@ describe("workspace engine IPC registrations", () => {
   it("reads and persistently dismisses capture recovery only for this renderer's workspace", async () => {
     const h = await harness();
     const bridge = operationBridge(captureRecoveryOperations, async (channel, payload) => h.invoke(channel, payload));
-    const recovery = { momentId: "recovery", versionId: "main", objectId: "object", path: "notes/a.md", captureMomentId: "capture" };
+    const recovery = { momentId: "recovery", versionId: "main", objectId: "object", path: "notes/a.md", captureMomentId: "capture", deleted: false };
     h.adapter.watcherStatus.mockResolvedValue({ running: true, degraded: false, terminal: false, phase: "ready", noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [recovery] });
     expect(await bridge.getCaptureRecoveryStatus({workspaceId: "workspace"})).toEqual({ captureRecoveries: [recovery] });
     expect(await bridge.clearCaptureRecovery({workspaceId: "workspace", momentId: "recovery"})).toBeUndefined();

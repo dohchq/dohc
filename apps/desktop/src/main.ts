@@ -2,7 +2,7 @@ import { createTypingQuitRecovery } from "./workspaces/typingQuitRecovery";
 import { writeTypingCheckpointSync, typingRecoveryFailure, hasUnresolvedTypingCheckpoints, flushTypingCheckpoints, writeTypingCheckpoint, readTypingCheckpoints, retireTypingCheckpoint, importTypingCheckpoints, type TypingRecoveryFailure } from "./workspaces/outageTypingRecovery";
 import { liveDraftRecoveryOperations } from "./ipc/bridgeContract";
 import { SharedDocumentWaitingError } from "./ipc/sharedDocumentOpenState";
-import { net } from "electron";
+import { net, clipboard } from "electron";
 import { writeWorkspaceFilesAs } from "./workspaces/workspaceFileWrites";
 import { createDesktopAutomationControls } from "./workspaces/desktopAutomationControls";
 import {parseDohcSiteConfig} from "@dohc/workspace-core";
@@ -116,7 +116,7 @@ import {
   type IpcMainEvent,
   type WebContents,
 } from "electron";
-import { existsSync, realpathSync, statSync } from "node:fs";
+import { watch, existsSync, realpathSync, statSync } from "node:fs";
 import { lstat, mkdir, readdir, writeFile } from "node:fs/promises";
 import { hostname, release as osRelease, type as osType } from "node:os";
 import { dirname, join, posix } from "node:path";
@@ -2195,7 +2195,7 @@ const typingQuitRecovery=createTypingQuitRecovery({
  hasWindows:()=>desktopWindows.workspaceWindows.allLive().length > 0,
  unresolved:hasUnresolvedTypingCheckpoints,flush:flushTypingCheckpoints,quit:()=>app.quit(),beforeQuit:event=>quitGuard.beforeQuit(event),
  confirmLoss:async()=>{const drawing=[...typingRecoveryFailures.values()].some(rows=>[...rows.values()].some(f=>f.reason === "drawing-unavailable"));
- const answer=await dialog.showMessageBox({type:"warning",title:drawing ? "Quit without your drawing changes?" : "Quit without your typing?",message:drawing ? "dohc could not keep your drawing changes on this computer." : "dohc could not keep your typing on this computer.",detail:drawing ? "Your drawing changes since the last saved copy are lost when dohc quits." : "Your typing since the last kept copy is lost when dohc quits.",buttons:["Go back","Quit anyway"],defaultId:0,cancelId:0});return answer.response === 1;},
+ const answer=await dialog.showMessageBox({type:"warning",title:drawing ? "Quit without your drawing changes?" : "Quit without your typing?",message:drawing ? "dohc could not keep your drawing changes on this computer." : "dohc could not keep your typing on this computer.",detail:drawing ? "Your drawing changes since the last saved copy are lost when dohc quits." : "Any typing dohc has not kept is lost when it quits.",buttons:["Go back","Quit anyway"],defaultId:0,cancelId:0});return answer.response === 1;},
 });
 function beforeQuitWithTypingRecovery(event:{preventDefault():void}):void {typingQuitRecovery.beforeQuit(event);}
 
@@ -2204,14 +2204,24 @@ const typingRecoveryImports = new Map<symbol, Promise<void>>();
 function reportTypingRecoveryFailure(workspaceId: string, failure: TypingRecoveryFailure): void {
   let failures = typingRecoveryFailures.get(workspaceId);
   if (!failures) {failures = new Map(); typingRecoveryFailures.set(workspaceId, failures);}
-  failures.set(failure.kind + ":" + failure.path, failure);
+  failures.set(failure.kind + ":" + (failure.checkpointId ?? failure.path), failure);
   notifyRenderer({workspaceId});
 }
 function recoverOutageTyping(workspace: CreatedWorkspace & {attachmentId: symbol}): Promise<void> {
   const current = () => workspaceAuthorities.isCurrentAttachment(workspace.workspaceId, workspace.attachmentId);
   const existing = typingRecoveryImports.get(workspace.attachmentId);
   if (existing) return existing;
-  const pending = importTypingCheckpoints(join(stateDir(), "live-draft-recovery"), workspace.workspaceId,
+  const pending = (async () => {
+    const gate = process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged ? process.env.DOHC_TEST_TYPING_IMPORT_GATE : undefined;
+    if (gate && existsSync(gate)) {
+      await writeFile(gate + ".waiting", "waiting");
+      await new Promise<void>((resolve, reject) => {
+        const watcher = watch(dirname(gate), () => {if (!existsSync(gate)) {watcher.close(); resolve();}});
+        watcher.on("error", reject);
+        if (!existsSync(gate)) {watcher.close(); resolve();}
+      });
+    }
+    return importTypingCheckpoints(join(stateDir(), "live-draft-recovery"), workspace.workspaceId,
     async input => {
       if (!current()) throw new Error("Workspace changed before typing recovery.");
       const result = await requireEngineSessions().withRetryBudget(120_000, () => requireEngineSessions().run(workspace, async binding => new VersionedLiveAdapter(binding.client, binding.workspace, {workspaceId: workspace.workspaceId}).importRecovery(input), {retryTransportErrors: true}));
@@ -2219,8 +2229,9 @@ function recoverOutageTyping(workspace: CreatedWorkspace & {attachmentId: symbol
       return result;
     },
     failure => {if (current()) reportTypingRecoveryFailure(workspace.workspaceId, failure);},
-    path => {if (current()) {typingRecoveryFailures.get(workspace.workspaceId)?.delete("import:" + path); notifyRenderer({workspaceId: workspace.workspaceId});}},
-  ).catch(error => {if (current()) reportTypingRecoveryFailure(workspace.workspaceId, {kind: "import", path: "", detail: String(error)});}).finally(() => typingRecoveryImports.delete(workspace.attachmentId));
+    (path, checkpointId) => {if (current()) {typingRecoveryFailures.get(workspace.workspaceId)?.delete("import:" + checkpointId); notifyRenderer({workspaceId: workspace.workspaceId});}},
+  );
+  })().catch(error => {if (current()) reportTypingRecoveryFailure(workspace.workspaceId, {kind: "import", path: "", detail: String(error)});}).finally(() => typingRecoveryImports.delete(workspace.attachmentId));
   typingRecoveryImports.set(workspace.attachmentId, pending);
   return pending;
 }
@@ -2251,7 +2262,11 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
       requireEngineSessions(),
       {
         ...testCaptureSeams(),
-        waitForTypingRecovery: () => recoverOutageTyping(workspace),
+        waitForTypingRecovery: async () => {
+          const gate = process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged ? process.env.DOHC_TEST_TYPING_IMPORT_GATE : undefined;
+          if (gate && existsSync(gate)) await writeFile(gate + ".opened", "registered");
+          await recoverOutageTyping(workspace);
+        },
         writeTypingCheckpoint: async checkpoint => {
           try {
             await writeTypingCheckpoint(join(stateDir(), "live-draft-recovery"), checkpoint);
@@ -6288,7 +6303,16 @@ function registerIpcHandlers(): void {
   registerOperations(operationBoundary, liveDraftRecoveryOperations, {
     typingRecovery: async (input, {operation}) => {
       operation.assertCurrent();
-      if (input.action !== "read") await flushTypingCheckpoints(operation.workspace.workspaceId);
+      if (input.action === "copy" || input.action === "dismiss") {
+        const row = (await readTypingCheckpoints(join(stateDir(), "live-draft-recovery"), operation.workspace.workspaceId)).find(row => row.checkpoint.checkpointId === input.checkpointId);
+        operation.assertCurrent();
+        if (row) {
+          if (input.action === "copy") clipboard.writeText(row.checkpoint.text);
+          await retireTypingCheckpoint(row);
+        }
+        typingRecoveryFailures.get(operation.workspace.workspaceId)?.delete("import:" + input.checkpointId);
+        notifyRenderer({workspaceId: operation.workspace.workspaceId});
+      } else if (input.action !== "read") await flushTypingCheckpoints(operation.workspace.workspaceId);
       if (input.action === "retry") await recoverOutageTyping(operation.workspace);
       operation.assertCurrent();
       return [...(typingRecoveryFailures.get(operation.workspace.workspaceId)?.values() ?? [])];

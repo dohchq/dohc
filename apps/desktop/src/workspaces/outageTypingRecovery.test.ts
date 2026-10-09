@@ -4,7 +4,7 @@ import { expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { createTestScratch } from "./testTemp";
 import { hasRetainedLiveDraft } from "./liveDraftRecovery";
-import { typingRecoveryStateVectorSha256, writeTypingCheckpoint, readTypingCheckpoints, retireTypingCheckpoint, importTypingCheckpoints, flushTypingCheckpoints, flushTypingCheckpointsSync, writeTypingCheckpointSync, registerTypingCheckpoint, type OutageTypingCheckpoint } from "./outageTypingRecovery";
+import { typingRecoveryFailure, typingRecoveryStateVectorSha256, writeTypingCheckpoint, readTypingCheckpoints, retireTypingCheckpoint, importTypingCheckpoints, flushTypingCheckpoints, flushTypingCheckpointsSync, writeTypingCheckpointSync, registerTypingCheckpoint, type OutageTypingCheckpoint } from "./outageTypingRecovery";
 const checkpoint: OutageTypingCheckpoint = {version: 2, checkpointId: "session-checkpoint", workspaceId: "workspace", versionId: "main", objectId: "object", path: "note.md", expectedClaimId: "claim", expectedStateVectorSha256: "a".repeat(64), expectedDiskSha256: "b".repeat(64), text: "typing", updateBase64: "AAA=", admittedBaseBase64: "AAA=", updates: [{requestId: "original", updateBase64: "AAA=", actorOriginId: "person", attribution: {actorKind: "human", onBehalfOf: "person", depth: 0}}]};
 it("persists originals and admitted base before exit and replaces the same record during outage edits", async () => {
  const directory = await createTestScratch("typing-checkpoint-");
@@ -77,7 +77,7 @@ it("hashes state vectors in the engine's canonical client order", () => {
 it("leaves live-session checkpoints to their replay owner during a rebind",async()=>{
  const directory=await createTestScratch("typing-owned-");await writeTypingCheckpoint(directory,checkpoint);
  const importer=vi.fn(async()=>({committed:true as const,outcome:"imported" as const,momentId:"false-moment"}));const failure=vi.fn(),refresh=vi.fn();
- const unregister=registerTypingCheckpoint("workspace",async()=>{},()=>true,{versionId:"main",path:"note.md",objectId:()=>"object"});
+ const unregister=registerTypingCheckpoint("workspace",async()=>{},()=>true,{checkpointId:checkpoint.checkpointId,path:"note.md"});
  try {await importTypingCheckpoints(directory,"workspace",importer,failure,refresh);expect(importer).not.toHaveBeenCalled();expect(refresh).not.toHaveBeenCalled();expect(await readTypingCheckpoints(directory,"workspace")).toHaveLength(1);}finally{unregister();}
  await importTypingCheckpoints(directory,"workspace",importer,failure,refresh);expect(importer).toHaveBeenCalledOnce();
 });
@@ -97,4 +97,15 @@ it("keeps the final synchronous OS-end copy when an older async rewrite finishes
  const older=writeTypingCheckpoint(directory,{...checkpoint,text:"debounced"});
  const unregister=registerTypingCheckpoint("workspace",async()=>{},()=>true,undefined,()=>writeTypingCheckpointSync(directory,{...checkpoint,text:"final OS typing"}));
  try {flushTypingCheckpointsSync();await older;expect((await readTypingCheckpoints(directory,"workspace"))[0]!.checkpoint.text).toBe("final OS typing");}finally{unregister();}
+});
+
+it("imports a crash-left checkpoint while a new session owns the same open file", async () => {
+ const directory=await createTestScratch("typing-crash-reopen-"); await writeTypingCheckpoint(directory, checkpoint);
+ const unregister=registerTypingCheckpoint("workspace",async()=>{},()=>true,{checkpointId:"new-process-session",path:checkpoint.path});
+ const importer=vi.fn(async()=>({committed:true as const,outcome:"replayed" as const,momentId:null}));
+ try {await importTypingCheckpoints(directory,"workspace",importer,vi.fn(),vi.fn());expect(importer).toHaveBeenCalledOnce();expect(await readTypingCheckpoints(directory,"workspace")).toEqual([]);}finally{unregister();}
+});
+it("distinguishes malformed attribution from a remote human",()=>{
+ expect(typingRecoveryFailure("import","note.md",Error("invalid-author"))).toMatchObject({reason:"invalid-author",retryable:false});
+ expect(typingRecoveryFailure("import","note.md",Error("remote-human-author"))).toMatchObject({reason:"author-refused",retryable:false});
 });

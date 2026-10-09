@@ -13,7 +13,8 @@ export const CAPTURE_RECOVERY_TITLE = "Typing kept in History";
 // only changes the host accepted, and kept typing is in none of them, so the
 // way back for a shared file is to put the kept version in by hand, as
 // History Restore would. The outside change stays in History either way.
-export function captureRecoveryMessage(path: string, shared: boolean): string {
+export function captureRecoveryMessage(path: string, shared: boolean, deleted = false): string {
+  if (deleted) return `The file "${path}" was deleted. Your typing is in History. Open the recovery change and choose Restore to recreate the file.`;
   return shared
     ? `The file "${path}" changed outside dohc. Your typing is in History. The file is shared live, so replace its text with your version from the recovery change.`
     : `The file "${path}" changed outside dohc. Your typing is in History. Open the recovery change and choose Restore.`;
@@ -54,7 +55,7 @@ export function useCaptureRecoveryNotices(input: {
       momentId: recovery.momentId,
       path: recovery.path,
       title: CAPTURE_RECOVERY_TITLE,
-      message: captureRecoveryMessage(recovery.path, shared.has(recovery.path)),
+      message: captureRecoveryMessage(recovery.path, shared.has(recovery.path), recovery.deleted),
       raise: recovery.path === raised,
       open: () => latest.current.openRecovery(recovery.momentId, recovery.path),
       dismiss: () => clear(recovery),

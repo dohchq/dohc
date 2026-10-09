@@ -1,4 +1,4 @@
-import { flushTypingCheckpoints, isTypingSessionUnresolved, readTypingCheckpoints, retireTypingCheckpoint, writeTypingCheckpoint } from "./outageTypingRecovery";
+import { flushTypingCheckpointsSync, writeTypingCheckpointSync, flushTypingCheckpoints, isTypingSessionUnresolved, readTypingCheckpoints, retireTypingCheckpoint, writeTypingCheckpoint } from "./outageTypingRecovery";
 import * as Y from "yjs";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -8354,7 +8354,7 @@ it("warns before quit when drawing edits cannot enter a text checkpoint",async()
  const session=await capture.openYDocSession({path:"note.md",contentKind:"scene",onRemoteUpdate:()=>{}});const renderer=new Y.Doc();Y.applyUpdate(renderer,session.initialUpdate);
  onTestFinished(async()=>{state.daemonAlive=true;await capture.stop();renderer.destroy();});
  state.daemonAlive=false;typeInto(renderer,session,"DRAWING_OUTAGE");await expect(session.settleNow()).rejects.toThrow();
- await expect(flushTypingCheckpoints(workspaceId)).rejects.toThrow("Drawing changes cannot be kept during an engine outage.");expect(failure).toHaveBeenCalledWith("note.md",expect.any(Error));
+ await expect(flushTypingCheckpoints(workspaceId)).rejects.toThrow("dohc cannot keep drawing changes while it reconnects.");expect(failure).toHaveBeenCalledWith("note.md",expect.any(Error));
 });
 
 it("publishes unresolved typing before a gated replacement opens", async () => {
@@ -8386,4 +8386,23 @@ it("publishes unresolved typing before a gated replacement opens", async () => {
   typeInto(renderer, session, "GATED_TYPING");
   expect(isTypingSessionUnresolved(workspaceId, "note.md")).toBe(true);
   expect(states.at(-1)).toBe(true);
+});
+
+it("retires the final synchronous checkpoint after an aborted OS session end", async()=>{
+ const workspaceId="outage-aborted-os-end";
+ const {rootPath,sessions,openProvider,state}=await daemonDeathCapture("outage-aborted-os-end-",workspaceId);
+ const directory=join(rootPath,"recovery");let notifyDeath!:(error:unknown)=>void;
+ let entered!:()=>void;const writing=new Promise<void>(r=>{entered=r;});let release!:()=>void;const gate=new Promise<void>(r=>{release=r;});let held=false;
+ const capture=createWorkspaceEngineCapture({workspaceId,rootPath,rustEngineSessions:sessions,openRustYDocProviderSession:async options=>{notifyDeath=options.onSessionError!;return {...await openProvider(options),objectId:"object",versionId:"main"};},onError:()=>{},
+ writeTypingCheckpoint:async checkpoint=>{const write=writeTypingCheckpoint(directory,checkpoint);if(held){held=false;entered();await gate;}await write;},
+ writeTypingCheckpointSync:checkpoint=>writeTypingCheckpointSync(directory,checkpoint),
+ retireTypingCheckpoint:async checkpoint=>{for(const row of await readTypingCheckpoints(directory,workspaceId))if(row.content === JSON.stringify(checkpoint))await retireTypingCheckpoint(row);}});
+ const renderer=new Y.Doc();onTestFinished(async()=>{release();state.daemonAlive=true;await capture.stop();renderer.destroy();});
+ const session=await capture.openYDocSession({path:"note.md",onRemoteUpdate:()=>{}});Y.applyUpdate(renderer,session.initialUpdate);
+ state.daemonAlive=false;notifyDeath(Object.assign(Error("The engine client is closed: transport closed."),{code:"transport-error"}));await flushTypingCheckpoints(workspaceId);
+ typeInto(renderer,session,"BEFORE_END ");held=true;const pending=flushTypingCheckpoints(workspaceId);await writing;
+ typeInto(renderer,session,"FINAL_OS_TYPING");flushTypingCheckpointsSync(workspaceId);release();await pending;
+ expect((await readTypingCheckpoints(directory,workspaceId))[0]!.checkpoint.text).toContain("FINAL_OS_TYPING");
+ state.daemonAlive=true;await session.settleNow();await flushTypingCheckpoints(workspaceId);
+ expect(state.diskMarkdown).toContain("FINAL_OS_TYPING");expect(await readTypingCheckpoints(directory,workspaceId)).toEqual([]);
 });

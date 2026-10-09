@@ -946,3 +946,8 @@ it("recovery replies only authorize retirement after a committed decision", () =
     expect(()=>decodeWorkspaceResult(WORKSPACE_METHOD.captureImportRecovery,reply)).toThrow(ProtocolShapeError);
   }
 });
+
+it("decodes whether a recovery keeps typing for a deleted file",()=>{
+ const record={momentId:"recovery",versionId:"main",objectId:"object",path:"note.md",captureMomentId:"deleted",deleted:true};
+ expect(decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus,{running:true,degraded:false,terminal:false,phase:"ready",noAtomicPlacement:false,recoveryUnavailable:false,keptFiles:[],captureRecoveries:[record]})).toMatchObject({captureRecoveries:[record]});
+});

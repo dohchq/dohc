@@ -206,7 +206,7 @@ describe("engine Y.Doc IPC adapter", () => {
     const h = harness();
     let unresolved = true;
     const unregister = registerTypingCheckpoint(DOCUMENT.workspaceId, async () => {}, () => false,
-      {versionId: "main", path: DOCUMENT.path, objectId: () => "object-1"}, undefined, () => unresolved);
+      {checkpointId: "active-session", path: DOCUMENT.path}, undefined, () => unresolved);
     try {
       await h.ipc.open(sender, openPayload);
       h.capturedOpen()?.onSaveState?.("settling", 0, "status");

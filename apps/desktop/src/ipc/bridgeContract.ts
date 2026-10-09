@@ -1421,7 +1421,7 @@ export type SyncStatusResult = z.infer<typeof SyncStatusResult>;
 
 export const CaptureRecoveryStatusResult = z.object({
   captureRecoveries: z.array(z.object({
-    momentId: z.string(), versionId: z.string(), objectId: z.string(), path: z.string(), captureMomentId: z.string(),
+    momentId: z.string(), versionId: z.string(), objectId: z.string(), path: z.string(), captureMomentId: z.string(), deleted: z.boolean(),
   })),
 });
 export type CaptureRecoveryStatusResult = z.infer<typeof CaptureRecoveryStatusResult>;
@@ -4939,12 +4939,12 @@ export const StopAndRestorePayload = z.object({
 }).strict();
 export type StopAndRestorePayload = z.infer<typeof StopAndRestorePayload>;
 export const DiscardLiveDraftRecoveryPayload = z.object({workspaceId: WORKSPACE_ID, path: PATH_STRING.refine(isNormalizedRelativePath), objectId: z.string().min(1).max(512), snapshotSha256: z.string().regex(/^[a-f0-9]{64}$/), discardedAtMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)}).strict();
-export const TypingRecoveryFailureSchema = z.object({kind: z.enum(["checkpoint", "import"]), path: z.string(), detail: z.string(), reason: z.enum(["author-refused","history-missing","drawing-unavailable"]).optional(), retryable: z.boolean().optional()}).strict();
+export const TypingRecoveryFailureSchema = z.object({kind: z.enum(["checkpoint", "import"]), path: z.string(), detail: z.string(), checkpointId: z.string().min(1).optional(), reason: z.enum(["author-refused","invalid-author","history-missing","drawing-unavailable"]).optional(), retryable: z.boolean().optional()}).strict();
 export const liveDraftRecoveryOperations = {
   typingRecovery: {
     capabilityId: "document.typing.recovery",
     channel: "desktop:typing-recovery",
-    payload: z.object({workspaceId: WORKSPACE_ID, action: z.enum(["read", "flush", "retry"])}).strict(),
+    payload: z.discriminatedUnion("action", [z.object({workspaceId: WORKSPACE_ID, action: z.enum(["read", "flush", "retry"])}).strict(), z.object({workspaceId: WORKSPACE_ID, action: z.enum(["copy", "dismiss"]), checkpointId: z.string().min(1).max(512)}).strict()]),
     result: z.array(TypingRecoveryFailureSchema),
     guard: "active-workspace",
     scope: "workspace",
