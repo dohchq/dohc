@@ -32,6 +32,9 @@ function capability(description: string, exposure: {
 }
 
 export const CAPABILITIES = {
+  "access.object.read": capability("Read observed grants covering an object.", {ipc: ["getObjectAccess"], socket: ["accessObject"], public: ["access object"]}),
+  "access.sharing.read": capability("Page observed granted and received shares.", {ipc: ["listSharingAccess"], socket: ["accessSharing"], public: ["access sharing"]}),
+  "access.refresh": capability("Request paced observations when Sharing opens or Access expands.", {ipc: ["requestAccessRefresh"]}),
   "share.access.read": capability("Check the current user's received share access.", {ipc: ["checkSharedViewAccess"]}),
   "share.capture.notice.dismiss": capability("Dismiss a received share's capture Notice.", {ipc: ["dismissShareCaptureNotice"]}),
   "capture.recovery.read": capability("Read capture recovery status.", {ipc: ["getCaptureRecoveryStatus"]}),

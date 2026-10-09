@@ -187,18 +187,58 @@ describe("chats panel (right side)", () => {
     expect(handle.getAttribute("aria-valuenow")).toBe("2400");
   });
 
-  it("the 'This file' tab shows the active file's chats surface", async () => {
+  it("the About tab says what it shows once a file is open", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
     renderShell(bridge);
 
     await user.click(await screen.findByTestId("titlebar-chats-sidebar"));
     await screen.findByTestId("chats-panel");
-    await user.click(screen.getByTestId("chats-panel-tab-file"));
+    const about = screen.getByTestId("chats-panel-tab-about");
+    expect(about.textContent).toBe("About");
+    await user.click(about);
 
-    // No file open yet: the linked-chats surface says so honestly.
+    // No file open yet: About says so honestly.
     expect(
       (await screen.findByTestId("linked-chats-empty")).textContent,
-    ).toContain("Open a file to see its chats.");
+    ).toBe("Open a file to see its chats, history, and access.");
+  });
+
+  it("About shows the open file's chats and History, and reads access only when opened", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    bridge.listFileChats.mockResolvedValue({ fileObjectId: "object-a", threads: [] });
+    const getObjectAccess = vi.fn(async () => ({
+      ref: { kind: "path" as const, path: "b.md", versionId: null },
+      rows: [],
+      visibility: "visible" as const,
+      coverage: { kind: "granted" as const, complete: true, observation: "interval" as const },
+      checkedAtMs: 1_700_000_000_000,
+      freshness: "fresh" as const,
+      nextCursor: null,
+    }));
+    const requestAccessRefresh = vi.fn(async () => undefined);
+    Object.assign(bridge, { getObjectAccess, requestAccessRefresh });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const panel = await screen.findByTestId("chats-panel");
+    await user.click(within(panel).getByTestId("chats-panel-tab-about"));
+    expect((await within(panel).findByTestId("about-header")).textContent).toBe("b.md");
+    await within(panel).findByTestId("about-history");
+    await waitFor(() =>
+      expect(bridge.listEngineMoments).toHaveBeenCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        objectId: "object-a",
+        limit: 5,
+      }),
+    );
+    expect(getObjectAccess).not.toHaveBeenCalled();
+    expect(requestAccessRefresh).not.toHaveBeenCalled();
+
+    await user.click(within(panel).getByTestId("about-access-toggle"));
+    expect((await within(panel).findByTestId("about-access-empty")).textContent).toBe(
+      "No share from this workspace includes this file.",
+    );
+    expect(requestAccessRefresh).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId, reason: "access-expand" });
   });
 });

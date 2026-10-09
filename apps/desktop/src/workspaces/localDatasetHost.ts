@@ -23,6 +23,7 @@ import { createLocalDatasetMigrations, type PrepareLocalDatasetMigration } from 
 import { createLocalDatasetRecovery } from "./localDatasetRecovery";
 import { createLocalDatasetTransfers, type DatasetTransferTarget } from "./localDatasetTransfer";
 import { hasGeneratedDatasetOperations } from "@dohc/security-contract/dataset-operations";
+import { DatasetPermissionsPage } from "@dohc/cli/dataset";
 
 type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources">;
 type OwnerContext = { readonly owner: true };
@@ -436,6 +437,10 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       cancelAttempt(input: { datasetId: string; reference: string; acknowledge: true }) { assertCurrent(); return host.cancelAttempt(owner, { workspaceId, ...input }); },
       historyRevision(input: { datasetId: string; revisionSha256: string }) { assertCurrent(); return host.historyRevision(owner, { workspaceId, ...input }); },
       history(input: { datasetId: string; beforeRevision?: number; limit?: number }) { assertCurrent(); return host.history(owner, { workspaceId, ...input }); },
+      async permissions(input: { datasetId: string; after?: string; limit?: number }) {
+        assertCurrent();
+        return DatasetPermissionsPage.parse(host.permissions(owner, { workspaceId, datasetId: input.datasetId, after: input.after, limit: input.limit }));
+      },
       approvedArtifacts(datasetId: string) { assertCurrent(); return host.approvedArtifacts(owner, {workspaceId, datasetId}); },
       prepareRecovery(input: Parameters<typeof recovery.prepare>[0]) { return tracked(() => recovery.prepare(input)); },
       claimRecovery(input: Parameters<typeof recovery.claim>[0]) { return tracked(() => recovery.claim(input)).then(changed); },

@@ -367,7 +367,7 @@ export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<impo
     file: async value => (await target(value.datasetId)).file(value),
     permissions: async value => {
       const authority = await target(value.datasetId);
-      if (!("permissions" in authority) || !authority.permissions) throw new Error("Publish this Collection before managing shared access.");
+      if (!("permissions" in authority) || !authority.permissions) throw new Error("Collection permissions are unavailable.");
       return authority.permissions(value);
     },
     setGrant: async value => {

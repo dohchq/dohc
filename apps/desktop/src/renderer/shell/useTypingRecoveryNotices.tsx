@@ -10,8 +10,9 @@ export function useTypingRecoveryNotices(input: {
   workspaceId: string;
   ready: boolean;
   openHistory: () => void;
+  importedRecovery: (momentId: string, path: string) => Promise<void>;
 } & Pick<ReturnType<typeof useShellError>, "reportShellFailure" | "showSuccessNotice" | "showWarningNotice" | "clearKind" | "clearIdentity">) {
-  const {workspaceId, ready, openHistory, reportShellFailure, showSuccessNotice, showWarningNotice, clearKind, clearIdentity} = input;
+  const {workspaceId, ready, openHistory, importedRecovery, reportShellFailure, showSuccessNotice, showWarningNotice, clearKind, clearIdentity} = input;
   const [discarding, setDiscarding] = useState<{workspaceId: string; path: string; run: () => void} | null>(null);
   useEffect(() => setDiscarding(null), [workspaceId, ready]);
   useEffect(() => {
@@ -42,11 +43,13 @@ export function useTypingRecoveryNotices(input: {
               try {
                 const result = await bridge().typingRecovery({workspaceId, action, checkpointId: failure.checkpointId});
                 if (cancelled) return;
-                if (result.outcome === "missing" || result.outcome === "imported") {
+                if (result.outcome === "missing" || result.outcome === "imported" || result.outcome === "replayed" || result.outcome === "covered") {
                   clearIdentity(identity!);
                   if (result.outcome === "imported") {
+                    void importedRecovery(result.momentId, failure.path);
+                  } else if (result.outcome !== "missing") {
                     showSuccessNotice(`dohc recovered your typing in "${failure.path}".`, undefined, undefined,
-                      {label: "Open History", run: () => {if (!cancelled) openHistory();}});
+                      {label: "Open History", run: openHistory});
                   } else showWarningNotice("This kept copy is no longer on this computer.");
                 }
                 void refresh();
@@ -59,7 +62,7 @@ export function useTypingRecoveryNotices(input: {
               message: typingRecoveryMessage(failure),
               details: failure.reason === "drawing-unavailable" ? [["File", failure.path]] : [["File", failure.path], ["Reason", failure.detail]],
               kind: noticeKind,
-              toast: "preserve",
+              repeat: true,
               ...(failure.checkpointId ? {
                 identity,
                 action: {label: "Copy your typing", run: () => {void actOnCopy("copy");}, additional: [{label: "Discard your typing", run: requestDiscard}]},
@@ -79,7 +82,7 @@ export function useTypingRecoveryNotices(input: {
     });
     void refresh();
     return () => {cancelled = true; unsubscribe();};
-  }, [workspaceId, ready, openHistory, reportShellFailure, showSuccessNotice, showWarningNotice, clearKind, clearIdentity]);
+  }, [workspaceId, ready, openHistory, importedRecovery, reportShellFailure, showSuccessNotice, showWarningNotice, clearKind, clearIdentity]);
   return discarding && discarding.workspaceId === workspaceId && ready ? (
     <ConfirmDialog intent="danger" title="Discard your typing?" confirmLabel="Discard your typing"
       testId="typing-discard-dialog" cancelTestId="typing-discard-cancel" confirmTestId="typing-discard-confirm"

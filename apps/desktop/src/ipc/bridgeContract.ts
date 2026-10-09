@@ -1,4 +1,5 @@
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
+import { accessOperations } from "./accessOperations";
 import { SaveStateSchema } from "@dohc/workspace-contracts/save-state-schema";
 import { nameByteLength } from "@dohc/workspace-contracts/names";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
@@ -4945,7 +4946,11 @@ export const liveDraftRecoveryOperations = {
     capabilityId: "document.typing.recovery",
     channel: "desktop:typing-recovery",
     payload: z.discriminatedUnion("action", [z.object({workspaceId: WORKSPACE_ID, action: z.enum(["read", "flush", "retry"])}).strict(), z.object({workspaceId: WORKSPACE_ID, action: z.enum(["copy", "discard", "dismiss"]), checkpointId: z.string().min(1).max(512)}).strict()]),
-    result: z.object({failures: z.array(TypingRecoveryFailureSchema), outcome: z.enum(["copied", "discarded", "missing", "imported"]).optional()}).strict(),
+    result: z.union([
+      z.object({failures: z.array(TypingRecoveryFailureSchema), outcome: z.enum(["copied", "discarded", "missing"]).optional()}).strict(),
+      z.object({failures: z.array(TypingRecoveryFailureSchema), outcome: z.enum(["replayed", "covered"]), momentId: z.null()}).strict(),
+      z.object({failures: z.array(TypingRecoveryFailureSchema), outcome: z.literal("imported"), momentId: OPAQUE_ID}).strict(),
+    ]),
     guard: "active-workspace",
     scope: "workspace",
     inactiveMessage: "This window changed workspaces.",
@@ -6493,7 +6498,8 @@ export const LaunchMarksResult = z.object({
 export type LaunchMarksResult = z.infer<typeof LaunchMarksResult>;
 
 export interface DohcDesktopBridge
-  extends OperationBridge<typeof workspaceVersionOperations>,
+  extends OperationBridge<typeof accessOperations>,
+    OperationBridge<typeof workspaceVersionOperations>,
     OperationBridge<typeof captureRecoveryOperations>,
     OperationBridge<typeof workspaceSearchOperations>,
     OperationBridge<typeof crashReportOperations>,

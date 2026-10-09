@@ -24,6 +24,7 @@ import mainCli from "./cliExposure.main.json";
 import publicationCli from "./cliExposure.pr1659.json";
 import commentsCli from "./cliExposure.pr1700.json";
 import admission from "./operationAdmission.json";
+import accessExposure from "./accessExposure.delta.json";
 
 const rows: OperationDefinition[] = OPERATION_TABLES.flatMap(table => Object.values(table));
 const publicVerbs = Object.entries(CLI_COMMANDS).flatMap(([group, command]) => Object.keys(command.verbs).map(verb => `${group} ${verb}`));
@@ -60,7 +61,7 @@ describe("B1 main inventories (a4be19d5b)", () => {
       expect(expectedNames).toContain(name);
       expectedNames.splice(expectedNames.indexOf(name), 1);
     }
-    for (const name of [...launchOpenIpc.nameAdditions, ...recipientRecordsIpc.nameAdditions, ...liveDraftRecoveryIpc.nameAdditions, ...restartCaptureIpc.nameAdditions, ...reportsIpc.nameAdditions, ...saveRetryIpc.nameAdditions, ...earlyQuitIpc.nameAdditions]) {
+    for (const name of [...launchOpenIpc.nameAdditions, ...recipientRecordsIpc.nameAdditions, ...liveDraftRecoveryIpc.nameAdditions, ...restartCaptureIpc.nameAdditions, ...reportsIpc.nameAdditions, ...saveRetryIpc.nameAdditions, ...accessExposure.nameAdditions, ...earlyQuitIpc.nameAdditions]) {
       expect(expectedNames).not.toContain(name);
       expectedNames.push(name);
     }
@@ -70,13 +71,13 @@ describe("B1 main inventories (a4be19d5b)", () => {
     expect(Object.fromEntries(Object.keys(mainIpc.guards).map(channel => [channel, guards[channel]]))).toEqual(mainIpc.guards);
   });
   it("preserves socket verbs, public verbs, and all public help", () => {
-    expect(socketVerbs).toEqual(mainCli.socketVerbs);
-    expect(Object.keys(CLI_COMMANDS)).toEqual(mainCli.publicGroups);
+    expect(socketVerbs).toEqual([...mainCli.socketVerbs, ...accessExposure.socketVerbAdditions].sort());
+    expect(Object.keys(CLI_COMMANDS)).toEqual([...accessExposure.publicGroupAdditions, ...mainCli.publicGroups]);
     const internal = new Set(mainCli.internalVerbs.filter(verb => !commentsCli.publicSocketPromotions.includes(verb)));
     expect(socketVerbs.filter(verb => internal.has(verb))).toEqual([...internal]);
-    expect(socketVerbs.filter(verb => !internal.has(verb))).toEqual([...mainCli.publicSocketVerbs, ...commentsCli.publicSocketPromotions].sort());
+    expect(socketVerbs.filter(verb => !internal.has(verb))).toEqual([...mainCli.publicSocketVerbs, ...commentsCli.publicSocketPromotions, ...accessExposure.socketVerbAdditions].sort());
     // Hand-reviewed #1659 additions, separate from the hashed main baseline.
-    const expectedPublicVerbs = [...mainCli.publicVerbs];
+    const expectedPublicVerbs = [...accessExposure.publicVerbAdditions, ...mainCli.publicVerbs];
     for (const { verb, before } of [...publicationCli.publicVerbAdditions, ...commentsCli.publicVerbAdditions]) {
       expect(expectedPublicVerbs).not.toContain(verb);
       expect(expectedPublicVerbs).toContain(before);
@@ -88,7 +89,7 @@ describe("B1 main inventories (a4be19d5b)", () => {
       help[group] = renderCliHelp({ help: [group] });
       for (const verb of Object.keys(command.verbs)) help[`${group} ${verb}`] = renderCliHelp({ help: [group, verb] });
     }
-    expect(help).toEqual({ ...mainCli.help, ...publicationCli.help, ...commentsCli.help });
+    expect(help).toEqual({ ...mainCli.help, ...publicationCli.help, ...commentsCli.help, ...accessExposure.help });
   });
   it("pins each row's guard, scope, and handler check to the hand-edited admission record", () => {
     expect(Object.fromEntries(rows.map(row => [row.channel, {

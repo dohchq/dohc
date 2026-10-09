@@ -125,9 +125,9 @@ export function useShellError(workspaceId: string) {
   // the same kind, so a read that keeps failing is one row, not a pile.
   // `seen` files the row without a toast; "keep" gives it the seen state of
   // the row of its kind it replaces, so an open toast stays open.
-  // "preserve" keeps an unchanged message's toast, and toasts a new message.
+  // "repeat" keeps an unchanged message's toast, and toasts a new message.
   const push = useCallback(
-    (error: Omit<ShellError, "id" | "atMs" | "seen">, seen: boolean | "keep" | "preserve" = false) => {
+    (error: Omit<ShellError, "id" | "atMs" | "seen">, seen: boolean | "keep" | "repeat" = false) => {
       nextId.current += 1;
       const id = `shell-error-${nextId.current}`;
       const atMs = Date.now();
@@ -141,13 +141,13 @@ export function useShellError(workspaceId: string) {
             ? error.identity === existing.identity
             : existing.message === message || (error.kind !== undefined && existing.kind === error.kind);
         const replaced = current.find(matches);
-        const preserved = seen === "preserve" && replaced?.message === message ? replaced : undefined;
+        const repeated = seen === "repeat" && replaced?.message === message ? replaced : undefined;
         const next: ShellError = {
           ...error,
           message,
-          id: preserved?.id ?? id,
-          atMs: preserved?.atMs ?? atMs,
-          seen: seen === "preserve" ? (preserved?.seen ?? false) : seen === "keep" ? (replaced?.seen ?? true) : seen,
+          id: repeated?.id ?? id,
+          atMs: repeated?.atMs ?? atMs,
+          seen: seen === "repeat" ? (repeated?.seen ?? false) : seen === "keep" ? (replaced?.seen ?? true) : seen,
         };
         return [
           ...current.filter((existing) => !matches(existing)),
@@ -275,11 +275,12 @@ export function useShellError(workspaceId: string) {
   // the words. Text that arrives raw is read into words the same way. A kind
   // makes a newer message replace the row of an older one, such as one
   // import's result replacing the last; an identity does the same for one
-  // thing, such as one folder.
+  // thing, such as one folder. `repeat` keeps an unchanged message's row
+  // and toast state. A changed message, or a missing row, toasts again.
   const reportShellFailure = useCallback(
     (failure: {
       title?: string;
-      toast?: "preserve";
+      repeat?: boolean;
       message: string;
       cause?: unknown;
       details?: ReadonlyArray<ErrorDetailField>;
@@ -304,7 +305,7 @@ export function useShellError(workspaceId: string) {
         ...(failure.action ? { action: failure.action } : {}),
         ...(failure.kind ? { kind: failure.kind } : {}),
         ...(failure.identity !== undefined ? { identity: failure.identity } : {}),
-      }, failure.toast === "preserve" ? "preserve" : false);
+      }, failure.repeat ? "repeat" : false);
     },
     [push],
   );

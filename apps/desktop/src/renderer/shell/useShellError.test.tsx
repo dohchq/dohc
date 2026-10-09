@@ -300,6 +300,50 @@ describe("useShellError", () => {
     expect(result.current.shellErrors).toEqual([]);
   });
 
+  it("replaces a repeated failure's row and keeps that row's toast, open or closed", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    act(() => result.current.reportShellFailure({ message: "Could not load History.", identity: "about-history:a.md" }));
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);
+    // Still open: the repeat keeps it open, as one row.
+    act(() => result.current.reportShellFailure({ message: "Could not load History.", identity: "about-history:a.md", repeat: true }));
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);
+    // Closed by the person: the repeat does not toast again.
+    act(() => result.current.hideShellError(result.current.shellErrors[0]!.id));
+    act(() => result.current.reportShellFailure({ message: "Could not load History.", identity: "about-history:a.md", repeat: true }));
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([true]);
+    // Another file's first failure is a toast of its own, repeat or not.
+    act(() => result.current.reportShellFailure({ message: "Could not load History.", identity: "about-history:b.md", repeat: true }));
+    expect(result.current.shellErrors.map((error) => [error.identity, error.seen])).toEqual([
+      ["about-history:a.md", true], ["about-history:b.md", false],
+    ]);
+  });
+
+  it("toasts a repeat again once Try again or Dismiss has removed its row", () => {
+    const retry = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const report = () => result.current.reportShellFailure({
+      message: "Could not load History.", identity: "about-history:a.md", retry, repeat: true,
+    });
+    act(report);
+    act(() => result.current.hideShellError(result.current.shellErrors[0]!.id));
+    // Try again removes the row, then reads; the read fails again.
+    act(() => result.current.retryShellError(result.current.shellErrors[0]!.id));
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(result.current.shellErrors).toEqual([]);
+    act(report);
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);
+    // Dismissed, then failing again: a toast, not a quiet row.
+    act(() => result.current.dismissShellError(result.current.shellErrors[0]!.id));
+    act(report);
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);
+  });
+
+  it("still files a sync failure that asks for no toast quietly when it has no predecessor", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    act(() => result.current.reportSyncFailure({ message: "Sync stopped.", detail: "relay", toast: false }, vi.fn()));
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([true]);
+  });
+
   it("shows words instead of Electron's prefix, a class name or a code, and keeps them for Copy", () => {
     const { result } = renderHook(() => useShellError("ws-a"));
     const refused = new Error(
@@ -394,21 +438,21 @@ it.each([["typing-checkpoint", CHECKPOINT_FAILURE_MESSAGE], ["typing-import", IM
  act(() => result.current.retryShellError(row.id)); expect(retry).toHaveBeenCalledOnce();
 });
 
-it("toasts a first preserved report and retains the toast identity and seen state on refresh",()=>{
+it("toasts a first repeated report and retains the toast identity and seen state on refresh",()=>{
  const {result}=renderHook(()=>useShellError("typing-refresh"));
- const report=()=>result.current.reportShellFailure({identity:"typing-import:one",kind:"typing-import",message:IMPORT_FAILURE_MESSAGE,toast:"preserve"});
+ const report=()=>result.current.reportShellFailure({identity:"typing-import:one",kind:"typing-import",message:IMPORT_FAILURE_MESSAGE,repeat:true});
  act(report);const first=result.current.shellErrors[0]!;expect(first.seen).toBe(false);
  act(report);expect(result.current.shellErrors[0]).toMatchObject({id:first.id,atMs:first.atMs,seen:false});
  act(()=>result.current.hideShellError(first.id));act(report);
  expect(result.current.shellErrors).toHaveLength(1);expect(result.current.shellErrors[0]).toMatchObject({id:first.id,atMs:first.atMs,seen:true});
 });
 
-it("toasts a changed reason even when the prior preserved toast was closed", () => {
+it("toasts a changed reason even when the prior repeated toast was closed", () => {
  const {result}=renderHook(()=>useShellError("typing-new-reason"));
- act(()=>result.current.reportShellFailure({identity:"typing-import:one",kind:"typing-import",message:IMPORT_FAILURE_MESSAGE,toast:"preserve"}));
+ act(()=>result.current.reportShellFailure({identity:"typing-import:one",kind:"typing-import",message:IMPORT_FAILURE_MESSAGE,repeat:true}));
  const first=result.current.shellErrors[0]!;
  act(()=>result.current.hideShellError(first.id));
- act(()=>result.current.reportShellFailure({identity:"typing-import:one",kind:"typing-import",message:"This file is no longer in History.",toast:"preserve"}));
+ act(()=>result.current.reportShellFailure({identity:"typing-import:one",kind:"typing-import",message:"This file is no longer in History.",repeat:true}));
  expect(result.current.shellErrors).toHaveLength(1);
  expect(result.current.shellErrors[0]).toMatchObject({message:"This file is no longer in History.",seen:false});
  expect(result.current.shellErrors[0]!.id).not.toBe(first.id);

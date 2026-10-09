@@ -21,6 +21,7 @@ const PATH_HINT_ENRICHMENT_CONCURRENCY = 8;
 
 export interface DesktopLinkedChatStore extends AwaitableLinkedChatStore {
   ensureOpen(): Promise<void>;
+  listChannelsPage(input: { workspaceId: string; limit: number }): Promise<{ channels: ChatChannelSummary[]; nextCursor: string | null }>;
   /** One message, whole: a Group automation reads a body its claim carried truncated. */
   getMessage(input: { workspaceId: string; messageId: string }): Promise<{ body: string }>;
 }
@@ -138,6 +139,11 @@ export function createLiveLinkedChatStore(
       (
         await invokeRead(async (adapter) => await adapter.listChannels(input))
       ).map(toStoreChannelSummary),
+    listChannelsPage: async input => invokeRead(async adapter => {
+      if (input.workspaceId !== workspace.workspaceId) throw new Error("Chat workspace mismatch.");
+      const page = await adapter.request("chats.channels.list", { pageLimit: input.limit });
+      return { channels: page.channels.map(toStoreChannelSummary), nextCursor: page.nextCursor };
+    }),
     findChannelBySlug: async (input) => {
       const channel = await invokeRead(
         async (adapter) => await adapter.findChannelBySlug(input),

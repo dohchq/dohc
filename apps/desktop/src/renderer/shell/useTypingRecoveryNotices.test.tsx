@@ -8,7 +8,7 @@ import { useShellError } from "./useShellError";
 import { useTypingRecoveryNotices } from "./useTypingRecoveryNotices";
 
 const state = vi.hoisted(() => ({
-  read: vi.fn<(input: {workspaceId: string; action: string}) => Promise<{failures: TypingRecoveryFailure[]; outcome?: "copied" | "discarded" | "missing" | "imported"}>>(),
+  read: vi.fn<(input: {workspaceId: string; action: string}) => Promise<{failures: TypingRecoveryFailure[]; outcome?: "copied" | "discarded" | "missing" | "imported" | "replayed" | "covered"; momentId?: string | null}>>(),
   listeners: new Set<(event: {workspaceId?: string}) => void>(),
 }));
 vi.mock("../bridge", () => ({bridge: () => ({
@@ -20,7 +20,7 @@ vi.mock("../bridge", () => ({bridge: () => ({
 })}));
 afterEach(cleanup);
 beforeEach(() => {state.read.mockReset().mockResolvedValue({failures: []}); state.listeners.clear();});
-const noticeOptions = () => ({showSuccessNotice: vi.fn(), showWarningNotice: vi.fn(), openHistory: vi.fn()});
+const noticeOptions = () => ({showSuccessNotice: vi.fn(), showWarningNotice: vi.fn(), openHistory: vi.fn(), importedRecovery: vi.fn(async () => {})});
 const failure: TypingRecoveryFailure = {kind: "checkpoint", path: "note.md", detail: "disk full"};
 const activity = (workspaceId: string) => act(() => {for (const listener of state.listeners) listener({workspaceId});});
 
@@ -122,21 +122,31 @@ it.each(["copy","discard"] as const)("reports a failed %s with the matching word
  await waitFor(()=>expect(input.reportShellFailure).toHaveBeenCalledWith(expect.objectContaining({message:`dohc could not ${action} your typing.`})));
 });
 
-it("names the file and History when recovery imported a copy before Copy",async()=>{
- const input=options();state.read.mockResolvedValue({failures:[refused]});renderHook(()=>useTypingRecoveryNotices(input));await waitFor(()=>expect(input.reportShellFailure).toHaveBeenCalledOnce());const row=input.reportShellFailure.mock.calls[0]![0];
- state.read.mockResolvedValue({failures:[],outcome:"imported"});act(()=>row.action.run());await waitFor(()=>expect(input.showSuccessNotice).toHaveBeenCalledWith('dohc recovered your typing in "note.md".',undefined,undefined,{label:"Open History",run:expect.any(Function)}));expect(input.clearIdentity).toHaveBeenCalledWith("typing-import:one");
+it.each(["replayed", "covered"] as const)("names the file after a %s decision and keeps its action live after readiness changes",async outcome=>{
+ const input=options();state.read.mockResolvedValue({failures:[refused]});const hook=renderHook(props=>useTypingRecoveryNotices(props),{initialProps:input});await waitFor(()=>expect(input.reportShellFailure).toHaveBeenCalledOnce());const row=input.reportShellFailure.mock.calls[0]![0];
+ state.read.mockResolvedValue({failures:[],outcome,momentId:null});act(()=>row.action.run());await waitFor(()=>expect(input.showSuccessNotice).toHaveBeenCalledWith('dohc recovered your typing in "note.md".',undefined,undefined,{label:"Open History",run:expect.any(Function)}));expect(input.clearIdentity).toHaveBeenCalledWith("typing-import:one");
  expect(input.reportShellFailure).toHaveBeenCalledOnce();
+ hook.rerender({...input,ready:false});
+ expect(input.showSuccessNotice.mock.calls[0]![3].run).toBe(input.openHistory);
  act(input.showSuccessNotice.mock.calls[0]![3].run);expect(input.openHistory).toHaveBeenCalledOnce();
 });
 
 it("keeps a closed toast closed after Copy and document-open activity", async () => {
  state.read.mockImplementation(async input => ({failures:[refused],...(input.action === "copy" ? {outcome:"copied" as const} : {})}));
- const openHistory=vi.fn();
- const {result}=renderHook(()=>{const shell=useShellError("copy-refresh");useTypingRecoveryNotices({openHistory,workspaceId:"copy-refresh",ready:true,...shell});return shell;});
+ const openHistory=vi.fn(), importedRecovery=vi.fn(async()=>{});
+ const {result}=renderHook(()=>{const shell=useShellError("copy-refresh");useTypingRecoveryNotices({openHistory,importedRecovery,workspaceId:"copy-refresh",ready:true,...shell});return shell;});
  await waitFor(()=>expect(result.current.shellErrors).toHaveLength(1));const first=result.current.shellErrors[0]!;expect(first.seen).toBe(false);
  act(()=>result.current.hideShellError(first.id));act(()=>result.current.runShellErrorAction(first.id));
  await waitFor(()=>expect(state.read).toHaveBeenCalledWith({workspaceId:"copy-refresh",action:"copy",checkpointId:"one"}));
  await waitFor(()=>expect(state.read).toHaveBeenCalledTimes(3));
  activity("copy-refresh");await waitFor(()=>expect(state.read).toHaveBeenCalledTimes(4));
  expect(result.current.shellErrors).toHaveLength(1);expect(result.current.shellErrors[0]).toMatchObject({id:first.id,atMs:first.atMs,seen:true});
+});
+
+it("routes a History-only import to its recovery moment without a second success message",async()=>{
+ const input=options();state.read.mockResolvedValue({failures:[{...refused,path:"deleted.md"}]});renderHook(()=>useTypingRecoveryNotices(input));
+ await waitFor(()=>expect(input.reportShellFailure).toHaveBeenCalledOnce());const row=input.reportShellFailure.mock.calls[0][0];
+ state.read.mockResolvedValue({failures:[],outcome:"imported",momentId:"deleted-file-moment"});act(()=>row.action.run());
+ await waitFor(()=>expect(input.importedRecovery).toHaveBeenCalledExactlyOnceWith("deleted-file-moment","deleted.md"));
+ expect(input.showSuccessNotice).not.toHaveBeenCalled();expect(input.showWarningNotice).not.toHaveBeenCalled();expect(input.clearIdentity).toHaveBeenCalledWith("typing-import:one");
 });

@@ -1,6 +1,6 @@
 import { createTypingQuitRecovery } from "./workspaces/typingQuitRecovery";
 import { writeTypingCheckpointSync, typingRecoveryFailure, hasUnresolvedTypingCheckpoints, flushTypingCheckpoints, writeTypingCheckpoint, readTypingCheckpoints, retireTypingCheckpoint, importTypingCheckpoints, type TypingRecoveryFailure } from "./workspaces/outageTypingRecovery";
-import { actOnTypingCopy } from "./workspaces/typingRecoveryActions";
+import { actOnTypingCopy, type TypingCopyResult } from "./workspaces/typingRecoveryActions";
 import { liveDraftRecoveryOperations } from "./ipc/bridgeContract";
 import { SharedDocumentWaitingError } from "./ipc/sharedDocumentOpenState";
 import { net, clipboard } from "electron";
@@ -90,6 +90,10 @@ import { createOpenPathFailures } from "./window/openPathFailures";
 import { runInWorkspaceAuthorityLane } from "./workspaces/workspaceAuthorityLane";
 import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
+import { accessCliQueries, createAccessAcquisition, createAccessOwner } from "./access/accessOwner";
+import { hasAccessChat, locateAccessVersionPath, resolveAccessObject } from "./access/accessObjectResolution";
+import { accessOperations } from "./ipc/accessOperations";
+import { assertResolvedWorkspacePath } from "./workspaces/workspaceRealPath";
 import {
   VersionedLiveAdapter,
   decodeAutomationGroupHandover,
@@ -1508,6 +1512,75 @@ const shareRosters = createShareRosters({
   onListed: (workspaceId) => collectionAutomationsOf(workspaceId)?.rosterChanged(),
 });
 
+const accessAcquisition = createAccessAcquisition({
+  roster: workspaceId => shareRosters.requestRefresh(workspaceId),
+  received: () => receivedShareAcquisition.refresh(),
+});
+const accessScopeIds = new WeakMap<object, string>();
+type AccessWorkspaceOperation = { workspace: RegistryEntry & { attachmentId: symbol }; signal: AbortSignal; assertCurrent(): void };
+const accessOwner = createAccessOwner<AccessWorkspaceOperation>({
+  scope: operation => {
+    const context = rosterContext(operation.workspace.workspaceId) as object;
+    let id = accessScopeIds.get(context);
+    if (!id) { id = randomUUID(); accessScopeIds.set(context, id); }
+    return id;
+  },
+  assertCurrent: operation => operation.assertCurrent(),
+  account: () => cachedCredentials?.relayUrl ? { userId: cachedCredentials.userId, email: cachedCredentials.email,
+    relayUrl: cachedCredentials.relayUrl, generation: credentialCacheGeneration } : null,
+  roster: ({ workspace }) => {
+    if (workspace.shareView || !workspace.remote || cachedCredentials?.userId !== workspace.remote.ownerUserId ||
+        cachedCredentials.relayUrl !== workspace.remote.serverUrl) return { listing: null, checkedAtMs: null, freshness: "unknown" };
+    return shareRosters.observation(workspace.workspaceId);
+  },
+  received: () => receivedShareAcquisition.observation(),
+  refresh: async operation => {
+    await warmCredentialCache().catch(() => undefined);
+    operation.assertCurrent();
+    await accessAcquisition.request(operation.workspace.workspaceId);
+  },
+  resolve: async (operation, ref) => {
+    const workspace = operation.workspace;
+    return resolveAccessObject(workspace, ref, {
+      filePathForObjectId: async objectId => {
+        const index = await engineSearchIndexFor(receivedShareEngine.workspaceForRegistered(workspace));
+        if (!index) throw new Error("File aliases are unavailable.");
+        const file = index.files.find(row => row.objectId === objectId);
+        return file ? { path: file.path, versionId: index.versionId } : null;
+      },
+      locatePath: async (path, versionId) => {
+        if (versionId !== null && versionId !== "main") {
+          return withEngineAdapter(receivedShareEngine.workspaceForRegistered(workspace), adapter =>
+            locateAccessVersionPath(workspace.workspaceId, path, versionId, adapter));
+        }
+        try {
+          const located = await assertResolvedWorkspacePath({ rootPath: workspace.rootPath, absolutePath: join(workspace.rootPath, path),
+            spelled: path, label: "File path", access: "read" });
+          const stat = await lstat(located.resolvedAbsolute).catch(error => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; });
+          return { path: located.relative.replaceAll("\\", "/"), exists: stat !== null };
+        } catch { return null; }
+      },
+      hasChat: async channelWireId => workspace.sharedChannels?.some(channel => channel.channelWireId === channelWireId) === true ||
+        await hasAccessChat(workspace.workspaceId, channelWireId, linkedChatStoreFor(workspace)),
+    });
+  },
+  permissions: async (operation, datasetId, after) => {
+    const { workspace, signal } = operation;
+    const local = await localDatasetHostFor(workspace, signal);
+    const data = createDatasetAuthorityRouter(local, {
+      status: async id => local.transferStatus(id),
+      remote: async targetOrigin => {
+        const remote = await remoteForWorkspace(workspace);
+        operation.assertCurrent();
+        if (!remote.credentials.relayUrl || new URL(remote.credentials.relayUrl).origin !== targetOrigin) throw new Error("Collection host unavailable.");
+        return createRemoteDatasetData({ workspaceId: workspace.workspaceId, ...remote, signal,
+          currentCredentialGeneration: () => credentialCacheGeneration, assertCurrent: () => operation.assertCurrent(), relayJson: relayShareJsonWithCredentials });
+      },
+    });
+    return data.permissions!({ action: "permissions", workspaceId: workspace.workspaceId, datasetId, after, limit: 100 });
+  },
+});
+
 // One formula evaluator for every open workspace. Its worker thread starts
 // on the first run and stops when idle. The worker runs from the staged
 // runtime, like the dataset child, because the main bundle cannot resolve
@@ -2217,7 +2290,7 @@ const typingQuitRecovery=createTypingQuitRecovery({
 function beforeQuitWithTypingRecovery(event:{preventDefault():void}):void {typingQuitRecovery.beforeQuit(event);}
 
 const typingRecoveryFailures = new Map<string, Map<string, TypingRecoveryFailure>>();
-const importedTypingCheckpoints = new Set<string>();
+const importedTypingCheckpoints = new Map<string, Awaited<ReturnType<VersionedLiveAdapter["importRecovery"]>>>();
 const dismissedTypingCheckpoints = new Set<string>();
 const typingRecoveryImports = new Map<symbol, Promise<void>>();
 function reportTypingRecoveryFailure(workspaceId: string, failure: TypingRecoveryFailure): void {
@@ -2240,7 +2313,7 @@ function recoverOutageTyping(workspace: CreatedWorkspace & {attachmentId: symbol
       return result;
     },
     failure => {if (current()) reportTypingRecoveryFailure(workspace.workspaceId, failure);},
-    (path, checkpointId) => {importedTypingCheckpoints.add(`${workspace.workspaceId}:${checkpointId}`); if (current()) {typingRecoveryFailures.get(workspace.workspaceId)?.delete("import:" + checkpointId); notifyRenderer({workspaceId: workspace.workspaceId});}},
+    (path, checkpointId, result) => {importedTypingCheckpoints.set(`${workspace.workspaceId}:${checkpointId}`, result); if (current()) {typingRecoveryFailures.get(workspace.workspaceId)?.delete("import:" + checkpointId); notifyRenderer({workspaceId: workspace.workspaceId});}},
   );
   })().catch(error => {if (current()) reportTypingRecoveryFailure(workspace.workspaceId, {kind: "import", path: "", detail: String(error)});}).finally(() => typingRecoveryImports.delete(workspace.attachmentId));
   typingRecoveryImports.set(workspace.attachmentId, pending);
@@ -4478,6 +4551,7 @@ const chatWrites = createChatWrites({
 let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null) => Promise<OwnerAppPublicationResult>) | undefined;
 let ownerAppResponsesForCli:((input:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>)|undefined;
 const { startDesktopCliServer } = createDesktopCliServer({
+  access: workspaceId => accessCliQueries(accessOwner, work => withPhysicalWorkspaceOperation(workspaceId, work)),
   recordSuccess: invocation => usageStore?.recordSuccess(invocation),
   dataset: (input, agent) => {
     if (!datasetForCli) throw new Error("Collections are not ready. Try again.");
@@ -5661,6 +5735,11 @@ async function currentDiagnostics(): Promise<string> {
 }
 
 function registerIpcHandlers(): void {
+  registerOperations(operationBoundary, accessOperations, {
+    getObjectAccess: (input, { operation }) => accessOwner.object(operation!, input),
+    listSharingAccess: (input, { operation }) => accessOwner.sharing(operation!, input),
+    requestAccessRefresh: (_input, { operation }) => accessOwner.refresh(operation!),
+  });
   const windowIpc = createWindowIpc<WebContents, IpcMainInvokeEvent, IpcMainEvent>({
     registerHandler: handleIpc,
     registerEvent: (channel, handler) => ipcMain.on(channel, handler),
@@ -6313,21 +6392,21 @@ function registerIpcHandlers(): void {
   registerOperations(operationBoundary, liveDraftRecoveryOperations, {
     typingRecovery: async (input, {operation}) => {
       operation.assertCurrent();
-      let outcome: "copied" | "discarded" | "missing" | "imported" | undefined;
+      let result: TypingCopyResult | undefined;
       if (input.action === "dismiss") {
         dismissedTypingCheckpoints.add(`${operation.workspace.workspaceId}:${input.checkpointId}`);
       } else if (input.action === "copy" || input.action === "discard") {
-        outcome = await actOnTypingCopy({directory: join(stateDir(), "live-draft-recovery"),
+        result = await actOnTypingCopy({directory: join(stateDir(), "live-draft-recovery"),
           workspaceId: operation.workspace.workspaceId, checkpointId: input.checkpointId, action: input.action,
           assertCurrent: () => operation.assertCurrent(), copyText: text => clipboard.writeText(text),
-          wasImported: () => importedTypingCheckpoints.has(`${operation.workspace.workspaceId}:${input.checkpointId}`)});
-        if (outcome !== "copied") typingRecoveryFailures.get(operation.workspace.workspaceId)?.delete("import:" + input.checkpointId);
+          recovered: () => importedTypingCheckpoints.get(`${operation.workspace.workspaceId}:${input.checkpointId}`)});
+        if (result.outcome !== "copied") typingRecoveryFailures.get(operation.workspace.workspaceId)?.delete("import:" + input.checkpointId);
         notifyRenderer({workspaceId: operation.workspace.workspaceId});
       } else if (input.action !== "read") await flushTypingCheckpoints(operation.workspace.workspaceId);
       if (input.action === "retry") await recoverOutageTyping(operation.workspace);
       operation.assertCurrent();
       return {failures: [...(typingRecoveryFailures.get(operation.workspace.workspaceId)?.values() ?? [])]
-        .filter(failure => !failure.checkpointId || !dismissedTypingCheckpoints.has(`${operation.workspace.workspaceId}:${failure.checkpointId}`)), ...(outcome ? {outcome} : {})};
+        .filter(failure => !failure.checkpointId || !dismissedTypingCheckpoints.has(`${operation.workspace.workspaceId}:${failure.checkpointId}`)), ...result};
     },
     discardLiveDraftRecovery: async (input, {event, operation}) => {
       operation.assertCurrent();

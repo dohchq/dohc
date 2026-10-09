@@ -60,6 +60,30 @@ const recoveryRows = (h: ReturnType<typeof harness>) =>
   h.result.current.shellErrors.filter((error) => error.kind === "capture-recovery");
 
 describe("useCaptureRecoveryNotices", () => {
+  it.each([false,true])("keeps one existing recovery row when Copy finds a History-only import (deleted=%s)", async deleted => {
+    const h=harness([{...RECOVERY,deleted}]);
+    await waitFor(()=>expect(recoveryRows(h)).toHaveLength(1));const row=recoveryRows(h)[0]!;
+    act(()=>h.result.current.hideShellError(row.id));
+    await act(async()=>{await h.result.current.notices.imported(RECOVERY.momentId,RECOVERY.path);});
+    expect(recoveryRows(h)).toHaveLength(1);
+    expect(recoveryRows(h)[0]).toMatchObject({id:row.id,seen:true,message:captureRecoveryMessage(RECOVERY.path,false,deleted)});
+    act(()=>h.result.current.runShellErrorAction(row.id));
+    expect(h.openRecovery).toHaveBeenCalledExactlyOnceWith(RECOVERY.momentId,RECOVERY.path);
+  });
+
+  it("opens the committed change even when the normal status row was already cleared", async () => {
+    const h=harness([]);await waitFor(()=>expect(h.bridge.getCaptureRecoveryStatus).toHaveBeenCalledOnce());
+    await act(async()=>{await h.result.current.notices.imported(RECOVERY.momentId,"deleted.md");});
+    const row=recoveryRows(h)[0]!;
+    expect(row).toMatchObject({title:CAPTURE_RECOVERY_TITLE,message:'Your typing for "deleted.md" is kept in History.',action:{label:"Open History"}});
+    await act(async()=>{await h.result.current.notices.refresh();});
+    expect(recoveryRows(h)).toHaveLength(1);
+    act(()=>h.result.current.runShellErrorAction(row.id));
+    expect(h.openRecovery).toHaveBeenCalledExactlyOnceWith(RECOVERY.momentId,"deleted.md");
+    act(()=>h.result.current.dismissShellError(row.id));
+    await waitFor(()=>expect(recoveryRows(h)).toHaveLength(0));
+  });
+
   it("raises one notice per kept typing, in these words, and one again on a later read", async () => {
     const h = harness([RECOVERY]);
     await waitFor(() => expect(recoveryRows(h)).toHaveLength(1));

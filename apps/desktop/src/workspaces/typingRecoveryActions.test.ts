@@ -13,7 +13,7 @@ async function copyFixture() {
 }
 it("copies typing while retaining the only durable copy for a later retry", async () => {
   const input = await copyFixture();
-  await expect(actOnTypingCopy({...input, action: "copy"})).resolves.toBe("copied");
+  await expect(actOnTypingCopy({...input, action: "copy"})).resolves.toEqual({outcome:"copied"});
   expect(input.copyText).toHaveBeenCalledExactlyOnceWith("KEPT_TYPING");
   expect((await readTypingCheckpoints(input.directory, input.workspaceId))[0]!.checkpoint).toEqual(checkpoint);
 });
@@ -24,10 +24,10 @@ it("keeps the checkpoint when the clipboard write fails", async () => {
 });
 it("only the explicit discard operation removes the kept copy", async () => {
   const input = await copyFixture();
-  await expect(actOnTypingCopy({...input, action: "discard"})).resolves.toBe("discarded");
+  await expect(actOnTypingCopy({...input, action: "discard"})).resolves.toEqual({outcome:"discarded"});
   expect(input.copyText).not.toHaveBeenCalled();
   expect(await readTypingCheckpoints(input.directory, input.workspaceId)).toEqual([]);
-  await expect(actOnTypingCopy({...input, action: "copy"})).resolves.toBe("missing");
+  await expect(actOnTypingCopy({...input, action: "copy"})).resolves.toEqual({outcome:"missing"});
   expect(input.copyText).not.toHaveBeenCalled();
 });
 it("does not act on a kept copy after a workspace switch", async () => {
@@ -37,9 +37,10 @@ it("does not act on a kept copy after a workspace switch", async () => {
   expect(await readTypingCheckpoints(input.directory, input.workspaceId)).toHaveLength(1);
 });
 
-it("names an imported copy when a committed retry wins just before Copy", async () => {
+it.each(["replayed", "covered", "imported"] as const)("returns the actual %s decision when a committed retry wins just before Copy", async outcome => {
   const input = await copyFixture();
   await actOnTypingCopy({...input, action: "discard"});
-  await expect(actOnTypingCopy({...input, action: "copy", wasImported: () => true})).resolves.toBe("imported");
+  const recovery={committed:true as const,outcome,momentId:outcome === "imported" ? "recovery-moment" : null};
+  await expect(actOnTypingCopy({...input, action: "copy", recovered: () => recovery})).resolves.toEqual({outcome,momentId:recovery.momentId});
   expect(input.copyText).not.toHaveBeenCalled();
 });

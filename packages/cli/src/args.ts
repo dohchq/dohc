@@ -5,6 +5,7 @@ import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
 import { OwnerAppResponsesRequest } from "./appResponses";
 import { DatasetRequest, DatasetSchemaChange } from "./dataset";
+import { AccessObjectRef } from "@dohc/workspace-contracts/access";
 
 interface ParsedCliBase {
   actor: CliActor;
@@ -17,6 +18,8 @@ type ExportScope =
   | { kind: "thread"; thread: string };
 
 type CliCommandBody =
+  | { verb: "accessObject"; ref: AccessObjectRef; cursor?: string }
+  | { verb: "accessSharing"; lane: "granted" | "received"; cursor?: string }
   | { verb: "documentRead"; path: string }
   | { verb: "fileChatStart"; path: string; title: string; body: string; stdin: boolean; agent?: string; requestId?: string; runId?: string }
   | { verb: "documentEdit" | "documentCreate"; path: string; text: string; stdin: boolean; find?: string; agent?: string; requestId?: string }
@@ -942,6 +945,34 @@ const APP_VERBS: Record<string, CliVerbSpec> = Object.fromEntries([
 
 /** Every command and verb the CLI dispatches. Help reads this table too. */
 export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
+  access: {
+    summary: "Read observed object grants and Sharing inventories.",
+    notes: ["Answers describe observed grants, not authorization. An empty page means no matching grants within its coverage.",
+      "Paths resolve from your current folder. Received selectors use their source workspace's coordinates."],
+    verbs: {
+      object: {
+        capabilityId: "access.object.read", summary: "Read the grants covering an object.", operands: "<reference-json>",
+        flags: [{ name: "--cursor", value: "cursor", text: "Continue the previous answer." }],
+        parse: input => {
+          const [value, ...extra] = input.operands; noExtraArgs(extra, "access object");
+          let ref: AccessObjectRef;
+          try { ref = AccessObjectRef.parse(JSON.parse(value ?? "")); } catch { return fail("Use a path, file, chat, or Collection reference as JSON."); }
+          const cursor = lastValue(input, "--cursor");
+          return { verb: "accessObject", ref, ...(cursor ? { cursor } : {}) };
+        },
+      },
+      sharing: {
+        capabilityId: "access.sharing.read", summary: "Page this workspace's granted shares or this account's received shares.", operands: "<granted|received>",
+        flags: [{ name: "--cursor", value: "cursor", text: "Continue the previous answer." }],
+        parse: input => {
+          const [lane, ...extra] = input.operands; noExtraArgs(extra, "access sharing");
+          if (lane !== "granted" && lane !== "received") return fail("Choose granted or received.");
+          const cursor = lastValue(input, "--cursor");
+          return { verb: "accessSharing", lane, ...(cursor ? { cursor } : {}) };
+        },
+      },
+    },
+  },
   document: {
     summary: "Read, edit, and create live Markdown documents, and comment on tracked text files.",
     notes: ["Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP.",

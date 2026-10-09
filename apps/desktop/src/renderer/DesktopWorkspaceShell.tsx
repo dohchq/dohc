@@ -263,6 +263,7 @@ import {
   type WorkbenchTab,
 } from "./workbench/workbenchState";
 import type { ChatsPanelTab } from "./workbench/ChatsPanel";
+import type { AboutNotices, AccessContext } from "./workbench/About";
 import { usePinnedApps } from "./workbench/pinnedApps";
 import { pinnedAppsFor } from "../settings/pinnedApps";
 import { ipcErrorMessage } from "./ipcError";
@@ -920,8 +921,36 @@ export function DesktopWorkspaceShell(props: {
     },
     [reportShellError],
   );
-  const { chatCollaboration, refreshCloudStatus, workspaceSynced } =
+  const { chatCollaboration, refreshCloudStatus, workspaceSynced, cloudStatus, cloudStatusUnreadable } =
     useCloudPresence(workspaceId, reportCloudStatusUnavailable);
+  // About's section reads report through this shell's notices, one row per
+  // section and file. Each may fail again, so each is a repeat: it keeps a
+  // row's toast while the row is there, and toasts again once it is gone.
+  const aboutNotices = useMemo<AboutNotices>(
+    () => ({ report: (failure) => reportShellFailure({ ...failure, repeat: true }), clear: clearIdentity }),
+    [clearIdentity, reportShellFailure],
+  );
+  // What can explain an Access answer that covers nothing. About derives the
+  // cause for each file from these facts (accessReasonFor).
+  const isShareView = props.workspace.shareView !== undefined;
+  const cloudConnected = cloudStatus?.connected;
+  const cloudWorkspaceSynced = cloudStatus?.workspaceSynced === true;
+  const cloudWorkspaceSyncConnected = cloudStatus?.workspaceSyncConnected === true;
+  const accessContext = useMemo<AccessContext>(
+    () => ({
+      facts: {
+        cloud: cloudConnected !== undefined ? {
+          connected: cloudConnected,
+          workspaceSynced: cloudWorkspaceSynced,
+          workspaceSyncConnected: cloudWorkspaceSyncConnected,
+        } : cloudStatusUnreadable ? "unreadable" : "checking",
+        shareView: isShareView,
+      },
+      openSyncSettings: () => openSettings("cloud"),
+      connect: () => setCloudOpen(true),
+    }),
+    [cloudConnected, cloudStatusUnreadable, cloudWorkspaceSyncConnected, cloudWorkspaceSynced, isShareView, openSettings],
+  );
 
   // @-mention roster + agent notifications (Agent Notifications & Mentions).
   // The renderer has no identity source yet, so the user shows as "You" —
@@ -1565,12 +1594,12 @@ export function DesktopWorkspaceShell(props: {
     engineHistoryToken,
     null,
   );
-  // Which surface the right-hand Chats panel shows (all chats vs the active
-  // file's). Runtime-only — not persisted.
+  // Which surface the right-hand Chats panel shows (all chats vs About the
+  // active file). Runtime-only — not persisted.
   const [chatsPanelTab, setChatsPanelTab] = useState<ChatsPanelTab>("all");
-  // A shared view offers the "This file" tab only, so the panel
-  // opens there whatever the runtime state carried in from another workspace.
-  const chatsPanelActiveTab: ChatsPanelTab = shareView ? "file" : chatsPanelTab;
+  // A shared view offers the About tab only, so the panel opens there
+  // whatever the runtime state carried in from another workspace.
+  const chatsPanelActiveTab: ChatsPanelTab = shareView ? "about" : chatsPanelTab;
   const [searchChatTarget, setSearchChatTarget] = useState<{
     thread: ChatThreadRecord;
     focusMessageId?: string;
@@ -1741,7 +1770,7 @@ export function DesktopWorkspaceShell(props: {
   // Chats is the exception. A share view still installs no capture, so
   // history and versions stay gone, but main answers chat from the SHARE
   // scope instead of a capture, so the Chats panel opens everywhere. Only
-  // its "This file" tab there: the per-file surface answers for a file the
+  // its About tab there: the per-file surface answers for a file the
   // share already served, and a workspace-wide listing would be a superset
   // to filter (decision 5, and the shape that produced #627).
   // Whether main's capture will SERVE those surfaces. Main's status is the
@@ -2399,7 +2428,7 @@ export function DesktopWorkspaceShell(props: {
   // The one way a chat thread lands in the Chats panel (search hits, file
   // mentions without channel metadata, and the Chats view "Files" grouping
   // all route here): hand the known thread to the panel's consume-once seam,
-  // switch to "This file", and force the panel visible.
+  // switch to About, and force the panel visible.
   const openChatThreadInPanel = useCallback(
     (
       thread: { id: string; title: string; createdAtMs: number; updatedAtMs: number },
@@ -2419,7 +2448,7 @@ export function DesktopWorkspaceShell(props: {
         },
         ...(focusMessageId ? { focusMessageId } : {}),
       });
-      setChatsPanelTab("file");
+      setChatsPanelTab("about");
       mutateWb((state) => ({ ...state, chatsVisible: true }));
     },
     [mutateWb],
@@ -4696,7 +4725,7 @@ export function DesktopWorkspaceShell(props: {
     if (syncStatus?.recoveryUnavailable === undefined) return;
     reportRecoveryUnavailable(syncStatus.recoveryUnavailable, retryFileRecovery, revealRecoveryWorkspace);
   }, [syncStatus?.recoveryUnavailable, reportRecoveryUnavailable, retryFileRecovery, revealRecoveryWorkspace]);
-  const typingRecoveryConfirmation = useTypingRecoveryNotices({workspaceId, ready: workspaceIsReady, openHistory: openHistoryView, reportShellFailure, showSuccessNotice, showWarningNotice, clearKind, clearIdentity});
+  const typingRecoveryConfirmation = useTypingRecoveryNotices({workspaceId, ready: workspaceIsReady, openHistory: openHistoryView, importedRecovery: captureRecoveries.imported, reportShellFailure, showSuccessNotice, showWarningNotice, clearKind, clearIdentity});
   const keptFilesNotice = useKeptFilesNotice({
     workspaceId,
     paths: syncStatus?.keptFiles?.filter(([path]) => !path),
@@ -5495,7 +5524,7 @@ export function DesktopWorkspaceShell(props: {
         </main>
 
         {/* Chats panel — the right-hand secondary sidebar (every
-            workspace; shared views with their file tab only). Hidden
+            workspace; shared views with their About tab only). Hidden
             entirely while collapsed; the titlebar Chats button, Ctrl+Alt+B,
             or the toggle-chats command bring it back. History lives in the
             left History view and the history tab — never here. */}
@@ -5520,6 +5549,10 @@ export function DesktopWorkspaceShell(props: {
             openPathWithHeading={openPathWithHeading}
             onChatsThreadRead={onChatsThreadRead}
             reportFailureMessage={reportFailureMessage}
+            historyRevision={historyRefreshCounter}
+            openMoment={openMomentDiffTab}
+            aboutNotices={aboutNotices}
+            accessContext={accessContext}
             chatsNavigatorProps={chatsNavigatorProps}
           />
         ) : null}

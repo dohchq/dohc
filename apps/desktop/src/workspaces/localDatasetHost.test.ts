@@ -73,6 +73,20 @@ async function activate(host: LocalDatasetHost, fixture = sources()) {
 const call = (approved: Awaited<ReturnType<typeof activate>>, operationId: string, idempotencyKey = "read", input = {}) =>
   ({datasetId: id(1), revision: approved.revision.revision, revisionSha256: approved.revision.revisionSha256, operationId, idempotencyKey, input});
 
+it("pages local Collection permissions live without disclosing stored grant credentials", async () => {
+  const { host, workspaceRoot } = await open(), approved = await activate(host);
+  const db = new DatabaseSync(join(workspaceRoot, ".dohc", "datasets", "state.sqlite"));
+  try {
+    const insert = db.prepare("INSERT INTO dohc_dataset_data_grants VALUES(?,?,?,?,?)");
+    for (let n = 0; n < 101; n++) insert.run("w", id(1), `recipient-${String(n).padStart(3, "0")}`,
+      JSON.stringify({ revision: approved.revision.revision, revisionSha256: approved.revision.revisionSha256, operationIds: [id(5)], discover: true }), "secret-grant-token");
+  } finally { db.close(); }
+  const first = await host.permissions({ datasetId: id(1), limit: 100 });
+  expect(first.permissions).toHaveLength(100); expect(first.nextCursor).toBe("data:recipient-099");
+  expect((await host.permissions({ datasetId: id(1), after: first.nextCursor!, limit: 100 })).permissions).toHaveLength(1);
+  expect(JSON.stringify(first)).not.toContain("secret-grant-token");
+});
+
 it("reopens the same recovery archive after installation was interrupted before claim", async () => {
   const sourceHost = await open(), approved = await activate(sourceHost.host);
   await sourceHost.host.invoke(call(approved, id(6), "saved", { name: "Preserved" }));

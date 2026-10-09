@@ -78,15 +78,16 @@ export async function retireTypingCheckpoint(row: {file: string; content: string
   if (current === row.content) rmSync(row.file, {force: true});
   });
 }
-export async function importTypingCheckpoints(directory: string, workspaceId: string, importer: (input: CaptureRecoveryImportParams) => Promise<CaptureRecoveryImportResult>, failure: (failure: TypingRecoveryFailure) => void, refresh: (path: string, checkpointId: string) => void): Promise<void> {
+export async function importTypingCheckpoints(directory: string, workspaceId: string, importer: (input: CaptureRecoveryImportParams) => Promise<CaptureRecoveryImportResult>, failure: (failure: TypingRecoveryFailure) => void, refresh: (path: string, checkpointId: string, result: CaptureRecoveryImportResult) => void): Promise<void> {
   for (const row of await readTypingCheckpoints(directory, workspaceId)) {
     if([...checkpoints.values()].some(owner=>owner.workspaceId === workspaceId && owner.identity?.checkpointId === row.checkpoint.checkpointId)) continue;
+    let result: CaptureRecoveryImportResult;
     try {
       const {version: _version, checkpointId: _checkpointId, workspaceId: _workspace, updateBase64: _update, ...input} = row.checkpoint;
-      const result = await importer(input);
+      result = await importer(input);
       if (result.committed !== true) throw new Error("Recovery was not committed.");
     } catch (error) { failure({...typingRecoveryFailure("import",row.checkpoint.path,error), checkpointId: row.checkpoint.checkpointId}); continue; }
-    refresh(row.checkpoint.path, row.checkpoint.checkpointId);
+    refresh(row.checkpoint.path, row.checkpoint.checkpointId, result);
     await retireTypingCheckpoint(row).catch(error => {
       console.warn("[desktop] typing recovery checkpoint cleanup failed", row.checkpoint.path, error);
     });

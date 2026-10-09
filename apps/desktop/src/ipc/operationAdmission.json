@@ -1,4 +1,7 @@
 {
+  "desktop:get-object-access": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:list-sharing-access": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:request-access-refresh": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:get-capture-recovery-status": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "withRendererWorkspaceOperation" } },
   "desktop:clear-capture-recovery": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "withRendererWorkspaceOperation" } },
   "desktop:list-workspace-versions": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },

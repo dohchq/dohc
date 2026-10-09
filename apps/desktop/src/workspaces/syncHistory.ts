@@ -1,7 +1,7 @@
-import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { atomicReplaceFileSync } from "../atomicReplaceFile";
 import type { RegistryEntry } from "./registryStore";
 
 // Whether a workspace ever synced or opened as a share, kept in its own
@@ -48,19 +48,7 @@ export function recordSynced(rootPath: string): void {
 // Written beside the record and renamed over it, so a crash never leaves a
 // cut-off record.
 function replaceRecord(rootPath: string, text: string): void {
-  const path = historyPath(rootPath);
-  const temporary = `${path}.${randomUUID()}.tmp`;
-  try {
-    writeFileSync(temporary, text);
-    renameSync(temporary, path);
-  } catch (error) {
-    try {
-      rmSync(temporary, { force: true });
-    } catch {
-      // The write's own error says what went wrong.
-    }
-    throw error;
-  }
+  atomicReplaceFileSync(historyPath(rootPath), (temporary) => writeFileSync(temporary, text));
 }
 
 /**

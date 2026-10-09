@@ -18,7 +18,7 @@ it("logs retirement failure after a committed import without reporting recovery 
  vi.mocked(rmSync).mockImplementationOnce(()=>{throw locked;});
  try {
   await importTypingCheckpoints(directory,"workspace",async()=>({committed:true,outcome:"replayed",momentId:null}),failure,refresh);
-  expect(refresh).toHaveBeenCalledExactlyOnceWith("note.md",checkpoint.checkpointId);
+  expect(refresh).toHaveBeenCalledExactlyOnceWith("note.md",checkpoint.checkpointId,{committed:true,outcome:"replayed",momentId:null});
   expect(failure).not.toHaveBeenCalled();
   expect(warning).toHaveBeenCalledExactlyOnceWith("[desktop] typing recovery checkpoint cleanup failed","note.md",locked);
   expect(await readTypingCheckpoints(directory,"workspace")).toHaveLength(1);
@@ -39,7 +39,7 @@ it.each(["replayed", "covered", "imported"] as const)("retires only the exact co
  const directory = await createTestScratch("typing-retire-"); await writeTypingCheckpoint(directory, checkpoint);
  const refresh = vi.fn(); const failure = vi.fn();
  await importTypingCheckpoints(directory, "workspace", async input => {expect(input.updates).toEqual(checkpoint.updates); return {committed: true, outcome, momentId: outcome === "imported" ? "moment" : null};}, failure, refresh);
- expect(await readTypingCheckpoints(directory, "workspace")).toEqual([]); expect(refresh).toHaveBeenCalledOnce(); expect(failure).not.toHaveBeenCalled();
+ expect(await readTypingCheckpoints(directory, "workspace")).toEqual([]); expect(refresh).toHaveBeenCalledExactlyOnceWith("note.md", checkpoint.checkpointId, {committed:true,outcome,momentId:outcome === "imported" ? "moment" : null}); expect(failure).not.toHaveBeenCalled();
  expect(await hasRetainedLiveDraft(directory, "workspace", "note.md", "object")).toBe(false);
 });
 it("keeps a newer checkpoint written while the engine answers an older import", async () => {

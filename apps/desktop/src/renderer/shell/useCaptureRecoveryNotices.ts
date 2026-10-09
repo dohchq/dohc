@@ -46,12 +46,13 @@ export function useCaptureRecoveryNotices(input: {
   const notices = useMemo(() => {
     const here = () => latest.current.workspaceId === workspaceId;
     let listed: readonly CaptureRecovery[] = [];
+    const committed = new Map<string, string>();
     // The files with listed kept typing that History Restore refused as
     // shared live. It chooses the words only.
     const shared = new Set<string>();
 
     // `raised` is the file whose rows answer what the person just did.
-    const publish = (raised?: string) => latest.current.show(listed.map((recovery) => ({
+    const publish = (raised?: string) => latest.current.show([...listed.map((recovery) => ({
       momentId: recovery.momentId,
       path: recovery.path,
       title: CAPTURE_RECOVERY_TITLE,
@@ -59,7 +60,12 @@ export function useCaptureRecoveryNotices(input: {
       raise: recovery.path === raised,
       open: () => latest.current.openRecovery(recovery.momentId, recovery.path),
       dismiss: () => clear(recovery),
-    })));
+    })), ...[...committed].filter(([momentId]) => !listed.some(recovery => recovery.momentId === momentId)).map(([momentId, path]) => ({
+      momentId, path, title: CAPTURE_RECOVERY_TITLE, raise: false,
+      message: `Your typing for "${path}" is kept in History.`,
+      open: () => latest.current.openRecovery(momentId, path),
+      dismiss: () => clear({momentId, path}),
+    }))]);
 
     const refresh = async (): Promise<void> => {
       const request = reads.next();
@@ -85,13 +91,13 @@ export function useCaptureRecoveryNotices(input: {
 
     // Persists that the person is done with this kept typing, so its notice
     // never returns on a later launch.
-    const clear = (recovery: CaptureRecovery): void => {
+    const clear = (recovery: Pick<CaptureRecovery, "momentId" | "path">): void => {
       // A read already on its way may still list it.
       reads.next();
       void bridge()
         .clearCaptureRecovery({ workspaceId, momentId: recovery.momentId })
         .then(() => {
-          if (here()) void refresh();
+          if (here()) {committed.delete(recovery.momentId); void refresh();}
         })
         .catch((error: unknown) => {
           if (!here()) return;
@@ -105,6 +111,12 @@ export function useCaptureRecoveryNotices(input: {
 
     return {
       refresh,
+      async imported(momentId: string, path: string): Promise<void> {
+        await refresh();
+        if (!here() || listed.some(recovery => recovery.momentId === momentId)) return;
+        committed.set(momentId, path);
+        publish();
+      },
       // A History Restore the engine refused because the file is shared live.
       // The kept typing's row takes the refusal: every refusal raises its
       // toast again, in the shared words, through the same row. True when a

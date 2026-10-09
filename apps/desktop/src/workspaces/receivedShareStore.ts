@@ -19,12 +19,14 @@ const Base = {
   sharerName: z.string().max(320).nullable().optional(),
   generation: z.number().int().positive(), createdAtMs: Timestamp,
   genericChatWritable: z.boolean(),
+  fileScope: z.enum(["served", "not-served"]).optional(),
 };
 const Row = z.union([
   z.object({ ...Base, selector: Selector, access: z.enum(["view", "comment", "edit", "read-only", "read-write"]), damaged: z.never().optional() })
     .refine(row => row.selector.kind === undefined
       ? ["view", "comment", "edit"].includes(row.access)
-      : ["read-only", "read-write"].includes(row.access)),
+      : ["read-only", "read-write"].includes(row.access))
+    .refine(row => row.selector.kind !== "group" || row.fileScope !== undefined),
   z.object({ ...Base, selector: z.null(), access: z.string().max(64), damaged: z.literal(true) }),
 ]);
 const Removed = z.object({ shareId: Id, grantId: Id, removedAtMs: Timestamp, message: z.string().min(1).max(500) });

@@ -75,7 +75,11 @@ test("cheap preflight rejects tool and host failures before queueing without too
     if (tool === "pwsh.exe") return "7.5.0";
     return `cargo-${args[0]} ${pins[`CARGO_${args[0].toUpperCase()}_VERSION`] ?? "fixture"}`;
   };
-  assert.throws(() => admissionPreflight({nodeVersion: "24.13.0", command}), /Node 24.14/);
+  for (const nodeVersion of ["24.14.0", "24.15.0"]) {
+    assert.throws(() => admissionPreflight({nodeVersion, command}), /Node 24.16/);
+  }
+  assert.equal(calls.length, 0);
+  admissionPreflight({nodeVersion: "24.16.0", platform: "linux", command});
   assert.equal(calls.length, 0);
   admissionPreflight({rust: true, native: true, pins, platform: "win32", command});
   assert.deepEqual(calls.map(([tool]) => tool), ["pwsh.exe", "rustc", "cargo", "cargo", "cargo", "cargo"]);

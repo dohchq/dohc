@@ -12,7 +12,7 @@ import {
 
 // A seam in the save: runs once dohc has written its temporary file and before
 // it replaces the settings file, which is where an editor's save can land.
-const race = vi.hoisted(() => ({ beforeReplace: null as (() => Promise<void>) | null }));
+const race = vi.hoisted(() => ({ beforeReplace: null as (() => Promise<void>) | null, renameLocked: false }));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   return {
@@ -20,16 +20,26 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     writeFile: async (...args: Parameters<typeof actual.writeFile>) => {
       await actual.writeFile(...args);
       const hook = race.beforeReplace;
-      if (hook && String(args[0]).includes(".tmp-")) {
+      if (hook && !race.renameLocked && String(args[0]).includes(".tmp-")) {
         race.beforeReplace = null;
         await hook();
       }
+    },
+    rename: async (...args: Parameters<typeof actual.rename>) => {
+      if (race.renameLocked) {
+        race.renameLocked = false;
+        const hook = race.beforeReplace;
+        race.beforeReplace = null;
+        await hook?.();
+        throw Object.assign(new Error("destination temporarily locked"), { code: "EPERM" });
+      }
+      await actual.rename(...args);
     },
   };
 });
 
 describe("a save while the settings file changes", () => {
-  it("merges onto the edit that landed during the save instead of replacing it", async () => {
+  it.each(["temp write", "rename retry"])("merges onto the edit that landed during %s instead of replacing it", async (stage) => {
     const root = await createTestScratch("dohc-user-settings-race-");
     const path = join(root, USER_SETTINGS_FILE);
     await writeFile(path, JSON.stringify({ appearance: { themeMode: "light" } }));
@@ -40,10 +50,20 @@ describe("a save while the settings file changes", () => {
       profile: { preferredName: "Ada" },
       wallpaper: "teal",
     }));
-    const saved = await writeUserSettingsFile(root, {
-      ...seen,
-      appearance: { ...seen.appearance, zoomLevel: 2 },
-    }, seen);
+    race.renameLocked = stage === "rename retry";
+    const descriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...descriptor, value: "win32" });
+    let saved;
+    try {
+      saved = await writeUserSettingsFile(root, {
+        ...seen,
+        appearance: { ...seen.appearance, zoomLevel: 2 },
+      }, seen);
+    } finally {
+      race.renameLocked = false;
+      race.beforeReplace = null;
+      Object.defineProperty(process, "platform", descriptor);
+    }
 
     expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
       appearance: { themeMode: "dark", zoomLevel: 2 },

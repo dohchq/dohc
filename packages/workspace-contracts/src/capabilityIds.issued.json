@@ -128,5 +128,8 @@
   "document.save.retry",
   "capture.recovery.read",
   "capture.recovery.clear",
+  "access.object.read",
+  "access.sharing.read",
+  "access.refresh",
   "document.typing.recovery"
 ]

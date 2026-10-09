@@ -53,7 +53,7 @@ export function verificationAdmission({ gates, javascript }, packages, dependenc
 /** Host/tool failures can be rejected before waiting; installations stay after admission. */
 export function admissionPreflight({ rust = false, native = false, root, pins = {}, platform = process.platform, nodeVersion = process.versions.node, command = execFileSync } = {}) {
   const [major, minor] = nodeVersion.split(".").map(Number);
-  if (!(major > 24 || major === 24 && minor >= 14)) throw new Error("Verification requires Node 24.14 or newer.");
+  if (!(major > 24 || major === 24 && minor >= 16)) throw new Error("Verification requires Node 24.16 or newer.");
   const options = { encoding: "utf8", windowsHide: true, timeout: 10_000, env: { ...process.env, RUSTUP_AUTO_INSTALL: "0" } };
   if (platform === "win32") {
     const version = command("pwsh.exe", ["-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSVersion.ToString()"], options).trim();
