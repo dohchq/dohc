@@ -3161,7 +3161,9 @@ export class CollectionAutomations {
     };
     const denied = (cause: string, reason: string): RelayButtonInspection => {
       if (moved()) reason = SHARED_BUTTON_MOVED;
-      this.options.onError(`inspect shared Button "${authority.automationId}": ${cause}`, new Error(reason));
+      if (reason !== SHARED_BUTTON_FIELD_CHANGED) {
+        this.options.onError(`inspect shared Button "${authority.automationId}": ${cause}`, new Error(reason));
+      }
       return {kind: "denied", reason: [SHARED_BUTTON_MOVED, SHARED_BUTTON_FIELD_CHANGED, SHARED_BUTTON_HELD].includes(reason) ? reason : SHARED_BUTTON_DENIED};
     };
     try {
