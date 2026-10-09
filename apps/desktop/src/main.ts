@@ -5046,9 +5046,9 @@ shareViewFiles = {
     withShareViewFilesOperation(target, (files) =>
       files.projectionStatus(target),
     ),
-  reconcile: (lease, target, request) =>
+  reconcile: (lease, target, request, onCursorCommitted) =>
     withShareViewFilesOperation(target, (files) =>
-      files.reconcile(lease, target, request),
+      files.reconcile(lease, target, request, onCursorCommitted),
     ),
   unmount: (lease, target) =>
     withShareViewFilesOperation(target, (files) =>

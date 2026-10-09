@@ -335,7 +335,7 @@ describe("ended Edit Collection shares", () => {
       await screen.findByTestId("collection-new-record");
       await act(async () => undefined);
       const registryReads = bridge.getWorkspaceRegistry.mock.calls.length;
-      bridge.refreshSharedView.mockResolvedValue({ ok: true, probed: true, nextCursor: 42, status: "unchanged", changedPaths: 0,
+      bridge.refreshSharedView.mockResolvedValue({ ok: true, probed: true, status: "unchanged", changedPaths: 0,
         excludedPaths: [], unjournalablePaths: [], refusedOps: 0, refusedDetail: null });
       bridge.checkSharedViewAccess.mockResolvedValue({ status: "current", access: "view" });
       await act(async () => focusAfterMinimum());
@@ -376,7 +376,7 @@ describe("ended Edit Collection shares", () => {
       const view = render(<Profiler id="shell" onRender={rendered}>{shell(bridge, workspace)}</Profiler>);
       await screen.findByText("Retained task");
       await act(async () => {});
-      bridge.refreshSharedView.mockResolvedValue({ ok: true, probed: true, nextCursor: 42, status: "unchanged", changedPaths: 0, excludedPaths: [], unjournalablePaths: [], refusedOps: 0, refusedDetail: null });
+      bridge.refreshSharedView.mockResolvedValue({ ok: true, probed: true, status: "unchanged", changedPaths: 0, excludedPaths: [], unjournalablePaths: [], refusedOps: 0, refusedDetail: null });
       const before = rendered.mock.calls.length;
       const registryReads = bridge.getWorkspaceRegistry.mock.calls.length;
       await act(() => vi.advanceTimersByTimeAsync(15_000));
@@ -783,7 +783,7 @@ describe("ended Edit Collection shares", () => {
     fireEvent.click(screen.getByTestId("shared-view-refresh"));
     fireEvent.click(screen.getByTestId("shared-view-refresh"));
     expect(bridge.refreshSharedView).toHaveBeenCalledOnce();
-    await act(async () => pull.resolve({ ok: true, probed: true, nextCursor: 42, status: "unchanged", changedPaths: 0,
+    await act(async () => pull.resolve({ ok: true, probed: true, status: "unchanged", changedPaths: 0,
       excludedPaths: [], unjournalablePaths: [], refusedOps: 0, refusedDetail: null }));
     expect(bridge.refreshSharedView).toHaveBeenCalledTimes(2);
     expect(bridge.refreshSharedView).toHaveBeenLastCalledWith({ workspaceId: EDIT_SHARE.workspaceId, trigger: "manual" });

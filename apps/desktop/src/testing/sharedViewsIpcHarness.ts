@@ -23,7 +23,7 @@ export const info: ShareViewInfo = {
   shareId: "share", granterUserId: "granter", granterEmail: "granter@example.test", genericChatWritable: true,
   selector: { paths: ["docs"], versionId: null, access: "edit" }, createdAtMs: 1,
 };
-export const outcome = { ok: true as const, status: "updated" as const, changedPaths: 2, excludedPaths: [], unjournalablePaths: [], collisionRecordQuarantined: false, refusedOps: 1, refusedDetail: "refused path", nextCursor: 42 };
+export const outcome = { ok: true as const, status: "updated" as const, changedPaths: 2, excludedPaths: [], unjournalablePaths: [], collisionRecordQuarantined: false, refusedOps: 1, refusedDetail: "refused path" };
 export const ready: WatcherStatusResult = {
   phase: "ready",
   terminal: false,
@@ -91,7 +91,9 @@ export async function createSharedViewsIpcHarness() {
   const relayFor = vi.fn<Dependencies["receivedShareEngine"]["relayFor"]>(() => ({ recordShareViewIdentity: recordIdentity } as unknown as EngineRelayWorkspaceClient));
   const status = vi.fn<() => Promise<WatcherStatusResult>>(async () => { steps.push("capture-ready"); return ready; });
   const storeFor = vi.fn<Dependencies["receivedShareEngine"]["storeFor"]>(() => ({ watcherStatus: status } as unknown as ReturnType<Dependencies["receivedShareEngine"]["storeFor"]>));
-  const reconcile = vi.fn<Dependencies["shareViewFiles"]["reconcile"]>(async () => { steps.push("reconcile"); return { kind: "refresh", outcome }; });
+  const reconcile = vi.fn<Dependencies["shareViewFiles"]["reconcile"]>(async (_lease, _target, _request, onCursorCommitted) => {
+    steps.push("reconcile"); onCursorCommitted?.(42); return { kind: "refresh", outcome };
+  });
   const end = vi.fn<Dependencies["shareViewFiles"]["end"]>(async (_lease, target, assertCurrent) => {
     assertCurrent();
     registry.get(target.workspaceId)!.shareView!.ended = true;

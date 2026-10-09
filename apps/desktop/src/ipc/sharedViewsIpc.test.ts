@@ -428,7 +428,9 @@ describe("background share pulls", () => {
     const h = await primed(); const reads = vi.spyOn(h.registry, "get");
     const fetch = vi.fn<typeof globalThis.fetch>(async () => Response.json({ ops: [], hasMore: false, nextCursor: 42 }));
     h.probeLog.mockImplementation(input => probeShareViewLog({ ...input, relay: { ...input.relay, fetch } }));
-    await expect(h.invoke(channel, payload)).resolves.toMatchObject({ ok: true, status: "unchanged", probed: true, nextCursor: 42 });
+    const result = await h.invoke(channel, payload);
+    expect(result).toMatchObject({ ok: true, status: "unchanged", probed: true });
+    expect(result).not.toHaveProperty("nextCursor");
     expect(fetch).toHaveBeenCalledOnce();
     expect(fetch).toHaveBeenCalledWith("https://relay.example.test/sync/shares/share/log?since=42",
       expect.objectContaining({ headers: expect.any(Headers), signal: expect.any(AbortSignal) }));
@@ -437,8 +439,12 @@ describe("background share pulls", () => {
   });
   it("runs the full path once for new ops, keeps its committed cursor and skips metadata and identity", async () => {
     const h = await primed(); h.probeLog.mockResolvedValue({ unchanged: false });
-    h.reconcile.mockResolvedValue({ kind: "refresh", outcome: { ...outcome, nextCursor: 57 } });
-    await expect(h.invoke(channel, payload)).resolves.toMatchObject({ ok: true, nextCursor: 57 });
+    h.reconcile.mockImplementation(async (_lease, _target, _request, onCursorCommitted) => {
+      onCursorCommitted?.(57); return { kind: "refresh", outcome };
+    });
+    const result = await h.invoke(channel, payload);
+    expect(result).toMatchObject({ ok: true, status: "updated" });
+    expect(result).not.toHaveProperty("nextCursor");
     expect(h.reconcile).toHaveBeenCalledOnce(); expect(h.status).toHaveBeenCalledOnce(); expect(h.notify).toHaveBeenCalledOnce();
     expect(h.fetchInfo).not.toHaveBeenCalled(); expect(h.recordIdentity).not.toHaveBeenCalled();
     h.probeLog.mockResolvedValue({ unchanged: true }); await h.invoke(channel, payload);
@@ -496,7 +502,7 @@ describe("background share pulls", () => {
     h.reconcile.mockImplementationOnce(async () => {
       h.cache.set({ ...credentials, userId: "Y" });
       h.cache.set(credentials);
-      return { kind: "refresh", outcome: { ...outcome, nextCursor: undefined } };
+      return { kind: "refresh", outcome };
     });
     await h.invoke(channel, payload);
     await h.invoke(channel, payload);
@@ -520,7 +526,7 @@ describe("background share pulls", () => {
   });
   it("remembers a successful full refresh without a cursor until manual refresh or credentials change", async () => {
     const h = await harness();
-    h.reconcile.mockResolvedValue({ kind: "refresh", outcome: { ...outcome, nextCursor: undefined } });
+    h.reconcile.mockResolvedValue({ kind: "refresh", outcome });
     await h.invoke(channel, payload);
     vi.clearAllMocks();
     await expect(h.invoke(channel, payload)).resolves.toMatchObject({ ok: true, status: "unchanged", probed: true });

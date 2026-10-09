@@ -1204,16 +1204,18 @@ describe("EngineRelayClient", () => {
       store,
       pinnedSelector: PINNED_SELECTOR,
       recordRefusals: async () => undefined,
-      pull: async (input) =>
-        await client.pullShareView({
+      pull: async (input) => {
+        const pull = await client.pullShareView({
           shareId: input.shareId,
           grantedSelector: input.grantedSelector,
-        }),
+        });
+        expect(pull.nextCursor).toBe(13);
+        return pull;
+      },
     });
 
     expect(outcome).toEqual({
       status: "unchanged",
-      nextCursor: 13,
       changedPaths: 0,
       excludedPaths: [],
       unjournalablePaths: [],
@@ -1592,15 +1594,17 @@ describe("EngineRelayClient", () => {
         store,
         pinnedSelector: PINNED_SELECTOR,
         recordRefusals: async () => undefined,
-        pull: async (input) =>
-          await client.pullShareView({
+        pull: async (input) => {
+          const pull = await client.pullShareView({
             shareId: input.shareId,
             grantedSelector: input.grantedSelector,
-          }),
+          });
+          expect(pull.nextCursor).toBe(14);
+          return pull;
+        },
       }),
     ).resolves.toEqual({
       status: "updated",
-      nextCursor: 14,
       changedPaths: 1,
       excludedPaths: [],
       unjournalablePaths: [],
@@ -1639,15 +1643,17 @@ describe("EngineRelayClient", () => {
           createCaptureLiveStores(workspace, sessions).store,
         pinnedSelector: PINNED_SELECTOR,
         recordRefusals: async () => undefined,
-        pull: async (input) =>
-          await mountRelay.pullShareView({
+        pull: async (input) => {
+          const pull = await mountRelay.pullShareView({
             shareId: input.shareId,
             grantedSelector: input.grantedSelector,
-          }),
+          });
+          expect(pull.nextCursor).toBe(13);
+          return pull;
+        },
       }),
     ).resolves.toEqual({
       status: "unchanged",
-      nextCursor: 13,
       changedPaths: 0,
       excludedPaths: [],
       unjournalablePaths: [],

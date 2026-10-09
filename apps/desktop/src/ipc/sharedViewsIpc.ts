@@ -356,7 +356,7 @@ export function registerSharedViewsIpcHandlers<
           });
           controller.signal.throwIfAborted();
           scoped.assertCurrent();
-          if (probe.unchanged) return { ok: true, status: "unchanged", probed: true, nextCursor: cached.nextCursor,
+          if (probe.unchanged) return { ok: true, status: "unchanged", probed: true,
             changedPaths: 0, excludedPaths: [], unjournalablePaths: [], refusedOps: 0, refusedDetail: null };
         } catch (error) {
           if (closed) controller.signal.throwIfAborted();
@@ -471,6 +471,7 @@ export function registerSharedViewsIpcHandlers<
           });
         }
         let outcome;
+        let nextCursor: number | undefined;
         try {
           const reconciled = await withStaleSensitiveWorkspaceOperation(
             workspace.rootPath,
@@ -479,6 +480,7 @@ export function registerSharedViewsIpcHandlers<
                 lease,
                 { kind: "standalone", workspaceId: workspace.workspaceId },
                 "refresh",
+                cursor => { nextCursor = cursor; },
               ),
           );
           if (reconciled.kind !== "refresh") {
@@ -511,7 +513,7 @@ export function registerSharedViewsIpcHandlers<
           workspace.shareView.recipientUserId && workspace.shareView.relayUrl) {
           pullCache.set(event.sender, { workspaceId: input.workspaceId, attachmentId: session!.attachmentId,
             shareId: workspace.shareView.shareId, recipientUserId: workspace.shareView.recipientUserId,
-            relayUrl: workspace.shareView.relayUrl, nextCursor: outcome.nextCursor,
+            relayUrl: workspace.shareView.relayUrl, nextCursor,
             credentialGeneration });
           const clear = () => clearCache(event.sender);
           const stopClose = dependencies.onSenderClosed(event.sender, clear);

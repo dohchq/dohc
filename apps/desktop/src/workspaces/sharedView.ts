@@ -59,7 +59,6 @@ export type SharedViewRefreshStatus = "updated" | "unchanged" | "ended";
 
 export interface RefreshSharedViewOutcome {
   status: SharedViewRefreshStatus;
-  nextCursor?: number;
   changedPaths: number;
   excludedPaths: string[];
   unjournalablePaths: UnjournalablePath[];
@@ -1946,6 +1945,7 @@ async function refreshSharedViewOnce(input: {
   // past it is committed, and idempotent by origin coordinate, because a
   // re-fetched page repeats refusals the record already holds.
   recordRefusals: (refusals: ShareViewRefusal[]) => Promise<void>;
+  onCursorCommitted?: (cursor: number) => void;
   excludeFromMaterialization?: ReadonlySet<string>;
   unjournalablePaths?: readonly UnjournalablePath[];
   trackPendingMaterialization?: boolean;
@@ -2106,6 +2106,7 @@ async function refreshSharedViewOnce(input: {
     await clearPullInFlightMarker(input.rootDir);
   }
   await pull.commitCursor();
+  input.onCursorCommitted?.(pull.nextCursor);
   // Logged one line per refusal, because the count alone cannot be diagnosed.
   // The engine's message names the constraint, and for a version refusal its
   // limit, unit and observed usage.
@@ -2117,7 +2118,6 @@ async function refreshSharedViewOnce(input: {
   }
   return {
     status: pull.changedPaths.length > 0 ? "updated" : "unchanged",
-    nextCursor: pull.nextCursor,
     changedPaths: pull.changedPaths.length,
     excludedPaths,
     unjournalablePaths,
