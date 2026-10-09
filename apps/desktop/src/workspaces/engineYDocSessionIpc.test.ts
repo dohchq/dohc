@@ -1,3 +1,4 @@
+import {registerTypingCheckpoint} from "./outageTypingRecovery";
 import { SharedDocumentWaitingError } from "../ipc/sharedDocumentOpenState";
 import { engineSaveState } from "./engineYDocSaveState";
 import {
@@ -200,6 +201,25 @@ const openPayload = {
 const DOCUMENT = { workspaceId: openPayload.workspaceId, path: openPayload.path };
 
 describe("engine Y.Doc IPC adapter", () => {
+  it("reports main's unresolved flag on status events and clears it after admission", async () => {
+    const sender = new FakeSender(7);
+    const h = harness();
+    let unresolved = true;
+    const unregister = registerTypingCheckpoint(DOCUMENT.workspaceId, async () => {}, () => false,
+      {versionId: "main", path: DOCUMENT.path, objectId: () => "object-1"}, undefined, () => unresolved);
+    try {
+      await h.ipc.open(sender, openPayload);
+      h.capturedOpen()?.onSaveState?.("settling", 0, "status");
+      expect(sender.sent.at(-1)?.payload).toMatchObject({typingUnresolved: true, seq: 0});
+      unresolved = false;
+      h.capturedOpen()?.onSaveState?.("saved", 0, "status");
+      expect(sender.sent.at(-1)?.payload).toMatchObject({typingUnresolved: false, seq: 0});
+    } finally {
+      unregister();
+      await h.ipc.shutdown();
+    }
+  });
+
   it("sends a definitive edit refusal through the scoped save event", async () => {
     const h = harness(providerSession());
     const sender = new FakeSender(7);
@@ -208,7 +228,7 @@ describe("engine Y.Doc IPC adapter", () => {
     h.capturedOpen()?.onEditRefused?.("request-1", message);
     expect(sender.sent).toContainEqual({
       channel: CHANNELS.engineYDocSaveState,
-      payload: { sessionId: openPayload.sessionId, ...DOCUMENT, ...engineSaveState("error", { requestId: "request-1", message }), seq: 0,
+      payload: { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("error", { requestId: "request-1", message }), seq: 0,
         editRefusal: { workspaceId: "workspace-1", path: "notes/a.md", requestId: "request-1", message } },
     });
     await h.ipc.shutdown();
@@ -358,7 +378,7 @@ describe("engine Y.Doc IPC adapter", () => {
     h.capturedOpen()?.onSaveState?.("error", 1, "outcome", true);
     expect(sender.sent).toContainEqual({
       channel: CHANNELS.engineYDocSaveState,
-      payload: {sessionId: openPayload.sessionId, ...DOCUMENT, ...engineSaveState("error"), seq: 0, authorCapacity: true},
+      payload: {sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("error"), seq: 0, authorCapacity: true},
     });
     await h.ipc.shutdown();
   });
@@ -640,8 +660,8 @@ describe("engine Y.Doc IPC adapter", () => {
     h.capturedOpen()?.onSaveState?.("settling", 9, "start");
     h.capturedOpen()?.onSaveState?.("saved", 9, "outcome");
     expect(sender.sent.slice(-2).map(({ payload }) => payload)).toEqual([
-      { sessionId: openPayload.sessionId, ...DOCUMENT, ...engineSaveState("settling"), seq: 4 },
-      { sessionId: openPayload.sessionId, ...DOCUMENT, ...engineSaveState("saved"), seq: 4 },
+      { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("settling"), seq: 4 },
+      { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("saved"), seq: 4 },
     ]);
   });
 
@@ -760,10 +780,10 @@ describe("engine Y.Doc IPC adapter", () => {
     h.capturedOpen()?.onSaveState?.("settling", 10, "start");
     h.capturedOpen()?.onSaveState?.("saved", 10, "outcome");
     expect(sender.sent.slice(-4).map(({ payload }) => payload)).toEqual([
-      { sessionId: openPayload.sessionId, ...DOCUMENT, ...engineSaveState("settling"), seq: 4 },
-      { sessionId: openPayload.sessionId, ...DOCUMENT, ...engineSaveState("saved"), seq: 0 },
-      { sessionId: openPayload.sessionId, ...DOCUMENT, ...engineSaveState("settling"), seq: 5 },
-      { sessionId: openPayload.sessionId, ...DOCUMENT, ...engineSaveState("saved"), seq: 5 },
+      { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("settling"), seq: 4 },
+      { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("saved"), seq: 0 },
+      { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("settling"), seq: 5 },
+      { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("saved"), seq: 5 },
     ]);
     await h.ipc.shutdown();
   });
@@ -785,11 +805,11 @@ describe("engine Y.Doc IPC adapter", () => {
     h.capturedOpen()?.onSaveState?.("settling", 0, "status");
     h.capturedOpen()?.onSaveState?.("error", 0, "status");
     expect(sender.sent.slice(-5).map(({ payload }) => payload)).toEqual([
-      { sessionId: openPayload.sessionId, ...DOCUMENT, ...engineSaveState("settling"), seq: 0 },
-      { sessionId: openPayload.sessionId, ...DOCUMENT, ...engineSaveState("error"), seq: 4, saveFailure: { readOnly: false } },
-      { sessionId: openPayload.sessionId, ...DOCUMENT, ...engineSaveState("changed-on-disk"), seq: 0 },
-      { sessionId: openPayload.sessionId, ...DOCUMENT, ...engineSaveState("settling"), seq: 0 },
-      { sessionId: openPayload.sessionId, ...DOCUMENT, ...engineSaveState("error"), seq: 0 },
+      { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("settling"), seq: 0 },
+      { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("error"), seq: 4, saveFailure: { readOnly: false } },
+      { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("changed-on-disk"), seq: 0 },
+      { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("settling"), seq: 0 },
+      { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("error"), seq: 0 },
     ]);
     await h.ipc.shutdown();
   });
@@ -962,7 +982,7 @@ describe("engine Y.Doc IPC adapter", () => {
     h.ipc
       .fileMutationPort()
       .markDeletedUnderPath(AUTHORITY_ID, "Notes/Folder");
-    expect(sender.sent.at(-1)?.payload).toMatchObject({ ...engineSaveState("deleted") });
+    expect(sender.sent.at(-1)?.payload).toMatchObject({ typingUnresolved: false, ...engineSaveState("deleted") });
   });
 
   it("opens the workspace activity when the renderer outruns daemon startup", async () => {
@@ -1345,7 +1365,7 @@ describe("engine Y.Doc IPC adapter", () => {
     expect(sender.sent.at(-1)?.payload).toEqual({
       sessionId: openPayload.sessionId,
       ...DOCUMENT,
-      ...engineSaveState("read-only"),
+      typingUnresolved: false, ...engineSaveState("read-only"),
       seq: 5,
       readOnlyCause: "reconnecting",
     });
@@ -1357,7 +1377,7 @@ describe("engine Y.Doc IPC adapter", () => {
     expect(sender.sent.at(-1)?.payload).toEqual({
       sessionId: openPayload.sessionId,
       ...DOCUMENT,
-      ...engineSaveState("deleted"),
+      typingUnresolved: false, ...engineSaveState("deleted"),
       seq: 0,
     });
     expect(
@@ -1380,7 +1400,7 @@ describe("engine Y.Doc IPC adapter", () => {
     expect(sender.sent.at(-1)?.payload).toEqual({
       sessionId: openPayload.sessionId,
       ...DOCUMENT,
-      ...engineSaveState("object-changed"),
+      typingUnresolved: false, ...engineSaveState("object-changed"),
       seq: 0,
     });
     expect(
