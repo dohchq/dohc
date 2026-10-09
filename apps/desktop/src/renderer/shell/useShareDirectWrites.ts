@@ -152,7 +152,7 @@ export function useShareDirectWrites(input: {
     pushOnOpen.current = push;
     const unsubscribe = bridge().onShareDirectWritesPushed((event) => {
       if (event.workspaceId === workspaceId) void report(event.result);
-    });
+    }, workspaceId);
     return () => {
       disposed = true;
       pushOnOpen.current = null;

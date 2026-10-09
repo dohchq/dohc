@@ -9,6 +9,17 @@ import type { Workspace } from "./DesktopWorkspaceShell";
 import { deferred } from "../testing/deferred";
 import { collectionTabPath } from "./workbench/workbenchState";
 import { serializeCollectionSchema } from "./collections/schemaAuthoring";
+import * as recordFieldWrites from "./collections/recordFieldWrites";
+import type { useShareDirectWrites } from "./shell/useShareDirectWrites";
+
+const directWriteInput = vi.hoisted(() => ({ current: null as Parameters<typeof useShareDirectWrites>[0] | null }));
+vi.mock("./shell/useShareDirectWrites", async importOriginal => {
+  const original = await importOriginal<typeof import("./shell/useShareDirectWrites")>();
+  return { ...original, useShareDirectWrites: (input: Parameters<typeof useShareDirectWrites>[0]) => {
+    directWriteInput.current = input;
+    original.useShareDirectWrites(input);
+  } };
+});
 import {
   DesktopWorkspaceShell, SHARE_VIEW, makeShareBridge, shellBootstrapProps, storedStateWithTabs,
 } from "./DesktopWorkspaceShell.testHarness";
@@ -92,6 +103,50 @@ async function assertReadableAndReadOnly(bridge: ReturnType<typeof collectionBri
 }
 
 describe("ended Edit Collection shares", () => {
+  it("ends the current registry snapshot when a pending refresh finds the share ended", async () => {
+    const bridge = collectionBridge();
+    const refresh = deferred<Awaited<ReturnType<typeof bridge.refreshSharedView>>>();
+    bridge.refreshSharedView.mockReturnValueOnce(refresh.promise);
+    vi.stubGlobal("dohcDesktop", bridge);
+    const view = render(shell(bridge, EDIT_SHARE));
+    await screen.findByTestId("collection-new-record");
+    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledOnce());
+    const replaced = { ...EDIT_SHARE, shareView: { ...EDIT_SHARE.shareView!, sharerName: "Updated owner" } };
+    view.rerender(shell(bridge, replaced));
+    await act(async () => refresh.resolve({ ok: true, status: "ended", changedPaths: 0,
+      excludedPaths: [], unjournalablePaths: [], refusedOps: 0, refusedDetail: null }));
+    expect(screen.queryByTestId("collection-new-record")).toBeNull();
+    expect(screen.queryByTestId("share-changes-send")).toBeNull();
+    expect(screen.getByTestId("shared-view-banner").textContent).toContain("This share was ended");
+  });
+
+  it.each(["record creation", "Send"] as const)("uses the shell's reopen refusal for retained %s after a damaged share also ends", async action => {
+    const shellRefusal = vi.spyOn(recordFieldWrites, "setCollectionFieldWriteAccess");
+    const bridge = collectionBridge();
+    bridge.createCollectionRecord.mockResolvedValueOnce({
+      kind: "partial", created: ["tasks/Untitled.md"], failedStage: "index", reason: "index unavailable",
+      retry: { mode: "resume", recordId: "rec_abcdefghijklmnopqrstuvwxyz", instruction: "Try again to finish this record." },
+    });
+    vi.stubGlobal("dohcDesktop", bridge);
+    const view = render(shell(bridge, EDIT_SHARE));
+    await screen.findByTestId("collection-new-record");
+    const send = directWriteInput.current!.sendShareChanges;
+    if (action === "record creation") {
+      fireEvent.click(screen.getByTestId("collection-new-record"));
+      await screen.findByTestId("workspace-shell-error");
+    }
+    view.rerender(shell(bridge, { ...ENDED_SHARE, shareView: { ...ENDED_SHARE.shareView!, damaged: true } }));
+    if (action === "record creation") {
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      fireEvent.click(within(screen.getByTestId("notice-center")).getByRole("button", { name: "Try again" }));
+    } else await act(async () => send());
+    const message = "This share must be reopened. Choose Forget in the workspace menu, then open the share code again. Forget keeps your files.";
+    expect(screen.getByTestId("workspace-shell-error").textContent).toContain(message);
+    expect(shellRefusal).toHaveBeenLastCalledWith(EDIT_SHARE.workspaceId, message);
+    expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(action === "record creation" ? 1 : 0);
+    expect(bridge.submitShareChanges).not.toHaveBeenCalled();
+    shellRefusal.mockRestore();
+  });
   const offsets = {
     offsetHeight: Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight"),
     offsetWidth: Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetWidth"),

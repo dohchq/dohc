@@ -1425,6 +1425,8 @@ export function DesktopWorkspaceShell(props: {
   // main's registry summary. This gates the versions surface and collections,
   // and restore, from the same fact.
   const shareView = props.workspace.shareView ?? null;
+  const shareViewRef = useRef(shareView);
+  shareViewRef.current = shareView;
   const [needsReopenFor, setNeedsReopenFor] = useState<NonNullable<Workspace["shareView"]> | null>(null);
   const shareViewDamaged = !!shareView?.damaged || (!!shareView && needsReopenFor === shareView);
   // A registry update replaces this snapshot, including when access returns.
@@ -1441,9 +1443,9 @@ export function DesktopWorkspaceShell(props: {
   const shareHadEditRef = useRef(shareView?.access === "edit");
   if (shareViewWritable) shareHadEditRef.current = true;
   const shareReopenMessage = "This share must be reopened. Choose Forget in the workspace menu, then open the share code again. Forget keeps your files.";
-  const shareWriteRefusal = shareViewEnded ? "Your access to this share ended."
-    : shareViewDamaged ? !shareView?.recipientUserId || needsReopenFor === shareView ? shareReopenMessage
+  const shareWriteRefusal = shareViewDamaged ? !shareView?.recipientUserId || needsReopenFor === shareView ? shareReopenMessage
       : "dohc can't read what this share grants. Open the share again to restore it."
+    : shareViewEnded ? "Your access to this share ended."
     : shareHadEditRef.current ? "Your access to this share changed. Ask for Edit access, then reopen the share."
     : "This share does not have Edit access.";
   const shareWriteRefusalRef = useRef(shareWriteRefusal);
@@ -3002,7 +3004,7 @@ export function DesktopWorkspaceShell(props: {
       const execute = async (recordId?: string): Promise<void> => {
         if (workspaceSelection.current !== selection) return;
         if (shareView && !shareViewWritableRef.current) {
-          const message = shareViewEndedRef.current ? "Your access to this share ended." : shareWriteRefusalRef.current;
+          const message = shareWriteRefusalRef.current;
           reportShellError(message, new Error(message));
           return;
         }
@@ -3987,7 +3989,7 @@ export function DesktopWorkspaceShell(props: {
       }
       if (outcome.status === "ended") {
         setShareExclusions({ workspaceId, paths: [] });
-        setEndedFor(shareView);
+        setEndedFor(shareViewRef.current);
       } else {
         setShareExclusions({ workspaceId, paths: outcome.unjournalablePaths });
       }
@@ -4088,7 +4090,7 @@ export function DesktopWorkspaceShell(props: {
   const sendShareChanges = useCallback(async () => {
     if (workspaceAdmission.superseded) return;
     if (!shareViewWritableRef.current) {
-      const message = shareViewEndedRef.current ? "Your access to this share ended." : shareWriteRefusalRef.current;
+      const message = shareWriteRefusalRef.current;
       reportShellError(message, new Error(message));
       return;
     }

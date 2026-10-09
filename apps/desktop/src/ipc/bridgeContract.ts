@@ -4506,6 +4506,14 @@ export const ShareDirectWritesPushedEvent = z.object({
 });
 export type ShareDirectWritesPushedEvent = z.infer<typeof ShareDirectWritesPushedEvent>;
 
+export const ShareDirectWritesSubscription = z.object({
+  workspaceId: WORKSPACE_ID,
+  rendererDocumentId: z.string().uuid(),
+  subscriptionId: z.string().uuid(),
+  listening: z.boolean(),
+});
+export type ShareDirectWritesSubscription = z.infer<typeof ShareDirectWritesSubscription>;
+
 export const ListMyShareChangesPayload = z.object({
   workspaceId: WORKSPACE_ID,
 });
@@ -6777,7 +6785,7 @@ export interface DohcDesktopBridge
   pushShareDirectWrites(
     payload: PushShareDirectWritesPayload,
   ): Promise<PushShareDirectWritesResult>;
-  onShareDirectWritesPushed(listener: (event: ShareDirectWritesPushedEvent) => void): () => void;
+  onShareDirectWritesPushed(listener: (event: ShareDirectWritesPushedEvent) => void, workspaceId: string): () => void;
   listMyShareChanges(
     payload: ListMyShareChangesPayload,
   ): Promise<ListMyShareChangesResult>;

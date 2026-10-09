@@ -91,6 +91,46 @@ it("holds an answer no window showed until the view opens again", async () => {
   expect(f.report).toHaveBeenCalledTimes(2);
 });
 
+it("answers a push joined by an opening view only through its caller", async () => {
+  const f = fixture();
+  let finish!: (result: PushShareDirectWritesResult) => void;
+  f.push.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  f.queue.edited("a");
+  await vi.advanceTimersByTimeAsync(DIRECT_WRITE_PUSH_DELAY_MS);
+  const opened = f.queue.pushNow("a");
+  f.push.mockResolvedValueOnce(NOTHING);
+  finish(REFUSED);
+  await expect(opened).resolves.toEqual(REFUSED);
+  await vi.waitFor(() => expect(f.push).toHaveBeenCalledTimes(2));
+  expect(f.report).not.toHaveBeenCalled();
+});
+
+it("reports a background push once when several delayed saves join it", async () => {
+  const f = fixture();
+  let finish!: (result: PushShareDirectWritesResult) => void;
+  f.push.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  for (let save = 0; save < 3; save += 1) {
+    f.queue.edited("a");
+    await vi.advanceTimersByTimeAsync(DIRECT_WRITE_PUSH_DELAY_MS);
+  }
+  f.push.mockResolvedValueOnce(NOTHING);
+  finish(REFUSED);
+  await vi.waitFor(() => expect(f.push).toHaveBeenCalledTimes(2));
+  expect(f.report).toHaveBeenCalledExactlyOnceWith("a", REFUSED);
+});
+
+it("returns each push's write rows to only one of its concurrent callers", async () => {
+  const f = fixture();
+  let finish!: (result: PushShareDirectWritesResult) => void;
+  f.push.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const first = f.queue.pushNow("a"), second = f.queue.pushNow("a");
+  f.push.mockResolvedValueOnce(NOTHING);
+  finish(REFUSED);
+  await expect(first).resolves.toEqual(REFUSED);
+  await expect(second).resolves.toEqual(NOTHING);
+  expect(f.report).not.toHaveBeenCalled();
+});
+
 it("asks again after an ended share's answer, and turns a thrown push into a failure", async () => {
   const f = fixture();
   f.push.mockRejectedValueOnce(new Error("offline"));

@@ -466,8 +466,17 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.submitShareChanges, payload),
   pushShareDirectWrites: (payload) =>
     ipcRenderer.invoke(CHANNELS.pushShareDirectWrites, payload),
-  onShareDirectWritesPushed: (listener) =>
-    onEvent(CHANNELS.shareDirectWritesPushed, ShareDirectWritesPushedEvent, listener),
+  onShareDirectWritesPushed: (listener, workspaceId) => {
+    const unsubscribe = onEvent(CHANNELS.shareDirectWritesPushed, ShareDirectWritesPushedEvent, listener);
+    const subscriptionId = crypto.randomUUID();
+    const update = (listening: boolean) => {
+      void ipcRenderer.invoke(CHANNELS.shareDirectWritesPushed, {
+        workspaceId, rendererDocumentId, subscriptionId, listening,
+      }).catch(error => console.error("[desktop] direct-write subscription failed:", error));
+    };
+    update(true);
+    return () => { unsubscribe(); update(false); };
+  },
   listMyShareChanges: (payload) =>
     ipcRenderer.invoke(CHANNELS.listMyShareChanges, payload),
   withdrawShareChanges: (payload) =>

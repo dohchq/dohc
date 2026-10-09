@@ -129,6 +129,7 @@ import {
   SyncStatusResult,
   RebuildEngineStoreResult,
   type PushShareDirectWritesResult,
+  ShareDirectWritesSubscription,
   WorkspaceSummary,
   UpdateStateEvent,
   ShareHandoffStatus,
@@ -764,16 +765,16 @@ function notifyWorkspaceWindows(workspaceId: string, channel: string): void {
   }
 }
 
-// A direct push main ran after a save in a share view finished: the windows
-// on that view show its stale and refused writes. False when no window
-// shows the view; the push queue then holds the answer until one does.
+const shareDirectWriteListeners = new WeakMap<WebContents, ShareDirectWritesSubscription>();
+
+// Count delivery only to a subscribed document on this workspace.
 function notifyShareDirectWritesPushed(workspaceId: string, result: PushShareDirectWritesResult): boolean {
   let shown = false;
   for (const win of BrowserWindow.getAllWindows()) {
-    if (
-      rendererWorkspaceSessions.current(win.webContents)?.workspaceId !==
-      workspaceId
-    ) {
+    const session = rendererWorkspaceSessions.current(win.webContents);
+    const listener = shareDirectWriteListeners.get(win.webContents);
+    if (session?.workspaceId !== workspaceId || listener?.workspaceId !== workspaceId ||
+      listener.rendererDocumentId !== session.rendererDocumentId) {
       continue;
     }
     win.webContents.send(CHANNELS.shareDirectWritesPushed, { workspaceId, result });
@@ -5641,6 +5642,14 @@ async function currentDiagnostics(): Promise<string> {
 }
 
 function registerIpcHandlers(): void {
+  handleIpc(CHANNELS.shareDirectWritesPushed, (event, payload) => {
+    assertTrustedSender(event);
+    const input = ShareDirectWritesSubscription.parse(payload);
+    if (input.listening) shareDirectWriteListeners.set(event.sender, input);
+    else if (shareDirectWriteListeners.get(event.sender)?.subscriptionId === input.subscriptionId) {
+      shareDirectWriteListeners.delete(event.sender);
+    }
+  });
   registerOperations(operationBoundary, accessOperations, {
     getObjectAccess: (input, { operation }) => accessOwner.object(operation!, input),
     listSharingAccess: (input, { operation }) => accessOwner.sharing(operation!, input),

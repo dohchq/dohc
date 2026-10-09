@@ -14,7 +14,7 @@ export function createShareDirectWriteQueue(dependencies: {
   push(workspaceId: string): Promise<PushShareDirectWritesResult>;
   /**
    * A push that no window asked for finished; windows on the view show it.
-   * Answers false when no window shows the view.
+   * Answers false when no renderer has subscribed for the view.
    */
   report(workspaceId: string, result: PushShareDirectWritesResult): boolean;
   /** Refresh definition delivery status when a push has writes or cannot finish. */
@@ -24,6 +24,8 @@ export function createShareDirectWriteQueue(dependencies: {
   const delayMs = dependencies.delayMs ?? DIRECT_WRITE_PUSH_DELAY_MS;
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
   const running = new Map<string, Promise<PushShareDirectWritesResult>>();
+  const answeredToCaller = new WeakSet<Promise<PushShareDirectWritesResult>>();
+  const backgroundReports = new WeakSet<Promise<PushShareDirectWritesResult>>();
   const again = new Set<string>();
   // Answers no window has shown yet, per view, until one opens it.
   const held = new Map<string, PushShareDirectWritesResult[]>();
@@ -61,11 +63,20 @@ export function createShareDirectWriteQueue(dependencies: {
     const pushed = pushOnce(workspaceId).finally(() => {
       running.delete(workspaceId);
       if (again.delete(workspaceId)) {
-        void run(workspaceId).then((result) => report(workspaceId, result));
+        runAndReport(workspaceId);
       }
     });
     running.set(workspaceId, pushed);
     return pushed;
+  }
+
+  function runAndReport(workspaceId: string): void {
+    const pushed = run(workspaceId);
+    if (backgroundReports.has(pushed)) return;
+    backgroundReports.add(pushed);
+    void pushed.then(result => {
+      if (!answeredToCaller.has(pushed)) report(workspaceId, result);
+    });
   }
 
   return {
@@ -77,7 +88,7 @@ export function createShareDirectWriteQueue(dependencies: {
       if (timer !== undefined) clearTimeout(timer);
       timers.set(workspaceId, setTimeout(() => {
         timers.delete(workspaceId);
-        void run(workspaceId).then((result) => report(workspaceId, result));
+        runAndReport(workspaceId);
       }, delayMs));
     },
     /**
@@ -92,7 +103,12 @@ export function createShareDirectWriteQueue(dependencies: {
       const waiting = held.get(workspaceId) ?? [];
       held.delete(workspaceId);
       for (const result of waiting) report(workspaceId, result);
-      return run(workspaceId);
+      const pushed = run(workspaceId);
+      // A joined push has one answer owner. run schedules another pass for
+      // the joining request, whose new answers go through the background lane.
+      if (answeredToCaller.has(pushed)) return pushed.then(() => ({ status: "pushed", writes: [] }));
+      answeredToCaller.add(pushed);
+      return pushed;
     },
   };
 }
