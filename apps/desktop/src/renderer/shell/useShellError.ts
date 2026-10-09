@@ -271,7 +271,8 @@ export function useShellError(workspaceId: string) {
   // the words. Text that arrives raw is read into words the same way. A kind
   // makes a newer message replace the row of an older one, such as one
   // import's result replacing the last; an identity does the same for one
-  // thing, such as one folder.
+  // thing, such as one folder. `repeat` is the same read failing again: its
+  // row replaces the last one and keeps that row's toast, open or closed.
   const reportShellFailure = useCallback(
     (failure: {
       title?: string;
@@ -282,6 +283,7 @@ export function useShellError(workspaceId: string) {
       onDismiss?: () => void;
       kind?: ShellErrorKind;
       identity?: string;
+      repeat?: boolean;
     }) => {
       const shown = readError(failure.message);
       const cause = failure.cause === undefined ? shown.cause : readError(failure.cause).cause;
@@ -297,7 +299,7 @@ export function useShellError(workspaceId: string) {
         ...(failure.onDismiss ? { onDismiss: failure.onDismiss } : {}),
         ...(failure.kind ? { kind: failure.kind } : {}),
         ...(failure.identity !== undefined ? { identity: failure.identity } : {}),
-      });
+      }, failure.repeat ? "keep" : false);
     },
     [push],
   );

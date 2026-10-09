@@ -292,6 +292,24 @@ describe("useShellError", () => {
     expect(result.current.shellErrors).toEqual([]);
   });
 
+  it("replaces a repeated failure's row and keeps that row's toast, open or closed", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    act(() => result.current.reportShellFailure({ message: "Could not load History.", identity: "about-history:a.md" }));
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);
+    // Still open: the repeat keeps it open, as one row.
+    act(() => result.current.reportShellFailure({ message: "Could not load History.", identity: "about-history:a.md", repeat: true }));
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);
+    // Closed by the person: the repeat does not toast again.
+    act(() => result.current.hideShellError(result.current.shellErrors[0]!.id));
+    act(() => result.current.reportShellFailure({ message: "Could not load History.", identity: "about-history:a.md", repeat: true }));
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([true]);
+    // Another file's first failure is a toast of its own.
+    act(() => result.current.reportShellFailure({ message: "Could not load History.", identity: "about-history:b.md" }));
+    expect(result.current.shellErrors.map((error) => [error.identity, error.seen])).toEqual([
+      ["about-history:a.md", true], ["about-history:b.md", false],
+    ]);
+  });
+
   it("shows words instead of Electron's prefix, a class name or a code, and keeps them for Copy", () => {
     const { result } = renderHook(() => useShellError("ws-a"));
     const refused = new Error(

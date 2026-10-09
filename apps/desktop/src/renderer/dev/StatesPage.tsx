@@ -28,7 +28,7 @@ import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { EditorGroupLayout } from "../workbench/EditorGroupLayout";
 import { EditorTabs } from "../workbench/EditorTabs";
-import { HistoryHiddenState, HistoryUntrackedState } from "../workbench/HistoryPolicyStates";
+import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords } from "../workbench/HistoryPolicyStates";
 import { TreeRow, type VisibleRow } from "../workbench/Explorer";
 import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
 import { MomentRow } from "../workbench/EngineHistory";
@@ -1292,6 +1292,16 @@ function Pane(props: { theme: "light" | "dark" }) {
             <AboutHistoryView view={{ status: "loading" }} expanded onToggle={noop} onOpenMoment={noop} />
             <AboutHistoryView view={{ status: "failed", retry: noop }} expanded onToggle={noop} onOpenMoment={noop} />
             <AboutAccessView view={{ status: "failed" }} expanded onToggle={noop} onRetry={noop} onMore={noop} setup={ACCESS_UNEXPLAINED} />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="History held back by its rules: drawn here, no row">
+          <AboutPanelSpecimen>
+            <AboutHistoryView
+              view={{ status: "held", words: historyHiddenWords([".dohc/files.toml"]), retry: noop }}
+              expanded
+              onToggle={noop}
+              onOpenMoment={noop}
+            />
           </AboutPanelSpecimen>
         </Specimen>
         <Specimen label="keyboard focus on a closed section">

@@ -51,7 +51,7 @@ export function ShellChatsPanel(props: {
   historyRevision: number;
   openMoment: NonNullable<LinkedChatsPanelProps["history"]>["onOpenMoment"];
   aboutNotices: LinkedChatsPanelProps["notices"];
-  accessSetup: LinkedChatsPanelProps["accessSetup"];
+  accessContext: LinkedChatsPanelProps["accessContext"];
   chatsNavigatorProps: ComponentProps<typeof LazyChatsView>;
 }) {
   const {
@@ -77,7 +77,7 @@ export function ShellChatsPanel(props: {
     historyRevision,
     openMoment,
     aboutNotices,
-    accessSetup,
+    accessContext,
     chatsNavigatorProps,
   } = props;
   return (
@@ -159,7 +159,7 @@ export function ShellChatsPanel(props: {
               onThreadRead={onChatsThreadRead}
               onError={reportFailureMessage}
               notices={aboutNotices}
-              accessSetup={accessSetup}
+              accessContext={accessContext}
             />
           </Suspense>
         ) : (

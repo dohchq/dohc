@@ -1,5 +1,6 @@
 import type { AccessAnswer } from "@dohc/workspace-contracts/access";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
+import { isSharedWithMePath } from "@dohc/workspace-core/paths";
 import {
   AppWindow,
   ChevronDown,
@@ -18,7 +19,7 @@ import {
   TriangleAlert,
   type LucideIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ChatThreadRecord, EngineMomentRecord } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
@@ -40,22 +41,52 @@ import { historyHiddenWords } from "./HistoryPolicyStates";
 export type AboutSectionId = "chats" | "history" | "access";
 
 // The shell's error hook. A section read that fails is one Notices row per
-// section and file, with Try again, and a read that succeeds clears it. The
-// section itself shows no error words, only the way to read again.
+// section and file, with Try again. A read that succeeds clears it, and so
+// does the file leaving About. The section itself shows no error words, only
+// the way to read again. `repeat` says the section already filed a row for
+// this file, so the new one replaces it without a second toast.
 export type AboutNotices = {
-  report(failure: { identity: string; message: string; cause?: unknown; retry: () => void }): void;
+  report(failure: { identity: string; message: string; cause?: unknown; retry: () => void; repeat: boolean }): void;
   clear(identity: string): void;
 };
 
-// What this computer knows about the workspace's sync and account, which
-// explains an Access answer that covers nothing. Main lists shares only for
-// a workspace that syncs, while the account it syncs with is signed in.
-export type AccessReason = "not-synced" | "signed-out" | "other-account" | "unexplained";
+// What explains an Access answer that covers nothing. `checking` waits for
+// the workspace's server connection to be read; it claims nothing.
+export type AccessReason = "checking" | "not-synced" | "signed-out" | "other-account" | "unexplained";
 export type AccessSetup = {
   reason: AccessReason;
   openSyncSettings: () => void;
   connect: () => void;
 };
+
+// What this computer knows about the workspace's server connection, from the
+// shell's cloud status: null while it is read, or when it could not be.
+export type AccessFacts = {
+  cloud: { connected: boolean; workspaceSynced: boolean; workspaceSyncConnected: boolean } | null;
+  shareView: boolean;
+};
+export type AccessContext = {
+  facts: AccessFacts;
+  openSyncSettings: () => void;
+  connect: () => void;
+};
+
+// The cause for one file, the way main answers it (accessOwner.ts). The
+// workspace's own files are listed from its owner's roster, which needs the
+// workspace to sync and its account to be signed in. A shared view's files
+// and files under shared-with-me/ are listed from the account's received
+// shares, which need only a signed-in account. Signed in, a received file
+// can still go unanswered: the account or server the share went to differs,
+// or the list has not arrived. The renderer cannot tell those apart.
+export function accessReasonFor(facts: AccessFacts, path: string): AccessReason {
+  const { cloud } = facts;
+  if (cloud === null) return "checking";
+  if (facts.shareView || isSharedWithMePath(path)) return cloud.connected ? "unexplained" : "signed-out";
+  if (!cloud.workspaceSynced) return "not-synced";
+  if (!cloud.connected) return "signed-out";
+  if (!cloud.workspaceSyncConnected) return "other-account";
+  return "unexplained";
+}
 
 // A row in a section, inset from the panel's edges like the drawing's rows.
 export const ABOUT_ROW =
@@ -195,41 +226,45 @@ function LinkMark() {
 type Keyed<View> = { key: string; view: View };
 const LOADING = { status: "loading" } as const;
 
-// A read for the current workspace and file: its answer lands only while it
-// is the newest read, and a failure files one Notices row whose Try again
-// reads again only if that file is still on screen.
+// A read for the current workspace and file. Its answer lands only while it
+// is the newest read for the file still on screen. A failure files one
+// Notices row, and the row goes when the file leaves About, so every row
+// left has a Try again that reads.
 function useSectionRead<View>(key: string, identity: string, notices: AboutNotices) {
   const [state, setState] = useState<Keyed<View | typeof LOADING>>({ key: "", view: LOADING });
   const token = useRef(0);
   const currentKey = useRef(key);
   currentKey.current = key;
+  // Whether this file has a row filed, so a read that fails again replaces
+  // it without a second toast.
+  const filed = useRef(false);
   const begin = useCallback(() => {
     const request = ++token.current;
-    const current = () => request === token.current;
+    const current = () => request === token.current && currentKey.current === key;
     return {
       current,
       settle(view: View) {
         if (!current()) return;
+        filed.current = false;
         notices.clear(identity);
         setState({ key, view });
       },
       fail(view: View, message: string, cause: unknown, retry: () => void) {
         if (!current()) return;
         setState({ key, view });
-        notices.report({
-          identity,
-          message,
-          cause,
-          retry: () => {
-            if (currentKey.current === key) retry();
-          },
-        });
+        notices.report({ identity, message, cause, retry, repeat: filed.current });
+        filed.current = true;
       },
     };
   }, [identity, key, notices]);
   const cancel = useCallback(() => {
     token.current += 1;
   }, []);
+  useEffect(() => () => {
+    token.current += 1;
+    filed.current = false;
+    notices.clear(identity);
+  }, [identity, notices]);
   return { view: state.key === key ? state.view : LOADING, begin, cancel };
 }
 
@@ -243,10 +278,14 @@ export type AboutFile =
   | { status: "failed"; retry: () => void }
   | { status: "ready"; objectId: string | null };
 
+// `held` is History holding the file's changes back, a state of the surface
+// drawn in place (HistoryPolicyStates.tsx): its rules can't be read, or the
+// workspace is still updating. Nothing failed, so it files no row.
 export type HistoryView =
   | typeof LOADING
   | { status: "ready"; moments: EngineMomentRecord[]; more: boolean }
   | { status: "untracked" }
+  | { status: "held"; words: string; retry: () => void }
   | { status: "failed"; retry: () => void };
 
 const HISTORY_ROWS = 5;
@@ -295,8 +334,11 @@ export function AboutHistory(props: {
         request.settle({ status: "ready", moments: response.moments, more: response.nextBeforeMomentOrder !== null });
         return;
       }
-      const message = response.status === "updating" ? WORKSPACE_UPDATING_MESSAGE : historyHiddenWords(response.unreadable);
-      request.fail(failed, message, undefined, failed.retry);
+      request.settle({
+        status: "held",
+        words: response.status === "updating" ? WORKSPACE_UPDATING_MESSAGE : historyHiddenWords(response.unreadable),
+        retry: failed.retry,
+      });
     } catch (error) {
       request.fail(failed, ipcErrorMessage(error, "Could not load History for this file."), error, failed.retry);
     }
@@ -338,6 +380,11 @@ export function AboutHistoryView(props: {
         <AboutRetry testId="about-history-failed" onRetry={view.retry} />
       ) : view.status === "untracked" ? (
         <AboutNote testId="about-history-untracked">History does not track this file yet.</AboutNote>
+      ) : view.status === "held" ? (
+        // The words end in "try again", so the control they name is here.
+        <AboutNote testId="about-history-held" icon={EyeOff} action={{ label: "Try again", run: view.retry }}>
+          {view.words}
+        </AboutNote>
       ) : view.moments.length === 0 ? (
         <AboutNote testId="about-history-empty">History has no changes to this file yet.</AboutNote>
       ) : (
@@ -466,9 +513,15 @@ export function AboutAccess(props: {
   expanded: boolean;
   onToggle: () => void;
   notices: AboutNotices;
-  setup: AccessSetup;
+  context: AccessContext;
 }) {
   const { workspaceId, path } = props;
+  const { facts, openSyncSettings, connect } = props.context;
+  const reason = accessReasonFor(facts, path);
+  // The server connection the last refresh was asked under. A new one, such
+  // as a Connect server that signed in, refreshes and reads again.
+  const connection = facts.cloud === null ? "checking"
+    : `${facts.cloud.connected}:${facts.cloud.workspaceSynced}:${facts.cloud.workspaceSyncConnected}`;
   const read = useSectionRead<AccessView>(`${workspaceId}\0${path}`, `about-access:${path}`, props.notices);
   const { begin, cancel } = read;
   // One read: from the start, or the page after `after`. Asking main to
@@ -506,18 +559,19 @@ export function AboutAccess(props: {
     },
     [begin, path, workspaceId],
   );
-  const refreshed = useRef(false);
+  const refreshedUnder = useRef<string | null>(null);
   useEffect(() => {
     if (!props.expanded) {
-      refreshed.current = false;
+      refreshedUnder.current = null;
       return;
     }
-    const refresh = !refreshed.current;
-    refreshed.current = true;
+    const refresh = refreshedUnder.current !== connection;
+    refreshedUnder.current = connection;
     void load({ refresh });
     return cancel;
-  }, [cancel, load, props.expanded]);
+  }, [cancel, connection, load, props.expanded]);
 
+  const setup = useMemo<AccessSetup>(() => ({ reason, openSyncSettings, connect }), [connect, openSyncSettings, reason]);
   return (
     <AboutAccessView
       view={read.view}
@@ -525,7 +579,7 @@ export function AboutAccess(props: {
       onToggle={props.onToggle}
       onRetry={() => void load({ refresh: true })}
       onMore={(answer) => void load({ after: answer })}
-      setup={props.setup}
+      setup={setup}
     />
   );
 }
@@ -545,6 +599,10 @@ function AccessUnknown(props: { answer: AccessAnswer; setup: AccessSetup; onRetr
     );
   }
   switch (setup.reason) {
+    // Nothing explains the answer until the server connection is read, so
+    // nothing is claimed: it reads as still loading.
+    case "checking":
+      return <SkeletonLines rows={2} className="px-2 py-1" />;
     case "not-synced":
       return (
         <AboutNote testId="about-access-unknown" reason="not-synced" icon={CloudOff}

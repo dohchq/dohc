@@ -262,7 +262,7 @@ import {
   type WorkbenchTab,
 } from "./workbench/workbenchState";
 import type { ChatsPanelTab } from "./workbench/ChatsPanel";
-import type { AboutNotices, AccessReason, AccessSetup } from "./workbench/About";
+import type { AboutNotices, AccessContext } from "./workbench/About";
 import { usePinnedApps } from "./workbench/pinnedApps";
 import { pinnedAppsFor } from "../settings/pinnedApps";
 import { ipcErrorMessage } from "./ipcError";
@@ -927,23 +927,26 @@ export function DesktopWorkspaceShell(props: {
     () => ({ report: reportShellFailure, clear: clearIdentity }),
     [clearIdentity, reportShellFailure],
   );
-  // What explains an Access answer that covers nothing. Main lists a
-  // workspace's shares only while it syncs and its account is signed in; a
-  // shared view's grant needs the account it was sent to.
-  const accessReason: AccessReason =
-    cloudStatus === null ? "unexplained"
-    : props.workspace.shareView ? (cloudStatus.connected ? "unexplained" : "signed-out")
-    : !cloudStatus.workspaceSynced ? "not-synced"
-    : !cloudStatus.connected ? "signed-out"
-    : cloudStatus.workspaceSyncConnected === false ? "other-account"
-    : "unexplained";
-  const accessSetup = useMemo<AccessSetup>(
+  // What can explain an Access answer that covers nothing. About derives the
+  // cause for each file from these facts (accessReasonFor).
+  const isShareView = props.workspace.shareView !== undefined;
+  const cloudConnected = cloudStatus?.connected;
+  const cloudWorkspaceSynced = cloudStatus?.workspaceSynced === true;
+  const cloudWorkspaceSyncConnected = cloudStatus?.workspaceSyncConnected === true;
+  const accessContext = useMemo<AccessContext>(
     () => ({
-      reason: accessReason,
+      facts: {
+        cloud: cloudConnected === undefined ? null : {
+          connected: cloudConnected,
+          workspaceSynced: cloudWorkspaceSynced,
+          workspaceSyncConnected: cloudWorkspaceSyncConnected,
+        },
+        shareView: isShareView,
+      },
       openSyncSettings: () => openSettings("cloud"),
       connect: () => setCloudOpen(true),
     }),
-    [accessReason, openSettings],
+    [cloudConnected, cloudWorkspaceSyncConnected, cloudWorkspaceSynced, isShareView, openSettings],
   );
 
   // @-mention roster + agent notifications (Agent Notifications & Mentions).
@@ -5544,7 +5547,7 @@ export function DesktopWorkspaceShell(props: {
             historyRevision={historyRefreshCounter}
             openMoment={openMomentDiffTab}
             aboutNotices={aboutNotices}
-            accessSetup={accessSetup}
+            accessContext={accessContext}
             chatsNavigatorProps={chatsNavigatorProps}
           />
         ) : null}

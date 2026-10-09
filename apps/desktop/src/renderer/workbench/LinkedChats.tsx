@@ -21,7 +21,7 @@ import {
   type AboutFile,
   type AboutNotices,
   type AboutSectionId,
-  type AccessSetup,
+  type AccessContext,
 } from "./About";
 import {
   ChatComposer,
@@ -114,10 +114,10 @@ export function LinkedChatsPanel(props: {
     revision: number;
     onOpenMoment: (momentId: string, filePath: string) => void;
   };
-  // Where a section read that failed reports, and what explains an Access
+  // Where a section read that failed reports, and what can explain an Access
   // answer that covers nothing. Both stay the same object between renders.
   notices: AboutNotices;
-  accessSetup: AccessSetup;
+  accessContext: AccessContext;
 }) {
   const { workspaceId, filePath } = props;
   const threadsKey = `${workspaceId}\0${filePath ?? ""}`;
@@ -141,30 +141,27 @@ export function LinkedChatsPanel(props: {
 
   const currentThreadsKey = useRef(threadsKey);
   currentThreadsKey.current = threadsKey;
+  // Whether this file's chats read has a Notices row filed.
+  const chatsFiled = useRef(false);
   const { notices } = props;
   const refreshThreads = useCallback(async () => {
     if (!filePath) return;
     const token = ++liveToken.current;
+    const current = () => token === liveToken.current && currentThreadsKey.current === threadsKey;
     const identity = `about-chats:${filePath}`;
-    // The words go to the shell's error hook. Its Try again reads again
-    // only while this file is still the one on screen.
+    // The words go to the shell's error hook. The row goes when this file
+    // leaves About, so its Try again always reads this file.
     const fail = (message: string, cause?: unknown) => {
       setThreadsState({ status: "unavailable", key: threadsKey });
-      notices.report({
-        identity,
-        message,
-        cause,
-        retry: () => {
-          if (currentThreadsKey.current === threadsKey) void refreshThreads();
-        },
-      });
+      notices.report({ identity, message, cause, retry: () => void refreshThreads(), repeat: chatsFiled.current });
+      chatsFiled.current = true;
     };
     setThreadsState({ status: "loading" });
     let updatingStartedAtMs: number | null = null;
-    while (token === liveToken.current) {
+    while (current()) {
       try {
         const result = await bridge().listFileChats({ workspaceId, path: filePath });
-        if (token !== liveToken.current) return;
+        if (!current()) return;
         if (isWorkspaceUpdatingResponse(result)) {
           const now = performance.now();
           updatingStartedAtMs ??= now;
@@ -179,6 +176,7 @@ export function LinkedChatsPanel(props: {
           );
           continue;
         }
+        chatsFiled.current = false;
         notices.clear(identity);
         setThreadsState({
           status: "ready",
@@ -188,14 +186,15 @@ export function LinkedChatsPanel(props: {
         });
         return;
       } catch (error) {
-        if (token !== liveToken.current) return;
+        if (!current()) return;
         fail(ipcErrorMessage(error, "Could not load Chats for this file."), error);
         return;
       }
     }
   }, [filePath, notices, threadsKey, workspaceId]);
 
-  // File (or workspace) switch: drop everything stale and reload.
+  // File (or workspace) switch: drop everything stale and reload. The file
+  // that leaves About takes its Notices row with it.
   useEffect(() => {
     liveToken.current += 1;
     setActiveThread(null);
@@ -209,8 +208,10 @@ export function LinkedChatsPanel(props: {
     void refreshThreads();
     return () => {
       liveToken.current += 1;
+      chatsFiled.current = false;
+      notices.clear(`about-chats:${filePath}`);
     };
-  }, [filePath, refreshThreads]);
+  }, [filePath, notices, refreshThreads]);
 
   const openThread = useCallback(
     async (thread: ChatThreadRecord, focusMessageId?: string) => {
@@ -502,7 +503,7 @@ export function LinkedChatsPanel(props: {
           expanded={sectionsOpen.access}
           onToggle={toggleSection("access")}
           notices={notices}
-          setup={props.accessSetup}
+          context={props.accessContext}
         />
       </div>
       {threads?.status !== "ready" ? null : readOnly ? (
