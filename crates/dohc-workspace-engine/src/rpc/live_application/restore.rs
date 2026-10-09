@@ -318,6 +318,7 @@ impl EngineService {
                         )
                         .await;
                     if observed.load(std::sync::atomic::Ordering::SeqCst) {
+                        let release_generation = leases.release_generation(&host.open.workspace_id);
                         let reconciliation = host
                             .open
                             .actor
@@ -336,9 +337,10 @@ impl EngineService {
                                 host.open.request_collection_reconcile();
                                 map_runtime(error)
                             })?;
-                        if reconciliation.lease_held {
-                            host.open.request_collection_reconcile();
-                        }
+                        host.open.record_collection_reconciliation(
+                            reconciliation.lease_held,
+                            release_generation,
+                        );
                         crate::events::emit_automation_claimed(
                             &reconcile_events,
                             &host.open.workspace_id,

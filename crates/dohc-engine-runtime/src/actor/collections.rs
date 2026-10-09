@@ -1351,7 +1351,7 @@ fn adopt_collection_record_on_store(
         }
         None
     } else {
-        match leases.acquire(&probe.key) {
+        match leases.acquire_internal(&probe.key) {
             Ok(lease) => Some(lease),
             Err(CollabError::LeaseHeld) => return Ok(None),
             Err(error) => return Err(error.into()),
@@ -1499,7 +1499,7 @@ fn cleanup_collection_relation_on_store(
         }
         .into());
     }
-    let _lease = match leases.acquire(&probe.key) {
+    let _lease = match leases.acquire_internal(&probe.key) {
         Ok(lease) => lease,
         Err(CollabError::LeaseHeld) => {
             return Ok(CollectionRelationCleanupExecution::LeaseHeld);

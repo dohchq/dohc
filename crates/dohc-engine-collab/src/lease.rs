@@ -82,6 +82,20 @@ impl LeaseRegistry {
     /// Acquire an exclusive lease for `key`. Fails with [`CollabError::LeaseHeld`]
     /// if another live lease for the same lineage is outstanding.
     pub fn acquire(&self, key: &DocKey) -> Result<Lease, CollabError> {
+        self.acquire_with_notification(key, true)
+    }
+
+    /// Acquire exclusion for an engine-internal attempt. Its release does not
+    /// wake deferred work: the attempt must finish before its caller returns.
+    pub fn acquire_internal(&self, key: &DocKey) -> Result<Lease, CollabError> {
+        self.acquire_with_notification(key, false)
+    }
+
+    fn acquire_with_notification(
+        &self,
+        key: &DocKey,
+        notify_release: bool,
+    ) -> Result<Lease, CollabError> {
         let mut held = self.held.lock().map_err(|_| CollabError::Corrupt {
             reason: "lease registry mutex poisoned".to_string(),
         })?;
@@ -93,6 +107,7 @@ impl LeaseRegistry {
             releases: self.released.clone(),
             key: self.object_scope(key),
             released: false,
+            notify_release,
         })
     }
 
@@ -104,8 +119,8 @@ impl LeaseRegistry {
             .unwrap_or(false)
     }
 
-    /// A count that moves every time a lease on `workspace_id` under this
-    /// view's root is released.
+    /// A count that moves when a session lease on `workspace_id` under this
+    /// view's root is released. Internal attempts do not move it.
     pub fn release_generation(&self, workspace_id: &str) -> u64 {
         self.released
             .lock()
@@ -121,6 +136,7 @@ pub struct Lease {
     releases: Arc<Mutex<HashMap<String, u64>>>,
     key: (String, String),
     released: bool,
+    notify_release: bool,
 }
 
 impl Lease {
@@ -141,6 +157,9 @@ impl Lease {
         self.released = true;
         if let Ok(mut held) = self.held.lock() {
             held.remove(&self.key);
+        }
+        if !self.notify_release {
+            return;
         }
         if let Ok(mut releases) = self.releases.lock() {
             let count = releases.entry(self.key.0.clone()).or_default();

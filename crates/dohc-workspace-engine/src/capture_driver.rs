@@ -907,7 +907,11 @@ impl DriverStatus {
     pub(crate) fn request_collection_reconcile(&self) {
         self.update(|bits| bits | STATUS_COLLECTION_RECONCILE_PENDING);
     }
-    fn record_collection_reconciliation(&self, lease_held: bool, release_generation: u64) {
+    pub(crate) fn record_collection_reconciliation(
+        &self,
+        lease_held: bool,
+        release_generation: u64,
+    ) {
         self.collection_release_generation
             .store(release_generation, Ordering::Relaxed);
         self.collection_lease_held
@@ -2476,6 +2480,7 @@ struct CaptureThreadOutcome {
     result: CaptureApplyResult,
     policy_held: bool,
     collections: Option<Result<CollectionReconciliation, RuntimeError>>,
+    collection_release_generation: u64,
     /// Automation claims the captures and the reconciliation committed.
     automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
 }
@@ -2724,7 +2729,6 @@ async fn apply_bound_run_with_handle(
     // history group with NULL correlation ids.
     let retire_provenance = provenance.clone();
     let apply_provenance = provenance;
-    let collection_release_generation = leases.release_generation(workspace_id);
     let apply_thread = std::thread::Builder::new()
         .name("dohc-capture-apply".to_owned())
         .spawn(move || {
@@ -2736,18 +2740,19 @@ async fn apply_bound_run_with_handle(
             // one-policy-snapshot-per-task rule.
             let mut sink = StoreCaptureSink::new(StoreCaptureSinkParams {
                 actor: apply_actor,
-                workspace_id: apply_workspace,
+                workspace_id: apply_workspace.clone(),
                 version_id,
                 shadow_root: apply_root,
                 captured_root: Ok(apply_captured_root),
                 now_ms,
                 author_json: apply_author_json,
-                leases: apply_leases,
+                leases: apply_leases.clone(),
                 self_writes: apply_self_writes,
                 provenance: apply_provenance,
             });
             let result =
                 apply_reconcile_plan_cancellable(&apply_plan, &mut sink, &NoFaults, &apply_cancel);
+            let mut collection_release_generation = 0;
             let collections =
                 if result.failed_applies.is_empty() && !result.degraded && result.completed() {
                     let reconcile = if collection_reconcile_requested {
@@ -2758,7 +2763,11 @@ async fn apply_bound_run_with_handle(
                         sink.collection_record_id_mismatch(changed_collection_paths)
                     };
                     match reconcile {
-                        Ok(true) => Some(sink.reconcile_collections()),
+                        Ok(true) => {
+                            collection_release_generation =
+                                apply_leases.release_generation(&apply_workspace);
+                            Some(sink.reconcile_collections())
+                        }
                         Ok(false) => None,
                         Err(error) => Some(Err(error)),
                     }
@@ -2770,6 +2779,7 @@ async fn apply_bound_run_with_handle(
                 result,
                 policy_held: sink.policy_held(),
                 collections,
+                collection_release_generation,
                 automation_claims: sink.take_automation_claims(),
             });
         });
@@ -2786,6 +2796,7 @@ async fn apply_bound_run_with_handle(
         mut result,
         policy_held: sink_policy_held,
         collections: collection_result,
+        collection_release_generation,
         automation_claims,
     }) = applied
     else {

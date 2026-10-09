@@ -224,6 +224,15 @@ fn collection_reconcile_request_take_preserves_a_concurrent_request() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lease_blocked_collection_adoption_retries_after_release_without_a_file_change() {
+    held_collection_idle_ticks(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lease_blocked_collection_with_pending_sibling_does_not_reconcile_on_idle_ticks() {
+    held_collection_idle_ticks(true).await;
+}
+
+async fn held_collection_idle_ticks(pending_sibling: bool) {
     let scratch = ScratchDir::new().expect("scratch");
     let collection_dir = scratch.path().join("tasks");
     std::fs::create_dir_all(&collection_dir).expect("collection directory");
@@ -293,15 +302,15 @@ async fn lease_blocked_collection_adoption_retries_after_release_without_a_file_
         !status.degraded(),
         "waiting on a session is not degraded capture"
     );
-    let observer = rusqlite::Connection::open(&db).expect("idle reconcile observer");
-    let data_version = || {
-        observer
-            .query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))
-            .unwrap()
-    };
-    let mut reconciles = 0;
-    for _ in 0..120 {
-        let before = data_version();
+    if pending_sibling {
+        let sibling = collection_dir.join("beta.md");
+        std::fs::write(&sibling, "Beta task\n").unwrap();
+        seed_collection_capture(&actor, scratch.path(), &["tasks/beta.md"]);
+        seed_plain_richdoc_lineage(&actor, "tasks/beta.md", "Beta task\n").await;
+        // The captured seed and lineage agree, but disk changed before adoption.
+        // This candidate takes its lease, then stays deferred on the stale target.
+        std::fs::write(&sibling, "Uncaptured sibling change\n").unwrap();
+        status.request_collection_reconcile();
         assert!(
             apply_bound_run_with_handle(
                 collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
@@ -314,6 +323,45 @@ async fn lease_blocked_collection_adoption_retries_after_release_without_a_file_
             )
             .await
         );
+        let state: String = rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row(
+                "SELECT adoption_state FROM collection_records WHERE file_path='tasks/beta.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            state.starts_with("deferred-conflict"),
+            "the sibling must remain pending: {state}"
+        );
+        assert!(
+            !std::fs::read_to_string(&sibling)
+                .unwrap()
+                .contains("id: rec_")
+        );
+    }
+    let observer = rusqlite::Connection::open(&db).expect("idle reconcile observer");
+    let data_version = || {
+        observer
+            .query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))
+            .unwrap()
+    };
+    let mut reconciles = 0;
+    let mut unsettled = 0;
+    for _ in 0..120 {
+        let before = data_version();
+        let clean = apply_bound_run_with_handle(
+            collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
+            &files.handle(),
+            RootBoundRun {
+                captured_root: bind_capture_root(scratch.path()).unwrap(),
+                run: ReconcileRun::Converged,
+            },
+            &CancellationToken::new(),
+        )
+        .await;
+        unsettled += usize::from(!clean);
         reconciles += usize::from(data_version() != before);
     }
     println!("held lease: {reconciles} reconciles / 120 idle ticks (one minute at 2 Hz)");
@@ -321,7 +369,14 @@ async fn lease_blocked_collection_adoption_retries_after_release_without_a_file_
         reconciles, 0,
         "a held lease must not repeatedly reconcile without a release or explicit request"
     );
+    assert_eq!(unsettled, 0, "idle ticks stay settled");
     assert!(!status.collection_reconcile_pending());
+    if pending_sibling {
+        drop(lease);
+        files.close().await;
+        supervisor.close(&db).expect("close actor");
+        return;
+    }
     status.request_collection_reconcile();
     let before = data_version();
     assert!(

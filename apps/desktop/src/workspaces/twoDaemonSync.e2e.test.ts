@@ -517,6 +517,7 @@ it.skipIf(engine.missing).each([
     expect(await adapter.flushCapture()).toMatchObject({settled: true});
     expect(saveState).toBe("pending-share");
     capture.start();
+    const beforeDeliveryResyncSignals = resyncSignals;
     delivery = startServerOwnerDelivery({workspaceIds: () => [workspaceId], attemptTimeoutMs: 60_000, retryDelayMs: 250,
       async runPass(_workspaceId, _index, signal) {
         const result = await pass(signal);
@@ -525,26 +526,26 @@ it.skipIf(engine.missing).each([
       },
       onError: error => recordError("owner delivery", error)});
     // Keep the original session while the adapter resyncs it after delivery.
+    // A recorded failure ends each poll; the assertion outside reports it.
     await expect.poll(async () => {
-      expect(errors).toEqual([]);
+      if (errors.length) return true;
       const pending = (await adapter.listPendingCollectionAdoptions()).adoptions.length;
       const {settled} = await adapter.flushCapture();
-      return {pending, settled};
-    }, {timeout: 120_000})
-      .toEqual({pending: 0, settled: true});
+      return pending === 0 && settled;
+    }, {timeout: 120_000}).toBe(true);
     expect(errors).toEqual([]);
     await capture.flush();
     // Adoption can finish before the owner's field edit is accepted and materialized.
     if (hasId) await expect.poll(async () => {
-      expect(errors).toEqual([]);
+      if (errors.length) return true;
       const pending = (await adapter.listPendingCollectionAdoptions()).adoptions.length;
       const {settled} = await adapter.flushCapture();
-      return {pending, settled, manual: (await readFile(join(rootA, path), "utf8")).includes("Name: Manual")};
-    }, {timeout: 120_000}).toEqual({pending: 0, settled: true, manual: true});
+      return pending === 0 && settled && (await readFile(join(rootA, path), "utf8")).includes("Name: Manual");
+    }, {timeout: 120_000}).toBe(true);
     expect(errors).toEqual([]);
     // Adoption can settle before the original session's final owner receipt arrives.
     await expect.poll(async () => {
-      expect(errors).toEqual([]);
+      if (errors.length) return true;
       try { await session.settleNow(); }
       catch (error) {
         if (!(error instanceof YdocOwnerDraftPendingError)) {
@@ -552,8 +553,10 @@ it.skipIf(engine.missing).each([
           throw error;
         }
       }
-      return saveState;
-    }, {timeout: 120_000}).toBe("saved-to-host");
+      return saveState === "saved-to-host";
+    }, {timeout: 120_000}).toBe(true);
+    expect(errors).toEqual([]);
+    expect(resyncSignals, "delivery must resync the original pending-share session").toBeGreaterThan(beforeDeliveryResyncSignals);
     const markdown = await readFile(join(rootA, path), "utf8");
     if (hasId) expect(markdown).toContain("Name: Manual");
     expect(markdown).toContain(`id: ${pending.recordId}`);
