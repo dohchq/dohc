@@ -28,6 +28,122 @@ fn covered_count(
         .len()
 }
 
+fn record_actorless(
+    ts: &mut TempStore,
+    key: &dohc_engine_collab::DocKey,
+    update: &[u8],
+    is_seed: bool,
+) {
+    record_local_update(
+        &mut ts.store,
+        &mut ts.cache,
+        key,
+        update,
+        LocalAppend {
+            marker: Some(MarkerCreation {
+                path: Some("authors.txt"),
+                content_kind: ContentKind::Plaintext,
+                regime: Regime::LocalOnly,
+            }),
+            is_seed,
+            ..LocalAppend::default()
+        },
+        &NoFaults,
+        1,
+        |_, _, _| Ok(()),
+    )
+    .expect("actorless update");
+}
+
+fn interval_authors(
+    ts: &TempStore,
+    key: &dohc_engine_collab::DocKey,
+    through: i64,
+) -> serde_json::Value {
+    let authors = ts
+        .store
+        .read_with(|conn| author_coverage::interval_in(conn, key, through))
+        .expect("interval coverage");
+    serde_json::from_str(&authors.json()).expect("author list")
+}
+
+#[test]
+fn interval_actorless_rows_add_one_marker_alongside_named_authors() {
+    let mut ts = fresh_store("interval-actorless");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1);
+    let doc = Ydoc::wire();
+    record_actorless(&mut ts, &key, &doc.plaintext_insert(0, "a"), false);
+    record(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &doc.plaintext_insert(1, "b"),
+        "editor",
+        "person",
+    )
+    .expect("named edit");
+    let expected = serde_json::json!([
+        {"kind":"agent", "agentId":"editor", "onBehalfOf":"person"},
+        {"kind":"unattributed"}
+    ]);
+    assert_eq!(interval_authors(&ts, &key, 2), expected);
+    record_actorless(&mut ts, &key, &doc.plaintext_insert(2, "c"), false);
+    assert_eq!(interval_authors(&ts, &key, i64::MAX), expected);
+    maybe_compact(&mut ts.store, &key, 0, &NoFaults, 2).expect("fold coverage");
+    assert_eq!(interval_authors(&ts, &key, i64::MAX), expected);
+    ts.store
+        .write_with(&NoFaults, |tx| author_coverage::advance_in(tx, &key, false))
+        .expect("consume interval");
+    assert_eq!(interval_authors(&ts, &key, i64::MAX), serde_json::json!([]));
+}
+
+#[test]
+fn interval_named_rows_have_no_marker_before_or_after_an_actorless_tail() {
+    let mut ts = fresh_store("interval-named");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1);
+    let doc = Ydoc::wire();
+    record(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &doc.plaintext_insert(0, "a"),
+        "editor",
+        "person",
+    )
+    .expect("named edit");
+    let expected = serde_json::json!([
+        {"kind":"agent", "agentId":"editor", "onBehalfOf":"person"}
+    ]);
+    assert_eq!(interval_authors(&ts, &key, i64::MAX), expected);
+    record_actorless(&mut ts, &key, &doc.plaintext_insert(1, "b"), false);
+    assert_eq!(interval_authors(&ts, &key, 1), expected);
+    ts.store
+        .write_with(&NoFaults, |tx| author_coverage::advance_in(tx, &key, false))
+        .expect("consume interval");
+    record(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &doc.plaintext_insert(2, "c"),
+        "editor",
+        "person",
+    )
+    .expect("next named edit");
+    assert_eq!(interval_authors(&ts, &key, i64::MAX), expected);
+}
+
+#[test]
+fn interval_actorless_seed_adds_no_marker() {
+    let mut ts = fresh_store("interval-actorless-seed");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1);
+    let doc = Ydoc::wire();
+    record_actorless(&mut ts, &key, &doc.plaintext_insert(0, "a"), true);
+    assert_eq!(interval_authors(&ts, &key, i64::MAX), serde_json::json!([]));
+}
+
 #[test]
 fn declared_seed_is_not_an_author_and_coverage_tracks_fold_reset_and_consumption() {
     let mut ts = fresh_store("seed-author-index");
@@ -654,7 +770,7 @@ fn remote_admission_enforces_capacity_and_scoped_identity_encoding() {
     )
     .expect("marker");
     let scope = "scope-雪-quote-\"";
-    let limit = author_coverage::MAX_INTERVAL_AUTHORS as u32;
+    let limit = (author_coverage::MAX_INTERVAL_AUTHORS - 1) as u32;
     for index in 0..limit {
         dohc_engine_collab::apply_remote_update(
             &mut ts.store,
@@ -711,7 +827,8 @@ fn remote_admission_enforces_capacity_and_scoped_identity_encoding() {
         .store
         .read_with(|conn| author_coverage::reserved_in(conn, &key))
         .expect("coverage remains readable");
-    assert_eq!(authors.len(), limit as usize);
+    assert_eq!(authors.len(), author_coverage::MAX_INTERVAL_AUTHORS);
+    assert!(authors.json().contains(r#"{"kind":"unattributed"}"#));
 }
 
 #[test]
@@ -783,8 +900,8 @@ fn every_author_field_at_its_maximum_fits_one_entry() {
         .expect("coverage");
     assert_eq!(
         authors.len(),
-        3,
-        "human, agent, and automation edits retain coverage"
+        4,
+        "human, agent, automation, and actorless edits retain coverage"
     );
     let entries: Vec<serde_json::Value> =
         serde_json::from_str(&authors.json()).expect("author list");

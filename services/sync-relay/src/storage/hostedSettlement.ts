@@ -498,7 +498,11 @@ export async function prepareHostedSettlements(
           (metadata.firstSeenDeletes?.length ?? 0) === 0
         )
           continue;
-        for (const author of metadata.authorSnapshot ?? []) {
+        const snapshot = metadata.authorSnapshot ?? [];
+        const coverage: readonly LiveAuthorEntry[] = snapshot.length === 0
+          ? [{kind: "unattributed"}]
+          : snapshot;
+        for (const author of coverage) {
           const key = liveAuthorIdentity(author),
             prior = authors.get(key);
           authors.set(

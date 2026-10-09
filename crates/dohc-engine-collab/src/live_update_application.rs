@@ -359,6 +359,7 @@ pub fn nonnull_optional<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
     deny_unknown_fields
 )]
 pub enum LiveAuthorEntry {
+    Unattributed {},
     Automation {
         automation_id: String,
         attribution: dohc_engine_domain::ChangeAttribution,
@@ -406,6 +407,7 @@ impl From<AgentDeclaration> for LiveAuthorEntry {
 impl LiveAuthorEntry {
     pub fn validate(&self) -> Result<(), ApplicationError> {
         match self {
+            Self::Unattributed {} => {}
             Self::Automation {
                 automation_id,
                 attribution,
@@ -459,6 +461,7 @@ impl LiveAuthorEntry {
     }
     pub fn identity(&self) -> (&'static str, Option<&str>, &str) {
         match self {
+            Self::Unattributed {} => ("unattributed", None, ""),
             Self::Automation {
                 automation_id,
                 attribution,

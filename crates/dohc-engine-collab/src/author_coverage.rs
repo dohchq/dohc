@@ -149,15 +149,17 @@ pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Auth
     if accepted_only_in(conn, key)? {
         return Ok(authors);
     }
-    // Admission caps distinct identities, so this returns at most
-    // MAX_INTERVAL_AUTHORS rows from the retained rows above the boundary.
+    // Collapse incomplete actor metadata into one coverage marker in the same scan.
+    // Admission caps the named identities retained above the boundary.
     let mut stmt = conn
         .prepare_cached(
-            "SELECT actor_origin_id, actor_kind, on_behalf_of, MAX(chain_depth) FROM ydoc_updates \
+            "SELECT CASE WHEN actor_kind IS NOT NULL THEN actor_origin_id END, \
+         CASE WHEN actor_origin_id IS NOT NULL THEN actor_kind END, \
+         CASE WHEN actor_origin_id IS NOT NULL AND actor_kind IS NOT NULL THEN on_behalf_of END, \
+         MAX(chain_depth) FROM ydoc_updates \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
          AND seq>COALESCE(?4,-1) AND seq<=?5 AND is_seed=0 \
-         AND actor_kind IN ('human','agent','automation') AND actor_origin_id IS NOT NULL \
-         GROUP BY actor_kind, on_behalf_of, actor_origin_id",
+         GROUP BY 1, 2, 3",
         )
         .map_err(sql)?;
     let rows = stmt
@@ -194,6 +196,8 @@ pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Auth
             dohc_engine_domain::moment_author_json(actor.as_deref(), attribution.as_ref())
         {
             authors.union_json(&json)?;
+        } else {
+            authors.union_json(r#"[{"kind":"unattributed"}]"#)?;
         }
     }
     Ok(authors)
