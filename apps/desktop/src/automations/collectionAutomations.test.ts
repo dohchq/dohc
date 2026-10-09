@@ -773,7 +773,7 @@ it.each([false, true])("bounds restore retention in a 10001-claim history (all u
   definition = listed.automations[0].automation;
   const definitions = [{collectionPath: "Tasks", id: "bump", definitionHash: definitionHash(definition)}];
   if (allUnfinished) {
-    await expect(executor.retainRunsForRestore(definitions, "retention-test")).rejects.toThrow("cannot undo more than 10,000");
+    await expect(executor.retainRunsForRestore(definitions, "retention-test")).rejects.toThrow("cannot keep more than 10,000");
     expect(await w.baseStore.pendingRestores()).toEqual([]);
   } else {
     await executor.retainRunsForRestore(definitions, "retention-test");
@@ -1124,8 +1124,12 @@ describe("Collection automations", () => {
     state = "pending";
     expect(await executor.undoRunsOf([{collectionPath: "Tasks", id: "finish", definitionHash: hash}], async () => undefined))
       .toMatchObject({undone: 0, left: 0, sharedReversals: [{state: "pending"}]});
+    expect(await executor.undoRunsOf([{collectionPath: "Tasks", id: "finish", definitionHash: hash}], async () => undefined, true))
+      .toMatchObject({sharedReversals: [{state: "pending"}]});
     state = "settled";
     expect(await executor.listedRun(claim.automationId, claim.claimId)).toMatchObject({undone: true});
+    expect(await executor.undoRunsOf([{collectionPath: "Tasks", id: "finish", definitionHash: hash}], async () => undefined, true))
+      .not.toHaveProperty("sharedReversals");
   });
 
   it.each(["absent", "not-accepted"] as const)("persists a %s reversal and keeps only host refusals retryable", async state => {
@@ -2750,6 +2754,53 @@ describe("Collection automations", () => {
     expect(((await w.executor.runs("collection:Tasks#stamp")).runs)[0]).toMatchObject({ undone: true });
     await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, deletes: null }, trash))
       .resolves.toEqual({ status: "refused", reason: "You already undid this run." });
+  });
+
+  it("gives each requested kept-field Undo a new durable key", async () => {
+    const w = await world({collections: ["Tasks", "Log"], automations: {Tasks: STAMP}});
+    const task = w.addRecord("Tasks", "one", {Status: "Done", Count: 2, Note: "old"});
+    const claim = w.claim("collection:Tasks#stamp", task);
+    await w.executor.open(); await w.settledClaim(claim);
+    const input = {automationId: "collection:Tasks#stamp", claimId: claim.claimId, deletes: null};
+    await w.executor.undo(input, async () => undefined);
+    // A cross-host pass kept this field after the first reversal. The person
+    // later restores the automation value and explicitly requests Undo again.
+    const [run] = (await w.baseStore.runsOf(input.automationId, claim.claimId)).runs;
+    await w.baseStore.updateState(run!, {undoKept: [{recordId: task.id, field: "Count", path: task.path, fieldName: "Count", datasetRecordId: null}]});
+    task.doc.getMap("frontmatter").set("Count", 3);
+    expect(await w.executor.undo(input, async () => undefined)).toMatchObject({status: "undone", reverted: 1});
+    expect(w.fieldsOf(task).Count).toBe(2);
+    const keys = w.journaled.filter(write => write.idempotencyKey?.startsWith("automation-undo/")).map(write => write.idempotencyKey);
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+  it("resumes a kept-field attempt after restart without replaying its completed reversal", async () => {
+    const w = await world({collections: ["Tasks", "Log"], automations: {Tasks: STAMP}});
+    const task = w.addRecord("Tasks", "one", {Status: "Done", Count: 2, Note: "old"});
+    const claim = w.claim("collection:Tasks#stamp", task);
+    await w.executor.open(); await w.settledClaim(claim);
+    const input = {automationId: claim.automationId, claimId: claim.claimId, deletes: null};
+    await w.executor.undo(input, async () => undefined);
+    const [run] = (await w.baseStore.runsOf(input.automationId, claim.claimId)).runs;
+    await w.baseStore.updateState(run!, {undoKept: [{recordId: task.id, field: "Count", path: task.path, fieldName: "Count", datasetRecordId: null}]});
+    await w.executor.dispose();
+    task.doc.getMap("frontmatter").set("Count", 3);
+    let failed = false;
+    const interrupted = w.makeExecutor({store: {...w.baseStore, updateState: async (run, state) => {
+      if(state.undo === "done" && !failed) {failed = true; throw Error("Interrupted after kept reversal");}
+      return w.baseStore.updateState(run, state);
+    }}});
+    onTestFinished(() => interrupted.dispose());
+    await interrupted.open();
+    await expect(interrupted.undo(input, async () => undefined)).rejects.toThrow("Interrupted after kept reversal");
+    expect(w.fieldsOf(task).Count).toBe(2);
+    await interrupted.dispose();
+    // Another Undo changes these fields while this attempt is interrupted.
+    task.doc.getMap("frontmatter").set("Count", 3);
+    task.doc.getMap("frontmatter").set("Note", "done");
+    const restarted = w.makeExecutor(); onTestFinished(() => restarted.dispose());
+    await restarted.open();
+    expect(await restarted.undo(input, async () => undefined)).toMatchObject({status: "undone", changedSince: 0});
+    expect(w.fieldsOf(task)).toMatchObject({Count: 3, Note: "done"});
   });
 
   it("tries a claim's kept fields with its runs not yet undone", async () => {
@@ -6796,3 +6847,33 @@ describe("code steps", () => {
     expect([...w.records.values()].filter((record) => record.collection === "Budget").map((record) => w.fieldsOf(record))).toEqual([{ Amount: 5 }]);
   });
 });
+
+it.skipIf(!process.env.DOHC_UNDO_BENCHMARK)("measures production Undo of 2000 records", async () => {
+  const w = await world({collections: ["Tasks", "Log"], automations: {Tasks: BUMP}});
+  await w.executor.open();
+  await w.executor.idle();
+  const listed = await w.executor.automationsIn("Tasks");
+  if (listed.status !== "read") throw new Error("No definitions");
+  const entry = listed.automations.find(item => item.valid);
+  if (!entry?.valid) throw new Error("No definition");
+  const records = Array.from({length: 2000}, (_, index) => w.addRecord("Tasks", `bench-${index}`, {Count: 2}));
+  const claim = w.claim(TASKS, records[0]!);
+  claim.state = "done";
+  const run = newRun(claim, entry.automation, "benchmark-1", Date.now());
+  run.outcome = {state: "done"}; run.finishedAtMs = Date.now(); run.settled = true;
+  run.steps = [{ordinal: 0, effects: records.map(record => ({kind: "set", target: {recordId: record.id,
+    path: record.path, collectionPath: "Tasks"}, fields: [{field: "Count", before: 1, after: 2}]}))}];
+  run.applied = [{ordinal: 0, writes: records.map(record => ({kind: "field", recordId: record.id,
+    path: record.path, field: "Count", before: 1, after: 2}))}];
+  const store = createAutomationRunStore(w.root, resolveWorkspaceMetadataDir);
+  await store.save(run);
+  const start = performance.now();
+  const result = await w.executor.undo({automationId: TASKS, claimId: claim.claimId, deletes: null}, async () => {});
+  const milliseconds = performance.now() - start;
+  await writeFile(process.env.DOHC_UNDO_BENCHMARK!, JSON.stringify({benchmark: "production-undo-2000", milliseconds, journaled: w.journaled.length, result}));
+  console.log(JSON.stringify({benchmark: "production-undo-2000", milliseconds, result}));
+  expect(result).toMatchObject({status: "undone", reverted: 2000});
+  expect(records.every(record => w.fieldsOf(record).Count === 1)).toBe(true);
+  console.log(JSON.stringify({benchmark: "production-undo-2000", milliseconds, journaled: w.journaled.length}));
+  await w.executor.close();
+}, 180_000);

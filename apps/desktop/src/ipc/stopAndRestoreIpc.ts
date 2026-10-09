@@ -161,9 +161,18 @@ export function registerStopAndRestoreIpc<
   const interrupted = (): Extract<StopAndRestoreResult, {status: "restored"}> => ({status: "restored", restored: [], review: [], runsUndone: 0,
     runsLeft: 0, runChangesKept: 0, wroteAutomations: false, sendsMessages: false, keptFields: [], fieldsMissing: 0,
     unfinished: {step: "files", message: "dohc has not finished restoring files."}});
+  const retryServerReleases = async (workspaceId: string, automations: CollectionAutomations) => {
+    for (const entry of await automations.pendingRestores()) {
+      if (!entry.serverRelease) continue;
+      try {
+        await dependencies.serverRuns.restore(workspaceId, [], false, entry.id);
+        await automations.removePendingRestore(entry.id);
+      } catch { /* Saved without a session or claims; retry when recovery runs again. */ }
+    }
+  };
   const releasePending = async (workspaceId: string, automations: CollectionAutomations, entry: PendingRestore) => {
-    await dependencies.serverRuns.restore(workspaceId, [], false, entry.id);
-    await automations.removePendingRestore(entry.id);
+    await automations.savePendingRestore({id: entry.id, claims: [], session: undefined, serverRelease: true});
+    await retryServerReleases(workspaceId, automations);
   };
   registerOperations<typeof stopAndRestoreRecoveryOperations, Event, Operation>({
     handle: registerHandler,
@@ -182,6 +191,7 @@ export function registerStopAndRestoreIpc<
     },
     pendingStopAndRestores: async (_input, { operation }) => {
       dependencies.assertOriginalWorkspace(operation.workspace);
+      await retryServerReleases(operation.workspace.workspaceId, operation.state.collectionAutomations);
       const pending = await operation.state.collectionAutomations.pendingRestores();
       operation.assertCurrent();
       return pending.flatMap(entry => entry.session
@@ -345,14 +355,16 @@ export function registerStopAndRestoreIpc<
       }
       const grants = [...grantIds].sort();
       const previous = fresh ? undefined : entries.find(entry => JSON.stringify(entry.session!.grants) === JSON.stringify(grants));
-      for (const entry of entries) if (entry !== previous) await releasePending(workspaceId, automations, entry);
+      try {
+        for (const entry of entries) if (entry !== previous) await releasePending(workspaceId, automations, entry);
+      } catch (cause) { throw new Error("Access stopped. dohc could not save Stop and restore progress.", {cause}); }
       const id = previous?.id ?? `restore:${randomUUID()}`;
       const pending: PendingRestore = previous ?? {id, claims: [], session: {
         grants, target: input.target, label: input.label ?? (input.target.kind === "person" ? "This person" : "Edit link"),
         definitions: [], filesUndone: false, receipts: [], result: interrupted(),
       }};
       const progress = pending.session!;
-      try { await automations.savePendingRestore(pending); }
+      try { await automations.savePendingRestore({id, session: progress}); }
       catch (cause) { throw new Error("Access stopped. dohc could not save Stop and restore progress.", {cause}); }
 
       // Access is stopped. Anything that fails from here is said as what is
@@ -373,7 +385,7 @@ export function registerStopAndRestoreIpc<
             fieldsMissing: earlier.fieldsMissing + outcome.fieldsMissing,
             runChangesKept: earlier.runChangesKept - earlier.keptFields.length + outcome.runChangesKept,
           } : outcome;
-          await automations.savePendingRestore(pending);
+          await automations.savePendingRestore({id, session: progress});
         }
         return outcome;
       };
@@ -422,11 +434,13 @@ export function registerStopAndRestoreIpc<
 
         const { capture } = await dependencies.requireEngineCapture(workspaceId);
         const root = operation.workspace.rootPath;
+        let retentionError: string | null = null;
         const outcome = await restoreDirectWrites({
           recordDefinitions: async definitions => {
             progress.definitions = [...definitions];
-            await automations.retainRunsForRestore(definitions, id);
-            await automations.savePendingRestore(pending);
+            await automations.savePendingRestore({id, session: progress});
+            try { await automations.retainRunsForRestore(definitions, id); }
+            catch (error) { retentionError = error instanceof Error ? error.message : String(error); }
           },
           recordRestore: async receipt => {
             progress.receipts.push(receipt);
@@ -462,7 +476,10 @@ export function registerStopAndRestoreIpc<
           },
           folderEntries: (path) => folderEntriesOrNone(join(root, path)),
           removeEmptyFolder: async (path) => await rmdir(join(root, path)).catch(() => undefined),
-          undoRuns: (definitions) => undoRunsHereAndOnServer(workspaceId, target, definitions, (again) =>
+          undoRuns: (definitions) => retentionError !== null
+            ? Promise.resolve({undone: 0, left: 0, keptFields: [], missing: 0, otherKept: 0,
+              errorMessage: `Access stopped. dohc could not undo runs. ${retentionError}`})
+            : undoRunsHereAndOnServer(workspaceId, target, definitions, (again) =>
             operation.state.collectionAutomations.undoRunsOf(definitions, async (relativePath) => {
               await dependencies.deletePath(event, { workspaceId, relativePath });
             }, again, id), id),
@@ -488,7 +505,7 @@ export function registerStopAndRestoreIpc<
         const pending = input.target ? (await automations.pendingRestores()).find(entry => entry.session && restoreId(entry.session.target) === restoreId(input.target!)) : undefined;
         if (pending?.session) {
           pending.session.filesUndone = true;
-          await automations.savePendingRestore(pending);
+          await automations.savePendingRestore({id: pending.id, session: pending.session});
         }
         const files: UndoStopAndRestoreResult["files"] = [];
         try {

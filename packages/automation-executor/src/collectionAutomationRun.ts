@@ -121,6 +121,7 @@ export interface CollectionRecordWrites {
     /** Names the write for the engine's idempotency check, one key per field under this prefix. */
     idempotencyKeyPrefix?: string;
     preserveCompletedFields?: boolean;
+    settleUnchanged?: boolean;
     /**
      * The value each field should hold before the write. A field holding
      * something else changed since the plan: the write keeps it and reports

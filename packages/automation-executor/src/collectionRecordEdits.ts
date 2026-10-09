@@ -413,9 +413,15 @@ export async function setCollectionRecordFields(
         nativeHeadSequence: error.draft.nativeHeadSequence, appendKey: `${appendPrefix}/${field}`,
       }] as const);
       const unchanged = candidates.filter(([field]) => !decidedFields.has(field));
-      // A failed status read leaves unchanged fields unknown; journaled writes still succeeded.
+      // Undo cannot finish while a prior reversal's receipt is unknown.
       const states = unchanged.length === 0 ? [] : await context.withAdapter(adapter =>
-        adapter.sharedFileUpdateStates(unchanged.map(([, draft]) => draft))).catch(() => []);
+        adapter.sharedFileUpdateStates(unchanged.map(([, draft]) => draft))).catch(error => {
+          if (input.preserveCompletedFields) throw new Error("dohc could not check this run's shared reversals.", {cause: error});
+          return [];
+        });
+      if (input.preserveCompletedFields && unchanged.some((_, index) => states?.[index] === undefined)) {
+        throw new Error("dohc could not check this run's shared reversals.");
+      }
       const existing = new Set(unchanged.filter((_, index) => states?.[index] !== undefined && states[index] !== "absent")
         .map(([field]) => field));
       sharedFileUpdates = Object.fromEntries(candidates.filter(([field]) => decidedFields.has(field) || existing.has(field)));

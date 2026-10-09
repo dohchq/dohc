@@ -52,6 +52,32 @@ it("uses the engine journal to skip an Undo field after a crash and another Undo
   fail.mockRestore();
 });
 
+it("keeps Undo unfinished until an unchanged shared receipt can be checked", async () => {
+  const root = await createTestScratch("dohc-undo-receipt-status-");
+  const draft = {outboxId: "outbox", nativeHeadSequence: 3, relayDatabaseNamespace: "relay", revision: 1,
+    acceptedCursor: 2, nativeUnsettled: false, pendingBytes: 10, state: "active" as const,
+    binding: {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
+      currentPath: "tasks/one.md", selectorPaths: ["tasks"], restoreFenceGeneration: 4}};
+  const {session, log} = fakeSession({settleError: new YdocOwnerDraftPendingError(draft)});
+  log.doc.getMap("frontmatter").set("status", "done");
+  let unavailable = false;
+  const context = contextFor(root, session, {withAdapter: async work => work({
+    getCollectionRecord: async () => {throw Error("Not used");}, sharedFileUpdateStates: async writes => {
+      if(unavailable) throw Error("Status lookup overloaded");
+      return writes.map(() => "pending");
+    },
+  })});
+  const input = {recordPath: "tasks/one.md", fields: {status: "todo"}, expectedBefore: {status: "done"},
+    author: {kind: "user", userId: "owner"} as const, idempotencyKeyPrefix: "automation-undo/status",
+    preserveCompletedFields: true, allowPendingSharedSettlement: true, settleUnchanged: true};
+  const written = await setCollectionRecordFields(context, input);
+  unavailable = true;
+  await expect(setCollectionRecordFields(context, input)).rejects.toThrow("dohc could not check this run's shared reversals.");
+  unavailable = false;
+  expect((await setCollectionRecordFields(context, input)).sharedFileUpdates).toEqual(written.sharedFileUpdates);
+  expect(log.journaled).toHaveLength(1);
+});
+
 it.each(["write-refused", "conflict-stale-target", "Saved locally. The shared file update is pending."])("does not accept other settlement errors as a completed automation effect (%s)", async message => {
   const root = await createTestScratch("dohc-automation-settle-refusal-");
   const error = new Error(message);

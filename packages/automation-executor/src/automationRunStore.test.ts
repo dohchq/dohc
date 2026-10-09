@@ -23,6 +23,29 @@ function run(claimId: string, state: "done" | "failed" | null, atMs: number, set
 }
 
 describe("the automation run store", () => {
+  it("keeps retained claims when the desktop saves only its restore session", async () => {
+    const root = await createTestScratch("dohc-restore-session-");
+    const store = createAutomationRunStore(root, testMetadataDir);
+    await store.save(run("older", "done", 1));
+    await store.savePendingRestore({id: "restore", claims: ["older"]});
+    await store.savePendingRestore({id: "restore", session: {grants: ["grant"], target: {kind: "person", userId: "ana"},
+      label: "Ana", definitions: [], filesUndone: false, receipts: [], result: {status: "waiting"}}});
+    const restarted = createAutomationRunStore(root, testMetadataDir);
+    expect(await restarted.unfinishedUndos()).toEqual(new Set(["older"]));
+    await restarted.expire(NOW, async () => "gone", null);
+    expect((await restarted.runsOf(AUTOMATION, "older")).runs).toHaveLength(1);
+  });
+  it("bounds the restore journal across repeated whole session saves", async () => {
+    const root = await createTestScratch("dohc-restore-bounded-");
+    const store = createAutomationRunStore(root, testMetadataDir);
+    const entry = {id: "restore", claims: Array.from({length: 10000}, (_, i) => `claim-${i}`), session: {
+      grants: ["grant"], target: {kind: "person" as const, userId: "ana"}, label: "Ana", definitions: [], filesUndone: false,
+      receipts: Array.from({length: 2000}, (_, i) => ({path: `Tasks/${i}.md`, restoredMomentId: `moment-${i}`})), result: {status: "waiting"}}};
+    for (let i = 0; i < 8; i++) await store.savePendingRestore(entry);
+    const text = await readFile(join(root, ".dohc/automations/restoring.json"), "utf8");
+    expect(text.trim().split("\n")).toHaveLength(1);
+    expect((await createAutomationRunStore(root, testMetadataDir).pendingRestores())[0]).toEqual(entry);
+  });
   it("appends restore and Undo receipts durably without repeating earlier receipts", async () => {
     const root = await createTestScratch("dohc-restore-lines-");
     const store = createAutomationRunStore(root, testMetadataDir);

@@ -1,5 +1,5 @@
 import { datasetBaseFolder } from "@dohc/security-contract/dataset";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { posix } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -67,7 +67,7 @@ import {
   type ReachShare,
   type ReachStep,
 } from "./automationReach";
-import type { AutomationRunStore, ClaimStanding, DatasetUndoCall, ExpiringClaim, ReportedFailure, RunWrite, StoredCircuitBreaker, StoredRun, StoredSubscription, UndoKeptField } from "./automationRunStore";
+import type { AutomationRunStore, ClaimStanding, DatasetUndoCall, ExpiringClaim, ReportedFailure, RunWrite, StoredCircuitBreaker, StoredRun, StoredSubscription, UndoKeptField, UndoWrite } from "./automationRunStore";
 import { sharedFileUpdateKey, sharedReversalsOf, recordedReversalsOf } from "./automationRunStore";
 import {
   runCollectionAutomation,
@@ -1052,7 +1052,7 @@ const CLAIM_PAGE_LIMIT = 100;
 
 export class CollectionAutomations {
   pendingRestores() { return this.options.store.pendingRestores(); }
-  savePendingRestore(entry: import("./automationRunStore").PendingRestore) { return this.options.store.savePendingRestore(entry); }
+  savePendingRestore(entry: import("./automationRunStore").PendingRestoreUpdate) { return this.options.store.savePendingRestore(entry); }
   recordRestoreReceipt(id: string, receipt: {path: string; restoredMomentId: string; removed?: boolean}) { return this.options.store.recordRestoreReceipt(id, receipt); }
   undoRestoreReceipt(id: string, momentId: string) { return this.options.store.undoRestoreReceipt(id, momentId); }
   removePendingRestore(id: string) { return this.options.store.removePendingRestore(id); }
@@ -3382,7 +3382,9 @@ export class CollectionAutomations {
       // undone again: what is already back stays as it is. Once every run
       // is undone, Undo tries again only the fields it kept.
       const pending = runs.filter((run) => run.undo !== "done" || sharedReversalsOf([run]).some(write => write.state === "not-accepted"));
-      const kept = pending.length === 0 ? runs.filter((run) => run.undoKept.length > 0) : [];
+      const keptRetry = pending.find(run => run.undo === "started" && run.undoKeptScope !== undefined)?.undoKeptScope;
+      const kept = keptRetry ? runs.filter(run => run.undoKeptScope === keptRetry)
+        : pending.length === 0 ? runs.filter(run => run.undoKept.length > 0) : [];
       if (runs.length > 0 && pending.length === 0 && kept.length === 0) {
         return { status: "refused", reason: "You already undid this run." };
       }
@@ -3421,12 +3423,7 @@ export class CollectionAutomations {
       const reverse = (host: DatasetUndoHost | null) => undoAutomationRuns({
         withReads: (work) => this.withLiveEngine(work), withRecordWrites: this.options.withUndoWrites,
         trash, collectionPathOf: (id) => this.collectionPathOf(id),
-        recordReversal: async write => {
-          const holder = newest();
-          const undoWrites = [...(holder.undoWrites ?? []).filter(previous => previous.recordId !== write.recordId || previous.field !== write.field), write];
-          await this.options.store.recordUndoWrite(holder, write);
-          holder.undoWrites = undoWrites;
-        },
+        recordReversal: write => this.recordUndoReversal(pending, write),
       }, host, collectionNamed(parsed.collectionPath), async () => {
         const roster = await this.options.cachedRoster();
         const moved = movedReason();
@@ -3453,6 +3450,12 @@ export class CollectionAutomations {
     }
   }
 
+  private async recordUndoReversal(runs: readonly StoredRun[], write: UndoWrite): Promise<void> {
+    const holder = runs.reduce((latest, run) => run.startedAtMs > latest.startedAtMs ? run : latest);
+    await this.options.store.recordUndoWrite(holder, write);
+    holder.undoWrites = [...(holder.undoWrites ?? []).filter(prior => prior.recordId !== write.recordId || prior.field !== write.field), write];
+  }
+
   /** Undo again, for runs already undone, of only the fields it kept. */
   private async undoKeptFields(
     runs: readonly StoredRun[],
@@ -3462,12 +3465,17 @@ export class CollectionAutomations {
     const documentKeys = new Set(only.map(({ recordId, field }) => JSON.stringify([recordId, field])));
     const datasetKept = [...new Map(runs.flatMap((run) => run.undoKept).filter((kept) => !documentKeys.has(JSON.stringify([kept.recordId, kept.field])))
       .map((kept) => [JSON.stringify([kept.recordId, kept.field]), kept])).values()];
-    for (const run of runs) await this.options.store.updateState(run, {undo: "started"});
+    const scope = runs.find(run => run.undo === "started" && run.undoKeptScope !== undefined)?.undoKeptScope ?? `kept:${randomUUID()}`;
+    for (const run of runs) {
+      await this.options.store.updateState(run, {undo: "started", undoKeptScope: scope});
+      run.undoKeptScope = scope;
+    }
     const { undone, keptFields, undoWrites } = await undoCollectionAutomationRuns({
       withReads: (work) => this.withLiveEngine(work),
       withRecordWrites: this.options.withUndoWrites,
       trash,
       collectionPathOf: (collectionId) => this.collectionPathOf(collectionId),
+      recordReversal: write => this.recordUndoReversal(runs, write),
     }, runs, this.runAbort.signal, only);
     keptFields.push(...datasetKept);
     undone.changedSince += datasetKept.length;
@@ -3580,6 +3588,7 @@ export class CollectionAutomations {
     // Every claim of these automations, newest first across them all, so a
     // field two automations wrote in turn goes back in the reverse order.
     const claims: Array<{ automationId: string; wanted: ReadonlySet<string>; claim: HistoryClaim }> = [];
+    const reportClaims: typeof claims = [];
     this.restorePlanning += 1;
     let retentionId: string;
     try {
@@ -3592,6 +3601,7 @@ export class CollectionAutomations {
         for (const claim of listed) {
           const stored = await this.options.store.runsOf(automationId, claim.claimId);
           const runs = stored.runs.filter(run => wanted.has(run.definitionHash));
+          if (stored.unreadable || runs.length > 0) reportClaims.push({automationId, wanted, claim});
           if (stored.unreadable || runs.some(run => run.undo !== "done") || documentUndoKept(runs).length > 0 ||
             sharedReversalsOf(runs).some(write => write.state === "pending" || write.state === "not-accepted")) {
             claims.push({ automationId, wanted, claim });
@@ -3599,18 +3609,19 @@ export class CollectionAutomations {
         }
       }
       claims.sort((left, right) => newerFirst(left.claim, right.claim));
+      reportClaims.sort((left, right) => newerFirst(left.claim, right.claim));
       retentionId = restoreId ?? `runs:${createHash("sha256").update(JSON.stringify([...hashes].map(([id, wanted]) => [id, [...wanted].sort()]).sort())).digest("hex")}`;
       const previous = (await this.options.store.pendingRestores()).find(entry => entry.id === retentionId);
       const retained = await this.options.store.unfinishedUndos();
       if (retained === null) throw new Error("dohc could not read unfinished Undo progress.");
       if (new Set([...retained, ...this.changing, ...claims.map(entry => entry.claim.claimId)]).size > MAX_HISTORY_KEEP) {
-        throw new Error("dohc cannot undo more than 10,000 runs at once. Undo some runs in run history.");
+        throw new Error("dohc cannot keep more than 10,000 claims for Undo. Undo some runs in run history.");
       }
-      if (claims.length > 0 || previous) await this.options.store.savePendingRestore({...previous, id: retentionId, claims: claims.map(entry => entry.claim.claimId)});
+      if (claims.length > 0 || previous) await this.options.store.savePendingRestore({id: retentionId, claims: claims.map(entry => entry.claim.claimId)});
     } finally {
       this.restorePlanning -= 1;
     }
-    return {claims, retentionId};
+    return {claims, reportClaims, retentionId};
   }
 
   private async undoEachRun(
@@ -3621,7 +3632,7 @@ export class CollectionAutomations {
     keptFields: Map<string, KeptAutomationField>,
     restoreId?: string,
   ): Promise<void> {
-    const {claims, retentionId} = await this.retainRestoreClaims(hashes, restoreId);
+    const {claims, reportClaims, retentionId} = await this.retainRestoreClaims(hashes, restoreId);
     // The pass stops at the first claim whose Undo fails, so no older claim
     // is undone over one that stopped part way.
     try {
@@ -3664,15 +3675,18 @@ export class CollectionAutomations {
       }
     } finally {
       if (restoreId === undefined) await this.options.store.removePendingRestore(retentionId);
-      for (const { automationId, wanted, claim } of claims) {
-        for (const run of (await this.options.store.runsOf(automationId, claim.claimId)).runs) {
-          if (!wanted.has(run.definitionHash)) continue;
+      const reported = new Map<string, NonNullable<CollectionAutomationUndone["sharedReversals"]>[number]>();
+      for (const { automationId, wanted, claim } of reportClaims) {
+        const runs = (await this.options.store.runsOf(automationId, claim.claimId)).runs.filter(run => wanted.has(run.definitionHash));
+        for (const write of sharedReversalsOf(runs)) reported.set(sharedFileUpdateKey(write.draft), write);
+        for (const run of runs) {
           for (const { recordId, field, path, fieldName, datasetRecordId } of run.undoKept) {
             const id = createHash("sha256").update(JSON.stringify([recordId, field])).digest("hex").slice(0, 32);
             if (!keptFields.has(id)) keptFields.set(id, { id, path, field: fieldName, recordId: datasetRecordId });
           }
         }
       }
+      result.sharedReversals = [...reported.values()];
     }
   }
 

@@ -3875,3 +3875,24 @@ it.each([1, 2])("keeps timed and message automations at the base after %s field 
     expect(f.errors).toEqual([]);
   } finally { await f.executor.dispose(); }
 });
+
+it("reports dataset-only kept fields on every Stop and restore retry", async () => {
+  const f = await world();
+  await f.writeAutomations(closePaid(`      - set: {Status: Closed, Notes: Closed by automation}
+        operation: invoices.edit
+`));
+  await f.executor.open();
+  const invoice = await f.create({[STATUS]: "Open", [NOTES]: "draft"});
+  await f.edit(invoice.id, {[PAID]: true});
+  await f.until(() => f.claims()[0]?.state === "done");
+  await f.edit(invoice.id, {[NOTES]: "mine"});
+  const listed = await f.executor.automationsIn("Budget");
+  if(listed.status !== "read" || !listed.automations[0]?.valid) throw Error("No definition");
+  const definitions = [{collectionPath: "Budget", id: "close-paid", definitionHash: listed.automations[0].definitionHash}];
+  definitions[0]!.id = listed.automations[0].automation.id;
+  const first = await f.executor.undoRunsOf(definitions, async () => undefined);
+  expect(first.keptFields).toHaveLength(1);
+  const retry = await f.executor.undoRunsOf(definitions, async () => undefined, true);
+  expect(retry.keptFields).toEqual(first.keptFields);
+  await f.executor.dispose();
+});

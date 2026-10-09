@@ -83,6 +83,7 @@ interface RecordChanges {
 export function documentUndoChanges(runs: readonly StoredRun[]): { added: Map<string, string>; records: Map<string, RecordChanges> } {
   const added = new Map<string, string>();
   const records = new Map<string, RecordChanges>();
+  const activeScopes = new Set(runs.filter(run => run.undo !== "done").flatMap(run => run.undoScope ? [run.undoScope] : []));
   const fallbackScope = createHash("sha256").update(JSON.stringify(runs.filter(run => run.undo !== "done" ||
     sharedReversalsOf([run]).some(write => write.state === "not-accepted"))
     .map(run => [run.automationId, run.claimId, run.keySeed]).sort())).digest("hex");
@@ -93,16 +94,16 @@ export function documentUndoChanges(runs: readonly StoredRun[]): { added: Map<st
     records.set(recordId, record);
   };
   for (const run of [...runs].sort((left, right) => left.startedAtMs - right.startedAtMs)) {
-    const refused = run.undo === "done" ? new Set(sharedReversalsOf([run]).filter(write => write.state === "not-accepted")
+    const refused = run.undo === "done" && !(run.undoScope && activeScopes.has(run.undoScope)) ? new Set(sharedReversalsOf([run]).filter(write => write.state === "not-accepted")
       .map(write => JSON.stringify([write.recordId, write.field]))) : null;
     if (refused?.size === 0) continue;
     const scope = run.undoScope ?? fallbackScope;
     // A record is listed as created before its fields are written, so one a
     // run stopped after creating is still found.
-    if (refused === null) for (const created of run.created) added.set(created.recordId, created.path);
+    if (run.undo !== "done") for (const created of run.created) added.set(created.recordId, created.path);
     for (const { writes } of run.applied) {
       for (const write of writes) {
-        if (write.kind === "created" && refused === null) added.set(write.recordId, write.path);
+        if (write.kind === "created" && run.undo !== "done") added.set(write.recordId, write.path);
         if (write.kind === "field" && (refused === null || refused.has(JSON.stringify([write.recordId, write.field])))) {
           wrote(write.recordId, write.path, write.field, { before: write.before, after: write.after, sure: true, scope });
         }
@@ -178,7 +179,7 @@ export async function undoCollectionAutomationRuns(
 ): Promise<{ undone: CollectionAutomationUndone; keptFields: UndoKeptField[]; undoWrites: UndoWrite[] }> {
   // Each run's records are found where their Collections are now. A
   // Collection no longer here keeps its paths, where no record is found.
-  const { added, records } = prepared ?? documentUndoChanges((only ? runs.map(run => ({...run, undo: null})) : runs).map((run) => {
+  const { added, records } = prepared ?? documentUndoChanges((only ? runs.map(run => ({...run, undo: null, undoScope: run.undoKeptScope ?? run.undoScope})) : runs).map((run) => {
     const moved = structuredClone(run);
     rebaseRun(moved, (collectionId) => dependencies.collectionPathOf(collectionId));
     return moved;
@@ -202,7 +203,7 @@ export async function undoCollectionAutomationRuns(
     const fields = [...record.fields].map(([field, writes]) => ({ field, ...wayBack(writes) })).filter(({ field, from }) => {
       const key = JSON.stringify([record.recordId, field]);
       return from.length > 0 && (tried === null || tried.has(key)) &&
-        (!recordedFields.has(key) || refusedFields.has(key));
+        (tried !== null || !recordedFields.has(key) || refusedFields.has(key));
     });
     if (fields.length === 0) continue;
     const found = await locate(dependencies, record.path, record.recordId);
@@ -238,6 +239,7 @@ export async function undoCollectionAutomationRuns(
               fields: Object.fromEntries(group.map(({ field, to }) => [field, to])),
               expectedBefore: Object.fromEntries(group.map(({ field, from, attempt }) => [field, from[attempt]])),
               preserveCompletedFields: true,
+              settleUnchanged: true,
               idempotencyKeyPrefix: `automation-undo/${createHash("sha256").update(JSON.stringify([
                 group[0]!.scope, record.recordId,
                 refusedReversals.filter(write => write.recordId === record.recordId && fields.has(write.field))

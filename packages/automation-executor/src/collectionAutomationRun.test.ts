@@ -4,7 +4,7 @@ import { parseAutomationsFile, type Automation } from "@dohc/workspace-contracts
 import type { CollectionRecord, CollectionSummary, CollectionValue } from "@dohc/workspace-contracts/collection";
 import type { AutomationClaim } from "@dohc/workspace-engine-client";
 import { createAutomationFormulaEvaluator } from "./automationEvaluatorHost";
-import { createAutomationRunStore, type AutomationRunStore, type StoredRun } from "./automationRunStore";
+import { createAutomationRunStore, type AutomationRunStore, type StoredRun, type UndoWrite } from "./automationRunStore";
 import { undoCollectionAutomationRuns } from "./collectionAutomationUndo";
 import { definitionHash } from "./automationPlan";
 import {
@@ -135,6 +135,46 @@ it.each([0, 1])("keeps the Undo key scope when only run %s saved completion befo
   expect(space.records.get("rec_t")!.values.Count).toBe(3);
 });
 
+it("keeps the chain target after the older run alone saved Undo completion", async () => {
+  const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {Count: 2}}]");
+  const space = workspace([task("rec_t", {Count: 1})]);
+  const runs = [1, 2].map(before => ({...newRun(added(), definition, `chain-${before}`, before),
+    undo: before === 1 ? "done" as const : "started" as const, undoScope: "joint-undo",
+    applied: [{ordinal: 0, writes: [{kind: "field" as const, recordId: "rec_t", path: "Tasks/rec_t.md", field: "Count", before, after: before + 1}]}]}));
+  const result = await undoCollectionAutomationRuns(space.undo([]), runs, new AbortController().signal);
+  expect(result.keptFields).toEqual([]);
+  expect(result.undone.changedSince).toBe(0);
+  expect(space.records.get("rec_t")!.values.Count).toBe(1);
+});
+
+it.each(["later-group", "receipt-save"])("recovers shared Undo receipts after %s fails", async fault => {
+  const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {Count: 2}}]");
+  const space = workspace([task("rec_t", {Count: 2, Note: 2})]);
+  const runs = ["Count", "Note"].map((field, index) => ({...newRun(added(), definition, `receipt-${index}`, index),
+    undo: "started" as const, undoScope: `scope-${index}`, applied: [{ordinal: 0, writes: [{kind: "field" as const,
+      recordId: "rec_t", path: "Tasks/rec_t.md", field, before: 1, after: 2}]}]}));
+  const signal = new AbortController().signal;
+  const base = space.undo([]);
+  let failed = false;
+  const receipts = new Map<string, UndoWrite["draft"]>();
+  const dependencies = {...base, recordReversal: async () => {if (!failed && fault === "receipt-save") {failed = true; throw Error("Receipt save stopped");}},
+    withRecordWrites: async <T>(abort: AbortSignal, work: (writes: CollectionRecordWrites) => Promise<T>) => base.withRecordWrites(abort, writes => work({...writes,
+      setFields: async input => {
+        if (!failed && fault === "later-group" && Object.hasOwn(input.fields, "Note")) {failed = true; throw Error("Later group stopped");}
+        const result = await writes.setFields(input);
+        const updates: Record<string, UndoWrite["draft"]> = {};
+        for (const field of Object.keys(input.fields)) {
+          const key = `${input.idempotencyKeyPrefix}/${field}`;
+          if (Object.hasOwn(result.replaced, field)) receipts.set(key, {outboxId: "outbox", appendKey: key, nativeHeadSequence: 1,
+            binding: {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64), currentPath: "Tasks/rec_t.md", selectorPaths: ["Tasks"], restoreFenceGeneration: 1}});
+          if (Object.hasOwn(result.replaced, field) || input.settleUnchanged) {const receipt = receipts.get(key); if(receipt) updates[field] = receipt;}
+        }
+        return {...result, sharedFileUpdates: updates};
+      }}))};
+  await expect(undoCollectionAutomationRuns(dependencies, runs, signal)).rejects.toThrow("stopped");
+  const retried = await undoCollectionAutomationRuns(dependencies, runs, signal);
+  expect(retried.undoWrites.map(write => write.field).sort()).toEqual(["Count", "Note"]);
+});
 it("describes an unfinished Undo without claiming the run was undone", async () => {
   const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {Count: 2}}]");
   const store = await scratchStore();

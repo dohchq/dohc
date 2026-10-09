@@ -317,6 +317,7 @@ const StoredRunSchema = z.object({
   superseded: z.boolean(),
   undo: z.enum(["started", "done"]).nullable(),
   undoScope: z.string().min(1).optional(),
+  undoKeptScope: z.string().min(1).optional(),
   undoKept: z.array(z.object({ recordId: z.string(), field: z.string(), path: z.string().nullable(), fieldName: z.string(), datasetRecordId: DatasetRecordIdSchema.nullable() })),
   sharedSettlements: z.array(SettlementSchema).optional(),
   undoWrites: z.array(UndoWriteSchema).optional(),
@@ -339,6 +340,7 @@ const ExpirySchema = z.object({
 const PendingRestoreSchema = z.object({
   id: z.string().min(1),
   claims: z.array(z.string().min(1)),
+  serverRelease: z.literal(true).optional(),
   session: z.object({
     grants: z.array(z.string().min(1)),
     target: z.union([z.object({kind: z.literal("person"), userId: z.string().min(1)}), z.object({kind: z.literal("link"), grantId: z.string().min(1)})]),
@@ -351,6 +353,7 @@ const PendingRestoreSchema = z.object({
   }).optional(),
 });
 export type PendingRestore = z.infer<typeof PendingRestoreSchema>;
+export type PendingRestoreUpdate = Pick<PendingRestore, "id"> & Partial<Omit<PendingRestore, "id">>;
 const RestoreReceiptSchema = z.object({path: z.string(), restoredMomentId: z.string(), removed: z.boolean().optional()});
 const RestoreLineSchema = z.discriminatedUnion("kind", [
   z.object({version: z.literal(2), kind: z.literal("restore"), entry: PendingRestoreSchema}),
@@ -455,6 +458,7 @@ export interface StoredRun {
   undo: "started" | "done" | null;
   /** Stable engine-key scope, saved before Undo starts and shared by the runs it reverses together. */
   undoScope?: string;
+  undoKeptScope?: string;
   /**
    * The fields a done Undo left because they no longer held what the run
    * wrote. Another run may have written them after this one, so Undo and
@@ -738,7 +742,7 @@ const tooLarge = () =>
 
 export interface AutomationRunStore {
   pendingRestores(): Promise<PendingRestore[]>;
-  savePendingRestore(restore: PendingRestore): Promise<void>;
+  savePendingRestore(restore: PendingRestoreUpdate): Promise<void>;
   recordRestoreReceipt(id: string, receipt: z.infer<typeof RestoreReceiptSchema>): Promise<void>;
   undoRestoreReceipt(id: string, momentId: string): Promise<void>;
   removePendingRestore(id: string): Promise<void>;
@@ -761,7 +765,7 @@ export interface AutomationRunStore {
    * its file, so the settle and an Undo never overwrite each other's state
    * with a copy read before it. Throws when the saved run cannot be read.
    */
-  updateState(run: StoredRun, state: Partial<Pick<StoredRun, "settled" | "undo" | "undoScope" | "undoKept" | "sharedSettlements" | "undoWrites">>): Promise<void>;
+  updateState(run: StoredRun, state: Partial<Pick<StoredRun, "settled" | "undo" | "undoScope" | "undoKeptScope" | "undoKept" | "sharedSettlements" | "undoWrites">>): Promise<void>;
   supersedeWake(automationId: string, claimId: string, keySeed: string, noticeId: string, supersededBy: string): Promise<void>;
   /** Records one landed effect after the run's saved progress. */
   appendEffect(run: StoredRun, applied: StoredRun["applied"][number]): Promise<void>;
@@ -918,20 +922,16 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     } catch { restores = null; }
     return restores!;
   };
-  const changeRestore = (id: string, entry?: PendingRestore) => serial(async () => {
+  const changeRestore = (id: string, entry?: PendingRestoreUpdate) => serial(async () => {
     const known = await readRestores();
     if (known === null) throw new Error("dohc could not read unfinished Stop and restore progress. Reopen the workspace, then try again.");
     const next = new Map(known);
-    if (entry) next.set(id, PendingRestoreSchema.parse(entry));
+    if (entry) next.set(id, PendingRestoreSchema.parse({claims: [], ...known.get(id), ...entry}));
     else next.delete(id);
-    if (entry) {
-      await appendDurableLine(await restoresFile(), {version: 2, kind: "restore", entry: next.get(id)}, MAX_RUN_FILE_BYTES, true);
-    } else {
-      // Compact at dismissal or completion, never once per restored file.
-      const text = [...next.values()].map(entry => `${JSON.stringify({version: 2, kind: "restore", entry})}\n`).join("");
-      if (Buffer.byteLength(text) > MAX_RUN_FILE_BYTES) throw tooLarge();
-      await writeDurably(await restoresFile(), text);
-    }
+    // Whole-state boundaries compact; only per-file receipts append.
+    const text = [...next.values()].map(entry => `${JSON.stringify({version: 2, kind: "restore", entry})}\n`).join("");
+    if (Buffer.byteLength(text) > MAX_RUN_FILE_BYTES) throw tooLarge();
+    await writeDurably(await restoresFile(), text);
     setRestores([...next.values()]);
   });
   const readUndos = async () => {

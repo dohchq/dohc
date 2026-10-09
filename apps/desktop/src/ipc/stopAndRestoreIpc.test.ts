@@ -8,13 +8,14 @@ import { createCaptureLiveStores } from "../workspaces/workspaceEngineCaptureLiv
 import { createWorkspaceEngineCapture, type WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 import { createServerRuns } from "../automations/serverRuns";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
-import { writeAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
+import { parseAutomationsFile, writeAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
 import { collectionAutomationId, definitionHash } from "@dohc/automation-executor/automation-plan";
-import type { CollectionAutomations, KeptAutomationField } from "@dohc/automation-executor/collection-automations";
+import { CollectionAutomations, type KeptAutomationField } from "@dohc/automation-executor/collection-automations";
 import { CHANNELS } from "./channels";
 import { registerStopAndRestoreIpc } from "./stopAndRestoreIpc";
 import { KeptAutomationFieldShape, stopAndRestoreRecoveryOperations } from "./bridgeContract";
-import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
+import { newRun } from "@dohc/automation-executor/collection-automation-run";
+import { createAutomationRunStore, type PendingRestore } from "@dohc/automation-executor/automation-run-store";
 import {
   LiveDocumentMutationError,
   RestoreHeadChangedError,
@@ -64,6 +65,8 @@ function fixture(options: {
   ledgerError?: () => Error | null;
   runStore?: ReturnType<typeof createAutomationRunStore>;
   runStoreError?: Error;
+  retainRunsForRestore?: CollectionAutomations["retainRunsForRestore"];
+  releaseError?: () => Error | null;
 } = {}) {
   const handlers = new Map<string, (event: { sender: string }, payload: unknown) => unknown>();
   const calls: Array<{ path: string; method: string }> = [];
@@ -85,7 +88,7 @@ function fixture(options: {
   const links = options.links ?? [[]];
   let conflicts = options.revokeConflicts ?? 0;
   const bodies: unknown[] = [];
-  const pendingEntries = new Map<string, Parameters<CollectionAutomations["savePendingRestore"]>[0]>();
+  const pendingEntries = new Map<string, PendingRestore>();
   const relayJson = vi.fn(async (_credentials: string, path: string, init?: RequestInit): Promise<unknown> => {
     calls.push({ path, method: init?.method ?? "GET" });
     if (typeof init?.body === "string") bodies.push(JSON.parse(init.body));
@@ -157,11 +160,11 @@ function fixture(options: {
     withRendererWorkspaceOperation: async (_sender, _workspaceId, _message, work) => await work({
       workspace: { workspaceId: WORKSPACE_ID, rootPath: options.rootPath ?? "/missing-root" },
       state: { collectionAutomations: { undoRunsOf: options.undoRunsOf,
-        retainRunsForRestore: async () => undefined,
+        retainRunsForRestore: options.retainRunsForRestore ?? (async () => undefined),
         pendingRestores: () => options.runStoreError ? Promise.reject(options.runStoreError) : options.runStore?.pendingRestores() ?? Promise.resolve(structuredClone([...pendingEntries.values()])),
         savePendingRestore: async (entry: Parameters<CollectionAutomations["savePendingRestore"]>[0]) => {
           if (options.runStore) await options.runStore.savePendingRestore(entry);
-          else pendingEntries.set(entry.id, structuredClone(entry));
+          else pendingEntries.set(entry.id, structuredClone({claims: [], ...pendingEntries.get(entry.id), ...entry}));
         },
         recordRestoreReceipt: async (id: string, receipt: {path: string; restoredMomentId: string}) => {
           if (options.runStore) await options.runStore.recordRestoreReceipt(id, receipt);
@@ -188,7 +191,7 @@ function fixture(options: {
     assertOriginalWorkspace: () => undefined,
     syncNow: async () => { await options.syncNow?.(); },
     serverRuns: { restore: async (_workspaceId, definitions, again, retentionId) => {
-      if (definitions.length === 0) {releases.push(retentionId); return NOTHING;}
+      if (definitions.length === 0) {releases.push(retentionId); const error = options.releaseError?.(); if(error) throw error; return NOTHING;}
       return (await options.serverRestore?.(definitions, again)) ?? NOTHING;
     } },
   });
@@ -224,6 +227,64 @@ async function capturedFiles(paths: string[]) {
 }
 
 describe("stop and restore in main", () => {
+  it.each([false, true])("uses real retention through session saves with unrelated claims at the cap: %s", async atCap => {
+    const root = await createTestScratch("dohc-restore-real-retention-");
+    const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
+    const store = createAutomationRunStore(root, resolver);
+    if(atCap) await store.savePendingRestore({id: "other-restore", claims: Array.from({length: 10000}, (_, i) => `other-${i}`)});
+    const files = automationsFile();
+    const parsed = parseAutomationsFile(files.moment.payload.after.text);
+    if(parsed.status !== "read" || parsed.entries[0]?.status !== "valid") throw Error("No definition");
+    const definition = parsed.entries[0].automation;
+    const automationId = collectionAutomationId("trip/packing", definition.id);
+    const claims = ["newer", "older"].map((claimId, index) => ({claimId, automationId, createdAtMs: 2 - index, updatedAtMs: 2 - index}));
+    for (const claim of claims) await store.save({...newRun(claim as Parameters<typeof newRun>[0], definition, "retention", claim.createdAtMs),
+      settled: true, outcome: {state: "done"}, finishedAtMs: claim.createdAtMs});
+    // Real retention selection and durable store; only engine/index reads are controlled.
+    const executor = new CollectionAutomations({store} as ConstructorParameters<typeof CollectionAutomations>[0]);
+    const reads = executor as unknown as {automationIdAt(): Promise<string>; indexAutomation(): Promise<void>; everyClaim(): Promise<typeof claims>};
+    vi.spyOn(reads, "automationIdAt").mockResolvedValue(automationId);
+    vi.spyOn(reads, "indexAutomation").mockResolvedValue(undefined);
+    vi.spyOn(reads, "everyClaim").mockResolvedValue(claims);
+    const undoRunsOf = vi.fn(async () => ({...NOTHING, errorMessage: "Resolve the conflict."}));
+    const f = fixture({...files, rootPath: root, runStore: store, retainRunsForRestore: executor.retainRunsForRestore.bind(executor), undoRunsOf});
+    const result = await f.call(CHANNELS.stopAndRestore, {target: {kind: "person", userId: "user_ana"}});
+    if(atCap) {
+      expect(result).toMatchObject({restored: [{restoredMomentId: "back-m-auto"}], unfinished: {step: "runs",
+        message: "Access stopped. dohc could not undo runs. dohc cannot keep more than 10,000 claims for Undo. Undo some runs in run history."}});
+      expect(undoRunsOf).not.toHaveBeenCalled();
+      return;
+    }
+    const restarted = createAutomationRunStore(root, resolver);
+    expect(await restarted.unfinishedUndos()).toEqual(new Set(["newer", "older"]));
+    await restarted.expire(31 * 24 * 60 * 60 * 1000, async () => "gone", null);
+    expect((await restarted.runsOf(automationId, "older")).runs).toHaveLength(1);
+  });
+
+  it("restores files when retaining automation claims exceeds the keep limit", async () => {
+    const f = fixture({...automationsFile(), retainRunsForRestore: async () => {throw Error("dohc cannot undo more than 10,000 claims at once. Undo some runs in run history.");},
+      undoRunsOf: async () => ({...NOTHING, errorMessage: "dohc cannot undo more than 10,000 claims at once. Undo some runs in run history."})});
+    const result = await f.call(CHANNELS.stopAndRestore, {target: {kind: "person", userId: "user_ana"}});
+    expect(result).toMatchObject({restored: [{restoredMomentId: "back-m-auto"}], unfinished: {step: "runs"}});
+    expect(f.calls.some(call => call.method === "POST" && call.path.endsWith("/revoke"))).toBe(true);
+  });
+  it.each(["dismiss", "complete"] as const)("releases locally offline on %s and retries server release after restart", async action => {
+    const root = await createTestScratch("dohc-restore-offline-");
+    const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
+    const store = createAutomationRunStore(root, resolver);
+    const target = {kind: "person" as const, userId: "user_ana"};
+    if(action === "dismiss") await store.savePendingRestore({id: "restore-test", claims: ["older"], session: {grants: ["grant-edit"], target,
+      label: "Ana", definitions: [], filesUndone: true, receipts: [], result: {status: "waiting"}}});
+    const f = fixture({rootPath: root, runStore: store, releaseError: () => Error("Offline")});
+    if(action === "dismiss") await expect(f.call(stopAndRestoreRecoveryOperations.dismissStopAndRestore.channel, {target})).resolves.toBeUndefined();
+    else await expect(f.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({restored: [{path: SCHEMA}], unfinished: null});
+    const restarted = createAutomationRunStore(root, resolver);
+    expect(await restarted.unfinishedUndos()).toEqual(new Set());
+    const recovery = fixture({rootPath: root, runStore: restarted});
+    expect(await recovery.call(stopAndRestoreRecoveryOperations.pendingStopAndRestores.channel, {})).toEqual([]);
+    expect(recovery.releases).toHaveLength(1);
+    expect(await restarted.pendingRestores()).toEqual([]);
+  });
   it.each(["dismiss", "missing-share"] as const)("releases both hosts' retained claims on %s", async action => {
     const root = await createTestScratch("dohc-restore-release-");
     const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
