@@ -65,6 +65,62 @@ const recoveryRows = (h: ReturnType<typeof harness>) =>
   h.result.current.shellErrors.filter((error) => error.kind === "capture-recovery");
 
 describe("useCaptureRecoveryNotices", () => {
+  it("uses the newest list before committing a Copy fallback, then follows an external restore", async () => {
+    const h=harness([]);await waitFor(()=>expect(h.bridge.getCaptureRecoveryStatus).toHaveBeenCalledOnce());
+    const stale=deferred<CaptureRecoveryStatusResult>();
+    const moment=deferred<ReadEngineMomentResult>();
+    h.bridge.getCaptureRecoveryStatus.mockImplementationOnce(()=>stale.promise);
+    h.bridge.readEngineMoment.mockImplementationOnce(()=>moment.promise);
+    const importing=h.result.current.notices.imported(RECOVERY.momentId,RECOVERY.path);
+    h.list([RECOVERY]);
+    await act(async()=>{await h.result.current.notices.refresh();stale.resolve({captureRecoveries:[]});});
+    // If the superseded read still starts metadata reads, let them finish.
+    await act(async()=>{moment.resolve({moment:{id:RECOVERY.momentId,versionId:"main",path:RECOVERY.path,
+      recordedAtMs:1,operation:"write",origin:"capture-recovery",correlationId:RECOVERY.captureMomentId,
+      beforeText:"kept typing",afterText:"disk text"}});await importing;});
+    expect(recoveryRows(h)).toHaveLength(1);
+    h.list([]);
+    await act(async()=>{await h.result.current.notices.refresh();});
+    expect(recoveryRows(h)).toHaveLength(0);
+  });
+
+  it("checks the latest list again when activity finishes during the moment reads", async () => {
+    const h=harness([]);await waitFor(()=>expect(h.bridge.getCaptureRecoveryStatus).toHaveBeenCalledOnce());
+    const answer=deferred<ReadEngineMomentResult>();
+    h.bridge.readEngineMoment.mockImplementationOnce(()=>answer.promise);
+    const importing=h.result.current.notices.imported(RECOVERY.momentId,RECOVERY.path);
+    await waitFor(()=>expect(h.bridge.readEngineMoment).toHaveBeenCalledOnce());
+    h.list([RECOVERY]);
+    await act(async()=>{await h.result.current.notices.refresh();answer.resolve({moment:{id:RECOVERY.momentId,
+      versionId:"main",path:RECOVERY.path,recordedAtMs:1,operation:"write",origin:"capture-recovery",
+      correlationId:RECOVERY.captureMomentId,beforeText:"kept typing",afterText:"disk text"}});await importing;});
+    h.list([]);
+    await act(async()=>{await h.result.current.notices.refresh();});
+    expect(recoveryRows(h)).toHaveLength(0);
+  });
+
+  it("lets two quick Copies on different moments both finish", async () => {
+    const h=harness([]);await waitFor(()=>expect(h.bridge.getCaptureRecoveryStatus).toHaveBeenCalledOnce());
+    const first=deferred<ReadEngineMomentResult>(),second=deferred<ReadEngineMomentResult>();
+    h.bridge.readEngineMoment.mockImplementation(async({momentId})=>{
+      if(momentId === "first") return first.promise;
+      if(momentId === "second") return second.promise;
+      return {moment:{id:momentId,versionId:"main",path:"notes/other.md",recordedAtMs:1,operation:"write",
+        origin:"local-file",beforeText:"before",afterText:"after"}};
+    });
+    const one=h.result.current.notices.imported("first","first.md");
+    const two=h.result.current.notices.imported("second","second.md");
+    await waitFor(()=>expect(h.bridge.readEngineMoment).toHaveBeenCalledTimes(2));
+    const detail=(id:string):ReadEngineMomentResult=>({moment:{id,versionId:"main",path:`${id}.md`,
+      recordedAtMs:1,operation:"write",origin:"capture-recovery-cleared",correlationId:`capture-${id}`,
+      beforeText:"kept typing",afterText:"disk text"}});
+    await act(async()=>{second.resolve(detail("second"));await two;});
+    await act(async()=>{first.resolve(detail("first"));await one;});
+    expect(recoveryRows(h).map(row=>row.identity).sort()).toEqual(["capture-recovery:first","capture-recovery:second"]);
+    await act(async()=>{await h.result.current.notices.refresh();});
+    expect(recoveryRows(h)).toHaveLength(2);
+  });
+
   it.each([false,true])("keeps one existing recovery row when Copy finds a History-only import (deleted=%s)", async deleted => {
     const h=harness([{...RECOVERY,deleted}]);
     await waitFor(()=>expect(recoveryRows(h)).toHaveLength(1));const row=recoveryRows(h)[0]!;
