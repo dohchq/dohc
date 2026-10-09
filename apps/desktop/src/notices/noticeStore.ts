@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { atomicReplaceFile } from "../atomicReplaceFile";
 import { join } from "node:path";
 import { z } from "zod";
 import { NoticeNotSentError } from "@dohc/automation-executor/automation-chat";
@@ -329,8 +330,7 @@ export function createNoticeStore(deps: {
   async function save(name: string, value: LocalFile | AccountFile): Promise<void> {
     await mkdir(deps.directory, { recursive: true });
     const path = join(deps.directory, name);
-    await writeFile(`${path}.tmp`, JSON.stringify(value), { mode: 0o600 });
-    await rename(`${path}.tmp`, path);
+    await atomicReplaceFile(path, (temporary) => writeFile(temporary, JSON.stringify(value), { mode: 0o600 }));
   }
 
   async function loadLocal(): Promise<LocalFile> {

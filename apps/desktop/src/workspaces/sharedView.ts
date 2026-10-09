@@ -1,5 +1,6 @@
 import { errorMessage } from "./workspaceError";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
+import { atomicReplaceFile } from "../atomicReplaceFile";
 import {
   lstat,
   mkdir,
@@ -454,22 +455,21 @@ async function writeSidecarAtomically(
 ): Promise<void> {
   const metadataDir = await ensureRealMetadataDirectory(rootDir);
   const target = join(metadataDir, fileName);
-  const temp = join(
-    metadataDir,
-    `.${fileName}.${process.pid}.${randomUUID()}.tmp`,
-  );
+  let temp: string | undefined;
   try {
-    const handle = await open(temp, "w");
-    try {
-      await writeContent(handle);
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    await rename(temp, target);
+    await atomicReplaceFile(target, async (temporary) => {
+      temp = temporary;
+      const handle = await open(temporary, "w");
+      try {
+        await writeContent(handle);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+    });
     await syncMetadataDirectory(metadataDir);
   } finally {
-    await rm(temp, { force: true });
+    if (temp) await rm(temp, { force: true });
   }
 }
 
