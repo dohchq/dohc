@@ -95,13 +95,12 @@ export function createAutomationWakeConsumer(deps: {
           const saved = await deps.intents.list();
           if (stopped) break;
           const pending = await deps.pending();
-          if (stopped) break;
           const savedKeys = new Set(saved.map((row) => JSON.stringify([row.account, row.noticeId])));
           const intents = [...saved, ...pending.filter((row) =>
             !savedKeys.has(JSON.stringify([row.account, row.noticeId])))
             .map((row) => ({ ...row, claimed: false }))];
           for (const intent of intents) {
-            // Admission: past this check the intent runs its whole path.
+            // Admission, and the check after pending: past it the intent runs its whole path.
             if (stopped) break;
             const key = JSON.stringify([intent.account, intent.noticeId]);
             if (attempted.has(key)) continue;

@@ -933,11 +933,11 @@ describe("desktop shutdown", () => {
   });
 
   it.each([
-    { work: "refusal Notice work", deadlineExitCode: 0 },
-    { work: "refusal Notice work", deadlineExitCode: 1 },
-    { work: "an agent wake", deadlineExitCode: 0 },
-    { work: "an agent wake", deadlineExitCode: 1 },
-  ] as const)("exits once with deadline status $deadlineExitCode while $work holds authorities open", async ({ work, deadlineExitCode }) => {
+    ["refusal Notice work", 0],
+    ["refusal Notice work", 1],
+    ["an agent wake", 0],
+    ["an agent wake", 1],
+  ] as const)("exits once while %s holds authorities open, with deadline status %d", async (work, deadlineExitCode) => {
     vi.useFakeTimers();
     const held = deferred();
     const f = fixture((d) => {

@@ -248,7 +248,7 @@ describe("agent wakes stopped at quit", () => {
   it.each<[string, (deps: Deps, hold: () => Promise<void>) => Partial<Deps>, AutomationWakeIntent[]]>([
     ["readiness", (d, hold) => ({ ready: async (intent, runner) => { await hold(); return await d.ready(intent, runner); } }), []],
     ["the open-workspace check", (d, hold) => ({
-      ready: async (_intent, runner) => !runner,
+      ready: async (intent, runner) => !runner || intent.noticeId !== pending.noticeId,
       enabledIfOpen: async (intent) => { await hold(); return await d.enabledIfOpen(intent); },
     }), [{ ...pending, claimed: false }]],
     ["dismissal", (d, hold) => ({ dismiss: async (intent) => { await hold(); return await d.dismiss(intent); } }), []],
@@ -314,6 +314,7 @@ describe("agent wakes stopped at quit", () => {
     g.release();
     await drain;
     expect(w.deps.onError).toHaveBeenCalledTimes(errors);
+    expect(w.deps.ready).not.toHaveBeenCalledWith(expect.objectContaining({ noticeId: second.noticeId }), expect.anything());
     expect(await createAutomationWakeIntents(w.file).list()).toEqual(kept);
   });
 });
