@@ -30,7 +30,7 @@ describe("share background work readiness", () => {
     expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
     expect(bridge.pushShareDirectWrites).not.toHaveBeenCalled();
-    expect(bridge.onShareDirectWritesPushed).toHaveBeenCalledOnce();
+    expect(bridge.onShareDirectWritesPushed).not.toHaveBeenCalled();
     expect((screen.getByRole("button", { name: "Refresh" }) as HTMLButtonElement).disabled).toBe(true);
 
     await act(async () => {
@@ -49,7 +49,7 @@ describe("share background work readiness", () => {
     await user.click(screen.getByTestId("notice-center-toggle"));
     const notices = await screen.findByTestId("notice-center");
     expect(within(notices).getAllByText(message)).toHaveLength(1);
-    bridge.pushShareDirectWrites.mockResolvedValue({ status: "pushed", writes: [] });
+    bridge.pushShareDirectWrites.mockResolvedValue(undefined);
     await user.click(within(notices).getByRole("button", { name: "Try again" }));
     expect(bridge.pushShareDirectWrites).toHaveBeenCalledTimes(2);
   });
@@ -728,7 +728,7 @@ describe("shared view send changes", () => {
     renderShell(bridge, { ...SHARE_VIEW, shareView: { shareId: "share-1", granterEmail: "sam@dohc.test", access: "comment" } });
     await screen.findByTestId("shared-view-banner");
     // A write started before access ended can still report its outcome.
-    expect(bridge.onShareDirectWritesPushed).toHaveBeenCalledOnce();
+    await waitFor(() => expect(bridge.onShareDirectWritesPushed).toHaveBeenCalledOnce());
     expect(bridge.pushShareDirectWrites).not.toHaveBeenCalled();
   });
 
@@ -1252,9 +1252,9 @@ describe("shared view chats surface", () => {
     expect(await screen.findByTestId("chats-panel")).toBeTruthy();
     expect(screen.getByTestId("titlebar-chats-sidebar")).toBeTruthy();
 
-    // The file tab is the only tab. A workspace-wide listing would be a
+    // About is the only tab. A workspace-wide listing would be a
     // superset to filter, which is the shape #627 came from.
-    expect(screen.getByTestId("chats-panel-tab-file")).toBeTruthy();
+    expect(screen.getByTestId("chats-panel-tab-about")).toBeTruthy();
     expect(screen.queryByTestId("chats-panel-tab-all")).toBeNull();
     expect(screen.queryByTestId("chats-panel-off")).toBeNull();
 
@@ -1269,6 +1269,8 @@ describe("shared view chats surface", () => {
     expect((await screen.findByTestId("linked-chat-readonly-note")).textContent).toBe(
       "Chats are read-only in this shared view.",
     );
+    // A shared view records no History, so About has no History section.
+    expect(screen.queryByTestId("about-history")).toBeNull();
 
     expect(bridge.listChatChannels).not.toHaveBeenCalled();
     expect(bridge.syncDms).not.toHaveBeenCalled();
@@ -1328,10 +1330,10 @@ describe("shared view chats surface", () => {
 
     expect(await screen.findByTestId("chats-panel")).toBeTruthy();
     expect(screen.getByTestId("titlebar-chats-sidebar")).toBeTruthy();
-    // Both tabs. Collapsing every workspace to the share's file-only strip
+    // Both tabs. Collapsing every workspace to the share's About-only strip
     // would keep the share pin above green.
     expect(screen.getByTestId("chats-panel-tab-all")).toBeTruthy();
-    expect(screen.getByTestId("chats-panel-tab-file")).toBeTruthy();
+    expect(screen.getByTestId("chats-panel-tab-about")).toBeTruthy();
     await waitFor(() => expect(bridge.listChatChannels).toHaveBeenCalled());
     expect(screen.queryByTestId("chats-panel-off")).toBeNull();
   });

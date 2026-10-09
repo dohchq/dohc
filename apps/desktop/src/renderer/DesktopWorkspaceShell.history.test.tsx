@@ -9,6 +9,7 @@ import { DEFAULT_WORKSPACE_SETTINGS, type WorkspaceSettingsResult } from "../wor
 import { rendererMarks } from "../performance/rendererMarks";
 import { momentDiffTabPath, versionCompareTabPath } from "./workbench/workbenchState";
 import { deferred } from "../testing/deferred";
+import { textEditorContent } from "./FileInspector.editor-fixture";
 import { WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, storedTabs, makeBridge, renderShell, SHARE_STATUS, SHARE_VIEW, makeShareBridge, settleShareView } from "./DesktopWorkspaceShell.testHarness";
 
 describe("history page", () => {
@@ -555,8 +556,7 @@ describe("history page", () => {
 
     const left = await screen.findByRole("region", { name: "Editor group 1" });
     const right = screen.getByRole("region", { name: "Editor group 2" });
-    const content = (await within(right).findByTestId("view-text-editor"))
-      .querySelector(".cm-content") as HTMLElement;
+    const content = await textEditorContent(await within(right).findByTestId("view-text-editor"));
     await user.click(content);
     await user.keyboard("{End} changed");
     await waitFor(() => expect(within(right).getByTestId("tab-dirty")).toBeTruthy());
@@ -617,8 +617,7 @@ describe("history page", () => {
     await settleShareView();
 
     const group = await screen.findByRole("region", { name: "Editor group 1" });
-    const content = (await within(group).findByTestId("view-text-editor"))
-      .querySelector(".cm-content") as HTMLElement;
+    const content = await textEditorContent(await within(group).findByTestId("view-text-editor"));
     await user.click(content);
     await user.keyboard("{End} changed");
     await waitFor(() => expect(within(group).getByTestId("tab-dirty")).toBeTruthy());
@@ -679,8 +678,7 @@ describe("history page", () => {
 
     const left = await screen.findByRole("region", { name: "Editor group 1" });
     const right = screen.getByRole("region", { name: "Editor group 2" });
-    const content = (await within(right).findByTestId("view-text-editor"))
-      .querySelector(".cm-content") as HTMLElement;
+    const content = await textEditorContent(await within(right).findByTestId("view-text-editor"));
     await user.click(content);
     await user.keyboard("{End} changed");
     await waitFor(() => expect(within(right).getByTestId("tab-dirty")).toBeTruthy());

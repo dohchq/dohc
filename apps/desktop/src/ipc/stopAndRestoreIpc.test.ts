@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
@@ -420,6 +421,33 @@ describe("stop and restore in main", () => {
       unfinished: { step: "runs", message: "Your server runs a different version of dohc. Update it, then try again." },
     });
   });
+
+  it.each(["local undo", "sync before local undo", "sync after local undo"] as const)(
+    "shows a readable sentence for a Zod error from %s", async source => {
+      const parsed = z.string().safeParse(42);
+      if (parsed.success) throw new Error("The test expected a validation failure.");
+      const error = parsed.error;
+      let syncs = 0;
+      const undoRunsOf = vi.fn(async () => {
+        if (source === "local undo") throw error;
+        return { ...NOTHING, undone: 1, reverted: 1 };
+      });
+      const f = fixture({
+        ...automationsFile(),
+        serverRestore: async () => ({ ...NOTHING, undone: 1, reverted: 1 }),
+        undoRunsOf,
+        syncNow: async () => {
+          syncs += 1;
+          if (source === "sync before local undo" || (source === "sync after local undo" && syncs === 2)) throw error;
+        },
+      });
+      await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({
+        runsUndone: source === "sync after local undo" ? 2 : 1,
+        unfinished: { step: "runs", message: "dohc could not finish undoing these runs." },
+      });
+      expect(undoRunsOf).toHaveBeenCalledTimes(source === "sync before local undo" ? 0 : 1);
+    },
+  );
 
   it.each(["../outside", "/outside", "C:/outside", "trip/../outside", "trip\\outside", "trip//outside"])("rejects kept field path %s", (path) => {
     expect(KeptAutomationFieldShape.safeParse({ ...KEPT, path }).success).toBe(false);

@@ -5,7 +5,7 @@ import { EmptyState } from "../ui/controls";
 import { useId, useMemo, useState } from "react";
 import { LegendList } from "@legendapp/list/react";
 import type { EngineMomentRecord } from "../../ipc/bridgeContract";
-import { chatAuthorLabel } from "./LinkedChats";
+import { chatAuthorLabel } from "./chatMessages";
 
 // Engine history timeline. Renders engine moments with their summaries
 // ("Saved latest edits", "Merged version X into Main", "Reconciled offline

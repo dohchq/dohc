@@ -7,7 +7,7 @@ import {
   groupAgentAuthorName,
   groupEngineMoments,
 } from "./EngineHistory";
-import { chatAuthorLabel } from "./LinkedChats";
+import { chatAuthorLabel } from "./chatMessages";
 
 function moment(overrides: Partial<EngineMomentRecord> & { id: string }): EngineMomentRecord {
   return {

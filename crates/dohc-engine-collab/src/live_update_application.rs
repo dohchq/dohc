@@ -562,9 +562,17 @@ impl AdmittedLiveUpdateMetadata {
     }
 
     pub fn matches_draft_declaration(&self, declaration: Option<&AgentDeclaration>) -> bool {
-        self.admitted_declaration()
-            .as_ref()
-            .is_none_or(|admitted| Some(admitted) == declaration)
+        let ServerDerivedLiveUpdateAuthority::Owner { principal_id } = &self.accepted.authority
+        else {
+            return false;
+        };
+        self.admitted_declaration().as_ref().is_none_or(|admitted| {
+            declaration.is_some_and(|draft| {
+                // Depth and name are not part of the relay's agent identity.
+                admitted.agent_id == draft.agent_id
+                    && admitted.on_behalf_of.as_deref() == Some(principal_id.as_str())
+            })
+        })
     }
 
     pub fn matches_automation_declaration(
@@ -2474,6 +2482,24 @@ mod tests {
         assert!(metadata.matches_draft_declaration(declared("agent").as_ref()));
         assert!(!metadata.matches_draft_declaration(declared("other").as_ref()));
         assert!(!metadata.matches_draft_declaration(None));
+        for authority in [
+            ServerDerivedLiveUpdateAuthority::Named {
+                principal_id: "owner-1".into(),
+                grant_id: "grant".into(),
+                grant_generation: 1,
+            },
+            ServerDerivedLiveUpdateAuthority::Link {
+                principal_id: "owner-1".into(),
+                grant_id: "grant".into(),
+                grant_generation: 1,
+            },
+        ] {
+            metadata.accepted.authority = authority;
+            assert!(!metadata.matches_draft_declaration(declared("agent").as_ref()));
+            snapshot(&mut metadata, None);
+            assert!(!metadata.matches_draft_declaration(declared("agent").as_ref()));
+            snapshot(&mut metadata, declared("agent"));
+        }
     }
 
     #[test]

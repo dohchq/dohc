@@ -50,10 +50,8 @@ import {
   type ShareMountEngineWorkspace,
 } from "@dohc/workspace-engine-client/daemon";
 
-// A manifest rebuild after a version switch costs one unsettled pass, so this
-// budget is generous by two orders of magnitude. It is bounded rather than
-// unbounded because a workspace under genuinely continuous mutation can keep
-// missing quiescence, and that must still surface as an error rather than hang.
+// Match the desktop relay pull's 30-second request deadline.
+const FLUSH_SETTLE_BUDGET_MS = 30_000;
 const FLUSH_SETTLE_ATTEMPTS = 50;
 const FLUSH_SETTLE_POLL_MS = 20;
 const ShareDeliveryStatus = z.object({ state: z.enum(["accepted", "pending", "refused"]) });
@@ -1430,50 +1428,68 @@ export function createCaptureLiveStores(
 
     async flushCapture() {
       captureWaitSignal?.throwIfAborted();
-      // `settled: false` is not an error. The daemon documents it as "state
-      // not comparable" — a layer down, a teardown race, or a workspace under
-      // continuous mutation — and expects the caller to poll. Every Rust-side
-      // consumer does (`flush_until_settled`); this one threw on the first
-      // unsettled answer.
-      //
-      // That made a normal sequence fail in the user's face. A version switch
-      // whose pre-switch reconcile saw change calls `request_manifest_refresh`,
-      // which bumps the driver's refresh epoch, so the next pass classifies the
-      // layer as PolicyChanged and drops it to rebuild the manifest — one
-      // deliberate unsettled pass, `running: false` with `degraded: false`.
-      // A second switch straight after the first therefore threw
-      // "did not settle" at whoever asked for it.
-      let outcome = await waitForCapture(() => runRead(async adapter => await adapter.flushCapture()));
-      if (!outcome.settled) {
-        const status = await waitForCapture(() => runRead(async adapter => await adapter.watcherStatus()));
-        if (status.phase === "starting" || status.phase === "importing") {
-          throw new DaemonRefusalError(
-            {
-              code: "OVERLOADED",
-              message: "Workspace is still updating. Try again.",
-              retry: "afterBackoff",
-            },
-            undefined,
-          );
-        }
-      }
-      for (
-        let attempt = 0;
-        !outcome.settled && attempt < FLUSH_SETTLE_ATTEMPTS;
-        attempt += 1
-      ) {
+      const deadline = performance.now() + FLUSH_SETTLE_BUDGET_MS;
+      let finished = false;
+      const didNotSettle = () => new Error(
+        `Engine capture for ${workspace.workspaceId} did not settle.`,
+      );
+      const assertActive = () => {
         captureWaitSignal?.throwIfAborted();
-        await delay(FLUSH_SETTLE_POLL_MS, undefined, { signal: captureWaitSignal }).catch(error => {
-          captureWaitSignal?.throwIfAborted();
-          throw error;
+        if (finished) throw didNotSettle();
+      };
+      const request = <T>(operation: (adapter: VersionedLiveAdapter) => Promise<T>) => {
+        assertActive();
+        return runRead(adapter => {
+          assertActive();
+          return operation(adapter);
         });
+      };
+      const settle = async () => {
+        // A manifest rebuild after switching versions needs an unsettled pass.
+        // Capture events report path progress or initial readiness, not quiescence.
+        let outcome = await request(adapter => adapter.flushCapture());
+        if (!outcome.settled) {
+          const status = await request(adapter => adapter.watcherStatus());
+          if (status.phase === "starting" || status.phase === "importing") {
+            throw new DaemonRefusalError(
+              {
+                code: "OVERLOADED",
+                message: "Workspace is still updating. Try again.",
+                retry: "afterBackoff",
+              },
+              undefined,
+            );
+          }
+        }
+        for (let attempt = 0; !outcome.settled && attempt < FLUSH_SETTLE_ATTEMPTS; attempt += 1) {
+          assertActive();
+          // Do not leave a poll scheduled beyond the total deadline.
+          await delay(Math.min(FLUSH_SETTLE_POLL_MS, Math.max(0, deadline - performance.now())), undefined, {
+            signal: captureWaitSignal,
+          }).catch(error => {
+            captureWaitSignal?.throwIfAborted();
+            throw error;
+          });
+          outcome = await request(adapter => adapter.flushCapture());
+        }
+        if (!outcome.settled) throw didNotSettle();
+      };
+      // Session binding and recovery also consume the same budget.
+      let timer!: ReturnType<typeof setTimeout>;
+      const expired = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(didNotSettle()), Math.max(0, deadline - performance.now()));
+      });
+      try {
+        await waitForCapture(() => Promise.race([settle(), expired]));
+      } catch (error) {
         captureWaitSignal?.throwIfAborted();
-        outcome = await waitForCapture(() => runRead(async adapter => await adapter.flushCapture()));
-      }
-      if (!outcome.settled) {
-        throw new Error(
-          `Engine capture for ${workspace.workspaceId} did not settle.`,
-        );
+        if (error instanceof DaemonRefusalError && error.wireCode === "DEADLINE_EXCEEDED") {
+          throw didNotSettle();
+        }
+        throw error;
+      } finally {
+        finished = true;
+        clearTimeout(timer);
       }
     },
 

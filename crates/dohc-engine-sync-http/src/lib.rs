@@ -523,8 +523,8 @@ fn name_relay_api_version(
 
 impl RelayTransport for HttpRelayTransport {
     fn publishes_native_settlements(&self) -> bool {
-        // main.ts mounts this credential prefix with provenance: native-settlements.
-        // The relay still authenticates the credential before accepting authors.
+        // main.ts mounts this credential prefix for the native service replica.
+        // The relay derives settlement authors from admitted live updates.
         self.token.starts_with("dohc-service-v1.")
     }
 
