@@ -1177,7 +1177,7 @@ pub fn apply_committed(
                     attribution.actor_kind == dohc_engine_domain::ChangeActorKind::Automation
                 })
             });
-            let append = durable::record_authorized_update_in_tx(
+            let append = durable::record_accepted_update_in_tx(
                 tx,
                 &key,
                 &event.update_bytes,

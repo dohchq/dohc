@@ -3,9 +3,16 @@ import {
   registered,
   cleanupLiveDeliveryFixtures,
 } from "../../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js";
-import { prepareHostedSettlements } from "./hostedSettlement.js";
+import { prepareHostedSettlements, parseSettlementAuthors } from "./hostedSettlement.js";
 import type { StorageContext } from "./context.js";
 afterEach(cleanupLiveDeliveryFixtures);
+
+it("fits 1023 named authors and the window's marker in a settlement snapshot", () => {
+  const authors = Array.from({length: 1023}, (_, index) => ({kind: "human", humanId: String(index), humanName: "Reader"}));
+  const marker = {kind: "unattributed"};
+  expect(parseSettlementAuthors([...authors, marker])).toHaveLength(1024);
+  expect(() => parseSettlementAuthors([...authors, {kind: "human", humanId: "new", humanName: "Reader"}, marker])).toThrow();
+});
 it("records deterministic settlement refusal and advances later origin operations without publishing its moment", async () => {
   const f = registered({ deployment: true });
   try {

@@ -940,6 +940,59 @@ fn latest_authors(f: &Fixture) -> serde_json::Value {
     })
 }
 
+async fn named_delivery_settles_without_marker(author: serde_json::Value) {
+    let f = Fixture::new().await;
+    f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
+    let bytes = f.doc.richdoc_append_paragraph("Named contribution");
+    let receipt = LiveUpdateReceipt {
+        delivery_id: "named-delivery".into(),
+        update_digest: hex_sha256(&bytes),
+        journal_cursor: 3,
+        accepting_host_epoch: 1,
+    };
+    let event = AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: receipt.clone(),
+                binding: f.binding.clone(),
+                authority: owner_authority(),
+                received_at_ms: 2,
+            },
+            first_seen: vec![],
+            canonical_version: Some(2),
+            author_snapshot: Some(vec![serde_json::from_value(author.clone()).unwrap()]),
+            first_seen_deletes: Some(vec![]),
+            checkpoint_coverage: None,
+        },
+        update_bytes: bytes,
+    };
+    assert!(matches!(
+        f.handle
+            .apply(event, Arc::new(NoFaults), 100_000_000)
+            .await
+            .unwrap(),
+        ApplicationResult::Applied(..)
+    ));
+    f.settle(Some(receipt), 100, Arc::new(NoFaults))
+        .await
+        .unwrap();
+    assert_eq!(latest_authors(&f), serde_json::json!([author]));
+    f.assert_projection();
+}
+
+#[tokio::test]
+async fn accepted_agent_delivery_settles_without_an_unattributed_marker() {
+    named_delivery_settles_without_marker(serde_json::json!({"kind":"agent","agentId":"cleanup-agent","onBehalfOf":"owner","depth":1})).await;
+}
+
+#[tokio::test]
+async fn accepted_human_delivery_settles_without_an_unattributed_marker() {
+    named_delivery_settles_without_marker(
+        serde_json::json!({"kind":"human","humanId":"owner","humanName":"Owner"}),
+    )
+    .await;
+}
+
 /// An update that only removes the body's last block: no new structs.
 fn delete_last_block(doc: &Ydoc) -> Vec<u8> {
     use yrs::updates::decoder::Decode;

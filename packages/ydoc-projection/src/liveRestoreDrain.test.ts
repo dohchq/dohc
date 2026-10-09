@@ -1342,6 +1342,9 @@ it.each([["bootstrap","service"],["bootstrap","device"],["owner","device"]] as c
     expect(row.restore_operation_id).toBe(f.input.operationId);
     expect(row.validation_checkpoint_bytes).toBeInstanceOf(Uint8Array);
     expect(admitted.admitted.firstSeen).toEqual(f.receipt.replacementRanges);
+    expect(admitted.admitted.authorSnapshot).toEqual([]);
+    expect(admitted.admitted.checkpointCoverage?.filter(entry => entry.author.kind === "unattributed"))
+      .toHaveLength(1);
     expect(f.store.admitStopRestoreProposal(f.input,proposed.proposalDigest,policy,205)).toEqual(admitted);
     const application={fence:admitted.preparation.fence,candidateDigest:admitted.candidateDigest,nativeSourceManifestDigest:admitted.nativeSourceManifestDigest,
       admitted:admitted.admitted,localHeadSequence:admitted.preparation.fence.localHeadSequence+1,

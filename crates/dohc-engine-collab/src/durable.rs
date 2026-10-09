@@ -673,6 +673,7 @@ where
                 index_frontmatter,
                 actor_origin_id,
                 attribution,
+                is_seed,
                 now_ms,
                 cache,
                 &mut probe,
@@ -881,6 +882,7 @@ fn append_local_update(
     sha: &str,
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
+    authors_admitted: bool,
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
     if let Some(actor_origin_id) = actor_origin_id {
@@ -896,8 +898,8 @@ fn append_local_update(
             record_facts: None,
         });
     }
-    let settlement_requested =
-        crate::author_coverage::check_admission_in(conn, key, actor_origin_id, attribution)?;
+    let settlement_requested = !authors_admitted
+        && crate::author_coverage::check_admission_in(conn, key, actor_origin_id, attribution)?;
     let base = load_doc_in(conn, key)?;
     let (_, seq, record_facts) = append_and_index_update(
         conn,
@@ -939,6 +941,7 @@ fn append_local_update_cached(
     index_frontmatter: bool,
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
+    is_seed: bool,
     now_ms: i64,
     cache: &WriterDocCache,
     probe: &mut GateBaseProbe,
@@ -957,8 +960,8 @@ fn append_local_update_cached(
             record_facts: None,
         });
     }
-    let settlement_requested =
-        crate::author_coverage::check_admission_in(conn, key, actor_origin_id, attribution)?;
+    let settlement_requested = !is_seed
+        && crate::author_coverage::check_admission_in(conn, key, actor_origin_id, attribution)?;
     let (seq, record_facts) = match cache.base_frontier_and_scratch_for_gate(conn, key, marker)? {
         Some((base, frontier, scratch)) => {
             let validation = crate::replay_parity::validate_replay_parity_for_cached_gate(
@@ -2191,6 +2194,32 @@ pub(crate) fn record_authorized_update_in_tx(
         &sha,
         actor_origin_id,
         attribution,
+        false,
+        now_ms,
+    )
+}
+
+/// Accepted delivery authors have already passed coverage admission in this transaction.
+pub(crate) fn record_accepted_update_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+    now_ms: i64,
+) -> Result<AppendOutcome, CollabError> {
+    validate_update_bytes(update)?;
+    let marker = read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
+    let sha = crate::hex_sha256(update);
+    append_local_update(
+        tx,
+        key,
+        &marker,
+        update,
+        &sha,
+        actor_origin_id,
+        attribution,
+        true,
         now_ms,
     )
 }

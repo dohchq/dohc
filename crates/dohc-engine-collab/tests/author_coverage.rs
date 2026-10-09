@@ -99,7 +99,7 @@ fn interval_actorless_rows_add_one_marker_alongside_named_authors() {
 }
 
 #[test]
-fn interval_named_rows_have_no_marker_before_or_after_an_actorless_tail() {
+fn interval_named_rows_keep_sequence_bounds_and_consumed_markers_out() {
     let mut ts = fresh_store("interval-named");
     let key = test_key();
     seed_parents(&mut ts.store, &key, 1);
@@ -117,8 +117,22 @@ fn interval_named_rows_have_no_marker_before_or_after_an_actorless_tail() {
         {"kind":"agent", "agentId":"editor", "onBehalfOf":"person"}
     ]);
     assert_eq!(interval_authors(&ts, &key, i64::MAX), expected);
-    record_actorless(&mut ts, &key, &doc.plaintext_insert(1, "b"), false);
+    record(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &doc.plaintext_insert(1, "b"),
+        "other",
+        "person",
+    )
+    .expect("later named edit");
     assert_eq!(interval_authors(&ts, &key, 1), expected);
+    record_actorless(&mut ts, &key, &doc.plaintext_insert(2, "c"), false);
+    assert!(interval_authors(&ts, &key, i64::MAX)
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|author| author["kind"] == "unattributed"));
     ts.store
         .write_with(&NoFaults, |tx| author_coverage::advance_in(tx, &key, false))
         .expect("consume interval");
@@ -126,7 +140,7 @@ fn interval_named_rows_have_no_marker_before_or_after_an_actorless_tail() {
         &mut ts.store,
         &mut ts.cache,
         &key,
-        &doc.plaintext_insert(2, "c"),
+        &doc.plaintext_insert(3, "d"),
         "editor",
         "person",
     )
@@ -142,6 +156,119 @@ fn interval_actorless_seed_adds_no_marker() {
     let doc = Ydoc::wire();
     record_actorless(&mut ts, &key, &doc.plaintext_insert(0, "a"), true);
     assert_eq!(interval_authors(&ts, &key, i64::MAX), serde_json::json!([]));
+}
+
+#[test]
+fn actorless_admission_counts_the_marker_and_refuses_before_appending() {
+    let mut ts = fresh_store("actorless-capacity");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1);
+    let doc = Ydoc::wire();
+    record_actorless(&mut ts, &key, &doc.plaintext_insert(0, "seed"), true);
+    let named: Vec<_> = (0..author_coverage::MAX_INTERVAL_AUTHORS)
+        .map(|index| serde_json::json!({"kind":"human","humanId":format!("person-{index}")}))
+        .collect();
+    ts.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE ydoc_docs SET pending_authors_json=?1",
+                [serde_json::to_string(&named).unwrap()],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            Ok::<_, CollabError>(())
+        })
+        .unwrap();
+    let update = doc.plaintext_insert(4, "a");
+    let result = record_local_update(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &update,
+        LocalAppend::default(),
+        &NoFaults,
+        2,
+        |_, _, _| Ok(()),
+    );
+    assert!(matches!(result, Err(CollabError::AuthorCapacity)));
+    ts.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE ydoc_docs SET regime='replicated'", [])
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            Ok::<_, CollabError>(())
+        })
+        .unwrap();
+    let remote = dohc_engine_collab::RemoteUpdate {
+        origin_id: "peer".into(),
+        origin_seq: 1,
+        bytes: update.clone(),
+    };
+    let result = dohc_engine_collab::apply_remote_update(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &remote,
+        None,
+        None,
+        &NoFaults,
+        2,
+    );
+    assert!(matches!(result, Err(CollabError::AuthorCapacity)));
+    assert_eq!(
+        dohc_engine_collab::read_marker(&ts.store, &key)
+            .unwrap()
+            .unwrap()
+            .head_update_seq,
+        1
+    );
+    assert_eq!(
+        covered_count(&ts.store, &key),
+        author_coverage::MAX_INTERVAL_AUTHORS
+    );
+    ts.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE ydoc_docs SET pending_authors_json=?1",
+                [serde_json::to_string(&named[..named.len() - 1]).unwrap()],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            Ok::<_, CollabError>(())
+        })
+        .unwrap();
+    dohc_engine_collab::apply_remote_update(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &remote,
+        None,
+        None,
+        &NoFaults,
+        2,
+    )
+    .expect("remote marker fits at the limit");
+    record_local_update(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &doc.plaintext_insert(5, "b"),
+        LocalAppend::default(),
+        &NoFaults,
+        3,
+        |_, _, _| Ok(()),
+    )
+    .expect("known local marker fits");
+    assert_eq!(
+        covered_count(&ts.store, &key),
+        author_coverage::MAX_INTERVAL_AUTHORS
+    );
+    assert_eq!(
+        interval_authors(&ts, &key, i64::MAX)
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|author| author["kind"] == "unattributed")
+            .count(),
+        1
+    );
 }
 
 #[test]

@@ -149,17 +149,15 @@ pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Auth
     if accepted_only_in(conn, key)? {
         return Ok(authors);
     }
-    // Collapse incomplete actor metadata into one coverage marker in the same scan.
+    // Actorless edits and accepted snapshots retain coverage at admission.
     // Admission caps the named identities retained above the boundary.
     let mut stmt = conn
         .prepare_cached(
-            "SELECT CASE WHEN actor_kind IS NOT NULL THEN actor_origin_id END, \
-         CASE WHEN actor_origin_id IS NOT NULL THEN actor_kind END, \
-         CASE WHEN actor_origin_id IS NOT NULL AND actor_kind IS NOT NULL THEN on_behalf_of END, \
-         MAX(chain_depth) FROM ydoc_updates \
+            "SELECT actor_origin_id, actor_kind, on_behalf_of, MAX(chain_depth) FROM ydoc_updates \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
          AND seq>COALESCE(?4,-1) AND seq<=?5 AND is_seed=0 \
-         GROUP BY 1, 2, 3",
+         AND actor_kind IN ('human','agent','automation') AND actor_origin_id IS NOT NULL \
+         GROUP BY actor_kind, on_behalf_of, actor_origin_id",
         )
         .map_err(sql)?;
     let rows = stmt
@@ -196,8 +194,6 @@ pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Auth
             dohc_engine_domain::moment_author_json(actor.as_deref(), attribution.as_ref())
         {
             authors.union_json(&json)?;
-        } else {
-            authors.union_json(r#"[{"kind":"unattributed"}]"#)?;
         }
     }
     Ok(authors)
@@ -322,9 +318,9 @@ pub fn check_admission_in(
     actor: Option<&str>,
     attribution: Option<&ChangeAttribution>,
 ) -> Result<bool, CollabError> {
-    let Some(json) = dohc_engine_domain::moment_author_json(actor, attribution) else {
-        return Ok(false);
-    };
+    let json = dohc_engine_domain::moment_author_json(actor, attribution);
+    let actorless = json.is_none();
+    let json = json.unwrap_or_else(|| r#"[{"kind":"unattributed"}]"#.to_owned());
     // An adopted owner's edit is private until the relay accepts it. Its
     // author joins the interval with that acceptance, where a settlement can
     // always make room, so only the entry itself is bounded here.
@@ -334,6 +330,9 @@ pub fn check_admission_in(
     }
     let mut covered = reserved_in(conn, key)?;
     let bytes = admit(&mut covered, &json)?;
+    if actorless {
+        retain_pending_in(conn, key, &[json])?;
+    }
     Ok(
         (bytes >= SETTLE_AUTHOR_BYTE_THRESHOLD || covered.len() >= SETTLE_AUTHOR_COUNT_THRESHOLD)
             && !unresolved_in(conn, key)?,
@@ -362,6 +361,14 @@ pub fn admit_accepted_in(
     for json in authors {
         admit(&mut covered, json)?;
     }
+    retain_pending_in(conn, key, authors)
+}
+
+fn retain_pending_in(
+    conn: &Connection,
+    key: &DocKey,
+    authors: &[String],
+) -> Result<(), CollabError> {
     let pending: String = conn
         .query_row(
             "SELECT pending_authors_json FROM ydoc_docs \
@@ -375,15 +382,14 @@ pub fn admit_accepted_in(
     for json in authors {
         admitted.union_json(json)?;
     }
+    let json = admitted.json();
+    if json == pending {
+        return Ok(());
+    }
     conn.execute(
         "UPDATE ydoc_docs SET pending_authors_json=?4 \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-        params![
-            key.workspace_id,
-            key.version_id,
-            key.object_id,
-            admitted.json()
-        ],
+        params![key.workspace_id, key.version_id, key.object_id, json],
     )
     .map_err(sql)?;
     Ok(())
