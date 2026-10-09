@@ -382,6 +382,12 @@ export interface SyncRelayGrantedInventoryPage {
   nextCursor: SyncRelayGrantedInventoryCursor | null;
 }
 
+export interface SyncRelayReceivedInventoryCursor { shareId: string }
+export interface SyncRelayReceivedInventoryPage {
+  shareIds: string[];
+  nextCursor: SyncRelayReceivedInventoryCursor | null;
+}
+
 export interface SyncRelayLinkInventoryRow extends SyncRelayShareWithGrantRow {
   dependents: SyncRelayShareGrantRow[];
   lastUsedAtMs: number | null;
@@ -1011,6 +1017,7 @@ export interface SyncRelayStorage {
   // Active listings never disclose revoked selectors. Removed named recipients
   // receive only their grant ID, share ID, removal time, and an explanation.
   listSharesReceivedBy(recipientUserId: string): SyncRelayShareWithGrantRow[];
+  listReceivedShareIdsPage(recipientUserId: string, cursor?: SyncRelayReceivedInventoryCursor): SyncRelayReceivedInventoryPage;
   removeShareAccess(input: import("./shareRemoval").ShareRemovalInput): ReturnType<typeof import("./shareRemoval").removeShareAccess>;
   undoShareRemoval(input: Parameters<typeof import("./shareRemoval").undoShareRemoval>[1]): void;
   purgeExpiredShareRemovals(nowMs: number): void;

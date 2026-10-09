@@ -62,6 +62,8 @@ import type {
   SyncRelayGrantedShareRow,
   SyncRelayGrantedInventoryCursor,
   SyncRelayGrantedInventoryPage,
+  SyncRelayReceivedInventoryCursor,
+  SyncRelayReceivedInventoryPage,
   SyncRelayLinkInventoryCursor,
   SyncRelayLinkInventoryPage,
   SyncRelayIndependentGrantInventoryCursor,
@@ -180,6 +182,8 @@ export {
   type SyncRelayGrantedShareRow,
   type SyncRelayGrantedInventoryCursor,
   type SyncRelayGrantedInventoryPage,
+  type SyncRelayReceivedInventoryCursor,
+  type SyncRelayReceivedInventoryPage,
   type SyncRelayLinkInventoryRow,
   type SyncRelayLinkInventoryCursor,
   type SyncRelayLinkInventoryPage,
@@ -1108,6 +1112,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   listSharesReceivedBy(recipientUserId: string): SyncRelayShareWithGrantRow[] {
     return sharesStorage.listSharesReceivedBy(this, recipientUserId);
+  }
+  listReceivedShareIdsPage(recipientUserId: string, cursor?: SyncRelayReceivedInventoryCursor): SyncRelayReceivedInventoryPage {
+    return sharesStorage.listReceivedShareIdsPage(this, recipientUserId, cursor);
   }
 
   removeShareAccess(input: shareRemovalStorage.ShareRemovalInput) {

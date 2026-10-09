@@ -7,7 +7,7 @@ import { cursorCodec } from "./requestInputs";
 import { resolveReceivedShareAuthority, selectorTargetsBlockedChannel, type AuthorizedShareAction } from "./shareAuthorization";
 import { fileSideOf, parseStoredAnyShareSelectorJson } from "./shareFilter";
 import type { createShareSummaries } from "./shareSummaries";
-import type { SyncRelayGrantedInventoryCursor, SyncRelayIndependentGrantInventoryCursor, SyncRelayLinkInventoryCursor, SyncRelayShareWithGrantRow, SyncRelayStorage } from "./storage";
+import type { SyncRelayGrantedInventoryCursor, SyncRelayReceivedInventoryCursor, SyncRelayIndependentGrantInventoryCursor, SyncRelayLinkInventoryCursor, SyncRelayShareWithGrantRow, SyncRelayStorage } from "./storage";
 
 export type ShareInventoryRoute =
   | { route: "shares-list" }
@@ -19,6 +19,7 @@ export function createShareInventoryRoutes(
     | "listSharesGrantedBy"
     | "listSharesGrantedPage"
     | "listSharesReceivedBy"
+    | "listReceivedShareIdsPage"
     | "listRemovedSharesForRecipient"
     | "getShare"
     | "setShareLabels"
@@ -42,6 +43,23 @@ export function createShareInventoryRoutes(
   senderLabel?: (userId: string, email: string | null) => Promise<string>,
   accessRateLimiter = new TokenBucketLimiter(30, 1, 10_000),
 ) {
+  async function receivedSummaries(rows: readonly SyncRelayShareWithGrantRow[], actorUserId: string) {
+    const receivedLookups = await Promise.all(rows.map(async fallback => {
+      const granterEmail = lookupUserEmail ? await lookupUserEmail(fallback.share.granterUserId) : null;
+      const sharerName = await senderLabel?.(fallback.share.granterUserId, granterEmail) ?? granterEmail;
+      return { fallback, granterEmail, sharerName };
+    }));
+    return receivedLookups.flatMap(({ fallback, granterEmail, sharerName }) => {
+      const effective = resolveReceivedShareAuthority({ storage, actorUserId, shareId: fallback.share.shareId });
+      if (effective.ok) return [receivedShareSummary({ share: effective.share, grant: effective.grant }, granterEmail,
+        effective.genericChatWritable, sharerName)];
+      const currentFallback = effective.fallback;
+      if (!currentFallback) return [];
+      const selector = parseStoredAnyShareSelectorJson(currentFallback.share.selectorJson);
+      return selector && selectorTargetsBlockedChannel(storage, currentFallback.share.workspaceId, selector)
+        ? [] : [receivedShareSummary(currentFallback, granterEmail, effective.genericChatWritable, sharerName)];
+    });
+  }
   async function respondToShareInventory(
     request: Request,
     route: ShareInventoryRoute,
@@ -56,17 +74,37 @@ export function createShareInventoryRoutes(
     }
     if (route.route === "shares-list" && request.method === "GET") {
       const url = new URL(request.url);
-      if (url.searchParams.getAll("workspaceId").length > 1 || url.searchParams.getAll("cursor").length > 1) {
+      if (url.searchParams.getAll("workspaceId").length > 1 || url.searchParams.getAll("cursor").length > 1 ||
+          url.searchParams.getAll("received").length > 1) {
         throw badRequest("inventory coordinates are invalid");
+      }
+      if (url.searchParams.has("received")) {
+        if (url.searchParams.get("received") !== "true" || url.searchParams.has("workspaceId")) throw badRequest("received inventory coordinates are invalid");
+        const cursor = receivedInventoryCursor.decode(url.searchParams.get("cursor"));
+        await claimPendingShares(actor.userId);
+        const page = storage.listReceivedShareIdsPage(actor.userId, cursor);
+        const active = page.shareIds.flatMap(shareId => {
+          const share = storage.getShare(shareId);
+          const grant = storage.listActiveShareGrantsForRecipient(shareId, actor.userId)[0];
+          return share && grant ? [{ share, grant }] : [];
+        });
+        const received = await receivedSummaries(active, actor.userId);
+        // Re-read removals after asynchronous serialization; a grant can end during a page.
+        const pageIds = new Set(page.shareIds);
+        const removed = storage.listRemovedSharesForRecipient(actor.userId).filter(row => pageIds.has(row.shareId));
+        return jsonResponse({ ok: true, received, removed,
+          ...(page.nextCursor ? { nextCursor: receivedInventoryCursor.encode(page.nextCursor) } : {}),
+        });
       }
       if (url.searchParams.has("workspaceId")) {
         const workspaceId = parseWorkspaceId(url.searchParams.get("workspaceId"));
         if (!storage.workspaceIsOwnedBy(workspaceId, actor.userId)) throw notFound();
         const cursor = grantedInventoryCursor.decode(url.searchParams.get("cursor"));
         const page = storage.listSharesGrantedPage(actor.userId, workspaceId, cursor);
-        const granted = await Promise.all(page.granted.map(grantedShareSummary));
+        const granterEmail = lookupUserEmail ? await lookupUserEmail(actor.userId) : null;
+        const granted = await Promise.all(page.granted.map(row => grantedShareSummary(row, { granterEmail })));
         if (!storage.workspaceIsOwnedBy(workspaceId, actor.userId)) throw notFound();
-        return jsonResponse({ok: true, granted,
+        return jsonResponse({ok: true, granterUserId: actor.userId, granterEmail, granted,
           ...(page.nextCursor ? {nextCursor: grantedInventoryCursor.encode(page.nextCursor)} : {}),
         });
       }
@@ -86,57 +124,7 @@ export function createShareInventoryRoutes(
         if (rows) rows.push(row);
         else receivedByShare.set(row.share.shareId, [row]);
       }
-      const receivedLookups = await Promise.all(
-        [...receivedByShare.values()].map(async (rows) => {
-          const fallback = rows[0]!;
-          const granterEmail = lookupUserEmail
-            ? await lookupUserEmail(fallback.share.granterUserId)
-            : null;
-          const sharerName = await senderLabel?.(fallback.share.granterUserId, granterEmail) ?? granterEmail;
-          return { fallback, granterEmail, sharerName };
-        }),
-      );
-      const received = receivedLookups.flatMap(({ fallback, granterEmail, sharerName }) => {
-        const effective = resolveReceivedShareAuthority({
-          storage,
-          actorUserId: actor.userId,
-          shareId: fallback.share.shareId,
-        });
-        if (effective.ok) {
-          return [
-            receivedShareSummary(
-              { share: effective.share, grant: effective.grant },
-              granterEmail,
-              effective.genericChatWritable,
-              sharerName,
-            ),
-          ];
-        }
-
-        const currentFallback = effective.fallback;
-        if (!currentFallback) return [];
-        // A damaged fallback does not carry validated selector authority.
-        // Recheck its selector immediately before serialization so a channel
-        // that became blocked does not get one final exposure.
-        const selector = parseStoredAnyShareSelectorJson(
-          currentFallback.share.selectorJson,
-        );
-        return selector &&
-          selectorTargetsBlockedChannel(
-            storage,
-            currentFallback.share.workspaceId,
-            selector,
-          )
-          ? []
-          : [
-              receivedShareSummary(
-                currentFallback,
-                granterEmail,
-                effective.genericChatWritable,
-                sharerName,
-              ),
-            ];
-      });
+      const received = await receivedSummaries([...receivedByShare.values()].map(rows => rows[0]!), actor.userId);
       return jsonResponse({ ok: true, granted, received, removed: storage.listRemovedSharesForRecipient(actor.userId) });
     }
     if (route.route === "shares-list") throw relayError("method_not_allowed");
@@ -244,3 +232,5 @@ const independentGrantInventoryCursor = cursorCodec<SyncRelayIndependentGrantInv
 );
 
 const grantedInventoryCursor = cursorCodec<SyncRelayGrantedInventoryCursor>({grantId: "id"}, "cursor");
+
+const receivedInventoryCursor = cursorCodec<SyncRelayReceivedInventoryCursor>({ shareId: "id" }, "cursor");

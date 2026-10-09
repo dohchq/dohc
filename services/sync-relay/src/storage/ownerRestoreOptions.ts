@@ -1,9 +1,10 @@
+import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import {isDeepStrictEqual} from "node:util";
 import {validateUserWritePath} from "@dohc/workspace-core";
 import {parseLiveDocumentKey, parseLiveUpdateDigest, parseLiveUpdateIdentifier, type LiveDocumentKey} from "@dohc/live-session-contract/live-update-admission";
 import {badRequest, notFound, relayError} from "../errors";
 import {MAX_LOG_PAGE_SIZE, MAX_PAYLOAD_JSON_BYTES} from "../wireLimits";
-import {effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson, visibleSharePath} from "../shareFilter";
+import {effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson} from "../shareFilter";
 import {authorityInteger, canonicalLiveSelector, currentLiveDocumentMoment} from "./liveDocumentAuthority";
 import {liveJournalHistoryNamespace} from "./liveJournalHistory";
 import {retainedRestoreLifecycle} from "./liveRestoreLifecycleStorage";

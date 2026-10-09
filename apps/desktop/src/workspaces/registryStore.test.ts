@@ -109,6 +109,7 @@ describe("received share reconciliation", () => {
 
 describe("share roster", () => {
   const grant = (grantId: string) => ({
+    shareId: "share", generation: 1, status: "active" as const, granterUserId: "owner", granterEmail: null, subjectName: null, sharerName: null,
     grantId,
     recipientUserId: "u-ana",
     recipientEmail: "ana@dohc.test",

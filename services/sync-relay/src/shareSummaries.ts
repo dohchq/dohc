@@ -93,6 +93,7 @@ export function createShareSummaries(
 
   const grantedShareSummary = async (
     row: SyncRelayGrantedShareRow,
+    roster?: { granterEmail: string | null },
   ): Promise<Record<string, unknown>> => {
     const { share, grant } = row;
     // A pending invite has no recipient user id yet; surface the addressed
@@ -106,6 +107,7 @@ export function createShareSummaries(
     const selector = parseStoredAnyShareSelectorJson(share.selectorJson);
     return {
       ...shareSummaryBase(row, selector),
+      ...(roster ? { granterUserId: share.granterUserId, granterEmail: roster.granterEmail, status: grant.status } : {}),
       workspaceId: share.workspaceId,
       recipientUserId: grant.principalUserId,
       recipientEmail,
