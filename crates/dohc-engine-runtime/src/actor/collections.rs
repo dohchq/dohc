@@ -387,16 +387,6 @@ fn file_conflict(error: &RuntimeError) -> bool {
     )
 }
 
-fn permanent_referrer(error: &RuntimeError) -> bool {
-    matches!(
-        error,
-        RuntimeError::Materialize(dohc_engine_files::MaterializeError::SymlinkTarget)
-            | RuntimeError::Domain(DomainError::InvalidInput {
-                reason: "collection relation referrer does not have a rich-document lineage"
-            })
-    )
-}
-
 fn adoption_pending(error: &RuntimeError) -> bool {
     matches!(
         error,
@@ -1099,23 +1089,17 @@ mod collection_adoption_update_tests {
         ] {
             assert!(!adoption_pending(&error));
             assert!(!file_conflict(&error));
-            assert!(!permanent_referrer(&error));
         }
         let stale = RuntimeError::Domain(DomainError::ConflictStaleTarget);
         assert!(adoption_pending(&stale));
-        assert!(!permanent_referrer(&RuntimeError::Domain(
-            DomainError::InvalidInput {
-                reason: "collection record does not have a rich-document lineage"
-            }
-        )));
         assert!(
-            !file_conflict(&stale) && !permanent_referrer(&stale),
+            !file_conflict(&stale),
             "relation cleanup must propagate and re-arm stale targets"
         );
     }
 
     #[test]
-    fn relation_cleanup_skips_a_symlink_referrer_without_blocking_siblings() {
+    fn relation_cleanup_propagates_a_symlink_refusal_then_reconciles_siblings() {
         let (scratch, mut store, mut cache) = fixture();
         seed_relation_referrers(&mut store, &mut cache, scratch.path());
         let target = scratch.path().join("symlink-target.md");
@@ -1126,6 +1110,17 @@ mod collection_adoption_update_tests {
             eprintln!("file symlink privilege unavailable; skipping symlink referrer test");
             return;
         }
+        assert!(matches!(
+            reconcile(&mut store, &mut cache, scratch.path()),
+            Err(RuntimeError::Materialize(
+                dohc_engine_files::MaterializeError::SymlinkTarget
+            ))
+        ));
+        assert!(
+            std::fs::read_to_string(scratch.path().join("tasks/z.md"))
+                .unwrap()
+                .contains("related:")
+        );
         assert_relation_cleanup_skips_only_broken_referrer(&mut store, &mut cache, scratch.path());
         assert!(
             std::fs::symlink_metadata(&path)
@@ -1163,6 +1158,75 @@ mod collection_adoption_update_tests {
             original
         );
         assert_relation_referrer_is_retried(&mut store, &mut cache, scratch.path());
+    }
+
+    #[test]
+    fn relation_cleanup_propagates_an_identity_change_between_opens() {
+        for replacement_kind in [ContentKind::Richdoc, ContentKind::Plaintext] {
+            let (scratch, mut store, mut cache) = fixture();
+            let key = seed_relation_referrers(&mut store, &mut cache, scratch.path());
+            let TxnOutcome::Committed(reconciliation) = store
+                .write_with(&dohc_engine_storage::NoFaults, |tx| {
+                    reconcile_collections_in_tx(tx, "workspace", "main")
+                })
+                .unwrap()
+            else {
+                panic!("candidate enumeration must commit");
+            };
+            let candidate = reconciliation
+                .relation_cleanups
+                .into_iter()
+                .find(|candidate| candidate.source_file_path == "tasks/a.md")
+                .unwrap();
+            store
+                .write_with(&dohc_engine_storage::NoFaults, |tx| {
+                    tx.execute("DELETE FROM ydoc_updates WHERE object_id=?1", [&key.object_id])
+                        .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                    tx.execute(
+                        "UPDATE ydoc_docs SET content_kind='plaintext',head_update_seq=0,head_snapshot_seq=0,settled_update_seq=NULL,lineage_claim_status='unclaimed',lineage_claim_id=NULL WHERE object_id=?1",
+                        [&key.object_id],
+                    ).map_err(dohc_engine_storage::StorageError::persist_public)?;
+                    tx.execute(
+                        "UPDATE ydoc_docs SET content_kind=?1 WHERE path='tasks/z.md'",
+                        [replacement_kind.as_str()],
+                    ).map_err(dohc_engine_storage::StorageError::persist_public)?;
+                    // Rewriting the bare marker during the probe rebinds the path before the second open.
+                    tx.execute_batch(
+                        "CREATE TEMP TRIGGER rebind_referrer AFTER UPDATE OF content_kind ON ydoc_docs \
+                         WHEN NEW.path='tasks/a.md' AND NEW.content_kind='richdoc' BEGIN \
+                         UPDATE path_aliases SET object_id=(SELECT object_id FROM path_aliases \
+                         WHERE workspace_id='workspace' AND version_id='main' AND path='tasks/z.md') \
+                         WHERE workspace_id='workspace' AND version_id='main' AND path='tasks/a.md'; END;",
+                    ).map_err(dohc_engine_storage::StorageError::persist_public)
+                })
+                .unwrap();
+            cache.clear();
+            let error = cleanup_collection_relation_on_store(
+                &mut store,
+                &mut cache,
+                &candidate,
+                "workspace",
+                "main",
+                scratch.path(),
+                &LeaseRegistry::new(),
+                &(),
+                10,
+                &dohc_engine_storage::NoFaults,
+                &CancellationToken::new(),
+                None,
+            )
+            .err()
+            .expect("identity changes must fail cleanup");
+            assert!(
+                matches!(
+                    error,
+                    RuntimeError::Domain(DomainError::StateCorrupt {
+                        reason: "collection relation referrer changed identity during cleanup"
+                    })
+                ),
+                "expected identity corruption, got {error:?}"
+            );
+        }
     }
 
     fn seed_relation_referrers(
@@ -1599,6 +1663,7 @@ fn adopt_collection_record_on_store(
 enum CollectionRelationCleanupExecution {
     Applied(String),
     NoChange,
+    Skipped,
     LeaseHeld,
 }
 
@@ -1659,11 +1724,14 @@ fn cleanup_collection_relation_on_store(
         false,
         token,
     )?;
-    if state.key != probe.key || state.content_kind != ContentKind::Richdoc {
-        return Err(DomainError::InvalidInput {
-            reason: "collection relation referrer does not have a rich-document lineage",
+    if state.key != probe.key {
+        return Err(DomainError::StateCorrupt {
+            reason: "collection relation referrer changed identity during cleanup",
         }
         .into());
+    }
+    if state.content_kind != ContentKind::Richdoc {
+        return Ok(CollectionRelationCleanupExecution::Skipped);
     }
 
     let doc = Ydoc::wire();
@@ -1914,11 +1982,14 @@ fn reconcile_collections_on_store(
                     changed_paths.push(path);
                 }
             }
-            Ok(CollectionRelationCleanupExecution::NoChange) => {}
+            Ok(
+                CollectionRelationCleanupExecution::NoChange
+                | CollectionRelationCleanupExecution::Skipped,
+            ) => {}
             Ok(CollectionRelationCleanupExecution::LeaseHeld) => {
                 lease_held = true;
             }
-            Err(error) if file_conflict(&error) || permanent_referrer(&error) => {}
+            Err(error) if file_conflict(&error) => {}
             Err(error) => return Err(error),
         }
     }
