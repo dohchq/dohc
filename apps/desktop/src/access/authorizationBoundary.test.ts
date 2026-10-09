@@ -9,7 +9,8 @@ const entries = ["services/sync-relay/src/shareAuthorization.ts", "services/sync
   "packages/app-backend-runtime/src/dataset-host.ts", "apps/desktop/src/workspaces/localDatasetHost.ts", "apps/desktop/src/workspaces/remoteDataset.ts",
   "apps/desktop/src/cli/cliServer.ts", "packages/mcp/src/server.ts", "apps/desktop/src/workspaces/shareWriteGate.ts",
   "apps/desktop/src/workspaces/receivedShareEngineAccess.ts", "apps/desktop/src/workspaces/shareViewInfo.ts",
-  "apps/desktop/src/workspaces/shareViewFilesTarget.ts"];
+  "apps/desktop/src/workspaces/shareViewFilesTarget.ts", "apps/desktop/src/workspaces/chatWrites.ts",
+  "apps/desktop/src/workspaces/workspaceAuthorityOwner.ts", "apps/desktop/src/workspaces/engineCaptureGate.ts"];
 function imports(file: string, source: string): string[] {
   const specifiers = [
     ...source.matchAll(/(?:import|export)\s+(?!type\b)[^;]*?\sfrom\s+["']([^"']+)["']/g),
