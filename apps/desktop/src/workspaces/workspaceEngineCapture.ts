@@ -2261,11 +2261,20 @@ export function createWorkspaceEngineCapture(
             ...(r.options.attribution !== undefined ? {attribution: structuredClone(r.options.attribution)} : {})}))};
       } finally { snapshot.destroy(); }
     };
+    const checkpointTypingIsDurable = (): boolean => canonicalDoc !== null &&
+      pendingRecords.size === 0 && queuedOriginals.size === 0 &&
+      Buffer.from(Y.encodeStateAsUpdate(canonicalDoc)).equals(Buffer.from(Y.encodeStateAsUpdate(recordedDoc)));
     const flushCheckpoint = (): Promise<void> => {
       if (checkpointTimer !== null) { clearTimeout(checkpointTimer); checkpointTimer = null; }
       const snapshot = checkpointSnapshot();
       if (!snapshot) return checkpointChain;
+      const durable = checkpointTypingIsDurable();
       const pending = checkpointChain.catch(() => undefined).then(async () => {
+        if (durable) {
+          if (lastCheckpoint) await options.retireTypingCheckpoint?.(lastCheckpoint);
+          lastCheckpoint = null;
+          return;
+        }
         await options.writeTypingCheckpoint!(snapshot);
         lastCheckpoint = snapshot;
       });
@@ -2282,10 +2291,10 @@ export function createWorkspaceEngineCapture(
       checkpointTimer = setTimeout(() => { checkpointTimer = null; void flushCheckpoint().catch(error => onError("Typing checkpoint", error)); }, 100);
       checkpointTimer.unref();
     };
-    const unregisterCheckpoint = registerTypingCheckpoint(workspaceId, flushCheckpoint, () => checkpointBase !== null);
+    const unregisterCheckpoint = registerTypingCheckpoint(workspaceId, flushCheckpoint, () => checkpointBase !== null && !checkpointTypingIsDurable());
     const retireCheckpointIfDurable = (): void => {
-      if (!checkpointBase || pendingRecords.size !== 0 || queuedOriginals.size !== 0) return;
-      checkpointBase = null;
+      if (!checkpointBase || !checkpointTypingIsDurable()) return;
+      if (!dead && current !== null) checkpointBase = null;
       if (checkpointTimer !== null) {clearTimeout(checkpointTimer); checkpointTimer = null;}
       checkpointChain = checkpointChain.catch(() => undefined).then(async () => {if (lastCheckpoint) await options.retireTypingCheckpoint?.(lastCheckpoint); lastCheckpoint = null;});
     };
@@ -2403,10 +2412,12 @@ export function createWorkspaceEngineCapture(
     // release obligation it left behind is discharged too.
     const markAlive = (): void => {
       releaseObligation = null;
-      if (!dead) return;
-      dead = false;
-      clearDeadYDocSession(deadSessionToken);
-      input.onAlive();
+      if (dead) {
+        dead = false;
+        clearDeadYDocSession(deadSessionToken);
+        input.onAlive();
+      }
+      retireCheckpointIfDurable();
     };
 
     // `generation` is always the `openEngineYdocProviderSession` ladder
