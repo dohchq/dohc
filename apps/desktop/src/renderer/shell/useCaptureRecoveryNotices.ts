@@ -46,13 +46,15 @@ export function useCaptureRecoveryNotices(input: {
   const notices = useMemo(() => {
     const here = () => latest.current.workspaceId === workspaceId;
     let listed: readonly CaptureRecovery[] = [];
-    const committed = new Map<string, string>();
+    const committed = new Map<string, Pick<CaptureRecovery, "momentId" | "path" | "deleted">>();
     // The files with listed kept typing that History Restore refused as
     // shared live. It chooses the words only.
     const shared = new Set<string>();
 
     // `raised` is the file whose rows answer what the person just did.
-    const publish = (raised?: string) => latest.current.show([...listed.map((recovery) => ({
+    const publish = (raised?: string) => latest.current.show([...listed,
+      ...[...committed.values()].filter(recovery => !listed.some(row => row.momentId === recovery.momentId)),
+    ].map((recovery) => ({
       momentId: recovery.momentId,
       path: recovery.path,
       title: CAPTURE_RECOVERY_TITLE,
@@ -60,32 +62,34 @@ export function useCaptureRecoveryNotices(input: {
       raise: recovery.path === raised,
       open: () => latest.current.openRecovery(recovery.momentId, recovery.path),
       dismiss: () => clear(recovery),
-    })), ...[...committed].filter(([momentId]) => !listed.some(recovery => recovery.momentId === momentId)).map(([momentId, path]) => ({
-      momentId, path, title: CAPTURE_RECOVERY_TITLE, raise: false,
-      message: `Your typing for "${path}" is kept in History.`,
-      open: () => latest.current.openRecovery(momentId, path),
-      dismiss: () => clear({momentId, path}),
-    }))]);
+    })));
 
-    const refresh = async (): Promise<void> => {
+    const refresh = async (): Promise<boolean> => {
       const request = reads.next();
       try {
         const status = await bridge().getCaptureRecoveryStatus({ workspaceId });
-        if (!reads.isCurrent(request) || !here()) return;
+        if (!reads.isCurrent(request) || !here()) return false;
         listed = status.captureRecoveries;
+        // An absent moment has been cleared or restored. A Copy response may
+        // show it once more, but the next authoritative read retires that row.
+        for (const momentId of committed.keys()) {
+          if (!listed.some(recovery => recovery.momentId === momentId)) committed.delete(momentId);
+        }
         // A refusal says nothing about kept typing recorded after its own
         // was dismissed or restored: that file may no longer be shared.
         for (const path of shared) {
           if (!listed.some((recovery) => recovery.path === path)) shared.delete(path);
         }
         publish();
+        return true;
       } catch (error) {
-        if (!reads.isCurrent(request) || !here()) return;
+        if (!reads.isCurrent(request) || !here()) return false;
         latest.current.reportShellError(
           "dohc could not check for typing it kept in History.",
           error,
           () => void refresh(),
         );
+        return false;
       }
     };
 
@@ -110,12 +114,26 @@ export function useCaptureRecoveryNotices(input: {
     };
 
     return {
-      refresh,
+      async refresh(): Promise<void> { await refresh(); },
       async imported(momentId: string, path: string): Promise<void> {
-        await refresh();
-        if (!here() || listed.some(recovery => recovery.momentId === momentId)) return;
-        committed.set(momentId, path);
-        publish();
+        if (!await refresh()) return;
+        const recovery = listed.find(recovery => recovery.momentId === momentId);
+        if (recovery) { publish(recovery.path); return; }
+        const request = reads.next();
+        try {
+          const {moment} = await bridge().readEngineMoment({workspaceId, momentId});
+          if (!reads.isCurrent(request) || !here()) return;
+          if (!moment?.correlationId) { latest.current.openRecovery(momentId, path); return; }
+          const captured = await bridge().readEngineMoment({workspaceId, momentId: moment.correlationId});
+          if (!reads.isCurrent(request) || !here()) return;
+          if (!captured.moment) { latest.current.openRecovery(momentId, path); return; }
+          committed.set(momentId, {momentId, path: moment.path, deleted: captured.moment.operation === "delete"});
+          publish(moment.path);
+        } catch (error) {
+          if (!reads.isCurrent(request) || !here()) return;
+          latest.current.reportShellError("dohc could not check for typing it kept in History.", error,
+            () => void notices.imported(momentId, path));
+        }
       },
       // A History Restore the engine refused because the file is shared live.
       // The kept typing's row takes the refusal: every refusal raises its

@@ -924,8 +924,8 @@ export function DesktopWorkspaceShell(props: {
   const { chatCollaboration, refreshCloudStatus, workspaceSynced, cloudStatus, cloudStatusUnreadable } =
     useCloudPresence(workspaceId, reportCloudStatusUnavailable);
   // About's section reads report through this shell's notices, one row per
-  // section and file. Each may fail again, so each is a repeat: it keeps a
-  // row's toast while the row is there, and toasts again once it is gone.
+  // section and file. A repeat keeps an existing row's toast state only for
+  // an unchanged message. A changed message, or a missing row, toasts again.
   const aboutNotices = useMemo<AboutNotices>(
     () => ({ report: (failure) => reportShellFailure({ ...failure, repeat: true }), clear: clearIdentity }),
     [clearIdentity, reportShellFailure],

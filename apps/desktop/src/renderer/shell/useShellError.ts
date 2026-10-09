@@ -124,7 +124,8 @@ export function useShellError(workspaceId: string) {
   // A new error replaces an older one that says the same thing, or one of
   // the same kind, so a read that keeps failing is one row, not a pile.
   // `seen` files the row without a toast; "keep" gives it the seen state of
-  // the row of its kind it replaces, so an open toast stays open.
+  // the row of its kind it replaces, so an open toast stays open, and files
+  // it quietly when there is none.
   // "repeat" keeps an unchanged message's toast, and toasts a new message.
   const push = useCallback(
     (error: Omit<ShellError, "id" | "atMs" | "seen">, seen: boolean | "keep" | "repeat" = false) => {

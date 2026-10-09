@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, configure, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { CaptureRecoveryStatusResult } from "../../ipc/bridgeContract";
+import type { CaptureRecoveryStatusResult, ReadEngineMomentResult } from "../../ipc/bridgeContract";
 import { deferred, type Deferred } from "../../testing/deferred";
 import { CAPTURE_RECOVERY_TITLE, captureRecoveryMessage, useCaptureRecoveryNotices } from "./useCaptureRecoveryNotices";
 import { useShellError } from "./useShellError";
@@ -29,6 +29,11 @@ const SHARED_REFUSAL = new Error(
 function harness(initial: Recovery[]) {
   let listed = initial;
   const bridge = {
+    readEngineMoment: vi.fn(async ({momentId}: {workspaceId: string; momentId: string}): Promise<ReadEngineMomentResult> => ({moment: {
+      id: momentId, versionId: "main", path: RECOVERY.path, recordedAtMs: 1,
+      operation: "write", origin: "capture-recovery", correlationId: RECOVERY.captureMomentId,
+      beforeText: "kept typing", afterText: "disk text",
+    }})),
     getCaptureRecoveryStatus: vi.fn(async (_input: { workspaceId: string }): Promise<CaptureRecoveryStatusResult> => ({ captureRecoveries: listed })),
     clearCaptureRecovery: vi.fn(async ({ momentId }: { workspaceId: string; momentId: string }): Promise<void> => {
       listed = listed.filter((recovery) => recovery.momentId !== momentId);
@@ -66,22 +71,48 @@ describe("useCaptureRecoveryNotices", () => {
     act(()=>h.result.current.hideShellError(row.id));
     await act(async()=>{await h.result.current.notices.imported(RECOVERY.momentId,RECOVERY.path);});
     expect(recoveryRows(h)).toHaveLength(1);
-    expect(recoveryRows(h)[0]).toMatchObject({id:row.id,seen:true,message:captureRecoveryMessage(RECOVERY.path,false,deleted)});
-    act(()=>h.result.current.runShellErrorAction(row.id));
+    expect(recoveryRows(h)[0]).toMatchObject({seen:false,message:captureRecoveryMessage(RECOVERY.path,false,deleted)});
+    expect(h.bridge.readEngineMoment).not.toHaveBeenCalled();
+    act(()=>h.result.current.runShellErrorAction(recoveryRows(h)[0]!.id));
     expect(h.openRecovery).toHaveBeenCalledExactlyOnceWith(RECOVERY.momentId,RECOVERY.path);
   });
 
-  it("opens the committed change even when the normal status row was already cleared", async () => {
+  it.each([false, true])("keeps the normal words for a cleared moment, then drops its fallback after resolution (deleted=%s)", async deleted => {
     const h=harness([]);await waitFor(()=>expect(h.bridge.getCaptureRecoveryStatus).toHaveBeenCalledOnce());
+    h.bridge.readEngineMoment.mockImplementation(async ({momentId}) => ({moment: {
+      id: momentId, versionId: "main", path: "deleted.md", recordedAtMs: 1,
+      operation: momentId === RECOVERY.captureMomentId && deleted ? "delete" : "write",
+      origin: "capture-recovery-cleared", correlationId: RECOVERY.captureMomentId,
+      beforeText: "kept typing", afterText: "disk text",
+    }}));
     await act(async()=>{await h.result.current.notices.imported(RECOVERY.momentId,"deleted.md");});
     const row=recoveryRows(h)[0]!;
-    expect(row).toMatchObject({title:CAPTURE_RECOVERY_TITLE,message:'Your typing for "deleted.md" is kept in History.',action:{label:"Open History"}});
-    await act(async()=>{await h.result.current.notices.refresh();});
-    expect(recoveryRows(h)).toHaveLength(1);
+    expect(row).toMatchObject({title:CAPTURE_RECOVERY_TITLE,seen:false,message:captureRecoveryMessage("deleted.md",false,deleted),action:{label:"Open History"}});
     act(()=>h.result.current.runShellErrorAction(row.id));
     expect(h.openRecovery).toHaveBeenCalledExactlyOnceWith(RECOVERY.momentId,"deleted.md");
-    act(()=>h.result.current.dismissShellError(row.id));
-    await waitFor(()=>expect(recoveryRows(h)).toHaveLength(0));
+    await act(async()=>{await h.result.current.notices.refresh();});
+    expect(recoveryRows(h)).toHaveLength(0);
+    expect(h.bridge.clearCaptureRecovery).not.toHaveBeenCalled();
+  });
+
+  it("drops a Copy fallback after History Restore refreshes the resolved status", async () => {
+    const h=harness([]);await waitFor(()=>expect(h.bridge.getCaptureRecoveryStatus).toHaveBeenCalledOnce());
+    await act(async()=>{await h.result.current.notices.imported(RECOVERY.momentId,RECOVERY.path);});
+    expect(recoveryRows(h)).toHaveLength(1);
+    await act(async()=>{await h.result.current.notices.refresh();});
+    expect(recoveryRows(h)).toHaveLength(0);
+  });
+
+  it("does not publish fallback metadata after a workspace switch", async () => {
+    const h=harness([]);await waitFor(()=>expect(h.bridge.getCaptureRecoveryStatus).toHaveBeenCalledOnce());
+    const answer=deferred<ReadEngineMomentResult>();
+    h.bridge.readEngineMoment.mockImplementationOnce(()=>answer.promise);
+    const importing=h.result.current.notices.imported(RECOVERY.momentId,RECOVERY.path);
+    await waitFor(()=>expect(h.bridge.readEngineMoment).toHaveBeenCalledOnce());
+    h.rendered.rerender({workspaceId:"ws-b"});
+    await act(async()=>{answer.resolve({moment:null});await importing;});
+    expect(recoveryRows(h)).toHaveLength(0);
+    expect(h.openRecovery).not.toHaveBeenCalled();
   });
 
   it("raises one notice per kept typing, in these words, and one again on a later read", async () => {
