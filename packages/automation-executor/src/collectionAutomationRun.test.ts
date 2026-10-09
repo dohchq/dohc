@@ -147,6 +147,30 @@ it("leaves fields of a completed creation alone after the person restores it fro
   expect(space.records.get("rec_t")!.values.Count).toBe(2);
 });
 
+it.each([true, false])("leaves a completed creation alone across the chain, restored from trash: %s", async restored => {
+  const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {Count: 2}}]");
+  const space = workspace(restored ? [task("rec_t", {Count: 3})] : []);
+  const done = {...newRun(added(), definition, "creation", 1), undo: "done" as const, undoScope: "joint",
+    created: [{ordinal: 0, recordId: "rec_t", planned: "rec_t", path: "Tasks/rec_t.md"}],
+    applied: [{ordinal: 0, writes: [{kind: "field" as const, recordId: "rec_t", path: "Tasks/rec_t.md", field: "Count", before: null, after: 2}]}]};
+  const active = {...newRun(added(), definition, "active", 2), undo: "started" as const, undoScope: "joint",
+    applied: [{ordinal: 0, writes: [{kind: "field" as const, recordId: "rec_t", path: "Tasks/rec_t.md", field: "Count", before: 2, after: 3}]}]};
+  const result = await undoCollectionAutomationRuns(space.undo([]), [done, active], new AbortController().signal);
+  expect(result.undone).toMatchObject({reverted: 0, removed: 0, missing: 0, changedSince: 0});
+  if (restored) expect(space.records.get("rec_t")!.values.Count).toBe(3);
+});
+
+it("can undo a later edit of a restored creation in a different Undo scope", async () => {
+  const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {Count: 2}}]");
+  const space = workspace([task("rec_t", {Count: 3})]);
+  const done = {...newRun(added(), definition, "creation", 1), undo: "done" as const, undoScope: "earlier",
+    created: [{ordinal: 0, recordId: "rec_t", planned: "rec_t", path: "Tasks/rec_t.md"}]};
+  const active = {...newRun(added(), definition, "later", 2), undo: "started" as const, undoScope: "later",
+    applied: [{ordinal: 0, writes: [{kind: "field" as const, recordId: "rec_t", path: "Tasks/rec_t.md", field: "Count", before: 2, after: 3}]}]};
+  expect((await undoCollectionAutomationRuns(space.undo([]), [done, active], new AbortController().signal)).undone).toMatchObject({reverted: 1, missing: 0});
+  expect(space.records.get("rec_t")!.values.Count).toBe(2);
+});
+
 it("keeps the chain target after the older run alone saved Undo completion", async () => {
   const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {Count: 2}}]");
   const space = workspace([task("rec_t", {Count: 1})]);

@@ -138,6 +138,9 @@ export function registerStopAndRestoreIpc<
   assertOriginalWorkspace(workspace: Workspace): void;
   /** The owner's self-hosted server's runs. */
   serverRuns: Pick<ServerRuns, "restore" | "releaseRestore">;
+  /** Resolve the current attachment each time; never retain an attachment across a network request. */
+  currentAutomations(workspaceId: string): CollectionAutomations | undefined;
+  canReleaseRuns(workspaceId: string): boolean;
 }): {retryServerReleases(): void} {
   const { registerHandler, assertTrustedSender, relayJson } = dependencies;
   const ownerRelayShareHandler = createOwnerRelayShareHandler<Sender, Workspace, Operation, Credentials>({
@@ -161,28 +164,37 @@ export function registerStopAndRestoreIpc<
   const interrupted = (): Extract<StopAndRestoreResult, {status: "restored"}> => ({status: "restored", restored: [], review: [], runsUndone: 0,
     runsLeft: 0, runChangesKept: 0, wroteAutomations: false, sendsMessages: false, keptFields: [], fieldsMissing: 0,
     unfinished: {step: "files", message: "dohc has not finished restoring files."}});
-  const releaseStores = new Map<string, CollectionAutomations>();
+  const releaseWorkspaces = new Set<string>();
   const releasing = new Set<string>();
   const retryRequested = new Set<string>();
-  const retryServerReleases = (workspaceId: string, automations: CollectionAutomations) => {
-    releaseStores.set(workspaceId, automations);
+  const activeUndos = new Map<string, {released: boolean}>();
+  const retryServerReleases = (workspaceId: string) => {
+    releaseWorkspaces.add(workspaceId);
+    if (!dependencies.canReleaseRuns(workspaceId)) return;
     if (releasing.has(workspaceId)) {retryRequested.add(workspaceId); return;}
     releasing.add(workspaceId);
     void (async () => {
+      const automations = dependencies.currentAutomations(workspaceId);
+      if (!automations) return;
       for (const entry of await automations.pendingRestores()) {
-        if (!entry.serverRelease) continue;
+        if (!entry.serverRelease || activeUndos.has(entry.id)) continue;
         try {
-          if (await dependencies.serverRuns.releaseRestore(workspaceId, entry.id)) await automations.removePendingRestore(entry.id);
+          if (!dependencies.canReleaseRuns(workspaceId) || !dependencies.currentAutomations(workspaceId)) return;
+          if (await dependencies.serverRuns.releaseRestore(workspaceId, entry.id)) {
+            await dependencies.currentAutomations(workspaceId)?.removePendingRestore(entry.id);
+          }
         } catch { /* Keep the release queued for the next recovery or sign-in. */ }
       }
     })().catch(() => undefined).finally(() => {
       releasing.delete(workspaceId);
-      if (retryRequested.delete(workspaceId)) retryServerReleases(workspaceId, automations);
+      if (retryRequested.delete(workspaceId)) retryServerReleases(workspaceId);
     });
   };
   const releasePending = async (workspaceId: string, automations: CollectionAutomations, entry: PendingRestore) => {
+    const active = activeUndos.get(entry.id);
+    if (active) active.released = true;
     await automations.savePendingRestore({id: entry.id, claims: [], session: undefined, serverRelease: true});
-    retryServerReleases(workspaceId, automations);
+    retryServerReleases(workspaceId);
   };
   registerOperations<typeof stopAndRestoreRecoveryOperations, Event, Operation>({
     handle: registerHandler,
@@ -201,7 +213,7 @@ export function registerStopAndRestoreIpc<
     },
     pendingStopAndRestores: async (_input, { operation }) => {
       dependencies.assertOriginalWorkspace(operation.workspace);
-      retryServerReleases(operation.workspace.workspaceId, operation.state.collectionAutomations);
+      retryServerReleases(operation.workspace.workspaceId);
       const pending = await operation.state.collectionAutomations.pendingRestores();
       operation.assertCurrent();
       return pending.flatMap(entry => entry.session
@@ -224,6 +236,7 @@ export function registerStopAndRestoreIpc<
     definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>,
     undoHere: (again: boolean) => ReturnType<CollectionAutomations["undoRunsOf"]>,
     retentionId: string,
+    automations: CollectionAutomations,
   ): Promise<UndoneRuns> {
     const counts = { undone: 0, left: 0, missing: 0, otherKept: 0, errorMessage: null, sharedReversals: [] as NonNullable<UndoneRuns["sharedReversals"]> };
     // The fields each computer's runs still keep, by identity: one kept on both appears once.
@@ -242,13 +255,34 @@ export function registerStopAndRestoreIpc<
       kept[host] = pass.keptFields;
       kept.latest = host;
     };
+    const active = {released: false};
+    activeUndos.set(retentionId, active);
+    const stillPending = async () => {
+      if (active.released) return false;
+      const current = dependencies.currentAutomations(workspaceId);
+      if (current !== automations) throw new Error("This workspace was closed.");
+      const entry = (await current.pendingRestores()).find(entry => entry.id === retentionId);
+      active.released = !entry?.session || entry.serverRelease === true;
+      return !active.released;
+    };
     try {
       for (let pass = 0; pass < UNDO_PASSES; pass += 1) {
+        if (!await stillPending()) break;
         const again = pass > 0;
-        const server = await dependencies.serverRuns.restore(workspaceId, definitions, again, retentionId);
+        let server: Awaited<ReturnType<ServerRuns["restore"]>>;
+        try { server = await dependencies.serverRuns.restore(workspaceId, definitions, again, retentionId); }
+        finally {
+          // A retain may land after dismissal's release. Queue its release again, including on a lost response.
+          if (!await stillPending()) {
+            const current = dependencies.currentAutomations(workspaceId);
+            if (current) await releasePending(workspaceId, current, {id: retentionId, claims: []});
+          }
+        }
+        if (active.released) break;
         add("server", server, again);
         // What the server put back reaches this computer, and what this one puts back reaches the server.
         await dependencies.syncNow(workspaceId);
+        if (!await stillPending()) break;
         const here = await undoHere(again);
         add("here", here, again);
         await dependencies.syncNow(workspaceId);
@@ -259,6 +293,9 @@ export function registerStopAndRestoreIpc<
       throw new UndoRunsStopped(error instanceof z.ZodError
         ? "Your server runs a different version of dohc. Update it, then try again."
         : error instanceof Error ? error.message : String(error), total());
+    } finally {
+      activeUndos.delete(retentionId);
+      if (active.released) retryServerReleases(workspaceId);
     }
     return total();
   }
@@ -403,7 +440,7 @@ export function registerStopAndRestoreIpc<
         if (progress.filesUndone) {
           const before = StopAndRestoreResult.parse(progress.result);
           let runs: UndoneRuns;
-          try { runs = await undoRunsHereAndOnServer(workspaceId, target, progress.definitions, again => undoHere(progress.definitions, again), id); }
+          try { runs = await undoRunsHereAndOnServer(workspaceId, target, progress.definitions, again => undoHere(progress.definitions, again), id, automations); }
           catch (error) { if (!(error instanceof UndoRunsStopped)) throw error; runs = {...error.runs, errorMessage: error.message}; }
           return finish({...interrupted(), ...(before.status === "restored" ? before : {}), status: "restored", restored: [],
             runsUndone: runs.undone, runsLeft: runs.left, keptFields: runs.keptFields, fieldsMissing: runs.missing,
@@ -492,7 +529,7 @@ export function registerStopAndRestoreIpc<
             : undoRunsHereAndOnServer(workspaceId, target, definitions, (again) =>
             operation.state.collectionAutomations.undoRunsOf(definitions, async (relativePath) => {
               await dependencies.deletePath(event, { workspaceId, relativePath });
-            }, again, id), id),
+            }, again, id), id, automations),
         }, writes.flatMap((write) => write.files));
         if (outcome.status === "waiting") dependencies.queuePull(workspaceId);
         else dependencies.notifyRenderer({ workspaceId });
@@ -550,6 +587,6 @@ export function registerStopAndRestoreIpc<
     );
   });
   return {retryServerReleases: () => {
-    for (const [workspaceId, automations] of releaseStores) retryServerReleases(workspaceId, automations);
+    for (const workspaceId of releaseWorkspaces) retryServerReleases(workspaceId);
   }};
 }

@@ -573,6 +573,7 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
   };
   const handlers = new Map<string, (event: {sender: string}, payload: unknown) => unknown>();
   registerStopAndRestoreIpc({
+    currentAutomations: () => executor!, canReleaseRuns: () => true,
     registerHandler: (channel, handler) => handlers.set(channel, handler), assertTrustedSender: () => undefined,
     withRendererWorkspaceOperation: async (_sender: string, _workspaceId, _message, work) => work({
       workspace: {workspaceId: WORKSPACE, rootPath: owner.root}, state: {collectionAutomations: executor!}, assertCurrent: () => undefined,

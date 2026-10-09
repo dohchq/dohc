@@ -3317,7 +3317,7 @@ export class CollectionAutomations {
     trash: (path: string) => Promise<void>,
     // Stop and restore undoes only the runs under these definitions.
     definitionHashes?: ReadonlySet<string>,
-    preloaded?: Awaited<ReturnType<AutomationRunStore["runsOf"]>>,
+    report?: Awaited<ReturnType<AutomationRunStore["runsOf"]>>,
   ): Promise<CollectionAutomationUndo> {
     await this.ready();
     const parsed = this.locate(input.automationId);
@@ -3338,7 +3338,8 @@ export class CollectionAutomations {
       if (claim.state !== "done" && claim.state !== "failed") {
         return { status: "refused", reason: "This run has not finished. Undo it once it finishes." };
       }
-      const stored = preloaded ?? await this.options.store.runsOf(input.automationId, input.claimId);
+      const stored = await this.options.store.runsOf(input.automationId, input.claimId);
+      if (report) Object.assign(report, stored);
       const { unreadable } = stored;
       const runs = definitionHashes
         ? stored.runs.filter((run) => definitionHashes.has(run.definitionHash))
@@ -3383,8 +3384,9 @@ export class CollectionAutomations {
       // undone again: what is already back stays as it is. Once every run
       // is undone, Undo tries again only the fields it kept.
       const pending = runs.filter((run) => run.undo !== "done" || sharedReversalsOf([run]).some(write => write.state === "not-accepted"));
-      const keptRetry = pending.find(run => run.undo === "started" && run.undoKeptScope !== undefined)?.undoKeptScope;
-      const kept = keptRetry ? runs.filter(run => run.undoKeptScope === keptRetry || run.undo === "done" && run.undoKept.length > 0)
+      const keptRetry = pending.find(run => run.undo === "started" && run.undoKeptScope !== undefined);
+      const kept = keptRetry ? runs.filter(run => run.undoKeptScope === keptRetry.undoKeptScope ||
+        run.undo === "done" && run.undoKept.length > 0 && keptRetry.undoKeptRuns?.includes(run.keySeed))
         : pending.length === 0 ? runs.filter(run => run.undoKept.length > 0) : [];
       if (runs.length > 0 && pending.length === 0 && kept.length === 0) {
         return { status: "refused", reason: "You already undid this run." };
@@ -3467,9 +3469,11 @@ export class CollectionAutomations {
     const datasetKept = [...new Map(runs.flatMap((run) => run.undoKept).filter((kept) => !documentKeys.has(JSON.stringify([kept.recordId, kept.field])))
       .map((kept) => [JSON.stringify([kept.recordId, kept.field]), kept])).values()];
     const scope = runs.find(run => run.undo === "started" && run.undoKeptScope !== undefined)?.undoKeptScope ?? `kept:${randomUUID()}`;
+    const members = runs.map(run => run.keySeed);
     for (const run of runs) {
-      await this.options.store.updateState(run, {undo: "started", undoKeptScope: scope});
+      await this.options.store.updateState(run, {undo: "started", undoKeptScope: scope, undoKeptRuns: members});
       run.undoKeptScope = scope;
+      run.undoKeptRuns = members;
     }
     const { undone, keptFields, undoWrites } = await undoCollectionAutomationRuns({
       withReads: (work) => this.withLiveEngine(work),
@@ -3617,9 +3621,11 @@ export class CollectionAutomations {
       const retained = await this.options.store.unfinishedUndos();
       if (retained === null) throw new Error("dohc could not read unfinished Undo progress.");
       if (new Set([...retained, ...this.changing, ...claims.map(entry => entry.claim.claimId)]).size > MAX_HISTORY_KEEP) {
-        const next = restores.some(entry => entry.id !== retentionId && entry.claims.length > 0)
+        const otherRestores = new Set(restores.filter(entry => entry.id !== retentionId).flatMap(entry => entry.claims));
+        const unfinishedUndos = [...retained].filter(id => !otherRestores.has(id));
+        const next = otherRestores.size > unfinishedUndos.length
           ? "Finish or dismiss another unfinished Stop and restore."
-          : "Finish an unfinished Undo or undo other runs in run history.";
+          : "Finish unfinished Undos or undo these runs in run history.";
         throw new Error(`dohc can keep up to 10,000 runs for Undo. ${next}`);
       }
       if (claims.length > 0 || previous) await this.options.store.savePendingRestore({id: retentionId, claims: claims.map(entry => entry.claim.claimId)});

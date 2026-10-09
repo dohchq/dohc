@@ -84,6 +84,10 @@ export function documentUndoChanges(runs: readonly StoredRun[]): { added: Map<st
   const added = new Map<string, string>();
   const records = new Map<string, RecordChanges>();
   const activeScopes = new Set(runs.filter(run => run.undo !== "done").flatMap(run => run.undoScope ? [run.undoScope] : []));
+  const completedCreations = new Set(runs.filter(run => run.undo === "done" && run.undoScope && activeScopes.has(run.undoScope)).flatMap(run => [
+    ...run.created.map(created => created.recordId),
+    ...run.applied.flatMap(step => step.writes.filter(write => write.kind === "created").map(write => write.recordId)),
+  ]));
   const fallbackScope = createHash("sha256").update(JSON.stringify(runs.filter(run => run.undo !== "done" ||
     sharedReversalsOf([run]).some(write => write.state === "not-accepted"))
     .map(run => [run.automationId, run.claimId, run.keySeed]).sort())).digest("hex");
@@ -98,23 +102,19 @@ export function documentUndoChanges(runs: readonly StoredRun[]): { added: Map<st
       .map(write => JSON.stringify([write.recordId, write.field]))) : null;
     if (refused?.size === 0) continue;
     const scope = run.undoScope ?? fallbackScope;
-    const completedCreations = new Set(run.undo === "done" ? [
-      ...run.created.map(created => created.recordId),
-      ...run.applied.flatMap(step => step.writes.filter(write => write.kind === "created").map(write => write.recordId)),
-    ] : []);
     // A record is listed as created before its fields are written, so one a
     // run stopped after creating is still found.
-    if (run.undo !== "done") for (const created of run.created) added.set(created.recordId, created.path);
+    if (run.undo !== "done") for (const created of run.created) if (!completedCreations.has(created.recordId)) added.set(created.recordId, created.path);
     for (const { writes } of run.applied) {
       for (const write of writes) {
-        if (write.kind === "created" && run.undo !== "done") added.set(write.recordId, write.path);
+        if (write.kind === "created" && run.undo !== "done" && !completedCreations.has(write.recordId)) added.set(write.recordId, write.path);
         if (write.kind === "field" && !completedCreations.has(write.recordId) && (refused === null || refused.has(JSON.stringify([write.recordId, write.field])))) {
           wrote(write.recordId, write.path, write.field, { before: write.before, after: write.after, sure: true, scope });
         }
       }
     }
     const unrecorded = refused === null ? unrecordedEffect(run)?.effect : undefined;
-    if (unrecorded?.kind === "add" && !run.created.some((created) => created.planned === unrecorded.recordId)) {
+    if (unrecorded?.kind === "add" && !completedCreations.has(unrecorded.recordId) && !run.created.some((created) => created.planned === unrecorded.recordId)) {
       added.set(unrecorded.recordId, `${unrecorded.collectionPath}/${unrecorded.name}.md`);
     } else if (unrecorded?.kind === "set" && !completedCreations.has(unrecorded.target.recordId)) {
       for (const { field, before, after } of unrecorded.fields) wrote(unrecorded.target.recordId, unrecorded.target.path, field, { before, after, sure: false, scope });

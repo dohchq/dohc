@@ -289,7 +289,8 @@ const UndoCallSchema = z.union([
     idempotencyKey: z.string(),
   }),
 ]);
-// Version 11 uses the engine journal for document reversals. It plans
+// Version 12 records the exact members of a kept-field Undo attempt. It uses
+// the engine journal for document reversals and plans
 // and saves each step beside the run's state, names each Collection by its
 // id, records when the run ended, qualifies formula-visible fields by
 // dataset and table, and keeps the deletes an Undo may use on each record
@@ -297,7 +298,7 @@ const UndoCallSchema = z.union([
 // cannot be read, and the claim fails instead of starting over or reading
 // bare field ids as current reach.
 const StoredRunSchema = z.object({
-  version: z.literal(11),
+  version: z.literal(12),
   claimId: z.string().min(1),
   automationId: z.string().min(1),
   definitionHash: z.string().min(1),
@@ -318,6 +319,7 @@ const StoredRunSchema = z.object({
   undo: z.enum(["started", "done"]).nullable(),
   undoScope: z.string().min(1).optional(),
   undoKeptScope: z.string().min(1).optional(),
+  undoKeptRuns: z.array(z.string().min(1)).optional(),
   undoKept: z.array(z.object({ recordId: z.string(), field: z.string(), path: z.string().nullable(), fieldName: z.string(), datasetRecordId: DatasetRecordIdSchema.nullable() })),
   sharedSettlements: z.array(SettlementSchema).optional(),
   undoWrites: z.array(UndoWriteSchema).optional(),
@@ -395,7 +397,7 @@ export interface StoredStep {
 
 /** One run of one claim under one definition of its automation. */
 export interface StoredRun {
-  version: 11;
+  version: 12;
   claimId: string;
   /** The engine automation id, "collection:<collection id>#<id>". */
   automationId: string;
@@ -459,6 +461,8 @@ export interface StoredRun {
   /** Stable engine-key scope, saved before Undo starts and shared by the runs it reverses together. */
   undoScope?: string;
   undoKeptScope?: string;
+  /** Exact members of the interrupted kept-field attempt, including scope saves not yet completed. */
+  undoKeptRuns?: string[];
   /**
    * The fields a done Undo left because they no longer held what the run
    * wrote. Another run may have written them after this one, so Undo and
@@ -662,11 +666,7 @@ async function retryFileAccess<T>(work: () => Promise<T>): Promise<T> {
   }
 }
 
-function writeDurably(path: string, text: string): Promise<void> {
-  return withFile(path, () => writeDurablyUnlocked(path, text));
-}
-
-async function writeDurablyUnlocked(path: string, text: string): Promise<void> {
+async function writeDurablyUnlocked(path: string, text: string, assertCurrent: () => void = () => {}): Promise<void> {
   const temp = `${path}.tmp-${process.pid}-${randomUUID()}`;
   try {
     const file = await open(temp, "w");
@@ -678,7 +678,7 @@ async function writeDurablyUnlocked(path: string, text: string): Promise<void> {
     }
     // Windows MoveFileEx cannot replace an open destination, even when the
     // reader shares deletion. Keep the flushed snapshot while brief reads finish.
-    await retryFileAccess(() => rename(temp, path));
+    await retryFileAccess(() => { assertCurrent(); return rename(temp, path); });
     await syncFolder(dirname(path));
   } finally {
     await rm(temp, { force: true }).catch(() => undefined);
@@ -765,7 +765,7 @@ export interface AutomationRunStore {
    * its file, so the settle and an Undo never overwrite each other's state
    * with a copy read before it. Throws when the saved run cannot be read.
    */
-  updateState(run: StoredRun, state: Partial<Pick<StoredRun, "settled" | "undo" | "undoScope" | "undoKeptScope" | "undoKept" | "sharedSettlements" | "undoWrites">>): Promise<void>;
+  updateState(run: StoredRun, state: Partial<Pick<StoredRun, "settled" | "undo" | "undoScope" | "undoKeptScope" | "undoKeptRuns" | "undoKept" | "sharedSettlements" | "undoWrites">>): Promise<void>;
   supersedeWake(automationId: string, claimId: string, keySeed: string, noticeId: string, supersededBy: string): Promise<void>;
   /** Records one landed effect after the run's saved progress. */
   appendEffect(run: StoredRun, applied: StoredRun["applied"][number]): Promise<void>;
@@ -879,11 +879,17 @@ export interface MetadataDirResolver {
  * folder `resolveMetadataDir` answers. Reads that change nothing make no
  * folders.
  */
-export function createAutomationRunStore(rootPath: string, resolveMetadataDir: MetadataDirResolver): AutomationRunStore {
+export function createAutomationRunStore(rootPath: string, resolveMetadataDir: MetadataDirResolver, assertCurrent: () => void = () => {}): AutomationRunStore {
+  const writeCurrentUnlocked = (path: string, text: string) => {
+    assertCurrent();
+    return writeDurablyUnlocked(path, text, assertCurrent);
+  };
+  const writeCurrent = (path: string, text: string) => withFile(path, () => writeCurrentUnlocked(path, text));
   // Writes queue behind each other, so two saves never race one rename.
   let queue: Promise<unknown> = Promise.resolve();
   const serial = <T>(work: () => Promise<T>): Promise<T> => {
-    const next = queue.then(work, work);
+    const guarded = () => { assertCurrent(); return work(); };
+    const next = queue.then(guarded, guarded);
     queue = next.catch(() => undefined);
     return next;
   };
@@ -904,9 +910,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     restores = new Map(entries.map(entry => [entry.id, entry]));
     restoreClaims = new Set(entries.flatMap(entry => entry.claims));
   };
-  const readRestores = async (): Promise<Map<string, PendingRestore> | null> => {
-    if (restores !== undefined) return restores;
-    const text = await readBounded(await restoresFile());
+  const parseRestores = (text: string | undefined | null): Map<string, PendingRestore> | null => {
     const entries = new Map<string, PendingRestore>();
     if (text === null) { restores = null; return null; }
     try {
@@ -924,18 +928,23 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     } catch { restores = null; }
     return restores!;
   };
+  const readRestores = async (refresh = false): Promise<Map<string, PendingRestore> | null> =>
+    !refresh && restores !== undefined ? restores : parseRestores(await readBounded(await restoresFile()));
   const changeRestore = (id: string, entry?: PendingRestoreUpdate) => serial(async () => {
-    const known = await readRestores();
-    if (known === null) throw new Error("dohc could not read unfinished Stop and restore progress. Reopen the workspace, then try again.");
-    if (entry && releasedRestores.has(id) && !entry.serverRelease) return;
-    const next = new Map(known);
-    if (entry) next.set(id, PendingRestoreSchema.parse({claims: [], ...known.get(id), ...entry}));
-    else next.delete(id);
-    // Whole-state boundaries compact; only per-file receipts append.
-    const text = [...next.values()].map(entry => `${JSON.stringify({version: 2, kind: "restore", entry})}\n`).join("");
-    if (Buffer.byteLength(text) > MAX_RUN_FILE_BYTES) throw tooLarge();
-    await writeDurably(await restoresFile(), text);
-    setRestores([...next.values()]);
+    const path = await restoresFile();
+    return withFile(path, async () => {
+      const known = parseRestores(await readBoundedUnlocked(path));
+      if (known === null) throw new Error("dohc could not read unfinished Stop and restore progress. Reopen the workspace, then try again.");
+      if (entry && releasedRestores.has(id) && !entry.serverRelease) return;
+      const next = new Map(known);
+      if (entry) next.set(id, PendingRestoreSchema.parse({claims: [], ...known.get(id), ...entry}));
+      else next.delete(id);
+      // Whole-state boundaries compact; only per-file receipts append.
+      const text = [...next.values()].map(entry => `${JSON.stringify({version: 2, kind: "restore", entry})}\n`).join("");
+      if (Buffer.byteLength(text) > MAX_RUN_FILE_BYTES) throw tooLarge();
+      await writeCurrentUnlocked(path, text);
+      setRestores([...next.values()]);
+    });
   });
   const readUndos = async () => {
     if (undos !== undefined) return undos;
@@ -953,7 +962,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     const next = new Map(known);
     if (run.undo === "started") next.set(key, { automationId: run.automationId, claimId: run.claimId, run: name });
     else next.delete(key);
-    await writeDurably(await undosFile(), `${JSON.stringify({ version: 1, runs: [...next.values()] })}\n`);
+    await writeCurrent(await undosFile(), `${JSON.stringify({ version: 1, runs: [...next.values()] })}\n`);
     undos = next;
   };
   const parseRun = (text: string | null | undefined, name: string, automationId: string): StoredRun | null => {
@@ -1038,7 +1047,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
       const existing = await lstat(path).catch(() => null);
       if (existing === null && create) {
         if (Buffer.byteLength(text) > limit) throw tooLarge();
-        await writeDurablyUnlocked(path, text);
+        await writeCurrentUnlocked(path, text);
         return;
       }
       if (existing === null || existing.isSymbolicLink() || !existing.isFile()) throw new Error("dohc could not read this run's saved changes in .dohc/automations.");
@@ -1049,14 +1058,17 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
         const last = Buffer.alloc(1);
         if (existing.size > 0 && (await repair.read(last, 0, 1, existing.size - 1)).bytesRead === 1 && last[0] !== 0x0a) {
           const whole = await readFile(path);
+          assertCurrent();
           await repair.truncate(whole.lastIndexOf(0x0a) + 1);
           await repair.sync();
         }
       } finally {
         await repair.close();
       }
+      assertCurrent();
       const file = await retryFileAccess(() => open(path, "a"));
       try {
+        assertCurrent();
         await file.appendFile(text);
         await file.sync();
       } finally {
@@ -1067,6 +1079,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
   const removeRun = async (folder: string, name: string) => {
     const fileName = `${name}${RUN_SUFFIX}`;
     for (const file of await readdir(folder)) {
+      assertCurrent();
       if (file === fileName || file.startsWith(`${fileName}.tmp-`)) await rm(join(folder, file), { force: true });
     }
   };
@@ -1155,7 +1168,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
             const head = `${JSON.stringify({ ...header, finishedAtMs: now })}\n`;
             const next = head + text.slice(newline + 1);
             if (Buffer.byteLength(head) > MAX_RUN_HEADER_BYTES || Buffer.byteLength(next) > MAX_RUN_FILE_BYTES) throw tooLarge();
-            await writeDurablyUnlocked(path, next);
+            await writeCurrentUnlocked(path, next);
           }
         }
         return true;
@@ -1216,7 +1229,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
           }
           // Saved first, so a run saved with its Undo started is always listed.
           if (run.undo === "started") await noteUndo(run, name);
-          await writeDurablyUnlocked(path, text);
+          await writeCurrentUnlocked(path, text);
           if (run.undo !== "started") await noteUndo(run, name);
         });
       });
@@ -1224,13 +1237,13 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     unfinishedUndos() {
       return serial(async () => {
         const known = await readUndos();
-        const pending = await readRestores();
+        const pending = await readRestores(true);
         return known === null || pending === null ? null : new Set([...restoreClaims, ...[...known.values()].map((entry) => entry.claimId)]);
       });
     },
     pendingRestores() {
       return serial(async () => {
-        const known = await readRestores();
+        const known = await readRestores(true);
         if (known === null) throw new Error("dohc could not read unfinished Stop and restore progress. Reopen the workspace, then try again.");
         return structuredClone([...known.values()]);
       });
@@ -1273,7 +1286,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
           ].map(status => [sharedFileUpdateKey(status.draft), status])).values()];
           // As a save does: an Undo that starts is listed before its run says so, and leaves the list after.
           if (next.undo === "started") await noteUndo(next, name);
-          await writeDurablyUnlocked(path, runText(next));
+          await writeCurrentUnlocked(path, runText(next));
           if (next.undo !== "started") await noteUndo(next, name);
         });
       });
@@ -1294,7 +1307,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
             changed = true;
             return { ...write, supersededBy, name: write.name + "; agent wake superseded by a later run" };
           }) }));
-          if (changed) await writeDurablyUnlocked(path, runText({ ...saved, applied }));
+          if (changed) await writeCurrentUnlocked(path, runText({ ...saved, applied }));
         });
       });
     },
@@ -1326,6 +1339,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
           if (next === null || next === "unusable") return null;
           found = next;
         }
+        await readRestores(true);
         if (from === null) {
           expiring = null;
           if (schedule === null) {
@@ -1394,7 +1408,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
       await serial(async () => {
         for (const folder of planned.keys()) if (!folders.includes(folder)) planned.delete(folder);
         const entries = [...planned].map(([folder, plan]) => ({ folder, ...plan }));
-        await writeDurably(await scheduleFile(), `${JSON.stringify({ version: 1, folders: entries })}\n`);
+        await writeCurrent(await scheduleFile(), `${JSON.stringify({ version: 1, folders: entries })}\n`);
       });
       return null;
     },
@@ -1404,7 +1418,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     },
     saveSubscriptions(subscriptions) {
       return serial(async () => {
-        await writeDurably(join(await base(), "subscriptions.json"), `${JSON.stringify({ version: 1, subscriptions })}\n`);
+        await writeCurrent(join(await base(), "subscriptions.json"), `${JSON.stringify({ version: 1, subscriptions })}\n`);
       });
     },
     async readReachVerdicts() {
@@ -1422,7 +1436,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     },
     saveReachVerdicts(reach) {
       return serial(async () => {
-        await writeDurably(join(await base(), "reach.json"), `${JSON.stringify({ version: 3, ...reach })}\n`);
+        await writeCurrent(join(await base(), "reach.json"), `${JSON.stringify({ version: 3, ...reach })}\n`);
       });
     },
     async reachVerdictsPath() {
@@ -1435,7 +1449,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     saveTimeouts(timeouts) {
       return serial(async () => {
         const entries = [...timeouts].map(([automationId, count]) => ({ automationId, count }));
-        await writeDurably(join(await base(), "timeouts.json"), `${JSON.stringify({ version: 1, timeouts: entries })}\n`);
+        await writeCurrent(join(await base(), "timeouts.json"), `${JSON.stringify({ version: 1, timeouts: entries })}\n`);
       });
     },
     async readCircuitBreakers() {
@@ -1447,7 +1461,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
         const parsed = CircuitBreakersSchema.safeParse(await readJson(join(await base(), "circuit-breakers.json")));
         const breakers = [...(parsed.success ? parsed.data.breakers : []).filter((entry) =>
           entry.automationId !== breaker.automationId || entry.datasetInstance !== breaker.datasetInstance), breaker];
-        await writeDurably(join(await base(), "circuit-breakers.json"), `${JSON.stringify({ version: 1, breakers })}\n`);
+        await writeCurrent(join(await base(), "circuit-breakers.json"), `${JSON.stringify({ version: 1, breakers })}\n`);
       });
     },
     clearCircuitBreaker(run) {
@@ -1456,7 +1470,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
         if (!parsed.success) return;
         const breakers = parsed.data.breakers.filter((entry) => entry.automationId !== run.automationId || entry.claimId !== run.claimId);
         if (breakers.length === parsed.data.breakers.length) return;
-        await writeDurably(join(await base(), "circuit-breakers.json"), `${JSON.stringify({ version: 1, breakers })}\n`);
+        await writeCurrent(join(await base(), "circuit-breakers.json"), `${JSON.stringify({ version: 1, breakers })}\n`);
       });
     },
     async readReportedFailures() {
@@ -1465,7 +1479,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     },
     saveReportedFailures(failures) {
       return serial(async () => {
-        await writeDurably(join(await base(), "failures.json"), `${JSON.stringify({ version: 1, failures })}\n`);
+        await writeCurrent(join(await base(), "failures.json"), `${JSON.stringify({ version: 1, failures })}\n`);
       });
     },
     async readEnabledAutomations() {
@@ -1478,7 +1492,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     saveEnabledAutomations(enabled) {
       return serial(async () => {
         const collections = [...enabled].map(([path, ids]) => ({ path, enabled: [...ids] }));
-        await writeDurably(join(await base(), "enabled.json"), `${JSON.stringify({ version: 1, collections })}\n`);
+        await writeCurrent(join(await base(), "enabled.json"), `${JSON.stringify({ version: 1, collections })}\n`);
       });
     },
   };

@@ -4262,7 +4262,9 @@ function createCollectionAutomationsFor(
     roster: () => shareRosters.forRun(workspaceId),
     cachedRoster: () => shareRosters.cached(workspaceId),
     evaluator: automationEvaluator.forWorkspace(workspaceId),
-    store: createAutomationRunStore(rootPath, resolveWorkspaceMetadataDir),
+    store: createAutomationRunStore(rootPath, resolveWorkspaceMetadataDir, () => {
+      if (!workspaceAuthorities.isCurrentAttachment(workspaceId, attachmentId)) throw new Error("This workspace was closed.");
+    }),
     onRunsChanged: () => notifyAutomationRunsChanged(workspaceId),
     reportFailure: (report) => sendFailureNotices({
       notices: noticeStore(),
@@ -5816,7 +5818,10 @@ function registerIpcHandlers(): void {
     withPhysicalWorkspaceOperation, withRendererWorkspaceOperation, receivedShareEngine,
     readWorkspaceSecretState, readWorkspaceDataKeyForEnrollment, assertWritableWorkspace,
     relayClientForWorkspace, enrollWorkspaceKeyEnvelope, installWorkspaceDataKey,
-    setWorkspaceRemote, usableRoot, readdir, mkdir, probeRelayWorkspace,
+    setWorkspaceRemote: (workspaceId, remote) => {
+      setWorkspaceRemote(workspaceId, remote);
+      retryStopAndRestoreReleases?.();
+    }, usableRoot, readdir, mkdir, probeRelayWorkspace,
     createJoinedWorkspace, bootstrapJoinedWorkspace, refreshNativeWorkspaceSurfaces,
     openWorkspaceActivity, completeWorkspaceJoinBootstrap, desktopMarks,
   });
@@ -6332,6 +6337,8 @@ function registerIpcHandlers(): void {
       if (shareViewIsPresent(workspace.shareView)) throw new Error("Only the original workspace has shares to stop.");
     },
     serverRuns,
+    currentAutomations: collectionAutomationsOf,
+    canReleaseRuns: workspaceId => findWorkspace(workspaceId)?.remote !== undefined && !!cachedCredentials?.relayUrl,
   }).retryServerReleases;
 
   shareDirectWrites = registerShareProposalsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
