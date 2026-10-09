@@ -175,6 +175,7 @@ function engineHistorySearchText(group: EngineHistoryGroup): string {
       moment.path,
       engineMomentSummary(moment),
       engineMomentSourceLabel(moment),
+      ...(moment.authorLabels ?? []),
     ]),
   ]
     .join("\n")

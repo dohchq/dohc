@@ -564,6 +564,14 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
       agent: {receipt: agentAck, settlement: agentSettlement, admitted: [human, agent], imported: [agent, human]},
       automation: {receipt: automationAck, settlement: automationSettlement, admitted: [automationAdmitted], imported: [automation]},
     };
+    // The service imports the admitted credit through its own background pull.
+    // Read its store only after its History shows that credit.
+    const serviceRpc: typeof rpc = async (method, params) => (await capture.client.sendRequest({id: capture.nextRequestId(),
+      workspace: capture.workspace, method, params, deadlineMs: capture.deadlineMs})).result as Awaited<ReturnType<typeof rpc>>;
+    await vi.waitFor(async () => {
+      expect(await momentAuthors(serviceRpc, settledMomentId)).toBeNull();
+      for (const {momentId, imported} of declaredCredit) expectAuthors(await momentAuthors(serviceRpc, momentId), imported);
+    }, {timeout: 30000});
     await supervisor!.close(); supervisor = undefined; active = undefined;
     const engine = new DatabaseSync(join(workspace, ".dohc/engine/engine.db"), {readOnly: true});
     try {results.persistedApplications = engine.prepare("SELECT delivery_id,update_digest FROM live_device_update_applications ORDER BY journal_cursor").all();
