@@ -5,7 +5,7 @@ export const ORPHANED_DRAFT_STORAGE_KEY = "dohc-set-aside-drafts";
 export const ORPHANED_DRAFT_STORAGE_PREFIX = `${ORPHANED_DRAFT_STORAGE_KEY}:`;
 export const ORPHANED_DRAFT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const STORED_DRAFT_VERSION = 1;
-export type DraftRecoveryIdentity = {objectId: string; updateBase64: string};
+export type DraftRecoveryIdentity = {objectId: string; updateBase64: string; recordId?: string};
 type StoredOrphanedDraft = { id: number; workspaceId: string; path: string; text: string; capturedAtMs: number; recovery?: DraftRecoveryIdentity };
 // Numeric handles belong to this renderer. Each durable recovery owns one key,
 // so another window never rewrites an array containing this window's work.
@@ -26,7 +26,7 @@ function valid(value: unknown): value is StoredOrphanedDraft {
   const row = value as Record<string, unknown>;
   return typeof row.id === "number" && typeof row.workspaceId === "string" && typeof row.path === "string" &&
     typeof row.text === "string" && typeof row.capturedAtMs === "number" &&
-    (row.recovery === undefined || (typeof row.recovery === "object" && row.recovery !== null && "objectId" in row.recovery && typeof row.recovery.objectId === "string" && "updateBase64" in row.recovery && typeof row.recovery.updateBase64 === "string"));
+    (row.recovery === undefined || (typeof row.recovery === "object" && row.recovery !== null && "objectId" in row.recovery && typeof row.recovery.objectId === "string" && "updateBase64" in row.recovery && typeof row.recovery.updateBase64 === "string" && (!("recordId" in row.recovery) || typeof row.recovery.recordId === "string")));
 }
 function storedKeys(): string[] {
   const result: string[] = [];

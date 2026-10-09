@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import * as Y from "yjs";
 import type { YdocContentKind } from "@dohc/workspace-engine-client";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
+import type { LiveDraftRecoveryRecord } from "../ipc/bridgeContract";
 
 export type LiveDraft = {
   path: string;
@@ -55,13 +56,38 @@ export async function hasRetainedLiveDraft(directory: string, workspaceId: strin
   return false;
 }
 
-export async function removeLiveDraftCopies(directory: string, workspaceId: string, objectId: string, snapshotSha256: string, throughMs: number): Promise<void> {
+export async function listLiveDraftRecovery(directory: string, workspaceId: string, target?: {objectId: string; path: string}): Promise<LiveDraftRecoveryRecord[]> {
+  const result: LiveDraftRecoveryRecord[] = [];
+  for (const {file, record} of await recoveryRecords(directory)) {
+    if (record.workspaceId !== workspaceId) continue;
+    if (target && record.objectId !== target.objectId && record.path !== target.path) continue;
+    if (typeof record.path !== "string" || typeof record.objectId !== "string" || typeof record.updateBase64 !== "string") throw new Error("Invalid saved live draft.");
+    if (classifyEngineFilePathForRead(record.path, process.platform).kind !== "tracked") throw new Error("This path cannot enter draft recovery.");
+    let text: string;
+    if (typeof record.text === "string") text = record.text;
+    else {
+      const doc = new Y.Doc();
+      try {
+        Y.applyUpdate(doc, Buffer.from(record.updateBase64, "base64"));
+        text = record.contentKind === "scene"
+          ? (await import("@dohc/excalidraw-scene")).exportPortableScene(doc)
+          : (await import("@dohc/ydoc-projection")).yDocToMarkdown(doc);
+      } finally { doc.destroy(); }
+    }
+    result.push({recordId: basename(file).slice(0, 64), path: record.path, objectId: record.objectId, updateBase64: record.updateBase64, text});
+  }
+  return result;
+}
+
+export async function removeLiveDraftCopies(directory: string, workspaceId: string, objectId: string, snapshotSha256: string, throughMs: number, path: string, recordId?: string): Promise<LiveDraftRecoveryRecord[]> {
   for (const row of await recoveryRecords(directory)) {
     if (row.record.workspaceId !== workspaceId || row.record.objectId !== objectId || typeof row.record.updateBase64 !== "string" || activeTemporaryDrafts.has(row.file)) continue;
+    if (recordId !== undefined && basename(row.file).slice(0, 64) !== recordId) continue;
     if (createHash("sha256").update(Buffer.from(row.record.updateBase64, "base64")).digest("hex") !== snapshotSha256) continue;
     const modified = await stat(row.file).catch((error: NodeJS.ErrnoException) => {if (error.code === "ENOENT") return null; throw error;});
     if (modified && modified.mtimeMs <= throughMs) await rm(row.file, {force: true});
   }
+  return listLiveDraftRecovery(directory, workspaceId, {objectId, path});
 }
 
 /** Exact CRDT recovery complements the renderer's user-visible set-aside text. */

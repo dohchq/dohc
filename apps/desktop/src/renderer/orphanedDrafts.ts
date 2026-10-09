@@ -1,6 +1,7 @@
 import { bridge } from "./bridge";
 import { useSyncExternalStore } from "react";
 import { base64ToBytes } from "./base64";
+import type { LiveDraftRecoveryRecord } from "../ipc/bridgeContract";
 import {
   clearStoredDrafts,
   forgetStoredDraft,
@@ -75,6 +76,40 @@ const pathSetCache = new Map<
 // refused — dies with this app run, and only those stay behind the close
 // warning.
 let storedIds: Set<number> = new Set();
+const recoveryRequests = new Map<string, Promise<void>>();
+let recoveryGeneration = 0;
+
+// A late list or dismiss reply must not reintroduce a record a later dismiss removed.
+function withRecoveryRequest(workspaceId: string, work: () => Promise<void>): Promise<void> {
+  const request = (recoveryRequests.get(workspaceId) ?? Promise.resolve()).catch(() => {}).then(work);
+  recoveryRequests.set(workspaceId, request);
+  void request.finally(() => {
+    if (recoveryRequests.get(workspaceId) === request) recoveryRequests.delete(workspaceId);
+  }).catch(() => {});
+  return request;
+}
+
+function captureLiveDraftRecovery(workspaceId: string, records: readonly LiveDraftRecoveryRecord[]): void {
+  for (const record of records) {
+    const current = drafts.get(keyFor(workspaceId, record.path)) ?? EMPTY;
+    if (current.some(draft => draft.recovery?.recordId === record.recordId)) continue;
+    const recovery = {objectId: record.objectId, updateBase64: record.updateBase64, recordId: record.recordId};
+    const existing = current.find(draft => draft.recovery?.recordId === undefined &&
+      draft.recovery?.objectId === record.objectId && draft.recovery.updateBase64 === record.updateBase64 && draft.text === record.text);
+    if (existing) replaceOrphanedDraft(workspaceId, record.path, existing.id, record.text, recovery);
+    else captureOrphanedDraft(workspaceId, record.path, record.text, recovery);
+  }
+}
+
+export function loadLiveDraftRecovery(workspaceId: string, isCurrent: () => boolean): Promise<void> {
+  const generation = recoveryGeneration;
+  return withRecoveryRequest(workspaceId, async () => {
+    if (!isCurrent() || generation !== recoveryGeneration) return;
+    const records = await bridge().listLiveDraftRecovery({workspaceId});
+    if (!isCurrent() || generation !== recoveryGeneration) return;
+    captureLiveDraftRecovery(workspaceId, records);
+  });
+}
 
 function keyFor(workspaceId: string, path: string): string {
   // JSON quotes each part, so two different keys cannot collide.
@@ -206,18 +241,34 @@ export async function dismissOrphanedDraft(
   const key = keyFor(workspaceId, path);
   const captured = drafts.get(key)?.find(draft => draft.id === id);
   if (!captured) return;
-  if (captured.recovery) {
+  const recovery = captured.recovery;
+  if (recovery) {
     const discardedAtMs = Date.now();
-    const bytes = base64ToBytes(captured.recovery.updateBase64);
-    const hash = await crypto.subtle.digest("SHA-256", new Uint8Array(bytes));
-    const snapshotSha256 = Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, "0")).join("");
-    await bridge().discardLiveDraftRecovery({
-      workspaceId, path, objectId: captured.recovery.objectId, snapshotSha256, discardedAtMs,
+    await withRecoveryRequest(workspaceId, async () => {
+      const assertCurrent = () => {
+        if (drafts.get(key)?.find(draft => draft.id === id) !== captured) {
+          throw new Error("This draft changed while dohc dismissed it. Review it and try again.");
+        }
+      };
+      assertCurrent();
+      const bytes = base64ToBytes(recovery.updateBase64);
+      const hash = await crypto.subtle.digest("SHA-256", new Uint8Array(bytes));
+      assertCurrent();
+      const snapshotSha256 = Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, "0")).join("");
+      const records = await bridge().discardLiveDraftRecovery({
+        workspaceId, path, objectId: recovery.objectId, snapshotSha256, discardedAtMs, recordId: recovery.recordId,
+      });
+      assertCurrent();
+      retireOrphanedDraft(workspaceId, path, id);
+      captureLiveDraftRecovery(workspaceId, records);
     });
-    if (drafts.get(key)?.find(draft => draft.id === id) !== captured) {
-      throw new Error("This draft changed while dohc dismissed it. Review it and try again.");
-    }
+    return;
   }
+  retireOrphanedDraft(workspaceId, path, id);
+}
+
+function retireOrphanedDraft(workspaceId: string, path: string, id: number): void {
+  const key = keyFor(workspaceId, path);
   const remaining = (drafts.get(key) ?? EMPTY).filter(
     (draft) => draft.id !== id,
   );
@@ -400,6 +451,7 @@ export function orphanedDraftStoreVersionForTests(): number {
 // Test seam: the store is module state, so suites that capture drafts reset
 // it between tests instead of leaking keys into each other.
 export function resetOrphanedDrafts(): void {
+  recoveryGeneration += 1;
   drafts.clear();
   workspaceLabels.clear();
   storedIds = new Set();

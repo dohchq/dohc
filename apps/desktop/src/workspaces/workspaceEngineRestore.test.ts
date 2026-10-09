@@ -17,6 +17,9 @@ import {
 } from "./workspaceEngineCapture";
 
 import { createTestScratch } from "./testTemp";
+import { createHash } from "node:crypto";
+import * as Y from "yjs";
+import { hasRetainedLiveDraft, preserveUnsentLiveDraft, removeLiveDraftCopies } from "./liveDraftRecovery";
 
 // The person a restore names, as desktop main reads them.
 const RESTORER = { kind: "human", humanId: "local-person" } as const;
@@ -119,6 +122,50 @@ describe("engine history reads", () => {
 });
 
 describe("engine restore", () => {
+  it("restores after the unseen main draft is reviewed and does not block a new object at its path", async () => {
+    const root = await createTestScratch("dohc-engine-leftover-draft-");
+    const recovery = await createTestScratch("dohc-live-draft-recovery-");
+    const workspaceId = "engine-restore-test";
+    await write(root, "a.txt", "saved original\n");
+    const engine = capture(root, new VersionedLoopbackEngine(), undefined,
+      (path, objectId) => hasRetainedLiveDraft(recovery, workspaceId, path, objectId));
+    const seen = new Y.Doc(), unseen = new Y.Doc();
+    engine.start();
+    try {
+      await engine.flush();
+      await write(root, "a.txt", "saved revision\n");
+      engine.observeFileEvents([{path: "a.txt", operation: "update"}]);
+      await engine.flush();
+      const edit = (await engine.listMoments()).moments[0]!;
+      if (!edit.objectId) throw new Error("Expected a file object");
+      seen.getText("plainText").insert(0, "renderer copy");
+      unseen.getText("plainText").insert(0, "unseen main copy");
+      for (const doc of [seen, unseen]) {
+        await preserveUnsentLiveDraft(recovery, workspaceId, {path: "a.txt", objectId: edit.objectId, contentKind: "plaintext", doc});
+      }
+      const remaining = await removeLiveDraftCopies(recovery, workspaceId, edit.objectId,
+        createHash("sha256").update(Y.encodeStateAsUpdate(seen)).digest("hex"), Date.now(), "a.txt");
+      await expect(engine.restoreFileToBeforeMoment(edit.id, RESTORER, {expectedHeadMomentId: edit.id})).rejects.toThrow("Changed on this device since the last saved version");
+      expect(remaining).toEqual([expect.objectContaining({text: "unseen main copy"})]);
+      await removeLiveDraftCopies(recovery, workspaceId, edit.objectId,
+        createHash("sha256").update(Y.encodeStateAsUpdate(unseen)).digest("hex"), Date.now(), "a.txt", remaining[0]!.recordId);
+      await engine.restoreFileToBeforeMoment(edit.id, RESTORER, {expectedHeadMomentId: edit.id});
+      expect(await readText(root, "a.txt")).toBe("saved original\n");
+      await rm(join(root, "a.txt"));
+      engine.observeFileEvents([{path: "a.txt", operation: "delete"}]);
+      await engine.flush();
+      await write(root, "a.txt", "new file\n");
+      engine.observeFileEvents([{path: "a.txt", operation: "update"}]);
+      await engine.flush();
+      const created = (await engine.listMoments()).moments[0]!;
+      if (!created.objectId) throw new Error("Expected a new file object");
+      expect(created.objectId).not.toBe(edit.objectId);
+      expect(await hasRetainedLiveDraft(recovery, workspaceId, "a.txt", created.objectId)).toBe(false);
+      await expect(engine.restoreFileToBeforeMoment(created.id, RESTORER, {expectedHeadMomentId: created.id})).resolves.toMatchObject({restored: "deleted"});
+      expect(existsSync(join(root, "a.txt"))).toBe(false);
+    } finally { seen.destroy(); unseen.destroy(); await engine.stop(); }
+  });
+
   it("guarded Undo recreates a removed record with its original identity and History", async () => {
     const root = await createTestScratch("dohc-engine-undo-");
     await write(root, "new.md", "recipient text\n");
