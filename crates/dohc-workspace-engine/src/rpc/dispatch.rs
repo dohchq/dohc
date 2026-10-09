@@ -995,7 +995,7 @@ impl EngineService {
         Ok(ServiceResponse::response(Response { id, result }))
     }
 
-    fn ensure_handle_allows_method(
+    pub(super) fn ensure_handle_allows_method(
         &self,
         handle: Option<&WorkspaceHandle>,
         method: &str,
@@ -1012,27 +1012,34 @@ impl EngineService {
                 )
             })
             .unwrap_or_default();
-        if projects_collections
-            && (method.starts_with("automations.")
-                || matches!(
-                    method,
-                    "ydoc.open"
-                        | "ydoc.recordUpdate"
-                        | "ydoc.resync"
-                        | "ydoc.adoptCollectionRecord"
-                        | "ydoc.settle"
-                        | "ydoc.close"
-                        | "ydoc.evict"
-                ))
-        {
-            return Err(WireError::new(
-                ErrorCode::Forbidden,
-                if method.starts_with("automations.") {
-                    "received shares do not execute automations"
-                } else {
-                    "received shares do not open live document sessions"
-                },
-            ));
+        if projects_collections {
+            if method.starts_with("automations.") {
+                return Err(WireError::new(
+                    ErrorCode::Forbidden,
+                    "received shares do not execute automations",
+                ));
+            }
+            if matches!(
+                method,
+                "ydoc.open"
+                    | "ydoc.recordUpdate"
+                    | "ydoc.resync"
+                    | "ydoc.adoptCollectionRecord"
+                    | "ydoc.settle"
+                    | "ydoc.close"
+                    | "ydoc.evict"
+            ) {
+                return Err(WireError::new(
+                    ErrorCode::Forbidden,
+                    "received shares do not open live document sessions",
+                ));
+            }
+            if method == "liveApplication.provisionOwner" {
+                return Err(WireError::new(
+                    ErrorCode::Forbidden,
+                    "received shares do not host live applications",
+                ));
+            }
         }
         if read_only
             && !matches!(
