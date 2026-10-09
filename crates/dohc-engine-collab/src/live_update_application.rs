@@ -568,7 +568,7 @@ impl AdmittedLiveUpdateMetadata {
         };
         self.admitted_declaration().as_ref().is_none_or(|admitted| {
             declaration.is_some_and(|draft| {
-                // The relay retains this client's first depth and name.
+                // Depth and name are not part of the relay's agent identity.
                 admitted.agent_id == draft.agent_id
                     && admitted.on_behalf_of.as_deref() == Some(principal_id.as_str())
             })
