@@ -3,7 +3,7 @@ import "./DesktopWorkspaceShell.testSupport";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { CaptureRecoveryStatusResult, EngineMomentRecord, ListEngineMomentsResult } from "../ipc/bridgeContract";
+import type { CaptureRecoveryStatusResult, EngineMomentRecord, ListEngineMomentsResult, ReadEngineMomentResult } from "../ipc/bridgeContract";
 import type { OwnerRestoreRequest } from "../ipc/ownerRestoreContract";
 import { deferred, type Deferred } from "../testing/deferred";
 import { CAPTURE_RECOVERY_TITLE, captureRecoveryMessage } from "./shell/useCaptureRecoveryNotices";
@@ -63,6 +63,42 @@ async function noticeRows(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe("typing kept in History", () => {
+  it("keeps Copy's fallback through activity refreshes during and after the moment reads", async () => {
+    const {bridge,clear}=recoveryBridge();clear();
+    let copied=false;
+    const restore=vi.fn(async()=>({restored:"text" as const,restoredMomentId:"restore-copy",path:PATH}));
+    Object.assign(bridge,{typingRecovery:vi.fn(async(input:{action:string})=>{
+      if(input.action === "copy") {copied=true;bridge.emitWorkspaceActivity();return {failures:[],outcome:"imported" as const,momentId:RECOVERY.momentId};}
+      return {failures:copied ? [] : [{kind:"import" as const,path:PATH,detail:"invalid-author",reason:"invalid-author" as const,retryable:false,checkpointId:"copy-fallback"}]};
+    }),restoreEngineMomentFile:restore});
+    const answer=deferred<ReadEngineMomentResult>();
+    bridge.readEngineMoment.mockImplementationOnce(()=>answer.promise);
+    const user=userEvent.setup();renderShell(bridge);
+    const toast=await screen.findByTestId("workspace-shell-error");
+    const copy=within(toast).getByTestId("workspace-shell-error-action");
+    expect(copy.textContent).toBe("Copy your typing");
+    await user.click(copy);
+    await waitFor(()=>expect(bridge.readEngineMoment).toHaveBeenCalledOnce());
+    const duringReads=bridge.getCaptureRecoveryStatus.mock.calls.length;
+    act(()=>bridge.emitWorkspaceActivity());
+    await waitFor(()=>expect(bridge.getCaptureRecoveryStatus.mock.calls.length).toBeGreaterThan(duringReads));
+    await act(async()=>{answer.resolve({moment:{...RECOVERY_MOMENT,correlationId:RECOVERY.captureMomentId,beforeText:"Typing kept here.\n",afterText:"Written outside dohc.\n"}});});
+    await waitFor(()=>expect(screen.getByTestId(NOTICE_TOAST).textContent).toContain(CAPTURE_RECOVERY_TITLE));
+    const afterCopy=bridge.getCaptureRecoveryStatus.mock.calls.length;
+    act(()=>bridge.emitWorkspaceActivity());
+    await waitFor(()=>expect(bridge.getCaptureRecoveryStatus.mock.calls.length).toBeGreaterThan(afterCopy));
+    expect(screen.getByTestId(NOTICE_TOAST).textContent).toContain(CAPTURE_RECOVERY_TITLE);
+    expect((await noticeRows(user)).filter(row=>row.textContent?.includes(CAPTURE_RECOVERY_TITLE))).toHaveLength(1);
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await user.click(screen.getByTestId("activity-history"));
+    await user.click(await screen.findByTestId("engine-moment-open"));
+    await user.click(await screen.findByTestId("engine-diff-restore-file"));
+    await user.click(await screen.findByTestId("engine-diff-confirm-restore"));
+    await waitFor(()=>expect(restore).toHaveBeenCalledWith({workspaceId:WORKSPACE.workspaceId,momentId:RECOVERY.momentId}));
+    await waitFor(()=>expect(screen.queryByTestId(NOTICE_TOAST)).toBeNull());
+    expect(await noticeRows(user)).toEqual([]);
+  });
+
   it("raises its notice on open, and Open History opens History with the recovery change", async () => {
     const { bridge } = recoveryBridge();
     const user = userEvent.setup();

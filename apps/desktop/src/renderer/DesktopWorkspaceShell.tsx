@@ -2559,9 +2559,10 @@ export function DesktopWorkspaceShell(props: {
     reportShellError,
     openRecovery: openCaptureRecovery,
   });
-  // A History Restore of kept typing clears it in the engine, so the next
-  // read drops its row.
-  const onHistoryRestored = useCallback(() => {
+  // Restore resolves this change's notice, including a Copy fallback that
+  // the engine no longer lists.
+  const onHistoryRestored = useCallback((momentId?: string) => {
+    if (momentId) captureRecoveries.restored(momentId);
     refreshAfterHistoryRestore();
     void captureRecoveries.refresh();
   }, [captureRecoveries, refreshAfterHistoryRestore]);

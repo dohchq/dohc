@@ -77,7 +77,7 @@ describe("useCaptureRecoveryNotices", () => {
     expect(h.openRecovery).toHaveBeenCalledExactlyOnceWith(RECOVERY.momentId,RECOVERY.path);
   });
 
-  it.each([false, true])("keeps the normal words for a cleared moment, then drops its fallback after resolution (deleted=%s)", async deleted => {
+  it.each([false, true])("keeps a cleared moment's normal words until its fallback is opened (deleted=%s)", async deleted => {
     const h=harness([]);await waitFor(()=>expect(h.bridge.getCaptureRecoveryStatus).toHaveBeenCalledOnce());
     h.bridge.readEngineMoment.mockImplementation(async ({momentId}) => ({moment: {
       id: momentId, versionId: "main", path: "deleted.md", recordedAtMs: 1,
@@ -88,6 +88,8 @@ describe("useCaptureRecoveryNotices", () => {
     await act(async()=>{await h.result.current.notices.imported(RECOVERY.momentId,"deleted.md");});
     const row=recoveryRows(h)[0]!;
     expect(row).toMatchObject({title:CAPTURE_RECOVERY_TITLE,seen:false,message:captureRecoveryMessage("deleted.md",false,deleted),action:{label:"Open History"}});
+    await act(async()=>{await h.result.current.notices.refresh();});
+    expect(recoveryRows(h)).toHaveLength(1);
     act(()=>h.result.current.runShellErrorAction(row.id));
     expect(h.openRecovery).toHaveBeenCalledExactlyOnceWith(RECOVERY.momentId,"deleted.md");
     await act(async()=>{await h.result.current.notices.refresh();});
@@ -95,10 +97,35 @@ describe("useCaptureRecoveryNotices", () => {
     expect(h.bridge.clearCaptureRecovery).not.toHaveBeenCalled();
   });
 
-  it("drops a Copy fallback after History Restore refreshes the resolved status", async () => {
+  it("retires only the restored Copy fallback and keeps it through unrelated status refreshes", async () => {
     const h=harness([]);await waitFor(()=>expect(h.bridge.getCaptureRecoveryStatus).toHaveBeenCalledOnce());
     await act(async()=>{await h.result.current.notices.imported(RECOVERY.momentId,RECOVERY.path);});
     expect(recoveryRows(h)).toHaveLength(1);
+    await act(async()=>{await h.result.current.notices.refresh();});
+    expect(recoveryRows(h)).toHaveLength(1);
+    act(()=>h.result.current.notices.restored("another-moment"));
+    expect(recoveryRows(h)).toHaveLength(1);
+    act(()=>h.result.current.notices.restored(RECOVERY.momentId));
+    expect(recoveryRows(h)).toHaveLength(0);
+    await act(async()=>{await h.result.current.notices.refresh();});
+    expect(recoveryRows(h)).toHaveLength(0);
+  });
+
+  it("raises only the requested change when two recoveries have the same path", async () => {
+    const other={...RECOVERY,momentId:"other-moment"};
+    const h=harness([RECOVERY,other]);
+    await waitFor(()=>expect(recoveryRows(h)).toHaveLength(2));
+    for(const row of recoveryRows(h)) act(()=>h.result.current.hideShellError(row.id));
+    await act(async()=>{await h.result.current.notices.imported(RECOVERY.momentId,RECOVERY.path);});
+    expect(recoveryRows(h).find(row=>row.identity === `capture-recovery:${RECOVERY.momentId}`)?.seen).toBe(false);
+    expect(recoveryRows(h).find(row=>row.identity === `capture-recovery:${other.momentId}`)?.seen).toBe(true);
+  });
+
+  it("keeps a dismissed Copy fallback closed through activity refreshes", async () => {
+    const h=harness([]);await waitFor(()=>expect(h.bridge.getCaptureRecoveryStatus).toHaveBeenCalledOnce());
+    await act(async()=>{await h.result.current.notices.imported(RECOVERY.momentId,RECOVERY.path);});
+    act(()=>h.result.current.dismissShellError(recoveryRows(h)[0]!.id));
+    await waitFor(()=>expect(h.bridge.clearCaptureRecovery).toHaveBeenCalledOnce());
     await act(async()=>{await h.result.current.notices.refresh();});
     expect(recoveryRows(h)).toHaveLength(0);
   });
