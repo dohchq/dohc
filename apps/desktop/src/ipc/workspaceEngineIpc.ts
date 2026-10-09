@@ -3,7 +3,7 @@ import { WorkspaceDaemonRequester, type VersionedLiveAdapter } from "@dohc/works
 import { z } from "zod";
 import type { EngineWorkspace, EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import {
-  CaptureRecoveryStatusResult, captureRecoveryOperations,
+  CaptureRecoveryStatusResult, captureRecoveryOperations, fileObservationOperations,
   ListCollectionsPayload, ListCollectionsResult, GetCollectionPayload, GetCollectionResult,
   QueryCollectionRecordsPayload, QueryCollectionRecordsResult, ListEngineMomentsPayload,
   ReadEngineMomentPayload, ReadEngineMomentResult, HistoryPolicyUnreadableResult, RestoreEngineMomentFilePayload,
@@ -84,6 +84,7 @@ export function createWorkspaceEngineIpc<
   notifyRenderer(target: { workspaceId: string }): void;
   retryOwnerLiveDelivery?(workspaceId: string): void;
   retryCloudSync(workspaceId: string, reason: RetryCloudSyncPayload["reason"]): Promise<void>;
+  retryFileObservation(workspaceId: string): Promise<void>;
   requireWorkspace(workspaceId: string): Workspace;
   assertWritableWorkspace(workspace: Workspace): void;
   syncStatusWithOwnedProjection(workspace: Workspace, status: SyncStatusResult): Promise<SyncStatusResult>;
@@ -401,6 +402,20 @@ export function createWorkspaceEngineIpc<
           });
           if (result === null) throw new Error("The workspace engine is not running.");
         });
+      },
+    });
+    registerOperations<typeof fileObservationOperations, Event, Operation>({
+      handle: registerHandler, assertTrustedSender,
+      withActiveWorkspace: (event, workspaceId, message, work) => withRendererWorkspaceOperation(event.sender, workspaceId, message, work),
+    }, fileObservationOperations, {
+      retryFileObservation: async (input, { event }) => {
+        const started = await withRendererWorkspaceOperation(event.sender, input.workspaceId, "This workspace is no longer active.", async operation => ({
+          workspaceId: operation.workspace.workspaceId,
+          read: dependencies.retryFileObservation(operation.workspace.workspaceId),
+        }));
+        // A stalled read must not hold the workspace operation open.
+        await started.read;
+        return activity.getStatus(started.workspaceId);
       },
     });
     registerHandler(CHANNELS.retryFileRecovery, async (event, payload) => {

@@ -18,12 +18,15 @@ describe("history page", () => {
     bridge.openWorkspace = vi.fn(async () => failedStatus);
     bridge.getSyncStatus = vi.fn(async () => failedStatus);
     renderShell(bridge);
-    const message = "dohc could not read file changes for this workspace. It will try again. Restart dohc if changes stay missing.";
+    const message = "dohc could not read file changes for this workspace.";
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain(message);
     expect(within(toast).getByRole("button", { name: /Copy/ })).toBeTruthy();
+    expect(toast.textContent).not.toContain("Restart");
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     expect(screen.getByRole("dialog", { name: "Notices" }).textContent).toContain(message);
+    await userEvent.click(within(screen.getByRole("dialog", { name: "Notices" })).getByRole("button", { name: "Try again" }));
+    expect(bridge.retryFileObservation).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId });
     expect(screen.queryByTestId("notice-history-recording-unavailable")).toBeNull();
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     await userEvent.click(screen.getByTestId("activity-history"));

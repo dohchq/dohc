@@ -10,7 +10,7 @@ import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createWorkspaceEngineIpc } from "./workspaceEngineIpc";
 import { CHANNELS } from "./channels";
 import type { EngineMomentRecord, RebuildEngineStoreResult, SyncStatusResult } from "./bridgeContract";
-import { GetCollectionRecordHistoryResult, captureRecoveryOperations, engineYDocAdmissionOperations, engineYDocSaveOperations } from "./bridgeContract";
+import { GetCollectionRecordHistoryResult, captureRecoveryOperations, fileObservationOperations, engineYDocAdmissionOperations, engineYDocSaveOperations } from "./bridgeContract";
 import { operationBridge } from "./operationTable";
 import { engineMomentSourceLabel } from "../renderer/workbench/EngineHistory";
 import { createWorkspaceAuthorityOwner, type WorkspaceAuthorityLease } from "../workspaces/workspaceAuthorityOwner";
@@ -162,6 +162,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string) {
   const routed: unknown[] = [];
   const requireSessions = vi.fn(() => sessions);
   const retryOwnerLiveDelivery = vi.fn();
+  const retryFileObservation = vi.fn(async (_workspaceId: string) => undefined);
   const retryCloudSync = vi.fn(async (_workspaceId: string, _reason: "person" | "reconnect") => undefined);
   const automationRunOnThisComputer = vi.fn(async (_workspaceId: string, _automationId: string, claimId: string) => claimId === "claim-here");
   // The relay's owner-only routes. It answers 404 to anyone but the owner.
@@ -199,7 +200,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string) {
     notifyRenderer: notify,
     namedAuthorLabels: () => () => "Someone you shared with",
     automationPersonName: (_workspaceId, userId) => userId === "person-local" ? null : userId,
-    retryOwnerLiveDelivery, retryCloudSync,
+    retryOwnerLiveDelivery, retryCloudSync, retryFileObservation,
     requireWorkspace, assertWritableWorkspace: writable, syncStatusWithOwnedProjection: syncProjection,
     activity: { getStatus, hasAgentRun }, workspaceAuthorities: authority, canonicalWorkspaceFor,
     requireEngineSessions: requireSessions, closeDispatchRunActivity: closeActivity,
@@ -219,7 +220,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string) {
     workspace, sender, physical, authority, renderers, sessions, ydoc, provider, openYDocSession,
     adapter, capture, requireEngineCapture, getStatus, hasAgentRun, closeActivity, probe, move, reopen,
     notify, writable, requireWorkspace, displayName, syncProjection, canonicalWorkspaceFor, requireSessions,
-    events, handlers, invoke, routed, retryOwnerLiveDelivery, retryCloudSync, automationRunOnThisComputer, relay, setMissingAdapter: () => { missingAdapter = true; },
+    events, handlers, invoke, routed, retryOwnerLiveDelivery, retryCloudSync, retryFileObservation, automationRunOnThisComputer, relay, setMissingAdapter: () => { missingAdapter = true; },
     storeWorkspaces, readPolicy,
     sent,
     signIn: (account: string | null) => { session.account = account; session.generation += 1; },
@@ -238,7 +239,7 @@ const channels = [
   CHANNELS.listCollections, CHANNELS.getCollection, CHANNELS.queryCollectionRecords, CHANNELS.getCollectionRecordHistory,
   CHANNELS.locateRecordHistoryRun, CHANNELS.listEngineMoments, CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
   CHANNELS.getSyncStatus, captureRecoveryOperations.getCaptureRecoveryStatus.channel, captureRecoveryOperations.clearCaptureRecovery.channel,
-  CHANNELS.retryFileRecovery, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
+  fileObservationOperations.retryFileObservation.channel, CHANNELS.retryFileRecovery, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
   CHANNELS.rebuildEngineStore,
   engineYDocAdmissionOperations.waitForEngineYDocAdmission.channel, engineYDocSaveOperations.retryEngineYDocSave.channel, CHANNELS.engineYDocOpen, CHANNELS.engineYDocReadArtifactAsset, CHANNELS.engineYDocApplyUpdate,
   CHANNELS.engineYDocAcknowledgeLineageReplacement, CHANNELS.engineYDocClose,
@@ -246,6 +247,16 @@ const channels = [
 ];
 
 describe("workspace engine IPC registrations", () => {
+  it("retries file observation only for this renderer's active workspace and propagates failure", async () => {
+    const h = await harness();
+    await h.invoke("desktop:retry-file-observation");
+    expect(h.retryFileObservation).toHaveBeenCalledExactlyOnceWith("workspace");
+    await expect(h.invoke("desktop:retry-file-observation", { workspaceId: "other" })).rejects.toThrow("no longer active");
+    await expect(h.invoke("desktop:retry-file-observation", null, new Sender(-1))).rejects.toThrow("untrusted");
+    expect(h.retryFileObservation).toHaveBeenCalledOnce();
+    h.retryFileObservation.mockRejectedValueOnce(new Error("read failed"));
+    await expect(h.invoke("desktop:retry-file-observation")).rejects.toThrow("read failed");
+  });
   it("reads and persistently dismisses capture recovery only for this renderer's workspace", async () => {
     const h = await harness();
     const bridge = operationBridge(captureRecoveryOperations, async (channel, payload) => h.invoke(channel, payload));

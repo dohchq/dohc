@@ -14,6 +14,7 @@ import type { SyncStatusResult } from "../ipc/bridgeContract";
 
 // The budget includes a queued read as well as the final drain.
 const DRAIN_TIMEOUT_MS = 5_000;
+const MAX_RETRY_MS = 5_000;
 type ObservationFailure = NonNullable<SyncStatusResult["fileObservationFailure"]>;
 
 export interface WorkspaceObservationHandle {
@@ -22,6 +23,7 @@ export interface WorkspaceObservationHandle {
   pulledPaths(paths: readonly string[]): Promise<void>;
   pullStarting(): void;
   pullFinished(): void;
+  retry(): Promise<void>;
 }
 
 export interface WorkspaceObservationCallbacks {
@@ -49,12 +51,13 @@ export function observeWorkspaceFiles(options: {
   const ready = new Promise<void>(resolve => { resolveReady = resolve; });
   let readySeen = false;
   let unavailable = false;
-  // Deduplicate facts delivered before a pull page. Activity handles the
-  // opposite order without withholding facts from capture or listings.
+  // Deduplicate facts delivered before a pull page. A later fact can also
+  // contain a local edit, so it must still reach all consumers.
   const observedPaths = new Set<string>();
   let pulling = false;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
   let retryMs = 250;
+  let pendingRead: Promise<void> | undefined;
 
   function degraded(reason: ObservationFailure): void {
     unavailable = true;
@@ -78,22 +81,27 @@ export function observeWorkspaceFiles(options: {
 
   function enqueue(task: () => Promise<void>): Promise<void> {
     const next = chain.then(task);
-    chain = next.catch(options.onError);
+    chain = next.catch(error => { if (!drainTimedOut) options.onError(error); });
     return next;
   }
 
-  function wake(): void {
-    if (closing || dirty) return;
+  function wake(): Promise<void> {
+    if (closing) return Promise.resolve();
+    if (dirty) return pendingRead ?? Promise.resolve();
     dirty = true;
-    void enqueue(async () => {
+    const next = enqueue(async () => {
       dirty = false;
       if (closing) return;
       await apply(await options.read(cursor, false));
       retryMs = 250;
       if (retryTimer) { clearTimeout(retryTimer); retryTimer = undefined; }
-    }).catch(() => {
+    });
+    pendingRead = next;
+    void next.catch(() => {
       if (closing) return;
-      degraded("read-failed");
+      unavailable = true;
+      resolveReady();
+      if (retryMs === MAX_RETRY_MS) degraded("read-failed");
       // The engine retains wakes, so only failed reads need recovery.
       // Keep dirty until the retry to coalesce wakes during the backoff.
       dirty = true;
@@ -103,9 +111,10 @@ export function observeWorkspaceFiles(options: {
         dirty = false;
         wake();
       }, retryMs);
-      retryMs = Math.min(retryMs * 2, 5_000);
+      retryMs = Math.min(retryMs * 2, MAX_RETRY_MS);
       retryTimer.unref?.();
     });
+    return next;
   }
   const unsubscribe = options.subscribe(wake, paths => {
     if (!closing) options.callbacks.captured(paths);
@@ -116,6 +125,14 @@ export function observeWorkspaceFiles(options: {
     ready,
     pullStarting() { pulling = true; observedPaths.clear(); },
     pullFinished() { pulling = false; observedPaths.clear(); },
+    retry() {
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+        retryTimer = undefined;
+        dirty = false;
+      }
+      return wake();
+    },
     pulledPaths(paths) {
       if (closing) return Promise.resolve();
       try {

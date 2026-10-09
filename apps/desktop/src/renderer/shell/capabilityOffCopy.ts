@@ -2,8 +2,8 @@ import { engineStoreRefusalCopy, type SyncStatusResult } from "../../ipc/bridgeC
 
 export function fileObservationFailureCopy(reason: NonNullable<SyncStatusResult["fileObservationFailure"]>): string {
   return reason === "read-failed"
-    ? "dohc could not read file changes for this workspace. It will try again. Restart dohc if changes stay missing."
-    : "dohc could not watch file changes for this workspace. Restart dohc to try again.";
+    ? "dohc could not read file changes for this workspace."
+    : "dohc could not watch file changes for this workspace.";
 }
 
 // What the history-off placeholder may claim. Whether changes are recorded

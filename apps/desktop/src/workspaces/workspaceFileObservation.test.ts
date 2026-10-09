@@ -28,7 +28,7 @@ describe("workspace file observation", () => {
     await f.handle.ready;
     f.wake();
     await vi.advanceTimersByTimeAsync(0);
-    expect(f.callbacks.degraded).toHaveBeenLastCalledWith("read-failed");
+    expect(f.callbacks.degraded).not.toHaveBeenCalledWith("read-failed");
     expect(read).toHaveBeenCalledTimes(2);
     f.wake();
     await vi.advanceTimersByTimeAsync(249);
@@ -51,7 +51,7 @@ describe("workspace file observation", () => {
     const f = fixture(read);
     await vi.advanceTimersByTimeAsync(0);
     await f.handle.ready;
-    expect(f.callbacks.degraded).toHaveBeenCalledWith("read-failed");
+    expect(f.callbacks.degraded).not.toHaveBeenCalledWith("read-failed");
     await f.handle.stop();
     await vi.advanceTimersByTimeAsync(10_000);
     expect(read).toHaveBeenCalledTimes(2);
@@ -141,6 +141,57 @@ describe("workspace file observation", () => {
     await f.handle.ready;
     await expect(f.handle.stop()).rejects.toThrow("drain unavailable");
     expect(read.mock.calls[1]).toEqual([{ generation: "first", revision: 1 }, true]);
+    expect(f.onError).toHaveBeenCalledOnce();
+  });
+
+  it("reports only persistent read failures and lets Try again bypass the backoff", async () => {
+    vi.useFakeTimers();
+    const read = vi.fn().mockRejectedValue(new Error("read failed"));
+    const f = fixture(read);
+    await vi.advanceTimersByTimeAsync(0);
+    await f.handle.ready;
+    await vi.advanceTimersByTimeAsync(7_749);
+    expect(f.callbacks.degraded).not.toHaveBeenCalledWith("read-failed");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(read).toHaveBeenCalledTimes(6);
+    expect(f.callbacks.degraded).toHaveBeenLastCalledWith("read-failed");
+    const retry = f.handle.retry();
+    await expect(retry).rejects.toThrow("read failed");
+    expect(read).toHaveBeenCalledTimes(7);
+    read.mockResolvedValue(answer(1));
+    await f.handle.retry();
+    expect(read).toHaveBeenCalledTimes(8);
+    expect(f.callbacks.degraded).toHaveBeenLastCalledWith(null);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(read).toHaveBeenCalledTimes(8);
+    await f.handle.stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps a flapping read quiet when each retry recovers", async () => {
+    vi.useFakeTimers();
+    const read = vi.fn().mockResolvedValue(answer(1));
+    const f = fixture(read);
+    await f.handle.ready;
+    for (let n = 0; n < 4; n++) {
+      read.mockRejectedValueOnce(new Error("transient failure"));
+      f.wake();
+      await vi.advanceTimersByTimeAsync(250);
+    }
+    expect(f.callbacks.degraded).not.toHaveBeenCalledWith("read-failed");
+    await f.handle.stop();
+  });
+
+  it("logs a drain timeout once even when the drain later rejects", async () => {
+    vi.useFakeTimers();
+    const pending = deferred<FileObservationChanges>();
+    const f = fixture(vi.fn().mockResolvedValueOnce(answer(1)).mockReturnValueOnce(pending.promise));
+    await f.handle.ready;
+    const result = expect(f.handle.stop()).rejects.toThrow("timed out");
+    await vi.advanceTimersByTimeAsync(5_000);
+    await result;
+    pending.reject(new Error("late drain failure"));
+    await vi.advanceTimersByTimeAsync(0);
     expect(f.onError).toHaveBeenCalledOnce();
   });
 

@@ -37,9 +37,6 @@ interface WatchedWorkspace {
   // not a capability, and the notice states which.
   historyRecordingUnavailable: boolean;
   fileObservationFailure: NonNullable<SyncStatusResult["fileObservationFailure"]> | null;
-  // Retain only paths from the latest pull; consume each later echo once.
-  // Starting the next pull drops paths whose facts never arrived.
-  pulledPaths: Set<string>;
   // True when this workspace is a shared view: no recorder by design.
   // Same rule as above — the cause travels with the decision so no consumer
   // has to guess it.
@@ -290,12 +287,11 @@ export function createWorkspaceActivity(
         workspace,
         inFlight: false,
         lastSyncedAtMs: null,
-        handle: { stop: async () => {}, ready: Promise.resolve(), pulledPaths: async () => {}, pullStarting: () => {}, pullFinished: () => {} },
+        handle: { stop: async () => {}, ready: Promise.resolve(), pulledPaths: async () => {}, pullStarting: () => {}, pullFinished: () => {}, retry: async () => {} },
         engine: null,
         capture: null,
         historyRecordingUnavailable: false,
         fileObservationFailure: null,
-        pulledPaths: new Set(),
         historyShareView: false,
         historyCaptureFailure: null,
         historyCaptureDetail: null,
@@ -358,17 +354,7 @@ export function createWorkspaceActivity(
           // Deletion suppression happens before any queued work or close.
           entry.capture?.observeFileEvents(events);
           if (state.entry !== entry) return;
-          let watcherEvents = events;
-          if (entry.pulledPaths.size) {
-            let remaining: WatcherEvent[] | undefined;
-            for (let i = 0; i < events.length; i++) {
-              const event = events[i]!;
-              if (entry.pulledPaths.delete(event.path)) remaining ??= events.slice(0, i);
-              else remaining?.push(event);
-            }
-            if (remaining) watcherEvents = remaining;
-          }
-          if (watcherEvents.length) options.onWatcherBatch?.(workspace, watcherEvents);
+          options.onWatcherBatch?.(workspace, events);
           notify({ workspaceId: workspace.workspaceId, paths: facts.map(fact => fact.path),
             pathSetChanged: facts.some(fact => fact.kind !== "changed") });
         },
@@ -389,7 +375,6 @@ export function createWorkspaceActivity(
         },
         pulled(paths) {
           if (state.entry !== entry) return;
-          for (const path of paths) entry.pulledPaths.add(path);
           options.onWatcherBatch?.(workspace, paths.map(path => ({ path, operation: "update" })));
         },
         degraded(reason) {
@@ -412,8 +397,6 @@ export function createWorkspaceActivity(
           entry.handle.ready,
           new Promise<void>(resolve => {
             readyTimer = setTimeout(() => {
-              entry.fileObservationFailure = "unavailable";
-              notify({ workspaceId: workspace.workspaceId });
               resolve();
             }, 5_000);
           }),
@@ -607,9 +590,10 @@ export function createWorkspaceActivity(
     state.entry?.engine?.queuePull();
   }
 
-  function pullStarting(state: WorkspaceActivityState): void {
-    state.entry?.pulledPaths.clear();
-    state.entry?.handle.pullStarting();
+  function pullStarting(state: WorkspaceActivityState): void { state.entry?.handle.pullStarting(); }
+  function retryFileObservation(state: WorkspaceActivityState): Promise<void> {
+    if (!state.entry) return Promise.reject(new Error("This workspace is not open."));
+    return state.entry.handle.retry();
   }
   function pullFinished(state: WorkspaceActivityState): void { state.entry?.handle.pullFinished(); }
   function handlePulledPaths(state: WorkspaceActivityState, paths: readonly string[]): Promise<void> {
@@ -773,6 +757,7 @@ export function createWorkspaceActivity(
     syncNow,
     queueCloudPull,
     pullStarting,
+    retryFileObservation,
     pullFinished,
     handlePulledPaths,
     drainObservations,

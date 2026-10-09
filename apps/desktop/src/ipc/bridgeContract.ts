@@ -1452,6 +1452,18 @@ export const captureRecoveryOperations = {
   },
 } satisfies OperationTable;
 
+export const fileObservationOperations = {
+  retryFileObservation: {
+    capabilityId: "file.observation.retry",
+    channel: "desktop:retry-file-observation",
+    payload: WorkspaceIdPayload,
+    result: SyncStatusResult,
+    guard: "trusted-sender",
+    scope: "workspace",
+    handlerCheck: { check: "withRendererWorkspaceOperation", reason: "The read starts only for the sending window's active workspace." },
+  },
+} satisfies OperationTable;
+
 export const ENGINE_STORE_BACKUP_DIR = ".dohc/engine/pre-v2-backup";
 
 export function engineStoreRefusalSentence(cause: EngineStoreRefusal): string {
@@ -6489,6 +6501,7 @@ export interface DohcDesktopBridge
   extends OperationBridge<typeof accessOperations>,
     OperationBridge<typeof workspaceVersionOperations>,
     OperationBridge<typeof captureRecoveryOperations>,
+    OperationBridge<typeof fileObservationOperations>,
     OperationBridge<typeof workspaceSearchOperations>,
     OperationBridge<typeof crashReportOperations>,
     OperationBridge<typeof reportingOperations>,
