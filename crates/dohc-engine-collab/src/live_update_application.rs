@@ -568,8 +568,8 @@ impl AdmittedLiveUpdateMetadata {
         };
         self.admitted_declaration().as_ref().is_none_or(|admitted| {
             declaration.is_some_and(|draft| {
+                // The relay retains this client's first depth and name.
                 admitted.agent_id == draft.agent_id
-                    && admitted.depth == draft.depth
                     && admitted.on_behalf_of.as_deref() == Some(principal_id.as_str())
             })
         })

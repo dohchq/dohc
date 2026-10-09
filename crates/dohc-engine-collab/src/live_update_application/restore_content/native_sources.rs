@@ -318,10 +318,6 @@ pub(super) fn classify(
                     || metadata.accepted.binding != *b
                     || metadata.accepted.receipt.journal_cursor
                         > operation.terminal.as_ref().map_or(0, |r| r.journal_cursor)
-                    || !matches!(
-                        metadata.accepted.authority,
-                        ServerDerivedLiveUpdateAuthority::Owner { .. }
-                    )
                 {
                     return Err(ApplicationError::Conflict);
                 }
