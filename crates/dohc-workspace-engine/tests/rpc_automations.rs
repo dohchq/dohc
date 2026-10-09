@@ -59,11 +59,11 @@ async fn received_share_handles_refuse_local_automation_claims_and_execution() {
         "automations.runNow",
         "automations.settle",
     ] {
+        let error = call_error(&transport, &handle, &mut id, method, json!({})).await;
+        assert_eq!(error.code, ErrorCode::Forbidden, "{method}");
         assert_eq!(
-            call_error(&transport, &handle, &mut id, method, json!({}))
-                .await
-                .code,
-            ErrorCode::Forbidden
+            error.message, "received shares do not execute automations",
+            "{method}"
         );
     }
     call(&transport, &handle, &mut id, "workspace.close", json!({})).await;

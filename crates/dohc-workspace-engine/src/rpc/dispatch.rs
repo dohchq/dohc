@@ -1003,19 +1003,37 @@ impl EngineService {
         let Some(handle) = handle else {
             return Ok(());
         };
-        if method.starts_with("automations.")
-            && lock(&self.handles)
-                .get(handle)
-                .is_some_and(|open| open.projects_collections())
+        let (projects_collections, read_only) = lock(&self.handles)
+            .get(handle)
+            .map(|open| {
+                (
+                    open.projects_collections(),
+                    open.mode == WorkspaceOpenMode::ReadOnly,
+                )
+            })
+            .unwrap_or_default();
+        if projects_collections
+            && (method.starts_with("automations.")
+                || matches!(
+                    method,
+                    "ydoc.open"
+                        | "ydoc.recordUpdate"
+                        | "ydoc.resync"
+                        | "ydoc.adoptCollectionRecord"
+                        | "ydoc.settle"
+                        | "ydoc.close"
+                        | "ydoc.evict"
+                ))
         {
             return Err(WireError::new(
                 ErrorCode::Forbidden,
-                "received shares do not execute automations",
+                if method.starts_with("automations.") {
+                    "received shares do not execute automations"
+                } else {
+                    "received shares do not open live document sessions"
+                },
             ));
         }
-        let read_only = lock(&self.handles)
-            .get(handle)
-            .is_some_and(|open| open.mode == WorkspaceOpenMode::ReadOnly);
         if read_only
             && !matches!(
                 method,
