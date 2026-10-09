@@ -172,6 +172,7 @@ interface EngineYDocBindOptions {
   // until every accepted local update has been acknowledged.
   onDeliveryPendingChange?: (pending: boolean) => void;
   checkpointForExit?: () => Promise<void>;
+  hasUnresolvedCheckpoint?:()=>boolean;
   // Starts before delivery and recovery await the replacement acknowledgement.
   onDocumentReplacementStarted?: () => void;
   // Runs after the losing mirror stops shipping updates and before main
@@ -470,10 +471,10 @@ export async function bindEngineYDoc(
 
   let drainRevision = 0;
   let drainedRevision = 0;
-  const unregisterDelivery = registerYDocDelivery({pending: () => deliveryPending || drainedRevision !== drainRevision, flush: async () => {
+  const unregisterDelivery = registerYDocDelivery({pending: () => deliveryPending || (options.hasUnresolvedCheckpoint?.() === true && drainedRevision !== drainRevision), flush: async () => {
     const revision = drainRevision;
     await flushPendingLocalUpdates();
-    await options.checkpointForExit?.();
+    if(options.hasUnresolvedCheckpoint?.() === true) await options.checkpointForExit?.();
     drainedRevision = revision;
   }});
 

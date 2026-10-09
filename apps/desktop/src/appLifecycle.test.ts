@@ -382,11 +382,11 @@ describe("desktop bootstrap", () => {
 
   it("flushes outage typing at OS session end without cancelling the end", async () => {
     const f = fixture(); await boot(f); const window = new EventEmitter();
-    const flush = vi.fn(async () => undefined); const unregister = registerTypingCheckpoint("workspace", flush);
+    const flush = vi.fn(() => undefined); const unregister = registerTypingCheckpoint("workspace", async()=>{},()=>true,undefined,flush);
     try {
       f.app.emit("browser-window-created", {}, window); const preventDefault = vi.fn();
       window.emit("session-end", {preventDefault});
-      await vi.waitFor(() => expect(flush).toHaveBeenCalledOnce()); expect(preventDefault).not.toHaveBeenCalled();
+      expect(flush).toHaveBeenCalledOnce(); expect(preventDefault).not.toHaveBeenCalled();
     } finally {unregister();}
   });
 

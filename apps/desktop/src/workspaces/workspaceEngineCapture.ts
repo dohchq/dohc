@@ -1,4 +1,4 @@
-import { registerTypingCheckpoint, typingRecoveryStateVectorSha256, type OutageTypingCheckpoint } from "./outageTypingRecovery";
+import { DrawingCheckpointUnavailable, registerTypingCheckpoint, typingRecoveryStateVectorSha256, type OutageTypingCheckpoint } from "./outageTypingRecovery";
 import type { RecordEditSession } from "@dohc/automation-executor/collection-record-edits";
 import { isCaptureRecoveryOrigin } from "@dohc/workspace-contracts/engine";
 import { errorMessage } from "./workspaceError";
@@ -767,6 +767,9 @@ export interface WorkspaceEngineCaptureOptions {
   hasRetainedLiveDraft?: (path: string, objectId: string) => Promise<boolean>;
   waitForTypingRecovery?: () => Promise<void>;
   writeTypingCheckpoint?: (checkpoint: OutageTypingCheckpoint) => Promise<void>;
+  writeTypingCheckpointSync?: (checkpoint: OutageTypingCheckpoint) => void;
+  onTypingCheckpointFailure?: (path:string,error:unknown)=>void;
+  onTypingCheckpointRecovered?: (path:string)=>void;
   retireTypingCheckpoint?: (checkpoint: OutageTypingCheckpoint) => Promise<void>;
   // Outcome of each background HISTORY-CAPTURE task (batch capture and
   // reconciliation passes). With the engine as the workspace's sole
@@ -2243,6 +2246,7 @@ export function createWorkspaceEngineCapture(
     let checkpointContentKind: YdocContentKind = input.contentKind ?? "richdoc";
     let checkpointChain: Promise<void> = Promise.resolve();
     let checkpointTimer: ReturnType<typeof setTimeout> | null = null;
+    const checkpointId = randomUUID();
     let lastCheckpoint: OutageTypingCheckpoint | null = null;
     const checkpointSnapshot = (): OutageTypingCheckpoint | null => {
       if (!checkpointBase || !canonicalDoc || !sessionObjectId || !options.writeTypingCheckpoint) return null;
@@ -2253,7 +2257,7 @@ export function createWorkspaceEngineCapture(
         for (const original of queuedOriginals) Y.applyUpdate(snapshot, original.update);
         const text = checkpointContentKind === "plaintext"
           ? snapshot.getText("plainText").toString() : yDocToMarkdown(snapshot);
-        return {version: 2, workspaceId, versionId: input.versionId, objectId: sessionObjectId, path: input.path,
+        return {version: 2, checkpointId, workspaceId, versionId: input.versionId, objectId: sessionObjectId, path: input.path,
           expectedClaimId: checkpointBase.claim, expectedStateVectorSha256: typingRecoveryStateVectorSha256(checkpointBase.vector),
           expectedDiskSha256: checkpointBase.disk, text, admittedBaseBase64: Buffer.from(checkpointBase.base).toString("base64"), updateBase64: Buffer.from(Y.encodeStateAsUpdate(snapshot)).toString("base64"),
           updates: [...pendingRecords, ...queuedOriginals].map(r => ({requestId: r.options.idempotencyKey!, updateBase64: Buffer.from(r.update).toString("base64"),
@@ -2266,6 +2270,7 @@ export function createWorkspaceEngineCapture(
       Buffer.from(Y.encodeStateAsUpdate(canonicalDoc)).equals(Buffer.from(Y.encodeStateAsUpdate(recordedDoc)));
     const flushCheckpoint = (): Promise<void> => {
       if (checkpointTimer !== null) { clearTimeout(checkpointTimer); checkpointTimer = null; }
+      if(checkpointBase && checkpointContentKind === "scene" && !checkpointTypingIsDurable()) {const error=new DrawingCheckpointUnavailable(); options.onTypingCheckpointFailure?.(input.path,error); return Promise.reject(error);}
       const snapshot = checkpointSnapshot();
       if (!snapshot) return checkpointChain;
       const durable = checkpointTypingIsDurable();
@@ -2291,9 +2296,16 @@ export function createWorkspaceEngineCapture(
       checkpointTimer = setTimeout(() => { checkpointTimer = null; void flushCheckpoint().catch(error => onError("Typing checkpoint", error)); }, 100);
       checkpointTimer.unref();
     };
-    const unregisterCheckpoint = registerTypingCheckpoint(workspaceId, flushCheckpoint, () => checkpointBase !== null && !checkpointTypingIsDurable());
+    const flushCheckpointSync=():void=>{
+      if(checkpointTimer !== null){clearTimeout(checkpointTimer);checkpointTimer=null;}
+      if(checkpointBase && checkpointContentKind === "scene" && !checkpointTypingIsDurable()) throw new DrawingCheckpointUnavailable();
+      if(checkpointTypingIsDurable()) return;
+      const snapshot=checkpointSnapshot(); if(snapshot){options.writeTypingCheckpointSync?.(snapshot);lastCheckpoint=snapshot;}
+    };
+    const unregisterCheckpoint = registerTypingCheckpoint(workspaceId,flushCheckpoint,()=>checkpointBase !== null && !checkpointTypingIsDurable(),{versionId:input.versionId,path:input.path,objectId:()=>sessionObjectId},flushCheckpointSync,()=>checkpointBase !== null);
     const retireCheckpointIfDurable = (): void => {
       if (!checkpointBase || !checkpointTypingIsDurable()) return;
+      options.onTypingCheckpointRecovered?.(input.path);
       if (!dead && current !== null) checkpointBase = null;
       if (checkpointTimer !== null) {clearTimeout(checkpointTimer); checkpointTimer = null;}
       checkpointChain = checkpointChain.catch(() => undefined).then(async () => {if (lastCheckpoint) await options.retireTypingCheckpoint?.(lastCheckpoint); lastCheckpoint = null;});
@@ -2415,6 +2427,7 @@ export function createWorkspaceEngineCapture(
       if (dead) {
         dead = false;
         clearDeadYDocSession(deadSessionToken);
+        retireCheckpointIfDurable();
         input.onAlive();
       }
       retireCheckpointIfDurable();
@@ -4436,6 +4449,7 @@ export function createWorkspaceEngineCapture(
             ) {
               entry.status = "dead-generation";
             }
+            reportSaveState("settling",0,"status");
           },
           onAlive: () => {
             if (
@@ -4445,6 +4459,7 @@ export function createWorkspaceEngineCapture(
             ) {
               entry.status = "live";
             }
+            reportSaveState("settling",0,"status");
           },
           onObjectChanged: () => {
             try {

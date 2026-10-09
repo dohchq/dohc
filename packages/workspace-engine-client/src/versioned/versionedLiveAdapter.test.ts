@@ -2022,7 +2022,7 @@ describe("shared file update states", () => {
 describe("outage typing recovery import", () => {
   const checkpoint = {
     versionId: "main", objectId: "object", path: "note.md", expectedClaimId: "claim",
-    expectedStateVectorSha256: "a".repeat(64), expectedDiskSha256: "b".repeat(64), text: "kept typing",
+    expectedStateVectorSha256: "a".repeat(64), expectedDiskSha256: "b".repeat(64), admittedBaseBase64: "AAA=", text: "kept typing",
     updates: [{requestId: "original", updateBase64: "AAA=", actorOriginId: "person",
       attribution: {actorKind: "human" as const, onBehalfOf: "person", depth: 0}}],
   };

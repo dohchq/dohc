@@ -2,7 +2,7 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { TypingRecoveryFailure } from "../../workspaces/outageTypingRecovery";
-import { CHECKPOINT_FAILURE_MESSAGE, IMPORT_FAILURE_MESSAGE } from "../../workspaces/typingRecoveryWords";
+import { AUTHOR_REFUSED_MESSAGE, DRAWING_UNAVAILABLE_MESSAGE, CHECKPOINT_FAILURE_MESSAGE, IMPORT_FAILURE_MESSAGE } from "../../workspaces/typingRecoveryWords";
 import { useTypingRecoveryNotices } from "./useTypingRecoveryNotices";
 
 const state = vi.hoisted(() => ({
@@ -65,4 +65,14 @@ it("waits for workspace admission before reading recovery status", () => {
   renderHook(() => useTypingRecoveryNotices({workspaceId: "a", ready: false, reportShellFailure: vi.fn(), clearKind: vi.fn()}));
   expect(state.read).not.toHaveBeenCalled();
   expect(state.listeners.size).toBe(0);
+});
+
+it("names a refused author and omits retry for a permanent refusal",async()=>{
+ state.read.mockResolvedValue([{kind:"import",path:"note.md",detail:"remote-human-author",reason:"author-refused",retryable:false}]);const reportShellFailure=vi.fn();
+ renderHook(()=>useTypingRecoveryNotices({workspaceId:"a",ready:true,reportShellFailure,clearKind:vi.fn()}));await waitFor(()=>expect(reportShellFailure).toHaveBeenCalledOnce());
+ expect(reportShellFailure.mock.calls[0]![0]).toMatchObject({message:AUTHOR_REFUSED_MESSAGE});expect(reportShellFailure.mock.calls[0]![0]).not.toHaveProperty("retry");
+});
+it("warns truthfully that drawing outage edits cannot be kept",async()=>{
+ state.read.mockResolvedValue([{kind:"checkpoint",path:"drawing.excalidraw",detail:"unsupported",reason:"drawing-unavailable",retryable:true}]);const reportShellFailure=vi.fn();
+ renderHook(()=>useTypingRecoveryNotices({workspaceId:"a",ready:true,reportShellFailure,clearKind:vi.fn()}));await waitFor(()=>expect(reportShellFailure).toHaveBeenCalledOnce());expect(reportShellFailure.mock.calls[0]![0]).toMatchObject({message:DRAWING_UNAVAILABLE_MESSAGE,retry:expect.any(Function)});
 });

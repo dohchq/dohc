@@ -2,11 +2,11 @@ import { expect, test } from "@playwright/test";
 import { access, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
-import { CHECKPOINT_FAILURE_MESSAGE, IMPORT_FAILURE_MESSAGE } from "../src/workspaces/typingRecoveryWords";
+import { CHECKPOINT_FAILURE_MESSAGE, AUTHOR_REFUSED_MESSAGE } from "../src/workspaces/typingRecoveryWords";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { engineDaemonPids, hardKillPid, hardKillAppTree } from "./helpers/daemonKill";
 import { withEngineDb } from "./helpers/engineDb";
-import { cleanupDesktopWorkspace, createTempWorkspace, explorerRow, openWorkspaceFromFirstRun, waitForWorkspaceFile, writeWorkspaceFiles } from "./helpers/workspace";
+import { cleanupDesktopWorkspace, createTempWorkspace, explorerRow, openHistoryView, openWorkspaceFromFirstRun, waitForWorkspaceFile, writeWorkspaceFiles } from "./helpers/workspace";
 
 const sentinels = ["EARLY_QUIT_ONE_741", "EARLY_QUIT_TWO_852", "EARLY_QUIT_THREE_963"];
 async function checkpointText(home: string): Promise<string> {
@@ -15,7 +15,7 @@ async function checkpointText(home: string): Promise<string> {
   return (await Promise.all(names.filter(n => n.endsWith(".json")).map(n => readFile(join(directory, n), "utf8")))).join(" ");
 }
 
-for (const mode of ["quit", "last-window", "crash", "outside-edit", "write-failure", "refused-import"] as const) {
+for (const mode of ["quit", "last-window", "crash", "outside-edit", "deleted-file", "write-failure", "refused-import"] as const) {
   test("outage typing survives " + mode + " before replacement publication", async () => {
     test.setTimeout(120_000);
     const temp = await createTempWorkspace();
@@ -82,6 +82,7 @@ for (const mode of ["quit", "last-window", "crash", "outside-edit", "write-failu
       desktop = null;
       await rm(gate, {force: true});
       if (mode === "outside-edit") await writeFile(join(temp.rootPath, path), "# Outside\n\nOUTSIDE_WINS\n");
+      if (mode === "deleted-file") await rm(join(temp.rootPath, path));
       if (mode === "refused-import") {
         const names = (await readdir(recovery)).filter(name => name.endsWith(".json"));
         expect(names).toHaveLength(1);
@@ -93,15 +94,31 @@ for (const mode of ["quit", "last-window", "crash", "outside-edit", "write-failu
       }
       desktop = await launchDesktopApp({workspace: temp});
       const reopened = await openWorkspaceFromFirstRun(desktop.page, temp);
-      await waitForWorkspaceFile(desktop.page, reopened.workspaceId, path);
+      if (mode !== "deleted-file") await waitForWorkspaceFile(desktop.page, reopened.workspaceId, path);
       await test.info().attach("reopened-lineage", {body: JSON.stringify(await withEngineDb(temp.rootPath, db => ({docs: db.prepare("SELECT * FROM ydoc_docs").all(), moments: db.prepare("SELECT moment_id, metadata_origin FROM moments").all()}))), contentType: "application/json"});
       if (mode === "refused-import") {
         await desktop.page.getByTestId("notice-center-toggle").click();
-        await expect(desktop.page.getByTestId("notice-center").getByText(IMPORT_FAILURE_MESSAGE, {exact: true})).toHaveCount(1);
+        await expect(desktop.page.getByTestId("notice-center").getByText(AUTHOR_REFUSED_MESSAGE, {exact: true})).toHaveCount(1);
         expect(await checkpointText(temp.homeDir)).toContain(sentinels[2]!);
         return;
       }
-      if (mode === "outside-edit") {
+      if (mode === "deleted-file") {
+        const recoveryStatus = () => desktop!.page.evaluate(async workspaceId =>
+          (window as unknown as {dohcDesktop: DohcDesktopBridge}).dohcDesktop.getCaptureRecoveryStatus({workspaceId}), reopened.workspaceId);
+        await expect.poll(async () => (await recoveryStatus()).captureRecoveries.length).toBe(1);
+        const momentId = (await recoveryStatus()).captureRecoveries[0]!.momentId;
+        await expect.poll(() => checkpointText(temp.homeDir)).toBe("");
+        await expect(access(join(temp.rootPath, path))).rejects.toThrow();
+        await openHistoryView(desktop.page);
+        await desktop.page.locator(`[data-testid="engine-moment-open"][data-moment-id="${momentId}"]`).click();
+        await expect(desktop.page.getByTestId("engine-diff-lines")).toContainText(sentinels[2]!);
+        await desktop.page.getByTestId("engine-diff-copy-typing").click();
+        await expect.poll(() => desktop!.app.evaluate(({clipboard}) => clipboard.readText())).toContain(sentinels[2]!);
+        await desktop.page.getByTestId("engine-diff-restore-file").click();
+        await desktop.page.getByTestId("engine-diff-confirm-restore").click();
+        await expect(desktop.page.getByTestId("engine-diff-restore-status")).toContainText("Restored the earlier state");
+        await expect.poll(() => readFile(join(temp.rootPath, path), "utf8")).toContain(sentinels[2]!);
+      } else if (mode === "outside-edit") {
         await expect.poll(() => withEngineDb(temp.rootPath, db => db.prepare(
           "SELECT b.text AS before_text FROM moments m JOIN blobs b ON b.sha256=m.payload_before_blob_sha256 WHERE m.metadata_origin='capture-recovery'"
         ).all())).toEqual(expect.arrayContaining([expect.objectContaining({before_text: expect.stringContaining(sentinels[2]!)})]));

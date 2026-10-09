@@ -94,7 +94,7 @@ export type WorkspaceOpenParams = WorkspaceJsonObject & {
 export type CaptureRecoveryImportParams = WorkspaceJsonObject & {
   versionId: string; objectId: string; path: string;
   expectedClaimId: string | null; expectedStateVectorSha256: string;
-  expectedDiskSha256: string | null; text: string;
+  expectedDiskSha256: string | null; admittedBaseBase64: string; text: string;
   updates: { requestId: string; updateBase64: string; actorOriginId?: string;
     attribution?: import("../ydoc/ydocWireContract").ChangeAttributionWire }[];
 };

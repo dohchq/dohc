@@ -4,8 +4,8 @@ import { expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { createTestScratch } from "./testTemp";
 import { hasRetainedLiveDraft } from "./liveDraftRecovery";
-import { typingRecoveryStateVectorSha256, writeTypingCheckpoint, readTypingCheckpoints, retireTypingCheckpoint, importTypingCheckpoints, flushTypingCheckpoints, registerTypingCheckpoint, type OutageTypingCheckpoint } from "./outageTypingRecovery";
-const checkpoint: OutageTypingCheckpoint = {version: 2, workspaceId: "workspace", versionId: "main", objectId: "object", path: "note.md", expectedClaimId: "claim", expectedStateVectorSha256: "a".repeat(64), expectedDiskSha256: "b".repeat(64), text: "typing", updateBase64: "AAA=", admittedBaseBase64: "AAA=", updates: [{requestId: "original", updateBase64: "AAA=", actorOriginId: "person", attribution: {actorKind: "human", onBehalfOf: "person", depth: 0}}]};
+import { typingRecoveryStateVectorSha256, writeTypingCheckpoint, readTypingCheckpoints, retireTypingCheckpoint, importTypingCheckpoints, flushTypingCheckpoints, flushTypingCheckpointsSync, writeTypingCheckpointSync, registerTypingCheckpoint, type OutageTypingCheckpoint } from "./outageTypingRecovery";
+const checkpoint: OutageTypingCheckpoint = {version: 2, checkpointId: "session-checkpoint", workspaceId: "workspace", versionId: "main", objectId: "object", path: "note.md", expectedClaimId: "claim", expectedStateVectorSha256: "a".repeat(64), expectedDiskSha256: "b".repeat(64), text: "typing", updateBase64: "AAA=", admittedBaseBase64: "AAA=", updates: [{requestId: "original", updateBase64: "AAA=", actorOriginId: "person", attribution: {actorKind: "human", onBehalfOf: "person", depth: 0}}]};
 it("persists originals and admitted base before exit and replaces the same record during outage edits", async () => {
  const directory = await createTestScratch("typing-checkpoint-");
  await writeTypingCheckpoint(directory, checkpoint);
@@ -72,4 +72,29 @@ it("hashes state vectors in the engine's canonical client order", () => {
   const engineDigest = createHash("sha256").update(ascending).digest("hex");
   expect(typingRecoveryStateVectorSha256(descending)).toBe(engineDigest);
   expect(typingRecoveryStateVectorSha256(ascending)).toBe(engineDigest);
+});
+
+it("leaves live-session checkpoints to their replay owner during a rebind",async()=>{
+ const directory=await createTestScratch("typing-owned-");await writeTypingCheckpoint(directory,checkpoint);
+ const importer=vi.fn(async()=>({committed:true as const,outcome:"imported" as const,momentId:"false-moment"}));const failure=vi.fn(),refresh=vi.fn();
+ const unregister=registerTypingCheckpoint("workspace",async()=>{},()=>true,{versionId:"main",path:"note.md",objectId:()=>"object"});
+ try {await importTypingCheckpoints(directory,"workspace",importer,failure,refresh);expect(importer).not.toHaveBeenCalled();expect(refresh).not.toHaveBeenCalled();expect(await readTypingCheckpoints(directory,"workspace")).toHaveLength(1);}finally{unregister();}
+ await importTypingCheckpoints(directory,"workspace",importer,failure,refresh);expect(importer).toHaveBeenCalledOnce();
+});
+it("a later session never overwrites typing whose import was refused",async()=>{
+ const directory=await createTestScratch("typing-retained-");await writeTypingCheckpoint(directory,checkpoint);
+ await importTypingCheckpoints(directory,"workspace",async()=>{throw Error("capture-recovery-refused:remote-human-author");},()=>{},()=>{});
+ await writeTypingCheckpoint(directory,{...checkpoint,checkpointId:"next-session",text:"later typing"});
+ expect((await readTypingCheckpoints(directory,"workspace")).map(r=>r.checkpoint.text).sort()).toEqual(["later typing","typing"]);
+});
+it("waits for every checkpoint even after one fails",async()=>{
+ let release!:()=>void;const held=new Promise<void>(done=>{release=done;});let finished=false;
+ const a=registerTypingCheckpoint("a",async()=>{throw Error("disk full");});const b=registerTypingCheckpoint("b",async()=>{await held;finished=true;});
+ try {let answered=false;const flush=flushTypingCheckpoints().catch(()=>{answered=true;});await Promise.resolve();expect(answered).toBe(false);release();await flush;expect(finished).toBe(true);}finally{a();b();}
+});
+it("keeps the final synchronous OS-end copy when an older async rewrite finishes",async()=>{
+ const directory=await createTestScratch("typing-os-end-");await writeTypingCheckpoint(directory,checkpoint);
+ const older=writeTypingCheckpoint(directory,{...checkpoint,text:"debounced"});
+ const unregister=registerTypingCheckpoint("workspace",async()=>{},()=>true,undefined,()=>writeTypingCheckpointSync(directory,{...checkpoint,text:"final OS typing"}));
+ try {flushTypingCheckpointsSync();await older;expect((await readTypingCheckpoints(directory,"workspace"))[0]!.checkpoint.text).toBe("final OS typing");}finally{unregister();}
 });

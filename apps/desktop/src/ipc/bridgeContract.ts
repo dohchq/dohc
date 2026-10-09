@@ -4939,7 +4939,7 @@ export const StopAndRestorePayload = z.object({
 }).strict();
 export type StopAndRestorePayload = z.infer<typeof StopAndRestorePayload>;
 export const DiscardLiveDraftRecoveryPayload = z.object({workspaceId: WORKSPACE_ID, path: PATH_STRING.refine(isNormalizedRelativePath), objectId: z.string().min(1).max(512), snapshotSha256: z.string().regex(/^[a-f0-9]{64}$/), discardedAtMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)}).strict();
-export const TypingRecoveryFailureSchema = z.object({kind: z.enum(["checkpoint", "import"]), path: z.string(), detail: z.string()}).strict();
+export const TypingRecoveryFailureSchema = z.object({kind: z.enum(["checkpoint", "import"]), path: z.string(), detail: z.string(), reason: z.enum(["author-refused","history-missing","drawing-unavailable"]).optional(), retryable: z.boolean().optional()}).strict();
 export const liveDraftRecoveryOperations = {
   typingRecovery: {
     capabilityId: "document.typing.recovery",
@@ -6440,6 +6440,7 @@ export const ReadOnlyTransitionCause = z.enum(["access-ended", "reconnecting", "
 export type ReadOnlyTransitionCause = z.infer<typeof ReadOnlyTransitionCause>;
 
 export const EngineYDocSaveStateEvent = z.object({
+  typingUnresolved: z.boolean().optional(),
   readOnlyCause: ReadOnlyTransitionCause.optional(),
   authorCapacity: z.boolean().optional(),
   editRefusal: z.object({

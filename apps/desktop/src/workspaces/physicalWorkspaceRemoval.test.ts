@@ -70,7 +70,7 @@ it("reports a draft cleanup failure during failed-join rollback without replacin
       persist: () => h.setRegistered(workspace),
       rollback: () => h.setRegistered(null),
     }),
-    remove: h.remove,
+    remove: async(binding,cleanup)=>{await h.remove(binding,cleanup);},
     release: (reservation, finalize) => h.owner.releaseReservation(reservation, finalize),
     closeRelay: vi.fn(async () => {}),
     rollbackComplete: h.notifyRenderer,
@@ -91,6 +91,7 @@ it("reports a draft cleanup failure during failed-join rollback without replacin
 
 it("warns before removing unresolved typing and leaves its registry and copies when cancelled", async () => {
  const confirm = vi.fn(async () => false); const h = harness(true, confirm);
- await expect(h.forget("workspace")).rejects.toThrow("Workspace removal cancelled.");
+ await expect(h.forget("workspace")).resolves.toBeUndefined();
+ expect(h.clearNotices).not.toHaveBeenCalled();expect(h.notifyRenderer).not.toHaveBeenCalled();expect(h.onError).not.toHaveBeenCalled();
  expect(confirm).toHaveBeenCalledExactlyOnceWith("workspace"); expect(h.removeWorkspace).not.toHaveBeenCalled(); expect(h.removeDrafts).not.toHaveBeenCalled(); expect(h.current()).toEqual(h.workspace);
 });

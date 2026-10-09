@@ -1,4 +1,4 @@
-import { flushTypingCheckpoints } from "./workspaces/outageTypingRecovery";
+import { flushTypingCheckpointsSync } from "./workspaces/outageTypingRecovery";
 import { isAbsolute } from "node:path";
 import {
   classifyShareHandoffArguments,
@@ -353,7 +353,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
 
       app.on("browser-window-created", (_event, window) => {
         window.on("session-end", () => {
-          void flushTypingCheckpoints().catch(() => undefined);
+          try {flushTypingCheckpointsSync();} catch {/* Session end cannot be cancelled. */}
           launch.finished();
         });
       });

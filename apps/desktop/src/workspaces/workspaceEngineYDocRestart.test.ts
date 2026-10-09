@@ -8347,3 +8347,12 @@ it("retires already admitted typing without losing later outage edits", async ()
   expect(state.diskMarkdown).toBe("admitted LATER_OUTAGE");
   expect(await readTypingCheckpoints(directory, workspaceId)).toEqual([]);
 });
+
+it("warns before quit when drawing edits cannot enter a text checkpoint",async()=>{
+ const workspaceId="scene-outage-warning";const {rootPath,sessions,openProvider,state}=await daemonDeathCapture("scene-outage-warning-",workspaceId);const failure=vi.fn();
+ const capture=createWorkspaceEngineCapture({workspaceId,rootPath,rustEngineSessions:sessions,openRustYDocProviderSession:async options=>({...await openProvider(options),contentKind:"scene" as const,objectId:"scene",versionId:"main"}),onError:()=>{},writeTypingCheckpoint:async()=>{},onTypingCheckpointFailure:failure});
+ const session=await capture.openYDocSession({path:"note.md",contentKind:"scene",onRemoteUpdate:()=>{}});const renderer=new Y.Doc();Y.applyUpdate(renderer,session.initialUpdate);
+ onTestFinished(async()=>{state.daemonAlive=true;await capture.stop();renderer.destroy();});
+ state.daemonAlive=false;typeInto(renderer,session,"DRAWING_OUTAGE");await expect(session.settleNow()).rejects.toThrow();
+ await expect(flushTypingCheckpoints(workspaceId)).rejects.toThrow("Drawing changes cannot be kept during an engine outage.");expect(failure).toHaveBeenCalledWith("note.md",expect.any(Error));
+});

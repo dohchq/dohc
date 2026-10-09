@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { bridge } from "../bridge";
-import { CHECKPOINT_FAILURE_MESSAGE, IMPORT_FAILURE_MESSAGE } from "../../workspaces/typingRecoveryWords";
+import { typingRecoveryMessage } from "../../workspaces/typingRecoveryWords";
 import type { useShellError } from "./useShellError";
 
 export function useTypingRecoveryNotices(input: {
@@ -22,10 +22,10 @@ export function useTypingRecoveryNotices(input: {
           const failure = failures.find(f => f.kind === kind);
           if (!failure) {clearKind(noticeKind); continue;}
           reportShellFailure({
-            message: kind === "checkpoint" ? CHECKPOINT_FAILURE_MESSAGE : IMPORT_FAILURE_MESSAGE,
+            message: typingRecoveryMessage(failure),
             details: [["File", failure.path], ["Reason", failure.detail]],
             kind: noticeKind,
-            retry: () => {void refresh("retry");},
+            ...(failure.retryable === false ? {} : {retry: () => {void refresh("retry");}}),
           });
         }
       } catch { /* A later activity event retries the main-process read. */ }

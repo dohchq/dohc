@@ -1,4 +1,5 @@
-import { hasUnresolvedTypingCheckpoints, flushTypingCheckpoints, writeTypingCheckpoint, readTypingCheckpoints, retireTypingCheckpoint, importTypingCheckpoints, type TypingRecoveryFailure } from "./workspaces/outageTypingRecovery";
+import { createTypingQuitRecovery } from "./workspaces/typingQuitRecovery";
+import { writeTypingCheckpointSync, typingRecoveryFailure, hasUnresolvedTypingCheckpoints, flushTypingCheckpoints, writeTypingCheckpoint, readTypingCheckpoints, retireTypingCheckpoint, importTypingCheckpoints, type TypingRecoveryFailure } from "./workspaces/outageTypingRecovery";
 import { liveDraftRecoveryOperations } from "./ipc/bridgeContract";
 import { SharedDocumentWaitingError } from "./ipc/sharedDocumentOpenState";
 import { net } from "electron";
@@ -1886,9 +1887,9 @@ const removePhysicalWorkspace = createPhysicalWorkspaceRemoval({
   confirmDraftRemoval: async workspaceId => {
     await flushTypingCheckpoints(workspaceId);
     if (!(await hasWorkspaceLiveDrafts(join(stateDir(), "live-draft-recovery"), workspaceId))) return true;
-    const answer = await dialog.showMessageBox({type: "warning", title: "Remove this workspace?",
-      message: "This workspace has typing waiting to recover.", detail: "Removing the workspace deletes its recovery copies. This cannot be undone.",
-      buttons: ["Go back", "Remove workspace"], defaultId: 0, cancelId: 0});
+    const answer = await dialog.showMessageBox({type: "warning", title: "Forget this workspace?",
+      message: "This workspace has typing waiting to recover.", detail: "Forget deletes its kept copies from dohc. The folder is not deleted. This cannot be undone.",
+      buttons: ["Go back", "Forget"], defaultId: 0, cancelId: 0});
     return answer.response === 1;
   },
   removeDrafts: workspaceId => removeWorkspaceLiveDrafts(join(stateDir(), "live-draft-recovery"), workspaceId),
@@ -1908,7 +1909,7 @@ const createJoinedWorkspace = createJoinedWorkspaceRunner({
   reserve: (input) => workspaceAuthorities.reserveBinding(input),
   createFolder: createWorkspaceFolder,
   register: registerReservedPhysicalWorkspace,
-  remove: removePhysicalWorkspace,
+  remove: async (binding,cleanup)=>{await removePhysicalWorkspace(binding,cleanup);},
   release: (reservation, cleanup) =>
     workspaceAuthorities.releaseReservation(reservation, cleanup),
   closeRelay: (workspaceId) => closeRelayTransportWorkspace(workspaceId),
@@ -2190,21 +2191,14 @@ function engineForWorkspace(
   });
 }
 
-function beforeQuitWithTypingRecovery(event: {preventDefault(): void}): void {
-    if (!desktopWindows.workspaceWindows.allLive().length && hasUnresolvedTypingCheckpoints() && !typingQuitApproved) {
-      event.preventDefault();
-      void flushTypingCheckpoints().then(() => {typingQuitApproved = true; app.quit();}, async () => {
-        const answer = await dialog.showMessageBox({type: "warning", title: "Quit without your typing?",
-          message: "dohc could not keep your typing on this computer.", detail: "Your typing is lost when dohc quits.",
-          buttons: ["Go back", "Quit anyway"], defaultId: 0, cancelId: 0});
-        if (answer.response === 1) {typingQuitApproved = true; app.quit();}
-      });
-      return;
-    }
-    quitGuard.beforeQuit(event);
-}
+const typingQuitRecovery=createTypingQuitRecovery({
+ hasWindows:()=>desktopWindows.workspaceWindows.allLive().length > 0,
+ unresolved:hasUnresolvedTypingCheckpoints,flush:flushTypingCheckpoints,quit:()=>app.quit(),beforeQuit:event=>quitGuard.beforeQuit(event),
+ confirmLoss:async()=>{const drawing=[...typingRecoveryFailures.values()].some(rows=>[...rows.values()].some(f=>f.reason === "drawing-unavailable"));
+ const answer=await dialog.showMessageBox({type:"warning",title:drawing ? "Quit without your drawing changes?" : "Quit without your typing?",message:drawing ? "dohc could not keep your drawing changes on this computer." : "dohc could not keep your typing on this computer.",detail:drawing ? "Your drawing changes since the last saved copy are lost when dohc quits." : "Your typing since the last kept copy is lost when dohc quits.",buttons:["Go back","Quit anyway"],defaultId:0,cancelId:0});return answer.response === 1;},
+});
+function beforeQuitWithTypingRecovery(event:{preventDefault():void}):void {typingQuitRecovery.beforeQuit(event);}
 
-let typingQuitApproved = false;
 const typingRecoveryFailures = new Map<string, Map<string, TypingRecoveryFailure>>();
 const typingRecoveryImports = new Map<symbol, Promise<void>>();
 function reportTypingRecoveryFailure(workspaceId: string, failure: TypingRecoveryFailure): void {
@@ -2264,10 +2258,13 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
             typingRecoveryFailures.get(workspace.workspaceId)?.delete("checkpoint:" + checkpoint.path);
             notifyRenderer({workspaceId: workspace.workspaceId});
           } catch (error) {
-            reportTypingRecoveryFailure(workspace.workspaceId, {kind: "checkpoint", path: checkpoint.path, detail: String(error)});
+            reportTypingRecoveryFailure(workspace.workspaceId, typingRecoveryFailure("checkpoint",checkpoint.path,error));
             throw error;
           }
         },
+        writeTypingCheckpointSync: checkpoint=>writeTypingCheckpointSync(join(stateDir(),"live-draft-recovery"),checkpoint),
+        onTypingCheckpointFailure: (path,error)=>reportTypingRecoveryFailure(workspace.workspaceId,typingRecoveryFailure("checkpoint",path,error)),
+        onTypingCheckpointRecovered: path=>{typingRecoveryFailures.get(workspace.workspaceId)?.delete("checkpoint:"+path);notifyRenderer({workspaceId:workspace.workspaceId});},
         retireTypingCheckpoint: async checkpoint => {
           for (const row of await readTypingCheckpoints(join(stateDir(), "live-draft-recovery"), workspace.workspaceId)) {
             if (row.checkpoint.objectId === checkpoint.objectId && row.content === JSON.stringify(checkpoint)) await retireTypingCheckpoint(row);
@@ -5365,10 +5362,9 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     stopSearch: () => workspaceSearchOwner.dispose(),
     stopSitePreviews: stopAllSitePreviews,
     settleYDocs: async () => {
-      await flushTypingCheckpoints();
       await settleYDocsAfterFileObservation(
-      workspaceAuthorities.workspaceIds().map(workspaceId =>
-        workspaceAuthorities.withAuthority(workspaceId, lease => workspaceActivity.drainObservations(lease.state.activity))),
+      [flushTypingCheckpoints(), ...workspaceAuthorities.workspaceIds().map(workspaceId =>
+        workspaceAuthorities.withAuthority(workspaceId, lease => workspaceActivity.drainObservations(lease.state.activity)))],
       closeAllEngineYDocSessions,
       );
     },

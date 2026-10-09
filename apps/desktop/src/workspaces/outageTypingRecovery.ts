@@ -1,5 +1,6 @@
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { decodeStateVector } from "yjs";
@@ -7,9 +8,15 @@ import type { CaptureRecoveryImportParams, CaptureRecoveryImportResult } from "@
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 
 const attribution = z.object({actorKind: z.enum(["human", "agent", "automation"]), onBehalfOf: z.string().optional(), depth: z.number().int().nonnegative().optional(), run: z.object({claimId: z.string(), automationName: z.string()}).strict().optional()}).strict();
-const checkpointSchema = z.object({version: z.literal(2), workspaceId: z.string().min(1), versionId: z.string().min(1), objectId: z.string().min(1), path: z.string().min(1), expectedClaimId: z.string().nullable(), expectedStateVectorSha256: z.string().regex(/^[a-f0-9]{64}$/), expectedDiskSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable(), text: z.string(), updateBase64: z.string(), admittedBaseBase64: z.string(), updates: z.array(z.object({requestId: z.string().min(1), updateBase64: z.string(), actorOriginId: z.string().optional(), attribution: attribution.optional()}).strict()).max(4096)}).strict();
+const checkpointSchema = z.object({version: z.literal(2), checkpointId: z.string().min(1), workspaceId: z.string().min(1), versionId: z.string().min(1), objectId: z.string().min(1), path: z.string().min(1), expectedClaimId: z.string().nullable(), expectedStateVectorSha256: z.string().regex(/^[a-f0-9]{64}$/), expectedDiskSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable(), text: z.string(), updateBase64: z.string(), admittedBaseBase64: z.string(), updates: z.array(z.object({requestId: z.string().min(1), updateBase64: z.string(), actorOriginId: z.string().optional(), attribution: attribution.optional()}).strict()).max(4096)}).strict();
 export type OutageTypingCheckpoint = z.infer<typeof checkpointSchema>;
-export type TypingRecoveryFailure = {kind: "checkpoint" | "import"; path: string; detail: string};
+export type TypingRecoveryFailure = {kind: "checkpoint" | "import"; path: string; detail: string; reason?: "author-refused" | "history-missing" | "drawing-unavailable"; retryable?: boolean};
+export class DrawingCheckpointUnavailable extends Error {constructor(){super("Drawing changes cannot be kept during an engine outage.");}}
+export function typingRecoveryFailure(kind: "checkpoint" | "import", path: string, error: unknown): TypingRecoveryFailure {
+ const detail=String(error);
+ const reason = error instanceof DrawingCheckpointUnavailable ? "drawing-unavailable" : /remote-human-author|invalid-author/.test(detail) ? "author-refused" : /object-history-missing/.test(detail) ? "history-missing" : undefined;
+ return {kind,path,detail,...(reason ? {reason,retryable: reason === "drawing-unavailable"} : {})};
+}
 const digest = (s: string) => createHash("sha256").update(s).digest("hex");
 export function typingRecoveryStateVectorSha256(vector: Uint8Array): string {
   const entries = [...decodeStateVector(vector)].sort(([left], [right]) => left - right);
@@ -25,7 +32,8 @@ export function typingRecoveryStateVectorSha256(vector: Uint8Array): string {
   for (const [client, clock] of entries) { append(client); append(clock); }
   return createHash("sha256").update(new Uint8Array(bytes)).digest("hex");
 }
-const checkpointName = (c: OutageTypingCheckpoint) => digest(JSON.stringify(["outage", c.workspaceId, c.versionId, c.objectId])) + ".json";
+const checkpointName = (c: OutageTypingCheckpoint) => digest(JSON.stringify(["outage", c.workspaceId, c.versionId, c.objectId, c.checkpointId])) + ".json";
+const fileRevisions = new Map<string, number>();
 const fileWrites = new Map<string, Promise<unknown>>();
 function withCheckpointFile<T>(file: string, operation: () => Promise<T>): Promise<T> {
   const pending = (fileWrites.get(file) ?? Promise.resolve()).catch(() => undefined).then(operation);
@@ -33,7 +41,9 @@ function withCheckpointFile<T>(file: string, operation: () => Promise<T>): Promi
   return pending.finally(() => {if (fileWrites.get(file) === pending) fileWrites.delete(file);});
 }
 export async function writeTypingCheckpoint(directory: string, checkpoint: OutageTypingCheckpoint): Promise<void> {
-  return withCheckpointFile(join(directory, checkpointName(checkpoint)), async () => {
+  const file=join(directory,checkpointName(checkpoint));
+  const revision=(fileRevisions.get(file) ?? 0)+1; fileRevisions.set(file,revision);
+  return withCheckpointFile(file, async () => {
   checkpointSchema.parse(checkpoint);
   if (classifyEngineFilePathForRead(checkpoint.path, process.platform).kind !== "tracked") throw new Error("This path cannot enter draft recovery.");
   await mkdir(directory, {recursive: true});
@@ -41,7 +51,7 @@ export async function writeTypingCheckpoint(directory: string, checkpoint: Outag
   const temporary = join(directory, checkpointName(checkpoint) + "." + randomUUID() + ".tmp");
   try {
     await writeFile(temporary, content, {encoding: "utf8", flag: "wx", flush: true, mode: 0o600});
-    await rename(temporary, join(directory, checkpointName(checkpoint)));
+    if(fileRevisions.get(file) === revision) renameSync(temporary,file);
   } finally { await rm(temporary, {force: true}).catch(() => undefined); }
   });
 }
@@ -64,30 +74,45 @@ export async function readTypingCheckpoints(directory: string, workspaceId: stri
 }
 export async function retireTypingCheckpoint(row: {file: string; content: string}): Promise<void> {
   return withCheckpointFile(row.file, async () => {
-  const current = await readFile(row.file, "utf8").catch((e: NodeJS.ErrnoException) => {if (e.code === "ENOENT") return null; throw e;});
-  if (current === row.content) await rm(row.file, {force: true});
+  let current: string; try {current=readFileSync(row.file,"utf8");} catch(error) {if((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error;}
+  if (current === row.content) rmSync(row.file, {force: true});
   });
 }
 export async function importTypingCheckpoints(directory: string, workspaceId: string, importer: (input: CaptureRecoveryImportParams) => Promise<CaptureRecoveryImportResult>, failure: (failure: TypingRecoveryFailure) => void, refresh: (path: string) => void): Promise<void> {
   for (const row of await readTypingCheckpoints(directory, workspaceId)) {
+    if([...checkpoints.values()].some(owner=>owner.workspaceId === workspaceId && owner.identity?.versionId === row.checkpoint.versionId && (owner.identity.path === row.checkpoint.path || owner.identity.objectId() === row.checkpoint.objectId))) continue;
     try {
-      const {version: _version, workspaceId: _workspace, updateBase64: _update, admittedBaseBase64: _base, ...input} = row.checkpoint;
+      const {version: _version, checkpointId: _checkpointId, workspaceId: _workspace, updateBase64: _update, ...input} = row.checkpoint;
       const result = await importer(input);
       if (result.committed !== true) throw new Error("Recovery was not committed.");
       await retireTypingCheckpoint(row);
       refresh(row.checkpoint.path);
-    } catch (error) { failure({kind: "import", path: row.checkpoint.path, detail: String(error)}); }
+    } catch (error) { failure(typingRecoveryFailure("import",row.checkpoint.path,error)); }
   }
 }
 
-const checkpoints = new Map<object, {workspaceId: string; flush: () => Promise<void>; pending: () => boolean}>();
-export function registerTypingCheckpoint(workspaceId: string, flush: () => Promise<void>, pending: () => boolean = () => true): () => void {
-  const token = {};
-  checkpoints.set(token, {workspaceId, flush, pending});
-  return () => checkpoints.delete(token);
+export function writeTypingCheckpointSync(directory: string, checkpoint: OutageTypingCheckpoint): void {
+ checkpointSchema.parse(checkpoint);
+ if(classifyEngineFilePathForRead(checkpoint.path,process.platform).kind !== "tracked") throw new Error("This path cannot enter draft recovery.");
+ const file=join(directory,checkpointName(checkpoint));
+ fileRevisions.set(file,(fileRevisions.get(file) ?? 0)+1);
+ mkdirSync(directory,{recursive:true});
+ const temporary=file+"."+randomUUID()+".tmp";
+ try {writeFileSync(temporary,JSON.stringify(checkpoint),{encoding:"utf8",flag:"wx",flush:true,mode:0o600});renameSync(temporary,file);}
+ finally {rmSync(temporary,{force:true});}
+}
+type CheckpointOwner = {workspaceId:string;flush:()=>Promise<void>;pending:()=>boolean;identity?:{versionId:string;path:string;objectId:()=>string|undefined};flushSync?:()=>void;unresolved:()=>boolean};
+const checkpoints = new Map<object, CheckpointOwner>();
+export function registerTypingCheckpoint(workspaceId: string, flush: () => Promise<void>, pending: () => boolean = () => true, identity?: CheckpointOwner["identity"], flushSync?:()=>void, unresolved:()=>boolean=pending): () => void {
+ const token={}; checkpoints.set(token,{workspaceId,flush,pending,identity,flushSync,unresolved});
+ return ()=>checkpoints.delete(token);
 }
 export async function flushTypingCheckpoints(workspaceId?: string): Promise<void> {
-  await Promise.all([...checkpoints.values()].filter(c => workspaceId === undefined || c.workspaceId === workspaceId).map(c => c.flush()));
+ const results=await Promise.allSettled([...checkpoints.values()].filter(c=>workspaceId === undefined || c.workspaceId === workspaceId).map(c=>c.flush()));
+ const failure=results.find((r):r is PromiseRejectedResult=>r.status === "rejected"); if(failure) throw failure.reason;
 }
-
-export function hasUnresolvedTypingCheckpoints(): boolean {return [...checkpoints.values()].some(c => c.pending());}
+export function flushTypingCheckpointsSync():void {
+ let failure:unknown; for(const checkpoint of checkpoints.values()) {try{checkpoint.flushSync?.();}catch(error){failure ??=error;}} if(failure)throw failure;
+}
+export function hasUnresolvedTypingCheckpoints(): boolean {return [...checkpoints.values()].some(c=>c.pending());}
+export function isTypingSessionUnresolved(workspaceId:string,path:string):boolean {return [...checkpoints.values()].some(c=>c.workspaceId === workspaceId && c.identity?.path === path && c.unresolved());}
