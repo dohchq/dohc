@@ -46,7 +46,10 @@ const descriptor = { id: "image", mimeType: "image/png", created: 1, ref: "asset
 type SharedHistoryStore = Pick<ReturnType<ReturnType<typeof createReceivedShareEngineAccess>["storeFor"]>, "listHistoryPage" | "getMoment">;
 
 /** `sharedStore` makes the renderer's workspace a received share view backed by that store. */
-async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string) {
+async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, retry?: {
+  afterOperation(): Promise<void>;
+  read(): Promise<void>;
+}) {
   const workspace: RegistryEntry = { workspaceId: "workspace", rootPath: policyRoot ?? "C:/alias", kind: "personal", mode: "local-first",
     ...(sharedStore ? { shareView: {} as NonNullable<RegistryEntry["shareView"]> } : {}) };
   // Open and writable, but not the workspace this renderer shows.
@@ -80,6 +83,11 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string) {
     currentSession: (value: Sender) => renderers.current(value),
     withPhysicalOperation: authority.withOperation.bind(authority),
   });
+  const gatedWorkspaceOperation: typeof withRendererWorkspaceOperation = async (sender, workspaceId, message, work) => {
+    const result = await withRendererWorkspaceOperation(sender, workspaceId, message, work);
+    if (retry) await retry.afterOperation();
+    return result;
+  };
   const sessions = new EngineWorkspaceSessions({ currentClient: () => { throw new Error("daemon boundary"); } });
   const storeWorkspaces: unknown[] = [];
   const receivedShareEngine = createReceivedShareEngineAccess({
@@ -189,7 +197,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string) {
     localPerson: async () => ({ kind: "human", humanId: session.account ?? "install-local" }),
     registerHandler: (channel, handler) => { handlers.set(channel, handler); },
     assertTrustedSender: (event: { sender: Sender }) => { if (event.sender.id === -1) throw new Error("untrusted"); },
-    withRendererWorkspaceOperation, receivedShareEngine,
+    withRendererWorkspaceOperation: gatedWorkspaceOperation, receivedShareEngine,
     withEngineAdapter: async (_workspace, work) => {
       routed.push(_workspace);
       return missingAdapter ? null : work(adapter);
@@ -200,7 +208,8 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string) {
     notifyRenderer: notify,
     namedAuthorLabels: () => () => "Someone you shared with",
     automationPersonName: (_workspaceId, userId) => userId === "person-local" ? null : userId,
-    retryOwnerLiveDelivery, retryCloudSync, retryFileObservation,
+    retryOwnerLiveDelivery, retryCloudSync,
+    retryFileObservation: retry ? id => { void retryFileObservation(id); return retry.read(); } : retryFileObservation,
     requireWorkspace, assertWritableWorkspace: writable, syncStatusWithOwnedProjection: syncProjection,
     activity: { getStatus, hasAgentRun }, workspaceAuthorities: authority, canonicalWorkspaceFor,
     requireEngineSessions: requireSessions, closeDispatchRunActivity: closeActivity,
@@ -247,6 +256,24 @@ const channels = [
 ];
 
 describe("workspace engine IPC registrations", () => {
+  it("handles a read rejection before workspace operation completion", async () => {
+    const completed = deferred<void>();
+    const read = deferred<void>();
+    const attached = vi.spyOn(read.promise, "then");
+    const h = await harness(undefined, undefined, { afterOperation: () => completed.promise, read: () => read.promise });
+    const result = expect(h.invoke("desktop:retry-file-observation")).rejects.toThrow("read failed");
+    try {
+      await vi.waitFor(() => expect(h.retryFileObservation).toHaveBeenCalledOnce());
+      expect(attached).toHaveBeenCalled();
+      expect(attached.mock.calls.some(([, rejected]) => typeof rejected === "function")).toBe(true);
+    } finally {
+      // Keep the failing baseline test from leaking an unhandled rejection.
+      void read.promise.catch(() => {});
+      read.reject(new Error("read failed"));
+      completed.resolve();
+      await result;
+    }
+  });
   it("retries file observation only for this renderer's active workspace and propagates failure", async () => {
     const h = await harness();
     await h.invoke("desktop:retry-file-observation");

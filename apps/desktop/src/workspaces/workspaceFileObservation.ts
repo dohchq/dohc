@@ -72,11 +72,14 @@ export function observeWorkspaceFiles(options: {
     if (pulling) for (const fact of changes.facts) observedPaths.add(fact.path);
     if (changes.facts.length) options.callbacks.facts(changes.facts);
     cursor = changes.cursor;
+    options.callbacks.degraded(changes.degraded ? "unavailable" : null);
     if (changes.ready) {
       unavailable = false;
-      options.callbacks.degraded(null);
       if (!readySeen) { readySeen = true; resolveReady(); }
-    } else if (changes.degraded) degraded("unavailable");
+    } else if (changes.degraded) {
+      unavailable = true;
+      resolveReady();
+    }
   }
 
   function enqueue(task: () => Promise<void>): Promise<void> {

@@ -409,10 +409,12 @@ export function createWorkspaceEngineIpc<
       withActiveWorkspace: (event, workspaceId, message, work) => withRendererWorkspaceOperation(event.sender, workspaceId, message, work),
     }, fileObservationOperations, {
       retryFileObservation: async (input, { event }) => {
-        const started = await withRendererWorkspaceOperation(event.sender, input.workspaceId, "This workspace is no longer active.", async operation => ({
-          workspaceId: operation.workspace.workspaceId,
-          read: dependencies.retryFileObservation(operation.workspace.workspaceId),
-        }));
+        const started = await withRendererWorkspaceOperation(event.sender, input.workspaceId, "This workspace is no longer active.", async operation => {
+          const read = dependencies.retryFileObservation(operation.workspace.workspaceId);
+          // Observe rejection while the workspace operation is still completing.
+          void read.catch(() => {});
+          return { workspaceId: operation.workspace.workspaceId, read };
+        });
         // A stalled read must not hold the workspace operation open.
         await started.read;
         return activity.getStatus(started.workspaceId);

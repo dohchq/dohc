@@ -239,26 +239,30 @@ describe("workspaceActivity capture hooks", () => {
     await activity.stop(state);
   });
 
-  it("names a persistent failed read separately from history and clears it after recovery", async () => {
+  it.each([true, false])("clears a persistent failed read after recovery with ready=%s", async ready => {
     vi.useFakeTimers();
     try {
       const recovered = {
-        cursor: { generation: "recovered", revision: 1 }, ready: true, resync: false, facts: [],
+        cursor: { generation: "recovered", revision: 1 }, ready, resync: false, facts: [],
       };
       const read = vi.fn().mockRejectedValue(new Error("read failed"));
-      const activity = createWorkspaceActivity(vi.fn(), {
+      const activity = createPhysicalWorkspaceActivity(vi.fn(), {
         observationFor: (_w, callbacks) => observeWorkspaceFiles({ callbacks, read, subscribe: () => () => {}, onError: vi.fn() }),
       });
-      const opening = activity.open(workspace());
+      const state = new WorkspaceActivityState();
+      const w = workspace();
+      const opening = activity.open(w, state);
       await vi.advanceTimersByTimeAsync(0);
       expect((await opening).historyRecordingUnavailable).toBe(false);
-      expect(activity.getStatus("activity-test").fileObservationFailure).toBeUndefined();
+      expect(activity.getStatus(w, state).fileObservationFailure).toBeUndefined();
       await vi.advanceTimersByTimeAsync(7_750);
-      expect(activity.getStatus("activity-test")).toMatchObject({ historyRecordingUnavailable: false, fileObservationFailure: "read-failed" });
+      expect(activity.getStatus(w, state)).toMatchObject({ historyRecordingUnavailable: false, fileObservationFailure: "read-failed" });
       read.mockResolvedValue(recovered);
       await vi.advanceTimersByTimeAsync(5_000);
-      expect(activity.getStatus("activity-test").fileObservationFailure).toBeUndefined();
-      await activity.stopAll();
+      expect(activity.getStatus(w, state).fileObservationFailure).toBeUndefined();
+      await activity.retryFileObservation(state);
+      expect(activity.getStatus(w, state).fileObservationFailure).toBeUndefined();
+      await activity.stop(state);
     } finally { vi.useRealTimers(); }
   });
 

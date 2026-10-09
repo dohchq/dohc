@@ -182,6 +182,33 @@ describe("workspace file observation", () => {
     await f.handle.stop();
   });
 
+  it("clears a failed read after restart while scanning, including Try again", async () => {
+    vi.useFakeTimers();
+    const read = vi.fn().mockResolvedValueOnce(answer(1)).mockRejectedValue(new Error("daemon stopped"));
+    const f = fixture(read);
+    await f.handle.ready;
+    f.wake();
+    await vi.advanceTimersByTimeAsync(7_750);
+    expect(f.callbacks.degraded).toHaveBeenLastCalledWith("read-failed");
+    read.mockResolvedValue({ ...answer(0, { cursor: { generation: "restarted", revision: 0 }, ready: false, resync: true }), degraded: false });
+    await f.handle.retry();
+    expect(f.callbacks.degraded).toHaveBeenLastCalledWith(null);
+    expect(f.callbacks.resync).toHaveBeenCalledOnce();
+    await f.handle.retry();
+    expect(f.callbacks.degraded).toHaveBeenLastCalledWith(null);
+    expect(read).toHaveBeenCalledTimes(9);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(read).toHaveBeenCalledTimes(9);
+    await f.handle.stop();
+  });
+
+  it("reports watcher degradation even when a successful read is ready", async () => {
+    const f = fixture(vi.fn().mockResolvedValue({ ...answer(1), degraded: true }));
+    await f.handle.ready;
+    expect(f.callbacks.degraded).toHaveBeenLastCalledWith("unavailable");
+    await f.handle.stop();
+  });
+
   it("logs a drain timeout once even when the drain later rejects", async () => {
     vi.useFakeTimers();
     const pending = deferred<FileObservationChanges>();
