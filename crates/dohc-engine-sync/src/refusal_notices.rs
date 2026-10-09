@@ -5,8 +5,7 @@ use serde_json::Value;
 
 use crate::SyncError;
 
-// reason_code currently permits only invalid-input. Keep the retained-update
-// messages shared with their writers until the schema can distinguish them.
+// Retained-update refusals share invalid-input; their messages distinguish the retained mutation.
 pub(crate) enum RetainedUpdateRefusal {
     ProjectionTooLarge(dohc_engine_collab::ContentKind),
     ContentKindMismatch,
@@ -88,7 +87,7 @@ fn document(payload: &Value) -> Option<RefusalDocument> {
 fn rows(conn: &Connection, workspace_id: &str) -> Result<Vec<RefusalNotice>, SyncError> {
     let mut statement = conn
         .prepare(
-            "SELECT p.origin_id,p.origin_seq,p.reason_message,r.payload_json \
+            "SELECT p.origin_id,p.origin_seq,p.reason_message,r.payload_json,p.reason_code \
          FROM replication_pending_refusals p JOIN replication_log r \
          USING(workspace_id,origin_id,origin_seq) WHERE p.workspace_id=?1 AND COALESCE(p.report_id,'') != ?2 \
          ORDER BY r.rowid",
@@ -103,6 +102,7 @@ fn rows(conn: &Connection, workspace_id: &str) -> Result<Vec<RefusalNotice>, Syn
                     row.get::<_, i64>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
                 ))
             },
         )
@@ -110,10 +110,10 @@ fn rows(conn: &Connection, workspace_id: &str) -> Result<Vec<RefusalNotice>, Syn
         .collect::<Result<Vec<_>, _>>()
         .map_err(SyncError::corrupt)?;
     rows.into_iter()
-        .map(|(origin_id, origin_seq, reason, payload)| {
+        .map(|(origin_id, origin_seq, reason, payload, code)| {
             let payload: Value = serde_json::from_str(&payload).map_err(SyncError::corrupt)?;
             let mut document = document(&payload);
-            if document.is_none() && reason==crate::moment_apply::open_artifacts::RECOVERY_FAILURE {
+            if document.is_none() && code==crate::moment_apply::open_artifacts::RECOVERY_FAILURE_CODE {
                 document=conn.query_row("SELECT p.version_id,p.object_id,p.lineage_claim_id,d.path FROM ydoc_pending_artifacts p JOIN ydoc_docs d USING(workspace_id,version_id,object_id) WHERE p.workspace_id=?1 AND p.origin_id=?2 AND p.origin_seq=?3",
                     params![workspace_id,origin_id,origin_seq],|row|Ok(RefusalDocument {version_id:row.get(0)?,object_id:row.get(1)?,lineage_claim_id:row.get(2)?,path:row.get(3)?,conflict_id:None})).optional().map_err(SyncError::corrupt)?;
             }

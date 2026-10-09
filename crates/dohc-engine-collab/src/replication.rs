@@ -301,6 +301,7 @@ fn apply_remote_update_in_transaction(
         origin.actor_id(),
         attribution,
         Some((&remote.origin_id, remote.origin_seq)),
+        false,
         now_ms,
     )?;
     Ok((
@@ -383,6 +384,7 @@ pub fn apply_remote_update_in_transaction_with_projection(
                 origin.actor_id(),
                 attribution,
                 Some((&remote.origin_id, remote.origin_seq)),
+                false,
                 now_ms,
             )?;
             (
@@ -419,6 +421,7 @@ pub fn apply_remote_update_in_transaction_with_projection(
                 origin.actor_id(),
                 attribution,
                 Some((&remote.origin_id, remote.origin_seq)),
+                false,
                 now_ms,
             )?;
             (

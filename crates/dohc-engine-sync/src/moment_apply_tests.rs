@@ -6750,3 +6750,353 @@ fn open_document_dismissed_refusal_still_holds() {
 fn open_document_parked_successor_still_holds() {
     assert_open_document_exclusion("parked-successor");
 }
+
+fn ended_recovery_fixture() -> (ScratchDir, EngineStore, DocKey, Ydoc, String) {
+    let (scratch, mut store) = test_store();
+    let key = DocKey::new("ws", "main", "object").unwrap();
+    let doc = Ydoc::wire();
+    doc.plaintext_insert(0, "before");
+    let claim = store.put_binary_blob(&doc.encode_full_state()).unwrap();
+    let mut base = envelope(
+        "peer",
+        0,
+        "ws",
+        json!({"versionId":"main","objectId":"object","path":"head.md","contentKind":"plaintext","updateBlobSha256":claim,"lineageClaimId":claim,"isBaseState":true}),
+    );
+    base.op_kind = "ydoc.update".into();
+    base.relay_seq = Some(1);
+    apply_ydoc_envelope(
+        &mut store,
+        &mut Default::default(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    let leases = LeaseRegistry::new();
+    let held = leases.acquire(&key).unwrap();
+    held.bind_claim(Some(&claim)).unwrap();
+    let delta = doc.plaintext_insert(6, " remote");
+    base.origin_seq = 1;
+    base.relay_seq = Some(2);
+    base.payload["isBaseState"] = json!(false);
+    base.payload["updateBlobSha256"] = json!(store.put_binary_blob(&delta).unwrap());
+    apply_ydoc_envelope(
+        &mut store,
+        &mut Default::default(),
+        &base,
+        &NoFaults,
+        &leases,
+    )
+    .unwrap();
+    hydrate_texts(&mut store, &["before remote"]);
+    let moment = envelope(
+        "peer",
+        2,
+        "ws",
+        absent_text_payload(
+            &format!("moment-ydoc-{}", "a".repeat(64)),
+            "object",
+            "head.md",
+            "before remote",
+        ),
+    );
+    crate::apply_moment_envelope_detailed(&mut store, &moment, &NoFaults, &leases).unwrap();
+    drop(held);
+    (scratch, store, key, doc, claim)
+}
+
+fn recover_ended(store: &mut EngineStore) -> Result<crate::OpenArtifactDrain, SyncError> {
+    crate::drain_open_document_artifacts(
+        store,
+        &mut Default::default(),
+        "ws",
+        &NoLiveLeases,
+        &NoFaults,
+    )
+}
+
+#[test]
+fn ended_recovery_storage_failure_propagates_without_notice_or_fingerprint() {
+    let (_scratch, mut store, _, _, _) = ended_recovery_fixture();
+    store.write_with(&NoFaults, |tx| {
+        tx.execute_batch("CREATE TRIGGER fail_projection BEFORE INSERT ON moments WHEN NEW.moment_id GLOB 'moment-ydoc-apply-*' BEGIN SELECT RAISE(ABORT,'projection unavailable'); END;").unwrap();
+        Ok::<_,SyncError>(())
+    }).unwrap();
+    assert!(matches!(
+        recover_ended(&mut store),
+        Err(SyncError::Storage(
+            dohc_engine_storage::StorageError::PersistFailed { .. }
+        ))
+    ));
+    store
+        .read_with(|conn| {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_pending_refusals",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT last_attempt_state FROM ydoc_pending_artifacts",
+                    [],
+                    |r| r.get::<_, Option<String>>(0)
+                )
+                .unwrap(),
+                None
+            );
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn ended_recovery_append_storage_failure_propagates() {
+    let (_scratch, mut store, _, _, _) = ended_recovery_fixture();
+    store.write_with(&NoFaults, |tx| {
+        tx.execute_batch("CREATE TRIGGER fail_append BEFORE INSERT ON ydoc_updates BEGIN SELECT RAISE(ABORT,'append unavailable'); END;").unwrap();
+        Ok::<_,SyncError>(())
+    }).unwrap();
+    assert!(matches!(
+        recover_ended(&mut store),
+        Err(SyncError::Storage(
+            dohc_engine_storage::StorageError::PersistFailed { .. }
+        ))
+    ));
+    store
+        .read_with(|conn| {
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_pending_refusals",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT last_attempt_state FROM ydoc_pending_artifacts",
+                    [],
+                    |r| r.get::<_, Option<String>>(0)
+                )
+                .unwrap(),
+                None
+            );
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn ended_recovery_notice_persist_failure_propagates() {
+    let (_scratch, mut store, _, _, _) = ended_recovery_fixture();
+    store.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE replication_log SET payload_json='{}' WHERE origin_seq=1", []).unwrap();
+        tx.execute_batch("CREATE TRIGGER fail_notice BEFORE INSERT ON replication_pending_refusals BEGIN SELECT RAISE(ABORT,'notice unavailable'); END;").unwrap();
+        Ok::<_,SyncError>(())
+    }).unwrap();
+    assert!(matches!(
+        recover_ended(&mut store),
+        Err(SyncError::Storage(
+            dohc_engine_storage::StorageError::PersistFailed { .. }
+        ))
+    ));
+    let state: Option<String> = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT last_attempt_state FROM ydoc_pending_artifacts",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        state, None,
+        "notice and fingerprint must roll back together"
+    );
+}
+
+#[test]
+fn ended_recovery_pending_materialization_keeps_queue_and_unattempted_mark() {
+    let (_scratch, mut store, _, _, _) = ended_recovery_fixture();
+    store.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE ydoc_docs SET settle_prior_update_seq=0,settle_seq=(SELECT m.moment_order FROM moments m JOIN snapshots s ON s.latest_moment_id=m.moment_id WHERE s.object_id='object')", []).unwrap();
+        tx.execute("INSERT INTO materialization_jobs(job_id,target_path,content_sha256,preimage_present,target_generation,created_at_ms,workspace_id) SELECT 'ydoc-mat_'||latest_moment_id,path,blob_sha256,1,999,0,workspace_id FROM snapshots WHERE object_id='object' ON CONFLICT(job_id) DO UPDATE SET status='pending',completed_at_ms=NULL", []).unwrap();
+        Ok::<_,SyncError>(())
+    }).unwrap();
+    recover_ended(&mut store).unwrap();
+    store
+        .read_with(|conn| {
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_pending_refusals",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT last_attempt_state FROM ydoc_pending_artifacts",
+                    [],
+                    |r| r.get::<_, Option<String>>(0)
+                )
+                .unwrap(),
+                None
+            );
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn ended_recovery_notice_identity_survives_wording_change() {
+    let (_scratch, mut store, _, _, _) = ended_recovery_fixture();
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE replication_log SET payload_json='{}' WHERE origin_seq=1",
+                [],
+            )
+            .unwrap();
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    recover_ended(&mut store).unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            let code: String = tx
+                .query_row(
+                    "SELECT reason_code FROM replication_pending_refusals",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(code, "document-artifact-recovery-failed");
+            tx.execute(
+                "UPDATE replication_pending_refusals SET reason_message='Translated notice'",
+                [],
+            )
+            .unwrap();
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let notices = crate::refusal_notices::list_refusal_notices(&store, "ws");
+    // The document association and cleanup must use the code, not English copy.
+    assert_eq!(
+        notices.unwrap()[0].document.as_ref().unwrap().object_id,
+        "object"
+    );
+    store.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE ydoc_docs SET settled_update_seq=head_update_seq,last_settled_sha=(SELECT blob_sha256 FROM snapshots WHERE object_id='object')", []).unwrap();
+        assert_eq!(tx.query_row("SELECT COUNT(*) FROM replication_pending_refusals", [], |r|r.get::<_,i64>(0)).unwrap(),0);
+        Ok::<_,SyncError>(())
+    }).unwrap();
+}
+
+#[test]
+fn ended_recovery_retries_inserted_durable_update_blob() {
+    let (_scratch, mut store, key, doc, claim) = ended_recovery_fixture();
+    let (sha, bytes): (String,Vec<u8>)=store.read_with(|conn|conn.query_row("SELECT b.sha256,b.bytes FROM binary_blobs b JOIN replication_log r ON b.sha256=json_extract(r.payload_json,'$.updateBlobSha256') WHERE r.origin_seq=1", [], |r|Ok((r.get(0)?,r.get(1)?)))).unwrap();
+    dohc_engine_collab::apply_remote_update(
+        &mut store,
+        &mut Default::default(),
+        &key,
+        &dohc_engine_collab::RemoteUpdate {
+            origin_id: "peer".into(),
+            origin_seq: 1,
+            bytes: bytes.clone(),
+        },
+        None,
+        None,
+        &NoFaults,
+        2000,
+    )
+    .unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM ydoc_deferred_updates WHERE origin_seq=1", [])
+                .unwrap();
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let tail = doc.plaintext_insert(13, " tail");
+    let tail_sha = store.put_binary_blob(&tail).unwrap();
+    let mut update = envelope(
+        "peer",
+        3,
+        "ws",
+        json!({"versionId":"main","objectId":"object","path":"head.md","contentKind":"plaintext","updateBlobSha256":tail_sha,"lineageClaimId":claim,"isBaseState":false}),
+    );
+    update.op_kind = "ydoc.update".into();
+    update.relay_seq = Some(4);
+    apply_ydoc_envelope(
+        &mut store,
+        &mut Default::default(),
+        &update,
+        &NoFaults,
+        &crate::AlwaysLive,
+    )
+    .unwrap();
+    // Model a missing durable blob while preserving the parked tail's blob.
+    store
+        .read_with(|conn| conn.execute_batch("PRAGMA foreign_keys=OFF"))
+        .unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM binary_blobs WHERE sha256=?1", [&sha])
+                .unwrap();
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    recover_ended(&mut store).unwrap();
+    let attempted: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT last_attempt_state FROM ydoc_pending_artifacts",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    recover_ended(&mut store).unwrap();
+    assert_eq!(
+        store
+            .read_with(|conn| conn.query_row(
+                "SELECT last_attempt_state FROM ydoc_pending_artifacts",
+                [],
+                |r| r.get::<_, String>(0)
+            ))
+            .unwrap(),
+        attempted
+    );
+    store.put_binary_blob(&bytes).unwrap();
+    store
+        .read_with(|conn| conn.execute_batch("PRAGMA foreign_keys=ON"))
+        .unwrap();
+    recover_ended(&mut store).unwrap();
+    assert_eq!(
+        snapshot(&store, "object").unwrap().2,
+        text_sha("before remote tail")
+    );
+    let remaining:i64=store.read_with(|conn|conn.query_row("SELECT (SELECT COUNT(*) FROM ydoc_pending_artifacts)+(SELECT COUNT(*) FROM ydoc_deferred_updates)+(SELECT COUNT(*) FROM replication_pending_refusals)", [], |r|r.get(0))).unwrap();
+    assert_eq!(remaining, 0);
+}

@@ -976,7 +976,12 @@ fn drain_deferred_ydoc(
             }
             Ok::<_, SyncError>(pending)
         })?;
-    if pending.is_empty() && recovery_leases.is_none() {
+    if pending.is_empty() {
+        if recovery_leases.is_some() {
+            return Err(SyncError::RetryableState {
+                reason: "no-deferred-document-updates",
+            });
+        }
         return Ok((
             YdocDrainResult {
                 refusals: inactive_refusals,
@@ -1011,6 +1016,11 @@ fn drain_deferred_ydoc(
         false
     };
     if materialization_pending {
+        if recovery_leases.is_some() {
+            return Err(SyncError::RetryableState {
+                reason: "document-materialization-pending",
+            });
+        }
         // Return to the caller so settlement can replay the pending job.
         // Keep every queued coordinate until its projection can commit.
         return Ok((
@@ -1329,21 +1339,6 @@ fn drain_deferred_ydoc(
     // did not project, the snapshot/materialization would stay stale until
     // some unrelated open/settle. Same idempotent-by-sha write as the pull
     // path; skipped while cross-origin dependencies are still pending.
-    if last_payload.is_none() && recovery_leases.is_some() {
-        let anchor: Option<(String,i64,i64,String)> = store.read_with(|conn| conn.query_row(
-            "SELECT r.origin_id,r.origin_seq,r.recorded_at_ms,r.payload_json FROM ydoc_pending_artifacts p JOIN replication_log r \
-             ON r.workspace_id=p.workspace_id AND r.origin_id=p.origin_id AND r.origin_seq=(SELECT MAX(origin_seq) \
-               FROM replication_log INDEXED BY replication_ydoc_origin_document WHERE workspace_id=p.workspace_id AND origin_id=p.origin_id \
-               AND op_kind='ydoc.update' AND json_extract(payload_json,'$.versionId')=p.version_id \
-               AND json_extract(payload_json,'$.objectId')=p.object_id AND origin_seq<p.origin_seq) \
-             WHERE p.workspace_id=?1 AND p.version_id=?2 AND p.object_id=?3",
-            params![key.workspace_id,key.version_id,key.object_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional().map_err(SyncError::corrupt))?;
-        if let Some((origin, seq, at, payload)) = anchor {
-            last_payload = Some(serde_json::from_str(&payload).map_err(SyncError::corrupt)?);
-            last_coordinate = Some((origin, seq));
-            payload_recorded_at = at;
-        }
-    }
     let (drain_origin, drain_seq) = match &last_coordinate {
         Some((origin, seq)) => (origin.as_str(), *seq),
         None => ("deferred-drain", payload_recorded_at),
@@ -1379,6 +1374,9 @@ fn drain_deferred_ydoc(
             // identity pin it must stay visible to the peer. Persist it against
             // the last coordinate whose accepted bytes made this projection
             // too large before the queue cleanup below consumes the marker.
+            Err(error @ SyncError::ProjectionTooLarge { .. }) if recovery_leases.is_some() => {
+                return Err(error);
+            }
             Err(SyncError::ProjectionTooLarge {
                 constraint,
                 actual_bytes,

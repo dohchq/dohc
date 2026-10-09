@@ -1,6 +1,8 @@
 use super::*;
 use dohc_engine_collab::WriterDocCache;
-use dohc_engine_storage::TxnOutcome;
+use dohc_engine_storage::{StorageError, TxnOutcome};
+
+pub(crate) const RECOVERY_FAILURE_CODE: &str = "document-artifact-recovery-failed";
 
 pub(crate) const RECOVERY_FAILURE: &str = "dohc could not write this document's changes to its file. Open the document and try saving again.";
 
@@ -36,6 +38,7 @@ fn state(conn: &rusqlite::Connection, key: &DocKey) -> Result<String, SyncError>
          (SELECT latest_moment_id FROM snapshots s WHERE s.workspace_id=d.workspace_id AND s.version_id=d.version_id AND s.object_id=d.object_id), \
          (SELECT json_array(COUNT(*),MAX(rowid)) FROM ydoc_deferred_updates u WHERE u.workspace_id=d.workspace_id AND u.version_id=d.version_id AND u.object_id=d.object_id), \
          (SELECT COUNT(b.sha256) FROM ydoc_deferred_updates u JOIN replication_log r USING(workspace_id,origin_id,origin_seq) LEFT JOIN binary_blobs b ON b.sha256=json_extract(r.payload_json,'$.updateBlobSha256') WHERE u.workspace_id=d.workspace_id AND u.version_id=d.version_id AND u.object_id=d.object_id), \
+         (SELECT COUNT(b.sha256) FROM ydoc_updates u LEFT JOIN binary_blobs b ON b.sha256=u.update_blob_sha256 WHERE u.workspace_id=d.workspace_id AND u.version_id=d.version_id AND u.object_id=d.object_id), \
          (SELECT COUNT(b.sha256) FROM ydoc_snapshots y LEFT JOIN binary_blobs b ON b.sha256=y.snapshot_blob_sha256 OR b.sha256=y.state_vector_blob_sha256 WHERE y.workspace_id=d.workspace_id AND y.version_id=d.version_id AND y.object_id=d.object_id), \
          (SELECT EXISTS(SELECT 1 FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.workspace_id=d.workspace_id AND s.version_id=d.version_id AND s.object_id=d.object_id)), \
          (SELECT group_concat(operation_id || COALESCE(resume_receipt_json,'')) FROM live_restore_fences f WHERE f.workspace_id=d.workspace_id AND f.main_version_id=d.version_id AND f.object_id=d.object_id), \
@@ -123,20 +126,20 @@ pub fn drain_open_document_artifacts(
                 result.conflicts_opened += drained.conflicts_opened;
             }
             Ok(None) => continue,
-            Err(SyncError::FaultCrash) => return Err(SyncError::FaultCrash),
-            Err(SyncError::LiveDocumentBindingActive) => continue,
-            Err(_) => {
-                // A local recovery failure is a notice on the settlement, not a refused update.
+            Err(error) => {
+                if !isolate_document_failure(error)? {
+                    continue;
+                }
                 let recorded = store.write_with(faults, |tx| {
                     if leases.is_live(&key) { return Ok(()); }
                     remember_attempt_in_tx(tx,&key)?;
                     tx.execute("INSERT OR IGNORE INTO replication_pending_refusals(workspace_id,origin_id,origin_seq,op_kind,reason_code,reason_message) \
-                        SELECT workspace_id,origin_id,origin_seq,'moment.append','invalid-input',?4 FROM ydoc_pending_artifacts \
+                        SELECT workspace_id,origin_id,origin_seq,'moment.append',?4,?5 FROM ydoc_pending_artifacts \
                         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-                        params![workspace_id,key.version_id,key.object_id,RECOVERY_FAILURE]).map_err(SyncError::persist)?;
+                        params![workspace_id,key.version_id,key.object_id,RECOVERY_FAILURE_CODE,RECOVERY_FAILURE]).map_err(SyncError::persist)?;
                     Ok::<_,SyncError>(())
-                });
-                if matches!(recorded, Ok(TxnOutcome::Crashed { .. })) {
+                })?;
+                if matches!(recorded, TxnOutcome::Crashed { .. }) {
                     return Err(SyncError::FaultCrash);
                 }
             }
@@ -144,4 +147,109 @@ pub fn drain_open_document_artifacts(
         cache.remove(&key);
     }
     Ok(result)
+}
+
+fn isolate_document_failure(error: SyncError) -> Result<bool, SyncError> {
+    match error {
+        SyncError::RetryableState { .. } | SyncError::LiveDocumentBindingActive => Ok(false),
+        SyncError::Storage(StorageError::StateCorrupt { ref source })
+            if source
+                .as_deref()
+                .and_then(|source| source.downcast_ref::<rusqlite::Error>())
+                .and_then(rusqlite::Error::sqlite_error_code)
+                .is_some_and(|code| {
+                    matches!(
+                        code,
+                        rusqlite::ErrorCode::SystemIoFailure
+                            | rusqlite::ErrorCode::DiskFull
+                            | rusqlite::ErrorCode::CannotOpen
+                            | rusqlite::ErrorCode::OutOfMemory
+                            | rusqlite::ErrorCode::DatabaseBusy
+                            | rusqlite::ErrorCode::DatabaseLocked
+                            | rusqlite::ErrorCode::PermissionDenied
+                            | rusqlite::ErrorCode::ReadOnly
+                    )
+                }) =>
+        {
+            Err(error)
+        }
+        SyncError::BlobInvalid
+        | SyncError::InvalidInput { .. }
+        | SyncError::ProjectionTooLarge { .. }
+        | SyncError::Storage(
+            StorageError::StateCorrupt { .. } | StorageError::BlobIntegrity { .. },
+        ) => Ok(true),
+        hard => Err(hard),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recovery_waits_without_recording_an_attempt() {
+        for error in [
+            SyncError::RetryableState {
+                reason: "waiting for base",
+            },
+            SyncError::RetryableState {
+                reason: "materialization pending",
+            },
+            SyncError::LiveDocumentBindingActive,
+        ] {
+            assert!(!isolate_document_failure(error).unwrap());
+        }
+    }
+
+    #[test]
+    fn recovery_isolates_document_data_and_projection_failures() {
+        for error in [
+            crate::error::local_corruption("corrupt update"),
+            StorageError::BlobIntegrity {
+                sha256: "missing".into(),
+            }
+            .into(),
+            SyncError::BlobInvalid,
+            SyncError::InvalidInput {
+                reason: "live document is stopped",
+            },
+            SyncError::ProjectionTooLarge {
+                constraint: "text",
+                actual_bytes: 2,
+                limit_bytes: 1,
+            },
+        ] {
+            assert!(isolate_document_failure(error).unwrap());
+        }
+    }
+
+    #[test]
+    fn recovery_propagates_io_persist_disk_full_busy_and_other_hard_failures() {
+        for error in [
+            StorageError::persist_public(std::io::Error::other("I/O failed")).into(),
+            StorageError::DiskFull {
+                needed: 2,
+                available: 1,
+            }
+            .into(),
+            StorageError::FileLocked.into(),
+            StorageError::PermissionDenied { source: None }.into(),
+            StorageError::BackupFailed { source: None }.into(),
+            SyncError::FaultCrash,
+            SyncError::SequenceGap,
+            SyncError::CoordinateDiverged,
+        ] {
+            let code = error.code();
+            assert_eq!(isolate_document_failure(error).unwrap_err().code(), code);
+        }
+        for sqlite_code in [10, 13, 14, 7, 5, 6, 3, 8] {
+            let error = SyncError::corrupt(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(sqlite_code),
+                None,
+            ));
+            let code = error.code();
+            assert_eq!(isolate_document_failure(error).unwrap_err().code(), code);
+        }
+    }
 }

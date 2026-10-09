@@ -1165,6 +1165,19 @@ async fn assert_open_document_artifact_recovery_inner(
     } else {
         Vec::new()
     };
+    let pending_attempt = exit.starts_with("pending-");
+    if pending_attempt {
+        let db = Connection::open(engine_db_path(&a_scratch).unwrap()).unwrap();
+        // Model the durable queue after a live resync, with its file write still pending.
+        db.execute("DELETE FROM ydoc_deferred_updates", []).unwrap();
+        db.execute("UPDATE ydoc_docs SET settle_prior_update_seq=0,settle_seq=(SELECT m.moment_order FROM moments m JOIN snapshots s ON s.latest_moment_id=m.moment_id WHERE s.path=?1)", [path]).unwrap();
+        db.execute("INSERT INTO materialization_jobs(job_id,target_path,content_sha256,preimage_present,target_generation,created_at_ms,workspace_id) SELECT 'ydoc-mat_'||latest_moment_id,path,blob_sha256,1,999,0,workspace_id FROM snapshots WHERE path=?1 ON CONFLICT(job_id) DO UPDATE SET status='pending',completed_at_ms=NULL", [path]).unwrap();
+    }
+    let exit = match exit {
+        "pending-pull" => "evict",
+        "pending-open" => "workspace-close",
+        other => other,
+    };
     match exit {
         "evict" => {
             call(
@@ -1188,6 +1201,40 @@ async fn assert_open_document_artifact_recovery_inner(
             a = open_uncaptured_workspace(&a_transport, &a_scratch, &relay, workspace).await;
         }
         _ => unreachable!(),
+    }
+    if pending_attempt {
+        pull_materialize_and_commit(&a_transport, &a, &mut a_id, workspace).await;
+        let db = Connection::open(engine_db_path(&a_scratch).unwrap()).unwrap();
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM ydoc_pending_artifacts", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT COUNT(*) FROM replication_pending_refusals",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT last_attempt_state FROM ydoc_pending_artifacts",
+                [],
+                |r| r.get::<_, Option<String>>(0)
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            std::fs::read_to_string(a_scratch.path().join(path)).unwrap(),
+            "Before"
+        );
+        call(&a_transport, &a, &mut a_id, "workspace.close", json!({})).await;
+        return;
     }
     if exit != "evict" && !local_edit && !broken {
         assert_eq!(
@@ -3964,4 +4011,13 @@ async fn ended_session_failure_does_not_block_pull() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ended_session_failure_does_not_block_workspace_open() {
     assert_open_document_artifact_recovery_inner("workspace-close", false, false, true).await;
+}
+
+#[tokio::test]
+async fn ended_session_pending_attempt_empty_queue_at_pull() {
+    assert_open_document_artifact_recovery_inner("pending-pull", false, false, false).await;
+}
+#[tokio::test]
+async fn ended_session_pending_attempt_empty_queue_at_workspace_open() {
+    assert_open_document_artifact_recovery_inner("pending-open", false, false, false).await;
 }

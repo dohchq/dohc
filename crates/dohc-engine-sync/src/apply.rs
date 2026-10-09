@@ -484,7 +484,7 @@ pub fn read_replayed_refusal(
         conn.query_row(
             "SELECT op_kind, reason_code, reason_message \
              FROM replication_pending_refusals \
-             WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+             WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3 AND reason_code='invalid-input'",
             params![
                 envelope.workspace_id,
                 envelope.origin_id,
