@@ -106,7 +106,7 @@ function settleHead(host: ReturnType<typeof render>, doc: Y.Doc) {
 }
 
 describe("retained failures", () => {
-  it("keeps an earlier failure reason through access refusal and reopening", () => {
+  it("keeps an earlier failure reason and replaces the cleared access refusal with retry copy", () => {
     docMock.current = engineDocState({ opening: true });
     render(<CollectionFieldWriteHost />);
     enqueue();
@@ -121,10 +121,12 @@ describe("retained failures", () => {
     expect(rows[1]!.textContent).toContain(refusal);
     expect(screen.getAllByTestId("collection-write-retry").every(button => button.hasAttribute("disabled"))).toBe(true);
     act(() => setCollectionFieldWriteAccess("ws-1", null));
-    expect(collectionWriteFailures().map(failure => failure.message)).toEqual([original, refusal]);
+    const retryMessage = "Try saving this change again.";
+    expect(collectionWriteFailures().map(failure => failure.message)).toEqual([original, retryMessage]);
     expect(rows[0]!.textContent).toContain(original);
     expect(rows[0]!.textContent).not.toContain(refusal);
-    expect(rows[1]!.textContent).toContain(refusal);
+    expect(rows[1]!.textContent).not.toContain(refusal);
+    expect(rows[1]!.textContent).toContain(retryMessage);
     expect(screen.getAllByTestId("collection-write-retry").every(button => !button.hasAttribute("disabled"))).toBe(true);
   });
 

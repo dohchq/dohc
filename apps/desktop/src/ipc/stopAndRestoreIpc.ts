@@ -187,7 +187,10 @@ export function registerStopAndRestoreIpc<
     try {
       for (let pass = 0; pass < UNDO_PASSES; pass += 1) {
         const again = pass > 0;
-        const server = await dependencies.serverRuns.restore(workspaceId, definitions, again);
+        const server = await dependencies.serverRuns.restore(workspaceId, definitions, again).catch((error: unknown) => {
+          if (error instanceof z.ZodError) throw new Error("Your server runs a different version of dohc. Update it, then try again.");
+          throw error;
+        });
         add("server", server, again);
         // What the server put back reaches this computer, and what this one puts back reaches the server.
         await dependencies.syncNow(workspaceId);
@@ -198,9 +201,7 @@ export function registerStopAndRestoreIpc<
       }
     } catch (error) {
       // What it undid before it stopped is reported with why it stopped.
-      throw new UndoRunsStopped(error instanceof z.ZodError
-        ? "Your server runs a different version of dohc. Update it, then try again."
-        : error instanceof Error ? error.message : String(error), total());
+      throw new UndoRunsStopped(error instanceof Error ? error.message : String(error), total());
     }
     return total();
   }

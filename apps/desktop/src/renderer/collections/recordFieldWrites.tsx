@@ -452,9 +452,16 @@ function retainFailure(write: CollectionFieldWrite, message: string, recoveryOnl
 }
 
 export function setCollectionFieldWriteAccess(workspaceId: string, refusal: string | null): void {
-  if ((accessRefusals.get(workspaceId) ?? null) === refusal) return;
-  if (refusal === null) accessRefusals.delete(workspaceId);
-  else {
+  const previousRefusal = accessRefusals.get(workspaceId) ?? null;
+  if (previousRefusal === refusal) return;
+  if (refusal === null) {
+    accessRefusals.delete(workspaceId);
+    failures = failures.map(failure =>
+      failure.workspaceId === workspaceId && failure.message === previousRefusal
+        ? { ...failure, message: "Try saving this change again." }
+        : failure,
+    );
+  } else {
     accessRefusals.set(workspaceId, refusal);
     const blocked = queue.filter(write => write.workspaceId === workspaceId && write.id !== appliedWrite?.id);
     for (const write of blocked) {
