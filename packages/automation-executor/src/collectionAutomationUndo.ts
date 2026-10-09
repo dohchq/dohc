@@ -53,6 +53,7 @@ export interface CollectionAutomationUndone {
 }
 
 export interface CollectionAutomationUndoDependencies {
+  recordCompletedField?(recordId: string, field: string): Promise<void>;
   recordReversal?(write: UndoWrite): Promise<void>;
   /** Engine reads; resolves null when the engine is unavailable. */
   withReads<T>(work: (reads: CollectionAutomationReads) => Promise<T>): Promise<T | null>;
@@ -184,6 +185,7 @@ export async function undoCollectionAutomationRuns(
   const refusedReversals = sharedReversalsOf(runs).filter(write => write.state === "not-accepted");
   const refusedFields = new Set(refusedReversals.map(write => JSON.stringify([write.recordId, write.field])));
   const recordedFields = new Set(undoWrites.map(write => JSON.stringify([write.recordId, write.field])));
+  const completedFields = new Set(runs.flatMap(run => run.undoCompletedFields).map(entry => JSON.stringify([entry.recordId, entry.field])));
   const tried = only ? new Set(only.map(({ recordId, field }) => JSON.stringify([recordId, field]))) : null;
   for (const record of records.values()) {
     if (onlyRecordId !== undefined && record.recordId !== onlyRecordId) continue;
@@ -192,6 +194,7 @@ export async function undoCollectionAutomationRuns(
     const fields = [...record.fields].map(([field, writes]) => ({ field, ...wayBack(writes) })).filter(({ field, from }) => {
       const key = JSON.stringify([record.recordId, field]);
       return from.length > 0 && (tried === null || tried.has(key)) &&
+        !completedFields.has(key) &&
         (!recordedFields.has(key) || refusedFields.has(key));
     });
     if (fields.length === 0) continue;
@@ -238,6 +241,8 @@ export async function undoCollectionAutomationRuns(
           const write = { recordId: record.recordId, field, draft };
           await dependencies.recordReversal?.(write);
           undoWrites.push(write);
+        } else {
+          await dependencies.recordCompletedField?.(record.recordId, field);
         }
       }
       const next: typeof pending = [];
@@ -245,7 +250,10 @@ export async function undoCollectionAutomationRuns(
         if (!Object.hasOwn(result.kept, entry.field)) continue;
         const current = result.kept[entry.field] as JsonValue;
         // Already back, from an Undo that stopped part way.
-        if (isDeepStrictEqual(current, entry.to)) continue;
+        if (isDeepStrictEqual(current, entry.to)) {
+          await dependencies.recordCompletedField?.(record.recordId, entry.field);
+          continue;
+        }
         const again = entry.from.findIndex((candidate, index) => index > entry.attempt && isDeepStrictEqual(candidate, current));
         if (again >= 0) next.push({ ...entry, attempt: again });
         else {

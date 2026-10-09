@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import { isNormalizedRelativePath } from "@dohc/workspace-contracts/collection-values";
 import type { CollectionAutomations, KeptAutomationField } from "@dohc/automation-executor/collection-automations";
+import type { PendingRestore } from "@dohc/automation-executor/automation-run-store";
 import type { ServerRuns } from "../automations/serverRuns";
 import {
   LiveDocumentMutationError,
@@ -18,12 +19,14 @@ import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 import { folderEntriesOrNone } from "../workspaces/folderEntries";
 import {
   StopAndRestorePayload,
+  stopAndRestoreRecoveryOperations,
   StopAndRestoreResult,
   UndoStopAndRestorePayload,
   UndoStopAndRestoreResult,
   type DeleteWorkspacePathPayload,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
+import { registerOperations } from "./operationTable";
 import { readError } from "./errorWords";
 import { createOwnerRelayShareHandler } from "./ownerRelayShareHandler";
 
@@ -152,6 +155,26 @@ export function registerStopAndRestoreIpc<
     const earlier = kept.latest === "here" ? kept.server : kept.here;
     return [...new Map([...earlier, ...kept[kept.latest]].map((field) => [field.id, field])).values()];
   };
+  const restoreId = (target: {kind: "person"; userId: string} | {kind: "link"; grantId: string}) =>
+    target.kind === "person" ? `person:${target.userId}` : `link:${target.grantId}`;
+  const interrupted = (): Extract<StopAndRestoreResult, {status: "restored"}> => ({status: "restored", restored: [], review: [], runsUndone: 0,
+    runsLeft: 0, runChangesKept: 0, wroteAutomations: false, sendsMessages: false, keptFields: [], fieldsMissing: 0,
+    unfinished: {step: "files", message: "dohc has not finished Stop and restore. Try again to finish."}});
+  registerOperations<typeof stopAndRestoreRecoveryOperations, Event, Operation>({
+    handle: registerHandler,
+    assertTrustedSender,
+    withActiveWorkspace: (event: Event, workspaceId, inactiveMessage, work) =>
+      dependencies.withRendererWorkspaceOperation(event.sender, workspaceId, inactiveMessage, work),
+  }, stopAndRestoreRecoveryOperations, {
+    pendingStopAndRestores: async (_input, { operation }) => {
+      dependencies.assertOriginalWorkspace(operation.workspace);
+      const pending = await operation.state.collectionAutomations.pendingRestores();
+      operation.assertCurrent();
+      return pending.flatMap(entry => entry.session
+        ? [{ ...entry.session, result: StopAndRestoreResult.parse(entry.session.result) }]
+        : []);
+    },
+  });
 
   /**
    * Undoes the runs of these definitions on the owner's server and here. A
@@ -212,6 +235,14 @@ export function registerStopAndRestoreIpc<
     return ownerRelayShareHandler(event.sender, input.workspaceId, async (operation, credentials, session) => {
       const workspaceId = operation.workspace.workspaceId;
       const relay = <Result>(path: string, init?: RequestInit) => session.run(() => relayJson<Result>(credentials, path, init));
+      const automations = operation.state.collectionAutomations;
+      const id = restoreId(input.target);
+      const previous = (await automations.pendingRestores()).find(entry => entry.id === id);
+      const pending: PendingRestore = previous ?? {id, claims: [], session: {
+        target: input.target, label: input.label ?? (input.target.kind === "person" ? "This person" : "Edit link"),
+        definitions: [], filesUndone: false, receipts: [], result: interrupted(),
+      }};
+      const progress = pending.session!;
 
       // Stop first, so no write lands while the files go back.
       let grantIds: string[];
@@ -225,6 +256,7 @@ export function registerStopAndRestoreIpc<
             : [];
         });
         if (grants.length === 0) throw new Error("dohc found no share of this workspace with this person.");
+        await automations.savePendingRestore(pending);
         const writing = grants.filter((grant) => grant.revokedAtMs === null && WRITING_ACCESS.has(grant.access));
         try {
           for (const grant of writing) {
@@ -258,6 +290,7 @@ export function registerStopAndRestoreIpc<
           for (let attempt = 1; ; attempt += 1) {
             const link = await findLink();
             if (link === null) throw new Error("dohc found no share link of this workspace with this id.");
+            await automations.savePendingRestore(pending);
             if (link.status === "revoked") break;
             ended = true;
             const answer = await session.run(() => dependencies.endLink(
@@ -286,22 +319,49 @@ export function registerStopAndRestoreIpc<
       // still to finish, so the owner knows access stays stopped. A try that
       // stops before undoing runs reports the fields earlier tries found kept.
       const target = JSON.stringify([workspaceId, input.target]);
+      const undoHere = (definitions: typeof progress.definitions, again: boolean) => automations.undoRunsOf(definitions, async relativePath => {
+        operation.assertCurrent();
+        await dependencies.deletePath(event, {workspaceId, relativePath});
+      }, again, id);
+      const finish = async (outcome: StopAndRestoreResult) => {
+        if (outcome.status === "restored" && outcome.unfinished === null) await automations.removePendingRestore(id);
+        else {
+          const earlier = StopAndRestoreResult.parse(progress.result);
+          progress.result = outcome.status === "restored" && earlier.status === "restored" ? {
+            ...outcome, restored: progress.receipts, runsUndone: earlier.runsUndone + outcome.runsUndone,
+            fieldsMissing: earlier.fieldsMissing + outcome.fieldsMissing,
+            runChangesKept: earlier.runChangesKept - earlier.keptFields.length + outcome.runChangesKept,
+          } : outcome;
+          await automations.savePendingRestore(pending);
+        }
+        return outcome;
+      };
       try {
+        if (progress.filesUndone) {
+          const before = StopAndRestoreResult.parse(progress.result);
+          let runs: UndoneRuns;
+          try { runs = await undoRunsHereAndOnServer(workspaceId, target, progress.definitions, again => undoHere(progress.definitions, again)); }
+          catch (error) { if (!(error instanceof UndoRunsStopped)) throw error; runs = {...error.runs, errorMessage: error.message}; }
+          return finish({...interrupted(), ...(before.status === "restored" ? before : {}), status: "restored", restored: [],
+            runsUndone: runs.undone, runsLeft: runs.left, keptFields: runs.keptFields, fieldsMissing: runs.missing,
+            runChangesKept: runs.keptFields.length + runs.missing + runs.otherKept,
+            unfinished: runs.errorMessage === null ? null : {step: "runs", message: runs.errorMessage}});
+        }
         const outcome = await restoreGrantWrites(grantIds);
-        if (outcome.status !== "restored" || outcome.unfinished?.step !== "files") return outcome;
+        if (outcome.status !== "restored" || outcome.unfinished?.step !== "files") return finish(outcome);
         const kept = knownKept(target);
-        return { ...outcome, keptFields: kept, runChangesKept: outcome.runChangesKept + kept.length };
+        return finish({ ...outcome, keptFields: kept, runChangesKept: outcome.runChangesKept + kept.length });
       } catch (error) {
         const kept = knownKept(target);
-        return StopAndRestoreResult.parse({
+        return finish(StopAndRestoreResult.parse({
           status: "restored", restored: [], review: [], runsUndone: 0, runsLeft: 0, runChangesKept: kept.length,
           wroteAutomations: false, sendsMessages: false, keptFields: kept, fieldsMissing: 0,
           unfinished: {
-            step: "files",
+            step: progress.filesUndone ? "runs" : "files",
             message: error instanceof z.ZodError ? "dohc could not read the relay's list of their changes."
               : error instanceof Error ? error.message : String(error),
           },
-        });
+        }));
       }
 
       async function restoreGrantWrites(grantIds: readonly string[]): Promise<StopAndRestoreResult> {
@@ -322,6 +382,15 @@ export function registerStopAndRestoreIpc<
         const { capture } = await dependencies.requireEngineCapture(workspaceId);
         const root = operation.workspace.rootPath;
         const outcome = await restoreDirectWrites({
+          recordDefinitions: async definitions => {
+            progress.definitions = [...definitions];
+            await automations.retainRunsForRestore(definitions, id);
+            await automations.savePendingRestore(pending);
+          },
+          recordRestore: async receipt => {
+            progress.receipts.push(receipt);
+            await automations.savePendingRestore(pending);
+          },
           reviewPath: path => dependencies.hasOtherWorkspaceWindow?.(event.sender, workspaceId)
             ? "Open in another window. Close that window and try again."
             : input.reviewPaths?.includes(path) ? "Changed on this device since the last saved version" : null,
@@ -355,7 +424,7 @@ export function registerStopAndRestoreIpc<
           undoRuns: (definitions) => undoRunsHereAndOnServer(workspaceId, target, definitions, (again) =>
             operation.state.collectionAutomations.undoRunsOf(definitions, async (relativePath) => {
               await dependencies.deletePath(event, { workspaceId, relativePath });
-            }, again)),
+            }, again, id)),
         }, writes.flatMap((write) => write.files));
         if (outcome.status === "waiting") dependencies.queuePull(workspaceId);
         else dependencies.notifyRenderer({ workspaceId });
@@ -374,6 +443,12 @@ export function registerStopAndRestoreIpc<
       event.sender, input.workspaceId, "Undo stopped because this window changed workspaces.",
       async (operation) => {
         const { capture } = await dependencies.requireEngineCapture(operation.workspace.workspaceId);
+        const automations = operation.state.collectionAutomations;
+        const pending = input.target ? (await automations.pendingRestores()).find(entry => entry.id === restoreId(input.target!)) : undefined;
+        if (pending?.session) {
+          pending.session.filesUndone = true;
+          await automations.savePendingRestore(pending);
+        }
         const files: UndoStopAndRestoreResult["files"] = [];
         try {
           for (const momentId of [...input.restoredMomentIds].reverse()) {
@@ -385,6 +460,10 @@ export function registerStopAndRestoreIpc<
               if (path && input.reviewPaths?.includes(path)) throw new RestoreLocalChangesError(path);
               const receipt = await capture.restoreFileToBeforeMoment(momentId, person, {expectedHeadMomentId: momentId});
               files.push({ momentId, kind: "restored", receipt: { path: receipt.path, restoredMomentId: receipt.restoredMomentId } });
+              if (pending?.session) {
+                pending.session.receipts = pending.session.receipts.filter(file => file.restoredMomentId !== momentId);
+                await automations.savePendingRestore(pending);
+              }
             } catch (error) {
               if (!(error instanceof RestorePolicyRefusalError || error instanceof LiveDocumentMutationError ||
                 error instanceof RestoreHeadChangedError || error instanceof RestoreLocalChangesError || error instanceof RestoreFolderInUseError)) throw error;

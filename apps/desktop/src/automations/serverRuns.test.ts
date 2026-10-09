@@ -2,11 +2,11 @@ import { describe, expect, it } from "vitest";
 import { createServerRuns } from "./serverRuns";
 
 describe("server automation recovery", () => {
-  it("retains a completed run's pending shared settlement note", async () => {
+  it("retains a completed run's pending shared settlement note and unfinished Undo", async () => {
     const run = {claimId: "pending", state: "done", error: null, createdAtMs: 1, updatedAtMs: 2, sharedSettlementPending: true,
       trigger: {kind: "button", recordId: "record", by: "human", sharedAuthor: null, depth: 0},
       writes: [{kind: "field", recordId: "record", path: "Tasks/one.md", field: "Status", before: null, after: "Done", sharedFileUpdateState: "pending"}],
-      definitionChanged: false, chainStopped: false, neverStarted: false, undone: false};
+      definitionChanged: false, chainStopped: false, neverStarted: false, undone: false, undoUnfinished: true};
     const server = createServerRuns(async () => ({status: 200, body: {ok: true, runs: [run], next: null}, asker: {account: "owner", current: () => true}}));
     await expect(server.runs("ws", "finish")).resolves.toEqual({runs: [run], next: null});
   });

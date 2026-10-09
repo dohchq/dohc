@@ -130,5 +130,6 @@
   "capture.recovery.clear",
   "access.object.read",
   "access.sharing.read",
-  "access.refresh"
+  "access.refresh",
+  "share.restore.pending.read"
 ]

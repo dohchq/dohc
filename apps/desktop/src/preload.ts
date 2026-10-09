@@ -52,6 +52,7 @@ import {
   reportingOperations,
   noticeOperations,
   liveDraftRecoveryOperations,
+  stopAndRestoreRecoveryOperations,
   scheduleHostOperations,
   chatDispatchNoticeOperations,
   sharedViewAccessOperations,
@@ -351,6 +352,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.checkCollectionAutomation, payload),
   stopAndRestore: (payload) =>
     ipcRenderer.invoke(CHANNELS.stopAndRestore, payload),
+  ...operationBridge(stopAndRestoreRecoveryOperations, invoke),
   ...operationBridge(liveDraftRecoveryOperations, invoke),
   undoStopAndRestore: (payload) =>
     ipcRenderer.invoke(CHANNELS.undoStopAndRestore, payload),

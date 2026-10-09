@@ -86,6 +86,7 @@ export const DEFINITION_CHANGED_ERROR =
 export const UNREADABLE_RUN_ERROR =
   "dohc could not read this run's saved progress in .dohc/automations, so it did not run again. Move that folder aside, then try again.";
 export const UNDONE_RUN_ERROR = "You undid this run, so dohc does not run it again.";
+export const UNFINISHED_UNDO_ERROR = "dohc has not finished undoing this run. Try again in run history to finish Undo.";
 export const LOST_COLLECTION_ERROR = "A Collection this run changes is no longer in this workspace, so the run stopped.";
 export const RULES_CHANGED_ERROR = "Collection rules changed after this run started.";
 
@@ -259,6 +260,7 @@ export type ClaimRuns =
        * keys and record ids are spent, so the claim never runs again.
        */
       undo: boolean;
+      undoUnfinished: boolean;
       /** A run that finished, under any definition. The claim needs only its settle. */
       done: StoredRun | null;
       /** The run this definition continues. */
@@ -282,6 +284,7 @@ export async function runsForClaim(
   return {
     unreadable: false,
     undo: runs.some((run) => run.undo !== null),
+    undoUnfinished: runs.some(run => run.undo === "started"),
     done: live.find((run) => run.outcome?.state === "done") ?? null,
     current: live.find((run) => run.definitionHash === hash) ?? null,
     // A run is saved only once its plan is ready to write, so any saved run
@@ -306,7 +309,7 @@ export async function savedRunOf(
   // It finished before this computer could settle the claim, whatever the
   // automation says now.
   if (done !== null) return { outcome: { kind: "done" } };
-  if (runs.undo) return { outcome: failed(UNDONE_RUN_ERROR) };
+  if (runs.undo) return { outcome: failed(runs.undoUnfinished ? UNFINISHED_UNDO_ERROR : UNDONE_RUN_ERROR) };
   // Running another definition from the start could repeat the changes the
   // earlier one made. A person has to choose that with Try again.
   if (current === null && changedSince !== null) return { outcome: failed(DEFINITION_CHANGED_ERROR) };
@@ -321,7 +324,7 @@ export async function savedRunOf(
 /** A new run's record, before anything of it is saved. */
 export function newRun(claim: Pick<AutomationClaim, "automationId" | "claimId">, automation: Automation, keySeed: string, nowMs: number): StoredRun {
   return {
-    version: 9,
+    version: 10,
     claimId: claim.claimId,
     automationId: claim.automationId,
     definitionHash: definitionHash(automation),
@@ -340,6 +343,7 @@ export function newRun(claim: Pick<AutomationClaim, "automationId" | "claimId">,
     rules: null,
     superseded: false,
     undo: null,
+    undoCompletedFields: [],
     undoKept: [],
     settled: false,
     outcome: null,

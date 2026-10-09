@@ -289,7 +289,7 @@ const UndoCallSchema = z.union([
     idempotencyKey: z.string(),
   }),
 ]);
-// Version 9 locates fields kept by Undo, including dataset records. It plans
+// Version 10 records completed document field reversals. It plans
 // and saves each step beside the run's state, names each Collection by its
 // id, records when the run ended, qualifies formula-visible fields by
 // dataset and table, and keeps the deletes an Undo may use on each record
@@ -297,7 +297,7 @@ const UndoCallSchema = z.union([
 // cannot be read, and the claim fails instead of starting over or reading
 // bare field ids as current reach.
 const StoredRunSchema = z.object({
-  version: z.literal(9),
+  version: z.literal(10),
   claimId: z.string().min(1),
   automationId: z.string().min(1),
   definitionHash: z.string().min(1),
@@ -316,6 +316,7 @@ const StoredRunSchema = z.object({
   rules: DatasetRulesSchema.nullable(),
   superseded: z.boolean(),
   undo: z.enum(["started", "done"]).nullable(),
+  undoCompletedFields: z.array(z.object({ recordId: z.string(), field: z.string() })),
   undoKept: z.array(z.object({ recordId: z.string(), field: z.string(), path: z.string().nullable(), fieldName: z.string(), datasetRecordId: DatasetRecordIdSchema.nullable() })),
   sharedSettlements: z.array(SettlementSchema).optional(),
   undoWrites: z.array(UndoWriteSchema).optional(),
@@ -334,6 +335,22 @@ const ExpirySchema = z.object({
   version: z.literal(1),
   folders: z.array(z.object({ folder: z.string().min(1), until: z.number(), recheck: z.array(z.string().min(1)) })),
 });
+
+const PendingRestoreSchema = z.object({
+  id: z.string().min(1),
+  claims: z.array(z.string().min(1)),
+  session: z.object({
+    target: z.union([z.object({kind: z.literal("person"), userId: z.string().min(1)}), z.object({kind: z.literal("link"), grantId: z.string().min(1)})]),
+    label: z.string(),
+    definitions: z.array(z.object({collectionPath: z.string(), id: z.string(), definitionHash: z.string()})),
+    filesUndone: z.boolean(),
+    receipts: z.array(z.object({path: z.string(), restoredMomentId: z.string(), removed: z.boolean().optional()})),
+    // The desktop validates its outcome with the bridge contract on recovery.
+    result: z.unknown(),
+  }).optional(),
+});
+export type PendingRestore = z.infer<typeof PendingRestoreSchema>;
+const PendingRestoresSchema = z.object({version: z.literal(1), restores: z.array(PendingRestoreSchema)});
 
 /**
  * What one effect did: a field the automation wrote, a record it added, a
@@ -369,7 +386,7 @@ export interface StoredStep {
 
 /** One run of one claim under one definition of its automation. */
 export interface StoredRun {
-  version: 9;
+  version: 10;
   claimId: string;
   /** The engine automation id, "collection:<collection id>#<id>". */
   automationId: string;
@@ -430,6 +447,7 @@ export interface StoredRun {
    * that stopped part way resumes.
    */
   undo: "started" | "done" | null;
+  undoCompletedFields: Array<{ recordId: string; field: string }>;
   /**
    * The fields a done Undo left because they no longer held what the run
    * wrote. Another run may have written them after this one, so Undo and
@@ -712,6 +730,9 @@ const tooLarge = () =>
   new Error("This run's progress is too large for dohc to save, so it stopped. Narrow its Find steps, or split it into smaller automations.");
 
 export interface AutomationRunStore {
+  pendingRestores(): Promise<PendingRestore[]>;
+  savePendingRestore(restore: PendingRestore): Promise<void>;
+  removePendingRestore(id: string): Promise<void>;
   /**
    * Every run of one claim, one per run it was planned in. `unreadable` is
    * true when a saved run exists that cannot be read: the claim must not
@@ -730,7 +751,7 @@ export interface AutomationRunStore {
    * its file, so the settle and an Undo never overwrite each other's state
    * with a copy read before it. Throws when the saved run cannot be read.
    */
-  updateState(run: StoredRun, state: Partial<Pick<StoredRun, "settled" | "undo" | "undoKept" | "sharedSettlements" | "undoWrites">>): Promise<void>;
+  updateState(run: StoredRun, state: Partial<Pick<StoredRun, "settled" | "undo" | "undoCompletedFields" | "undoKept" | "sharedSettlements" | "undoWrites">>): Promise<void>;
   supersedeWake(automationId: string, claimId: string, keySeed: string, noticeId: string, supersededBy: string): Promise<void>;
   /** Records one landed effect after the run's saved progress. */
   appendEffect(run: StoredRun, applied: StoredRun["applied"][number]): Promise<void>;
@@ -857,6 +878,31 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
   // their file cannot be read, so nothing counts as finished.
   let undos: Map<string, { automationId: string; claimId: string; run: string }> | null | undefined;
   const undosFile = async () => join(await base(), "undoing.json");
+  let restores: Map<string, PendingRestore> | null | undefined;
+  let restoreClaims = new Set<string>();
+  const restoresFile = async () => join(await base(), "restoring.json");
+  const setRestores = (entries: PendingRestore[]) => {
+    restores = new Map(entries.map(entry => [entry.id, entry]));
+    restoreClaims = new Set(entries.flatMap(entry => entry.claims));
+  };
+  const readRestores = async (): Promise<Map<string, PendingRestore> | null> => {
+    if (restores !== undefined) return restores;
+    const read = await readJson(await restoresFile());
+    const parsed = PendingRestoresSchema.safeParse(read === undefined ? {version: 1, restores: []} : read);
+    if (parsed.success) setRestores(parsed.data.restores);
+    else restores = null;
+    return restores!;
+  };
+  const changeRestore = (id: string, entry?: PendingRestore) => serial(async () => {
+    const known = await readRestores();
+    if (known === null) throw new Error("dohc could not read unfinished Stop and restore progress. Reopen the workspace, then try again.");
+    const next = new Map(known);
+    if (entry) next.set(id, PendingRestoreSchema.parse({...entry,
+      claims: [...new Set([...(known.get(id)?.claims ?? []), ...entry.claims])]}));
+    else next.delete(id);
+    await writeDurably(await restoresFile(), `${JSON.stringify({version: 1, restores: [...next.values()]})}\n`);
+    setRestores([...next.values()]);
+  });
   const readUndos = async () => {
     if (undos !== undefined) return undos;
     const read = await readJson(await undosFile());
@@ -1013,6 +1059,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     | { kind: "keep"; until?: number; recheck?: true }
     | { kind: "remove" | "end"; texts: Map<string, string | null | undefined> };
   const weigh = async (folder: string, names: readonly string[], now: number, standing: (claim: ExpiringClaim) => Promise<ClaimStanding>): Promise<Weighed> => {
+    if (await readRestores() === null) return {kind: "keep", recheck: true};
     const texts = new Map<string, string | null | undefined>();
     const runs: Array<{ claimId: string; automationId: string; datasetId: string | null; undo: StoredRun["undo"]; finishedAtMs: number | null }> = [];
     for (const name of names) {
@@ -1031,6 +1078,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     }
     const [first] = runs;
     if (first === undefined || runs.some((run) => run.claimId !== first.claimId || run.automationId !== first.automationId)) return { kind: "keep" };
+    if (restoreClaims.has(first.claimId)) return {kind: "keep", recheck: true};
     if (runs.some((run) => run.undo === "started")) return { kind: "keep", recheck: true };
     const claim = { automationId: first.automationId, claimId: first.claimId, datasetId: runs.find((run) => run.datasetId !== null)?.datasetId ?? null };
     if (runs.some((run) => run.finishedAtMs === null)) {
@@ -1130,9 +1178,19 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     unfinishedUndos() {
       return serial(async () => {
         const known = await readUndos();
-        return known === null ? null : new Set([...known.values()].map((entry) => entry.claimId));
+        const pending = await readRestores();
+        return known === null || pending === null ? null : new Set([...restoreClaims, ...[...known.values()].map((entry) => entry.claimId)]);
       });
     },
+    pendingRestores() {
+      return serial(async () => {
+        const known = await readRestores();
+        if (known === null) throw new Error("dohc could not read unfinished Stop and restore progress. Reopen the workspace, then try again.");
+        return structuredClone([...known.values()]);
+      });
+    },
+    savePendingRestore(entry) { return changeRestore(entry.id, entry); },
+    removePendingRestore(id) { return changeRestore(id); },
     appendStep(run, step) {
       return serial(() => appendLine(run, { kind: "step", ...step }));
     },

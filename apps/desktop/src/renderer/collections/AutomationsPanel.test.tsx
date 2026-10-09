@@ -2788,6 +2788,23 @@ describe("an automation's runs", () => {
     expect(row.textContent).toContain("Sent a message to Trip");
   });
 
+  it("marks unfinished Undo and routes Try again to finish the reversal", async () => {
+    const saved = run({undoUnfinished: true, state: "failed", writes: [
+      {kind: "field", recordId: "rec_1", path: "Tasks/Plan.md", field: "Note", before: "a", after: "b"},
+    ]});
+    const {bridge} = makeBridge(read([summary(stamp)]), [saved]);
+    bridge.undoCollectionAutomationRun.mockResolvedValue({...NOTHING_UNDONE, reverted: 1});
+    const onRetry = vi.fn();
+    render(<AutomationRuns workspaceId="ws-1" automationId="collection:Tasks#stamp" refreshKey={0}
+      onRetry={onRetry} onError={vi.fn()} onNotice={vi.fn()} />);
+    const row = await screen.findByTestId("automation-run-atc_1");
+    expect(row.textContent).toContain("dohc has not finished undoing this run.");
+    expect(within(row).queryByLabelText("Done")).toBeNull();
+    await userEvent.click(within(row).getByRole("button", {name: "Try again"}));
+    await waitFor(() => expect(bridge.undoCollectionAutomationRun).toHaveBeenCalled());
+    expect(onRetry).not.toHaveBeenCalled();
+  });
+
   it("keeps Undo available for a locally saved run and clears its pending note after settlement", async () => {
     const saved = run({ trigger: {kind: "button", recordId: "rec_1", by: "human", sharedAuthor: null, depth: 0}, sharedSettlementPending: true,
       writes: [{kind: "field", recordId: "rec_1", path: "Tasks/Plan.md", field: "Note", before: "a", after: "b"}] });

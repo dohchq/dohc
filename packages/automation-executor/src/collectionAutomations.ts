@@ -73,6 +73,7 @@ import {
   runCollectionAutomation,
   runsForClaim,
   UNDONE_RUN_ERROR,
+  UNFINISHED_UNDO_ERROR,
   sendsMessages,
   RECORD_NOT_FOUND,
   UNREADABLE_RUN_ERROR,
@@ -668,6 +669,7 @@ export interface CollectionAutomationRun {
   chainStopped: boolean;
   /** A person undid what it changed. */
   undone: boolean;
+  undoUnfinished?: boolean;
 }
 
 /** One run with what each of its steps changed, for reading a single run. */
@@ -873,7 +875,7 @@ function tryAgainOf(
 ): { refused: string } | (Extract<ClaimRuns, { unreadable: false }> & { startsOver: boolean }) {
   if (runs.unreadable) return { refused: UNREADABLE_RUN_ERROR };
   // An undone run's keys and record ids are spent, so it cannot run again.
-  if (runs.undo) return { refused: UNDONE_RUN_ERROR };
+  if (runs.undo) return { refused: runs.undoUnfinished ? UNFINISHED_UNDO_ERROR : UNDONE_RUN_ERROR };
   return { ...runs, startsOver: runs.current === null && runs.changedSince !== null };
 }
 
@@ -1049,6 +1051,9 @@ const RUN_PAGE = 20;
 const CLAIM_PAGE_LIMIT = 100;
 
 export class CollectionAutomations {
+  pendingRestores() { return this.options.store.pendingRestores(); }
+  savePendingRestore(entry: import("./automationRunStore").PendingRestore) { return this.options.store.savePendingRestore(entry); }
+  removePendingRestore(id: string) { return this.options.store.removePendingRestore(id); }
   /**
    * Every document Collection the engine lists, and those a watcher batch
    * added, with its Collection id: the object id of its collection.yaml.
@@ -1193,6 +1198,7 @@ export class CollectionAutomations {
   private historyPruning: Promise<void> = Promise.resolve();
   // The expiry batch in progress. An Undo waits for it before it reads its claim.
   private historyBatch: Promise<unknown> = Promise.resolve();
+  private restorePlanning = 0;
   // The next expiry while the workspace stays open.
   private historyTimer: ReturnType<typeof setTimeout> | null = null;
   private runAbort = new AbortController();
@@ -2582,7 +2588,7 @@ export class CollectionAutomations {
     const row: CollectionAutomationRun = { ...run, writes: stepWritesOf(stored).map(({ write }) => write) };
     await this.readSharedSettlement([{ stored, row }]);
     Object.assign(run, { sharedSettlementPending: row.sharedSettlementPending, sharedSettlementNotAccepted: row.sharedSettlementNotAccepted,
-      undoSettlementPending: row.undoSettlementPending, undoSettlementNotAccepted: row.undoSettlementNotAccepted, reversals: row.reversals, undone: row.undone });
+      undoSettlementPending: row.undoSettlementPending, undoSettlementNotAccepted: row.undoSettlementNotAccepted, reversals: row.reversals, undone: row.undone, undoUnfinished: row.undoUnfinished });
     if (run.state !== "failed" || run.neverStarted) return { ...run, ...timingOf(stored), steps: stepsOf(stored), failedStep: null, startsOver: false };
     // The run Try again continues, and whether it starts over, by retry's own rule.
     const tryAgain = automation ? tryAgainOf(await runsForClaim(this.options.store, { automationId, claimId }, automation)) : null;
@@ -2625,6 +2631,7 @@ export class CollectionAutomations {
         definitionChanged: hash !== null && live.some((run) => run.definitionHash !== hash),
         ...stopOf(claim),
         undone: stored.length > 0 && stored.every((run) => run.undo === "done" && run.undoKept.length === 0),
+        undoUnfinished: stored.some(run => run.undo === "started"),
       },
     };
   }
@@ -3412,6 +3419,12 @@ export class CollectionAutomations {
           await this.options.store.updateState(holder, { undoWrites });
           holder.undoWrites = undoWrites;
         },
+        recordCompletedField: async (recordId, field) => {
+          const holder = newest();
+          const undoCompletedFields = [...holder.undoCompletedFields.filter(entry => entry.recordId !== recordId || entry.field !== field), {recordId, field}];
+          await this.options.store.updateState(holder, {undoCompletedFields});
+          holder.undoCompletedFields = undoCompletedFields;
+        },
       }, host, collectionNamed(parsed.collectionPath), async () => {
         const roster = await this.options.cachedRoster();
         const moved = movedReason();
@@ -3448,16 +3461,23 @@ export class CollectionAutomations {
     const documentKeys = new Set(only.map(({ recordId, field }) => JSON.stringify([recordId, field])));
     const datasetKept = [...new Map(runs.flatMap((run) => run.undoKept).filter((kept) => !documentKeys.has(JSON.stringify([kept.recordId, kept.field])))
       .map((kept) => [JSON.stringify([kept.recordId, kept.field]), kept])).values()];
+    for (const run of runs) await this.options.store.updateState(run, {undo: "started"});
     const { undone, keptFields, undoWrites } = await undoCollectionAutomationRuns({
       withReads: (work) => this.withLiveEngine(work),
       withRecordWrites: this.options.withUndoWrites,
       trash,
       collectionPathOf: (collectionId) => this.collectionPathOf(collectionId),
+      recordCompletedField: async (recordId, field) => {
+        const holder = runs.reduce((latest, run) => run.startedAtMs > latest.startedAtMs ? run : latest);
+        const undoCompletedFields = [...holder.undoCompletedFields.filter(entry => entry.recordId !== recordId || entry.field !== field), {recordId, field}];
+        await this.options.store.updateState(holder, {undoCompletedFields});
+        holder.undoCompletedFields = undoCompletedFields;
+      },
     }, runs, this.runAbort.signal, only);
     keptFields.push(...datasetKept);
     undone.changedSince += datasetKept.length;
     for (const run of runs) {
-      await this.options.store.updateState(run, { undoKept: keptFields, undoWrites });
+      await this.options.store.updateState(run, { undo: "done", undoKept: keptFields, undoWrites });
       run.undoWrites = undoWrites;
     }
     const sharedReversals = sharedReversalsOf(runs);
@@ -3525,12 +3545,9 @@ export class CollectionAutomations {
     definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>,
     trash: (path: string) => Promise<void>,
     again = false,
+    retentionId?: string,
   ): Promise<{ undone: number; left: number; reverted: number; missing: number; keptFields: KeptAutomationField[]; otherKept: number; sharedReversals?: CollectionAutomationUndone["sharedReversals"]; errorMessage: string | null }> {
-    const hashes = new Map<string, Set<string>>();
-    for (const { collectionPath, id, definitionHash: hash } of definitions) {
-      const automationId = await this.automationIdAt(collectionPath, id);
-      if (automationId !== null) hashes.set(automationId, (hashes.get(automationId) ?? new Set()).add(hash));
-    }
+    const hashes = await this.restoreDefinitionHashes(definitions);
     const result = { undone: 0, left: 0, reverted: 0, missing: 0, otherKept: 0, sharedReversals: [] as NonNullable<CollectionAutomationUndone["sharedReversals"]> };
     const keptFields = new Map<string, KeptAutomationField>();
     const counts = () => {
@@ -3538,7 +3555,7 @@ export class CollectionAutomations {
       return { ...rest, ...(sharedReversals.length ? { sharedReversals } : {}) };
     };
     try {
-      await this.undoEachRun(hashes, trash, result, again, keptFields);
+      await this.undoEachRun(hashes, trash, result, again, keptFields, retentionId);
     } catch (error) {
       return { ...counts(), keptFields: [...keptFields.values()], errorMessage: error instanceof Error ? error.message : String(error) };
     } finally {
@@ -3548,24 +3565,56 @@ export class CollectionAutomations {
     return { ...counts(), keptFields: [...keptFields.values()], errorMessage: null };
   }
 
+  async retainRunsForRestore(definitions: ReadonlyArray<{collectionPath: string; id: string; definitionHash: string}>, id: string): Promise<void> {
+    await this.retainRestoreClaims(await this.restoreDefinitionHashes(definitions), id);
+  }
+
+  private async restoreDefinitionHashes(definitions: ReadonlyArray<{collectionPath: string; id: string; definitionHash: string}>) {
+    const hashes = new Map<string, Set<string>>();
+    for (const { collectionPath, id, definitionHash: hash } of definitions) {
+      const automationId = await this.automationIdAt(collectionPath, id);
+      if (automationId !== null) hashes.set(automationId, (hashes.get(automationId) ?? new Set()).add(hash));
+    }
+    return hashes;
+  }
+
+  private async retainRestoreClaims(
+    hashes: ReadonlyMap<string, ReadonlySet<string>>,
+    restoreId?: string,
+  ) {
+    // Every claim of these automations, newest first across them all, so a
+    // field two automations wrote in turn goes back in the reverse order.
+    const claims: Array<{ automationId: string; wanted: ReadonlySet<string>; claim: HistoryClaim }> = [];
+    this.restorePlanning += 1;
+    let retentionId: string;
+    try {
+      await this.historyBatch;
+      for (const [automationId, wanted] of hashes) {
+        // A dataset's runs are in its host's ledger, which may not be open yet.
+        await this.indexAutomation(automationId);
+        const listed = await this.everyClaim(automationId);
+        if (listed === null) throw new Error("The workspace engine is not running.");
+        for (const claim of listed) claims.push({ automationId, wanted, claim });
+      }
+      claims.sort((left, right) => newerFirst(left.claim, right.claim));
+      retentionId = restoreId ?? `runs:${createHash("sha256").update(JSON.stringify([...hashes].map(([id, wanted]) => [id, [...wanted].sort()]).sort())).digest("hex")}`;
+      const previous = (await this.options.store.pendingRestores()).find(entry => entry.id === retentionId);
+      if (claims.length > 0) await this.options.store.savePendingRestore({...previous, id: retentionId, claims: claims.map(entry => entry.claim.claimId)});
+    } finally {
+      this.restorePlanning -= 1;
+    }
+    return {claims, retentionId};
+  }
+
   private async undoEachRun(
     hashes: ReadonlyMap<string, ReadonlySet<string>>,
     trash: (path: string) => Promise<void>,
     result: { undone: number; left: number; reverted: number; missing: number; otherKept: number; sharedReversals: NonNullable<CollectionAutomationUndone["sharedReversals"]> },
     again: boolean,
     keptFields: Map<string, KeptAutomationField>,
+    restoreId?: string,
   ): Promise<void> {
-    // Every claim of these automations, newest first across them all, so a
-    // field two automations wrote in turn goes back in the reverse order.
-    const claims: Array<{ automationId: string; wanted: ReadonlySet<string>; claim: HistoryClaim }> = [];
-    for (const [automationId, wanted] of hashes) {
-      // A dataset's runs are in its host's ledger, which may not be open yet.
-      await this.indexAutomation(automationId);
-      const listed = await this.everyClaim(automationId);
-      if (listed === null) throw new Error("The workspace engine is not running.");
-      for (const claim of listed) claims.push({ automationId, wanted, claim });
-    }
-    claims.sort((left, right) => newerFirst(left.claim, right.claim));
+    const {claims, retentionId} = await this.retainRestoreClaims(hashes, restoreId);
     // The pass stops at the first claim whose Undo fails, so no older claim
     // is undone over one that stopped part way.
     try {
@@ -3606,6 +3655,7 @@ export class CollectionAutomations {
           result.left += 1;
         }
       }
+      if (restoreId === undefined) await this.options.store.removePendingRestore(retentionId);
     } finally {
       for (const { automationId, wanted, claim } of claims) {
         for (const run of (await this.options.store.runsOf(automationId, claim.claimId)).runs) {
@@ -5084,7 +5134,7 @@ export class CollectionAutomations {
   }
 
   private async expireHistory(generation: number): Promise<void> {
-    const current = () => this.generation === generation && this.state === "open";
+    const current = () => this.generation === generation && this.state === "open" && this.restorePlanning === 0;
     // Runs one batch, which an Undo waits for; the event loop runs after it.
     const batch = async <T>(work: Promise<T>): Promise<T> => {
       this.historyBatch = work.catch(() => undefined);

@@ -4936,6 +4936,7 @@ export type StopAndRestoreTarget = z.infer<typeof StopAndRestoreTarget>;
 export const StopAndRestorePayload = z.object({
   workspaceId: WORKSPACE_ID,
   target: StopAndRestoreTarget,
+  label: z.string().max(2_000).optional(),
   reviewPaths: z.array(PATH_STRING.refine(isNormalizedRelativePath)).max(4096).optional(),
 }).strict();
 export type StopAndRestorePayload = z.infer<typeof StopAndRestorePayload>;
@@ -4992,8 +4993,28 @@ export const StopAndRestoreResult = z.discriminatedUnion("status", [
   z.object({ status: z.literal("waiting") }).strict(),
 ]);
 export type StopAndRestoreResult = z.infer<typeof StopAndRestoreResult>;
+export const PendingStopAndRestoresPayload = z.object({workspaceId: WORKSPACE_ID}).strict();
+export type PendingStopAndRestoresPayload = z.infer<typeof PendingStopAndRestoresPayload>;
+export const PendingStopAndRestoresResult = z.array(z.object({
+  target: StopAndRestoreTarget, label: z.string(), filesUndone: z.boolean(),
+  receipts: z.array(z.object({path: PATH_STRING, restoredMomentId: OPAQUE_ID, removed: z.boolean().optional()})),
+  result: StopAndRestoreResult,
+}));
+export type PendingStopAndRestoresResult = z.infer<typeof PendingStopAndRestoresResult>;
+export const stopAndRestoreRecoveryOperations = {
+  pendingStopAndRestores: {
+    capabilityId: "share.restore.pending.read",
+    channel: "desktop:pending-stop-and-restores",
+    payload: PendingStopAndRestoresPayload,
+    result: PendingStopAndRestoresResult,
+    guard: "active-workspace",
+    scope: "workspace",
+    inactiveMessage: "dohc could not read unfinished Stop and restore progress because this window changed workspaces.",
+  },
+} satisfies OperationTable;
 export const UndoStopAndRestorePayload = z.object({
   workspaceId: WORKSPACE_ID,
+  target: StopAndRestoreTarget.optional(),
   restoredMomentIds: z.array(OPAQUE_ID).min(1).max(20_000),
   reviewPaths: z.array(PATH_STRING.refine(isNormalizedRelativePath)).max(4096).optional(),
 }).strict();
@@ -6495,6 +6516,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof sharedViewAccessOperations>,
     OperationBridge<typeof engineYDocAdmissionOperations>,
     OperationBridge<typeof liveDraftRecoveryOperations>,
+    OperationBridge<typeof stopAndRestoreRecoveryOperations>,
     OperationBridge<typeof engineYDocSaveOperations> {
   listOwnerLiveDocuments(payload: ListOwnerLiveDocumentsPayload): Promise<OwnerLiveDocumentsResult>;
   listOwnerLiveRefusals(payload: ListOwnerLiveRefusalsPayload): Promise<OwnerLiveRefusalsResult>;

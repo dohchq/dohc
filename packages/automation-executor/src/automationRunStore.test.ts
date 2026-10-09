@@ -14,15 +14,29 @@ const setA = { kind: "set" as const, target: { recordId: "rec_a", collectionPath
 
 function run(claimId: string, state: "done" | "failed" | null, atMs: number, settled = state === "done"): StoredRun {
   return {
-    version: 9, claimId, automationId: AUTOMATION, definitionHash: "0123456789abcdef", keySeed: "0123456789abcdef",
+    version: 10, claimId, automationId: AUTOMATION, definitionHash: "0123456789abcdef", keySeed: "0123456789abcdef",
     startedAtMs: atMs, finishedAtMs: state === null ? null : atMs, steps: [{ ordinal: 0, effects: [setA, setA] }],
     applied: [{ ordinal: 0, writes: [{ kind: "field", recordId: "rec_a", path: "Tasks/a.md", field: "__proto__", before: 1, after: 2 }] }],
-    created: [], replans: [], undoRequests: [], undoCalls: [], undoCovers: [], readableFields: null, collections: [], rules: null, superseded: false, undo: null, undoKept: [], settled,
+    created: [], replans: [], undoRequests: [], undoCalls: [], undoCovers: [], readableFields: null, collections: [], rules: null, superseded: false, undo: null, undoKept: [], undoCompletedFields: [], settled,
     outcome: state === null ? null : state === "done" ? { state } : { state, error: "No.", run: 1, step: 0 },
   };
 }
 
 describe("the automation run store", () => {
+  it("retains older claims needed by an unfinished restore across restart and expiry", async () => {
+    const root = await createTestScratch("dohc-restore-retention-");
+    const store = createAutomationRunStore(root, testMetadataDir);
+    await store.save({...run("atc_new", "done", 2), undo: "started"});
+    await store.save(run("atc_old", "done", 1));
+    await store.savePendingRestore({id: "restore", claims: ["atc_new", "atc_old"]});
+    const restarted = createAutomationRunStore(root, testMetadataDir);
+    expect(await restarted.unfinishedUndos()).toEqual(new Set(["atc_new", "atc_old"]));
+    await restarted.expire(NOW, async () => "gone", null);
+    expect((await restarted.runsOf(AUTOMATION, "atc_old")).runs).toHaveLength(1);
+    await restarted.removePendingRestore("restore");
+    await restarted.expire(NOW + 1, async () => "gone", null);
+    expect((await restarted.runsOf(AUTOMATION, "atc_old")).runs).toHaveLength(0);
+  });
   it("reserves header space when appends fill the progress budget", async () => {
     const root = await createTestScratch("dohc-automation-size-");
     const store = createAutomationRunStore(root, testMetadataDir);
@@ -98,7 +112,7 @@ describe("the automation run store", () => {
     await restarted.updateState(loaded, {sharedSettlements: [{draft: undoWrites[0]!.draft, state: "not-accepted"}]});
     expect((await restarted.runsOf(AUTOMATION, "settlement")).runs[0]?.sharedSettlements).toHaveLength(2);
   });
-  it("saves version 9 and refuses version 8 kept fields without a compatibility reader", async () => {
+  it("saves version 10 and refuses version 9 without a compatibility reader", async () => {
     const root = await createTestScratch("dohc-automation-runs-");
     const store = createAutomationRunStore(root, testMetadataDir);
     await store.save({ ...run("atc_one", "done", 1), undoKept: [{ recordId: "rec_a", field: "A", path: "Tasks/a.md", fieldName: "A", datasetRecordId: null }] });
@@ -106,8 +120,8 @@ describe("the automation run store", () => {
     const headerName = (await readdir(folder)).find((file) => file.endsWith(".json"))!;
     const headerPath = join(folder, headerName);
     const header = JSON.parse((await readFile(headerPath, "utf8")).split("\n")[0]!);
-    expect(header.version).toBe(9);
-    header.version = 8;
+    expect(header.version).toBe(10);
+    header.version = 9;
     header.undoKept = [{ recordId: "rec_a", field: "A" }];
     await writeFile(headerPath, JSON.stringify(header));
     await expect(store.runsOf(AUTOMATION, "atc_one")).resolves.toEqual({ runs: [], unreadable: true });
@@ -346,7 +360,7 @@ describe("the automation run store", () => {
     const files = await readdir(join(folder, automationFolder!));
     const planOf = (claimId: string) => join(folder, automationFolder!, files.find((file) => file.endsWith(".json") && file.startsWith(hashOf(claimId)))!);
     const text = await readFile(planOf("atc_older"), "utf8");
-    await writeFile(planOf("atc_older"), text.replace('"version":9', '"version":8'));
+    await writeFile(planOf("atc_older"), text.replace('"version":10', '"version":9'));
     await writeFile(planOf("atc_damaged"), "{ torn");
     const later = Date.now() + 31 * 24 * 60 * 60 * 1000;
     await expect(store.expire(Date.now(), async () => "gone", null)).resolves.toBeNull();

@@ -13,7 +13,8 @@ import { collectionAutomationId, definitionHash } from "@dohc/automation-executo
 import type { CollectionAutomations, KeptAutomationField } from "@dohc/automation-executor/collection-automations";
 import { CHANNELS } from "./channels";
 import { registerStopAndRestoreIpc } from "./stopAndRestoreIpc";
-import { KeptAutomationFieldShape } from "./bridgeContract";
+import { KeptAutomationFieldShape, stopAndRestoreRecoveryOperations } from "./bridgeContract";
+import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
 import {
   LiveDocumentMutationError,
   RestoreHeadChangedError,
@@ -61,6 +62,7 @@ function fixture(options: {
   serverRestore?: (definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>, again: boolean) => Promise<Pass>;
   syncNow?: () => Promise<void>;
   ledgerError?: () => Error | null;
+  runStore?: ReturnType<typeof createAutomationRunStore>;
 } = {}) {
   const handlers = new Map<string, (event: { sender: string }, payload: unknown) => unknown>();
   const calls: Array<{ path: string; method: string }> = [];
@@ -145,7 +147,12 @@ function fixture(options: {
     assertTrustedSender: () => undefined,
     withRendererWorkspaceOperation: async (_sender, _workspaceId, _message, work) => await work({
       workspace: { workspaceId: WORKSPACE_ID, rootPath: options.rootPath ?? "/missing-root" },
-      state: { collectionAutomations: { undoRunsOf: options.undoRunsOf } as CollectionAutomations },
+      state: { collectionAutomations: { undoRunsOf: options.undoRunsOf,
+        retainRunsForRestore: async () => undefined,
+        pendingRestores: () => options.runStore?.pendingRestores() ?? Promise.resolve([]),
+        savePendingRestore: (entry: Parameters<CollectionAutomations["savePendingRestore"]>[0]) => options.runStore?.savePendingRestore(entry) ?? Promise.resolve(),
+        removePendingRestore: (id: string) => options.runStore?.removePendingRestore(id) ?? Promise.resolve(),
+      } as unknown as CollectionAutomations },
       assertCurrent: () => undefined,
     }),
     remoteForWorkspace: async () => ({ credentials: "token", credentialGeneration: 1 }),
@@ -194,6 +201,33 @@ async function capturedFiles(paths: string[]) {
 }
 
 describe("stop and restore in main", () => {
+  it("recovers an unfinished restore after restart and finishes runs after Undo of the files", async () => {
+    const root = await createTestScratch("dohc-restore-restart-");
+    const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
+    const target = {kind: "person", userId: "user_ana"};
+    const definition = {id: "bump", name: "Bump", enabled: true, when: {kind: "record-added", table: null}, if: null,
+      do: [{kind: "set", values: [{field: "Count", value: {kind: "literal", value: 2}}], records: null, operation: null}]} as unknown as Automation;
+    const written = writeAutomationsFile([{status: "valid", automation: definition}]);
+    if (written.status !== "ok") throw new Error("Invalid test automation");
+    const moment = {...schemaMoment, path: "trip/automations.yaml", payload: {
+      before: {path: "trip/automations.yaml", text: "version: 1\nautomations: []\n"},
+      after: {path: "trip/automations.yaml", text: written.text},
+    }};
+    const first = fixture({rootPath: root, runStore: createAutomationRunStore(root, resolver), moment,
+      ledger: {"grant-edit": [{writes: [{committedAtMs: 2, files: [{path: moment.path, objectId: moment.objectId, momentId: moment.id, created: false}]}], nextAfterOriginSeq: null}]},
+      undoRunsOf: async () => ({...NOTHING, errorMessage: "Resolve the conflict."}),
+    });
+    const outcome = await first.call(CHANNELS.stopAndRestore, {target}) as {restored: {restoredMomentId: string}[]};
+    const resumedRuns = vi.fn(async () => NOTHING);
+    const restarted = fixture({rootPath: root, runStore: createAutomationRunStore(root, resolver), undoRunsOf: resumedRuns});
+    const saved = await restarted.call(stopAndRestoreRecoveryOperations.pendingStopAndRestores.channel, {}) as unknown[];
+    expect(saved).toHaveLength(1);
+    await restarted.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: outcome.restored.map(file => file.restoredMomentId)});
+    await restarted.call(CHANNELS.stopAndRestore, {target});
+    expect(resumedRuns).toHaveBeenCalled();
+    expect(restarted.capture.restoreFileToBeforeMoment).toHaveBeenCalledTimes(1);
+    expect(await restarted.call(stopAndRestoreRecoveryOperations.pendingStopAndRestores.channel, {})).toEqual([]);
+  });
   it("reviews a retired file and restores the following admitted file", async () => {
     const f = await capturedFiles(["notes/a.md", "docs/b.md"]);
     try {

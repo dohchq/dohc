@@ -40,7 +40,7 @@ import {
   DIRECT_MESSAGE_TO_YOU,
   type CollectionAutomationPeople,
 } from "@dohc/automation-executor/collection-automations";
-import { DEADLINE_ERROR, DEFINITION_CHANGED_ERROR, GROUP_CHANGED_ERROR, LOST_COLLECTION_ERROR, UNDONE_RUN_ERROR, UNREADABLE_RUN_ERROR } from "@dohc/automation-executor/collection-automation-run";
+import { DEADLINE_ERROR, DEFINITION_CHANGED_ERROR, GROUP_CHANGED_ERROR, LOST_COLLECTION_ERROR, UNDONE_RUN_ERROR, UNFINISHED_UNDO_ERROR, UNREADABLE_RUN_ERROR } from "@dohc/automation-executor/collection-automation-run";
 import {
   AutomationChatSessionWait,
   automationMessageId,
@@ -2872,13 +2872,14 @@ describe("Collection automations", () => {
   });
 
   it.each([
-    ["no record has a sync conflict", false],
-    ["the newer run's other record has a sync conflict", true],
-  ] as const)("undoes runs of two automations newest first across both when %s", async (_case, conflict) => {
+    ["no record has a sync conflict", false, false],
+    ["the newer run's other record has a sync conflict", true, false],
+    ["older Undo intervenes before expiry and restart", true, true],
+  ] as const)("undoes runs of two automations newest first across both when %s", async (_case, conflict, intervenes) => {
     const later = STAMP.replace("id: stamp", "id: later").replace("name: Stamp", "name: Later");
     const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: `${STAMP}\n${later}\n` } });
     let now = Date.UTC(2026, 8, 1);
-    const executor = w.makeExecutor({ nowMs: () => now });
+    let executor = w.makeExecutor({ nowMs: () => now });
     const shared = w.addRecord("Tasks", "shared", { Status: "Done", Count: 2, Note: "two" });
     const other = w.addRecord("Tasks", "other", { Status: "Done", Count: 2, Note: "y" });
     const older = w.claim("collection:Tasks#stamp", shared);
@@ -2926,9 +2927,23 @@ describe("Collection automations", () => {
       expect(w.fieldsOf(shared).Note).toBe("one");
       expect(w.fieldsOf(other).Note).toBe("y");
       expect((await w.baseStore.runsOf("collection:Tasks#stamp", older.claimId)).runs.map((run) => run.undo)).toEqual([null]);
+      if (intervenes) {
+        now += 31 * 24 * 60 * 60 * 1000;
+        await w.baseStore.expire(now, async () => "gone", null);
+        expect((await w.baseStore.runsOf("collection:Tasks#stamp", older.claimId)).runs).toHaveLength(1);
+        expect((await executor.listedRun("collection:Tasks#later", newer.claimId))?.undoUnfinished).toBe(true);
+        expect(await executor.retry({automationId: "collection:Tasks#later", claimId: newer.claimId, startOver: false})).toMatchObject({
+          status: "refused", reason: "dohc has not finished undoing this run. Try again in run history to finish Undo.",
+        });
+        await executor.undo({automationId: "collection:Tasks#stamp", claimId: older.claimId, deletes: null}, async () => undefined);
+        expect(w.fieldsOf(shared).Note).toBe("two");
+        await executor.dispose();
+        executor = w.makeExecutor({nowMs: () => now});
+        await executor.open();
+      }
       other.conflicted = false;
     }
-    await expect(executor.undoRunsOf(definitions, async () => undefined)).resolves.toMatchObject({ undone: 2, errorMessage: null });
+    await expect(executor.undoRunsOf(definitions, async () => undefined)).resolves.toMatchObject({ undone: intervenes ? 1 : 2, errorMessage: null });
     expect(w.fieldsOf(other).Note).toBe("x");
     expect(w.fieldsOf(shared).Note).toBe("two");
     await executor.dispose();
@@ -2996,14 +3011,14 @@ describe("Collection automations", () => {
     const [stopped] = (await w.executor.runs("collection:Tasks#stamp")).runs;
     expect(stopped).toMatchObject({ undone: false });
     await expect(w.executor.retry({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, startOver: false }))
-      .resolves.toEqual({ status: "refused", reason: UNDONE_RUN_ERROR });
+      .resolves.toEqual({ status: "refused", reason: UNFINISHED_UNDO_ERROR });
     // Even once the automation changes, reading the run does not offer to start over: Try again refuses.
     await w.writeAutomations("Tasks", STAMP.replace("Title: Stamped", "Title: Stamped again"));
     // The executor reads the file again before it answers.
     w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
     expect(await w.executor.run("collection:Tasks#stamp", claim.claimId)).toMatchObject({ definitionChanged: true, startsOver: false });
     await expect(w.executor.retry({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, startOver: true }))
-      .resolves.toEqual({ status: "refused", reason: UNDONE_RUN_ERROR });
+      .resolves.toEqual({ status: "refused", reason: UNFINISHED_UNDO_ERROR });
     await w.writeAutomations("Tasks", STAMP);
     w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
     expect(await w.executor.run("collection:Tasks#stamp", claim.claimId)).toMatchObject({ definitionChanged: false });
@@ -3011,7 +3026,7 @@ describe("Collection automations", () => {
     claim.state = "pending";
     w.requeue(claim);
     w.executor.notifyClaimed();
-    await w.until(() => claim.state === "failed" && claim.error === UNDONE_RUN_ERROR);
+    await w.until(() => claim.state === "failed" && claim.error === UNFINISHED_UNDO_ERROR);
     expect([...w.records.values()].filter((record) => record.collection === "Log")).toEqual([]);
 
     await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, deletes: null }, async () => undefined))

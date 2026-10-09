@@ -66,7 +66,10 @@ interface Shown {
  * from the Notices row after the dialog closed opens it again on that
  * outcome, with Undo for every file, and a retry that fails leaves it there.
  */
-export function useStopAndRestore(workspaceId: string) {
+export function useStopAndRestore(workspaceId: string, recovery?: {
+  ready: boolean;
+  onError(fallback: string, error: unknown, retry: () => void, identity: string): void;
+}) {
   const [session, setSession] = useState<StopAndRestoreSession | null>(null);
   const receipts = useRef(new Map<string, Receipt[]>());
   const runs = useRef(new Map<string, RunTotals>());
@@ -107,6 +110,37 @@ export function useStopAndRestore(workspaceId: string) {
       },
     };
   }, []);
+  const recoveryRef = useRef(recovery);
+  recoveryRef.current = recovery;
+  useEffect(() => {
+    if (!recovery?.ready) return;
+    let current = true;
+    const recover = async () => {
+      try {
+        const pending = await bridge().pendingStopAndRestores({workspaceId});
+        if (!current) return;
+        for (const entry of pending) {
+          const target = {target: entry.target, label: entry.label};
+          store.set(workspaceId, entry.target, entry.receipts);
+          if (entry.result.status === "restored") {
+            store.show(workspaceId, entry.target, {result: entry.result, undone: entry.filesUndone});
+            store.addRuns(workspaceId, entry.target, {runsUndone: entry.result.runsUndone,
+              fieldsMissing: entry.result.fieldsMissing, otherKept: otherKept(entry.result)});
+          }
+          const message = entry.filesUndone
+            ? "dohc has not finished undoing runs. Try again to finish."
+            : "dohc has not finished Stop and restore. Try again to finish.";
+          recoveryRef.current?.onError(message, new Error(message), () => retry(workspaceId, target, "stop"),
+            `stop-and-restore:${JSON.stringify([workspaceId, keyOf(entry.target)])}`);
+        }
+      } catch (error) {
+        if (current) recoveryRef.current?.onError("dohc could not read unfinished Stop and restore progress.", error,
+          () => void recover(), `stop-and-restore:recovery:${workspaceId}`);
+      }
+    };
+    void recover();
+    return () => {current = false;};
+  }, [workspaceId, recovery?.ready, store, retry]);
   return {
     session: session?.workspaceId === workspaceId ? session : null,
     open,
@@ -237,7 +271,9 @@ export function StopAndRestoreDialog({
   };
 
   const stop = (): Promise<void> => perform(stopFallback(), "stop", async (token) => {
-    const result = await bridge().stopAndRestore({ workspaceId, target: chosen.target, reviewPaths: [...new Set([...retainedCollectionFieldWritePaths(workspaceId), ...retainedOrphanedDraftPaths(workspaceId)])] });
+    const filesUndone = receipts.shown(workspaceId, chosen.target)?.undone === true &&
+      receipts.shown(workspaceId, chosen.target)?.result.unfinished !== null;
+    const result = await bridge().stopAndRestore({ workspaceId, target: chosen.target, label: chosen.label, reviewPaths: [...new Set([...retainedCollectionFieldWritePaths(workspaceId), ...retainedOrphanedDraftPaths(workspaceId)])] });
     if (result.status === "waiting") {
       if (request.isCurrent(token)) setState((current) => ({ kind: "waiting", targets: listedTargets(current) }));
       return;
@@ -264,7 +300,7 @@ export function StopAndRestoreDialog({
           sendsMessages: (carried?.sendsMessages ?? false) || result.sendsMessages,
         }),
       },
-      undone: false,
+      undone: filesUndone,
     };
     receipts.show(workspaceId, chosen.target, outcome);
     onRestored();
@@ -279,7 +315,7 @@ export function StopAndRestoreDialog({
   const undo = (): Promise<void> => perform("dohc could not undo the restore.", "undo", async (token) => {
     const restored = receipts.get(workspaceId, chosen.target);
     const result = restored.length > 0
-      ? await bridge().undoStopAndRestore({ workspaceId, reviewPaths: [...new Set([...retainedCollectionFieldWritePaths(workspaceId), ...retainedOrphanedDraftPaths(workspaceId)])], restoredMomentIds: restored.map((file) => file.restoredMomentId) })
+      ? await bridge().undoStopAndRestore({ workspaceId, target: chosen.target, reviewPaths: [...new Set([...retainedCollectionFieldWritePaths(workspaceId), ...retainedOrphanedDraftPaths(workspaceId)])], restoredMomentIds: restored.map((file) => file.restoredMomentId) })
       : { files: [], errorMessage: null };
     const completed = new Set(result.files.flatMap(file => file.kind === "restored" ? [file.momentId] : []));
     receipts.set(workspaceId, chosen.target, restored.filter(file => !completed.has(file.restoredMomentId)));
@@ -312,8 +348,10 @@ export function StopAndRestoreDialog({
     if (result.errorMessage !== null) {
       onError("dohc could not undo the restore.", new Error(result.errorMessage), () => onRetry(workspaceId, chosen, "undo"), identity);
     } else {
-      // Remove the retry notice after Undo finishes.
-      onSettled(identity);
+      if (outcome.result.unfinished !== null) {
+        const message = "dohc has not finished undoing runs. Try again to finish.";
+        onError(message, new Error(message), () => onRetry(workspaceId, chosen, "stop"), identity);
+      } else onSettled(identity);
     }
     if (request.isCurrent(token)) setState((current) => ({ kind: "done", targets: listedTargets(current), ...outcome }));
   });
@@ -359,7 +397,7 @@ export function StopAndRestoreDialog({
         {state.kind === "choose" ? (
           <DangerButton data-testid="stop-and-restore-confirm" onClick={() => void stop()}>Stop and restore</DangerButton>
         ) : null}
-        {state.kind === "done" && !state.undone && state.result.unfinished !== null ? (
+        {state.kind === "done" && state.result.unfinished !== null ? (
           <PrimaryButton onClick={() => void stop()}>Try again</PrimaryButton>
         ) : null}
         {state.kind === "waiting" ? <PrimaryButton onClick={() => void stop()}>Try again</PrimaryButton> : null}
@@ -453,7 +491,7 @@ function Outcome({ words, result, undone, onOpenFile, onOpenCollection }: {
       {result.unfinished !== null && result.wroteAutomations ? (
         <p className="m-0 text-[13px] text-ink">
           dohc has not finished undoing runs{result.runsUndone > 0 ? "" : ` of ${words.automations}`}.
-          {undone ? " Stop and restore again to finish. This restores the files again too." : ""}
+          {undone ? " Try again to finish." : ""}
         </p>
       ) : null}
       {result.runsLeft > 0 ? (

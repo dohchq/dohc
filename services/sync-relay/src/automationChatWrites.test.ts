@@ -57,9 +57,9 @@ const message = (target: AutomationChatMessage["target"]): AutomationChatMessage
 });
 
 const savedRun = (): StoredRun => ({
-  version: 9, rules: null, collections: [], undoCalls: [], undoCovers: [], claimId: "claim", automationId: automation.automationId, definitionHash: "hash", keySeed: "hash",
+  version: 10, rules: null, collections: [], undoCalls: [], undoCovers: [], claimId: "claim", automationId: automation.automationId, definitionHash: "hash", keySeed: "hash",
   startedAtMs: 10_000, finishedAtMs: 10_000, steps: [], applied: [], created: [], replans: [], undoRequests: [],
-  readableFields: null, superseded: false, undo: null, undoKept: [], settled: true, outcome: { state: "done" },
+  readableFields: null, superseded: false, undo: null, undoKept: [], undoCompletedFields: [], settled: true, outcome: { state: "done" },
 });
 const runStore = { supersedeWake: async () => undefined };
 

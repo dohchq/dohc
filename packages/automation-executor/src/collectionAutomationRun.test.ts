@@ -9,6 +9,7 @@ import { undoCollectionAutomationRuns } from "./collectionAutomationUndo";
 import { definitionHash } from "./automationPlan";
 import {
   newRun,
+  savedRunOf,
   rebaseRun,
   RECORD_NOT_FOUND,
   RULES_CHANGED_ERROR,
@@ -40,6 +41,67 @@ function automation(yaml: string): Automation {
 type Doc = { id: string; path: string; collection: string; values: Record<string, JsonValue> };
 
 class Crash extends Error {}
+
+it("does not replay a completed field reversal after another claim's Undo and restart", async () => {
+  const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {Count: 2}}]");
+  const space = workspace([task("rec_t", { Count: 2 }), task("rec_other", { Count: 2 })]);
+  const store = await scratchStore();
+  const write = (recordId: string, before: number, after: number) => ({kind: "field" as const,
+    recordId, path: `Tasks/${recordId}.md`, field: "Count", before, after});
+  const older = {...newRun({...added(), claimId: "atc_old"}, definition, "old", 1),
+    applied: [{ordinal: 0, writes: [write("rec_t", 2, 1)]}]};
+  const newer: StoredRun = {...newRun(added(), definition, "new", 2), undo: "started" as const,
+    steps: [{ordinal: 0, effects: [{kind: "set", target: {recordId: "rec_t", path: "Tasks/rec_t.md", collectionPath: "Tasks"}, fields: [{field: "Count", before: 1, after: 2}]}]}],
+    applied: [{ordinal: 0, writes: [write("rec_t", 1, 2), write("rec_other", 1, 2)]}]};
+  await store.save(newer);
+  let blocked = true;
+  const deps = {...space.undo([]),
+    withRecordWrites: async <T>(signal: AbortSignal, work: (writes: CollectionRecordWrites) => Promise<T>) => space.undo([]).withRecordWrites(signal, writes => work({...writes,
+      setFields: input => writes.setFields({...input, idempotencyKeyPrefix: undefined}),
+    })),
+    withReads: async <T>(work: (reads: CollectionAutomationReads) => Promise<T>) => space.undo([]).withReads(reads => work({...reads,
+      getCollectionRecord: async input => {
+        const result = await reads.getCollectionRecord(input);
+        return {...result, record: {...result.record, conflicted: blocked && input.recordId === "rec_other"}};
+      },
+    })),
+    recordCompletedField: async (recordId: string, field: string) => {
+      const undoCompletedFields = [...(newer.undoCompletedFields ?? []), {recordId, field}];
+      await store.updateState(newer, {undoCompletedFields});
+      newer.undoCompletedFields = undoCompletedFields;
+    },
+  };
+  await expect(undoCollectionAutomationRuns(deps, [newer], new AbortController().signal)).rejects.toThrow("sync conflict");
+  expect(space.records.get("rec_t")!.values.Count).toBe(1);
+  await undoCollectionAutomationRuns(space.undo([]), [older], new AbortController().signal);
+  expect(space.records.get("rec_t")!.values.Count).toBe(2);
+  blocked = false;
+  const recovered = (await store.runsOf(newer.automationId, newer.claimId)).runs;
+  expect(recovered).toHaveLength(1);
+  await undoCollectionAutomationRuns(deps, recovered, new AbortController().signal);
+  expect(space.records.get("rec_t")!.values.Count).toBe(2);
+  expect(space.records.get("rec_other")!.values.Count).toBe(1);
+});
+
+it("describes an unfinished Undo without claiming the run was undone", async () => {
+  const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {Count: 2}}]");
+  const store = await scratchStore();
+  await store.save({...newRun(added(), definition, "partial", 1), undo: "started"});
+  expect(await savedRunOf(store, added(), definition)).toMatchObject({outcome: {
+    error: "dohc has not finished undoing this run. Try again in run history to finish Undo.",
+  }});
+});
+
+it("stops before the next record reversal when saving completed field progress fails", async () => {
+  const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {Count: 2}}]");
+  const space = workspace([task("rec_t", {Count: 2}), task("rec_other", {Count: 2})]);
+  const run = {...newRun(added(), definition, "progress", 1), applied: [{ordinal: 0, writes: ["rec_t", "rec_other"].map(recordId =>
+    ({kind: "field" as const, recordId, path: `Tasks/${recordId}.md`, field: "Count", before: 1, after: 2}))}]};
+  await expect(undoCollectionAutomationRuns({...space.undo([]), recordCompletedField: async () => {throw new Error("Disk full");}},
+    [run], new AbortController().signal)).rejects.toThrow("Disk full");
+  expect(space.records.get("rec_t")!.values.Count).toBe(1);
+  expect(space.records.get("rec_other")!.values.Count).toBe(2);
+});
 
 it("records a refused field write as a failed run without completed writes", async () => {
   const space = workspace([task("rec_t", {})]);
