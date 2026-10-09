@@ -109,14 +109,17 @@ describe("ordinary admitted authorship", () => {
     expect(Number(db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage").get()?.usage_bytes)).toBe(0);
   });
 
-  it("preserves stored public snapshots in authenticated and accountless share serialization", async () => {
+  it("keeps non-moment snapshots out of authenticated and accountless share serialization", async () => {
     const storage = await testStorage();
     const row = {workspaceId: "workspace", originId: "device", originSeq: 0, opKind: "workspace.init",
       payloadJson: "{}", recordedAtMs: 1, relaySeq: 1, admittedAuthorSnapshot: snapshot};
     const queries = createShareReadQueries({...storage, fetchLogPage: () => ({rows: [row], nextCursor: 1, hasMore: false})}, 500);
     for (const audience of ["authenticated", "accountless"] as const) {
-      const page = queries.filteredLogPage("workspace", {paths: ["doc.md"], versionId: null, access: "view"}, 0, 10, audience);
-      expect(page.ops[0]?.admittedAuthorSnapshot).toEqual(snapshot);
+      const page = queries.filteredLogPage("workspace", "share", {paths: ["doc.md"], versionId: null, access: "view"}, 0, 10, audience);
+      expect(page.ops).toHaveLength(1);
+      expect(page.ops[0]).not.toHaveProperty("admittedAuthorSnapshot");
+      expect(page.ops[0]!.payload).not.toHaveProperty("authors");
     }
+    expect(row.admittedAuthorSnapshot).toEqual(snapshot);
   });
 });

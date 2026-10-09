@@ -1,3 +1,4 @@
+import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract";
 import { createHash } from "node:crypto";
 import { jsonResponse, TokenBucketLimiter } from "@dohc/service-http";
 import type { PublicEditRelease } from "@dohc/security-contract";
@@ -78,6 +79,9 @@ export function createCollectionWriteRoutes(input: {
       return jsonResponse({ ok: true, canSwitch: storage.automationSwitchableFolder(share.workspaceId, collectionPath) }, 200,
         { "cache-control": "private, no-store" });
     }
+    const humanName = accountDisplayName(input.lookupUserDisplayName, actorUserId).then(name => {
+      try { return parseLiveUpdateIdentifier(name); } catch { return "Unnamed"; }
+    });
     const body = await readBody(request);
     if (Object.keys(body).some((key) => key !== "submitId" && key !== "changes")) {
       throw relayError("share_op_rejected");
@@ -92,7 +96,7 @@ export function createCollectionWriteRoutes(input: {
       grantId: grant.grantId,
       grantGeneration: grant.generation,
       writer: { kind: "named", userId: actorUserId,
-        humanName: await accountDisplayName(input.lookupUserDisplayName, actorUserId) ?? "Unnamed" },
+        humanName: await humanName },
       submitId,
       rawChanges: body.changes,
       write: decision.write,

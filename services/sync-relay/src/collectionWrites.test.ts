@@ -128,7 +128,39 @@ it("shares a named direct-write snapshot with a co-editor, without private autho
   expect(lookup.mock.calls.filter(([id]) => id === RECIPIENT)).toHaveLength(1);
 });
 
-it("stores one bounded, quota-counted public snapshot per batch and keeps it after a rename and retry", async () => {
+it("starts the name lookup before reading the body and waits for it at commit", async () => {
+  let lookupStarted = false;
+  let bodyFinished = false;
+  let finishLookup!: (name: string) => void;
+  const lookup = vi.fn(() => {
+    lookupStarted = true;
+    return bodyFinished ? Promise.resolve("Recipient name")
+      : new Promise<string>(resolve => { finishLookup = resolve; });
+  });
+  const r = await relay();
+  await upload(r, SCHEMA_TWO);
+  const h = testHandler(r.storage, {nowMs: () => CLOCK, lookupUserDisplayName: lookup});
+  const req = request(RECIPIENT, `/sync/shares/${r.shareId}/collection-writes`,
+    jsonBody({submitId: "lookup-overlap", changes: [edit(`${PACKING}/collection.yaml`, SCHEMA, SCHEMA_TWO)]}));
+  const reader = req.body!.getReader();
+  const read = reader.read.bind(reader);
+  let startedBeforeBody: boolean | undefined;
+  vi.spyOn(req.body!, "getReader").mockReturnValue(reader);
+  vi.spyOn(reader, "read").mockImplementation(async () => {
+    startedBeforeBody ??= lookupStarted;
+    const item = await read();
+    if (item.done) {
+      bodyFinished = true;
+      if (lookupStarted) finishLookup("Recipient name");
+    }
+    return item;
+  });
+  expect((await h(req)).status).toBe(200);
+  expect(startedBeforeBody).toBe(true);
+  expect(lookup).toHaveBeenCalledExactlyOnceWith(RECIPIENT);
+});
+
+it("stores bounded, quota-counted public snapshots per log row and keeps them after a rename and retry", async () => {
   let name = "Recipient name";
   const lookup = vi.fn((_id: string) => name);
   const r = await relay({overrides: {lookupUserDisplayName: lookup}});
@@ -148,29 +180,27 @@ it("stores one bounded, quota-counted public snapshot per batch and keeps it aft
   const rows = db.prepare("SELECT * FROM sync_relay_collection_writes").all();
   expect(rows).toHaveLength(1);
   const row = rows[0]!;
-  expect(row).toHaveProperty("admitted_author_snapshot_json");
-  const snapshotJson = String(row.admitted_author_snapshot_json);
+  expect(row).not.toHaveProperty("admitted_author_snapshot_json");
+  const logSnapshots = db.prepare("SELECT admitted_author_snapshot_json FROM sync_relay_log WHERE origin_id=?").all(row.origin_id);
+  const snapshotJson = String(logSnapshots[0]!.admitted_author_snapshot_json);
   const snapshot = JSON.parse(snapshotJson);
   expect(snapshot).toEqual([{kind: "human", humanId: RECIPIENT, humanName: "Recipient name"}]);
   expect(snapshot.length).toBeLessThanOrEqual(2);
   expect(Buffer.byteLength(JSON.stringify(snapshot[0]))).toBeLessThanOrEqual(4096);
   expect(row.storage_bytes).toBe(Buffer.byteLength(String(row.paths_json)) + Buffer.byteLength(String(row.receipt_json)) +
-    Buffer.byteLength(r.grantId) + Buffer.byteLength(RECIPIENT) + Buffer.byteLength(String(row.origin_id)) + Buffer.byteLength(snapshotJson) + 256);
-  expect(db.prepare("SELECT admitted_author_snapshot_json FROM sync_relay_log WHERE origin_id=?").all(row.origin_id))
-    .toEqual(Array(3).fill({admitted_author_snapshot_json: null}));
-  const plan = db.prepare(`EXPLAIN QUERY PLAN SELECT admitted_author_snapshot_json FROM sync_relay_collection_writes
-    WHERE workspace_id=? AND origin_id=? AND first_origin_seq<=? AND last_origin_seq>=?
-    ORDER BY first_origin_seq DESC LIMIT 1`).all(WORKSPACE, row.origin_id, 1, 1);
-  expect(JSON.stringify(plan)).toContain("idx_sync_relay_collection_writes_origin_seq");
+    Buffer.byteLength(r.grantId) + Buffer.byteLength(RECIPIENT) + Buffer.byteLength(String(row.origin_id)) + 256);
+  expect(logSnapshots).toEqual(Array(3).fill({admitted_author_snapshot_json: snapshotJson}));
+  expect(db.prepare("SELECT name FROM sqlite_schema WHERE name='idx_sync_relay_collection_writes_origin_seq'").get()).toBeUndefined();
+  expect(db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id='collection-write-public-authors-v1'").get()).toBeUndefined();
   const usage = db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id=?").get(WORKSPACE);
   const logBytes = Number(db.prepare("SELECT SUM(length(CAST(payload_json AS BLOB))) AS bytes FROM sync_relay_log WHERE origin_id=?").get(row.origin_id)!.bytes);
-  expect(Number(usage!.usage_bytes) - beforeUsage).toBe(Number(row.storage_bytes) + logBytes);
+  expect(Number(usage!.usage_bytes) - beforeUsage).toBe(Number(row.storage_bytes) + logBytes + 3 * Buffer.byteLength(snapshotJson));
   db.close();
   name = "Renamed recipient";
   expect(await json(await write(r, changes))).toMatchObject({created: false});
   const again = inspectDatabase(storagePath(r.storage));
   expect(again.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id=?").get(WORKSPACE)).toEqual(usage);
-  expect(again.prepare("SELECT admitted_author_snapshot_json FROM sync_relay_collection_writes").get()?.admitted_author_snapshot_json).toBe(snapshotJson);
+  expect(again.prepare("SELECT admitted_author_snapshot_json FROM sync_relay_log WHERE origin_id=?").all(row.origin_id)).toEqual(logSnapshots);
   again.close();
   const path = storagePath(r.storage);
   closeTestStorage(r.storage);
@@ -787,7 +817,7 @@ describe("direct writes to a Collection's own files", () => {
       shareId: r.shareId,
       grantId: r.grantId,
       grantGeneration: 1,
-      writer: { kind: "named", userId: RECIPIENT },
+      writer: { kind: "named", userId: RECIPIENT, humanName: "Recipient" },
       submitId: "submit-1",
       rawChanges: changes,
       write: decision.write,
@@ -1164,7 +1194,7 @@ describe("the owner's read of a grant's direct writes", () => {
     const usage = () => db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id = ?").get(WORKSPACE);
     const quota = usage();
     db.exec(`
-      DELETE FROM sync_relay_migrations WHERE migration_id IN ('collection-write-authors-v1', 'collection-write-public-authors-v1');
+      DELETE FROM sync_relay_migrations WHERE migration_id = 'collection-write-authors-v1';
       ALTER TABLE sync_relay_collection_writes RENAME TO current_ledger;
       CREATE TABLE sync_relay_collection_writes (
         grant_id TEXT NOT NULL,
@@ -1215,7 +1245,6 @@ describe("the owner's read of a grant's direct writes", () => {
       "SELECT name FROM sqlite_master WHERE name LIKE '%collection_writes%' ORDER BY name",
     ).all().map((row) => row.name)).toEqual([
       "idx_sync_relay_collection_writes_grant_seq",
-      "idx_sync_relay_collection_writes_origin_seq",
       "sqlite_autoindex_sync_relay_collection_writes_1",
       "sync_relay_collection_writes",
       "sync_relay_collection_writes_usage_delete",
@@ -1354,7 +1383,12 @@ describe("direct writes through an Edit share link", () => {
   it.skipIf(!process.env.SHARE_AUTHOR_PERF_OUTPUT)("measures direct-write routes and share reads", async () => {
     const {writeFile} = await import("node:fs/promises");
     let clock = CLOCK;
-    const r = await linkRelay({overrides: {nowMs: () => clock, lookupUserDisplayName: () => "Recipient"}});
+    const r = await linkRelay({overrides: {nowMs: () => clock,
+      lookupUserDisplayName: async () => {
+        // Model a 2 ms account-service round trip in this performance workload.
+        await new Promise(resolve => setTimeout(resolve, 2));
+        return "Recipient";
+      }}});
     sql(r, "UPDATE sync_relay_link_sessions SET expires_at_ms=10000000");
     const coShare = await createShare(r.h, OWNER, WORKSPACE, {recipientUserId: "coeditor", paths: ["trip"], access: "edit"});
     await upload(r, SCHEMA, SCHEMA_TWO);

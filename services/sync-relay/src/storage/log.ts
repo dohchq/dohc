@@ -23,13 +23,6 @@ import {
 import { rowToLogRow } from "./rows";
 import { notifyDesktopReadiness } from "../desktopReadinessChanges";
 
-const LOG_AUTHOR_SNAPSHOT_SQL = `COALESCE(admitted_author_snapshot_json,
-  CASE WHEN origin_id LIKE 'relay:collection-file:%' THEN (
-    SELECT writes.admitted_author_snapshot_json FROM sync_relay_collection_writes AS writes
-    WHERE writes.workspace_id = sync_relay_log.workspace_id AND writes.origin_id = sync_relay_log.origin_id
-      AND writes.first_origin_seq <= sync_relay_log.origin_seq AND writes.last_origin_seq >= sync_relay_log.origin_seq
-    ORDER BY writes.first_origin_seq DESC LIMIT 1
-  ) END) AS admitted_author_snapshot_json`;
 const logPageStatements = new WeakMap<SqliteDb, ReturnType<SqliteDb["prepare"]>>();
 
 export function appendLogBatch(storage: StorageContext, input: {
@@ -256,7 +249,7 @@ export function fetchLogPage(storage: StorageContext, input: {
     let statement = logPageStatements.get(storage.db);
     if (!statement) {
       statement = storage.db.prepare(
-        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, ${LOG_AUTHOR_SNAPSHOT_SQL}, settlement_admission_json
+        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json
          FROM sync_relay_log
          WHERE workspace_id = ? AND relay_seq > ?
          ORDER BY relay_seq
@@ -283,7 +276,7 @@ export function fetchLogPageDescending(storage: StorageContext, input: {
       input.beforeRelaySeq === null
         ? storage.db
             .prepare(
-              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, ${LOG_AUTHOR_SNAPSHOT_SQL}, settlement_admission_json
+              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json
                FROM sync_relay_log
                WHERE workspace_id = ?
                ORDER BY relay_seq DESC
@@ -292,7 +285,7 @@ export function fetchLogPageDescending(storage: StorageContext, input: {
             .all(input.workspaceId, input.limit)
         : storage.db
             .prepare(
-              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, ${LOG_AUTHOR_SNAPSHOT_SQL}, settlement_admission_json
+              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json
                FROM sync_relay_log
                WHERE workspace_id = ? AND relay_seq < ?
                ORDER BY relay_seq DESC
@@ -309,7 +302,7 @@ export function fetchLogCoordinate(storage: StorageContext, input: {
   }): SyncRelayLogRow | null {
     const row = storage.db
       .prepare(
-        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, ${LOG_AUTHOR_SNAPSHOT_SQL}, settlement_admission_json
+        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json
          FROM sync_relay_log
          WHERE workspace_id = ? AND origin_id = ? AND origin_seq = ?`,
       )

@@ -10,18 +10,33 @@ const moment = (authors: unknown) => ({
 });
 
 function page(payload: Record<string, unknown>, audience: "authenticated" | "accountless" = "authenticated",
-  admittedAuthorSnapshot?: import("./storage").SyncRelayLogRow["admittedAuthorSnapshot"]) {
+  admittedAuthorSnapshot?: import("./storage").SyncRelayLogRow["admittedAuthorSnapshot"],
+  originId = "owner-origin", shareId = "share") {
   const storage: Pick<Parameters<typeof createShareReadQueries>[0], "fetchLogPage" | "hasRefusedSettlement"> = {
     hasRefusedSettlement: () => false,
-    fetchLogPage: () => ({ rows: [{ workspaceId: "workspace", originId: "owner-origin", originSeq: 0,
+    fetchLogPage: () => ({ rows: [{ workspaceId: "workspace", originId, originSeq: 0,
       relaySeq: 1, opKind: "moment.append", payloadJson: JSON.stringify(payload), recordedAtMs: 1, ...(admittedAuthorSnapshot === undefined ? {} : {admittedAuthorSnapshot}) }], nextCursor: 1, hasMore: false }),
   };
   // Selected file moments use only fetchLogPage; the other query surfaces are outside this fixture.
   const queries = createShareReadQueries(storage as unknown as Parameters<typeof createShareReadQueries>[0], 500);
-  return queries.filteredLogPage("workspace", selector, 0, 10, audience);
+  return queries.filteredLogPage("workspace", shareId, selector, 0, 10, audience);
 }
 
 describe("authenticated selected moment declarations", () => {
+  it("scopes direct-write origins to the share while keeping retries stable", () => {
+    const origin = "relay:collection-file:private-grant";
+    const first = page(moment(undefined), "authenticated", undefined, origin, "share-one");
+    expect(first.ops[0]!.originId).toBe(page(moment(undefined), "authenticated", undefined, origin, "share-one").ops[0]!.originId);
+    expect(first.ops[0]!.originId).not.toBe(page(moment(undefined), "authenticated", undefined, origin, "share-two").ops[0]!.originId);
+    expect(JSON.stringify(first)).not.toContain("private-grant");
+  });
+
+  it("collapses unavailable authors to one marker in a snapshot", () => {
+    const snapshot = [{kind: "agent" as const, agentId: "one"},
+      {kind: "agent" as const, agentId: "two", onBehalfOf: "absent"}];
+    expect((page(moment(undefined), "authenticated", snapshot).ops[0]!.payload as Record<string, unknown>).authors)
+      .toEqual([{kind: "unattributed"}]);
+  });
   it("does not publish client-declared people or an agent's onBehalfOf without relay proof", () => {
     const served = page(moment([
       {kind: "human", humanId: "claimed-person", humanName: "Claimed person"},
@@ -107,12 +122,12 @@ it("serves only relay-admitted settlement authors, keeps owner bytes, and advanc
      row.settlementAdmission?.status === "refused" && row.settlementAdmission.settlementId === input.settlementId &&
      row.settlementAdmission.reason === input.reason && JSON.parse(row.payloadJson).momentId === input.momentId)};
  const queries=createShareReadQueries(storage as unknown as Parameters<typeof createShareReadQueries>[0],500);
- const served=queries.filteredLogPage("workspace",selector,0,10,"authenticated");
+ const served=queries.filteredLogPage("workspace", "share",selector,0,10,"authenticated");
  expect(served.ops.map(op=>op.relaySeq)).toEqual([1,3]);expect(served.nextCursor).toBe(3);
  expect(served.ops[0]!.payload).toMatchObject({authors});expect(served.ops[0]).not.toHaveProperty("admittedAuthorSnapshot");expect(served.ops[0]).not.toHaveProperty("settlementAdmission");
  expect(served.ops[0]!.payload).not.toHaveProperty("settlementReference");expect(served.ops[1]!.payload).toMatchObject({authors: [{kind:"unattributed"}]});expect(served.ops[1]!.payload).toMatchObject({metadata:{origin:"sync",summary:"Attribution unavailable"}});
  expect(rows[0]!.payloadJson).toBe(payloadJson);expect(JSON.parse(payloadJson)).not.toHaveProperty("authors");
- const accountless=queries.filteredLogPage("workspace",selector,0,10,"accountless");expect(accountless.ops.map(op=>op.relaySeq)).toEqual([1,3]);expect(accountless.ops[0]!.payload).not.toHaveProperty("authors");
+ const accountless=queries.filteredLogPage("workspace", "share",selector,0,10,"accountless");expect(accountless.ops.map(op=>op.relaySeq)).toEqual([1,3]);expect(accountless.ops[0]!.payload).not.toHaveProperty("authors");
 });
 
 it("converts admitted automation to the ordinary moment format only for authenticated shares", () => {
@@ -123,8 +138,8 @@ it("converts admitted automation to the ordinary moment format only for authenti
    opKind:"moment.append",payloadJson,recordedAtMs:1,admittedAuthorSnapshot:authors,settlementAdmission:{status:"accepted",settlementId:"automation"}};
  const storage = {fetchLogPage:()=>({rows:[row],nextCursor:1,hasMore:false})};
  const queries=createShareReadQueries(storage as unknown as Parameters<typeof createShareReadQueries>[0],500);
- expect(queries.filteredLogPage("workspace",selector,0,10,"authenticated").ops[0]?.payload).toMatchObject({
+ expect(queries.filteredLogPage("workspace", "share",selector,0,10,"authenticated").ops[0]?.payload).toMatchObject({
    authors:[{kind:"automation",automationId:"collection:Tasks#mark",onBehalfOf:"presser",depth:2}]});
- expect(queries.filteredLogPage("workspace",selector,0,10,"accountless").ops[0]?.payload).not.toHaveProperty("authors");
+ expect(queries.filteredLogPage("workspace", "share",selector,0,10,"accountless").ops[0]?.payload).not.toHaveProperty("authors");
  expect(row.admittedAuthorSnapshot).toEqual(authors);
 });

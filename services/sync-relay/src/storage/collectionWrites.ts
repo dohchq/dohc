@@ -35,7 +35,6 @@ import {
   type LinkEnrollment,
 } from "./linkEnrollment";
 import { appendLogBatchInTransaction, maxOriginSeq } from "./log";
-import { ensureLiveLinkPublicPrincipal } from "./liveAuthorSnapshot";
 import type { SqliteDb } from "./types";
 import { assertWorkspaceQuota } from "./workspaces";
 
@@ -105,19 +104,7 @@ export function initializeCollectionWriteSchema(db: SqliteDb): void {
     db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)")
       .run(COLLECTION_WRITE_AUTHORS_MIGRATION, Date.now());
   }
-  const publicAuthorsMigration = "collection-write-public-authors-v1";
-  if (!db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(publicAuthorsMigration)) {
-    db.exec(`ALTER TABLE sync_relay_collection_writes ADD COLUMN admitted_author_snapshot_json TEXT
-      CHECK (admitted_author_snapshot_json IS NULL OR (json_valid(admitted_author_snapshot_json)
-        AND json_type(admitted_author_snapshot_json) = 'array'
-        AND json_array_length(admitted_author_snapshot_json) BETWEEN 1 AND 2
-        AND length(CAST(admitted_author_snapshot_json AS BLOB)) <= 8195))`);
-    db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)")
-      .run(publicAuthorsMigration, Date.now());
-  }
   db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_sync_relay_collection_writes_origin_seq
-      ON sync_relay_collection_writes(workspace_id, origin_id, first_origin_seq DESC);
     CREATE INDEX IF NOT EXISTS idx_sync_relay_collection_writes_grant_seq
       ON sync_relay_collection_writes(grant_id, first_origin_seq);
     CREATE TRIGGER IF NOT EXISTS sync_relay_collection_writes_usage_insert
@@ -155,7 +142,7 @@ export class CollectionWriteStaleError extends RelayError {
  * write from its capability and profile, never from anything it claims.
  */
 export type CollectionWriter =
-  | { kind: "named"; userId: string; humanName?: string }
+  | { kind: "named"; userId: string; humanName: string }
   | {
       kind: "link";
       capabilityHash: string;
@@ -237,6 +224,7 @@ export function commitCollectionWrite(
 
     let addedBytes = 0;
     let principalId: string | null = null;
+    let linkAuthor: {kind: "link"; publicPrincipalId: string; label: string} | undefined;
     if (current.kind === "link") {
       if (linkPrincipalLimitReached(storage, current.enrollment)) {
         throw relayError("quota_exceeded", "This link has as many browsers as it can hold.");
@@ -247,7 +235,7 @@ export function commitCollectionWrite(
       }
       addedBytes += newBlobBytes(storage, workspaceId, current.content);
       assertWorkspaceQuota(storage, workspaceId, addedBytes);
-      commitLinkEnrollment(storage, {
+      const principal = commitLinkEnrollment(storage, {
         capabilityHash: current.capabilityHash,
         profileTokenHash: current.profileTokenHash,
         enrollment: current.enrollment,
@@ -257,18 +245,16 @@ export function commitCollectionWrite(
         discussionRevision: Number(current.enrollment.authority.discussion_revision),
       });
       insertNewBlobs(storage, workspaceId, current.content, input.nowMs);
+      linkAuthor = {kind: "link", publicPrincipalId: collectionLinkPublicPrincipal(storage,
+        current.authorized.share.workspaceId, input.grantId, principal.principalId),
+        label: principal.displayName ?? "Anonymous"};
     }
     const author: DirectWriteMomentAuthor = current.kind === "named"
       ? { kind: "named", userId: current.userId, grantId: input.grantId, grantGeneration: input.grantGeneration }
       : { kind: "link", grantId: input.grantId, grantGeneration: input.grantGeneration, principalId: principalId! };
-    let humanName = writer.kind === "named" ? writer.humanName ?? "Unnamed" : "Unnamed";
-    try { parseLiveUpdateIdentifier(humanName); } catch { humanName = "Unnamed"; }
-    const admittedAuthorSnapshot = parseLiveAuthorSnapshot(current.kind === "named"
-      ? [{kind: "human", humanId: current.userId, humanName}]
-      : [{kind: "link", publicPrincipalId: ensureLiveLinkPublicPrincipal(storage, {
-          principalKind: "link", principalId: principalId!, grantId: input.grantId, grantGeneration: input.grantGeneration,
-        }), label: storage.getLinkPrincipal(principalId!)!.displayName ?? "Anonymous"}]);
-    const snapshotJson = JSON.stringify(admittedAuthorSnapshot);
+    const admittedAuthorSnapshot = parseLiveAuthorSnapshot(writer.kind === "named"
+      ? [{kind: "human", humanId: writer.userId, humanName: writer.humanName}]
+      : [linkAuthor!]);
     const originId = `${COLLECTION_FILE_ORIGIN_PREFIX}${input.grantId}`;
     const firstOriginSeq = maxOriginSeq(storage, workspaceId, originId) + 1;
     const ops = changesOf(decision.write).map((change, index) => ({
@@ -276,6 +262,7 @@ export function commitCollectionWrite(
       opKind: "moment.append",
       payloadJson: stableJsonStringify(momentFor(storage, workspaceId, change, index, author, input)),
       recordedAtMs: input.nowMs,
+      admittedAuthorSnapshot,
     }));
     const paths = changesOf(decision.write).map((change) => change.afterPath!);
     const receipt: CollectionWriteReceipt = { submitId: input.submitId, paths, committedAtMs: input.nowMs };
@@ -284,23 +271,50 @@ export function commitCollectionWrite(
     const authorId = author.kind === "named" ? author.userId : author.principalId;
     const storageBytes = Buffer.byteLength(pathsJson) + Buffer.byteLength(receiptJson) +
       Buffer.byteLength(input.grantId) + Buffer.byteLength(authorId) + Buffer.byteLength(originId) +
-      Buffer.byteLength(snapshotJson) + 256;
+      256;
     // The ledger row goes first, so the append's quota check counts it.
     storage.db.prepare(
       `INSERT INTO sync_relay_collection_writes (
          grant_id, submit_id, workspace_id, share_id, grant_generation, author_kind, user_id, principal_id,
          payload_sha256, origin_id, first_origin_seq, last_origin_seq, paths_json, receipt_json, created_at_ms,
-         storage_bytes, admitted_author_snapshot_json
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         storage_bytes
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       input.grantId, input.submitId, workspaceId, input.shareId, input.grantGeneration, author.kind,
       author.kind === "named" ? author.userId : null, author.kind === "link" ? author.principalId : null,
       payloadSha256, originId, firstOriginSeq, firstOriginSeq + ops.length - 1, pathsJson, receiptJson,
-      input.nowMs, storageBytes, snapshotJson,
+      input.nowMs, storageBytes,
     );
     appendLogBatchInTransaction(storage, { workspaceId, originId, ops });
     return { receipt, created: true };
   });
+}
+
+const publicPrincipalStatements = new WeakMap<SqliteDb, {
+  find: ReturnType<SqliteDb["prepare"]>;
+  insert: ReturnType<SqliteDb["prepare"]>;
+}>();
+
+/** The write transaction has already authenticated and enrolled this principal. */
+function collectionLinkPublicPrincipal(storage: StorageContext, workspaceId: string, grantId: string, principalId: string): string {
+  let statements = publicPrincipalStatements.get(storage.db);
+  if (!statements) {
+    statements = {
+      find: storage.db.prepare("SELECT workspace_id,public_principal_id FROM sync_relay_app_public_principals WHERE grant_id=? AND principal_id=?"),
+      insert: storage.db.prepare("INSERT INTO sync_relay_app_public_principals(workspace_id,grant_id,principal_id,public_principal_id,storage_bytes) VALUES(?,?,?,?,?)"),
+    };
+    publicPrincipalStatements.set(storage.db, statements);
+  }
+  const mapping = statements.find.get(grantId, principalId);
+  if (mapping) {
+    if (mapping.workspace_id !== workspaceId) throw new Error("The public link principal mapping is damaged.");
+    return parseLiveUpdateIdentifier(mapping.public_principal_id);
+  }
+  const publicId = `public_${randomUUID()}`;
+  const storageBytes = Buffer.byteLength(JSON.stringify([workspaceId, grantId, principalId, publicId])) + 128;
+  assertWorkspaceQuota(storage, workspaceId, storageBytes);
+  statements.insert.run(workspaceId, grantId, principalId, publicId, storageBytes);
+  return publicId;
 }
 
 function changesOf(write: CollectionWrite): ProposedChange[] {

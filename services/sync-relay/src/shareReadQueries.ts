@@ -1,6 +1,6 @@
 import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
-import { createHash } from "node:crypto";
+import { createHmac } from "node:crypto";
 import { COLLECTION_FILE_ORIGIN_PREFIX } from "./relayLogInputs";
 import {
   filterOpForShare,
@@ -181,6 +181,7 @@ export function createShareReadQueries(
 
   const filteredLogPage = (
     workspaceId: string,
+    shareId: string,
     selector: AnyShareSelector,
     since: number,
     limit: number,
@@ -262,13 +263,12 @@ export function createShareReadQueries(
         ops.push({
           relaySeq: row.relaySeq,
           ...(audience === "authenticated" ? { originId: row.originId.startsWith(COLLECTION_FILE_ORIGIN_PREFIX)
-            ? `${COLLECTION_FILE_ORIGIN_PREFIX}${createHash("sha256").update(JSON.stringify([workspaceId, row.originId])).digest("hex")}`
+            ? `${COLLECTION_FILE_ORIGIN_PREFIX}${createHmac("sha256", shareId).update(row.originId).digest("hex")}`
             : row.originId } : {}),
           originSeq: row.originSeq,
           opKind: row.opKind,
           payload,
           recordedAtMs: row.recordedAtMs,
-          ...(audience === "accountless" || row.admittedAuthorSnapshot === undefined || row.opKind === "moment.append" ? {} : {admittedAuthorSnapshot: row.admittedAuthorSnapshot}),
         });
         if (ops.length === limit) {
           return {
@@ -465,9 +465,12 @@ function sharedMomentAuthors(snapshot: SyncRelayLogRow["admittedAuthorSnapshot"]
   if (!snapshot?.length) return [{kind: "unattributed"}];
   const principals = new Set(snapshot.flatMap(author => author.kind === "human" ? [author.humanId]
     : author.kind === "link" ? [author.publicPrincipalId] : []));
-  return snapshot.map(author => {
+  let unattributed = false;
+  return snapshot.flatMap(author => {
     if (author.kind === "agent" && (!author.onBehalfOf || !principals.has(author.onBehalfOf))) {
-      return {kind: "unattributed"};
+      if (unattributed) return [];
+      unattributed = true;
+      return [{kind: "unattributed"}];
     }
     if (author.kind === "automation") return {kind: "automation", automationId: author.automationId,
       depth: author.attribution.depth,
