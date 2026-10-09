@@ -377,3 +377,27 @@ it("updates an automation presser from the background account cache", async () =
   await screen.findByText(/ben@test.example/);
   expect(read).toHaveBeenCalledTimes(2);
 });
+
+it("scans loaded record names once per revision, not after each older page", async () => {
+  let notify!: (event: { workspaceId: string }) => void;
+  const read = vi.fn(async ({ beforeHistoryId }: GetCollectionRecordHistoryPayload) => {
+    if (beforeHistoryId === undefined || beforeHistoryId === 10) return { entries: [entry(9, null)], nextBeforeHistoryId: 9 };
+    if (beforeHistoryId === 9) return { entries: [entry(4, null)], nextBeforeHistoryId: 4 };
+    return { entries: [entry(1, null)], nextBeforeHistoryId: null };
+  });
+  vi.stubGlobal("dohcDesktop", { getCollectionRecordHistory: read, locateRecordHistoryRun: vi.fn(), onHistoryNamesChanged: (listener: typeof notify) => { notify = listener; return () => {}; } });
+  render(dialog());
+  await screen.findByRole("button", { name: "Older changes" });
+  await act(async () => notify({ workspaceId: "ws-1" }));
+  expect(read).toHaveBeenCalledTimes(2);
+
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Older changes" })));
+  expect(screen.getAllByTestId("record-history-entry")).toHaveLength(2);
+  expect(read).toHaveBeenCalledTimes(3);
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Older changes" })));
+  expect(screen.getAllByTestId("record-history-entry")).toHaveLength(3);
+  expect(read).toHaveBeenCalledTimes(4);
+
+  await act(async () => notify({ workspaceId: "ws-1" }));
+  expect(read.mock.calls.map(([payload]) => payload.beforeHistoryId)).toEqual([undefined, 10, 9, 4, 10, 9, 4]);
+});

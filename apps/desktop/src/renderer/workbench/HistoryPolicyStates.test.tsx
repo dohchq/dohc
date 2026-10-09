@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { EngineMomentDetailRecord, HistoryPolicyUnreadableResult } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import { EngineMomentDiffPage } from "./EngineMomentDiffPage";
+import * as unifiedDiff from "./unifiedDiff";
 import { HistoryHiddenState, historyHiddenWords, restoreRulesUnreadableWords } from "./HistoryPolicyStates";
 import { momentDiffTabPath } from "./workbenchState";
 
@@ -19,6 +20,7 @@ const hidden: HistoryPolicyUnreadableResult = {
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
@@ -377,4 +379,29 @@ it("refreshes a diff's account name without waiting on the server", async () => 
   named = true;
   act(() => notify({ workspaceId: "ws-names" }));
   await screen.findByText(/ben@test.example/);
+});
+
+it("keeps the prepared diff across name events and unrelated History answers", async () => {
+  const compute = vi.spyOn(unifiedDiff, "computeTextDiff");
+  const lines = vi.spyOn(unifiedDiff, "buildUnifiedDiffLines");
+  let notify!: (event: { workspaceId: string }) => void;
+  let label = "Someone you shared with";
+  const read = vi.fn(async () => ({ moment: { ...moment(), namedAuthor: { userId: "ben", label } } }));
+  const page = renderPage(read);
+  window.dohcDesktop!.onHistoryNamesChanged = listener => { notify = listener; return () => {}; };
+  page.update({ workspaceId: "ws-names" });
+  await screen.findByText(/Someone you shared with/);
+  expect(compute).toHaveBeenCalledOnce();
+  expect(lines).toHaveBeenCalledOnce();
+
+  label = "ben@test.example (via share link)";
+  act(() => notify({ workspaceId: "ws-names" }));
+  await screen.findByText(/ben@test.example/);
+  expect.soft(compute).toHaveBeenCalledOnce();
+  expect.soft(lines).toHaveBeenCalledOnce();
+
+  await act(async () => { page.update({ historyAnswer: { answer: "unrelated" } }); });
+  expect(read).toHaveBeenCalledTimes(4);
+  expect(compute).toHaveBeenCalledOnce();
+  expect(lines).toHaveBeenCalledOnce();
 });

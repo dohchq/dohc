@@ -16,6 +16,7 @@ import clipboardIpc from "./ipcExposure.pr1639.json";
 import recipientRecordsIpc from "./ipcExposure.pr1688.json";
 import launchOpenIpc from "./ipcExposure.pr1701.json";
 import restartCaptureIpc from "./ipcExposure.pr1719.json";
+import historyNamesIpc from "./ipcExposure.pr1785.json";
 import liveDraftRecoveryIpc from "./ipcExposure.pr1747.json";
 import reportsIpc from "./ipcExposure.reports.json";
 import saveRetryIpc from "./ipcExposure.saveRetry.json";
@@ -52,7 +53,7 @@ function assertAdmission(row: Pick<OperationDefinition, "channel" | "guard" | "s
 describe("B1 main inventories (a4be19d5b)", () => {
   it("preserves every IPC wire name and the 26 enforced table guards", () => {
     // Hand-reviewed #1639 removals and #1701, #1688, #1747, reports, save retry and
-    // capture recovery additions, separate from the hashed main baseline.
+    // capture recovery and History names additions, separate from the hashed main baseline.
     const expectedNames = [...mainIpc.names];
     expectedNames.push("desktop:check-shared-view-access");
     expectedNames.push("desktop:dismiss-share-capture-notice");
@@ -60,7 +61,7 @@ describe("B1 main inventories (a4be19d5b)", () => {
       expect(expectedNames).toContain(name);
       expectedNames.splice(expectedNames.indexOf(name), 1);
     }
-    for (const name of [...launchOpenIpc.nameAdditions, ...recipientRecordsIpc.nameAdditions, ...liveDraftRecoveryIpc.nameAdditions, ...restartCaptureIpc.nameAdditions, ...reportsIpc.nameAdditions, ...saveRetryIpc.nameAdditions, ...accessExposure.nameAdditions]) {
+    for (const name of [...launchOpenIpc.nameAdditions, ...recipientRecordsIpc.nameAdditions, ...liveDraftRecoveryIpc.nameAdditions, ...restartCaptureIpc.nameAdditions, ...historyNamesIpc.nameAdditions, ...reportsIpc.nameAdditions, ...saveRetryIpc.nameAdditions, ...accessExposure.nameAdditions]) {
       expect(expectedNames).not.toContain(name);
       expectedNames.push(name);
     }

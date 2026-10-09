@@ -98,7 +98,7 @@ export function EngineMomentDiffPage({
   const momentId = useMemo(() => parseMomentDiffTabPath(tabPath), [tabPath]);
   const [state, setState] = useState<
     | { status: "loading" }
-    | { status: "ready"; moment: EngineMomentDetailRecord | null }
+    | { status: "ready"; moment: EngineMomentDetailRecord | null; namedAuthor: EngineMomentDetailRecord["namedAuthor"] }
     | { status: "hidden"; result: HistoryPolicyUnreadableResult }
     | { status: "untracked" }
     | { status: "error" }
@@ -165,10 +165,13 @@ export function EngineMomentDiffPage({
         const next = result.moment;
         // A change never changes, so reading the same one again keeps the
         // diff already built for it.
-        setState((current) =>
-          current.status === "ready" && next !== null && current.moment?.id === next.id
-            ? { ...current, moment: { ...current.moment!, namedAuthor: next.namedAuthor } }
-            : { status: "ready", moment: next });
+        setState((current) => {
+          if (current.status === "ready" && next !== null && current.moment?.id === next.id) {
+            if (current.namedAuthor?.userId === next.namedAuthor?.userId && current.namedAuthor?.label === next.namedAuthor?.label) return current;
+            return { ...current, namedAuthor: next.namedAuthor };
+          }
+          return { status: "ready", moment: next, namedAuthor: next?.namedAuthor };
+        });
       })
       .catch(() => {
         if (read !== readToken.current) return;
@@ -193,17 +196,20 @@ export function EngineMomentDiffPage({
     setUndoMomentId(null);
   }, [tabPath]);
 
-  const moment = state.status === "ready" ? state.moment : null;
+  const diffMoment = state.status === "ready" ? state.moment : null;
+  const moment = useMemo(() => state.status === "ready" && state.moment
+    ? { ...state.moment, namedAuthor: state.namedAuthor }
+    : null, [state]);
   // The diff is the expensive part of this page, and a moment's bodies never
   // change while its tab is open. Build it once per moment: it used to run
   // twice per render — once for the counts, once for the lines — and a
   // hydrated 10 MiB body cost seconds each time.
   const prepared = useMemo(() => {
-    if (!moment) return null;
-    const sides = momentDiffSides(moment);
+    if (!diffMoment) return null;
+    const sides = momentDiffSides(diffMoment);
     const diff = computeTextDiff(sides.before, sides.after, 800);
     return { sides, diff, lines: buildUnifiedDiffLines(diff) };
-  }, [moment]);
+  }, [diffMoment]);
   const restoreBusy =
     restoreState.status === "restoring" || restoreState.status === "undoing";
   const canRestore = moment !== null && moment.operation !== "rename" && !undoMomentId;

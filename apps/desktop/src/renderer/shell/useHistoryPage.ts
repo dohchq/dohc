@@ -352,13 +352,21 @@ export function useHistoryPage(
   );
 
   const [namesRevision, setNamesRevision] = useState({ workspaceId, value: 0 });
-  const namedPage = useRef<{ revision: number; page: HistoryPage } | null>(null);
+  const namedRevision = useRef<{ workspaceId: string; value: number } | null>(null);
   useEffect(() => bridge().onHistoryNamesChanged?.(event => {
     if (event.workspaceId === workspaceId) setNamesRevision(previous => ({ workspaceId, value: previous.workspaceId === workspaceId ? previous.value + 1 : 1 }));
   }), [workspaceId]);
   useEffect(() => {
       const shown = latestPage.current;
-      if (namesRevision.workspaceId !== workspaceId || !namesRevision.value || shown === null || shown.moments.length === 0 || namedPage.current?.revision === namesRevision.value && namedPage.current.page === shown) return;
+      const consumed = namedRevision.current;
+      if (
+        namesRevision.workspaceId !== workspaceId || !namesRevision.value ||
+        shown === null || shown.moments.length === 0 ||
+        (consumed?.workspaceId === workspaceId && consumed.value >= namesRevision.value)
+      ) return;
+      // Later page reads already use the name cache. Consume this revision
+      // before reading, even if a newer page supersedes the scan.
+      namedRevision.current = namesRevision;
       let liveRequest = true;
       const watermark = committed.current;
       const version = committedVersionId.current;
@@ -378,7 +386,6 @@ export function useHistoryPage(
         if (!live()) return;
         const next = { ...shown, moments: shown.moments.map(moment => named.get(moment.id) ?? moment) };
         latestPage.current = next;
-        namedPage.current = { revision: namesRevision.value, page: next };
         setPageState(next);
       })().catch(() => undefined);
     return () => { liveRequest = false; };

@@ -756,3 +756,37 @@ it("re-reads cached names and ignores a late naming answer after a workspace swi
   await settle(late, page("late-old"));
   expect(view.result.current.page?.moments.map(moment => moment.id)).toEqual(["new"]);
 });
+
+it("re-reads each names revision once, without scanning again on refresh or load-more", async () => {
+  let notify!: (event: { workspaceId: string }) => void;
+  window.dohcDesktop!.onHistoryNamesChanged = listener => { notify = listener; return () => {}; };
+  const it0 = mount();
+  const orderedPage = (id: string, order: number, next: number | null): ListEngineMomentsResult => ({
+    ...page(id, { nextBeforeMomentOrder: next, latestMomentOrder: 3 }),
+    moments: [{ ...moment(id), momentOrder: order }],
+  });
+  await committed(it0, orderedPage("first", 3, 3));
+  act(() => notify({ workspaceId: "ws-1" }));
+  await settle(reads[1]!, orderedPage("first", 3, 3));
+  expect(reads).toHaveLength(2);
+
+  await committed(it0, orderedPage("refreshed", 3, 3));
+  expect(reads).toHaveLength(3);
+  const older = it0.loadMore();
+  await settle(reads[3]!, orderedPage("older", 2, 2));
+  await older;
+  expect(reads).toHaveLength(4);
+  const oldest = it0.loadMore();
+  await settle(reads[4]!, orderedPage("oldest", 1, null));
+  await oldest;
+  expect(reads).toHaveLength(5);
+
+  act(() => notify({ workspaceId: "ws-1" }));
+  expect(reads).toHaveLength(6);
+  await settle(reads[5]!, orderedPage("refreshed", 3, 3));
+  await settle(reads[6]!, orderedPage("older", 2, 2));
+  await settle(reads[7]!, orderedPage("oldest", 1, null));
+  expect(listEngineMoments.mock.calls.map(([payload]) => payload.beforeMomentOrder)).toEqual([undefined, 4, undefined, 3, 2, 4, 3, 2]);
+  expect(reads).toHaveLength(8);
+  expect(it0.ids()).toEqual(["refreshed", "older", "oldest"]);
+});

@@ -258,13 +258,22 @@ export function RecordHistoryDialog(props: {
   }, [load]);
 
   const [namesRevision, setNamesRevision] = useState({ workspaceId, value: 0 });
-  const namedPage = useRef<{ revision: number; page: typeof page } | null>(null);
+  const namedRevision = useRef<{ workspaceId: string; collectionPath: string; recordId: string; value: number } | null>(null);
   useEffect(() => bridge().onHistoryNamesChanged?.(event => {
     if (event.workspaceId === workspaceId) setNamesRevision(previous => ({ workspaceId, value: previous.workspaceId === workspaceId ? previous.value + 1 : 1 }));
   }), [workspaceId]);
   useEffect(() => {
       let live = true;
-      if (namesRevision.workspaceId !== workspaceId || !namesRevision.value || page === null || loading !== null || page.entries.length === 0 || namedPage.current?.revision === namesRevision.value && namedPage.current.page === page) return;
+      const consumed = namedRevision.current;
+      if (
+        namesRevision.workspaceId !== workspaceId || !namesRevision.value ||
+        page === null || loading !== null || page.entries.length === 0 ||
+        (consumed?.workspaceId === workspaceId && consumed.collectionPath === collectionPath &&
+          consumed.recordId === recordId && consumed.value >= namesRevision.value)
+      ) return;
+      // New pages already use cached names; only a newer names revision
+      // needs another scan of the entries on screen.
+      namedRevision.current = { workspaceId, collectionPath, recordId, value: namesRevision.value };
       const token = request.next();
       const shown = page;
       void (async () => {
@@ -281,7 +290,6 @@ export function RecordHistoryDialog(props: {
         } while (live);
         if (live && request.isCurrent(token)) {
           const next = { ...shown, entries: shown.entries.map(entry => authors.has(entry.historyId) ? { ...entry, author: authors.get(entry.historyId)! } : entry) };
-          namedPage.current = { revision: namesRevision.value, page: next };
           setPage(current => current === shown ? next : current);
         }
       })().catch(() => undefined);
