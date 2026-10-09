@@ -1517,7 +1517,7 @@ export function DesktopWorkspaceShell(props: {
     enabled: workspaceIsReady && !!shareView && !shareViewDamaged && !shareViewEnded,
     admission: workspaceAdmission,
     relayFailed: captureDecidedFor !== workspaceId || syncStatus === null ? undefined : !!syncStatus.syncFailure,
-    pull: () => refreshShareViewRef.current("background"),
+    pull: async () => await refreshShareViewRef.current("background") === "changed",
     onPersistentFailure: error => reportShellError("Couldn't refresh the shared view.", error,
       () => { if (!workspaceAdmission.superseded) void refreshShareViewRef.current(); }),
     onVerified: result => {
@@ -3965,6 +3965,7 @@ export function DesktopWorkspaceShell(props: {
       const token = ++shareRefreshToken.current;
       const isCurrent = () => !workspaceAdmission.superseded && token === shareRefreshToken.current;
       let readShareRecords = !background;
+      let probeFailure = false;
       if (!background) setShareRefreshing(true);
       const repaintAfterChange = async () => {
         await refreshFiles();
@@ -3987,6 +3988,7 @@ export function DesktopWorkspaceShell(props: {
         readShareRecords = !outcome.probed;
         if ((!background && !outcome.ok) || outcome.ok && outcome.refusedOps > 0) void checkShareAccess();
         if (!outcome.ok) {
+          probeFailure = outcome.probed === true;
           if (outcome.changedPaths > 0) await bestEffortRepaint();
           if (!isCurrent()) return "stale";
           if (background) throw Object.assign(new Error(outcome.errorMessage), { errorKind: outcome.errorKind });
@@ -4013,10 +4015,13 @@ export function DesktopWorkspaceShell(props: {
           await repaintAfterChange();
         }
         if (!isCurrent()) return "stale";
-        return outcome.status === "ended" ? "ended" : "current";
+        return outcome.status === "ended" ? "ended" : background && outcome.changedPaths > 0 ? "changed" : "current";
       } catch (error) {
         if (!isCurrent()) return "stale";
-        if (background) readShareRecords = false;
+        if (background) {
+          readShareRecords = false;
+          if (probeFailure) throw error;
+        }
         if (!background) void checkShareAccess();
         // A store only a newer dohc opens stops the whole workspace, and the
         // stop state already says so. A toast would repeat it.

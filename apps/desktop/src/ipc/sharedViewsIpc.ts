@@ -316,17 +316,23 @@ export function registerSharedViewsIpcHandlers<
       }
     };
     assertSession();
+    await warmCredentialCache();
+    assertSession();
+    const credentialGeneration = dependencies.currentCredentialGeneration();
     const entry = pullCache.get(event.sender);
     let cached = entry?.workspaceId === input.workspaceId && entry.attachmentId === session!.attachmentId ? entry : undefined;
     if (input.trigger === "background") {
-      await warmCredentialCache();
-      assertSession();
       if (cached && cached.nextCursor === undefined &&
         cached.credentialGeneration !== dependencies.currentCredentialGeneration()) {
         clearCache(event.sender);
         cached = undefined;
       }
-      const share = cached ?? requireWorkspace(input.workspaceId).shareView;
+      const view = cached ? undefined : requireWorkspace(input.workspaceId).shareView;
+      if (view && (!view.recipientUserId || !recordedShareSelector(view.grantedSelector))) {
+        return { ok: true, status: "unchanged", probed: true, changedPaths: 0,
+          excludedPaths: [], unjournalablePaths: [], refusedOps: 0, refusedDetail: null };
+      }
+      const share = cached ?? view;
       const credentials = currentCredentials();
       if (!share?.relayUrl || !credentials?.relayUrl || credentials.userId !== share.recipientUserId ||
         !relayUrlsMatch(credentials.relayUrl, share.relayUrl)) {
@@ -338,9 +344,10 @@ export function registerSharedViewsIpcHandlers<
       }
       if (cached?.nextCursor !== undefined) {
         const scoped = credentialScopedOperation({ assertCurrent: assertSession,
-          capturedGeneration: dependencies.currentCredentialGeneration(), currentGeneration: dependencies.currentCredentialGeneration });
+          capturedGeneration: credentialGeneration, currentGeneration: dependencies.currentCredentialGeneration });
         const controller = new AbortController();
-        const stopClose = dependencies.onSenderClosed(event.sender, () => controller.abort());
+        let closed = false;
+        const stopClose = dependencies.onSenderClosed(event.sender, () => { closed = true; controller.abort(); });
         const timeout = setTimeout(() => controller.abort(), 10_000);
         try {
           const probe = await dependencies.probeShareViewLog({
@@ -352,8 +359,10 @@ export function registerSharedViewsIpcHandlers<
           if (probe.unchanged) return { ok: true, status: "unchanged", probed: true, nextCursor: cached.nextCursor,
             changedPaths: 0, excludedPaths: [], unjournalablePaths: [], refusedOps: 0, refusedDetail: null };
         } catch (error) {
-          controller.signal.throwIfAborted();
+          if (closed) controller.signal.throwIfAborted();
           scoped.assertCurrent();
+          if (controller.signal.aborted) return { ok: false, probed: true, changedPaths: 0,
+            errorKind: "transient", errorMessage: "The shared view refresh timed out." };
           // A revoked share needs the existing full path to preserve local work
           // and publish its ended state. Transient probes never touch the store.
           if (!(error instanceof ShareUnavailableError)) {
@@ -503,7 +512,7 @@ export function registerSharedViewsIpcHandlers<
           pullCache.set(event.sender, { workspaceId: input.workspaceId, attachmentId: session!.attachmentId,
             shareId: workspace.shareView.shareId, recipientUserId: workspace.shareView.recipientUserId,
             relayUrl: workspace.shareView.relayUrl, nextCursor: outcome.nextCursor,
-            credentialGeneration: dependencies.currentCredentialGeneration() });
+            credentialGeneration });
           const clear = () => clearCache(event.sender);
           const stopClose = dependencies.onSenderClosed(event.sender, clear);
           retirement!.addEventListener("abort", clear, { once: true });

@@ -474,16 +474,49 @@ describe("background share pulls", () => {
     await expect(h.invoke(channel, payload)).resolves.toMatchObject({ status: "ended" });
     expect(h.reconcile).toHaveBeenCalledOnce(); expect(h.surfaces).toHaveBeenCalledOnce();
   });
-  it.each(["account", "relay", "missing relay", "signed out", "missing recipient"])("pauses no-cursor background work for %s before operation admission", async change => {
+  it.each(["account", "relay", "missing relay", "signed out"])("pauses no-cursor background work for %s before operation admission", async change => {
     const h = await harness();
     if (change === "account") h.cache.set({ ...credentials, userId: "other" });
     if (change === "relay") h.cache.set({ ...credentials, relayUrl: "https://other.test" });
     if (change === "missing relay") delete h.workspace.shareView!.relayUrl;
-    if (change === "missing recipient") delete h.workspace.shareView!.recipientUserId;
     if (change === "signed out") h.cache.clear();
     await expect(h.invoke(channel, payload)).resolves.toMatchObject({ ok: false, errorKind: "unauthorized", probed: true });
     expect(h.registryRead).toHaveBeenCalledOnce();
     h.registryRead.mockClear(); noLocalWork(h);
+  });
+  it.each(["recipient", "selector"])("skips a no-cursor opening pull when its %s requires reopening", async missing => {
+    const h = await harness();
+    if (missing === "recipient") delete h.workspace.shareView!.recipientUserId;
+    else h.workspace.shareView!.grantedSelector = { paths: [], versionId: null, access: "edit" };
+    await expect(h.invoke(channel, payload)).resolves.toMatchObject({ ok: true, probed: true, status: "unchanged" });
+    expect(h.registryRead).toHaveBeenCalledOnce(); h.registryRead.mockClear(); noLocalWork(h);
+  });
+  it("does not suppress a later pull after X to Y to X changes credentials during a no-cursor refresh", async () => {
+    const h = await harness();
+    h.reconcile.mockImplementationOnce(async () => {
+      h.cache.set({ ...credentials, userId: "Y" });
+      h.cache.set(credentials);
+      return { kind: "refresh", outcome: { ...outcome, nextCursor: undefined } };
+    });
+    await h.invoke(channel, payload);
+    await h.invoke(channel, payload);
+    expect(h.reconcile).toHaveBeenCalledTimes(2);
+    expect(h.fetchInfo).toHaveBeenCalledTimes(2);
+    expect(h.probeLog).not.toHaveBeenCalled();
+  });
+  it("returns a typed transient failure for a timed-out probe without local work", async () => {
+    const h = await primed(); const started = deferred();
+    h.probeLog.mockImplementation(({ signal }) => {
+      started.resolve();
+      return new Promise((_resolve, reject) => signal!.addEventListener("abort", () => reject(signal!.reason), { once: true }));
+    });
+    vi.useFakeTimers();
+    try {
+      const response = h.invoke(channel, payload); await started.promise;
+      await vi.advanceTimersByTimeAsync(10_000);
+      await expect(response).resolves.toMatchObject({ ok: false, probed: true, errorKind: "transient" });
+      expect(vi.getTimerCount()).toBe(0); noLocalWork(h);
+    } finally { vi.useRealTimers(); }
   });
   it("remembers a successful full refresh without a cursor until manual refresh or credentials change", async () => {
     const h = await harness();

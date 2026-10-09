@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { CheckSharedViewAccessResult } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
-import { onAutomationButtonCompleted } from "../collections/useAutomationButtons";
+import { onAutomationButtonResult } from "../collections/useAutomationButtons";
 
 const unverified = (): CheckSharedViewAccessResult => ({ status: "unverified" });
 export type SharedViewAccessScheduler = (() => Promise<CheckSharedViewAccessResult>) & {
@@ -14,7 +14,7 @@ export function useSharedViewAccess(input: {
   relayFailed?: boolean;
   admission: { readonly superseded: boolean };
   onVerified(result: CheckSharedViewAccessResult): void;
-  pull(): Promise<unknown>;
+  pull(): Promise<boolean>;
   onPersistentFailure(error: unknown): void;
 }): SharedViewAccessScheduler {
   const latest = useRef(input);
@@ -29,6 +29,7 @@ export function useSharedViewAccess(input: {
     let timer: number | undefined;
     let nextPullAt = Date.now() + 30_000;
     let lastPullAt = -Infinity;
+    let buttonPulls: number[] = [];
     let inFlight: Promise<CheckSharedViewAccessResult> | null = null;
     let followUp: Promise<CheckSharedViewAccessResult> | null = null;
     let queuedAccess = false;
@@ -40,7 +41,11 @@ export function useSharedViewAccess(input: {
     const schedule = () => {
       clearTimer();
       if (!isCurrent() || !visible() || paused) return;
-      timer = window.setTimeout(() => { void request(false, true); }, Math.max(0, nextPullAt - Date.now()));
+      const due = Math.min(nextPullAt, buttonPulls[0] ?? Infinity);
+      timer = window.setTimeout(() => {
+        buttonPulls = buttonPulls.filter(at => at > Date.now());
+        void request(false, true);
+      }, Math.max(0, due - Date.now()));
     };
     const check = (access: boolean, pull: boolean): Promise<CheckSharedViewAccessResult> => {
       if (!isCurrent() || !visible() || paused) return Promise.resolve(unverified());
@@ -58,17 +63,25 @@ export function useSharedViewAccess(input: {
           const pullShare = async () => {
             if (!pull) return;
             lastPullAt = Date.now();
-            await latest.current.pull();
+            const changed = await latest.current.pull();
             if (!isCurrent() || startedEpoch !== epoch) return unverified();
+            if (changed) buttonPulls = [];
             failures = 0;
             nextPullAt = Date.now() + 30_000;
           };
           // Access verification must not delay the opening pull.
           const completed = await Promise.allSettled([accessCheck(), pullShare()]);
+          if (!isCurrent() || startedEpoch !== epoch) return unverified();
+          if (result.status === "needs-reopen") {
+            paused = true;
+            buttonPulls = [];
+            return result;
+          }
           for (const completion of completed) if (completion.status === "rejected") throw completion.reason;
           return result;
         } catch (error) {
           if (!isCurrent() || startedEpoch !== epoch) return unverified();
+          buttonPulls = [];
           failures += 1;
           const backoff = Math.min(600_000, 30_000 * 2 ** Math.min(failures - 1, 5));
           nextPullAt = Date.now() + Math.min(600_000, backoff * (0.8 + Math.random() * 0.4));
@@ -108,17 +121,23 @@ export function useSharedViewAccess(input: {
       }
       onReset();
     };
-    const onVisibility = () => { if (visible()) void request(true, true); else clearTimer(); };
+    const onVisibility = () => { if (visible()) void request(true, true); else { buttonPulls = []; clearTimer(); } };
     window.addEventListener("focus", onFocus);
     window.addEventListener("online", onReset);
     document.addEventListener("visibilitychange", onVisibility);
     const stopSession = bridge().onCloudSessionChanged(({ phase }) => {
       epoch += 1;
+      buttonPulls = [];
       paused = phase === "changing";
       clearTimer();
       if (phase === "ready") onReset();
     });
-    const stopButtons = onAutomationButtonCompleted(input.workspaceId, () => { void request(false, true); });
+    const stopButtons = onAutomationButtonResult(input.workspaceId, kind => {
+      if (!isCurrent() || !visible() || paused) return;
+      if (kind === "settled") { void request(false, true); return; }
+      buttonPulls = [2_000, 5_000, 10_000, 20_000].map(delay => Date.now() + delay);
+      if (!inFlight) schedule();
+    });
     void request(true, true);
     return () => {
       disposed = true;

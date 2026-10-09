@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Profiler, useMemo, useRef, useState } from "react";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { deferred } from "../testing/deferred";
+import { createAutomationButtons } from "./collections/useAutomationButtons";
 import { collectionTabPath } from "./workbench/workbenchState";
 import { serializeCollectionSchema } from "./collections/schemaAuthoring";
 import {
@@ -719,6 +720,57 @@ describe("ended Edit Collection shares", () => {
     expect(bridge.refreshSharedView.mock.calls.length).toBe(before + 1);
     expect(bridge.refreshSharedView).toHaveBeenLastCalledWith({ workspaceId: EDIT_SHARE.workspaceId, trigger: "background" });
     expect((screen.getByTestId("shared-view-refresh") as HTMLButtonElement).disabled).toBe(false);
+    view.unmount();
+  });
+
+  it("stops the relayed Button burst after the shell pulls changed files", async () => {
+    const bridge = collectionBridge();
+    vi.stubGlobal("dohcDesktop", { ...bridge,
+      onAutomationRunSettled: () => () => undefined,
+      onAutomationRunWaiting: () => () => undefined,
+      onCollectionAutomationsChanged: () => () => undefined,
+      pressAutomationButton: async () => ({ busy: false, relayed: true }),
+    });
+    const view = render(shell(bridge, EDIT_SHARE));
+    await screen.findByText("Retained task"); await act(async () => undefined);
+    bridge.refreshSharedView.mockClear();
+    bridge.refreshSharedView.mockResolvedValue({ ok: true, status: "updated", changedPaths: 1,
+      excludedPaths: [], unjournalablePaths: [], refusedOps: 0, refusedDetail: null });
+    const buttons = createAutomationButtons({ workspaceId: EDIT_SHARE.workspaceId, of: { collectionPath: "tasks" } });
+    vi.useFakeTimers();
+    try {
+      await act(async () => buttons.press("Finish", { id: "retained", label: "Retained task" }));
+      expect(bridge.refreshSharedView).not.toHaveBeenCalled();
+      await act(() => vi.advanceTimersByTimeAsync(20_000));
+      expect(bridge.refreshSharedView).toHaveBeenCalledOnce();
+      expect(bridge.refreshSharedView).toHaveBeenCalledWith({ workspaceId: EDIT_SHARE.workspaceId, trigger: "background" });
+      view.unmount(); buttons.close();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("does not read sync status or the registry for a typed probe timeout", async () => {
+    const bridge = collectionBridge(); vi.stubGlobal("dohcDesktop", bridge);
+    const view = render(shell(bridge, EDIT_SHARE));
+    await screen.findByText("Retained task"); await act(async () => undefined);
+    bridge.getSyncStatus.mockClear(); bridge.getWorkspaceRegistry.mockClear();
+    bridge.refreshSharedView.mockResolvedValue({ ok: false, probed: true, errorKind: "transient",
+      changedPaths: 0, errorMessage: "The shared view refresh timed out." });
+    await act(async () => window.dispatchEvent(new Event("online")));
+    expect(bridge.getSyncStatus).not.toHaveBeenCalled();
+    expect(bridge.getWorkspaceRegistry).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    view.unmount();
+  });
+
+  it("shows the reopen banner without a sign-in Notice during the opening access check", async () => {
+    const bridge = collectionBridge(); vi.stubGlobal("dohcDesktop", bridge);
+    bridge.checkSharedViewAccess.mockResolvedValue({ status: "needs-reopen" });
+    bridge.refreshSharedView.mockResolvedValue({ ok: true, probed: true, status: "unchanged", changedPaths: 0,
+      excludedPaths: [], unjournalablePaths: [], refusedOps: 0, refusedDetail: null });
+    const view = render(shell(bridge, EDIT_SHARE));
+    await waitFor(() => expect(screen.getByTestId("shared-view-banner").textContent).toContain("This share must be reopened."));
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(document.body.textContent).not.toContain("Sign in to the account");
     view.unmount();
   });
 
