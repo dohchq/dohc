@@ -35,6 +35,51 @@ pub fn has_adopted_owner_in(
         .map_err(|error| crate::CollabError::Storage(StorageError::corrupt_public(error)))
 }
 
+/// Diff the visible owner fields against their current Collection index.
+pub(super) fn index_frontmatter_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    binding: &LiveObjectBinding,
+    visible: &crate::Ydoc,
+    actor: Option<&str>,
+    attribution: Option<&dohc_engine_domain::ChangeAttribution>,
+    now_ms: i64,
+) -> Result<(), OwnerOutboxError> {
+    let before = dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
+        tx,
+        &binding.workspace_id,
+        &binding.main_version_id,
+        &binding.object_id,
+    )
+    .map_err(index_error)?;
+    if let Some(before) = before {
+        let after = visible.frontmatter_json();
+        dohc_engine_domain::index_collection_frontmatter_apply_in_tx(
+            tx,
+            &binding.workspace_id,
+            &binding.main_version_id,
+            &binding.object_id,
+            &before,
+            &after,
+            &before,
+            &after,
+            None,
+            actor,
+            attribution,
+            None,
+            now_ms,
+        )
+        .map_err(index_error)?;
+    }
+    Ok(())
+}
+
+fn index_error(error: dohc_engine_domain::DomainError) -> OwnerOutboxError {
+    match error {
+        dohc_engine_domain::DomainError::Storage(error) => OwnerOutboxError::Storage(error),
+        _ => OwnerOutboxError::Corrupt,
+    }
+}
+
 /// Where a live frame was accepted, as far as its receiver can tell.
 #[derive(Debug, Clone, Copy)]
 pub enum AcceptedAs<'a> {
@@ -281,12 +326,16 @@ pub fn refuse_entry_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace: &str,
     input: &OwnerOutboxRefuseInput,
+    now_ms: i64,
 ) -> Result<LiveObjectBinding, OwnerOutboxError> {
     validate_identifier(&input.outbox_id, "invalid outbox id")?;
     validate_identifier(&input.delivery_id, "invalid delivery id")?;
     validate_identifier(&input.reason, "invalid refusal reason")?;
     if input.reason.len() > 256 {
         return Err(OwnerOutboxError::InvalidInput("invalid refusal reason"));
+    }
+    if !(0..=9_007_199_254_740_991).contains(&now_ms) {
+        return Err(OwnerOutboxError::InvalidInput("invalid refusal time"));
     }
     validate_digest(&input.update_digest)?;
     let parent = read_parent(tx, &input.outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
@@ -307,13 +356,23 @@ pub fn refuse_entry_in_tx(
             Err(OwnerOutboxError::ReceiptMismatch)
         };
     }
-    let checkpoint_digest = match observed {
-        Some(observed) => observed.checkpoint_digest,
+    let checkpoint_digest = match &observed {
+        Some(observed) => observed.checkpoint_digest.clone(),
         None => native_refusal_checkpoint_in_tx(tx, &parent.binding, input)?,
     };
     tx.execute("UPDATE owner_ydoc_outbox_entries SET pending=0,terminal_blob_digest=update_blob_digest,update_blob_digest=NULL,terminal_reason=?3 WHERE outbox_id=?1 AND delivery_id=?2 AND pending=1", params![input.outbox_id,input.delivery_id,input.reason]).map_err(write_sql)?;
-    draft::refuse_dependent_entries_in_tx(tx, &input.outbox_id, &checkpoint_digest)?;
+    let visible = draft::refuse_dependent_entries_in_tx(tx, &input.outbox_id, &checkpoint_digest)?;
     refresh_pending_in_tx(tx, &input.outbox_id)?;
+    if observed.is_some() {
+        index_frontmatter_in_tx(
+            tx,
+            &parent.binding,
+            &visible,
+            Some("owner-draft-refusal"),
+            None,
+            now_ms,
+        )?;
+    }
     Ok(parent.binding)
 }
 

@@ -284,12 +284,7 @@ pub fn enroll_in_tx(
                 &checkpoint,
                 now_ms,
             )?;
-            index_checkpoint_frontmatter_in_tx(
-                tx,
-                &input.binding,
-                &host.frontmatter_json(),
-                now_ms,
-            )?;
+            index_frontmatter_in_tx(tx, &input.binding, &host, None, None, now_ms)?;
             return Ok(draft);
         }
         let draft = advance_generation_in_tx(
@@ -302,7 +297,7 @@ pub fn enroll_in_tx(
             checkpoint,
             now_ms,
         )?;
-        index_checkpoint_frontmatter_in_tx(tx, &input.binding, &host.frontmatter_json(), now_ms)?;
+        index_frontmatter_in_tx(tx, &input.binding, &host, None, None, now_ms)?;
         return Ok(draft);
     }
     host.apply(&local_bytes).map_err(collab)?;
@@ -335,7 +330,7 @@ pub fn enroll_in_tx(
         &input.host_vector,
         now_ms,
     )?;
-    index_checkpoint_frontmatter_in_tx(tx, &input.binding, &host.frontmatter_json(), now_ms)?;
+    index_frontmatter_in_tx(tx, &input.binding, &host, None, None, now_ms)?;
     let observed = ObservedOwnerBinding {
         binding: input.binding.clone(),
         relay_database_namespace: input.relay_database_namespace.clone(),
@@ -416,47 +411,6 @@ fn recover_in_tx(
         delete_binary_blob_if_unreferenced(tx, &previous.checkpoint_digest)?;
     }
     super::draft::descriptor_for_key_in(tx, &key(&input.binding)?)?.ok_or(OwnerOutboxError::Corrupt)
-}
-
-fn index_checkpoint_frontmatter_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    binding: &LiveObjectBinding,
-    after: &serde_json::Value,
-    now_ms: i64,
-) -> Result<(), OwnerOutboxError> {
-    let before = dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
-        tx,
-        &binding.workspace_id,
-        &binding.main_version_id,
-        &binding.object_id,
-    )
-    .map_err(checkpoint_index_error)?;
-    if let Some(before) = before {
-        dohc_engine_domain::index_collection_frontmatter_apply_in_tx(
-            tx,
-            &binding.workspace_id,
-            &binding.main_version_id,
-            &binding.object_id,
-            &before,
-            after,
-            &before,
-            after,
-            None,
-            None,
-            None,
-            None,
-            now_ms,
-        )
-        .map_err(checkpoint_index_error)?;
-    }
-    Ok(())
-}
-
-fn checkpoint_index_error(error: dohc_engine_domain::DomainError) -> OwnerOutboxError {
-    match error {
-        dohc_engine_domain::DomainError::Storage(error) => OwnerOutboxError::Storage(error),
-        _ => OwnerOutboxError::Corrupt,
-    }
 }
 
 /// A later restore generation of an observed owner. The authenticated host cut

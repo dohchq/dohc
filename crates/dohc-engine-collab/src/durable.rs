@@ -879,6 +879,7 @@ fn append_local_update(
     marker: &Marker,
     update: &[u8],
     sha: &str,
+    index_frontmatter: bool,
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
     now_ms: i64,
@@ -906,7 +907,7 @@ fn append_local_update(
         &base,
         update,
         sha,
-        true,
+        index_frontmatter,
         actor_origin_id,
         attribution,
         None,
@@ -2168,7 +2169,7 @@ pub fn record_update_in_tx(
     if crate::owner_outbox::has_adopted_owner_in(tx, key)? {
         return Err(CollabError::OwnerOutboxFrozen);
     }
-    record_authorized_update_in_tx(tx, key, update, actor_origin_id, attribution, now_ms)
+    record_authorized_update_in_tx(tx, key, update, true, actor_origin_id, attribution, now_ms)
 }
 
 /// The receipt application owner has checked its full binding in this transaction.
@@ -2176,6 +2177,7 @@ pub(crate) fn record_authorized_update_in_tx(
     tx: &Transaction<'_>,
     key: &DocKey,
     update: &[u8],
+    index_frontmatter: bool,
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
     now_ms: i64,
@@ -2189,6 +2191,7 @@ pub(crate) fn record_authorized_update_in_tx(
         &marker,
         update,
         &sha,
+        index_frontmatter,
         actor_origin_id,
         attribution,
         now_ms,

@@ -128,10 +128,7 @@ fn remote_changes(store: &EngineStore) -> i64 {
         .unwrap()
 }
 
-#[test]
-fn first_enrollment_preserves_pending_field_history_and_does_not_trigger_reapplication() {
-    use dohc_engine_domain::{AutomationChangeKind, AutomationSubscription};
-
+fn collection_fixture() -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u8>, Ydoc) {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
         "../../tests/owner-source/owner-source-seed.json"
     ))
@@ -145,7 +142,7 @@ fn first_enrollment_preserves_pending_field_history_and_does_not_trigger_reappli
     local.frontmatter_set("title", "Original").unwrap();
     local.frontmatter_set("status", "open").unwrap();
     let markdown = local.project(crate::ContentKind::Richdoc).unwrap().content;
-    let (_dir, mut store, observed, checkpoint) =
+    let (dir, mut store, observed, checkpoint) =
         fixture_with_source(&bounded(&local).unwrap(), &markdown, "tasks/owner.md");
     VersionedTextStore::new(&mut store)
         .write_text(
@@ -154,7 +151,7 @@ fn first_enrollment_preserves_pending_field_history_and_does_not_trigger_reappli
                 version_id: "main".into(),
                 object_id: "schema".into(),
                 path: "tasks/collection.yaml".into(),
-                text: "fields:\n  title:\n    type: text\n  status:\n    type: text\n".into(),
+                text: "fields:\n  title:\n    type: text\n  status:\n    type: text\n  priority:\n    type: text\n".into(),
                 moment_id: "schema".into(),
                 metadata_origin: "user".into(),
                 metadata_summary: None,
@@ -168,130 +165,425 @@ fn first_enrollment_preserves_pending_field_history_and_does_not_trigger_reappli
         .unwrap();
     store
         .write_with(&NoFaults, |tx| {
-            dohc_engine_domain::reconcile_collections_in_tx(tx, "workspace", "main")?;
-            dohc_engine_domain::subscribe_automation_in_tx(
-                tx,
-                "workspace",
-                &AutomationSubscription {
-                    automation_id: "collection:tasks#watch".into(),
-                    prefix: "tasks".into(),
-                    kinds: vec![AutomationChangeKind::Changed],
-                    fields: Some(vec!["title".into(), "status".into()]),
-                },
-                2,
-            )
+            dohc_engine_domain::reconcile_collections_in_tx(tx, "workspace", "main")
         })
         .unwrap();
-    let key = key(&observed.binding).unwrap();
     let vector = local.encode_state_vector();
     local.frontmatter_set("title", "Edited title").unwrap();
     local.frontmatter_set("status", "done").unwrap();
-    let delta = local.diff(&vector).unwrap();
     store
         .write_with(&NoFaults, |tx| {
-            crate::record_update_in_tx(tx, &key, &delta, Some("person"), None, 3)
-        })
-        .unwrap();
-    let history = |store: &EngineStore| {
-        store
-            .read_with(|conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT field_name,previous_value_json,next_value_json \
-                     FROM collection_field_history WHERE workspace_id='workspace' \
-                       AND version_id='main' AND record_id='rec_aaaaaaaaaaaaaaaaaaaaaaaaaa' \
-                     ORDER BY history_id",
-                )?;
-                let rows = stmt
-                    .query_map([], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, Option<String>>(1)?,
-                            row.get::<_, Option<String>>(2)?,
-                        ))
-                    })?
-                    .collect::<Result<Vec<_>, _>>();
-                rows
-            })
-            .unwrap()
-    };
-    let edited_history = history(&store);
-    assert_eq!(
-        edited_history,
-        vec![
-            (
-                "status".into(),
-                Some("\"open\"".into()),
-                Some("\"done\"".into())
-            ),
-            (
-                "title".into(),
-                Some("\"Original\"".into()),
-                Some("\"Edited title\"".into())
-            ),
-        ]
-    );
-    let enrollment = input(&store, &observed, checkpoint);
-    let enrolled = enroll(&mut store, &enrollment, &observed.limits).unwrap();
-    assert!(enrolled.pending_bytes > 0);
-    let enrollment_history = history(&store);
-    let indexed = store
-        .read_with(|conn| {
-            dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
-                conn,
-                "workspace",
-                "main",
-                "object",
+            crate::record_update_in_tx(
+                tx,
+                &key(&observed.binding).unwrap(),
+                &local.diff(&vector).unwrap(),
+                Some("person"),
+                None,
+                3,
             )
         })
         .unwrap();
-    let draft = store
-        .read_with(|conn| open_draft_in(conn, &observed.binding, enrolled.revision))
-        .unwrap();
-    assert_eq!(draft.doc.frontmatter_json(), local.frontmatter_json());
+    (dir, store, observed, checkpoint, local)
+}
 
-    // Exercise the index/history consumer used by file writes and trigger claims.
-    // Enrollment itself discards its index facts and does not claim automations.
-    let projected = draft
-        .doc
-        .project(crate::ContentKind::Richdoc)
-        .unwrap()
-        .content;
+type FieldHistoryRow = (String, Option<String>, Option<String>, Option<String>);
+
+fn field_history(store: &EngineStore) -> Vec<FieldHistoryRow> {
     store
-        .write_with(&NoFaults, |tx| {
-            if let Some(facts) = dohc_engine_domain::index_collection_record_text_in_tx(
-                tx,
-                "workspace",
-                "main",
-                "object",
-                "tasks/owner.md",
-                &projected,
-                Some("person"),
-                None,
-                11,
-            )? {
-                dohc_engine_domain::claim_automation_triggers_in_tx(tx, "workspace", &facts, 11)?;
-            }
-            Ok::<_, dohc_engine_domain::DomainError>(())
+        .read_with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT field_name,previous_value_json,next_value_json,author_origin_id \
+             FROM collection_field_history WHERE workspace_id='workspace' \
+               AND version_id='main' AND record_id='rec_aaaaaaaaaaaaaaaaaaaaaaaaaa' \
+             ORDER BY history_id",
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })?
+                .collect::<Result<Vec<_>, _>>();
+            rows
+        })
+        .unwrap()
+}
+
+fn assert_visible_fields(
+    store: &EngineStore,
+    binding: &LiveObjectBinding,
+    expected: serde_json::Value,
+) {
+    store
+        .read_with(|conn| {
+            let indexed =
+                dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
+                    conn,
+                    "workspace",
+                    "main",
+                    "object",
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(indexed, expected);
+            let observed = super::super::draft::read_observed_in(conn, binding)?.unwrap();
+            let draft = open_draft_in(conn, binding, observed.revision)?;
+            let mut visible = draft.doc.frontmatter_json();
+            visible.as_object_mut().unwrap().remove("id");
+            assert_eq!(indexed, visible, "the index must follow the visible draft");
+            Ok::<_, OwnerOutboxError>(())
         })
         .unwrap();
-    let claims = store.table_row_count("automation_claims").unwrap();
-    assert_eq!(
-        enrollment_history, edited_history,
-        "enrollment must not revert local fields; after draft indexing: {:?}; automation claims: {claims}",
-        history(&store)
+}
+
+fn accept_field_frame(store: &mut EngineStore, binding: &LiveObjectBinding, bytes: Vec<u8>) {
+    use crate::owner_outbox::accepted::{apply_frame_in_tx, OwnerAcceptedFrameInput};
+    let observed = store
+        .read_with(|conn| super::super::draft::read_observed_in(conn, binding))
+        .unwrap()
+        .unwrap();
+    let input = OwnerAcceptedFrameInput {
+        binding: binding.clone(),
+        relay_database_namespace: "relay".into(),
+        expected_revision: observed.revision,
+        expected_native_head_sequence: observed.native_head_sequence,
+        previous_accepted_cursor: observed.accepted_cursor,
+        journal_cursor: observed.accepted_cursor + 1,
+        update_bytes: bytes,
+    };
+    for _ in 0..2 {
+        store
+            .write_with(&NoFaults, |tx| {
+                apply_frame_in_tx(tx, "workspace", &input, 11)
+            })
+            .unwrap();
+    }
+}
+
+fn refuse_field_entry(
+    store: &mut EngineStore,
+    outbox: &str,
+    entry: &super::super::OwnerOutboxEntry,
+) {
+    let refusal = super::super::OwnerOutboxRefuseInput {
+        outbox_id: outbox.into(),
+        delivery_id: entry.delivery_id.clone(),
+        update_digest: entry.update_digest.clone(),
+        reason: "The presser no longer has edit access.".into(),
+    };
+    for _ in 0..2 {
+        store
+            .write_with(&NoFaults, |tx| {
+                super::super::refuse_entry_in_tx(tx, "workspace", &refusal, 12)
+            })
+            .unwrap();
+    }
+    store
+        .read_with(|conn| {
+            let reason: String = conn
+                .query_row(
+                    "SELECT terminal_reason FROM owner_ydoc_outbox_entries WHERE delivery_id=?1",
+                    [&entry.delivery_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(reason, refusal.reason);
+            Ok::<_, OwnerOutboxError>(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn first_enrollment_own_draft_acceptance_keeps_each_field_edit_once() {
+    let (_dir, mut store, observed, checkpoint, local) = collection_fixture();
+    let history = field_history(&store);
+    assert_eq!(history.len(), 2);
+    assert!(history.iter().all(|row| row.3.as_deref() == Some("person")));
+    let enrollment = input(&store, &observed, checkpoint);
+    let enrolled = enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    assert!(enrolled.pending_bytes > 0);
+    assert_eq!(field_history(&store), history);
+    let pending =
+        super::super::read_pending(&store, "workspace", enrolled.outbox_id.as_ref().unwrap())
+            .unwrap();
+    assert_eq!(pending.entries[0].update, bounded(&local).unwrap());
+    accept_field_frame(
+        &mut store,
+        &observed.binding,
+        pending.entries[0].update.clone(),
     );
     assert_eq!(
-        history(&store),
-        edited_history,
-        "reading the draft must not reapply local fields"
+        field_history(&store),
+        history,
+        "an accepted own-draft echo must not duplicate History"
+    );
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Edited title", "status":"done"}),
+    );
+    super::super::acknowledge(
+        &mut store,
+        "workspace",
+        &pending.outbox_id,
+        &[super::super::OwnerDeliveryReceipt {
+            delivery_id: pending.entries[0].delivery_id.clone(),
+            update_digest: pending.entries[0].update_digest.clone(),
+            journal_cursor: enrollment.journal_cursor + 1,
+            accepting_host_epoch: 1,
+        }],
+    )
+    .unwrap();
+    assert_eq!(field_history(&store), history);
+    accept_field_frame(
+        &mut store,
+        &observed.binding,
+        local.frontmatter_set("status", "review").unwrap(),
+    );
+    let after = field_history(&store);
+    assert_eq!(&after[..2], &history);
+    assert_eq!(after.len(), 3);
+    assert_eq!(
+        after[2],
+        (
+            "status".into(),
+            Some("\"done\"".into()),
+            Some("\"review\"".into()),
+            None
+        )
+    );
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Edited title", "status":"review"}),
+    );
+}
+
+#[test]
+fn first_enrollment_refusal_reverts_fields_once_with_a_refusal_actor() {
+    let (_dir, mut store, observed, checkpoint, _) = collection_fixture();
+    let enrollment = input(&store, &observed, checkpoint.clone());
+    let enrolled = enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    let pending =
+        super::super::read_pending(&store, "workspace", enrolled.outbox_id.as_ref().unwrap())
+            .unwrap();
+    refuse_field_entry(&mut store, &pending.outbox_id, &pending.entries[0]);
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Original", "status":"open"}),
+    );
+    let history = field_history(&store);
+    assert_eq!(history.len(), 4);
+    assert_eq!(
+        &history[2..],
+        &[
+            (
+                "status".into(),
+                Some("\"done\"".into()),
+                Some("\"open\"".into()),
+                Some("owner-draft-refusal".into())
+            ),
+            (
+                "title".into(),
+                Some("\"Edited title\"".into()),
+                Some("\"Original\"".into()),
+                Some("owner-draft-refusal".into())
+            ),
+        ]
+    );
+    let host = Ydoc::wire();
+    host.apply(&checkpoint).unwrap();
+    accept_field_frame(
+        &mut store,
+        &observed.binding,
+        host.richdoc_append_paragraph("a later host frame"),
     );
     assert_eq!(
-        indexed,
-        Some(serde_json::json!({"title": "Edited title", "status": "done"}))
+        field_history(&store),
+        history,
+        "a later frame must not silently repair the index"
     );
+}
+
+#[test]
+fn first_enrollment_remote_checkpoint_records_only_the_remote_field_change() {
+    let (_dir, mut store, observed, checkpoint, _) = collection_fixture();
+    let host = Ydoc::wire();
+    host.apply(&checkpoint).unwrap();
+    host.frontmatter_set("priority", "high").unwrap();
+    let enrollment = input(&store, &observed, bounded(&host).unwrap());
+    let enrolled = enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    let history = field_history(&store);
+    assert_eq!(history.len(), 3);
     assert_eq!(
-        claims, 0,
-        "unchanged fields must not trigger automation claims"
+        history[2],
+        ("priority".into(), None, Some("\"high\"".into()), None)
+    );
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Edited title", "status":"done", "priority":"high"}),
+    );
+    let pending =
+        super::super::read_pending(&store, "workspace", enrolled.outbox_id.as_ref().unwrap())
+            .unwrap();
+    accept_field_frame(
+        &mut store,
+        &observed.binding,
+        pending.entries[0].update.clone(),
+    );
+    assert_eq!(field_history(&store), history);
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Edited title", "status":"done", "priority":"high"}),
+    );
+}
+
+#[test]
+fn first_enrollment_accept_echo_preserves_later_draft_fields_until_refusal() {
+    use crate::owner_outbox::draft::{append_draft_cached, OwnerDraftAppendInput};
+    let (_dir, mut store, observed, checkpoint, local) = collection_fixture();
+    let enrollment = input(&store, &observed, checkpoint);
+    let enrolled = enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    let initial = bounded(&local).unwrap();
+    let mut cache = crate::WriterDocCache::new();
+    let input = OwnerDraftAppendInput {
+        binding: observed.binding.clone(),
+        expected_revision: enrolled.revision,
+        append_key: "agent-status".into(),
+        update: local.frontmatter_set("status", "blocked").unwrap(),
+        now_ms: 11,
+        agent_declaration: Some(dohc_engine_domain::AgentDeclaration {
+            agent_id: "writer".into(),
+            on_behalf_of: Some("person".into()),
+            depth: 1,
+        }),
+        automation_declaration: None,
+    };
+    let entry = append_draft_cached(
+        &mut store,
+        &mut cache,
+        "workspace",
+        input.clone(),
+        &NoFaults,
+    )
+    .unwrap();
+    append_draft_cached(&mut store, &mut cache, "workspace", input, &NoFaults).unwrap();
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Edited title", "status":"blocked"}),
+    );
+    let history = field_history(&store);
+    assert_eq!(history.len(), 3);
+    assert_eq!(
+        history[2],
+        (
+            "status".into(),
+            Some("\"done\"".into()),
+            Some("\"blocked\"".into()),
+            Some("writer".into())
+        )
+    );
+    accept_field_frame(&mut store, &observed.binding, initial);
+    assert_eq!(field_history(&store), history);
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Edited title", "status":"blocked"}),
+    );
+    let host = store
+        .read_with(|conn| crate::load_doc_in(conn, &key(&observed.binding).unwrap()))
+        .unwrap();
+    accept_field_frame(
+        &mut store,
+        &observed.binding,
+        host.frontmatter_set("priority", "high").unwrap(),
+    );
+    let after_remote = field_history(&store);
+    assert_eq!(&after_remote[..3], &history);
+    assert_eq!(after_remote.len(), 4);
+    assert_eq!(
+        after_remote[3],
+        ("priority".into(), None, Some("\"high\"".into()), None)
+    );
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Edited title", "status":"blocked", "priority":"high"}),
+    );
+    let pending = super::super::read_pending(&store, "workspace", &entry.outbox_id).unwrap();
+    let later = pending
+        .entries
+        .iter()
+        .find(|pending| pending.delivery_id == entry.delivery_id)
+        .unwrap();
+    refuse_field_entry(&mut store, &entry.outbox_id, later);
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Edited title", "status":"done", "priority":"high"}),
+    );
+    let after_refusal = field_history(&store);
+    assert_eq!(&after_refusal[..4], &after_remote);
+    assert_eq!(after_refusal.len(), 5);
+    assert_eq!(
+        after_refusal[4],
+        (
+            "status".into(),
+            Some("\"blocked\"".into()),
+            Some("\"done\"".into()),
+            Some("owner-draft-refusal".into())
+        )
+    );
+}
+
+#[test]
+fn first_enrollment_refusal_preserves_an_independent_pending_field_edit() {
+    let (_dir, mut store, observed, checkpoint, _) = collection_fixture();
+    let enrollment = input(&store, &observed, checkpoint.clone());
+    let enrolled = enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    let independent = Ydoc::wire();
+    independent.apply(&checkpoint).unwrap();
+    let update = independent.frontmatter_set("priority", "high").unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            super::super::draft::append_draft_in_tx(
+                tx,
+                "workspace",
+                &observed.binding,
+                enrolled.revision,
+                "independent-priority".into(),
+                update,
+                11,
+            )
+        })
+        .unwrap();
+    let pending =
+        super::super::read_pending(&store, "workspace", enrolled.outbox_id.as_ref().unwrap())
+            .unwrap();
+    assert_eq!(pending.entries.len(), 2);
+    refuse_field_entry(&mut store, &pending.outbox_id, &pending.entries[0]);
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Original", "status":"open", "priority":"high"}),
+    );
+    let remaining = super::super::read_pending(&store, "workspace", &pending.outbox_id).unwrap();
+    assert_eq!(remaining.entries.len(), 1);
+    assert_eq!(
+        remaining.entries[0].delivery_id,
+        pending.entries[1].delivery_id
+    );
+    let history = field_history(&store);
+    assert_eq!(history.len(), 5);
+    assert_eq!(history.iter().filter(|row| row.0 == "priority").count(), 1);
+    assert_eq!(
+        history
+            .iter()
+            .filter(|row| row.3.as_deref() == Some("owner-draft-refusal"))
+            .count(),
+        2
     );
 }
 
