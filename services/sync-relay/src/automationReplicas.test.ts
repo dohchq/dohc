@@ -351,7 +351,7 @@ describe("the automation replicas", () => {
   });
 
   it("backs off a persistently failing step instead of retrying twice every 100 ms", async () => {
-    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
     vi.setSystemTime(0);
     cleanup.push(async () => { vi.useRealTimers(); });
     const { storage, log } = await relay();
@@ -373,7 +373,6 @@ describe("the automation replicas", () => {
     await vi.advanceTimersByTimeAsync(100);
     await failed;
     await vi.advanceTimersByTimeAsync(14_000);
-    console.info("persistent step over 14 s", { steps: steps.length, onError: errors.length });
     expect({ steps: steps.length, onError: errors.length }).toEqual({ steps: 4, onError: 4 });
     expect(steps).toEqual([100, 2_100, 6_100, 14_100]);
     expect(running.replica(WORKSPACE)!.pulledHead).toBe(0);
@@ -402,7 +401,7 @@ describe("the automation replicas", () => {
   });
 
   it("syncs healthy relay writes and retention deadlines without retrying a failing step early", async () => {
-    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
     vi.setSystemTime(0);
     cleanup.push(async () => { vi.useRealTimers(); });
     const { storage, raw, log } = await relay();
@@ -459,7 +458,7 @@ describe("the automation replicas", () => {
   });
 
   it("schedules retries for direct sync failures and resets their delay after a successful sync", async () => {
-    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
     vi.setSystemTime(0);
     cleanup.push(async () => { vi.useRealTimers(); });
     const { storage } = await relay();
@@ -492,6 +491,206 @@ describe("the automation replicas", () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(steps).toEqual([0, 2_000, 2_000, 2_000, 4_000]);
     expect(errors).toHaveLength(2);
+  });
+
+  it("keeps healthy relay writes within 100 ms after a direct failure at the 60 s retry cap", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
+    vi.setSystemTime(0);
+    cleanup.push(async () => { vi.useRealTimers(); });
+    const { storage, raw } = await relay();
+    storage.claimWorkspace({ workspaceId: "healthy", ownerUserId: "owner", createdAtMs: 1 });
+    storage.claimWorkspaceIdentity({ workspaceId: "healthy", replicationEpoch: "epoch-1", streamIdentity: "stream-1" });
+    for (const workspaceId of [WORKSPACE, "healthy"]) storage.joinAutomationWorkspace({ workspaceId, nowMs: 0 });
+    const engine = fakeEngine();
+    const passes = passEnds();
+    const steps: Array<[string, number]> = [];
+    const running = await start(storage, { wanted: () => [WORKSPACE, "healthy"], onReconciled: passes.onReconciled,
+      onError: () => {}, onBeforeSync: async workspaceId => { steps.push([workspaceId, Date.now()]); } });
+    const opened = passes.next();
+    await vi.advanceTimersByTimeAsync(0);
+    await opened;
+    const replica = running.replica(WORKSPACE)!;
+    engine.failPush(true, replica.workspace);
+    await expect(replica.sync()).rejects.toThrow("replica cannot push");
+    await vi.advanceTimersByTimeAsync(62_000);
+    expect(steps.filter(([id]) => id === WORKSPACE).map(([, at]) => at)).toEqual([0, 0, 2_000, 6_000, 14_000, 30_000, 62_000]);
+    await expect(replica.sync()).rejects.toThrow("replica cannot push");
+    // Let the worker consume the direct caller's wake before the healthy write.
+    await turn();
+    raw.prepare("INSERT INTO sync_relay_log (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms) VALUES ('healthy', 'desk', 1, 'moment.append', '{}', 1)").run();
+    notifyRelayWrite(storage);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(steps.filter(([id]) => id === "healthy")).toEqual([["healthy", 0], ["healthy", 62_100]]);
+    expect(running.replica("healthy")!.pulledHead).toBe(storage.automationWorkspaceLogHead("healthy"));
+  });
+
+  it("does not spin passes when a direct sync is still busy after its retry becomes due", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
+    vi.setSystemTime(0);
+    cleanup.push(async () => { vi.useRealTimers(); });
+    const { storage } = await relay();
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    const engine = fakeEngine();
+    const pushed = gate(), pushing = gate();
+    let hold = false;
+    const answer = spawn.getMockImplementation()!;
+    spawn.mockImplementation(async (spawned: Parameters<typeof answer>[0]) => {
+      const client = await answer(spawned);
+      const send = client.sendRequest.getMockImplementation()!;
+      client.sendRequest.mockImplementation(async (request: Sent) => {
+        if (hold && request.method === "sync.push") { pushing.resolve(); await pushed.promise; }
+        return await send(request);
+      });
+      return client;
+    });
+    const passes = passEnds();
+    let count = 0;
+    const running = await start(storage, { wanted: () => [WORKSPACE], onError: () => {},
+      onReconciled: () => { count += 1; passes.onReconciled(); } });
+    const opened = passes.next();
+    await vi.advanceTimersByTimeAsync(0);
+    await opened;
+    const replica = running.replica(WORKSPACE)!;
+    engine.failPush(true);
+    await expect(replica.sync()).rejects.toThrow("replica cannot push");
+    engine.failPush(false);
+    hold = true;
+    const syncing = replica.sync();
+    cleanup.push(async () => { pushed.resolve(); await syncing; });
+    await pushing.promise;
+    const before = count;
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(count - before, "only the wake and the due retry run while sync is held").toBe(2);
+    expect(running.failedSyncs().has(WORKSPACE)).toBe(true);
+    pushed.resolve();
+    await syncing;
+    await running.settled();
+    expect(running.failedSyncs().size).toBe(0);
+  });
+
+  it("clears a failed open's retry when its wanted workspace row disappears", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
+    vi.setSystemTime(0);
+    cleanup.push(async () => { vi.useRealTimers(); });
+    const { storage, raw } = await relay();
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    const engine = fakeEngine();
+    engine.failPush(true);
+    const passes = passEnds();
+    let count = 0;
+    const running = await start(storage, { wanted: () => [WORKSPACE], onError: () => {},
+      onReconciled: () => { count += 1; passes.onReconciled(); } });
+    const failed = passes.next();
+    await vi.advanceTimersByTimeAsync(0);
+    await failed;
+    expect(running.replica(WORKSPACE)).toBeUndefined();
+    expect(running.failedSyncs().has(WORKSPACE)).toBe(true);
+    raw.prepare("DELETE FROM sync_relay_workspaces WHERE workspace_id = ?").run(WORKSPACE);
+    const removed = passes.next();
+    running.reconcile();
+    await vi.advanceTimersByTimeAsync(100);
+    await removed;
+    const before = count;
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(count - before, "no overdue retry keeps requesting passes").toBe(0);
+    expect(running.failedSyncs().size).toBe(0);
+    await running.settled();
+  });
+
+  it("opens a new incarnation promptly after the previous incarnation failed during open", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
+    vi.setSystemTime(0);
+    cleanup.push(async () => { vi.useRealTimers(); });
+    const { storage } = await relay();
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    const engine = fakeEngine();
+    engine.failPush(true);
+    const passes = passEnds();
+    const running = await start(storage, { wanted: () => [WORKSPACE], onError: () => {}, onReconciled: passes.onReconciled });
+    const failed = passes.next();
+    await vi.advanceTimersByTimeAsync(0);
+    await failed;
+    storage.rotateWorkspaceIdentity({ workspaceId: WORKSPACE, ownerUserId: "owner", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 1 });
+    engine.failPush(false);
+    const changed = passes.next();
+    running.reconcile();
+    await vi.advanceTimersByTimeAsync(100);
+    await changed;
+    expect(running.replica(WORKSPACE)).toMatchObject({ incarnation: 2 });
+    expect(running.failedSyncs().size).toBe(0);
+  });
+
+  it("retries by elapsed time even when the wall clock moves backwards", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
+    vi.setSystemTime(0);
+    cleanup.push(async () => { vi.useRealTimers(); });
+    const { storage } = await relay();
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    const engine = fakeEngine();
+    const passes = passEnds();
+    const steps: number[] = [];
+    const running = await start(storage, { wanted: () => [WORKSPACE], nowMs: () => 0, onError: () => {},
+      onReconciled: passes.onReconciled, onBeforeSync: async () => { steps.push(performance.now()); } });
+    const opened = passes.next();
+    await vi.advanceTimersByTimeAsync(0);
+    await opened;
+    steps.length = 0;
+    engine.failPush(true);
+    await expect(running.replica(WORKSPACE)!.sync()).rejects.toThrow("replica cannot push");
+    vi.setSystemTime(-60_000);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(steps).toEqual([0, 2_000]);
+  });
+
+  it("does not repeat a failed step in a pass whose healthy sync outlasts its retry delay", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
+    vi.setSystemTime(0);
+    cleanup.push(async () => { vi.useRealTimers(); });
+    const { storage, raw, log } = await relay();
+    storage.claimWorkspace({ workspaceId: "healthy", ownerUserId: "owner", createdAtMs: 1 });
+    storage.claimWorkspaceIdentity({ workspaceId: "healthy", replicationEpoch: "epoch-1", streamIdentity: "stream-1" });
+    for (const workspaceId of [WORKSPACE, "healthy"]) storage.joinAutomationWorkspace({ workspaceId, nowMs: 0 });
+    const engine = fakeEngine();
+    const pushing = gate(), pushed = gate();
+    let healthy: string | undefined;
+    const answer = spawn.getMockImplementation()!;
+    spawn.mockImplementation(async (spawned: Parameters<typeof answer>[0]) => {
+      const client = await answer(spawned);
+      const send = client.sendRequest.getMockImplementation()!;
+      client.sendRequest.mockImplementation(async (request: Sent) => {
+        if (request.method === "sync.push" && request.workspace === healthy) { pushing.resolve(); await pushed.promise; }
+        return await send(request);
+      });
+      return client;
+    });
+    const passes = passEnds();
+    const steps: number[] = [];
+    // The healthy replica comes first in the later pull loop, holding it before the failed replica.
+    const running = await start(storage, { wanted: () => ["healthy", WORKSPACE], onReconciled: passes.onReconciled,
+      onError: () => {}, onBeforeSync: async id => { if (id === WORKSPACE) steps.push(Date.now()); } });
+    cleanup.push(async () => { pushed.resolve(); });
+    const opened = passes.next();
+    await vi.advanceTimersByTimeAsync(0);
+    await opened;
+    const replica = running.replica(WORKSPACE)!;
+    steps.length = 0;
+    engine.failPush(true, replica.workspace);
+    await expect(replica.sync()).rejects.toThrow("replica cannot push");
+    // Drain the ordinary failure wake before requesting a pass at the retry time.
+    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(1_800);
+    healthy = running.replica("healthy")!.workspace;
+    raw.prepare("INSERT INTO sync_relay_log (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms) VALUES ('healthy', 'desk', 1, 'moment.append', '{}', 1)").run();
+    log(1);
+    notifyRelayWrite(storage);
+    const finished = passes.next();
+    await vi.advanceTimersByTimeAsync(100);
+    await pushing.promise;
+    // The first step in this pass failed at 2 s; its next retry is due at 6 s.
+    await vi.advanceTimersByTimeAsync(5_000);
+    pushed.resolve();
+    await finished;
+    expect(steps, "the same pass must not retry the failure again at 7 s").toEqual([0, 2_000]);
   });
 
   it("refreshes live checkpoints before syncing and still syncs when that lane fails", async () => {
