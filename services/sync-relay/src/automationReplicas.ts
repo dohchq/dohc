@@ -319,8 +319,6 @@ export async function startAutomationReplicas(options: {
   // failure that is no one workspace's, once every workspace had its turn.
   async function reconcile(): Promise<boolean> {
     let ok = true;
-    // Other work can outlast a retry delay; a failed step still gets only one turn per pass.
-    const failedSteps = new Set<string>();
     let passFailure: unknown = null;
     await engine();
     const wanted = new Set(options.wanted());
@@ -338,9 +336,7 @@ export async function startAutomationReplicas(options: {
         else if (row !== null && failedSyncs.has(workspaceId)) {
           const retry = replicas.get(workspaceId)!;
           if (!retry.busy()) {
-            failedSteps.add(workspaceId);
             if (!(await retry.step())) schedule();
-            failedSteps.delete(workspaceId);
           }
         }
       }) && ok;
@@ -397,7 +393,8 @@ export async function startAutomationReplicas(options: {
     for (const replica of [...replicas.values()]) {
       if (!wanted.has(replica.workspaceId) || logHead(replica.workspaceId) <= replica.pulledHead) continue;
       // A copy already syncing gets there on its own; waiting on it would hold the pass.
-      if (replica.busy() || failedSteps.has(replica.workspaceId) || !canSync(replica.workspaceId)) continue;
+      // Failed syncs retry in the next pass, even if their delay ended during this one.
+      if (replica.busy() || failedSyncs.has(replica.workspaceId)) continue;
       ok = await each(replica.workspaceId, async () => {
         // A copy with more to sync goes on in the next pass, after the others.
         if (!(await replica.step())) schedule();
@@ -490,7 +487,7 @@ export async function startAutomationReplicas(options: {
         const now = performance.now();
         for (const workspaceId of failedSyncs.keys()) {
           const syncRetry = syncRetries.get(workspaceId);
-          if (syncRetry && syncRetry.at > now) retry = Math.min(retry, syncRetry.at - now);
+          if (syncRetry && !replicas.get(workspaceId)?.busy()) retry = Math.min(retry, Math.max(syncRetry.at - now, 0));
         }
         return Effect.raceFirst(sleep(retry).pipe(Effect.as(Effect.void)), Queue.take(wakes).pipe(Effect.map(sleep))).pipe(Effect.flatten);
       }));
@@ -543,8 +540,12 @@ export async function startAutomationReplicas(options: {
     },
     /** The open replica of this workspace, or undefined. */
     replica(workspaceId: string): AutomationReplica | undefined { return replicas.get(workspaceId); },
-    /** Ask for a pass now, as after a change the relay's write observer does not see. */
-    reconcile(): void { schedule(); },
+    /** Ask for a pass; an owner's action can retry its workspace immediately. */
+    reconcile(workspaceId?: string): void {
+      const retry = workspaceId === undefined ? undefined : syncRetries.get(workspaceId);
+      if (retry) retry.at = performance.now();
+      schedule();
+    },
     /** The workspaces whose copy failed to open, sync, leave, or go in the last pass, with why. */
     failedSyncs(): ReadonlyMap<string, unknown> { return failedSyncs; },
     /** Resolves once no pass is asked for, waiting, running, or retrying. Rejects if the passes stopped on a failure. */
