@@ -305,8 +305,6 @@ it.skipIf(engine.missing)(
   120_000,
 );
 
-const CREATION_REPLAY_TIMEOUT_MS = 120_000;
-
 it.skipIf(engine.missing).each(["deleted", "moved"] as const)(
   "skips replay of a %s creation through the native engine and desktop facade",
   async change => {
@@ -342,13 +340,13 @@ it.skipIf(engine.missing).each(["deleted", "moved"] as const)(
       await expect.poll(async () => {
         const records = (await ctx.withEngine(adapter => adapter.queryCollectionRecords({ collectionPath: "Tasks" }))).records;
         return records.map(record => record.id);
-      }, { timeout: CREATION_REPLAY_TIMEOUT_MS }).not.toContain(effect.recordId);
+      }, { timeout: 60_000 }).not.toContain(effect.recordId);
       const result = await applyDocumentEffect(dependencies, context, effect, "may-have-landed");
       expect(result).toMatchObject([{ kind: "skipped", reason: "The record was already created, then moved or deleted." }]);
       expect((await ctx.withEngine(adapter => adapter.queryCollectionRecords({ collectionPath: "Tasks" }))).records.map(record => record.path)).toEqual(["Tasks/one.md"]);
       await expect(stat(join(ctx.root, "Tasks", `${effect.name}.md`))).rejects.toThrow();
     });
-  }, CREATION_REPLAY_TIMEOUT_MS,
+  }, 120_000,
 );
 
 it.skipIf(engine.missing)("finishes a written but unadopted creation on native desktop replay", async () => {
