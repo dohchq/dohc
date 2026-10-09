@@ -11,7 +11,7 @@ export function doctor({ ready = false, engine = true, desktop = true, browser =
   const add = (name, ok, detail, optional = false) => checks.push({ name, state: ok ? "PASS" : optional ? "PENDING" : "FAIL", detail });
   const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
   const [major, minor] = process.versions.node.split(".").map(Number);
-  add("node", major > 24 || major === 24 && minor >= 14, process.version);
+  add("node", major > 24 || major === 24 && minor >= 16, process.version);
   if (process.platform === "win32") {
     try {
       const version = execFileSync("pwsh.exe", ["-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSVersion.ToString()"], {
