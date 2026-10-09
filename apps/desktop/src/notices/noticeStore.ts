@@ -329,8 +329,14 @@ export function createNoticeStore(deps: {
   }
 
   async function save(name: string, value: LocalFile | AccountFile): Promise<void> {
-    await mkdir(deps.directory, { recursive: true });
-    await atomicWriteFile(join(deps.directory, name), JSON.stringify(value), deps.fileOperations);
+    try {
+      await mkdir(deps.directory, { recursive: true });
+      await atomicWriteFile(join(deps.directory, name), JSON.stringify(value), deps.fileOperations);
+    } catch (error) {
+      localFile = null;
+      accountFiles.clear();
+      throw error;
+    }
   }
 
   async function loadLocal(): Promise<LocalFile> {

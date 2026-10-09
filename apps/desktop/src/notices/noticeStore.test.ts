@@ -51,6 +51,58 @@ import {
 afterEach(closeTestStorages);
 
 describe("Notice save durability", () => {
+  it.each(["local", "account"] as const)("reloads the %s list after postNotice fails to sync the directory", async (where) => {
+    const server = await relay();
+    server.online = false;
+    let fail = false;
+    const error = new Error("directory sync failed");
+    const laptop = await computer(where === "local" ? null : account(server, "ana"), { fileOperations: {
+      platform: "linux",
+      open: async (path, flags, mode) => {
+        if (flags === "r") return {
+          writeFile: async () => {},
+          sync: async () => { if (fail) throw error; },
+          close: async () => {},
+        };
+        return open(path, flags, mode);
+      },
+    } });
+    await laptop.store.postNotice(notice({ noticeId: "first" }));
+    await laptop.store.sync();
+    fail = true;
+    await expect(laptop.store.postNotice(notice({ noticeId: "second" }))).rejects.toBe(error);
+    fail = false;
+    await laptop.store.postNotice(notice({ noticeId: "third" }));
+    await laptop.store.sync();
+    const restarted = await computer(laptop.signedIn, { directory: laptop.directory });
+    expect((await restarted.store.list()).notices.map(row => row.noticeId).sort()).toEqual(["first", "second", "third"]);
+  });
+
+  it("reloads the local list so retrying mark after a failed temp sync saves the change", async () => {
+    let fail = false;
+    const error = new Error("temp sync failed");
+    const laptop = await computer(null, { fileOperations: {
+      open: async (...args) => {
+        const handle = await open(...args);
+        return {
+          writeFile: handle.writeFile.bind(handle),
+          sync: async () => { if (fail) throw error; await handle.sync(); },
+          close: handle.close.bind(handle),
+        };
+      },
+    } });
+    await laptop.store.postNotice(notice({ noticeId: "first" }));
+    const refs = [{ store: "local", noticeId: "first" }] as const;
+    fail = true;
+    await expect(laptop.store.mark(refs, "read", null)).rejects.toBe(error);
+    fail = false;
+    await laptop.store.mark(refs, "read", null);
+    const restarted = await computer(null, { directory: laptop.directory });
+    expect((await restarted.store.list()).notices).toEqual([
+      expect.objectContaining({ noticeId: "first", readAtMs: clock }),
+    ]);
+  });
+
   it.each(["local", "account"] as const)("syncs and closes a %s save before rename and caller completion", async (where) => {
     const events: string[] = [];
     let completed = 0;
