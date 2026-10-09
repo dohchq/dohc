@@ -106,6 +106,40 @@ function settleHead(host: ReturnType<typeof render>, doc: Y.Doc) {
 }
 
 describe("retained failures", () => {
+  it("keeps an older lineage's status reason when share access is refused", () => {
+    docMock.current = engineDocState({ available: false });
+    render(<CollectionFieldWriteHost />);
+    enqueue();
+    const status = renderHook(() => useCollectionWriteStatus("ws-1", "tasks"));
+    const ownMessage = collectionWriteFailures()[0]!.message;
+    const refusal = "This share must be reopened.";
+    act(() => setCollectionFieldWriteAccess("ws-1", refusal));
+    expect(status.result.current.error).toBe(refusal);
+    act(() => advanceCollectionWriteLineage("ws-1"));
+    expect(status.result.current.error).toBe(ownMessage);
+    expect(screen.getByTestId("collection-write-retry")).toHaveProperty("disabled", true);
+  });
+
+  it("does not rerender a collection status for unrelated retained failures or enqueues", () => {
+    docMock.current = engineDocState({ available: false });
+    render(<CollectionFieldWriteHost />);
+    enqueue();
+    let renders = 0;
+    const status = renderHook(() => {
+      renders += 1;
+      return useCollectionWriteStatus("ws-1", "tasks");
+    });
+    const refusal = "This share must be reopened.";
+    act(() => setCollectionFieldWriteAccess("ws-1", refusal));
+    expect(status.result.current.error).toBe(refusal);
+    const before = renders;
+    act(() => { enqueueCollectionFieldWrite("ws-1", "other", { ...CHANGE, recordId: "rec-2", recordPath: "other/Else.md" }); });
+    expect(renders).toBe(before);
+    act(() => { enqueueCollectionFieldWrite("other", "tasks", CHANGE); });
+    expect(renders).toBe(before);
+    expect(status.result.current.error).toBe(refusal);
+  });
+
   it("keeps writes' own reasons through refusal A, refusal B, and restored access", () => {
     docMock.current = engineDocState({ opening: true });
     render(<CollectionFieldWriteHost />);
@@ -883,6 +917,7 @@ describe("abandoned schema preparation", () => {
   it("keeps a changed selection recovery-only through refusal changes and restored access", () => {
     docMock.current = engineDocState({ opening: true });
     const host = render(<CollectionFieldWriteHost />);
+    const status = renderHook(() => useCollectionWriteStatus("ws-1", "tasks"));
     const value = ["alpha", "gamma"];
     enqueue({ ...CHANGE, field: "tags", value, previousValues: [["alpha"]] });
     const doc = new Y.Doc();
@@ -896,6 +931,7 @@ describe("abandoned schema preparation", () => {
     for (const refusal of ["This share must be reopened.", "Your access to this share changed.", null]) {
       act(() => setCollectionFieldWriteAccess("ws-1", refusal));
       expect(collectionWriteFailures()[0]?.message).toBe(ownMessage);
+      expect(status.result.current.error).toBe(ownMessage);
       expect(screen.getByTestId("collection-write-failure").textContent).toContain(ownMessage);
       if (refusal !== null) expect(screen.getByTestId("collection-write-failure").textContent).not.toContain(refusal);
       expect(screen.getByTestId("collection-write-retry")).toHaveProperty("disabled", true);
@@ -1119,6 +1155,7 @@ describe("abandonPendingCollectionFieldWrites", () => {
     doc.getMap("frontmatter").set("id", "rec-1");
     docMock.current = engineDocState({ available: true, doc });
     const host = render(<CollectionFieldWriteHost />);
+    const status = renderHook(() => useCollectionWriteStatus("ws-1", "tasks"));
     enqueue();
     enqueue({ ...CHANGE, value: "newer" });
     act(() => abandonPendingCollectionFieldWrites("stalled"));
@@ -1126,6 +1163,9 @@ describe("abandonPendingCollectionFieldWrites", () => {
     host.rerender(<CollectionFieldWriteHost />);
     const older = collectionWriteFailures().find((failure) => failure.change.value === "done")!;
     expect(older.superseded).toBe(true);
+    expect(status.result.current.error).toBe(older.message);
+    act(() => setCollectionFieldWriteAccess("ws-1", "This share must be reopened."));
+    expect(status.result.current.error).toBe(older.message);
     act(() => retryCollectionFieldWrite(older.id));
     expect(hasPendingCollectionFieldWrites()).toBe(false);
   });

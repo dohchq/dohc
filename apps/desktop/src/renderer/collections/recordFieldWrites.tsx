@@ -845,11 +845,14 @@ export function useCollectionWriteStatus(
     () => statuses.get(keyFor(workspaceId, collectionPath)) ?? EMPTY_STATUS,
   );
   const accessRefusal = useSyncExternalStore(subscribe, () => accessRefusals.get(workspaceId) ?? null);
-  const retained = useCollectionWriteFailures();
-  // Saved holds use this line too; access explains only a retained failure.
-  const hasFailedWrite = retained.some(failure => failure.workspaceId === workspaceId &&
-    failure.collectionPath === collectionPath && failure.message === status.error);
-  return accessRefusal === null || status.error === null || !hasFailedWrite ? status : { ...status, error: accessRefusal };
+  // Saved holds use this line too; access explains only a retryable failure.
+  const hasRetryableFailure = useSyncExternalStore(subscribe, () => {
+    const error = statuses.get(keyFor(workspaceId, collectionPath))?.error ?? null;
+    return error !== null && failures.some(failure => failure.workspaceId === workspaceId &&
+      failure.collectionPath === collectionPath && failure.message === error &&
+      !failure.recoveryOnly && !failure.superseded && failure.lineage === collectionWriteLineage(workspaceId));
+  });
+  return accessRefusal === null || status.error === null || !hasRetryableFailure ? status : { ...status, error: accessRefusal };
 }
 
 // Test seam: the queue is module state, so suites that enqueue writes reset
