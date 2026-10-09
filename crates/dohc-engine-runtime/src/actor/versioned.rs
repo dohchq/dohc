@@ -1474,14 +1474,8 @@ pub(super) fn publish_checked_delete_on_store(
     match outcome {
         Ok(_) if applied => Ok(()),
         Err(error) => Err(error),
-        Ok(JobOutcome::Conflict | JobOutcome::Superseded) => {
-            Err(DomainError::WritePreconditionFailed {
-                current_sha256: None,
-            }
-            .into())
-        }
-        Ok(_) => Err(DomainError::InvalidInput {
-            reason: "dohc could not remove this file. It may be open in another app.",
+        Ok(_) => Err(DomainError::WritePreconditionFailed {
+            current_sha256: None,
         }
         .into()),
     }
@@ -3367,7 +3361,7 @@ mod doc_cache_reset_tests {
         .unwrap();
     }
 
-    fn switch_checked_delete_version(store: &mut EngineStore) {
+    fn create_checked_delete_version(store: &mut EngineStore) {
         let mut versioned = VersionedTextStore::new(store);
         versioned
             .create_named_version(
@@ -3382,7 +3376,11 @@ mod doc_cache_reset_tests {
                 &NoFaults,
             )
             .unwrap();
-        versioned
+    }
+
+    fn switch_checked_delete_version(store: &mut EngineStore) {
+        create_checked_delete_version(store);
+        VersionedTextStore::new(store)
             .set_active_version("workspace", "other", &NoFaults)
             .unwrap();
     }
@@ -3487,36 +3485,19 @@ mod doc_cache_reset_tests {
                 &expected,
                 FaultPoint::MaterializeAfterKnownCopyDeletion,
             );
-            switch_checked_delete_version(&mut store);
-            // The switch queues a projection after changing active_versions.
-            store
-                .write_with(&NoFaults, |tx| {
-                    dohc_engine_storage::enqueue_job(
-                        tx,
-                        &dohc_engine_storage::MaterializationJobSpec {
-                            job_id: "switch-projection".into(),
-                            workspace_id: "workspace".into(),
-                            target_path: "record.md".into(),
-                            content_sha256: expected.clone(),
-                            preimage: Preimage::Absent,
-                            target_generation: 10,
-                            now_ms: 4,
-                        },
-                    )
-                })
-                .unwrap();
-            publish_checked_delete_on_store(
+            create_checked_delete_version(&mut store);
+            let switched = super::super::versions::switch_active_version_on_store(
                 &mut store,
-                &root,
                 "workspace",
-                "restore-delete-mat_restore-delete",
+                "other",
+                &root,
                 &(),
                 4,
                 &NoFaults,
-                true,
-                false,
+                &tokio_util::sync::CancellationToken::new(),
             )
-            .unwrap_err();
+            .unwrap();
+            assert_eq!(switched.version_id, "other");
             assert_checked_delete_absent(&store);
             let snapshots: i64 = store
                 .read_with(|c| {
@@ -3528,14 +3509,6 @@ mod doc_cache_reset_tests {
                 })
                 .unwrap();
             assert_eq!(snapshots, 2);
-            assert_eq!(
-                store
-                    .load_materialization_job("switch-projection")
-                    .unwrap()
-                    .unwrap()
-                    .status,
-                JobStatus::Pending
-            );
             checked_delete_replay(&mut store, &root);
             assert_eq!(
                 hex_sha256(&std::fs::read(root.join("record.md")).unwrap()),
@@ -3648,6 +3621,35 @@ mod doc_cache_reset_tests {
                     );
                     assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 0);
                     assert!(!dohc_engine_files::workspace_recovery_unavailable(&root));
+                    assert!(!root.join("record.md").exists());
+                    if change != "unchanged" {
+                        let version = if change == "version" { "other" } else { "main" };
+                        let snapshot = VersionedTextStore::new(&mut store)
+                            .list_snapshot_metadata("workspace", version, None, 10)
+                            .unwrap()
+                            .into_iter()
+                            .find(|snapshot| snapshot.path == "record.md")
+                            .expect("refused deletion keeps the current snapshot");
+                        let hash = if change == "content" {
+                            hex_sha256(b"Owner bytes KEEP")
+                        } else {
+                            expected.clone()
+                        };
+                        assert_eq!(snapshot.sha256, hash);
+                        let versioned = VersionedTextStore::new(&mut store);
+                        let preserved = if binary {
+                            versioned
+                                .read_binary_blob("workspace", &expected)
+                                .unwrap()
+                                .and_then(|blob| blob.bytes)
+                        } else {
+                            versioned
+                                .read_text_blob("workspace", &expected)
+                                .unwrap()
+                                .and_then(|blob| blob.text.map(String::into_bytes))
+                        };
+                        assert_eq!(hex_sha256(&preserved.unwrap()), expected);
+                    }
                 }
             }
         }
