@@ -739,15 +739,6 @@ pub(crate) fn drained_coordinate_authors(
                 payload.attribution.as_ref(),
             ) {
                 authors.union_json(&recorded).map_err(SyncError::corrupt)?;
-                if payload.attribution.as_ref().is_some_and(|attribution| {
-                    attribution.actor_kind == dohc_engine_domain::ChangeActorKind::Human
-                }) {
-                    // Another coordinate may confirm this same ID. Its proof
-                    // cannot erase this coordinate's unconfirmed coverage.
-                    authors
-                        .union_json(r#"[{"kind":"unattributed"}]"#)
-                        .map_err(SyncError::corrupt)?;
-                }
             }
         }
     }
@@ -895,16 +886,54 @@ pub(crate) fn refresh_confirmed_application_in_tx(
     {
         return Ok(());
     }
-    let (payload, mut record) = parse_event_envelope(tx, envelope)?;
-    let p = scope(
-        &record.header.relay_database_namespace,
-        &record.accepted.binding,
-    );
-    let retained: bool = tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM live_audit_events WHERE {SCOPE} AND event_count=?6 AND record_digest=?7)"),
-        params![p[0],p[1],p[2],p[3],p[4],record.header.event_count,payload.manifest.record_digest], |row|row.get(0)).map_err(SyncError::corrupt)?;
-    if retained && confirm_record_authors(&mut record, envelope)? {
-        retain_projection_authors(tx, &record, true)?;
+    let applied: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM replication_log WHERE workspace_id=?1 AND origin_id=?2 \
+         AND origin_seq=?3 AND op_kind='live.audit.application' AND apply_disposition='applied')",
+            params![
+                envelope.workspace_id,
+                envelope.origin_id,
+                envelope.origin_seq
+            ],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if !applied {
+        return Ok(());
     }
+    let payload = &envelope.payload;
+    let (Some(namespace), Some(version), Some(object), Some(lineage), Some(count), Some(digest)) = (
+        payload["relayDatabaseNamespace"].as_str(),
+        payload["mainVersionId"].as_str(),
+        payload["objectId"].as_str(),
+        payload["lineageClaimId"].as_str(),
+        payload["eventCount"].as_i64(),
+        payload["manifest"]["recordDigest"].as_str(),
+    ) else {
+        return Ok(());
+    };
+    let retained: bool = tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM live_audit_events WHERE {SCOPE} AND event_count=?6 AND record_digest=?7)"),
+        params![namespace,envelope.workspace_id,version,object,lineage,count,digest], |row|row.get(0)).map_err(SyncError::corrupt)?;
+    if !retained {
+        return Ok(());
+    }
+    // Refresh is optional proof enrichment. A damaged or refused audit must
+    // never prevent subsequent content from passing an already-acked row.
+    tx.execute_batch("SAVEPOINT dohc_audit_confirmation")
+        .map_err(SyncError::persist)?;
+    let refresh = (|| {
+        let (_, mut record) = parse_event_envelope(tx, envelope)?;
+        if confirm_record_authors(&mut record, envelope)? {
+            retain_projection_authors(tx, &record, true)?;
+        }
+        Ok::<_, SyncError>(())
+    })();
+    if refresh.is_err() {
+        tx.execute_batch("ROLLBACK TO dohc_audit_confirmation")
+            .map_err(SyncError::persist)?;
+    }
+    tx.execute_batch("RELEASE dohc_audit_confirmation")
+        .map_err(SyncError::persist)?;
     Ok(())
 }
 

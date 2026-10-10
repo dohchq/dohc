@@ -21,7 +21,7 @@ import {
 } from "./currentFiles";
 import { rowToLogRow } from "./rows";
 import { notifyDesktopReadiness } from "../desktopReadinessChanges";
-import {confirmLiveApplication} from "./liveApplicationAuthorship";
+import {confirmLiveApplication, prepareLiveApplications} from "./liveApplicationAuthorship";
 
 export function appendLogBatch(storage: StorageContext, input: {
     workspaceId: string;
@@ -29,6 +29,7 @@ export function appendLogBatch(storage: StorageContext, input: {
     ops: SyncRelayLogInput[];
     guard?: (context: AppendLogBatchGuardContext) => void;
   }): AppendLogBatchResult {
+    prepareLiveApplications(storage, input);
     return storage.tx(() => appendLogBatchInTransaction(storage, input));
   }
 

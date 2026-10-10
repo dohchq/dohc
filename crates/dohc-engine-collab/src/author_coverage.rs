@@ -25,7 +25,7 @@ fn corrupt(reason: impl Into<String>) -> CollabError {
     }
 }
 
-/// One snapshot per scoped identity. Later admissions replace the summary snapshot.
+/// One snapshot per scoped identity. Confirmation requires every merged entry.
 #[derive(Default)]
 pub struct Authors(BTreeMap<String, Value>);
 
@@ -62,9 +62,17 @@ impl Authors {
             .ok_or_else(|| corrupt("author has no identity"))?;
         let scope = author.get("onBehalfOf").and_then(Value::as_str);
         let identity = serde_json::json!([kind, scope, id]).to_string();
-        let prior_depth = self
-            .0
-            .get(&identity)
+        let previous = self.0.get(&identity);
+        if previous.is_some_and(|previous| {
+            previous.get("relayConfirmed") != Some(&Value::Bool(true))
+                || author.get("relayConfirmed") != Some(&Value::Bool(true))
+        }) {
+            author
+                .as_object_mut()
+                .expect("author object")
+                .remove("relayConfirmed");
+        }
+        let prior_depth = previous
             .and_then(|previous| previous.get("depth"))
             .and_then(Value::as_u64)
             .unwrap_or(0);
@@ -640,4 +648,26 @@ pub fn reconcile_workspace_in(
         reconcile_in(conn, &key, now_ms)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod confirmation_tests {
+    use super::Authors;
+    use serde_json::json;
+
+    #[test]
+    fn confirmation_requires_every_entry_for_an_identity_in_either_order() {
+        let plain = json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"}]);
+        let confirmed = json!([{"kind":"human","humanId":"recipient","humanName":"Recipient","relayConfirmed":true}]);
+        for (first, second) in [(&plain, &confirmed), (&confirmed, &plain)] {
+            let mut authors = Authors::default();
+            authors.union_json(&first.to_string()).unwrap();
+            authors.union_json(&second.to_string()).unwrap();
+            assert_eq!(authors.json(), plain.to_string());
+        }
+        let mut authors = Authors::default();
+        authors.union_json(&confirmed.to_string()).unwrap();
+        authors.union_json(&confirmed.to_string()).unwrap();
+        assert_eq!(authors.json(), confirmed.to_string());
+    }
 }

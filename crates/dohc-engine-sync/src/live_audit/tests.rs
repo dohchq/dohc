@@ -756,6 +756,7 @@ enum FirstDrainCoordinate {
     RefusedPath,
     Declared,
     DeclaredHuman,
+    UnconfirmedHumanAudit,
 }
 
 fn import_authored_projection(
@@ -774,6 +775,7 @@ enum Confirmation {
     Mismatch,
     NoReceipt,
     ForgedMarker,
+    RetentionBound,
 }
 
 #[test]
@@ -868,8 +870,11 @@ fn import_confirmed_projection(
         first.metadata.accepted.receipt.delivery_id = "first-delivery".into();
         first.metadata.accepted.receipt.update_digest = hex_sha256(&first.update_bytes);
         first.metadata.accepted.receipt.journal_cursor = 1;
-        first.metadata.author_snapshot = (first_coordinate == Some(FirstDrainCoordinate::Verified))
-            .then(|| serde_json::from_value(authors.clone()).unwrap());
+        first.metadata.author_snapshot = matches!(
+            first_coordinate,
+            Some(FirstDrainCoordinate::Verified | FirstDrainCoordinate::UnconfirmedHumanAudit)
+        )
+        .then(|| serde_json::from_value(authors.clone()).unwrap());
         if first.metadata.author_snapshot.is_none() {
             first.metadata.canonical_version = None;
             first.metadata.first_seen_deletes = None;
@@ -933,8 +938,13 @@ fn import_confirmed_projection(
         op.relay_seq = Some(op.origin_seq + 1);
         if op.op_kind == application_record::EVENT_OP
             && confirmation != Confirmation::None
-            && (first_coordinate != Some(FirstDrainCoordinate::DeclaredHuman)
-                || op.origin_seq == last_audit_seq)
+            && (!matches!(
+                first_coordinate,
+                Some(
+                    FirstDrainCoordinate::DeclaredHuman
+                        | FirstDrainCoordinate::UnconfirmedHumanAudit
+                )
+            ) || op.origin_seq == last_audit_seq)
         {
             let mut snapshot = authors.clone();
             if mixed {
@@ -951,7 +961,28 @@ fn import_confirmed_projection(
                 op.relay_seq = None;
             }
         }
-        if confirmation == Confirmation::Admitted {
+        if matches!(
+            confirmation,
+            Confirmation::Admitted | Confirmation::RetentionBound
+        ) {
+            let bounded = confirmation == Confirmation::RetentionBound
+                && op.op_kind == application_record::EVENT_OP;
+            let full_coverage = if bounded {
+                json!(
+                    (0..dohc_engine_collab::author_coverage::MAX_INTERVAL_AUTHORS)
+                        .map(|i| json!({"kind":"link","publicPrincipalId":format!("link-{i}")}))
+                        .collect::<Vec<_>>()
+                )
+                .to_string()
+            } else {
+                String::new()
+            };
+            if bounded {
+                f.store.read_with(|conn| conn.execute(
+                    "INSERT INTO live_audit_projection_authors(workspace_id,origin_id,origin_seq,version_id,object_id,path,lineage_claim_id,author_json) VALUES ('ws','owner-origin',?1,'main','object','note.md',?2,?3)",
+                    params![op.origin_seq-1,f.binding.lineage_claim_id,full_coverage],
+                )).unwrap();
+            }
             let echoed = crate::apply_replication_envelope(
                 &mut f.store,
                 &mut WriterDocCache::new(),
@@ -961,7 +992,33 @@ fn import_confirmed_projection(
             )
             .unwrap();
             assert!(matches!(echoed.primary, ApplyDisposition::Skipped));
-            if op.op_kind == application_record::EVENT_OP && op.admitted_author_snapshot.is_some() {
+            if bounded {
+                let retained: String = f
+                    .store
+                    .read_with(|conn| {
+                        conn.query_row(
+                    "SELECT author_json FROM live_audit_projection_authors WHERE origin_seq=?1",
+                    [op.origin_seq-1], |row| row.get(0),
+                )
+                    })
+                    .unwrap();
+                assert_eq!(
+                    retained, full_coverage,
+                    "optional proof must roll back on a bound failure"
+                );
+                f.store
+                    .read_with(|conn| {
+                        conn.execute(
+                            "DELETE FROM live_audit_projection_authors WHERE origin_seq=?1",
+                            [op.origin_seq - 1],
+                        )
+                    })
+                    .unwrap();
+            }
+            if !bounded
+                && op.op_kind == application_record::EVENT_OP
+                && op.admitted_author_snapshot.is_some()
+            {
                 let saved: Option<String> = f
                     .store
                     .read_with(|conn| {
@@ -1092,7 +1149,10 @@ fn import_confirmed_projection(
         }
         assert_eq!(
             count(&receiver, "live_audit_projection_authors"),
-            i64::from(first_coordinate == Some(FirstDrainCoordinate::Verified)) + i64::from(!late)
+            i64::from(matches!(
+                first_coordinate,
+                Some(FirstDrainCoordinate::Verified | FirstDrainCoordinate::UnconfirmedHumanAudit)
+            )) + i64::from(!late)
         );
         drop(receiver);
         receiver = EngineStore::open(&path, 250).unwrap();
@@ -1133,16 +1193,19 @@ fn import_confirmed_projection(
             .expect("verified public authors"),
     )
     .unwrap();
-    if confirmation == Confirmation::Admitted {
+    if matches!(
+        confirmation,
+        Confirmation::Admitted | Confirmation::RetentionBound
+    ) {
         authors[0]["relayConfirmed"] = json!(true);
     }
-    if first_coordinate == Some(FirstDrainCoordinate::DeclaredHuman) {
-        assert!(
-            stored
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|author| author["kind"] == "unattributed")
+    if matches!(
+        first_coordinate,
+        Some(FirstDrainCoordinate::DeclaredHuman | FirstDrainCoordinate::UnconfirmedHumanAudit)
+    ) {
+        assert_eq!(
+            stored,
+            json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"}])
         );
     } else if mixed {
         assert_eq!(stored.as_array().unwrap().len(), 3);
@@ -2551,4 +2614,82 @@ fn imported_activation_publication(foreign_baseline: bool, preserve_baseline: bo
         second.payload["payloadAfterBlobSha256"],
         hex_sha256(b"Next accepted edit.")
     );
+}
+
+#[test]
+fn refused_audit_replayed_below_ack_does_not_block_later_operations() {
+    let mut f = fixture(true);
+    let op = ReplicationEnvelope {
+        workspace_id: "ws".into(),
+        origin_id: "remote".into(),
+        origin_seq: 0,
+        op_kind: application_record::EVENT_OP.into(),
+        recorded_at_ms: 200,
+        payload: json!({"extra":"refused"}),
+        relay_seq: Some(100),
+        admitted_author_snapshot: Some(
+            json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"}]),
+        ),
+        settlement_admission: None,
+    };
+    let first = crate::apply_replication_envelope(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    assert!(matches!(first.primary, ApplyDisposition::Refused(_)));
+    let replay = crate::apply_replication_envelope(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    assert!(matches!(replay.primary, ApplyDisposition::Skipped));
+    let mut next = op;
+    next.origin_seq = 1;
+    next.relay_seq = Some(101);
+    next.op_kind = "workspace.init".into();
+    next.payload = json!({});
+    next.admitted_author_snapshot = None;
+    let later = crate::apply_replication_envelope(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &next,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    assert!(matches!(later.primary, ApplyDisposition::Applied(_)));
+}
+
+#[test]
+fn ordinary_human_drain_keeps_exact_authors_without_an_unknown_contributor() {
+    import_confirmed_projection(
+        true,
+        false,
+        Some(FirstDrainCoordinate::DeclaredHuman),
+        false,
+        Confirmation::None,
+    );
+}
+
+#[test]
+fn confirmed_and_unconfirmed_audits_of_one_person_merge_without_confirmation() {
+    import_confirmed_projection(
+        true,
+        false,
+        Some(FirstDrainCoordinate::UnconfirmedHumanAudit),
+        false,
+        Confirmation::Admitted,
+    );
+}
+
+#[test]
+fn confirmation_refresh_bound_failure_is_skipped_without_partial_annotation() {
+    import_confirmed_projection(false, false, None, false, Confirmation::RetentionBound);
 }

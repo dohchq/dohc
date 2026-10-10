@@ -1,7 +1,9 @@
-import {afterEach, expect, it} from "vitest";
+import {afterEach, expect, it, vi} from "vitest";
 import {createHash} from "node:crypto";
 import {registered, cleanupLiveDeliveryFixtures} from "../../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport";
 import {canonicalVersionedAcceptedMetadata} from "../liveAcceptedHistory";
+import {RestoreHistoryBudget} from "./liveAcceptedHistory";
+import type {StorageContext} from "./context";
 import {parseAuthenticatedLogOps} from "../relayLogInputs";
 
 afterEach(cleanupLiveDeliveryFixtures);
@@ -41,7 +43,7 @@ function application(inBatch = false) {
     expect(f.storage.maxOriginSeq("workspace", "device")).toBe(3);
     return f.storage.fetchLogCoordinate({workspaceId: "workspace", originId: "device", originSeq: 2});
   };
-  return {...f, publish};
+  return {...f, storage: f.storage as StorageContext, publish, record};
 }
 
 it("confirms an audit application only with the relay journal snapshot", async () => {
@@ -76,4 +78,102 @@ it.each(["person", "document", "coordinate", "unknown", "marker", "cursor", "evi
     }, true);
     expect(op).not.toHaveProperty("admittedAuthorSnapshot");
   } finally {f.close();}
+});
+
+function blobReads(f: ReturnType<typeof application>) {
+  let bytes = 0;
+  let inWrite = false;
+  const prepare = f.storage.db.prepare.bind(f.storage.db);
+  const spy = vi.spyOn(f.storage.db, "prepare").mockImplementation(sql => {
+    const statement = prepare(sql);
+    if (!sql.includes("SELECT content FROM sync_relay_blobs")) return statement;
+    const get = statement.get.bind(statement);
+    statement.get = (...args) => {
+      inWrite ||= (f.storage.db as typeof f.storage.db & {isTransaction: boolean}).isTransaction;
+      const row = get(...args);
+      if (row?.content instanceof Uint8Array) bytes += row.content.byteLength;
+      return row;
+    };
+    return statement;
+  });
+  return {spy, read: () => ({bytes, inWrite})};
+}
+
+it("does not read blobs for a payload with no matching journal row", async () => {
+  const f = application(); const reads = blobReads(f);
+  try {
+    await f.publish(record => {record.eventCount = 999;});
+    expect(reads.read().bytes).toBe(0);
+  } finally {reads.spy.mockRestore(); f.close();}
+});
+
+it("reads confirmed audit blobs outside the write transaction", async () => {
+  const f = application(); const reads = blobReads(f);
+  try {
+    expect(await f.publish()).toHaveProperty("admittedAuthorSnapshot");
+    expect(reads.read().bytes).toBeGreaterThan(0);
+    expect(reads.read().inWrite).toBe(false);
+  } finally {reads.spy.mockRestore(); f.close();}
+});
+
+it("bounds a 500-op push referencing one oversized audit and keeps later operations flowing", async () => {
+  const f = application();
+  const bytes = Buffer.from(JSON.stringify({...f.record, padding: "x".repeat(128 * 1024)}));
+  const digest = hash(bytes);
+  f.storage.putBlob({workspaceId: "workspace", sha256: digest, content: bytes, createdAtMs: 1});
+  const binding = f.record.metadata.accepted.binding;
+  const payload = {relayDatabaseNamespace: f.record.relayDatabaseNamespace, mainVersionId: binding.mainVersionId,
+    objectId: binding.objectId, lineageClaimId: binding.lineageClaimId, eventCount: f.record.eventCount,
+    updateBlobSha256: f.record.metadata.accepted.receipt.updateDigest,
+    manifest: {formatVersion: 1, recordDigest: digest, byteLength: bytes.length, chunks: [{sha256: digest, byteLength: bytes.length}]}};
+  const ops = await parseAuthenticatedLogOps(Array.from({length: 500}, (_, i) => ({originSeq: i + 2,
+    opKind: "live.audit.application", payload, recordedAtMs: 1})), "owner");
+  const reads = blobReads(f);
+  try {
+    expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "device", ops}).inserted).toBe(500);
+    expect(reads.read()).toEqual({bytes: 0, inWrite: false});
+    expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "device", ops: [
+      {originSeq: 502, opKind: "opaque", payloadJson: "{}", recordedAtMs: 1}]}).inserted).toBe(1);
+    expect(f.storage.fetchLogCoordinate({workspaceId: "workspace", originId: "device", originSeq: 501}))
+      .not.toHaveProperty("admittedAuthorSnapshot");
+  } finally {reads.spy.mockRestore(); f.close();}
+});
+
+it("shares one exhausted byte budget while still storing the whole audit push", async () => {
+  const f = application();
+  const row = (await f.publish())!;
+  f.storage.db.prepare("DELETE FROM sync_relay_log WHERE workspace_id='workspace' AND origin_id='device' AND origin_seq>=2").run();
+  const ops = Array.from({length: 20}, (_, i) => ({...row, originSeq: i + 2}));
+  const input = {workspaceId: "workspace", originId: "device", ops};
+  const reads = blobReads(f);
+  const limit = JSON.parse(row.payloadJson).manifest.byteLength + 8192;
+  const budgets = new Set<RestoreHistoryBudget>();
+  const charge = RestoreHistoryBudget.prototype.chargeBytes;
+  // Lower the production budget for this push, without changing its append path.
+  const chargeSpy = vi.spyOn(RestoreHistoryBudget.prototype, "chargeBytes").mockImplementation(function(this: RestoreHistoryBudget, value: number) {
+    budgets.add(this);
+    this.bytes = Math.min(this.bytes, limit);
+    return charge.call(this, value);
+  });
+  try {
+    expect(f.storage.appendLogBatch(input).inserted).toBe(20);
+    expect(budgets.size).toBe(1);
+    expect(reads.read().bytes).toBeLessThanOrEqual(limit);
+    expect(reads.read().inWrite).toBe(false);
+    expect(f.storage.fetchLogCoordinate({workspaceId: "workspace", originId: "device", originSeq: 21}))
+      .not.toHaveProperty("admittedAuthorSnapshot");
+  } finally {chargeSpy.mockRestore(); reads.spy.mockRestore(); f.close();}
+});
+
+it("does not confirm alternate record key order or extra record fields", async () => {
+  for (const extra of [false, true]) {
+    const f = application();
+    try {
+      const row = await f.publish(record => {
+        if (extra) Object.assign(record, {extra: "unknown"});
+        else {const kind = record.kind; delete (record as Partial<typeof record>).kind; record.kind = kind;}
+      });
+      expect(row).not.toHaveProperty("admittedAuthorSnapshot");
+    } finally {f.close();}
+  }
 });
