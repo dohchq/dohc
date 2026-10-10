@@ -173,7 +173,7 @@ export interface EngineDaemonLifecycleOptions {
   onFailure?: (error: Error, terminal: boolean) => void;
   // Retire work owned by the previous daemon before callers can open workspaces
   // on its replacement. This barrier must not request the unpublished client.
-  beforePublish?: () => void | Promise<void>;
+  beforePublish?: (signal: AbortSignal) => void | Promise<void>;
   // Fires once per launched daemon generation (the first launch and every
   // restart). The first generation is only handshaked when this fires — its
   // startup smoke still runs behind it; restart generations have passed the
@@ -932,7 +932,7 @@ export class EngineDaemonLifecycle {
         if (signal.aborted) onAbort();
         // Shutdown stops waiting; the race still observes a later retirement
         // rejection, and the publication check below rejects a cancelled launch.
-        await Promise.race([this.options.beforePublish?.(), cancelled]);
+        await Promise.race([this.options.beforePublish?.(signal), cancelled]);
       } finally {
         signal.removeEventListener("abort", onAbort);
       }

@@ -778,7 +778,7 @@ describe("ended Edit Collection shares", () => {
     view.unmount();
   });
 
-  it("stops the relayed Button burst after the shell pulls changed files", async () => {
+  it("keeps all relayed Button probes after the shell pulls changed files", async () => {
     const bridge = collectionBridge();
     vi.stubGlobal("dohcDesktop", { ...bridge,
       onAutomationRunSettled: () => () => undefined,
@@ -797,8 +797,8 @@ describe("ended Edit Collection shares", () => {
       await act(async () => buttons.press("Finish", { id: "retained", label: "Retained task" }));
       expect(bridge.refreshSharedView).not.toHaveBeenCalled();
       await act(() => vi.advanceTimersByTimeAsync(20_000));
-      expect(bridge.refreshSharedView).toHaveBeenCalledOnce();
-      expect(bridge.refreshSharedView).toHaveBeenCalledWith({ workspaceId: EDIT_SHARE.workspaceId, trigger: "background" });
+      expect(bridge.refreshSharedView).toHaveBeenCalledTimes(4);
+      expect(bridge.refreshSharedView).toHaveBeenCalledWith({ workspaceId: EDIT_SHARE.workspaceId, trigger: "press-burst" });
       view.unmount(); buttons.close();
     } finally { vi.useRealTimers(); }
   });

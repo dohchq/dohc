@@ -1,3 +1,4 @@
+import { settleYDocsAfterFileObservation } from "./workspaceActivity";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -982,4 +983,9 @@ describe("workspaceActivity cloud sync nudge", () => {
     }
     await activity.stopAll();
   });
+});
+
+it("still settles healthy workspaces when an outage checkpoint fails",async()=>{
+ let release!:()=>void;const healthyDrain=new Promise<void>(done=>{release=done;});const settled=vi.fn(async()=>{});
+ const quit=settleYDocsAfterFileObservation([Promise.reject(Error("checkpoint disk full")),healthyDrain],settled);await Promise.resolve();expect(settled).not.toHaveBeenCalled();release();await quit;expect(settled).toHaveBeenCalledOnce();
 });

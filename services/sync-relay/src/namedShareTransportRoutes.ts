@@ -98,6 +98,7 @@ export function createNamedShareTransportRoutes(
       // accountless route applies a narrower metadata boundary afterward.
       const page = filteredLogPage(
         share.workspaceId,
+        share.shareId,
         share.selector,
         since,
         limit,

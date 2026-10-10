@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { registerYDocDelivery } from "./pendingYDocDeliveries";
 import {
   act,
   cleanup,
@@ -63,6 +64,7 @@ function seedStoredDraft(): void {
 function stubBridge(overrides: Record<string, unknown> = {}): void {
   vi.stubGlobal("dohcDesktop", {
     platform: "linux" as const,
+    typingRecovery: async () => ({failures: []}),
     onExitRound: () => () => undefined,
     answerExitRound: async () => undefined,
     holdQuit: async () => undefined,
@@ -1942,4 +1944,16 @@ describe("RecoveryCloseGuard with pending collection writes", () => {
     await screen.findByTestId("recovery-close-warning");
     closeSpy.mockRestore();
   });
+});
+
+it("holds last-window unload until pending Y.Doc deliveries and their main checkpoint land", async () => {
+ const gate = deferred<void>(); let pending = true;
+ const unregister = registerYDocDelivery({pending: () => pending, flush: async () => {await gate.promise; pending = false;}});
+ const close = vi.spyOn(window, "close").mockImplementation(() => undefined);
+ try {
+  render(<RecoveryCloseGuard><span>Workspace</span></RecoveryCloseGuard>);
+  const unload = new Event("beforeunload", {cancelable: true}); act(() => {window.dispatchEvent(unload);});
+  expect(unload.defaultPrevented).toBe(true); expect(close).not.toHaveBeenCalled();
+  await act(async () => {gate.resolve(); await gate.promise;}); await waitFor(() => expect(close).toHaveBeenCalledOnce());
+ } finally {unregister();}
 });

@@ -31,6 +31,8 @@ afterEach(async () => {
 
 const WORKSPACE = "workspace-trip";
 const key = new Uint8Array(32).fill(7), namespace = "automation-replica-test";
+// vi.waitFor has its own 1 s default, independent of the package's expect.poll timeout.
+const WAIT_TIMEOUT_MS = 10_000;
 
 async function relay() {
   const storage = await testStorage();
@@ -348,6 +350,39 @@ describe("the automation replicas", () => {
     expect(running.unavailable).toBe(false);
     expect(running.failedSyncs().size).toBe(0);
     expect(engine.methods().filter(method => method === "sync.push")).toHaveLength(3);
+  });
+
+  it("retries a lease-deferred collection reconciliation without advancing pulledHead or another relay write", async () => {
+    const {storage, log} = await relay();
+    const engine = fakeEngine();
+    let held = false;
+    const answer = spawn.getMockImplementation()!;
+    spawn.mockImplementation(async (options: Parameters<typeof answer>[0]) => {
+      const client = await answer(options);
+      const send = client.sendRequest.getMockImplementation()!;
+      client.sendRequest.mockImplementation(async (request: Sent) => {
+        if (request.method === "sync.commitCursor" && held) {
+          engine.sent.push(request);
+          throw Object.assign(new Error("collection reconciliation waits for a document lease"), {code: "OVERLOADED", retry: "afterBackoff"});
+        }
+        return send(request);
+      });
+      return client;
+    });
+    const {replicas: running} = await replicas(storage, () => [WORKSPACE], {ms: 0});
+    const replica = running.replica(WORKSPACE)!;
+    const before = replica.pulledHead;
+    held = true;
+    log(2);
+    await expect(replica.sync()).rejects.toMatchObject({code: "OVERLOADED"});
+    expect(replica.pulledHead).toBe(before);
+    expect(running.failedSyncs().has(WORKSPACE)).toBe(true);
+    const pulls = engine.methods().filter(method => method === "sync.pull").length;
+    held = false;
+    await running.settled();
+    expect(engine.methods().filter(method => method === "sync.pull").length).toBeGreaterThan(pulls);
+    expect(replica.pulledHead).toBe(storage.automationWorkspaceLogHead(WORKSPACE));
+    expect(running.failedSyncs().size).toBe(0);
   });
 
   it("backs off a persistently failing step instead of retrying twice every 100 ms", async () => {
@@ -1017,7 +1052,7 @@ describe("the automation replicas", () => {
     const running = await startAutomationReplicas({ storage, root, engineExecutable: process.execPath, relayOrigin: "https://relay.example",
       key, namespace, wanted: () => [WORKSPACE], onError: (error) => errors.push(error) });
     cleanup.push(async () => { await running.close(); await rm(root, { recursive: true, force: true }); });
-    await vi.waitFor(() => expect(errors).toHaveLength(1));
+    await vi.waitFor(() => expect(errors).toHaveLength(1), { timeout: WAIT_TIMEOUT_MS });
     expect(running.replica(WORKSPACE)).toBeUndefined();
     expect(engine.methods().slice(0, 4)).toEqual(["workspace.open", "versions.ensureMain", "sync.adoptJoinIdentity", "workspace.close"]);
   });
@@ -1121,7 +1156,7 @@ describe("the automation replicas", () => {
       key, namespace, wanted: () => ["busy", WORKSPACE], nowMs: () => clock.ms, onError: unexpectedErrors() });
     cleanup.push(async () => { await running.close(); await rm(root, { recursive: true, force: true }); });
     // The busy one never catches up, and the quiet one still opens.
-    await vi.waitFor(() => expect(running.replica(WORKSPACE)).toBeDefined());
+    await vi.waitFor(() => expect(running.replica(WORKSPACE)).toBeDefined(), { timeout: WAIT_TIMEOUT_MS });
     const pulls = (handle: string) => engine.sent.filter((request) => request.method === "sync.pull" && request.workspace === handle).length;
     const busy = running.replica("busy")!, quiet = running.replica(WORKSPACE)!;
     const [busyBefore, quietBefore] = [pulls(busy.workspace), pulls(quiet.workspace)];
@@ -1131,7 +1166,7 @@ describe("the automation replicas", () => {
     }
     raw.close();
     running.reconcile();
-    await vi.waitFor(() => expect(pulls(quiet.workspace), "the quiet workspace is pulled").toBe(quietBefore + 1));
+    await vi.waitFor(() => expect(pulls(quiet.workspace), "the quiet workspace is pulled").toBe(quietBefore + 1), { timeout: WAIT_TIMEOUT_MS });
     // At most four rounds of eight pages for the busy one before the quiet one.
     expect(pulls(busy.workspace) - busyBefore).toBeLessThanOrEqual(32);
     expect(pulls(busy.workspace) - busyBefore).toBeGreaterThan(0);
@@ -1199,7 +1234,7 @@ describe("the automation replicas", () => {
     });
     const started = holdStartups()();
     const running = await start(storage);
-    await vi.waitFor(() => expect(spawn).toHaveBeenCalled());
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalled(), { timeout: WAIT_TIMEOUT_MS });
     const first = running.close(), second = running.close();
     expect(second).toBe(first);
     expect((spawn.mock.calls[0]![0] as { signal: AbortSignal }).signal.aborted, "it aborts at once").toBe(true);
@@ -1208,7 +1243,7 @@ describe("the automation replicas", () => {
     await turn();
     expect(closed, "the engine is still starting").toBe(false);
     started();
-    await vi.waitFor(() => expect(engine.engines[0]?.close).toHaveBeenCalled());
+    await vi.waitFor(() => expect(engine.engines[0]?.close).toHaveBeenCalled(), { timeout: WAIT_TIMEOUT_MS });
     await turn();
     expect(closed, "the engine has not exited").toBe(false);
     exited.resolve();

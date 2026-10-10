@@ -11,6 +11,7 @@ import type { ReactionStore } from "./workbench/reactionStore";
 import { deferred, type Deferred } from "../testing/deferred";
 
 const shellRenders = vi.hoisted(() => ({ count: 0 }));
+const shellCommits = vi.hoisted(() => ({ onCommit: null as ((workspace: Workspace) => void) | null }));
 // The reaction store each mounted shell received from DesktopRoot's owner.
 const shellReactions = vi.hoisted(() => ({ current: null as ReactionStore | null }));
 
@@ -46,6 +47,7 @@ vi.mock("./WorkspaceManager", () => ({
 }));
 
 vi.mock("./DesktopWorkspaceShell", async () => {
+  const { useLayoutEffect } = await import("react");
   const { useReactions } = await import("./workbench/reactionStore");
   return { DesktopWorkspaceShell: (props: {
     workspace: Workspace;
@@ -58,6 +60,9 @@ vi.mock("./DesktopWorkspaceShell", async () => {
   }) => {
     shellRenders.count += 1;
     shellReactions.current = useReactions();
+    useLayoutEffect(() => {
+      shellCommits.onCommit?.(props.workspace);
+    }, [props.workspace]);
     return (
     <div data-testid="workspace-shell">
       <span data-testid="active-workspace">{props.workspace.workspaceId}</span>
@@ -166,6 +171,30 @@ describe("workspace summary changes", () => {
     expect(screen.getByRole("button", { name: "Switch to c" })).toBeTruthy();
   });
 
+  it.each(["a", "b"])("accepts a summary during workspace %s's commit before passive effects", async activeId => {
+    const h = setup();
+    const shareView = { granterEmail: null, ended: true };
+    const onCommit = vi.fn((current: Workspace) => {
+      if (current.workspaceId !== activeId) return;
+      shellCommits.onCommit = null;
+      h.replace([{ ...workspace(activeId), shareView }, workspace("c")]);
+      // The shell has committed, but the root's activity effect has not run.
+      h.emit({ workspaceId: activeId, summaryChanged: true });
+    });
+    shellCommits.onCommit = onCommit;
+
+    await act(async () => { render(<DesktopRoot />); });
+    if (activeId === "b") {
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Switch to b" }));
+      });
+    }
+
+    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: activeId }));
+    expect(JSON.parse(screen.getByTestId("share-summary").textContent!)).toEqual(shareView);
+    expect(screen.getByRole("button", { name: "Switch to c" })).toBeTruthy();
+  });
+
   it.each([false, true])("retains a pending summary across a switch (return: %s)", async returnToA => {
     const h = setup();
     render(<DesktopRoot />);
@@ -209,6 +238,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  shellCommits.onCommit = null;
   vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
@@ -305,6 +335,8 @@ describe("DesktopRoot", () => {
       withoutGrant.unmount();
 
       vi.stubGlobal("dohcDesktop", stub(true));
+      // Await cold transforms before the DOM wait for the granted page starts.
+      await import("./dev/StatesPage");
       render(<DesktopRoot />);
       expect(await screen.findByTestId("states-page")).toBeTruthy();
       expect(screen.queryByTestId("first-run")).toBeNull();

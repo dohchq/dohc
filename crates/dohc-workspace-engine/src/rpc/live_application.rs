@@ -771,6 +771,10 @@ impl EngineService {
                 "workspace-read-only",
             ));
         }
+        self.ensure_handle_allows_method(
+            Some(&config.workspace),
+            "liveApplication.provisionOwner",
+        )?;
         let _serial = Arc::clone(&open.session_ops).lock_owned().await;
         if !Arc::ptr_eq(&self.open(Some(&config.workspace))?, &open) {
             return Err(workspace_unavailable());

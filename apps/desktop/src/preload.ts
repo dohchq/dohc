@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
+import { shareCopyOperations } from "./ipc/shareCopyOperations";
 import { accessOperations } from "./ipc/accessOperations";
 import { devToolsGranted } from "./ipc/devToolsIpc";
 import {OwnerRestoreRequest, OwnerRestoreActionResponse, type OwnerRestoreAction, type OwnerRestoreResult} from "./ipc/ownerRestoreContract";
@@ -52,6 +53,7 @@ import {
   captureRecoveryOperations,
   fileObservationOperations,
   reportingOperations,
+  usageRecordOperations,
   noticeOperations,
   liveDraftRecoveryOperations,
   stopAndRestoreRecoveryOperations,
@@ -109,6 +111,7 @@ const rendererDocumentId = crypto.randomUUID();
 
 const bridge: DohcDesktopBridge = {
   ...operationBridge(shareDirectWriteDeliveryOperations, invoke),
+  ...operationBridge(shareCopyOperations, invoke),
   ...operationBridge(accessOperations, invoke),
   platform: process.platform,
   devTools: devToolsGranted(process.argv),
@@ -412,6 +415,7 @@ const bridge: DohcDesktopBridge = {
   },
   ...operationBridge(crashReportOperations, invoke),
   ...operationBridge(reportingOperations, invoke),
+  ...operationBridge(usageRecordOperations, invoke),
   onCrashReportChanged: (listener) =>
     onEvent(CHANNELS.crashReportChanged, CrashReportChangedEvent, () => listener()),
   onAutomationHoldsChanged: (

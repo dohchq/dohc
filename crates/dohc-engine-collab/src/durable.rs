@@ -18,7 +18,7 @@
 use dohc_engine_domain::ChangeAttribution;
 use dohc_engine_storage::{
     enqueue_job, put_binary_blob, put_binary_blob_with_sha, EngineStore, FaultInjector,
-    MaterializationJobSpec, Preimage, TxnOutcome,
+    MaterializationJobSpec, Preimage, StorageError, TxnOutcome,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
@@ -674,6 +674,7 @@ where
                 actor_origin_id,
                 attribution,
                 now_ms,
+                !is_seed,
                 cache,
                 &mut probe,
             )?;
@@ -784,6 +785,7 @@ pub(crate) fn append_and_index_update(
         actor_origin_id,
         attribution,
         history_source,
+        history_source.is_none(),
         now_ms,
     )?;
     Ok((projection, seq, record_facts))
@@ -802,13 +804,22 @@ pub(crate) fn append_validated_and_index_update(
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
     history_source: Option<(&str, i64)>,
+    local_edit: bool,
     now_ms: i64,
 ) -> Result<(i64, Option<dohc_engine_domain::CollectionRecordApplyFacts>), CollabError> {
     // The one choke point every durable update write passes, local or remote:
     // an out-of-bounds attribution never reaches a row.
     validate_attribution(attribution)?;
     put_binary_blob_with_sha(conn, update, sha)?;
-    let seq = append_row(conn, key, sha, actor_origin_id, attribution, now_ms)?;
+    let seq = append_row(
+        conn,
+        key,
+        sha,
+        actor_origin_id,
+        attribution,
+        local_edit,
+        now_ms,
+    )?;
     let is_bound_collection_record = index_frontmatter
         && content_kind == ContentKind::Richdoc
         && dohc_engine_domain::is_collection_record_bound_in_tx(
@@ -941,6 +952,7 @@ fn append_local_update_cached(
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
     now_ms: i64,
+    local_edit: bool,
     cache: &WriterDocCache,
     probe: &mut GateBaseProbe,
 ) -> Result<AppendOutcome, CollabError> {
@@ -981,6 +993,7 @@ fn append_local_update_cached(
                 actor_origin_id,
                 attribution,
                 None,
+                local_edit,
                 now_ms,
             )?;
             probe.candidate = Some(validation.candidate);
@@ -1012,6 +1025,7 @@ fn append_local_update_cached(
                 actor_origin_id,
                 attribution,
                 None,
+                local_edit,
                 now_ms,
             )?;
             probe.candidate = Some(validation.candidate);
@@ -2984,12 +2998,14 @@ pub(crate) fn blob_seq_in_log(
 
 /// Insert one update row with `seq = head + 1` and advance the head, atomically
 /// within the caller's transaction. Returns the assigned seq.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn append_row(
     conn: &Connection,
     key: &DocKey,
     sha: &str,
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
+    local_edit: bool,
     now_ms: i64,
 ) -> Result<i64, CollabError> {
     let (head, _, _) = head_of(conn, key)?;
@@ -3012,13 +3028,21 @@ pub(crate) fn append_row(
             now_ms,
         ],
     )
-    .map_err(map_sql)?;
+    .map_err(|error| CollabError::Storage(StorageError::persist_public(error)))?;
     conn.execute(
-        "UPDATE ydoc_docs SET head_update_seq = ?4, updated_at_ms = ?5 \
+        "UPDATE ydoc_docs SET head_update_seq = ?4, updated_at_ms = ?5, \
+         last_local_update_seq = CASE WHEN ?6 THEN ?4 ELSE last_local_update_seq END \
          WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-        rusqlite::params![key.workspace_id, key.version_id, key.object_id, seq, now_ms],
+        rusqlite::params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            seq,
+            now_ms,
+            local_edit
+        ],
     )
-    .map_err(map_sql)?;
+    .map_err(|error| CollabError::Storage(StorageError::persist_public(error)))?;
     Ok(seq)
 }
 
@@ -3063,6 +3087,21 @@ fn updates_after(
 }
 
 pub(crate) fn map_sql(e: rusqlite::Error) -> CollabError {
+    if e.sqlite_error_code().is_some_and(|code| {
+        matches!(
+            code,
+            rusqlite::ErrorCode::SystemIoFailure
+                | rusqlite::ErrorCode::DiskFull
+                | rusqlite::ErrorCode::CannotOpen
+                | rusqlite::ErrorCode::OutOfMemory
+                | rusqlite::ErrorCode::DatabaseBusy
+                | rusqlite::ErrorCode::DatabaseLocked
+                | rusqlite::ErrorCode::PermissionDenied
+                | rusqlite::ErrorCode::ReadOnly
+        )
+    }) {
+        return StorageError::persist_public(e).into();
+    }
     CollabError::Corrupt {
         reason: e.to_string(),
     }
@@ -3185,6 +3224,20 @@ mod successor_validation_tests {
             ),
             "{error:?}"
         );
+    }
+
+    #[test]
+    fn document_sql_resource_failures_keep_storage_class() {
+        for code in [5, 6, 10, 13, 14, 7, 3, 8] {
+            let error = map_sql(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                None,
+            ));
+            assert!(
+                matches!(error, CollabError::Storage(_)),
+                "{code}: {error:?}"
+            );
+        }
     }
 
     #[test]
@@ -3359,4 +3412,102 @@ mod append_compaction_query_tests {
             "a below-threshold append must not enter maybe_compact's marker read"
         );
     }
+}
+
+/// Replay uses the same publication guard as an ordinary live append.
+pub fn require_recovery_write_in(tx: &Transaction<'_>, key: &DocKey) -> Result<(), CollabError> {
+    crate::owner_outbox::draft::require_ordinary_write(tx, key)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn recovery_update_is_recorded_in(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    original_path: &str,
+    request_id: &str,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+) -> Result<bool, CollabError> {
+    Ok(recovery_request_in(
+        tx,
+        key,
+        original_path,
+        request_id,
+        update,
+        actor_origin_id,
+        attribution,
+    )?
+    .1
+    .is_some())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recovery_request_in(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    original_path: &str,
+    request_id: &str,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+) -> Result<(String, Option<i64>), CollabError> {
+    let path_identity = format!("some:{}", crate::hex_sha256(original_path.as_bytes()));
+    let update_sha = crate::hex_sha256(update);
+    let restore_generation = crate::live_update_application::restore_generation(tx, key)?;
+    let hash = crate::hex_sha256(format!(
+        "ydoc-record-v6{sep}{restore_generation:?}{sep}false{sep}{}{sep}{}{sep}{}{sep}{path_identity}{sep}{}{sep}{}",
+        key.workspace_id, key.version_id, key.object_id, update_sha,
+        serde_json::json!([actor_origin_id, attribution]), sep = char::from(0),
+    ).as_bytes());
+    let recorded: Option<(String, i64)> = tx
+        .query_row(
+            "SELECT payload_hash,result_seq FROM engine_requests WHERE request_id=?1",
+            [request_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(map_sql)?;
+    match recorded {
+        Some((prior, seq)) if prior == hash => Ok((hash, Some(-seq))),
+        Some(_) => Err(CollabError::IdempotencyKeyReused),
+        None => Ok((hash, None)),
+    }
+}
+
+/// Recovery retains each original request's ledger identity across a restart.
+#[allow(clippy::too_many_arguments)]
+pub fn record_recovery_update_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    original_path: &str,
+    request_id: &str,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+    now_ms: i64,
+) -> Result<AppendOutcome, CollabError> {
+    require_recovery_write_in(tx, key)?;
+    let (hash, recorded) = recovery_request_in(
+        tx,
+        key,
+        original_path,
+        request_id,
+        update,
+        actor_origin_id,
+        attribution,
+    )?;
+    if let Some(seq) = recorded {
+        return Ok(AppendOutcome {
+            settlement_requested: false,
+            seq,
+            deduped: true,
+            emit_outbound: false,
+            record_facts: None,
+        });
+    }
+    let outcome = record_update_in_tx(tx, key, update, actor_origin_id, attribution, now_ms)?;
+    tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES(?1,?2,?3,?4,'ydoc')",
+        rusqlite::params![request_id,hash,-outcome.seq,now_ms]).map_err(map_sql)?;
+    Ok(outcome)
 }

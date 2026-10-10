@@ -475,8 +475,8 @@ impl EngineService {
     /// workspace with capture asks its driver, whose next pass reconciles
     /// after it applies what it scanned. One that keeps its Collections itself
     /// reconciles now, under the gate a capture pass holds, and wakes the
-    /// executors for the claims an adoption made. It fails when the
-    /// reconcile fails, so the caller's retry reconciles again.
+    /// executors for committed claims. Workspaces that reconcile here have no
+    /// capture driver. A held lease fails the request so the caller retries.
     pub(super) async fn collections_changed(
         &self,
         ctx: &RequestContext,
@@ -523,6 +523,12 @@ impl EngineService {
             &open.workspace_id,
             &reconciliation.automation_claims,
         );
+        if reconciliation.lease_held {
+            return Err(WireError::new(
+                ErrorCode::Overloaded,
+                "collection reconciliation waits for a document lease",
+            ));
+        }
         Ok(())
     }
 
@@ -950,6 +956,13 @@ impl EngineService {
                 ),
             )
             .await?;
+            actor
+                .recover_open_document_artifacts(
+                    params.workspace_id.clone(),
+                    self.leases.scoped(&root),
+                )
+                .await
+                .map_err(map_runtime)?;
             // Startup replay before the files layer exists: jobs left pending by
             // a crash, a transient settle failure, or a pulled replication apply
             // land on disk while nothing is watching (no suppression window),
@@ -1965,6 +1978,172 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(opened, repeated);
+        service.workspace_close(Some(handle)).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn automation_replica_retries_lease_deferred_relation_cleanup() {
+        use dohc_engine_collab::{ContentKind, DocKey, Ydoc};
+        use dohc_engine_runtime::CancellationToken;
+        const WS: &str = "replica-reconcile-retry";
+        const SOURCE: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const TARGET: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let scratch = ScratchDir::new().unwrap();
+        let service = EngineService::new();
+        let ctx = RequestContext::unbounded();
+        let opened = service
+            .workspace_open(
+                &ctx,
+                json!({
+                    "rootDir": scratch.path(), "workspaceId": WS,
+                    "captureMode": "none", "reconcileCollections": true,
+                }),
+            )
+            .await
+            .unwrap();
+        let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        service
+            .versions_ensure_main(&ctx, Some(handle.clone()), json!({"workspaceId": WS}))
+            .await
+            .unwrap();
+        let open = service.open(Some(&handle)).unwrap();
+        assert!(lock(&open.capture).is_none());
+        assert!(lock(&open.collection_projection).is_none());
+        let target_markdown = format!("---\nid: {TARGET}\n---\n\nTarget\n");
+        let markdown = format!("---\nid: {SOURCE}\nrelated: {TARGET}\n---\n\nSource\n");
+        for (object, path, text) in [
+            (
+                "schema",
+                "tasks/collection.yaml",
+                "fields:\n  related:\n    type: relation\n    collection: tasks\n    many: false\n",
+            ),
+            ("source", "tasks/source.md", markdown.as_str()),
+            ("target", "tasks/target.md", target_markdown.as_str()),
+        ] {
+            open.actor
+                .versioned_text_write(
+                    WriteText {
+                        workspace_id: WS.into(),
+                        version_id: "main".into(),
+                        object_id: object.into(),
+                        path: path.into(),
+                        text: text.into(),
+                        moment_id: object.into(),
+                        metadata_origin: "test".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 2,
+                        request_id: None,
+                    },
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+        }
+        std::fs::create_dir_all(scratch.path().join("tasks")).unwrap();
+        std::fs::write(scratch.path().join("tasks/source.md"), &markdown).unwrap();
+        std::fs::write(scratch.path().join("tasks/target.md"), &target_markdown).unwrap();
+        let state = open
+            .actor
+            .ydoc_open_state(
+                WS.into(),
+                3,
+                false,
+                None,
+                "main".into(),
+                "tasks/source.md".into(),
+                Some(ContentKind::Richdoc),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let doc = Ydoc::wire();
+        doc.apply(&state.initial_update).unwrap();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, &markdown)
+            .unwrap();
+        open.actor
+            .ydoc_record_update(
+                state.key,
+                "tasks/source.md".into(),
+                ContentKind::Richdoc,
+                state.regime,
+                doc.encode_full_state(),
+                None,
+                None,
+                state.lineage_claim_id,
+                true,
+                state.owner_seed_source,
+                None,
+                4,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        service.collections_changed(&ctx, &open).await.unwrap();
+        // A pull deletes the target while automation retains the source's session lease.
+        let observer = rusqlite::Connection::open(&open.db_path).unwrap();
+        let count = || {
+            observer
+                .query_row(
+                    "SELECT COUNT(*) FROM collection_relation_edges",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+        let leases = service.leases.scoped(&open.root);
+        let lease = leases
+            .acquire(&DocKey::new(WS, "main", "source").unwrap())
+            .unwrap();
+        open.actor
+            .versioned_text_delete(
+                dohc_engine_domain::DeleteTextFile {
+                    workspace_id: WS.into(),
+                    version_id: "main".into(),
+                    path: "tasks/target.md".into(),
+                    moment_id: "delete-target".into(),
+                    request_id: None,
+                    metadata_origin: "sync".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 5,
+                },
+                open.root.clone(),
+                Arc::new(service.self_writes.scoped(&open.root)),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let result = service.collections_changed(&ctx, &open).await;
+        assert_eq!(count(), 1, "the held source keeps its stale relation");
+        let error =
+            result.expect_err("a replica must leave the pull retryable until cleanup completes");
+        assert_eq!(error.code, ErrorCode::Overloaded);
+        assert_eq!(
+            error.retry,
+            dohc_engine_protocol::error::Retryability::AfterBackoff
+        );
+        drop(lease);
+        service
+            .collections_changed(&ctx, &open)
+            .await
+            .expect("retry after release");
+        assert_eq!(
+            count(),
+            0,
+            "the retry cleans the relation without another relay change"
+        );
+        assert!(
+            !std::fs::read_to_string(scratch.path().join("tasks/source.md"))
+                .unwrap()
+                .contains("related:")
+        );
         service.workspace_close(Some(handle)).await.unwrap();
     }
 
