@@ -25,7 +25,8 @@ The PR verifier rejects missing tools or versions that differ from those workflo
 
 On Linux, install Chromium system dependencies once with `pnpm exec playwright install-deps chromium`.
 This preparation requires administrator access.
-The verifier installs the pinned browser and validates its host dependencies.
+The verifier installs the pinned browser.
+Missing host dependencies fail the browser proofs.
 
 Run `pnpm run doctor` to inspect readiness without changing the checkout.
 `pnpm doctor` invokes pnpm's own command and does not check this repository's readiness.
