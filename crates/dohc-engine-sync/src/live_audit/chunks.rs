@@ -7,6 +7,43 @@ pub(super) const CHUNK_BYTES: usize = 4 * 1024 * 1024;
 const MAX_RECORD_BYTES: u64 = u32::MAX as u64 + 32_768;
 const MAX_CHUNKS: usize = MAX_RECORD_BYTES.div_ceil(CHUNK_BYTES as u64) as usize;
 
+pub(super) fn require_blob_length(
+    conn: &Connection,
+    sha256: &str,
+    claimed: usize,
+) -> Result<(), SyncError> {
+    let lengths: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT byte_length,length(bytes) FROM binary_blobs WHERE sha256=?1",
+            [sha256],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let Some((stored, actual)) = lengths else {
+        return Err(SyncError::BlobInvalid);
+    };
+    if stored != actual || stored < 0 {
+        return Err(dohc_engine_storage::StorageError::BlobIntegrity {
+            sha256: sha256.to_owned(),
+        }
+        .into());
+    }
+    if usize::try_from(stored).ok() != Some(claimed) {
+        return Err(invalid("live audit blob length differs"));
+    }
+    Ok(())
+}
+
+fn read_error(error: SyncError) -> io::Error {
+    let kind = match &error {
+        SyncError::BlobInvalid => io::ErrorKind::NotFound,
+        SyncError::InvalidInput { .. } => io::ErrorKind::InvalidData,
+        _ => io::ErrorKind::Other,
+    };
+    io::Error::new(kind, error)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct Chunk {
@@ -246,23 +283,12 @@ impl Read for ChunkReader<'_> {
             let Some(chunk) = self.manifest.chunks.get(self.next) else {
                 return Ok(0);
             };
-            let lengths: Option<(i64, i64)> = self
-                .conn
-                .query_row(
-                    "SELECT byte_length,length(bytes) FROM binary_blobs WHERE sha256=?1",
-                    [&chunk.sha256],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()
-                .map_err(io::Error::other)?;
-            if lengths != Some((chunk.byte_length as i64, chunk.byte_length as i64)) {
-                return Err(io::Error::other("live audit chunk unavailable"));
-            }
+            require_blob_length(self.conn, &chunk.sha256, chunk.byte_length).map_err(read_error)?;
             // Drop the previous allocation before the bounded blob read.
             self.buffer = Vec::new();
             self.buffer = dohc_engine_storage::get_binary_blob(self.conn, &chunk.sha256)
                 .map_err(io::Error::other)?
-                .ok_or_else(|| io::Error::other("live audit chunk unavailable"))?;
+                .ok_or_else(|| read_error(SyncError::BlobInvalid))?;
             self.offset = 0;
             self.next += 1;
         }
