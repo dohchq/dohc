@@ -247,6 +247,11 @@ The fixture also contains 1,000 protected rows and 100 version markers.
 The candidate drains those streams before timing a later text cursor, so the benchmark exercises a text position as well as marker positions.
 It reports capture-inclusive reads and the first reopen after removing the candidate's History index migration.
 The reopen builds both History indexes.
+After the reads, it times 100 saves through `versionedText.write`, following ten warmup saves.
+It then imports ten batches of 100 moments through `apply_moment_envelope`, following one warmup batch.
+Each imported moment uses its own production sync transaction. Envelope preparation stays outside timing.
+`save` reports milliseconds per save. `importPerMoment` reports milliseconds per moment, averaged within each batch.
+Both paths append to the same 100,000-moment fixture. Compare their baseline and candidate values to measure the indexes' write cost.
 
 Prepare separate base and candidate checkouts before the admitted measurement window.
 Copy `crates/dohc-workspace-engine/tests/history_page_benchmark.rs` from the candidate into the base checkout.
@@ -263,18 +268,21 @@ Use the test executable path printed by Cargo. It is platform-specific and inclu
 Record its SHA256, checkout commit, profile, fixture size, and concurrent host context.
 Both arms must use the release profile and the same fixture.
 
-The orchestrator runs these executables only through `acquireProfilingSlot` from `tools/perf-profiling/admission.mjs`.
-Admission must monitor the child, cancel it through the slot's signal, and release the slot after the child exits.
+Run both arms from the candidate checkout with the repository runner:
+
+```text
+node tools/perf-profiling/history-query-benchmark.mjs --exe <base-release-test-executable> --mode baseline
+node tools/perf-profiling/history-query-benchmark.mjs --exe <candidate-release-test-executable> --mode candidate
+```
+
+Use absolute executable paths for the base and candidate builds. The runner fixes the fixture size at 100,000 moments.
+The runner acquires profiling admission, monitors the owned child, and releases admission after the child exits.
+Admission refusal ends the command without launching the executable. Rerun during the scheduled window.
 Do not run the test through Cargo while holding profiling admission: its build slot conflicts with profiling admission.
 Do not bypass an admission refusal.
 
-In the admitted runner, set `HISTORY_BENCH_ENTRIES=100000` and use these child commands:
-
-```text
-HISTORY_BENCH_MODE=baseline <base-release-test-executable> history_page_benchmark --exact --ignored --nocapture
-HISTORY_BENCH_MODE=candidate <candidate-release-test-executable> history_page_benchmark --exact --ignored --nocapture
-```
-
-The environment assignment shown above is POSIX syntax. On Windows, set `$env:HISTORY_BENCH_MODE` before spawning each child.
-Set TEMP, TMP, and DOHC_TEST_SCRATCH_ROOT to task-owned directories inside each checkout.
-Preserve the `HISTORY_BENCH` output and admission receipt with the comparison.
+The runner prints `HISTORY_BENCH` numbers after successful completion and a final admission check.
+It rejects debug-profile executables.
+It records the executable SHA256, process ownership, raw log, numbers, and admission observations under `.agent-artifacts/history-page/measurement-*`.
+TEMP, TMP, and DOHC_TEST_SCRATCH_ROOT stay inside that run's checkout.
+Preserve the printed evidence path with the comparison.

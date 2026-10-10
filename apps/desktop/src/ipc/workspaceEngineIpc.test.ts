@@ -127,6 +127,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string) {
     getCollectionRecord: vi.fn<VersionedLiveAdapter["getCollectionRecord"]>(async () => { throw new Error("record boundary"); }),
   };
   const capture = {
+    filePathForObjectId: vi.fn<WorkspaceEngineCapture["filePathForObjectId"]>(async () => null),
     listMoments: vi.fn<WorkspaceEngineCapture["listMoments"]>(async () => ({
       moments: [], nextCursor: null, latestMomentOrder: 0, activeVersionId: "main", ...historyPageFields,
     })),
@@ -1011,6 +1012,30 @@ describe("owner History path policy", () => {
     }));
     await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({ moments: [], nextCursor: historyCursor(0) });
     expect(h.capture.listMoments).toHaveBeenCalledTimes(40);
+  });
+
+  it("caps five-row requests at 40 pages instead of making 400 capture reads", async () => {
+    const h = await harness();
+    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
+    h.capture.listMoments.mockImplementation(async ({ cursor } = {}) => ({
+      ...historyPage("private/a.md"), nextCursor: historyCursor((cursor?.text?.momentOrder ?? 2000) - 5),
+    }));
+    await expect(h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", limit: 5 })).resolves.toMatchObject({
+      moments: [], nextCursor: historyCursor(1800),
+    });
+    expect(h.capture.listMoments).toHaveBeenCalledTimes(40);
+  });
+
+  it("does not skip through an object's old pages when its current path is excluded", async () => {
+    const h = await harness();
+    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
+    h.capture.filePathForObjectId.mockResolvedValue("private/a.md");
+    h.capture.listMoments.mockResolvedValue(historyPage("notes/old-name.md"));
+    await expect(h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", objectId: "object-1", limit: 5 })).resolves.toMatchObject({
+      moments: [], nextCursor: null,
+    });
+    expect(h.capture.filePathForObjectId).toHaveBeenCalledExactlyOnceWith("object-1");
+    expect(h.capture.listMoments).toHaveBeenCalledExactlyOnceWith({ objectId: "object-1", limit: 5 });
   });
 
   it("stops skipping at the end of History", async () => {

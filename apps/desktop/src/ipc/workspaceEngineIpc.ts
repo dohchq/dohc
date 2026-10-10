@@ -285,7 +285,7 @@ export function createWorkspaceEngineIpc<
     // history it already imported, as it keeps its files, and gains nothing new.
     async function readHistory<Result>(
       event: Event, workspaceId: string,
-      read: (history: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment">, rootPath: string | null) => Promise<Result>,
+      read: (history: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment"> & Partial<Pick<WorkspaceEngineCapture, "filePathForObjectId">>, rootPath: string | null) => Promise<Result>,
     ): Promise<Result> {
       if (!shareViewIsPresent(requireWorkspace(workspaceId).shareView)) {
         const { capture } = await requireEngineCapture(workspaceId, "Engine history");
@@ -313,13 +313,16 @@ export function createWorkspaceEngineIpc<
         const policy = rootPath === null ? null : await readWorkspaceEnginePolicy(rootPath);
         if (policy?.errors.length) return policyUnreadable(policy);
         const admitted = policy ? historyPathAdmission(policy) : null;
+        const objectPath = admitted && input.objectId !== undefined
+          ? await history.filePathForObjectId?.(input.objectId) : null;
+        const objectExcluded = objectPath != null && admitted !== null && !admitted(objectPath);
         return listEngineMomentsForIpc(
           async () => {
             let cursor = input.cursor;
             let startCursor = input.cursor;
             const versionMarkers: Awaited<ReturnType<typeof history.listMoments>>["versionMarkers"] = [];
             // Today's view shows moments. Keep skipped markers for the later timeline UI.
-            const pageReach = Math.ceil(2_000 / (input.limit ?? 50));
+            const pageReach = Math.min(40, Math.ceil(2_000 / (input.limit ?? 50)));
             for (let pageIndex = 0; ; pageIndex += 1) {
               const page = await history.listMoments({
                 ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
@@ -328,6 +331,7 @@ export function createWorkspaceEngineIpc<
               });
               startCursor ??= page.startCursor;
               versionMarkers.push(...page.versionMarkers);
+              if (objectExcluded) return { ...page, moments: [], nextCursor: null, startCursor, versionMarkers };
               const moments = admitted ? page.moments.filter(moment => moment.protected || admitted(moment.path)) : page.moments;
               if (moments.length > 0 || page.nextCursor === null || pageIndex + 1 >= pageReach) {
                 return { ...page, moments, startCursor, versionMarkers };

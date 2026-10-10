@@ -4,6 +4,8 @@ use dohc_engine_protocol::{
     transport::{EngineTransport, InProcessTransport, RequestContext},
     wire::WorkspaceHandle,
 };
+use dohc_engine_storage::{EngineStore, NoFaults, hex_sha256};
+use dohc_engine_sync::{NoLiveLeases, ReplicationEnvelope, apply_moment_envelope};
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{EngineService, root_binding::write_root_binding};
 use serde_json::{Value, json};
@@ -43,6 +45,7 @@ async fn history_page_benchmark() {
         .unwrap();
     let mode = std::env::var("HISTORY_BENCH_MODE").unwrap_or_else(|_| "candidate".into());
     assert!(entries >= 100);
+    assert!(matches!(mode.as_str(), "baseline" | "candidate"));
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).unwrap();
     write_file(scratch.path(), "bench.md", b"benchmark body");
@@ -221,9 +224,74 @@ async fn history_page_benchmark() {
         flush_inclusive.push(start.elapsed().as_secs_f64() * 1000.0);
     }
     call(&transport, &handle, id, "workspace.close", json!({})).await;
+    id += 1;
+    let handle = open(&transport, &scratch, id, false).await;
+    id += 1;
+    let mut saves = Vec::new();
+    for iteration in 0..110 {
+        let params = json!({"versionId":"main","path":"bench.md","text":format!("save {iteration}"),"origin":"api","momentId":format!("save-{iteration}"),"nowMs":entries+2000+iteration});
+        let start = Instant::now();
+        call(&transport, &handle, id, "versionedText.write", params).await;
+        id += 1;
+        if iteration >= 10 {
+            saves.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+    call(&transport, &handle, id, "workspace.close", json!({})).await;
+    let mut store = EngineStore::open(&scratch.path().join(".dohc/engine/engine.db"), 1).unwrap();
+    let sha = hex_sha256(b"remote");
+    store
+        .read_with(|conn| {
+            conn.execute(
+                "INSERT OR IGNORE INTO blobs(sha256,byte_length,text) VALUES(?1,6,'remote')",
+                [&sha],
+            )?;
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM moments WHERE moment_id LIKE 'save-%'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(count, 110, "every save must append a moment");
+            Ok::<(), rusqlite::Error>(())
+        })
+        .unwrap();
+    // Prepare envelopes outside timing. Each uses the production sync transaction.
+    let import_batch_size = 100;
+    let envelopes: Vec<_> = (0..11*import_batch_size).map(|n| ReplicationEnvelope {
+        workspace_id: "history-benchmark".into(), origin_id: "benchmark-peer".into(), origin_seq: n,
+        op_kind: "moment.append".into(), recorded_at_ms: 50, relay_seq: None,
+        settlement_admission: None, admitted_author_snapshot: None,
+        payload: json!({"momentId":format!("import-{n}"),"versionId":"main","objectId":format!("remote-object-{n}"),"objectCreatedAtMs":1,"path":format!("remote-{n}.md"),"recordedAtMs":50,"operation":"write","payloadBeforeBlobSha256":null,"payloadBeforePath":null,"payloadAfterBlobSha256":sha,"payloadAfterPath":format!("remote-{n}.md"),"metadata":{"origin":"sync"},"beforePresent":"absent"}),
+    }).collect();
+    let mut import_per_moment = Vec::new();
+    for (batch, envelopes) in envelopes.chunks(import_batch_size as usize).enumerate() {
+        let start = Instant::now();
+        for envelope in envelopes {
+            apply_moment_envelope(&mut store, envelope, &NoFaults, &NoLiveLeases).unwrap();
+        }
+        if batch > 0 {
+            import_per_moment
+                .push(start.elapsed().as_secs_f64() * 1000.0 / import_batch_size as f64);
+        }
+    }
+    let imported: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM moments WHERE moment_id LIKE 'import-%'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        imported,
+        11 * import_batch_size,
+        "every imported envelope must append a moment"
+    );
+    drop(store);
     println!(
         "HISTORY_BENCH {}",
-        json!({"mode":mode,"entries":entries,"limit":50,"build":if cfg!(debug_assertions) {"debug"} else {"release"},"protectedRows":1000,"versionMarkers":100,"objectFirst":stats(object),"settledLaterText":stats(later_text),"firstLaunchMs":first_launch_ms,"settledFirst":stats(first),"settledLater":stats(later),"captureEnabledSettled":stats(flush_inclusive),"settledFlush":stats(flush_only)})
+        json!({"mode":mode,"entries":entries,"limit":50,"build":if cfg!(debug_assertions) {"debug"} else {"release"},"protectedRows":1000,"versionMarkers":100,"objectFirst":stats(object),"settledLaterText":stats(later_text),"firstLaunchMs":first_launch_ms,"settledFirst":stats(first),"settledLater":stats(later),"captureEnabledSettled":stats(flush_inclusive),"settledFlush":stats(flush_only),"save":stats(saves),"importPerMoment":stats(import_per_moment),"importBatchSize":import_batch_size,"importTransactions":"one per moment"})
     );
 }
 
