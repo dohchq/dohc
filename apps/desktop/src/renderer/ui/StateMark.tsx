@@ -139,8 +139,11 @@ export function saveStatePresentationKey(state: SaveState): SaveStateKey | null 
   }
 }
 
-// Kinds that need nothing from the person and do not hold the file.
-const CALM: ReadonlySet<StateMarkKind> = new Set(["settled", "dated", "working"]);
+// Save states that need nothing from the person and pass on their own: an
+// edit in flight, and an edit the file or its host has taken. Pending share
+// is not one: it can last while the host is away, and until it ends
+// collaborators do not have the edits.
+const CALM: ReadonlySet<SaveStateKey | AccessStateKey> = new Set(["saved", "saving", "saved-to-host"]);
 
 const MARK_TONE: Record<StateMarkKind, string> = {
   settled: "text-subtle",
@@ -174,10 +177,10 @@ function Mark(props: { kind: StateMarkKind }) {
  * runs out, such as a narrow file header. While the label is cut short, the
  * chip takes keyboard focus and shows the whole label and its explanation in
  * a tooltip, on focus or hover, in place of the title; with room to spare it
- * is not a tab stop and keeps its title. `quietWhenCalm` keeps a settled,
- * dated or working chip for screen readers only, where the titlebar's dot
- * already shows it: words appear only when the file is held or the state
- * needs the person, so typing never changes what the row draws. */
+ * is not a tab stop and keeps its title. `quietWhenCalm` keeps a saved,
+ * saving or saved-to-host chip for screen readers only: those pass on their
+ * own, so typing never changes what the row draws. Words appear when the
+ * file is held, pending share, or the state needs the person. */
 export function StateMark(props: {
   state: string | SaveState;
   shown: SaveStateKey | AccessStateKey | SaveState;
@@ -227,7 +230,7 @@ export function StateMark(props: {
   }, [shown]);
   if (!presentation) return null;
   const dataState = typeof props.state === "string" ? props.state : props.state.kind === "unknown" ? "unknown" : saveStatePresentationKey(props.state);
-  if (props.quietWhenCalm && CALM.has(presentation.mark)) {
+  if (props.quietWhenCalm && shownKey !== null && CALM.has(shownKey)) {
     return <span data-testid={props.testId} data-state={dataState ?? undefined} title={title} className="sr-only">{presentation.label}</span>;
   }
   const chip = (

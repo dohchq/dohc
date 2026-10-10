@@ -7,7 +7,7 @@ import type { ChatThreadRecord, EngineMomentRecord, HistoryPolicyUnreadableResul
 import { readError, withErrorWords } from "../../ipc/errorWords";
 import { DocumentMenu } from "../DocumentMenu";
 import { FrontmatterAsWritten } from "../FrontmatterAsWritten";
-import { DocumentControls, OPENING_TITLE, ViewActions } from "../fileInspectorUi";
+import { DocumentControls, OPENING_TITLE, OpeningState, ViewActions } from "../fileInspectorUi";
 import { BlockMenu } from "../editor/blockControls";
 import { SlashCommandMenu, type SlashCommandState } from "../editor/slashCommands";
 import { buildTableMenu, type TableMenuRow } from "../editor/tableControls";
@@ -1146,15 +1146,17 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       {/* After the history part, so the parts above keep their places. */}
       <Section part="tab-row-actions" title="Document actions in the tab row" menusAtRest>
-        {/* One document loading, saved, saving, held, failed, and changed
-            on disk in a narrow pane: Share, the toggle and the menu keep
-            their places, and the save state gives way before the tab name.
-            Saved and saving say so only to screen readers, so they draw the
-            loading width. No box clips them, so an overflow shows. */}
+        {/* One document loading, saved, saving, pending share, held,
+            failed, and changed on disk in a narrow pane: Share, the toggle
+            and the menu keep their places, and the save state gives way
+            before the tab name. Opening, saved and saving say so only to
+            screen readers, so loading and ready draw the same width. No box
+            clips them, so an overflow shows. */}
         <Specimen label="loading" className="w-full">
           <TabRowActionsSpecimen width="w-full">
             <ViewActions
               onShare={noop}
+              status={<OpeningState />}
               actions={
                 <DocumentControls
                   toggle={{ label: "Edit", disabled: true, title: OPENING_TITLE }}
@@ -1183,6 +1185,20 @@ function Pane(props: { theme: "light" | "dark" }) {
             <ViewActions
               onShare={noop}
               status={<StateMark testId={`states-tab-row-actions-saving-${theme}`} truncate quietWhenCalm state="saving" shown="saving" />}
+              actions={
+                <DocumentControls
+                  toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}
+                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => "# Plan" }}
+                />
+              }
+            />
+          </TabRowActionsSpecimen>
+        </Specimen>
+        <Specimen label="pending share" className="w-full">
+          <TabRowActionsSpecimen width="w-full">
+            <ViewActions
+              onShare={noop}
+              status={<StateMark testId={`states-tab-row-actions-pending-${theme}`} truncate quietWhenCalm state="pending-share" shown="pending-share" />}
               actions={
                 <DocumentControls
                   toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}

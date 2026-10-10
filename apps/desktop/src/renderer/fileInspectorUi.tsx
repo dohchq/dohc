@@ -67,6 +67,18 @@ export function ViewActions(props: {
 
 export const OPENING_TITLE = "You can edit this document when it finishes opening.";
 
+// A document still opening, as its save state slot says it: for screen
+// readers only, like a save in flight. The page's loading lines and the
+// disabled toggle show the wait, and the actions stay where the ready
+// document draws them.
+export function OpeningState() {
+  return (
+    <span data-testid="markdown-open-state" data-state="opening" title={OPENING_TITLE} className="sr-only">
+      Opening…
+    </span>
+  );
+}
+
 // A document's controls, the same pair in every phase of an open: the mode
 // toggle and the document menu. The toggle's box holds "Edit", "Source" and
 // "Editor", so the words it says on its own never move the menu or Share;

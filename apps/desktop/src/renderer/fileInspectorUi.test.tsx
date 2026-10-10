@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ViewActions } from "./fileInspectorUi";
+import { OpeningState, ViewActions } from "./fileInspectorUi";
 import { StateMark, type SaveStateKey } from "./ui/StateMark";
 import { EditorTabs } from "./workbench/EditorTabs";
 import { EditorGroupFrame } from "./workbench/tabRowActions";
@@ -18,7 +18,7 @@ function Group(props: {
   path: string;
   onShare?: () => void;
   view?: boolean;
-  saveState?: SaveStateKey;
+  saveState?: SaveStateKey | "opening";
 }) {
   return (
     <div data-testid={`group-${props.id}`}>
@@ -46,13 +46,17 @@ function Group(props: {
             <ViewActions
               onShare={props.onShare}
               status={
-                <StateMark
-                  testId={`status-${props.id}`}
-                  truncate
-                  quietWhenCalm
-                  state={props.saveState ?? "file-locked"}
-                  shown={props.saveState ?? "file-locked"}
-                />
+                props.saveState === "opening" ? (
+                  <OpeningState />
+                ) : (
+                  <StateMark
+                    testId={`status-${props.id}`}
+                    truncate
+                    quietWhenCalm
+                    state={props.saveState ?? "file-locked"}
+                    shown={props.saveState ?? "file-locked"}
+                  />
+                )
               }
               actions={<button type="button">Source</button>}
             />
@@ -86,10 +90,10 @@ describe("ViewActions", () => {
     expect(precedes(toggle, within(row).getByTestId("create-editor-group-right"))).toBe(true);
   });
 
-  // The titlebar dot shows saved and saving, so the row says them only to
-  // screen readers, and typing never changes what the row draws. A held
-  // file or a failed save keeps its words.
-  it.each(["saved", "saving", "saved-to-host", "pending-share"] as const)(
+  // Saved, saving and saved-to-host pass on their own, so the row says them
+  // only to screen readers, and typing never changes what the row draws. A
+  // held file, a pending share or a failed save keeps its words.
+  it.each(["saved", "saving", "saved-to-host"] as const)(
     "keeps a calm %s state for screen readers only, with no box beside Share",
     (saveState) => {
       render(<Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} saveState={saveState} />);
@@ -105,11 +109,27 @@ describe("ViewActions", () => {
     ["file-locked", "File in use"],
     ["error", "Couldn't save"],
     ["changed-on-disk", "Changed on disk"],
+    // Collaborators don't have the edits until the share takes them.
+    ["pending-share", "Saved locally · Pending share"],
   ] as const)("shows a %s state in words beside Share", (saveState, words) => {
     render(<Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} saveState={saveState} />);
     const mark = screen.getByTestId("status-left");
     expect(mark.classList.contains("sr-only")).toBe(false);
     expect(mark.textContent).toBe(words);
+  });
+
+  // A document that opens draws its actions where the ready document will:
+  // "Opening…" is for screen readers, so the status box takes no room in
+  // either phase.
+  it("draws the opening and the ready document's actions in the same place", () => {
+    const { rerender } = render(<Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} saveState="opening" />);
+    const opening = screen.getByTestId("markdown-open-state");
+    expect(opening.classList.contains("sr-only")).toBe(true);
+    expect(opening.textContent).toBe("Opening…");
+    expect(opening.parentElement?.className.split(" ")[0]).toBe("contents");
+    rerender(<Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} saveState="saved" />);
+    expect(screen.queryByTestId("markdown-open-state")).toBeNull();
+    expect(screen.getByTestId("status-left").parentElement?.className.split(" ")[0]).toBe("contents");
   });
 
   it("leaves the row's action slot empty for a tab with no actions", () => {

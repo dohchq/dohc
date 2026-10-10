@@ -7,6 +7,7 @@ import {
   DocumentControls,
   EngineMayHoldDocumentNotice,
   OPENING_TITLE,
+  OpeningState,
   ViewActions,
   OrphanedDraftNotices,
   EngineRemovalInProgressNotice,
@@ -2123,21 +2124,7 @@ export function MarkdownView(props: {
                 save (saveState.kind !== "saved-here") must surface even when not
                 `editing`, or a failed title/icon save is invisible while the
                 optimistic value keeps showing. */}
-            {opening ? (
-              <span
-                data-testid="markdown-open-state"
-                data-state="opening"
-                // The same sentence as the disabled button's, because a
-                // browser does not reliably draw a tooltip over a disabled
-                // control. This span is not disabled, so hovering the state
-                // always explains it.
-                title={OPENING_TITLE}
-                // Shown only if opening is slow, like the loading lines.
-                className="dohc-reveal-if-slow min-w-0 truncate font-mono text-[11px] text-subtle"
-              >
-                Opening…
-              </span>
-            ) : null}
+            {opening ? <OpeningState /> : null}
             {/* Independent of "Opening…", not its else-branch: a save
                 that fails inside the opening window must still surface. While
                 opening, `editing` is always false, so the chip appears there
