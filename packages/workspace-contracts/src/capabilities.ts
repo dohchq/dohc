@@ -42,6 +42,7 @@ export const CAPABILITIES = {
   "share.restore.pending.dismiss": capability("Dismiss unfinished Stop and restore progress.", {ipc: ["dismissStopAndRestore"]}),
   "capture.recovery.read": capability("Read capture recovery status.", {ipc: ["getCaptureRecoveryStatus"]}),
   "capture.recovery.clear": capability("Clear a capture recovery notice persistently.", {ipc: ["clearCaptureRecovery"]}),
+  "file.observation.retry": capability("Retry reading a workspace's file changes.", {ipc: ["retryFileObservation"]}),
   "version.list": capability("List workspace versions.", {ipc: ["listWorkspaceVersions"]}),
   "version.create": capability("Create a workspace version.", {ipc: ["createWorkspaceVersion"]}),
   "version.switch": capability("Switch workspace versions.", {ipc: ["switchWorkspaceVersion"]}),
@@ -166,6 +167,7 @@ export const CAPABILITIES = {
   "data.query": capability("Query the local database.", {mcp: {owner: ["dohc_query_database"], view: ["dohc_query_database"], comment: ["dohc_query_database"], edit: ["dohc_query_database"]}}),
   "document.shared.admission.wait": capability("Wait until a shared document is ready for live editing.", {ipc: ["waitForEngineYDocAdmission"]}),
   "document.draft.discard": capability("Discard the recovery copy of a set-aside draft.", {ipc: ["discardLiveDraftRecovery"]}),
+  "document.draft.list": capability("Read saved live drafts for review.", {ipc: ["listLiveDraftRecovery"]}),
   "document.save.retry": capability("Try again to save an open document to its file.", {ipc: ["retryEngineYDocSave"]}),
 } as const;
 

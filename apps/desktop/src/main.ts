@@ -8,7 +8,7 @@ import {ownerShareLabels, refreshOwnerShareLabels, createOwnerShareLabelRefresh}
 import { describeAutomationDataset } from "./workspaces/automationDatasetDescription";
 import { invalidateDatasetAddresses } from "./workspaces/datasetAddress";
 import { createChatDispatchNotices } from "./agents/chatDispatchNotices";
-import { hasRetainedLiveDraft, removeLiveDraftCopies, preserveLiveDraft, preserveUnsentLiveDraft, removeWorkspaceLiveDrafts } from "./workspaces/liveDraftRecovery";
+import { hasRetainedLiveDraft, listLiveDraftRecovery, removeLiveDraftCopies, preserveLiveDraft, preserveUnsentLiveDraft, removeWorkspaceLiveDrafts } from "./workspaces/liveDraftRecovery";
 import { createPhysicalWorkspaceRemoval, createWorkspaceForget } from "./workspaces/physicalWorkspaceRemoval";
 import { createNamedDesktopLiveCapture } from "./workspaces/namedDesktopLive";
 import {
@@ -233,8 +233,8 @@ import {
   reconcileRecipientSharesAfterLookup,
 } from "./workspaces/recipientShareReconciliation";
 import { createReceivedShareAcquisition, createReceivedShareStore, listReceivedInventory } from "./workspaces/receivedShareStore";
-import { createShareRosters, rosterAuthorLabel, rosterPersonLabel } from "./automations/shareRoster";
-import { listRosterGrants, readStoredRoster } from "@dohc/automation-executor/roster-listing";
+import { createShareRosters, createHistoryLabels } from "./automations/shareRoster";
+import { listRosterGrants, lookupHistoryAccounts } from "@dohc/automation-executor/roster-listing";
 import {
   CollectionAutomations,
   type CollectionAutomationsOptions,
@@ -1499,6 +1499,45 @@ const shareRosters = createShareRosters({
   onListed: (workspaceId) => collectionAutomationsOf(workspaceId)?.rosterChanged(),
 });
 
+const historyLabelWindows = new Map<WebContents, ReturnType<typeof createHistoryLabels>>();
+function invalidateHistoryLabels(workspaceId: string | null): void {
+  for (const labels of historyLabelWindows.values()) labels.invalidate(workspaceId);
+}
+function historyLabelsFor(sender: WebContents): ReturnType<typeof createHistoryLabels> {
+  const existing = historyLabelWindows.get(sender);
+  if (existing) return existing;
+  const labels = createHistoryLabels({
+    snapshot: (workspaceId) => {
+      const workspace = findWorkspace(workspaceId);
+      return { roster: shareRosters.observation(workspaceId).listing,
+        owner: !sender.isDestroyed() && !!workspace?.remote && !workspace.shareView && cachedCredentials?.userId === workspace.remote.ownerUserId,
+        context: rosterContext(workspaceId), inventory: workspace?.shareRoster?.version };
+    },
+    ready: workspaceId => {
+      if (!sender.isDestroyed() && rendererWorkspaceSessions.current(sender)?.workspaceId === workspaceId) sender.send(CHANNELS.historyNamesChanged, { workspaceId });
+    },
+    lookupAccounts: async (workspaceId, ids) => {
+      const workspace = findWorkspace(workspaceId);
+      if (!workspace?.remote || workspace.shareView) return null;
+      await warmCredentialCache();
+      const { credentials } = await remoteForWorkspace(workspace);
+      if (credentials.userId !== workspace.remote.ownerUserId) return null;
+      return lookupHistoryAccounts(workspaceId, async path => {
+        const response = await relayShareResponseWithCredentials(credentials, path, { method: "GET" });
+        return { status: response.status, body: await response.json().catch(() => undefined) };
+      }, ids);
+    },
+  });
+  if (!sender.isDestroyed()) {
+    historyLabelWindows.set(sender, labels);
+    sender.once("destroyed", () => {
+      labels.invalidate(null);
+      historyLabelWindows.delete(sender);
+    });
+  }
+  return labels;
+}
+
 const accessAcquisition = createAccessAcquisition({
   roster: workspaceId => shareRosters.requestRefresh(workspaceId),
   received: () => receivedShareAcquisition.refresh(),
@@ -1747,6 +1786,7 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
     const relayCloseTargets =
       relayCloseTargetsForPhysicalWorkspace(physicalWorkspace);
     shareRosters.close(binding.workspaceId);
+    invalidateHistoryLabels(binding.workspaceId);
     rosterContexts.delete(binding.workspaceId);
     automationScheduler.remove(binding.workspaceId);
     automationHosts.close(binding.workspaceId);
@@ -2405,6 +2445,8 @@ const activity = {
     withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.retryCloudSync(lease.state.activity, reason),
     ),
+  retryFileObservation: (workspaceId: string): Promise<void> =>
+    withWorkspaceActivityState(workspaceId, lease => workspaceActivity.retryFileObservation(lease.state.activity)),
   syncNow: (workspaceId: string): Promise<void> =>
     withWorkspaceActivityState(workspaceId, (lease) => workspaceActivity.syncNow(lease.state.activity)),
   retryFailingCloudSyncs: (): void => {
@@ -5730,14 +5772,23 @@ function registerIpcHandlers(): void {
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
     withEngineAdapter, requireEngineCapture, readWorkspaceEnginePolicy, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
     localPersonName: localUserDisplayName, localPerson,
-    automationPersonName: (workspaceId, userId) => {
+    automationPersonName: (workspaceId, userId, sender) => {
       const workspace = findWorkspace(workspaceId);
       if (userId === (workspace?.remote?.ownerUserId ?? localUserId())) return null;
-      return rosterPersonLabel(readStoredRoster(workspace?.shareRoster), userId);
+      const historyLabels = historyLabelsFor(sender);
+      historyLabels.prepare(workspaceId, [{ userId }]);
+      return historyLabels.person(workspaceId, userId);
     },
-    namedAuthorLabels: (workspaceId) => {
-      const roster = readStoredRoster(findWorkspace(workspaceId)?.shareRoster);
-      return (author) => rosterAuthorLabel(roster, author);
+    namedAuthorLabels: (workspaceId, sender) => {
+      const historyLabels = historyLabelsFor(sender);
+      return {
+        prepare: authors => {
+          const named = authors.filter(author => author.kind === "named");
+          if (named.length === 0) return;
+          historyLabels.prepare(workspaceId, named);
+        },
+        named: author => historyLabels.author(workspaceId, author),
+      };
     },
     automationAuthor, notifyRenderer,
     // A shared view keeps no runs: its automations run on the owner's computer.
@@ -5748,6 +5799,7 @@ function registerIpcHandlers(): void {
     requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection, activity,
     retryOwnerLiveDelivery: workspaceId => desktopEngine.retryOwnerDelivery(workspaceId),
     retryCloudSync: (workspaceId, reason) => activity.retryCloudSync(workspaceId, reason),
+    retryFileObservation: workspaceId => activity.retryFileObservation(workspaceId),
     workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions, isOnline: () => net.isOnline(),
     closeDispatchRunActivity, probeEngineStoreRefusal, moveEngineStoreAside,
     openWorkspaceActivityUnderEngineStoreLock, engineYDocSessionIpc,
@@ -5840,7 +5892,7 @@ function registerIpcHandlers(): void {
     relayShareJsonWithCredentials,
     relayShareErrorCopy,
     relayShareDiscussionActivityPolls,
-    sharesChanged: (workspaceId) => { receivedShareAcquisition.invalidate(); shareRosters.sharesChanged(workspaceId); },
+    sharesChanged: (workspaceId) => { receivedShareAcquisition.invalidate(); invalidateHistoryLabels(workspaceId); shareRosters.sharesChanged(workspaceId); },
     reconcileReceivedShares,
   });
 
@@ -6192,7 +6244,7 @@ function registerIpcHandlers(): void {
         ...(labelHint.length > 0 ? { labelHint } : {}),
         assertCurrent,
       }),
-    sharesChanged: (workspaceId) => { receivedShareAcquisition.invalidate(); shareRosters.sharesChanged(workspaceId); },
+    sharesChanged: (workspaceId) => { receivedShareAcquisition.invalidate(); invalidateHistoryLabels(workspaceId); shareRosters.sharesChanged(workspaceId); },
     reconcileReceivedShares,
   });
 
@@ -6300,10 +6352,14 @@ function registerIpcHandlers(): void {
   inspectNamedForCli = buttonsIpc.inspectNamed;
 
   registerOperations(operationBoundary, liveDraftRecoveryOperations, {
+    listLiveDraftRecovery: (input, {operation}) => {
+      operation.assertCurrent();
+      return listLiveDraftRecovery(join(stateDir(), "live-draft-recovery"), input.workspaceId);
+    },
     discardLiveDraftRecovery: async (input, {event, operation}) => {
       operation.assertCurrent();
       if (desktopWindows.workspaceWindows.allLive().some(window => window.webContents !== event.sender && rendererWorkspaceSessions.current(window.webContents)?.workspaceId === input.workspaceId)) throw new Error("Close the other window for this workspace, then dismiss this draft again.");
-      await removeLiveDraftCopies(join(stateDir(), "live-draft-recovery"), operation.workspace.workspaceId, input.objectId, input.snapshotSha256, Math.min(input.discardedAtMs, Date.now()));
+      return removeLiveDraftCopies(join(stateDir(), "live-draft-recovery"), operation.workspace.workspaceId, input.objectId, input.snapshotSha256, Math.min(input.discardedAtMs, Date.now()), input.path, input.recordId);
     },
   });
 
@@ -6323,7 +6379,7 @@ function registerIpcHandlers(): void {
       (await relayShareJsonWithCredentials<unknown>(credentials, path, init, { retainDependentSetConflict: true })).kind === "success"
         ? "ended"
         : "dependents-changed",
-    sharesChanged: (workspaceId) => { receivedShareAcquisition.invalidate(); shareRosters.sharesChanged(workspaceId); },
+    sharesChanged: (workspaceId) => { receivedShareAcquisition.invalidate(); invalidateHistoryLabels(workspaceId); shareRosters.sharesChanged(workspaceId); },
     requireEngineCapture: (workspaceId) => requireEngineCapture(workspaceId, "Engine history"),
     localPerson,
     queuePull: (workspaceId) => activity.queueCloudPull(workspaceId),

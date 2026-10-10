@@ -224,17 +224,19 @@ impl DeferredRelayTransport {
             .iter()
             .position(|(completed, _)| same_io_request(completed, &request))
         {
-            let release = matches!(
-                state.completed[index].0,
-                RelayIoRequest::Push(_)
-                    | RelayIoRequest::ShareLogPush(_)
-                    | RelayIoRequest::UploadBlob(_)
-                    | RelayIoRequest::DownloadBlobs(_)
-                    | RelayIoRequest::UploadKeyEnvelope(_)
-                    | RelayIoRequest::DownloadKeyEnvelope(_)
-                    | RelayIoRequest::ShareBlob(_)
-                    | RelayIoRequest::ShareProposalSubmit(_)
-            );
+            // Only the stable repair probe must survive operation replay.
+            let release = !matches!(&state.completed[index].0, RelayIoRequest::Push(push) if push.ops.is_empty() && push.after_seq == -1)
+                && matches!(
+                    state.completed[index].0,
+                    RelayIoRequest::Push(_)
+                        | RelayIoRequest::ShareLogPush(_)
+                        | RelayIoRequest::UploadBlob(_)
+                        | RelayIoRequest::DownloadBlobs(_)
+                        | RelayIoRequest::UploadKeyEnvelope(_)
+                        | RelayIoRequest::DownloadKeyEnvelope(_)
+                        | RelayIoRequest::ShareBlob(_)
+                        | RelayIoRequest::ShareProposalSubmit(_)
+                );
             let uploaded = match &state.completed[index].0 {
                 RelayIoRequest::UploadBlob(upload) => Some((
                     upload.workspace_id.clone(),
@@ -482,6 +484,212 @@ mod relay_push_tests;
 #[cfg(test)]
 mod deferred_relay_tests {
     use super::*;
+
+    #[test]
+    fn base_repair_probe_is_sent_once_across_pull_replays_without_cursor_advance() {
+        base_repair_probe_across_replays(false);
+    }
+
+    #[test]
+    fn base_repair_push_between_pull_replays_keeps_stale_probe_safe() {
+        base_repair_probe_across_replays(true);
+    }
+
+    fn base_repair_probe_across_replays(push_between_replays: bool) {
+        use dohc_engine_sync::{ReplicationEnvelope, SyncError};
+        use rusqlite::params;
+        let (_scratch, _path, mut store) = dohc_engine_testkit::open_store();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1000, &NoFaults)
+            .unwrap();
+        dohc_engine_sync::adopt_join_identity(
+            &mut store, "ws", "local", "epoch", "stream", 1000, &NoFaults,
+        )
+        .unwrap();
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO file_objects (workspace_id,object_id,created_at_ms) VALUES ('ws','doc',1000)", []).map_err(|error| SyncError::Storage(dohc_engine_storage::StorageError::persist_public(error)))?;
+            tx.execute("INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) VALUES ('ws','local',-1)", []).map_err(|error| SyncError::Storage(dohc_engine_storage::StorageError::persist_public(error)))?;
+            Ok::<_,SyncError>(())
+        }).unwrap();
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.plaintext_insert(0, "base");
+        let bytes = doc.encode_full_state();
+        let claim = dohc_engine_storage::hex_sha256(&bytes);
+        let key = dohc_engine_collab::DocKey::new("ws", "main", "doc").unwrap();
+        dohc_engine_collab::claim_base(
+            &mut store,
+            &key,
+            dohc_engine_collab::ContentKind::Plaintext,
+            &bytes,
+            &NoFaults,
+            1000,
+        )
+        .unwrap();
+        let payload = serde_json::json!({"versionId":"main","objectId":"doc","path":"doc.md","contentKind":"plaintext","lineageClaimId":claim,"updateBlobSha256":claim,"isBaseState":true});
+        store.write_with(&NoFaults, |tx| {
+            for (origin,seq) in [("local",0),("local",1),("peer",0)] {
+                tx.execute("INSERT INTO replication_log (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported,apply_disposition) VALUES ('ws',?1,?2,'ydoc.update',?3,1000,?4,'applied')",params![origin,seq,payload.to_string(),i64::from(origin!="local")]).map_err(|error| SyncError::Storage(dohc_engine_storage::StorageError::persist_public(error)))?;
+                tx.execute("INSERT INTO ydoc_base_relay_candidates (workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq) VALUES ('ws','main','doc',?1,?2,?3)",params![claim,origin,seq]).map_err(|error| SyncError::Storage(dohc_engine_storage::StorageError::persist_public(error)))?;
+            }
+            Ok::<_,SyncError>(())
+        }).unwrap();
+        let committed = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
+            workspace_id: "ws".into(),
+            origin_id: "local".into(),
+            origin_seq: 0,
+            op_kind: "ydoc.update".into(),
+            payload: payload.clone(),
+            recorded_at_ms: 1000,
+            relay_seq: Some(100),
+        };
+        let transport = DeferredRelayTransport::default();
+        let mut cache = WriterDocCache::new();
+        let operation = RelayOperation::Pull {
+            workspace_id: "ws".into(),
+            now_ms: 1200,
+        };
+        let mut probes = 0;
+        let mut lookups = 0;
+        let mut runs = 0;
+        loop {
+            runs += 1;
+            assert!(
+                runs <= 6,
+                "repair repeated a relay request: probes={probes}, lookups={lookups}"
+            );
+            match execute_relay_operation(
+                &mut store,
+                &mut cache,
+                transport.clone(),
+                operation.clone(),
+                &LeaseRegistry::default(),
+                &ClaimAnnouncer::default(),
+            ) {
+                Ok(RelayOperationOutcome::Sync(SyncPassOutcome::Complete { .. })) => break,
+                Err(RuntimeError::Relay(RelayError::Local(reason)))
+                    if reason == RELAY_IO_PENDING =>
+                {
+                    let request = transport.take_pending().unwrap();
+                    let response = match &request {
+                        RelayIoRequest::Pull(_) => RelayIoResponse::Pull(PullResponse {
+                            ops: Vec::new(),
+                            next_cursor: 0,
+                            has_more: false,
+                        }),
+                        RelayIoRequest::Push(push) => {
+                            assert!(push.ops.is_empty());
+                            probes += 1;
+                            RelayIoResponse::Push(PushResponse {
+                                settlement_refusals: Vec::new(),
+                                accepted: 0,
+                                inserted: 0,
+                                skipped: 0,
+                                current_max_origin_seq: 0,
+                            })
+                        }
+                        RelayIoRequest::LookupCoordinate(coordinate) => {
+                            lookups += 1;
+                            RelayIoResponse::LookupCoordinate(if coordinate.origin_id == "local" {
+                                let mut op = committed.clone();
+                                op.origin_seq = coordinate.origin_seq;
+                                op.relay_seq = Some(100 + coordinate.origin_seq);
+                                LogCoordinateResponse::Present(op)
+                            } else {
+                                LogCoordinateResponse::Absent
+                            })
+                        }
+                        other => panic!("unexpected repair request: {other:?}"),
+                    };
+                    transport.complete(request, Ok(response));
+                    if push_between_replays && runs == 2 {
+                        // Complete a separate push while this pull retains the earlier maximum of zero.
+                        let push_transport = DeferredRelayTransport::default();
+                        for push_run in 0..4 {
+                            match execute_relay_operation(
+                                &mut store,
+                                &mut WriterDocCache::new(),
+                                push_transport.clone(),
+                                RelayOperation::Push {
+                                    workspace_id: "ws".into(),
+                                    now_ms: 1201,
+                                    max_read_bytes: 0,
+                                },
+                                &LeaseRegistry::default(),
+                                &ClaimAnnouncer::default(),
+                            ) {
+                                Ok(RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
+                                    ..
+                                })) => break,
+                                Err(RuntimeError::Relay(RelayError::Local(reason)))
+                                    if reason == RELAY_IO_PENDING =>
+                                {
+                                    assert!(push_run < 3, "push failed to finish");
+                                    let request = push_transport.take_pending().unwrap();
+                                    let response = match &request {
+                                        RelayIoRequest::BlobsHave(_) => {
+                                            RelayIoResponse::BlobsHave(BlobHaveResponse {
+                                                missing: Vec::new(),
+                                            })
+                                        }
+                                        RelayIoRequest::Push(push) => {
+                                            assert_eq!(push.ops.len(), 2);
+                                            RelayIoResponse::Push(PushResponse {
+                                                settlement_refusals: Vec::new(),
+                                                accepted: 2,
+                                                inserted: 1,
+                                                skipped: 1,
+                                                current_max_origin_seq: 1,
+                                            })
+                                        }
+                                        other => {
+                                            panic!("unexpected concurrent push request: {other:?}")
+                                        }
+                                    };
+                                    push_transport.complete(request, Ok(response));
+                                }
+                                other => panic!("unexpected concurrent push result: {other:?}"),
+                            }
+                        }
+                        assert_eq!(
+                            dohc_engine_sync::read_pushed_seq(&store, "ws", "local").unwrap(),
+                            1
+                        );
+                        // A newly captured base still needs the cached bound when the pull resumes.
+                        store.write_with(&NoFaults, |tx| {
+                            tx.execute("INSERT INTO replication_log (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported,apply_disposition) VALUES ('ws','local',2,'ydoc.update',?1,1000,0,'applied')", [payload.to_string()]).unwrap();
+                            tx.execute("INSERT INTO ydoc_base_relay_candidates (workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq) VALUES ('ws','main','doc',?1,'local',2)", [&claim]).unwrap();
+                            Ok::<_,SyncError>(())
+                        }).unwrap();
+                    }
+                }
+                other => panic!("unexpected pull result: {other:?}"),
+            }
+        }
+        assert_eq!(
+            (probes, lookups, runs),
+            if push_between_replays {
+                (1, 3, 6)
+            } else {
+                (1, 2, 5)
+            }
+        );
+        assert_eq!(
+            dohc_engine_sync::read_pushed_seq(&store, "ws", "local").unwrap(),
+            if push_between_replays { 1 } else { -1 }
+        );
+        let relay_seq: Option<i64> = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT base_relay_seq FROM ydoc_docs WHERE object_id='doc'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(relay_seq, Some(100));
+    }
 
     /// An operation reruns from its start after each relay call. Send changes
     /// uploads each changed file's content before it submits, so a completed

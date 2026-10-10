@@ -50,7 +50,7 @@ describe("CollectionHistoryDialog", () => {
     await waitFor(() => expect(onChanged).toHaveBeenCalledOnce());
     expect(onUndo).toHaveBeenCalledWith({ workspaceId: "a", datasetId, revision: 1, revisionSha256: reversal.revisionSha256, operationId: reversal.operationId,
       idempotencyKey: expect.any(String), input: { id: "record", expectedVersion: 3, values: { [reversal.fields[0]!.fieldId]: "Alice" } } }, expect.any(AbortSignal));
-    expect(onLoad).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(onLoad).toHaveBeenCalledTimes(2));
   });
   it("keeps the same undo request after a lost reply and leaves refused prior values visible", async () => {
     const onUndo = vi.fn().mockRejectedValueOnce(Error("Offline")).mockRejectedValueOnce(Object.assign(Error("Record changed"), { code: "operation_refused" }));
