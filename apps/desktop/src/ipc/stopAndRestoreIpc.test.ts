@@ -163,8 +163,8 @@ function fixture(options: {
     makeWritesDurable: barrier,
     retainRunsForRestore: options.retainRunsForRestore ?? (async () => undefined),
     pendingRestores: () => options.runStoreError ? Promise.reject(options.runStoreError) : runStore?.pendingRestores() ?? Promise.resolve(structuredClone([...pendingEntries.values()])),
-    savePendingRestore: async (entry: Parameters<CollectionAutomations["savePendingRestore"]>[0]) => {
-      if (runStore) await runStore.savePendingRestore(entry);
+    savePendingRestore: async (entry: Parameters<CollectionAutomations["savePendingRestore"]>[0], whilePending?: string) => {
+      if (runStore) await runStore.savePendingRestore(entry, whilePending);
       else pendingEntries.set(entry.id, structuredClone({claims: [], ...pendingEntries.get(entry.id), ...entry}));
     },
     recordRestoreIntents: async (id: string, momentIds: readonly string[]) => {
@@ -308,20 +308,174 @@ describe("stop and restore in main", () => {
     await vi.waitFor(() => expect(f.releases).toContain("pending-pass"));
   });
 
-  it.each(["re-shared person", "deleted link"])("resumes an interrupted file Undo before checking the %s", async changed => {
+  it.each(["missing person", "deleted link"])("resumes an interrupted file Undo after checking the %s", async changed => {
     const {store, target, rootPath, resolver} = await pendingFileUndo(changed === "deleted link" ? "link" : "person");
     const first = fixture({rootPath, runStore: store, restoreError: Error("Interrupted Undo")});
     await expect(first.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: []})).resolves.toMatchObject({errorMessage: "Interrupted Undo"});
     expect((await createAutomationRunStore(rootPath, resolver).pendingRestores())[0]!.session).toMatchObject({undoingFiles: true, filesUndone: false});
     const runs = vi.fn(async () => NOTHING);
     const retry = fixture({rootPath, runStore: createAutomationRunStore(rootPath, resolver), undoRunsOf: runs,
-      granted: [grant({grantId: "new-grant", shareId: "new-share"})], links: [[]]});
+      granted: [], links: [[]]});
     await expect(retry.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({unfinished: null, restored: []});
     expect(retry.capture.restoreFileToBeforeMoment).toHaveBeenCalledWith("back-schema", OWNER, expect.anything());
     expect(runs).toHaveBeenCalled();
-    expect(retry.calls.some(call => call.path.includes("shares"))).toBe(false);
+    expect(retry.calls.some(call => call.path.includes("shares"))).toBe(true);
     await vi.waitFor(async () => expect(await store.pendingRestores()).toEqual([]));
     expect(retry.releases).toContain("pending-pass");
+  });
+
+  it.each(["person", "link"] as const)("revokes current %s access before resuming Undo and queues a new restore", async kind => {
+    const {store, target, rootPath, resolver} = await pendingFileUndo(kind);
+    const entry = (await store.pendingRestores())[0]!;
+    entry.session!.undoingFiles = true;
+    await store.savePendingRestore(entry);
+    const newMoment = {...schemaMoment, id: "new-write", objectId: "new-object", path: "notes/new.txt"};
+    const newGrant = kind === "person" ? "new-grant" : "grant-link";
+    const rows = [grant({revokedAtMs: 3}), grant({grantId: "new-grant", shareId: "new-share"})];
+    const f = fixture({rootPath, runStore: store, undoRunsOf: async () => NOTHING, moment: newMoment,
+      granted: rows, links: [[{shareId: "new-link", grantId: "grant-link", status: "active", dependents: []}]],
+      ledger: {"grant-edit": [{writes: [], nextAfterOriginSeq: null}], [newGrant]: [{writes: [{committedAtMs: 4,
+        files: [{path: newMoment.path, objectId: newMoment.objectId, momentId: newMoment.id, created: false}]}], nextAfterOriginSeq: null}]}});
+    f.capture.restoreFileToBeforeMoment.mockImplementationOnce(async () => {
+      expect(f.calls.some(call => call.method === "POST" && call.path.endsWith("/revoke"))).toBe(true);
+      return {restored: "text", path: SCHEMA, restoredMomentId: "undo-old"};
+    }).mockImplementationOnce(async momentId => {
+      expect(momentId).toBe(newMoment.id);
+      return {restored: "text", path: newMoment.path, restoredMomentId: "back-new-write"};
+    });
+    await expect(f.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({
+      restored: [], unfinished: {step: "files"},
+    });
+    expect(f.calls.filter(call => call.method === "POST").map(call => call.path)).toEqual([
+      kind === "person" ? "/sync/shares/new-share/grants/new-grant/revoke" : "/sync/shares/new-link/revoke",
+    ]);
+    const pending = (await createAutomationRunStore(rootPath, resolver).pendingRestores()).find(entry => entry.session)!;
+    expect(pending.id).not.toBe("pending-pass");
+    expect(pending.session).toMatchObject({filesUndone: false, receipts: []});
+    expect(pending.session!.grants).toContain(newGrant);
+    expect(pending.session!.restoreGrants).toEqual([newGrant]);
+    if (kind === "person") rows.splice(0, 1);
+    await expect(f.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({
+      restored: [{path: newMoment.path, restoredMomentId: "back-new-write"}], unfinished: null,
+    });
+    expect(f.calls.some(call => call.path.includes(`/collection-writes/${newGrant}?`))).toBe(true);
+    if (kind === "person") expect(f.calls.some(call => call.path.includes("/collection-writes/grant-edit?"))).toBe(false);
+    await vi.waitFor(async () => expect(await store.pendingRestores()).toEqual([]));
+    expect(f.releases).toContain("pending-pass");
+    expect(f.releases).toContain(pending.id);
+  });
+
+  it("keeps a waiting session's refused file in review on the next Stop", async () => {
+    const {store, target, rootPath, resolver} = await pendingFileUndo();
+    const f = fixture({rootPath, runStore: store, granted: [grant({revokedAtMs: 3})],
+      restoreError: new RestoreHeadChangedError(SCHEMA), undoRunsOf: async () => NOTHING});
+    f.capture.readMoment.mockResolvedValueOnce(null);
+    await expect(f.call(CHANNELS.stopAndRestore, {target})).resolves.toEqual({status: "waiting"});
+    expect((await store.pendingRestores())[0]!.session!.receipts).toHaveLength(1);
+    await expect(f.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: []})).resolves.toMatchObject({
+      files: [{kind: "refused"}], errorMessage: null,
+    });
+    expect((await createAutomationRunStore(rootPath, resolver).pendingRestores())[0]!.session!.result).toMatchObject({
+      status: "restored", review: [{path: SCHEMA, reason: "restore-refused"}],
+    });
+    await expect(f.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({
+      review: [{path: SCHEMA, reason: "restore-refused"}], unfinished: null,
+    });
+    await vi.waitFor(async () => expect(await store.pendingRestores()).toEqual([]));
+  });
+
+  it("carries old Undo refusals through a waiting follow-up restore", async () => {
+    const {store, target, rootPath} = await pendingFileUndo();
+    const entry = (await store.pendingRestores())[0]!;
+    entry.session!.undoingFiles = true;
+    await store.savePendingRestore(entry);
+    const moment = {...schemaMoment, id: "new-write", objectId: "new-object", path: "notes/new.txt"};
+    const f = fixture({rootPath, runStore: store, undoRunsOf: async () => NOTHING, moment,
+      granted: [grant({revokedAtMs: 3}), grant({grantId: "new-grant", shareId: "new-share"})],
+      ledger: {"new-grant": [{writes: [{committedAtMs: 4, files: [{path: moment.path, objectId: moment.objectId,
+        momentId: moment.id, created: false}]}], nextAfterOriginSeq: null}]}});
+    f.capture.restoreFileToBeforeMoment.mockRejectedValueOnce(new RestoreHeadChangedError(SCHEMA))
+      .mockResolvedValueOnce({restored: "text", path: moment.path, restoredMomentId: "back-new-write"});
+    await expect(f.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({
+      review: [{path: SCHEMA, reason: "restore-refused"}], unfinished: {step: "files"},
+    });
+    f.capture.readMoment.mockResolvedValueOnce(null);
+    await expect(f.call(CHANNELS.stopAndRestore, {target})).resolves.toEqual({status: "waiting"});
+    expect((await store.pendingRestores()).find(entry => entry.session)?.session!.result).toMatchObject({
+      review: [{path: SCHEMA, reason: "restore-refused"}],
+    });
+    await expect(f.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({
+      restored: [{path: moment.path}], review: [{path: SCHEMA, reason: "restore-refused"}], unfinished: null,
+    });
+    expect(f.calls.some(call => call.path.includes("/collection-writes/grant-edit?"))).toBe(false);
+    await vi.waitFor(async () => expect(await store.pendingRestores()).toEqual([]));
+  });
+
+  it.each(["Undo", "runs", "handoff"])("keeps the follow-up Stop after an interrupted %s", async boundary => {
+    const {store, target, rootPath, resolver} = await pendingFileUndo();
+    const entry = (await store.pendingRestores())[0]!;
+    entry.session!.undoingFiles = true;
+    await store.savePendingRestore(entry);
+    const rows = [grant({revokedAtMs: 3}), grant({grantId: "new-grant", shareId: "new-share"})];
+    const f = fixture({rootPath, runStore: store, granted: rows, undoRunsOf: async () => NOTHING});
+    if (boundary === "Undo") f.barrier.mockRejectedValueOnce(Error("Interrupted Undo"));
+    if (boundary === "runs") {
+      const failing = fixture({rootPath, runStore: store, granted: rows, undoRunsOf: async () => {throw Error("Interrupted runs");}});
+      await expect(failing.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({unfinished: {step: "runs"}});
+    } else {
+      if (boundary === "handoff") {
+        const save = store.savePendingRestore;
+        let interrupted = false;
+        vi.spyOn(store, "savePendingRestore").mockImplementation(async update => {
+          if (update.id === "pending-pass" && update.serverRelease && !interrupted) {
+            interrupted = true; throw Error("Interrupted handoff");
+          }
+          await save(update);
+        });
+      }
+      if (boundary === "handoff") await expect(f.call(CHANNELS.stopAndRestore, {target})).rejects.toThrow("Interrupted handoff");
+      else await expect(f.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({unfinished: {message: `Interrupted ${boundary}`}});
+    }
+    expect(rows[1]).toMatchObject({revokedAtMs: 3});
+    const restartedStore = createAutomationRunStore(rootPath, resolver);
+    const saved = (await restartedStore.pendingRestores()).find(entry => entry.id === "pending-pass")!;
+    expect(saved.session).toMatchObject({nextGrants: ["new-grant"]});
+    if (boundary === "handoff") {
+      expect((await restartedStore.pendingRestores()).find(entry => entry.id === "pending-pass:next")?.session).toBeDefined();
+      rows.push(grant({grantId: "third-grant", shareId: "third-share"}));
+    }
+    const retry = fixture({rootPath, runStore: restartedStore, granted: rows, undoRunsOf: async () => NOTHING,
+      ledger: {"grant-edit": [{writes: [], nextAfterOriginSeq: null}], "new-grant": [{writes: [], nextAfterOriginSeq: null}]}});
+    await expect(retry.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({unfinished: {step: "files"}});
+    const next = (await restartedStore.pendingRestores()).find(entry => entry.session)!;
+    expect(next.id).toBe("pending-pass:next");
+    expect(next.session!.grants).toEqual(boundary === "handoff" ? ["grant-edit", "new-grant", "third-grant"] : ["grant-edit", "new-grant"]);
+    expect(next.session!.restoreGrants).toEqual(boundary === "handoff" ? ["new-grant", "third-grant"] : ["new-grant"]);
+    await expect(retry.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({unfinished: null});
+    expect(retry.calls.some(call => call.path.includes("/collection-writes/new-grant?"))).toBe(true);
+    if (boundary === "handoff") expect(retry.calls.some(call => call.path.includes("/collection-writes/third-grant?"))).toBe(true);
+    await vi.waitFor(async () => expect(await restartedStore.pendingRestores()).toEqual([]));
+  });
+
+  it("does not create a follow-up when the owner dismisses during run Undo", async () => {
+    const {store, target, rootPath} = await pendingFileUndo();
+    const entry = (await store.pendingRestores())[0]!;
+    entry.session!.undoingFiles = true;
+    await store.savePendingRestore(entry);
+    const rows = [grant({revokedAtMs: 3}), grant({grantId: "new-grant", shareId: "new-share"})];
+    let reached!: () => void, resume!: () => void;
+    const entered = new Promise<void>(resolve => {reached = resolve;});
+    const blocked = new Promise<void>(resolve => {resume = resolve;});
+    const f = fixture({rootPath, runStore: store, granted: rows, undoRunsOf: async () => NOTHING,
+      serverRestore: async () => {reached(); await blocked; return NOTHING;}});
+    const trying = Promise.resolve(f.call(CHANNELS.stopAndRestore, {target}));
+    try {
+      await entered;
+      expect(rows[1]).toMatchObject({revokedAtMs: 3});
+      await f.call(stopAndRestoreRecoveryOperations.dismissStopAndRestore.channel, {target});
+    } finally {resume(); await trying;}
+    await vi.waitFor(async () => expect(await store.pendingRestores()).toEqual([]));
+    expect(f.releases).toContain("pending-pass");
   });
 
   it.each(["first batch", "mid-batch", "before barrier", "before receipts", "retry", "mid-Undo"])("keeps every file reversible after an unjournaled batch: %s", async boundary => {

@@ -78,6 +78,19 @@ describe("the automation run store", () => {
     await store.savePendingRestore(late);
     expect(await store.pendingRestores()).toEqual([]);
   });
+  it.each([false, true])("does not create a follow-up after its parent was dismissed, removed: %s", async removed => {
+    const root = await createTestScratch("dohc-restore-follow-up-dismiss-");
+    const old = createAutomationRunStore(root, testMetadataDir);
+    const session = {grants: ["grant"], target: {kind: "person" as const, userId: "ana"},
+      label: "Ana", definitions: [], filesUndone: false, receipts: [], result: {status: "waiting"}};
+    await old.savePendingRestore({id: "parent", session});
+    await old.pendingRestores();
+    const current = createAutomationRunStore(root, testMetadataDir);
+    await current.savePendingRestore({id: "parent", serverRelease: true, claims: [], session: undefined});
+    if (removed) await current.removePendingRestore("parent");
+    await old.savePendingRestore({id: "parent:next", session}, "parent");
+    expect((await createAutomationRunStore(root, testMetadataDir).pendingRestores()).some(entry => entry.id === "parent:next")).toBe(false);
+  });
   it("keeps retained claims when the desktop saves only its restore session", async () => {
     const root = await createTestScratch("dohc-restore-session-");
     const store = createAutomationRunStore(root, testMetadataDir);

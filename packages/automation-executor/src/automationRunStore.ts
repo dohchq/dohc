@@ -351,6 +351,8 @@ const PendingRestoreSchema = z.object({
     definitions: z.array(z.object({collectionPath: z.string(), id: z.string(), definitionHash: z.string()})),
     filesUndone: z.boolean(),
     undoingFiles: z.boolean().optional(),
+    restoreGrants: z.array(z.string().min(1)).optional(),
+    nextGrants: z.array(z.string().min(1)).optional(),
     receipts: z.array(z.object({path: z.string(), restoredMomentId: z.string(), removed: z.boolean().optional()})),
     intents: z.array(z.string().min(1)).optional(),
     // The desktop validates its outcome with the bridge contract on recovery.
@@ -758,7 +760,7 @@ const tooLarge = () =>
 
 export interface AutomationRunStore {
   pendingRestores(): Promise<PendingRestore[]>;
-  savePendingRestore(restore: PendingRestoreUpdate): Promise<void>;
+  savePendingRestore(restore: PendingRestoreUpdate, whilePending?: string): Promise<void>;
   recordRestoreIntents(id: string, momentIds: readonly string[]): Promise<void>;
   recordRestoreReceipts(id: string, receipts: readonly z.infer<typeof RestoreReceiptSchema>[], originalMomentIds?: readonly string[]): Promise<void>;
   undoRestoreReceipts(id: string, momentIds: readonly string[], originalMomentIds?: readonly string[]): Promise<void>;
@@ -951,11 +953,15 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
   };
   const readRestores = async (refresh = false): Promise<Map<string, PendingRestore> | null> =>
     !refresh && restores !== undefined ? restores : parseRestores(await readBounded(await restoresFile()));
-  const changeRestore = (id: string, entry?: PendingRestoreUpdate) => serial(async () => {
+  const changeRestore = (id: string, entry?: PendingRestoreUpdate, whilePending?: string) => serial(async () => {
     const path = await restoresFile();
     return withFile(path, async () => {
       const known = parseRestores(await readBoundedUnlocked(path));
       if (known === null) throw new Error("dohc could not read unfinished Stop and restore progress. Reopen the workspace, then try again.");
+      if (whilePending !== undefined) {
+        const parent = known.get(whilePending);
+        if (!parent?.session || parent.serverRelease) return;
+      }
       if (entry && releasedRestores.has(id) && !entry.serverRelease) return;
       const next = new Map(known);
       if (entry) next.set(id, PendingRestoreSchema.parse({claims: [], ...known.get(id), ...entry}));
@@ -1269,7 +1275,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
         return structuredClone([...known.values()]);
       });
     },
-    savePendingRestore(entry) { return changeRestore(entry.id, entry); },
+    savePendingRestore(entry, whilePending) { return changeRestore(entry.id, entry, whilePending); },
     recordRestoreIntents(id, momentIds) {
       return serial(async () => {
         const session = (await readRestores())?.get(id)?.session;

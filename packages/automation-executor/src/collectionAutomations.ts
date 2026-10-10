@@ -1063,7 +1063,7 @@ export class CollectionAutomations {
     if (result === null) throw new AutomationRunWait("The workspace engine is unavailable.");
   }
   pendingRestores() { return this.options.store.pendingRestores(); }
-  savePendingRestore(entry: import("./automationRunStore").PendingRestoreUpdate) { return this.options.store.savePendingRestore(entry); }
+  savePendingRestore(entry: import("./automationRunStore").PendingRestoreUpdate, whilePending?: string) { return this.options.store.savePendingRestore(entry, whilePending); }
   recordRestoreIntents(id: string, momentIds: readonly string[]) { return this.options.store.recordRestoreIntents(id, momentIds); }
   async recordRestoreReceipts(id: string, receipts: readonly {path: string; restoredMomentId: string; removed?: boolean}[], originalMomentIds: readonly string[] = []) {
     await this.makeWritesDurable();
