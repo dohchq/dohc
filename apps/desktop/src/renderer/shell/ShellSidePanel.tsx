@@ -12,8 +12,8 @@ import { SkeletonRows, SkeletonSlot } from "../ui/SkeletonRows";
 // missing. The view carries no dependency the shell does not already load.
 import { SearchView } from "../workbench/SearchView";
 import { SidePanel } from "../workbench/SidePanel";
-import { setView, setSidebarWidth, type WorkbenchState } from "../workbench/workbenchState";
-import { LazyGraphView, LazySitePreviewPage } from "./lazyViews";
+import { setView, setSidebarWidth, SHARING_VIEW_ID, type WorkbenchState } from "../workbench/workbenchState";
+import { LazyGraphView, LazySharingView, LazySitePreviewPage } from "./lazyViews";
 
 const LazyAppsView = lazy(() =>
   import("../workbench/AppsView").then((mod) => ({ default: mod.AppsView })),
@@ -61,6 +61,7 @@ export function ShellSidePanel(props: {
   createFirstApp: AppsViewProps["onCreateFirstApp"];
   shareView: NonNullable<WorkspaceSummary["shareView"]> | null;
   historyTimeline: ReactNode;
+  sharing: ComponentProps<typeof LazySharingView>;
   selectedAppRoot: string | null;
   openAppTab: SitePreviewPageProps["onOpenApp"];
   reportShellError: SitePreviewPageProps["reportError"];
@@ -90,6 +91,7 @@ export function ShellSidePanel(props: {
     createFirstApp,
     shareView,
     historyTimeline,
+    sharing,
     selectedAppRoot,
     openAppTab,
     reportShellError,
@@ -188,6 +190,10 @@ export function ShellSidePanel(props: {
         </SkeletonSlot>
       ) : wb.activeView === "history" ? (
         historyTimeline
+      ) : wb.activeView === SHARING_VIEW_ID ? (
+        <Suspense fallback={<SkeletonRows layout="panel" label="Loading sharing..." />}>
+          <LazySharingView {...sharing} />
+        </Suspense>
       ) : selectedAppRoot !== null ? (
         // The same sealed preview an app's tab runs: a sandboxed frame
         // on a dohc loopback server, with no dohc bridge.

@@ -27,7 +27,7 @@ const noop = () => {};
 function renderFrame() {
   render(<>
     <Titlebar chatsSidebar={{ visible: true, onToggle: noop }} />
-    <ActivityBar views={["explorer", "search", "graph", "sites", "history"]} activeView="explorer" sidebarVisible hasConflict={false} onSelectView={noop} onOpenSettings={noop} onOpenCloud={noop} />
+    <ActivityBar views={["explorer", "search", "graph", "sites", "history"]} activeView="explorer" sidebarVisible hasConflict={false} onSelectView={noop} onOpenSettings={noop} />
     <ChatsPanel width={320} onWidthChange={noop} onCollapse={noop} tabs={["all", "about"]} tab="all" onTabChange={noop}>Chats</ChatsPanel>
     <SidePanel title="Explorer" width={320} onWidthChange={noop}>Files</SidePanel>
   </>);
@@ -39,7 +39,7 @@ it.each(["titlebar", "titlebarChatsSidebar", "activityBar", "chatsPanel", "chats
     expect(screen.getByTestId(desktopPins[key])).toBeTruthy();
   },
 );
-it.each(["explorer", "search", "graph", "sites", "history", "cloud", "settings"])(
+it.each(["explorer", "search", "graph", "sites", "history", "sharing", "settings"])(
   "couples activity %s to its producer", (view) => {
     renderFrame();
     expect(screen.getByTestId(activityPin(view))).toBeTruthy();
