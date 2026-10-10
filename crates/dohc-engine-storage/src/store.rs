@@ -168,7 +168,7 @@ impl EngineStore {
         self.freshly_created
     }
 
-    /// Move WAL checkpoint I/O off the actor without changing commit durability.
+    /// Use background WAL checkpoints without changing commit durability.
     pub fn enable_background_checkpoints(&mut self) -> Result<(), StorageError> {
         if self
             .conn
@@ -197,13 +197,16 @@ impl EngineStore {
         }
     }
 
-    /// Coalesce checkpoint requests; the actor never waits for checkpoint I/O.
+    /// Coalesce background checkpoints, with a writer fallback for oversized WALs.
     pub fn request_checkpoint(&mut self) {
         let changes = self.conn.total_changes();
         if self.checkpoints.is_none() || changes == self.checkpoint_changes {
             return;
         }
         self.checkpoint_changes = changes;
+        if let Some(checkpoints) = &self.checkpoints {
+            checkpoints.checkpoint_on_writer_if_needed(&self.conn);
+        }
         if self
             .checkpoints
             .as_ref()
