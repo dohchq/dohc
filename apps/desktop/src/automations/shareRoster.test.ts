@@ -1,3 +1,4 @@
+import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { deferred } from "../testing/deferred";
@@ -899,7 +900,7 @@ describe("a direct write's author in History", () => {
         operation: "write", metadata: { origin: "sync" }, momentOrder: 0, protected: false,
         authors: [{ kind: "named", userId: "ana", grantId: "g-1", grantGeneration: 1 }],
       }],
-      nextBeforeMomentOrder: null, latestMomentOrder: 0, activeVersionId: "main", protectedTruncated: false,
+      nextCursor: null, latestMomentOrder: 0, activeVersionId: "main", ...historyPageFields,
     }), { agent: () => undefined, person: () => undefined, automation: () => null, named: (author) => labelFrom(saved, author) });
     expect(history).toMatchObject({ moments: [{ namedAuthor: { userId: "ana", label: "Someone you shared with" } }] });
   });

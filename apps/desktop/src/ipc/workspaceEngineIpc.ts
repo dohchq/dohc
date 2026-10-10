@@ -315,22 +315,20 @@ export function createWorkspaceEngineIpc<
         const admitted = policy ? historyPathAdmission(policy) : null;
         return listEngineMomentsForIpc(
           async () => {
-            let beforeMomentOrder = input.beforeMomentOrder;
-            let protectedTruncated = false;
+            let cursor = input.cursor;
             // Skip retired pages, but leave a continuation after a bounded scan.
             for (let pageIndex = 0; ; pageIndex += 1) {
               const page = await history.listMoments({
                 ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
                 ...(input.limit !== undefined ? { limit: input.limit } : {}),
-                ...(beforeMomentOrder !== undefined ? { beforeMomentOrder } : {}),
+                ...(cursor !== undefined ? { cursor } : {}),
               });
               if (!admitted) return page;
-              protectedTruncated ||= page.protectedTruncated;
               const moments = page.moments.filter(moment => moment.protected || admitted(moment.path));
-              if (moments.length > 0 || page.nextBeforeMomentOrder === null || pageIndex === 9) {
-                return { ...page, moments, protectedTruncated };
+              if (moments.length > 0 || page.versionMarkers.length > 0 || page.nextCursor === null || pageIndex === 9) {
+                return { ...page, moments };
               }
-              beforeMomentOrder = page.nextBeforeMomentOrder;
+              cursor = page.nextCursor;
             }
           },
           authorNames(input.workspaceId),

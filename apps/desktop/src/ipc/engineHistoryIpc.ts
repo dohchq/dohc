@@ -42,10 +42,11 @@ export async function listEngineMomentsForIpc(
       moments: page.moments.map((moment) =>
         engineMomentForIpc(moment, names),
       ),
-      nextBeforeMomentOrder: page.nextBeforeMomentOrder,
+      startCursor: page.startCursor,
+      nextCursor: page.nextCursor,
+      versionMarkers: page.versionMarkers,
       latestMomentOrder: page.latestMomentOrder,
       activeVersionId: page.activeVersionId,
-      protectedTruncated: page.protectedTruncated,
     });
   } catch (error) {
     if (isWorkspaceUpdatingRefusal(error)) {

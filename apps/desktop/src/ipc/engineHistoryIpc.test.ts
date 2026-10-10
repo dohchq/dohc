@@ -1,3 +1,4 @@
+import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import { describe, expect, it, vi } from "vitest";
 import {
   engineMomentDetailForIpc,
@@ -65,10 +66,10 @@ describe("listEngineMomentsForIpc", () => {
     ];
     const response = await listEngineMomentsForIpc(async () => ({
       moments: [{...detail.moment, authors, momentOrder: 1, protected: false}],
-      nextBeforeMomentOrder: null,
+      nextCursor: null,
       latestMomentOrder: 1,
-      activeVersionId: "main",
-      protectedTruncated: false,
+      activeVersionId: "main", ...historyPageFields,
+
     }), names);
     if (!("moments" in response)) throw new Error("Expected ready history");
     expect(response.moments[0]?.authors).toEqual(authors);
@@ -520,7 +521,7 @@ it("omits only rename summaries from timeline rows and details", async () => {
     detail.moment.metadata.summary = operation === "rename" ? "Renamed private/a.md to notes/a.md" : "Saved latest edits";
     const listed = await listEngineMomentsForIpc(async () => ({
       moments: [{ ...detail.moment, momentOrder: 1, protected: false }],
-      nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+      nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields,
     }), names);
     if (!("moments" in listed)) throw new Error("Expected ready history");
     for (const row of [listed.moments[0], engineMomentDetailForIpc(detail, names)]) {

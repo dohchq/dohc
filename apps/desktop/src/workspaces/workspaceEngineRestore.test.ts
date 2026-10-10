@@ -84,7 +84,7 @@ describe("engine history reads", () => {
     expect(page.moments[0].recordedAtMs).toBeGreaterThanOrEqual(
       page.moments[1].recordedAtMs,
     );
-    expect(page.nextBeforeMomentOrder).toBeNull();
+    expect(page.nextCursor).toBeNull();
 
     const detail = await engine.readMoment(page.moments[0].id);
     expect(detail?.protected).toBe(false);

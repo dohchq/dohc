@@ -303,9 +303,10 @@ type MomentsGetParams = JsonObject & { momentId: string };
 
 type HistoryPageParams = JsonObject & {
   workspaceId: string;
+  versionId?: string;
   objectId?: string;
   limit?: number;
-  beforeMomentOrder?: number;
+  cursor?: HistoryCursor;
 };
 
 type SearchEnsureIndexParams = JsonObject & {
@@ -982,11 +983,30 @@ const MomentsListResultSchema = mutableStruct({
   nextBeforeMomentOrder: NullableInt,
   latestMomentOrder: Schema.Int,
 });
+const HistoryMomentPositionSchema = mutableStruct({ recordedAtMs: Schema.Int, momentOrder: Schema.Int });
+const HistoryMarkerPositionSchema = mutableStruct({ createdAtMs: Schema.Int, versionId: Schema.String });
+const HistoryCursorSchema = mutableStruct({
+  format: Schema.Literal(1), engineUuid: Schema.String, workspaceId: Schema.String,
+  versionId: Schema.String, objectId: NullableString,
+  textFence: Schema.Int, protectedFence: Schema.Int, markerFence: Schema.Int,
+  text: Schema.NullOr(HistoryMomentPositionSchema), protected: Schema.NullOr(HistoryMomentPositionSchema),
+  marker: Schema.NullOr(HistoryMarkerPositionSchema),
+});
+export type HistoryCursor = typeof HistoryCursorSchema.Type;
+const HistoryMomentMetadataSchema = mutableStruct({
+  momentOrder: Schema.Int, momentId: Schema.String, versionId: Schema.String, objectId: Schema.String,
+  path: Schema.String, recordedAtMs: Schema.Int, operation: Schema.Literals(["write", "delete", "rename"]),
+  afterContentKind: ContentKindSchema, afterByteLength: NullableInt, metadataOrigin: Schema.String,
+  metadataSummary: Schema.optionalKey(NullableString), metadataCorrelationId: Schema.optionalKey(NullableString),
+  authors: MomentAuthorsSchema, syncRecordOnly: Schema.Boolean,
+});
+export type HistoryMomentMetadata = typeof HistoryMomentMetadataSchema.Type;
 const HistoryPageResultSchema = mutableStruct({
   activeVersion: VersionRecordSchema,
-  textMomentPage: MomentsListResultSchema,
+  moments: Schema.mutable(Schema.Array(HistoryMomentMetadataSchema)),
   protectedMoments: Schema.mutable(Schema.Array(SecretMomentRecordSchema)),
-  protectedTruncated: Schema.Boolean,
+  versionMarkers: Schema.mutable(Schema.Array(VersionRecordSchema)),
+  startCursor: HistoryCursorSchema, nextCursor: Schema.NullOr(HistoryCursorSchema), latestMomentOrder: Schema.Int,
 });
 const TextListResultSchema = mutableStruct({
   files: Schema.mutable(

@@ -4301,9 +4301,8 @@ export function DesktopWorkspaceShell(props: {
     engineHistory ? (
       <EngineHistoryView
         moments={engineHistory.moments}
-        hasMore={engineHistory.nextBeforeMomentOrder != null}
+        hasMore={engineHistory.nextCursor != null}
         loadingMore={engineHistoryLoadingMore}
-        protectedTruncated={engineHistory.protectedTruncated}
         onLoadMore={() =>
           void loadMoreEngineHistory().catch((error) =>
             reportShellError("Could not load earlier history.", error),

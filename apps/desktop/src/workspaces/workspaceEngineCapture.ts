@@ -1,3 +1,4 @@
+import type { HistoryCursor } from "@dohc/workspace-engine-client";
 import type { RecordEditSession } from "@dohc/automation-executor/collection-record-edits";
 import { isCaptureRecoveryOrigin } from "@dohc/workspace-contracts/engine";
 import { errorMessage } from "./workspaceError";
@@ -276,16 +277,13 @@ export interface WorkspaceEngineMomentSummary {
   protected: boolean;
 }
 
-// One page of the active version's timeline (the folder shows the active
-// version, so its history is what the history UI shows). Secret moments are
-// interleaved by recording time; pagination stays keyed on the TEXT
-// timeline's momentOrder (see listMoments for the window rule).
 export interface WorkspaceEngineMomentPage {
   moments: WorkspaceEngineMomentSummary[];
-  nextBeforeMomentOrder: number | null;
+  startCursor: HistoryCursor;
+  nextCursor: HistoryCursor | null;
+  versionMarkers: VersionRecord[];
   latestMomentOrder: number;
   activeVersionId: string;
-  protectedTruncated: boolean;
 }
 
 // The diff page's payload: a text moment carries its full before/after
@@ -639,7 +637,7 @@ export interface WorkspaceEngineCapture {
   // version, across its renames.
   listMoments(input?: {
     limit?: number;
-    beforeMomentOrder?: number;
+    cursor?: HistoryCursor;
     objectId?: string;
   }): Promise<WorkspaceEngineMomentPage>;
   readMoment(momentId: string): Promise<WorkspaceEngineMomentDetail | null>;
@@ -6246,18 +6244,16 @@ export function createWorkspaceEngineCapture(
         workspaceId,
         ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
         ...(input.limit !== undefined ? { limit: input.limit } : {}),
-        ...(input.beforeMomentOrder !== undefined
-          ? { beforeMomentOrder: input.beforeMomentOrder }
+        ...(input.cursor !== undefined
+          ? { cursor: input.cursor }
           : {}),
       });
       const activeVersionId = history.activeVersion.id;
-      const page = history.textMomentPage;
+      const page = history;
       const textMoments: WorkspaceEngineMomentSummary[] = page.moments.map(
         (moment) => ({ ...moment, protected: false }),
       );
-      // The daemon already restricted protected moments to this text page's
-      // half-open time window. The desktop owns only the visible merge order.
-      const protectedInWindow: WorkspaceEngineMomentSummary[] =
+      const protectedMoments: WorkspaceEngineMomentSummary[] =
         history.protectedMoments.map((moment) => ({
           id: moment.id,
           versionId: moment.versionId,
@@ -6276,7 +6272,7 @@ export function createWorkspaceEngineCapture(
       // momentOrder (a counter each store keeps for itself, so it ranks only
       // moments of the same kind), then lower id. The renderer shows this
       // order as given, so it is what the user reads.
-      const merged = [...textMoments, ...protectedInWindow].sort((a, b) => {
+      const merged = [...textMoments, ...protectedMoments].sort((a, b) => {
         if (a.recordedAtMs !== b.recordedAtMs) {
           return b.recordedAtMs - a.recordedAtMs;
         }
@@ -6286,10 +6282,11 @@ export function createWorkspaceEngineCapture(
       });
       return {
         moments: merged,
-        nextBeforeMomentOrder: page.nextBeforeMomentOrder,
+        startCursor: page.startCursor,
+        nextCursor: page.nextCursor,
+        versionMarkers: page.versionMarkers,
         latestMomentOrder: page.latestMomentOrder,
         activeVersionId,
-        protectedTruncated: history.protectedTruncated,
       };
     },
 

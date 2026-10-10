@@ -18,15 +18,16 @@ export function sharedViewHistory(store: HistoryStore, workspaceId: string):
         workspaceId,
         ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
         ...(input.limit !== undefined ? { limit: input.limit } : {}),
-        ...(input.beforeMomentOrder !== undefined ? { beforeMomentOrder: input.beforeMomentOrder } : {}),
+        ...(input.cursor !== undefined ? { cursor: input.cursor } : {}),
       });
-      const page = history.textMomentPage;
+      const page = history;
       return {
         moments: page.moments.map((moment) => ({ ...moment, protected: false as const })),
-        nextBeforeMomentOrder: page.nextBeforeMomentOrder,
+        startCursor: page.startCursor,
+        nextCursor: page.nextCursor,
+        versionMarkers: page.versionMarkers,
         latestMomentOrder: page.latestMomentOrder,
         activeVersionId: history.activeVersion.id,
-        protectedTruncated: false,
       };
     },
     async readMoment(momentId) {

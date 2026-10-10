@@ -16,6 +16,11 @@ mod binary_write;
 mod capture_recovery;
 mod capture_write;
 mod delete_rename;
+mod history;
+pub use history::{
+    HistoryCursor, HistoryMarkerPosition, HistoryMomentMetadata, HistoryMomentPosition,
+    HistoryPageRead,
+};
 mod request_ledger;
 mod rollback;
 mod source_capture;

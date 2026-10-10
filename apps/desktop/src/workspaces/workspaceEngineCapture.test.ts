@@ -220,14 +220,14 @@ async function liveMoments(engine: WorkspaceEngineCapture): Promise<EngineMoment
   // here is a limit rejecting valid work; paging costs nothing and removes the
   // question. (Same correction as the moments reader on #417.)
   const summaries: Awaited<ReturnType<WorkspaceEngineCapture["listMoments"]>>["moments"] = [];
-  let beforeMomentOrder: number | undefined;
+  let cursor: import("@dohc/workspace-engine-client").HistoryCursor | undefined;
   for (;;) {
     const page = await engine.listMoments({
-      ...(beforeMomentOrder === undefined ? {} : { beforeMomentOrder }),
+      ...(cursor === undefined ? {} : { cursor }),
     });
     summaries.push(...page.moments);
-    if (page.nextBeforeMomentOrder === null) break;
-    beforeMomentOrder = page.nextBeforeMomentOrder;
+    if (page.nextCursor === null) break;
+    cursor = page.nextCursor;
   }
   const rows: EngineMomentRow[] = [];
   for (const summary of [...summaries].reverse()) {

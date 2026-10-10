@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
-  EngineMomentRecord,
   HistoryPolicyUnreadableResult,
   ListEngineMomentsResponse,
   ListEngineMomentsResult,
@@ -11,12 +10,7 @@ import { bridge } from "../bridge";
 // pages, and the latest order of the answer on screen. A refresh replaces
 // that order outright; the shell keeps its own floor for the open-file
 // refresh key.
-export type HistoryPage = {
-  moments: EngineMomentRecord[];
-  nextBeforeMomentOrder: number | null;
-  latestMomentOrder: number;
-  protectedTruncated: boolean;
-};
+export type HistoryPage = Pick<ListEngineMomentsResult, "moments" | "startCursor" | "nextCursor" | "versionMarkers" | "latestMomentOrder">;
 
 // Why there is no page. A null timeline is not "no changes": it is also a
 // first read still in flight, a read that failed, and a page dropped as stale
@@ -31,7 +25,7 @@ export type HistoryReadState = "loading" | "failed" | "updating";
 // flush another 1.85 seconds of breathing room without leaving the panel in
 // an unbounded spinner. After this ladder, the inline Try again remains.
 const HISTORY_UPDATING_RETRY_DELAYS_MS = [100, 250, 500, 1_000] as const;
-const HISTORY_PAGE_LIMIT = 200;
+const HISTORY_PAGE_LIMIT = 50;
 
 function waitForHistoryRetry(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -207,9 +201,10 @@ export function useHistoryPage(
         setLoadingMore(false);
         setPage({
           moments: answer.moments,
-          nextBeforeMomentOrder: answer.nextBeforeMomentOrder,
+          nextCursor: answer.nextCursor,
           latestMomentOrder: answer.latestMomentOrder,
-          protectedTruncated: answer.protectedTruncated,
+          startCursor: answer.startCursor,
+          versionMarkers: answer.versionMarkers,
         });
         // Readiness belongs to the page that actually commits. A newer
         // activity refresh can beat the workspace-open refresh; marking only
@@ -231,7 +226,7 @@ export function useHistoryPage(
     };
 
     const loadMore = async (): Promise<void> => {
-      const cursor = latestPage.current?.nextBeforeMomentOrder;
+      const cursor = latestPage.current?.nextCursor;
       if (cursor === null || cursor === undefined || loadingMoreNow.current) return;
       const token = ++issue.current;
       // The version this page belongs to: the one the displayed timeline
@@ -243,7 +238,7 @@ export function useHistoryPage(
         const answer = await bridge().listEngineMoments({
           workspaceId,
           limit: HISTORY_PAGE_LIMIT,
-          beforeMomentOrder: cursor,
+          cursor,
         });
         // The displayed page remains the honest last answer while capture is
         // settling. Releasing the button below gives the user a bounded
@@ -270,9 +265,10 @@ export function useHistoryPage(
           committed.current = token;
           setPage({
             moments: [...current.moments, ...answer.moments],
-            nextBeforeMomentOrder: answer.nextBeforeMomentOrder,
+            nextCursor: answer.nextCursor,
             latestMomentOrder: Math.max(current.latestMomentOrder, answer.latestMomentOrder),
-            protectedTruncated: current.protectedTruncated || answer.protectedTruncated,
+            startCursor: current.startCursor,
+            versionMarkers: [...current.versionMarkers, ...answer.versionMarkers],
           });
         }
       } catch (error) {

@@ -1,3 +1,5 @@
+import type { HistoryCursor } from "./versionedWireContract";
+function historyCursor(): HistoryCursor { return { format: 1, engineUuid: "test", workspaceId: "workspace", versionId: "main", objectId: null, textFence: 41, protectedFence: -1, markerFence: -1, text: null, protected: null, marker: null }; }
 import { ProtocolShapeError } from "../wireSchema";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
@@ -473,13 +475,12 @@ describe("VersionedLiveAdapter", () => {
               name: "Main",
               createdAtMs: 1,
             },
-            textMomentPage: {
+
               moments: [],
-              nextBeforeMomentOrder: null,
+              nextCursor: null,
               latestMomentOrder: -1,
-            },
-            protectedMoments: [],
-            protectedTruncated: true,
+          protectedMoments: [], startCursor: historyCursor(), versionMarkers: [],
+
           },
         };
       },
@@ -492,14 +493,13 @@ describe("VersionedLiveAdapter", () => {
       adapter.readHistoryPage({
         workspaceId: WORKSPACE,
         ...(objectId !== undefined ? { objectId } : {}),
-        limit: 200,
-        beforeMomentOrder: 41,
+        limit: 50,
+        cursor: historyCursor(),
       }),
     ).resolves.toMatchObject({
       activeVersion: { id: "main" },
-      textMomentPage: { moments: [] },
-      protectedMoments: [],
-      protectedTruncated: true,
+       moments: [], protectedMoments: [], startCursor: historyCursor(), nextCursor: null, versionMarkers: [],
+
     });
     expect(requests).toHaveLength(1);
     expect(requests[0]).toMatchObject({
@@ -507,8 +507,8 @@ describe("VersionedLiveAdapter", () => {
       params: {
         workspaceId: WORKSPACE,
         ...(objectId !== undefined ? { objectId } : {}),
-        limit: 200,
-        beforeMomentOrder: 41,
+        limit: 50,
+        cursor: historyCursor(),
       },
     });
   });

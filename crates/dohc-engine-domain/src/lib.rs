@@ -157,8 +157,7 @@ pub use secrets::{
     compare_secret_files_page_keyless, delete_secret_file_keyless_with,
     derive_capture_secret_moment_id, derive_capture_secret_retire_moment_id,
     fork_version_keyless_with, get_secret_moment_keyless, has_secret_state,
-    list_secret_files_keyless, list_secret_files_keyless_page,
-    list_secret_moments_in_time_window_keyless, list_secret_moments_keyless,
+    list_secret_files_keyless, list_secret_files_keyless_page, list_secret_moments_keyless,
     list_secret_moments_page_keyless, restore_secret_file_verbatim_with_metadata_and_after,
     secret_file_len_keyless,
 };
@@ -180,6 +179,10 @@ pub use store::{
     validate_plaintext_storable_path, validate_write_input, write_binary_in_tx,
     write_history_text_in_tx, write_projected_text_in_tx, write_published_binary_in_tx,
     write_published_history_text_in_tx, write_published_text_in_tx, write_text_in_tx,
+};
+pub use store::{
+    HistoryCursor, HistoryMarkerPosition, HistoryMomentMetadata, HistoryMomentPosition,
+    HistoryPageRead,
 };
 
 // Re-export the storage surface a domain caller needs on the common path.

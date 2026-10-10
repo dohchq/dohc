@@ -1,3 +1,4 @@
+import { historyCursor, historyPageFields } from "../../testing/historyPageFixture";
 // @vitest-environment jsdom
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -470,10 +471,10 @@ function moment(overrides: Partial<EngineMomentRecord> = {}): EngineMomentRecord
 function page(moments: EngineMomentRecord[], more = false): ListEngineMomentsResponse {
   return {
     moments,
-    nextBeforeMomentOrder: more ? 1 : null,
+    nextCursor: more ? historyCursor(1) : null,
     latestMomentOrder: 4,
-    activeVersionId: "main",
-    protectedTruncated: false,
+    activeVersionId: "main", ...historyPageFields,
+
   };
 }
 

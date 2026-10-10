@@ -9,7 +9,10 @@ use crate::rpc::secrets::secret_moment_json;
 use crate::rpc::versions::version_record_json;
 use crate::rpc::workspace::validate_workspace_param;
 use dohc_engine_domain::MomentPage;
-use dohc_engine_domain::SecretMomentRecord;
+use dohc_engine_domain::{
+    HistoryCursor, HistoryMarkerPosition, HistoryMomentMetadata, HistoryMomentPosition,
+    HistoryPageRead,
+};
 use dohc_engine_protocol::error::ErrorCode;
 use dohc_engine_protocol::error::WireError;
 use dohc_engine_protocol::transport::RequestContext;
@@ -24,8 +27,6 @@ use std::time::Duration;
 /// never bound the frame — the page cuts when the running estimate would
 /// pass this, well under the 1 MiB frame limit.
 pub(super) const MOMENTS_PAGE_BYTE_BUDGET: usize = 256 * 1024;
-
-const HISTORY_PROTECTED_MOMENT_LIMIT: usize = 500;
 
 const HISTORY_PAGE_FLUSH_RETRIES: usize = 50;
 
@@ -66,11 +67,13 @@ struct MomentsListParams {
 struct HistoryPageParams {
     workspace_id: String,
     #[serde(default)]
+    version_id: Option<String>,
+    #[serde(default)]
     object_id: Option<String>,
     #[serde(default)]
     limit: Option<i64>,
     #[serde(default)]
-    before_moment_order: Option<i64>,
+    cursor: Option<HistoryCursor>,
 }
 
 #[derive(Deserialize)]
@@ -165,6 +168,126 @@ fn encode_moment_page(page: &MomentPage) -> Result<EncodedMomentPage, WireError>
         // The TS contract uses -1 for an empty timeline, never null.
         latest_moment_order: page.latest_moment_order.unwrap_or(-1),
     })
+}
+
+fn history_moment_json(moment: &HistoryMomentMetadata) -> Value {
+    json!({
+        "momentOrder":moment.moment_order,"momentId":moment.moment_id,"versionId":moment.version_id,
+        "objectId":moment.object_id,"path":moment.path,"recordedAtMs":moment.recorded_at_ms,
+        "operation":moment.operation.as_str(),"afterContentKind":moment.after_content_kind,
+        "afterByteLength":moment.after_byte_length,"metadataOrigin":moment.metadata_origin,
+        "metadataSummary":moment.metadata_summary,"metadataCorrelationId":moment.metadata_correlation_id,
+        "authors":moment.author_json.as_deref().map(parsed_moment_authors),"syncRecordOnly":moment.sync_record_only,
+    })
+}
+
+enum HistoryPosition {
+    Text(HistoryMomentPosition),
+    Protected(HistoryMomentPosition),
+    Marker(HistoryMarkerPosition),
+}
+
+fn encode_history_page(read: HistoryPageRead, limit: usize) -> Result<Value, WireError> {
+    let start_cursor = read.cursor;
+    let mut cursor = start_cursor.clone();
+    let mut rows = Vec::new();
+    for moment in read.moments {
+        let pos = HistoryMomentPosition {
+            recorded_at_ms: moment.recorded_at_ms,
+            moment_order: moment.moment_order,
+        };
+        rows.push((
+            moment.recorded_at_ms,
+            0,
+            moment.moment_order,
+            moment.moment_id.clone(),
+            history_moment_json(&moment),
+            HistoryPosition::Text(pos),
+        ));
+    }
+    for moment in read.protected_moments {
+        let pos = HistoryMomentPosition {
+            recorded_at_ms: moment.recorded_at_ms,
+            moment_order: moment.moment_order,
+        };
+        rows.push((
+            moment.recorded_at_ms,
+            1,
+            moment.moment_order,
+            moment.moment_id.clone(),
+            secret_moment_json(&moment),
+            HistoryPosition::Protected(pos),
+        ));
+    }
+    for version in read.version_markers {
+        let pos = HistoryMarkerPosition {
+            created_at_ms: version.created_at_ms,
+            version_id: version.version_id.clone(),
+        };
+        rows.push((
+            version.created_at_ms,
+            2,
+            0,
+            version.version_id.clone(),
+            version_record_json(&version),
+            HistoryPosition::Marker(pos),
+        ));
+    }
+    rows.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then(a.1.cmp(&b.1))
+            .then(b.2.cmp(&a.2))
+            .then(b.3.cmp(&a.3))
+    });
+    let available = rows.len();
+    let mut result = json!({"activeVersion":version_record_json(&read.active_version),"moments":[],"protectedMoments":[],"versionMarkers":[],"startCursor":start_cursor,"nextCursor":null,"latestMomentOrder":cursor.text_fence});
+    let base_bytes = serde_json::to_vec(&result)
+        .map_err(|_| WireError::new(ErrorCode::Internal, "history metadata encoding failed"))?
+        .len();
+    let mut used_bytes = 0;
+    let mut included = 0;
+    for (_, _, _, _, row, position) in rows.into_iter().take(limit) {
+        let mut next = cursor.clone();
+        let key = match position {
+            HistoryPosition::Text(position) => {
+                next.text = Some(position);
+                "moments"
+            }
+            HistoryPosition::Protected(position) => {
+                next.protected = Some(position);
+                "protectedMoments"
+            }
+            HistoryPosition::Marker(position) => {
+                next.marker = Some(position);
+                "versionMarkers"
+            }
+        };
+        let row_bytes = serde_json::to_vec(&row)
+            .map_err(|_| WireError::new(ErrorCode::Internal, "history metadata encoding failed"))?
+            .len();
+        let cursor_bytes = serde_json::to_vec(&next)
+            .map_err(|_| WireError::new(ErrorCode::Internal, "history cursor encoding failed"))?
+            .len();
+        if base_bytes + used_bytes + row_bytes + cursor_bytes + included + 16
+            > MOMENTS_PAGE_BYTE_BUDGET
+        {
+            break;
+        }
+        used_bytes += row_bytes;
+        result[key].as_array_mut().expect("history array").push(row);
+        cursor = next;
+        included += 1;
+    }
+    if included == 0 && available > 0 {
+        return Err(WireError::new(
+            ErrorCode::Internal,
+            "a history metadata row exceeds the page byte budget",
+        ));
+    }
+    if included < available {
+        result["nextCursor"] = json!(cursor);
+    }
+    Ok(result)
 }
 
 /// A moment's stored author list, entry by entry. A value that is not a
@@ -389,50 +512,21 @@ impl EngineService {
             }
         }
 
+        let limit = params.limit.unwrap_or(50).clamp(1, 50) as usize;
         let cancellation = OperationCancellation::new(ctx);
         let read = Self::read_under_ctx(
             &cancellation,
             "history.page",
             open.actor.history_page(
                 open.workspace_id.clone(),
+                params.version_id,
                 params.object_id,
-                params.limit.unwrap_or(200).min(500),
-                params.before_moment_order,
-                HISTORY_PROTECTED_MOMENT_LIMIT + 1,
+                limit,
+                params.cursor,
             ),
         )
         .await?;
-        let text_page = encode_moment_page(&read.text_moment_page)?;
-        let lower_recorded_at_ms = text_page.next_before_moment_order.and_then(|_| {
-            read.text_moment_page
-                .moments
-                .get(text_page.included.saturating_sub(1))
-                .map(|moment| moment.recorded_at_ms)
-        });
-        let protected_moments: Vec<&SecretMomentRecord> = read
-            .protected_moments
-            .iter()
-            .filter(|moment| {
-                lower_recorded_at_ms.is_none_or(|lower| moment.recorded_at_ms > lower)
-                    && read
-                        .upper_recorded_at_ms
-                        .is_none_or(|upper| moment.recorded_at_ms <= upper)
-            })
-            .collect();
-        let row_truncated = protected_moments.len() > HISTORY_PROTECTED_MOMENT_LIMIT;
-        let protected_rows: Vec<Value> = protected_moments
-            .into_iter()
-            .take(HISTORY_PROTECTED_MOMENT_LIMIT)
-            .map(secret_moment_json)
-            .collect();
-        let included = byte_budget_cut_serialized(&protected_rows, MOMENTS_PAGE_BYTE_BUDGET);
-        let byte_truncated = included < protected_rows.len();
-        Ok(json!({
-            "activeVersion": version_record_json(&read.active_version),
-            "textMomentPage": text_page.into_json(),
-            "protectedMoments": &protected_rows[..included],
-            "protectedTruncated": row_truncated || byte_truncated,
-        }))
+        encode_history_page(read, limit)
     }
 
     pub(super) async fn moments_get(

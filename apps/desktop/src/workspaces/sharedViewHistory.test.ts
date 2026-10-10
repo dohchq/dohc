@@ -1,3 +1,4 @@
+import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import { describe, expect, it, vi } from "vitest";
 import { sharedViewHistory } from "./sharedViewHistory";
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
@@ -17,7 +18,7 @@ describe("sharedViewHistory", () => {
     const { store } = createCaptureLiveStores({ workspaceId: "shared-workspace", rootPath: await createTestScratch("history-share-"), attachmentId: Symbol("share") }, mockLiveSessions(loopback));
     const history = sharedViewHistory(store, "shared-workspace");
     expect((await history.listMoments({ objectId: "shared-a" })).moments.map((moment) => moment.objectId)).toEqual(["shared-a"]);
-    await expect(history.listMoments({ objectId: "hidden" })).resolves.toMatchObject({ moments: [], latestMomentOrder: -1, protectedTruncated: false });
+    await expect(history.listMoments({ objectId: "hidden" })).resolves.toMatchObject({ moments: [], latestMomentOrder: -1,  });
     expect((await history.listMoments()).moments).toHaveLength(2);
   });
 
@@ -26,25 +27,24 @@ describe("sharedViewHistory", () => {
   it("lists and opens only the share store's text moments", async () => {
     const text = { id: "moment-1", path: "notes/plan.md", momentOrder: 1 };
     const page = {
-      activeVersion: { id: "main" },
-      textMomentPage: { moments: [text], nextBeforeMomentOrder: null, latestMomentOrder: 1 },
-      protectedMoments: [{ id: "secret-1", path: "private/key.md" }],
-      protectedTruncated: true,
+      activeVersion: { id: "main" }, ...historyPageFields,
+       moments: [text], nextCursor: null, latestMomentOrder: 1, protectedMoments: [{ id: "secret-1", path: "private/key.md" }],
+
     } as unknown as Page;
     const store = { listHistoryPage: vi.fn(async () => page), getMoment: vi.fn(async () => null) };
     const history = sharedViewHistory(store, "shared-workspace");
 
     expect(await history.listMoments({ limit: 5 })).toEqual({
       moments: [{ ...text, protected: false }],
-      nextBeforeMomentOrder: null,
+      nextCursor: null,
       latestMomentOrder: 1,
-      activeVersionId: "main",
-      protectedTruncated: false,
+      activeVersionId: "main", ...historyPageFields,
+
     });
     expect(store.listHistoryPage).toHaveBeenCalledWith({ workspaceId: "shared-workspace", limit: 5 });
     expect(await history.readMoment("secret-1")).toBeNull();
     expect(store.getMoment).toHaveBeenCalledWith({ workspaceId: "shared-workspace", momentId: "secret-1" });
-    await expect(history.listMoments({ objectId: "object-1", limit: 1, beforeMomentOrder: 8 })).resolves.toMatchObject({ moments: [{ ...text, protected: false }] });
-    expect(store.listHistoryPage).toHaveBeenLastCalledWith({ workspaceId: "shared-workspace", objectId: "object-1", limit: 1, beforeMomentOrder: 8 });
+    await expect(history.listMoments({ objectId: "object-1", limit: 1, cursor: historyCursor(8) })).resolves.toMatchObject({ moments: [{ ...text, protected: false }] });
+    expect(store.listHistoryPage).toHaveBeenLastCalledWith({ workspaceId: "shared-workspace", objectId: "object-1", limit: 1, cursor: historyCursor(8) });
   });
 });

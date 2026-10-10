@@ -1,3 +1,4 @@
+import { historyCursor, historyPageFields } from "../../testing/historyPageFixture";
 // @vitest-environment jsdom
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -55,10 +56,10 @@ function page(
 ): ListEngineMomentsResult {
   return {
     moments: [moment(id)],
-    nextBeforeMomentOrder: null,
+    nextCursor: null,
     latestMomentOrder: 1,
-    activeVersionId: "main",
-    protectedTruncated: false,
+    activeVersionId: "main", ...historyPageFields,
+
     ...overrides,
   };
 }
@@ -206,26 +207,26 @@ describe("history page ordering", () => {
 });
 
 describe("history page pagination", () => {
-  it("appends the earlier page, keeps the highest order and any protected truncation", async () => {
+  it("appends the earlier page, keeps the highest order and version markers", async () => {
     const it0 = mount();
-    await committed(it0, page("first", { nextBeforeMomentOrder: 1, latestMomentOrder: 5 }));
+    await committed(it0, page("first", { nextCursor: historyCursor(1), latestMomentOrder: 5 }));
     const loadMore = it0.loadMore();
     expect(it0.hook().loadingMore).toBe(true);
     expect(listEngineMoments).toHaveBeenLastCalledWith({
       workspaceId: "ws-1",
-      limit: 200,
-      beforeMomentOrder: 1,
+      limit: 50,
+      cursor: historyCursor(1),
     });
     await settle(
       reads[1]!,
-      page("earlier", { nextBeforeMomentOrder: 0, latestMomentOrder: 2, protectedTruncated: true }),
+      page("earlier", { nextCursor: historyCursor(0), latestMomentOrder: 2,  }),
     );
     await loadMore;
     expect(it0.hook().page).toEqual({
       moments: [moment("first"), moment("earlier")],
-      nextBeforeMomentOrder: 0,
+      nextCursor: historyCursor(0),
       latestMomentOrder: 5,
-      protectedTruncated: true,
+      ...historyPageFields,
     });
     expect(it0.hook().loadingMore).toBe(false);
     expect(it0.markReady).toHaveBeenCalledTimes(1);
@@ -237,7 +238,7 @@ describe("history page pagination", () => {
     await it0.loadMore();
     expect(listEngineMoments).toHaveBeenCalledTimes(1);
 
-    await committed(it0, page("again", { nextBeforeMomentOrder: 1 }));
+    await committed(it0, page("again", { nextCursor: historyCursor(1) }));
     // Both clicks land before React renders the first one's loading state,
     // so the suppression has to be synchronous.
     let first!: Promise<void>;
@@ -257,7 +258,7 @@ describe("history page pagination", () => {
   // pagination may still fail.
   it("holds an older refresh behind a pagination and drops it once the page lands", async () => {
     const it0 = mount();
-    await committed(it0, page("first", { nextBeforeMomentOrder: 1 }));
+    await committed(it0, page("first", { nextCursor: historyCursor(1) }));
     const refresh = it0.refresh();
     const loadMore = it0.loadMore();
     await settle(reads[1]!, page("refreshed"));
@@ -272,7 +273,7 @@ describe("history page pagination", () => {
 
   it("drops an older refresh that answers after the pagination it raced", async () => {
     const it0 = mount();
-    await committed(it0, page("first", { nextBeforeMomentOrder: 1 }));
+    await committed(it0, page("first", { nextCursor: historyCursor(1) }));
     const refresh = it0.refresh();
     const loadMore = it0.loadMore();
     await settle(reads[2]!, page("earlier"));
@@ -287,7 +288,7 @@ describe("history page pagination", () => {
   // held answer commits first.
   it("commits a held refresh when the pagination fails, and rejects that failure", async () => {
     const it0 = mount();
-    await committed(it0, page("first", { nextBeforeMomentOrder: 1 }));
+    await committed(it0, page("first", { nextCursor: historyCursor(1) }));
     const refresh = it0.refresh();
     const loadMore = it0.loadMore();
     const loadMoreFailed = expect(loadMore).rejects.toThrow("pagination failed");
@@ -304,7 +305,7 @@ describe("history page pagination", () => {
 
   it("keeps only the newest held refresh", async () => {
     const it0 = mount();
-    await committed(it0, page("first", { nextBeforeMomentOrder: 1 }));
+    await committed(it0, page("first", { nextCursor: historyCursor(1) }));
     const olderRefresh = it0.refresh();
     const newerRefresh = it0.refresh();
     const loadMore = it0.loadMore();
@@ -322,7 +323,7 @@ describe("history page pagination", () => {
 
   it("commits a refresh that raced a pagination which then failed", async () => {
     const it0 = mount();
-    await committed(it0, page("first", { nextBeforeMomentOrder: 1 }));
+    await committed(it0, page("first", { nextCursor: historyCursor(1) }));
     const refresh = it0.refresh();
     const loadMore = it0.loadMore();
     const loadMoreFailed = expect(loadMore).rejects.toThrow("pagination failed");
@@ -339,18 +340,18 @@ describe("history page pagination", () => {
   // away, nor leave the button disabled.
   it("commits a pagination whose newer refresh failed, and frees the button", async () => {
     const it0 = mount();
-    await committed(it0, page("first", { nextBeforeMomentOrder: 1 }));
+    await committed(it0, page("first", { nextCursor: historyCursor(1) }));
     const loadMore = it0.loadMore();
     const refresh = it0.refresh();
     const refreshFailed = expect(refresh).rejects.toThrow("history failed");
     await fail(reads[2]!, "history failed");
     await refreshFailed;
 
-    await settle(reads[1]!, page("earlier", { nextBeforeMomentOrder: 0 }));
+    await settle(reads[1]!, page("earlier", { nextCursor: historyCursor(0) }));
     await loadMore;
     expect(it0.ids()).toEqual(["first", "earlier"]);
     expect(it0.hook().loadingMore).toBe(false);
-    expect(it0.hook().page?.nextBeforeMomentOrder).toBe(0);
+    expect(it0.hook().page?.nextCursor).toEqual(historyCursor(0));
   });
 
   // A refresh issued after the pagination replaces the page and frees the
@@ -359,9 +360,9 @@ describe("history page pagination", () => {
   // what the second now owns.
   it("lets a newer refresh replace the page while only the owning pagination releases the slot", async () => {
     const it0 = mount();
-    await committed(it0, page("first", { nextBeforeMomentOrder: 1 }));
+    await committed(it0, page("first", { nextCursor: historyCursor(1) }));
     const firstLoadMore = it0.loadMore();
-    await committed(it0, page("replaced", { nextBeforeMomentOrder: 2 }));
+    await committed(it0, page("replaced", { nextCursor: historyCursor(2) }));
     expect(it0.ids()).toEqual(["replaced"]);
     expect(it0.hook().loadingMore).toBe(false);
 
@@ -369,8 +370,8 @@ describe("history page pagination", () => {
     expect(it0.hook().loadingMore).toBe(true);
     expect(listEngineMoments).toHaveBeenLastCalledWith({
       workspaceId: "ws-1",
-      limit: 200,
-      beforeMomentOrder: 2,
+      limit: 50,
+      cursor: historyCursor(2),
     });
 
     await settle(reads[1]!, page("stale-earlier"));
@@ -386,7 +387,7 @@ describe("history page pagination", () => {
 
   it("keeps a superseded pagination's failure quiet", async () => {
     const it0 = mount();
-    await committed(it0, page("first", { nextBeforeMomentOrder: 1 }));
+    await committed(it0, page("first", { nextCursor: historyCursor(1) }));
     const loadMore = it0.loadMore();
     await committed(it0, page("replaced"));
     await fail(reads[1]!, "pagination failed");
@@ -450,7 +451,7 @@ describe("history page versions", () => {
   // the user has left, so it is nobody's to report.
   it("says nothing about a pagination that failed for the version the user left", async () => {
     const it0 = mount();
-    await committed(it0, page("try", { nextBeforeMomentOrder: 1, activeVersionId: "try-1" }));
+    await committed(it0, page("try", { nextCursor: historyCursor(1), activeVersionId: "try-1" }));
     const loadMore = it0.loadMore();
     it0.observeVersion("main");
     await fail(reads[1]!, "pagination failed");
@@ -460,9 +461,9 @@ describe("history page versions", () => {
 
   it("drops a pagination page from a version the timeline no longer shows", async () => {
     const it0 = mount();
-    await committed(it0, page("try", { nextBeforeMomentOrder: 1, activeVersionId: "try-1" }));
+    await committed(it0, page("try", { nextCursor: historyCursor(1), activeVersionId: "try-1" }));
     const loadMore = it0.loadMore();
-    await committed(it0, page("main-first", { nextBeforeMomentOrder: 3 }));
+    await committed(it0, page("main-first", { nextCursor: historyCursor(3) }));
     await settle(reads[1]!, page("try-earlier", { activeVersionId: "try-1" }));
     await loadMore;
     expect(it0.ids()).toEqual(["main-first"]);
@@ -472,7 +473,7 @@ describe("history page versions", () => {
   // describes, so a held refresh survives it.
   it("keeps a held refresh across a version statement that changed nothing", async () => {
     const it0 = mount();
-    await committed(it0, page("first", { nextBeforeMomentOrder: 1 }));
+    await committed(it0, page("first", { nextCursor: historyCursor(1) }));
     const refresh = it0.refresh();
     const loadMore = it0.loadMore();
     const loadMoreFailed = expect(loadMore).rejects.toThrow("pagination failed");
@@ -590,7 +591,7 @@ describe("history page readiness and lifetime", () => {
 
   it("marks a held refresh with its own marker when the pagination releases it", async () => {
     const it0 = mount();
-    await committed(it0, page("first", { nextBeforeMomentOrder: 1 }));
+    await committed(it0, page("first", { nextCursor: historyCursor(1) }));
     const refresh = it0.refresh();
     const loadMore = it0.loadMore();
     const loadMoreFailed = expect(loadMore).rejects.toThrow("pagination failed");
@@ -610,7 +611,7 @@ describe("history page readiness and lifetime", () => {
   // before the pagination that held it settles.
   it("invalidates every read in flight on unmount and retracts nothing after", async () => {
     const it0 = mount();
-    await committed(it0, page("first", { nextBeforeMomentOrder: 1, activeVersionId: "try-1" }));
+    await committed(it0, page("first", { nextCursor: historyCursor(1), activeVersionId: "try-1" }));
     const held = it0.refresh();
     const loadMore = it0.loadMore();
     await settle(reads[1]!, page("held", { activeVersionId: "try-1" }));
@@ -632,7 +633,7 @@ describe("history page readiness and lifetime", () => {
   it("keeps working after StrictMode replays its effects", async () => {
     const it0 = mount({ strict: true });
     expect(it0.issue.current).toBe(1);
-    await committed(it0, page("first", { nextBeforeMomentOrder: 1 }));
+    await committed(it0, page("first", { nextCursor: historyCursor(1) }));
     expect(it0.ids()).toEqual(["first"]);
     expect(it0.markReady).toHaveBeenCalledTimes(1);
 
@@ -665,7 +666,7 @@ describe("History policy read failure", () => {
 
   it("retracts the whole page when pagination discovers a broken policy", async () => {
     const it0 = mount();
-    await committed(it0, page("old", { nextBeforeMomentOrder: 10 }));
+    await committed(it0, page("old", { nextCursor: historyCursor(10) }));
     const pending = it0.loadMore();
     await settle(reads.at(-1)!, blocked);
     await pending;
@@ -707,7 +708,7 @@ describe("History policy read failure", () => {
 it("keeps a newer committed pagination when an older refresh reports unreadable policy", async () => {
   vi.useFakeTimers();
   const it0 = mount();
-  await committed(it0, page("newest", { nextBeforeMomentOrder: 10 }));
+  await committed(it0, page("newest", { nextCursor: historyCursor(10) }));
   const refresh = it0.refresh();
   const olderPage = it0.loadMore();
   await settle(reads[2]!, page("older"));
@@ -721,7 +722,7 @@ it("keeps a newer committed pagination when an older refresh reports unreadable 
 it("never appends an old pagination after a policy refusal hides the page", async () => {
   vi.useFakeTimers();
   const it0 = mount();
-  await committed(it0, page("newest", { nextBeforeMomentOrder: 10 }));
+  await committed(it0, page("newest", { nextCursor: historyCursor(10) }));
   const olderPage = it0.loadMore();
   const refresh = it0.refresh();
   await settle(reads[2]!, { status: "policy-unreadable", unreadable: [".dohc/files.toml"], policyErrors: ["files.toml"] });

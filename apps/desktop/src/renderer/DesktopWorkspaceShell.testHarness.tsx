@@ -1,3 +1,4 @@
+import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import "../testing/legendListMock";
 import {
   act,
@@ -748,10 +749,10 @@ export function makeBridge(
     listEngineMoments: vi.fn(
       async (): Promise<ListEngineMomentsResponse> => ({
         moments: [],
-        nextBeforeMomentOrder: null,
+        nextCursor: null,
         latestMomentOrder: 0,
-        activeVersionId: "main",
-        protectedTruncated: false,
+        activeVersionId: "main", ...historyPageFields,
+
       }),
     ),
     // Typed to the contract, not to these empty defaults: the freshness tests
@@ -762,7 +763,7 @@ export function makeBridge(
     dismissTryInVersionReview: vi.fn(async (): Promise<void> => undefined),
     switchWorkspaceVersion: vi.fn(
       async (): Promise<SwitchWorkspaceVersionResult> => ({
-        activeVersionId: "main",
+        activeVersionId: "main", ...historyPageFields,
         changedFileCount: 0,
       }),
     ),
@@ -779,7 +780,7 @@ export function makeBridge(
             canMergeIntoMain: false,
           },
         ],
-        activeVersionId: "main",
+        activeVersionId: "main", ...historyPageFields,
       }),
     ),
     // Typed to the contract as well: the moment-diff page mounts on it, and

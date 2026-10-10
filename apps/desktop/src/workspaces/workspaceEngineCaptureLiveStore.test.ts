@@ -1,3 +1,4 @@
+import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import type {
   EngineDaemonClient,
 } from "@dohc/workspace-engine-client/daemon";
@@ -2241,11 +2242,11 @@ describe("createCaptureLiveStores", () => {
             name: "Main",
             createdAtMs: 0,
           },
-          textMomentPage: {
+
             moments: [],
-            nextBeforeMomentOrder: null,
+            nextCursor: null,
             latestMomentOrder: -1,
-          },
+          ...historyPageFields,
           protectedMoments: [
             {
               id: "secret-moment",
@@ -2263,7 +2264,7 @@ describe("createCaptureLiveStores", () => {
               protected: true,
             },
           ],
-          protectedTruncated: true,
+
         },
       };
     });
@@ -2276,8 +2277,7 @@ describe("createCaptureLiveStores", () => {
       store.listHistoryPage({ workspaceId: WORKSPACE_ID, objectId: "object-1", limit: 200 }),
     ).resolves.toMatchObject({
       activeVersion: { id: "main" },
-      textMomentPage: { moments: [], nextBeforeMomentOrder: null },
-      protectedMoments: [
+       moments: [], nextCursor: null, protectedMoments: [
         {
           id: "secret-moment",
           workspaceId: WORKSPACE_ID,
@@ -2290,7 +2290,7 @@ describe("createCaptureLiveStores", () => {
           protected: true,
         },
       ],
-      protectedTruncated: true,
+
     });
     expect(requests).toHaveLength(1);
     expect(requests[0]?.params).toEqual({
@@ -2301,6 +2301,7 @@ describe("createCaptureLiveStores", () => {
   });
 
   it("keeps live and recovery origins on history moments and nowhere else", async () => {
+    const historyMoment = Object.fromEntries(Object.entries(moment).filter(([key]) => ["momentOrder", "momentId", "versionId", "objectId", "path", "recordedAtMs", "operation", "afterContentKind", "afterByteLength", "metadataOrigin", "metadataSummary", "metadataCorrelationId", "authors", "syncRecordOnly"].includes(key)));
     const client = clientFor(async (request) => {
       if (request.method === VERSIONED_METHOD.historyPage) {
         return {
@@ -2313,18 +2314,17 @@ describe("createCaptureLiveStores", () => {
               name: "Main",
               createdAtMs: 0,
             },
-            textMomentPage: {
+
               moments: [
-                { ...moment, metadataOrigin: "ydoc" },
-                { ...moment, momentId: "recovery", metadataOrigin: "capture-recovery" },
-                { ...moment, momentId: "cleared-recovery", metadataOrigin: "capture-recovery-cleared" },
-                { ...moment, momentOrder: 0, momentId: "captured", metadataOrigin: "capture" },
+                { ...historyMoment, metadataOrigin: "ydoc" },
+                { ...historyMoment, momentId: "recovery", metadataOrigin: "capture-recovery" },
+                { ...historyMoment, momentId: "cleared-recovery", metadataOrigin: "capture-recovery-cleared" },
+                { ...historyMoment, momentOrder: 0, momentId: "captured", metadataOrigin: "capture" },
               ],
-              nextBeforeMomentOrder: null,
+              nextCursor: null,
               latestMomentOrder: 1,
-            },
-            protectedMoments: [],
-            protectedTruncated: false,
+          protectedMoments: [], startCursor: historyCursor(), versionMarkers: [],
+
           },
         };
       }
@@ -2338,7 +2338,7 @@ describe("createCaptureLiveStores", () => {
 
     const page = await store.listHistoryPage({ workspaceId: WORKSPACE_ID, limit: 200 });
     expect(
-      page.textMomentPage.moments.map((entry) => entry.metadata.origin),
+      page.moments.map((entry) => entry.metadata.origin),
     ).toEqual(["ydoc", "capture-recovery", "capture-recovery-cleared", "local-file"]);
     // A snapshot's metadata shares the write type, so no write can carry the
     // live origin forward.

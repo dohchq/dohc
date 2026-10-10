@@ -328,7 +328,7 @@ export function AboutHistory(props: {
     try {
       const response = await bridge().listEngineMoments({ workspaceId, objectId, limit: HISTORY_ROWS });
       if (!("status" in response)) {
-        request.settle({ status: "ready", moments: response.moments, more: response.nextBeforeMomentOrder !== null });
+        request.settle({ status: "ready", moments: response.moments, more: response.nextCursor !== null });
         return;
       }
       request.settle({

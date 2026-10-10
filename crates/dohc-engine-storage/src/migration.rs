@@ -3099,6 +3099,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_LIVE_SETTLEMENT_PUBLICATION_DDL,
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 39,
+        id: "v2-moments-history-time",
+        sql: "CREATE INDEX idx_moments_history_time ON moments(workspace_id, version_id, recorded_at_ms, moment_order);",
+        sets_user_version: None,
+    },
 ];
 
 /// Lowercase-hex sha-256 of the migration DDL — the checksum stored in and
@@ -3576,6 +3582,10 @@ mod tests {
             (
                 "v2-live-settlement-publication",
                 "e37325b7a31bbba1c63cfd891cbecd6054809201002ac482c95ab41d54ad8458",
+            ),
+            (
+                "v2-moments-history-time",
+                "13a5805796980400efc80b09d322fa1377ab6df461139f552c2c382c14bdee43",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

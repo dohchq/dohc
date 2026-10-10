@@ -237,3 +237,19 @@ describe("versionedText.list hasYdocMarker", () => {
     ).toThrow(ProtocolShapeError);
   });
 });
+
+
+describe("metadata-only History pages", () => {
+  const cursor = { format: 1, engineUuid: "store", workspaceId: "ws", versionId: "main", objectId: null,
+    textFence: 1, protectedFence: -1, markerFence: 1, text: null, protected: null, marker: null };
+  const metadata = { momentOrder: 1, momentId: "m", versionId: "main", objectId: "o", path: "a.md", recordedAtMs: 10,
+    operation: "write", afterContentKind: "text", afterByteLength: 1, metadataOrigin: "api", authors: null, syncRecordOnly: false };
+  const page = { activeVersion: { id: "main", workspaceId: "ws", kind: "main", name: "Main", createdAtMs: 1 },
+    moments: [metadata], protectedMoments: [], versionMarkers: [], startCursor: cursor, nextCursor: null, latestMomentOrder: 1 };
+  it("decodes literal positions and metadata without payload fields", () => {
+    expect(decodeVersionedResult(VERSIONED_METHOD.historyPage, page)).toEqual(page);
+  });
+  it.each(["afterText", "beforeText", "payload", "bytesBase64"])("rejects a page moment carrying %s", key => {
+    expect(() => decodeVersionedResult(VERSIONED_METHOD.historyPage, { ...page, moments: [{ ...metadata, [key]: "body" }] })).toThrow(ProtocolShapeError);
+  });
+});

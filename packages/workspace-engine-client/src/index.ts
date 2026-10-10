@@ -60,6 +60,8 @@ export {
   type AgentAuthor,
   type WriteAuthor,
   type MomentRecord,
+  type HistoryCursor,
+  type HistoryMomentMetadata,
   type SecretMomentRecord,
   type VersionedComparisonRecord,
   type VersionedTextListEntry,

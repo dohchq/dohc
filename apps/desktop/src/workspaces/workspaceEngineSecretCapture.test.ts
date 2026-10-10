@@ -331,7 +331,7 @@ describe("secret version operations through the desktop daemon path", () => {
 });
 
 describe("listMoments protected pagination", () => {
-  it("assigns tied protected moments to one half-open production page window", async () => {
+  it("pages tied protected moments with their own positions", async () => {
     const root = await createTestScratch("dohc-engine-secret-");
     const loopback = new VersionedLoopbackEngine();
     await loopback.sendRequest({
@@ -370,66 +370,19 @@ describe("listMoments protected pagination", () => {
     await engine.listVersions();
     requests.length = 0;
 
-    const newest = await engine.listMoments({ limit: 2 });
-    const middle = await engine.listMoments({
-      limit: 2,
-      beforeMomentOrder: newest.nextBeforeMomentOrder ?? undefined,
-    });
-    const oldest = await engine.listMoments({
-      limit: 2,
-      beforeMomentOrder: middle.nextBeforeMomentOrder ?? undefined,
-    });
-
-    // protected-upper ties text-5, which ends the first page, so it waits
-    // for the page that contains that timestamp. Each page must omit the two
-    // protected rows outside its own half-open time window.
-    expect(newest.moments.map((moment) => moment.id)).toEqual([
-      "text-5",
-      "protected-upper",
-      "text-4",
+    const timeline = [];
+    let cursor: import("@dohc/workspace-engine-client").HistoryCursor | undefined;
+    do {
+      const page = await engine.listMoments({ limit: 2, ...(cursor ? { cursor } : {}) });
+      expect(page.moments.length + page.versionMarkers.length).toBeLessThanOrEqual(2);
+      timeline.push(...page.moments);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+    expect(timeline.map(moment => moment.id)).toEqual([
+      "text-5", "protected-upper", "text-4", "text-3", "protected-middle", "text-2", "text-1", "protected-lower", "text-0",
     ]);
-    expect(middle.moments.map((moment) => moment.id)).toEqual([
-      "text-3",
-      "protected-middle",
-      "text-2",
-    ]);
-    expect(oldest.moments.map((moment) => moment.id)).toEqual([
-      "text-1",
-      "protected-lower",
-      "text-0",
-    ]);
-    // What the user reads is the pages appended in order; the split above may
-    // move, this may not.
-    expect(
-      [...newest.moments, ...middle.moments, ...oldest.moments].map(
-        (moment) => moment.id,
-      ),
-    ).toEqual([
-      "text-5",
-      "protected-upper",
-      "text-4",
-      "text-3",
-      "protected-middle",
-      "text-2",
-      "text-1",
-      "protected-lower",
-      "text-0",
-    ]);
-
-    const protectedIds = [...newest.moments, ...middle.moments, ...oldest.moments]
-      .filter((moment) => moment.protected)
-      .map((moment) => moment.id);
-    expect(protectedIds).toEqual([
-      "protected-upper",
-      "protected-middle",
-      "protected-lower",
-    ]);
-    expect(new Set(protectedIds).size).toBe(protectedMoments.length);
-    expect(requests.map((request) => request.method)).toEqual([
-      VERSIONED_METHOD.historyPage,
-      VERSIONED_METHOD.historyPage,
-      VERSIONED_METHOD.historyPage,
-    ]);
+    expect(new Set(timeline.map(moment => moment.id)).size).toBe(9);
+    expect(requests.every(request => request.method === VERSIONED_METHOD.historyPage)).toBe(true);
     await engine.stop();
   });
 
@@ -491,7 +444,7 @@ describe("listMoments protected pagination", () => {
   });
 
   // The rule has to hold across the whole timeline the user reads, not only
-  // inside one page. DesktopWorkspaceShell loads 200 moments at a time and
+  // inside one page. DesktopWorkspaceShell loads 50 entries at a time and
   // appends each later page, so a tie group longer than one page would put
   // the protected moment in front of the tied text moments still to come.
   it("keeps tied text before a protected moment across a page boundary", async () => {
@@ -509,7 +462,7 @@ describe("listMoments protected pagination", () => {
       "tied-secret",
       "tie",
     );
-    const tiedTextCount = 201;
+    const tiedTextCount = 51;
     for (let index = 0; index < tiedTextCount; index += 1) {
       await loopback.sendRequest({
         id: index + 2,
@@ -528,11 +481,11 @@ describe("listMoments protected pagination", () => {
     }
     const engine = daemonCapture(root, loopback);
 
-    // The shell's own paging: 200 per request, later pages appended.
-    const first = await engine.listMoments({ limit: 200 });
+    // The shell's own paging: 50 per request, later pages appended.
+    const first = await engine.listMoments({ limit: 50 });
     const second = await engine.listMoments({
-      limit: 200,
-      beforeMomentOrder: first.nextBeforeMomentOrder ?? undefined,
+      limit: 50,
+      cursor: first.nextCursor ?? undefined,
     });
     const timeline = [...first.moments, ...second.moments];
     await engine.stop();

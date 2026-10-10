@@ -1,3 +1,4 @@
+import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 // @vitest-environment jsdom
 import "./DesktopWorkspaceShell.testSupport";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
@@ -18,7 +19,7 @@ const RECOVERY_MOMENT: EngineMomentRecord = {
   id: RECOVERY.momentId, versionId: "main", path: PATH, recordedAtMs: 100, operation: "write", origin: "capture-recovery", momentOrder: 2,
 };
 const page = (moments: EngineMomentRecord[]): ListEngineMomentsResult => ({
-  moments, nextBeforeMomentOrder: null, latestMomentOrder: 2, activeVersionId: "main", protectedTruncated: false,
+  moments, nextCursor: null, latestMomentOrder: 2, activeVersionId: "main", ...historyPageFields,
 });
 // What main sends when History Restore refuses a file whose live binding is
 // active, as on a replicated lineage: the engine's refusal in the capture
