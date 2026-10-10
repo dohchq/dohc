@@ -336,6 +336,13 @@ export function registerStopAndRestoreIpc<
       };
       let fresh = false;
       let stoppedGrants: string[] = [];
+      const rememberNextGrants = async (grants: string[]) => {
+        if (!interruptedUndo || grants.every(grant => interruptedUndo.session!.nextGrants?.includes(grant))) return;
+        const progress = interruptedUndo.session!;
+        progress.nextGrants = [...new Set([...(progress.nextGrants ?? []), ...grants])].sort();
+        try { await automations.savePendingRestore({id: interruptedUndo.id, session: progress}); }
+        catch (cause) { throw new Error("dohc could not save Stop and restore progress. Try again.", {cause}); }
+      };
 
       // Stop first, so no write lands while the files go back.
       let grantIds: string[];
@@ -355,6 +362,7 @@ export function registerStopAndRestoreIpc<
         const writing = grants.filter((grant) => grant.revokedAtMs === null && WRITING_ACCESS.has(grant.access));
         stoppedGrants = writing.map(grant => grant.grantId);
         fresh = writing.length > 0;
+        await rememberNextGrants(stoppedGrants);
         try {
           for (const grant of writing) {
             await relay<unknown>(
@@ -392,6 +400,7 @@ export function registerStopAndRestoreIpc<
               throw new Error("This share link no longer exists.");
             }
             if (link.status === "revoked") break;
+            await rememberNextGrants([grantId]);
             ended = true;
             fresh = true;
             stoppedGrants = [grantId];
@@ -417,7 +426,7 @@ export function registerStopAndRestoreIpc<
         grantIds = [grantId];
       }
 
-      // New access is stopped before progress is written.
+      // Fresh Stop saves progress after revocation; resumed Undo also saves its next grants before it.
       try {
         entries ??= (await automations.pendingRestores()).filter(entry => entry.session && restoreId(entry.session.target) === targetKey);
       } catch (cause) {
@@ -474,9 +483,10 @@ export function registerStopAndRestoreIpc<
             next.grants = [...new Set([...next.grants, ...progress.grants, ...grants, ...progress.nextGrants])].sort();
             next.restoreGrants = [...new Set([...(next.restoreGrants ?? []), ...progress.nextGrants])].sort();
             await automations.savePendingRestore({id: nextId, session: next}, id);
+            const saved = (await automations.pendingRestores()).find(entry => entry.id === nextId);
             await releasePending(workspaceId, automations, pending);
             keptByTarget.delete(target);
-            return {...outcome, unfinished};
+            return saved?.session && !saved.serverRelease ? {...outcome, unfinished} : outcome;
           }
           await releasePending(workspaceId, automations, pending);
         }

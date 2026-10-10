@@ -56,6 +56,7 @@ function fixture(options: {
   revokeConflicts?: number;
   // A link revoke that fails for another reason.
   revokeError?: Error;
+  afterRevoke?: () => Promise<void>;
   moment?: VersionedTextMoment | null;
   protectedMoment?: boolean;
   changed?: boolean;
@@ -117,6 +118,7 @@ function fixture(options: {
         const row = value as {grantId: string; revokedAtMs: number | null};
         if (path.includes(`/grants/${row.grantId}/`)) row.revokedAtMs = 3;
       }
+      await options.afterRevoke?.();
     }
     return {};
   });
@@ -129,6 +131,7 @@ function fixture(options: {
       return "dependents-changed";
     }
     for (const list of links) for (const link of list as Array<{ status: string }>) link.status = "revoked";
+    await options.afterRevoke?.();
     return "ended";
   });
   // Each restore's own moment, which puts the file back as it was before the person.
@@ -457,7 +460,49 @@ describe("stop and restore in main", () => {
     await vi.waitFor(async () => expect(await restartedStore.pendingRestores()).toEqual([]));
   });
 
-  it("does not create a follow-up when the owner dismisses during run Undo", async () => {
+  it.each(["person", "link"] as const)("keeps a reactivated %s grant after a crash immediately after revocation", async kind => {
+    const {store, target, rootPath, resolver} = await pendingFileUndo(kind);
+    const entry = (await store.pendingRestores())[0]!;
+    entry.session!.undoingFiles = true;
+    await store.savePendingRestore(entry);
+    const grantId = entry.session!.grants[0]!;
+    const rows = [grant({})];
+    const links = [[{shareId: "share-link", grantId, status: "active", dependents: []}]];
+    const f = fixture({rootPath, runStore: store, granted: rows, links,
+      afterRevoke: async () => {throw Error("Crash after revocation");}});
+    await expect(f.call(CHANNELS.stopAndRestore, {target})).rejects.toThrow("Crash after revocation");
+    expect(kind === "person" ? rows[0]!.revokedAtMs : links[0]![0]!.status).toBe(kind === "person" ? 3 : "revoked");
+    const reopened = createAutomationRunStore(rootPath, resolver);
+    expect((await reopened.pendingRestores())[0]!.session!.nextGrants).toEqual([grantId]);
+    const newMoment = {...schemaMoment, id: "reactivated-write", objectId: "reactivated-object", path: "notes/reactivated.txt"};
+    const retry = fixture({rootPath, runStore: reopened, granted: rows, links, moment: newMoment,
+      undoRunsOf: async () => NOTHING, ledger: {[grantId]: [{writes: [{committedAtMs: 4,
+        files: [{path: newMoment.path, objectId: newMoment.objectId, momentId: newMoment.id, created: false}]}], nextAfterOriginSeq: null}]}});
+    retry.capture.restoreFileToBeforeMoment.mockImplementationOnce(async () => ({restored: "text", path: SCHEMA, restoredMomentId: "undo-old"}))
+      .mockImplementationOnce(async momentId => {
+        expect(momentId).toBe(newMoment.id);
+        return {restored: "text", path: newMoment.path, restoredMomentId: `back-${newMoment.id}`};
+      });
+    await expect(retry.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({unfinished: {step: "files"}});
+    expect((await reopened.pendingRestores()).find(entry => entry.session)?.session!.restoreGrants).toEqual([grantId]);
+    await expect(retry.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({unfinished: null,
+      restored: [{path: newMoment.path, restoredMomentId: `back-${newMoment.id}`}]});
+    expect(retry.calls.some(call => call.path.includes(`/collection-writes/${grantId}?`))).toBe(true);
+  });
+
+  it.each(["person", "link"] as const)("does not revoke a reactivated %s grant when saving the follow-up intent fails", async kind => {
+    const {store, target, rootPath} = await pendingFileUndo(kind);
+    const entry = (await store.pendingRestores())[0]!;
+    entry.session!.undoingFiles = true;
+    await store.savePendingRestore(entry);
+    vi.spyOn(store, "savePendingRestore").mockRejectedValueOnce(Error("Save failed"));
+    const f = fixture({rootPath, runStore: store, granted: [grant({})],
+      links: [[{shareId: "share-link", grantId: "grant-link", status: "active", dependents: []}]]});
+    await expect(f.call(CHANNELS.stopAndRestore, {target})).rejects.toThrow("dohc could not save Stop and restore progress.");
+    expect(f.calls.filter(call => call.method === "POST" && call.path.endsWith("/revoke"))).toEqual([]);
+  });
+
+  it("does not offer Try again when the owner dismisses during run Undo", async () => {
     const {store, target, rootPath} = await pendingFileUndo();
     const entry = (await store.pendingRestores())[0]!;
     entry.session!.undoingFiles = true;
@@ -473,7 +518,8 @@ describe("stop and restore in main", () => {
       await entered;
       expect(rows[1]).toMatchObject({revokedAtMs: 3});
       await f.call(stopAndRestoreRecoveryOperations.dismissStopAndRestore.channel, {target});
-    } finally {resume(); await trying;}
+    } finally {resume();}
+    await expect(trying).resolves.toMatchObject({status: "restored", unfinished: null});
     await vi.waitFor(async () => expect(await store.pendingRestores()).toEqual([]));
     expect(f.releases).toContain("pending-pass");
   });
