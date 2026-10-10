@@ -249,8 +249,12 @@ fn parsed_moment_author(value: Value) -> Value {
         let valid = object.len()
             == 2 + usize::from(object.contains_key("onBehalfOf"))
                 + usize::from(object.contains_key("humanName"))
+                + usize::from(object.contains_key("relayConfirmed"))
             && bounded_ids(&["humanId"])
             && (!object.contains_key("humanName") || bounded_ids(&["humanName"]))
+            && object
+                .get("relayConfirmed")
+                .is_none_or(|value| value == &Value::Bool(true))
             && principal_ok;
         return if valid { value } else { corrupt() };
     }
@@ -480,6 +484,20 @@ mod relay_author_tests {
             panic!("one author in, one author out: {authors}");
         };
         author.clone()
+    }
+
+    #[test]
+    fn keeps_only_a_true_relay_confirmation_marker() {
+        let confirmed = json!({"kind":"human","humanId":"reader","relayConfirmed":true});
+        assert_eq!(parsed_moment_author(&confirmed.to_string()), confirmed);
+        for marker in [json!(false), json!(null), json!("true"), json!(1)] {
+            assert_eq!(
+                parsed_moment_author(
+                    &json!({"kind":"human","humanId":"reader","relayConfirmed":marker}).to_string()
+                ),
+                json!({"corrupt":true})
+            );
+        }
     }
 
     #[test]
