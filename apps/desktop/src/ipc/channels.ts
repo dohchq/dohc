@@ -150,6 +150,7 @@ export const CHANNELS = {
   listCollections: "desktop:list-collections",
   getCollection: "desktop:get-collection",
   queryCollectionRecords: "desktop:query-collection-records",
+  historyNamesChanged: "desktop:history-names-changed",
   getCollectionRecordHistory: "desktop:get-collection-record-history",
   locateRecordHistoryRun: "desktop:locate-record-history-run",
   readWorkspaceDatabase: "desktop:read-workspace-database",

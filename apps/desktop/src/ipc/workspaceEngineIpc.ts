@@ -66,14 +66,14 @@ export function createWorkspaceEngineIpc<
   localPersonId(): string;
   /** This computer's person as History names them. */
   localPersonName(): string;
-  automationPersonName(workspaceId: string, userId: string): string | null;
+  automationPersonName(workspaceId: string, userId: string, sender: Sender): string | null;
   /** The person a request is made by, read from main's own account when it arrives. */
   localPerson(): Promise<LocalPersonAuthor>;
   /** An automation author as History shows it, in one workspace. */
   automationAuthor(workspaceId: string, automationId: string): ReturnType<EngineMomentAuthorNames["automation"]>;
   /** A person the owner shared with, as History names their direct write. */
   /** How one History read names the people the owner shared with, reading the roster once. */
-  namedAuthorLabels(workspaceId: string): EngineMomentAuthorNames["named"];
+  namedAuthorLabels(workspaceId: string, sender: Sender): Pick<EngineMomentAuthorNames, "named" | "prepare">;
   /** Whether this computer keeps an automation's run, so a record's history can open it. */
   automationRunOnThisComputer(workspaceId: string, automationId: string, claimId: string): Promise<boolean>;
   /** The owner's server's runs; the relay answers only the workspace's owner. */
@@ -239,7 +239,7 @@ export function createWorkspaceEngineIpc<
           result.record.path = source.prefix + result.record.path;
           const { workspaceId } = operation.workspace;
           const authors: RecordHistoryAuthors = {
-            person: userId => dependencies.automationPersonName(workspaceId, userId),
+            person: userId => dependencies.automationPersonName(workspaceId, userId, event.sender),
             agent: (onBehalfOf) => onBehalfOf === localPersonId() ? localAgentDisplayName() : "Agent",
             automationName: (automationId) => automationAuthor(workspaceId, automationId)?.name ?? null,
             runAvailable: (automationId, claimId) => runLocator.available(workspaceId, automationId, claimId),
@@ -270,12 +270,12 @@ export function createWorkspaceEngineIpc<
     // timeline from engine moments; every handler resolves the workspace via
     // requireWorkspace and rejects when the engine capture is not attached.
     // Runs dohc started use the Settings name. Other agents use their handshake label.
-    function authorNames(workspaceId: string): EngineMomentAuthorNames {
+    function authorNames(workspaceId: string, sender: Sender): EngineMomentAuthorNames {
       return {
         agent: (author) => author.agentRunId ? (author.onBehalfOf === localPersonId() ? localAgentDisplayName() : "Agent") : author.agentId === "dohc-mcp" ? "Agent" : author.agentId,
         person: (author) => author.humanId === localPersonId() ? localPersonName() : undefined,
         automation: (automationId) => automationAuthor(workspaceId, automationId),
-        named: namedAuthorLabels(workspaceId),
+        ...namedAuthorLabels(workspaceId, sender),
       };
     }
 
@@ -333,7 +333,7 @@ export function createWorkspaceEngineIpc<
               beforeMomentOrder = page.nextBeforeMomentOrder;
             }
           },
-          authorNames(input.workspaceId),
+          authorNames(input.workspaceId, event.sender),
         );
       });
     });
@@ -348,8 +348,10 @@ export function createWorkspaceEngineIpc<
         if (moment && !moment.protected && policy && !historyMomentPathsAdmitted(historyPathAdmission(policy), moment.moment)) {
           return ReadEngineMomentResult.parse({ status: "untracked", moment: null });
         }
+        const names = authorNames(input.workspaceId, event.sender);
+        if (moment && !moment.protected && moment.moment.authors?.length === 1) names.prepare?.(moment.moment.authors);
         return ReadEngineMomentResult.parse({
-          moment: moment ? engineMomentDetailForIpc(moment, authorNames(input.workspaceId)) : null,
+          moment: moment ? engineMomentDetailForIpc(moment, names) : null,
         });
       });
     });
