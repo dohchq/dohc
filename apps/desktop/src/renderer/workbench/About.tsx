@@ -590,20 +590,25 @@ export function AboutAccess(props: {
   );
 }
 
-// The freshness of an answer, and when main checked it.
-export function AccessChecked(props: { testId: string; answer: AccessAnswer }) {
+// The freshness of an answer, when main checked it, and for a list, what it covers.
+export function AccessChecked(props: { testId: string; answer: AccessAnswer; scope?: string }) {
   const { answer } = props;
   return (
-    <div className="flex items-center gap-2 px-2 pb-1">
-      <StateMark testId={props.testId} state={answer.freshness} shown={`access-${answer.freshness}`} />
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 px-2 pb-1">
+      <StateMark testId={props.testId} state={answer.freshness} shown={`access-${answer.freshness}`} className="shrink-0" />
       {answer.checkedAtMs !== null ? (
         <time
           dateTime={formatChatTime(answer.checkedAtMs).iso}
           title={formatChatTime(answer.checkedAtMs).label}
-          className="font-mono text-[11px] text-subtle"
+          className="shrink-0 font-mono text-[11px] text-subtle"
         >
           {formatShortTime(answer.checkedAtMs)}
         </time>
+      ) : null}
+      {props.scope ? (
+        <span data-testid={`${props.testId}-scope`} className="whitespace-nowrap text-[11px] text-subtle">
+          {props.scope}
+        </span>
       ) : null}
     </div>
   );

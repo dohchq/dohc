@@ -133,6 +133,9 @@ describe("the Sharing view's two lists", () => {
     expect(within(receivedRow).getByRole("img", { name: "View" })).toBeTruthy();
     expect(screen.getByTestId("sharing-received-count").textContent).toBe("1");
     expect(screen.getByTestId("sharing-granted-freshness").getAttribute("data-state")).toBe("fresh");
+    // Each list says what it covers, rows or not.
+    expect(screen.getByTestId("sharing-granted-freshness-scope").textContent).toBe("for this workspace");
+    expect(screen.getByTestId("sharing-received-freshness-scope").textContent).toBe("for your account");
     // Opening the view asks main to check again once, for both lists.
     expect(bridgeMock.requestAccessRefresh).toHaveBeenCalledTimes(1);
     expect(bridgeMock.requestAccessRefresh).toHaveBeenCalledWith({ workspaceId: "workspace-a", reason: "sharing-open" });
@@ -277,6 +280,67 @@ describe("the actions Settings offers on a share", () => {
     expect(shareRemovals.failed.mock.calls[0]![0]).toMatchObject({
       workspaceId: "workspace-a", message: "dohc could not end the share of notes/product-plan.md with sam@example.com.",
     });
+  });
+
+  it("ends a share for everyone it names, deciding from its live grant when the first one ended", async () => {
+    answerWith({ granted: answer("granted", { rows: [
+      granted({ grantId: "grant-0", recipientEmail: "kim@example.com", status: "revoked", selector: null, access: null }),
+      granted(),
+      granted({ grantId: "grant-2", recipientEmail: "nova@example.com" }),
+    ] }) });
+    bridgeMock.revokeRelayShare.mockResolvedValue({ undo: { undoId: "undo-1", expiresAtMs: Date.now() + 600_000 } });
+    render(<View />);
+    const row = await screen.findByTestId("sharing-granted-row");
+    expect(row.textContent).toContain("product-plan.md");
+    await userEvent.click(within(await openMenu(row)).getByRole("menuitem", { name: "End share…" }));
+    expect(screen.getByTestId("sharing-end-confirm").textContent).toContain(
+      "End this share? sam@example.com and nova@example.com keep read-only copies and stop receiving updates.");
+    await userEvent.click(screen.getByTestId("sharing-end"));
+    await waitFor(() => expect(shareRemovals.removed).toHaveBeenCalledOnce());
+    expect(shareRemovals.removed).toHaveBeenCalledWith(expect.objectContaining({
+      message: "Ended the share of notes/product-plan.md with sam@example.com and nova@example.com.",
+      restoredMessage: "Restored the share of notes/product-plan.md with sam@example.com and nova@example.com.",
+    }));
+  });
+
+  it("counts the people a share names past three", async () => {
+    answerWith({ granted: answer("granted", { rows: ["a", "b", "c", "d"].map((name, index) =>
+      granted({ grantId: `grant-${index}`, recipientEmail: `${name}@example.com` })) }) });
+    render(<View />);
+    const row = await screen.findByTestId("sharing-granted-row");
+    await userEvent.click(within(await openMenu(row)).getByRole("menuitem", { name: "End share…" }));
+    expect(screen.getByTestId("sharing-end-confirm").textContent).toContain("End this share? 4 people keep read-only copies");
+  });
+
+  it("reports an End share that fails after the view closed", async () => {
+    answerWith({ granted: answer("granted", { rows: [granted()] }) });
+    const revoke = deferred<{ undo?: { undoId: string; expiresAtMs: number } }>();
+    bridgeMock.revokeRelayShare.mockReturnValue(revoke.promise);
+    const { unmount } = render(<View />);
+    const row = await screen.findByTestId("sharing-granted-row");
+    await userEvent.click(within(await openMenu(row)).getByRole("menuitem", { name: "End share…" }));
+    await userEvent.click(screen.getByTestId("sharing-end"));
+    unmount();
+    revoke.reject(new Error("relay down"));
+    await waitFor(() => expect(shareRemovals.failed).toHaveBeenCalledOnce());
+    expect(shareRemovals.failed.mock.calls[0]![0]).toMatchObject({
+      workspaceId: "workspace-a", message: "dohc could not end the share of notes/product-plan.md with sam@example.com.",
+    });
+  });
+
+  it("tells the shell about a share added after the view closed", async () => {
+    answerWith({ received: answer("received", { rows: [received()] }) });
+    bridgeMock.getRelayReceivedShare.mockResolvedValue({ found: true, share: { shareCode: "code-1" } });
+    const mounted = deferred<unknown>();
+    bridgeMock.mountShare.mockReturnValue(mounted.promise);
+    const { unmount } = render(<View />);
+    const row = await screen.findByTestId("sharing-received-row");
+    await userEvent.click(within(await openMenu(row)).getByRole("menuitem", { name: "Add to workspace" }));
+    await waitFor(() => expect(bridgeMock.mountShare).toHaveBeenCalledOnce());
+    unmount();
+    mounted.resolve({});
+    await waitFor(() => expect(callbacks.onMounted).toHaveBeenCalledOnce());
+    expect(callbacks.reportError).not.toHaveBeenCalled();
   });
 
   it("opens the oldest waiting change for review, from the row and from its menu", async () => {

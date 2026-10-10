@@ -44,12 +44,15 @@ export type WaitingChanges = { count: number; oldestProposalId: string };
 const LANE = {
   granted: {
     label: "Shared by me",
+    // What each list covers, stated beside when it was checked.
+    scope: "for this workspace",
     empty: "No shares from this workspace. Right-click a file and choose Share… to share it.",
     unexplained: "Access information is unavailable for this workspace. This does not mean that nothing is shared.",
     failed: "dohc could not check the shares from this workspace.",
   },
   received: {
     label: "Shared with me",
+    scope: "for your account",
     empty: "No shares to your account.",
     unexplained: "Access information is unavailable for your account. This does not mean that nothing is shared with you.",
     failed: "dohc could not check the shares to your account.",
@@ -121,19 +124,41 @@ function recipientOf(row: AccessShareRow): string {
   return row.recipientEmail ?? row.recipientUserId ?? "Unnamed person";
 }
 
+// The grant a share's row speaks for: a live one, else one that still says
+// what the share covered. An ended grant comes back without its selector.
+function liveGrant(group: ShareGroup): AccessShareRow {
+  return group.rows.find((row) => row.status === "active" && row.selector !== null)
+    ?? group.rows.find((row) => row.selector !== null) ?? group.rows[0]!;
+}
+
+// Everyone ending the share removes: each person, or how many past three.
+function recipientNames(group: ShareGroup): string[] {
+  return [...new Set(group.rows.filter((row) => row.status === "active").map(recipientOf))];
+}
+function recipientsOf(group: ShareGroup): string {
+  const names = recipientNames(group);
+  if (names.length > 3) return `${names.length} people`;
+  return names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : names[0] ?? "the recipient";
+}
+
 // Settings ends a share it lists: a path or version share named to people.
 // Links and chats end where they were made.
 function endable(group: ShareGroup): boolean {
-  const selector = group.rows[0]?.selector;
+  const selector = liveGrant(group).selector;
   return !!selector && selector.kind === undefined && group.rows.every((row) => row.via === "named")
     && group.rows.some((row) => row.status === "active");
 }
 
-function endConfirmWords(recipient: string, waiting: WaitingChanges | undefined): string {
-  if (!waiting) return `End this share? ${recipient} keeps a read-only copy and stops receiving updates.`;
+function endConfirmWords(group: ShareGroup, waiting: WaitingChanges | undefined): string {
+  const who = recipientsOf(group);
+  if (!waiting) {
+    return recipientNames(group).length > 1
+      ? `End this share? ${who} keep read-only copies and stop receiving updates.`
+      : `End this share? ${who} keeps a read-only copy and stops receiving updates.`;
+  }
   return waiting.count === 1
-    ? `End this share and decline 1 change ${recipient} sent? Undo restores the share, not the declined change.`
-    : `End this share and decline ${waiting.count} changes ${recipient} sent? Undo restores the share, not the declined changes.`;
+    ? `End this share and decline 1 change ${who} sent? Undo restores the share, not the declined change.`
+    : `End this share and decline ${waiting.count} changes ${who} sent? Undo restores the share, not the declined changes.`;
 }
 
 function StatusWord(props: { status: AccessShareRow["status"] }) {
@@ -224,7 +249,7 @@ function GrantedRow(props: {
   actions: SharingActions;
 }) {
   const { group, waiting, actions } = props;
-  const first = group.rows.find((row) => row.selector !== null) ?? group.rows[0]!;
+  const first = liveGrant(group);
   const active = group.rows.find((row) => row.status === "active");
   const subject = subjectOf(first);
   const canEnd = endable(group);
@@ -272,7 +297,7 @@ function GrantedRow(props: {
           }}
           className="mx-2 mb-1 flex flex-col gap-2 rounded-md bg-panel-2 px-2 py-2"
         >
-          <p className="m-0 text-[12px] leading-4 text-muted">{endConfirmWords(recipientOf(active), waiting)}</p>
+          <p className="m-0 text-[12px] leading-4 text-muted">{endConfirmWords(group, waiting)}</p>
           <div className="flex justify-end gap-2">
             <SecondaryButton ref={cancelRef} size="compact" data-testid="sharing-end-cancel" onClick={actions.cancelEnd}>
               Cancel
@@ -365,7 +390,7 @@ function Section(props: {
                 setup={props.setup} onRetry={() => actions.retry(lane)} />
             ) : (
               <>
-                <AccessChecked testId={`sharing-${lane}-freshness`} answer={view.answer} />
+                <AccessChecked testId={`sharing-${lane}-freshness`} answer={view.answer} scope={words.scope} />
                 {view.answer.rows.length === 0 ? (
                   <AboutNote testId={`sharing-${lane}-empty`}>{words.empty}</AboutNote>
                 ) : (
@@ -491,7 +516,7 @@ export function SharingView(props: {
   const received = useSharingLane(workspaceId, "received", props.notices, refresh);
   const [confirmShareId, setConfirmShareId] = useState<string | null>(null);
   const [busyShareId, setBusyShareId] = useState<string | null>(null);
-  // Bumped by a workspace switch or unmount, so a late action answer lands nowhere.
+  // Bumped when the view closes, so a late answer leaves the view's own state alone.
   const epoch = useRequestSequence([workspaceId]);
 
   // As About's Access: ask main to check again when the view opens, and when
@@ -519,12 +544,12 @@ export function SharingView(props: {
   );
   const waiting = useMemo(() => waitingByShare(props.proposals), [props.proposals]);
 
+  // An action's outcome reaches the shell even after the view closes; the
+  // shell lives for one workspace. Only the view's own state checks `epoch`.
   async function end(group: ShareGroup) {
-    const active = group.rows.find((row) => row.status === "active");
-    const first = group.rows[0];
-    if (!active || !first) return;
+    if (!group.rows.some((row) => row.status === "active")) return;
     const token = epoch.current();
-    const subject = `the share of ${subjectOf(first).title} with ${recipientOf(active)}`;
+    const subject = `the share of ${subjectOf(liveGrant(group)).title} with ${recipientsOf(group)}`;
     setBusyShareId(group.shareId);
     try {
       const result = await bridge().revokeRelayShare({ shareId: group.shareId });
@@ -542,7 +567,6 @@ export function SharingView(props: {
       setConfirmShareId(null);
       void loadGranted({ refreshed: refresh() });
     } catch (cause) {
-      if (!epoch.isCurrent(token)) return;
       props.shareRemovals.failed({ workspaceId, message: `dohc could not end ${subject}.`, cause, retry: () => void end(group) });
     } finally {
       if (epoch.isCurrent(token)) setBusyShareId(null);
@@ -556,11 +580,9 @@ export function SharingView(props: {
       const found = await bridge().getRelayReceivedShare({ shareId });
       if (!found.found) throw new Error(found.removed?.message ?? "This share is no longer shared with you.");
       await bridge().mountShare({ workspaceId, shareCode: found.share.shareCode });
-      if (epoch.isCurrent(token)) props.onMounted();
+      props.onMounted();
     } catch (cause) {
-      if (epoch.isCurrent(token)) {
-        props.reportError("dohc could not add this share to the workspace.", cause, () => void mount(shareId));
-      }
+      props.reportError("dohc could not add this share to the workspace.", cause, () => void mount(shareId));
     } finally {
       if (epoch.isCurrent(token)) setBusyShareId(null);
     }
