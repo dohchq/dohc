@@ -2383,6 +2383,16 @@ async fn a_quarantined_path_keeps_capture_flush_unsettled() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "manual quiet-host 5000-file initial capture measurement"]
 async fn measure_five_thousand_file_initial_capture() {
+    measure_initial_capture(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "manual matched-profile 5000-file capture comparison"]
+async fn measure_five_thousand_file_capture_only() {
+    measure_initial_capture(false).await;
+}
+
+async fn measure_initial_capture(measure_typing: bool) {
     for n in 0..3 {
         let scratch = ScratchDir::new().unwrap();
         write_root_binding(scratch.path(), TOKEN).unwrap();
@@ -2421,7 +2431,7 @@ async fn measure_five_thousand_file_initial_capture() {
             elapsed.as_millis()
         );
         assert_eq!(snapshots, 5_000);
-        if n == 0 {
+        if measure_typing && n == 0 {
             use base64::Engine as _;
             use dohc_engine_protocol::transport::EngineService as Service;
             let opened = Service::call(
