@@ -23,6 +23,10 @@ cargo install cargo-nextest --locked --version 0.9.143
 
 The PR verifier rejects missing tools or versions that differ from those workflow pins.
 
+On Linux, install Chromium system dependencies once with `pnpm exec playwright install-deps chromium`.
+This preparation requires administrator access.
+The verifier installs the pinned browser and validates its host dependencies.
+
 Run `pnpm run doctor` to inspect readiness without changing the checkout.
 `pnpm doctor` invokes pnpm's own command and does not check this repository's readiness.
 Run `pnpm qa:prepare` to build the native engine and desktop.

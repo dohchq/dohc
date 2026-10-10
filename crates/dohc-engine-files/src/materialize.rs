@@ -5066,7 +5066,7 @@ mod tests {
                 ErrorKind::Unsupported
             );
         }
-        for err in [Errno::EXIST, Errno::ACCES, Errno::XDEV] {
+        for err in [Errno::EXIST, Errno::ACCESS, Errno::XDEV] {
             assert_eq!(
                 exclusive_move_result(Err(err))
                     .expect_err("rename refusal")
