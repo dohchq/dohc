@@ -36,7 +36,7 @@ interface WatchedWorkspace {
   // True when building the recorder threw: the cause is a failure,
   // not a capability, and the notice states which.
   historyRecordingUnavailable: boolean;
-  fileObservationUnavailable: boolean;
+  fileObservationFailure: NonNullable<SyncStatusResult["fileObservationFailure"]> | null;
   // True when this workspace is a shared view: no recorder by design.
   // Same rule as above — the cause travels with the decision so no consumer
   // has to guess it.
@@ -200,7 +200,8 @@ export function createWorkspaceActivity(
       conflictCount,
       ...(snap?.claimingIdentity ? { claimingIdentity: true } : {}),
       ...(snap?.updateRequired ? { updateRequired: snap.updateRequired } : {}),
-      historyRecordingUnavailable: (w?.historyRecordingUnavailable ?? false) || (w?.fileObservationUnavailable ?? false),
+      historyRecordingUnavailable: w?.historyRecordingUnavailable ?? false,
+      ...(w?.fileObservationFailure ? { fileObservationFailure: w.fileObservationFailure } : {}),
       historyShareView: w?.historyShareView ?? false,
       atomicPlacementUnavailable: w?.atomicPlacementUnavailable ?? false,
       recoveryUnavailable: w?.recoveryUnavailable ?? false,
@@ -286,11 +287,11 @@ export function createWorkspaceActivity(
         workspace,
         inFlight: false,
         lastSyncedAtMs: null,
-        handle: { stop: async () => {}, ready: Promise.resolve(), pulledPaths: async () => {}, pullStarting: () => {}, pullFinished: () => {} },
+        handle: { stop: async () => {}, ready: Promise.resolve(), pulledPaths: async () => {}, pullStarting: () => {}, pullFinished: () => {}, retry: async () => {} },
         engine: null,
         capture: null,
         historyRecordingUnavailable: false,
-        fileObservationUnavailable: false,
+        fileObservationFailure: null,
         historyShareView: false,
         historyCaptureFailure: null,
         historyCaptureDetail: null,
@@ -376,9 +377,9 @@ export function createWorkspaceActivity(
           if (state.entry !== entry) return;
           options.onWatcherBatch?.(workspace, paths.map(path => ({ path, operation: "update" })));
         },
-        degraded(unavailable) {
-          if (state.entry !== entry || entry.fileObservationUnavailable === unavailable) return;
-          entry.fileObservationUnavailable = unavailable;
+        degraded(reason) {
+          if (state.entry !== entry || entry.fileObservationFailure === reason) return;
+          entry.fileObservationFailure = reason;
           notify({ workspaceId: workspace.workspaceId });
         },
       });
@@ -396,8 +397,6 @@ export function createWorkspaceActivity(
           entry.handle.ready,
           new Promise<void>(resolve => {
             readyTimer = setTimeout(() => {
-              entry.fileObservationUnavailable = true;
-              notify({ workspaceId: workspace.workspaceId });
               resolve();
             }, 5_000);
           }),
@@ -592,6 +591,10 @@ export function createWorkspaceActivity(
   }
 
   function pullStarting(state: WorkspaceActivityState): void { state.entry?.handle.pullStarting(); }
+  function retryFileObservation(state: WorkspaceActivityState): Promise<void> {
+    if (!state.entry) return Promise.reject(new Error("This workspace is not open."));
+    return state.entry.handle.retry();
+  }
   function pullFinished(state: WorkspaceActivityState): void { state.entry?.handle.pullFinished(); }
   function handlePulledPaths(state: WorkspaceActivityState, paths: readonly string[]): Promise<void> {
     return state.entry?.handle.pulledPaths(paths) ?? Promise.resolve();
@@ -754,6 +757,7 @@ export function createWorkspaceActivity(
     syncNow,
     queueCloudPull,
     pullStarting,
+    retryFileObservation,
     pullFinished,
     handlePulledPaths,
     drainObservations,

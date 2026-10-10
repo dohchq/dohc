@@ -601,6 +601,41 @@ describe("ShareViewFiles", () => {
     expect(await readFile(join(rootPath, path), "utf8")).toBe("recipient edit\n");
   });
 
+  it.each([false, true])("reports the cursor internally only after a successful commit (commit fails: %s)", async commitFails => {
+    const rootPath = await workspaceRoot();
+    const registered = target(rootPath, "view");
+    const committing = deferred();
+    const committed = deferred();
+    const onCursorCommitted = vi.fn();
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => registered,
+      openStore: () => mutableTextStore(),
+      resolveRelay: async () => ({ baseUrl: "https://relay.example", token: "token" }),
+      pull: async () => ({
+        fetched: 0, applied: 0, skipped: 0, refusals: [], refusalCount: 0,
+        changedPaths: [], nextCursor: 57,
+        commitCursor: async () => { committing.resolve(); await committed.promise; },
+      }),
+    });
+    const result = withStaleSensitiveWorkspaceOperation(rootPath, lease => files.reconcile(
+      lease, { kind: "standalone", workspaceId: registered.workspaceId }, "refresh", onCursorCommitted,
+    ));
+    await committing.promise;
+    expect(onCursorCommitted).not.toHaveBeenCalled();
+    if (commitFails) committed.reject(new Error("cursor commit failed"));
+    else committed.resolve();
+    const reconciled = await result;
+    expect(reconciled).toMatchObject({ kind: "refresh", outcome: { ok: !commitFails } });
+    if (reconciled.kind !== "refresh") throw new Error("Expected a refresh result");
+    expect(reconciled.outcome).not.toHaveProperty("nextCursor");
+    if (commitFails) expect(onCursorCommitted).not.toHaveBeenCalled();
+    else {
+      expect(onCursorCommitted).toHaveBeenCalledOnce();
+      expect(onCursorCommitted).toHaveBeenCalledWith(57);
+    }
+  });
+
   it("refuses automation saves on mounted shares", async () => {
     const rootPath = await workspaceRoot();
     const initial = "version: 1\nautomations: []\n";

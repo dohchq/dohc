@@ -732,7 +732,9 @@ impl EngineService {
                 let Some(claim) = claim else { continue };
                 let handed = match lock(&sessions).get_mut(&session_id) {
                     Some(session) => {
-                        session.lineage_claim_id = Some(claim);
+                        session
+                            .set_lineage_claim(Some(claim))
+                            .map_err(dohc_engine_runtime::RuntimeError::Collab)?;
                         true
                     }
                     None => false,

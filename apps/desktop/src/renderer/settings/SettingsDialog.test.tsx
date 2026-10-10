@@ -79,6 +79,7 @@ async function resetWorkspaceSettings(): Promise<WorkspaceSettingsResult> {
 const bridge = {
   onWorkspaceActivity: vi.fn(() => () => {}),
   readDiagnostics: vi.fn(async () => ({ text: "dohc diagnostics", available: { usage: false, errors: false } })),
+  readUsageRecord: vi.fn(async () => ({ status: "readable", enabled: true, file: "/state/dohc-usage.json", since: null, incompleteDays: 0, rows: [] })),
   listRelayShares: vi.fn(async () => ({ owned: [], received: [], removed: [] })),
   getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
   detectAgentTools: vi.fn(async () => ({ workingDirectory: "/workspace", tools: [] })),
@@ -966,6 +967,25 @@ describe("SettingsDialog", () => {
     expect(row.textContent).toContain("Stopping one keeps the file and its history.");
     await user.click(within(row).getByRole("button", { name: "Open live documents" }));
     expect(onOpenLiveDocuments).toHaveBeenCalledOnce();
+  });
+
+  it("opens the Sharing view from each share list", async () => {
+    const onOpenSharing = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <SettingsDialog
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="cloud"
+        onOpenSharing={onOpenSharing}
+        onClose={() => {}}
+      />,
+    );
+
+    await user.click(await screen.findByTestId("settings-manage-sharing-granted"));
+    await user.click(screen.getByTestId("settings-manage-sharing-received"));
+    expect(onOpenSharing).toHaveBeenCalledTimes(2);
+    expect(screen.getAllByRole("button", { name: "Manage in Sharing" })).toHaveLength(2);
   });
 
   it("hides live documents in a shared view", async () => {

@@ -32,6 +32,7 @@ export function createShareInventoryRoutes(
     | "findChannelCreateKind"
     | "workspaceIsOwnedBy"
     | "listLinkGrantsByWorkspace"
+    | "lookupHistoryAccounts"
     | "listActiveIndependentShareGrants"
   >,
   nowMs: () => number,
@@ -46,6 +47,7 @@ export function createShareInventoryRoutes(
   publicEditRelease?: PublicEditRelease,
   senderLabel?: (userId: string, email: string | null) => Promise<string>,
   accessRateLimiter = new TokenBucketLimiter(30, 1, 10_000),
+  lookupUserEmails?: (userIds: readonly string[]) => Promise<ReadonlyMap<string, string>>,
 ) {
   async function receivedSummaries(rows: readonly SyncRelayShareWithGrantRow[], actorUserId: string) {
     const receivedLookups = await Promise.all(rows.map(async fallback => {
@@ -201,6 +203,16 @@ export function createShareInventoryRoutes(
     const independentGrantCursor = independentGrantInventoryCursor.decode(
       url.searchParams.get("independentGrantCursor"),
     );
+    const grantIds = [...new Set(url.searchParams.getAll("historyGrantId"))];
+    const userIds = [...new Set(url.searchParams.getAll("historyUserId"))];
+    if (grantIds.length || userIds.length) {
+      if (url.searchParams.getAll("historyGrantId").length + url.searchParams.getAll("historyUserId").length > 200 || [...grantIds, ...userIds].some(id => id.length === 0 || id.length > 256)
+        || linkCursor || independentGrantCursor) throw badRequest("History lookup ids are invalid");
+      const accounts = storage.lookupHistoryAccounts(workspaceId, grantIds, userIds);
+      const emails = accounts.length ? await lookupUserEmails?.([...new Set(accounts.map(account => account.recipientUserId))]) : undefined;
+      if (!storage.workspaceIsOwnedBy(workspaceId, actor.userId)) throw notFound();
+      return jsonResponse({ ok: true, holders: accounts.map(account => ({ ...account, recipientEmail: emails?.get(account.recipientUserId) ?? null })) });
+    }
     const page = storage.listLinkGrantsByWorkspace(
       workspaceId,
       linkCursor,

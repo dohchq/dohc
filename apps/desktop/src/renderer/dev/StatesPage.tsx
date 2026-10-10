@@ -3,7 +3,14 @@ import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contrac
 import { AlertTriangle, Bot, CheckCircle2, Globe2, MessageSquare, MoreHorizontal, SearchX } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import type { ChatThreadRecord, EngineMomentRecord, HistoryPolicyUnreadableResult, SyncStatusResult } from "../../ipc/bridgeContract";
+import type {
+  ChatThreadRecord,
+  EngineMomentRecord,
+  HistoryPolicyUnreadableResult,
+  SyncStatusResult,
+  UsageRecordResult,
+  UsageRecordRow,
+} from "../../ipc/bridgeContract";
 import { readError, withErrorWords } from "../../ipc/errorWords";
 import { DocumentMenu } from "../DocumentMenu";
 import { FrontmatterAsWritten } from "../FrontmatterAsWritten";
@@ -14,6 +21,7 @@ import { buildTableMenu, type TableMenuRow } from "../editor/tableControls";
 import { OverlayFrame } from "../Overlay";
 import { CollectionUnavailable } from "../TransactionalCollectionPage";
 import { ColorControl, HueControl, SwitchControl, TextControl } from "../settings/SettingRow";
+import { UsageRecordCard, UsageRecordClearConfirm, type UsageRecordView } from "../settings/UsageRecordSettings";
 import { ConfirmDialogCard } from "../ui/ConfirmDialog";
 import { CopyButton, CopyField } from "../ui/CopyButton";
 import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
@@ -42,6 +50,7 @@ import {
   type AccessSetup,
   type AccessView,
 } from "../workbench/About";
+import { SharingPanel, type SharingActions } from "../workbench/SharingView";
 import { CAPTURE_RECOVERY_TITLE, captureRecoveryMessage } from "../shell/useCaptureRecoveryNotices";
 import { WorkspaceSyncStatus } from "../workbench/WorkspaceSyncStatus";
 import { closeStatesPage } from "./statesRoute";
@@ -418,6 +427,72 @@ function AccessSpecimen(props: { view: AccessView; reason?: AccessReason }) {
       <AboutAccessView view={props.view} expanded onToggle={noop} onRetry={noop} onMore={noop}
         setup={props.reason ? accessSetup(props.reason) : ACCESS_UNEXPLAINED} />
     </AboutPanelSpecimen>
+  );
+}
+
+// The Sharing view's lists, as the drawing fills them.
+const SHARING_CHECKED_AT = new Date(2026, 6, 8, 9, 40).getTime();
+const SHARING_GRANTED: AccessAnswer = {
+  ...ABOUT_ACCESS,
+  ref: null,
+  rows: [
+    aboutGrant({ shareId: "share-plan", grantId: "grant-sam", recipientUserId: "sam", recipientEmail: "sam@hollis.studio",
+      selector: { paths: ["notes/product-plan.md"], versionId: null } }),
+    aboutGrant({ shareId: "share-research", grantId: "grant-link", via: "link", recipientUserId: null, recipientEmail: null,
+      selector: { paths: ["research/competitors.md"], versionId: null }, access: "view" }),
+    aboutGrant({ shareId: "share-old", grantId: "grant-kim", recipientUserId: "kim", recipientEmail: "kim@example.com",
+      subjectName: "budget.csv", selector: null, access: null, status: "revoked" }),
+  ],
+  checkedAtMs: SHARING_CHECKED_AT,
+};
+const SHARING_RECEIVED: AccessAnswer = {
+  ...SHARING_GRANTED,
+  coverage: { kind: "received-account", complete: true, observation: "interval" },
+  rows: [
+    aboutGrant({ shareId: "in-funnel", grantId: "in-1", via: "received", sharerName: "Sam", granterEmail: "sam@hollis.studio",
+      recipientUserId: "me", recipientEmail: null, subjectName: "funnel.csv", selector: { paths: ["data/funnel.csv"], versionId: null }, access: "view" }),
+    aboutGrant({ shareId: "in-research", grantId: "in-2", via: "received", sharerName: "Sam", granterEmail: "sam@hollis.studio",
+      recipientUserId: "me", recipientEmail: null, subjectName: "research", selector: { kind: "chat", channelWireId: "wire-research" }, access: "read-only" }),
+  ],
+};
+const SHARING_UNKNOWN: Partial<AccessAnswer> = {
+  rows: [],
+  visibility: "unknown",
+  coverage: { kind: "unavailable", complete: false, observation: "interval" },
+  checkedAtMs: null,
+  freshness: "unknown",
+};
+const SHARING_MOUNTS = [{ shareId: "in-funnel", label: "funnel", granterEmail: "sam@hollis.studio", access: "view" as const }];
+const SHARING_WAITING = new Map([["share-plan", { count: 2, senders: ["sam@hollis.studio"], oldestProposalId: "proposal-1" }]]);
+const SHARING_ACTIONS: SharingActions = {
+  retry: noop, more: noop, reviewChanges: noop, startEnd: noop, cancelEnd: noop, end: noop, mount: noop, unmount: noop, reviewConflicts: noop,
+};
+const ready = (answer: AccessAnswer): AccessView => ({ status: "ready", answer });
+
+// The Sharing view at the drawing's 280px, on the chrome.
+function SharingSpecimen(props: {
+  granted: AccessView;
+  received: AccessView;
+  grantedReason?: AccessReason;
+  receivedReason?: AccessReason;
+  conflictCount?: number;
+  confirmShareId?: string;
+}) {
+  return (
+    <div className="flex w-[280px] flex-col rounded-lg border border-line bg-panel">
+      <SharingPanel
+        granted={props.granted}
+        received={props.received}
+        grantedSetup={props.grantedReason ? accessSetup(props.grantedReason) : ACCESS_UNEXPLAINED}
+        receivedSetup={props.receivedReason ? accessSetup(props.receivedReason) : ACCESS_UNEXPLAINED}
+        conflictCount={props.conflictCount ?? null}
+        waiting={SHARING_WAITING}
+        mounts={SHARING_MOUNTS}
+        confirmShareId={props.confirmShareId ?? null}
+        busyShareId={null}
+        actions={SHARING_ACTIONS}
+      />
+    </div>
   );
 }
 
@@ -1314,7 +1389,105 @@ function Pane(props: { theme: "light" | "dark" }) {
           </div>
         </Specimen>
       </Section>
+
+      {/* After About, so the parts above keep their places. Its rows' menus
+          rest; the menu part draws an open one. */}
+      <Section part="sharing" title="Sharing" menusAtRest>
+        <Specimen label="both lists, a conflict, and changes waiting">
+          <SharingSpecimen granted={ready(SHARING_GRANTED)} received={ready(SHARING_RECEIVED)} conflictCount={2} />
+        </Specimen>
+        <Specimen label="may be out of date">
+          <SharingSpecimen granted={ready({ ...SHARING_GRANTED, freshness: "stale" })}
+            received={ready({ ...SHARING_RECEIVED, freshness: "stale" })} />
+        </Specimen>
+        <Specimen label="no share within each coverage">
+          <SharingSpecimen granted={ready({ ...SHARING_GRANTED, rows: [] })} received={ready({ ...SHARING_RECEIVED, rows: [] })} />
+        </Specimen>
+        <Specimen label="unknown: no cause dohc can name, and signed out">
+          <SharingSpecimen granted={ready({ ...SHARING_GRANTED, ...SHARING_UNKNOWN })}
+            received={ready({ ...SHARING_RECEIVED, ...SHARING_UNKNOWN })} receivedReason="signed-out" />
+        </Specimen>
+        <Specimen label="unknown: the workspace does not sync">
+          <SharingSpecimen granted={ready({ ...SHARING_GRANTED, ...SHARING_UNKNOWN })} grantedReason="not-synced"
+            received={ready(SHARING_RECEIVED)} />
+        </Specimen>
+        <Specimen label="loading, then failed reads: words in Notices">
+          <SharingSpecimen granted={{ status: "loading" }} received={{ status: "failed" }} />
+        </Specimen>
+        <Specimen label="ending a share asks first">
+          <SharingSpecimen granted={ready(SHARING_GRANTED)} received={ready({ ...SHARING_RECEIVED, rows: [] })}
+            confirmShareId="share-plan" />
+        </Specimen>
+        <Specimen label="keyboard focus on a row's actions">
+          <div data-force-state="focus-within" data-force-target='[data-testid="sharing-granted-actions"]'>
+            <div data-force-state="focus focus-visible" data-force-target='[data-testid="sharing-granted-menu"]'>
+              <SharingSpecimen granted={ready({ ...SHARING_GRANTED, rows: SHARING_GRANTED.rows.slice(0, 1) })}
+                received={ready({ ...SHARING_RECEIVED, rows: [] })} />
+            </div>
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* Last, so the parts above keep their places. */}
+      <Section part="usage-record" title="Usage record">
+        <Specimen label="counts, with a row and a door this version does not count">
+          <UsageRecordSpecimen view={USAGE_RECORD} />
+        </Specimen>
+        <Specimen label="off, with saved counts">
+          <UsageRecordSpecimen view={{ ...USAGE_RECORD, enabled: false }} />
+        </Specimen>
+        <Specimen label="nothing counted yet">
+          <UsageRecordSpecimen view={{ ...USAGE_RECORD, since: USAGE_TODAY, rows: [] }} />
+        </Specimen>
+        <Specimen label="a record dohc cannot read">
+          <UsageRecordSpecimen view={{ status: "unreadable", file: USAGE_RECORD.file, code: "EACCES" }} />
+        </Specimen>
+        <Specimen label="loading, then a failed read: words in Notices">
+          <div className="flex flex-col gap-3">
+            <UsageRecordSpecimen view={{ status: "loading" }} />
+            <UsageRecordSpecimen view={{ status: "failed" }} />
+          </div>
+        </Specimen>
+        <Specimen label="Clear's confirm, with Copy first">
+          <div className={SHADOW_ROOM}>
+            <UsageRecordClearConfirm card record={USAGE_RECORD} onCancel={noop} onConfirm={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="keyboard focus on the switch">
+          <div data-force-state="focus focus-visible" data-force-target='[role="switch"]'>
+            <UsageRecordSpecimen view={{ ...USAGE_RECORD, rows: USAGE_RECORD.rows.slice(0, 2) }} />
+          </div>
+        </Specimen>
+      </Section>
     </section>
+  );
+}
+
+// A fixed day, so "today" and "since" never move the capture.
+const USAGE_TODAY = "2026-10-07";
+const usageCell = (count: number, counted = true) => ({ count, counted });
+const usageRow = (capabilityId: string, label: string, doors: Partial<UsageRecordRow["doors"]>, lastUsed: string | null = null): UsageRecordRow => ({
+  capabilityId, label, lastUsed,
+  doors: { renderer: usageCell(0, false), cli: usageCell(0, false), mcp: usageCell(0, false), automation: usageCell(0, false), ...doors },
+});
+const USAGE_RECORD: Extract<UsageRecordResult, { status: "readable" }> = {
+  status: "readable", enabled: true, file: "C:\\Users\\ada\\AppData\\Roaming\\dohc\\dohc-usage.json",
+  since: "2026-09-12", incompleteDays: 1,
+  rows: [
+    usageRow("version.create", "Create a workspace version", { renderer: usageCell(41), cli: usageCell(2, false) }, "2026-10-07"),
+    usageRow("file.kept.save", "Save a kept copy beside its file", { renderer: usageCell(3), cli: usageCell(1), mcp: usageCell(0) }, "2026-10-06"),
+    usageRow("version.try", "Try changes in a workspace version", { renderer: usageCell(1) }, "2026-09-03"),
+    usageRow("chat.post", "Post a chat message", { cli: usageCell(0), mcp: usageCell(0) }),
+    usageRow("chat.export", "Export a chat", {}),
+  ],
+};
+
+// Privacy's width for the card.
+function UsageRecordSpecimen(props: { view: UsageRecordView }) {
+  return (
+    <div className="w-[560px] [&>section]:mt-0">
+      <UsageRecordCard view={props.view} today={USAGE_TODAY} onSwitch={noop} onClear={noop} onRetry={noop} />
+    </div>
   );
 }
 

@@ -193,13 +193,15 @@ export function DesktopRoot() {
     };
   }, [acceptUserSettings, refreshUserSettings]);
 
-  const activeWorkspaceId = workspace?.workspaceId;
+  const activeWorkspaceId = useRef(workspace?.workspaceId);
+  // A committed shell can emit before passive effects run after a switch.
+  activeWorkspaceId.current = workspace?.workspaceId;
   useEffect(() => {
     return bridge().onWorkspaceActivity((event) => {
-      if (event.workspaceId !== undefined && (!event.summaryChanged || event.workspaceId !== activeWorkspaceId)) return;
+      if (event.workspaceId !== undefined && (!event.summaryChanged || event.workspaceId !== activeWorkspaceId.current)) return;
       void refreshWorkspaceRegistry().catch(() => undefined);
     });
-  }, [activeWorkspaceId, refreshWorkspaceRegistry]);
+  }, [refreshWorkspaceRegistry]);
 
   useEffect(() => {
     return bridge().onWorkspaceActivated((next) => {

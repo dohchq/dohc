@@ -509,7 +509,7 @@ Read the grants covering an object.
 
 - `--cursor <cursor>`: Continue the previous answer.
 
-With `--json`, prints `{ schemaVersion, ref: { kind: "path", path, versionId } | { kind: "file", objectId } | { kind: "chat", channelWireId } | { kind: "collection", datasetId } | null, rows: ({ kind: "share", shareId, grantId, via, granterUserId, granterEmail, recipientUserId, recipientEmail, subjectName, sharerName, selector, access, status, generation, fileScope? } | { kind: "collection", datasetId, principal, appId, operationIds, revision, revisionSha256, compatible })[], visibility, coverage: { kind, complete, observation: "interval" }, checkedAtMs, freshness, nextCursor }`. Uses socket verb `accessObject`.
+With `--json`, prints `{ schemaVersion, ref: { kind: "path", path, versionId } | { kind: "file", objectId } | { kind: "chat", channelWireId } | { kind: "collection", datasetId } | null, rows: ({ kind: "share", shareId, grantId, via, granterUserId, granterEmail, recipientUserId, recipientEmail, subjectName, sharerName, selector, access, status, generation, fileScope?, removalMessage? } | { kind: "collection", datasetId, principal, appId, operationIds, revision, revisionSha256, compatible })[], visibility, coverage: { kind, complete, observation: "interval" }, checkedAtMs, freshness, nextCursor }`. Uses socket verb `accessObject`.
 
 #### `dohc access sharing`
 
@@ -521,7 +521,7 @@ Page this workspace's granted shares or this account's received shares.
 
 - `--cursor <cursor>`: Continue the previous answer.
 
-With `--json`, prints `{ schemaVersion, ref: { kind: "path", path, versionId } | { kind: "file", objectId } | { kind: "chat", channelWireId } | { kind: "collection", datasetId } | null, rows: ({ kind: "share", shareId, grantId, via, granterUserId, granterEmail, recipientUserId, recipientEmail, subjectName, sharerName, selector, access, status, generation, fileScope? } | { kind: "collection", datasetId, principal, appId, operationIds, revision, revisionSha256, compatible })[], visibility, coverage: { kind, complete, observation: "interval" }, checkedAtMs, freshness, nextCursor }`. Uses socket verb `accessSharing`.
+With `--json`, prints `{ schemaVersion, ref: { kind: "path", path, versionId } | { kind: "file", objectId } | { kind: "chat", channelWireId } | { kind: "collection", datasetId } | null, rows: ({ kind: "share", shareId, grantId, via, granterUserId, granterEmail, recipientUserId, recipientEmail, subjectName, sharerName, selector, access, status, generation, fileScope?, removalMessage? } | { kind: "collection", datasetId, principal, appId, operationIds, revision, revisionSha256, compatible })[], visibility, coverage: { kind, complete, observation: "interval" }, checkedAtMs, freshness, nextCursor }`. Uses socket verb `accessSharing`.
 
 ### `dohc document`
 
