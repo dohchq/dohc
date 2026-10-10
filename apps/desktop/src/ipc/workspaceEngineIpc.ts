@@ -316,17 +316,21 @@ export function createWorkspaceEngineIpc<
         return listEngineMomentsForIpc(
           async () => {
             let cursor = input.cursor;
-            // Skip retired pages, but leave a continuation after a bounded scan.
+            let startCursor = input.cursor;
+            const versionMarkers: Awaited<ReturnType<typeof history.listMoments>>["versionMarkers"] = [];
+            // Today's view shows moments. Keep skipped markers for the later timeline UI.
+            const pageReach = Math.ceil(2_000 / (input.limit ?? 50));
             for (let pageIndex = 0; ; pageIndex += 1) {
               const page = await history.listMoments({
                 ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
                 ...(input.limit !== undefined ? { limit: input.limit } : {}),
                 ...(cursor !== undefined ? { cursor } : {}),
               });
-              if (!admitted) return page;
-              const moments = page.moments.filter(moment => moment.protected || admitted(moment.path));
-              if (moments.length > 0 || page.versionMarkers.length > 0 || page.nextCursor === null || pageIndex === 9) {
-                return { ...page, moments };
+              startCursor ??= page.startCursor;
+              versionMarkers.push(...page.versionMarkers);
+              const moments = admitted ? page.moments.filter(moment => moment.protected || admitted(moment.path)) : page.moments;
+              if (moments.length > 0 || page.nextCursor === null || pageIndex + 1 >= pageReach) {
+                return { ...page, moments, startCursor, versionMarkers };
               }
               cursor = page.nextCursor;
             }

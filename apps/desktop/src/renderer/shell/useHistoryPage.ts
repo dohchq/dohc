@@ -10,7 +10,7 @@ import { bridge } from "../bridge";
 // pages, and the latest order of the answer on screen. A refresh replaces
 // that order outright; the shell keeps its own floor for the open-file
 // refresh key.
-export type HistoryPage = Pick<ListEngineMomentsResult, "moments" | "startCursor" | "nextCursor" | "versionMarkers" | "latestMomentOrder">;
+export type HistoryPage = Pick<ListEngineMomentsResult, "moments" | "nextCursor" | "versionMarkers" | "latestMomentOrder">;
 
 // Why there is no page. A null timeline is not "no changes": it is also a
 // first read still in flight, a read that failed, and a page dropped as stale
@@ -203,7 +203,6 @@ export function useHistoryPage(
           moments: answer.moments,
           nextCursor: answer.nextCursor,
           latestMomentOrder: answer.latestMomentOrder,
-          startCursor: answer.startCursor,
           versionMarkers: answer.versionMarkers,
         });
         // Readiness belongs to the page that actually commits. A newer
@@ -267,7 +266,6 @@ export function useHistoryPage(
             moments: [...current.moments, ...answer.moments],
             nextCursor: answer.nextCursor,
             latestMomentOrder: Math.max(current.latestMomentOrder, answer.latestMomentOrder),
-            startCursor: current.startCursor,
             versionMarkers: [...current.versionMarkers, ...answer.versionMarkers],
           });
         }

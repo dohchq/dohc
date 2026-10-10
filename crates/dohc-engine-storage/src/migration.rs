@@ -3108,7 +3108,7 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     Migration {
         ordinal: 40,
         id: "v2-moments-history-time",
-        sql: "CREATE INDEX idx_moments_history_time ON moments(workspace_id, version_id, recorded_at_ms, moment_order);",
+        sql: "CREATE INDEX idx_moments_history_time ON moments(workspace_id, version_id, recorded_at_ms, moment_order); CREATE INDEX idx_moments_object_history_time ON moments(workspace_id, version_id, object_id, recorded_at_ms, moment_order);",
         sets_user_version: None,
     },
 ];
@@ -3595,7 +3595,7 @@ mod tests {
             ),
             (
                 "v2-moments-history-time",
-                "13a5805796980400efc80b09d322fa1377ab6df461139f552c2c382c14bdee43",
+                "5aa8707d5659bbfb8e3e0076c812d1d723a011e6cfb32fefe490f8b1066b2c39",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

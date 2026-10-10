@@ -236,3 +236,119 @@ fn history_migration_provides_the_time_index() {
     let plan:String=store.read_with(|conn|conn.query_row("EXPLAIN QUERY PLAN SELECT moment_id FROM moments INDEXED BY idx_moments_history_time WHERE workspace_id='ws' AND version_id='main' AND moment_order<=100 AND (recorded_at_ms,moment_order)<(100,10) ORDER BY recorded_at_ms DESC,moment_order DESC LIMIT 51",[],|r|r.get(3))).unwrap();
     assert!(plan.contains("idx_moments_history_time"), "{plan}");
 }
+
+fn insert_markers(scratch: &ScratchDir, markers: &[(&str, i64)]) {
+    let conn = rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).unwrap();
+    conn.execute(
+        "UPDATE versions SET created_at_ms=1000 WHERE version_id='main'",
+        [],
+    )
+    .unwrap();
+    for (id, at) in markers {
+        conn.execute("INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms,fork_version_id) VALUES('history-object',?1,'named',?1,?2,'main')", rusqlite::params![id, at]).unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn marker_order_is_newest_first_and_fenced_across_pages() {
+    let scratch = ScratchDir::new().unwrap();
+    let (transport, handle) = open(&scratch).await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "versions.ensureMain",
+        json!({"workspaceId":"history-object"}),
+    )
+    .await;
+    insert_markers(&scratch, &[("old", 100), ("middle", 200), ("new", 300)]);
+    let first = page(&transport, &handle, None, 1).await;
+    insert_markers(&scratch, &[("late-middle", 250)]);
+    assert_eq!(
+        collect(&transport, &handle, first, 1).await.2,
+        vec!["main", "new", "middle", "old"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn old_dated_version_arriving_mid_chain_waits_for_refresh() {
+    let scratch = ScratchDir::new().unwrap();
+    let (transport, handle) = open(&scratch).await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "versions.ensureMain",
+        json!({"workspaceId":"history-object"}),
+    )
+    .await;
+    insert_markers(&scratch, &[("before", 300)]);
+    let first = page(&transport, &handle, None, 1).await;
+    insert_markers(&scratch, &[("old-import", 1)]);
+    assert_eq!(
+        collect(&transport, &handle, first, 1).await.2,
+        vec!["main", "before"]
+    );
+    let refreshed = page(&transport, &handle, None, 1).await;
+    assert_eq!(
+        collect(&transport, &handle, refreshed, 1).await.2,
+        vec!["main", "before", "old-import"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn equal_millisecond_versions_use_id_order_and_an_admission_fence() {
+    let scratch = ScratchDir::new().unwrap();
+    let (transport, handle) = open(&scratch).await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "versions.ensureMain",
+        json!({"workspaceId":"history-object"}),
+    )
+    .await;
+    insert_markers(&scratch, &[("a", 300), ("z", 300)]);
+    let first = page(&transport, &handle, None, 1).await;
+    insert_markers(&scratch, &[("y", 300)]);
+    assert_eq!(
+        collect(&transport, &handle, first, 1).await.2,
+        vec!["main", "z", "a"]
+    );
+    let refreshed = page(&transport, &handle, None, 1).await;
+    assert_eq!(
+        collect(&transport, &handle, refreshed, 1).await.2,
+        vec!["main", "z", "y", "a"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn history_rejects_cursors_from_another_workspace_engine_version_or_object() {
+    let scratch = ScratchDir::new().unwrap();
+    let (transport, handle) = open(&scratch).await;
+    seed(&transport, &handle, 0, 100).await;
+    let first = page(&transport, &handle, None, 1).await;
+    for (field, value) in [
+        ("workspaceId", "other-workspace"),
+        ("engineUuid", "other-engine"),
+        ("versionId", "other-version"),
+        ("objectId", "other-object"),
+    ] {
+        let mut cursor = first["startCursor"].clone();
+        cursor[field] = json!(value);
+        let error = call_error(
+            &transport,
+            &handle,
+            2000,
+            "history.page",
+            json!({"workspaceId":"history-object","limit":1,"cursor":cursor}),
+        )
+        .await;
+        assert_eq!(
+            error.code,
+            dohc_engine_protocol::error::ErrorCode::InvalidParams,
+            "{field}: {error:?}"
+        );
+        assert_eq!(error.message, "invalid-input", "{field}: {error:?}");
+    }
+}

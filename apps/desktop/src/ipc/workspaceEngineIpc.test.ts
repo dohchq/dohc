@@ -945,6 +945,38 @@ function historyPage(path = "notes/a.md") {
 }
 
 describe("owner History path policy", () => {
+  it.each([false, true])("preserves the request start cursor after skipping with policy=%s", async policy => {
+    const h = await harness();
+    if (policy) h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
+    const start = historyCursor(100);
+    const marker = { id: "draft", workspaceId: "workspace", kind: "named" as const, name: "Draft", createdAtMs: 90 };
+    h.capture.listMoments
+      .mockResolvedValueOnce({ ...historyPage("private/a.md"), moments: policy ? historyPage("private/a.md").moments : [], startCursor: start, nextCursor: historyCursor(80), versionMarkers: [marker] })
+      .mockResolvedValueOnce({ ...historyPage(), startCursor: historyCursor(80), nextCursor: null });
+    await expect(h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", cursor: start })).resolves.toMatchObject({
+      startCursor: start, moments: [{ path: "notes/a.md" }], versionMarkers: [marker], nextCursor: null,
+    });
+    expect(h.capture.listMoments).toHaveBeenCalledTimes(2);
+  });
+
+  it("skips marker-only pages without policy filtering", async () => {
+    const h = await harness();
+    const marker = { id: "draft", workspaceId: "workspace", kind: "named" as const, name: "Draft", createdAtMs: 90 };
+    h.capture.listMoments
+      .mockResolvedValueOnce({ ...historyPage(), moments: [], versionMarkers: [marker], nextCursor: historyCursor(8) })
+      .mockResolvedValueOnce({ ...historyPage("notes/old.md"), startCursor: historyCursor(8), nextCursor: null });
+    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({ moments: [{ path: "notes/old.md" }], startCursor: historyPageFields.startCursor, versionMarkers: [marker] });
+    expect(h.capture.listMoments).toHaveBeenCalledTimes(2);
+  });
+
+  it("reaches admitted moments after more than 500 excluded moments", async () => {
+    const h = await harness();
+    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
+    for (let i = 0; i < 12; i += 1) h.capture.listMoments.mockResolvedValueOnce({ ...historyPage("private/a.md"), moments: Array(50).fill(historyPage("private/a.md").moments[0]), nextCursor: historyCursor(2_000 - (i + 1) * 50) });
+    h.capture.listMoments.mockResolvedValueOnce({ ...historyPage(), nextCursor: null });
+    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({ moments: [{ path: "notes/a.md" }] });
+    expect(h.capture.listMoments).toHaveBeenCalledTimes(13);
+  });
   it("keeps version markers when a page's file moments are excluded", async () => {
     const h = await harness();
     h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
@@ -953,9 +985,9 @@ describe("owner History path policy", () => {
       .mockResolvedValueOnce({ ...historyPage("private/a.md"), versionMarkers: [marker] })
       .mockResolvedValueOnce({ ...historyPage("notes/old.md"), nextCursor: null });
     await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({
-      moments: [], versionMarkers: [marker], nextCursor: historyCursor(8),
+      moments: [{ path: "notes/old.md" }], versionMarkers: [marker], nextCursor: null,
     });
-    expect(h.capture.listMoments).toHaveBeenCalledTimes(1);
+    expect(h.capture.listMoments).toHaveBeenCalledTimes(2);
   });
 
   it("skips excluded pages to reach older admitted History", async () => {
@@ -975,10 +1007,10 @@ describe("owner History path policy", () => {
     const h = await harness();
     h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
     h.capture.listMoments.mockImplementation(async ({ cursor } = {}) => ({
-      ...historyPage("private/a.md"), nextCursor: historyCursor((cursor?.text?.momentOrder ?? 2000) - 200),
+      ...historyPage("private/a.md"), nextCursor: historyCursor((cursor?.text?.momentOrder ?? 2000) - 50),
     }));
     await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({ moments: [], nextCursor: historyCursor(0) });
-    expect(h.capture.listMoments).toHaveBeenCalledTimes(10);
+    expect(h.capture.listMoments).toHaveBeenCalledTimes(40);
   });
 
   it("stops skipping at the end of History", async () => {

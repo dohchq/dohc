@@ -401,6 +401,10 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(requests.filter((request) => request.method === VERSIONED_METHOD.historyPage)).toEqual([expect.objectContaining({ params: { workspaceId: WORKSPACE_ID, objectId: "object-plan", limit: 10 } })]);
     expect(requests.some((request) => request.method === VERSIONED_METHOD.momentsList)).toBe(false);
     expect((await engine.listMoments({ limit: 10 })).moments).toHaveLength(3);
+    const first = await engine.listMoments({ limit: 1, objectId: "object-plan" });
+    expect(first.nextCursor).not.toBeNull();
+    await engine.listMoments({ limit: 1, objectId: "object-plan", cursor: first.nextCursor! });
+    expect(requests.filter(request => request.method === VERSIONED_METHOD.historyPage).at(-1)?.params).toMatchObject({ versionId: "main", cursor: first.nextCursor });
     await engine.stop();
   });
 

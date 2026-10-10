@@ -121,9 +121,12 @@ impl VersionedTextStore<'_> {
                         object_id: object_id.map(str::to_owned),
                         text_fence: conn
                             .query_row(
-                                "SELECT COALESCE(MAX(moment_order),-1) FROM moments \
-                         WHERE workspace_id=?1 AND version_id=?2 AND (?3 IS NULL OR object_id=?3)",
-                                params![workspace_id, version_id, object_id],
+                                text_fence_query(object_id.is_some()),
+                                rusqlite::params_from_iter(
+                                    [Some(workspace_id), Some(version_id)]
+                                        .into_iter()
+                                        .chain(object_id.map(Some)),
+                                ),
                                 |r| r.get(0),
                             )
                             .map_err(DomainError::sql_corrupt)?,
@@ -174,6 +177,14 @@ impl VersionedTextStore<'_> {
     }
 }
 
+fn text_fence_query(object: bool) -> &'static str {
+    if object {
+        "SELECT COALESCE(MAX(moment_order),-1) FROM moments WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3"
+    } else {
+        "SELECT COALESCE(MAX(moment_order),-1) FROM moments WHERE workspace_id=?1 AND version_id=?2"
+    }
+}
+
 fn read_text(
     conn: &Connection,
     cursor: &HistoryCursor,
@@ -189,12 +200,18 @@ fn read_text(
 }
 
 fn text_query(cursor: &HistoryCursor, limit: usize) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+    // The admission fence must not make SQLite sort all eligible rows before LIMIT.
+    let index = if cursor.object_id.is_some() {
+        "idx_moments_object_history_time"
+    } else {
+        "idx_moments_history_time"
+    };
     // No payload column is selected, including for oversized live-document blobs.
-    let mut sql = String::from(
+    let mut sql = format!(
         "SELECT m.moment_order,m.moment_id,m.version_id,m.object_id,m.path,m.recorded_at_ms,m.operation, \
          COALESCE(m.after_content_kind,'text'),COALESCE(b.byte_length,bb.byte_length), \
          m.metadata_origin,m.metadata_summary,m.metadata_correlation_id,m.author_json,COALESCE(m.sync_record_only,0) \
-         FROM moments m INDEXED BY idx_moments_history_time \
+         FROM moments m INDEXED BY {index} \
          LEFT JOIN blobs b ON b.sha256=m.after_blob_sha256 \
          LEFT JOIN binary_blobs bb ON bb.sha256=m.after_binary_sha256 \
          WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.moment_order<=?3 \
@@ -380,5 +397,75 @@ mod tests {
                 "{plans:?}"
             );
         }
+    }
+
+    #[test]
+    fn object_history_page_and_fence_search_object_indexes_without_scanning() {
+        let dir = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let store = dohc_engine_storage::EngineStore::open(
+            &dohc_engine_testkit::engine_db_path(&dir).unwrap(),
+            1,
+        )
+        .unwrap();
+        for position in [
+            None,
+            Some(HistoryMomentPosition {
+                recorded_at_ms: 100,
+                moment_order: 10,
+            }),
+        ] {
+            let cursor = HistoryCursor {
+                format: 1,
+                engine_uuid: "test".into(),
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                object_id: Some("object".into()),
+                text_fence: 100,
+                protected_fence: -1,
+                marker_fence: -1,
+                text: position,
+                protected: None,
+                marker: None,
+            };
+            let (sql, binds) = text_query(&cursor, 51);
+            let plans: Vec<String> = store
+                .read_with(|conn| {
+                    let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+                    let refs = binds.iter().map(|b| b.as_ref()).collect::<Vec<_>>();
+                    stmt.query_map(refs.as_slice(), |r| r.get(3))?
+                        .collect::<Result<Vec<String>, rusqlite::Error>>()
+                })
+                .unwrap();
+            assert!(
+                plans.iter().any(|p| p
+                    .contains("SEARCH m USING INDEX idx_moments_object_history_time")
+                    && p.contains("object_id=?")),
+                "{plans:?}"
+            );
+            assert!(
+                !plans
+                    .iter()
+                    .any(|p| p.contains("SCAN m") || p.contains("TEMP B-TREE")),
+                "{plans:?}"
+            );
+        }
+        let plans: Vec<String> = store
+            .read_with(|conn| {
+                let mut stmt =
+                    conn.prepare(&format!("EXPLAIN QUERY PLAN {}", text_fence_query(true)))?;
+                stmt.query_map(params!["ws", "main", "object"], |r| r.get(3))?
+                    .collect::<Result<Vec<String>, rusqlite::Error>>()
+            })
+            .unwrap();
+        assert!(
+            plans.iter().any(|p| p.contains("SEARCH moments USING")
+                && p.contains("idx_moments_object")
+                && p.contains("object_id=?")),
+            "{plans:?}"
+        );
+        assert!(
+            !plans.iter().any(|p| p.contains("SCAN moments")),
+            "{plans:?}"
+        );
     }
 }

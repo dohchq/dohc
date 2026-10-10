@@ -238,3 +238,43 @@ A missing scenario is `null`, never a pass. `complete` is true only when every
 scenario produced an artifact.
 
 React commit counts are currently `null`. The app has no production React Profiler or commit mark.
+
+
+## Measure engine History queries
+
+The ignored Rust test `history_page_benchmark` measures first pages, later pages, and a three-edit object in a 100,000-moment version.
+The fixture also contains 1,000 protected rows and 100 version markers.
+The candidate drains those streams before timing a later text cursor, so the benchmark exercises a text position as well as marker positions.
+It reports capture-inclusive reads and the first reopen after removing the candidate's History index migration.
+The reopen builds both History indexes.
+
+Prepare separate base and candidate checkouts before the admitted measurement window.
+Copy `crates/dohc-workspace-engine/tests/history_page_benchmark.rs` from the candidate into the base checkout.
+The harness chooses the old page cursor when `HISTORY_BENCH_MODE=baseline`.
+Keep both checkouts and build outputs within their registered task worktrees.
+
+Read the repository's `rust-gate` skill and build each executable through its build budget with these arguments:
+
+```text
+cargo test --locked --release -p dohc-workspace-engine --test history_page_benchmark --no-run -j 8
+```
+
+Use the test executable path printed by Cargo. It is platform-specific and includes a content hash.
+Record its SHA256, checkout commit, profile, fixture size, and concurrent host context.
+Both arms must use the release profile and the same fixture.
+
+The orchestrator runs these executables only through `acquireProfilingSlot` from `tools/perf-profiling/admission.mjs`.
+Admission must monitor the child, cancel it through the slot's signal, and release the slot after the child exits.
+Do not run the test through Cargo while holding profiling admission: its build slot conflicts with profiling admission.
+Do not bypass an admission refusal.
+
+In the admitted runner, set `HISTORY_BENCH_ENTRIES=100000` and use these child commands:
+
+```text
+HISTORY_BENCH_MODE=baseline <base-release-test-executable> history_page_benchmark --exact --ignored --nocapture
+HISTORY_BENCH_MODE=candidate <candidate-release-test-executable> history_page_benchmark --exact --ignored --nocapture
+```
+
+The environment assignment shown above is POSIX syntax. On Windows, set `$env:HISTORY_BENCH_MODE` before spawning each child.
+Set TEMP, TMP, and DOHC_TEST_SCRATCH_ROOT to task-owned directories inside each checkout.
+Preserve the `HISTORY_BENCH` output and admission receipt with the comparison.

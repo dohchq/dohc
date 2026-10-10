@@ -1,5 +1,5 @@
 import type { HistoryCursor, VersionRecord } from "../versioned/versionedWireContract";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import { hasIgnoredSegment, validateUserWritePath } from "@dohc/workspace-core/paths";
 import type { ErrorCode, Event, JsonValue, Request, Response, WireError } from "../protocol";
@@ -984,6 +984,7 @@ function mergeMarkdown(base: string, local: string, remote: string): MarkdownMer
 }
 
 export class VersionedLoopbackEngine implements EngineTransport {
+  private readonly engineUuid = randomUUID();
   readonly requests: Request[] = [];
   readonly responses: Response[] = [];
 
@@ -2640,12 +2641,16 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const protectedRows = objectId === null ? [...state.secretMoments.values()].map(m => m.wire).filter(m => m.versionId === versionId) : [];
     const versions = [...state.versions.values()].map(v => this.versionJson(v) as unknown as VersionRecord);
     const startCursor: HistoryCursor = params.cursor as HistoryCursor | undefined ?? {
-      format: 1, engineUuid: "loopback", workspaceId: versions[0]!.workspaceId,
+      format: 1, engineUuid: this.engineUuid, workspaceId: versions[0]!.workspaceId,
       versionId, objectId, textFence: Math.max(-1, ...text.map(m => m.momentOrder)),
       protectedFence: Math.max(-1, ...protectedRows.map(m => m.momentOrder)), markerFence: objectId === null ? versions.length : -1,
       text: null, protected: null, marker: null,
     };
-    if (startCursor.versionId !== versionId || startCursor.objectId !== objectId) throw new Error("invalid-input");
+    const validPosition = (position: HistoryCursor["text"], fence: number) => position === null || (position.momentOrder >= 0 && position.momentOrder <= fence);
+    const objectStreamsEmpty = objectId === null || (startCursor.protectedFence === -1 && startCursor.markerFence === -1 && startCursor.protected === null && startCursor.marker === null);
+    if (startCursor.format !== 1 || startCursor.engineUuid !== this.engineUuid || startCursor.workspaceId !== versions[0]!.workspaceId ||
+      startCursor.versionId !== versionId || startCursor.objectId !== objectId || startCursor.textFence < -1 || startCursor.protectedFence < -1 || startCursor.markerFence < -1 ||
+      !validPosition(startCursor.text, startCursor.textFence) || !validPosition(startCursor.protected, startCursor.protectedFence) || !objectStreamsEmpty) throw new Error("invalid-input");
     const cursor = structuredClone(startCursor);
     const afterPosition = (m: {recordedAtMs: number; momentOrder: number}, p: HistoryCursor["text"]) => p === null || m.recordedAtMs < p.recordedAtMs || (m.recordedAtMs === p.recordedAtMs && m.momentOrder < p.momentOrder);
     const rows = [

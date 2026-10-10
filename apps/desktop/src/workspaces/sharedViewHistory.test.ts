@@ -10,6 +10,19 @@ type Store = Parameters<typeof sharedViewHistory>[0];
 type Page = Awaited<ReturnType<Store["listHistoryPage"]>>;
 
 describe("sharedViewHistory", () => {
+  it("continues the cursor version after switching and reports the new active version", async () => {
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({ workspace: "shared-workspace", path: "a.md", text: "first", objectId: "shared-a" });
+    const { store } = createCaptureLiveStores({ workspaceId: "shared-workspace", rootPath: await createTestScratch("history-switch-"), attachmentId: Symbol("share") }, mockLiveSessions(loopback));
+    const history = sharedViewHistory(store, "shared-workspace");
+    const first = await history.listMoments({ limit: 1 });
+    expect(first.nextCursor).not.toBeNull();
+    const draft = await store.createNamedVersion({ workspaceId: "shared-workspace", name: "Draft", fromVersionId: "main" });
+    await store.setActiveVersion({ workspaceId: "shared-workspace", versionId: draft.id });
+    const later = await history.listMoments({ limit: 1, cursor: first.nextCursor! });
+    expect(later.activeVersionId).toBe(draft.id);
+    expect(later.startCursor.versionId).toBe("main");
+  });
   it("filters imported objects inside the received share store", async () => {
     const loopback = new VersionedLoopbackEngine();
     loopback.seedTextFile({ workspace: "shared-workspace", path: "a.md", text: "first", objectId: "shared-a" });
@@ -45,6 +58,6 @@ describe("sharedViewHistory", () => {
     expect(await history.readMoment("secret-1")).toBeNull();
     expect(store.getMoment).toHaveBeenCalledWith({ workspaceId: "shared-workspace", momentId: "secret-1" });
     await expect(history.listMoments({ objectId: "object-1", limit: 1, cursor: historyCursor(8) })).resolves.toMatchObject({ moments: [{ ...text, protected: false }] });
-    expect(store.listHistoryPage).toHaveBeenLastCalledWith({ workspaceId: "shared-workspace", objectId: "object-1", limit: 1, cursor: historyCursor(8) });
+    expect(store.listHistoryPage).toHaveBeenLastCalledWith({ workspaceId: "shared-workspace", versionId: "main", objectId: "object-1", limit: 1, cursor: historyCursor(8) });
   });
 });

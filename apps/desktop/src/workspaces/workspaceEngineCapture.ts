@@ -6242,6 +6242,7 @@ export function createWorkspaceEngineCapture(
       const engine = await engineStore();
       const history = await engine.listHistoryPage({
         workspaceId,
+        ...(input.cursor !== undefined ? { versionId: input.cursor.versionId } : {}),
         ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
         ...(input.limit !== undefined ? { limit: input.limit } : {}),
         ...(input.cursor !== undefined
@@ -6249,8 +6250,7 @@ export function createWorkspaceEngineCapture(
           : {}),
       });
       const activeVersionId = history.activeVersion.id;
-      const page = history;
-      const textMoments: WorkspaceEngineMomentSummary[] = page.moments.map(
+      const textMoments: WorkspaceEngineMomentSummary[] = history.moments.map(
         (moment) => ({ ...moment, protected: false }),
       );
       const protectedMoments: WorkspaceEngineMomentSummary[] =
@@ -6282,10 +6282,10 @@ export function createWorkspaceEngineCapture(
       });
       return {
         moments: merged,
-        startCursor: page.startCursor,
-        nextCursor: page.nextCursor,
-        versionMarkers: page.versionMarkers,
-        latestMomentOrder: page.latestMomentOrder,
+        startCursor: history.startCursor,
+        nextCursor: history.nextCursor,
+        versionMarkers: history.versionMarkers,
+        latestMomentOrder: history.latestMomentOrder,
         activeVersionId,
       };
     },

@@ -209,7 +209,9 @@ describe("history page ordering", () => {
 describe("history page pagination", () => {
   it("appends the earlier page, keeps the highest order and version markers", async () => {
     const it0 = mount();
-    await committed(it0, page("first", { nextCursor: historyCursor(1), latestMomentOrder: 5 }));
+    const newerMarker = { id: "draft", workspaceId: "ws-1", kind: "named" as const, name: "Draft", createdAtMs: 20 };
+    const olderMarker = { id: "main", workspaceId: "ws-1", kind: "main" as const, name: "Main", createdAtMs: 1 };
+    await committed(it0, page("first", { nextCursor: historyCursor(1), latestMomentOrder: 5, versionMarkers: [newerMarker] }));
     const loadMore = it0.loadMore();
     expect(it0.hook().loadingMore).toBe(true);
     expect(listEngineMoments).toHaveBeenLastCalledWith({
@@ -219,14 +221,14 @@ describe("history page pagination", () => {
     });
     await settle(
       reads[1]!,
-      page("earlier", { nextCursor: historyCursor(0), latestMomentOrder: 2,  }),
+      page("earlier", { nextCursor: historyCursor(0), latestMomentOrder: 2, versionMarkers: [olderMarker] }),
     );
     await loadMore;
     expect(it0.hook().page).toEqual({
       moments: [moment("first"), moment("earlier")],
       nextCursor: historyCursor(0),
       latestMomentOrder: 5,
-      ...historyPageFields,
+      versionMarkers: [newerMarker, olderMarker],
     });
     expect(it0.hook().loadingMore).toBe(false);
     expect(it0.markReady).toHaveBeenCalledTimes(1);

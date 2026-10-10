@@ -396,6 +396,25 @@ function captureClient(requests: Request[]): MinimalDaemonClient {
 }
 
 describe("VersionedLiveAdapter", () => {
+  it.each(["workspaceId", "engineUuid", "versionId", "objectId"] as const)("rejects a History cursor from another %s", async field => {
+    const engine = new VersionedLoopbackEngine();
+    const adapter = new VersionedLiveAdapter({ sendRequest: request => engine.sendRequest(request), close: () => undefined }, WORKSPACE, { workspaceId: WORKSPACE });
+    await adapter.ensureMainVersion({ workspaceId: WORKSPACE });
+    const first = await adapter.readHistoryPage({ workspaceId: WORKSPACE });
+    await expect(adapter.readHistoryPage({ workspaceId: WORKSPACE, cursor: { ...first.startCursor, [field]: "another" } })).rejects.toThrow("invalid-input");
+  });
+
+  it("rejects an actual cursor issued by another engine", async () => {
+    const make = async () => {
+      const engine = new VersionedLoopbackEngine();
+      const adapter = new VersionedLiveAdapter({ sendRequest: request => engine.sendRequest(request), close: () => undefined }, WORKSPACE, { workspaceId: WORKSPACE });
+      await adapter.ensureMainVersion({ workspaceId: WORKSPACE });
+      return adapter;
+    };
+    const source = await make(), target = await make();
+    const first = await source.readHistoryPage({ workspaceId: WORKSPACE });
+    await expect(target.readHistoryPage({ workspaceId: WORKSPACE, cursor: first.startCursor })).rejects.toThrow("invalid-input");
+  });
   it.each(["api", "local-file"] as const)("records %s text without publishing unless explicitly requested", async (origin) => {
     const loopback = new VersionedLoopbackEngine();
     const adapter = new VersionedLiveAdapter({ sendRequest: (request) => loopback.sendRequest(request), close: () => undefined }, WORKSPACE, { workspaceId: WORKSPACE });

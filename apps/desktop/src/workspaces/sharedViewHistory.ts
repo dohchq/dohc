@@ -16,17 +16,17 @@ export function sharedViewHistory(store: HistoryStore, workspaceId: string):
     async listMoments(input = {}) {
       const history = await store.listHistoryPage({
         workspaceId,
+        ...(input.cursor !== undefined ? { versionId: input.cursor.versionId } : {}),
         ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
         ...(input.limit !== undefined ? { limit: input.limit } : {}),
         ...(input.cursor !== undefined ? { cursor: input.cursor } : {}),
       });
-      const page = history;
       return {
-        moments: page.moments.map((moment) => ({ ...moment, protected: false as const })),
-        startCursor: page.startCursor,
-        nextCursor: page.nextCursor,
-        versionMarkers: page.versionMarkers,
-        latestMomentOrder: page.latestMomentOrder,
+        moments: history.moments.map((moment) => ({ ...moment, protected: false as const })),
+        startCursor: history.startCursor,
+        nextCursor: history.nextCursor,
+        versionMarkers: history.versionMarkers,
+        latestMomentOrder: history.latestMomentOrder,
         activeVersionId: history.activeVersion.id,
       };
     },
