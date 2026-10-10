@@ -449,12 +449,41 @@ describe("ChatsView document thread", () => {
     expect(contexts).toHaveLength(1);
     expect(contexts[0]?.textContent).toBe("↳ replying to Ana");
     expect(screen.getByTestId("chats-comment-agent-badge").textContent).toBe("agent");
-    expect(screen.getAllByTestId("chats-comment-bubble")[2]?.className).toContain(
-      "border-l-2",
-    );
 
     await user.click(contexts[0]!);
     expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ block: "center" });
+  });
+
+  it("draws one author's comments within five minutes as one run with hover actions", async () => {
+    const user = userEvent.setup();
+    const opening = message({ body: "The full opening post body." });
+    const first = message({ id: "comment-1", parentMessageId: opening.id, authorDisplayName: "Ana", body: "First" });
+    const second = message({
+      id: "comment-2", parentMessageId: opening.id, authorDisplayName: "Ana", body: "Second", createdAtMs: NOW + 60_000,
+    });
+    const later = message({
+      id: "comment-3", parentMessageId: opening.id, authorDisplayName: "Ana", body: "Later", createdAtMs: NOW + 10 * 60_000,
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ messageCount: 4 })] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [opening, first, second, later] });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    const divider = await screen.findByTestId("chats-comments-divider");
+    expect(divider.getAttribute("aria-label")).toBe("3 comments");
+    const items = screen.getAllByTestId("chats-message").filter((element) => element.tagName === "LI");
+    expect(items.map((item) => item.dataset.continues)).toEqual(["false", "true", "false"]);
+    // The continued comment keeps its author and time for screen readers.
+    const author = items[1]!.querySelector('[data-testid="chats-message-author"]');
+    expect(author?.textContent).toBe("Ana");
+    expect(author?.parentElement?.className).toBe("sr-only");
+    // Every action sits in the row's toolbar, inside the row.
+    const bubble = items[0]!.querySelector('[data-testid="chats-comment-bubble"]')!;
+    const toolbar = bubble.querySelector('[data-testid="chats-message-toolbar"]')!;
+    expect(toolbar.querySelector('[data-testid="chats-comment-reply"]')?.getAttribute("aria-label")).toBe("Reply");
+    expect(toolbar.querySelector('[data-testid="chats-add-reaction"]')).not.toBeNull();
+    expect(toolbar.querySelector('[data-testid="chats-message-bookmark"]')).not.toBeNull();
   });
 
   it("enters reply mode and sends the true parent message id", async () => {

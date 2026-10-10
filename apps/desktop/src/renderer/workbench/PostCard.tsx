@@ -2,16 +2,16 @@ import { AgentBadge, useIsOwnAuthor } from "./AgentBadge";
 import { AutomationBadge } from "./AutomationBadge";
 import { Bookmark, CircleHelp, FileText, MessageSquare } from "lucide-react";
 import type { ChannelThreadRecord, ChatBookmarkRecord, ChatReactionRecord } from "../../ipc/bridgeContract";
-import { formatChatTime } from "../time";
+import { formatChatTime, formatShortTime } from "../time";
 import { ChatAvatar } from "./ChatAvatar";
-import { chatAuthorLabel, MessageReactions, type ChatReactionControls } from "./chatMessages";
+import { chatAuthorLabel, MessageReactions, RowToolbar, TOOLBAR_BUTTON, type ChatReactionControls } from "./chatMessages";
 import { UnreadPill } from "./ChatsControls";
-import { useId } from "react";
 
-// A post in a group's feed. Drawn like a social card: who, where, when; the
-// title or the text; then one row of reactions, Comment, Save as file. The
-// whole card opens the post. Controls inside stop the click so a reaction
-// never also opens it.
+// A post in a group's feed, drawn as a row: who and when on one line, the
+// title or the text, then a meta line with reactions, an open poll, and the
+// comment count when there are any. Add reaction, Comment, and Save as file
+// sit in a toolbar shown on hover and focus. The whole row opens the post.
+// Controls inside stop the click so a reaction never also opens it.
 //
 // Pinned names from the previous card are kept: chats-post-card,
 // chats-thread, chats-post-author, chats-post-agent-badge, chats-post-time,
@@ -62,25 +62,29 @@ export function postText(title: string, body: string): { heading: string; excerp
   return { heading: firstLine, excerpt: newline === -1 ? "" : body.slice(newline + 1).trim() };
 }
 
+// A feed row: a hairline under each row but the last, and on hover the
+// panel fill with the hairline gone. PostFeedList marks the last row.
+export const FEED_ROW =
+  "group relative border-b border-line px-2 py-3 transition-colors duration-75 hover:rounded-lg hover:border-transparent hover:bg-panel/70 in-data-[feed-last]:border-transparent";
+// Where a feed row's toolbar floats: over its top edge, clear of the unread count.
+export const FEED_TOOLBAR = "-top-2.5 right-9";
+// A feed row's meta line: reactions and counts in the mono voice.
+export const FEED_META = "mt-1.5 flex flex-wrap items-center gap-3 font-mono text-[11px] text-subtle";
 
-
+// One icon button in a row's toolbar.
 export function ActionButton(props: {
   testId?: string;
   label: string;
   icon: React.ReactNode;
-  count?: React.ReactNode;
   active?: boolean;
   disabled?: boolean;
   onClick: () => void;
 }) {
-  // The pinned label stays the name; the count describes it.
-  const countId = useId();
   return (
     <button
       type="button"
       data-testid={props.testId}
       aria-pressed={props.active}
-      aria-describedby={props.count ? countId : undefined}
       disabled={props.disabled}
       onClick={(event) => {
         event.stopPropagation();
@@ -88,15 +92,45 @@ export function ActionButton(props: {
       }}
       title={props.label}
       aria-label={props.label}
-      className={`flex h-8 min-w-8 shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-1.5 text-[13px] font-medium transition-colors duration-75 dohc-focus-visible disabled:cursor-default disabled:opacity-50 ${
-        props.active ? "text-accent" : "text-muted hover:bg-hover hover:text-ink"
-      }`}
+      className={`${TOOLBAR_BUTTON} ${props.active ? "text-accent" : "text-muted"}`}
     >
       {props.icon}
       <span className="sr-only">{props.label}</span>
-      {props.count ? (
-        <span id={countId} className="font-mono text-[11px] font-normal tabular-nums text-subtle">{props.count}</span>
-      ) : null}
+    </button>
+  );
+}
+
+// A reaction pill on a feed row: the emoji and its count. Who reacted is
+// its tooltip.
+export function FeedReactionPill(props: {
+  testId: string;
+  emoji: string;
+  count: number;
+  title?: string;
+  mine?: boolean;
+  disabled?: boolean;
+  pending?: boolean;
+  onClick: (event: React.MouseEvent<HTMLButtonElement>) => void;
+}) {
+  return (
+    <button
+      type="button"
+      data-testid={props.testId}
+      data-emoji={props.emoji}
+      data-mine={props.mine}
+      aria-label={`${props.emoji} ${props.count}`}
+      aria-pressed={props.mine}
+      aria-disabled={props.pending || undefined}
+      title={props.title}
+      disabled={props.disabled}
+      onClick={(event) => {
+        event.stopPropagation();
+        props.onClick(event);
+      }}
+      className="inline-flex items-center gap-1 rounded-full border border-line bg-bg px-1.5 font-sans text-[11px] leading-5 text-muted hover:border-accent/60 dohc-focus-visible disabled:cursor-default aria-disabled:cursor-default aria-disabled:opacity-50"
+    >
+      <span aria-hidden>{props.emoji}</span>
+      <span className="tabular-nums">{props.count}</span>
     </button>
   );
 }
@@ -116,7 +150,7 @@ export function SaveAsFileActions(props: {
         <ActionButton
           testId={props.testIdPrefix}
           label={props.bookmark ? "Saved" : "Save as file"}
-          icon={<Bookmark size={16} strokeWidth={1.9} fill={props.bookmark ? "currentColor" : "none"} aria-hidden />}
+          icon={<Bookmark size={14} strokeWidth={1.9} fill={props.bookmark ? "currentColor" : "none"} aria-hidden />}
           active={Boolean(props.bookmark)}
           disabled={props.busy}
           onClick={() => props.onToggle?.("live")}
@@ -126,11 +160,10 @@ export function SaveAsFileActions(props: {
         <ActionButton
           testId={`${props.testIdPrefix}-open`}
           label="Open file"
-          icon={<FileText size={15} strokeWidth={1.9} aria-hidden />}
+          icon={<FileText size={14} strokeWidth={1.9} aria-hidden />}
           onClick={props.onOpen}
         />
       ) : null}
-
     </>
   );
 }
@@ -151,7 +184,8 @@ export function PostCard(props: {
   const isOwn = useIsOwnAuthor();
   const message = props.data.openingMessage;
   const isAgent = message?.authorKind === "agent";
-  const time = formatChatTime(message?.createdAtMs ?? props.thread.createdAtMs);
+  const createdAtMs = message?.createdAtMs ?? props.thread.createdAtMs;
+  const time = formatChatTime(createdAtMs);
   const commentCount = Math.max(0, props.thread.messageCount - 1);
   const { heading, excerpt } = message
     ? postText(props.thread.title, message.bodySnippet)
@@ -169,6 +203,23 @@ export function PostCard(props: {
     else byEmoji.set(reaction.emoji, [reaction]);
   }
   const readOnly = props.reactionControls.readOnly === true || message === null;
+  const actions = (
+    <>
+      <ActionButton
+        testId="chats-post-comment"
+        label="Comment"
+        icon={<MessageSquare size={14} strokeWidth={1.9} aria-hidden />}
+        onClick={props.onOpen}
+      />
+      <SaveAsFileActions
+        testIdPrefix="chats-post-bookmark"
+        bookmark={props.bookmark}
+        busy={props.bookmarkBusy}
+        onToggle={props.onToggleBookmark}
+        onOpen={props.onOpenBookmark}
+      />
+    </>
+  );
 
   return (
     <div
@@ -185,148 +236,132 @@ export function PostCard(props: {
           props.onOpen();
         }
       }}
-      className="group @container relative cursor-pointer rounded-xl border border-line bg-panel px-4 pb-1 pt-3.5 text-left transition-colors duration-75 hover:border-muted/50 dohc-focus-visible"
+      className={`${FEED_ROW} cursor-pointer text-left dohc-focus-visible focus-visible:rounded-lg`}
     >
-      {/* Unread: a bar down the left edge, inset past the corner radius. */}
-      {props.thread.unreadCount > 0 ? (
-        <span aria-hidden className="absolute inset-y-3 left-0 w-0.5 rounded-full bg-ink" />
-      ) : null}
       {/* Compatibility target retained for existing navigation and e2e
-          drivers. The card itself is the semantic button. */}
-      <div data-testid="chats-thread" data-thread-id={props.thread.id}>
-        <div className="flex items-center gap-2.5">
-          <ChatAvatar
-            name={message?.authorDisplayName ?? "?"}
-            kind={message?.authorKind ?? "human"}
-            own={message ? isOwn(message.authorKind, message, props.data.viewerAuthorId) : false}
-          />
-          <div className="flex min-w-0 flex-1 flex-col leading-tight">
-            <span className="flex items-center gap-1.5">
-              <span
-                data-testid="chats-post-author"
-                className={`truncate text-[14px] font-semibold ${
-                  isAgent ? "text-agent" : "text-ink"
-                }`}
-              >
-                {message ? chatAuthorLabel(message) : "Unknown author"}
-              </span>
-              {isAgent ? (
-                <AgentBadge testIdPrefix="chats-post" author={message!} viewerAuthorId={props.data.viewerAuthorId} />
-              ) : null}
-              {message?.authorKind === "automation" ? (
-                <AutomationBadge
-                  testIdPrefix="chats-post"
-                  author={message}
-                  viewerAuthorId={props.data.viewerAuthorId}
-                  onOpenPath={props.onOpenPath}
-                />
-              ) : null}
+          drivers. The row itself is the semantic button. */}
+      <div data-testid="chats-thread" data-thread-id={props.thread.id} className="flex items-start gap-3">
+        <ChatAvatar
+          name={message?.authorDisplayName ?? "?"}
+          kind={message?.authorKind ?? "human"}
+          own={message ? isOwn(message.authorKind, message, props.data.viewerAuthorId) : false}
+          size="row"
+        />
+        <div className="min-w-0 flex-1">
+          <span className="flex items-baseline gap-1.5 leading-[18px]">
+            <span
+              data-testid="chats-post-author"
+              className={`truncate text-[13px] font-semibold ${isAgent ? "text-agent" : "text-ink"}`}
+            >
+              {message ? chatAuthorLabel(message) : "Unknown author"}
             </span>
-            <span className="flex items-center gap-1.5 text-[12px] text-subtle">
-              {props.groupLabel ? (
-                <span className="truncate font-mono text-[11px]">{props.groupLabel}</span>
-              ) : null}
-              {props.groupLabel ? <span aria-hidden>·</span> : null}
-              <time
-                data-testid="chats-post-time"
-                dateTime={time.iso}
-                title={time.iso}
-                className="shrink-0"
-              >
-                {time.label}
-              </time>
-            </span>
-          </div>
-          <span className="flex shrink-0 items-center gap-2">
-            {openDecision ? (
-              <span
-                data-testid="chats-post-decision-open"
-                className="inline-flex items-center gap-1 text-[11px] text-warning"
-              >
-                <CircleHelp size={11} strokeWidth={2} aria-hidden />
-                Poll open
-              </span>
+            {isAgent ? (
+              <AgentBadge testIdPrefix="chats-post" author={message!} viewerAuthorId={props.data.viewerAuthorId} />
             ) : null}
-            <UnreadPill count={props.thread.unreadCount} testId="chats-thread-unread" />
+            {message?.authorKind === "automation" ? (
+              <AutomationBadge
+                testIdPrefix="chats-post"
+                author={message}
+                viewerAuthorId={props.data.viewerAuthorId}
+                onOpenPath={props.onOpenPath}
+              />
+            ) : null}
+            {props.groupLabel ? (
+              <span className="truncate font-mono text-[11px] text-subtle">{props.groupLabel}</span>
+            ) : null}
+            <time
+              data-testid="chats-post-time"
+              dateTime={time.iso}
+              title={time.label}
+              className="shrink-0 font-mono text-[11px] text-subtle"
+            >
+              {formatShortTime(createdAtMs)}
+            </time>
           </span>
-        </div>
-        <span
-          data-testid="chats-post-title"
-          className={`mt-2.5 line-clamp-3 whitespace-pre-wrap break-words text-ink ${
-            plain
-              ? "text-[15px] leading-relaxed"
-              : "text-[16px] font-semibold leading-snug tracking-[-0.01em]"
-          }`}
-        >
-          {heading}
-        </span>
-        {excerpt ? (
           <span
-            data-testid="chats-post-excerpt"
-            className="mt-1 line-clamp-3 whitespace-pre-wrap break-words text-[14px] leading-relaxed text-muted"
+            data-testid="chats-post-title"
+            className={`mt-0.5 line-clamp-3 whitespace-pre-wrap break-words text-ink ${
+              plain ? "text-[14px] leading-[21px]" : "text-[14px] font-semibold leading-5"
+            }`}
           >
-            {excerpt}
+            {heading}
           </span>
-        ) : null}
+          {excerpt ? (
+            <span
+              data-testid="chats-post-excerpt"
+              className="mt-px line-clamp-3 whitespace-pre-wrap break-words text-[13px] leading-5 text-muted"
+            >
+              {excerpt}
+            </span>
+          ) : null}
+          {byEmoji.size > 0 || openDecision || commentCount > 0 ? (
+            <div data-testid="chats-post-footer" className={FEED_META}>
+              {[...byEmoji.entries()].map(([emoji, records]) => {
+                const mine = records.some((r) => r.authorId === props.data.viewerAuthorId);
+                return (
+                  <FeedReactionPill
+                    key={emoji}
+                    testId="chats-post-reaction-pill"
+                    emoji={emoji}
+                    count={records.length}
+                    mine={mine}
+                    title={records.map((record) => chatAuthorLabel(record)).join(", ")}
+                    disabled={readOnly}
+                    onClick={() => {
+                      if (!message) return;
+                      props.reactionControls.onToggle({
+                        messageId: message.id,
+                        emoji,
+                        nextState: mine ? "removed" : "added",
+                      });
+                    }}
+                  />
+                );
+              })}
+              {openDecision ? (
+                <span
+                  data-testid="chats-post-decision-open"
+                  role="img"
+                  aria-label="Poll open"
+                  title="Poll open"
+                  className="inline-flex text-muted"
+                >
+                  <CircleHelp size={13} strokeWidth={1.9} aria-hidden />
+                </span>
+              ) : null}
+              {commentCount > 0 ? (
+                <span
+                  data-testid="chats-post-comment-count"
+                  role="img"
+                  aria-label={`${commentCount} ${commentCount === 1 ? "comment" : "comments"}`}
+                  className="inline-flex items-center gap-1 tabular-nums"
+                >
+                  <MessageSquare size={13} strokeWidth={1.9} aria-hidden />
+                  {commentCount}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+        <UnreadPill count={props.thread.unreadCount} testId="chats-thread-unread" tone="quiet" />
       </div>
-
-      {/* One row: who reacted and the picker on the left; Comment, with its
-          count, and Save as file on the right. In a narrow panel the actions
-          wrap under the pills instead of crushing them. */}
-      <div
-        data-testid="chats-post-footer"
-        className="mt-2.5 flex flex-wrap items-center gap-1.5 border-t border-line py-1.5"
-      >
-        {[...byEmoji.entries()].map(([emoji, records]) => (
-          <button
-            key={emoji}
-            type="button"
-            data-testid="chats-post-reaction-pill"
-            data-emoji={emoji}
-            data-mine={records.some((r) => r.authorId === props.data.viewerAuthorId)}
-            aria-label={`${emoji} ${records.length}`}
-            title={records.map((record) => chatAuthorLabel(record)).join(", ")}
-            disabled={readOnly}
-            onClick={(event) => {
-              event.stopPropagation();
-              if (!message) return;
-              const mine = records.some((r) => r.authorId === props.data.viewerAuthorId);
-              props.reactionControls.onToggle({
-                messageId: message.id,
-                emoji,
-                nextState: mine ? "removed" : "added",
-              });
-            }}
-            className="inline-flex items-center gap-1 rounded-full border border-line bg-bg px-1.5 text-[11px] leading-5 text-muted hover:border-accent/60 dohc-focus-visible disabled:cursor-default"
-          >
-            <span aria-hidden>{emoji}</span>
-            <span className="tabular-nums">{records.length}</span>
-          </button>
-        ))}
-        {message ? <MessageReactions testIdPrefix="chats-post" actionTestId="chats-post-like" pickerOnly
-          messageId={message.id} records={reactions} controls={{ ...props.reactionControls, readOnly }} flush /> : null}
-        <span className="flex-1" />
-        <ActionButton
-          testId="chats-post-comment"
-          label="Comment"
-          icon={<MessageSquare size={15} strokeWidth={1.9} aria-hidden />}
-          count={
-            commentCount > 0 ? (
-              <span data-testid="chats-post-comment-count">
-                {commentCount} {commentCount === 1 ? "comment" : "comments"}
-              </span>
-            ) : undefined
-          }
-          onClick={props.onOpen}
+      {/* Add reaction, Comment, and Save as file, in that order, so Save as
+          file stays the row's last stop before the next row. */}
+      {message ? (
+        <MessageReactions
+          testIdPrefix="chats-post"
+          actionTestId="chats-post-like"
+          pickerOnly
+          hoverToolbar
+          toolbarClassName={FEED_TOOLBAR}
+          toolbarActions={actions}
+          messageId={message.id}
+          records={reactions}
+          controls={{ ...props.reactionControls, readOnly }}
         />
-        <SaveAsFileActions
-          testIdPrefix="chats-post-bookmark"
-          bookmark={props.bookmark}
-          busy={props.bookmarkBusy}
-          onToggle={props.onToggleBookmark}
-          onOpen={props.onOpenBookmark}
-        />
-      </div>
+      ) : (
+        <RowToolbar className={FEED_TOOLBAR}>{actions}</RowToolbar>
+      )}
     </div>
   );
 }

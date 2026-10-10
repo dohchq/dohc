@@ -197,9 +197,6 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await expect(ownBubble(agentComment).getByTestId("chats-comment-agent-badge")).toHaveText(
       "agent",
     );
-    const agentBubble = ownBubble(agentComment);
-    await expect(agentBubble).toHaveClass(/border-l-2/);
-    await expect(agentBubble).toHaveAttribute("style", /--dohc-agent/);
     await expect(ownBubble(agentComment).getByTestId("chats-comment-decision-open")).toHaveText(
       "Poll open",
     );
@@ -208,7 +205,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     // the full agent treatment and resolve gesture intact.
     await view.getByTestId("chats-thread-back").click();
     const decisionCard = postCard(view, postTitle);
-    await expect(decisionCard.getByTestId("chats-post-decision-open")).toHaveText(
+    await expect(decisionCard.getByTestId("chats-post-decision-open")).toHaveAccessibleName(
       "Poll open",
     );
     await decisionCard.click();
@@ -262,9 +259,9 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await expect(persistedCard).toBeVisible();
     await expect(persistedCard.getByTestId("chats-post-title")).toHaveText(postTitle);
     await expect(persistedCard.getByTestId("chats-post-excerpt")).toHaveText(postExcerpt);
-    await expect(persistedCard.getByTestId("chats-post-comment-count")).toHaveText(
-      "5 comments",
-    );
+    const commentCount = persistedCard.getByTestId("chats-post-comment-count");
+    await expect(commentCount).toHaveText("5");
+    await expect(commentCount).toHaveAccessibleName("5 comments");
     await expect(
       persistedCard.locator(
         '[data-testid="chats-post-reaction-pill"][data-emoji="👍"]',
@@ -292,8 +289,6 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     const persistedAgentComment = commentWithBody(view, decisionBody);
     await expect(ownBubble(persistedAgentComment).getByTestId("chats-comment-agent-badge"))
       .toHaveText("agent");
-    await expect(ownBubble(persistedAgentComment))
-      .toHaveClass(/border-l-2/);
     await expect(
       ownBubble(persistedAgentComment).getByTestId("chats-comment-decision-resolved"),
     ).toHaveText("Answered");

@@ -236,8 +236,25 @@ export function MentionText(props: {
 const DEFAULT_REACTION_EMOJIS = ["👍", "❤️", "🎉", "🙌", "😄", "👀", "✅", "🚀"] as const;
 // One-click reactions on the row's hover toolbar.
 const QUICK_REACTION_EMOJIS = ["👍", "🙌"] as const;
-const TOOLBAR_BUTTON =
+export const TOOLBAR_BUTTON =
   "grid size-6 place-items-center rounded-md transition-colors duration-75 hover:bg-hover hover:text-ink dohc-focus-visible disabled:opacity-50 disabled:cursor-default";
+
+// A row's actions, floating over its top-right corner while the row is
+// hovered or holds focus. Only opacity changes, so the row never moves, and
+// the buttons stay in the Tab order. An open picker inside keeps it shown.
+export function RowToolbar(props: { testId?: string; className?: string; children: ReactNode }) {
+  return (
+    <div
+      data-testid={props.testId}
+      className={`dohc-popover absolute z-10 flex items-center gap-0.5 rounded-md border border-line bg-panel p-0.5 text-muted opacity-0 transition-opacity duration-75 group-hover:opacity-100 group-focus-within:opacity-100 has-[[popover]]:opacity-100 ${
+        props.className ?? "-top-1 right-0"
+      }`}
+    >
+      {props.children}
+    </div>
+  );
+}
+
 const SINGLE_EMOJI = new RegExp("^(?:\\p{RGI_Emoji}|\\p{Extended_Pictographic})$", "v");
 
 export interface ChatReactionControls {
@@ -275,7 +292,12 @@ export function MessageReactions(props: {
   // toolbar over the row's top-right corner, shown on hover or focus, so a
   // run of short lines keeps its rhythm. Pills still flow under the body.
   hoverToolbar?: boolean;
+  // The row's other actions, after the reaction controls in its toolbar.
+  toolbarActions?: ReactNode;
+  toolbarClassName?: string;
   actionTestId?: string;
+  // Only the add trigger: the host draws its own pills, and its toolbar has
+  // no quick reactions.
   pickerOnly?: boolean;
   // The add trigger's element, for a parent whose own pill is about to
   // unmount and needs somewhere in the same message to put focus.
@@ -492,7 +514,7 @@ export function MessageReactions(props: {
       onClick={(event) => event.stopPropagation()}
       className={
         props.hoverToolbar
-          ? byEmoji.length === 0 ? "absolute right-0 top-0" : "mt-1 flex flex-wrap items-center gap-1"
+          ? props.pickerOnly || byEmoji.length === 0 ? "contents" : "mt-1 flex flex-wrap items-center gap-1"
           : `relative flex flex-wrap items-center gap-1 ${props.flush ? "" : "mt-1"}`
       }
     >
@@ -523,11 +545,8 @@ export function MessageReactions(props: {
         </button>
       ))}
       {props.hoverToolbar ? (
-        <div
-          data-testid={`${props.testIdPrefix}-message-toolbar`}
-          className="absolute -top-1 right-0 z-10 flex items-center gap-0.5 rounded-md border border-line bg-panel p-0.5 shadow-sm opacity-0 transition-opacity duration-75 group-hover:opacity-100 group-focus-within:opacity-100 has-[[popover]]:opacity-100"
-        >
-          {QUICK_REACTION_EMOJIS.map((emoji) => {
+        <RowToolbar testId={`${props.testIdPrefix}-message-toolbar`} className={props.toolbarClassName}>
+          {(props.pickerOnly ? [] : QUICK_REACTION_EMOJIS).map((emoji) => {
             const mine = byEmoji[index.get(emoji) ?? -1]?.mine ?? false;
             return (
               <button
@@ -549,7 +568,8 @@ export function MessageReactions(props: {
           })}
           {trigger}
           {picker}
-        </div>
+          {props.toolbarActions}
+        </RowToolbar>
       ) : (
         <>
           {trigger}
@@ -561,6 +581,20 @@ export function MessageReactions(props: {
 }
 
 const GROUP_WINDOW_MS = 5 * 60_000;
+
+// Whether a message continues the run before it: the same author within
+// five minutes on the same day.
+export function continuesRun(previous: ChatMessageRecord | undefined, message: ChatMessageRecord): boolean {
+  return previous !== undefined &&
+    sameChatDay(previous.createdAtMs, message.createdAtMs) &&
+    previous.authorKind === message.authorKind &&
+    (previous.authorUserId && message.authorUserId
+      ? previous.authorUserId === message.authorUserId
+      : !previous.authorUserId && !message.authorUserId &&
+        previous.authorDisplayName === message.authorDisplayName) &&
+    message.createdAtMs - previous.createdAtMs < GROUP_WINDOW_MS;
+}
+
 const EMPTY_MENTION_CANDIDATES: readonly MentionCandidate[] = [];
 const messageKeyExtractor = (message: ChatMessageRecord) => message.id;
 
@@ -697,15 +731,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   const renderMessage = useCallback(({ item: message, index: at }: { item: ChatMessageRecord; index: number }) => {
     const previous = at > 0 ? props.messages[at - 1] : undefined;
     const newDay = !previous || !sameChatDay(previous.createdAtMs, message.createdAtMs);
-    const continues =
-      !newDay &&
-      previous !== undefined &&
-      previous.authorKind === message.authorKind &&
-      (previous.authorUserId && message.authorUserId
-        ? previous.authorUserId === message.authorUserId
-        : !previous.authorUserId && !message.authorUserId &&
-          previous.authorDisplayName === message.authorDisplayName) &&
-      message.createdAtMs - previous.createdAtMs < GROUP_WINDOW_MS;
+    const continues = continuesRun(previous, message);
     const isAgent = message.authorKind === "agent";
     const time = formatChatTime(message.createdAtMs);
     const reactions = reactionsByMessage.get(message.id) ?? [];
@@ -742,7 +768,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
             New
           </span>
         ) : null}
-        <div className="group -mx-2 flex gap-2.5 rounded-md px-2 hover:bg-hover">
+        <div className="group -mx-2 flex gap-2.5 rounded-lg px-2 hover:bg-hover">
           <span className="flex h-5 w-9 shrink-0 items-start justify-end">
             {continues ? (
               <time
@@ -785,7 +811,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                 <time
                   dateTime={time.iso}
                   title={time.iso}
-                  className="shrink-0 text-[11px] text-subtle"
+                  className="shrink-0 font-mono text-[11px] text-subtle"
                 >
                   {formatClock(message.createdAtMs)}
                 </time>

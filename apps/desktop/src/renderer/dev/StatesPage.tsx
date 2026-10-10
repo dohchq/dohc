@@ -3,7 +3,15 @@ import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contrac
 import { AlertTriangle, Bot, CheckCircle2, Globe2, MessageSquare, MoreHorizontal, SearchX } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import type { ChatThreadRecord, EngineMomentRecord, HistoryPolicyUnreadableResult, SyncStatusResult } from "../../ipc/bridgeContract";
+import type {
+  ChannelThreadRecord,
+  ChatChannelRecord,
+  ChatMessageRecord,
+  ChatThreadRecord,
+  EngineMomentRecord,
+  HistoryPolicyUnreadableResult,
+  SyncStatusResult,
+} from "../../ipc/bridgeContract";
 import { readError, withErrorWords } from "../../ipc/errorWords";
 import { DocumentMenu } from "../DocumentMenu";
 import { FrontmatterAsWritten } from "../FrontmatterAsWritten";
@@ -26,6 +34,9 @@ import { FolderChip, Step } from "../ui/Step";
 import { AgentBadge } from "../workbench/AgentBadge";
 import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
+import { ThreadMessages } from "../workbench/ChatPosts";
+import type { ChatReactionControls } from "../workbench/chatMessages";
+import { PostCard, type PostData } from "../workbench/PostCard";
 import { EditorGroupLayout } from "../workbench/EditorGroupLayout";
 import { EditorTabs } from "../workbench/EditorTabs";
 import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords } from "../workbench/HistoryPolicyStates";
@@ -404,6 +415,74 @@ const ABOUT_ACCESS_UNKNOWN: AccessAnswer = {
   freshness: "unknown",
 };
 
+// A group's feed and a thread, from the drawing's #general.
+const CHAT_AT = new Date(2026, 6, 8, 14, 43).getTime();
+const CHAT_REACTIONS: ChatReactionControls = { reactions: [], viewerAuthorId: "you", onToggle: noop };
+const CHAT_CHANNEL: ChatChannelRecord = {
+  id: "general", name: "general", slug: "general", kind: "channel", type: "posts",
+  createdAtMs: CHAT_AT, updatedAtMs: CHAT_AT, threadCount: 3, unreadCount: 0,
+};
+const chatPost = (
+  id: string,
+  author: { authorKind: "human" | "agent"; authorDisplayName: string },
+  title: string,
+  bodySnippet: string,
+  counts: Partial<Pick<ChannelThreadRecord, "messageCount" | "unreadCount" | "openDecisionCount">> = {},
+): { thread: ChannelThreadRecord; data: PostData } => ({
+  thread: {
+    id, title, createdAtMs: CHAT_AT, updatedAtMs: CHAT_AT, channelId: CHAT_CHANNEL.id,
+    messageCount: 1, lastReadSequence: 0, unreadCount: 0, ...counts,
+  },
+  data: { openingMessage: { id: `${id}-opening`, createdAtMs: CHAT_AT, bodySnippet, ...author }, reactions: [], viewerAuthorId: "you" },
+});
+const SAM = { authorKind: "human", authorDisplayName: "Sam" } as const;
+const CHAT_POSTS = [
+  chatPost("post-plain", SAM, "Pricing page copy", "Pricing page copy\nDraft is in research/competitors.md for now. Comments welcome."),
+  chatPost("post-hover", { authorKind: "agent", authorDisplayName: "Agent" }, "The funnel numbers changed since last week.",
+    "The funnel numbers changed since last week.", { unreadCount: 1 }),
+  chatPost("post-poll", SAM, "Can we get the launch checklist into shape before Friday?",
+    "Can we get the launch checklist into shape before Friday?", { messageCount: 5, unreadCount: 2, openDecisionCount: 1 }),
+];
+const chatMessage = (id: string, body: string, minutes: number, parentMessageId?: string): ChatMessageRecord => ({
+  id, threadId: "post-plain", ...SAM, body, createdAtMs: CHAT_AT + minutes * 60_000,
+  ...(parentMessageId ? { parentMessageId } : {}),
+});
+const CHAT_THREAD_MESSAGES = [
+  chatMessage("opening", "Draft is in research/competitors.md for now. Comments welcome.", 0),
+  chatMessage("comment-1", "The second section reads well.", 1, "opening"),
+  chatMessage("comment-2", "Can we cut the last paragraph?", 2, "opening"),
+];
+const CHAT_THREAD_NAV = { level: "thread", channel: CHAT_CHANNEL, thread: CHAT_POSTS[0]!.thread } as const;
+const NO_BOOKMARKS = new Set<string>();
+
+// A thread at the drawing's column, its second comment hovered.
+function ChatThreadSpecimen() {
+  return (
+    <div className="w-[560px]" data-force-state="hover" data-force-target='[data-message-id="comment-2"] > [data-testid="chats-comment-bubble"]'>
+      <ThreadMessages
+        nav={CHAT_THREAD_NAV}
+        messages={CHAT_THREAD_MESSAGES}
+        messagesLoading={false}
+        threadLocked={false}
+        flashMessageId={null}
+        runRecords={{}}
+        reactionsByMessage={new Map()}
+        decisionsByMessage={new Map()}
+        attachmentsByMessage={new Map()}
+        reactionControls={CHAT_REACTIONS}
+        mentionCandidates={[]}
+        bookmarkFor={() => undefined}
+        bookmarkBusy={NO_BOOKMARKS}
+        toggleBookmark={async () => undefined}
+        beginReply={noop}
+        beginResolve={noop}
+        scrollToMessage={noop}
+        setMessageNode={noop}
+      />
+    </div>
+  );
+}
+
 // The About tab at the drawing's 290px, on the chrome.
 function AboutPanelSpecimen(props: { children: ReactNode }) {
   return <div className="flex w-[290px] flex-col rounded-lg border border-line bg-panel pb-2">{props.children}</div>;
@@ -479,7 +558,7 @@ const menuItems = [
   { label: "Delete", onSelect: noop, disabled: true },
 ];
 
-const avatarSizes = ["post", "comment", "strip"] as const;
+const avatarSizes = ["post", "row", "comment", "strip"] as const;
 
 const SYNC_CODE = "dohc-sync:ws_7f3a:wss://relay.dohc.dev";
 
@@ -786,17 +865,17 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="avatars" title="Avatars">
-        <Specimen label="human: post, comment, strip">
+        <Specimen label="human: post, row, comment, strip">
           {avatarSizes.map((size) => (
             <ChatAvatar key={size} name="Ice de Vera" kind="human" size={size} />
           ))}
         </Specimen>
-        <Specimen label="agent: post, comment, strip">
+        <Specimen label="agent: post, row, comment, strip">
           {avatarSizes.map((size) => (
             <ChatAvatar key={size} name="Agent" kind="agent" size={size} />
           ))}
         </Specimen>
-        <Specimen label="automation: post, comment, strip">
+        <Specimen label="automation: post, row, comment, strip">
           {avatarSizes.map((size) => (
             <ChatAvatar key={size} name="Nightly digest" kind="automation" size={size} />
           ))}
@@ -1312,6 +1391,26 @@ function Pane(props: { theme: "light" | "dark" }) {
                 setup={ACCESS_UNEXPLAINED} />
             </AboutPanelSpecimen>
           </div>
+        </Specimen>
+      </Section>
+
+      <Section part="chat-rows" title="Chat rows">
+        <Specimen label="feed: titled; hovered, unread; untitled, unread, poll, comments">
+          <div className="w-[560px]">
+            {CHAT_POSTS.map(({ thread, data }, index) => (
+              <div
+                key={thread.id}
+                data-feed-last={index === CHAT_POSTS.length - 1 ? "" : undefined}
+                data-force-state={index === 1 ? "hover" : undefined}
+                data-force-target={index === 1 ? '[data-testid="chats-post-card"]' : undefined}
+              >
+                <PostCard thread={thread} data={data} reactionControls={CHAT_REACTIONS} onOpen={noop} onToggleBookmark={noop} />
+              </div>
+            ))}
+          </div>
+        </Specimen>
+        <Specimen label="thread: opening post, divider, a run of two comments, the second hovered">
+          <ChatThreadSpecimen />
         </Specimen>
       </Section>
     </section>

@@ -59,9 +59,13 @@ test("emoji reactions and floating mentions stay visible without moving the comp
     await expect(card.locator('[data-testid="chats-post-reaction-pill"][data-emoji="🦦"]')).toBeVisible();
     await page.getByTestId("chats-feed-link").click();
     const homeTrigger = view.getByTestId("chats-feed-like").first();
+    // Home's actions sit in each row's toolbar, shown on hover and on focus.
+    const homeToolbar = view.getByTestId("chats-feed-message-toolbar").first();
     await page.mouse.move(0, 0);
+    await expect(homeToolbar).toHaveCSS("opacity", "0");
+    await view.getByTestId("chats-feed-item").first().hover();
+    await expect(homeToolbar).toHaveCSS("opacity", "1");
     await expect(homeTrigger).toBeVisible();
-    await expect(homeTrigger).toHaveCSS("opacity", "1");
     await homeTrigger.click();
     await page.getByRole("textbox", { name: "Search emoji or paste any emoji" }).fill("🦋");
     await page.getByRole("button", { name: "🦋", exact: true }).click();
@@ -75,6 +79,9 @@ test("emoji reactions and floating mentions stay visible without moving the comp
     for (const theme of ["light", "dark"]) {
       await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
       const homeCard = view.getByTestId("chats-feed-item").first();
+      // Compared at rest: a hovered row takes a fill and rounded corners.
+      await page.mouse.move(0, 0);
+      await expect(homeCard).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
       const surface = await homeCard.evaluate(node => {
         const style = getComputedStyle(node);
         return { background: style.backgroundColor, radius: style.borderRadius, padding: style.paddingLeft };
