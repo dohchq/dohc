@@ -11,6 +11,7 @@ import type { EngineRemovalInProgress } from "./collab/useEngineDoc";
 import { DocumentMenu } from "./DocumentMenu";
 import { IconButton, SecondaryButton } from "./ui/controls";
 import { useTabRowActionsSlot } from "./workbench/tabRowActions";
+import { useShownAfter } from "./ui/useShownAfter";
 
 // A file view's actions, at the right end of its editor group's tab row: the
 // tab already names the file, so no header repeats it above the page. They
@@ -18,12 +19,12 @@ import { useTabRowActionsSlot } from "./workbench/tabRowActions";
 // file draw the same actions. `actions` are the view's controls, right of
 // Share; a view that has controls draws them, disabled, while it loads or
 // when it cannot open (DocumentControls). Share and the controls never
-// shrink. `status` (a save state that needs the person, "Opening…") sits
-// left of them and gives way first, before the tab names: its words can
-// change width without moving a control, and in a narrow pane it ends in an
-// ellipsis. A status with nothing visible, such as a calm save state kept
-// for screen readers, draws no box, so loading, ready and failed views take
-// the same width. Outside an editor group, as on the states page, they draw
+// shrink. `status` (a save state that needs the person, a slow open's
+// "Opening…") sits left of them and gives way first, before the tab names:
+// its words can change width without moving a control, and in a narrow pane
+// it ends in an ellipsis. A status with nothing visible, such as a calm save
+// state or a quick open kept for screen readers, draws no box, so loading,
+// ready and failed views take the same width. Outside an editor group, as on the states page, they draw
 // in a row of their own.
 export function ViewActions(props: {
   onShare?: () => void;
@@ -67,13 +68,25 @@ export function ViewActions(props: {
 
 export const OPENING_TITLE = "You can edit this document when it finishes opening.";
 
-// A document still opening, as its save state slot says it: for screen
-// readers only, like a save in flight. The page's loading lines and the
-// disabled toggle show the wait, and the actions stay where the ready
-// document draws them.
+// The wait before a slow open says so, the same wait as the loading lines'
+// (styles.css, dohc-reveal-if-slow).
+export const OPENING_WORDS_DELAY_MS = 150;
+
+// A document still opening, as its save state slot says it. An open can last
+// (until the engine's retry deadline, or while a guest waits for the host),
+// and meanwhile the page shows the disk copy read-only, so a slow open says
+// "Opening…" in words. A quick one keeps them for screen readers only: it
+// draws nothing, and the actions stay where the ready document draws them.
 export function OpeningState() {
+  const slow = useShownAfter(true, OPENING_WORDS_DELAY_MS);
   return (
-    <span data-testid="markdown-open-state" data-state="opening" title={OPENING_TITLE} className="sr-only">
+    <span
+      data-testid="markdown-open-state"
+      data-state="opening"
+      role="status"
+      title={OPENING_TITLE}
+      className={slow ? "min-w-0 truncate font-mono text-[11px] text-subtle" : "sr-only"}
+    >
       Opening…
     </span>
   );

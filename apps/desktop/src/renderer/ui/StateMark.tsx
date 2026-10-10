@@ -1,6 +1,7 @@
 import { Clock, Lock, TriangleAlert } from "lucide-react";
 import { useId, useLayoutEffect, useRef, useState } from "react";
 import type { SaveState } from "@dohc/workspace-contracts/save-state";
+import { useShownAfter } from "./useShownAfter";
 
 // Save facts and access/view facts share this presentation map.
 //
@@ -145,6 +146,12 @@ export function saveStatePresentationKey(state: SaveState): SaveStateKey | null 
 // collaborators do not have the edits.
 const CALM: ReadonlySet<SaveStateKey | AccessStateKey> = new Set(["saved", "saving", "saved-to-host"]);
 
+// A settle that beats the host's acknowledgement passes through pending share
+// on its way to saved to host, so its words wait until it has lasted. A host
+// that answers within this never makes the row flash; one that does not is
+// away, and the person is told.
+export const PENDING_SHARE_WORDS_DELAY_MS = 2_000;
+
 const MARK_TONE: Record<StateMarkKind, string> = {
   settled: "text-subtle",
   dated: "text-subtle",
@@ -180,7 +187,7 @@ function Mark(props: { kind: StateMarkKind }) {
  * is not a tab stop and keeps its title. `quietWhenCalm` keeps a saved,
  * saving or saved-to-host chip for screen readers only: those pass on their
  * own, so typing never changes what the row draws. Words appear when the
- * file is held, pending share, or the state needs the person. */
+ * file is held, a pending share has lasted, or the state needs the person. */
 export function StateMark(props: {
   state: string | SaveState;
   shown: SaveStateKey | AccessStateKey | SaveState;
@@ -203,6 +210,10 @@ export function StateMark(props: {
   const chipRef = useRef<HTMLSpanElement>(null);
   const tooltip = useRef<HTMLSpanElement>(null);
   const [place, setPlace] = useState<{ left: number; top: number } | null>(null);
+  const pendingShareLasted = useShownAfter(
+    props.quietWhenCalm === true && shownKey === "pending-share",
+    PENDING_SHARE_WORDS_DELAY_MS,
+  );
   // Placed as Menu places its list: measured before the first paint, under
   // the chip with its right edge at the chip's, and kept inside the window,
   // so no pane or panel edge cuts it off. Placed again while it shows,
@@ -230,7 +241,7 @@ export function StateMark(props: {
   }, [shown]);
   if (!presentation) return null;
   const dataState = typeof props.state === "string" ? props.state : props.state.kind === "unknown" ? "unknown" : saveStatePresentationKey(props.state);
-  if (props.quietWhenCalm && shownKey !== null && CALM.has(shownKey)) {
+  if (props.quietWhenCalm && shownKey !== null && (CALM.has(shownKey) || (shownKey === "pending-share" && !pendingShareLasted))) {
     return <span data-testid={props.testId} data-state={dataState ?? undefined} title={title} className="sr-only">{presentation.label}</span>;
   }
   const chip = (

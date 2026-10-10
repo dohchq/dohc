@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { OpeningState, ViewActions } from "./fileInspectorUi";
-import { StateMark, type SaveStateKey } from "./ui/StateMark";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { OPENING_TITLE, OPENING_WORDS_DELAY_MS, OpeningState, ViewActions } from "./fileInspectorUi";
+import { PENDING_SHARE_WORDS_DELAY_MS, StateMark, type SaveStateKey } from "./ui/StateMark";
 import { EditorTabs } from "./workbench/EditorTabs";
 import { EditorGroupFrame } from "./workbench/tabRowActions";
 
@@ -92,7 +92,7 @@ describe("ViewActions", () => {
 
   // Saved, saving and saved-to-host pass on their own, so the row says them
   // only to screen readers, and typing never changes what the row draws. A
-  // held file, a pending share or a failed save keeps its words.
+  // held file, a lasting pending share or a failed save keeps its words.
   it.each(["saved", "saving", "saved-to-host"] as const)(
     "keeps a calm %s state for screen readers only, with no box beside Share",
     (saveState) => {
@@ -109,8 +109,6 @@ describe("ViewActions", () => {
     ["file-locked", "File in use"],
     ["error", "Couldn't save"],
     ["changed-on-disk", "Changed on disk"],
-    // Collaborators don't have the edits until the share takes them.
-    ["pending-share", "Saved locally · Pending share"],
   ] as const)("shows a %s state in words beside Share", (saveState, words) => {
     render(<Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} saveState={saveState} />);
     const mark = screen.getByTestId("status-left");
@@ -118,18 +116,68 @@ describe("ViewActions", () => {
     expect(mark.textContent).toBe(words);
   });
 
-  // A document that opens draws its actions where the ready document will:
-  // "Opening…" is for screen readers, so the status box takes no room in
-  // either phase.
-  it("draws the opening and the ready document's actions in the same place", () => {
-    const { rerender } = render(<Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} saveState="opening" />);
-    const opening = screen.getByTestId("markdown-open-state");
-    expect(opening.classList.contains("sr-only")).toBe(true);
-    expect(opening.textContent).toBe("Opening…");
-    expect(opening.parentElement?.className.split(" ")[0]).toBe("contents");
-    rerender(<Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} saveState="saved" />);
-    expect(screen.queryByTestId("markdown-open-state")).toBeNull();
-    expect(screen.getByTestId("status-left").parentElement?.className.split(" ")[0]).toBe("contents");
+  // Collaborators don't have the edits until the share takes them, so a
+  // pending share that lasts says so. A settle that beats the host's
+  // acknowledgement passes through it on the way to saved to host; that
+  // never shows words, so typing never makes the row flash.
+  describe("pending share", () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it("shows its words once it has lasted", () => {
+      render(<Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} saveState="pending-share" />);
+      expect(screen.getByTestId("status-left").classList.contains("sr-only")).toBe(true);
+      act(() => vi.advanceTimersByTime(PENDING_SHARE_WORDS_DELAY_MS));
+      const mark = screen.getByTestId("status-left");
+      expect(mark.classList.contains("sr-only")).toBe(false);
+      expect(mark.textContent).toBe("Saved locally · Pending share");
+    });
+
+    it("draws nothing while a host answers each settle in time", () => {
+      const group = (saveState: SaveStateKey) => (
+        <Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} saveState={saveState} />
+      );
+      const { rerender } = render(group("saving"));
+      for (let settle = 0; settle < 5; settle += 1) {
+        rerender(group("pending-share"));
+        act(() => vi.advanceTimersByTime(PENDING_SHARE_WORDS_DELAY_MS - 1));
+        expect(screen.getByTestId("status-left").classList.contains("sr-only")).toBe(true);
+        rerender(group("saved-to-host"));
+        rerender(group("saving"));
+      }
+      expect(screen.getByTestId("status-left").parentElement?.className.split(" ")[0]).toBe("contents");
+    });
+  });
+
+  // An open can last, and meanwhile the page shows the disk copy read-only,
+  // so a slow open says "Opening…". A quick one draws nothing: the actions
+  // stay where the ready document draws them.
+  describe("opening", () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it("draws no words and keeps the actions in place for a quick open", () => {
+      const { rerender } = render(<Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} saveState="opening" />);
+      const opening = screen.getByTestId("markdown-open-state");
+      expect(opening.classList.contains("sr-only")).toBe(true);
+      expect(opening.textContent).toBe("Opening…");
+      expect(opening.parentElement?.className.split(" ")[0]).toBe("contents");
+      act(() => vi.advanceTimersByTime(OPENING_WORDS_DELAY_MS - 1));
+      expect(screen.getByTestId("markdown-open-state").classList.contains("sr-only")).toBe(true);
+      rerender(<Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} saveState="saved" />);
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull();
+      expect(screen.getByTestId("status-left").parentElement?.className.split(" ")[0]).toBe("contents");
+    });
+
+    it("says Opening… in words once the open is slow", () => {
+      render(<Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} saveState="opening" />);
+      act(() => vi.advanceTimersByTime(OPENING_WORDS_DELAY_MS));
+      const opening = screen.getByTestId("markdown-open-state");
+      expect(opening.getAttribute("role")).toBe("status");
+      expect(opening.textContent).toBe("Opening…");
+      expect(opening.classList.contains("sr-only")).toBe(false);
+      expect(opening.getAttribute("title")).toBe(OPENING_TITLE);
+    });
   });
 
   it("leaves the row's action slot empty for a tab with no actions", () => {

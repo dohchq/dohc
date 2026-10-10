@@ -2117,11 +2117,12 @@ export function MarkdownView(props: {
         onShare={onShareCurrentPath}
         status={
           <>
-            {/* The wait has its own word: an opening document is not a
-                saved one, and dohc has not decided about it yet. Read mode
-                hides the "Saved" idle chip, but PageIdentity stays editable
-                there and autosaves title/icon edits — so a pending or failed
-                save (saveState.kind !== "saved-here") must surface even when not
+            {/* The wait has its own word, shown once the open is slow
+                (OpeningState): an opening document is not a saved one, and
+                dohc has not decided about it yet. Read mode hides the
+                "Saved" chip, but PageIdentity stays editable there and
+                autosaves title/icon edits — so a pending or failed save
+                (saveState.kind !== "saved-here") must surface even when not
                 `editing`, or a failed title/icon save is invisible while the
                 optimistic value keeps showing. */}
             {opening ? <OpeningState /> : null}
