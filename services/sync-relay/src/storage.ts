@@ -838,7 +838,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return keyEnvelopesStorage.getKeyEnvelope(this, workspaceId);
   }
 
-  async prepareHostedSettlements(input:{workspaceId:string;originId:string;ops:SyncRelayLogInput[]},signal?:AbortSignal):Promise<void>{
+  async prepareLogAppend(input:{workspaceId:string;originId:string;ops:SyncRelayLogInput[]},signal?:AbortSignal):Promise<void>{
     await prepareHostedSettlements(this,input,undefined,signal);
     await prepareLiveApplications(this,input,signal);
   }

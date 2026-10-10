@@ -41,12 +41,12 @@ function application(inBatch = false) {
           chunks: [{sha256: digest, byteLength: bytes.byteLength}]}, updateBlobSha256: value.metadata.accepted.receipt.updateDigest}};
     const ops = await parseAuthenticatedLogOps([raw, {originSeq: 3, opKind: "opaque", payload: {}, recordedAtMs: 1}], "owner");
     const input = {workspaceId: "workspace", originId: "device", ops: inBatch ? [...contentOps, ...ops] : ops};
-    await f.storage.prepareHostedSettlements(input);
+    await f.storage.prepareLogAppend(input);
     f.storage.appendLogBatch(input);
     expect(f.storage.maxOriginSeq("workspace", "device")).toBe(3);
     return f.storage.fetchLogCoordinate({workspaceId: "workspace", originId: "device", originSeq: 2});
   };
-  return {...f, storage: f.storage as StorageContext, publish, record, prepare: (input: Parameters<typeof f.storage.prepareHostedSettlements>[0]) => f.storage.prepareHostedSettlements(input)};
+  return {...f, storage: f.storage as StorageContext, publish, record, prepare: (input: Parameters<typeof f.storage.prepareLogAppend>[0]) => f.storage.prepareLogAppend(input)};
 }
 
 it("confirms an audit application only with the relay journal snapshot", async () => {

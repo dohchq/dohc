@@ -356,7 +356,7 @@ impl<'de> Visitor<'de> for MetadataSeed<'_> {
         if self.header.event_count > 1 {
             let p = scope(&self.header.relay_database_namespace, &accepted.binding);
             let prior: u8 = self.conn.query_row(&format!("SELECT canonical_version FROM live_audit_events WHERE {SCOPE} AND event_count=?6"),
-                params![p[0],p[1],p[2],p[3],p[4],self.header.event_count-1], |row|row.get(0)).map_err(serde::de::Error::custom)?;
+                params![p[0],p[1],p[2],p[3],p[4],self.header.event_count-1], |row|row.get(0)).map_err(SyncError::corrupt).map_err(|error| decode_failure(error, self.storage_failure))?;
             if prior == 2 && version == 1 {
                 return Err(serde::de::Error::custom(
                     "accepted history version downgrade",
@@ -465,7 +465,9 @@ fn parse(
         return Err(error.into());
     }
     let record = decoded.map_err(parse_error)?;
-    chunks.finish()?;
+    chunks
+        .finish()
+        .map_err(|_| invalid("invalid historical live application"))?;
     if record.canonical_digest != manifest.record_digest {
         return Err(invalid("noncanonical historical live application"));
     }

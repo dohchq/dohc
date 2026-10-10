@@ -2757,3 +2757,371 @@ fn confirmation_refresh_propagates_streaming_storage_failure_and_can_retry() {
         Confirmation::ReaderStorageFailure,
     );
 }
+
+fn copy_audit_blobs(source: &EngineStore, target: &mut EngineStore) {
+    let blobs: Vec<Vec<u8>> = source
+        .read_with(|conn| {
+            conn.prepare("SELECT bytes FROM binary_blobs")?
+                .query_map([], |row| row.get(0))?
+                .collect()
+        })
+        .unwrap();
+    target
+        .write_with(&NoFaults, |tx| {
+            for bytes in blobs {
+                put_binary_blob(tx, &bytes)?;
+            }
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+}
+
+fn malformed_restore_receipt_pull(field: &str, value: serde_json::Value) {
+    use dohc_engine_collab::live_update_application::AdmittedLiveUpdateMetadata;
+    let mut f = fixture(true);
+    bootstrap(&mut f, false).unwrap();
+    let (_scratch, _path, mut receiver) = open_store();
+    crate::adopt_join_identity(
+        &mut receiver,
+        "ws",
+        "receiver",
+        "epoch",
+        "stream",
+        200,
+        &NoFaults,
+    )
+    .unwrap();
+    copy_audit_blobs(&f.store, &mut receiver);
+    for mut op in operations(&f.store) {
+        op.relay_seq = Some(op.origin_seq + 1);
+        crate::apply_replication_envelope(
+            &mut receiver,
+            &mut WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+    }
+    accept_enrollment_event(&mut f, 1);
+    let mut audit = operations(&f.store)
+        .into_iter()
+        .find(|op| op.op_kind == application_record::EVENT_OP)
+        .unwrap();
+    let manifest: chunks::Manifest =
+        serde_json::from_value(audit.payload["manifest"].clone()).unwrap();
+    let record: serde_json::Value = f
+        .store
+        .read_with(|conn| {
+            serde_json::from_reader(chunks::ChunkReader::new(conn, &manifest).unwrap())
+        })
+        .unwrap();
+    let mut metadata: AdmittedLiveUpdateMetadata =
+        serde_json::from_value(record["metadata"].clone()).unwrap();
+    metadata.accepted.binding.restore_fence_generation = 1;
+    metadata.accepted.receipt.journal_cursor = 2;
+    let base: BasePayload = serde_json::from_value(published(&f).payload).unwrap();
+    let previous = &base.record.checkpoint.evidence_digest;
+    let evidence =
+        hex_sha256(&serde_json::to_vec(&("accepted-event-v1", previous, 1, &metadata)).unwrap());
+    let mut terminal = json!({"deliveryId":"earlier", "updateDigest": f.binding.lineage_claim_id,
+        "journalCursor":1, "acceptingHostEpoch":1});
+    terminal[field] = value;
+    let restore: restore_record::RestoreSource = serde_json::from_value(json!({
+        "operationId":"restore", "oldGeneration":0, "origin":{"kind":"bootstrap","id":"bootstrap"},
+        "hostId":"host", "appliedSequence":1, "fenceHeadSequence":1, "fencedAtMs":100,
+        "point":{"journalCursor":0,"receiptDigest":f.binding.lineage_claim_id,
+            "markdownDigest":f.input.projected_markdown_digest,"projectionDigest":f.input.projected_markdown_digest},
+        "selected":{"eventCount":0,"terminal":null,"evidenceDigest":previous},
+        "accepted":{"eventCount":0,"terminal":terminal,"evidenceDigest":previous},
+        "originEvidenceDigest":hex_sha256(&serde_json::to_vec(&f.input).unwrap()),
+        "nativeSourceManifestDigest":f.binding.lineage_claim_id,"frozenStateDigest":f.binding.lineage_claim_id,
+        "pointStateDigest":f.binding.lineage_claim_id,"finalContentDigest":f.input.projected_markdown_digest
+    })).unwrap();
+    // Serialize through the native metadata and restore types, in native record order.
+    let bytes = format!(
+        "{{\"kind\":\"application\",\"relayDatabaseNamespace\":\"relay\",\"eventCount\":1,\"evidenceDigest\":\"{evidence}\",\"updateByteLength\":{},\"metadata\":{},\"sourceApplication\":{{\"localYDocSequence\":2,\"hostCoordinate\":{{\"hostId\":\"host\",\"hostEpoch\":1,\"instanceId\":\"instance\",\"connectionId\":\"connection\"}}}},\"sourceRestore\":{},\"contentCoordinate\":{}}}",
+        f.bytes.len(),
+        serde_json::to_string(&metadata).unwrap(),
+        serde_json::to_string(&restore).unwrap(),
+        record["contentCoordinate"]
+    );
+    let dohc_engine_storage::TxnOutcome::Committed(manifest) = receiver
+        .write_with(&NoFaults, |tx| {
+            use std::io::Write;
+            let mut writer = chunks::ChunkWriter::new(tx);
+            writer.write_all(bytes.as_bytes()).unwrap();
+            writer.finish()
+        })
+        .unwrap()
+    else {
+        panic!("record write rolled back")
+    };
+    audit.payload["manifest"] = serde_json::to_value(manifest).unwrap();
+    pull_refused_audit(&mut receiver, audit);
+}
+
+fn pull_refused_audit(receiver: &mut EngineStore, mut audit: ReplicationEnvelope) {
+    audit.origin_id = "malformed".into();
+    audit.origin_seq = 0;
+    audit.relay_seq = Some(100);
+    audit.admitted_author_snapshot = None;
+    let mut later = audit.clone();
+    later.origin_seq = 1;
+    later.relay_seq = Some(101);
+    later.op_kind = "workspace.init".into();
+    later.payload = json!({});
+    contact(receiver);
+    let relay = crate::tests::FakeRelay::default();
+    *relay.pull.lock().unwrap() = Some(crate::PullResponse {
+        ops: vec![audit, later],
+        next_cursor: 101,
+        has_more: false,
+    });
+    let client = crate::RelaySyncClient::new(relay);
+    let result = client
+        .pull_chat_workspace(
+            receiver,
+            &mut WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            300,
+        )
+        .unwrap();
+    assert!(
+        matches!(
+            result,
+            crate::SyncPassOutcome::Complete {
+                refused: 1,
+                applied: 1,
+                ..
+            }
+        ),
+        "{result:?}"
+    );
+    assert_eq!(
+        crate::read_replication_acked_seq(receiver, "ws", "malformed").unwrap(),
+        1
+    );
+    assert_eq!(count(receiver, "live_audit_events"), 0);
+}
+
+#[test]
+fn record_digest_mismatch_does_not_stall_pull() {
+    let mut f = fixture(true);
+    bootstrap(&mut f, false).unwrap();
+    accept_enrollment_event(&mut f, 1);
+    let (_scratch, _path, mut receiver) = open_store();
+    crate::adopt_join_identity(
+        &mut receiver,
+        "ws",
+        "receiver",
+        "epoch",
+        "stream",
+        200,
+        &NoFaults,
+    )
+    .unwrap();
+    copy_audit_blobs(&f.store, &mut receiver);
+    let mut ops = operations(&f.store);
+    let mut audit = ops.pop().unwrap();
+    assert_eq!(audit.op_kind, application_record::EVENT_OP);
+    for mut op in ops {
+        op.relay_seq = Some(op.origin_seq + 1);
+        crate::apply_replication_envelope(
+            &mut receiver,
+            &mut WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+    }
+    audit.payload["manifest"]["recordDigest"] = json!("f".repeat(64));
+    pull_refused_audit(&mut receiver, audit);
+}
+
+#[test]
+fn malformed_restore_receipt_epoch_does_not_stall_pull() {
+    malformed_restore_receipt_pull("acceptingHostEpoch", json!(0));
+}
+
+#[test]
+fn malformed_restore_receipt_delivery_does_not_stall_pull() {
+    malformed_restore_receipt_pull("deliveryId", json!(""));
+}
+
+#[test]
+fn malformed_restore_receipt_digest_does_not_stall_pull() {
+    malformed_restore_receipt_pull("updateDigest", json!("x"));
+}
+
+fn canonical_version_read_failure(refresh: bool) {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let mut f = fixture(true);
+    bootstrap(&mut f, false).unwrap();
+    accept_enrollment_event(&mut f, 1);
+    accept_enrollment_event(&mut f, 2);
+    let (_scratch, _path, mut receiver) = open_store();
+    copy_audit_blobs(&f.store, &mut receiver);
+    let mut ops = operations(&f.store);
+    let mut audit = ops.pop().unwrap();
+    assert_eq!(audit.op_kind, application_record::EVENT_OP);
+    for mut op in ops {
+        op.relay_seq = Some(op.origin_seq + 1);
+        crate::apply_replication_envelope(
+            &mut receiver,
+            &mut WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+    }
+    audit.relay_seq = Some(audit.origin_seq + 1);
+    audit.admitted_author_snapshot = Some(json!([]));
+    if refresh {
+        crate::apply_replication_envelope(
+            &mut receiver,
+            &mut WriterDocCache::new(),
+            &audit,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+    }
+    let target = &mut receiver;
+    let before_ack = crate::read_replication_acked_seq(target, "ws", &audit.origin_id).unwrap();
+    let denied = Arc::new(AtomicBool::new(false));
+    let captured = denied.clone();
+    target
+        .read_with(|conn| {
+            conn.authorizer(Some(move |ctx: AuthContext<'_>| {
+                if matches!(
+                    ctx.action,
+                    AuthAction::Read {
+                        table_name: "live_audit_events",
+                        column_name: "canonical_version"
+                    }
+                ) {
+                    captured.store(true, Ordering::SeqCst);
+                    Authorization::Deny
+                } else {
+                    Authorization::Allow
+                }
+            }))
+        })
+        .unwrap();
+    let failed = crate::apply_replication_envelope(
+        target,
+        &mut WriterDocCache::new(),
+        &audit,
+        &NoFaults,
+        &NoLiveLeases,
+    );
+    target
+        .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+        .unwrap();
+    assert!(denied.load(Ordering::SeqCst));
+    assert!(matches!(failed, Err(SyncError::Storage(_))), "{failed:?}");
+    assert_eq!(
+        crate::read_replication_acked_seq(target, "ws", &audit.origin_id).unwrap(),
+        before_ack
+    );
+    assert_eq!(count(target, "replication_pending_refusals"), 0);
+    let retried = crate::apply_replication_envelope(
+        target,
+        &mut WriterDocCache::new(),
+        &audit,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    assert!(!matches!(retried.primary, ApplyDisposition::Refused(_)));
+}
+
+#[test]
+fn canonical_version_read_failure_on_import_can_retry() {
+    canonical_version_read_failure(false);
+}
+
+#[test]
+fn canonical_version_read_failure_on_refresh_can_retry() {
+    canonical_version_read_failure(true);
+}
+
+#[test]
+fn damaged_local_audit_chunk_propagates_storage_failure_and_can_retry() {
+    let mut f = fixture(true);
+    bootstrap(&mut f, false).unwrap();
+    accept_enrollment_event(&mut f, 1);
+    let mut audit = operations(&f.store).pop().unwrap();
+    audit.relay_seq = Some(audit.origin_seq + 1);
+    audit.admitted_author_snapshot = Some(json!([]));
+    let manifest: chunks::Manifest =
+        serde_json::from_value(audit.payload["manifest"].clone()).unwrap();
+    let sha = &manifest.chunks[0].sha256;
+    let (_scratch, _path, mut receiver) = open_store();
+    copy_audit_blobs(&f.store, &mut receiver);
+    for mut op in operations(&f.store) {
+        op.relay_seq = Some(op.origin_seq + 1);
+        crate::apply_replication_envelope(
+            &mut receiver,
+            &mut WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+    }
+    let original = f.store.get_binary_blob(sha).unwrap().unwrap();
+    let mut damaged = original.clone();
+    damaged[0] ^= 1;
+    receiver
+        .read_with(|conn| {
+            conn.execute(
+                "UPDATE binary_blobs SET bytes=?1 WHERE sha256=?2",
+                params![damaged, sha],
+            )
+        })
+        .unwrap();
+    let result = crate::apply_replication_envelope(
+        &mut receiver,
+        &mut WriterDocCache::new(),
+        &audit,
+        &NoFaults,
+        &NoLiveLeases,
+    );
+    assert!(
+        matches!(
+            result,
+            Err(SyncError::Storage(
+                dohc_engine_storage::StorageError::BlobIntegrity { .. }
+            ))
+        ),
+        "{result:?}"
+    );
+    assert_eq!(count(&receiver, "replication_pending_refusals"), 0);
+    receiver
+        .read_with(|conn| {
+            conn.execute(
+                "UPDATE binary_blobs SET bytes=?1 WHERE sha256=?2",
+                params![original, sha],
+            )
+        })
+        .unwrap();
+    let result = crate::apply_replication_envelope(
+        &mut receiver,
+        &mut WriterDocCache::new(),
+        &audit,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    assert!(matches!(result.primary, ApplyDisposition::Skipped));
+}
