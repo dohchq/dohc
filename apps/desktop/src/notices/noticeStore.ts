@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { atomicReplaceFile } from "../atomicReplaceFile";
+import { mkdir, readFile, rename } from "node:fs/promises";
+import { atomicWriteFile, type DurableFileOperations } from "../atomicReplaceFile";
 import { join } from "node:path";
 import { z } from "zod";
 import { NoticeNotSentError } from "@dohc/automation-executor/automation-chat";
@@ -285,14 +285,15 @@ export function createNoticeStore(deps: {
   dismissRefusal?(workspaceId: string, noticeId: string, refusalCoordinates: RefusalCoordinate[]): Promise<void>;
   nowMs?: () => number;
   outboxPostLimit?: number;
+  fileOperations?: DurableFileOperations;
 }): NoticeStore {
   const nowMs = deps.nowMs ?? Date.now;
   const outboxPostLimit = deps.outboxPostLimit ?? NOTICE_LIST_ROW_LIMIT;
   let localFile: LocalFile | null = null;
   const accountFiles = new Map<string, AccountFile>();
 
-  // Every read and write of the files runs in this queue, one at a time.
-  // Relay calls run outside it.
+  // File operations run one at a time; relay calls run outside the queue.
+  // Saves sync file data. On Windows, a power cut can still undo the rename.
   let queue: Promise<unknown> = Promise.resolve();
   function locked<T>(work: () => Promise<T>): Promise<T> {
     const run = queue.then(work);
@@ -328,9 +329,14 @@ export function createNoticeStore(deps: {
   }
 
   async function save(name: string, value: LocalFile | AccountFile): Promise<void> {
-    await mkdir(deps.directory, { recursive: true });
-    const path = join(deps.directory, name);
-    await atomicReplaceFile(path, (temporary) => writeFile(temporary, JSON.stringify(value), { mode: 0o600 }));
+    try {
+      await mkdir(deps.directory, { recursive: true });
+      await atomicWriteFile(join(deps.directory, name), JSON.stringify(value), deps.fileOperations);
+    } catch (error) {
+      localFile = null;
+      accountFiles.clear();
+      throw error;
+    }
   }
 
   async function loadLocal(): Promise<LocalFile> {

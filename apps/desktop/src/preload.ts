@@ -385,6 +385,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.findDatasetCollection, payload),
   findAutomationCollection: (payload) =>
     ipcRenderer.invoke(CHANNELS.findAutomationCollection, payload),
+  onHistoryNamesChanged: (listener) => onEvent(CHANNELS.historyNamesChanged, WorkspaceIdPayload, listener),
   onCollectionAutomationsChanged: (listener) =>
     onEvent(CHANNELS.collectionAutomationsChanged, WorkspaceIdPayload, listener),
   onAutomationRunsChanged: (

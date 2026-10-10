@@ -164,6 +164,7 @@ import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
 import { Explorer } from "./workbench/Explorer";
 import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
 import {
+  loadLiveDraftRecovery,
   noteWorkspaceLabel,
   remapOrphanedDraftPaths,
   useOrphanedDraftPaths,
@@ -3510,6 +3511,13 @@ export function DesktopWorkspaceShell(props: {
         }
       };
       void refreshInitialFiles().catch(reportInitialFilesFailure);
+      const recoverDrafts = () => loadLiveDraftRecovery(workspaceId, () => !cancelled && !workspaceAdmission.superseded);
+      const reportDraftRecoveryFailure = (error: unknown) => {
+        if (!cancelled && !workspaceAdmission.superseded) {
+          reportShellError("dohc could not read set-aside edits.", error, () => { void recoverDrafts().catch(reportDraftRecoveryFailure); });
+        }
+      };
+      void recoverDrafts().catch(reportDraftRecoveryFailure);
     })();
     return () => {
       cancelled = true;

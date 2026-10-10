@@ -189,6 +189,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
   });
   const readPolicy = vi.fn<(rootPath: string) => Promise<WorkspaceEnginePolicySnapshot>>(async () => ({ filesPolicy: null, visibilityPolicy: null, errors: [], unreadable: [] }));
   if (policyRoot) readPolicy.mockImplementation(readWorkspaceEnginePolicy);
+  const automationPersonName = vi.fn((_workspaceId: string, userId: string, _sender: Sender): string | null => userId === "person-local" ? null : userId);
   const registrations = createWorkspaceEngineIpc({
     readWorkspaceEnginePolicy: readPolicy,
     localPersonId: () => "person-local",
@@ -206,8 +207,8 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     automationAuthor: (_workspaceId, automationId) => ({ name: automationId, collection: "Tasks" }),
     automationRunOnThisComputer, serverRuns, signedInAccount: () => session.account,
     notifyRenderer: notify,
-    namedAuthorLabels: () => () => "Someone you shared with",
-    automationPersonName: (_workspaceId, userId) => userId === "person-local" ? null : userId,
+    namedAuthorLabels: () => ({ named: () => "Someone you shared with" }),
+    automationPersonName,
     retryOwnerLiveDelivery, retryCloudSync,
     retryFileObservation: retry ? id => { void retryFileObservation(id); return retry.read(); } : retryFileObservation,
     requireWorkspace, assertWritableWorkspace: writable, syncStatusWithOwnedProjection: syncProjection,
@@ -231,7 +232,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     notify, writable, requireWorkspace, displayName, syncProjection, canonicalWorkspaceFor, requireSessions,
     events, handlers, invoke, routed, retryOwnerLiveDelivery, retryCloudSync, retryFileObservation, automationRunOnThisComputer, relay, setMissingAdapter: () => { missingAdapter = true; },
     storeWorkspaces, readPolicy,
-    sent,
+    sent, automationPersonName,
     signIn: (account: string | null) => { session.account = account; session.generation += 1; },
     /** A credential load begins: no account is known until it reads the store. Resolves the load with its account. */
     loading: () => {
@@ -283,6 +284,30 @@ describe("workspace engine IPC registrations", () => {
     expect(h.retryFileObservation).toHaveBeenCalledOnce();
     h.retryFileObservation.mockRejectedValueOnce(new Error("read failed"));
     await expect(h.invoke("desktop:retry-file-observation")).rejects.toThrow("read failed");
+  });
+  it("releases the record History lease before background account lookup finishes", async () => {
+    const { createHistoryLabels } = await import("../automations/shareRoster");
+    const h = await harness();
+    const held = deferred<null>();
+    const lookupAccounts = vi.fn(() => held.promise);
+    const labels = createHistoryLabels({ snapshot: () => ({ roster: { grants: [], links: [], endedGrants: [], formerGrants: [] }, owner: true, context: 1, inventory: 1 }), lookupAccounts });
+    h.automationPersonName.mockImplementation((workspaceId, userId) => {
+      labels.prepare(workspaceId, [{ userId }]);
+      return labels.person(workspaceId, userId);
+    });
+    h.adapter.getCollectionRecord.mockResolvedValue({
+      collection: { path: "tasks", objectId: "tasks", status: "valid", reasons: [] },
+      record: { id: "a", path: "tasks/a.md", conflicted: false, values: [] }, nextBeforeHistoryId: null,
+      history: [{ historyId: 1, field: "Status", previous: { present: false, value: null }, next: { present: true, value: "Done" },
+        authorOriginId: "automation", actorKind: "automation", onBehalfOf: "ben", depth: 1, recordedAtMs: 1, automationRun: null }],
+    });
+    await h.invoke(CHANNELS.getCollectionRecordHistory, { workspaceId: "workspace", collectionPath: "tasks", recordId: "a" });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(lookupAccounts).toHaveBeenCalledTimes(1);
+    const removed = vi.fn();
+    await h.authority.retireBinding(h.authority.currentBinding("workspace")!, { removeBinding: removed });
+    expect(removed).toHaveBeenCalledTimes(1);
+    held.resolve(null);
   });
   it("reads and persistently dismisses capture recovery only for this renderer's workspace", async () => {
     const h = await harness();

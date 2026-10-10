@@ -1,5 +1,6 @@
 import {afterEach, expect, it} from "vitest";
 import type {AgentDeclaration} from "@dohc/live-session-contract/live-update-admission";
+import type {LiveAuthorSnapshot} from "@dohc/live-session-contract";
 import {cleanupLiveDeliveryFixtures, registered} from "../../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js";
 import {initialAcceptedHistoryDigest} from "../liveAcceptedHistory.js";
 import {openRelayDeployment} from "../relayDeployment.js";
@@ -8,6 +9,7 @@ import type {StorageContext} from "./context.js";
 import {readAcceptedHistoryDelivery, readAcceptedHistoryInterval, RestoreHistoryBudget} from "./liveAcceptedHistory.js";
 import {nativeSourceAuthorMatches} from "./liveNativeSourceAuthors.js";
 import type {NativeRestoreProposalReceipt} from "../liveRestoreProposal.js";
+import {limitLiveDeclaredAgents} from "./liveAuthorWindow.js";
 
 afterEach(cleanupLiveDeliveryFixtures);
 
@@ -50,7 +52,36 @@ const declare = (input: Input, agentDeclaration: AgentDeclaration): Input =>
 const declarations = (f: Fixture) =>
   f.raw.prepare("SELECT author_snapshot_json FROM sync_relay_live_update_journal WHERE author_context_json IS NOT NULL ORDER BY journal_cursor").all();
 const admittedAgent = (metadata: import("@dohc/live-session-contract").AdmittedLiveUpdateMetadata | null | undefined) => metadata?.authorSnapshot?.find(author => author.kind === "agent");
-const expectedAgent = {kind: "agent", ...declared};
+const expectedAgent = {kind: "agent", ...declared, onBehalfOf: "owner"};
+
+it("records a recipient's bound pair while replay and native restore match the original declaration", () => {
+  const f = registered({deployment: true});
+  try {
+    const agent = {...declared, onBehalfOf: "owner"};
+    const first = {...declare(f.capture(f.update(), "recipient-agent", {kind: "named", userId: "reader", grantId: "grant"}), agent),
+      trustedAccount: {accountId: "reader", name: "Reader"}};
+    const accepted = f.storage.commitLiveUpdateJournal(first);
+    expect(accepted.result).toMatchObject({kind: "accepted", replayed: false});
+    const boundAgent = {kind: "agent" as const, ...agent, onBehalfOf: "reader"};
+    const snapshot: LiveAuthorSnapshot = [{kind: "human", humanId: "reader", humanName: "Reader"}, boundAgent];
+    expect(accepted.admitted!.metadata.authorSnapshot).toEqual(snapshot);
+    expect(f.storage.commitLiveUpdateJournal(first)).toEqual({...accepted, result: {...accepted.result, replayed: true}});
+    expect(f.raw.prepare("SELECT author_context_json FROM sync_relay_live_update_journal WHERE delivery_id=?").get("recipient-agent")?.author_context_json)
+      .toBe(JSON.stringify(first.metadata.authorContext));
+    const source = {source: {origin: {kind: "ownerDraft", agentDeclaration: agent}}} as NativeRestoreProposalReceipt["nativeSources"][number];
+    const matches = (candidate: typeof source) => nativeSourceAuthorMatches(f.storage as StorageContext, candidate,
+      accepted.admitted!.metadata, new RestoreHistoryBudget(1 << 20, 100));
+    expect(matches(source)).toBe(true);
+    expect(matches({source: {origin: {kind: "ownerDraft", agentDeclaration: {...agent, onBehalfOf: "reader"}}}} as typeof source)).toBe(false);
+
+    // Changing the declaration on a new update cannot change the capped identity.
+    const second = declare(f.capture(f.update("more", "recipient-more"), "recipient-more", {kind: "named", userId: "reader", grantId: "grant"}), {...agent, onBehalfOf: "other"});
+    expect(f.storage.commitLiveUpdateJournal(second).admitted!.metadata.authorSnapshot).toEqual(snapshot);
+    const suffix = Array.from({length: 16}, (_, index) => ({...accepted.admitted!.metadata,
+      authorSnapshot: [snapshot[0]!, {...boundAgent, agentId: index === 0 ? agent.agentId : `writer-${index}`}]}));
+    expect(limitLiveDeclaredAgents(suffix, first.expectedAuthority, accepted.admitted!.metadata.authorSnapshot!)).toEqual(snapshot);
+  } finally {f.close();}
+});
 
 it("charges native request context before loading it for restore association", () => {
   const f = registered({deployment: true});

@@ -56,7 +56,7 @@ export function createRunLocator(dependencies: {
 /**
  * A page of record history as the record's History shows it. Each automation
  * run is looked up once, however many of the page's changes it made. The
- * page never waits on the server.
+ * Run availability uses the local cache; author labels may need a History lookup.
  */
 export async function recordHistoryForIpc(
   page: Pick<CollectionGetRecordResult, "history" | "nextBeforeHistoryId">,

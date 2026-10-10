@@ -747,6 +747,7 @@ impl EngineService {
                 .owner_ydoc_refuse_entry(
                     guard.open.workspace_id.clone(),
                     input,
+                    now_ms()?,
                     cancellation.token(),
                     guard.reservation.clone(),
                 )
