@@ -137,5 +137,9 @@
   "share.restore.pending.read",
   "share.restore.pending.dismiss",
   "share.view.refresh",
+  "usage.read",
+  "usage.clear",
+  "usage.switch",
+  "share.copy.read",
   "document.typing.recovery"
 ]

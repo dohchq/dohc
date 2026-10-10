@@ -66,6 +66,7 @@ import type {
   RebuildEngineStoreResult,
   RefreshSharedViewResult,
   ReportKinds,
+  UsageRecordResult,
   StartAgentRunResult,
   SwitchWorkspaceVersionResult,
   SyncDmsPayload,
@@ -523,6 +524,7 @@ function makeBaseBridge(
       shareCode: "dohc-share:relay-share-1:http://relay.test",
       recipientEmail: "friend@dohc.test",
     })),
+    getShareCopyDetails: vi.fn(async () => ({ status: "ended" as const })),
     listRelayShares: vi.fn(async () => ({ granted: [], received: [], removed: [] })),
     retryShareHandoff: vi.fn(async () => undefined),
     dismissShareHandoff: vi.fn(async () => undefined),
@@ -685,6 +687,10 @@ function makeBaseBridge(
     acknowledgeReportsNotice: vi.fn(async (_shown: ReportKinds) => undefined),
     readDiagnostics: vi.fn(async (_payload: Record<string, never>) => ({ text: "dohc diagnostics", available: { usage: false, errors: false } })),
     saveDiagnostics: vi.fn(async (_payload: Record<string, never>) => ({ saved: true })),
+    readUsageRecord: vi.fn(async (_payload: Record<string, never>): Promise<UsageRecordResult> =>
+      ({ status: "readable", enabled: true, file: "/state/dohc-usage.json", since: null, incompleteDays: 0, rows: [] })),
+    clearUsageRecord: vi.fn(async (_payload: Record<string, never>) => undefined),
+    setUsageRecordEnabled: vi.fn(async (_payload: { enabled: boolean }) => undefined),
     reportRendererError: vi.fn(async (_payload: unknown) => undefined),
     emitCrashReportChanged: () => {
       for (const callback of [...crashReportCallbacks]) callback();

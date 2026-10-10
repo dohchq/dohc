@@ -35,6 +35,7 @@ export const CAPABILITIES = {
   "access.object.read": capability("Read observed grants covering an object.", {ipc: ["getObjectAccess"], socket: ["accessObject"], public: ["access object"]}),
   "access.sharing.read": capability("Page observed granted and received shares.", {ipc: ["listSharingAccess"], socket: ["accessSharing"], public: ["access sharing"]}),
   "access.refresh": capability("Request paced observations when Sharing opens or Access expands.", {ipc: ["requestAccessRefresh"]}),
+  "share.copy.read": capability("Read one owned grant's copy details on an explicit renderer action.", {ipc: ["getShareCopyDetails"], mcpReason: "Invitation reads remain renderer-only pending Ice's decision on agent exposure."}),
   "share.access.read": capability("Check the current user's received share access.", {ipc: ["checkSharedViewAccess"]}),
   "share.direct.writes.feedback": capability("Subscribe to and acknowledge shared-view write feedback.", {ipc: ["updateShareDirectWriteDelivery"]}),
   "share.view.refresh": capability("Pull changes into a received share.", {ipc: ["refreshSharedView"]}),
@@ -66,6 +67,10 @@ export const CAPABILITIES = {
   "reports.notice.read": capability("Read which reports the notice must name.", {ipc: ["readReportsNotice"]}),
   "reports.notice.acknowledge": capability("Record that a window showed the notice about reports.", {ipc: ["acknowledgeReportsNotice"]}),
   "reports.error.send": capability("Report an error a dohc window met.", {ipc: ["reportRendererError"]}),
+  // Privacy only. No agent door reads or changes the usage record.
+  "usage.read": capability("Read this computer's usage record.", {ipc: ["readUsageRecord"]}),
+  "usage.clear": capability("Clear this computer's usage record.", {ipc: ["clearUsageRecord"]}),
+  "usage.switch": capability("Turn this computer's usage record on or off.", {ipc: ["setUsageRecordEnabled"]}),
   "chat.dispatch.notices.read": capability("Read chat dispatch notices.", {ipc: ["registerChatDispatchNotices"]}),
   "chat.dispatch.notice.dismiss": capability("Dismiss a chat dispatch notice.", {ipc: ["dismissChatDispatchNotice"]}),
   "automation.host.read": capability("Read the computer that runs schedules.", {ipc: ["readScheduleHost"]}),

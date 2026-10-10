@@ -93,6 +93,8 @@ import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
 import { accessCliQueries, createAccessAcquisition, createAccessOwner } from "./access/accessOwner";
 import { hasAccessChat, locateAccessVersionPath, resolveAccessObject } from "./access/accessObjectResolution";
+import { createShareCopyHandler } from "./ipc/shareCopyHandler";
+import { shareCopyOperations } from "./ipc/shareCopyOperations";
 import { accessOperations } from "./ipc/accessOperations";
 import { assertResolvedWorkspacePath } from "./workspaces/workspaceRealPath";
 import {
@@ -137,6 +139,7 @@ import {
   ShareHandoffStatus,
   crashReportOperations,
   reportingOperations,
+  usageRecordOperations,
   noticeOperations,
   scheduleHostOperations,
   chatDispatchNoticeOperations,
@@ -158,9 +161,10 @@ import { createRecordByHand, desktopRecordEditContext, type DesktopRecordEditHos
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
 import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
 import { registerOperations, type OperationBoundary } from "./ipc/operationTable";
-import { createUsageStore } from "./usage/usageStore";
+import { createUsageStore, USAGE_SNAPSHOT_NAME } from "./usage/usageStore";
 import { createRendererUsage } from "./usage/rendererUsage";
 import { DESKTOP_USAGE_COVERAGE } from "./usage/cliUsage";
+import { usageRecordHandlers } from "./usage/usageRecord";
 
 import { createPresencePollRegistry } from "./collab/presencePollRegistry";
 
@@ -5779,6 +5783,15 @@ async function currentDiagnostics(): Promise<string> {
 
 function registerIpcHandlers(): void {
   shareDirectWriteDelivery.register(operationBoundary);
+  const shareCopyHandler = createShareCopyHandler<WebContents, RegistryEntry, DesktopRendererWorkspaceOperation>({
+    currentSession: sender => rendererWorkspaceSessions.current(sender) ?? null,
+    withRendererWorkspaceOperation, remoteForWorkspace,
+    currentCredentialGeneration: () => credentialCacheGeneration,
+    relayJson: (credentials, path) => relayShareJsonWithCredentials(credentials, path),
+  });
+  registerOperations(operationBoundary, shareCopyOperations, {
+    getShareCopyDetails: (input, { event }) => shareCopyHandler(event.sender, input),
+  });
   registerOperations(operationBoundary, accessOperations, {
     getObjectAccess: (input, { operation }) => accessOwner.object(operation!, input),
     listSharingAccess: (input, { operation }) => accessOwner.sharing(operation!, input),
@@ -6749,6 +6762,12 @@ function registerIpcHandlers(): void {
       telemetry.reportError({ kind: "renderer", origin, error });
     },
   });
+
+  registerOperations(operationBoundary, usageRecordOperations, usageRecordHandlers({
+    store: () => usageStore,
+    file: () => join(stateDir(), USAGE_SNAPSHOT_NAME),
+    coverage: DESKTOP_USAGE_COVERAGE,
+  }));
 
   registerOperations(operationBoundary, workspaceSearchOperations, workspaceSearchHandlers<
     IpcMainInvokeEvent,
