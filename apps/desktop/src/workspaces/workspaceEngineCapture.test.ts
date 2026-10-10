@@ -422,7 +422,6 @@ describe("workspaceEngineCapture batch capture", () => {
     let healthyPending = true;
     const reconcile = vi.fn(async () => {
       healthyPending = false;
-      throw new DaemonRefusalError({ code: "COLLECTION_RECONCILIATION_LEASE_HELD", message: "A document is still open.", retry: "afterBackoff" }, undefined);
     });
     const store = new Proxy(liveStore, {
       get(target, property) {
@@ -485,9 +484,9 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(errors).toEqual([]);
     healthyPending = true;
     reconcile.mockRejectedValueOnce(new DaemonRefusalError({
-      code: "INTERNAL", message: "collection-reconciliation-lease-held", retry: "no",
+      code: "INTERNAL", message: "reconciliation-failed", retry: "no",
     }, undefined));
-    await expect(engine.flush()).rejects.toThrow("collection-reconciliation-lease-held");
+    await expect(engine.flush()).rejects.toThrow("reconciliation-failed");
     healthyPending = false;
     // Retry after capacity clears, or observe adoption completed by the owner host.
     if (transient) blocked = false;
@@ -612,9 +611,6 @@ describe("workspaceEngineCapture batch capture", () => {
       flushCapture: async () => undefined,
       reconcileCapture: async () => {
         attempts.push("reconcile");
-        if (leasedPaths.size > 0) {
-          throw new DaemonRefusalError({ code: "COLLECTION_RECONCILIATION_LEASE_HELD", message: "A document is still open.", retry: "afterBackoff" }, undefined);
-        }
       },
       listPendingCollectionAdoptions: async () => ({
         adoptions: adoptions.filter(
@@ -708,9 +704,6 @@ describe("workspaceEngineCapture batch capture", () => {
       flushCapture: async () => undefined,
       reconcileCapture: async () => {
         attempts.push("reconcile");
-        if (leasedPaths.size > 0) {
-          throw new DaemonRefusalError({ code: "COLLECTION_RECONCILIATION_LEASE_HELD", message: "A document is still open.", retry: "afterBackoff" }, undefined);
-        }
       },
       listPendingCollectionAdoptions: async () => ({
         adoptions: completed.has(adoption.filePath) ? [] : [adoption],

@@ -98,17 +98,6 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
     if matches!(
         &error,
         RuntimeError::Sync(SyncError::RetryableState {
-            reason: "collection-reconciliation-lease-held"
-        })
-    ) {
-        return WireError::new(
-            ErrorCode::CollectionReconciliationLeaseHeld,
-            "collection-reconciliation-lease-held",
-        );
-    }
-    if matches!(
-        &error,
-        RuntimeError::Sync(SyncError::RetryableState {
             reason: "settlement-materialization-pending"
         })
     ) {
@@ -566,23 +555,6 @@ mod tests {
             assert_eq!(wire.message, code);
             assert!(!wire.message.contains("record.md"));
         }
-    }
-
-    #[test]
-    fn collection_lease_refusal_has_its_own_retryable_wire_code() {
-        let error = super::map_runtime(dohc_engine_runtime::RuntimeError::Sync(
-            dohc_engine_sync::SyncError::RetryableState {
-                reason: "collection-reconciliation-lease-held",
-            },
-        ));
-        assert_eq!(
-            error.code,
-            dohc_engine_protocol::ErrorCode::CollectionReconciliationLeaseHeld
-        );
-        assert_eq!(
-            error.retry,
-            dohc_engine_protocol::Retryability::AfterBackoff
-        );
     }
 
     #[test]
