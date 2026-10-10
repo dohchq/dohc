@@ -18,8 +18,8 @@ interface Attachment { workspaceId: string; attachmentId: symbol }
 
 export const MAX_REQUESTED_APP_FOLDERS = 128;
 
-// Observation has settled each batch. The queue also joins renderer reads
-// and batches arriving before a folder's scan starts.
+// Settled observation batches share one background queue per attachment.
+// Renderer reads join existing folder work or start independently.
 export function createFolderAppDetection<Workspace extends Attachment>(input: {
   sources(workspace: Workspace, folder: string): Promise<readonly (string | WorkspaceSiteSource)[]>;
   updated(workspace: Workspace, answer: FolderAppAnswer): void;
@@ -40,13 +40,14 @@ export function createFolderAppDetection<Workspace extends Attachment>(input: {
     folders.delete(folder);
     folders.set(folder, state);
     if (folders.size > MAX_REQUESTED_APP_FOLDERS) folders.delete(folders.keys().next().value!);
+    // A pending refresh broadcasts its eventual answer through updated.
+    if (state.pending && state.answer) return Promise.resolve(state.answer);
     return scan(workspace, folder, tracking, state);
   }
-  function scan(workspace: Workspace, folder: string, tracking: Tracking, current: Folder): Promise<FolderAppAnswer> {
+  function scan(workspace: Workspace, folder: string, tracking: Tracking, current: Folder, background = false): Promise<FolderAppAnswer> {
     if (current.pending) return current.pending;
     if (!current.dirty && current.answer) return Promise.resolve(current.answer);
-    // Serialize source reads per attachment, including rescans after resync.
-    const pending = tracking.queue.then(async () => {
+    const pending = (background ? tracking.queue : Promise.resolve()).then(async () => {
       let answer: FolderAppAnswer;
       do {
         current.dirty = false;
@@ -68,7 +69,7 @@ export function createFolderAppDetection<Workspace extends Attachment>(input: {
     });
     current.pending = pending;
     tracking.pending.add(pending);
-    tracking.queue = pending.then(() => undefined, () => undefined);
+    if (background) tracking.queue = pending.then(() => undefined, () => undefined);
     return pending;
   }
   function settledEvents(workspace: Workspace, events: readonly WatcherEvent[]) {
@@ -86,7 +87,7 @@ export function createFolderAppDetection<Workspace extends Attachment>(input: {
       const state = folders.get(folder);
       if (state) {
         state.dirty = true;
-        void scan(workspace, folder, tracking, state).catch(input.failed);
+        void scan(workspace, folder, tracking, state, true).catch(input.failed);
       }
     }
   }
@@ -101,7 +102,7 @@ export function createFolderAppDetection<Workspace extends Attachment>(input: {
     if (!tracking) return;
     for (const [folder, state] of tracking.folders) {
       state.dirty = true;
-      void scan(workspace, folder, tracking, state).catch(input.failed);
+      void scan(workspace, folder, tracking, state, true).catch(input.failed);
     }
   }
   return { read, settledEvents, retire, invalidate };

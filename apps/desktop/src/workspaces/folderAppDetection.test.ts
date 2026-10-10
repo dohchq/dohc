@@ -99,12 +99,13 @@ describe("requested-folder observation", () => {
     expect(updated).not.toHaveBeenCalled();
     sources.mockResolvedValue([]);
     service.settledEvents(workspace, [{ path: "app/index.html", operation: "delete" }]);
+    await vi.waitFor(() => expect(updated).toHaveBeenCalledExactlyOnceWith(workspace, expect.objectContaining({ folder: "app", isApp: false })));
     const answer = await service.read(workspace, "app");
     expect(updated).toHaveBeenCalledExactlyOnceWith(workspace, answer);
     service.settledEvents(workspace, [{ path: "app/notes.md", operation: "update" }]);
     await service.read(workspace, "app");
-    expect(updated).toHaveBeenCalledTimes(1);
     await service.retire(workspace.attachmentId);
+    expect(updated).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -158,14 +159,18 @@ describe("bounded folder tracking and resync", () => {
   it.each([false, true])("signals recovery after a failed read (older successful answer: %s)", async previouslySuccessful => {
     const sources = vi.fn().mockResolvedValue(["app/index.html"]);
     const updated = vi.fn();
-    const service = createFolderAppDetection({ sources, updated, failed: vi.fn() });
+    const failed = vi.fn();
+    const service = createFolderAppDetection({ sources, updated, failed });
     if (previouslySuccessful) await service.read(workspace, "app");
     updated.mockClear();
     sources.mockRejectedValueOnce(new Error("received-share listing unavailable"));
-    if (previouslySuccessful) service.settledEvents(workspace, [{ path: "app/index.html", operation: "update" }]);
-    await expect(service.read(workspace, "app")).rejects.toThrow("received-share listing unavailable");
+    if (previouslySuccessful) {
+      service.settledEvents(workspace, [{ path: "app/index.html", operation: "update" }]);
+      await vi.waitFor(() => expect(failed).toHaveBeenCalledWith(expect.objectContaining({ message: "received-share listing unavailable" })));
+    } else await expect(service.read(workspace, "app")).rejects.toThrow("received-share listing unavailable");
     expect(updated).not.toHaveBeenCalled();
     service.settledEvents(workspace, [{ path: "app/index.html", operation: "update" }]);
+    await vi.waitFor(() => expect(updated).toHaveBeenCalledExactlyOnceWith(workspace, expect.objectContaining({ folder: "app", isApp: true })));
     const recovered = await service.read(workspace, "app");
     expect(recovered.isApp).toBe(true);
     expect(updated).toHaveBeenCalledExactlyOnceWith(workspace, recovered);
@@ -246,4 +251,60 @@ it("serializes a many-folder resync and coalesces queued and in-flight invalidat
   for (let i = 0; i < MAX_REQUESTED_APP_FOLDERS; i++) {
     expect(sources.mock.calls.filter(([, folder]) => folder === "folder" + i)).toHaveLength(i === 0 ? 2 : 1);
   }
+});
+
+describe("renderer reads beside background scans", () => {
+  it("resolves a new folder while the background queue is blocked", async () => {
+    let release!: (paths: string[]) => void;
+    let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    const sources = vi.fn().mockResolvedValue([]);
+    const service = createFolderAppDetection({ sources, updated: vi.fn(), failed: vi.fn() });
+    await service.read(workspace, "shared");
+    sources.mockImplementationOnce(() => {
+      started();
+      return new Promise<string[]>(resolve => { release = resolve; });
+    });
+    service.invalidate(workspace);
+    await ready;
+    const resolved = vi.fn();
+    const reading = service.read(workspace, "new").then(resolved);
+    try {
+      await vi.waitFor(() => expect(resolved).toHaveBeenCalledWith(expect.objectContaining({ folder: "new", isApp: false })));
+    } finally {
+      release([]);
+      await reading;
+      await service.retire(workspace.attachmentId);
+    }
+  });
+  it("returns the previous answer for a queued folder and broadcasts its later change", async () => {
+    let release!: (paths: string[]) => void;
+    let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    const sources = vi.fn().mockResolvedValue(["app/index.html"]);
+    const updated = vi.fn();
+    const service = createFolderAppDetection({ sources, updated, failed: vi.fn() });
+    await service.read(workspace, "shared");
+    const previous = await service.read(workspace, "app");
+    sources.mockClear();
+    updated.mockClear();
+    sources.mockImplementationOnce(() => {
+      started();
+      return new Promise<string[]>(resolve => { release = resolve; });
+    }).mockResolvedValue([]);
+    service.invalidate(workspace);
+    await ready;
+    const resolved = vi.fn();
+    const reading = service.read(workspace, "app").then(resolved);
+    try {
+      await vi.waitFor(() => expect(resolved).toHaveBeenCalledWith(previous));
+      expect(sources).not.toHaveBeenCalledWith(workspace, "app");
+      expect(updated).not.toHaveBeenCalled();
+    } finally {
+      release([]);
+      await reading;
+      await service.retire(workspace.attachmentId);
+    }
+    expect(updated).toHaveBeenCalledExactlyOnceWith(workspace, expect.objectContaining({ folder: "app", isApp: false }));
+  });
 });
