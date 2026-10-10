@@ -133,6 +133,39 @@ describe("ViewActions", () => {
       expect(mark.textContent).toBe("Saved locally · Pending share");
     });
 
+    // Host away: each keystroke's save passes through saving, and the words
+    // stay up through it until the host takes the edits.
+    it("keeps its words while the person types, until the host takes the edits", () => {
+      const group = (saveState: SaveStateKey) => (
+        <Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} saveState={saveState} />
+      );
+      const words = () => {
+        const mark = screen.getByTestId("status-left");
+        return mark.classList.contains("sr-only") ? null : mark.textContent;
+      };
+      const { rerender } = render(group("pending-share"));
+      act(() => vi.advanceTimersByTime(PENDING_SHARE_WORDS_DELAY_MS));
+      expect(words()).toBe("Saved locally · Pending share");
+      for (let keystroke = 0; keystroke < 5; keystroke += 1) {
+        rerender(group("saving"));
+        expect(words()).toBe("Saved locally · Pending share");
+        act(() => vi.advanceTimersByTime(100));
+        rerender(group("pending-share"));
+        expect(words()).toBe("Saved locally · Pending share");
+      }
+      // The store's own state stays readable through the held words.
+      rerender(group("saving"));
+      expect(screen.getByTestId("status-left").dataset.state).toBe("saving");
+
+      rerender(group("saved-to-host"));
+      expect(words()).toBeNull();
+      // Resolved: the next brief pending share waits again.
+      rerender(group("saving"));
+      expect(words()).toBeNull();
+      rerender(group("pending-share"));
+      expect(words()).toBeNull();
+    });
+
     it("draws nothing while a host answers each settle in time", () => {
       const group = (saveState: SaveStateKey) => (
         <Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} saveState={saveState} />

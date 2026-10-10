@@ -1,5 +1,5 @@
 import { Clock, Lock, TriangleAlert } from "lucide-react";
-import { useId, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import { useShownAfter } from "./useShownAfter";
 
@@ -187,7 +187,8 @@ function Mark(props: { kind: StateMarkKind }) {
  * is not a tab stop and keeps its title. `quietWhenCalm` keeps a saved,
  * saving or saved-to-host chip for screen readers only: those pass on their
  * own, so typing never changes what the row draws. Words appear when the
- * file is held, a pending share has lasted, or the state needs the person. */
+ * file is held, a pending share has lasted (and then stay while the person
+ * keeps typing), or the state needs the person. */
 export function StateMark(props: {
   state: string | SaveState;
   shown: SaveStateKey | AccessStateKey | SaveState;
@@ -197,7 +198,19 @@ export function StateMark(props: {
   truncate?: boolean;
   quietWhenCalm?: boolean;
 }) {
-  const shownKey = typeof props.shown === "string" ? props.shown : saveStatePresentationKey(props.shown);
+  const storedKey = typeof props.shown === "string" ? props.shown : saveStatePresentationKey(props.shown);
+  const quiet = props.quietWhenCalm === true;
+  // Once a pending share has shown its words, they stay through the saves the
+  // person's typing starts, until the share takes the edits or the state
+  // otherwise resolves: each keystroke passes through saving, and dropping
+  // the words there would hide them for as long as the person types.
+  const [shareHeld, setShareHeld] = useState(false);
+  const shownKey = quiet && shareHeld && storedKey === "saving" ? "pending-share" : storedKey;
+  const pendingShareLasted = useShownAfter(quiet && shownKey === "pending-share", PENDING_SHARE_WORDS_DELAY_MS);
+  useEffect(() => {
+    if (pendingShareLasted) setShareHeld(true);
+    else if (storedKey !== "pending-share" && storedKey !== "saving") setShareHeld(false);
+  }, [pendingShareLasted, storedKey]);
   const presentation = shownKey === null ? null : PRESENTATIONS[shownKey];
   const title = props.title ?? presentation?.title;
   const { label, cut } = useCutShort(presentation?.label ?? "", props.truncate === true);
@@ -210,10 +223,6 @@ export function StateMark(props: {
   const chipRef = useRef<HTMLSpanElement>(null);
   const tooltip = useRef<HTMLSpanElement>(null);
   const [place, setPlace] = useState<{ left: number; top: number } | null>(null);
-  const pendingShareLasted = useShownAfter(
-    props.quietWhenCalm === true && shownKey === "pending-share",
-    PENDING_SHARE_WORDS_DELAY_MS,
-  );
   // Placed as Menu places its list: measured before the first paint, under
   // the chip with its right edge at the chip's, and kept inside the window,
   // so no pane or panel edge cuts it off. Placed again while it shows,
@@ -241,7 +250,7 @@ export function StateMark(props: {
   }, [shown]);
   if (!presentation) return null;
   const dataState = typeof props.state === "string" ? props.state : props.state.kind === "unknown" ? "unknown" : saveStatePresentationKey(props.state);
-  if (props.quietWhenCalm && shownKey !== null && (CALM.has(shownKey) || (shownKey === "pending-share" && !pendingShareLasted))) {
+  if (quiet && shownKey !== null && (CALM.has(shownKey) || (shownKey === "pending-share" && !pendingShareLasted))) {
     return <span data-testid={props.testId} data-state={dataState ?? undefined} title={title} className="sr-only">{presentation.label}</span>;
   }
   const chip = (
