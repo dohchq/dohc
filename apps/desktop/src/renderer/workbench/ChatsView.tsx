@@ -11,8 +11,8 @@ import {
   ActionButton,
   FEED_META,
   FEED_ROW,
-  FEED_TOOLBAR,
   FeedReactionPill,
+  HOME_TOOLBAR,
   PostCard,
   SaveAsFileActions,
   type PostData,
@@ -3805,7 +3805,7 @@ export function ChatsView(props: {
                       </div>
                     ) : null}
                     <MessageReactions testIdPrefix="chats-feed" actionTestId="chats-feed-like" pickerOnly hoverToolbar
-                      toolbarClassName={FEED_TOOLBAR}
+                      toolbarClassName={HOME_TOOLBAR}
                       messageId={item.message.id} records={itemReactions}
                       triggerRef={(node) => {
                         if (node) homeLikeTriggers.current.set(item.message.id, node);

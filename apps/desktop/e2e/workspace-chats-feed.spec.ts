@@ -1,5 +1,6 @@
 import { desktopPins, activityPin } from "../src/testPins";
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
@@ -45,8 +46,11 @@ function ownBubble(message: Locator): Locator {
   return message.locator('> [data-testid="chats-comment-bubble"]');
 }
 
-async function addReaction(message: Locator, emoji: string): Promise<void> {
-  await message.hover();
+// A message's actions show, and take the pointer, while its own row is
+// hovered. A comment's item also holds its replies, so hover its bubble;
+// the opening post is its own row.
+async function addReaction(message: Locator, emoji: string, row: Locator = ownBubble(message)): Promise<void> {
+  await row.hover();
   const actions = ownActions(message);
   await actions.getByTestId("chats-add-reaction").click();
   await message.page()
@@ -135,6 +139,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await composer.press("Enter");
     await expect(commentWithBody(view, interveningCommentBody)).toBeVisible();
 
+    await ownBubble(firstComment).hover();
     await ownActions(firstComment).getByTestId("chats-comment-reply").click();
     await expect(view.getByTestId("chats-replying-mode")).toContainText(
       "Replying to You",
@@ -155,7 +160,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     // A post reaction is a reaction on the opening message. The same quiet
     // pills work on comments.
     const openingMessage = view.locator('article[data-testid="chats-message"]');
-    await addReaction(openingMessage, "👍");
+    await addReaction(openingMessage, "👍", openingMessage);
     await expect(reactionPill(openingMessage, "👍")).toHaveAttribute(
       "data-mine",
       "true",
@@ -294,6 +299,54 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     ).toHaveText("Answered");
     await expect(view.getByTestId("chats-comment-decision-open")).toHaveCount(0);
     await expect(commentWithBody(view, resolutionBody)).toBeVisible();
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+// A comment's toolbar floats 4px over the comment above it. Hidden, it
+// takes no pointer, so a click on the bottom edge of the comment above,
+// right where the hidden Reply sits, starts no reply to the comment below.
+test("a comment's hidden toolbar takes no click meant for the comment above", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const workspaceId = "chats-run-toolbar-e2e";
+  const aboveBody = "First line of the run";
+  const belowBody = "Second line of the run";
+  try {
+    await seedWorkspaceManifest(temp, workspaceId);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+    await openWorkspaceFromFirstRun(page, temp);
+    await page.evaluate(async ({ workspaceId, bodies }) => {
+      const bridge = (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop;
+      const { channel } = await bridge.createChatChannel({ workspaceId, name: "Run check", type: "posts" });
+      const { thread } = await bridge.startChannelThread({ workspaceId, channelId: channel.id, body: "Launch checklist" });
+      for (const body of bodies) await bridge.sendChatMessage({ workspaceId, threadId: thread.id, body });
+    }, { workspaceId, bodies: [aboveBody, belowBody] });
+    await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
+    await page.getByTestId("chats-channel").filter({ hasText: "Run check" }).click();
+    await page.getByTestId(desktopPins.chatsPanelCollapse).click();
+    const view = editorArea(page);
+    await view.getByTestId("chats-post-card").first().click();
+
+    const above = commentWithBody(view, aboveBody);
+    const below = commentWithBody(view, belowBody);
+    await expect(below).toHaveAttribute("data-continues", "true");
+    const aboveBox = await ownBubble(above).boundingBox();
+    const replyBox = await ownBubble(below).getByTestId("chats-comment-reply").boundingBox();
+    if (!aboveBox || !replyBox) throw new Error("both comments need a box");
+    // Half a pixel inside the hidden Reply, where it overlaps the comment above.
+    const point = { x: replyBox.x + replyBox.width / 2, y: replyBox.y + 0.5 };
+    expect(point.y).toBeGreaterThan(aboveBox.y);
+    expect(point.y).toBeLessThan(aboveBox.y + aboveBox.height);
+    await page.mouse.click(point.x, point.y);
+    await expect(view.getByTestId("chats-replying-mode")).toHaveCount(0);
+
+    // The same Reply, shown on hover, still starts a reply.
+    await ownBubble(below).hover();
+    await ownBubble(below).getByTestId("chats-comment-reply").click();
+    await expect(view.getByTestId("chats-replying-mode")).toContainText("Replying to You");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

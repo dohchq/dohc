@@ -70,6 +70,8 @@ export const FEED_ROW =
 // the unread count. The list paints each row in its own box, so the
 // toolbar stays inside the row rather than over its top edge.
 export const FEED_TOOLBAR = "top-1 right-9";
+// Home's rows have no unread count, so their toolbar sits at the row's edge.
+export const HOME_TOOLBAR = "top-1 right-2";
 // A feed row's meta line: reactions and counts in the mono voice.
 export const FEED_META = "mt-1.5 flex flex-wrap items-center gap-3 font-mono text-[11px] text-subtle";
 

@@ -14,7 +14,7 @@ import type {
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { basenameOf } from "../path";
 import { SkeletonRows } from "../ui/SkeletonRows";
-import { formatChatTime, formatClock, formatShortTime } from "../time";
+import { formatChatTime, formatClockDigits, formatShortTime } from "../time";
 import { CopyButton } from "../ui/CopyButton";
 import { ChatAvatar } from "./ChatAvatar";
 import {
@@ -564,14 +564,21 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
           data-system={isSystem ? "true" : undefined}
           className="group relative -ml-[46px] -mr-2 rounded-lg py-1 pl-[46px] pr-2 transition-colors duration-75 hover:bg-hover"
         >
-          <span className="absolute left-2 top-1 flex w-7 justify-center">
+          {/* A continued comment's slot runs from the row's edge to the
+              avatar's right edge, so "12:45" fits at every hour. The full
+              time is its tooltip, and the sr-only name line reads it. */}
+          <span
+            data-testid={continues ? "chats-comment-run-time" : undefined}
+            className={`absolute top-1 flex ${continues ? "left-0 w-9 justify-end" : "left-2 w-7 justify-center"}`}
+          >
             {continues ? (
               <time
                 aria-hidden
                 dateTime={commentTime.iso}
+                title={commentTime.label}
                 className="whitespace-nowrap font-mono text-[10px] leading-[22px] text-subtle opacity-0 group-hover:opacity-100"
               >
-                {formatClock(comment.createdAtMs)}
+                {formatClockDigits(comment.createdAtMs)}
               </time>
             ) : isSystem ? (
               <span

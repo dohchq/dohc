@@ -18,6 +18,7 @@ import {
   mentionRoster,
 } from "./ChatsView.testHarness";
 import { runnerProgram } from "./ChatsView";
+import { formatChatTime, formatClockDigits } from "../time";
 
 describe("ChatsView My agent", () => {
   it("discovers an opted-in agent after creation while navigator polling is suspended", async () => {
@@ -479,6 +480,15 @@ describe("ChatsView document thread", () => {
     const author = items[1]!.querySelector('[data-testid="chats-message-author"]');
     expect(author?.textContent).toBe("Ana");
     expect(author?.parentElement?.className).toBe("sr-only");
+    // Its hover time is the clock without AM or PM, right-aligned in a slot
+    // that ends at the avatar's edge; the full time is its tooltip.
+    const slot = items[1]!.querySelector('[data-testid="chats-comment-run-time"]')!;
+    expect(slot.className.split(/\s+/)).toEqual(expect.arrayContaining(["left-0", "w-9", "justify-end"]));
+    const runTime = slot.querySelector("time")!;
+    expect(runTime.textContent).toBe(formatClockDigits(second.createdAtMs));
+    expect(runTime.textContent).not.toMatch(/AM|PM/i);
+    expect(runTime.getAttribute("title")).toBe(formatChatTime(second.createdAtMs).label);
+    expect(items[0]!.querySelector('[data-testid="chats-comment-run-time"]')).toBeNull();
     // Every action sits in the row's toolbar, inside the row.
     const bubble = items[0]!.querySelector('[data-testid="chats-comment-bubble"]')!;
     const toolbar = bubble.querySelector('[data-testid="chats-message-toolbar"]')!;

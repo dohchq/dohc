@@ -33,15 +33,6 @@ test("posts and Home keep a bounded list while preserving focus and older pages"
     const first = view.locator(`[data-testid="chats-post-card"][data-thread-id="${order[0]}"]`);
     await expect(first).toBeVisible();
     await expect.poll(() => cards.count()).toBeLessThan(30);
-    // The next row's hidden toolbar takes no pointer, so a click on this
-    // row's bottom edge, where the toolbars sit, opens this row's post.
-    const firstTitle = await first.getByTestId("chats-post-title").textContent();
-    const firstBox = await first.boundingBox();
-    if (!firstTitle || !firstBox) throw new Error("the first post needs a title and a box");
-    await page.mouse.click(firstBox.x + firstBox.width - 60, firstBox.y + firstBox.height - 2);
-    await expect(view.getByTestId("chats-thread-post-title")).toHaveText(firstTitle);
-    await view.getByTestId("chats-thread-back").click();
-    await expect(first).toBeVisible();
     const like = first.getByTestId("chats-post-like");
     await like.focus();
     await list.evaluate((element) => { element.scrollTop = element.scrollHeight / 2; });
