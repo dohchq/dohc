@@ -337,7 +337,13 @@ export async function startAutomationReplicas(options: {
         if (open_ && (row === null || open_.incarnation !== row.incarnation)) await open_.close();
         if (!canSync(workspaceId)) return;
         if (row !== null && !replicas.has(workspaceId)) {
-          await open(row);
+          try { await open(row); }
+          catch (error) {
+            if (!syncRetries.has(workspaceId)) {
+              syncRetries.set(workspaceId, { at: performance.now() + RETRY_FIRST_MS, delay: RETRY_FIRST_MS, incarnation: row.incarnation });
+            }
+            throw error;
+          }
         }
         else if (row !== null && failedSyncs.has(workspaceId)) {
           const retry = replicas.get(workspaceId)!;
