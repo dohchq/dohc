@@ -282,7 +282,7 @@ Do not run the test through Cargo while holding profiling admission: its build s
 Do not bypass an admission refusal.
 
 The runner prints `HISTORY_BENCH` numbers after successful completion and a final admission check.
-It rejects debug-profile executables.
+After the run, it rejects results from a debug-profile build.
 It records the executable SHA256, process ownership, raw log, numbers, and admission observations under `.agent-artifacts/history-page/measurement-*`.
 TEMP, TMP, and DOHC_TEST_SCRATCH_ROOT stay inside that run's checkout.
 Preserve the printed evidence path with the comparison.

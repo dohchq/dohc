@@ -1026,11 +1026,23 @@ describe("owner History path policy", () => {
     expect(h.capture.listMoments).toHaveBeenCalledTimes(40);
   });
 
+  it.each([undefined, { ...historyCursor(8), objectId: "object-1" }])("loads ordinary object History without a path lookup with cursor=%s", async cursor => {
+    const h = await harness();
+    h.capture.listMoments.mockResolvedValue(historyPage());
+    await expect(h.invoke(CHANNELS.listEngineMoments, {
+      workspaceId: "workspace", objectId: "object-1", limit: 5, ...(cursor ? { cursor } : {}),
+    })).resolves.toMatchObject({ moments: [{ path: "notes/a.md" }] });
+    expect(h.capture.filePathForObjectId).not.toHaveBeenCalled();
+    expect(h.capture.listMoments).toHaveBeenCalledExactlyOnceWith({
+      objectId: "object-1", limit: 5, ...(cursor ? { cursor } : {}),
+    });
+  });
+
   it("does not skip through an object's old pages when its current path is excluded", async () => {
     const h = await harness();
     h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
     h.capture.filePathForObjectId.mockResolvedValue("private/a.md");
-    h.capture.listMoments.mockResolvedValue(historyPage("notes/old-name.md"));
+    h.capture.listMoments.mockResolvedValue(historyPage("private/a.md"));
     await expect(h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", objectId: "object-1", limit: 5 })).resolves.toMatchObject({
       moments: [], nextCursor: null,
     });

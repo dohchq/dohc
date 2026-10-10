@@ -313,9 +313,6 @@ export function createWorkspaceEngineIpc<
         const policy = rootPath === null ? null : await readWorkspaceEnginePolicy(rootPath);
         if (policy?.errors.length) return policyUnreadable(policy);
         const admitted = policy ? historyPathAdmission(policy) : null;
-        const objectPath = admitted && input.objectId !== undefined
-          ? await history.filePathForObjectId?.(input.objectId) : null;
-        const objectExcluded = objectPath != null && admitted !== null && !admitted(objectPath);
         return listEngineMomentsForIpc(
           async () => {
             let cursor = input.cursor;
@@ -331,10 +328,15 @@ export function createWorkspaceEngineIpc<
               });
               startCursor ??= page.startCursor;
               versionMarkers.push(...page.versionMarkers);
-              if (objectExcluded) return { ...page, moments: [], nextCursor: null, startCursor, versionMarkers };
               const moments = admitted ? page.moments.filter(moment => moment.protected || admitted(moment.path)) : page.moments;
               if (moments.length > 0 || page.nextCursor === null || pageIndex + 1 >= pageReach) {
                 return { ...page, moments, startCursor, versionMarkers };
+              }
+              if (pageIndex === 0 && admitted && input.objectId !== undefined) {
+                const objectPath = await history.filePathForObjectId?.(input.objectId);
+                if (objectPath != null && !admitted(objectPath)) {
+                  return { ...page, moments, nextCursor: null, startCursor, versionMarkers };
+                }
               }
               cursor = page.nextCursor;
             }
