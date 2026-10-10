@@ -351,6 +351,7 @@ const PendingRestoreSchema = z.object({
     definitions: z.array(z.object({collectionPath: z.string(), id: z.string(), definitionHash: z.string()})),
     filesUndone: z.boolean(),
     receipts: z.array(z.object({path: z.string(), restoredMomentId: z.string(), removed: z.boolean().optional()})),
+    intents: z.array(z.string().min(1)).optional(),
     // The desktop validates its outcome with the bridge contract on recovery.
     result: z.unknown(),
   }).optional(),
@@ -360,8 +361,9 @@ export type PendingRestoreUpdate = Pick<PendingRestore, "id"> & Partial<Omit<Pen
 const RestoreReceiptSchema = z.object({path: z.string(), restoredMomentId: z.string(), removed: z.boolean().optional()});
 const RestoreLineSchema = z.discriminatedUnion("kind", [
   z.object({version: z.literal(2), kind: z.literal("restore"), entry: PendingRestoreSchema}),
-  z.object({version: z.literal(2), kind: z.literal("receipts"), id: z.string(), receipts: z.array(RestoreReceiptSchema)}),
-  z.object({version: z.literal(2), kind: z.literal("undo-receipts"), id: z.string(), momentIds: z.array(z.string())}),
+  z.object({version: z.literal(2), kind: z.literal("intents"), id: z.string(), momentIds: z.array(z.string().min(1))}),
+  z.object({version: z.literal(2), kind: z.literal("receipts"), id: z.string(), receipts: z.array(RestoreReceiptSchema), originalMomentIds: z.array(z.string()).default([])}),
+  z.object({version: z.literal(2), kind: z.literal("undo-receipts"), id: z.string(), momentIds: z.array(z.string()), originalMomentIds: z.array(z.string()).default([])}),
 ]);
 
 /**
@@ -756,8 +758,9 @@ const tooLarge = () =>
 export interface AutomationRunStore {
   pendingRestores(): Promise<PendingRestore[]>;
   savePendingRestore(restore: PendingRestoreUpdate): Promise<void>;
-  recordRestoreReceipts(id: string, receipts: readonly z.infer<typeof RestoreReceiptSchema>[]): Promise<void>;
-  undoRestoreReceipts(id: string, momentIds: readonly string[]): Promise<void>;
+  recordRestoreIntents(id: string, momentIds: readonly string[]): Promise<void>;
+  recordRestoreReceipts(id: string, receipts: readonly z.infer<typeof RestoreReceiptSchema>[], originalMomentIds?: readonly string[]): Promise<void>;
+  undoRestoreReceipts(id: string, momentIds: readonly string[], originalMomentIds?: readonly string[]): Promise<void>;
   removePendingRestore(id: string): Promise<void>;
   recordUndoWrites(run: StoredRun, writes: readonly UndoWrite[]): Promise<void>;
   /**
@@ -933,8 +936,12 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
         else {
           const session = entries.get(entry.id)?.session;
           if (!session) throw new Error("Restore receipt without a session");
-          if (entry.kind === "receipts") session.receipts = [...new Map([...session.receipts, ...entry.receipts].map(receipt => [receipt.restoredMomentId, receipt])).values()];
-          else session.receipts = session.receipts.filter(file => !entry.momentIds.includes(file.restoredMomentId));
+          if (entry.kind === "intents") session.intents = [...new Set([...(session.intents ?? []), ...entry.momentIds])];
+          else {
+            if (entry.kind === "receipts") session.receipts = [...new Map([...session.receipts, ...entry.receipts].map(receipt => [receipt.restoredMomentId, receipt])).values()];
+            else session.receipts = session.receipts.filter(file => !entry.momentIds.includes(file.restoredMomentId));
+            session.intents = session.intents?.filter(id => !entry.originalMomentIds.includes(id));
+          }
         }
       }
       setRestores([...entries.values()]);
@@ -1262,23 +1269,34 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
       });
     },
     savePendingRestore(entry) { return changeRestore(entry.id, entry); },
-    recordRestoreReceipts(id, receipts) {
+    recordRestoreIntents(id, momentIds) {
+      return serial(async () => {
+        const session = (await readRestores())?.get(id)?.session;
+        if (!session) throw new Error("dohc could not save this restore's progress.");
+        const saved = z.array(z.string().min(1)).parse(momentIds);
+        await appendDurableLine(await restoresFile(), {version: 2, kind: "intents", id, momentIds: saved}, MAX_RUN_FILE_BYTES);
+        session.intents = [...new Set([...(session.intents ?? []), ...saved])];
+      });
+    },
+    recordRestoreReceipts(id, receipts, originalMomentIds = []) {
       return serial(async () => {
         const known = await readRestores();
         const entry = known?.get(id);
         if (!entry?.session) throw new Error("dohc could not save this restore's progress.");
         const saved = z.array(RestoreReceiptSchema).parse(receipts);
-        await appendDurableLine(await restoresFile(), {version: 2, kind: "receipts", id, receipts: saved}, MAX_RUN_FILE_BYTES);
+        await appendDurableLine(await restoresFile(), {version: 2, kind: "receipts", id, receipts: saved, originalMomentIds}, MAX_RUN_FILE_BYTES);
         entry.session.receipts = [...new Map([...entry.session.receipts, ...saved].map(receipt => [receipt.restoredMomentId, receipt])).values()];
+        entry.session.intents = entry.session.intents?.filter(id => !originalMomentIds.includes(id));
       });
     },
     removePendingRestore(id) { return changeRestore(id); },
-    undoRestoreReceipts(id, momentIds) {
+    undoRestoreReceipts(id, momentIds, originalMomentIds = []) {
       return serial(async () => {
         const session = (await readRestores())?.get(id)?.session;
         if (!session) throw new Error("dohc could not save this restore's progress.");
-        await appendDurableLine(await restoresFile(), {version: 2, kind: "undo-receipts", id, momentIds}, MAX_RUN_FILE_BYTES);
+        await appendDurableLine(await restoresFile(), {version: 2, kind: "undo-receipts", id, momentIds, originalMomentIds}, MAX_RUN_FILE_BYTES);
         session.receipts = session.receipts.filter(file => !momentIds.includes(file.restoredMomentId));
+        session.intents = session.intents?.filter(id => !originalMomentIds.includes(id));
       });
     },
     recordUndoWrites(run, writes) { return serial(() => appendLine(run, {kind: "undo-writes", writes: [...writes]})); },

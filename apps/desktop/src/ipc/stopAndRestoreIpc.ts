@@ -125,7 +125,7 @@ export function registerStopAndRestoreIpc<
   /** A grant changed on the relay: the share roster lists again. */
   sharesChanged(workspaceId: string): void;
   requireEngineCapture(workspaceId: string): Promise<{
-    capture: Pick<WorkspaceEngineCapture, "readMoment" | "listObjectMomentsAfter" | "restoreFileToBeforeMoment">;
+    capture: Pick<WorkspaceEngineCapture, "readMoment" | "listObjectMomentsAfter" | "restoreFileToBeforeMoment" | "findRestoreReceipt">;
   }>;
   /** The person a request is made by, read from main's own account when it arrives. */
   localPerson(): Promise<LocalPersonAuthor>;
@@ -497,11 +497,18 @@ export function registerStopAndRestoreIpc<
             catch (error) { retentionError = error instanceof Error ? error.message : String(error); }
           },
           replayRequestId: previous ? momentId => restoreRequestId(id, momentId) : undefined,
-          recordRestores: async receipts => {
+          recordedRestores: progress.receipts,
+          findRestoreReceipt: (momentId, requestId) => capture.findRestoreReceipt(momentId, requestId),
+          recordRestoreIntents: async momentIds => {
+            await automations.recordRestoreIntents(id, momentIds);
+            progress.intents = [...new Set([...(progress.intents ?? []), ...momentIds])];
+          },
+          recordRestores: async (receipts, originalMomentIds) => {
             const known = new Set(progress.receipts.map(receipt => receipt.restoredMomentId));
             const added = receipts.filter(receipt => !known.has(receipt.restoredMomentId));
-            if (added.length) await automations.recordRestoreReceipts(id, added);
+            if (added.length) await automations.recordRestoreReceipts(id, added, originalMomentIds);
             progress.receipts.push(...added);
+            progress.intents = progress.intents?.filter(id => !originalMomentIds.includes(id));
           },
           reviewPath: path => dependencies.hasOtherWorkspaceWindow?.(event.sender, workspaceId)
             ? "Open in another window. Close that window and try again."
@@ -561,24 +568,42 @@ export function registerStopAndRestoreIpc<
         const { capture } = await dependencies.requireEngineCapture(operation.workspace.workspaceId);
         const automations = operation.state.collectionAutomations;
         const pending = input.target ? (await automations.pendingRestores()).find(entry => entry.session && restoreId(entry.session.target) === restoreId(input.target!)) : undefined;
-        if (pending?.session) {
-          pending.session.filesUndone = true;
-          await automations.savePendingRestore({id: pending.id, session: pending.session});
-        }
+        const intendedByReceipt = new Map<string, string>();
+        const recovered = new Map<string, {path: string; restoredMomentId: string; removed?: boolean}>();
+        const publishedRecoveries: Array<{path: string; restoredMomentId: string; removed?: boolean}> = [];
         const files: UndoStopAndRestoreResult["files"] = [];
         const receipts = durableBatch<UndoStopAndRestoreResult["files"][number]>(async batch => {
           const successful = batch.filter(file => file.kind === "restored");
-          if (successful.length) {
+          if (successful.length || batch.some(file => recovered.has(file.momentId))) {
             if (pending?.session) {
               const ids = successful.map(file => file.momentId);
-              await automations.undoRestoreReceipts(pending.id, ids);
+              const originalIds = ids.flatMap(id => intendedByReceipt.has(id) ? [intendedByReceipt.get(id)!] : []);
+              await automations.undoRestoreReceipts(pending.id, ids, originalIds);
               pending.session.receipts = pending.session.receipts.filter(file => !ids.includes(file.restoredMomentId));
+              pending.session.intents = pending.session.intents?.filter(id => !originalIds.includes(id));
             } else await automations.makeWritesDurable();
           }
+          publishedRecoveries.push(...batch.flatMap(file => recovered.has(file.momentId) ? [recovered.get(file.momentId)!] : []));
           files.push(...batch);
         });
         try {
-          for (const momentId of [...input.restoredMomentIds].reverse()) {
+          const ids = new Set(input.restoredMomentIds);
+          if (pending?.session) {
+            for (const receipt of pending.session.receipts) ids.add(receipt.restoredMomentId);
+            const written: string[] = [];
+            for (const originalId of pending.session.intents ?? []) {
+              operation.assertCurrent();
+              const found = await capture.findRestoreReceipt(originalId, restoreRequestId(pending.id, originalId));
+              if (found) {
+                ids.add(found.restoredMomentId); intendedByReceipt.set(found.restoredMomentId, originalId); written.push(originalId);
+                recovered.set(found.restoredMomentId, {path: found.path, restoredMomentId: found.restoredMomentId, ...(found.restored === "deleted" ? {removed: true} : {})});
+              }
+            }
+            pending.session.intents = written;
+            pending.session.filesUndone = true;
+            await automations.savePendingRestore({id: pending.id, session: pending.session});
+          }
+          for (const momentId of [...ids].reverse()) {
             operation.assertCurrent();
             try {
               const detail = await capture.readMoment(momentId);
@@ -598,11 +623,11 @@ export function registerStopAndRestoreIpc<
             }
           }
           await receipts.flush();
-          return UndoStopAndRestoreResult.parse({ files, errorMessage: null });
+          return UndoStopAndRestoreResult.parse({ files, ...(publishedRecoveries.length ? {recovered: publishedRecoveries} : {}), errorMessage: null });
         } catch (error) {
           try { await receipts.flush(); }
           catch (flushError) { error = flushError; }
-          return UndoStopAndRestoreResult.parse({ files, errorMessage: (error instanceof Error ? error.message : String(error)).slice(0, 2_000) });
+          return UndoStopAndRestoreResult.parse({ files, ...(publishedRecoveries.length ? {recovered: publishedRecoveries} : {}), errorMessage: (error instanceof Error ? error.message : String(error)).slice(0, 2_000) });
         } finally {
           dependencies.notifyRenderer({ workspaceId: operation.workspace.workspaceId });
         }

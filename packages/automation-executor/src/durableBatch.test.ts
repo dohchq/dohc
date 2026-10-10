@@ -20,6 +20,7 @@ it("does not retry or publish a failed batch while returning an earlier partial 
   });
   for (let i = 0; i < 199; i++) await batch.add(i);
   await expect(batch.add(199)).rejects.toThrow("sync failed");
-  await batch.flush();
+  await expect(batch.flush()).rejects.toThrow("sync failed");
+  await expect(batch.add(200)).rejects.toThrow("sync failed");
   expect(calls).toBe(2); expect(saved).toHaveLength(100);
 });

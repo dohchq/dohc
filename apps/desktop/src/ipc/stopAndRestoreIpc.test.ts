@@ -24,7 +24,7 @@ import {
   type WorkspaceEngineMomentDetail,
 } from "../workspaces/workspaceEngineCapture";
 import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
-import {restoreRequestId} from "../workspaces/restoreWriteIdentity";
+import {restoreRequestId, restoreReceiptOf} from "../workspaces/restoreWriteIdentity";
 
 const KEPT = { id: "f".repeat(32), path: "trip/Tasks/Untitled.md", field: "Finished on", recordId: null };
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
@@ -134,6 +134,7 @@ function fixture(options: {
   // Each restore's own moment, which puts the file back as it was before the person.
   const restores = new Map<string, VersionedTextMoment>();
   const capture = {
+    findRestoreReceipt: vi.fn(async () => null),
     readMoment: vi.fn(async (momentId: string): Promise<WorkspaceEngineMomentDetail | null> => {
       if (options.protectedMoment) return { protected: true, moment: { ...schemaMoment, momentOrder: 1, protected: true } as never };
       const restore = restores.get(momentId);
@@ -166,16 +167,20 @@ function fixture(options: {
       if (runStore) await runStore.savePendingRestore(entry);
       else pendingEntries.set(entry.id, structuredClone({claims: [], ...pendingEntries.get(entry.id), ...entry}));
     },
-    recordRestoreReceipts: async (id: string, receipts: readonly {path: string; restoredMomentId: string}[]) => {
+    recordRestoreIntents: async (id: string, momentIds: readonly string[]) => {
+      if (runStore) await runStore.recordRestoreIntents(id, momentIds);
+      else {const session = pendingEntries.get(id)?.session; if (session) session.intents = [...new Set([...(session.intents ?? []), ...momentIds])];}
+    },
+    recordRestoreReceipts: async (id: string, receipts: readonly {path: string; restoredMomentId: string}[], originalMomentIds: readonly string[] = []) => {
       if (options.receiptError) throw options.receiptError;
       await barrier(); await options.beforeReceipt?.(); receiptBatches.push(receipts.length);
-      if (runStore) await runStore.recordRestoreReceipts(id, receipts);
-      else pendingEntries.get(id)?.session?.receipts.push(...receipts);
+      if (runStore) await runStore.recordRestoreReceipts(id, receipts, originalMomentIds);
+      else {const session = pendingEntries.get(id)?.session; if (session) {session.receipts.push(...receipts); session.intents = session.intents?.filter(id => !originalMomentIds.includes(id));}}
     },
-    undoRestoreReceipts: async (id: string, momentIds: readonly string[]) => {
+    undoRestoreReceipts: async (id: string, momentIds: readonly string[], originalMomentIds: readonly string[] = []) => {
       await barrier(); await options.beforeReceipt?.(); receiptBatches.push(momentIds.length);
-      if (runStore) await runStore.undoRestoreReceipts(id, momentIds);
-      else {const session = pendingEntries.get(id)?.session; if (session) session.receipts = session.receipts.filter(file => !momentIds.includes(file.restoredMomentId));}
+      if (runStore) await runStore.undoRestoreReceipts(id, momentIds, originalMomentIds);
+      else {const session = pendingEntries.get(id)?.session; if (session) {session.receipts = session.receipts.filter(file => !momentIds.includes(file.restoredMomentId)); session.intents = session.intents?.filter(id => !originalMomentIds.includes(id));}}
     },
     removePendingRestore: async (id: string) => {if (runStore) await runStore.removePendingRestore(id); else pendingEntries.delete(id);},
   } as unknown as CollectionAutomations);
@@ -248,6 +253,54 @@ async function capturedFiles(paths: string[]) {
 }
 
 describe("stop and restore in main", () => {
+  it.each(["first batch", "mid-batch", "before barrier", "before receipts", "retry"])("keeps every file reversible after an unjournaled batch: %s", async boundary => {
+    const root = await createTestScratch("dohc-restore-intents-");
+    const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
+    const originals = Array.from({length: 150}, (_, i) => ({...schemaMoment, id: `intent-${i}`, objectId: `object-${i}`, path: `notes/${i}.txt`}));
+    const all = [...originals], writes = new Map<string, {path: string; restoredMomentId: string; restored: "text"}>();
+    const capture = {
+      readMoment: async (id: string) => ({moment: all.find(m => m.id === id)!}),
+      listObjectMomentsAfter: async (objectId: string) => all.filter(m => m.objectId === objectId).slice(1).map(m => m.id).reverse(),
+      findRestoreReceipt: async (id: string, key: string) => {
+        const original = all.find(m => m.id === id)!;
+        for (const saved of all) {const receipt = restoreReceiptOf(saved, original, key); if (receipt) return {...receipt, restored: "text"};}
+        return null;
+      },
+      restoreFileToBeforeMoment: async (id: string, _person: unknown, options: {requestId: string}) => {
+        const prior = writes.get(options.requestId); if (prior) return prior;
+        if (boundary === "mid-batch" && !id.startsWith("back-") && writes.size === 125) throw Error("crash");
+        const original = all.find(m => m.id === id)!;
+        const receipt = {path: original.path, restoredMomentId: `back-${id}`, restored: "text" as const};
+        writes.set(options.requestId, receipt);
+        all.push({...original, id: receipt.restoredMomentId, metadata: {origin: "restore", correlationId: options.requestId}});
+        return receipt;
+      },
+    } as unknown as WorkspaceEngineCapture;
+    const options = {rootPath: root, granted: [grant({})], engineCapture: capture,
+      ledger: {"grant-edit": [{writes: [{committedAtMs: 2, files: originals.map(m => ({path: m.path, objectId: m.objectId, momentId: m.id, created: false}))}], nextAfterOriginSeq: null}]}};
+    const store = createAutomationRunStore(root, resolver);
+    let appends = 0;
+    const first = fixture({...options, runStore: store, beforeReceipt: async () => {if ((boundary === "before receipts" || boundary === "retry") && ++appends === 2) throw Error("crash");}});
+    if (boundary === "before barrier" || boundary === "mid-batch") first.barrier.mockResolvedValueOnce(undefined).mockRejectedValueOnce(Error("crash"));
+    if (boundary === "first batch") first.barrier.mockRejectedValueOnce(Error("crash"));
+    const target = {kind: "person", userId: "user_ana"};
+    const failed = await first.call(CHANNELS.stopAndRestore, {target}) as {restored: {restoredMomentId: string}[]};
+    expect(failed).toMatchObject({unfinished: {message: "crash"}}); expect(failed.restored).toHaveLength(boundary === "first batch" ? 0 : 100);
+    const committed = boundary === "first batch" ? 100 : boundary === "mid-batch" ? 125 : 150;
+    expect(writes.size).toBe(committed);
+    const restartedStore = createAutomationRunStore(root, resolver), restarted = fixture({...options, runStore: restartedStore});
+    let ids = failed.restored.map(r => r.restoredMomentId);
+    if (boundary === "retry") {
+      const retried = await restarted.call(CHANNELS.stopAndRestore, {target}) as {restored: {restoredMomentId: string}[]};
+      expect(retried).toMatchObject({unfinished: null, review: []}); expect(retried.restored).toHaveLength(50);
+      ids = [...ids, ...retried.restored.map(r => r.restoredMomentId)]; expect(new Set(ids).size).toBe(150);
+    }
+    const undone = await restarted.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: boundary === "retry" ? [...ids, ...ids] : ids}) as {files: unknown[]};
+    expect(undone).toMatchObject({errorMessage: null}); expect(undone.files).toHaveLength(committed); expect(writes.size).toBe(committed * 2);
+    const pending = (await restartedStore.pendingRestores())[0]?.session;
+    if (boundary !== "retry") {expect(pending?.receipts).toEqual([]); expect(pending?.intents).toEqual([]);}
+  });
+
   it.each(["before barrier", "before receipts"])("retries unjournaled file batches after a crash %s", async boundary => {
     const root = await createTestScratch("dohc-restore-crash-batch-");
     const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};

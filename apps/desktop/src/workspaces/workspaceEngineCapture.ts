@@ -644,6 +644,7 @@ export interface WorkspaceEngineCapture {
     objectId?: string;
   }): Promise<WorkspaceEngineMomentPage>;
   readMoment(momentId: string): Promise<WorkspaceEngineMomentDetail | null>;
+  findRestoreReceipt(momentId: string, requestId: string): Promise<WorkspaceEngineRestoreResult | null>;
   // The ids of a file's moments in the active version after `momentId`,
   // newest first, deletes and renames included. Record-only sync rows never
   // touched the file, so they are passed over.
@@ -6308,6 +6309,13 @@ export function createWorkspaceEngineCapture(
       });
       if (secretMoment) return { protected: true, moment: secretMoment };
       return null;
+    },
+
+    async findRestoreReceipt(momentId, requestId) {
+      await chain;
+      const engine = await engineStore();
+      const original = await engine.getMoment({workspaceId, momentId});
+      return original ? findRestoreReceipt(engine, original, requestId) : null;
     },
 
     async listObjectMomentsAfter(objectId, momentId) {

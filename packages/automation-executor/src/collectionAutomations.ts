@@ -1064,13 +1064,14 @@ export class CollectionAutomations {
   }
   pendingRestores() { return this.options.store.pendingRestores(); }
   savePendingRestore(entry: import("./automationRunStore").PendingRestoreUpdate) { return this.options.store.savePendingRestore(entry); }
-  async recordRestoreReceipts(id: string, receipts: readonly {path: string; restoredMomentId: string; removed?: boolean}[]) {
+  recordRestoreIntents(id: string, momentIds: readonly string[]) { return this.options.store.recordRestoreIntents(id, momentIds); }
+  async recordRestoreReceipts(id: string, receipts: readonly {path: string; restoredMomentId: string; removed?: boolean}[], originalMomentIds: readonly string[] = []) {
     await this.makeWritesDurable();
-    await this.options.store.recordRestoreReceipts(id, receipts);
+    await this.options.store.recordRestoreReceipts(id, receipts, originalMomentIds);
   }
-  async undoRestoreReceipts(id: string, momentIds: readonly string[]) {
+  async undoRestoreReceipts(id: string, momentIds: readonly string[], originalMomentIds: readonly string[] = []) {
     await this.makeWritesDurable();
-    await this.options.store.undoRestoreReceipts(id, momentIds);
+    await this.options.store.undoRestoreReceipts(id, momentIds, originalMomentIds);
   }
   removePendingRestore(id: string) { return this.options.store.removePendingRestore(id); }
   /**

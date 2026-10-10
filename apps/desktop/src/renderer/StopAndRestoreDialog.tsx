@@ -1,7 +1,7 @@
 import { retainedCollectionFieldWritePaths } from "./collections/recordFieldWrites";
 import { retainedOrphanedDraftPaths } from "./orphanedDrafts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { StopAndRestoreResult, StopAndRestoreTarget } from "../ipc/bridgeContract";
+import type { StopAndRestoreResult, StopAndRestoreTarget, UndoStopAndRestoreResult } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { Overlay } from "./Overlay";
 import { DangerButton, PrimaryButton, SecondaryButton } from "./ui/controls";
@@ -347,10 +347,11 @@ export function StopAndRestoreDialog({
   });
 
   const undo = (): Promise<void> => perform("dohc could not undo the restore.", "undo", async (token) => {
-    const restored = receipts.get(workspaceId, chosen.target);
-    const result = restored.length > 0
+    let restored = receipts.get(workspaceId, chosen.target);
+    const result: UndoStopAndRestoreResult = restored.length > 0 || receipts.shown(workspaceId, chosen.target)?.result.unfinished?.step === "files"
       ? await bridge().undoStopAndRestore({ workspaceId, target: chosen.target, reviewPaths: [...new Set([...retainedCollectionFieldWritePaths(workspaceId), ...retainedOrphanedDraftPaths(workspaceId)])], restoredMomentIds: restored.map((file) => file.restoredMomentId) })
       : { files: [], errorMessage: null };
+    restored = [...new Map([...restored, ...(result.recovered ?? [])].map(file => [file.restoredMomentId, file])).values()];
     const completed = new Set(result.files.flatMap(file => file.kind === "restored" ? [file.momentId] : []));
     receipts.set(workspaceId, chosen.target, restored.filter(file => !completed.has(file.restoredMomentId)));
     onRestored();
@@ -427,7 +428,7 @@ export function StopAndRestoreDialog({
       {state.kind === "done" ? <Outcome words={words} result={state.result} undone={state.undone} onOpenFile={onOpenFile} onOpenCollection={onOpenCollection} /> : null}
       <div className="mt-4 flex justify-end gap-2">
         <SecondaryButton onClick={onClose}>{state.kind === "choose" ? "Cancel" : "Close"}</SecondaryButton>
-        {state.kind === "done" && receipts.get(workspaceId, chosen.target).length > 0 ? (
+        {state.kind === "done" && (receipts.get(workspaceId, chosen.target).length > 0 || state.result.unfinished?.step === "files") ? (
           <SecondaryButton data-testid="stop-and-restore-undo" onClick={() => void undo()}>Undo</SecondaryButton>
         ) : null}
         {state.kind === "choose" ? (

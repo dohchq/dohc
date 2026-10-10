@@ -167,6 +167,19 @@ afterEach(() => {
   delete window.dohcDesktop;
 });
 
+it("undoes intended files even when the first receipt batch was not saved, and lists recovered files", async () => {
+  const f = fixture([{status: "restored", restored: [], review: [], runsUndone: 0, runsLeft: 0,
+    keptFields: [], fieldsMissing: 0, runChangesKept: 0, wroteAutomations: false, sendsMessages: false,
+    unfinished: {step: "files", message: "Barrier failed"}}]);
+  f.undoStopAndRestore.mockResolvedValueOnce({errorMessage: null,
+    recovered: [{path: "trip/unconfirmed.txt", restoredMomentId: "unconfirmed"}],
+    files: [{kind: "restored", momentId: "unconfirmed", receipt: {path: "trip/unconfirmed.txt", restoredMomentId: "undo-unconfirmed"}}]});
+  fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
+  fireEvent.click(await screen.findByTestId("stop-and-restore-undo"));
+  await waitFor(() => expect(f.undoStopAndRestore).toHaveBeenCalledWith({workspaceId: WORKSPACE, target: ANA.target, reviewPaths: [], restoredMomentIds: []}));
+  await waitFor(() => expect(f.shell().receipts.shown(WORKSPACE, ANA.target)?.result.restored).toEqual([{path: "trip/unconfirmed.txt", restoredMomentId: "unconfirmed"}]));
+});
+
 it("passes queued, failed and set-aside paths to Stop and restore", async () => {
   const result: StopAndRestoreResult = {status: "restored", restored: [], review: [], runsUndone: 0, runsLeft: 0, runChangesKept: 0,
     wroteAutomations: false, sendsMessages: false, keptFields: [], fieldsMissing: 0, unfinished: null};

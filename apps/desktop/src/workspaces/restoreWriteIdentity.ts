@@ -5,7 +5,8 @@ export const restoreRequestId = (session: string, momentId: string) =>
   `restore/${createHash("sha256").update(JSON.stringify([session, momentId])).digest("hex")}`;
 
 export function restoreReceiptOf(saved: Pick<VersionedTextMoment, "objectId" | "versionId" | "metadata" | "path" | "id">, original: VersionedTextMoment, requestId: string) {
-  return saved.objectId === original.objectId && saved.versionId === original.versionId &&
+  const binaryRecreation = original.operation === "delete" && original.payload.before?.contentKind === "binary";
+  return (saved.objectId === original.objectId || binaryRecreation) && saved.versionId === original.versionId &&
     saved.metadata.origin === "restore" && saved.metadata.correlationId === requestId
     ? {path: saved.path, restoredMomentId: saved.id} : null;
 }
@@ -15,7 +16,8 @@ export async function findRestoreReceipt(engine: Pick<VersionedTextStore, "listM
   let beforeMomentOrder: number | undefined;
   for (;;) {
     const page = await engine.listMoments({workspaceId: original.workspaceId, versionId: original.versionId,
-      objectId: original.objectId, limit: 100, ...(beforeMomentOrder === undefined ? {} : {beforeMomentOrder})});
+      ...(original.operation === "delete" && original.payload.before?.contentKind === "binary" ? {} : {objectId: original.objectId}),
+      limit: 100, ...(beforeMomentOrder === undefined ? {} : {beforeMomentOrder})});
     for (const saved of page.moments) {
       if (saved.id === original.id) return null;
       const receipt = restoreReceiptOf(saved, original, requestId);

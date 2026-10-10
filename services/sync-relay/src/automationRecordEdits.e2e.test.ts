@@ -600,6 +600,7 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
     },
     requireEngineCapture: async () => ({capture: {
       readMoment,
+      findRestoreReceipt: async () => {throw new Error("This fixture has no unjournaled restore to recover.");},
       listObjectMomentsAfter: async (objectId, momentId) => {
         const page = await ownerHistory.listMoments({workspaceId: WORKSPACE, versionId: "main", objectId, limit: 100});
         const before = page.moments.findIndex(moment => moment.momentId === momentId);

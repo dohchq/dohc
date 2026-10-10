@@ -15,6 +15,40 @@ const OWNERS = "  - id: owners\n    name: Owners\n    when: record-added\n    do
 const automations = (...items: string[]) => `version: 1\nautomations:\n${items.join("")}`;
 const RECORD = "---\nTitle: Tent\n---\n";
 
+it("writes no file when the batch intent cannot be saved", async () => {
+  const original = moment("one", "object", "notes/one.txt", "old", "new"), e = engine([original]);
+  expect(await restoreDirectWrites({...e.dependencies, recordRestoreIntents: async () => {throw Error("intent failed");}}, [file(original.id, original.objectId, original.path)]))
+    .toMatchObject({restored: [], unfinished: {message: "intent failed"}});
+  expect(e.restored).toEqual([]);
+});
+
+it("recovers a recreated binary outside the original object's history", async () => {
+  const original = moment("deleted", "old-object", "image.png", "binary", null);
+  original.payload.before!.contentKind = "binary";
+  const key = restoreRequestId("session", original.id), e = engine([original]);
+  const recovered = {path: original.path, restoredMomentId: "binary-restore"};
+  const outcome = await restoreDirectWrites({...e.dependencies, replayRequestId: () => key,
+    findRestoreReceipt: async () => recovered}, [file(original.id, original.objectId, original.path)]);
+  expect(outcome).toMatchObject({restored: [recovered], review: [], unfinished: null});
+  expect(e.restored).toEqual([]);
+});
+
+it("removes a created Collection folder only after its schema receipt is durable, including recovery", async () => {
+  const original = moment("schema", "object", "Tasks/collection.yaml", null, SCHEMA);
+  const e = engine([original]), events: string[] = [];
+  const restore = e.dependencies.restore;
+  const key = restoreRequestId("session", original.id);
+  const deps = {...e.dependencies, folderEntries: async () => ["collection.yaml"],
+    restore: async (...args: Parameters<typeof restore>) => {events.push("write"); const result = await restore(...args);
+      if (result.kind === "restored") e.all.at(-1)!.metadata = {origin: "restore", correlationId: key}; return result;},
+    recordRestores: async () => {events.push("durable");}, removeEmptyFolder: async () => {events.push("folder");}};
+  await restoreDirectWrites(deps, [{...file(original.id, original.objectId, original.path), created: true}]);
+  expect(events).toEqual(["write", "durable", "folder"]);
+  events.length = 0;
+  await restoreDirectWrites({...deps, replayRequestId: () => key}, [{...file(original.id, original.objectId, original.path), created: true}]);
+  expect(events).toEqual(["durable", "folder"]);
+});
+
 it.each(["before barrier", "before receipts"])("recovers every restored file after a crash %s", async boundary => {
   const originals = Array.from({length: 3}, (_, i) => moment(`m-${i}`, `o-${i}`, `notes/${i}.txt`, "old", "new"));
   originals.forEach(m => {m.authors = [{kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1}];});

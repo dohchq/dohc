@@ -122,6 +122,19 @@ describe("the automation run store", () => {
     expect(await readFile(path, "utf8")).toBe("");
     expect(await createAutomationRunStore(root, testMetadataDir).pendingRestores()).toEqual([]);
   });
+  it("keeps restore intents across restart until their receipt or Undo is saved", async () => {
+    const root = await createTestScratch("dohc-restore-intents-");
+    const store = createAutomationRunStore(root, testMetadataDir);
+    await store.savePendingRestore({id: "restore", session: {grants: [], target: {kind: "person", userId: "ana"},
+      label: "Ana", definitions: [], filesUndone: false, receipts: [], result: {status: "waiting"}}});
+    await store.recordRestoreIntents("restore", ["original-1", "original-2"]);
+    const restart = createAutomationRunStore(root, testMetadataDir);
+    expect((await restart.pendingRestores())[0]?.session?.intents).toEqual(["original-1", "original-2"]);
+    await restart.recordRestoreReceipts("restore", [{path: "one.txt", restoredMomentId: "restore-1"}], ["original-1"]);
+    expect((await createAutomationRunStore(root, testMetadataDir).pendingRestores())[0]?.session?.intents).toEqual(["original-2"]);
+    await restart.undoRestoreReceipts("restore", ["restore-2"], ["original-2"]);
+    expect((await createAutomationRunStore(root, testMetadataDir).pendingRestores())[0]?.session?.intents).toEqual([]);
+  });
   it("retains older claims needed by an unfinished restore across restart and expiry", async () => {
     const root = await createTestScratch("dohc-restore-retention-");
     const store = createAutomationRunStore(root, testMetadataDir);
