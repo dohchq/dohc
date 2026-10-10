@@ -53,6 +53,10 @@ it.each(["collectionSetFields", "collectionCreateRecord"])("validates the agent 
 });
 
 describe("moment author results", () => {
+  it("preserves a relay-confirmed person's public name", () => {
+    const result = momentsResult([{kind: "human", humanId: "recipient", humanName: "Recipient", relayConfirmed: true}]);
+    expect(parseCliResult("moments", result)).toEqual(result);
+  });
   it.each([
     { kind: "agent", agentId: "agent" },
     { kind: "automation", automationId: "collection:tasks#stamp", depth: 4 },

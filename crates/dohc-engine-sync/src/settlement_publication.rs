@@ -378,9 +378,19 @@ mod tests {
     #[test]
     fn only_admitted_humans_carry_relay_confirmation() {
         let (_scratch, _path, mut store) = open_store();
-        let local = source(&mut store);
-        assert!(admitted_moment_authors(&local).unwrap().is_none());
-        let accepted = proved(local);
+        let accepted = proved(source(&mut store));
+        for missing_receipt in [false, true] {
+            let mut unadmitted = accepted.clone();
+            if missing_receipt {
+                unadmitted.relay_seq = None;
+            } else {
+                unadmitted.settlement_admission = None;
+            }
+            assert_eq!(
+                admitted_moment_authors(&unadmitted).unwrap().unwrap()[0],
+                json!({"kind":"human","humanId":"reader","humanName":"Reader"})
+            );
+        }
         assert_eq!(
             admitted_moment_authors(&accepted).unwrap().unwrap()[0],
             json!({"kind":"human","humanId":"reader","humanName":"Reader","relayConfirmed":true})

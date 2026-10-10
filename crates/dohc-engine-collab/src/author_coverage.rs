@@ -233,6 +233,12 @@ pub fn reserved_in(conn: &Connection, key: &DocKey) -> Result<Authors, CollabErr
         .flatten();
     if let Some(json) = reserved {
         authors.union_json(&json)?;
+        // Confirmation belongs to that settlement, not the next local interval.
+        for author in authors.0.values_mut() {
+            if let Some(fields) = author.as_object_mut() {
+                fields.remove("relayConfirmed");
+            }
+        }
     }
     for author in interval_in(conn, key, i64::MAX)?.0.into_values() {
         authors.insert(author)?;
