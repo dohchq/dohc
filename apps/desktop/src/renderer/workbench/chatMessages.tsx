@@ -242,13 +242,15 @@ export const TOOLBAR_BUTTON =
 // A row's actions, floating over its top-right corner while the row is
 // hovered or holds focus. Only opacity changes, so the row never moves, and
 // the buttons stay in the Tab order. An open picker inside keeps it shown.
+// Hidden, it takes no pointer, so a click there reaches the row beneath.
+export const ROW_TOOLBAR =
+  "dohc-popover absolute z-10 flex items-center gap-0.5 rounded-md border border-line bg-panel p-0.5 text-muted pointer-events-none opacity-0 transition-opacity duration-75 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 has-[[popover]]:pointer-events-auto has-[[popover]]:opacity-100";
+
 export function RowToolbar(props: { testId?: string; className?: string; children: ReactNode }) {
   return (
     <div
       data-testid={props.testId}
-      className={`dohc-popover absolute z-10 flex items-center gap-0.5 rounded-md border border-line bg-panel p-0.5 text-muted opacity-0 transition-opacity duration-75 group-hover:opacity-100 group-focus-within:opacity-100 has-[[popover]]:opacity-100 ${
-        props.className ?? "-top-1 right-0"
-      }`}
+      className={`${ROW_TOOLBAR} ${props.className ?? "-top-1 right-0"}`}
     >
       {props.children}
     </div>

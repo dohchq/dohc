@@ -443,6 +443,15 @@ const CHAT_POSTS = [
   chatPost("post-poll", SAM, "Can we get the launch checklist into shape before Friday?",
     "Can we get the launch checklist into shape before Friday?", { messageCount: 5, unreadCount: 2, openDecisionCount: 1 }),
 ];
+// The feed's rows, then two kept rows with keyboard focus: on the row, and
+// on Comment inside its toolbar.
+const CHAT_FEED_SPECIMENS: { key: string; post: (typeof CHAT_POSTS)[number]; force?: { row?: string; button?: string }; last?: boolean }[] = [
+  { key: "titled", post: CHAT_POSTS[0]! },
+  { key: "hovered", post: CHAT_POSTS[1]!, force: { row: "hover" } },
+  { key: "poll", post: CHAT_POSTS[2]! },
+  { key: "row-focus", post: CHAT_POSTS[0]!, force: { row: "focus focus-visible" } },
+  { key: "toolbar-focus", post: CHAT_POSTS[0]!, force: { row: "focus-within", button: "focus focus-visible" }, last: true },
+];
 const chatMessage = (id: string, body: string, minutes: number, parentMessageId?: string): ChatMessageRecord => ({
   id, threadId: "post-plain", ...SAM, body, createdAtMs: CHAT_AT + minutes * 60_000,
   ...(parentMessageId ? { parentMessageId } : {}),
@@ -1395,16 +1404,16 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="chat-rows" title="Chat rows">
-        <Specimen label="feed: titled; hovered, unread; untitled, unread, poll, comments">
+        <Specimen label="feed: titled; hovered, unread; untitled, unread, poll, comments; focus on a row; focus in its toolbar">
           <div className="w-[560px]">
-            {CHAT_POSTS.map(({ thread, data }, index) => (
-              <div
-                key={thread.id}
-                data-feed-last={index === CHAT_POSTS.length - 1 ? "" : undefined}
-                data-force-state={index === 1 ? "hover" : undefined}
-                data-force-target={index === 1 ? '[data-testid="chats-post-card"]' : undefined}
-              >
-                <PostCard thread={thread} data={data} reactionControls={CHAT_REACTIONS} onOpen={noop} onToggleBookmark={noop} />
+            {CHAT_FEED_SPECIMENS.map(({ key, post, force, last }) => (
+              // Each row is painted in its own box, as the feed list's items are.
+              <div key={key} data-feed-last={last ? "" : undefined} className="[contain:paint_layout_style]">
+                <div data-force-state={force?.row} data-force-target='[data-testid="chats-post-card"]'>
+                  <div data-force-state={force?.button} data-force-target='[data-testid="chats-post-comment"]'>
+                    <PostCard thread={post.thread} data={post.data} reactionControls={CHAT_REACTIONS} onOpen={noop} onToggleBookmark={noop} />
+                  </div>
+                </div>
               </div>
             ))}
           </div>

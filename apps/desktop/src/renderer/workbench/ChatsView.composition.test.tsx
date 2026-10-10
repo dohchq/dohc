@@ -471,7 +471,8 @@ describe("ChatsView document thread", () => {
     await user.click(await screen.findByTestId("chats-channel"));
     await user.click(await screen.findByTestId("chats-thread"));
     const divider = await screen.findByTestId("chats-comments-divider");
-    expect(divider.getAttribute("aria-label")).toBe("3 comments");
+    expect(divider.getAttribute("role")).toBeNull();
+    expect(divider.querySelector(".sr-only")?.textContent).toBe("3 comments");
     const items = screen.getAllByTestId("chats-message").filter((element) => element.tagName === "LI");
     expect(items.map((item) => item.dataset.continues)).toEqual(["false", "true", "false"]);
     // The continued comment keeps its author and time for screen readers.
@@ -484,6 +485,35 @@ describe("ChatsView document thread", () => {
     expect(toolbar.querySelector('[data-testid="chats-comment-reply"]')?.getAttribute("aria-label")).toBe("Reply");
     expect(toolbar.querySelector('[data-testid="chats-add-reaction"]')).not.toBeNull();
     expect(toolbar.querySelector('[data-testid="chats-message-bookmark"]')).not.toBeNull();
+  });
+
+  it("breaks a run at an agent's run failure but not at a person's words that read like one", async () => {
+    const user = userEvent.setup();
+    const opening = message({ body: "The full opening post body." });
+    const failure = "⚠ Agent run failed: exit 1";
+    const comments = [
+      message({ id: "agent-1", parentMessageId: opening.id, authorKind: "agent", authorDisplayName: "Agent", body: "Starting" }),
+      message({ id: "agent-failed", parentMessageId: opening.id, authorKind: "agent", authorDisplayName: "Agent", body: failure, createdAtMs: NOW + 1 }),
+      message({ id: "agent-2", parentMessageId: opening.id, authorKind: "agent", authorDisplayName: "Agent", body: "Retrying", createdAtMs: NOW + 2 }),
+      message({ id: "ana-1", parentMessageId: opening.id, authorDisplayName: "Ana", body: failure, createdAtMs: NOW + 3 }),
+      message({ id: "ana-2", parentMessageId: opening.id, authorDisplayName: "Ana", body: "That was me quoting it", createdAtMs: NOW + 4 }),
+    ];
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ messageCount: 6 })] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [opening, ...comments] });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await screen.findByTestId("chats-comments-divider");
+    const items = screen.getAllByTestId("chats-message").filter((element) => element.tagName === "LI");
+    expect(items.map((item) => [item.dataset.messageId, item.dataset.continues])).toEqual([
+      ["agent-1", "false"],
+      ["agent-failed", "false"],
+      ["agent-2", "false"],
+      ["ana-1", "false"],
+      ["ana-2", "true"],
+    ]);
+    expect(items[3]!.querySelector('[data-testid="chats-comment-bubble"]')?.getAttribute("data-system")).toBeNull();
   });
 
   it("enters reply mode and sends the true parent message id", async () => {

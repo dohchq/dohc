@@ -63,11 +63,13 @@ export function postText(title: string, body: string): { heading: string; excerp
 }
 
 // A feed row: a hairline under each row but the last, and on hover the
-// panel fill with the hairline gone. PostFeedList marks the last row.
+// hover fill with the hairline gone. PostFeedList marks the last row.
 export const FEED_ROW =
-  "group relative border-b border-line px-2 py-3 transition-colors duration-75 hover:rounded-lg hover:border-transparent hover:bg-panel/70 in-data-[feed-last]:border-transparent";
-// Where a feed row's toolbar floats: over its top edge, clear of the unread count.
-export const FEED_TOOLBAR = "-top-2.5 right-9";
+  "group relative border-b border-line px-2 py-3 transition-colors duration-75 hover:rounded-lg hover:border-transparent hover:bg-hover in-data-[feed-last]:border-transparent";
+// Where a feed row's toolbar floats: level with the name line and clear of
+// the unread count. The list paints each row in its own box, so the
+// toolbar stays inside the row rather than over its top edge.
+export const FEED_TOOLBAR = "top-1 right-9";
 // A feed row's meta line: reactions and counts in the mono voice.
 export const FEED_META = "mt-1.5 flex flex-wrap items-center gap-3 font-mono text-[11px] text-subtle";
 
@@ -236,7 +238,7 @@ export function PostCard(props: {
           props.onOpen();
         }
       }}
-      className={`${FEED_ROW} cursor-pointer text-left dohc-focus-visible focus-visible:rounded-lg`}
+      className={`${FEED_ROW} cursor-pointer text-left dohc-focus-visible focus-visible:rounded-lg focus-visible:-outline-offset-2`}
     >
       {/* Compatibility target retained for existing navigation and e2e
           drivers. The row itself is the semantic button. */}

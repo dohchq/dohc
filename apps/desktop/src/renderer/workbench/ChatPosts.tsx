@@ -37,8 +37,8 @@ function pathBasename(pathHint: string | undefined): string {
 
 // The dispatcher writes a failure as the agent, so the thread has a record.
 // It reads as a notice from dohc, never as something the agent said.
-function isRunnerFailure(body: string): boolean {
-  return body.startsWith("⚠ Agent run failed");
+function isRunnerFailure(message: ChatMessageRecord): boolean {
+  return message.authorKind === "agent" && message.body.startsWith("⚠ Agent run failed");
 }
 
 // "4s", "1m 20s", "2h 5m".
@@ -517,9 +517,9 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
     const commentDecision = decisionsByMessage.get(comment.id);
     const commentAttachments = attachmentsByMessage.get(comment.id) ?? [];
     const isAgent = comment.authorKind === "agent";
-    const isSystem = isAgent && isRunnerFailure(comment.body);
+    const isSystem = isRunnerFailure(comment);
     const continues = !isSystem && previous !== undefined && previous.replies.length === 0 &&
-      !isRunnerFailure(previous.message.body) && continuesRun(previous.message, comment);
+      !isRunnerFailure(previous.message) && continuesRun(previous.message, comment);
     const replyCount = node.replies.length;
     const commentBookmark = bookmarkFor("message", comment.id);
     const commentBookmarkKey = `message:${comment.id}`;
@@ -882,13 +882,12 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
 
       <div
         data-testid="chats-comments-divider"
-        role="separator"
-        aria-label={`${commentCount} ${commentCount === 1 ? "comment" : "comments"}`}
         className="mb-3.5 mt-[18px] flex items-center gap-2 px-2 font-mono text-[11px] text-subtle before:h-px before:flex-1 before:bg-line after:h-px after:flex-1 after:bg-line"
       >
         <span className="inline-flex items-center gap-1">
           <MessageSquare size={12} strokeWidth={1.9} aria-hidden />
-          {commentCount}
+          <span aria-hidden>{commentCount}</span>
+          <span className="sr-only">{`${commentCount} ${commentCount === 1 ? "comment" : "comments"}`}</span>
         </span>
       </div>
 
