@@ -1838,6 +1838,16 @@ struct RestoreOwner {
 }
 
 fn restore_owner() -> RestoreOwner {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../dohc-engine-collab/tests/owner-source/owner-source-seed.json"
+    ))
+    .unwrap();
+    let original: Vec<u8> = serde_json::from_value(fixture["bytes"].clone()).unwrap();
+    let initial_text = fixture["markdown"].as_str().unwrap().to_owned();
+    restore_owner_from(&original, &initial_text, "owner.md")
+}
+
+fn restore_owner_from(original: &[u8], initial_text: &str, path: &str) -> RestoreOwner {
     use dohc_engine_collab::live_object_binding::LiveObjectBinding;
     use dohc_engine_collab::owner_outbox::{
         OwnerOutboxLimits,
@@ -1845,18 +1855,12 @@ fn restore_owner() -> RestoreOwner {
     };
     let (scratch, mut store) = test_store();
     crate::adopt_join_identity(&mut store, "ws", "local", "epoch", "stream", 1, &NoFaults).unwrap();
-    let fixture: Value = serde_json::from_str(include_str!(
-        "../../dohc-engine-collab/tests/owner-source/owner-source-seed.json"
-    ))
-    .unwrap();
-    let original: Vec<u8> = serde_json::from_value(fixture["bytes"].clone()).unwrap();
-    let initial_text = fixture["markdown"].as_str().unwrap().to_owned();
     let initial_moment = format!("moment-ydoc-{}", "a".repeat(64));
     seed_text_moment(
         &mut store,
         "object",
-        "owner.md",
-        &initial_text,
+        path,
+        initial_text,
         &initial_moment,
         None,
         true,
@@ -1866,13 +1870,13 @@ fn restore_owner() -> RestoreOwner {
         &mut store,
         &key,
         YdocContentKind::Richdoc,
-        &original,
+        original,
         &NoFaults,
         2,
     )
     .unwrap();
     store
-        .read_with(|conn| conn.execute("UPDATE ydoc_docs SET path='owner.md'", []))
+        .read_with(|conn| conn.execute("UPDATE ydoc_docs SET path=?1", [path]))
         .unwrap();
     let checkpoint = store
         .read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))
@@ -1883,9 +1887,9 @@ fn restore_owner() -> RestoreOwner {
             workspace_id: "ws".into(),
             main_version_id: "main".into(),
             object_id: "object".into(),
-            lineage_claim_id: hex_sha256(&original),
-            current_path: "owner.md".into(),
-            selector_paths: vec!["owner.md".into()],
+            lineage_claim_id: hex_sha256(original),
+            current_path: path.into(),
+            selector_paths: vec![path.into()],
             restore_fence_generation: 0,
         },
         relay_database_namespace: "relay".into(),
@@ -1912,9 +1916,452 @@ fn restore_owner() -> RestoreOwner {
         store,
         observed,
         checkpoint,
-        initial_text,
+        initial_text: initial_text.into(),
         initial_moment,
     }
+}
+
+#[test]
+fn observed_owner_settlement_preserves_pending_field_history_through_acceptance() {
+    pending_field_settlement(false);
+}
+
+#[test]
+fn observed_owner_settlement_replay_preserves_pending_field_history_through_acceptance() {
+    pending_field_settlement(true);
+}
+
+fn apply_test_owner_frame(owner: &mut RestoreOwner, update: Vec<u8>, cursor: i64) {
+    use dohc_engine_collab::owner_outbox::accepted::{OwnerAcceptedFrameInput, apply_frame_in_tx};
+    let observed = &owner.observed;
+    let dohc_engine_storage::TxnOutcome::Committed(result) = owner
+        .store
+        .write_with(&NoFaults, |tx| {
+            apply_frame_in_tx(
+                tx,
+                "ws",
+                &OwnerAcceptedFrameInput {
+                    binding: observed.binding.clone(),
+                    relay_database_namespace: "relay".into(),
+                    expected_revision: observed.revision,
+                    expected_native_head_sequence: observed.native_head_sequence,
+                    previous_accepted_cursor: observed.accepted_cursor,
+                    journal_cursor: cursor,
+                    update_bytes: update,
+                },
+                10 + cursor,
+            )
+        })
+        .unwrap()
+    else {
+        panic!("frame must commit")
+    };
+    owner.observed.revision = result.revision;
+    owner.observed.native_head_sequence = result.native_head_sequence;
+    owner.observed.accepted_cursor = result.accepted_cursor;
+}
+
+fn assert_pending_status(owner: &RestoreOwner) {
+    owner.store.read_with(|conn| {
+        let indexed = dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(conn, "ws", "main", "object").unwrap().unwrap();
+        let visible = dohc_engine_collab::owner_outbox::draft::open_draft_in(conn, &owner.observed.binding, owner.observed.revision).unwrap();
+        assert_eq!(indexed["status"], json!("done"));
+        assert_eq!(indexed["status"], visible.doc.frontmatter_json()["status"]);
+        let mut stmt = conn.prepare("SELECT previous_value_json,next_value_json,author_origin_id FROM collection_field_history WHERE field_name='status' ORDER BY history_id")?;
+        let history = stmt.query_map([], |r| Ok((r.get::<_, Option<String>>(0)?,r.get::<_, Option<String>>(1)?,r.get::<_, Option<String>>(2)?)))?.collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(history, vec![(Some("\"open\"".into()), Some("\"done\"".into()), None)]);
+        Ok::<_, rusqlite::Error>(())
+    }).unwrap();
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PendingFieldSettlement {
+    Direct,
+    Replay,
+    Quarantined,
+    QuarantinedRefusal,
+    StorageFailure,
+    Oversize,
+    ReplayFailure,
+}
+
+#[test]
+fn observed_owner_quarantine_refusal_then_settlement_keeps_checkpoint_history() {
+    pending_field_settlement_case(PendingFieldSettlement::QuarantinedRefusal);
+}
+
+#[test]
+fn observed_owner_settlement_replay_storage_error_rolls_back_the_moment() {
+    pending_field_settlement_case(PendingFieldSettlement::StorageFailure);
+}
+
+#[test]
+fn observed_owner_quarantine_then_settlement_preserves_history_actor() {
+    pending_field_settlement_case(PendingFieldSettlement::Quarantined);
+}
+
+#[test]
+fn observed_owner_oversize_checkpoint_and_drafts_do_not_fail_settlement() {
+    pending_field_settlement_case(PendingFieldSettlement::Oversize);
+}
+
+#[test]
+fn observed_owner_indexing_replay_failure_does_not_stop_frames_or_settlement() {
+    pending_field_settlement_case(PendingFieldSettlement::ReplayFailure);
+}
+
+fn pending_field_settlement(replay: bool) {
+    pending_field_settlement_case(if replay {
+        PendingFieldSettlement::Replay
+    } else {
+        PendingFieldSettlement::Direct
+    });
+}
+
+fn pending_field_settlement_case(case: PendingFieldSettlement) {
+    let replay = case == PendingFieldSettlement::Replay;
+
+    use dohc_engine_collab::owner_outbox::draft::append_draft_in_tx;
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../dohc-engine-collab/tests/owner-source/owner-source-seed.json"
+    ))
+    .unwrap();
+    let doc = Ydoc::wire();
+    doc.apply(&serde_json::from_value::<Vec<u8>>(fixture["bytes"].clone()).unwrap())
+        .unwrap();
+    doc.frontmatter_set("id", "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa")
+        .unwrap();
+    doc.frontmatter_set("status", "open").unwrap();
+    let text = doc.project(YdocContentKind::Richdoc).unwrap().content;
+    let mut owner = restore_owner_from(&doc.encode_full_state(), &text, "tasks/owner.md");
+    seed_text_moment(
+        &mut owner.store,
+        "schema",
+        "tasks/collection.yaml",
+        "fields:\n  status:\n    type: text\n",
+        "schema",
+        None,
+        true,
+    );
+    owner
+        .store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_domain::reconcile_collections_in_tx(tx, "ws", "main")
+        })
+        .unwrap();
+    let host = Ydoc::wire();
+    host.apply(&owner.checkpoint).unwrap();
+    apply_test_owner_frame(
+        &mut owner,
+        host.richdoc_append_paragraph("accepted body"),
+        1,
+    );
+    let draft = Ydoc::wire();
+    draft.apply(&host.encode_full_state()).unwrap();
+    let vector = draft.encode_state_vector();
+    draft.frontmatter_set("status", "done").unwrap();
+    if case == PendingFieldSettlement::Oversize {
+        draft.richdoc_append_paragraph(&"pending body ".repeat(170_000));
+        owner.observed.limits.max_pending_bytes = 3_000_000;
+        owner
+            .store
+            .read_with(|conn| {
+                conn.execute(
+                    "UPDATE ydoc_owner_bindings SET max_pending_bytes=3000000",
+                    [],
+                )
+            })
+            .unwrap();
+    }
+    let pending = draft.diff(&vector).unwrap();
+    owner
+        .store
+        .write_with(&NoFaults, |tx| {
+            append_draft_in_tx(
+                tx,
+                "ws",
+                &owner.observed.binding,
+                owner.observed.revision,
+                "pending-status".into(),
+                pending.clone(),
+                12,
+            )
+        })
+        .unwrap();
+    assert_pending_status(&owner);
+    if matches!(
+        case,
+        PendingFieldSettlement::Quarantined | PendingFieldSettlement::QuarantinedRefusal
+    ) {
+        if case == PendingFieldSettlement::QuarantinedRefusal {
+            // Refuse a body-only entry while an independent field edit survives.
+            // It must not bring the frozen field edit back into the index.
+            let independent = Ydoc::wire();
+            independent.apply(&host.encode_full_state()).unwrap();
+            owner
+                .store
+                .write_with(&NoFaults, |tx| {
+                    append_draft_in_tx(
+                        tx,
+                        "ws",
+                        &owner.observed.binding,
+                        owner.observed.revision,
+                        "pending-body".into(),
+                        independent.richdoc_append_paragraph("in-flight body"),
+                        13,
+                    )
+                })
+                .unwrap();
+        }
+        let descriptor = owner
+            .store
+            .read_with(|conn| {
+                dohc_engine_collab::owner_outbox::draft::descriptor_for_key_in(
+                    conn,
+                    &DocKey::new("ws", "main", "object").unwrap(),
+                )
+            })
+            .unwrap()
+            .unwrap();
+        for _ in 0..2 {
+            dohc_engine_collab::owner_outbox::quarantine(
+                &mut owner.store,
+                "ws",
+                dohc_engine_collab::owner_outbox::OwnerOutboxQuarantineInput {
+                    outbox_id: descriptor.outbox_id.clone().unwrap(),
+                    reason: "restore-fenced".into(),
+                    observed_binding: None,
+                },
+                20,
+            )
+            .unwrap();
+        }
+        assert_quarantined_status(&owner);
+        if case == PendingFieldSettlement::QuarantinedRefusal {
+            let outbox = descriptor.outbox_id.unwrap();
+            let queued =
+                dohc_engine_collab::owner_outbox::read_pending(&owner.store, "ws", &outbox)
+                    .unwrap();
+            let entry = queued
+                .entries
+                .iter()
+                .find(|entry| entry.append_key == "pending-body")
+                .unwrap();
+            let refusal = dohc_engine_collab::owner_outbox::OwnerOutboxRefuseInput {
+                outbox_id: outbox,
+                delivery_id: entry.delivery_id.clone(),
+                update_digest: entry.update_digest.clone(),
+                reason: "access-revoked".into(),
+            };
+            for _ in 0..2 {
+                owner
+                    .store
+                    .write_with(&NoFaults, |tx| {
+                        dohc_engine_collab::owner_outbox::refuse_entry_in_tx(tx, "ws", &refusal, 21)
+                    })
+                    .unwrap();
+            }
+            assert_quarantined_status(&owner);
+        }
+    }
+    if case == PendingFieldSettlement::Oversize {
+        let vector = host.encode_state_vector();
+        // Deleted CRDT payload stays in the checkpoint, but the settled text is small.
+        host.richdoc_append_paragraph(&"x".repeat(19 * 1024 * 1024));
+        host.rewrite_content_to_markdown_for_fold(YdocContentKind::Richdoc, &text)
+            .unwrap();
+        assert!(host.encode_full_state().len() < dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES);
+        apply_test_owner_frame(&mut owner, host.diff(&vector).unwrap(), 2);
+        let visible = Ydoc::wire();
+        visible.apply(&host.encode_full_state()).unwrap();
+        visible.apply(&pending).unwrap();
+        assert!(
+            visible.encode_full_state().len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES
+        );
+    }
+    if case == PendingFieldSettlement::ReplayFailure {
+        // A retained entry can no longer be replayed. Indexing must not roll back sync.
+        owner.store.read_with(|conn| conn.execute("UPDATE owner_ydoc_outbox_entries SET byte_length=byte_length+1 WHERE pending=1", [])).unwrap();
+        apply_test_owner_frame(
+            &mut owner,
+            host.frontmatter_set("status", "remote").unwrap(),
+            2,
+        );
+        assert_retained_status(&owner);
+    }
+    let later_frame = replay.then(|| host.richdoc_append_paragraph("settled before its frame"));
+    let settled = host.project(YdocContentKind::Richdoc).unwrap().content;
+    let cursor = if replay {
+        2
+    } else {
+        owner.observed.accepted_cursor
+    };
+    let id = format!("moment-ydoc-{}", "b".repeat(64));
+    hydrate_texts(&mut owner.store, &[&settled]);
+    retain_restore_audit(
+        &owner.store,
+        &owner.observed.binding,
+        "relay",
+        &id,
+        &settled,
+        cursor,
+    );
+    let settlement = envelope(
+        "host",
+        0,
+        "ws",
+        present_text_payload(
+            &id,
+            "object",
+            "write",
+            "tasks/owner.md",
+            "tasks/owner.md",
+            &owner.initial_text,
+            &owner.initial_moment,
+            &settled,
+        ),
+    );
+    if case == PendingFieldSettlement::StorageFailure {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let denied = Arc::new(AtomicBool::new(false));
+        let captured = denied.clone();
+        let before = snapshot(&owner.store, "object");
+        let moments = owner.store.table_row_count("moments").unwrap();
+        let log = owner.store.table_row_count("replication_log").unwrap();
+        owner
+            .store
+            .read_with(|conn| {
+                conn.authorizer(Some(move |ctx: AuthContext<'_>| {
+                    if matches!(
+                        ctx.action,
+                        AuthAction::Read {
+                            table_name: "owner_ydoc_outbox_entries",
+                            column_name: "byte_length"
+                        }
+                    ) && !captured.swap(true, Ordering::SeqCst)
+                    {
+                        Authorization::Deny
+                    } else {
+                        Authorization::Allow
+                    }
+                }))
+            })
+            .unwrap();
+        let result = crate::apply_moment_envelope_detailed(
+            &mut owner.store,
+            &settlement,
+            &NoFaults,
+            &crate::AlwaysLive,
+        );
+        owner
+            .store
+            .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+            .unwrap();
+        assert!(denied.load(Ordering::SeqCst));
+        assert!(matches!(result, Err(SyncError::Storage(_))));
+        assert_eq!(snapshot(&owner.store, "object"), before);
+        assert_eq!(owner.store.table_row_count("moments").unwrap(), moments);
+        assert_eq!(owner.store.table_row_count("replication_log").unwrap(), log);
+        assert_pending_status(&owner);
+    }
+    let result = crate::apply_moment_envelope_detailed(
+        &mut owner.store,
+        &settlement,
+        &NoFaults,
+        &crate::AlwaysLive,
+    )
+    .unwrap();
+    assert!(matches!(result.primary, ApplyDisposition::Applied(ref r) if r.record_facts.is_none()));
+    if let Some(update) = later_frame {
+        assert_eq!(
+            owner
+                .store
+                .table_row_count("owner_pending_settlements")
+                .unwrap(),
+            1
+        );
+        apply_test_owner_frame(&mut owner, update, cursor);
+        assert_pending_status(&owner);
+        let drained = super::moment_apply::pending::drain_and_claim(
+            &mut owner.store,
+            "ws",
+            &NoFaults,
+            &crate::AlwaysLive,
+        )
+        .unwrap();
+        assert!(drained.record_facts.is_empty());
+        assert_eq!(drained.changes.len(), 1);
+    }
+    match case {
+        PendingFieldSettlement::Quarantined | PendingFieldSettlement::QuarantinedRefusal => {
+            assert_quarantined_status(&owner)
+        }
+        PendingFieldSettlement::ReplayFailure => assert_retained_status(&owner),
+        PendingFieldSettlement::Oversize => {
+            owner.store.read_with(|conn| {
+                let visible = dohc_engine_collab::load_doc_in(conn, &DocKey::new("ws", "main", "object").unwrap()).unwrap();
+                dohc_engine_collab::owner_outbox::draft::apply_pending_to_checkpoint_in(conn, &owner.observed.binding, &visible).unwrap();
+                let indexed = dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(conn, "ws", "main", "object").unwrap().unwrap();
+                assert_eq!(indexed["status"], visible.frontmatter_json()["status"]);
+                Ok::<_, rusqlite::Error>(())
+            }).unwrap();
+        }
+        _ => assert_pending_status(&owner),
+    }
+    assert_eq!(
+        snapshot(&owner.store, "object").unwrap().2,
+        text_sha(&settled)
+    );
+    if matches!(
+        case,
+        PendingFieldSettlement::Quarantined
+            | PendingFieldSettlement::QuarantinedRefusal
+            | PendingFieldSettlement::Oversize
+            | PendingFieldSettlement::ReplayFailure
+    ) {
+        return;
+    }
+    let accepted_cursor = owner.observed.accepted_cursor + 1;
+    apply_test_owner_frame(&mut owner, pending, accepted_cursor);
+    assert_pending_status(&owner);
+}
+
+fn assert_quarantined_status(owner: &RestoreOwner) {
+    owner.store.read_with(|conn| {
+        let indexed = dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(conn, "ws", "main", "object").unwrap().unwrap();
+        assert_eq!(indexed["status"], json!("open"));
+        let mut stmt = conn.prepare("SELECT previous_value_json,next_value_json,author_origin_id FROM collection_field_history WHERE field_name='status' ORDER BY history_id")?;
+        let history = stmt.query_map([], |r| Ok((r.get::<_, Option<String>>(0)?,r.get::<_, Option<String>>(1)?,r.get::<_, Option<String>>(2)?)))?.collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(history, vec![(Some("\"open\"".into()), Some("\"done\"".into()), None), (Some("\"done\"".into()), Some("\"open\"".into()), Some("owner-draft-quarantine".into()))]);
+        assert!(matches!(dohc_engine_collab::owner_outbox::draft::open_draft_in(conn, &owner.observed.binding, owner.observed.revision), Err(dohc_engine_collab::OwnerOutboxError::Frozen)));
+        Ok::<_, rusqlite::Error>(())
+    }).unwrap();
+}
+
+fn assert_retained_status(owner: &RestoreOwner) {
+    owner
+        .store
+        .read_with(|conn| {
+            let indexed =
+                dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
+                    conn, "ws", "main", "object",
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(indexed["status"], json!("done"));
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM collection_field_history WHERE field_name='status'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(count, 1);
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
 }
 
 /// The host's state once a restore that appends `paragraph` is accepted.

@@ -147,6 +147,8 @@ async function materializeSnapshotToBytes(
     const file = join(dir, 'database.sqlite')
     const db = new DatabaseSync(file)
     try {
+      // This scratch database becomes bytes immediately; it does not need crash recovery.
+      db.exec('PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF')
       createTables(db, snapshot)
       db.close()
       const bytes = await readFile(file)
