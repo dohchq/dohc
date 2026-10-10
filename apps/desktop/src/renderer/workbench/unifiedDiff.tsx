@@ -575,18 +575,19 @@ export function buildUnifiedDiffLines(diff: TextDiff): UnifiedDiffLine[] {
 }
 
 // A changed line's text, with its changed words inside <ins> or <del>, which
-// screen readers announce as an insertion or a deletion.
+// screen readers announce as an insertion or a deletion. A deleted word keeps
+// its line-through, so the two differ without color.
 function LineText({ line }: { line: UnifiedDiffLine }) {
   if (line.text.length === 0) return " ";
   if (!line.words || line.words.length === 0) return line.text;
   const Mark = line.kind === "added" ? "ins" : "del";
-  const fill = line.kind === "added" ? "bg-success/30" : "bg-danger/30";
+  const fill = line.kind === "added" ? "bg-success/30 no-underline" : "bg-danger/30";
   const parts: ReactNode[] = [];
   let offset = 0;
   for (const [start, end] of line.words) {
     if (start > offset) parts.push(line.text.slice(offset, start));
     parts.push(
-      <Mark key={start} className={`rounded-xs no-underline ${fill}`}>
+      <Mark key={start} className={`rounded-xs ${fill}`}>
         {line.text.slice(start, end)}
       </Mark>,
     );
@@ -597,9 +598,9 @@ function LineText({ line }: { line: UnifiedDiffLine }) {
 }
 
 // The shared diff-lines block (history diff page, versions compare page,
-// proposal review): old/new gutters, then the text. A changed line is tinted
-// with a bar at its edge, and its number sits in only one gutter, so the
-// change reads without color too.
+// proposal review): old/new gutters, a quiet +/− mark, then the text. A
+// changed line is tinted with a bar at its edge; the mark says which way it
+// changed without color. Screen readers hear the line's prefix instead.
 export function UnifiedDiffLines(props: {
   lines: UnifiedDiffLine[];
   testId?: string;
@@ -626,7 +627,7 @@ export function UnifiedDiffLines(props: {
           <div
             key={index}
             data-kind={line.kind}
-            className={`grid min-w-0 grid-cols-[40px_40px_minmax(0,1fr)] pl-3.5 ${
+            className={`grid min-w-0 grid-cols-[40px_40px_10px_minmax(0,1fr)] pl-3.5 ${
               line.kind === "added"
                 ? "bg-success/8 text-ink shadow-[inset_2px_0_0_var(--color-success)]"
                 : line.kind === "removed"
@@ -640,7 +641,10 @@ export function UnifiedDiffLines(props: {
             <span aria-hidden className="select-none pr-3 text-right text-[11px] text-subtle">
               {line.newLineNumber ?? ""}
             </span>
-            <code className="min-w-0 whitespace-pre-wrap break-words pl-2.5 pr-3 font-inherit text-inherit">
+            <span aria-hidden className="select-none text-[11px] text-muted">
+              {line.kind === "added" ? "+" : line.kind === "removed" ? "−" : ""}
+            </span>
+            <code className="min-w-0 whitespace-pre-wrap break-words pr-3 font-inherit text-inherit">
               {line.kind === "context" ? null : (
                 <span className="sr-only select-none">
                   {line.kind === "added" ? "Added: " : "Removed: "}

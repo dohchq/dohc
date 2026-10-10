@@ -477,7 +477,7 @@ export function EngineMomentDiffPage({
             the whole file as it was with the typing, to replace the
             file's text with. */}
         {keptTyping !== undefined ? (
-          <CopyButton label="Copy your version" testId="engine-diff-copy-typing" getText={() => keptTyping} />
+          <CopyButton size="header" label="Copy your version" testId="engine-diff-copy-typing" getText={() => keptTyping} />
         ) : null}
         {readOnly ? null : <>
         <button

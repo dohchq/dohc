@@ -200,9 +200,28 @@ describe("history diff page", () => {
     const added = body.querySelector("[data-kind='added'] code");
     expect(removed?.textContent).toBe("Removed: - First document in under 30 seconds");
     expect(added?.textContent).toBe("Added: - First document in under 20 seconds");
+    // Without color: a quiet mark beside each changed line, which screen
+    // readers skip because the prefix says it, and a struck-through deletion.
+    const mark = (kind: string) => body.querySelector(`[data-kind='${kind}'] > span:nth-child(3)`);
+    expect(mark("removed")?.textContent).toBe("−");
+    expect(mark("added")?.textContent).toBe("+");
+    expect(mark("removed")?.getAttribute("aria-hidden")).toBe("true");
+    expect(mark("context")?.textContent).toBe("");
+    expect(body.querySelector("del")?.className).not.toContain("no-underline");
+    expect(body.querySelector("ins")?.className).toContain("no-underline");
     expect(screen.getByTestId("engine-diff-counts").querySelector(".sr-only")?.textContent).toBe(
       "1 line added, 1 line removed",
     );
+  });
+
+  it("sizes Copy your version like the header buttons beside it", async () => {
+    renderPage(momentDetail({ origin: "capture-recovery" }));
+    const copy = await screen.findByTestId("engine-diff-copy-typing");
+    const restore = screen.getByTestId("engine-diff-restore-file");
+    for (const size of ["h-7", "text-[11px]"]) {
+      expect(restore.className.split(" ")).toContain(size);
+      expect(copy.className.split(" ")).toContain(size);
+    }
   });
 
   const bytes = (byteLength: number) => ({ sha256: "a".repeat(64), byteLength });
