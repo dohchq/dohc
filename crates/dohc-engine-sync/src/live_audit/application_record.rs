@@ -590,7 +590,11 @@ fn insert_event(
     Ok(true)
 }
 
-fn retain_projection_authors(tx: &Transaction<'_>, record: &ParsedRecord) -> Result<(), SyncError> {
+fn retain_projection_authors(
+    tx: &Transaction<'_>,
+    record: &ParsedRecord,
+    confirmed: bool,
+) -> Result<(), SyncError> {
     if record.authors.is_empty() {
         return Ok(());
     }
@@ -598,9 +602,9 @@ fn retain_projection_authors(tx: &Transaction<'_>, record: &ParsedRecord) -> Res
     let coordinate = &record.suffix.content_coordinate;
     let imported_content: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM replication_log WHERE workspace_id=?1 AND origin_id=?2 \
-         AND origin_seq=?3 AND op_kind='ydoc.update' AND imported=1 AND apply_disposition='applied' \
+         AND origin_seq=?3 AND op_kind='ydoc.update' AND (?4 OR imported=1) AND apply_disposition='applied' \
          AND COALESCE(json_extract(payload_json,'$.isBaseState'),0)=0)",
-        params![binding.workspace_id,coordinate.origin_id,coordinate.origin_seq], |row| row.get(0),
+        params![binding.workspace_id,coordinate.origin_id,coordinate.origin_seq,confirmed], |row| row.get(0),
     ).map_err(SyncError::corrupt)?;
     if !imported_content {
         return Ok(());
@@ -735,6 +739,15 @@ pub(crate) fn drained_coordinate_authors(
                 payload.attribution.as_ref(),
             ) {
                 authors.union_json(&recorded).map_err(SyncError::corrupt)?;
+                if payload.attribution.as_ref().is_some_and(|attribution| {
+                    attribution.actor_kind == dohc_engine_domain::ChangeActorKind::Human
+                }) {
+                    // Another coordinate may confirm this same ID. Its proof
+                    // cannot erase this coordinate's unconfirmed coverage.
+                    authors
+                        .union_json(r#"[{"kind":"unattributed"}]"#)
+                        .map_err(SyncError::corrupt)?;
+                }
             }
         }
     }
@@ -790,45 +803,126 @@ pub(crate) fn annotate_drained_projection_in_tx(
     Ok(())
 }
 
+fn parse_event_envelope(
+    tx: &Transaction<'_>,
+    op: &ReplicationEnvelope,
+) -> Result<(EventPayload, ParsedRecord), SyncError> {
+    let payload: EventPayload = serde_json::from_value(op.payload.clone())
+        .map_err(|_| invalid("invalid live audit application payload"))?;
+    if serde_json::to_value(&payload).map_err(SyncError::corrupt)? != op.payload {
+        return Err(invalid("noncanonical live audit application payload"));
+    }
+    let routing = [
+        payload.relay_database_namespace.as_str(),
+        op.workspace_id.as_str(),
+        payload.main_version_id.as_str(),
+        payload.object_id.as_str(),
+        payload.lineage_claim_id.as_str(),
+    ];
+    if !(1..=crate::MAX_WIRE_INTEGER).contains(&payload.event_count) {
+        return Err(invalid("invalid live audit event count"));
+    }
+    previous_evidence(tx, routing, payload.event_count)?;
+    let record = parse(tx, &op.workspace_id, &payload.manifest)?;
+    if scope(
+        &record.header.relay_database_namespace,
+        &record.accepted.binding,
+    ) != routing
+        || record.header.event_count != payload.event_count
+        || record.accepted.receipt.update_digest != payload.update_blob_sha256
+    {
+        return Err(invalid("live audit routing differs"));
+    }
+    Ok((payload, record))
+}
+
+fn confirm_record_authors(
+    record: &mut ParsedRecord,
+    envelope: &ReplicationEnvelope,
+) -> Result<bool, SyncError> {
+    if envelope.relay_seq.is_none_or(|seq| seq <= 0) {
+        return Ok(false);
+    }
+    let Some(snapshot) = &envelope.admitted_author_snapshot else {
+        return Ok(false);
+    };
+    if snapshot.as_array().is_none_or(|authors| {
+        authors.len() > dohc_engine_collab::author_coverage::MAX_INTERVAL_AUTHORS
+    }) || serde_json::to_vec(snapshot)
+        .map_err(SyncError::corrupt)?
+        .len()
+        > dohc_engine_collab::author_coverage::MAX_INTERVAL_AUTHOR_BYTES
+    {
+        return Ok(false);
+    }
+    let Ok(entries) = serde_json::from_value::<Vec<LiveAuthorEntry>>(snapshot.clone()) else {
+        return Ok(false);
+    };
+    if entries.iter().any(|author| author.validate().is_err()) {
+        return Ok(false);
+    }
+    let mut values = serde_json::to_value(entries).map_err(SyncError::corrupt)?;
+    let mut authors = dohc_engine_collab::author_coverage::Authors::default();
+    authors
+        .union_json(&values.to_string())
+        .map_err(SyncError::corrupt)?;
+    if authors.is_empty() || authors.json() != record.authors.json() {
+        return Ok(false);
+    }
+    for author in values.as_array_mut().expect("serialized author list") {
+        if author["kind"] == "human" {
+            author["relayConfirmed"] = serde_json::Value::Bool(true);
+        }
+    }
+    let mut confirmed = dohc_engine_collab::author_coverage::Authors::default();
+    confirmed
+        .union_json(&values.to_string())
+        .map_err(SyncError::corrupt)?;
+    if confirmed.journal_bytes() > dohc_engine_collab::author_coverage::MAX_INTERVAL_AUTHOR_BYTES {
+        return Ok(false);
+    }
+    record.authors = confirmed;
+    Ok(true)
+}
+
+pub(crate) fn refresh_confirmed_application_in_tx(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+) -> Result<(), SyncError> {
+    if envelope.op_kind != EVENT_OP
+        || envelope.admitted_author_snapshot.is_none()
+        || envelope.relay_seq.is_none_or(|seq| seq <= 0)
+    {
+        return Ok(());
+    }
+    let (payload, mut record) = parse_event_envelope(tx, envelope)?;
+    let p = scope(
+        &record.header.relay_database_namespace,
+        &record.accepted.binding,
+    );
+    let retained: bool = tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM live_audit_events WHERE {SCOPE} AND event_count=?6 AND record_digest=?7)"),
+        params![p[0],p[1],p[2],p[3],p[4],record.header.event_count,payload.manifest.record_digest], |row|row.get(0)).map_err(SyncError::corrupt)?;
+    if retained && confirm_record_authors(&mut record, envelope)? {
+        retain_projection_authors(tx, &record, true)?;
+    }
+    Ok(())
+}
+
 pub(super) fn apply_event_envelope(
     store: &mut EngineStore,
     envelope: &ReplicationEnvelope,
     faults: &dyn FaultInjector,
 ) -> Result<ApplyOutcome<()>, SyncError> {
     apply_envelope_with_mutation_outcome(store, envelope, faults, |tx, op| {
-        let payload: EventPayload = serde_json::from_value(op.payload.clone())
-            .map_err(|_| invalid("invalid live audit application payload"))?;
-        if serde_json::to_value(&payload).map_err(SyncError::corrupt)? != op.payload {
-            return Err(invalid("noncanonical live audit application payload"));
-        }
-        let routing = [
-            payload.relay_database_namespace.as_str(),
-            op.workspace_id.as_str(),
-            payload.main_version_id.as_str(),
-            payload.object_id.as_str(),
-            payload.lineage_claim_id.as_str(),
-        ];
-        if !(1..=crate::MAX_WIRE_INTEGER).contains(&payload.event_count) {
-            return Err(invalid("invalid live audit event count"));
-        }
-        previous_evidence(tx, routing, payload.event_count)?;
-        let record = parse(tx, &op.workspace_id, &payload.manifest)?;
-        if scope(
-            &record.header.relay_database_namespace,
-            &record.accepted.binding,
-        ) != routing
-            || record.header.event_count != payload.event_count
-            || record.accepted.receipt.update_digest != payload.update_blob_sha256
-        {
-            return Err(invalid("live audit routing differs"));
-        }
+        let (payload, mut record) = parse_event_envelope(tx, op)?;
         if !insert_event(tx, &record, &payload.manifest)? {
             tx.execute("INSERT INTO live_audit_event_conflicts(workspace_id,origin_id,origin_seq,record_digest) VALUES (?1,?2,?3,?4)",params![op.workspace_id,op.origin_id,op.origin_seq,payload.manifest.record_digest]).map_err(SyncError::persist)?;
             return Ok(MutationOutcome::RefusedRetainingMutation {
                 reason: "live audit event identity contains different evidence".into(),
             });
         }
-        retain_projection_authors(tx, &record)?;
+        let confirmed = confirm_record_authors(&mut record, op)?;
+        retain_projection_authors(tx, &record, confirmed)?;
         Ok(MutationOutcome::Applied(()))
     })
 }

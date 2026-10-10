@@ -21,6 +21,7 @@ import {
 } from "./currentFiles";
 import { rowToLogRow } from "./rows";
 import { notifyDesktopReadiness } from "../desktopReadinessChanges";
+import {confirmLiveApplication} from "./liveApplicationAuthorship";
 
 export function appendLogBatch(storage: StorageContext, input: {
     workspaceId: string;
@@ -103,7 +104,14 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
         }
       }
 
-      for(const op of newOps)commitHostedSettlement(storage,op,input.workspaceId,input.originId);
+      let batchCoordinates: Map<number, SyncRelayLogInput> | undefined;
+      for (const op of newOps) {
+        commitHostedSettlement(storage, op, input.workspaceId, input.originId);
+        if (op.opKind === "live.audit.application") {
+          batchCoordinates ??= new Map(newOps.map(entry => [entry.originSeq, entry]));
+          confirmLiveApplication(storage, op, input.workspaceId, input.originId, batchCoordinates);
+        }
+      }
       addedLogBytes=newOps.reduce((bytes,op)=>bytes+Buffer.byteLength(op.payloadJson)+
         (op.admittedAuthorSnapshot===undefined?0:Buffer.byteLength(JSON.stringify(op.admittedAuthorSnapshot)))+
         (op.settlementAdmission===undefined?0:Buffer.byteLength(JSON.stringify(op.settlementAdmission))),0);

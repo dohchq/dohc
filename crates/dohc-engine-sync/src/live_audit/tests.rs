@@ -755,6 +755,7 @@ enum FirstDrainCoordinate {
     Verified,
     RefusedPath,
     Declared,
+    DeclaredHuman,
 }
 
 fn import_authored_projection(
@@ -762,6 +763,60 @@ fn import_authored_projection(
     mixed: bool,
     first_coordinate: Option<FirstDrainCoordinate>,
     late: bool,
+) {
+    import_confirmed_projection(deferred, mixed, first_coordinate, late, Confirmation::None);
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Confirmation {
+    None,
+    Admitted,
+    Mismatch,
+    NoReceipt,
+    ForgedMarker,
+}
+
+#[test]
+fn relay_confirmed_audit_authors_reach_import_and_origin_echo() {
+    import_confirmed_projection(false, false, None, false, Confirmation::Admitted);
+}
+
+#[test]
+fn relay_confirmed_audit_authors_survive_deferred_projection_and_reopen() {
+    import_confirmed_projection(true, false, None, false, Confirmation::Admitted);
+}
+
+#[test]
+fn relay_confirmed_audit_preserves_other_checkpoint_authors() {
+    import_confirmed_projection(false, true, None, false, Confirmation::Admitted);
+}
+
+#[test]
+fn forged_audit_snapshot_or_missing_relay_receipt_cannot_confirm_a_person() {
+    import_confirmed_projection(false, false, None, false, Confirmation::Mismatch);
+    import_confirmed_projection(false, false, None, false, Confirmation::NoReceipt);
+    import_confirmed_projection(false, false, None, false, Confirmation::ForgedMarker);
+}
+
+#[test]
+fn confirmed_audit_cannot_attest_a_declared_same_person_in_a_drain() {
+    for late in [false, true] {
+        import_confirmed_projection(
+            true,
+            false,
+            Some(FirstDrainCoordinate::DeclaredHuman),
+            late,
+            Confirmation::Admitted,
+        );
+    }
+}
+
+fn import_confirmed_projection(
+    deferred: bool,
+    mixed: bool,
+    first_coordinate: Option<FirstDrainCoordinate>,
+    late: bool,
+    confirmation: Confirmation,
 ) {
     use dohc_engine_collab::live_update_application::{
         AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, LiveUpdateReceipt, RelayAcceptedLiveUpdate,
@@ -773,7 +828,7 @@ fn import_authored_projection(
     doc.apply(&f.bytes).unwrap();
     let first_update = first_coordinate.map(|_| doc.richdoc_append_paragraph("First coordinate."));
     let update = doc.richdoc_append_paragraph("Recipient changed this paragraph.");
-    let authors = json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"}]);
+    let mut authors = json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"}]);
     let other = json!({"kind":"link","publicPrincipalId":"other-link","label":"Link editor"});
     let prior = json!([{"kind":"human","humanId":"owner","humanName":"Owner"}]);
     let event = AdmittedLiveUpdate {
@@ -876,13 +931,70 @@ fn import_authored_projection(
         .origin_seq;
     for mut op in ops {
         op.relay_seq = Some(op.origin_seq + 1);
-        if first_coordinate == Some(FirstDrainCoordinate::Declared)
-            && op.op_kind == "ydoc.update"
+        if op.op_kind == application_record::EVENT_OP
+            && confirmation != Confirmation::None
+            && (first_coordinate != Some(FirstDrainCoordinate::DeclaredHuman)
+                || op.origin_seq == last_audit_seq)
+        {
+            let mut snapshot = authors.clone();
+            if mixed {
+                snapshot.as_array_mut().unwrap().push(other.clone());
+            }
+            if confirmation == Confirmation::Mismatch {
+                snapshot[0]["humanId"] = json!("forged");
+            }
+            if confirmation == Confirmation::ForgedMarker {
+                snapshot[0]["relayConfirmed"] = json!(true);
+            }
+            op.admitted_author_snapshot = Some(snapshot);
+            if confirmation == Confirmation::NoReceipt {
+                op.relay_seq = None;
+            }
+        }
+        if confirmation == Confirmation::Admitted {
+            let echoed = crate::apply_replication_envelope(
+                &mut f.store,
+                &mut WriterDocCache::new(),
+                &op,
+                &NoFaults,
+                &NoLiveLeases,
+            )
+            .unwrap();
+            assert!(matches!(echoed.primary, ApplyDisposition::Skipped));
+            if op.op_kind == application_record::EVENT_OP && op.admitted_author_snapshot.is_some() {
+                let saved: Option<String> = f
+                    .store
+                    .read_with(|conn| {
+                        conn.query_row(
+                            "SELECT author_json FROM live_audit_projection_authors LIMIT 1",
+                            [],
+                            |r| r.get(0),
+                        )
+                        .optional()
+                    })
+                    .unwrap();
+                assert!(
+                    saved
+                        .as_deref()
+                        .unwrap_or("")
+                        .contains("\"relayConfirmed\":true")
+                );
+            }
+        }
+        if matches!(
+            first_coordinate,
+            Some(FirstDrainCoordinate::Declared | FirstDrainCoordinate::DeclaredHuman)
+        ) && op.op_kind == "ydoc.update"
             && op.payload["isBaseState"] != true
             && (op.origin_seq == first_delta_seq || late)
         {
-            op.payload["actorOriginId"] = json!("agent-x");
-            op.payload["attribution"] = json!({"actorKind":"agent","depth":0});
+            if first_coordinate == Some(FirstDrainCoordinate::DeclaredHuman) {
+                op.payload["actorOriginId"] = json!("recipient");
+                op.payload["attribution"] = json!({"actorKind":"human","depth":0});
+            } else {
+                op.payload["actorOriginId"] = json!("agent-x");
+                op.payload["attribution"] = json!({"actorKind":"agent","depth":0});
+            }
         }
         if late && op.op_kind == application_record::EVENT_OP && op.origin_seq == last_audit_seq {
             late_ops.push(op);
@@ -1021,7 +1133,18 @@ fn import_authored_projection(
             .expect("verified public authors"),
     )
     .unwrap();
-    if mixed {
+    if confirmation == Confirmation::Admitted {
+        authors[0]["relayConfirmed"] = json!(true);
+    }
+    if first_coordinate == Some(FirstDrainCoordinate::DeclaredHuman) {
+        assert!(
+            stored
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|author| author["kind"] == "unattributed")
+        );
+    } else if mixed {
         assert_eq!(stored.as_array().unwrap().len(), 3);
         for author in [authors[0].clone(), prior[0].clone(), other] {
             assert!(stored.as_array().unwrap().contains(&author));

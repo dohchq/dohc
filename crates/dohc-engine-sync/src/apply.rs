@@ -276,6 +276,7 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
                 }
             }
             if let Some(refusal) = crate::settlement_publication::refresh_in_tx(tx,envelope)? { return Ok(Admission::Refused(refusal)); }
+            crate::live_audit::refresh_confirmed_application_in_tx(tx, envelope)?;
             return Ok(Admission::Skipped);
         }
         let expected = acked.checked_add(1).ok_or(SyncError::CoordinateDiverged)?;
@@ -298,6 +299,7 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
             }
             ack_tx(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
             if let Some(refusal) = crate::settlement_publication::refresh_in_tx(tx,envelope)? { return Ok(Admission::Refused(refusal)); }
+            crate::live_audit::refresh_confirmed_application_in_tx(tx, envelope)?;
             return Ok(Admission::Skipped);
         }
         tx.execute_batch("SAVEPOINT dohc_replication_mutation")
