@@ -327,6 +327,7 @@ pub(super) fn chunk(
 mod tests {
     use super::*;
     use crate::lock;
+    use base64::Engine as _;
     use dohc_engine_collab::{ContentKind, Ydoc};
     use dohc_engine_protocol::transport::{ConnectionOwner, EngineService as _, RequestContext};
     use dohc_engine_protocol::wire::WorkspaceHandle;
@@ -516,6 +517,9 @@ mod tests {
     }
     impl Fixture {
         async fn new() -> Self {
+            Self::with_ordinary_host(false).await
+        }
+        async fn with_ordinary_host(ordinary: bool) -> Self {
             let scratch = ScratchDir::new().unwrap();
             let db = scratch.path().join(".dohc/engine/engine.db");
             std::fs::create_dir_all(db.parent().unwrap()).unwrap();
@@ -534,9 +538,37 @@ mod tests {
                 "restore":{"maxBytes":1_000_000,"maxEvents":100},
                 "sync":{"policy":{"maxClientVectorBytes":1024,"maxHostVectorBytes":4096,"maxOutputBytes":1_000_000,"maxReadBytes":10_000_000},"workingReserveBytes":16*1024*1024}
             })).unwrap();
-            let (service, owner, ingress) =
-                EngineService::configured_live_host(config).await.unwrap();
-            let workspace = lock(&service.handles).keys().next().unwrap().clone();
+            let (service, owner, ingress, workspace) = if ordinary {
+                let config = serde_json::from_value(json!({
+                    "ingress":{"aggregateBytes":512*1024*1024,"applicationWorkingReserveBytes":32*1024*1024,"maxUploads":2,"uploadDeadlineMs":30_000},
+                    "maxRegistrations":4,"maxAdoptionBytes":1_000_000,"maxAdoptionEvents":100,
+                    "maxApplicationsPerSettlement":100,
+                    "ownerOutbox":{"maxPendingBytes":1_000_000,"maxPendingAgeMs":100_000},
+                    "restore":{"maxBytes":1_000_000,"maxEvents":100}
+                })).unwrap();
+                let (service, owner, ingress) = EngineService::ordinary_live_host(config).unwrap();
+                let mut ctx = RequestContext::unbounded();
+                ctx.connection = Some(owner.handle());
+                let opened = service.call(ctx, Request {
+                    id: 0, method: "workspace.open".into(), workspace: None,
+                    deadline_ms: None, idempotency_key: None, progress: false,
+                    params: json!({"rootDir":scratch.path(),"workspaceId":"workspace","captureMode":"none"}),
+                }).await.unwrap();
+                let workspace: WorkspaceHandle =
+                    serde_json::from_value(opened.response.result["workspace"].clone()).unwrap();
+                service.provision_live_application(owner.handle(), crate::LiveApplicationHostConfig {
+                    workspace: workspace.clone(), namespace: "namespace".into(),
+                    coordinate: dohc_engine_collab::live_update_application::ApplicationHostCoordinate {
+                        host_id: "host".into(), host_epoch: 1, instance_id: "instance".into(), connection_id: "connection".into(),
+                    }, max_registrations: 4,
+                }).await.unwrap();
+                (service, owner, ingress, workspace)
+            } else {
+                let (service, owner, ingress) =
+                    EngineService::configured_live_host(config).await.unwrap();
+                let workspace = lock(&service.handles).keys().next().unwrap().clone();
+                (service, owner, ingress, workspace)
+            };
             let vectors: Value = serde_json::from_str(include_str!(
                 "../../../dohc-engine-collab/tests/live-bootstrap-fixtures/live-bootstrap.json"
             ))
@@ -759,10 +791,12 @@ mod tests {
                 ..
             } = self;
             drop(ingress);
-            Arc::get_mut(&mut service)
-                .unwrap()
-                .configured_live_host
-                .take();
+            if service.ordinary_live_host.get().is_none() {
+                Arc::get_mut(&mut service)
+                    .unwrap()
+                    .configured_live_host
+                    .take();
+            }
             service
                 .call(
                     RequestContext::unbounded(),
@@ -1410,6 +1444,164 @@ mod tests {
         );
         drop(raw);
         drop(settled);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn ordinary_restore_defers_a_sibling_record_held_by_an_editor_until_release() {
+        let mut f = Fixture::with_ordinary_host(true).await;
+        std::fs::create_dir_all(f._scratch.path().join("tasks")).unwrap();
+        std::fs::write(f._scratch.path().join("tasks/sibling.md"), "# Sibling\n").unwrap();
+        let db = f._scratch.path().join(".dohc/engine/engine.db");
+        let mut raw = rusqlite::Connection::open(&db).unwrap();
+        let tx = raw.transaction().unwrap();
+        for (object, path, text) in [
+            (
+                "schema",
+                "notes/.collection.json",
+                "{\"fields\":[],\"views\":[]}",
+            ),
+            (
+                "tasks-schema",
+                "tasks/collection.yaml",
+                "fields:\n  Title:\n    type: text\n",
+            ),
+            ("sibling", "tasks/sibling.md", "# Sibling\n"),
+        ] {
+            dohc_engine_domain::write_projected_text_in_tx(
+                &tx,
+                dohc_engine_domain::ProjectedWriteText {
+                    workspace_id: "workspace",
+                    version_id: "main",
+                    object_id: object,
+                    path: std::borrow::Cow::Borrowed(path),
+                    text: std::borrow::Cow::Borrowed(text),
+                    moment_id: object,
+                    metadata_origin: "test",
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2,
+                    request_id: None,
+                },
+            )
+            .unwrap();
+        }
+        tx.execute("INSERT INTO collections VALUES ('workspace','main','notes','notes/.collection.json','valid','[]')",[]).unwrap();
+        tx.execute("INSERT INTO collection_records (workspace_id,version_id,record_id,collection_path,file_path,object_id,adoption_state) VALUES ('workspace','main','rec_00000000000000000000000000','notes','notes/a.md','object','adopted')",[]).unwrap();
+        tx.commit().unwrap();
+        drop(raw);
+        f.edit("---\nid: rec_00000000000000000000000000\n---\n# Later\n")
+            .await;
+        let header = f.prepare_admitted().await;
+        drop(f.restore("liveApplication.applyRestore", &header).await);
+        // Restore fences its own document, while a sibling editor retains its lease.
+        let opened = f.control("ydoc.open", json!({"versionId":"main","path":"tasks/sibling.md","contentKind":"richdoc","seedFromArtifact":false})).await;
+        let session = opened.response.result["sessionId"].clone();
+        drop(opened);
+        let sibling = Ydoc::wire();
+        sibling
+            .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "# Sibling\n")
+            .unwrap();
+        drop(f.control("ydoc.recordUpdate", json!({
+            "sessionId":session,"seed":true,
+            "updateBase64":base64::engine::general_purpose::STANDARD.encode(sibling.encode_full_state())
+        })).await);
+        let raw = rusqlite::Connection::open(&db).unwrap();
+        raw.execute("DELETE FROM snapshots WHERE object_id='schema'", [])
+            .unwrap();
+        drop(raw);
+        // A synchronized record retains its lineage when the editor closes.
+        let raw = rusqlite::Connection::open(&db).unwrap();
+        assert_eq!(
+            raw.execute(
+                "UPDATE ydoc_docs SET regime='replicated' WHERE object_id='sibling'",
+                []
+            )
+            .unwrap(),
+            1
+        );
+        drop(raw);
+        let root = crate::root_binding::canonical_root(f._scratch.path()).unwrap();
+        let key = dohc_engine_collab::DocKey::new("workspace", "main", "sibling").unwrap();
+        assert!(f.service.leases.scoped(&root).is_held(&key));
+        let settled = f.restore("liveApplication.settleRestore", &header).await;
+        let result: Value =
+            serde_json::from_slice(&settled.blob_egress.as_ref().unwrap().bytes).unwrap();
+        assert_eq!(result["collectionReconcileRequired"], true);
+        assert!(f.service.leases.scoped(&root).is_held(&key));
+        drop(settled);
+        let raw = rusqlite::Connection::open(&db).unwrap();
+        let state: String = raw
+            .query_row(
+                "SELECT adoption_state FROM collection_records WHERE object_id='sibling'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            state, "pending-lossless",
+            "restore must respect the live sibling's root-scoped lease"
+        );
+        let text: String = raw.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.object_id='sibling'", [], |r| r.get(0)).unwrap();
+        assert_eq!(text, "# Sibling\n");
+        drop(raw);
+        drop(
+            f.control("ydoc.close", json!({"sessionId":session,"settle":false}))
+                .await,
+        );
+        assert!(!f.service.leases.scoped(&root).is_held(&key));
+        assert_eq!(
+            std::fs::read_to_string(root.join("tasks/sibling.md")).unwrap(),
+            "# Sibling\n"
+        );
+        // Offer the requested retry directly: this fixture disables background capture.
+        let opened = f.service.supervisor.open(&db, 5).unwrap();
+        assert!(
+            !opened.created_actor,
+            "retry uses the existing workspace actor"
+        );
+        let reconciliation = opened
+            .actor
+            .reconcile_collections(
+                "workspace".into(),
+                "main".into(),
+                root.clone(),
+                f.service.leases.scoped(&root),
+                std::sync::Arc::new(f.service.self_writes.scoped(&root)),
+                5,
+                std::sync::Arc::new(NoFaults),
+                dohc_engine_runtime::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!reconciliation.lease_held);
+        assert!(
+            reconciliation
+                .changed_paths
+                .iter()
+                .any(|path| path == "tasks/sibling.md")
+        );
+        drop(opened);
+        let raw = rusqlite::Connection::open(&db).unwrap();
+        let state: String = raw
+            .query_row(
+                "SELECT adoption_state FROM collection_records WHERE object_id='sibling'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "adopted");
+        let text: String = raw.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.object_id='sibling'", [], |r| r.get(0)).unwrap();
+        assert!(
+            text.contains("id: rec_"),
+            "delivery inserts the record ID after release"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("tasks/sibling.md")).unwrap(),
+            text
+        );
+        drop(raw);
         f.close().await;
     }
 

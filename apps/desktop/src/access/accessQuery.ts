@@ -104,7 +104,7 @@ function receivedRows(observation: ReceivedObservation, recipientUserId: string)
     ...observation.inventory.received.map(row => AccessShareRow.parse({ ...row, kind: "share", via: "received",
       status: "damaged" in row ? "damaged" : "active", recipientUserId, recipientEmail: null,
       access: "damaged" in row ? null : row.access, subjectName: row.subjectName ?? null, sharerName: row.sharerName ?? null })),
-    ...observation.inventory.removed.map(row => AccessShareRow.parse({ ...row, kind: "share", via: "received", status: "removed",
+    ...observation.inventory.removed.map(row => AccessShareRow.parse({ ...row, kind: "share", via: "received", status: "removed", removalMessage: row.message,
       granterUserId: null, granterEmail: null, recipientUserId, recipientEmail: null, subjectName: null, sharerName: null,
       selector: null, access: null, generation: null })),
   ];

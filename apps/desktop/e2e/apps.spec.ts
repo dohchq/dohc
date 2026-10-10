@@ -81,6 +81,40 @@ test("@apps opens a static workspace app in the sandboxed preview", async () => 
   }
 });
 
+test("@apps pins an app from its shelf row and opens it, from the keyboard", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+  try {
+    await writeWorkspaceFiles(temp, [
+      { path: "demo/index.html", contents: "<!doctype html><title>Launch app</title><main>From the shelf</main>" },
+    ]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+    await openWorkspaceFromFirstRun(page, temp);
+
+    await page.getByTestId(activityPin("sites")).click();
+    await expect(page.getByTestId("sites-count")).toHaveText("1 app", { timeout: 20_000 });
+    const row = page.locator('[data-testid="sites-row"][data-root="demo"]');
+    await row.focus();
+    await page.keyboard.press("Tab");
+    await expect(page.getByRole("button", { name: "Pin to sidebar" })).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("activity-pinned-app")).toHaveCount(1);
+    await expect(page.getByRole("button", { name: "Unpin" })).toBeFocused();
+
+    await page.keyboard.press("Shift+Tab");
+    await expect(row).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(
+      page.frameLocator('[data-testid="site-preview-frame"]').locator("main"),
+    ).toHaveText("From the shelf", { timeout: 20_000 });
+    await expect(row).toHaveAttribute("aria-current", "page");
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
 // A click in the preview never reaches the page, so Preview options closes
 // when the preview takes focus.
 test("@apps closes Preview options when a click lands in the preview", async () => {

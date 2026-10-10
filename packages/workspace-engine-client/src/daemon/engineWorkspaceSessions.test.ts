@@ -3390,3 +3390,17 @@ describe("EngineWorkspaceSessions", () => {
     expect(sleep).toHaveBeenCalledTimes(1);
   });
 });
+
+it("checks client publication during shutdown without sending a daemon request", () => {
+  const client = new MockClient("published");
+  let published = false;
+  const sessions = new EngineWorkspaceSessions({currentClient: () => {
+    if (!published) throw new EngineDaemonUnavailableError("Engine unavailable.");
+    return client;
+  }});
+  expect(sessions.hasAvailableClient()).toBe(false);
+  published = true;
+  sessions.beginShutdown();
+  expect(sessions.hasAvailableClient()).toBe(true);
+  expect(client.requests).toEqual([]);
+});

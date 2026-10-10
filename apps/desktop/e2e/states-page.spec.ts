@@ -56,6 +56,10 @@ const PARTS = [
   "title-bar-status",
   "capture-recovery",
   "about",
+  "sharing",
+  "usage-record",
+  "word-diff",
+  "apps-shelf",
   "chat-rows",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an
