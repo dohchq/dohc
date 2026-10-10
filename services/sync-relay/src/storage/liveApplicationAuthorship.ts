@@ -1,8 +1,9 @@
+import {setImmediate} from "node:timers/promises";
 import {createHash} from "node:crypto";
 import {isDeepStrictEqual} from "node:util";
 import type {StorageContext} from "./context";
 import type {SyncRelayLogInput} from "./types";
-import {LIVE_JOURNAL_TABLE} from "./schema";
+import {LIVE_JOURNAL_TABLE, LIVE_APPLICATION_AUTHORSHIP_INDEX} from "./schema";
 import {readAcceptedHistoryDeliveryMetadata, RestoreHistoryBudget, RestoreHistoryBudgetExceeded} from "./liveAcceptedHistory";
 import {parseSettlementAuthors} from "./hostedSettlement";
 
@@ -36,7 +37,7 @@ const journalWhere = `workspace_id=? AND main_version_id=? AND object_id=? AND l
   AND relay_database_namespace=? AND accepted_event_count=? AND update_digest=?`;
 function journal(storage: StorageContext, workspaceId: string, payload: Record<string, unknown>) {
   return storage.db.prepare(`SELECT journal_cursor,delivery_id,accepted_event_count,accepted_evidence_digest,
-    accepted_metadata_bytes,length(update_bytes) AS bytes FROM ${LIVE_JOURNAL_TABLE} WHERE ${journalWhere}`)
+    accepted_metadata_bytes,length(update_bytes) AS bytes FROM ${LIVE_JOURNAL_TABLE} INDEXED BY ${LIVE_APPLICATION_AUTHORSHIP_INDEX} WHERE ${journalWhere}`)
     .get(workspaceId, payload.mainVersionId, payload.objectId, payload.lineageClaimId,
       payload.relayDatabaseNamespace, payload.eventCount, payload.updateBlobSha256);
 }
@@ -47,19 +48,23 @@ type Prepared = {workspaceId: string; originId: string; payloadJson: string; cur
 const prepared = new WeakMap<SyncRelayLogInput, Prepared>();
 
 /** Blob work is bounded across the push and runs before acquiring the writer. */
-export function prepareLiveApplications(storage: StorageContext,
-  input: {workspaceId: string; originId: string; ops: SyncRelayLogInput[]}) {
+export async function prepareLiveApplications(storage: StorageContext,
+  input: {workspaceId: string; originId: string; ops: SyncRelayLogInput[]}, signal?: AbortSignal) {
   if (!input.ops.some(op => op.opKind === "live.audit.application")) return;
   const budget = new RestoreHistoryBudget(PUSH_BYTES, input.ops.length);
   let exhausted = false;
+  let bytesSinceYield = 0;
+  let audits = 0;
   const coordinates = new Map(input.ops.map(op => [op.originSeq, op]));
   for (const op of input.ops) {
     if (op.opKind !== "live.audit.application") continue;
     prepared.delete(op);
     delete op.admittedAuthorSnapshot;
     if (exhausted) continue;
+    if (++audits % 32 === 0) await setImmediate(undefined, {signal});
     try {
-      const payload = JSON.parse(op.payloadJson);
+      const payloadJson = op.payloadJson;
+      const payload = JSON.parse(payloadJson);
       // A client supplies routing, never the person. Unknown routes cost no blob reads.
       const header = journal(storage, input.workspaceId, payload);
       require(header && Number.isSafeInteger(header.accepted_metadata_bytes) && Number(header.accepted_metadata_bytes) > 0);
@@ -69,16 +74,23 @@ export function prepareLiveApplications(storage: StorageContext,
         Array.isArray(manifest.chunks) && manifest.chunks.length === Math.ceil(manifest.byteLength / CHUNK_BYTES));
       budget.chargeBytes(manifest.byteLength);
       const chunks: Buffer[] = [];
+      const recordHash = manifest.chunks.length > 1 ? createHash("sha256") : undefined;
       for (const [index, chunk] of manifest.chunks.entries()) {
         const length = Math.min(CHUNK_BYTES, manifest.byteLength - index * CHUNK_BYTES);
         require(chunk.byteLength === length && typeof chunk.sha256 === "string");
         const blob = storage.db.prepare(`SELECT content FROM sync_relay_blobs
           WHERE workspace_id=? AND sha256=? AND length(content)=?`).get(input.workspaceId, chunk.sha256, length)?.content;
         require(blob instanceof Uint8Array && blob.byteLength === length && sha(blob) === chunk.sha256);
+        recordHash?.update(blob);
         chunks.push(Buffer.isBuffer(blob) ? blob : Buffer.from(blob));
+        bytesSinceYield += length;
+        if (bytesSinceYield >= CHUNK_BYTES) {
+          await setImmediate(undefined, {signal});
+          bytesSinceYield = 0;
+        }
       }
       const bytes = chunks.length === 1 ? chunks[0]! : Buffer.concat(chunks, manifest.byteLength);
-      require(chunks.length === 1 ? manifest.recordDigest === manifest.chunks[0].sha256 : sha(bytes) === manifest.recordDigest);
+      require(chunks.length === 1 ? manifest.recordDigest === manifest.chunks[0].sha256 : recordHash!.digest("hex") === manifest.recordDigest);
       const record = JSON.parse(bytes.toString("utf8"));
       const metadata = record.metadata, binding = metadata?.accepted?.binding, receipt = metadata?.accepted?.receipt;
       require(record.kind === "application" && binding?.workspaceId === input.workspaceId &&
@@ -117,9 +129,10 @@ export function prepareLiveApplications(storage: StorageContext,
         authors.set(JSON.stringify(author), author);
       }
       if (authors.size) prepared.set(op, {workspaceId: input.workspaceId, originId: input.originId,
-        payloadJson: op.payloadJson, cursor: header.journal_cursor, coordinate, contentJson: String(content.payloadJson),
+        payloadJson, cursor: header.journal_cursor, coordinate, contentJson: String(content.payloadJson),
         authors: parseSettlementAuthors([...authors.values()])});
     } catch (error) {
+      if (signal?.aborted) throw error;
       if (error instanceof RestoreHistoryBudgetExceeded) exhausted = true;
       // Exhausted budgets and mismatches retain the audit without confirmation.
     }
@@ -133,8 +146,13 @@ export function confirmLiveApplication(storage: StorageContext, op: SyncRelayLog
   delete op.admittedAuthorSnapshot;
   const proof = prepared.get(op);
   if (!proof || proof.workspaceId !== workspaceId || proof.originId !== originId || proof.payloadJson !== op.payloadJson) return;
-  const header = journal(storage, workspaceId, JSON.parse(op.payloadJson));
-  if (header?.journal_cursor !== proof.cursor) return;
+  const payload = JSON.parse(op.payloadJson);
+  // The covering index checks the primary coordinate and scope without decoding a blob row.
+  const header = storage.db.prepare(`SELECT journal_cursor FROM ${LIVE_JOURNAL_TABLE}
+    INDEXED BY ${LIVE_APPLICATION_AUTHORSHIP_INDEX} WHERE journal_cursor=? AND ${journalWhere}`)
+    .get(proof.cursor, workspaceId, payload.mainVersionId, payload.objectId, payload.lineageClaimId,
+      payload.relayDatabaseNamespace, payload.eventCount, payload.updateBlobSha256);
+  if (!header) return;
   const pending = proof.coordinate.originId === originId ? batchCoordinates.get(proof.coordinate.originSeq) : undefined;
   const content = pending ?? storage.db.prepare(`SELECT op_kind AS opKind,payload_json AS payloadJson FROM sync_relay_log
     WHERE workspace_id=? AND origin_id=? AND origin_seq=?`).get(workspaceId, proof.coordinate.originId, proof.coordinate.originSeq);

@@ -6,6 +6,7 @@ use dohc_engine_collab::live_update_application::{
     validate_checkpoint_coverage,
 };
 use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
+use std::cell::RefCell;
 use std::fmt;
 use std::io::{BufReader, Write};
 
@@ -119,6 +120,7 @@ fn end_fields<'de, A: MapAccess<'de>>(map: &mut A) -> Result<(), A::Error> {
 }
 
 struct RecordVisitor<'a> {
+    storage_failure: &'a RefCell<Option<SyncError>>,
     conn: &'a Connection,
     workspace: &'a str,
 }
@@ -159,6 +161,7 @@ impl<'de> Visitor<'de> for RecordVisitor<'_> {
             canonical_version,
             authors,
         } = map.next_value_seed(MetadataSeed {
+            storage_failure: self.storage_failure,
             conn: self.conn,
             workspace: self.workspace,
             header: &header,
@@ -193,7 +196,7 @@ impl<'de> Visitor<'de> for RecordVisitor<'_> {
                     source.local_ydoc_sequence,
                     &source.host_coordinate.host_id,
                 )
-                .map_err(serde::de::Error::custom)?;
+                .map_err(|error| decode_failure(error, self.storage_failure))?;
         }
         crate::model::bounded(
             &suffix.content_coordinate.origin_id,
@@ -224,6 +227,7 @@ impl<'de> Visitor<'de> for RecordVisitor<'_> {
 }
 
 struct MetadataSeed<'a> {
+    storage_failure: &'a RefCell<Option<SyncError>>,
     conn: &'a Connection,
     workspace: &'a str,
     header: &'a Header,
@@ -251,10 +255,10 @@ impl<'de> Visitor<'de> for MetadataSeed<'_> {
             scope(&self.header.relay_database_namespace, &accepted.binding),
             self.header.event_count,
         )
-        .map_err(serde::de::Error::custom)?;
+        .map_err(|error| decode_failure(error, self.storage_failure))?;
         if self.header.event_count > 1 {
             let p = scope(&self.header.relay_database_namespace, &accepted.binding);
-            let cursor:i64=self.conn.query_row(&format!("SELECT journal_cursor FROM live_audit_events WHERE {SCOPE} AND event_count=?6"),params![p[0],p[1],p[2],p[3],p[4],self.header.event_count-1],|r|r.get(0)).map_err(serde::de::Error::custom)?;
+            let cursor:i64=self.conn.query_row(&format!("SELECT journal_cursor FROM live_audit_events WHERE {SCOPE} AND event_count=?6"),params![p[0],p[1],p[2],p[3],p[4],self.header.event_count-1],|r|r.get(0)).map_err(SyncError::corrupt).map_err(|error| decode_failure(error, self.storage_failure))?;
             if accepted.receipt.journal_cursor <= cursor {
                 return Err(serde::de::Error::custom(
                     "live audit cursor did not advance",
@@ -437,18 +441,47 @@ fn parse(
     // Missing source order is retryable even though serde wraps visitor errors.
     // The small routing header is retained separately by the envelope and checked
     // before parsing at the import seam.
+    let storage_failure = RefCell::new(None);
     let mut reader = BufReader::with_capacity(65_536, ChunkReader::new(conn, manifest)?);
     let mut decoder = serde_json::Deserializer::from_reader(&mut reader);
-    let record =
-        serde::Deserializer::deserialize_map(&mut decoder, RecordVisitor { conn, workspace })
-            .map_err(parse_error)?;
-    decoder.end().map_err(parse_error)?;
-    reader.into_inner().finish()?;
+    let decoded = serde::Deserializer::deserialize_map(
+        &mut decoder,
+        RecordVisitor {
+            conn,
+            workspace,
+            storage_failure: &storage_failure,
+        },
+    )
+    .and_then(|record| {
+        decoder.end()?;
+        Ok(record)
+    });
+    drop(decoder);
+    let mut chunks = reader.into_inner();
+    if let Some(error) = storage_failure.into_inner() {
+        return Err(error);
+    }
+    if let Some(error) = chunks.take_storage_failure() {
+        return Err(error.into());
+    }
+    let record = decoded.map_err(parse_error)?;
+    chunks.finish()?;
     if record.canonical_digest != manifest.record_digest {
         return Err(invalid("noncanonical historical live application"));
     }
     require_content(conn, &record)?;
     Ok(record)
+}
+
+fn decode_failure<E: serde::de::Error>(
+    error: SyncError,
+    storage_failure: &RefCell<Option<SyncError>>,
+) -> E {
+    let message = E::custom(&error);
+    if matches!(&error, SyncError::Storage(_)) {
+        *storage_failure.borrow_mut() = Some(error);
+    }
+    message
 }
 
 fn parse_error(error: serde_json::Error) -> SyncError {
@@ -928,6 +961,9 @@ pub(crate) fn refresh_confirmed_application_in_tx(
         }
         Ok::<_, SyncError>(())
     })();
+    if matches!(&refresh, Err(SyncError::Storage(_))) {
+        return refresh;
+    }
     if refresh.is_err() {
         tx.execute_batch("ROLLBACK TO dohc_audit_confirmation")
             .map_err(SyncError::persist)?;

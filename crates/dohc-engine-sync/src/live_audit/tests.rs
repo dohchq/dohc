@@ -776,6 +776,8 @@ enum Confirmation {
     NoReceipt,
     ForgedMarker,
     RetentionBound,
+    StorageFailure,
+    ReaderStorageFailure,
 }
 
 #[test]
@@ -963,7 +965,10 @@ fn import_confirmed_projection(
         }
         if matches!(
             confirmation,
-            Confirmation::Admitted | Confirmation::RetentionBound
+            Confirmation::Admitted
+                | Confirmation::RetentionBound
+                | Confirmation::StorageFailure
+                | Confirmation::ReaderStorageFailure
         ) {
             let bounded = confirmation == Confirmation::RetentionBound
                 && op.op_kind == application_record::EVENT_OP;
@@ -982,6 +987,46 @@ fn import_confirmed_projection(
                     "INSERT INTO live_audit_projection_authors(workspace_id,origin_id,origin_seq,version_id,object_id,path,lineage_claim_id,author_json) VALUES ('ws','owner-origin',?1,'main','object','note.md',?2,?3)",
                     params![op.origin_seq-1,f.binding.lineage_claim_id,full_coverage],
                 )).unwrap();
+            }
+            if confirmation == Confirmation::StorageFailure
+                && op.op_kind == application_record::EVENT_OP
+            {
+                f.store.read_with(|conn| conn.execute_batch(
+                    "CREATE TEMP TRIGGER fail_audit_confirmation BEFORE INSERT ON live_audit_projection_authors BEGIN SELECT RAISE(ABORT,'injected storage failure'); END;",
+                )).unwrap();
+                let failed = crate::apply_replication_envelope(
+                    &mut f.store,
+                    &mut WriterDocCache::new(),
+                    &op,
+                    &NoFaults,
+                    &NoLiveLeases,
+                );
+                assert!(matches!(failed, Err(SyncError::Storage(_))), "{failed:?}");
+                f.store
+                    .read_with(|conn| conn.execute_batch("DROP TRIGGER fail_audit_confirmation"))
+                    .unwrap();
+            }
+            if confirmation == Confirmation::ReaderStorageFailure
+                && op.op_kind == application_record::EVENT_OP
+            {
+                f.store
+                    .read_with(|conn| {
+                        conn.execute_batch("ALTER TABLE binary_blobs RENAME TO unavailable_blobs")
+                    })
+                    .unwrap();
+                let failed = crate::apply_replication_envelope(
+                    &mut f.store,
+                    &mut WriterDocCache::new(),
+                    &op,
+                    &NoFaults,
+                    &NoLiveLeases,
+                );
+                assert!(matches!(failed, Err(SyncError::Storage(_))), "{failed:?}");
+                f.store
+                    .read_with(|conn| {
+                        conn.execute_batch("ALTER TABLE unavailable_blobs RENAME TO binary_blobs")
+                    })
+                    .unwrap();
             }
             let echoed = crate::apply_replication_envelope(
                 &mut f.store,
@@ -1195,7 +1240,10 @@ fn import_confirmed_projection(
     .unwrap();
     if matches!(
         confirmation,
-        Confirmation::Admitted | Confirmation::RetentionBound
+        Confirmation::Admitted
+            | Confirmation::RetentionBound
+            | Confirmation::StorageFailure
+            | Confirmation::ReaderStorageFailure
     ) {
         authors[0]["relayConfirmed"] = json!(true);
     }
@@ -2692,4 +2740,20 @@ fn confirmed_and_unconfirmed_audits_of_one_person_merge_without_confirmation() {
 #[test]
 fn confirmation_refresh_bound_failure_is_skipped_without_partial_annotation() {
     import_confirmed_projection(false, false, None, false, Confirmation::RetentionBound);
+}
+
+#[test]
+fn confirmation_refresh_propagates_storage_failure_and_can_retry() {
+    import_confirmed_projection(false, false, None, false, Confirmation::StorageFailure);
+}
+
+#[test]
+fn confirmation_refresh_propagates_streaming_storage_failure_and_can_retry() {
+    import_confirmed_projection(
+        false,
+        false,
+        None,
+        false,
+        Confirmation::ReaderStorageFailure,
+    );
 }

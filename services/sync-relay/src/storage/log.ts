@@ -22,7 +22,7 @@ import {
 } from "./currentFiles";
 import { rowToLogRow } from "./rows";
 import { notifyDesktopReadiness } from "../desktopReadinessChanges";
-import {confirmLiveApplication, prepareLiveApplications} from "./liveApplicationAuthorship";
+import {confirmLiveApplication} from "./liveApplicationAuthorship";
 
 const logPageStatements = new WeakMap<SqliteDb, ReturnType<SqliteDb["prepare"]>>();
 
@@ -32,7 +32,6 @@ export function appendLogBatch(storage: StorageContext, input: {
     ops: SyncRelayLogInput[];
     guard?: (context: AppendLogBatchGuardContext) => void;
   }): AppendLogBatchResult {
-    prepareLiveApplications(storage, input);
     return storage.tx(() => appendLogBatchInTransaction(storage, input));
   }
 

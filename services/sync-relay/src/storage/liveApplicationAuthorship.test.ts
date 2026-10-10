@@ -3,6 +3,7 @@ import {createHash} from "node:crypto";
 import {registered, cleanupLiveDeliveryFixtures} from "../../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport";
 import {canonicalVersionedAcceptedMetadata} from "../liveAcceptedHistory";
 import {RestoreHistoryBudget} from "./liveAcceptedHistory";
+import {initializeSyncRelaySchema} from "./schema";
 import type {StorageContext} from "./context";
 import {parseAuthenticatedLogOps} from "../relayLogInputs";
 
@@ -39,11 +40,13 @@ function application(inBatch = false) {
         eventCount: value.eventCount, manifest: {formatVersion: 1, recordDigest: digest, byteLength: bytes.byteLength,
           chunks: [{sha256: digest, byteLength: bytes.byteLength}]}, updateBlobSha256: value.metadata.accepted.receipt.updateDigest}};
     const ops = await parseAuthenticatedLogOps([raw, {originSeq: 3, opKind: "opaque", payload: {}, recordedAtMs: 1}], "owner");
-    f.storage.appendLogBatch({workspaceId: "workspace", originId: "device", ops: inBatch ? [...contentOps, ...ops] : ops});
+    const input = {workspaceId: "workspace", originId: "device", ops: inBatch ? [...contentOps, ...ops] : ops};
+    await f.storage.prepareHostedSettlements(input);
+    f.storage.appendLogBatch(input);
     expect(f.storage.maxOriginSeq("workspace", "device")).toBe(3);
     return f.storage.fetchLogCoordinate({workspaceId: "workspace", originId: "device", originSeq: 2});
   };
-  return {...f, storage: f.storage as StorageContext, publish, record};
+  return {...f, storage: f.storage as StorageContext, publish, record, prepare: (input: Parameters<typeof f.storage.prepareHostedSettlements>[0]) => f.storage.prepareHostedSettlements(input)};
 }
 
 it("confirms an audit application only with the relay journal snapshot", async () => {
@@ -130,7 +133,9 @@ it("bounds a 500-op push referencing one oversized audit and keeps later operati
     opKind: "live.audit.application", payload, recordedAtMs: 1})), "owner");
   const reads = blobReads(f);
   try {
-    expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "device", ops}).inserted).toBe(500);
+    const input = {workspaceId: "workspace", originId: "device", ops};
+    await f.prepare(input);
+    expect(f.storage.appendLogBatch(input).inserted).toBe(500);
     expect(reads.read()).toEqual({bytes: 0, inWrite: false});
     expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "device", ops: [
       {originSeq: 502, opKind: "opaque", payloadJson: "{}", recordedAtMs: 1}]}).inserted).toBe(1);
@@ -156,6 +161,7 @@ it("shares one exhausted byte budget while still storing the whole audit push", 
     return charge.call(this, value);
   });
   try {
+    await f.prepare(input);
     expect(f.storage.appendLogBatch(input).inserted).toBe(20);
     expect(budgets.size).toBe(1);
     expect(reads.read().bytes).toBeLessThanOrEqual(limit);
@@ -176,4 +182,139 @@ it("does not confirm alternate record key order or extra record fields", async (
       expect(row).not.toHaveProperty("admittedAuthorSnapshot");
     } finally {f.close();}
   }
+});
+
+function largeJournal(f: ReturnType<typeof application>) {
+  const table = "sync_relay_live_update_journal";
+  const columns = f.storage.db.prepare(`PRAGMA table_info(${table})`).all().map(row => String(row.name)).filter(name => name !== "journal_cursor");
+  const values = columns.map(name => name === "delivery_id" || name === "accepted_event_count" ? "?" : name);
+  const insert = f.storage.db.prepare(`INSERT INTO ${table} (${columns.join(",")}) SELECT ${values.join(",")} FROM ${table} WHERE journal_cursor=?`);
+  const cursor = f.record.metadata.accepted.receipt.journalCursor;
+  f.storage.tx(() => {for (let i = 0; i < 50_000; i++) insert.run(`retained-${i}`, i + 2, cursor);});
+}
+
+it("indexes a 500-audit push on a document with 50000 journal rows without reading the table", async () => {
+  const f = application();
+  try {
+    largeJournal(f);
+    const valid = (await f.publish())!;
+    f.storage.db.prepare("DELETE FROM sync_relay_log WHERE workspace_id='workspace' AND origin_id='device' AND origin_seq>=2").run();
+    const payload = JSON.parse(valid.payloadJson);
+    const ops = Array.from({length: 500}, (_, i) => ({...valid, originSeq: i + 2,
+      payloadJson: JSON.stringify({...payload, eventCount: i === 499 ? payload.eventCount : 50_002})}));
+    const plans = new Map<boolean, string[]>();
+    const prepare = f.storage.db.prepare.bind(f.storage.db);
+    const spy = vi.spyOn(f.storage.db, "prepare").mockImplementation(sql => {
+      const statement = prepare(sql);
+      if (!sql.includes("accepted_event_count=?") || !sql.includes("update_digest=?")) return statement;
+      const get = statement.get.bind(statement);
+      statement.get = (...args) => {
+        const writer = (f.storage.db as typeof f.storage.db & {isTransaction: boolean}).isTransaction;
+        if (!plans.has(writer)) {
+          plans.set(writer, prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...args).map(row => String(row.detail)));
+          // A deferred table cursor is harmless; no Column instruction may decode it.
+          const bytecode = prepare(`EXPLAIN ${sql}`).all(...args);
+          const root = prepare("SELECT rootpage FROM sqlite_schema WHERE name='sync_relay_live_update_journal'").get()!.rootpage;
+          const tableCursors = bytecode.filter(row => row.opcode === "OpenRead" && row.p2 === root).map(row => row.p1);
+          expect(bytecode.filter(row => row.opcode === "Column" && tableCursors.includes(row.p1))).toEqual([]);
+        }
+        return get(...args);
+      };
+      return statement;
+    });
+    try {
+      const input = {workspaceId: "workspace", originId: "device", ops};
+      await f.prepare(input);
+      expect(f.storage.appendLogBatch(input).inserted).toBe(500);
+      expect(plans.size).toBe(2);
+      for (const plan of plans.values()) expect(plan.join(" ")).toContain("idx_sync_relay_live_application_authorship");
+      expect(f.storage.fetchLogCoordinate({workspaceId: "workspace", originId: "device", originSeq: 501})).toHaveProperty("admittedAuthorSnapshot");
+      expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "device", ops: [{originSeq: 502, opKind: "opaque", payloadJson: "{}", recordedAtMs: 1}]}).inserted).toBe(1);
+      console.log("FIX4_PLANS", JSON.stringify([...plans]));
+    } finally {spy.mockRestore();}
+  } finally {f.close();}
+}, 120_000);
+
+it("yields between audit batches before taking the write lock", async () => {
+  const f = application();
+  try {
+    const valid = (await f.publish())!;
+    const ops = Array.from({length: 500}, (_, i) => ({...valid, originSeq: i + 2}));
+    let progressed = false;
+    const tick = new Promise<void>(resolve => setImmediate(() => {progressed = true; resolve();}));
+    await f.prepare({workspaceId: "workspace", originId: "device", ops});
+    expect(progressed).toBe(true);
+    await tick;
+  } finally {f.close();}
+});
+
+it("adds the covering index to an existing journal without rewriting rows and detects damage", () => {
+  const f = application();
+  try {
+    const before = f.journalRows();
+    f.storage.db.exec("DROP INDEX IF EXISTS idx_sync_relay_live_application_authorship");
+    f.storage.db.prepare("DELETE FROM sync_relay_migrations WHERE migration_id='live-application-authorship-index-v1'").run();
+    initializeSyncRelaySchema(f.storage.db);
+    expect(f.journalRows()).toEqual(before);
+    expect(f.storage.db.prepare("SELECT 1 AS present FROM sqlite_schema WHERE name='idx_sync_relay_live_application_authorship'").get()?.present).toBe(1);
+    initializeSyncRelaySchema(f.storage.db);
+    f.storage.db.exec("DROP INDEX idx_sync_relay_live_application_authorship");
+    expect(() => initializeSyncRelaySchema(f.storage.db)).toThrow("live application authorship index is missing or damaged");
+  } finally {f.close();}
+});
+
+it("lets another request run between hashed 4 MiB chunks without entering the writer", async () => {
+  const f = application();
+  try {
+    const bytes = Buffer.from(JSON.stringify({...f.record, padding: "x".repeat(6 * 1024 * 1024)}));
+    const chunks = [];
+    for (let offset = 0; offset < bytes.length; offset += 4 * 1024 * 1024) {
+      const content = bytes.subarray(offset, offset + 4 * 1024 * 1024), sha256 = hash(content);
+      f.storage.putBlob({workspaceId: "workspace", sha256, content, createdAtMs: 1});
+      chunks.push({sha256, byteLength: content.length});
+    }
+    // Raise only the manifest reservation; the noncanonical record remains unconfirmed.
+    f.storage.db.prepare("UPDATE sync_relay_live_update_journal SET accepted_metadata_bytes=? WHERE journal_cursor=?").run(bytes.length, f.record.metadata.accepted.receipt.journalCursor);
+    const binding = f.record.metadata.accepted.binding;
+    const ops = await parseAuthenticatedLogOps([{originSeq: 2, opKind: "live.audit.application", recordedAtMs: 1,
+      payload: {relayDatabaseNamespace: f.record.relayDatabaseNamespace, mainVersionId: binding.mainVersionId,
+        objectId: binding.objectId, lineageClaimId: binding.lineageClaimId, eventCount: f.record.eventCount,
+        updateBlobSha256: f.record.metadata.accepted.receipt.updateDigest,
+        manifest: {formatVersion: 1, recordDigest: hash(bytes), byteLength: bytes.length, chunks}}}], "owner");
+    const reads = blobReads(f);
+    let observed = 0;
+    const tick = new Promise<void>(resolve => setImmediate(() => {observed = reads.read().bytes; resolve();}));
+    try {
+      const input = {workspaceId: "workspace", originId: "device", ops};
+      await f.prepare(input);
+      await tick;
+      expect(observed).toBe(4 * 1024 * 1024);
+      expect(reads.read()).toEqual({bytes: bytes.length, inWrite: false});
+      expect(f.storage.appendLogBatch(input).inserted).toBe(1);
+      expect(f.storage.fetchLogCoordinate({workspaceId: "workspace", originId: "device", originSeq: 2})).not.toHaveProperty("admittedAuthorSnapshot");
+    } finally {reads.spy.mockRestore();}
+  } finally {f.close();}
+});
+
+it("binds the prepared proof to the payload parsed before asynchronous work", async () => {
+  const f = application();
+  const charge = RestoreHistoryBudget.prototype.chargeBytes;
+  try {
+    const row = (await f.publish())!;
+    f.storage.db.prepare("DELETE FROM sync_relay_log WHERE workspace_id='workspace' AND origin_id='device' AND origin_seq>=2").run();
+    const op = {...row};
+    const altered = JSON.parse(row.payloadJson);
+    altered.manifest.recordDigest = "0".repeat(64);
+    const input = {workspaceId: "workspace", originId: "device", ops: [op]};
+    // This hook models an operation mutation after the payload was parsed.
+    const spy = vi.spyOn(RestoreHistoryBudget.prototype, "chargeBytes").mockImplementation(function(this: RestoreHistoryBudget, value: number) {
+      op.payloadJson = JSON.stringify(altered);
+      return charge.call(this, value);
+    });
+    try {
+      await f.prepare(input);
+      expect(f.storage.appendLogBatch(input).inserted).toBe(1);
+      expect(f.storage.fetchLogCoordinate({workspaceId: "workspace", originId: "device", originSeq: 2})).not.toHaveProperty("admittedAuthorSnapshot");
+    } finally {spy.mockRestore();}
+  } finally {f.close();}
 });
