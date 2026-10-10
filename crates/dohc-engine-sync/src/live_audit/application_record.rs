@@ -681,12 +681,12 @@ pub(crate) fn annotate_projected_moment_in_tx(
     }
     // Only a marker introduced by this one coordinate can become verified.
     // A local gap or an aggregate drain's earlier gap remains unattributed.
-    let provisional: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id=?1 AND kind='sync-ydoc-provisional-author')",
-        [format!("sync-ydoc-provisional-author:{moment_id}")],
-        |row| row.get(0),
-    ).map_err(SyncError::corrupt)?;
-    if provisional {
+    let provisional = tx.execute(
+        "DELETE FROM engine_requests WHERE request_id='sync-ydoc-provisional-author:'||json_array(?1,?2,?3) \
+         AND payload_hash=?4 AND kind='sync-ydoc-provisional-author'",
+        params![key.workspace_id,key.version_id,key.object_id,moment_id],
+    ).map_err(SyncError::persist)?;
+    if provisional != 0 {
         authors.remove_unattributed();
     }
     authors.union_json(&verified).map_err(SyncError::corrupt)?;

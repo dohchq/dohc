@@ -1025,6 +1025,11 @@ fn import_authored_projection_with_local_gap(
                     json!([{"kind":"unattributed"}]),
                     "the content coordinate is not yet audited",
                 );
+                let pending: i64 = receiver.read_with(|conn| conn.query_row(
+                    "SELECT COUNT(*) FROM engine_requests WHERE kind='sync-ydoc-provisional-author'",
+                    [], |row| row.get(0),
+                )).unwrap();
+                assert_eq!(pending, i64::from(!local_gap));
             }
             projection = Some(id);
         }
@@ -1137,6 +1142,19 @@ fn import_authored_projection_with_local_gap(
         assert_eq!(stored, authors);
     }
     assert_eq!(count(&receiver, "live_device_update_applications"), 0);
+    let pending: i64 = receiver
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM engine_requests WHERE kind='sync-ydoc-provisional-author'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        pending, 0,
+        "verified coordinates consume their outstanding audit request"
+    );
     assert_eq!(count(&receiver, "live_device_application_bindings"), 0);
     drop(receiver);
     let mut receiver = EngineStore::open(&path, 300).unwrap();

@@ -327,6 +327,21 @@ pub fn check_admission_in(
     actor: Option<&str>,
     attribution: Option<&ChangeAttribution>,
 ) -> Result<bool, CollabError> {
+    check_admission_with_coverage_in(conn, key, actor, attribution)
+        .map(|admission| admission.request_settlement)
+}
+
+struct Admission {
+    request_settlement: bool,
+    introduced_unattributed: bool,
+}
+
+fn check_admission_with_coverage_in(
+    conn: &Connection,
+    key: &DocKey,
+    actor: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+) -> Result<Admission, CollabError> {
     let json = dohc_engine_domain::moment_author_json(actor, attribution);
     let actorless = json.is_none();
     let json = json.unwrap_or_else(|| r#"[{"kind":"unattributed"}]"#.to_owned());
@@ -335,7 +350,10 @@ pub fn check_admission_in(
     // always make room, so only the entry itself is bounded here.
     if accepted_only_in(conn, key)? {
         entry(&json)?;
-        return Ok(false);
+        return Ok(Admission {
+            request_settlement: false,
+            introduced_unattributed: false,
+        });
     }
     if actorless {
         let pending: String = conn
@@ -351,8 +369,11 @@ pub fn check_admission_in(
         // Repeated actorless edits add no identity or bytes. Only a new named
         // identity needs room; its admission checks capacity again, and
         // AuthorCapacity queues a settlement.
-        if admitted.0.contains_key("unattributed") {
-            return Ok(false);
+        if admitted.has_unattributed() {
+            return Ok(Admission {
+                request_settlement: false,
+                introduced_unattributed: false,
+            });
         }
     }
     let mut covered = reserved_in(conn, key)?;
@@ -360,14 +381,17 @@ pub fn check_admission_in(
     if actorless {
         retain_pending_in(conn, key, &[json])?;
     }
-    Ok(
-        (bytes >= SETTLE_AUTHOR_BYTE_THRESHOLD || covered.len() >= SETTLE_AUTHOR_COUNT_THRESHOLD)
+    Ok(Admission {
+        request_settlement: (bytes >= SETTLE_AUTHOR_BYTE_THRESHOLD
+            || covered.len() >= SETTLE_AUTHOR_COUNT_THRESHOLD)
             && !unresolved_in(conn, key)?,
-    )
+        introduced_unattributed: actorless,
+    })
 }
 
 /// A historical coordinate's verified snapshot owns its coverage, just as an
 /// accepted delivery's snapshot does. Raw replication rows cannot mint it.
+/// Returns whether admission introduced the unknown-author marker.
 pub(crate) fn check_remote_admission_in(
     conn: &Connection,
     key: &DocKey,
@@ -375,7 +399,7 @@ pub(crate) fn check_remote_admission_in(
     origin_seq: i64,
     actor: Option<&str>,
     attribution: Option<&ChangeAttribution>,
-) -> Result<(), CollabError> {
+) -> Result<bool, CollabError> {
     let verified: Option<(String, String)> = conn
         .query_row(
             "SELECT a.author_json,d.pending_authors_json FROM live_audit_projection_authors a JOIN ydoc_docs d \
@@ -395,7 +419,7 @@ pub(crate) fn check_remote_admission_in(
         // Identical admitted snapshots add no identity or bytes. Catch-up must
         // not scan the native interval again for every known coordinate.
         if covered.json() == pending {
-            return Ok(());
+            return Ok(false);
         }
         let authors: Vec<Value> = serde_json::from_str(&verified)
             .map_err(|_| corrupt("verified remote coverage is not an author list"))?;
@@ -403,9 +427,10 @@ pub(crate) fn check_remote_admission_in(
             .into_iter()
             .map(|author| Value::Array(vec![author]).to_string())
             .collect::<Vec<_>>();
-        admit_accepted_in(conn, key, &entries)
+        admit_accepted_in(conn, key, &entries).map(|_| false)
     } else {
-        check_admission_in(conn, key, actor, attribution).map(|_| ())
+        check_admission_with_coverage_in(conn, key, actor, attribution)
+            .map(|admission| admission.introduced_unattributed)
     }
 }
 
@@ -521,6 +546,18 @@ fn advance(
         ],
     )
     .map_err(sql)?;
+    clear_provisional_author_in(conn, key)?;
+    Ok(())
+}
+
+/// Only the latest covered interval can still replace its provisional marker.
+fn clear_provisional_author_in(conn: &Connection, key: &DocKey) -> Result<(), CollabError> {
+    conn.execute(
+        "DELETE FROM engine_requests WHERE request_id='sync-ydoc-provisional-author:'||json_array(?1,?2,?3) \
+         AND kind='sync-ydoc-provisional-author'",
+        params![key.workspace_id, key.version_id, key.object_id],
+    )
+    .map_err(sql)?;
     Ok(())
 }
 
@@ -610,6 +647,7 @@ pub fn reset_in(conn: &Connection, key: &DocKey, retain_content: bool) -> Result
     if retain_content {
         fold_in(conn, key, i64::MAX)?;
     }
+    clear_provisional_author_in(conn, key)?;
     conn.execute(
         "UPDATE ydoc_docs SET settled_update_seq=NULL,settle_prior_update_seq=NULL, \
          last_settled_sha=CASE WHEN ?4 THEN last_settled_sha ELSE NULL END, \

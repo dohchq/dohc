@@ -3644,6 +3644,7 @@ fn require_resolved_local_settlement(
     Ok(())
 }
 
+/// Returns whether this projection created a History moment.
 #[allow(clippy::too_many_arguments)]
 pub fn project_and_write_in_tx(
     tx: &rusqlite::Transaction<'_>,
@@ -3655,7 +3656,7 @@ pub fn project_and_write_in_tx(
     origin_seq: i64,
     now_ms: i64,
     search_policy: Option<&SearchPolicySnapshot>,
-) -> Result<(), SyncError> {
+) -> Result<bool, SyncError> {
     require_resolved_local_settlement(tx, key, now_ms)?;
     let current = validate_ydoc_identity(tx, key, path)?;
     if content_kind == dohc_engine_collab::ContentKind::Richdoc {
@@ -3726,43 +3727,8 @@ pub fn project_and_write_in_tx(
                 now_ms,
             )?;
         }
-        return Ok(());
+        return Ok(false);
     }
-    // Idempotent skip: a redelivered (or content-converged) envelope whose
-    // projection already IS the head mints no duplicate moment/job — but the
-    // MARKER still advances: the head may have reached these bytes via
-    // capture/local write while last_settled_sha points at an older settle,
-    // and leaving it stale would wedge the next settle in
-    // ConflictStaleTarget over a converged doc.
-    let projected_sha = dohc_engine_storage::hex_sha256(projection.content.as_bytes());
-    if let Some(snapshot) = current
-        .snapshot
-        .as_ref()
-        .filter(|snapshot| snapshot.blob_sha256 == projected_sha)
-    {
-        dohc_engine_collab::author_coverage::advance_in(tx, key, false)
-            .map_err(map_collab_hard_error)?;
-        tx.execute(
-            "UPDATE ydoc_docs SET last_settled_sha = ?4, updated_at_ms = ?5, path = ?6 \
-             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-            params![
-                key.workspace_id,
-                key.version_id,
-                key.object_id,
-                snapshot.blob_sha256,
-                now_ms,
-                path,
-            ],
-        )
-        .map_err(SyncError::persist)?;
-        return Ok(());
-    }
-    let preimage = current
-        .snapshot
-        .as_ref()
-        .map_or(Preimage::Absent, |snapshot| {
-            Preimage::Present(snapshot.blob_sha256.clone())
-        });
     // A deterministic per-envelope id keeps a retained drain's retry on its
     // original History row, even after another write advances the head.
     let moment_id = ydoc_apply_moment_id(key, path, origin_id, origin_seq);
@@ -3784,6 +3750,43 @@ pub fn project_and_write_in_tx(
         )
         .optional()
         .map_err(SyncError::corrupt)?;
+    let replayed = recorded_authors.is_some();
+    // Converged content needs no new moment/job. Refresh the settled digest:
+    // capture may have reached these bytes while that digest stayed behind,
+    // which would leave the next settlement in ConflictStaleTarget.
+    let projected_sha = dohc_engine_storage::hex_sha256(projection.content.as_bytes());
+    if let Some(snapshot) = current
+        .snapshot
+        .as_ref()
+        .filter(|snapshot| snapshot.blob_sha256 == projected_sha)
+    {
+        // The original projection already consumed its interval. A retry must
+        // leave edits made afterward for their own settlement.
+        if !replayed {
+            dohc_engine_collab::author_coverage::advance_in(tx, key, false)
+                .map_err(map_collab_hard_error)?;
+        }
+        tx.execute(
+            "UPDATE ydoc_docs SET last_settled_sha = ?4, updated_at_ms = ?5, path = ?6 \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+            params![
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                snapshot.blob_sha256,
+                now_ms,
+                path,
+            ],
+        )
+        .map_err(SyncError::persist)?;
+        return Ok(false);
+    }
+    let preimage = current
+        .snapshot
+        .as_ref()
+        .map_or(Preimage::Absent, |snapshot| {
+            Preimage::Present(snapshot.blob_sha256.clone())
+        });
     let authors = match recorded_authors {
         Some(authors) => authors,
         None => dohc_engine_collab::author_coverage::interval_in(tx, key, i64::MAX)
@@ -3822,8 +3825,10 @@ pub fn project_and_write_in_tx(
     }
     enqueue_write(tx, &result, preimage, "ydoc").map_err(map_domain_hard_error)?;
     // Later envelopes may supersede this disk projection; the history moment already covers its interval.
-    dohc_engine_collab::author_coverage::advance_in(tx, key, false)
-        .map_err(map_collab_hard_error)?;
+    if !(replayed && result.deduped) {
+        dohc_engine_collab::author_coverage::advance_in(tx, key, false)
+            .map_err(map_collab_hard_error)?;
+    }
     // The pulled projection IS the settled artifact (its job materializes
     // it): advance the marker exactly like a local settle would. Leaving the
     // old locally-settled sha behind would make the next session's settle
@@ -3843,7 +3848,7 @@ pub fn project_and_write_in_tx(
         ],
     )
     .map_err(SyncError::persist)?;
-    Ok(())
+    Ok(!result.deduped)
 }
 
 pub fn apply_ydoc_envelope(
@@ -4704,25 +4709,6 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
         envelope,
         faults,
         |tx, op| {
-            let provisional_author = if dohc_engine_domain::moment_author_json(
-                payload.actor_origin_id.as_deref(),
-                payload.attribution.as_ref(),
-            )
-            .is_none()
-            {
-                let pending: String = tx.query_row(
-                    "SELECT pending_authors_json FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-                    params![key.workspace_id, key.version_id, key.object_id],
-                    |row| row.get(0),
-                ).map_err(SyncError::corrupt)?;
-                let mut prior_authors = dohc_engine_collab::author_coverage::Authors::default();
-                prior_authors
-                    .union_json(&pending)
-                    .map_err(map_collab_hard_error)?;
-                !prior_authors.has_unattributed()
-            } else {
-                false
-            };
             let projected = apply_remote_update_in_transaction_with_projection(
                 tx,
                 gate_cache,
@@ -4735,6 +4721,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
             )
             .map_err(|error| map_collab_payload_error(error, "ydoc.update could not be applied"))?;
             let applied = projected.outcome;
+            let provisional_author = projected.introduced_unattributed;
             let update_kind = projected.content_kind;
             record_facts = projected.record_facts;
             // An out-of-order cross-origin update parks durably with missing
@@ -4748,20 +4735,6 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                     .map_err(SyncError::persist)?;
                 let projection_moment_id =
                     ydoc_apply_moment_id(&key, &update_path, &op.origin_id, op.origin_seq);
-                let provisional_request_id =
-                    format!("sync-ydoc-provisional-author:{projection_moment_id}");
-                if provisional_author && matches!(applied, ReplicationApplyOutcome::Applied { .. })
-                {
-                    // Record that this coordinate alone introduced the marker.
-                    // Late proof may replace it without erasing other interval gaps.
-                    tx.execute(
-                        "INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) \
-                         SELECT ?1,'unattributed',?2,?3,'sync-ydoc-provisional-author' \
-                         WHERE NOT EXISTS(SELECT 1 FROM moments WHERE workspace_id=?4 AND moment_id=?5) \
-                         ON CONFLICT(request_id) DO NOTHING",
-                        params![provisional_request_id, op.origin_seq, op.recorded_at_ms, key.workspace_id, projection_moment_id],
-                    ).map_err(SyncError::persist)?;
-                }
                 match project_and_write_in_tx(
                     tx,
                     &key,
@@ -4773,13 +4746,18 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                     op.recorded_at_ms,
                     search_policy.as_ref(),
                 ) {
-                    Ok(()) => {
-                        if provisional_author {
+                    Ok(created) => {
+                        if created && provisional_author {
+                            // One outstanding audit request per document. The next
+                            // interval advance, reset, audit or rollback removes it.
                             tx.execute(
-                            "DELETE FROM engine_requests WHERE request_id=?1 AND kind='sync-ydoc-provisional-author' \
-                             AND NOT EXISTS(SELECT 1 FROM moments WHERE workspace_id=?2 AND moment_id=?3)",
-                            params![provisional_request_id, key.workspace_id, projection_moment_id],
-                        ).map_err(SyncError::persist)?;
+                                "INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) \
+                                 VALUES ('sync-ydoc-provisional-author:'||json_array(?1,?2,?3),?4,?5,?6,'sync-ydoc-provisional-author') \
+                                 ON CONFLICT(request_id) DO UPDATE SET payload_hash=excluded.payload_hash, \
+                                 result_seq=excluded.result_seq,committed_at=excluded.committed_at \
+                                 WHERE engine_requests.kind='sync-ydoc-provisional-author'",
+                                params![key.workspace_id,key.version_id,key.object_id,projection_moment_id,op.origin_seq,op.recorded_at_ms],
+                            ).map_err(SyncError::persist)?;
                         }
                         if let crate::BaseOrigination::Declined(declined) =
                             crate::originate_ydoc_base_in_tx(

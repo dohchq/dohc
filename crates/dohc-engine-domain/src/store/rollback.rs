@@ -160,6 +160,12 @@ impl<'a> VersionedTextStore<'a> {
             let restore_generation = next_moment_order(tx)?;
             before_remove(tx, &prep.moment)?;
             tx.execute(
+                "DELETE FROM engine_requests WHERE request_id='sync-ydoc-provisional-author:'||json_array(?1,?2,?3) \
+                 AND payload_hash=?4 AND kind='sync-ydoc-provisional-author'",
+                params![ws, input.version_id, prep.moment.object_id, input.mutation_moment_id],
+            )
+            .map_err(DomainError::sql_persist)?;
+            tx.execute(
                 "DELETE FROM moments WHERE workspace_id = ?1 AND moment_id = ?2",
                 params![ws, input.mutation_moment_id],
             )
