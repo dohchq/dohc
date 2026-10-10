@@ -10,6 +10,12 @@ import {
 import type { ActivityWorkspace } from "./workspaceActivity";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { scopeOf } from "./captureActivityBridge";
+import type { SyncStatusResult } from "../ipc/bridgeContract";
+
+// The budget includes a queued read as well as the final drain.
+const DRAIN_TIMEOUT_MS = 5_000;
+const MAX_RETRY_MS = 5_000;
+type ObservationFailure = NonNullable<SyncStatusResult["fileObservationFailure"]>;
 
 export interface WorkspaceObservationHandle {
   ready: Promise<void>;
@@ -17,6 +23,7 @@ export interface WorkspaceObservationHandle {
   pulledPaths(paths: readonly string[]): Promise<void>;
   pullStarting(): void;
   pullFinished(): void;
+  retry(): Promise<void>;
 }
 
 export interface WorkspaceObservationCallbacks {
@@ -24,7 +31,7 @@ export interface WorkspaceObservationCallbacks {
   resync(): Promise<void>;
   captured(paths?: readonly string[]): void;
   pulled(paths: readonly string[]): void;
-  degraded(unavailable: boolean): void;
+  degraded(reason: ObservationFailure | null): void;
 }
 
 // Read one cursor at a time. A wake received during a read schedules another
@@ -37,55 +44,67 @@ export function observeWorkspaceFiles(options: {
 }): WorkspaceObservationHandle {
   let cursor: FileObservationCursor | undefined;
   let closing = false;
+  let drainTimedOut = false;
   let dirty = false;
   let chain = Promise.resolve();
   let resolveReady!: () => void;
   const ready = new Promise<void>(resolve => { resolveReady = resolve; });
   let readySeen = false;
   let unavailable = false;
-  // Deduplicate paths already delivered during this pull. Late feed facts
-  // can safely reread consumers; a relay page never waits for a full walk.
+  // Deduplicate facts delivered before a pull page. A later fact can also
+  // contain a local edit, so it must still reach all consumers.
   const observedPaths = new Set<string>();
   let pulling = false;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
   let retryMs = 250;
+  let pendingRead: Promise<void> | undefined;
 
-  function degraded(): void {
+  function degraded(reason: ObservationFailure): void {
     unavailable = true;
-    options.callbacks.degraded(true);
+    options.callbacks.degraded(reason);
     resolveReady();
   }
 
   async function apply(changes: FileObservationChanges & { degraded?: boolean }): Promise<void> {
+    if (drainTimedOut) return;
     if (changes.resync && (readySeen || unavailable)) await options.callbacks.resync();
+    if (drainTimedOut) return;
     if (pulling) for (const fact of changes.facts) observedPaths.add(fact.path);
     if (changes.facts.length) options.callbacks.facts(changes.facts);
     cursor = changes.cursor;
+    options.callbacks.degraded(changes.degraded ? "unavailable" : null);
     if (changes.ready) {
       unavailable = false;
-      options.callbacks.degraded(false);
       if (!readySeen) { readySeen = true; resolveReady(); }
-    } else if (changes.degraded) degraded();
+    } else if (changes.degraded) {
+      unavailable = true;
+      resolveReady();
+    }
   }
 
   function enqueue(task: () => Promise<void>): Promise<void> {
     const next = chain.then(task);
-    chain = next.catch(options.onError);
+    chain = next.catch(error => { if (!drainTimedOut) options.onError(error); });
     return next;
   }
 
-  function wake(): void {
-    if (closing || dirty) return;
+  function wake(): Promise<void> {
+    if (closing) return Promise.resolve();
+    if (dirty) return pendingRead ?? Promise.resolve();
     dirty = true;
-    void enqueue(async () => {
+    const next = enqueue(async () => {
       dirty = false;
       if (closing) return;
       await apply(await options.read(cursor, false));
       retryMs = 250;
       if (retryTimer) { clearTimeout(retryTimer); retryTimer = undefined; }
-    }).catch(() => {
+    });
+    pendingRead = next;
+    void next.catch(() => {
       if (closing) return;
-      degraded();
+      unavailable = true;
+      resolveReady();
+      if (retryMs === MAX_RETRY_MS) degraded("read-failed");
       // The engine retains wakes, so only failed reads need recovery.
       // Keep dirty until the retry to coalesce wakes during the backoff.
       dirty = true;
@@ -95,9 +114,10 @@ export function observeWorkspaceFiles(options: {
         dirty = false;
         wake();
       }, retryMs);
-      retryMs = Math.min(retryMs * 2, 5_000);
+      retryMs = Math.min(retryMs * 2, MAX_RETRY_MS);
       retryTimer.unref?.();
     });
+    return next;
   }
   const unsubscribe = options.subscribe(wake, paths => {
     if (!closing) options.callbacks.captured(paths);
@@ -108,6 +128,14 @@ export function observeWorkspaceFiles(options: {
     ready,
     pullStarting() { pulling = true; observedPaths.clear(); },
     pullFinished() { pulling = false; observedPaths.clear(); },
+    retry() {
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+        retryTimer = undefined;
+        dirty = false;
+      }
+      return wake();
+    },
     pulledPaths(paths) {
       if (closing) return Promise.resolve();
       try {
@@ -122,10 +150,23 @@ export function observeWorkspaceFiles(options: {
       resolveReady();
       if (retryTimer) clearTimeout(retryTimer);
       unsubscribe();
-      stopped = enqueue(async () => {
+      const drain = enqueue(async () => {
+        if (drainTimedOut) return;
         // Failure leaves the cursor and expected-delete tokens intact.
         await apply(await options.read(cursor, true));
       });
+      let timer: ReturnType<typeof setTimeout>;
+      stopped = Promise.race([
+        drain,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            drainTimedOut = true;
+            const error = new Error(`File observation drain timed out after ${DRAIN_TIMEOUT_MS}ms`);
+            options.onError(error);
+            reject(error);
+          }, DRAIN_TIMEOUT_MS);
+        }),
+      ]).finally(() => clearTimeout(timer));
       return stopped;
     },
   };

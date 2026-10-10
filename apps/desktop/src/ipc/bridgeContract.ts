@@ -1323,6 +1323,9 @@ const SYNC_STATUS_BASE_FIELDS = {
   // an omitted boolean reads as false, and a producer that cannot say which
   // cause it means must not compile.
   historyRecordingUnavailable: z.boolean(),
+  // A failed feed read or unavailable watcher does not establish that the
+  // history recorder stopped. Omitted once observation recovers.
+  fileObservationFailure: z.enum(["read-failed", "unavailable"]).optional(),
   // True when this workspace is a shared view, fed by the share's pull
   // and never a recorder of its own. A capability, not a failure. Required
   // for the same reason as its neighbour.
@@ -1446,6 +1449,18 @@ export const captureRecoveryOperations = {
     guard: "trusted-sender",
     scope: "workspace",
     handlerCheck: { check: "withRendererWorkspaceOperation", reason: "The handler clears recovery only in the sending window's active workspace." },
+  },
+} satisfies OperationTable;
+
+export const fileObservationOperations = {
+  retryFileObservation: {
+    capabilityId: "file.observation.retry",
+    channel: "desktop:retry-file-observation",
+    payload: WorkspaceIdPayload,
+    result: SyncStatusResult,
+    guard: "trusted-sender",
+    scope: "workspace",
+    handlerCheck: { check: "withRendererWorkspaceOperation", reason: "The read starts only for the sending window's active workspace." },
   },
 } satisfies OperationTable;
 
@@ -4969,15 +4984,34 @@ export type StopAndRestoreTarget = z.infer<typeof StopAndRestoreTarget>;
 export const StopAndRestorePayload = z.object({
   workspaceId: WORKSPACE_ID,
   target: StopAndRestoreTarget,
+  label: z.string().max(2_000).optional(),
   reviewPaths: z.array(PATH_STRING.refine(isNormalizedRelativePath)).max(4096).optional(),
 }).strict();
 export type StopAndRestorePayload = z.infer<typeof StopAndRestorePayload>;
-export const DiscardLiveDraftRecoveryPayload = z.object({workspaceId: WORKSPACE_ID, path: PATH_STRING.refine(isNormalizedRelativePath), objectId: z.string().min(1).max(512), snapshotSha256: z.string().regex(/^[a-f0-9]{64}$/), discardedAtMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)}).strict();
+export const LiveDraftRecoveryRecord = z.object({
+  recordId: z.string().regex(/^[a-f0-9]{64}$/),
+  path: PATH_STRING.refine(isNormalizedRelativePath),
+  objectId: z.string().min(1).max(512),
+  text: z.string(),
+  updateBase64: z.string(),
+}).strict();
+export type LiveDraftRecoveryRecord = z.infer<typeof LiveDraftRecoveryRecord>;
+export const DiscardLiveDraftRecoveryPayload = z.object({workspaceId: WORKSPACE_ID, path: PATH_STRING.refine(isNormalizedRelativePath), objectId: z.string().min(1).max(512), snapshotSha256: z.string().regex(/^[a-f0-9]{64}$/), discardedAtMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), recordId: LiveDraftRecoveryRecord.shape.recordId.optional()}).strict();
 export const liveDraftRecoveryOperations = {
+  listLiveDraftRecovery: {
+    capabilityId: "document.draft.list",
+    channel: "desktop:list-live-draft-recovery",
+    payload: z.object({workspaceId: WORKSPACE_ID}).strict(),
+    result: z.array(LiveDraftRecoveryRecord),
+    guard: "active-workspace",
+    scope: "workspace",
+    inactiveMessage: "This window changed workspaces.",
+  },
   discardLiveDraftRecovery: {
     capabilityId: "document.draft.discard",
     channel: "desktop:discard-live-draft-recovery",
     payload: DiscardLiveDraftRecoveryPayload,
+    result: z.array(LiveDraftRecoveryRecord),
     guard: "active-workspace",
     scope: "workspace",
     inactiveMessage: "This window changed workspaces.",
@@ -5025,8 +5059,36 @@ export const StopAndRestoreResult = z.discriminatedUnion("status", [
   z.object({ status: z.literal("waiting") }).strict(),
 ]);
 export type StopAndRestoreResult = z.infer<typeof StopAndRestoreResult>;
+export const PendingStopAndRestoresPayload = z.object({workspaceId: WORKSPACE_ID}).strict();
+export type PendingStopAndRestoresPayload = z.infer<typeof PendingStopAndRestoresPayload>;
+export const PendingStopAndRestoresResult = z.array(z.object({
+  target: StopAndRestoreTarget, label: z.string(), filesUndone: z.boolean(),
+  receipts: z.array(z.object({path: PATH_STRING, restoredMomentId: OPAQUE_ID, removed: z.boolean().optional()})),
+  result: StopAndRestoreResult,
+}));
+export type PendingStopAndRestoresResult = z.infer<typeof PendingStopAndRestoresResult>;
+export const stopAndRestoreRecoveryOperations = {
+  dismissStopAndRestore: {
+    capabilityId: "share.restore.pending.dismiss",
+    channel: "desktop:dismiss-stop-and-restore",
+    payload: z.object({workspaceId: WORKSPACE_ID, target: StopAndRestoreTarget}).strict(),
+    guard: "active-workspace",
+    scope: "workspace",
+    inactiveMessage: "This window changed workspaces.",
+  },
+  pendingStopAndRestores: {
+    capabilityId: "share.restore.pending.read",
+    channel: "desktop:pending-stop-and-restores",
+    payload: PendingStopAndRestoresPayload,
+    result: PendingStopAndRestoresResult,
+    guard: "active-workspace",
+    scope: "workspace",
+    inactiveMessage: "dohc could not read unfinished Stop and restore progress because this window changed workspaces.",
+  },
+} satisfies OperationTable;
 export const UndoStopAndRestorePayload = z.object({
   workspaceId: WORKSPACE_ID,
+  target: StopAndRestoreTarget.optional(),
   restoredMomentIds: z.array(OPAQUE_ID).min(1).max(20_000),
   reviewPaths: z.array(PATH_STRING.refine(isNormalizedRelativePath)).max(4096).optional(),
 }).strict();
@@ -6529,6 +6591,7 @@ export interface DohcDesktopBridge
   extends OperationBridge<typeof accessOperations>,
     OperationBridge<typeof workspaceVersionOperations>,
     OperationBridge<typeof captureRecoveryOperations>,
+    OperationBridge<typeof fileObservationOperations>,
     OperationBridge<typeof workspaceSearchOperations>,
     OperationBridge<typeof crashReportOperations>,
     OperationBridge<typeof reportingOperations>,
@@ -6539,6 +6602,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof shareDirectWriteDeliveryOperations>,
     OperationBridge<typeof engineYDocAdmissionOperations>,
     OperationBridge<typeof liveDraftRecoveryOperations>,
+    OperationBridge<typeof stopAndRestoreRecoveryOperations>,
     OperationBridge<typeof engineYDocSaveOperations> {
   listOwnerLiveDocuments(payload: ListOwnerLiveDocumentsPayload): Promise<OwnerLiveDocumentsResult>;
   listOwnerLiveRefusals(payload: ListOwnerLiveRefusalsPayload): Promise<OwnerLiveRefusalsResult>;
@@ -6963,6 +7027,8 @@ export interface DohcDesktopBridge
     payload: WorkspaceIdPayload,
   ): Promise<GetWorkspaceUiStateResult>;
   setWorkspaceUiState(payload: SetWorkspaceUiStatePayload): Promise<void>;
+  // Cached History names changed. Subscribers re-read with workspace/request guards.
+  onHistoryNamesChanged(listener: (event: WorkspaceIdPayload) => void): () => void;
   // Live push: main signals the renderer when the active workspace's files
   // or history changed (settled filesystem batch recorded). Main filters by
   // each window's active workspace, so a window only hears about its own

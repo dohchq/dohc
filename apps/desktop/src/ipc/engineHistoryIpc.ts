@@ -26,6 +26,7 @@ type MomentAuthor = NonNullable<VersionedTextMomentSummary["authors"]>[number];
 // reads as its name and the Collection it belongs to; null leaves any other
 // automation on the moment's origin label.
 export interface EngineMomentAuthorNames {
+  prepare?(authors: readonly MomentAuthor[]): void;
   agent(author: Extract<MomentAuthor, {kind: "agent"}>): string | undefined;
   person(author: Extract<MomentAuthor, {kind: "human"}>): string | undefined;
   automation(automationId: string): { name: string; collection?: string } | null;
@@ -38,6 +39,7 @@ export async function listEngineMomentsForIpc(
 ): Promise<ListEngineMomentsResponse> {
   try {
     const page = await read();
+    names.prepare?.(page.moments.flatMap(moment => moment.authors?.length === 1 ? moment.authors : []));
     return ListEngineMomentsResponseSchema.parse({
       moments: page.moments.map((moment) =>
         engineMomentForIpc(moment, names),

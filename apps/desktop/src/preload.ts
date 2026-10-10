@@ -50,9 +50,11 @@ import {
   WorkspacePathOpenFailedEvent,
   crashReportOperations,
   captureRecoveryOperations,
+  fileObservationOperations,
   reportingOperations,
   noticeOperations,
   liveDraftRecoveryOperations,
+  stopAndRestoreRecoveryOperations,
   scheduleHostOperations,
   chatDispatchNoticeOperations,
   sharedViewAccessOperations,
@@ -352,6 +354,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.checkCollectionAutomation, payload),
   stopAndRestore: (payload) =>
     ipcRenderer.invoke(CHANNELS.stopAndRestore, payload),
+  ...operationBridge(stopAndRestoreRecoveryOperations, invoke),
   ...operationBridge(liveDraftRecoveryOperations, invoke),
   undoStopAndRestore: (payload) =>
     ipcRenderer.invoke(CHANNELS.undoStopAndRestore, payload),
@@ -383,6 +386,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.findDatasetCollection, payload),
   findAutomationCollection: (payload) =>
     ipcRenderer.invoke(CHANNELS.findAutomationCollection, payload),
+  onHistoryNamesChanged: (listener) => onEvent(CHANNELS.historyNamesChanged, WorkspaceIdPayload, listener),
   onCollectionAutomationsChanged: (listener) =>
     onEvent(CHANNELS.collectionAutomationsChanged, WorkspaceIdPayload, listener),
   onAutomationRunsChanged: (
@@ -557,6 +561,7 @@ const bridge: DohcDesktopBridge = {
   presenceCancel: (payload) => ipcRenderer.invoke(CHANNELS.presenceCancel, payload),
   getSyncStatus: (payload) => ipcRenderer.invoke(CHANNELS.getSyncStatus, payload),
   ...operationBridge(captureRecoveryOperations, invoke),
+  ...operationBridge(fileObservationOperations, invoke),
   retryOwnerLiveDelivery: (payload) => ipcRenderer.invoke(CHANNELS.retryOwnerLiveDelivery, payload),
   retryFileRecovery: (payload) => ipcRenderer.invoke(CHANNELS.retryFileRecovery, payload),
   retryCloudSync: (payload) => ipcRenderer.invoke(CHANNELS.retryCloudSync, payload),

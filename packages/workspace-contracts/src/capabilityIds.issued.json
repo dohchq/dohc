@@ -132,5 +132,9 @@
   "access.sharing.read",
   "access.refresh",
   "share.direct.writes.feedback",
+  "document.draft.list",
+  "file.observation.retry",
+  "share.restore.pending.read",
+  "share.restore.pending.dismiss",
   "share.view.refresh"
 ]

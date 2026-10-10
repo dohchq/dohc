@@ -69,6 +69,7 @@ import {
 import { runCanonicalDmNavigation } from "./shell/canonicalDmNavigation";
 import {
   chatsOffCopy,
+  fileObservationFailureCopy,
   historyOffPlaceholderCopy,
   versionCompareOffCopy,
 } from "./shell/capabilityOffCopy";
@@ -163,6 +164,7 @@ import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
 import { Explorer } from "./workbench/Explorer";
 import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
 import {
+  loadLiveDraftRecovery,
   noteWorkspaceLabel,
   remapOrphanedDraftPaths,
   useOrphanedDraftPaths,
@@ -653,7 +655,6 @@ export function DesktopWorkspaceShell(props: {
   } = useEditorRegistry(workspaceId, openTabs);
   const flushActiveDraft = useCallback(() => flushStableDrafts(), [flushStableDrafts]);
   const collectionLineage = useCollectionWriteLineage(workspaceId);
-  const stopAndRestore = useStopAndRestore(workspaceId);
 
   // `openWorkspace` installs main's exact renderer session before it waits
   // for watcher readiness. Its response is the renderer's existing proof that
@@ -814,6 +815,8 @@ export function DesktopWorkspaceShell(props: {
     runShellErrorAction,
     clearIdentity,
   } = useShellError(workspaceId);
+  const stopAndRestore = useStopAndRestore(workspaceId, {ready: workspaceIsReady && !props.workspace.shareView,
+    onError: (fallback, error, retry, identity) => reportShellError(fallback, error, retry, undefined, identity)});
   useChatDispatchNotices(workspaceId, workspaceIsReady, reportShellFailure, clearKind);
   useWorkspacePathOpenFailures(workspaceId, reportShellFailure);
   // Share removals from Chats, Settings and the share dialog: one notice
@@ -3512,6 +3515,13 @@ export function DesktopWorkspaceShell(props: {
         }
       };
       void refreshInitialFiles().catch(reportInitialFilesFailure);
+      const recoverDrafts = () => loadLiveDraftRecovery(workspaceId, () => !cancelled && !workspaceAdmission.superseded);
+      const reportDraftRecoveryFailure = (error: unknown) => {
+        if (!cancelled && !workspaceAdmission.superseded) {
+          reportShellError("dohc could not read set-aside edits.", error, () => { void recoverDrafts().catch(reportDraftRecoveryFailure); });
+        }
+      };
+      void recoverDrafts().catch(reportDraftRecoveryFailure);
     })();
     return () => {
       cancelled = true;
@@ -4720,6 +4730,37 @@ export function DesktopWorkspaceShell(props: {
     report: reportSyncFailure,
     clear: clearSyncFailure,
   });
+  const filedObservationFailure = useRef<SyncStatusResult["fileObservationFailure"]>(undefined);
+  const observationFailure = syncStatus?.fileObservationFailure;
+  const retryFileObservationRef = useRef<() => void>(() => {});
+  const retryFileObservation = useCallback(() => {
+    const askedFor = workspaceIdRef.current;
+    void bridge().retryFileObservation({ workspaceId: askedFor }).then(status => {
+      if (workspaceAdmission.superseded || workspaceIdRef.current !== askedFor) return;
+      if (status.fileObservationFailure) {
+        reportShellFailure({ message: fileObservationFailureCopy(status.fileObservationFailure), identity: "file-observation",
+          retry: () => retryFileObservationRef.current() });
+      } else {
+        clearIdentity("file-observation");
+      }
+    }, error => {
+      if (workspaceAdmission.superseded || workspaceIdRef.current !== askedFor) return;
+      reportShellFailure({ message: fileObservationFailureCopy(observationFailure ?? "read-failed"), cause: error,
+        identity: "file-observation", retry: () => retryFileObservationRef.current() });
+    });
+  }, [workspaceAdmission, observationFailure, reportShellFailure, clearIdentity]);
+  retryFileObservationRef.current = retryFileObservation;
+  useEffect(() => {
+    if (syncStatus === null) return;
+    if (filedObservationFailure.current === observationFailure) return;
+    filedObservationFailure.current = observationFailure;
+    if (observationFailure) {
+      reportShellFailure({ message: fileObservationFailureCopy(observationFailure), identity: "file-observation",
+        retry: () => retryFileObservationRef.current() });
+    } else {
+      clearIdentity("file-observation");
+    }
+  }, [syncStatus, observationFailure, reportShellFailure, clearIdentity]);
   useEffect(() => {
     showSyncRefusals((props.sentNotices?.notices ?? []).filter(notice =>
       notice.kind === "sync-refusal" && notice.workspaceId === workspaceId), syncFailureNotice.retry);
@@ -4769,7 +4810,18 @@ export function DesktopWorkspaceShell(props: {
   // Keep each notice kind's dismissal state across remounts.
   const dismissWorkspaceError = useCallback(
     (id: string) => {
-      const kind = shellErrors.find((error) => error.id === id)?.kind;
+      const notice = shellErrors.find((error) => error.id === id);
+      const kind = notice?.kind;
+      if (notice?.identity?.startsWith("stop-and-restore:") && !notice.identity.startsWith("stop-and-restore:recovery:")) {
+        const askedFor = workspaceId;
+        void stopAndRestore.dismiss(notice.identity).then(dismissed => {
+          if (dismissed && workspaceIdRef.current === askedFor) dismissShellError(id);
+        }).catch(error => {
+          if (workspaceIdRef.current === askedFor) reportShellError("dohc could not dismiss this Notice.", error,
+            () => dismissWorkspaceError(id));
+        });
+        return;
+      }
       if (kind === "cloud-sync") syncFailureNotice.noteDismissed();
       if (kind === "drive-no-atomic-placement") driveLimitNotice.noteDismissed();
       if (kind === "kept-files") keptFilesNotice.noteDismissed();
@@ -4791,7 +4843,7 @@ export function DesktopWorkspaceShell(props: {
         });
       } else dismissShellError(id);
     },
-    [dismissShellError, driveLimitNotice, keptFilesNotice, shellErrors, shareView, syncFailureNotice, props.sentNotices, workspaceId, reportShellError],
+    [dismissShellError, driveLimitNotice, keptFilesNotice, shellErrors, shareView, syncFailureNotice, props.sentNotices, workspaceId, reportShellError, stopAndRestore],
   );
   return (
     <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>

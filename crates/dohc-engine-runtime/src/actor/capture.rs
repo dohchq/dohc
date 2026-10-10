@@ -1571,6 +1571,7 @@ mod capture_secret_root_guard_tests {
                                         reason: "cancelled quarantine".to_owned(),
                                         observed_binding: None,
                                     },
+                                    20,
                                     token.clone(),
                                 )
                                 .await
