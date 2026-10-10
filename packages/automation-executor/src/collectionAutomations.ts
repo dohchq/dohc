@@ -1612,7 +1612,7 @@ export class CollectionAutomations {
     await this.payOwed(false);
     this.flushRunsFinished();
     this.opened = null;
-    await Promise.allSettled([this.chain, this.verdictChain]);
+    await Promise.allSettled([this.chain, this.verdictChain, this.historyPruning]);
   }
 
   /** Resolves once no drain is running or queued. */
