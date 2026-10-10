@@ -23,6 +23,7 @@ import stopAndRestoreIpc from "./ipcExposure.stopAndRestore.json";
 import reportsIpc from "./ipcExposure.reports.json";
 import saveRetryIpc from "./ipcExposure.saveRetry.json";
 import fileObservationIpc from "./ipcExposure.fileObservation.json";
+import usageRecordIpc from "./ipcExposure.usageRecord.json";
 import mainCli from "./cliExposure.main.json";
 import publicationCli from "./cliExposure.pr1659.json";
 import commentsCli from "./cliExposure.pr1700.json";
@@ -56,8 +57,9 @@ function assertAdmission(row: Pick<OperationDefinition, "channel" | "guard" | "s
 
 describe("B1 main inventories (a4be19d5b)", () => {
   it("preserves every IPC wire name and the 26 enforced table guards", () => {
-    // Hand-reviewed #1639 removals and #1701, #1688, #1747, reports, save retry and
-    // capture recovery, History names, shared write feedback and Stop and restore additions, separate from the hashed main baseline.
+    // Hand-reviewed #1639 removals and #1701, #1688, #1747, reports, save retry,
+    // capture recovery, History names, shared write feedback, Stop and restore
+    // and usage record additions, separate from the hashed main baseline.
     const expectedNames = [...mainIpc.names];
     expectedNames.push("desktop:check-shared-view-access");
     expectedNames.push("desktop:dismiss-share-capture-notice");
@@ -65,7 +67,7 @@ describe("B1 main inventories (a4be19d5b)", () => {
       expect(expectedNames).toContain(name);
       expectedNames.splice(expectedNames.indexOf(name), 1);
     }
-    for (const name of [...launchOpenIpc.nameAdditions, ...recipientRecordsIpc.nameAdditions, ...liveDraftRecoveryIpc.nameAdditions, ...liveDraftListingIpc.nameAdditions, ...restartCaptureIpc.nameAdditions, ...historyNamesIpc.nameAdditions, ...reportsIpc.nameAdditions, ...saveRetryIpc.nameAdditions, ...accessExposure.nameAdditions, ...sharedWriteFeedback.nameAdditions, ...fileObservationIpc.nameAdditions, ...stopAndRestoreIpc.nameAdditions]) {
+    for (const name of [...launchOpenIpc.nameAdditions, ...recipientRecordsIpc.nameAdditions, ...liveDraftRecoveryIpc.nameAdditions, ...liveDraftListingIpc.nameAdditions, ...restartCaptureIpc.nameAdditions, ...historyNamesIpc.nameAdditions, ...reportsIpc.nameAdditions, ...saveRetryIpc.nameAdditions, ...accessExposure.nameAdditions, ...sharedWriteFeedback.nameAdditions, ...fileObservationIpc.nameAdditions, ...stopAndRestoreIpc.nameAdditions, ...usageRecordIpc.nameAdditions]) {
       expect(expectedNames).not.toContain(name);
       expectedNames.push(name);
     }

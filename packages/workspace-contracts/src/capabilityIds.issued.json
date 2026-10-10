@@ -136,5 +136,8 @@
   "file.observation.retry",
   "share.restore.pending.read",
   "share.restore.pending.dismiss",
-  "share.view.refresh"
+  "share.view.refresh",
+  "usage.read",
+  "usage.clear",
+  "usage.switch"
 ]

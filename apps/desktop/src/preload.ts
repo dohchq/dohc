@@ -52,6 +52,7 @@ import {
   captureRecoveryOperations,
   fileObservationOperations,
   reportingOperations,
+  usageRecordOperations,
   noticeOperations,
   liveDraftRecoveryOperations,
   stopAndRestoreRecoveryOperations,
@@ -412,6 +413,7 @@ const bridge: DohcDesktopBridge = {
   },
   ...operationBridge(crashReportOperations, invoke),
   ...operationBridge(reportingOperations, invoke),
+  ...operationBridge(usageRecordOperations, invoke),
   onCrashReportChanged: (listener) =>
     onEvent(CHANNELS.crashReportChanged, CrashReportChangedEvent, () => listener()),
   onAutomationHoldsChanged: (

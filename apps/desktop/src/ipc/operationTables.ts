@@ -12,6 +12,7 @@ import {
   scheduleHostOperations,
   sharedViewAccessOperations,
   shareDirectWriteDeliveryOperations,
+  usageRecordOperations,
   workspaceSearchOperations,
   workspaceVersionOperations,
 } from "./bridgeContract";
@@ -25,6 +26,7 @@ export const OPERATION_TABLES = [
   workspaceSearchOperations,
   crashReportOperations,
   reportingOperations,
+  usageRecordOperations,
   engineYDocAdmissionOperations,
   liveDraftRecoveryOperations,
   stopAndRestoreRecoveryOperations,
