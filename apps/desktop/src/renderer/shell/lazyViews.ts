@@ -11,3 +11,6 @@ export const LazySitePreviewPage = lazy(() =>
 export const LazyChatsView = lazy(() =>
   import("../workbench/ChatsView").then((mod) => ({ default: mod.ChatsView })),
 );
+export const LazySharingView = lazy(() =>
+  import("../workbench/SharingView").then((mod) => ({ default: mod.SharingView })),
+);

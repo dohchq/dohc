@@ -90,6 +90,7 @@ import {
   SIDEBAR_MIN_WIDTH,
   APP_VIEW_ID_PREFIX,
   parseAppViewId,
+  SHARING_VIEW_ID,
   VIEW_IDS,
 } from "../renderer/workbench/workbenchState";
 import {
@@ -5682,9 +5683,9 @@ const APP_VIEW_ID = z
 
 export const WorkspaceUiState = z.object({
   version: z.literal(3),
-  // dohc's own views or a pinned app. The catch keeps a stored id that names
-  // neither from failing the file.
-  activeView: z.union([z.enum(VIEW_IDS), APP_VIEW_ID]).catch("explorer"),
+  // dohc's own views, Sharing, or a pinned app. The catch keeps a stored id
+  // that names none of them from failing the file.
+  activeView: z.union([z.enum(VIEW_IDS), z.literal(SHARING_VIEW_ID), APP_VIEW_ID]).catch("explorer"),
   sidebarVisible: z.boolean(),
   sidebarWidth: z.number().int().min(SIDEBAR_MIN_WIDTH).max(SIDEBAR_MAX_WIDTH),
   editorGroups: WorkspaceEditorGroups,

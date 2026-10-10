@@ -15,6 +15,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useReducer,
   useRef,
   useState,
 } from "react";
@@ -257,6 +258,7 @@ import {
   toggleFolderExpanded,
   togglePinned,
   toggleSidebarOnRail,
+  SHARING_VIEW_ID,
   VIEW_IDS,
   type ActivityViewId,
   type EditorGroup,
@@ -819,12 +821,15 @@ export function DesktopWorkspaceShell(props: {
     onError: (fallback, error, retry, identity) => reportShellError(fallback, error, retry, undefined, identity)});
   useChatDispatchNotices(workspaceId, workspaceIsReady, reportShellFailure, clearKind);
   useWorkspacePathOpenFailures(workspaceId, reportShellFailure);
-  // Share removals from Chats, Settings and the share dialog: one notice
-  // with Undo, held here so it outlives the surface that removed the access.
+  // Share removals from Chats, Settings, Sharing and the share dialog: one
+  // notice with Undo, held here so it outlives the surface that removed the
+  // access. Each removal and Undo counts, so an open Sharing view reads again.
+  const [sharesRevision, sharesChanged] = useReducer((revision: number) => revision + 1, 0);
   const shareRemovals = useShareRemovalNotices({
     workspaceId,
     showSuccessNotice,
     reportShellFailure,
+    onSharesChanged: sharesChanged,
   });
   // For surfaces that report a failure as one sentence, with the error that
   // caused it when they have one. One stable identity: ChatsView keys its
@@ -1140,11 +1145,12 @@ export function DesktopWorkspaceShell(props: {
   // The panel's header names dohc's own view or the pinned app.
   const sidePanelTitle = isViewId(wb.activeView)
     ? activityViewLabel(wb.activeView)
-    : selectedApp?.label ?? "App";
+    : wb.activeView === SHARING_VIEW_ID ? "Sharing" : selectedApp?.label ?? "App";
 
-  // Every view on the rail, in its order: dohc's own, then pinned apps.
+  // Every view on the rail, in its order: dohc's own, pinned apps, then
+  // Sharing at the rail's foot.
   const railOrder = useMemo<readonly ActivityViewId[]>(
-    () => [...railViews, ...pinnedRoots.map(appViewId)],
+    () => [...railViews, ...pinnedRoots.map(appViewId), SHARING_VIEW_ID],
     [pinnedRoots, railViews],
   );
   const railOrderRef = useRef(railOrder);
@@ -2960,6 +2966,7 @@ export function DesktopWorkspaceShell(props: {
   );
 
   const {
+    shareMounts,
     mountCount,
     mountContentEpoch,
     reloadShareMounts,
@@ -5073,7 +5080,6 @@ export function DesktopWorkspaceShell(props: {
             search.model.totalMatches > 0 ? search.model.totalMatches : undefined
           }
           onSelectView={(view) => mutateWb((state) => setView(state, view))}
-          onOpenCloud={() => setCloudOpen(true)}
           onOpenSettings={() => openSettings()}
           viewsDisabled={!workspaceIsReady || storeUpdateRequired}
           notices={
@@ -5152,6 +5158,22 @@ export function DesktopWorkspaceShell(props: {
             createFirstApp={createFirstApp}
             shareView={shareView}
             historyTimeline={historyTimeline}
+            sharing={{
+              workspaceId,
+              shareView: isShareView,
+              context: accessContext,
+              notices: aboutNotices,
+              conflictCount: syncStatus?.state === "conflict" ? (syncStatus.conflictCount ?? 0) : null,
+              onReviewConflicts: () => setConflictReviewOpen(true),
+              proposals: shareProposals,
+              onReviewChanges: setReviewProposalId,
+              mounts: shareMounts,
+              onMounted: () => onSettingsFilesChanged(),
+              onUnmount: unmountShare,
+              shareRemovals,
+              sharesRevision,
+              reportError: reportShellError,
+            }}
             selectedAppRoot={selectedAppRoot}
             openAppTab={openAppTab}
             reportShellError={reportShellError}
@@ -6147,6 +6169,10 @@ export function DesktopWorkspaceShell(props: {
             onOpenCloud={() => {
               closeSettings();
               setCloudOpen(true);
+            }}
+            onOpenSharing={() => {
+              closeSettings();
+              mutateWb((state) => ({ ...state, activeView: SHARING_VIEW_ID, sidebarVisible: true }));
             }}
             {...(liveDocumentsAvailable
               ? {
