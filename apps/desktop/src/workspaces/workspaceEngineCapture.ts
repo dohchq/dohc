@@ -6620,7 +6620,11 @@ export function createWorkspaceEngineCapture(
         } catch (error) {
           if (restoreOptions.expectedHeadMomentId !== undefined) {
             if (error instanceof AuthoredTextChangedError || (error instanceof VersionedTextStoreError && ["write-precondition-failed", "target-path-exists"].includes(error.code))) throw new RestoreLocalChangesError(path);
-            if (error instanceof VersionedTextStoreError && (error.code.startsWith("materialize-") || (error.code === "invalid-input" && error.message.includes("could not remove")))) throw new RestoreLocalChangesError(path, "dohc could not remove this file. It may be open in another app.");
+            const code = error instanceof DaemonRefusalError ? error.message : error instanceof VersionedTextStoreError ? error.code : undefined;
+            if (code === "symlink-target") throw new RestoreLocalChangesError(path, "dohc could not remove this file because its path contains a link. Check the file's path.");
+            if (code === "recovery-unavailable") throw new RestoreLocalChangesError(path, "dohc could not remove this file. Check folder access, then try again.");
+            if (code === "file-locked") throw new RestoreLocalChangesError(path, "dohc could not remove this file. It may be open in another app.");
+            if (code?.startsWith("materialize-")) throw new RestoreLocalChangesError(path, "dohc could not remove this file.");
           }
           throw liveDocumentMutationRefusal(error, path, "restore") ?? error;
         }

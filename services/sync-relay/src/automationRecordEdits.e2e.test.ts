@@ -134,11 +134,17 @@ async function computer(input: {
     await client.waitForExit();
   };
   cleanup.push(closeEngine);
+  // Like automationReplicas, queue complete passes from every caller.
+  let syncChain: Promise<void> = Promise.resolve();
   return {
     root: input.root, nextRequestId, client, workspace, lifetime: lifetime.signal, request,
     async sync() {
-      for (let more = true; more;) more = (await replication.push()).hasMore;
-      for (let more = true; more;) more = (await replication.pull()).hasMore;
+      const run = syncChain.then(async () => {
+        for (let more = true; more;) more = (await replication.push()).hasMore;
+        for (let more = true; more;) more = (await replication.pull()).hasMore;
+      });
+      syncChain = run.catch(() => undefined);
+      await run;
     },
     record: async (recordId: string) =>
       await request("collections.getRecord", { collectionPath: "Tasks", recordId, historyLimit: 10 }, workspace) as unknown as CollectionGetRecordResult,
@@ -537,7 +543,7 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
   for (const side of [owner, recipient]) expect(await readFile(join(side.root, "Tasks/one.md"), "utf8")).toContain("Status: Doing");
   expect(await sharedValue(firstGrant)).toBe("Doing");
   const restoredClaim = await press(firstGrant.shareId, "button-native-before-stop");
-  expect(await running.runs.restore(scope, [{collectionPath: "Tasks", id: "mark", definitionHash: hash}], false)).toMatchObject({undone: 1, left: 0, errorMessage: null});
+  expect(await running.runs.restore(scope, [{collectionPath: "Tasks", id: "mark", definitionHash: hash}], false, "restore-test")).toMatchObject({undone: 1, left: 0, errorMessage: null});
   await vi.waitFor(async () => expect((await running.runs.get(scope, markId, restoredClaim))?.undone).toBe(true), {timeout: DEADLINE_MS});
   await consumer.settle(document); await owner.sync(); await recipient.sync();
   for (const side of [owner, recipient]) expect(await readFile(join(side.root, "Tasks/one.md"), "utf8")).toContain("Status: Doing");
@@ -573,6 +579,7 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
   };
   const handlers = new Map<string, (event: {sender: string}, payload: unknown) => unknown>();
   registerStopAndRestoreIpc({
+    currentAutomations: () => executor!, canReleaseRuns: () => true,
     registerHandler: (channel, handler) => handlers.set(channel, handler), assertTrustedSender: () => undefined,
     withRendererWorkspaceOperation: async (_sender: string, _workspaceId, _message, work) => work({
       workspace: {workspaceId: WORKSPACE, rootPath: owner.root}, state: {collectionAutomations: executor!}, assertCurrent: () => undefined,
@@ -587,7 +594,10 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
     localPerson: async () => ({kind: "human", humanId: "owner"}), queuePull: () => undefined,
     syncNow: async () => {await owner.sync(); await copy.sync();}, deletePath: async () => undefined,
     notifyRenderer: () => undefined, assertOriginalWorkspace: () => undefined,
-    serverRuns: {restore: (_workspaceId, definitions, again) => running.runs.restore(scope, definitions, again)},
+    serverRuns: {
+      restore: (_workspaceId, definitions, again, retentionId) => running.runs.restore(scope, definitions, again, retentionId),
+      releaseRestore: async (_workspaceId, retentionId) => {await running.runs.restore(scope, [], false, retentionId); return true;},
+    },
     requireEngineCapture: async () => ({capture: {
       readMoment,
       listObjectMomentsAfter: async (objectId, momentId) => {

@@ -4,24 +4,32 @@ use dohc_engine_domain::{VersionedTextStore, WriteText};
 use dohc_test_scratch::ScratchDir;
 
 fn fixture() -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u8>) {
-    let dir = ScratchDir::new_named("observed-owner-draft").unwrap();
-    let mut store = EngineStore::open(&dir.join("engine.db"), 0).unwrap();
-    VersionedTextStore::new(&mut store)
-        .ensure_main_version("workspace", "main", 0, &NoFaults)
-        .unwrap();
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
         "../../tests/owner-source/owner-source-seed.json"
     ))
     .unwrap();
     let original: Vec<u8> = serde_json::from_value(fixture["bytes"].clone()).unwrap();
+    fixture_with_source(&original, fixture["markdown"].as_str().unwrap(), "owner.md")
+}
+
+fn fixture_with_source(
+    original: &[u8],
+    markdown: &str,
+    path: &str,
+) -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u8>) {
+    let dir = ScratchDir::new_named("observed-owner-draft").unwrap();
+    let mut store = EngineStore::open(&dir.join("engine.db"), 0).unwrap();
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version("workspace", "main", 0, &NoFaults)
+        .unwrap();
     VersionedTextStore::new(&mut store)
         .write_text(
             &WriteText {
                 workspace_id: "workspace".into(),
                 version_id: "main".into(),
                 object_id: "object".into(),
-                path: "owner.md".into(),
-                text: fixture["markdown"].as_str().unwrap().into(),
+                path: path.into(),
+                text: markdown.into(),
                 moment_id: "original".into(),
                 metadata_origin: "user".into(),
                 metadata_summary: None,
@@ -38,15 +46,14 @@ fn fixture() -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u8>) {
         &mut store,
         &key,
         crate::ContentKind::Richdoc,
-        &original,
+        original,
         &NoFaults,
         2,
     )
     .unwrap();
     store
         .write_with(&NoFaults, |tx| {
-            tx.execute("UPDATE ydoc_docs SET path='owner.md'", [])
-                .unwrap();
+            tx.execute("UPDATE ydoc_docs SET path=?1", [path]).unwrap();
             Ok::<_, OwnerOutboxError>(())
         })
         .unwrap();
@@ -66,9 +73,9 @@ fn fixture() -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u8>) {
             workspace_id: "workspace".into(),
             main_version_id: "main".into(),
             object_id: "object".into(),
-            lineage_claim_id: hex_sha256(&original),
-            current_path: "owner.md".into(),
-            selector_paths: vec!["owner.md".into()],
+            lineage_claim_id: hex_sha256(original),
+            current_path: path.into(),
+            selector_paths: vec![path.into()],
             restore_fence_generation: 0,
         },
         relay_database_namespace: "relay".into(),
@@ -119,6 +126,465 @@ fn remote_changes(store: &EngineStore) -> i64 {
     store
         .read_with(|c| dohc_engine_storage::remote_changes_applied_in(c, "workspace"))
         .unwrap()
+}
+
+fn collection_fixture() -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u8>, Ydoc) {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/owner-source/owner-source-seed.json"
+    ))
+    .unwrap();
+    let original: Vec<u8> = serde_json::from_value(fixture["bytes"].clone()).unwrap();
+    let local = Ydoc::with_client_id(1);
+    local.apply(&original).unwrap();
+    local
+        .frontmatter_set("id", "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa")
+        .unwrap();
+    local.frontmatter_set("title", "Original").unwrap();
+    local.frontmatter_set("status", "open").unwrap();
+    let markdown = local.project(crate::ContentKind::Richdoc).unwrap().content;
+    let (dir, mut store, observed, checkpoint) =
+        fixture_with_source(&bounded(&local).unwrap(), &markdown, "tasks/owner.md");
+    VersionedTextStore::new(&mut store)
+        .write_text(
+            &WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "schema".into(),
+                path: "tasks/collection.yaml".into(),
+                text: "fields:\n  title:\n    type: text\n  status:\n    type: text\n  priority:\n    type: text\n".into(),
+                moment_id: "schema".into(),
+                metadata_origin: "user".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_domain::reconcile_collections_in_tx(tx, "workspace", "main")
+        })
+        .unwrap();
+    let vector = local.encode_state_vector();
+    local.frontmatter_set("title", "Edited title").unwrap();
+    local.frontmatter_set("status", "done").unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            crate::record_update_in_tx(
+                tx,
+                &key(&observed.binding).unwrap(),
+                &local.diff(&vector).unwrap(),
+                Some("person"),
+                None,
+                3,
+            )
+        })
+        .unwrap();
+    (dir, store, observed, checkpoint, local)
+}
+
+type FieldHistoryRow = (String, Option<String>, Option<String>, Option<String>);
+
+fn field_history(store: &EngineStore) -> Vec<FieldHistoryRow> {
+    store
+        .read_with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT field_name,previous_value_json,next_value_json,author_origin_id \
+             FROM collection_field_history WHERE workspace_id='workspace' \
+               AND version_id='main' AND record_id='rec_aaaaaaaaaaaaaaaaaaaaaaaaaa' \
+             ORDER BY history_id",
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })?
+                .collect::<Result<Vec<_>, _>>();
+            rows
+        })
+        .unwrap()
+}
+
+fn assert_visible_fields(
+    store: &EngineStore,
+    binding: &LiveObjectBinding,
+    expected: serde_json::Value,
+) {
+    store
+        .read_with(|conn| {
+            let indexed =
+                dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
+                    conn,
+                    "workspace",
+                    "main",
+                    "object",
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(indexed, expected);
+            let observed = super::super::draft::read_observed_in(conn, binding)?.unwrap();
+            let draft = open_draft_in(conn, binding, observed.revision)?;
+            let mut visible = draft.doc.frontmatter_json();
+            visible.as_object_mut().unwrap().remove("id");
+            assert_eq!(indexed, visible, "the index must follow the visible draft");
+            Ok::<_, OwnerOutboxError>(())
+        })
+        .unwrap();
+}
+
+fn accept_field_frame(store: &mut EngineStore, binding: &LiveObjectBinding, bytes: Vec<u8>) {
+    use crate::owner_outbox::accepted::{apply_frame_in_tx, OwnerAcceptedFrameInput};
+    let observed = store
+        .read_with(|conn| super::super::draft::read_observed_in(conn, binding))
+        .unwrap()
+        .unwrap();
+    let input = OwnerAcceptedFrameInput {
+        binding: binding.clone(),
+        relay_database_namespace: "relay".into(),
+        expected_revision: observed.revision,
+        expected_native_head_sequence: observed.native_head_sequence,
+        previous_accepted_cursor: observed.accepted_cursor,
+        journal_cursor: observed.accepted_cursor + 1,
+        update_bytes: bytes,
+    };
+    for _ in 0..2 {
+        store
+            .write_with(&NoFaults, |tx| {
+                apply_frame_in_tx(tx, "workspace", &input, 11)
+            })
+            .unwrap();
+    }
+}
+
+fn refuse_field_entry(
+    store: &mut EngineStore,
+    outbox: &str,
+    entry: &super::super::OwnerOutboxEntry,
+) {
+    let refusal = super::super::OwnerOutboxRefuseInput {
+        outbox_id: outbox.into(),
+        delivery_id: entry.delivery_id.clone(),
+        update_digest: entry.update_digest.clone(),
+        reason: "The presser no longer has edit access.".into(),
+    };
+    for _ in 0..2 {
+        store
+            .write_with(&NoFaults, |tx| {
+                super::super::refuse_entry_in_tx(tx, "workspace", &refusal, 12)
+            })
+            .unwrap();
+    }
+    store
+        .read_with(|conn| {
+            let reason: String = conn
+                .query_row(
+                    "SELECT terminal_reason FROM owner_ydoc_outbox_entries WHERE delivery_id=?1",
+                    [&entry.delivery_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(reason, refusal.reason);
+            Ok::<_, OwnerOutboxError>(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn first_enrollment_own_draft_acceptance_keeps_each_field_edit_once() {
+    let (_dir, mut store, observed, checkpoint, local) = collection_fixture();
+    let history = field_history(&store);
+    assert_eq!(history.len(), 2);
+    assert!(history.iter().all(|row| row.3.as_deref() == Some("person")));
+    let enrollment = input(&store, &observed, checkpoint);
+    let enrolled = enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    assert!(enrolled.pending_bytes > 0);
+    assert_eq!(field_history(&store), history);
+    let pending =
+        super::super::read_pending(&store, "workspace", enrolled.outbox_id.as_ref().unwrap())
+            .unwrap();
+    assert_eq!(pending.entries[0].update, bounded(&local).unwrap());
+    accept_field_frame(
+        &mut store,
+        &observed.binding,
+        pending.entries[0].update.clone(),
+    );
+    assert_eq!(
+        field_history(&store),
+        history,
+        "an accepted own-draft echo must not duplicate History"
+    );
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Edited title", "status":"done"}),
+    );
+    super::super::acknowledge(
+        &mut store,
+        "workspace",
+        &pending.outbox_id,
+        &[super::super::OwnerDeliveryReceipt {
+            delivery_id: pending.entries[0].delivery_id.clone(),
+            update_digest: pending.entries[0].update_digest.clone(),
+            journal_cursor: enrollment.journal_cursor + 1,
+            accepting_host_epoch: 1,
+        }],
+    )
+    .unwrap();
+    assert_eq!(field_history(&store), history);
+    accept_field_frame(
+        &mut store,
+        &observed.binding,
+        local.frontmatter_set("status", "review").unwrap(),
+    );
+    let after = field_history(&store);
+    assert_eq!(&after[..2], &history);
+    assert_eq!(after.len(), 3);
+    assert_eq!(
+        after[2],
+        (
+            "status".into(),
+            Some("\"done\"".into()),
+            Some("\"review\"".into()),
+            None
+        )
+    );
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Edited title", "status":"review"}),
+    );
+}
+
+#[test]
+fn first_enrollment_refusal_reverts_fields_once_with_a_refusal_actor() {
+    let (_dir, mut store, observed, checkpoint, _) = collection_fixture();
+    let enrollment = input(&store, &observed, checkpoint.clone());
+    let enrolled = enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    let pending =
+        super::super::read_pending(&store, "workspace", enrolled.outbox_id.as_ref().unwrap())
+            .unwrap();
+    refuse_field_entry(&mut store, &pending.outbox_id, &pending.entries[0]);
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Original", "status":"open"}),
+    );
+    let history = field_history(&store);
+    assert_eq!(history.len(), 4);
+    assert_eq!(
+        &history[2..],
+        &[
+            (
+                "status".into(),
+                Some("\"done\"".into()),
+                Some("\"open\"".into()),
+                Some("owner-draft-refusal".into())
+            ),
+            (
+                "title".into(),
+                Some("\"Edited title\"".into()),
+                Some("\"Original\"".into()),
+                Some("owner-draft-refusal".into())
+            ),
+        ]
+    );
+    let host = Ydoc::wire();
+    host.apply(&checkpoint).unwrap();
+    accept_field_frame(
+        &mut store,
+        &observed.binding,
+        host.richdoc_append_paragraph("a later host frame"),
+    );
+    assert_eq!(
+        field_history(&store),
+        history,
+        "a later frame must not silently repair the index"
+    );
+}
+
+#[test]
+fn first_enrollment_remote_checkpoint_records_only_the_remote_field_change() {
+    let (_dir, mut store, observed, checkpoint, _) = collection_fixture();
+    let host = Ydoc::wire();
+    host.apply(&checkpoint).unwrap();
+    host.frontmatter_set("priority", "high").unwrap();
+    let enrollment = input(&store, &observed, bounded(&host).unwrap());
+    let enrolled = enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    let history = field_history(&store);
+    assert_eq!(history.len(), 3);
+    assert_eq!(
+        history[2],
+        ("priority".into(), None, Some("\"high\"".into()), None)
+    );
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Edited title", "status":"done", "priority":"high"}),
+    );
+    let pending =
+        super::super::read_pending(&store, "workspace", enrolled.outbox_id.as_ref().unwrap())
+            .unwrap();
+    accept_field_frame(
+        &mut store,
+        &observed.binding,
+        pending.entries[0].update.clone(),
+    );
+    assert_eq!(field_history(&store), history);
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Edited title", "status":"done", "priority":"high"}),
+    );
+}
+
+#[test]
+fn first_enrollment_accept_echo_preserves_later_draft_fields_until_refusal() {
+    use crate::owner_outbox::draft::{append_draft_cached, OwnerDraftAppendInput};
+    let (_dir, mut store, observed, checkpoint, local) = collection_fixture();
+    let enrollment = input(&store, &observed, checkpoint);
+    let enrolled = enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    let initial = bounded(&local).unwrap();
+    let mut cache = crate::WriterDocCache::new();
+    let input = OwnerDraftAppendInput {
+        binding: observed.binding.clone(),
+        expected_revision: enrolled.revision,
+        append_key: "agent-status".into(),
+        update: local.frontmatter_set("status", "blocked").unwrap(),
+        now_ms: 11,
+        agent_declaration: Some(dohc_engine_domain::AgentDeclaration {
+            agent_id: "writer".into(),
+            on_behalf_of: Some("person".into()),
+            depth: 1,
+        }),
+        automation_declaration: None,
+    };
+    let entry = append_draft_cached(
+        &mut store,
+        &mut cache,
+        "workspace",
+        input.clone(),
+        &NoFaults,
+    )
+    .unwrap();
+    append_draft_cached(&mut store, &mut cache, "workspace", input, &NoFaults).unwrap();
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Edited title", "status":"blocked"}),
+    );
+    let history = field_history(&store);
+    assert_eq!(history.len(), 3);
+    assert_eq!(
+        history[2],
+        (
+            "status".into(),
+            Some("\"done\"".into()),
+            Some("\"blocked\"".into()),
+            Some("writer".into())
+        )
+    );
+    accept_field_frame(&mut store, &observed.binding, initial);
+    assert_eq!(field_history(&store), history);
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Edited title", "status":"blocked"}),
+    );
+    let host = store
+        .read_with(|conn| crate::load_doc_in(conn, &key(&observed.binding).unwrap()))
+        .unwrap();
+    accept_field_frame(
+        &mut store,
+        &observed.binding,
+        host.frontmatter_set("priority", "high").unwrap(),
+    );
+    let after_remote = field_history(&store);
+    assert_eq!(&after_remote[..3], &history);
+    assert_eq!(after_remote.len(), 4);
+    assert_eq!(
+        after_remote[3],
+        ("priority".into(), None, Some("\"high\"".into()), None)
+    );
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Edited title", "status":"blocked", "priority":"high"}),
+    );
+    let pending = super::super::read_pending(&store, "workspace", &entry.outbox_id).unwrap();
+    let later = pending
+        .entries
+        .iter()
+        .find(|pending| pending.delivery_id == entry.delivery_id)
+        .unwrap();
+    refuse_field_entry(&mut store, &entry.outbox_id, later);
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Edited title", "status":"done", "priority":"high"}),
+    );
+    let after_refusal = field_history(&store);
+    assert_eq!(&after_refusal[..4], &after_remote);
+    assert_eq!(after_refusal.len(), 5);
+    assert_eq!(
+        after_refusal[4],
+        (
+            "status".into(),
+            Some("\"blocked\"".into()),
+            Some("\"done\"".into()),
+            Some("owner-draft-refusal".into())
+        )
+    );
+}
+
+#[test]
+fn first_enrollment_refusal_preserves_an_independent_pending_field_edit() {
+    let (_dir, mut store, observed, checkpoint, _) = collection_fixture();
+    let enrollment = input(&store, &observed, checkpoint.clone());
+    let enrolled = enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    let independent = Ydoc::wire();
+    independent.apply(&checkpoint).unwrap();
+    let update = independent.frontmatter_set("priority", "high").unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            super::super::draft::append_draft_in_tx(
+                tx,
+                "workspace",
+                &observed.binding,
+                enrolled.revision,
+                "independent-priority".into(),
+                update,
+                11,
+            )
+        })
+        .unwrap();
+    let pending =
+        super::super::read_pending(&store, "workspace", enrolled.outbox_id.as_ref().unwrap())
+            .unwrap();
+    assert_eq!(pending.entries.len(), 2);
+    refuse_field_entry(&mut store, &pending.outbox_id, &pending.entries[0]);
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Original", "status":"open", "priority":"high"}),
+    );
+    let remaining = super::super::read_pending(&store, "workspace", &pending.outbox_id).unwrap();
+    assert_eq!(remaining.entries.len(), 1);
+    assert_eq!(
+        remaining.entries[0].delivery_id,
+        pending.entries[1].delivery_id
+    );
+    let history = field_history(&store);
+    assert_eq!(history.len(), 5);
+    assert_eq!(history.iter().filter(|row| row.0 == "priority").count(), 1);
+    assert_eq!(
+        history
+            .iter()
+            .filter(|row| row.3.as_deref() == Some("owner-draft-refusal"))
+            .count(),
+        2
+    );
 }
 
 /// A host checkpoint holding another computer's edit replaces the native
@@ -319,6 +785,7 @@ fn explicit_recovery_keeps_old_writes_refused_and_installs_only_the_host_checkpo
             reason: "stale-binding".into(),
             observed_binding: None,
         },
+        20,
     )
     .unwrap();
     assert!(matches!(
@@ -435,6 +902,7 @@ fn recovery_rebinds_current_coordinates_without_rewriting_the_old_delivery_paren
             reason: "binding-changed".into(),
             observed_binding: None,
         },
+        20,
     )
     .unwrap();
     let mut next = observed.binding.clone();
@@ -526,6 +994,7 @@ fn recovery_rebinds_current_coordinates_without_rewriting_the_old_delivery_paren
             reason: "binding-changed".into(),
             observed_binding: None,
         },
+        20,
     )
     .unwrap();
     store
@@ -784,4 +1253,385 @@ fn enrollment_folds_unsettled_authors_before_removing_native_update_rows() {
         recovered.json().contains("writer"),
         "History recovery includes the enrollment's folded authors"
     );
+}
+
+#[test]
+fn accepted_collection_frames_advance_while_local_work_is_quarantined() {
+    let (_dir, mut store, observed, checkpoint, _) = collection_fixture();
+    let enrollment = input(&store, &observed, checkpoint.clone());
+    let enrolled = enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    let outbox = enrolled.outbox_id.unwrap();
+    super::super::quarantine(
+        &mut store,
+        "workspace",
+        super::super::OwnerOutboxQuarantineInput {
+            outbox_id: outbox.clone(),
+            reason: "restore-fenced".into(),
+            observed_binding: None,
+        },
+        20,
+    )
+    .unwrap();
+    let history = field_history(&store);
+    assert_eq!(history.len(), 4);
+    assert!(history[2..]
+        .iter()
+        .all(|row| row.3.as_deref() == Some("owner-draft-quarantine")));
+    let host = Ydoc::wire();
+    host.apply(&checkpoint).unwrap();
+    accept_field_frame(
+        &mut store,
+        &observed.binding,
+        host.richdoc_append_paragraph("accepted body"),
+    );
+    assert_eq!(field_history(&store), history);
+    accept_field_frame(
+        &mut store,
+        &observed.binding,
+        host.frontmatter_set("priority", "high").unwrap(),
+    );
+    let after = field_history(&store);
+    assert_eq!(after[..4], history);
+    assert_eq!(after.len(), 5);
+    assert_eq!(after[4].0, "priority");
+    assert_eq!(after[4].3, None);
+    store
+        .read_with(|conn| {
+            let indexed =
+                dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
+                    conn,
+                    "workspace",
+                    "main",
+                    "object",
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                indexed,
+                serde_json::json!({"title":"Original", "status":"open", "priority":"high"})
+            );
+            let native = crate::load_doc_in(conn, &key(&observed.binding).unwrap()).unwrap();
+            assert_eq!(
+                native.frontmatter_json()["priority"],
+                serde_json::json!("high")
+            );
+            let observed = super::super::draft::read_observed_in(conn, &observed.binding)
+                .unwrap()
+                .unwrap();
+            assert!(matches!(
+                open_draft_in(conn, &observed.binding, observed.revision),
+                Err(OwnerOutboxError::Frozen)
+            ));
+            Ok::<_, OwnerOutboxError>(())
+        })
+        .unwrap();
+    let pending = super::super::read_pending(&store, "workspace", &outbox).unwrap();
+    assert_eq!(pending.entries.len(), 1);
+    assert_eq!(pending.state, super::super::OwnerOutboxState::Quarantined);
+}
+#[test]
+fn accepted_collection_catch_up_reindexes_drafts_when_checkpoint_fields_are_unchanged() {
+    use crate::owner_outbox::accepted::{apply_sync_in_tx, OwnerAcceptedFrameInput};
+    let (_dir, mut store, observed, checkpoint, _) = collection_fixture();
+    let enrollment = input(&store, &observed, checkpoint.clone());
+    let enrolled = enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    let pending =
+        super::super::read_pending(&store, "workspace", enrolled.outbox_id.as_ref().unwrap())
+            .unwrap();
+    let host = Ydoc::with_client_id(9);
+    host.apply(&checkpoint).unwrap();
+    let before = host.frontmatter_json();
+    // Catch-up contains the accepted draft followed by the collaborator's undo.
+    host.apply(&pending.entries[0].update).unwrap();
+    host.frontmatter_set("status", "open").unwrap();
+    host.frontmatter_set("title", "Original").unwrap();
+    assert_eq!(before, host.frontmatter_json());
+    let frame = OwnerAcceptedFrameInput {
+        binding: observed.binding.clone(),
+        relay_database_namespace: "relay".into(),
+        expected_revision: enrolled.revision,
+        expected_native_head_sequence: enrolled.native_head_sequence,
+        previous_accepted_cursor: enrolled.accepted_cursor,
+        journal_cursor: enrolled.accepted_cursor + 2,
+        update_bytes: host.encode_full_state(),
+    };
+    store
+        .write_with(&NoFaults, |tx| {
+            apply_sync_in_tx(tx, "workspace", &frame, &host.encode_state_vector(), 20)
+        })
+        .unwrap();
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Original", "status":"open"}),
+    );
+    assert_checkpoint_revert_history(&store);
+}
+
+#[test]
+fn accepted_collection_fold_reindexes_drafts_when_checkpoint_fields_are_unchanged() {
+    let (_dir, mut store, observed, checkpoint, _) = collection_fixture();
+    let enrollment = input(&store, &observed, checkpoint.clone());
+    enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    let host = Ydoc::with_client_id(9);
+    host.apply(&checkpoint).unwrap();
+    let before = host.frontmatter_json();
+    let text = host.project(crate::ContentKind::Richdoc).unwrap().content;
+    let fold = host
+        .rewrite_content_to_markdown_for_fold(crate::ContentKind::Richdoc, &text)
+        .unwrap();
+    assert_eq!(before, host.frontmatter_json());
+    accept_field_frame(&mut store, &observed.binding, fold);
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Original", "status":"open"}),
+    );
+    assert_checkpoint_revert_history(&store);
+}
+
+fn assert_checkpoint_revert_history(store: &EngineStore) {
+    let history = field_history(store);
+    assert_eq!(history.len(), 4);
+    for field in ["title", "status"] {
+        let rows: Vec<_> = history.iter().filter(|row| row.0 == field).collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].3.as_deref(), Some("person"));
+        assert_eq!(rows[1].1, rows[0].2);
+        assert_eq!(rows[1].2, rows[0].1);
+        // Applied frames do not carry actor attribution.
+        assert_eq!(rows[1].3, None);
+    }
+}
+
+#[test]
+fn collection_generation_drop_records_the_quarantine_actor() {
+    let (_dir, mut store, observed, checkpoint, _) = collection_fixture();
+    let enrollment = input(&store, &observed, checkpoint.clone());
+    enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    let next = next_generation(&observed);
+    let transition = successor_input(&store, &next, checkpoint);
+    enroll(&mut store, &transition, &observed.limits).unwrap();
+    assert_visible_fields(
+        &store,
+        &next,
+        serde_json::json!({"title":"Original","status":"open"}),
+    );
+    let history = field_history(&store);
+    assert_eq!(history.len(), 4);
+    assert!(history[2..]
+        .iter()
+        .all(|row| row.3.as_deref() == Some("owner-draft-quarantine")));
+}
+
+#[test]
+fn accepted_collection_replay_storage_error_rolls_back_the_frame() {
+    use crate::owner_outbox::accepted::{apply_frame_in_tx, OwnerAcceptedFrameInput};
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    let (_dir, mut store, observed, checkpoint, _) = collection_fixture();
+    let enrollment = input(&store, &observed, checkpoint.clone());
+    enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    let history = field_history(&store);
+    let before = store
+        .read_with(|conn| super::super::draft::read_observed_in(conn, &observed.binding))
+        .unwrap()
+        .unwrap();
+    let host = Ydoc::wire();
+    host.apply(&checkpoint).unwrap();
+    let frame = OwnerAcceptedFrameInput {
+        binding: observed.binding.clone(),
+        relay_database_namespace: "relay".into(),
+        expected_revision: before.revision,
+        expected_native_head_sequence: before.native_head_sequence,
+        previous_accepted_cursor: before.accepted_cursor,
+        journal_cursor: before.accepted_cursor + 1,
+        update_bytes: host.frontmatter_set("priority", "high").unwrap(),
+    };
+    let denied = Arc::new(AtomicBool::new(false));
+    let captured = denied.clone();
+    let result = store.write_with(&NoFaults, |tx| {
+        tx.authorizer(Some(move |ctx: AuthContext<'_>| {
+            if matches!(
+                ctx.action,
+                AuthAction::Read {
+                    table_name: "owner_ydoc_outbox_entries",
+                    column_name: "byte_length"
+                }
+            ) && !captured.swap(true, Ordering::SeqCst)
+            {
+                Authorization::Deny
+            } else {
+                Authorization::Allow
+            }
+        }))
+        .unwrap();
+        let result = apply_frame_in_tx(tx, "workspace", &frame, 20);
+        tx.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .unwrap();
+        result
+    });
+    assert!(denied.load(Ordering::SeqCst));
+    assert!(matches!(result, Err(OwnerOutboxError::Storage(_))));
+    let after = store
+        .read_with(|conn| super::super::draft::read_observed_in(conn, &observed.binding))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            after.revision,
+            after.accepted_cursor,
+            after.native_head_sequence,
+            after.checkpoint_digest
+        ),
+        (
+            before.revision,
+            before.accepted_cursor,
+            before.native_head_sequence,
+            before.checkpoint_digest
+        )
+    );
+    assert_eq!(field_history(&store), history);
+    assert_eq!(
+        store.table_row_count("ydoc_owner_applied_frames").unwrap(),
+        0
+    );
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Edited title","status":"done"}),
+    );
+    accept_field_frame(&mut store, &observed.binding, frame.update_bytes);
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Edited title","status":"done","priority":"high"}),
+    );
+}
+
+#[test]
+fn collection_generation_without_drafts_credits_owner_checkpoint_progress() {
+    collection_owner_checkpoint_progress(false, false);
+}
+
+#[test]
+fn collection_generation_separates_dropped_drafts_from_owner_checkpoint_progress() {
+    collection_owner_checkpoint_progress(true, false);
+}
+
+#[test]
+fn collection_recovery_credits_owner_progress_after_quarantine() {
+    collection_owner_checkpoint_progress(true, true);
+}
+
+fn collection_owner_checkpoint_progress(with_drafts: bool, recovery: bool) {
+    let (_dir, mut store, observed, checkpoint, local) = collection_fixture();
+    let old_checkpoint = if with_drafts {
+        checkpoint
+    } else {
+        bounded(&local).unwrap()
+    };
+    let enrollment = input(&store, &observed, old_checkpoint.clone());
+    let enrolled = enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    assert_eq!(enrolled.pending_bytes > 0, with_drafts);
+    if !with_drafts {
+        assert!(enrolled.outbox_id.is_none());
+    }
+    if recovery {
+        super::super::quarantine(
+            &mut store,
+            "workspace",
+            super::super::OwnerOutboxQuarantineInput {
+                outbox_id: enrolled.outbox_id.unwrap(),
+                reason: "restore-fenced".into(),
+                observed_binding: None,
+            },
+            11,
+        )
+        .unwrap();
+    }
+    let before = field_history(&store);
+    let remote_before = remote_changes(&store);
+    let host = Ydoc::wire();
+    host.apply(&old_checkpoint).unwrap();
+    let owner_title = if with_drafts {
+        "Owner title"
+    } else {
+        "Original"
+    };
+    host.frontmatter_set("title", owner_title).unwrap();
+    host.frontmatter_set("status", "archived").unwrap();
+    let next = if recovery {
+        observed.binding.clone()
+    } else {
+        next_generation(&observed)
+    };
+    let checkpoint = bounded(&host).unwrap();
+    let mut transition = if recovery {
+        let captured = match store
+            .read_with(|conn| prepare_in(conn, &next, "relay", true))
+            .unwrap()
+        {
+            OwnerEnrollmentPreparation::Capture { captured } => captured,
+            _ => panic!("recovery needs a fresh authenticated cut"),
+        };
+        OwnerEnrollmentInput {
+            binding: next.clone(),
+            relay_database_namespace: "relay".into(),
+            captured,
+            journal_cursor: 12,
+            checkpoint,
+            host_vector: host.encode_state_vector(),
+            recovery: true,
+        }
+    } else {
+        successor_input(&store, &next, checkpoint)
+    };
+    transition.recovery = recovery;
+    transition.journal_cursor = 12;
+    enroll(&mut store, &transition, &observed.limits).unwrap();
+    assert_visible_fields(
+        &store,
+        &next,
+        serde_json::json!({"title":owner_title,"status":"archived"}),
+    );
+    assert_eq!(remote_changes(&store), remote_before + 1);
+    let history = field_history(&store);
+    assert_eq!(&history[..before.len()], &before);
+    let mut expected = Vec::new();
+    if with_drafts && !recovery {
+        expected.push((
+            "status".into(),
+            Some(serde_json::json!("done").to_string()),
+            Some(serde_json::json!("open").to_string()),
+            Some("owner-draft-quarantine".into()),
+        ));
+        expected.push((
+            "title".into(),
+            Some(serde_json::json!("Edited title").to_string()),
+            Some(serde_json::json!("Original").to_string()),
+            Some("owner-draft-quarantine".into()),
+        ));
+    }
+    let (old_title, old_status) = if with_drafts {
+        ("Original", "open")
+    } else {
+        ("Edited title", "done")
+    };
+    expected.push((
+        "status".into(),
+        Some(serde_json::json!(old_status).to_string()),
+        Some(serde_json::json!("archived").to_string()),
+        None,
+    ));
+    expected.push((
+        "title".into(),
+        Some(serde_json::json!(old_title).to_string()),
+        Some(serde_json::json!(owner_title).to_string()),
+        None,
+    ));
+    assert_eq!(&history[before.len()..], &expected);
 }

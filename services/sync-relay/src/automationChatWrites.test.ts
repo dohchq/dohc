@@ -57,7 +57,7 @@ const message = (target: AutomationChatMessage["target"]): AutomationChatMessage
 });
 
 const savedRun = (): StoredRun => ({
-  durableEffects: 0, version: 10, rules: null, collections: [], undoCalls: [], undoCovers: [], claimId: "claim", automationId: automation.automationId, definitionHash: "hash", keySeed: "hash",
+  durableEffects: 0, version: 13, rules: null, collections: [], undoCalls: [], undoCovers: [], claimId: "claim", automationId: automation.automationId, definitionHash: "hash", keySeed: "hash",
   startedAtMs: 10_000, finishedAtMs: 10_000, steps: [], applied: [], created: [], replans: [], undoRequests: [],
   readableFields: null, superseded: false, undo: null, undoKept: [], settled: true, outcome: { state: "done" },
 });

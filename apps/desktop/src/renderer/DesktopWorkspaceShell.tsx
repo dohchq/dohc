@@ -69,6 +69,7 @@ import {
 import { runCanonicalDmNavigation } from "./shell/canonicalDmNavigation";
 import {
   chatsOffCopy,
+  fileObservationFailureCopy,
   historyOffPlaceholderCopy,
   versionCompareOffCopy,
 } from "./shell/capabilityOffCopy";
@@ -163,6 +164,7 @@ import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
 import { Explorer } from "./workbench/Explorer";
 import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
 import {
+  loadLiveDraftRecovery,
   noteWorkspaceLabel,
   remapOrphanedDraftPaths,
   useOrphanedDraftPaths,
@@ -262,6 +264,7 @@ import {
   type WorkbenchTab,
 } from "./workbench/workbenchState";
 import type { ChatsPanelTab } from "./workbench/ChatsPanel";
+import type { AboutNotices, AccessContext } from "./workbench/About";
 import { usePinnedApps } from "./workbench/pinnedApps";
 import { pinnedAppsFor } from "../settings/pinnedApps";
 import { ipcErrorMessage } from "./ipcError";
@@ -652,7 +655,6 @@ export function DesktopWorkspaceShell(props: {
   } = useEditorRegistry(workspaceId, openTabs);
   const flushActiveDraft = useCallback(() => flushStableDrafts(), [flushStableDrafts]);
   const collectionLineage = useCollectionWriteLineage(workspaceId);
-  const stopAndRestore = useStopAndRestore(workspaceId);
 
   // `openWorkspace` installs main's exact renderer session before it waits
   // for watcher readiness. Its response is the renderer's existing proof that
@@ -813,6 +815,8 @@ export function DesktopWorkspaceShell(props: {
     runShellErrorAction,
     clearIdentity,
   } = useShellError(workspaceId);
+  const stopAndRestore = useStopAndRestore(workspaceId, {ready: workspaceIsReady && !props.workspace.shareView,
+    onError: (fallback, error, retry, identity) => reportShellError(fallback, error, retry, undefined, identity)});
   useChatDispatchNotices(workspaceId, workspaceIsReady, reportShellFailure, clearKind);
   useWorkspacePathOpenFailures(workspaceId, reportShellFailure);
   // Share removals from Chats, Settings and the share dialog: one notice
@@ -918,8 +922,36 @@ export function DesktopWorkspaceShell(props: {
     },
     [reportShellError],
   );
-  const { chatCollaboration, refreshCloudStatus, workspaceSynced } =
+  const { chatCollaboration, refreshCloudStatus, workspaceSynced, cloudStatus, cloudStatusUnreadable } =
     useCloudPresence(workspaceId, reportCloudStatusUnavailable);
+  // About's section reads report through this shell's notices, one row per
+  // section and file. Each may fail again, so each is a repeat: it keeps a
+  // row's toast while the row is there, and toasts again once it is gone.
+  const aboutNotices = useMemo<AboutNotices>(
+    () => ({ report: (failure) => reportShellFailure({ ...failure, repeat: true }), clear: clearIdentity }),
+    [clearIdentity, reportShellFailure],
+  );
+  // What can explain an Access answer that covers nothing. About derives the
+  // cause for each file from these facts (accessReasonFor).
+  const isShareView = props.workspace.shareView !== undefined;
+  const cloudConnected = cloudStatus?.connected;
+  const cloudWorkspaceSynced = cloudStatus?.workspaceSynced === true;
+  const cloudWorkspaceSyncConnected = cloudStatus?.workspaceSyncConnected === true;
+  const accessContext = useMemo<AccessContext>(
+    () => ({
+      facts: {
+        cloud: cloudConnected !== undefined ? {
+          connected: cloudConnected,
+          workspaceSynced: cloudWorkspaceSynced,
+          workspaceSyncConnected: cloudWorkspaceSyncConnected,
+        } : cloudStatusUnreadable ? "unreadable" : "checking",
+        shareView: isShareView,
+      },
+      openSyncSettings: () => openSettings("cloud"),
+      connect: () => setCloudOpen(true),
+    }),
+    [cloudConnected, cloudStatusUnreadable, cloudWorkspaceSyncConnected, cloudWorkspaceSynced, isShareView, openSettings],
+  );
 
   // @-mention roster + agent notifications (Agent Notifications & Mentions).
   // The renderer has no identity source yet, so the user shows as "You" —
@@ -1425,6 +1457,8 @@ export function DesktopWorkspaceShell(props: {
   // main's registry summary. This gates the versions surface and collections,
   // and restore, from the same fact.
   const shareView = props.workspace.shareView ?? null;
+  const shareViewRef = useRef(shareView);
+  shareViewRef.current = shareView;
   const [needsReopenFor, setNeedsReopenFor] = useState<NonNullable<Workspace["shareView"]> | null>(null);
   const shareViewDamaged = !!shareView?.damaged || (!!shareView && needsReopenFor === shareView);
   // A registry update replaces this snapshot, including when access returns.
@@ -1563,12 +1597,12 @@ export function DesktopWorkspaceShell(props: {
     engineHistoryToken,
     null,
   );
-  // Which surface the right-hand Chats panel shows (all chats vs the active
-  // file's). Runtime-only — not persisted.
+  // Which surface the right-hand Chats panel shows (all chats vs About the
+  // active file). Runtime-only — not persisted.
   const [chatsPanelTab, setChatsPanelTab] = useState<ChatsPanelTab>("all");
-  // A shared view offers the "This file" tab only, so the panel
-  // opens there whatever the runtime state carried in from another workspace.
-  const chatsPanelActiveTab: ChatsPanelTab = shareView ? "file" : chatsPanelTab;
+  // A shared view offers the About tab only, so the panel opens there
+  // whatever the runtime state carried in from another workspace.
+  const chatsPanelActiveTab: ChatsPanelTab = shareView ? "about" : chatsPanelTab;
   const [searchChatTarget, setSearchChatTarget] = useState<{
     thread: ChatThreadRecord;
     focusMessageId?: string;
@@ -1739,7 +1773,7 @@ export function DesktopWorkspaceShell(props: {
   // Chats is the exception. A share view still installs no capture, so
   // history and versions stay gone, but main answers chat from the SHARE
   // scope instead of a capture, so the Chats panel opens everywhere. Only
-  // its "This file" tab there: the per-file surface answers for a file the
+  // its About tab there: the per-file surface answers for a file the
   // share already served, and a workspace-wide listing would be a superset
   // to filter (decision 5, and the shape that produced #627).
   // Whether main's capture will SERVE those surfaces. Main's status is the
@@ -2397,7 +2431,7 @@ export function DesktopWorkspaceShell(props: {
   // The one way a chat thread lands in the Chats panel (search hits, file
   // mentions without channel metadata, and the Chats view "Files" grouping
   // all route here): hand the known thread to the panel's consume-once seam,
-  // switch to "This file", and force the panel visible.
+  // switch to About, and force the panel visible.
   const openChatThreadInPanel = useCallback(
     (
       thread: { id: string; title: string; createdAtMs: number; updatedAtMs: number },
@@ -2417,7 +2451,7 @@ export function DesktopWorkspaceShell(props: {
         },
         ...(focusMessageId ? { focusMessageId } : {}),
       });
-      setChatsPanelTab("file");
+      setChatsPanelTab("about");
       mutateWb((state) => ({ ...state, chatsVisible: true }));
     },
     [mutateWb],
@@ -3002,7 +3036,7 @@ export function DesktopWorkspaceShell(props: {
       const execute = async (recordId?: string): Promise<void> => {
         if (workspaceSelection.current !== selection) return;
         if (shareView && !shareViewWritableRef.current) {
-          const message = shareViewEndedRef.current ? "Your access to this share ended." : shareWriteRefusalRef.current;
+          const message = shareWriteRefusalRef.current;
           reportShellError(message, new Error(message));
           return;
         }
@@ -3478,6 +3512,13 @@ export function DesktopWorkspaceShell(props: {
         }
       };
       void refreshInitialFiles().catch(reportInitialFilesFailure);
+      const recoverDrafts = () => loadLiveDraftRecovery(workspaceId, () => !cancelled && !workspaceAdmission.superseded);
+      const reportDraftRecoveryFailure = (error: unknown) => {
+        if (!cancelled && !workspaceAdmission.superseded) {
+          reportShellError("dohc could not read set-aside edits.", error, () => { void recoverDrafts().catch(reportDraftRecoveryFailure); });
+        }
+      };
+      void recoverDrafts().catch(reportDraftRecoveryFailure);
     })();
     return () => {
       cancelled = true;
@@ -3986,8 +4027,12 @@ export function DesktopWorkspaceShell(props: {
         });
       }
       if (outcome.status === "ended") {
+        shareViewEndedRef.current = true;
+        shareViewWritableRef.current = false;
+        shareWriteRefusalRef.current = "Your access to this share ended.";
+        setCollectionFieldWriteAccess(workspaceId, shareWriteRefusalRef.current);
         setShareExclusions({ workspaceId, paths: [] });
-        setEndedFor(shareView);
+        setEndedFor(shareViewRef.current);
       } else {
         setShareExclusions({ workspaceId, paths: outcome.unjournalablePaths });
       }
@@ -4088,7 +4133,7 @@ export function DesktopWorkspaceShell(props: {
   const sendShareChanges = useCallback(async () => {
     if (workspaceAdmission.superseded) return;
     if (!shareViewWritableRef.current) {
-      const message = shareViewEndedRef.current ? "Your access to this share ended." : shareWriteRefusalRef.current;
+      const message = shareWriteRefusalRef.current;
       reportShellError(message, new Error(message));
       return;
     }
@@ -4139,6 +4184,7 @@ export function DesktopWorkspaceShell(props: {
   }, [workspaceId, workspaceAdmission, reloadMyShareChanges]);
   useShareDirectWrites({
     workspaceId,
+    sharedView: !!shareView,
     enabled: shareViewWritable,
     ready: workspaceIsReady,
     ownerName: shareGranterName,
@@ -4653,6 +4699,37 @@ export function DesktopWorkspaceShell(props: {
     report: reportSyncFailure,
     clear: clearSyncFailure,
   });
+  const filedObservationFailure = useRef<SyncStatusResult["fileObservationFailure"]>(undefined);
+  const observationFailure = syncStatus?.fileObservationFailure;
+  const retryFileObservationRef = useRef<() => void>(() => {});
+  const retryFileObservation = useCallback(() => {
+    const askedFor = workspaceIdRef.current;
+    void bridge().retryFileObservation({ workspaceId: askedFor }).then(status => {
+      if (workspaceAdmission.superseded || workspaceIdRef.current !== askedFor) return;
+      if (status.fileObservationFailure) {
+        reportShellFailure({ message: fileObservationFailureCopy(status.fileObservationFailure), identity: "file-observation",
+          retry: () => retryFileObservationRef.current() });
+      } else {
+        clearIdentity("file-observation");
+      }
+    }, error => {
+      if (workspaceAdmission.superseded || workspaceIdRef.current !== askedFor) return;
+      reportShellFailure({ message: fileObservationFailureCopy(observationFailure ?? "read-failed"), cause: error,
+        identity: "file-observation", retry: () => retryFileObservationRef.current() });
+    });
+  }, [workspaceAdmission, observationFailure, reportShellFailure, clearIdentity]);
+  retryFileObservationRef.current = retryFileObservation;
+  useEffect(() => {
+    if (syncStatus === null) return;
+    if (filedObservationFailure.current === observationFailure) return;
+    filedObservationFailure.current = observationFailure;
+    if (observationFailure) {
+      reportShellFailure({ message: fileObservationFailureCopy(observationFailure), identity: "file-observation",
+        retry: () => retryFileObservationRef.current() });
+    } else {
+      clearIdentity("file-observation");
+    }
+  }, [syncStatus, observationFailure, reportShellFailure, clearIdentity]);
   useEffect(() => {
     showSyncRefusals((props.sentNotices?.notices ?? []).filter(notice =>
       notice.kind === "sync-refusal" && notice.workspaceId === workspaceId), syncFailureNotice.retry);
@@ -4702,7 +4779,18 @@ export function DesktopWorkspaceShell(props: {
   // Keep each notice kind's dismissal state across remounts.
   const dismissWorkspaceError = useCallback(
     (id: string) => {
-      const kind = shellErrors.find((error) => error.id === id)?.kind;
+      const notice = shellErrors.find((error) => error.id === id);
+      const kind = notice?.kind;
+      if (notice?.identity?.startsWith("stop-and-restore:") && !notice.identity.startsWith("stop-and-restore:recovery:")) {
+        const askedFor = workspaceId;
+        void stopAndRestore.dismiss(notice.identity).then(dismissed => {
+          if (dismissed && workspaceIdRef.current === askedFor) dismissShellError(id);
+        }).catch(error => {
+          if (workspaceIdRef.current === askedFor) reportShellError("dohc could not dismiss this Notice.", error,
+            () => dismissWorkspaceError(id));
+        });
+        return;
+      }
       if (kind === "cloud-sync") syncFailureNotice.noteDismissed();
       if (kind === "drive-no-atomic-placement") driveLimitNotice.noteDismissed();
       if (kind === "kept-files") keptFilesNotice.noteDismissed();
@@ -4724,7 +4812,7 @@ export function DesktopWorkspaceShell(props: {
         });
       } else dismissShellError(id);
     },
-    [dismissShellError, driveLimitNotice, keptFilesNotice, shellErrors, shareView, syncFailureNotice, props.sentNotices, workspaceId, reportShellError],
+    [dismissShellError, driveLimitNotice, keptFilesNotice, shellErrors, shareView, syncFailureNotice, props.sentNotices, workspaceId, reportShellError, stopAndRestore],
   );
   return (
     <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
@@ -5491,7 +5579,7 @@ export function DesktopWorkspaceShell(props: {
         </main>
 
         {/* Chats panel — the right-hand secondary sidebar (every
-            workspace; shared views with their file tab only). Hidden
+            workspace; shared views with their About tab only). Hidden
             entirely while collapsed; the titlebar Chats button, Ctrl+Alt+B,
             or the toggle-chats command bring it back. History lives in the
             left History view and the history tab — never here. */}
@@ -5516,6 +5604,10 @@ export function DesktopWorkspaceShell(props: {
             openPathWithHeading={openPathWithHeading}
             onChatsThreadRead={onChatsThreadRead}
             reportFailureMessage={reportFailureMessage}
+            historyRevision={historyRefreshCounter}
+            openMoment={openMomentDiffTab}
+            aboutNotices={aboutNotices}
+            accessContext={accessContext}
             chatsNavigatorProps={chatsNavigatorProps}
           />
         ) : null}

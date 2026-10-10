@@ -130,5 +130,10 @@
   "capture.recovery.clear",
   "access.object.read",
   "access.sharing.read",
-  "access.refresh"
+  "access.refresh",
+  "share.direct.writes.feedback",
+  "document.draft.list",
+  "file.observation.retry",
+  "share.restore.pending.read",
+  "share.restore.pending.dismiss"
 ]

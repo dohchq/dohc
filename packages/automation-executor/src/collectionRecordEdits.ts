@@ -129,6 +129,8 @@ export interface SetCollectionRecordFieldsInput {
   allowPendingSharedSettlement?: boolean;
   /** A creation key already recorded by the engine must not seed the field again. */
   preserveCompletedSeeds?: boolean;
+  /** Undo treats an existing field key as a completed reversal, even after a later edit. */
+  preserveCompletedFields?: boolean;
   /** Creation reports the stage that could not finish. */
   onStage?(stage: CreationStage): void;
   /** Finish a prior journaled update even when its values already match. */
@@ -382,12 +384,13 @@ export async function setCollectionRecordFields(
         }
         return written;
       }).catch(async error => {
-        if (!input.preserveCompletedSeeds || idempotencyKey === undefined || !isIdempotencyKeyReuseRefusal(error)) throw error;
-        // This typed refusal proves the creation key already landed. The session
-        // restores canonical state before rejecting; no new seed was recorded.
+        if ((!input.preserveCompletedSeeds && !input.preserveCompletedFields) || idempotencyKey === undefined || !isIdempotencyKeyReuseRefusal(error)) throw error;
+        // This typed refusal proves the chosen key already landed. The session
+        // restores canonical state before rejecting; no new write was recorded.
         if (fieldArmed) armed -= 1;
         delete replaced[field];
         decidedFields.delete(field);
+        if (input.preserveCompletedFields) return false;
         return session.applyDecidedLocalUpdate(doc => {
           const current = doc.getMap(FRONTMATTER_FIELD).get(field);
           kept[field] = (current instanceof Y.AbstractType ? current.toJSON() : current) ?? null;
@@ -417,9 +420,15 @@ export async function setCollectionRecordFields(
         nativeHeadSequence: error.draft.nativeHeadSequence, appendKey: `${appendPrefix}/${field}`,
       }] as const);
       const unchanged = candidates.filter(([field]) => !decidedFields.has(field));
-      // A failed status read leaves unchanged fields unknown; journaled writes still succeeded.
+      // Undo cannot finish while a prior reversal's receipt is unknown.
       const states = unchanged.length === 0 ? [] : await context.withAdapter(adapter =>
-        adapter.sharedFileUpdateStates(unchanged.map(([, draft]) => draft))).catch(() => []);
+        adapter.sharedFileUpdateStates(unchanged.map(([, draft]) => draft))).catch(error => {
+          if (input.preserveCompletedFields) throw new Error("dohc could not check this run's shared reversals.", {cause: error});
+          return [];
+        });
+      if (input.preserveCompletedFields && unchanged.some((_, index) => states?.[index] === undefined)) {
+        throw new Error("dohc could not check this run's shared reversals.");
+      }
       const existing = new Set(unchanged.filter((_, index) => states?.[index] !== undefined && states[index] !== "absent")
         .map(([field]) => field));
       sharedFileUpdates = Object.fromEntries(candidates.filter(([field]) => decidedFields.has(field) || existing.has(field)));

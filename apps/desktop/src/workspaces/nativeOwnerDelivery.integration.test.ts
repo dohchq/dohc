@@ -1,4 +1,5 @@
 import {createHash} from "node:crypto";
+import {resolve} from "node:path";
 import {afterEach, expect, it, vi} from "vitest";
 import {OwnerYDocOutbox} from "@dohc/workspace-engine-client";
 import type {EngineClient} from "@dohc/workspace-engine-client/daemon";
@@ -16,7 +17,7 @@ const binding = {workspaceId: "workspace", mainVersionId: "main", objectId: "obj
   currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 1};
 const frames = {receive: {maxFrameBytes: 4096, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
   maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096};
-const configValue = {version: 1, nativeConfigPath: "C:/native.json", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2},
+const configValue = {version: 1, nativeConfigPath: resolve("test", "native.json"), nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2},
   relayUrl: "https://relay.example.test", frames, attemptTimeoutMs: 10_000, retryDelayMs: 1000,
   documents: [{binding, relayDatabaseNamespace: "namespace", shareId: "share"}]};
 const config = parseDesktopOwnerDeliveryConfig(configValue);
@@ -65,7 +66,7 @@ it("delivers the hosted declaration to the relay under the credential account", 
   expect(deriveLiveAuthorSnapshot({} as StorageContext,
     {principalKind: "owner", principalId: "authenticated-owner", grantId: null, grantGeneration: null}, submitted.authorContext,
     {accountId: "authenticated-owner", name: "Owner"})).toEqual([
-      {kind: "human", humanId: "authenticated-owner", humanName: "Owner"}, {kind: "agent", ...agentDeclaration},
+      {kind: "human", humanId: "authenticated-owner", humanName: "Owner"}, {kind: "agent", ...agentDeclaration, onBehalfOf: "authenticated-owner"},
     ]);
 });
 

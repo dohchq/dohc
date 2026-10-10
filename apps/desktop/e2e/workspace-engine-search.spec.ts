@@ -8,7 +8,7 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   explorerRow,
-  openFileChatsPanel,
+  openAboutPanel,
   openWorkspaceFromFirstRun,
   revealExplorerPath,
   seedWorkspaceManifest,
@@ -101,7 +101,7 @@ test("search finds file content and a chat message; .env.local content never sur
     // versioned-text store may open a second writable engine.db connection.
     await revealExplorerPath(page, "notes/roadmap.md");
     await explorerRow(page, "notes/roadmap.md").click();
-    await openFileChatsPanel(page);
+    await openAboutPanel(page);
     await page.getByTestId("linked-chat-new").click();
     const titleInput = page.getByTestId("linked-chat-new-title");
     await titleInput.fill("Roadmap sync");

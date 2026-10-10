@@ -28,6 +28,7 @@ import {
   OwnerLiveDocumentActionPayload,
   DesktopUserSettingsResult,
   ShareDirectWritesPushedEvent,
+  shareDirectWriteDeliveryOperations,
   EngineYDocLineageReplacementEvent,
   EngineYDocRemoteUpdateEvent,
   EngineYDocOwnerHandoff,
@@ -49,9 +50,11 @@ import {
   WorkspacePathOpenFailedEvent,
   crashReportOperations,
   captureRecoveryOperations,
+  fileObservationOperations,
   reportingOperations,
   noticeOperations,
   liveDraftRecoveryOperations,
+  stopAndRestoreRecoveryOperations,
   scheduleHostOperations,
   chatDispatchNoticeOperations,
   sharedViewAccessOperations,
@@ -105,6 +108,7 @@ async function invokeParsed<Schema extends z.ZodType>(
 const rendererDocumentId = crypto.randomUUID();
 
 const bridge: DohcDesktopBridge = {
+  ...operationBridge(shareDirectWriteDeliveryOperations, invoke),
   ...operationBridge(accessOperations, invoke),
   platform: process.platform,
   devTools: devToolsGranted(process.argv),
@@ -351,6 +355,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.checkCollectionAutomation, payload),
   stopAndRestore: (payload) =>
     ipcRenderer.invoke(CHANNELS.stopAndRestore, payload),
+  ...operationBridge(stopAndRestoreRecoveryOperations, invoke),
   ...operationBridge(liveDraftRecoveryOperations, invoke),
   undoStopAndRestore: (payload) =>
     ipcRenderer.invoke(CHANNELS.undoStopAndRestore, payload),
@@ -382,6 +387,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.findDatasetCollection, payload),
   findAutomationCollection: (payload) =>
     ipcRenderer.invoke(CHANNELS.findAutomationCollection, payload),
+  onHistoryNamesChanged: (listener) => onEvent(CHANNELS.historyNamesChanged, WorkspaceIdPayload, listener),
   onCollectionAutomationsChanged: (listener) =>
     onEvent(CHANNELS.collectionAutomationsChanged, WorkspaceIdPayload, listener),
   onAutomationRunsChanged: (
@@ -466,8 +472,23 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.submitShareChanges, payload),
   pushShareDirectWrites: (payload) =>
     ipcRenderer.invoke(CHANNELS.pushShareDirectWrites, payload),
-  onShareDirectWritesPushed: (listener) =>
-    onEvent(CHANNELS.shareDirectWritesPushed, ShareDirectWritesPushedEvent, listener),
+  onShareDirectWritesPushed: (listener, workspaceId) => {
+    const subscriptionId = crypto.randomUUID();
+    const identity = { workspaceId, rendererDocumentId, subscriptionId };
+    const unsubscribe = onEvent(CHANNELS.shareDirectWritesPushed, ShareDirectWritesPushedEvent, event => {
+      if (event.workspaceId !== workspaceId) return;
+      const update = (action: "claim" | "acknowledge" | "release") => bridge.updateShareDirectWriteDelivery({
+        ...identity, action, answerId: event.answerId,
+      });
+      listener(event, { claim: () => update("claim"), acknowledge: () => update("acknowledge"), release: () => update("release") });
+    });
+    const update = (listening: boolean) => {
+      void bridge.updateShareDirectWriteDelivery({ ...identity, action: "listen", listening })
+        .catch(error => console.error("[desktop] direct-write subscription failed:", error));
+    };
+    update(true);
+    return () => { unsubscribe(); update(false); };
+  },
   listMyShareChanges: (payload) =>
     ipcRenderer.invoke(CHANNELS.listMyShareChanges, payload),
   withdrawShareChanges: (payload) =>
@@ -541,6 +562,7 @@ const bridge: DohcDesktopBridge = {
   presenceCancel: (payload) => ipcRenderer.invoke(CHANNELS.presenceCancel, payload),
   getSyncStatus: (payload) => ipcRenderer.invoke(CHANNELS.getSyncStatus, payload),
   ...operationBridge(captureRecoveryOperations, invoke),
+  ...operationBridge(fileObservationOperations, invoke),
   retryOwnerLiveDelivery: (payload) => ipcRenderer.invoke(CHANNELS.retryOwnerLiveDelivery, payload),
   retryFileRecovery: (payload) => ipcRenderer.invoke(CHANNELS.retryFileRecovery, payload),
   retryCloudSync: (payload) => ipcRenderer.invoke(CHANNELS.retryCloudSync, payload),

@@ -73,7 +73,7 @@ pub(crate) fn mark_unproven_hosted_authors(payload: &mut serde_json::Value) -> b
     true
 }
 
-/// Client log routes cannot attest relay identities. Keep local coverage intact.
+/// Unproved moments cannot claim relay identities. Keep local coverage intact.
 pub(crate) fn omit_client_identity_authors(payload: &mut serde_json::Value) -> bool {
     let before = payload.get("authors").cloned();
     omit_local_person_authors(payload);
@@ -120,6 +120,8 @@ pub(crate) fn repair_queued_moment_authors(
             }
             let mut payload = op.payload.clone();
             let marked = mark_unproven_hosted_authors(&mut payload);
+            // A native credential does not attest declared authors. Both paths
+            // need a settlement proof to publish relay-derived attribution.
             let omitted = if native_settlements {
                 omit_local_person_authors(&mut payload)
             } else {
