@@ -337,21 +337,42 @@ test("@states-page @states-baselines every shared part matches its baseline in b
       await closeMenu(page, trigger, menu);
     }
     // A tab row keeps Share and the document's controls inside itself at any
-    // width, and the save state beside them gives way first. The narrow
-    // specimen must really have cut its save state short, or the check
-    // proves nothing.
+    // width, and its save state gives way before the tab's file name: the
+    // name is cut only once the save state shows no more than one character
+    // and an ellipsis (13px of 11px mono). A row whose save state shows no
+    // words draws the same width as the loading row. The narrow specimen must
+    // really have cut its save state short, or the check proves nothing.
     for (const theme of THEMES) {
       const part = page.getByTestId(`states-${theme}`).locator('[data-part="tab-row-actions"]');
+      const widths: number[] = [];
       for (const row of await part.getByTestId("editor-tabs").all()) {
         const edge = await row.evaluate((el) => el.getBoundingClientRect().right);
-        const rights = await row
-          .getByTestId("editor-tab-actions")
+        const actions = row.getByTestId("editor-tab-actions");
+        const rights = await actions
           .locator("button")
           .evaluateAll((buttons) => buttons.map((button) => button.getBoundingClientRect().right));
         if (rights.length === 0) failures.push(`a tab row (${theme}) has no document actions`);
         if (rights.some((right) => right > edge + 0.5)) failures.push(`a document control (${theme}) runs past its tab row`);
+        const order = await row.evaluate((el) => {
+          const list = el.querySelector('[role="tablist"]')!.getBoundingClientRect();
+          const tab = el.querySelector('[role="tab"][data-active]');
+          const name = tab?.querySelector(".truncate");
+          const box = tab?.getBoundingClientRect();
+          const label = el.querySelector('[data-testid="editor-tab-actions"] [data-view-status] .truncate');
+          const nameCut =
+            !!name && (name.scrollWidth > name.clientWidth || (!!box && (box.right > list.right + 0.5 || box.left < list.left - 0.5)));
+          const actionsBox = el.querySelector('[data-testid="editor-tab-actions"]')!.getBoundingClientRect();
+          return { nameCut, statusWidth: label?.clientWidth ?? 0, worded: !!label, actionsWidth: actionsBox.width };
+        });
+        if (order.nameCut && order.statusWidth >= 13) {
+          failures.push(`a tab row (${theme}) cut its file name while its save state still had ${order.statusWidth}px of words`);
+        }
+        if (!order.worded) widths.push(order.actionsWidth);
       }
-      const label = page.getByTestId(`states-tab-row-actions-pending-${theme}`).locator(".truncate");
+      if (widths.length > 0 && Math.max(...widths) - Math.min(...widths) > 0.5) {
+        failures.push(`the tab rows without save-state words (${theme}) draw different widths: ${widths.join(", ")}`);
+      }
+      const label = page.getByTestId(`states-tab-row-actions-cut-${theme}`).locator(".truncate");
       if (!(await label.evaluate((el) => el.scrollWidth > el.clientWidth))) {
         failures.push(`the narrow tab row's save state (${theme}) is not cut short`);
       }

@@ -1146,11 +1146,11 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       {/* After the history part, so the parts above keep their places. */}
       <Section part="tab-row-actions" title="Document actions in the tab row" menusAtRest>
-        {/* One document loading, saved, saving, failed, and pending in a
-            narrow pane: Share, the toggle and the menu keep their places,
-            and only the save state gives way. A saved document says so
-            only through the titlebar's dot. No box clips them, so an
-            overflow shows. */}
+        {/* One document loading, saved, saving, held, failed, and changed
+            on disk in a narrow pane: Share, the toggle and the menu keep
+            their places, and the save state gives way before the tab name.
+            Saved and saving say so only to screen readers, so they draw the
+            loading width. No box clips them, so an overflow shows. */}
         <Specimen label="loading" className="w-full">
           <TabRowActionsSpecimen width="w-full">
             <ViewActions
@@ -1168,7 +1168,7 @@ function Pane(props: { theme: "light" | "dark" }) {
           <TabRowActionsSpecimen width="w-full">
             <ViewActions
               onShare={noop}
-              status={<StateMark testId={`states-tab-row-actions-state-${theme}`} truncate quietWhenSettled state="saved" shown="saved" />}
+              status={<StateMark testId={`states-tab-row-actions-state-${theme}`} truncate quietWhenCalm state="saved" shown="saved" />}
               actions={
                 <DocumentControls
                   toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}
@@ -1182,7 +1182,21 @@ function Pane(props: { theme: "light" | "dark" }) {
           <TabRowActionsSpecimen width="w-full">
             <ViewActions
               onShare={noop}
-              status={<StateMark testId={`states-tab-row-actions-saving-${theme}`} truncate quietWhenSettled state="saving" shown="saving" />}
+              status={<StateMark testId={`states-tab-row-actions-saving-${theme}`} truncate quietWhenCalm state="saving" shown="saving" />}
+              actions={
+                <DocumentControls
+                  toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}
+                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => "# Plan" }}
+                />
+              }
+            />
+          </TabRowActionsSpecimen>
+        </Specimen>
+        <Specimen label="held: file in use" className="w-full">
+          <TabRowActionsSpecimen width="w-full">
+            <ViewActions
+              onShare={noop}
+              status={<StateMark testId={`states-tab-row-actions-held-${theme}`} truncate quietWhenCalm state="file-locked" shown="file-locked" />}
               actions={
                 <DocumentControls
                   toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}
@@ -1205,12 +1219,12 @@ function Pane(props: { theme: "light" | "dark" }) {
             />
           </TabRowActionsSpecimen>
         </Specimen>
-        <Specimen label="narrow, pending share">
-          <TabRowActionsSpecimen width="w-[400px]" testId={`states-tab-row-actions-narrow-${theme}`}>
+        <Specimen label="narrow, changed on disk">
+          <TabRowActionsSpecimen width="w-[360px]" testId={`states-tab-row-actions-narrow-${theme}`}>
             <ViewActions
               onShare={noop}
               status={
-                <StateMark testId={`states-tab-row-actions-pending-${theme}`} truncate quietWhenSettled state="pending-share" shown="pending-share" />
+                <StateMark testId={`states-tab-row-actions-cut-${theme}`} truncate quietWhenCalm state="changed-on-disk" shown="changed-on-disk" />
               }
               actions={
                 <DocumentControls
@@ -1262,10 +1276,10 @@ function Pane(props: { theme: "light" | "dark" }) {
       <Section part="title-bar-status" title="Title bar status">
         {/* The saved dot alone while nothing needs the person, and its words
             once something does. */}
-        {TITLE_BAR_STATUSES.map(({ label, syncStatus, failedSaves, unsaved }) => (
+        {TITLE_BAR_STATUSES.map(({ label, syncStatus, failedSaves }) => (
           <Specimen key={label} label={label}>
             <span className="flex h-8 items-center rounded-md border border-line bg-panel px-3">
-              <WorkspaceSyncStatus syncStatus={syncStatus} failedSaves={failedSaves} unsaved={unsaved} />
+              <WorkspaceSyncStatus syncStatus={syncStatus} failedSaves={failedSaves} />
             </span>
           </Specimen>
         ))}
@@ -1374,12 +1388,12 @@ const SYNCED_STATUS: SyncStatusResult = {
   historyShareView: false,
 };
 
-const TITLE_BAR_STATUSES: { label: string; syncStatus: SyncStatusResult; failedSaves: number; unsaved: boolean }[] = [
-  { label: "saved", syncStatus: SYNCED_STATUS, failedSaves: 0, unsaved: false },
-  { label: "unsaved changes", syncStatus: SYNCED_STATUS, failedSaves: 0, unsaved: true },
-  { label: "a file couldn't save", syncStatus: SYNCED_STATUS, failedSaves: 1, unsaved: true },
-  { label: "files couldn't save, during a sync pass", syncStatus: { ...SYNCED_STATUS, state: "syncing" }, failedSaves: 2, unsaved: false },
-  { label: "server disconnected", syncStatus: { ...SYNCED_STATUS, state: "cloud-disconnected" }, failedSaves: 0, unsaved: false },
+const TITLE_BAR_STATUSES: { label: string; syncStatus: SyncStatusResult; failedSaves: number }[] = [
+  { label: "saved", syncStatus: SYNCED_STATUS, failedSaves: 0 },
+  { label: "syncing", syncStatus: { ...SYNCED_STATUS, state: "syncing" }, failedSaves: 0 },
+  { label: "a file couldn't save", syncStatus: SYNCED_STATUS, failedSaves: 1 },
+  { label: "files couldn't save, during a sync pass", syncStatus: { ...SYNCED_STATUS, state: "syncing" }, failedSaves: 2 },
+  { label: "server disconnected", syncStatus: { ...SYNCED_STATUS, state: "cloud-disconnected" }, failedSaves: 0 },
 ];
 
 export function StatesPage() {

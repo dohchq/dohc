@@ -67,16 +67,13 @@ function saveFailedLabel(syncStatus: SyncStatusResult | null, failedSaves: numbe
   return `Couldn't save ${failedSaves} ${failedSaves === 1 ? "file" : "files"}`;
 }
 
-// An open editor holds edits that are not on disk yet. It outranks only the
-// states that would call those edits saved or say nothing about them.
-const UNSAVED_OUTRANKS = new Set<SyncStatusResult["state"] | undefined>([undefined, "synced", "syncing", "local-changes"]);
-
-export function WorkspaceSyncStatus({ syncStatus, failedSaves, unsaved }: {
+// The workspace's save and sync state. An editor's own edits in flight show
+// on its tab, not here: this is a live region, and typing must not make it
+// speak.
+export function WorkspaceSyncStatus({ syncStatus, failedSaves }: {
   syncStatus: SyncStatusResult | null;
   // Files in this workspace whose save failed.
   failedSaves: number;
-  // Whether any open editor reports edits that are not saved here.
-  unsaved: boolean;
 }) {
   const state = syncStatus?.state;
   const conflictCount = state === "conflict" ? syncStatus?.conflictCount ?? 0 : 0;
@@ -92,21 +89,16 @@ export function WorkspaceSyncStatus({ syncStatus, failedSaves, unsaved }: {
     ? `${stateLabel}${conflictCount > 0 ? ` (${conflictCount})` : ""}`
     : "Checking status";
   const saveFailed = saveFailedLabel(syncStatus, failedSaves);
-  const shownUnsaved = !saveFailed && !syncStatus?.updateRequired && unsaved && UNSAVED_OUTRANKS.has(state);
   const shownLabel = saveFailed ?? (syncStatus?.updateRequired
     ? UPDATE_REQUIRED_LABEL[syncStatus.updateRequired]
-    : shownUnsaved
-      ? "Unsaved changes"
-      : state === "syncing" && syncStatus?.claimingIdentity
-        ? "Setting up sync…"
-        : label);
+    : state === "syncing" && syncStatus?.claimingIdentity
+      ? "Setting up sync…"
+      : label);
   const dot: DotKind = saveFailed || syncStatus?.updateRequired
     ? "attention"
-    : shownUnsaved
-      ? "working"
-      : state
-        ? SYNC_DOT[state]
-        : "waiting";
+    : state
+      ? SYNC_DOT[state]
+      : "waiting";
   // A state that needs the person says so in words beside the dot.
   const worded = dot === "attention" || (dot === "waiting" && state !== undefined);
   // Absent means this workspace has nothing to say about live delivery, so
@@ -119,7 +111,7 @@ export function WorkspaceSyncStatus({ syncStatus, failedSaves, unsaved }: {
     <>
       <span
         data-testid="sync-status"
-        data-state={saveFailed ? "save-failed" : shownUnsaved ? "unsaved" : state ?? "unknown"}
+        data-state={saveFailed ? "save-failed" : state ?? "unknown"}
         role="status"
         aria-label={shownLabel}
         title={shownLabel}

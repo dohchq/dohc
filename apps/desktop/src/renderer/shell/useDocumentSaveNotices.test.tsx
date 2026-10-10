@@ -41,7 +41,7 @@ function Shell(props: { workspaceId?: string; children?: ReactNode }) {
   const failedSaves = useDocumentSaveNotices({ workspaceId, report: shell.reportShellFailure, clear: shell.clearIdentity, open });
   return (
     <>
-      <WorkspaceSyncStatus syncStatus={SYNCED} failedSaves={failedSaves} unsaved={false} />
+      <WorkspaceSyncStatus syncStatus={SYNCED} failedSaves={failedSaves} />
       <ConnectionNotices
         notices={shell.shellErrors.map((error) => ({
           id: error.id,

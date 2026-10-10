@@ -4788,7 +4788,6 @@ export function DesktopWorkspaceShell(props: {
         setQuickOpenOpen={setQuickOpenOpen}
         syncStatus={syncStatus}
         failedSaves={failedSaves}
-        unsaved={anyTabDirty}
         showWorkbenchMenu={showWorkbenchMenu}
         agentActive={agentActive}
         wb={wb}

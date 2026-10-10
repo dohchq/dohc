@@ -2,6 +2,7 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ViewActions } from "./fileInspectorUi";
+import { StateMark, type SaveStateKey } from "./ui/StateMark";
 import { EditorTabs } from "./workbench/EditorTabs";
 import { EditorGroupFrame } from "./workbench/tabRowActions";
 
@@ -11,7 +12,14 @@ const noop = () => undefined;
 const NO_RECOVERY: ReadonlySet<string> = new Set();
 
 // One editor group as the shell lays it out: its tab row, then the view.
-function Group(props: { id: string; groupNumber: number; path: string; onShare?: () => void; view?: boolean }) {
+function Group(props: {
+  id: string;
+  groupNumber: number;
+  path: string;
+  onShare?: () => void;
+  view?: boolean;
+  saveState?: SaveStateKey;
+}) {
   return (
     <div data-testid={`group-${props.id}`}>
       <EditorGroupFrame
@@ -37,7 +45,15 @@ function Group(props: { id: string; groupNumber: number; path: string; onShare?:
           {props.view === false ? null : (
             <ViewActions
               onShare={props.onShare}
-              status={<span data-testid={`status-${props.id}`}>Saving…</span>}
+              status={
+                <StateMark
+                  testId={`status-${props.id}`}
+                  truncate
+                  quietWhenCalm
+                  state={props.saveState ?? "file-locked"}
+                  shown={props.saveState ?? "file-locked"}
+                />
+              }
               actions={<button type="button">Source</button>}
             />
           )}
@@ -59,7 +75,7 @@ describe("ViewActions", () => {
     const actions = within(row).getByTestId("editor-tab-actions");
     const share = within(actions).getByRole("button", { name: "Share file" });
     const toggle = within(actions).getByRole("button", { name: "Source" });
-    expect(within(actions).getByTestId("status-left").textContent).toBe("Saving…");
+    expect(within(actions).getByTestId("status-left").textContent).toBe("File in use");
     expect(screen.getByTestId("page-left").childElementCount).toBe(0);
 
     // Keyboard order: the tabs, then the actions in the order the header
@@ -68,6 +84,32 @@ describe("ViewActions", () => {
     expect(precedes(tablist, share)).toBe(true);
     expect(precedes(share, toggle)).toBe(true);
     expect(precedes(toggle, within(row).getByTestId("create-editor-group-right"))).toBe(true);
+  });
+
+  // The titlebar dot shows saved and saving, so the row says them only to
+  // screen readers, and typing never changes what the row draws. A held
+  // file or a failed save keeps its words.
+  it.each(["saved", "saving", "saved-to-host", "pending-share"] as const)(
+    "keeps a calm %s state for screen readers only, with no box beside Share",
+    (saveState) => {
+      render(<Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} saveState={saveState} />);
+      const mark = screen.getByTestId("status-left");
+      expect(mark.classList.contains("sr-only")).toBe(true);
+      expect(mark.dataset.state).toBe(saveState);
+      // The status box draws nothing, so the row is as wide as a loading one.
+      expect(mark.parentElement?.className.split(" ")[0]).toBe("contents");
+    },
+  );
+
+  it.each([
+    ["file-locked", "File in use"],
+    ["error", "Couldn't save"],
+    ["changed-on-disk", "Changed on disk"],
+  ] as const)("shows a %s state in words beside Share", (saveState, words) => {
+    render(<Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} saveState={saveState} />);
+    const mark = screen.getByTestId("status-left");
+    expect(mark.classList.contains("sr-only")).toBe(false);
+    expect(mark.textContent).toBe(words);
   });
 
   it("leaves the row's action slot empty for a tab with no actions", () => {

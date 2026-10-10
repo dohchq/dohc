@@ -892,7 +892,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
           }
         }}
         aria-label={`Editor group ${props.groupNumber} tabs`}
-        className="dohc-tab-strip flex min-w-0 flex-1 overflow-x-auto overflow-y-hidden"
+        className="dohc-tab-strip flex min-w-0 flex-auto overflow-x-auto overflow-y-hidden"
       >
         {props.tabs.map((tab) => (
           <Tab
@@ -916,11 +916,14 @@ export const EditorTabs = memo(function EditorTabs(props: {
         <div aria-hidden className="min-w-4 flex-1 border-b border-line" />
       </div>
       {/* The open document's actions, after the tabs in the keyboard order
-          as they were after the tab row. Empty for a tab with none. */}
+          as they were after the tab row. Empty for a tab with none. When
+          room runs out they give way before the tab names (a far higher
+          shrink factor than the tab list's), and stop at their buttons and
+          the status's 25px minimum, their automatic minimum width. */}
       <div
         ref={props.actionsRef}
         data-testid="editor-tab-actions"
-        className="flex min-w-0 max-w-[60%] shrink-0 items-center justify-end gap-1 border-b border-line pl-2 pr-1 empty:hidden"
+        className="flex shrink-[1000] items-center justify-end gap-1 border-b border-line pl-2 pr-1 empty:hidden"
       />
       {props.onCloseGroup ? (
         <button

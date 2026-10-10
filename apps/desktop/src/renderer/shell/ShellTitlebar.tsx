@@ -9,8 +9,6 @@ import { toggleChats, type WorkbenchState } from "../workbench/workbenchState";
 export function ShellTitlebar(props: {
   // The version picker, when this workspace records versions.
   version?: ReactNode;
-  // Whether any open editor holds edits that are not saved here.
-  unsaved: boolean;
   workspace: WorkspaceSummary;
   workspaces: WorkspaceSummary[];
   onSwitchWorkspace: (workspace: WorkspaceSummary) => void;
@@ -47,7 +45,7 @@ export function ShellTitlebar(props: {
       onManageWorkspaces={props.onManageWorkspaces ? manageWorkspaces : undefined}
       onQuickOpen={() => setQuickOpenOpen(true)}
       version={props.version}
-      workspaceStatus={<WorkspaceSyncStatus syncStatus={syncStatus} failedSaves={failedSaves} unsaved={props.unsaved} />}
+      workspaceStatus={<WorkspaceSyncStatus syncStatus={syncStatus} failedSaves={failedSaves} />}
       onWorkspaceContextMenu={() => void showWorkbenchMenu("status")}
       agentActive={agentActive}
       primarySidebar={{

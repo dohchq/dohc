@@ -289,7 +289,7 @@ export function DrawingView({
           <StateMark
             testId="drawing-save-state"
             truncate
-            quietWhenSettled
+            quietWhenCalm
             state={drawingChipState}
             shown={drawingShown}
             title={typeof drawingChipState !== "string" && drawingChipState.kind === "error" && engine.saveError ? engine.saveError : undefined}

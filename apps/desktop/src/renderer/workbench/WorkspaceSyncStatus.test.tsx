@@ -5,8 +5,8 @@ import { WorkspaceSyncStatus } from "./WorkspaceSyncStatus";
 import type { SyncStatusResult } from "../../ipc/bridgeContract";
 
 afterEach(cleanup);
-function renderStatus(props: { syncStatus: SyncStatusResult | null; failedSaves?: number; unsaved?: boolean }) {
-  return render(<WorkspaceSyncStatus failedSaves={0} unsaved={false} {...props} />);
+function renderStatus(props: { syncStatus: SyncStatusResult | null; failedSaves?: number }) {
+  return render(<WorkspaceSyncStatus failedSaves={0} {...props} />);
 }
 
 // The dot's kind: saved, working, waiting or attention.
@@ -53,9 +53,9 @@ describe("sync status surface", () => {
     const { rerender } = renderStatus({ syncStatus: { ...syncState("syncing"), claimingIdentity: true } });
     expect(screen.getByTestId("sync-status").textContent).toBe("Setting up sync…");
     expect(screen.getByTestId("sync-status").getAttribute("data-state")).toBe("syncing");
-    rerender(<WorkspaceSyncStatus syncStatus={{ ...syncState("sync-failed"), claimingIdentity: true }} failedSaves={0} unsaved={false} />);
+    rerender(<WorkspaceSyncStatus syncStatus={{ ...syncState("sync-failed"), claimingIdentity: true }} failedSaves={0} />);
     expect(screen.getByTestId("sync-status").textContent).toBe("Sync failed");
-    rerender(<WorkspaceSyncStatus syncStatus={syncState("syncing")} failedSaves={0} unsaved={false} />);
+    rerender(<WorkspaceSyncStatus syncStatus={syncState("syncing")} failedSaves={0} />);
     expect(screen.getByTestId("sync-status").textContent).toBe("Syncing…");
   });
 
@@ -84,7 +84,6 @@ describe("sync status surface", () => {
       <WorkspaceSyncStatus
         syncStatus={syncState("sync-failed", { cause: "unknown", detail: "Error: refused", sinceMs: 1, attempts: 1 })}
         failedSaves={0}
-        unsaved={false}
       />,
     );
     expect(screen.getByTestId("sync-status").textContent).toBe("Sync failed");
@@ -116,31 +115,13 @@ describe("sync status surface", () => {
     expect(worded()).toBe(false);
   });
 
-  // Edits an open editor has not saved yet: the dot stops saying saved.
-  it("names unsaved changes with a working ring, and says saved once they settle", () => {
-    const { rerender } = renderStatus({ syncStatus: syncState("synced"), unsaved: true });
+  // A sync pass is work in flight: a ring, its words kept for the name.
+  it("shows a sync pass as a ring and a lost server in words", () => {
+    const { rerender } = renderStatus({ syncStatus: syncState("syncing") });
     const status = screen.getByTestId("sync-status");
-    expect(status.getAttribute("data-state")).toBe("unsaved");
-    expect(status.getAttribute("aria-label")).toBe("Unsaved changes");
     expect(dotOf()).toBe("working");
     expect(worded()).toBe(false);
-
-    // A sync pass in flight does not hide edits that are not on disk.
-    rerender(<WorkspaceSyncStatus syncStatus={syncState("syncing")} failedSaves={0} unsaved />);
-    expect(status.getAttribute("data-state")).toBe("unsaved");
-
-    rerender(<WorkspaceSyncStatus syncStatus={syncState("synced")} failedSaves={0} unsaved={false} />);
-    expect(status.getAttribute("data-state")).toBe("synced");
-    expect(dotOf()).toBe("saved");
-  });
-
-  it("keeps a failed save, a conflict and a lost server ahead of unsaved changes", () => {
-    const { rerender } = renderStatus({ syncStatus: syncState("synced"), failedSaves: 1, unsaved: true });
-    const status = screen.getByTestId("sync-status");
-    expect(status.getAttribute("data-state")).toBe("save-failed");
-    rerender(<WorkspaceSyncStatus syncStatus={{ ...syncState("conflict"), conflictCount: 1 }} failedSaves={0} unsaved />);
-    expect(status.getAttribute("data-state")).toBe("conflict");
-    rerender(<WorkspaceSyncStatus syncStatus={syncState("cloud-disconnected")} failedSaves={0} unsaved />);
+    rerender(<WorkspaceSyncStatus syncStatus={syncState("cloud-disconnected")} failedSaves={0} />);
     expect(status.getAttribute("data-state")).toBe("cloud-disconnected");
     expect(dotOf()).toBe("waiting");
     expect(worded()).toBe(true);
@@ -158,10 +139,10 @@ describe("sync status surface", () => {
     expect(status.textContent).not.toContain("saved");
 
     // It stays through a sync pass, so the mark does not flicker to Syncing.
-    rerender(<WorkspaceSyncStatus syncStatus={syncState("syncing")} failedSaves={2} unsaved={false} />);
+    rerender(<WorkspaceSyncStatus syncStatus={syncState("syncing")} failedSaves={2} />);
     expect(status.textContent).toBe("Couldn't save 2 files");
 
-    rerender(<WorkspaceSyncStatus syncStatus={syncState("synced")} failedSaves={0} unsaved={false} />);
+    rerender(<WorkspaceSyncStatus syncStatus={syncState("synced")} failedSaves={0} />);
     expect(status.textContent).toBe("Local · saved");
     expect(status.getAttribute("data-state")).toBe("synced");
     expect(dotOf()).toBe("saved");
@@ -173,10 +154,10 @@ describe("sync status surface", () => {
     const status = screen.getByTestId("sync-status");
     expect(status.textContent).toBe("Conflict (1)");
     expect(status.getAttribute("data-state")).toBe("conflict");
-    rerender(<WorkspaceSyncStatus syncStatus={syncState("sync-failed")} failedSaves={1} unsaved={false} />);
+    rerender(<WorkspaceSyncStatus syncStatus={syncState("sync-failed")} failedSaves={1} />);
     expect(status.textContent).toBe("Sync failed");
     rerender(
-      <WorkspaceSyncStatus syncStatus={{ ...syncState("cloud-disconnected"), updateRequired: "app" }} failedSaves={1} unsaved={false} />,
+      <WorkspaceSyncStatus syncStatus={{ ...syncState("cloud-disconnected"), updateRequired: "app" }} failedSaves={1} />,
     );
     expect(status.textContent).toBe("Update dohc to sync");
     expect(dotOf()).toBe("attention");

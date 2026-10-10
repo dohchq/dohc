@@ -19,9 +19,12 @@ import { useTabRowActionsSlot } from "./workbench/tabRowActions";
 // Share; a view that has controls draws them, disabled, while it loads or
 // when it cannot open (DocumentControls). Share and the controls never
 // shrink. `status` (a save state that needs the person, "Opening…") sits
-// left of them and gives way first: its words can change width without
-// moving a control, and in a narrow pane it ends in an ellipsis. Outside an
-// editor group, as on the states page, they draw in a row of their own.
+// left of them and gives way first, before the tab names: its words can
+// change width without moving a control, and in a narrow pane it ends in an
+// ellipsis. A status with nothing visible, such as a calm save state kept
+// for screen readers, draws no box, so loading, ready and failed views take
+// the same width. Outside an editor group, as on the states page, they draw
+// in a row of their own.
 export function ViewActions(props: {
   onShare?: () => void;
   status?: ReactNode;
@@ -30,9 +33,17 @@ export function ViewActions(props: {
   const slot = useTabRowActionsSlot();
   const content = (
     <>
-      {/* 25px: the widest mark (12px), its gap and an ellipsis. */}
+      {/* 25px: the widest mark (12px), its gap and an ellipsis. A grid of
+          minmax(0, max-content) columns, so its words set how wide it can
+          grow but not how narrow it can get: the row shrinks it to 25px
+          before any tab name gives way. */}
       {props.status ? (
-        <div data-view-status="" className="flex min-w-[25px] shrink items-center justify-end gap-2 empty:min-w-0">{props.status}</div>
+        <div
+          data-view-status=""
+          className="contents [&:has(>:not(.sr-only))]:grid [&:has(>:not(.sr-only))]:min-w-[25px] auto-cols-[minmax(0,max-content)] grid-flow-col items-center justify-end gap-2"
+        >
+          {props.status}
+        </div>
       ) : null}
       {props.onShare ? (
         <IconButton

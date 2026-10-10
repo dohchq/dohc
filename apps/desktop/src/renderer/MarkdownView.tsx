@@ -1960,7 +1960,7 @@ export function MarkdownView(props: {
             <StateMark
               testId="markdown-save-state"
               truncate
-              quietWhenSettled
+              quietWhenCalm
               state={engine.readOnlyWhileEditing || readOnlyCopy ? "read-only" : engineChipState}
               shown={engine.readOnlyWhileEditing || readOnlyCopy
                 ? orphanedDrafts.length > 0 ? "read-only-transition" : engine.readOnlyCause === "access-ended" ? "read-only" : "read-only-unavailable"
@@ -2143,7 +2143,7 @@ export function MarkdownView(props: {
                 opening, `editing` is always false, so the chip appears there
                 only when the state is not "saved". */}
             {editing || chipState !== "saved" ? (
-              <StateMark testId="markdown-save-state" truncate quietWhenSettled state={chipState} shown={chipState} title={chipState === "read-only" ? "Your access to this document ended." : undefined} />
+              <StateMark testId="markdown-save-state" truncate quietWhenCalm state={chipState} shown={chipState} title={chipState === "read-only" ? "Your access to this document ended." : undefined} />
             ) : null}
           </>
         }
