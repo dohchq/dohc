@@ -8,7 +8,7 @@ import { foldScene, insertElementRevision, setAppStateProperty } from "@dohc/exc
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
 import { createPhysicalWorkspaceRemoval } from "./physicalWorkspaceRemoval";
-import { hasRetainedLiveDraft, preserveLiveDraft, preserveUnsentLiveDraft, removeLiveDraftCopies, removeWorkspaceLiveDrafts } from "./liveDraftRecovery";
+import { hasRetainedLiveDraft, listLiveDraftRecovery, preserveLiveDraft, preserveUnsentLiveDraft, removeLiveDraftCopies, removeWorkspaceLiveDrafts } from "./liveDraftRecovery";
 const snapshotSha = (update: Uint8Array) => createHash("sha256").update(update).digest("hex");
 
 vi.mock("node:fs/promises", async importOriginal => {
@@ -34,11 +34,150 @@ it("finds retained drafts by workspace and object or path without blocking unrel
   expect(await hasRetainedLiveDraft(join(directory, "absent"), "workspace", "a.md", "object")).toBe(false);
 });
 
-it.each(["malformed", "incomplete", "unreadable"] as const)("refuses to prove a file safe with %s recovery state", async kind => {
+it.each(["malformed", "incomplete"] as const)("does not block restore with %s recovery state nobody can review", async kind => {
   const directory = await mkdtemp(join(tmpdir(), "dohc-restore-recovery-")); directories.push(directory);
   await writeFile(join(directory, `${"0".repeat(64)}.${kind === "incomplete" ? "tmp" : "json"}`), "{");
-  if (kind === "unreadable") vi.mocked(readFile).mockRejectedValueOnce(Object.assign(new Error("access denied"), {code: "EACCES"}));
-  await expect(hasRetainedLiveDraft(directory, "workspace", "a.md", "object")).rejects.toThrow();
+  expect(await hasRetainedLiveDraft(directory, "workspace", "a.md", "object")).toBe(false);
+});
+
+it.each(["half-written temp", "invalid path", "non-string update", "untracked path", "invalid CRDT"])("does not hide other drafts or fail dismissal beside a %s record", async kind => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-bad-recovery-")); directories.push(directory);
+  const update = new Uint8Array([0, 0]);
+  const draft = {path: "a.txt", objectId: "object", contentKind: "plaintext" as const, text: "seen", update};
+  await preserveLiveDraft(directory, "workspace", draft);
+  await preserveLiveDraft(directory, "workspace", {...draft, text: "survivor"});
+  const bad = join(directory, `${"0".repeat(64)}.${kind === "half-written temp" ? "tmp" : "json"}`);
+  await writeFile(bad, kind === "half-written temp" ? '{"workspaceId":"workspace","path":"a.txt",' : JSON.stringify({
+    workspaceId: "workspace", objectId: "object", path: kind === "invalid path" ? 7 : kind === "untracked path" ? ".env" : "a.txt",
+    updateBase64: kind === "non-string update" ? 7 : "AAE=",
+  }));
+  const records = await listLiveDraftRecovery(directory, "workspace");
+  expect(records.map(record => record.text).sort()).toEqual(["seen", "survivor"]);
+  const seen = records.find(record => record.text === "seen")!;
+  const after = await removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(update), Date.now(), "a.txt", seen.recordId);
+  expect(after.map(record => record.text)).toEqual(["survivor"]);
+  expect(await hasRetainedLiveDraft(directory, "workspace", "a.txt", "object")).toBe(true);
+  await removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(update), Date.now(), "a.txt", after[0]!.recordId);
+  expect(await hasRetainedLiveDraft(directory, "workspace", "a.txt", "object")).toBe(false);
+  expect(await readdir(directory)).toEqual([bad.slice(directory.length + 1)]);
+});
+
+it.each(["EBUSY", "EACCES", "EMFILE"])("reports %s as a read failure and refuses to prove restore safe", async code => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-recovery-io-")); directories.push(directory);
+  await preserveLiveDraft(directory, "workspace", {path: "a.txt", objectId: "object", contentKind: "plaintext", text: "unseen typing", update: new Uint8Array([0, 0])});
+  const error = Object.assign(new Error("temporary read failure"), {code});
+  vi.mocked(readFile).mockRejectedValue(error);
+  await expect(listLiveDraftRecovery(directory, "workspace")).rejects.toBe(error);
+  await expect(hasRetainedLiveDraft(directory, "workspace", "a.txt", "object")).rejects.toBe(error);
+  await expect(removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(new Uint8Array([0, 0])), Date.now(), "a.txt")).rejects.toBe(error);
+  expect(await readdir(directory)).toHaveLength(1);
+});
+
+it("includes a draft saved after the initial dismiss scan in the reply", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-dismiss-newer-")); directories.push(directory);
+  const draft = {path: "a.txt", objectId: "object", contentKind: "plaintext" as const, text: "seen", update: new Uint8Array([0, 0])};
+  await preserveLiveDraft(directory, "workspace", draft);
+  const seen = (await listLiveDraftRecovery(directory, "workspace"))[0]!;
+  const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+  vi.mocked(rm).mockImplementationOnce(async (path, options) => {
+    await actual.rm(path, options);
+    await preserveLiveDraft(directory, "workspace", {...draft, text: "saved during dismiss"});
+  });
+  await expect(removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(draft.update), Date.now(), "a.txt", seen.recordId))
+    .resolves.toEqual([expect.objectContaining({text: "saved during dismiss"})]);
+});
+
+it("skips an active half-written temporary record until preserve completes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-active-recovery-")); directories.push(directory);
+  const draft = {path: "a.txt", objectId: "object", contentKind: "plaintext" as const, text: "seen", update: new Uint8Array([0, 0])};
+  await preserveLiveDraft(directory, "workspace", draft);
+  const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+  let release!: () => void, started!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const writing = new Promise<void>(resolve => { started = resolve; });
+  vi.mocked(writeFile).mockImplementationOnce(async (path, content, options) => {
+    await actual.writeFile(path, '{"workspaceId":"workspace","path":"other.txt",', options);
+    started(); await gate;
+    await actual.writeFile(path, content, {encoding: "utf8"});
+  });
+  const preserving = preserveLiveDraft(directory, "workspace", {...draft, path: "other.txt", objectId: "other", text: "active copy"});
+  try {
+    await writing;
+    const records = await listLiveDraftRecovery(directory, "workspace");
+    expect(records.map(record => record.text)).toEqual(["seen"]);
+    expect(await hasRetainedLiveDraft(directory, "workspace", "other.txt", "other")).toBe(false);
+    await expect(removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(draft.update), Date.now(), "a.txt", records[0]!.recordId)).resolves.toEqual([]);
+  } finally { release(); await preserving; }
+  expect((await listLiveDraftRecovery(directory, "workspace")).map(record => record.text)).toEqual(["active copy"]);
+});
+
+it("falls back to known survivors when a disk read fails after deletion", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-dismiss-reply-")); directories.push(directory);
+  const draft = {path: "a.txt", objectId: "object", contentKind: "plaintext" as const, text: "seen", update: new Uint8Array([0, 0])};
+  await preserveLiveDraft(directory, "workspace", draft);
+  await preserveLiveDraft(directory, "workspace", {...draft, text: "survivor"});
+  const records = await listLiveDraftRecovery(directory, "workspace");
+  const seen = records.find(record => record.text === "seen")!;
+  const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+  vi.mocked(rm).mockImplementationOnce(async (path, options) => {
+    await actual.rm(path, options);
+    vi.mocked(readFile).mockRejectedValue(new Error("reading stopped after delete"));
+  });
+  await expect(removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(draft.update), Date.now(), "a.txt", seen.recordId))
+    .resolves.toEqual([expect.objectContaining({text: "survivor"})]);
+  expect(await readdir(directory)).toHaveLength(1);
+});
+
+it("reports a projection import failure without treating the valid record as absent", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-recovery-import-")); directories.push(directory);
+  await preserveLiveDraft(directory, "workspace", {path: "a.md", objectId: "object", remoteWorkspaceId: "owner", update: new Uint8Array([0, 0])});
+  const error = new Error("projection import failed");
+  vi.resetModules();
+  vi.doMock("@dohc/ydoc-projection", () => {throw error;});
+  try {
+    const recovery = await import("./liveDraftRecovery");
+    await expect(recovery.listLiveDraftRecovery(directory, "workspace")).rejects.toThrow();
+    await expect(recovery.hasRetainedLiveDraft(directory, "workspace", "a.md", "object")).rejects.toThrow();
+  } finally {vi.doUnmock("@dohc/ydoc-projection"); vi.resetModules();}
+});
+
+it.each(["richdoc", "scene"] as const)("skips one %s record whose projection throws without hiding other drafts or failing dismiss", async kind => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-recovery-projection-")); directories.push(directory);
+  const draft = {path: "a.txt", objectId: "object", contentKind: "plaintext" as const, text: "seen", update: new Uint8Array([0, 0])};
+  await preserveLiveDraft(directory, "workspace", draft);
+  await preserveLiveDraft(directory, "workspace", {...draft, text: "survivor"});
+  const bad = new Y.Doc();
+  bad.getText("badContent").insert(0, "invalid projection");
+  try {
+    const update = Y.encodeStateAsUpdate(bad);
+    await preserveLiveDraft(directory, "workspace", kind === "scene"
+      ? {path: "a.txt", objectId: "object", contentKind: "scene", update}
+      : {path: "a.txt", objectId: "object", remoteWorkspaceId: "owner", update});
+  } finally {bad.destroy();}
+  const scene = await vi.importActual<typeof import("@dohc/excalidraw-scene")>("@dohc/excalidraw-scene");
+  const markdown = await vi.importActual<typeof import("@dohc/ydoc-projection")>("@dohc/ydoc-projection");
+  const project = () => {throw new Error("invalid document content");};
+  vi.resetModules();
+  if (kind === "scene") vi.doMock("@dohc/excalidraw-scene", () => ({...scene, exportPortableScene: project}));
+  else vi.doMock("@dohc/ydoc-projection", () => ({...markdown, yDocToMarkdown: project}));
+  try {
+    const recovery = await import("./liveDraftRecovery");
+    const records = await recovery.listLiveDraftRecovery(directory, "workspace");
+    expect(records.map(record => record.text).sort()).toEqual(["seen", "survivor"]);
+    const seen = records.find(record => record.text === "seen")!;
+    const after = await recovery.removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(draft.update), Date.now(), "a.txt", seen.recordId);
+    expect(after.map(record => record.text)).toEqual(["survivor"]);
+    await recovery.removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(draft.update), Date.now(), "a.txt", after[0]!.recordId);
+    expect(await recovery.hasRetainedLiveDraft(directory, "workspace", "a.txt", "object")).toBe(false);
+    expect(await readdir(directory)).toHaveLength(1);
+  } finally {vi.doUnmock("@dohc/excalidraw-scene"); vi.doUnmock("@dohc/ydoc-projection"); vi.resetModules();}
+});
+
+it("skips a record removed during the scan", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-recovery-removed-")); directories.push(directory);
+  await preserveLiveDraft(directory, "workspace", {path: "a.txt", objectId: "object", contentKind: "plaintext", text: "already removed", update: new Uint8Array([0, 0])});
+  vi.mocked(readFile).mockRejectedValue(Object.assign(new Error("removed"), {code: "ENOENT"}));
+  await expect(listLiveDraftRecovery(directory, "workspace")).resolves.toEqual([]);
 });
 
 it("ignores another workspace's malformed and temporary records", async () => {
@@ -64,7 +203,7 @@ it("stops blocking a path after its recovery is discarded and preserves other dr
   const draft = {path: "a.md", objectId: "object", remoteWorkspaceId: "owner", update: new Uint8Array([0, 0])};
   await preserveLiveDraft(directory, "workspace", draft);
   await preserveLiveDraft(directory, "other", draft);
-  await removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(draft.update), Date.now());
+  await removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(draft.update), Date.now(), "a.md");
   expect(await hasRetainedLiveDraft(directory, "workspace", "a.md", "object")).toBe(false);
   expect(await hasRetainedLiveDraft(directory, "other", "a.md", "object")).toBe(true);
 });
@@ -75,7 +214,7 @@ it("keeps recovery written after a dismissal request", async () => {
   const file = join(directory, (await readdir(directory))[0]!);
   const newer = new Date(Date.now() + 1000);
   await utimes(file, newer, newer);
-  await removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(new Uint8Array([0, 0])), Date.now());
+  await removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(new Uint8Array([0, 0])), Date.now(), "a.md");
   expect(await hasRetainedLiveDraft(directory, "workspace", "a.md", "object")).toBe(true);
 });
 
@@ -85,17 +224,51 @@ it("discards only the captured snapshot by object after a rename, preserving uns
   const draft = {path: "old.md", objectId: "object", remoteWorkspaceId: "owner", update};
   await preserveLiveDraft(directory, "workspace", draft);
   await preserveLiveDraft(directory, "workspace", {...draft, path: "renamed.md"});
-  await preserveLiveDraft(directory, "workspace", {...draft, update: new Uint8Array([0, 1])});
+  const unseen = markdownToYDoc("Unseen copy\n");
+  const unseenUpdate = Y.encodeStateAsUpdate(unseen);
+  unseen.destroy();
+  await preserveLiveDraft(directory, "workspace", {...draft, update: unseenUpdate});
   await preserveLiveDraft(directory, "workspace", {...draft, objectId: "replacement"});
   await preserveLiveDraft(directory, "other", draft);
-  await removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(update), Date.now());
+  const remaining = await removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(update), Date.now(), "renamed.md");
+  expect(remaining.map(record => record.text)).toEqual(["Unseen copy"]);
   const records = await Promise.all((await readdir(directory)).map(async name => JSON.parse(await readFile(join(directory, name), "utf8"))));
   expect(records).toHaveLength(3);
   expect(records).toEqual(expect.arrayContaining([
-    expect.objectContaining({workspaceId: "workspace", objectId: "object", updateBase64: "AAE="}),
+    expect.objectContaining({workspaceId: "workspace", objectId: "object", updateBase64: Buffer.from(unseenUpdate).toString("base64")}),
     expect.objectContaining({workspaceId: "workspace", objectId: "replacement"}),
     expect.objectContaining({workspaceId: "other"}),
   ]));
+});
+
+it("returns every remaining record for the object or path, and discards a listed record exactly", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-listed-recovery-")); directories.push(directory);
+  const seen = new Y.Doc(), unseen = new Y.Doc();
+  try {
+    seen.getText("plainText").insert(0, "seen"); unseen.getText("plainText").insert(0, "unseen");
+    const seenUpdate = Y.encodeStateAsUpdate(seen), unseenUpdate = Y.encodeStateAsUpdate(unseen);
+    const draft = {path: "a.txt", objectId: "object", contentKind: "plaintext" as const, text: "seen", update: seenUpdate};
+    await preserveLiveDraft(directory, "workspace", draft);
+    await preserveLiveDraft(directory, "workspace", {...draft, text: "unseen", update: unseenUpdate});
+    await preserveLiveDraft(directory, "workspace", {...draft, path: "renamed.txt", text: "unseen", update: unseenUpdate});
+    await preserveLiveDraft(directory, "workspace", {...draft, objectId: "replacement", text: "replacement"});
+    await preserveLiveDraft(directory, "workspace", {...draft, path: "other.txt", objectId: "other"});
+    await preserveLiveDraft(directory, "other-workspace", draft);
+    const remaining = await removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(seenUpdate), Date.now(), "a.txt");
+    expect(remaining).toHaveLength(3);
+    expect(remaining).toEqual(expect.arrayContaining([
+      expect.objectContaining({path: "a.txt", objectId: "object", text: "unseen"}),
+      expect.objectContaining({path: "renamed.txt", objectId: "object", text: "unseen"}),
+      expect.objectContaining({path: "a.txt", objectId: "replacement", text: "replacement"}),
+    ]));
+    const target = remaining.find(record => record.path === "a.txt" && record.objectId === "object")!;
+    const after = await removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(unseenUpdate), Date.now(), "a.txt", target.recordId);
+    expect(after).toHaveLength(2);
+    expect(after.some(record => record.recordId === target.recordId)).toBe(false);
+    expect(after.some(record => record.path === "renamed.txt")).toBe(true);
+    expect(await hasRetainedLiveDraft(directory, "other-workspace", "a.txt", "object")).toBe(true);
+    expect(await listLiveDraftRecovery(directory, "workspace")).toHaveLength(3);
+  } finally { seen.destroy(); unseen.destroy(); }
 });
 
 it("keeps a complete recovery when a repeated snapshot write fails after partial output", async () => {
@@ -130,6 +303,7 @@ it.each(["plaintext", "richdoc"] as const)("preserves faithful %s text and exact
     const stored = JSON.parse(await readFile(join(directory, names[0]!), "utf8"));
     expect(stored).toMatchObject({ workspaceId: "local-workspace", path: "notes/plan.md", objectId: "object", text: projection });
     expect(stored).not.toHaveProperty("remoteWorkspaceId");
+    expect(await listLiveDraftRecovery(directory, "local-workspace")).toEqual([expect.objectContaining({text: projection, objectId: "object"})]);
     const recovered = new Y.Doc();
     try {
       Y.applyUpdate(recovered, Buffer.from(stored.updateBase64, "base64"));
@@ -159,6 +333,8 @@ it("preserves a scene as an exact CRDT recovery without projecting text", async 
     expect(stored).not.toHaveProperty("text");
     Y.applyUpdate(recovered, Buffer.from(stored.updateBase64, "base64"));
     expect(foldScene(recovered)).toEqual({elements: [drawing], appState: {viewBackgroundColor: "#ffffff"}, assets: {}});
+    const listed = await listLiveDraftRecovery(directory, "workspace");
+    expect(JSON.parse(listed[0]!.text)).toMatchObject({type: "excalidraw", elements: [expect.objectContaining({id: "rectangle", x: 42, y: 17})]});
   } finally {doc.destroy(); recovered.destroy();}
 });
 

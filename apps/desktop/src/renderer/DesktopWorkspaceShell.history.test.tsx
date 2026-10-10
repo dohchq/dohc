@@ -13,6 +13,31 @@ import { textEditorContent } from "./FileInspector.editor-fixture";
 import { WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, storedTabs, makeBridge, renderShell, SHARE_STATUS, SHARE_VIEW, makeShareBridge, settleShareView } from "./DesktopWorkspaceShell.testHarness";
 
 describe("history page", () => {
+  it("shows a failed file read in a toast and Notices while history stays available", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const failedStatus = { ...SYNC_STATUS, fileObservationFailure: "read-failed" as const };
+    bridge.openWorkspace = vi.fn(async () => failedStatus);
+    bridge.getSyncStatus = vi.fn(async () => failedStatus);
+    renderShell(bridge);
+    const message = "dohc could not read file changes for this workspace.";
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(message);
+    expect(within(toast).getByRole("button", { name: /Copy/ })).toBeTruthy();
+    expect(toast.textContent).not.toContain("Restart");
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByRole("dialog", { name: "Notices" }).textContent).toContain(message);
+    await userEvent.click(within(screen.getByRole("dialog", { name: "Notices" })).getByRole("button", { name: "Try again" }));
+    expect(bridge.retryFileObservation).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId });
+    expect(screen.queryByTestId("notice-history-recording-unavailable")).toBeNull();
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.click(screen.getByTestId("activity-history"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalled());
+    expect(screen.queryByTestId("history-off-placeholder")).toBeNull();
+    bridge.getSyncStatus.mockResolvedValue(SYNC_STATUS);
+    act(() => bridge.emitWorkspaceActivity());
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await waitFor(() => expect(screen.getByRole("dialog", { name: "Notices" }).textContent).not.toContain(message));
+  });
   // The recorder failed to build. Without the status override the shell
   // mounts the engine timeline, whose every listEngineMoments call can only
   // error. Main's status gates the surface, and the engine fetch must never

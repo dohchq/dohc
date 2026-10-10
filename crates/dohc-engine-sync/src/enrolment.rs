@@ -250,7 +250,7 @@ macro_rules! head_export_exclusions_sql {
 
 const COVERED_HEADS_SQL: &str = concat!(
     "SELECT s.latest_moment_id,s.version_id,s.object_id,s.blob_sha256,d.content_kind, \
-                     d.head_update_seq,d.head_snapshot_seq FROM snapshots s JOIN ydoc_docs d \
+                     d.head_update_seq,d.head_snapshot_seq,d.lineage_claim_id FROM snapshots s JOIN ydoc_docs d \
                      ON d.workspace_id=s.workspace_id AND d.version_id=s.version_id \
                        AND d.object_id=s.object_id \
                    JOIN moments h ON h.workspace_id=s.workspace_id \
@@ -263,9 +263,28 @@ const COVERED_HEADS_SQL: &str = concat!(
                      AND d.lineage_claim_status != 'unclaimed' \
                      AND d.lineage_parent_claim_id IS NULL AND d.base_origin_id = ( \
                        SELECT origin_id FROM sync_identity WHERE workspace_id=?1) \
-                     AND (d.export_attempt_moment_id IS NOT s.latest_moment_id \
+                     AND CASE WHEN d.export_attempt_moment_id IS NOT s.latest_moment_id \
                        OR d.export_attempt_update_seq IS NOT d.head_update_seq \
-                       OR d.export_attempt_snapshot_seq IS NOT d.head_snapshot_seq) \
+                       OR d.export_attempt_snapshot_seq IS NOT d.head_snapshot_seq \
+                       OR d.export_attempt_lineage_claim_id IS NOT d.lineage_claim_id \
+                       THEN 1 WHEN d.export_wait_asset_sha256 IS NULL THEN 0 \
+                         WHEN NOT EXISTS (SELECT 1 FROM binary_blobs waiting_blob \
+                           WHERE waiting_blob.sha256=d.export_wait_asset_sha256) THEN 0 \
+                         WHEN d.export_wait_asset_path IS NULL THEN 1 \
+                         ELSE EXISTS (SELECT 1 FROM path_aliases a JOIN snapshots asset \
+                           ON asset.workspace_id=a.workspace_id AND asset.version_id=a.version_id \
+                             AND asset.object_id=a.object_id \
+                           WHERE a.workspace_id=d.workspace_id AND a.version_id=d.version_id \
+                             AND a.path=d.export_wait_asset_path AND asset.content_kind='binary' \
+                             AND asset.binary_sha256=d.export_wait_asset_sha256 \
+                           UNION ALL ",
+    crate::ydoc_apply::retired_scene_asset_sql!(
+        "d.workspace_id",
+        "d.version_id",
+        "d.export_wait_asset_path",
+        "d.export_wait_asset_sha256"
+    ),
+    ") END \
                      AND ((d.settled_update_seq=d.head_update_seq \
                        AND d.last_settled_sha=s.blob_sha256) OR ( \
                        d.last_settled_sha IS NULL AND d.seed_source_sha256=s.blob_sha256 \
@@ -304,7 +323,9 @@ pub(crate) fn export_covered_heads_in_tx(
     leases: &dyn LeaseProbe,
 ) -> Result<(), SyncError> {
     let candidates = {
-        let mut statement = tx.prepare(COVERED_HEADS_SQL).map_err(SyncError::corrupt)?;
+        let mut statement = tx
+            .prepare_cached(COVERED_HEADS_SQL)
+            .map_err(SyncError::corrupt)?;
         statement
             .query_map([workspace_id], |row| {
                 Ok((
@@ -315,13 +336,16 @@ pub(crate) fn export_covered_heads_in_tx(
                     row.get::<_, String>(4)?,
                     row.get::<_, i64>(5)?,
                     row.get::<_, i64>(6)?,
+                    row.get::<_, String>(7)?,
                 ))
             })
             .map_err(SyncError::corrupt)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(SyncError::corrupt)?
     };
-    for (moment_id, version_id, object_id, sha, kind, update_seq, snapshot_seq) in candidates {
+    for (moment_id, version_id, object_id, sha, kind, update_seq, snapshot_seq, lineage_claim_id) in
+        candidates
+    {
         let key = DocKey {
             workspace_id: workspace_id.to_owned(),
             version_id,
@@ -330,12 +354,13 @@ pub(crate) fn export_covered_heads_in_tx(
         if leases.is_live(&key) {
             continue;
         }
-        // Retry only when the artifact or durable document head changes. Keep
-        // the attempt in this transaction so rollback cannot suppress a retry.
+        // Keep attempts and asset waits in this transaction so rollback
+        // cannot suppress a retry.
         tx.execute(
             "UPDATE ydoc_docs SET export_attempt_moment_id=?4,export_attempt_update_seq=?5, \
-             export_attempt_snapshot_seq=?6 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-            params![workspace_id, key.version_id, key.object_id, moment_id, update_seq, snapshot_seq],
+             export_attempt_snapshot_seq=?6,export_attempt_lineage_claim_id=?7, \
+             export_wait_asset_sha256=NULL,export_wait_asset_path=NULL WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![workspace_id, key.version_id, key.object_id, moment_id, update_seq, snapshot_seq, lineage_claim_id],
         ).map_err(SyncError::persist)?;
         let doc = match dohc_engine_collab::load_doc_in(tx, &key) {
             Ok(doc) => doc,
@@ -346,19 +371,38 @@ pub(crate) fn export_covered_heads_in_tx(
             continue;
         };
         let projection = if kind == dohc_engine_collab::ContentKind::Scene {
-            crate::project_ydoc_with_store(tx, &key, &doc, kind)
+            crate::ydoc_apply::project_scene_with_store(tx, &key, &doc)
         } else {
-            doc.project(kind).map_err(|error| match error {
-                dohc_engine_collab::CollabError::Storage(error) => SyncError::Storage(error),
-                _ => SyncError::InvalidInput {
-                    reason: "export projection is unavailable",
-                },
-            })
+            doc.project(kind)
+                .map_err(|error| match error {
+                    dohc_engine_collab::CollabError::Storage(error) => SyncError::Storage(error),
+                    _ => SyncError::InvalidInput {
+                        reason: "export projection is unavailable",
+                    },
+                })
+                .map_err(crate::ydoc_apply::SceneProjectionError::from)
         };
         let projection = match projection {
             Ok(projection) => projection,
-            Err(error @ SyncError::Storage(_)) => return Err(error),
-            Err(_) => continue,
+            Err(failure) => {
+                if let SyncError::Storage(_) = failure.error {
+                    return Err(failure.error);
+                }
+                if let Some(wait) = failure.waiting_asset {
+                    let (path, sha256) = match wait {
+                        crate::ydoc_apply::SceneAssetWait::Head { path, sha256 } => {
+                            (Some(path), sha256)
+                        }
+                        crate::ydoc_apply::SceneAssetWait::Blob { sha256 } => (None, sha256),
+                    };
+                    tx.execute(
+                        "UPDATE ydoc_docs SET export_wait_asset_path=?4,export_wait_asset_sha256=?5 \
+                         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                        params![workspace_id, key.version_id, key.object_id, path, sha256],
+                    ).map_err(SyncError::persist)?;
+                }
+                continue;
+            }
         };
         let mut projection = projection.content;
         if kind == dohc_engine_collab::ContentKind::Richdoc
@@ -2754,30 +2798,18 @@ mod tests {
         seed_retained_artifact_as(&mut store, "- parent\n  - nested\n", ContentKind::Richdoc);
         mark_head_settled(&mut store);
         enroll(&mut store).expect("enroll unprojectable seed");
-        store.write_with(&NoFaults, |tx| {
-            tx.execute_batch("CREATE TABLE export_attempt_test(count INTEGER NOT NULL); \
-                INSERT INTO export_attempt_test VALUES(0); \
-                CREATE TRIGGER count_export_attempts AFTER UPDATE OF export_attempt_moment_id ON ydoc_docs \
-                BEGIN UPDATE export_attempt_test SET count=count+1; END;")
-                .map_err(SyncError::persist)?;
-            Ok::<_, SyncError>(())
-        }).expect("observe attempts");
+        observe_export_attempts(&mut store);
         sweep(&mut store, 101);
-        let count = |store: &EngineStore| {
-            store
-                .read_with(|conn| {
-                    conn.query_row("SELECT count FROM export_attempt_test", [], |r| {
-                        r.get::<_, i64>(0)
-                    })
-                })
-                .expect("attempt count")
-        };
-        assert_eq!(count(&store), 0, "unchanged failed projection is skipped");
+        assert_eq!(
+            export_attempt_count(&store),
+            0,
+            "unchanged failed projection is skipped"
+        );
         drop(store);
         let mut store = EngineStore::open(&path, 102).expect("reopen failed projection cache");
         sweep(&mut store, 102);
         assert_eq!(
-            count(&store),
+            export_attempt_count(&store),
             0,
             "restart keeps the failed projection skipped"
         );
@@ -2791,7 +2823,7 @@ mod tests {
             102,
         );
         sweep(&mut store, 103);
-        assert_eq!(count(&store), 1, "new moment is retried");
+        assert_eq!(export_attempt_count(&store), 1, "new moment is retried");
         store
             .write_with(&NoFaults, |tx| {
                 tx.execute(
@@ -2803,42 +2835,399 @@ mod tests {
             })
             .expect("advance document head");
         sweep(&mut store, 104);
-        assert_eq!(count(&store), 2, "new document sequence is retried");
+        assert_eq!(
+            export_attempt_count(&store),
+            2,
+            "new document sequence is retried"
+        );
         sweep(&mut store, 105);
-        assert_eq!(count(&store), 2, "unchanged failed head is skipped");
+        assert_eq!(
+            export_attempt_count(&store),
+            2,
+            "unchanged failed head is skipped"
+        );
+    }
+
+    fn export_pass(store: &mut EngineStore) {
+        store
+            .write_with(&NoFaults, |tx| {
+                export_covered_heads_in_tx(tx, "ws", &crate::NoLiveLeases)
+            })
+            .expect("export pass");
+    }
+
+    fn observe_export_attempts(store: &mut EngineStore) {
+        store.write_with(&NoFaults, |tx| {
+            tx.execute_batch("CREATE TABLE export_attempt_test(count INTEGER NOT NULL); \
+                INSERT INTO export_attempt_test VALUES(0); \
+                CREATE TRIGGER count_export_attempts AFTER UPDATE OF export_attempt_moment_id ON ydoc_docs \
+                WHEN NEW.export_attempt_moment_id IS NOT NULL \
+                BEGIN UPDATE export_attempt_test SET count=count+1; END;")
+                .map_err(SyncError::persist)
+        }).expect("observe attempts");
+    }
+
+    fn export_attempt_count(store: &EngineStore) -> i64 {
+        store
+            .read_with(|conn| {
+                conn.query_row("SELECT count FROM export_attempt_test", [], |row| {
+                    row.get(0)
+                })
+            })
+            .expect("attempt count")
     }
 
     #[test]
-    fn retained_scene_with_image_exports_the_hydrated_artifact_after_its_base() {
-        use dohc_engine_domain::WriteBinary;
-        use serde_json::json;
-        use std::collections::BTreeMap;
+    fn retained_export_retries_reseeded_lineage_on_the_same_head() {
         let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
-        let key = DocKey::new("ws", "main", "scene").expect("scene key");
-        let asset_sha = dohc_engine_storage::hex_sha256(&[1, 2, 3]);
-        let asset_ref =
-            dohc_engine_collab::scene_asset_ref("ws", "main", "scene", &asset_sha, "image/png")
-                .expect("asset ref");
+        seed_retained_artifact(&mut store);
+        let author: Option<String> = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT author_json FROM moments WHERE moment_id='seed-moment'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .expect("original author");
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO sync_relay_push_state(workspace_id,origin_id,pushed_seq) VALUES ('ws','local',-1)", [])
+                .map_err(SyncError::persist)?;
+            originate_unclaimed_ydoc_bases_in_tx(tx, "ws", &crate::NoLiveLeases, 100)?;
+            tx.execute("UPDATE moments SET author_json='invalid' WHERE moment_id='seed-moment'", [])
+                .map_err(SyncError::persist)?;
+            export_covered_heads_in_tx(tx, "ws", &crate::NoLiveLeases)
+        }).expect("attempt cannot journal malformed author");
+        observe_export_attempts(&mut store);
+        let coordinates = |store: &EngineStore| {
+            store
+                .read_with(|conn| {
+                    conn.query_row(
+            "SELECT export_attempt_moment_id,head_update_seq,head_snapshot_seq FROM ydoc_docs", [],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)),
+        )
+                })
+                .expect("head coordinates")
+        };
+        let before = coordinates(&store);
+        store
+            .write_with(&NoFaults, |tx| {
+                let lineage = dohc_engine_storage::put_binary_blob(tx, b"reseeded lineage")?;
+                tx.execute("UPDATE ydoc_docs SET lineage_claim_id=?1", [lineage])
+                    .map_err(SyncError::persist)?;
+                tx.execute(
+                    "UPDATE moments SET author_json=?1 WHERE moment_id='seed-moment'",
+                    [author],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("reseed lineage and restore journalable artifact");
+        export_pass(&mut store);
+        assert_eq!(
+            coordinates(&store),
+            before,
+            "moment and head sequences did not change"
+        );
+        assert_eq!(
+            export_attempt_count(&store),
+            1,
+            "new lineage retries unchanged head"
+        );
+        assert!(
+            local_ops(&store)
+                .iter()
+                .any(|(kind, p)| kind == "moment.append" && p["momentId"] == "seed-moment")
+        );
+        export_pass(&mut store);
+        assert_eq!(export_attempt_count(&store), 1);
+    }
+
+    #[test]
+    fn retained_export_retries_scene_after_missing_asset_arrives() {
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        seed_retained_scene(&mut store, "scene", false);
+        observe_export_attempts(&mut store);
+        enroll(&mut store).expect("enroll pending scene");
+        assert_eq!(export_attempt_count(&store), 1);
+        assert!(
+            !local_ops(&store)
+                .iter()
+                .any(|(kind, p)| kind == "moment.append" && p["objectId"] == "scene")
+        );
+        // Store and authorize the asset without changing the scene's document or moment.
+        let sha = dohc_engine_storage::hex_sha256(&[1, 2, 3]);
         VersionedTextStore::new(&mut store)
             .write_binary(
-                &WriteBinary {
+                &dohc_engine_domain::WriteBinary {
                     workspace_id: "ws".to_owned(),
                     version_id: "main".to_owned(),
                     object_id: "asset".to_owned(),
-                    path: asset_ref.clone(),
+                    path: dohc_engine_collab::scene_asset_ref(
+                        "ws",
+                        "main",
+                        "scene",
+                        &sha,
+                        "image/png",
+                    )
+                    .expect("ref"),
                     bytes: vec![1, 2, 3],
                     moment_id: "asset-moment".to_owned(),
                     metadata_origin: "api".to_owned(),
                     metadata_summary: None,
                     metadata_correlation_id: None,
                     author_json: None,
-                    now_ms: 10,
+                    now_ms: 101,
                     request_id: None,
                 },
                 &NoFaults,
             )
-            .expect("save image");
+            .expect("asset arrives");
+        sweep(&mut store, 102);
+        assert_eq!(
+            export_attempt_count(&store),
+            2,
+            "asset arrival retries the scene"
+        );
+        assert!(
+            local_ops(&store)
+                .iter()
+                .any(|(kind, p)| kind == "moment.append" && p["objectId"] == "scene")
+        );
+        sweep(&mut store, 103);
+        assert_eq!(
+            export_attempt_count(&store),
+            2,
+            "successful scene is skipped"
+        );
+        let wait: (Option<String>, Option<String>) = store.read_with(|conn| conn.query_row(
+            "SELECT export_wait_asset_path,export_wait_asset_sha256 FROM ydoc_docs WHERE object_id='scene'",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        )).expect("cleared asset wait");
+        assert_eq!(wait, (None, None));
+    }
+
+    #[test]
+    fn retained_export_waits_for_its_asset_before_retrying() {
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        seed_retained_scene(&mut store, "scene", false);
+        observe_export_attempts(&mut store);
+        enroll(&mut store).expect("enroll waiting scene");
+        store_scene_asset(&mut store, "unrelated");
+        for pass in 101..104 {
+            sweep(&mut store, pass);
+        }
+        assert_eq!(
+            export_attempt_count(&store),
+            1,
+            "unchanged missing asset must not re-project"
+        );
+        store_scene_asset(&mut store, "scene");
+        sweep(&mut store, 104);
+        sweep(&mut store, 105);
+        assert_eq!(
+            export_attempt_count(&store),
+            2,
+            "arrival wakes exactly one attempt"
+        );
+        assert_eq!(
+            local_ops(&store)
+                .iter()
+                .filter(|(kind, p)| kind == "moment.append" && p["objectId"] == "scene")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn retained_export_wakes_when_the_arriving_asset_head_was_retired() {
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        seed_retained_scene(&mut store, "scene", false);
+        observe_export_attempts(&mut store);
+        enroll(&mut store).expect("enroll waiting scene");
+        store_scene_asset(&mut store, "scene");
+        let sha = dohc_engine_storage::hex_sha256(&[1, 2, 3]);
+        let path = dohc_engine_collab::scene_asset_ref("ws", "main", "scene", &sha, "image/png")
+            .expect("ref");
+        VersionedTextStore::new(&mut store)
+            .delete_text_file(
+                &dohc_engine_domain::DeleteTextFile {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    path,
+                    moment_id: "asset-retired".to_owned(),
+                    request_id: None,
+                    metadata_origin: "ydoc".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 102,
+                },
+                &NoFaults,
+            )
+            .expect("retire arriving asset head");
+        let key = DocKey::new("ws", "main", "scene").expect("key");
+        store
+            .read_with(|conn| {
+                let doc = dohc_engine_collab::load_doc_in(conn, &key).expect("scene");
+                crate::project_ydoc_with_store(conn, &key, &doc, ContentKind::Scene)
+            })
+            .expect("retired history already authorizes the scene asset");
+        sweep(&mut store, 103);
+        assert_eq!(
+            export_attempt_count(&store),
+            2,
+            "retired asset arrival wakes the scene"
+        );
+        assert!(
+            local_ops(&store)
+                .iter()
+                .any(|(kind, p)| kind == "moment.append" && p["objectId"] == "scene")
+        );
+        sweep(&mut store, 104);
+        assert_eq!(export_attempt_count(&store), 2);
+    }
+
+    fn store_scene_asset(store: &mut EngineStore, object_id: &str) {
+        let sha = dohc_engine_storage::hex_sha256(&[1, 2, 3]);
+        VersionedTextStore::new(store)
+            .write_binary(
+                &dohc_engine_domain::WriteBinary {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: format!("{object_id}-asset"),
+                    path: dohc_engine_collab::scene_asset_ref(
+                        "ws",
+                        "main",
+                        object_id,
+                        &sha,
+                        "image/png",
+                    )
+                    .expect("ref"),
+                    bytes: vec![1, 2, 3],
+                    moment_id: format!("{object_id}-asset-moment"),
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 101,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("asset arrives");
+    }
+
+    #[test]
+    fn retained_export_wait_selection_uses_asset_indexes() {
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        seed_retained_scene(&mut store, "scene", false);
+        enroll(&mut store).expect("enroll waiting scene");
+        let plan = store
+            .read_with(|conn| {
+                conn.prepare(&format!("EXPLAIN QUERY PLAN {COVERED_HEADS_SQL}"))?
+                    .query_map(["ws"], |row| row.get::<_, String>(3))?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .expect("selection plan");
+        for index in [
+            "sqlite_autoindex_binary_blobs_1",
+            "sqlite_autoindex_path_aliases_1",
+            "sqlite_autoindex_snapshots_1",
+            "idx_moments_version_path_order",
+        ] {
+            assert!(
+                plan.iter().any(|line| line.contains(index)),
+                "{index}: {plan:?}"
+            );
+        }
+        assert!(
+            !plan.iter().any(|line| line.starts_with("SCAN ")),
+            "unexpected scan in retained export selection: {plan:?}"
+        );
+        for alias in ["deleted", "newer"] {
+            let search = format!("SEARCH {alias} USING INDEX idx_moments_version_path_order ");
+            assert!(
+                plan.iter().any(|line| line.starts_with(&search)),
+                "{alias} must search the partial index: {plan:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn retained_export_keeps_non_asset_permanent_projection_failure() {
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        seed_retained_artifact(&mut store);
+        let oversized = Ydoc::wire().plaintext_insert(
+            0,
+            &"x".repeat(dohc_engine_collab::limits::MAX_PROJECTION_BYTES + 1),
+        );
+        store
+            .write_with(&NoFaults, |tx| {
+                let sha = dohc_engine_storage::put_binary_blob(tx, &oversized)?;
+                tx.execute("UPDATE ydoc_updates SET update_blob_sha256=?1", [sha])
+                    .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("oversized projection");
+        observe_export_attempts(&mut store);
+        enroll(&mut store).expect("enroll oversized projection");
+        assert_eq!(export_attempt_count(&store), 1);
+        for pass in 101..104 {
+            sweep(&mut store, pass);
+        }
+        assert_eq!(
+            export_attempt_count(&store),
+            1,
+            "permanent projection failure stays cached"
+        );
+        assert!(
+            !local_ops(&store)
+                .iter()
+                .any(|(kind, p)| kind == "moment.append" && p["objectId"] == "seed-object")
+        );
+    }
+
+    fn seed_retained_scene(
+        store: &mut EngineStore,
+        object_id: &str,
+        asset_present: bool,
+    ) -> String {
+        use dohc_engine_domain::WriteBinary;
+        use serde_json::json;
+        use std::collections::BTreeMap;
+        let key = DocKey::new("ws", "main", object_id).expect("scene key");
+        let asset_sha = dohc_engine_storage::hex_sha256(&[1, 2, 3]);
+        let asset_ref =
+            dohc_engine_collab::scene_asset_ref("ws", "main", object_id, &asset_sha, "image/png")
+                .expect("asset ref");
+        if asset_present {
+            VersionedTextStore::new(store)
+                .write_binary(
+                    &WriteBinary {
+                        workspace_id: "ws".to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: format!("{object_id}-asset"),
+                        path: asset_ref.clone(),
+                        bytes: vec![1, 2, 3],
+                        moment_id: format!("{object_id}-asset-moment"),
+                        metadata_origin: "api".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 10,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .expect("save image");
+        }
         let imported = dohc_engine_collab::import_portable_scene(
             &json!({
                 "type":"excalidraw", "version":2, "source":"https://excalidraw.com",
@@ -2862,33 +3251,31 @@ mod tests {
             .expect("scene state");
         let doc = Ydoc::wire();
         doc.apply(&update).expect("apply scene");
-        let projection = store
-            .read_with(|conn| crate::project_ydoc_with_store(conn, &key, &doc, ContentKind::Scene))
-            .expect("hydrate scene");
-        assert_ne!(
-            projection.content,
-            doc.project(ContentKind::Scene)
-                .expect("unhydrated projection")
-                .content
-        );
+        let content = doc
+            .fold_scene()
+            .portable_json_with_asset_bytes(&BTreeMap::from([(
+                "image-file".to_owned(),
+                vec![1, 2, 3],
+            )]))
+            .expect("hydrated artifact");
         write_text(
-            &mut store,
+            store,
             "main",
-            "scene",
-            "scene-moment",
-            &projection.content,
+            object_id,
+            &format!("{object_id}-moment"),
+            &content,
             "capture",
             11,
         );
-        let sha = dohc_engine_storage::hex_sha256(projection.content.as_bytes());
+        let sha = dohc_engine_storage::hex_sha256(content.as_bytes());
         dohc_engine_collab::record_local_update(
-            &mut store,
+            store,
             &mut dohc_engine_collab::WriterDocCache::new(),
             &key,
             &update,
             dohc_engine_collab::LocalAppend {
                 marker: Some(dohc_engine_collab::MarkerCreation {
-                    path: Some("scene.md"),
+                    path: Some(&format!("{object_id}.md")),
                     content_kind: ContentKind::Scene,
                     regime: Regime::LocalOnly,
                 }),
@@ -2901,6 +3288,14 @@ mod tests {
             |_, _, _| Ok(()),
         )
         .expect("retain scene");
+        sha
+    }
+
+    #[test]
+    fn retained_scene_with_image_exports_the_hydrated_artifact_after_its_base() {
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        let sha = seed_retained_scene(&mut store, "scene", true);
         enroll(&mut store).expect("enroll scene");
         let ops = local_ops(&store);
         let base = ops

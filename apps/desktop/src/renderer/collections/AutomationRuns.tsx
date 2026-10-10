@@ -126,6 +126,7 @@ function settlementText(state: "pending" | "settled" | "not-accepted" | "absent"
 }
 
 function runSummary(run: Run): string {
+  if (run.undoUnfinished) return "Undo unfinished";
   if (run.undoSettlementNotAccepted) return "Reversal not accepted";
   if (run.undoSettlementPending) return "Reversal pending";
   if (run.sharedSettlementNotAccepted) return "Update not accepted";
@@ -149,6 +150,7 @@ function runSummary(run: Run): string {
 }
 
 function RunMark({ run }: { run: Run }) {
+  if (run.undoUnfinished) return <CircleDashed size={13} aria-label="Undo unfinished" className="mt-0.5 shrink-0 text-warning" />;
   if (run.sharedSettlementNotAccepted || run.undoSettlementNotAccepted) return <AlertTriangle size={13} aria-label="Not accepted" className="mt-0.5 shrink-0 text-warning" />;
   if (run.sharedSettlementPending || run.undoSettlementPending) return <CircleDashed size={13} aria-label="Pending" className="mt-0.5 shrink-0 text-subtle" />;
   if (run.undone) return <Undo2 size={13} aria-label="Undone" className="mt-0.5 shrink-0 text-subtle" />;
@@ -200,7 +202,7 @@ function RunRow(props: {
   useEffect(() => {
     if (props.opened) row.current?.scrollIntoView({ block: "nearest" });
   }, [props.opened]);
-  const canRetry = run.state === "failed" && !run.neverStarted && !run.undone;
+  const canRetry = run.undoUnfinished || (run.state === "failed" && !run.neverStarted && !run.undone);
   const canUndo = (run.state === "done" || run.state === "failed") && !run.undone &&
     run.writes.some((write) => write.kind === "field" || write.kind === "created" || write.kind === "dataset-edit" ||
       (write.kind === "dataset-action" && write.undo !== undefined) ||
@@ -245,8 +247,8 @@ function RunRow(props: {
       ) : null}
       {canRetry || canUndo || run.writes.length > 0 ? (
         <div className="mt-1.5 flex flex-wrap items-center gap-1.5 pl-5">
-          {canRetry ? <SecondaryButton size="compact" onClick={props.onRetry}>Try again</SecondaryButton> : null}
-          {canUndo ? (
+          {canRetry ? <SecondaryButton size="compact" disabled={props.undoing} onClick={run.undoUnfinished ? props.onUndo : props.onRetry}>Try again</SecondaryButton> : null}
+          {canUndo && !run.undoUnfinished ? (
             <SecondaryButton size="compact" disabled={props.undoing} onClick={props.onUndo}>Undo</SecondaryButton>
           ) : null}
           {run.writes.length > 0 ? (

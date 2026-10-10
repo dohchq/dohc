@@ -200,6 +200,8 @@ export interface ShareViewFiles {
     lease: WorkspaceOperationLease,
     target: ShareViewFilesTarget,
     request: ShareViewReconcileRequest,
+    // Internal pull scheduling state; never part of the refresh result.
+    onCursorCommitted?: (cursor: number) => void,
   ): Promise<ShareViewReconcileOutcome>;
   unmount(
     lease: WorkspaceOperationLease,
@@ -847,6 +849,7 @@ export function createShareViewFiles(
     target: ActiveShareViewFilesTarget,
     request: ShareViewReconcileRequest,
     owner: ShareViewFilesOwnerCapability,
+    onCursorCommitted?: (cursor: number) => void,
   ): Promise<ShareViewReconcileOutcome> {
     const lifecycle = createShareViewLifecycle(owner);
     if (target.kind === "mount") {
@@ -960,6 +963,7 @@ export function createShareViewFiles(
                 recordRefusals,
                 captured: recovered,
                 preservedPaths: target.unsavedPaths,
+                onCursorCommitted,
               })
             : await lifecycle.refreshCaptured({
                 rootDir: target.rootPath,
@@ -972,6 +976,7 @@ export function createShareViewFiles(
                 recordRefusals,
                 captured: recovered,
                 preservedPaths: target.unsavedPaths,
+                onCursorCommitted,
               });
       }
     }
@@ -1309,13 +1314,13 @@ export function createShareViewFiles(
       });
     },
 
-    async reconcile(lease, requested, request) {
+    async reconcile(lease, requested, request, onCursorCommitted) {
       assertLease(lease);
       return withCurrentTarget(requested, async (target) => {
         assertLease(lease, target);
         assertActiveTarget(target);
         return withOwnerCapability(lease, target, (owner) =>
-          reconcileWithOwner(lease, target, request, owner),
+          reconcileWithOwner(lease, target, request, owner, onCursorCommitted),
         );
       });
     },
