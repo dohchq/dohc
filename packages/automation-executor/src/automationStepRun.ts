@@ -1,3 +1,4 @@
+import { isEngineStoreBusyRefusal } from "@dohc/workspace-engine-client";
 import { prepareRecordBackend, type RecordRunDependencies, type RecordRunInput, type RunSource } from "./automationRecordBackend";
 import { AutomationRunWait } from "./automationRunWait";
 import type { AutomationTimeSpent, JsonValue } from "@dohc/app-backend-runtime/automation";
@@ -351,6 +352,7 @@ async function walkSteps(
         if ("outcome" in applied) return applied.outcome;
         writes = applied;
       } catch (error) {
+        if (isEngineStoreBusyRefusal(error)) return { kind: "wait", reason: "busy" };
         if (error instanceof AutomationRunWait) return { kind: "wait", reason: error.reason };
         if (input.stopped.aborted) return stopped;
         // A synced workspace with no session waits for one: a post written now would reach nobody.
@@ -387,6 +389,7 @@ async function walkSteps(
         try {
           prepared = await prepare(entry);
         } catch (error) {
+          if (isEngineStoreBusyRefusal(error)) return end({ kind: "wait", reason: "busy" });
           if (error instanceof AutomationRunWait) return end({ kind: "wait", reason: error.reason });
           return end(input.stopped.aborted ? stopped : input.signal.aborted ? failed(DEADLINE_ERROR, true) : failed(errorText(error)));
         }
@@ -462,13 +465,14 @@ export async function coordinateSourceRun(
       let started: CollectionAutomationRunOutcome | null;
       try { started = await startRun(dependencies.evaluator, backend, ctx, spent); }
       catch (error) {
-        if (error instanceof AutomationRunWait) throw error;
+        if (error instanceof AutomationRunWait || isEngineStoreBusyRefusal(error)) throw error;
         return failed(errorText(error));
       }
       if (started !== null) return input.stopped.aborted ? stopped : started;
     }
     return await runSteps(dependencies, backend, { ...input, claimRun: input.claim.run }, ctx, state, resuming, spent);
   } catch (error) {
+    if (isEngineStoreBusyRefusal(error)) return { kind: "wait", reason: "busy" };
     if (error instanceof AutomationRunWait) return { kind: "wait", reason: error.reason };
     throw error;
   }

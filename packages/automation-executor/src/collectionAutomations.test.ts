@@ -1,3 +1,4 @@
+import { DaemonRefusalError } from "@dohc/workspace-engine-client";
 import { createHash } from "node:crypto";
 import { expect, it, vi } from "vitest";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
@@ -65,6 +66,11 @@ it("persists unchanged reach verdicts after the first save fails", async () => {
     expect(save).toHaveBeenCalledTimes(2);
     expect(save.mock.calls[1]![0]).toEqual(attempted);
     expect((await store.readReachVerdicts()).verdicts).toEqual(attempted.verdicts);
+    expect(errors.mock.calls).toEqual([["check who can edit automations", failure]]);
+    const claim = vi.fn().mockRejectedValueOnce(new DaemonRefusalError({code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff"}, undefined)).mockResolvedValue(null);
+    engine.claimNextAutomation = claim;
+    executor.notifyClaimed();
+    await expect.poll(() => claim.mock.calls.length, { timeout: 10_000 }).toBeGreaterThanOrEqual(2);
     expect(errors.mock.calls).toEqual([["check who can edit automations", failure]]);
   } finally {
     await executor.dispose();

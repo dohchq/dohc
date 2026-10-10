@@ -2612,3 +2612,155 @@ async fn measure_initial_capture(measure_typing: bool) {
             .unwrap();
     }
 }
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn open_and_edited_document_settle_retry_a_huge_first_capture_transaction() {
+    use base64::Engine as _;
+    use dohc_engine_protocol::transport::EngineService as Service;
+
+    let scratch = ScratchDir::new().unwrap();
+    write_root_binding(scratch.path(), TOKEN).unwrap();
+    for n in 0..EARLY_IMPORT_MIN_ADDED_FILES {
+        write_file(scratch.path(), &format!("seed-{n:04}.md"), b"captured");
+    }
+    let probe = CaptureApplyProbe::default();
+    probe.pause_next_apply();
+    let service = Arc::new(EngineService::with_capture_apply_probe_for_harness(
+        probe.clone(),
+    ));
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let handle = tokio::time::timeout(WAIT, open_workspace(&transport, &scratch, 1))
+        .await
+        .unwrap();
+    tokio::time::timeout(WAIT, probe.wait_until_paused())
+        .await
+        .unwrap();
+    let opened = Service::call(
+        service.as_ref(),
+        RequestContext::unbounded().with_capability("blobs"),
+        request(
+            2,
+            "ydoc.open",
+            Some(handle.clone()),
+            json!({"versionId":"main","path":"draft.md","contentKind":"plaintext"}),
+        ),
+    )
+    .await
+    .unwrap();
+    let session = opened.response.result["sessionId"].clone();
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(&opened.blob_egress.unwrap().bytes).unwrap();
+    let update = doc.plaintext_insert(0, "edit survives capture backfill");
+    call(&transport, &handle, 3, "ydoc.recordUpdate", json!({"sessionId":session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(update)})).await;
+
+    let db = scratch.path().join(".dohc/engine/engine.db");
+    let observer = rusqlite::Connection::open(&db).unwrap();
+    // Enlarge one real capture transaction deterministically, without a load run.
+    // The snapshot trigger's payload commits atomically with the captured file.
+    observer
+        .execute_batch(
+            "CREATE TABLE capture_checkpoint_payload(body BLOB);
+        CREATE TRIGGER huge_capture AFTER INSERT ON snapshots WHEN NEW.path='seed-0000.md'
+        BEGIN INSERT INTO capture_checkpoint_payload VALUES(zeroblob(28*1024*1024)); END;",
+        )
+        .unwrap();
+    observer
+        .execute_batch("BEGIN; SELECT count(*) FROM snapshots;")
+        .unwrap();
+    probe.release();
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let probe_connection = rusqlite::Connection::open(&db).unwrap();
+            let log: i64 = probe_connection
+                .query_row("PRAGMA wal_checkpoint(NOOP)", [], |r| r.get(1))
+                .unwrap();
+            drop(probe_connection);
+            if log > 6000 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("one capture transaction must exceed 6000 frames");
+    let busy = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                4,
+                "ydoc.settle",
+                Some(handle.clone()),
+                json!({"sessionId":session}),
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(busy.message, "engine-store-busy");
+    let opening = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                5,
+                "ydoc.open",
+                Some(handle.clone()),
+                json!({"versionId":"main","path":"seed-0999.md","contentKind":"plaintext"}),
+            ),
+        )
+        .await;
+    match opening {
+        Ok(response) => assert_eq!(response.result["head"], json!("present")),
+        Err(error) => assert!(
+            error.message == "engine-store-busy"
+                || error.message == "Workspace is still updating. Try again.",
+            "{error:?}"
+        ),
+    }
+
+    observer.execute_batch("ROLLBACK").unwrap();
+    drop(observer);
+
+    // Both renderer-style callers retain the same request after a refusal.
+    for (method, params) in [
+        ("ydoc.settle", json!({"sessionId":session})),
+        (
+            "ydoc.open",
+            json!({"versionId":"main","path":"seed-0999.md","contentKind":"plaintext"}),
+        ),
+    ] {
+        tokio::time::timeout(WAIT, async {
+            loop {
+                match transport
+                    .call(
+                        RequestContext::unbounded(),
+                        request(6, method, Some(handle.clone()), params.clone()),
+                    )
+                    .await
+                {
+                    Ok(_) => break,
+                    Err(error) => {
+                        assert!(
+                            error.message == "engine-store-busy"
+                                || error.message == "Workspace is still updating. Try again.",
+                            "{error:?}"
+                        );
+                        tokio::task::yield_now().await;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+    }
+    wait_until_capture_ready(&transport, &handle, 100).await;
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("draft.md")).unwrap(),
+        "edit survives capture backfill"
+    );
+    wait_for_text(
+        &transport,
+        &handle,
+        "draft.md",
+        Some("edit survives capture backfill"),
+    )
+    .await;
+    call(&transport, &handle, 101, "workspace.close", json!({})).await;
+}

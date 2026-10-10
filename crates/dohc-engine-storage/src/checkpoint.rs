@@ -277,14 +277,13 @@ mod tests {
     }
 
     fn store(path: &Path) -> EngineStore {
-        let mut s = EngineStore::open(path, 1).unwrap();
+        let mut s = EngineStore::open_for_actor(path, 1, None, None).unwrap();
         s.write_with(&NoFaults, |tx| {
             tx.execute_batch("CREATE TABLE checkpoint_load(id INTEGER PRIMARY KEY, body BLOB)")
                 .map_err(StorageError::persist)?;
             Ok::<_, StorageError>(())
         })
         .unwrap();
-        s.enable_background_checkpoints().unwrap();
         s
     }
     fn wait_checkpoint(conn: &Connection, checkpoints: &Checkpoints) {
@@ -373,7 +372,7 @@ mod tests {
         let mut previous = 0;
         let mut resets = 0;
         for n in 0..1600 {
-            write(&mut s, n % 64, 16 * 1024);
+            write_after_checkpoint(&mut s, n % 64, 16 * 1024);
             let log = s.read_with(frames).unwrap().0;
             maximum = maximum.max(log);
             resets += usize::from(log < previous);
@@ -489,7 +488,7 @@ mod tests {
     fn pinned_reader_does_not_block_shutdown_or_lose_commits() {
         let scratch = ScratchDir::new().unwrap();
         let path = scratch.path().join("engine.db");
-        let mut s = EngineStore::open(&path, 1).unwrap();
+        let mut s = EngineStore::open_for_actor(&path, 1, None, None).unwrap();
         s.read_with(|c| c.pragma_update(None, "wal_autocheckpoint", 0))
             .unwrap();
         s.write_with(&NoFaults, |tx| {
@@ -506,7 +505,6 @@ mod tests {
             .read_with(|c| c.execute_batch("BEGIN; SELECT * FROM checkpoint_load"))
             .unwrap();
         assert_eq!(reader.table_row_count("checkpoint_load").unwrap(), 64);
-        s.enable_background_checkpoints().unwrap();
         for n in 64..1024 {
             s.read_with(|c| {
                 c.execute(
@@ -621,11 +619,13 @@ mod tests {
     }
 
     #[test]
-    fn crash_during_background_catch_up_preserves_every_committed_row() {
+    // The worker pauses after PASSIVE returns, before its next call.
+    // This tests recovery from a partially copied WAL, not a kill inside SQLite.
+    fn crash_between_passive_checkpoints_preserves_every_committed_row() {
         const CHILD: &str = "DOHC_CHECKPOINT_CRASH_CHILD";
         if let Some(root) = std::env::var_os(CHILD) {
             let path = std::path::PathBuf::from(root).join("engine.db");
-            let mut s = EngineStore::open(&path, 1).unwrap();
+            let mut s = EngineStore::open_for_actor(&path, 1, None, None).unwrap();
             s.read_with(|c| c.pragma_update(None, "wal_autocheckpoint", 0))
                 .unwrap();
             s.write_with(&NoFaults, |tx| {
@@ -641,7 +641,6 @@ mod tests {
             reader
                 .read_with(|c| c.execute_batch("BEGIN; SELECT * FROM checkpoint_load"))
                 .unwrap();
-            s.enable_background_checkpoints().unwrap();
             for n in 64..128 {
                 write(&mut s, n, 32 * 1024);
             }
@@ -675,7 +674,7 @@ mod tests {
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "checkpoint::tests::crash_during_background_catch_up_preserves_every_committed_row",
+                "checkpoint::tests::crash_between_passive_checkpoints_preserves_every_committed_row",
                 "--nocapture",
             ])
             .env(CHILD, scratch.path())

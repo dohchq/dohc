@@ -188,28 +188,6 @@ impl EngineStore {
         self.freshly_created
     }
 
-    /// Use background WAL checkpoints without changing commit durability.
-    pub fn enable_background_checkpoints(&mut self) -> Result<(), StorageError> {
-        if self
-            .conn
-            .is_readonly("main")
-            .map_err(StorageError::corrupt)?
-        {
-            return Err(StorageError::InvalidInput {
-                reason: "checkpoint owner must be writable",
-            });
-        }
-        if self.checkpoints.is_none() {
-            let checkpoints = crate::checkpoint::Checkpoints::start(&self.database_path)?;
-            self.conn
-                .pragma_update(None, "wal_autocheckpoint", 0)
-                .map_err(StorageError::persist)?;
-            self.checkpoint_changes = self.conn.total_changes();
-            self.checkpoints = Some(checkpoints);
-        }
-        Ok(())
-    }
-
     /// Request background work and finish only bounded writer-side tails.
     pub fn request_checkpoint(&mut self) {
         let changes = self.conn.total_changes();

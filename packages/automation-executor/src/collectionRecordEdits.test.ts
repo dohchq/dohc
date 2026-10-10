@@ -1509,6 +1509,23 @@ describe("partial record retry", () => {
     expect(await readdir(join(root, "tasks"))).toEqual(["retry.md"]);
   });
 
+  it("keeps an adopted record ID while preserving a busy creation refusal", async () => {
+    const root = await createTestScratch("dohc-record-busy-retry-");
+    const { session } = fakeSession();
+    const engine = fakeEngine();
+    const context = contextFor(root, session, engine.overrides);
+    const busy = new DaemonRefusalError({code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff"}, undefined);
+    vi.spyOn(context, "onRecordsChanged").mockImplementationOnce(() => { throw busy; });
+    const onPartial = vi.fn(async () => undefined);
+    const input = { collectionPath: "tasks", name: "retry", author: AGENT, recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa", onPartial };
+    const first = collectionRecordWrites(context).create(input);
+    await expect(first).rejects.toBe(busy);
+    const id = await engine.adopt(root, "tasks/retry.md");
+    expect(onPartial).toHaveBeenCalledWith({path: "tasks/retry.md", recordId: id});
+    await expect(collectionRecordWrites(context).create({...input, recordId: id})).resolves.toEqual({path: "tasks/retry.md", recordId: id});
+    expect(await readdir(join(root, "tasks"))).toEqual(["retry.md"]);
+  });
+
   it.each(["bind", "fields", "settle", "close"] as const)("resumes after %s without another file or field update", async stage => {
     const root = await createTestScratch("dohc-record-retry-");
     const { session, log } = fakeSession();

@@ -1,3 +1,4 @@
+import { DaemonRefusalError } from "@dohc/workspace-engine-client";
 import { afterAll, describe, expect, it } from "vitest";
 import type { JsonValue } from "@dohc/app-backend-runtime/automation";
 import { parseAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
@@ -51,6 +52,29 @@ it("records a refused field write as a failed run without completed writes", asy
     collection: {path: "Tasks", name: "Tasks"}, roster: {kind: "owner", ownerUserId: null, grants: []}, signal, stopped: signal}))
     .resolves.toMatchObject({kind: "failed", error: "The engine refused this write."});
   expect((await store.runsOf("collection:Tasks#chain", "atc_one")).runs[0]?.applied).toEqual([]);
+});
+
+it("resumes a busy field write without failing the run or duplicating it", async () => {
+  const space = workspace([task("rec_t", {})]);
+  const store = await scratchStore();
+  const dependencies = space.dependencies(store);
+  const writes = dependencies.withRecordWrites;
+  const reads = dependencies.withReads;
+  const input = {claim: added(), automation: automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {Note: saved}}]"),
+    collection: {path: "Tasks", name: "Tasks"}, roster: {kind: "owner" as const, ownerUserId: null, grants: []},
+    signal: new AbortController().signal, stopped: new AbortController().signal};
+  const busy = () => new DaemonRefusalError({code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff"}, undefined);
+  dependencies.withReads = async () => { throw busy(); };
+  await expect(runCollectionAutomation(dependencies, input)).resolves.toEqual({kind: "wait", reason: "busy"});
+  dependencies.withReads = reads;
+  dependencies.withRecordWrites = async () => { throw busy(); };
+  await expect(runCollectionAutomation(dependencies, input)).resolves.toEqual({kind: "wait", reason: "busy"});
+  const pending = (await store.runsOf("collection:Tasks#chain", "atc_one")).runs[0]!;
+  expect(pending.applied).toEqual([]);
+  expect(pending.outcome).toBeNull();
+  dependencies.withRecordWrites = writes;
+  await expect(runCollectionAutomation(dependencies, input)).resolves.toMatchObject({kind: "done"});
+  expect((await store.runsOf("collection:Tasks#chain", "atc_one")).runs[0]!.applied).toHaveLength(1);
 });
 
 type Fault = { at: number; when: "before" | "mid" | "after" };

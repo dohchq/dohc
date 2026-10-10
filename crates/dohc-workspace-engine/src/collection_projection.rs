@@ -40,7 +40,16 @@ impl CollectionProjectionWorker {
                         }
                         Err(error) => {
                             previous = CollectionProjection::default();
-                            eprintln!("engine: received Collection projection failed: {error}");
+                            if error.code() == "file-locked" {
+                                tokio::select! {
+                                    biased;
+                                    () = cancel.cancelled() => break,
+                                    () = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+                                }
+                                wake.notify_one();
+                            } else {
+                                eprintln!("engine: received Collection projection failed: {error}");
+                            }
                         }
                     }
                 }
