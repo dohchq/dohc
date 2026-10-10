@@ -8,6 +8,7 @@ import {
   type ListedGrant,
   type RosterAnswer,
   type RosterListing,
+  type HistoryAccount,
 } from "@dohc/automation-executor/roster-listing";
 
 // The share roster: the grants the owner gave on one workspace, as the relay
@@ -445,8 +446,95 @@ export function rosterAuthorLabel(
 /** A Button presser's name, including people whose grants have ended. */
 export function rosterPersonLabel(listing: RosterListing | null, userId: string): string {
   if (listing === null || listing.grants === null) return "Someone you shared with";
-  const email = [...listing.grants, ...listing.formerGrants.map((former) => former.grant), ...listing.endedGrants].find(
+  const grant = [...listing.grants, ...listing.formerGrants.map((former) => former.grant), ...listing.endedGrants].find(
     (candidate) => candidate.recipientUserId === userId && candidate.recipientEmail !== null,
-  )?.recipientEmail;
-  return email ?? "Someone you shared with";
+  );
+  if (!grant?.recipientEmail) return "Someone you shared with";
+  return grant.recipientEmail;
+}
+
+/** History's window-lifetime cache. Reads never wait for account lookups. */
+export function createHistoryLabels(dependencies: {
+  snapshot(workspaceId: string): { roster: RosterListing | null; owner: boolean; context: unknown; inventory: unknown };
+  lookupAccounts(workspaceId: string, ids: { grantIds: string[]; userIds: string[] }): Promise<HistoryAccount[] | null>;
+  ready?(workspaceId: string): void;
+  nowMs?(): number;
+}) {
+  type Snapshot = ReturnType<typeof dependencies.snapshot>;
+  type Cache = { snapshot: Snapshot; grants: Map<string, HistoryAccount>; people: Map<string, HistoryAccount>;
+    asked: Set<string>; pending: Map<string, { userId: string; grantId?: string }>; running: boolean; retryAt: number };
+  const caches = new Map<string, Cache>();
+  const now = dependencies.nowMs ?? (() => performance.now());
+  const key = (person: { userId: string; grantId?: string }) => person.grantId === undefined ? `user:${person.userId}` : `grant:${person.grantId}`;
+  const same = (left: Snapshot, right: Snapshot) => left.context === right.context && left.inventory === right.inventory;
+  const current = (workspaceId: string, snapshot: Snapshot) => {
+    const cache = caches.get(workspaceId);
+    return cache && same(cache.snapshot, snapshot) ? cache : undefined;
+  };
+  const live = (workspaceId: string, cache: Cache) => caches.get(workspaceId) === cache && same(cache.snapshot, dependencies.snapshot(workspaceId)) && dependencies.snapshot(workspaceId).owner;
+  function cachedLabel(workspaceId: string, userId: string, grantId?: string): string {
+    const snapshot = dependencies.snapshot(workspaceId);
+    const cache = snapshot.owner ? current(workspaceId, snapshot) : undefined;
+    const account = grantId === undefined ? cache?.people.get(userId) : cache?.grants.get(grantId);
+    return account?.recipientUserId === userId && account.recipientEmail
+      ? `${account.recipientEmail} (via share link)` : "Someone you shared with";
+  }
+  function schedule(workspaceId: string, target: Cache): void {
+    if (target.running || target.pending.size === 0 || now() < target.retryAt) return;
+    target.running = true;
+    // Let the IPC read answer and release its workspace lease before starting I/O.
+    setImmediate(() => { void (async () => {
+      if (!live(workspaceId, target)) return;
+      const batch = [...target.pending.entries()].slice(0, 200);
+      for (const [id] of batch) { target.pending.delete(id); target.asked.add(id); }
+      let accounts: HistoryAccount[] | null;
+      try { accounts = await dependencies.lookupAccounts(workspaceId, {
+        grantIds: batch.flatMap(([, person]) => person.grantId === undefined ? [] : [person.grantId]),
+        userIds: batch.flatMap(([, person]) => person.grantId === undefined ? [person.userId] : []),
+      }); } catch { accounts = null; }
+      if (!live(workspaceId, target)) return;
+      if (accounts === null) { for (const [id] of batch) target.asked.delete(id); target.retryAt = now() + 60_000; target.pending.clear(); return; }
+      for (const [id] of batch) target.asked.add(id);
+      for (const account of accounts) {
+        target.grants.set(account.grantId, account);
+        if (!target.people.has(account.recipientUserId)) target.people.set(account.recipientUserId, account);
+      }
+      if (accounts.some(account => account.recipientEmail)) dependencies.ready?.(workspaceId);
+    })().finally(() => {
+      target.running = false;
+      if (live(workspaceId, target)) schedule(workspaceId, target);
+    }); });
+  }
+  return {
+    invalidate(workspaceId: string | null): void {
+      if (workspaceId === null) caches.clear(); else caches.delete(workspaceId);
+    },
+    prepare(workspaceId: string, principals: readonly { userId: string; grantId?: string }[]): void {
+      const snapshot = dependencies.snapshot(workspaceId);
+      if (!snapshot.owner) return;
+      let cache = current(workspaceId, snapshot);
+      if (cache && now() < cache.retryAt) return;
+      const missing = principals.filter(person => !cache?.asked.has(key(person)) && !(person.grantId === undefined ? cache?.people.has(person.userId) : cache?.grants.has(person.grantId)) && (person.grantId === undefined
+        ? rosterPersonLabel(snapshot.roster, person.userId) : rosterAuthorLabel(snapshot.roster, { userId: person.userId, grantId: person.grantId })) === "Someone you shared with");
+      if (missing.length === 0) return;
+      if (!cache) {
+        cache = { snapshot, grants: new Map(), people: new Map(), asked: new Set(), pending: new Map(), running: false, retryAt: 0 };
+        caches.set(workspaceId, cache);
+      }
+      if (now() < cache.retryAt) return;
+      for (const person of missing) {
+        const id = key(person);
+        if (!cache.asked.has(id) && (person.grantId === undefined ? !cache.people.has(person.userId) : !cache.grants.has(person.grantId))) cache.pending.set(id, person);
+      }
+      schedule(workspaceId, cache);
+    },
+    author(workspaceId: string, author: { userId: string; grantId: string }): string {
+      const known = rosterAuthorLabel(dependencies.snapshot(workspaceId).roster, author);
+      return known !== "Someone you shared with" ? known : cachedLabel(workspaceId, author.userId, author.grantId);
+    },
+    person(workspaceId: string, userId: string): string {
+      const known = rosterPersonLabel(dependencies.snapshot(workspaceId).roster, userId);
+      return known !== "Someone you shared with" ? known : cachedLabel(workspaceId, userId);
+    },
+  };
 }

@@ -50,6 +50,8 @@ export interface RestoreReceipt {
 }
 
 export interface StopAndRestoreDependencies {
+  recordDefinitions?(definitions: ReadonlyArray<{collectionPath: string; id: string; definitionHash: string}>): Promise<void>;
+  recordRestore?(receipt: RestoreReceipt): Promise<void>;
   /** A moment, `protected` when its contents are protected here, or null while it has not arrived. */
   moment(momentId: string): Promise<VersionedTextMoment | "protected" | null>;
   /** Throws when the window that asked has left the workspace. */
@@ -343,6 +345,7 @@ export async function restoreDirectWrites(
     unfinished: message === null ? null : { step, message },
   });
   try {
+    await dependencies.recordDefinitions?.(definitions);
     for (const { entry, head } of restorable) {
       const folder = posix.dirname(entry.first.path);
       if (isCreatedSchema(entry)) {
@@ -373,6 +376,7 @@ export async function restoreDirectWrites(
         continue;
       }
       restored.push({ ...result.receipt, ...(entry.first.created ? { removed: true } : {}) });
+      await dependencies.recordRestore?.(restored.at(-1)!);
       if (isCreatedSchema(entry)) await dependencies.removeEmptyFolder(folder);
     }
     if (definitions.length > 0) {

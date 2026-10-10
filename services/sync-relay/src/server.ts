@@ -121,6 +121,7 @@ export interface CreateSyncRelayHandlerOptions {
   lookupVerifiedUserEmail?: (userId: string) => Promise<string | null> | string | null;
   // Display-only reverse lookup for share listings; never used for authz.
   lookupUserEmail?: (userId: string) => Promise<string | null> | string | null;
+  lookupUserEmails?: (userIds: readonly string[]) => Promise<ReadonlyMap<string, string>>;
   // Better Auth display name for discussion authorship; never used for authz.
   lookupUserDisplayName?: (
     userId: string,
@@ -191,6 +192,7 @@ export function createSyncRelayHandler({
   resolveUserIdByEmail,
   lookupVerifiedUserEmail,
   lookupUserEmail,
+  lookupUserEmails,
   lookupUserDisplayName,
   newShareId = () => randomUUID(),
   newGrantId = () => randomUUID(),
@@ -481,6 +483,8 @@ export function createSyncRelayHandler({
     linkInventorySummary,
     publicEditRelease,
     shareSenderLabel,
+    undefined,
+    lookupUserEmails,
   );
   const { respondToShareInventory, respondToWorkspaceLinkInventory } = shareInventoryRoutes(claimPendingShares);
   // The server reads the owner's shares without the owner there, so it

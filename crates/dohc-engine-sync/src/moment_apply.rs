@@ -13,6 +13,10 @@ use crate::file_search::{
 };
 use crate::{ApplyOutcome, LeaseProbe, ReplicationEnvelope, SyncError, apply_envelope_with};
 
+#[cfg(test)]
+mod openhold_measurement;
+
+pub(crate) mod open_artifacts;
 pub(crate) mod pending;
 #[cfg(test)]
 mod pending_tests;
@@ -433,6 +437,10 @@ pub fn apply_moment_envelope_detailed(
             search_policy.as_ref(),
             MomentApplyMode::Ordinary,
             content_held,
+            content_held
+                .then(|| leases.bound_claim(&key))
+                .flatten()
+                .as_deref(),
         )
     })
 }
@@ -583,6 +591,7 @@ fn apply_moment_append(
     search_policy: Option<&SearchPolicySnapshot>,
     mode: MomentApplyMode,
     content_held: bool,
+    live_claim: Option<&str>,
 ) -> Result<MomentApplyResult, SyncError> {
     require_version(tx, &envelope.workspace_id, &payload.version_id)?;
 
@@ -689,10 +698,34 @@ fn apply_moment_append(
         && (local
             .as_ref()
             .is_some_and(|snapshot| snapshot.digest == payload.payload_after_blob_sha256)
-            || holds_earlier_lineage_artifact(tx, envelope, payload)?)
+            || if content_held {
+                live_claim.is_some_and(|_| {
+                    is_ydoc_settlement_moment_id(&payload.moment_id)
+                        && after_kind == ContentKind::Text
+                        && payload.path == payload.payload_after_path
+                        && payload
+                            .payload_before_path
+                            .as_deref()
+                            .is_none_or(|path| path == payload.payload_after_path)
+                        && payload
+                            .before_path
+                            .as_deref()
+                            .is_none_or(|path| path == payload.payload_after_path)
+                }) && holds_earlier_lineage_artifact(tx, envelope, payload, live_claim)?
+            } else {
+                holds_earlier_lineage_artifact(tx, envelope, payload, None)?
+            })
     {
         ensure_file_object(tx, &envelope.workspace_id, payload)?;
         insert_moment(tx, &envelope.workspace_id, payload, &remote_before, true)?;
+        if content_held
+            && let Some(claim) = live_claim
+            && local
+                .as_ref()
+                .is_some_and(|head| head.digest != payload.payload_after_blob_sha256)
+        {
+            open_artifacts::enqueue(tx, envelope, payload, claim)?;
+        }
         return Ok(MomentApplyResult {
             conflicts_opened: 0,
             materialization_changes: Vec::new(),
@@ -1259,11 +1292,42 @@ fn recorded_preimage_matches(
     ).map_err(SyncError::corrupt)
 }
 
+fn origin_update_is_on_live_claim(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+    payload: &MomentAppendPayload,
+    live_claim: &str,
+) -> Result<bool, SyncError> {
+    // Select the latest coordinate from the covering index, then read one
+    // primary-key row. Refusal and claim checks cannot select an older update.
+    let claim: Option<String> = tx.query_row(
+        "SELECT json_extract(r.payload_json,'$.lineageClaimId') FROM \
+         replication_log r \
+         JOIN ydoc_docs d ON d.workspace_id=?1 AND d.version_id=?3 AND d.object_id=?4 \
+         WHERE r.workspace_id=?1 AND r.origin_id=?2 AND r.origin_seq=(\
+           SELECT MAX(origin_seq) FROM replication_log INDEXED BY replication_ydoc_origin_document \
+           WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq<?5 AND op_kind='ydoc.update' \
+             AND json_extract(payload_json,'$.versionId')=?3 AND json_extract(payload_json,'$.objectId')=?4) \
+           AND r.apply_disposition='applied' AND d.lineage_claim_status='exact' \
+           AND json_extract(r.payload_json,'$.lineageClaimId')=d.lineage_claim_id \
+           AND d.lineage_claim_id=?6 AND d.content_kind IN ('plaintext','richdoc') \
+           AND NOT EXISTS (SELECT 1 FROM ydoc_deferred_updates p \
+             WHERE p.workspace_id=?1 AND p.version_id=?3 AND p.object_id=?4 AND p.lineage_claim_id IS NOT ?6)",
+        params![envelope.workspace_id,envelope.origin_id,payload.version_id,payload.object_id,envelope.origin_seq,live_claim],
+        |row| row.get(0),
+    ).optional().map_err(SyncError::corrupt)?.flatten();
+    Ok(claim.is_some())
+}
+
 fn holds_earlier_lineage_artifact(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
     payload: &MomentAppendPayload,
+    live_claim: Option<&str>,
 ) -> Result<bool, SyncError> {
+    if let Some(claim) = live_claim {
+        return origin_update_is_on_live_claim(tx, envelope, payload, claim);
+    }
     // The ordered origin log identifies the claim this artifact follows.
     // Never use equal bytes from a replaced or independently claimed base.
     let claim: Option<String> = tx.query_row(
@@ -1418,6 +1482,7 @@ pub(crate) fn apply_conflict_parent_shadow_in_tx(
         search_policy,
         MomentApplyMode::ConflictParent,
         false,
+        None,
     )
 }
 
@@ -2175,7 +2240,7 @@ fn require_binary_blob(tx: &Transaction<'_>, sha: &str) -> Result<i64, SyncError
 }
 
 fn select_snapshot_by_object(
-    tx: &Transaction<'_>,
+    tx: &rusqlite::Connection,
     workspace_id: &str,
     version_id: &str,
     object_id: &str,
