@@ -1,14 +1,15 @@
 import { mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { foldScene, insertElementRevision, setAppStateProperty } from "@dohc/excalidraw-scene";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
 import { createPhysicalWorkspaceRemoval } from "./physicalWorkspaceRemoval";
-import { hasRetainedLiveDraft, listLiveDraftRecovery, preserveLiveDraft, preserveUnsentLiveDraft, removeLiveDraftCopies, removeWorkspaceLiveDrafts } from "./liveDraftRecovery";
+import { hasRetainedLiveDraft, hasWorkspaceLiveDrafts, listLiveDraftRecovery, preserveLiveDraft, preserveUnsentLiveDraft, removeLiveDraftCopies, removeWorkspaceLiveDrafts } from "./liveDraftRecovery";
+import { readTypingCheckpoints, writeTypingCheckpoint, type OutageTypingCheckpoint } from "./outageTypingRecovery";
 const snapshotSha = (update: Uint8Array) => createHash("sha256").update(update).digest("hex");
 
 vi.mock("node:fs/promises", async importOriginal => {
@@ -32,6 +33,39 @@ it("finds retained drafts by workspace and object or path without blocking unrel
   expect(await hasRetainedLiveDraft(directory, "other", "a.md", "object")).toBe(false);
   expect(await hasRetainedLiveDraft(directory, "workspace", "b.md", "other")).toBe(false);
   expect(await hasRetainedLiveDraft(join(directory, "absent"), "workspace", "a.md", "object")).toBe(false);
+});
+
+it("lists and discards only set-aside drafts while pending typing checkpoints still protect the file and workspace", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-mixed-recovery-")); directories.push(directory);
+  const update = new Uint8Array([0, 0]);
+  const checkpoint: OutageTypingCheckpoint = {
+    version: 2, checkpointId: "pending-session", workspaceId: "workspace", versionId: "main",
+    objectId: "object", path: "a.txt", expectedClaimId: null,
+    expectedStateVectorSha256: "a".repeat(64), expectedDiskSha256: null,
+    text: "pending typing", updateBase64: Buffer.from(update).toString("base64"),
+    admittedBaseBase64: Buffer.from(update).toString("base64"), updates: [],
+  };
+  await writeTypingCheckpoint(directory, checkpoint);
+  await preserveLiveDraft(directory, "workspace", {path: "a.txt", objectId: "object", contentKind: "plaintext", text: "set-aside draft", update});
+  const [typing] = await readTypingCheckpoints(directory, "workspace");
+  const listed = await listLiveDraftRecovery(directory, "workspace");
+  expect(listed.map(record => record.text)).toEqual(["set-aside draft"]);
+  // Even an explicit checkpoint ID and identical update cannot admit draft discard.
+  expect(await removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(update), Date.now(), "a.txt", basename(typing!.file, ".json"))).toEqual(listed);
+  expect(await readFile(typing!.file, "utf8")).toBe(typing!.content);
+  expect(await removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(update), Date.now(), "a.txt")).toEqual([]);
+  expect(await readTypingCheckpoints(directory, "workspace")).toEqual([typing]);
+  expect(await hasRetainedLiveDraft(directory, "workspace", "renamed.txt", "object")).toBe(true);
+  expect(await hasRetainedLiveDraft(directory, "workspace", "a.txt", "replacement")).toBe(true);
+  expect(await hasRetainedLiveDraft(directory, "workspace", "other.txt", "other")).toBe(false);
+  expect(await hasRetainedLiveDraft(directory, "other", "a.txt", "object")).toBe(false);
+  expect(await hasWorkspaceLiveDrafts(directory, "workspace")).toBe(true);
+  expect(await hasWorkspaceLiveDrafts(directory, "other")).toBe(false);
+  // Forget's confirmed removal still removes all retained work for its workspace.
+  await removeWorkspaceLiveDrafts(directory, "workspace");
+  expect(await readTypingCheckpoints(directory, "workspace")).toEqual([]);
+  expect(await hasRetainedLiveDraft(directory, "workspace", "a.txt", "object")).toBe(false);
+  expect(await hasWorkspaceLiveDrafts(directory, "workspace")).toBe(false);
 });
 
 it.each(["malformed", "incomplete"] as const)("does not block restore with %s recovery state nobody can review", async kind => {

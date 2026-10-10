@@ -99,6 +99,13 @@ for (const mode of ["quit", "last-window", "crash", "crash-reopen-before-import"
       if (mode !== "deleted-file") await waitForWorkspaceFile(desktop.page, reopened.workspaceId, path);
       if (mode === "crash-reopen-before-import") {
         await expect.poll(()=>access(importGate+".waiting").then(()=>true,()=>false)).toBe(true);
+        // The pending checkpoint must never enter the persistent set-aside rows.
+        expect(await desktop.page.evaluate(async workspaceId =>
+          (window as unknown as {dohcDesktop: DohcDesktopBridge}).dohcDesktop.listLiveDraftRecovery({workspaceId}), reopened.workspaceId)).toEqual([]);
+        await desktop.page.getByTestId("notice-center-toggle").click();
+        await expect(desktop.page.getByTestId("notice-center")).toBeVisible();
+        await expect(desktop.page.getByTestId("notice-set-aside-edits")).toHaveCount(0);
+        await desktop.page.getByTestId("notice-center-toggle").click();
         await explorerRow(desktop.page,path).click();
         await expect.poll(()=>access(importGate+".opened").then(()=>true,()=>false)).toBe(true);
         expect(await checkpointText(temp.homeDir)).toContain(sentinels[2]!);
@@ -193,6 +200,11 @@ for (const mode of ["quit", "last-window", "crash", "crash-reopen-before-import"
         for (const sentinel of sentinels) expect(disk.split(sentinel).length - 1).toBe(1);
       }
       await expect.poll(() => checkpointText(temp.homeDir)).toBe("");
+      if (mode === "crash-reopen-before-import") {
+        await desktop.page.getByTestId("notice-center-toggle").click();
+        await expect(desktop.page.getByTestId("notice-center")).toBeVisible();
+        await expect(desktop.page.getByTestId("notice-set-aside-edits")).toHaveCount(0);
+      }
     } finally {
       await rm(gate, {force: true});
       await rm(importGate, {force:true});
