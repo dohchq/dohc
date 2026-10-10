@@ -81,6 +81,7 @@ pub use model::{
     MAX_BLOB_HAVE_BATCH, MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS, MAX_PUSH_OPS_PER_BATCH,
     MAX_SHARE_PROPOSAL_OPS, MAX_WIRE_INTEGER, ReplicationEnvelope, SettlementAdmission,
 };
+pub use moment_apply::open_artifacts::{OpenArtifactDrain, drain_open_document_artifacts};
 pub use moment_apply::{
     MomentApplyResult, MomentMaterializationChange, apply_moment_envelope,
     apply_moment_envelope_detailed,
