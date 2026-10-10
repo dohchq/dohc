@@ -1012,7 +1012,8 @@ function clearCachedCredentials(): void {
 }
 
 // Notices sent to the signed-in person, and this computer's own. The store
-// pulls after each sync pass, at sign-in, and when a window gains focus.
+// pulls after workspace/share changes and settled press receipts, at sign-in,
+// and when a window gains focus.
 let cachedNoticeStore: NoticeStore | null = null;
 // The signed-in session from one credential snapshot: the account and every
 // reach read the same credentials, and the session stops being current as
@@ -6317,7 +6318,11 @@ function registerIpcHandlers(): void {
     // person's own grant; the relay checks the grant again.
     relayPress: async (operation, input) => {
       await warmCredentialCache();
+      operation.assertCurrent();
       const credentials = cachedCredentials;
+      const generation = credentialCacheGeneration;
+      const session = "session" in operation ? (operation as DesktopRendererWorkspaceOperation).session : undefined;
+      const retirement = workspaceAuthorities.attachmentRetirementSignal(operation.workspace.workspaceId, operation.workspace.attachmentId);
       const marker = operation.workspace.shareView;
       const shareId = isRecordValue(marker) && typeof marker.shareId === "string" ? marker.shareId : null;
       const shareRelayUrl = isRecordValue(marker) && typeof marker.relayUrl === "string" ? marker.relayUrl : null;
@@ -6327,7 +6332,10 @@ function registerIpcHandlers(): void {
         throw new Error("Sign in to the cloud server this share came from.");
       }
       await automationPressRelay({ baseUrl: normalizeServerUrl(credentials.relayUrl), token: credentials.token, fetch: relayShareFetch })
-        .press(shareId, input);
+        .press(shareId, input, {
+          isCurrent: () => (session?.isCurrent() ?? true) && !retirement.aborted && credentialCacheGeneration === generation,
+          sync: isCurrent => noticeStore().sync(isCurrent),
+        });
     },
     relayInspect: async (operation, input) => {
       const marker = operation.workspace.shareView;
@@ -6430,6 +6438,7 @@ function registerIpcHandlers(): void {
     setWorkspaceShareView, refreshNativeWorkspaceSurfaces, workspaceAuthorities,
     canonicalWorkspaceFor, withStaleSensitiveWorkspaceOperation, shareViewFiles,
     receivedShareEngine, openWorkspaceActivity, requireWorkspace, notifyRenderer,
+    syncNotices: isCurrent => noticeStore().sync(isCurrent),
     recordShareViewStoreRefusal: activity.recordShareViewStoreRefusal,
     recheckRemovedShares,
   });

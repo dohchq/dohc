@@ -1,5 +1,148 @@
 use super::*;
 
+fn open_document_pull_fixture(later: i64, live: bool) -> (i64, i64, u128) {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1000, &NoFaults)
+        .unwrap();
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "shared").unwrap();
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.plaintext_insert(0, "before");
+    let sha = engine.put_binary_blob(&doc.encode_full_state()).unwrap();
+    let base = envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        json!({"versionId":"main", "objectId":"shared", "path":"shared.md", "contentKind":"plaintext", "updateBlobSha256":sha, "lineageClaimId":sha, "isBaseState":true}),
+    );
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut Default::default(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    let leases = dohc_engine_collab::LeaseRegistry::new();
+    let _held = live.then(|| leases.acquire(&key).unwrap());
+    if let Some(held) = &_held {
+        held.bind_claim(base.payload["lineageClaimId"].as_str())
+            .unwrap();
+    }
+    let bytes = doc.plaintext_insert(6, " settled");
+    let delta_sha = engine.put_binary_blob(&bytes).unwrap();
+    let mut delta = base.clone();
+    delta.origin_seq = 1;
+    delta.payload["updateBlobSha256"] = json!(delta_sha);
+    delta.payload["isBaseState"] = json!(false);
+    let text = "before settled";
+    let text_sha = dohc_engine_storage::hex_sha256(text.as_bytes());
+    let moment = |seq, object: String, path: String| {
+        envelope(
+            "peer",
+            seq,
+            "moment.append",
+            json!({
+                "momentId":if seq == 2 { format!("moment-ydoc-{}", "c".repeat(64)) } else { format!("settled-{seq}") }, "versionId":"main", "objectId":object, "objectCreatedAtMs":1,
+                "path":path, "recordedAtMs":2000, "operation":"write", "payloadBeforeBlobSha256":null, "payloadBeforePath":null,
+                "payloadAfterBlobSha256":text_sha, "payloadAfterPath":path, "payloadAfterContentKind":"text",
+                "metadata":{"origin":"sync"}, "beforePresent":"absent"
+            }),
+        )
+    };
+    let mut ops = vec![delta, moment(2, "shared".into(), "shared.md".into())];
+    ops.extend((0..later).map(|i| moment(i + 3, format!("other-{i}"), format!("other-{i}.md"))));
+    let mut cursor = 0;
+    let total = ops.len();
+    let pages = ops
+        .chunks(500)
+        .map(|chunk| {
+            let start = cursor;
+            cursor += chunk.len() as i64;
+            (
+                start,
+                PullResponse {
+                    ops: chunk.to_vec(),
+                    next_cursor: cursor,
+                    has_more: cursor < total as i64,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut relay = PagedRelay::new(pages);
+    relay.blobs.insert(text_sha, text.as_bytes().to_vec());
+    let client = RelaySyncClient::new(relay);
+    let start = std::time::Instant::now();
+    let mut cache = Default::default();
+    loop {
+        let result = client
+            .pull_chat_workspace(&mut engine, &mut cache, "ws", &NoFaults, &leases, 2100)
+            .unwrap();
+        let SyncPassOutcome::Complete {
+            has_more,
+            pending_cursor: Some(cursor),
+            ..
+        } = result
+        else {
+            panic!("{result:?}");
+        };
+        client
+            .commit_pull_cursor(&mut engine, "ws", &cursor, &NoFaults, &leases, 2100)
+            .unwrap();
+        if !has_more {
+            break;
+        }
+    }
+    let micros = start.elapsed().as_micros();
+    let deferred = engine
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM relay_deferred_ops", [], |r| {
+                r.get::<_, i64>(0)
+            })
+        })
+        .unwrap();
+    let others = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM snapshots WHERE object_id LIKE 'other-%'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+        })
+        .unwrap();
+    if deferred == 0 {
+        assert_eq!(
+            read_replication_acked_seq(&engine, "ws", "peer").unwrap(),
+            later + 2
+        );
+    }
+    (others, deferred, micros)
+}
+
+#[test]
+fn open_document_pull_admits_settlement_and_same_origin_later_files() {
+    let (others, deferred, _) = open_document_pull_fixture(2, true);
+    assert_eq!((others, deferred), (2, 0));
+}
+
+#[test]
+#[ignore = "manual before/after pull measurement"]
+fn open_document_pull_measurement() {
+    for live in [true, false] {
+        for sample in 0..std::env::var("OPENHOLD_SAMPLES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5)
+        {
+            let (others, deferred, micros) = open_document_pull_fixture(1000, live);
+            println!(
+                "OPENHOLD pull live={live} sample={sample} applied_later={others} deferred={deferred} micros={micros}"
+            );
+        }
+    }
+}
+
 #[derive(Default)]
 struct ClaimRelay {
     relay: FakeRelay,
@@ -6576,5 +6719,118 @@ fn deferred_relay_suffixes_and_new_origins_keep_their_place_in_the_cycle() {
             &NoFaults,
         )
         .unwrap();
+    }
+}
+
+#[test]
+#[ignore = "manual partial-index insert measurement"]
+fn ydoc_update_index_insert_measurement() {
+    for local in [true, false] {
+        for live in [true, false] {
+            for indexed in [true, false, false, true] {
+                let (_scratch, _path, mut store) = open_store();
+                seed_identity(&mut store);
+                VersionedTextStore::new(&mut store)
+                    .ensure_main_version("ws", "main", 1, &NoFaults)
+                    .unwrap();
+                let key = dohc_engine_collab::DocKey::new("ws", "main", "measured").unwrap();
+                let doc = dohc_engine_collab::Ydoc::wire();
+                doc.plaintext_insert(0, "base");
+                let sha = store.put_binary_blob(&doc.encode_full_state()).unwrap();
+                let base = envelope(
+                    "peer",
+                    0,
+                    "ydoc.update",
+                    json!({"versionId":"main","objectId":"measured","path":"measured.md","contentKind":"plaintext","updateBlobSha256":sha,"lineageClaimId":sha,"isBaseState":true}),
+                );
+                let mut cache = Default::default();
+                apply_ydoc_envelope(&mut store, &mut cache, &base, &NoFaults, &NoLiveLeases)
+                    .unwrap();
+                store.write_with(&NoFaults,|tx| {
+                    for origin in ["history-a","history-b","history-c"] {
+                        for seq in 0..3334 {
+                            tx.execute("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES ('ws',?1,?2,'ydoc.update',?3,1,1)",params![origin,seq,base.payload.to_string()]).unwrap();
+                        }
+                    }
+                    if !indexed { tx.execute_batch("DROP INDEX replication_ydoc_origin_document").unwrap(); }
+                    Ok::<_,SyncError>(())
+                }).unwrap();
+                let leases = dohc_engine_collab::LeaseRegistry::new();
+                let held = live.then(|| leases.acquire(&key).unwrap());
+                if let Some(held) = &held {
+                    held.bind_claim(Some(&sha)).unwrap();
+                }
+                let mut samples = Vec::new();
+                let mut inserts = Vec::new();
+                for seq in 1..=110 {
+                    let update = doc.plaintext_insert((seq + 3) as u32, "x");
+                    let mut op = base.clone();
+                    op.origin_seq = seq;
+                    op.payload["isBaseState"] = json!(false);
+                    // Hydration is outside the timed remote apply, as in a pull.
+                    if !local {
+                        op.payload["updateBlobSha256"] =
+                            json!(store.put_binary_blob(&update).unwrap());
+                    }
+                    let started = std::time::Instant::now();
+                    if local {
+                        dohc_engine_collab::record_local_update(
+                            &mut store,
+                            &mut cache,
+                            &key,
+                            &update,
+                            Default::default(),
+                            &NoFaults,
+                            seq + 2,
+                            |tx, _, update_sha| {
+                                op.payload["updateBlobSha256"] = json!(update_sha);
+                                let journal = std::time::Instant::now();
+                                crate::journal_local_op_in_tx(
+                                    tx,
+                                    "ws",
+                                    "ydoc.update",
+                                    &op.payload,
+                                    seq + 2,
+                                )
+                                .unwrap();
+                                inserts.push(journal.elapsed().as_nanos());
+                                Ok(())
+                            },
+                        )
+                        .unwrap();
+                    } else {
+                        apply_ydoc_envelope(&mut store, &mut cache, &op, &NoFaults, &leases)
+                            .unwrap();
+                    }
+                    if seq > 10 {
+                        samples.push(started.elapsed().as_nanos());
+                    }
+                }
+                samples.sort_unstable();
+                inserts = inserts.into_iter().skip(10).collect();
+                inserts.sort_unstable();
+                println!(
+                    "OPENHOLD index local={local} live={live} indexed={indexed} n=100 p50_ns={} p95_ns={} journal_p50_ns={} journal_p95_ns={}",
+                    samples[49],
+                    samples[94],
+                    inserts.get(49).copied().unwrap_or(0),
+                    inserts.get(94).copied().unwrap_or(0)
+                );
+                // Isolate the journal insert from remote projection and local replay costs.
+                let payload = base.payload.to_string();
+                store.write_with(&NoFaults,|tx| {
+                    let mut timings=Vec::new();
+                    let mut statement=tx.prepare_cached("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported,apply_disposition) VALUES ('ws','insert-only',?1,'ydoc.update',?2,1,?3,'applied')").unwrap();
+                    for seq in 0..1010 {
+                        let start=std::time::Instant::now();
+                        statement.execute(params![seq,payload,i64::from(!local)]).unwrap();
+                        if seq>=10 { timings.push(start.elapsed().as_nanos()); }
+                    }
+                    timings.sort_unstable();
+                    println!("OPENHOLD insert local={local} live={live} indexed={indexed} n=1000 p50_ns={} p95_ns={}",timings[499],timings[949]);
+                    Ok::<_,SyncError>(())
+                }).unwrap();
+            }
+        }
     }
 }
