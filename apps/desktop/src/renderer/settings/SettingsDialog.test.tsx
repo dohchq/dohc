@@ -968,6 +968,25 @@ describe("SettingsDialog", () => {
     expect(onOpenLiveDocuments).toHaveBeenCalledOnce();
   });
 
+  it("opens the Sharing view from each share list", async () => {
+    const onOpenSharing = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <SettingsDialog
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="cloud"
+        onOpenSharing={onOpenSharing}
+        onClose={() => {}}
+      />,
+    );
+
+    await user.click(await screen.findByTestId("settings-manage-sharing-granted"));
+    await user.click(screen.getByTestId("settings-manage-sharing-received"));
+    expect(onOpenSharing).toHaveBeenCalledTimes(2);
+    expect(screen.getAllByRole("button", { name: "Manage in Sharing" })).toHaveLength(2);
+  });
+
   it("hides live documents in a shared view", async () => {
     render(
       <SettingsDialog

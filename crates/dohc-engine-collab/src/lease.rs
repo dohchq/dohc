@@ -19,7 +19,7 @@
 //! [`LeaseRegistry::acquire`] fails closed (no lease is granted) rather than
 //! risk double-granting.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::error::CollabError;
@@ -43,11 +43,17 @@ pub struct LeaseRegistry {
     /// default instance has an empty scope; per-root users hold a
     /// [`Self::scoped`] view sharing the same held-set.
     scope: String,
-    held: Arc<Mutex<HashSet<(String, String)>>>,
+    held: Arc<Mutex<HashMap<(String, String), LeaseBinding>>>,
     /// How many leases each scoped workspace has released. Capture defers a
     /// new file a live session holds and offers it again once its
     /// workspace's count moves.
     released: Arc<Mutex<HashMap<String, u64>>>,
+}
+
+#[derive(Clone)]
+struct LeaseBinding {
+    version_id: String,
+    claim_id: Option<String>,
 }
 
 impl LeaseRegistry {
@@ -99,9 +105,16 @@ impl LeaseRegistry {
         let mut held = self.held.lock().map_err(|_| CollabError::Corrupt {
             reason: "lease registry mutex poisoned".to_string(),
         })?;
-        if !held.insert(self.object_scope(key)) {
+        if held.contains_key(&self.object_scope(key)) {
             return Err(CollabError::LeaseHeld);
         }
+        held.insert(
+            self.object_scope(key),
+            LeaseBinding {
+                version_id: key.version_id.clone(),
+                claim_id: None,
+            },
+        );
         Ok(Lease {
             held: self.held.clone(),
             releases: self.released.clone(),
@@ -115,8 +128,20 @@ impl LeaseRegistry {
     pub fn is_held(&self, key: &DocKey) -> bool {
         self.held
             .lock()
-            .map(|held| held.contains(&self.object_scope(key)))
+            .map(|held| held.contains_key(&self.object_scope(key)))
             .unwrap_or(false)
+    }
+
+    /// The exact claim the editor currently consumes, scoped to its version.
+    /// Missing bindings and poisoned registries cannot authorize history admission.
+    pub fn bound_claim(&self, key: &DocKey) -> Option<String> {
+        self.held
+            .lock()
+            .ok()?
+            .get(&self.object_scope(key))
+            .filter(|binding| binding.version_id == key.version_id)?
+            .claim_id
+            .clone()
     }
 
     /// A count that moves when a session lease on `workspace_id` under this
@@ -132,7 +157,7 @@ impl LeaseRegistry {
 
 /// An RAII lease guard. Dropping it releases the lease deterministically.
 pub struct Lease {
-    held: Arc<Mutex<HashSet<(String, String)>>>,
+    held: Arc<Mutex<HashMap<(String, String), LeaseBinding>>>,
     releases: Arc<Mutex<HashMap<String, u64>>>,
     key: (String, String),
     released: bool,
@@ -140,6 +165,20 @@ pub struct Lease {
 }
 
 impl Lease {
+    /// Bind the lease to the claim the session consumes after open or resync.
+    pub fn bind_claim(&self, claim_id: Option<&str>) -> Result<(), CollabError> {
+        let mut held = self.held.lock().map_err(|_| CollabError::Corrupt {
+            reason: "lease registry mutex poisoned".to_owned(),
+        })?;
+        let binding = held
+            .get_mut(&self.key)
+            .ok_or_else(|| CollabError::Corrupt {
+                reason: "document lease is missing".to_owned(),
+            })?;
+        binding.claim_id = claim_id.map(ToOwned::to_owned);
+        Ok(())
+    }
+
     /// The leased (workspace, object) scope.
     pub fn scope(&self) -> (&str, &str) {
         (&self.key.0, &self.key.1)
@@ -177,5 +216,90 @@ impl Drop for Lease {
 impl std::fmt::Debug for Lease {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Lease").field("key", &self.key).finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn internal_attempts_preserve_a_sessions_bound_claim_and_release_generation() {
+        let registry = LeaseRegistry::new();
+        let key = DocKey::new("ws", "main", "object").unwrap();
+        let fork = DocKey::new("ws", "fork", "object").unwrap();
+        let lease = registry.acquire(&key).unwrap();
+        lease.bind_claim(Some("predecessor")).unwrap();
+        for attempt in [&key, &fork] {
+            assert!(matches!(
+                registry.acquire_internal(attempt),
+                Err(CollabError::LeaseHeld)
+            ));
+            assert_eq!(registry.bound_claim(&key).as_deref(), Some("predecessor"));
+        }
+        lease.bind_claim(Some("successor")).unwrap();
+        assert_eq!(registry.bound_claim(&key).as_deref(), Some("successor"));
+        assert_eq!(registry.release_generation("ws"), 0);
+        drop(lease);
+        assert_eq!(registry.bound_claim(&key), None);
+        assert_eq!(registry.release_generation("ws"), 1);
+        drop(registry.acquire_internal(&key).unwrap());
+        assert_eq!(registry.bound_claim(&key), None);
+        assert_eq!(registry.release_generation("ws"), 1);
+    }
+
+    #[test]
+    fn binding_updates_do_not_bypass_or_notify_an_internal_guard() {
+        let registry = LeaseRegistry::new();
+        let key = DocKey::new("ws", "main", "object").unwrap();
+        let fork = DocKey::new("ws", "fork", "object").unwrap();
+        let sibling = DocKey::new("ws", "main", "sibling").unwrap();
+        let internal = registry.acquire_internal(&key).unwrap();
+        let session = registry.acquire(&sibling).unwrap();
+        for claim in [Some("predecessor"), Some("successor"), None] {
+            session.bind_claim(claim).unwrap();
+            assert_eq!(registry.bound_claim(&sibling).as_deref(), claim);
+            assert_eq!(registry.bound_claim(&key), None);
+            assert!(registry.is_held(&key));
+            for attempt in [&key, &fork] {
+                assert!(matches!(
+                    registry.acquire(attempt),
+                    Err(CollabError::LeaseHeld)
+                ));
+            }
+            assert_eq!(registry.release_generation("ws"), 0);
+        }
+        session.bind_claim(Some("sibling-session")).unwrap();
+        drop(internal);
+        assert!(!registry.is_held(&key));
+        assert_eq!(
+            registry.bound_claim(&sibling).as_deref(),
+            Some("sibling-session")
+        );
+        assert_eq!(registry.release_generation("ws"), 0);
+        let reopened = registry.acquire(&key).unwrap();
+        reopened.bind_claim(Some("new-session")).unwrap();
+        assert_eq!(registry.bound_claim(&key).as_deref(), Some("new-session"));
+    }
+
+    #[test]
+    fn bound_claim_follows_the_session_and_is_scoped_to_root_and_version() {
+        let registry = LeaseRegistry::new();
+        let first = registry.scoped(std::path::Path::new("first"));
+        let second = registry.scoped(std::path::Path::new("second"));
+        let key = DocKey::new("ws", "main", "object").unwrap();
+        let fork = DocKey::new("ws", "fork", "object").unwrap();
+        let lease = first.acquire(&key).unwrap();
+        assert_eq!(first.bound_claim(&key), None);
+        lease.bind_claim(Some("predecessor")).unwrap();
+        assert_eq!(first.bound_claim(&key).as_deref(), Some("predecessor"));
+        assert_eq!(first.bound_claim(&fork), None);
+        assert_eq!(second.bound_claim(&key), None);
+        lease.bind_claim(Some("successor")).unwrap();
+        assert_eq!(first.bound_claim(&key).as_deref(), Some("successor"));
+        drop(lease);
+        assert_eq!(first.bound_claim(&key), None);
+        let _lease = first.acquire(&key).unwrap();
+        assert_eq!(first.bound_claim(&key), None);
     }
 }

@@ -13,6 +13,10 @@ use crate::file_search::{
 };
 use crate::{ApplyOutcome, LeaseProbe, ReplicationEnvelope, SyncError, apply_envelope_with};
 
+#[cfg(test)]
+mod openhold_measurement;
+
+pub(crate) mod open_artifacts;
 pub(crate) mod pending;
 #[cfg(test)]
 mod pending_tests;
@@ -411,6 +415,10 @@ pub fn apply_moment_envelope_detailed(
             search_policy.as_ref(),
             MomentApplyMode::Ordinary,
             content_held,
+            content_held
+                .then(|| leases.bound_claim(&key))
+                .flatten()
+                .as_deref(),
         )
     })
 }
@@ -561,6 +569,7 @@ fn apply_moment_append(
     search_policy: Option<&SearchPolicySnapshot>,
     mode: MomentApplyMode,
     content_held: bool,
+    live_claim: Option<&str>,
 ) -> Result<MomentApplyResult, SyncError> {
     require_version(tx, &envelope.workspace_id, &payload.version_id)?;
 
@@ -667,10 +676,34 @@ fn apply_moment_append(
         && (local
             .as_ref()
             .is_some_and(|snapshot| snapshot.digest == payload.payload_after_blob_sha256)
-            || holds_earlier_lineage_artifact(tx, envelope, payload)?)
+            || if content_held {
+                live_claim.is_some_and(|_| {
+                    is_ydoc_settlement_moment_id(&payload.moment_id)
+                        && after_kind == ContentKind::Text
+                        && payload.path == payload.payload_after_path
+                        && payload
+                            .payload_before_path
+                            .as_deref()
+                            .is_none_or(|path| path == payload.payload_after_path)
+                        && payload
+                            .before_path
+                            .as_deref()
+                            .is_none_or(|path| path == payload.payload_after_path)
+                }) && holds_earlier_lineage_artifact(tx, envelope, payload, live_claim)?
+            } else {
+                holds_earlier_lineage_artifact(tx, envelope, payload, None)?
+            })
     {
         ensure_file_object(tx, &envelope.workspace_id, payload)?;
         insert_moment(tx, &envelope.workspace_id, payload, &remote_before, true)?;
+        if content_held
+            && let Some(claim) = live_claim
+            && local
+                .as_ref()
+                .is_some_and(|head| head.digest != payload.payload_after_blob_sha256)
+        {
+            open_artifacts::enqueue(tx, envelope, payload, claim)?;
+        }
         return Ok(MomentApplyResult {
             conflicts_opened: 0,
             materialization_changes: Vec::new(),
@@ -683,7 +716,7 @@ fn apply_moment_append(
         });
     }
 
-    let mut owner_settlement_committed = false;
+    let mut owner_settlement = None;
     if mode == MomentApplyMode::Ordinary {
         let key = DocKey::new(
             &envelope.workspace_id,
@@ -777,7 +810,7 @@ fn apply_moment_append(
             // predecessor may be history-only and was never materialized.
             head_fast_forward = false;
             content_fast_forward = true;
-            owner_settlement_committed = true;
+            owner_settlement = Some(owner);
         }
     }
 
@@ -927,7 +960,7 @@ fn apply_moment_append(
         upsert_snapshot(tx, &envelope.workspace_id, payload, after_kind, byte_length)?;
         // The audited host settlement is now this owner's committed head.
         // Complete its matching binding even while the editor retains its lease.
-        if owner_settlement_committed
+        if owner_settlement.is_some()
             && !dohc_engine_domain::collection_record_id_mismatch_in_tx(
                 tx,
                 &envelope.workspace_id,
@@ -972,22 +1005,50 @@ fn apply_moment_append(
             // write is a suppressed self-write, so no capture apply indexes
             // it later: a bound record's index must ride this transaction.
             if let Some(text) = after_text.as_deref() {
-                // Moment-only edits diff the prior file snapshot. Audited owner
-                // settlements use the field index the live feed has advanced.
+                // Moment-only edits diff the prior file snapshot. Owner
+                // settlements preserve the visible draft over the checkpoint.
                 // Unparseable frontmatter must still clear the index.
                 let empty = || serde_json::Value::Object(serde_json::Map::new());
-                let before_frontmatter = if owner_settlement_committed {
-                    // Accepted frames advance the field index before the file.
-                    // Diff that index so only changes not indexed by the feed
-                    // (such as an enrolled restore checkpoint) get history.
-                    dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
+                let (mut frontmatter, provenance) =
+                    dohc_engine_domain::collections::markdown_frontmatter_json_with_provenance(
+                        text,
+                    )
+                    .unwrap_or_else(|| (empty(), Default::default()));
+                let before_frontmatter = if let Some(owner) = &owner_settlement {
+                    // The index follows the visible draft, including pending
+                    // edits that this settled checkpoint does not contain.
+                    let indexed = dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
                         tx,
                         &envelope.workspace_id,
                         &payload.version_id,
                         &payload.object_id,
                     )
-                    .map_err(crate::ydoc_apply::map_domain_hard_error)?
-                    .unwrap_or_else(empty)
+                    .map_err(crate::ydoc_apply::map_domain_hard_error)?;
+                    if let Some(indexed_fields) =
+                        indexed.as_ref().filter(|_| owner.pending_bytes > 0)
+                    {
+                        let key = DocKey::new(
+                            &envelope.workspace_id,
+                            &payload.version_id,
+                            &payload.object_id,
+                        )
+                        .map_err(SyncError::corrupt)?;
+                        let visible = dohc_engine_collab::load_doc_in(tx, &key)
+                            .map_err(SyncError::corrupt)?;
+                        frontmatter = match dohc_engine_collab::owner_outbox::draft::apply_pending_to_checkpoint_in(
+                            tx,
+                            &owner.binding,
+                            &visible,
+                        ) {
+                            Ok(()) => visible.frontmatter_json(),
+                            Err(dohc_engine_collab::OwnerOutboxError::Storage(error)) => {
+                                return Err(error.into());
+                            }
+                            // Replay-state errors must not invent an indexed change.
+                            Err(_) => indexed_fields.clone(),
+                        };
+                    }
+                    indexed.unwrap_or_else(empty)
                 } else {
                     local
                         .as_ref()
@@ -999,11 +1060,6 @@ fn apply_moment_append(
                         })
                         .unwrap_or_else(empty)
                 };
-                let (frontmatter, provenance) =
-                    dohc_engine_domain::collections::markdown_frontmatter_json_with_provenance(
-                        text,
-                    )
-                    .unwrap_or_else(|| (empty(), Default::default()));
                 record_facts = dohc_engine_domain::index_collection_frontmatter_apply_in_tx(
                     tx,
                     &envelope.workspace_id,
@@ -1214,11 +1270,42 @@ fn recorded_preimage_matches(
     ).map_err(SyncError::corrupt)
 }
 
+fn origin_update_is_on_live_claim(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+    payload: &MomentAppendPayload,
+    live_claim: &str,
+) -> Result<bool, SyncError> {
+    // Select the latest coordinate from the covering index, then read one
+    // primary-key row. Refusal and claim checks cannot select an older update.
+    let claim: Option<String> = tx.query_row(
+        "SELECT json_extract(r.payload_json,'$.lineageClaimId') FROM \
+         replication_log r \
+         JOIN ydoc_docs d ON d.workspace_id=?1 AND d.version_id=?3 AND d.object_id=?4 \
+         WHERE r.workspace_id=?1 AND r.origin_id=?2 AND r.origin_seq=(\
+           SELECT MAX(origin_seq) FROM replication_log INDEXED BY replication_ydoc_origin_document \
+           WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq<?5 AND op_kind='ydoc.update' \
+             AND json_extract(payload_json,'$.versionId')=?3 AND json_extract(payload_json,'$.objectId')=?4) \
+           AND r.apply_disposition='applied' AND d.lineage_claim_status='exact' \
+           AND json_extract(r.payload_json,'$.lineageClaimId')=d.lineage_claim_id \
+           AND d.lineage_claim_id=?6 AND d.content_kind IN ('plaintext','richdoc') \
+           AND NOT EXISTS (SELECT 1 FROM ydoc_deferred_updates p \
+             WHERE p.workspace_id=?1 AND p.version_id=?3 AND p.object_id=?4 AND p.lineage_claim_id IS NOT ?6)",
+        params![envelope.workspace_id,envelope.origin_id,payload.version_id,payload.object_id,envelope.origin_seq,live_claim],
+        |row| row.get(0),
+    ).optional().map_err(SyncError::corrupt)?.flatten();
+    Ok(claim.is_some())
+}
+
 fn holds_earlier_lineage_artifact(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
     payload: &MomentAppendPayload,
+    live_claim: Option<&str>,
 ) -> Result<bool, SyncError> {
+    if let Some(claim) = live_claim {
+        return origin_update_is_on_live_claim(tx, envelope, payload, claim);
+    }
     // The ordered origin log identifies the claim this artifact follows.
     // Never use equal bytes from a replaced or independently claimed base.
     let claim: Option<String> = tx.query_row(
@@ -1373,6 +1460,7 @@ pub(crate) fn apply_conflict_parent_shadow_in_tx(
         search_policy,
         MomentApplyMode::ConflictParent,
         false,
+        None,
     )
 }
 
@@ -2130,7 +2218,7 @@ fn require_binary_blob(tx: &Transaction<'_>, sha: &str) -> Result<i64, SyncError
 }
 
 fn select_snapshot_by_object(
-    tx: &Transaction<'_>,
+    tx: &rusqlite::Connection,
     workspace_id: &str,
     version_id: &str,
     object_id: &str,

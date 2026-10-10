@@ -1934,6 +1934,7 @@ async fn terminal_native_seed_publishes_only_accepted_content_and_unblocks_ordin
         .owner_ydoc_refuse_entry(
             "workspace".into(),
             input,
+            12,
             CancellationToken::new(),
             Arc::new(()),
         )
@@ -2100,6 +2101,7 @@ async fn native_refusal_rejects_wrong_digest_stale_binding_and_accepted_delivery
             .owner_ydoc_refuse_entry(
                 "workspace".into(),
                 wrong,
+                12,
                 CancellationToken::new(),
                 Arc::new(())
             )
@@ -2127,6 +2129,7 @@ async fn native_refusal_rejects_wrong_digest_stale_binding_and_accepted_delivery
             .owner_ydoc_refuse_entry(
                 "workspace".into(),
                 input.clone(),
+                12,
                 CancellationToken::new(),
                 Arc::new(())
             )
@@ -2191,6 +2194,7 @@ async fn native_refusal_rejects_wrong_digest_stale_binding_and_accepted_delivery
             .owner_ydoc_refuse_entry(
                 "workspace".into(),
                 input,
+                12,
                 CancellationToken::new(),
                 Arc::new(())
             )

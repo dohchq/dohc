@@ -87,13 +87,22 @@ pub(crate) struct YdocSession {
 }
 
 impl YdocSession {
+    pub(super) fn set_lineage_claim(&mut self, claim: Option<String>) -> Result<(), CollabError> {
+        if self.lineage_claim_id != claim {
+            self._lease.bind_claim(claim.as_deref())?;
+            self.lineage_claim_id = claim;
+        }
+        Ok(())
+    }
+
     pub(super) fn imported_owner(
         workspace: WorkspaceHandle,
         key: DocKey,
         captured: &dohc_engine_collab::live_update_application::ImportedOwnerActivation,
         lease: Lease,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, CollabError> {
+        lease.bind_claim(Some(&captured.source.lineage_claim_id))?;
+        Ok(Self {
             owner_draft: None,
             workspace,
             key,
@@ -109,7 +118,7 @@ impl YdocSession {
             open_head_sha: Some(captured.source.source_digest.clone()),
             owner_seed_source: None,
             _lease: lease,
-        }
+        })
     }
 }
 
@@ -767,6 +776,7 @@ impl EngineService {
                     reason: params.reason,
                     observed_binding: params.observed_binding,
                 },
+                now_ms()?,
                 cancellation.token(),
             )
             .await
@@ -1030,6 +1040,9 @@ impl EngineService {
                     .collect()
             }),
         };
+        lease
+            .bind_claim(state.lineage_claim_id.as_deref())
+            .map_err(|error| map_runtime(RuntimeError::Collab(error)))?;
         lock(&self.sessions).insert(
             session_id,
             YdocSession {
@@ -1214,7 +1227,9 @@ impl EngineService {
                     && let Some(session) = lock(&sessions).get_mut(&session_id)
                 {
                     session.first_update_pending = false;
-                    session.lineage_claim_id = append.lineage_claim_id.clone();
+                    session
+                        .set_lineage_claim(append.lineage_claim_id.clone())
+                        .map_err(RuntimeError::Collab)?;
                 }
                 let settlement_requested = match &outcome {
                     Ok(append) => append.settlement_requested,
@@ -1747,7 +1762,9 @@ impl EngineService {
             ),
         };
         if let Some(session) = lock(&self.sessions).get_mut(&params.session_id) {
-            session.lineage_claim_id = state.lineage_claim_id.clone();
+            session
+                .set_lineage_claim(state.lineage_claim_id.clone())
+                .map_err(|error| map_runtime(RuntimeError::Collab(error)))?;
             session.owner_draft = owner_draft.clone();
         }
         let initial_update = state.initial_update;
@@ -1878,6 +1895,38 @@ mod tests {
     }
 
     use super::*;
+    #[test]
+    fn imported_owner_binds_session_claim() {
+        use dohc_engine_collab::live_update_application::{
+            ImportedOwnerActivation, ImportedOwnerSource,
+        };
+        let claim = "a".repeat(64);
+        let source: ImportedOwnerSource = serde_json::from_value(json!({
+            "version":1,"relayDatabaseNamespace":"relay","workspaceId":"ws","mainVersionId":"main",
+            "objectId":"object","lineageClaimId":claim,"currentPath":"head.md","replicationEpoch":"epoch",
+            "streamIdentity":"stream","committedCursor":1,"baseOriginId":"peer","baseOriginSeq":0,
+            "baseRelaySeq":1,"sourceMomentId":"source","sourceDigest":claim,"sourceByteLength":0,
+            "nativeHeadSequence":0,"fullStateDigest":claim,"fullStateByteLength":0
+        })).unwrap();
+        let captured = ImportedOwnerActivation {
+            activation_id: "activation".into(),
+            source,
+            baseline_bytes: Vec::new(),
+            full_state: Vec::new(),
+            restore_generation: None,
+        };
+        let leases = dohc_engine_collab::LeaseRegistry::new();
+        let key = DocKey::new("ws", "main", "object").unwrap();
+        let session = YdocSession::imported_owner(
+            WorkspaceHandle("handle".into()),
+            key.clone(),
+            &captured,
+            leases.acquire(&key).unwrap(),
+        );
+        assert_eq!(leases.bound_claim(&key).as_deref(), Some(claim.as_str()));
+        drop(session);
+        assert_eq!(leases.bound_claim(&key), None);
+    }
     use crate::EngineService;
     use crate::rpc::error::map_owner_outbox;
     use crate::rpc::request::OperationCancellation;

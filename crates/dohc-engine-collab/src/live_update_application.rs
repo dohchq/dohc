@@ -562,9 +562,17 @@ impl AdmittedLiveUpdateMetadata {
     }
 
     pub fn matches_draft_declaration(&self, declaration: Option<&AgentDeclaration>) -> bool {
-        self.admitted_declaration()
-            .as_ref()
-            .is_none_or(|admitted| Some(admitted) == declaration)
+        let ServerDerivedLiveUpdateAuthority::Owner { principal_id } = &self.accepted.authority
+        else {
+            return false;
+        };
+        self.admitted_declaration().as_ref().is_none_or(|admitted| {
+            declaration.is_some_and(|draft| {
+                // Depth and name are not part of the relay's agent identity.
+                admitted.agent_id == draft.agent_id
+                    && admitted.on_behalf_of.as_deref() == Some(principal_id.as_str())
+            })
+        })
     }
 
     pub fn matches_automation_declaration(
@@ -1178,6 +1186,7 @@ pub fn apply_committed(
                 tx,
                 &key,
                 &event.update_bytes,
+                true,
                 native_actor.and_then(|(actor, _)| actor.as_deref()),
                 native_actor.and_then(|(_, attribution)| attribution.as_ref()),
                 event.metadata.accepted.received_at_ms,
@@ -2457,6 +2466,24 @@ mod tests {
         assert!(metadata.matches_draft_declaration(declared("agent").as_ref()));
         assert!(!metadata.matches_draft_declaration(declared("other").as_ref()));
         assert!(!metadata.matches_draft_declaration(None));
+        for authority in [
+            ServerDerivedLiveUpdateAuthority::Named {
+                principal_id: "owner-1".into(),
+                grant_id: "grant".into(),
+                grant_generation: 1,
+            },
+            ServerDerivedLiveUpdateAuthority::Link {
+                principal_id: "owner-1".into(),
+                grant_id: "grant".into(),
+                grant_generation: 1,
+            },
+        ] {
+            metadata.accepted.authority = authority;
+            assert!(!metadata.matches_draft_declaration(declared("agent").as_ref()));
+            snapshot(&mut metadata, None);
+            assert!(!metadata.matches_draft_declaration(declared("agent").as_ref()));
+            snapshot(&mut metadata, declared("agent"));
+        }
     }
 
     #[test]
@@ -2781,6 +2808,45 @@ mod tests {
                 update
             ))
             .application_replayed
+        );
+    }
+
+    #[test]
+    fn live_application_ended_without_settle_preserves_local_tail() {
+        let (dir, mut store, mut cache, owner, handle) = fixture();
+        let producer = Ydoc::wire();
+        let initial = ack(apply(
+            &mut store,
+            &mut cache,
+            &handle,
+            event("unsettled", 1, producer.plaintext_insert(0, "local draft")),
+        ));
+        drop(owner);
+        store = reopen(store, &dir);
+        let (tail, settled): (i64, i64) =
+            store
+                .read_with(|conn| {
+                    conn.query_row(
+            "SELECT last_local_update_seq,COALESCE(settled_update_seq,0) FROM ydoc_docs", [],
+            |row| Ok((row.get(0)?,row.get(1)?)))
+                })
+                .unwrap();
+        assert_eq!(tail, initial.local_ydoc_sequence);
+        assert!(
+            tail > settled,
+            "recovery must wait for this device's open-time settle"
+        );
+        assert_eq!(
+            count(&store, "moments"),
+            0,
+            "the application did not publish a file"
+        );
+        assert_eq!(
+            document(&store)
+                .project(ContentKind::Plaintext)
+                .unwrap()
+                .content,
+            "local draft"
         );
     }
 
