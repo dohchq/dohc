@@ -2286,7 +2286,7 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
   },
   onObservationResync: async workspace => {
     await onObservationResync(workspace);
-    folderAppDetection.invalidate(workspace.attachmentId);
+    folderAppDetection.invalidate(workspace);
   },
   observationFor: (workspace, callbacks) => {
     const daemon = desktopEngine.daemon;

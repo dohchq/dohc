@@ -16,6 +16,8 @@ export function detectFolderApp(workspaceId: string, folder: string, sources: re
 
 interface Attachment { workspaceId: string; attachmentId: symbol }
 
+export const MAX_REQUESTED_APP_FOLDERS = 128;
+
 // Observation has settled each batch. The queue also joins renderer reads
 // and batches arriving before a folder's scan starts.
 export function createFolderAppDetection<Workspace extends Attachment>(input: {
@@ -23,36 +25,54 @@ export function createFolderAppDetection<Workspace extends Attachment>(input: {
   updated(workspace: Workspace, answer: FolderAppAnswer): void;
   failed(error: unknown): void;
 }) {
-  interface Folder { answer?: FolderAppAnswer; dirty: boolean; pending?: Promise<FolderAppAnswer> }
-  const attachments = new Map<symbol, Map<string, Folder>>();
-  function foldersFor(workspace: Workspace) {
-    let folders = attachments.get(workspace.attachmentId);
-    if (!folders) { folders = new Map(); attachments.set(workspace.attachmentId, folders); }
-    return folders;
-  }
+  interface Folder { answer?: FolderAppAnswer; dirty: boolean; readFailed?: boolean; pending?: Promise<FolderAppAnswer> }
+  interface Tracking { folders: Map<string, Folder>; pending: Set<Promise<FolderAppAnswer>> }
+  const attachments = new Map<symbol, Tracking>();
   function read(workspace: Workspace, folder: string): Promise<FolderAppAnswer> {
-    const folders = foldersFor(workspace);
-    let state = folders.get(folder);
-    if (!state) { state = { dirty: true }; folders.set(folder, state); }
-    if (state.pending) return state.pending;
-    if (!state.dirty && state.answer) return Promise.resolve(state.answer);
-    const current = state;
-    current.pending = Promise.resolve().then(async () => {
+    let tracking = attachments.get(workspace.attachmentId);
+    if (!tracking) {
+      tracking = { folders: new Map(), pending: new Set() };
+      attachments.set(workspace.attachmentId, tracking);
+    }
+    const { folders } = tracking;
+    const state = folders.get(folder) ?? { dirty: true };
+    // Map order records renderer requests, never background scans.
+    folders.delete(folder);
+    folders.set(folder, state);
+    if (folders.size > MAX_REQUESTED_APP_FOLDERS) folders.delete(folders.keys().next().value!);
+    return scan(workspace, folder, tracking, state);
+  }
+  function scan(workspace: Workspace, folder: string, tracking: Tracking, current: Folder): Promise<FolderAppAnswer> {
+    if (current.pending) return current.pending;
+    if (!current.dirty && current.answer) return Promise.resolve(current.answer);
+    const pending = Promise.resolve().then(async () => {
       let answer: FolderAppAnswer;
       do {
         current.dirty = false;
         answer = detectFolderApp(workspace.workspaceId, folder, await input.sources(workspace, folder));
-      } while (current.dirty);
+      } while (current.dirty && tracking.folders.get(folder) === current);
       const previous = current.answer;
+      const changed = current.readFailed || !previous || JSON.stringify(previous) !== JSON.stringify(answer);
       current.answer = answer;
-      if (previous && JSON.stringify(previous) !== JSON.stringify(answer)) input.updated(workspace, answer);
+      current.readFailed = false;
+      if (tracking.folders.get(folder) === current && changed) input.updated(workspace, answer);
       return answer;
-    }).catch(error => { current.dirty = true; throw error; }).finally(() => { current.pending = undefined; });
-    return current.pending;
+    }).catch(error => {
+      current.readFailed = true;
+      current.dirty = true;
+      throw error;
+    }).finally(() => {
+      current.pending = undefined;
+      tracking.pending.delete(pending);
+    });
+    current.pending = pending;
+    tracking.pending.add(pending);
+    return pending;
   }
   function settledEvents(workspace: Workspace, events: readonly WatcherEvent[]) {
-    const folders = attachments.get(workspace.attachmentId);
-    if (!folders) return;
+    const tracking = attachments.get(workspace.attachmentId);
+    if (!tracking) return;
+    const { folders } = tracking;
     const affected = new Set<string>();
     for (const event of events) {
       const slash = event.path.lastIndexOf("/");
@@ -62,18 +82,25 @@ export function createFolderAppDetection<Workspace extends Attachment>(input: {
     }
     for (const folder of affected) {
       const state = folders.get(folder);
-      if (state) state.dirty = true;
-      void read(workspace, folder).catch(input.failed);
+      if (state) {
+        state.dirty = true;
+        void scan(workspace, folder, tracking, state).catch(input.failed);
+      }
     }
   }
   async function retire(attachmentId: symbol) {
-    const folders = attachments.get(attachmentId);
-    if (!folders) return;
-    await Promise.allSettled([...folders.values()].map(state => state.pending));
+    const tracking = attachments.get(attachmentId);
+    if (!tracking) return;
+    await Promise.allSettled(tracking.pending);
     attachments.delete(attachmentId);
   }
-  function invalidate(attachmentId: symbol) {
-    for (const state of attachments.get(attachmentId)?.values() ?? []) state.dirty = true;
+  function invalidate(workspace: Workspace) {
+    const tracking = attachments.get(workspace.attachmentId);
+    if (!tracking) return;
+    for (const [folder, state] of tracking.folders) {
+      state.dirty = true;
+      void scan(workspace, folder, tracking, state).catch(input.failed);
+    }
   }
   return { read, settledEvents, retire, invalidate };
 }
