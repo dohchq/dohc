@@ -453,6 +453,7 @@ export function createSyncRelayHandler({
 
   const respondToCollectionWrites = createCollectionWriteRoutes({
     storage,
+    lookupUserDisplayName,
     rateLimiter: collectionWriteRateLimiter,
     nowMs,
     newId,

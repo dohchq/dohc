@@ -14,14 +14,14 @@ describe("shared desktop pins", () => {
   it("lets e2e readers find literal and generated frame producers", () => {
     render(<>
       <Titlebar chatsSidebar={{ visible: true, onToggle: noop }} primarySidebar={{ visible: true, onToggle: noop }} onQuickOpen={noop} />
-      <ActivityBar views={["explorer", "search", "graph", "sites", "history"]} activeView="search" sidebarVisible hasConflict={false} searchResultCount={3} onSelectView={noop} onOpenSettings={noop} onOpenCloud={noop} />
+      <ActivityBar views={["explorer", "search", "graph", "sites", "history"]} activeView="search" sidebarVisible hasConflict={false} searchResultCount={3} onSelectView={noop} onOpenSettings={noop} />
       <ChatsPanel width={320} onWidthChange={noop} onCollapse={noop} tabs={["all", "about"]} tab="all" onTabChange={noop}>Chats</ChatsPanel>
       <SidePanel title="Explorer" width={320} onWidthChange={noop}>Files</SidePanel>
     </>);
     for (const id of [desktopPins.titlebar, desktopPins.titlebarChatsSidebar, desktopPins.activityBar, desktopPins.chatsPanel, desktopPins.chatsPanelCollapse, desktopPins.sidePanel]) {
       expect(screen.getByTestId(id).getAttribute("data-testid")).toBe(id);
     }
-    for (const view of ["explorer", "search", "graph", "sites", "history", "cloud", "settings"]) {
+    for (const view of ["explorer", "search", "graph", "sites", "history", "sharing", "settings"]) {
       expect(screen.getByTestId(activityPin(view)).getAttribute("data-testid")).toBe("activity-" + view);
     }
     for (const tab of ["all", "about"]) {

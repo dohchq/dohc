@@ -100,7 +100,7 @@ export interface TransitionCheckpointInput extends Omit<InitializeDatasetInput,"
 export type JournalExportRecord =
   | ({ kind: "event"; byteLength: number } & Omit<JournalEvent, "changeset">)
   | { kind: "checkpoint"; cursor: DatasetCursor; previous: DatasetCursor | null; source: string; schemaSql: string;
-      definitionJson: string; approvalAgent?: ApprovalAgent | null; capacityBytes: number; byteLength: number; sha256: string };
+      definitionJson: string; approvalAgent?: ApprovalAgent | null; recordedAtMs?: number; capacityBytes: number; byteLength: number; sha256: string };
 export interface JournalExportCapture<T> { cursor: DatasetCursor; checkpoint: Extract<JournalExportRecord, { kind: "checkpoint" }>; captured: T }
 export interface DatasetJournal {
   materialization(input: { scope: DatasetScope; authorize: Authorize }): JournalMaterialization | null;
@@ -227,6 +227,10 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
       PRIMARY KEY(workspace_id,dataset_id,revision)
     ) STRICT;
     CREATE INDEX IF NOT EXISTS idx_dataset_approval_hash ON dohc_dataset_approval_provenance(workspace_id,dataset_id,approved_revision_hash);
+    CREATE TABLE IF NOT EXISTS dohc_dataset_checkpoint_times (
+      workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>=0),
+      recorded_at_ms INTEGER NOT NULL CHECK(recorded_at_ms>=0),
+      PRIMARY KEY(workspace_id,dataset_id,revision)) STRICT;
     CREATE TABLE IF NOT EXISTS dohc_dataset_checkpoint_history (
       workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>=0),
       cursor_json TEXT NOT NULL,previous_json TEXT,source TEXT NOT NULL,schema_sql TEXT NOT NULL,definition_json TEXT NOT NULL,
@@ -297,6 +301,9 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
   function recordApproval(at: DatasetCursor, value: ApprovalAgent | null | undefined) {
     if (value !== undefined) db.prepare("INSERT INTO dohc_dataset_approval_provenance VALUES(?,?,?,?,?)").run(at.workspaceId,at.datasetId,at.revision,at.approvedRevisionHash,JSON.stringify(parseApprovalAgent(value)));
   }
+  function recordCheckpointTime(at: DatasetCursor) {
+    db.prepare("INSERT INTO dohc_dataset_checkpoint_times VALUES(?,?,?,?)").run(at.workspaceId,at.datasetId,at.revision,integer(now()));
+  }
   function exportRecord(key: DatasetScope, revision: number): JournalExportRecord {
     const h = storedHead(key);
     const checkpoint = revision === h.checkpointCursor.revision
@@ -315,7 +322,8 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
         (previous ? previous.revision+1!==revision||previous.workspaceId!==key.workspaceId||previous.datasetId!==key.datasetId : revision!==0)||
         checkpointHash(current,sha256,source,schemaSql,definitionJson,capacityBytes,previous)!==current.digest) return corrupt("This Collection's saved records are damaged, so dohc cannot export it.");
       const approval = db.prepare("SELECT agent_json FROM dohc_dataset_approval_provenance WHERE workspace_id=? AND dataset_id=? AND revision=? AND approved_revision_hash=?").get(key.workspaceId,key.datasetId,current.revision,current.approvedRevisionHash);
-      return {kind:"checkpoint",cursor:current,previous,source,schemaSql,definitionJson,capacityBytes,byteLength,sha256,...(approval ? {approvalAgent:parseApprovalAgent(JSON.parse(String(approval.agent_json)))} : {})};
+      const time = db.prepare("SELECT recorded_at_ms FROM dohc_dataset_checkpoint_times WHERE workspace_id=? AND dataset_id=? AND revision=?").get(key.workspaceId,key.datasetId,current.revision);
+      return {kind:"checkpoint",cursor:current,previous,source,schemaSql,definitionJson,capacityBytes,byteLength,sha256,...(time ? {recordedAtMs:integer(Number(time.recorded_at_ms))} : {}),...(approval ? {approvalAgent:parseApprovalAgent(JSON.parse(String(approval.agent_json)))} : {})};
     }
     const row=db.prepare(`SELECT workspace_id,dataset_id,revision,previous_digest,digest,host_epoch,approved_revision_hash,proposal_id,operation,
         caller_key,idempotency_key,payload_sha256,result_json,changeset_sha256,attached_file_ids,recorded_at_ms,length(changeset) AS byte_length
@@ -412,7 +420,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
         if(cleanup)callback(cleanup);
         callback(authorize);
         checkpoints.destroy(expected);
-        for(const table of ["dohc_dataset_approval_provenance","dohc_dataset_materializations","dohc_dataset_receipts","dohc_dataset_events","dohc_dataset_checkpoint_history","dohc_dataset_journals"])
+        for(const table of ["dohc_dataset_checkpoint_times","dohc_dataset_approval_provenance","dohc_dataset_materializations","dohc_dataset_receipts","dohc_dataset_events","dohc_dataset_checkpoint_history","dohc_dataset_journals"])
           db.prepare(`DELETE FROM ${table} WHERE workspace_id=? AND dataset_id=?`).run(expected.workspaceId,expected.datasetId);
       });
     },
@@ -492,6 +500,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
         const checkpointId=checkpoints.activate(key,checkpoint);
         db.prepare("INSERT INTO dohc_dataset_journals VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
           .run(key.workspaceId,key.datasetId,hostEpoch,approvedRevisionHash,source,schemaSql,definitionJson,0,initial.digest,1,capacityBytes,checkpointId,checkpointSha256,0,initial.digest,null);
+        recordCheckpointTime(initial);
         recordApproval(initial,input.approvalAgent);
         return initial;
       });
@@ -533,6 +542,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
           .run(hostEpoch,approvedRevisionHash,source,schemaSql,definitionJson,next.revision,next.digest,capacityBytes,checkpointId,checkpointSha256,
             next.revision,next.digest,JSON.stringify(expected),expected.workspaceId,expected.datasetId,expected.hostEpoch,expected.approvedRevisionHash,expected.revision,expected.digest);
         if(Number(changed.changes)!==1)throw new JournalError("conflict","The Collection changed while dohc saved its records. Try again.");
+        recordCheckpointTime(next);
         recordApproval(next,input.approvalAgent);
         return next;
       });
@@ -576,6 +586,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
           .run(hostEpoch,approvedRevisionHash,source,schemaSql,definitionJson,next.revision,next.digest,checkpointId,resolved.sha256,next.revision,next.digest,JSON.stringify(expected),
             expected.workspaceId,expected.datasetId,expected.hostEpoch,expected.approvedRevisionHash,expected.revision,expected.digest);
         if(Number(changed.changes)!==1)throw new JournalError("conflict","The Collection changed while dohc restored it. Try again.");
+        recordCheckpointTime(next);
         return next;
       });
     },

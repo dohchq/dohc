@@ -14,15 +14,17 @@ export function readDatasetHistory(db: JournalDb, scope: DatasetScope, approved:
       LEFT JOIN dohc_dataset_automation_revisions a ON a.workspace_id=e.workspace_id AND a.dataset_id=e.dataset_id AND a.revision=e.revision
       WHERE e.workspace_id=? AND e.dataset_id=? AND e.revision<?
     UNION ALL
-    SELECT revision,'Fields and rules',NULL,NULL,json_extract(cursor_json,'$.approvedRevisionHash'),0,0,NULL,
-      json_extract(previous_json,'$.approvedRevisionHash'),NULL,NULL FROM dohc_dataset_checkpoint_history
-      WHERE workspace_id=? AND dataset_id=? AND revision<? AND previous_json IS NOT NULL
-        AND json_extract(previous_json,'$.approvedRevisionHash') != json_extract(cursor_json,'$.approvedRevisionHash')
+    SELECT h.revision,'Fields and rules',NULL,t.recorded_at_ms,json_extract(h.cursor_json,'$.approvedRevisionHash'),0,0,NULL,
+      json_extract(h.previous_json,'$.approvedRevisionHash'),NULL,NULL FROM dohc_dataset_checkpoint_history h
+      LEFT JOIN dohc_dataset_checkpoint_times t ON t.workspace_id=h.workspace_id AND t.dataset_id=h.dataset_id AND t.revision=h.revision
+      WHERE h.workspace_id=? AND h.dataset_id=? AND h.revision<? AND h.previous_json IS NOT NULL
+        AND json_extract(h.previous_json,'$.approvedRevisionHash') != json_extract(h.cursor_json,'$.approvedRevisionHash')
     UNION ALL
-    SELECT checkpoint_revision,'Fields and rules',NULL,NULL,approved_revision_hash,0,0,NULL,
-      json_extract(checkpoint_previous_json,'$.approvedRevisionHash'),NULL,NULL FROM dohc_dataset_journals
-      WHERE workspace_id=? AND dataset_id=? AND checkpoint_revision<? AND checkpoint_previous_json IS NOT NULL
-        AND json_extract(checkpoint_previous_json,'$.approvedRevisionHash') != approved_revision_hash
+    SELECT j.checkpoint_revision,'Fields and rules',NULL,t.recorded_at_ms,j.approved_revision_hash,0,0,NULL,
+      json_extract(j.checkpoint_previous_json,'$.approvedRevisionHash'),NULL,NULL FROM dohc_dataset_journals j
+      LEFT JOIN dohc_dataset_checkpoint_times t ON t.workspace_id=j.workspace_id AND t.dataset_id=j.dataset_id AND t.revision=j.checkpoint_revision
+      WHERE j.workspace_id=? AND j.dataset_id=? AND j.checkpoint_revision<? AND j.checkpoint_previous_json IS NOT NULL
+        AND json_extract(j.checkpoint_previous_json,'$.approvedRevisionHash') != j.approved_revision_hash
   ) SELECT * FROM changes ORDER BY revision DESC LIMIT ?`).all(
     scope.workspaceId, scope.datasetId, before, scope.workspaceId, scope.datasetId, before,
     scope.workspaceId, scope.datasetId, before, limit + 1);

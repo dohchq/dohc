@@ -1,4 +1,4 @@
-import { activityPin, editorTabTestId } from "../src/testPins";
+import { activityPin, editorTabTestId, settingsNavPin } from "../src/testPins";
 import type { LiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -383,7 +383,9 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await writeWorkspaceFiles(ownerTemp, [{ path: PATH, contents: SEED }, { path: HIDDEN, contents: `${HIDDEN_TEXT}\n` }]);
       owner = await launch(ownerTemp);
       const opened = await openWorkspaceFromFirstRun(owner.page, ownerTemp);
-      await owner.page.getByTestId(activityPin("cloud")).click();
+      await owner.page.getByTestId(activityPin("settings")).click();
+      await owner.page.getByTestId(settingsNavPin("cloud")).click();
+      await owner.page.getByRole("button", { name: "Open sync and sharing" }).click();
       await expect(owner.page.getByTestId("cloud-sync-panel")).toBeVisible();
       const ownerPage = await ownerBrowser!.newPage();
       const approval = await openDesktopApproval(owner, ownerPage, origin);

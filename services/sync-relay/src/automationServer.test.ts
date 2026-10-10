@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import type { ScheduledAutomation, CollectionAutomationsOptions, DatasetAutomationHost, CollectionAutomationHold } from "@dohc/automation-executor/collection-automations";
@@ -9,7 +12,8 @@ import type { ReachHandover } from "@dohc/automation-executor/reach-verdicts";
 import { DaemonRefusalError, OwnerYDocOutbox, VersionedLiveAdapter, type AutomationClaim, type AutomationGroupHandover, type MomentRecord } from "@dohc/workspace-engine-client";
 import { AUTOMATION_SWITCHED_OFF_BODY, AUTOMATION_SWITCHED_OFF_VIEW_BODY } from "@dohc/automation-executor/automation-failed-notice";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
-import type { AutomationReplica, startAutomationReplicas } from "./automationReplicas";
+import * as daemon from "@dohc/workspace-engine-client/daemon";
+import { startAutomationReplicas, type AutomationReplica } from "./automationReplicas";
 import type { LiveClaimLedger } from "./automationLiveClaims";
 import { createRunGate, SERVER_RUN_BURST, startAutomationServer, type AutomationServerOptions, type ServerExecutor } from "./automationServer";
 import type { Event } from "@dohc/workspace-engine-client";
@@ -165,6 +169,8 @@ async function server(storage: SyncRelayStorage, h: Pick<ReturnType<typeof testH
   client?: EngineClient;
   inspection?: RelayButtonInspection;
   recordDelivery?: AutomationServerOptions["recordDelivery"];
+  root?: string;
+  startReplicas?: typeof startAutomationReplicas;
 } = {}) {
   const marks = input.marks ?? new Map();
   const executors: Fake[] = [];
@@ -179,7 +185,7 @@ async function server(storage: SyncRelayStorage, h: Pick<ReturnType<typeof testH
   const run = await startAutomationServer({
     storage, datasetHost: input.datasetHost,
     server: { label: "My dohc server" },
-    replicas: { root: "unused", engineExecutable: "unused", relayOrigin: "https://relay.example.test", key: new Uint8Array(32), namespace: "test" },
+    replicas: { root: input.root ?? "unused", engineExecutable: "unused", relayOrigin: "https://relay.example.test", key: new Uint8Array(32), namespace: "test" },
     readOwnerShares: (ownerUserId, path) => h.readOwnerShares(ownerUserId, path),
     lookupUserDisplayName: (userId) => (userId === OWNER ? "Ice" : "Ana"),
     noticeLimiter: new TokenBucketLimiter(10, 1, 100),
@@ -189,6 +195,7 @@ async function server(storage: SyncRelayStorage, h: Pick<ReturnType<typeof testH
     clock: { now: () => clock, monotonic: () => clock, setTimer: () => null, clearTimer: () => undefined },
     startReplicas: async (options) => {
       hooks = options;
+      if (input.startReplicas) return await input.startReplicas(options);
       return { unavailable: false, replica: (id) => open.get(id), reconcile: () => undefined, failedSyncs: () => new Map(), settled: async () => undefined, close: async () => undefined };
     },
     ...(input.live ? { live: input.live } : {}),
@@ -1200,6 +1207,70 @@ describe("the owner's routes to the server's runs", () => {
     expect(storage.listAutomationWorkspaces()[0]).toMatchObject({ unwantedSinceMs: 0, leftAtMs: AUTOMATION_WORKSPACE_LEAVE_AFTER_MS });
     // The host record names no server, so the reopened copy runs no schedules.
     expect(fake.claims).toEqual([]);
+  });
+
+  it("opens a failed copy at the 60 s retry cap within one pass for an owner's action", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
+    vi.setSystemTime(0);
+    cleanup.push(async () => { vi.useRealTimers(); });
+    clock = 0;
+    const { storage, h } = await relay();
+    storage.claimWorkspaceIdentity({ workspaceId: WORKSPACE, replicationEpoch: "epoch-1", streamIdentity: "stream-1" });
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    inspectDatabase(storagePath(storage)).prepare("INSERT INTO sync_relay_automation_hosts (workspace_id, install_id, generation, handover_from) VALUES (?, 'server', 1, NULL)").run(WORKSPACE);
+    const root = await mkdtemp(join(tmpdir(), "automation-owner-retry-"));
+    cleanup.push(async () => { await rm(root, { recursive: true, force: true }); });
+    let failing = true, opens = 0;
+    const engine = {
+      sendRequest: vi.fn(async ({ method }: { method: string }) => {
+        switch (method) {
+          case "workspace.open": return { result: { workspace: `handle-${++opens}` } };
+          case "versions.ensureMain": return { result: { id: "main" } };
+          case "sync.adoptJoinIdentity": return { result: { adopted: true } };
+          case "sync.push":
+            if (failing) throw new Error("replica cannot push");
+            return { result: { status: "complete", pushed: 0, hasMore: false, sharingDeclined: [], ownerAdmissionPending: [] } };
+          case "sync.pull": return { result: { status: "complete", nextCursor: 1, pendingCursor: { kind: "relay", token: "t" }, hasMore: false,
+            fetched: 0, applied: 0, refused: 0, skipped: 0, conflictsOpened: 0, refusals: [], sharingDeclined: [], changedPaths: [] } };
+          case "sync.materializePendingCursor": return { result: { materialized: true } };
+          case "sync.commitCursor": return { result: { committed: true, sharingDeclined: [] } };
+          case "workspace.close": return { result: {} };
+          default: throw new Error(`unexpected ${method}`);
+        }
+      }),
+      ownerYDocListDrafts: vi.fn(async () => ({ drafts: [], next: null })),
+      onEvent: vi.fn(), close: vi.fn(), waitForExit: vi.fn(async () => undefined),
+    };
+    const spawning = vi.spyOn(daemon, "createEngineClient").mockResolvedValue(engine as unknown as EngineClient);
+    cleanup.push(async () => { spawning.mockRestore(); });
+    const waiting: Array<{ attempts: number; resolve(): void }> = [];
+    const passAfter = (attempts: number) => new Promise<void>(resolve => waiting.push({ attempts, resolve }));
+    const s = await server(storage, h, { root, schedules: [], startReplicas: options => startAutomationReplicas({ ...options,
+      onReconciled: () => {
+        options.onReconciled?.();
+        for (const waiter of [...waiting]) if (opens >= waiter.attempts) {
+          waiting.splice(waiting.indexOf(waiter), 1);
+          waiter.resolve();
+        }
+      } }) });
+    for (const [index, delay] of [0, 2_000, 4_000, 8_000, 16_000, 32_000].entries()) {
+      const failed = passAfter(index + 1);
+      await vi.advanceTimersByTimeAsync(delay);
+      await failed;
+    }
+    expect(opens).toBe(6);
+    failing = false;
+    let outcome: unknown;
+    const requested = passAfter(0);
+    const action = s.run.runs.list({ workspaceId: WORKSPACE, ownerUserId: OWNER }, PRESSED)
+      .then(result => { outcome = result; }, error => { outcome = error; });
+    cleanup.push(async () => { if (outcome === undefined) await vi.advanceTimersByTimeAsync(30_000); await action; });
+    await vi.advanceTimersByTimeAsync(100);
+    // Fake time does not wait for the pass's real folder work.
+    await requested;
+    expect(opens, "the owner's action bypasses the remaining minute of backoff").toBe(7);
+    await action;
+    expect(outcome).toMatchObject({ runs: [{ claimId: "claim-1" }] });
   });
 
   it("opens no kept copy past the server's cap, and says so", async () => {

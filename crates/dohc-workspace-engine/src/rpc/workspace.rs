@@ -950,6 +950,13 @@ impl EngineService {
                 ),
             )
             .await?;
+            actor
+                .recover_open_document_artifacts(
+                    params.workspace_id.clone(),
+                    self.leases.scoped(&root),
+                )
+                .await
+                .map_err(map_runtime)?;
             // Startup replay before the files layer exists: jobs left pending by
             // a crash, a transient settle failure, or a pulled replication apply
             // land on disk while nothing is watching (no suppression window),
