@@ -190,7 +190,7 @@ impl EngineStore {
         Ok(())
     }
 
-    /// Keep derived checkpoint I/O behind capture without moving it onto the writer.
+    /// Postpone small background checkpoints while capture holds the actor.
     pub fn pause_background_checkpoints(&self, paused: bool) {
         if let Some(checkpoints) = &self.checkpoints {
             checkpoints.set_paused(paused);

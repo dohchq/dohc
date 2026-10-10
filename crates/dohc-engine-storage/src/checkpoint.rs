@@ -8,10 +8,10 @@ use std::sync::{
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-const CAPTURE_CHECKPOINT_FRAMES: i64 = 16_384;
-const WRITER_CHECKPOINT_FRAMES: i64 = 4 * CAPTURE_CHECKPOINT_FRAMES;
+const CAPTURE_CHECKPOINT_FRAMES: i64 = 32_768;
+const WRITER_CHECKPOINT_FRAMES: i64 = 65_536;
 
-/// Checkpoints have their own connection and never issue domain writes.
+/// Background checkpoints have their own connection and never issue domain writes.
 /// PASSIVE never invokes SQLite's busy handler.
 #[derive(Debug)]
 pub(crate) struct Checkpoints {
@@ -85,7 +85,7 @@ impl Checkpoints {
     }
 
     // Only an oversized WAL falls back to SQLite's writer-side checkpoint.
-    // Holding the writer through backfill lets its next transaction reset the log.
+    // Occupying the writer thread through backfill lets its next transaction reset the log.
     pub(crate) fn checkpoint_on_writer_if_needed(&self, conn: &Connection) {
         if !self.writer_needed.load(Ordering::Acquire) {
             return;
@@ -294,7 +294,7 @@ mod tests {
                     .prepare_cached("INSERT INTO blobs VALUES(?1,?2,?3)")
                     .map_err(StorageError::persist)?;
                 for n in 0..1100 {
-                    let text = format!("{n:04}{}", "x".repeat(65_536));
+                    let text = format!("{n:04}{}", "x".repeat(131_072));
                     insert
                         .execute(rusqlite::params![
                             hex_sha256(text.as_bytes()),
