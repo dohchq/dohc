@@ -332,6 +332,7 @@ impl ActorHandle {
         &self,
         workspace_id: String,
         input: dohc_engine_collab::owner_outbox::OwnerOutboxRefuseInput,
+        now_ms: i64,
         token: CancellationToken,
         reservation: Arc<dyn Send + Sync>,
     ) -> Result<Result<dohc_engine_collab::LiveObjectBinding, OwnerOutboxError>, RuntimeError> {
@@ -342,7 +343,12 @@ impl ActorHandle {
             }
             Ok(
                 match store.write_with(&NoFaults, |tx| {
-                    dohc_engine_collab::owner_outbox::refuse_entry_in_tx(tx, &workspace_id, &input)
+                    dohc_engine_collab::owner_outbox::refuse_entry_in_tx(
+                        tx,
+                        &workspace_id,
+                        &input,
+                        now_ms,
+                    )
                 }) {
                     Ok(TxnOutcome::Committed(binding)) => Ok(binding),
                     Ok(TxnOutcome::Crashed { .. }) => Err(OwnerOutboxError::Corrupt),
@@ -605,13 +611,14 @@ impl ActorHandle {
         &self,
         workspace_id: String,
         input: OwnerOutboxQuarantineInput,
+        now_ms: i64,
         token: CancellationToken,
     ) -> Result<Result<(), OwnerOutboxError>, RuntimeError> {
         self.run(move |store, _cache| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                Ok(quarantine_owner_outbox(store, &workspace_id, input))
+                Ok(quarantine_owner_outbox(store, &workspace_id, input, now_ms))
             }
         })
         .await

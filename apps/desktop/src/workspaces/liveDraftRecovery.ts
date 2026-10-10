@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import * as Y from "yjs";
 import type { YdocContentKind } from "@dohc/workspace-engine-client";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
+import { LiveDraftRecoveryRecord } from "../ipc/bridgeContract";
 
 export type LiveDraft = {
   path: string;
@@ -18,50 +19,86 @@ export type LiveDraft = {
 const activeTemporaryDrafts = new Set<string>();
 
 const STALE_TEMPORARY_DRAFT_MS = 24 * 60 * 60 * 1000;
+type RecoveryRow = {file: string; record: Record<string, unknown>};
 
-async function recoveryRecords(directory: string): Promise<{file: string; record: Record<string, unknown>}[]> {
+async function recoveryRecords(directory: string): Promise<RecoveryRow[]> {
   const names = await readdir(directory).catch((error: NodeJS.ErrnoException) => {if (error.code === "ENOENT") return []; throw error;});
-  const rows: {file: string; record: Record<string, unknown>}[] = [];
+  const rows: RecoveryRow[] = [];
   for (const name of names) {
     if (!/^[a-f0-9]{64}\.json$/.test(name) && !name.endsWith(".tmp")) continue;
     let file = join(directory, name);
-    let raw: string;
-    try {raw = await readFile(file, "utf8");} catch (error) {if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error;}
-    let record: Record<string, unknown>;
-    try {const value: unknown = JSON.parse(raw); record = typeof value === "object" && value !== null ? value as Record<string, unknown> : {};}
-    catch {const match = /"workspaceId"\s*:\s*("(?:[^"\\]|\\.)*")/.exec(raw); record = match ? {workspaceId: JSON.parse(match[1]!)} : {};}
-    if (name.endsWith(".tmp") && !activeTemporaryDrafts.has(file) && Date.now() - (await stat(file)).mtimeMs >= STALE_TEMPORARY_DRAFT_MS) {
-      if (createHash("sha256").update(raw).digest("hex") === name.slice(0, 64) && typeof record.workspaceId === "string" && typeof record.path === "string" && typeof record.objectId === "string" && typeof record.updateBase64 === "string") {
-        const recovered = join(directory, `${name.slice(0,64)}.json`);
-        await rename(file, recovered).catch((error: NodeJS.ErrnoException) => {if (error.code !== "ENOENT") throw error;}); file = recovered;
-      } else {
-        await mkdir(join(directory, "quarantine"), {recursive: true});
-        await rename(file, join(directory, "quarantine", name)).catch((error: NodeJS.ErrnoException) => {if (error.code !== "ENOENT") throw error;});
-        continue;
+    if (activeTemporaryDrafts.has(file)) continue;
+    try {
+      const raw = await readFile(file, "utf8");
+      let record: Record<string, unknown>;
+      try {const value: unknown = JSON.parse(raw); record = typeof value === "object" && value !== null ? value as Record<string, unknown> : {};}
+      catch {
+        const match = /"workspaceId"\s*:\s*("(?:[^"\\]|\\.)*")/.exec(raw);
+        try {record = match ? {workspaceId: JSON.parse(match[1]!)} : {};} catch {record = {};}
       }
-    }
-    rows.push({file, record});
+      if (name.endsWith(".tmp") && Date.now() - (await stat(file)).mtimeMs >= STALE_TEMPORARY_DRAFT_MS) {
+        if (createHash("sha256").update(raw).digest("hex") === name.slice(0, 64) && typeof record.workspaceId === "string" && typeof record.path === "string" && typeof record.objectId === "string" && typeof record.updateBase64 === "string") {
+          const recovered = join(directory, `${name.slice(0,64)}.json`);
+          await rename(file, recovered).catch((error: NodeJS.ErrnoException) => {if (error.code !== "ENOENT") throw error;}); file = recovered;
+        } else {
+          await mkdir(join(directory, "quarantine"), {recursive: true});
+          await rename(file, join(directory, "quarantine", name)).catch((error: NodeJS.ErrnoException) => {if (error.code !== "ENOENT") throw error;});
+          continue;
+        }
+      }
+      rows.push({file, record});
+    } catch (error) {if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;}
   }
   return rows;
 }
 
 export async function hasRetainedLiveDraft(directory: string, workspaceId: string, path: string, objectId: string): Promise<boolean> {
-  for (const {record} of await recoveryRecords(directory)) {
-    if (typeof record.workspaceId === "string" && record.workspaceId !== workspaceId) continue;
-    if (record.workspaceId !== workspaceId) throw new Error("Saved live draft cannot be attributed to a workspace.");
-    if (typeof record.path !== "string" || typeof record.objectId !== "string") throw new Error("Invalid saved live draft.");
-    if (record.objectId === objectId || record.path === path) return true;
-  }
-  return false;
+  return (await listLiveDraftRecovery(directory, workspaceId, {objectId, path})).length > 0;
 }
 
-export async function removeLiveDraftCopies(directory: string, workspaceId: string, objectId: string, snapshotSha256: string, throughMs: number): Promise<void> {
-  for (const row of await recoveryRecords(directory)) {
+export async function listLiveDraftRecovery(directory: string, workspaceId: string, target?: {objectId: string; path: string}): Promise<LiveDraftRecoveryRecord[]> {
+  return readableRecoveryRecords(await recoveryRecords(directory), workspaceId, target);
+}
+
+async function readableRecoveryRecords(rows: readonly RecoveryRow[], workspaceId: string, target?: {objectId: string; path: string}): Promise<LiveDraftRecoveryRecord[]> {
+  const result: LiveDraftRecoveryRecord[] = [];
+  for (const {file, record} of rows) {
+    if (record.workspaceId !== workspaceId) continue;
+    if (target && record.objectId !== target.objectId && record.path !== target.path) continue;
+    const parsed = LiveDraftRecoveryRecord.safeParse({recordId: basename(file).slice(0, 64), path: record.path, objectId: record.objectId, updateBase64: record.updateBase64, text: record.text === undefined ? "" : record.text});
+    if (!parsed.success || classifyEngineFilePathForRead(parsed.data.path, process.platform).kind !== "tracked") continue;
+    let text = parsed.data.text;
+    if (record.text === undefined) {
+      const doc = new Y.Doc();
+      try {
+        try {Y.applyUpdate(doc, Buffer.from(parsed.data.updateBase64, "base64"));} catch {continue;}
+        const project = record.contentKind === "scene"
+          ? (await import("@dohc/excalidraw-scene")).exportPortableScene
+          : (await import("@dohc/ydoc-projection")).yDocToMarkdown;
+        try {text = project(doc);} catch {continue;}
+      } finally { doc.destroy(); }
+    }
+    result.push({...parsed.data, text});
+  }
+  return result;
+}
+
+export async function removeLiveDraftCopies(directory: string, workspaceId: string, objectId: string, snapshotSha256: string, throughMs: number, path: string, recordId?: string): Promise<LiveDraftRecoveryRecord[]> {
+  const rows = await recoveryRecords(directory);
+  const before = await readableRecoveryRecords(rows, workspaceId, {objectId, path});
+  const removed = new Set<string>();
+  for (const row of rows) {
     if (row.record.workspaceId !== workspaceId || row.record.objectId !== objectId || typeof row.record.updateBase64 !== "string" || activeTemporaryDrafts.has(row.file)) continue;
+    if (recordId !== undefined && basename(row.file).slice(0, 64) !== recordId) continue;
     if (createHash("sha256").update(Buffer.from(row.record.updateBase64, "base64")).digest("hex") !== snapshotSha256) continue;
     const modified = await stat(row.file).catch((error: NodeJS.ErrnoException) => {if (error.code === "ENOENT") return null; throw error;});
-    if (modified && modified.mtimeMs <= throughMs) await rm(row.file, {force: true});
+    if (modified && modified.mtimeMs <= throughMs) {
+      await rm(row.file, {force: true});
+      removed.add(basename(row.file).slice(0, 64));
+    }
   }
+  try {return await listLiveDraftRecovery(directory, workspaceId, {objectId, path});}
+  catch {return before.filter(record => !removed.has(record.recordId));}
 }
 
 /** Exact CRDT recovery complements the renderer's user-visible set-aside text. */

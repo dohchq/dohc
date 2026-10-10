@@ -57,8 +57,8 @@ import type {
   UndoRelaySharePayload,
   SettleShareProposalResult,
   SubmitShareChangesResult,
-  PushShareDirectWritesResult,
   ShareDirectWritesPushedEvent,
+  ShareDirectWriteAnswerDelivery,
   WithdrawShareChangesResult,
   McpConfigResult,
   ReadWorkspaceTextPayload,
@@ -299,7 +299,9 @@ function makeBaseBridge(
   platform: NodeJS.Platform = "linux",
 ) {
   const activityCallbacks = new Set<(event: WorkspaceActivityEvent) => void>();
-  const directWritesPushedCallbacks = new Set<(event: ShareDirectWritesPushedEvent) => void>();
+  const heldDirectAnswers: ShareDirectWritesPushedEvent[] = [];
+  const directAnswerDelivery: ShareDirectWriteAnswerDelivery = { claim: async () => true, acknowledge: async () => true, release: async () => true };
+  const directWritesPushedCallbacks = new Set<(event: ShareDirectWritesPushedEvent, delivery: ShareDirectWriteAnswerDelivery) => void>();
   const crashReportCallbacks = new Set<() => void>();
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
   let menuCallback: ((command: MenuCommand) => void) | null = null;
@@ -332,6 +334,8 @@ function makeBaseBridge(
       }),
     ),
     openWorkspace: vi.fn(async () => SYNC_STATUS),
+    listLiveDraftRecovery: vi.fn(async (): Promise<import("../ipc/bridgeContract").LiveDraftRecoveryRecord[]> => []),
+    discardLiveDraftRecovery: vi.fn(async (_input: Parameters<import("../ipc/bridgeContract").DohcDesktopBridge["discardLiveDraftRecovery"]>[0]): Promise<import("../ipc/bridgeContract").LiveDraftRecoveryRecord[]> => []),
     getSyncStatus: vi.fn(async () => SYNC_STATUS),
     // Owner live documents and the live-delivery retry command. Typed to the
     // contracts, not to these empty defaults: the live-document tests swap in
@@ -367,6 +371,7 @@ function makeBaseBridge(
     retryCloudSync: vi.fn(
       async (_payload: { workspaceId: string; reason: "person" | "reconnect" }): Promise<SyncStatusResult> => SYNC_STATUS,
     ),
+    retryFileObservation: vi.fn(async (_payload: { workspaceId: string }): Promise<SyncStatusResult> => SYNC_STATUS),
     // The refused-store rebuild. Typed to the contract, not to this
     // default: the recovery tests swap in the no-clobber refusal.
     rebuildEngineStore: vi.fn(
@@ -573,14 +578,17 @@ function makeBaseBridge(
       async (): Promise<WithdrawShareChangesResult> => ({ state: "withdrawn" }),
     ),
     pushShareDirectWrites: vi.fn(
-      async (): Promise<PushShareDirectWritesResult> => ({ status: "pushed", writes: [] }),
+      async (): Promise<void> => undefined,
     ),
-    emitShareDirectWritesPushed: (event: ShareDirectWritesPushedEvent) => {
-      for (const callback of [...directWritesPushedCallbacks]) callback(event);
+    emitShareDirectWritesPushed: (input: Omit<ShareDirectWritesPushedEvent, "answerId"> & { answerId?: string }) => {
+      const event = { ...input, answerId: input.answerId ?? crypto.randomUUID() };
+      if (!directWritesPushedCallbacks.size) heldDirectAnswers.push(event);
+      for (const callback of [...directWritesPushedCallbacks]) callback(event, directAnswerDelivery);
     },
     onShareDirectWritesPushed: vi.fn(
-      (listener: (event: ShareDirectWritesPushedEvent) => void) => {
+      (listener: (event: ShareDirectWritesPushedEvent, delivery: ShareDirectWriteAnswerDelivery) => void) => {
         directWritesPushedCallbacks.add(listener);
+        for (const event of heldDirectAnswers.splice(0)) listener(event, directAnswerDelivery);
         return () => directWritesPushedCallbacks.delete(listener);
       },
     ),
@@ -710,6 +718,8 @@ export function makeBridge(
 ) {
   const bridge = makeBaseBridge(uiStatePromise, platform);
   return Object.assign(bridge, {
+    pendingStopAndRestores: vi.fn(async (): Promise<import("../ipc/bridgeContract").PendingStopAndRestoresResult> => []),
+    dismissStopAndRestore: vi.fn(async (): Promise<void> => undefined),
     onEngineYDocSaveState: vi.fn((_listener: (event: import("../ipc/bridgeContract").EngineYDocSaveStateEvent) => void) => () => undefined),
     // Collections: the flagged shell lists collections on
     // ready and on activity. Typed to the contract; the collection tests

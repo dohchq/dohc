@@ -7,7 +7,8 @@ import { engineStoreRefusalDetailOf, engineStoreRefusalOf, type EngineStoreRefus
 import { credentialScopedOperation, requireCredentials } from "../workspaces/credentialScopedOperation";
 import { parseShareCode, relayUrlsMatch } from "../workspaces/syncCode";
 import { RelayUnauthorizedError, ShareUnavailableError } from "@dohc/workspace-contracts/relay";
-import { ShareSelectorInvalidError, type fetchShareViewInfo, type fetchShareViewAccess } from "../workspaces/shareViewInfo";
+import { ShareSelectorInvalidError, type fetchShareViewInfo, type fetchShareViewAccess, type probeShareViewLog } from "../workspaces/shareViewInfo";
+import type { RendererWorkspaceOperationSession } from "../window/rendererWorkspaceOperation";
 import { assertMountableSelector } from "../workspaces/shareMounts";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { SharePinInvalidError, shareViewIdentitySelector, recordedShareSelector } from "../workspaces/shareViewRecords";
@@ -42,10 +43,12 @@ export function registerSharedViewsIpcHandlers<
   warmCredentialCache(): Promise<void>;
   currentCredentials(): CloudCredentials | null;
   currentCredentialGeneration(): number;
+  currentRendererSession(sender: Sender): RendererWorkspaceOperationSession | undefined;
   onSenderClosed(sender: Sender, close: () => void): () => void;
   engineDaemonStartup(): Promise<unknown>;
   fetchShareViewInfo: typeof fetchShareViewInfo;
   fetchShareViewAccess: typeof fetchShareViewAccess;
+  probeShareViewLog: typeof probeShareViewLog;
   usableRoot(path: string): string;
   readdir(path: string): Promise<string[]>;
   mkdir(path: string, options: { recursive: true }): Promise<unknown>;
@@ -53,6 +56,7 @@ export function registerSharedViewsIpcHandlers<
   setWorkspaceShareView: typeof setWorkspaceShareView;
   refreshNativeWorkspaceSurfaces(): void;
   workspaceAuthorities: {
+    attachmentRetirementSignal(workspaceId: string, attachmentId: symbol): AbortSignal;
     withBinding<Result>(binding: WorkspaceAuthorityBinding<RegistryEntry>, work: (lease: Lease) => Result | Promise<Result>): Promise<Result>;
   };
   canonicalWorkspaceFor(lease: Lease): RegistryEntry & { readonly attachmentId: symbol };
@@ -62,6 +66,7 @@ export function registerSharedViewsIpcHandlers<
   openWorkspaceActivity(workspace: CreatedWorkspace): Promise<unknown>;
   requireWorkspace(workspaceId: string): RegistryEntry;
   notifyRenderer(scope?: WorkspaceActivityScope): void;
+  syncNotices(isCurrent: () => boolean): Promise<void>;
   recordShareViewStoreRefusal(
     workspaceId: string,
     refusal: EngineStoreRefusal | null,
@@ -230,7 +235,7 @@ export function registerSharedViewsIpcHandlers<
         //
         // Soft, like the refresh site. Opening a share is a read, and a failure
         // here costs the recipient the ability to send changes, not the ability
-        // to open what they were given. The next refresh records it.
+        // to open what they were given. The first window refresh retries it.
         await workspaceAuthorities
           .withBinding(authorityBinding, (lease) =>
             recordShareViewIdentity(canonicalWorkspaceFor(lease)),
@@ -293,14 +298,113 @@ export function registerSharedViewsIpcHandlers<
     return OpenSharedViewResult.parse({ workspace: summary });
   });
 
-  registerHandler(CHANNELS.refreshSharedView, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = RefreshSharedViewPayload.parse(payload);
+  const pullCache = new Map<Sender, {
+    workspaceId: string; attachmentId: symbol; shareId: string;
+    recipientUserId: string; relayUrl: string; nextCursor?: number; credentialGeneration: number;
+  }>();
+  const cacheClosers = new Map<Sender, () => void>();
+  const clearCache = (sender: Sender) => {
+    pullCache.delete(sender);
+    cacheClosers.get(sender)?.();
+    cacheClosers.delete(sender);
+  };
+  function syncSharedViewNotices(session: NonNullable<ReturnType<typeof dependencies.currentRendererSession>>,
+    retirement: AbortSignal, credentialGeneration: number,
+    share: { recipientUserId?: string; relayUrl?: string } | undefined) {
+    const isCurrent = () => {
+      const credentials = currentCredentials();
+      return session.isCurrent() && !retirement.aborted &&
+        dependencies.currentCredentialGeneration() === credentialGeneration &&
+        !!credentials?.relayUrl && share?.recipientUserId === credentials.userId &&
+        !!share.relayUrl && relayUrlsMatch(credentials.relayUrl, share.relayUrl);
+    };
+    if (!isCurrent()) return;
+    void dependencies.syncNotices(isCurrent);
+  }
+
+  async function refreshSharedView(event: Event, input: RefreshSharedViewPayload, pressBurst: boolean): Promise<RefreshSharedViewResult> {
+    const session = dependencies.currentRendererSession(event.sender);
+    const retirement = session && workspaceAuthorities.attachmentRetirementSignal(session.workspaceId, session.attachmentId);
+    const assertSession = () => {
+      if (!session?.isCurrent() || retirement?.aborted || session.workspaceId !== input.workspaceId) {
+        throw new Error("Shared view refresh stopped because this window changed workspaces.");
+      }
+    };
+    assertSession();
+    await warmCredentialCache();
+    assertSession();
+    const credentialGeneration = dependencies.currentCredentialGeneration();
+    const entry = pullCache.get(event.sender);
+    let cached = entry?.workspaceId === input.workspaceId && entry.attachmentId === session!.attachmentId ? entry : undefined;
+    if (input.trigger === "background") {
+      if (cached && cached.nextCursor === undefined &&
+        cached.credentialGeneration !== dependencies.currentCredentialGeneration()) {
+        clearCache(event.sender);
+        cached = undefined;
+      }
+      const view = cached ? undefined : requireWorkspace(input.workspaceId).shareView;
+      if (view && (!view.recipientUserId || !recordedShareSelector(view.grantedSelector))) {
+        return { ok: true, status: "unchanged", probed: true, changedPaths: 0,
+          excludedPaths: [], unjournalablePaths: [], refusedOps: 0, refusedDetail: null };
+      }
+      const share = cached ?? view;
+      const credentials = currentCredentials();
+      if (!share?.relayUrl || !credentials?.relayUrl || credentials.userId !== share.recipientUserId ||
+        !relayUrlsMatch(credentials.relayUrl, share.relayUrl)) {
+        return { ok: false, probed: true, changedPaths: 0, errorKind: "unauthorized", errorMessage: "Sign in to the account that received this share." };
+      }
+      if (cached && cached.nextCursor === undefined) {
+        if (pressBurst) syncSharedViewNotices(session!, retirement!, credentialGeneration, cached);
+        return { ok: true, status: "unchanged", probed: true, changedPaths: 0,
+          excludedPaths: [], unjournalablePaths: [], refusedOps: 0, refusedDetail: null };
+      }
+      if (cached?.nextCursor !== undefined) {
+        const scoped = credentialScopedOperation({ assertCurrent: assertSession,
+          capturedGeneration: credentialGeneration, currentGeneration: dependencies.currentCredentialGeneration });
+        const controller = new AbortController();
+        let closed = false;
+        const stopClose = dependencies.onSenderClosed(event.sender, () => { closed = true; controller.abort(); });
+        const timeout = setTimeout(() => controller.abort(), 10_000);
+        try {
+          const probe = await dependencies.probeShareViewLog({
+            relay: { baseUrl: credentials.relayUrl, token: credentials.token },
+            shareId: cached.shareId, since: cached.nextCursor, signal: AbortSignal.any([controller.signal, retirement!]),
+          });
+          controller.signal.throwIfAborted();
+          scoped.assertCurrent();
+          if (probe.unchanged) {
+            if (pressBurst) syncSharedViewNotices(session!, retirement!, credentialGeneration, cached);
+            return { ok: true, status: "unchanged", probed: true,
+              changedPaths: 0, excludedPaths: [], unjournalablePaths: [], refusedOps: 0, refusedDetail: null };
+          }
+        } catch (error) {
+          if (closed) controller.signal.throwIfAborted();
+          scoped.assertCurrent();
+          if (controller.signal.aborted) return { ok: false, probed: true, changedPaths: 0,
+            errorKind: "transient", errorMessage: "The shared view refresh timed out." };
+          // A revoked share needs the existing full path to preserve local work
+          // and publish its ended state. Transient probes never touch the store.
+          if (!(error instanceof ShareUnavailableError)) {
+            return { ok: false, probed: true, changedPaths: 0, errorKind: error instanceof RelayUnauthorizedError ? "unauthorized" : "transient",
+              errorMessage: error instanceof Error ? error.message : String(error) };
+          }
+        } finally {
+          clearTimeout(timeout);
+          stopClose();
+        }
+      }
+    }
+    clearCache(event.sender);
     return withRendererWorkspaceOperation(
       event.sender,
       input.workspaceId,
       "Shared view refresh stopped because this window changed workspaces.",
       (operation) => reportingShareStoreRefusal(operation, async () => {
+        const summaryBefore = JSON.stringify(workspaceSummaryFor(operation.workspace));
+        const summaryChanged = () => summaryBefore !== JSON.stringify(workspaceSummaryFor(requireWorkspace(input.workspaceId)));
+        const notifyPull = (changed: boolean) => notifyRenderer({ workspaceId: input.workspaceId, ...(changed ? { summaryChanged: true } : {}) });
+        const noticeShare = operation.workspace.shareView;
+        const syncPullNotices = () => syncSharedViewNotices(session!, retirement!, credentialGeneration, noticeShare);
         // The shell's on-open auto-refresh can run during the daemon handshake
         // now that the window loads during it; the reconcile needs sessions. The
         // physical operation is already held before this wait begins.
@@ -350,7 +454,7 @@ export function registerSharedViewsIpcHandlers<
         // Refresh the relay-derived chat fact for the banner's next step. It
         // does not grant desktop generic-chat writes. Keep the share identity
         // current for the separate Edit proposal lane.
-        if (!workspace.shareView.ended) {
+        if (!workspace.shareView.ended && (input.trigger !== "background" || !cached)) {
           let refreshedWorkspace = workspace;
           await warmCredentialCache().catch(() => undefined);
           const credentials = currentCredentials();
@@ -391,6 +495,7 @@ export function registerSharedViewsIpcHandlers<
           });
         }
         let outcome;
+        let nextCursor: number | undefined;
         try {
           const reconciled = await withStaleSensitiveWorkspaceOperation(
             workspace.rootPath,
@@ -399,6 +504,7 @@ export function registerSharedViewsIpcHandlers<
                 lease,
                 { kind: "standalone", workspaceId: workspace.workspaceId },
                 "refresh",
+                cursor => { nextCursor = cursor; },
               ),
           );
           if (reconciled.kind !== "refresh") {
@@ -409,7 +515,7 @@ export function registerSharedViewsIpcHandlers<
           operation.assertCurrent();
           // A pull that failed on a later page still persisted the refusals its
           // earlier pages recorded, so the renderer is told once here too.
-          notifyRenderer({ workspaceId: workspace.workspaceId });
+          notifyPull(summaryChanged());
           // A damaged pin does not heal on the next try, and re-asking the relay
           // for one would let it restate a wider scope. Say so instead of
           // reporting "refreshed, nothing new" forever.
@@ -421,18 +527,37 @@ export function registerSharedViewsIpcHandlers<
           }
           throw error;
         }
+        operation.assertCurrent();
+        const changedSummary = summaryChanged();
         if ("ok" in outcome && !outcome.ok) {
-          operation.assertCurrent();
-          notifyRenderer({ workspaceId: workspace.workspaceId });
+          if (pressBurst || outcome.changedPaths > 0 || changedSummary) syncPullNotices();
+          notifyPull(changedSummary);
           return RefreshSharedViewResult.parse(outcome);
         }
-        operation.assertCurrent();
+        if (outcome.status !== "ended" &&
+          workspace.shareView.recipientUserId && workspace.shareView.relayUrl) {
+          pullCache.set(event.sender, { workspaceId: input.workspaceId, attachmentId: session!.attachmentId,
+            shareId: workspace.shareView.shareId, recipientUserId: workspace.shareView.recipientUserId,
+            relayUrl: workspace.shareView.relayUrl, nextCursor,
+            credentialGeneration });
+          const clear = () => clearCache(event.sender);
+          const stopClose = dependencies.onSenderClosed(event.sender, clear);
+          retirement!.addEventListener("abort", clear, { once: true });
+          cacheClosers.set(event.sender, () => {
+            stopClose();
+            retirement!.removeEventListener("abort", clear);
+          });
+        } else clearCache(event.sender);
         if (outcome.status === "ended") refreshNativeWorkspaceSurfaces();
-        notifyRenderer({ workspaceId: workspace.workspaceId });
+        if (pressBurst || outcome.changedPaths > 0 || outcome.refusedOps > 0 || changedSummary ||
+          nextCursor !== undefined && cached?.nextCursor !== undefined && nextCursor !== cached.nextCursor) {
+          syncPullNotices();
+        }
+        notifyPull(changedSummary);
         return RefreshSharedViewResult.parse(outcome);
       }),
     );
-  });
+  }
 
   const checks = new Set<Sender>();
   registerOperations<typeof sharedViewAccessOperations, Event, Operation>({
@@ -441,6 +566,15 @@ export function registerSharedViewsIpcHandlers<
     withActiveWorkspace: (event, workspaceId, inactiveMessage, work) =>
       withRendererWorkspaceOperation(event.sender, workspaceId, inactiveMessage, work),
   }, sharedViewAccessOperations, {
+    refreshSharedView: async (input, { event }) => {
+      const pressBurst = input.trigger === "press-burst";
+      if (pressBurst) input = { ...input, trigger: "background" };
+      try { return await refreshSharedView(event, input, pressBurst); }
+      catch (error) {
+        if (input.trigger !== "background" || !(error instanceof RelayUnauthorizedError)) throw error;
+        return { ok: false, changedPaths: 0, errorKind: "unauthorized", errorMessage: error.message };
+      }
+    },
     dismissShareCaptureNotice: async (input, { operation }) => {
       operation.assertCurrent();
       const view = operation.workspace.shareView;

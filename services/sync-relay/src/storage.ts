@@ -66,6 +66,7 @@ import type {
   SyncRelayReceivedInventoryPage,
   SyncRelayLinkInventoryCursor,
   SyncRelayLinkInventoryPage,
+  SyncRelayHistoryAccount,
   SyncRelayIndependentGrantInventoryCursor,
   SyncRelayIndependentGrantInventoryPage,
   SyncRelayLogRow,
@@ -1100,6 +1101,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     cursor?: SyncRelayLinkInventoryCursor,
   ): SyncRelayLinkInventoryPage {
     return sharesStorage.listLinkGrantsByWorkspace(this, workspaceId, cursor);
+  }
+
+  lookupHistoryAccounts(workspaceId: string, grantIds: readonly string[], userIds: readonly string[]): SyncRelayHistoryAccount[] {
+    return sharesStorage.lookupHistoryAccounts(this, workspaceId, grantIds, userIds);
   }
 
   listActiveIndependentShareGrants(input: {

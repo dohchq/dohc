@@ -150,6 +150,7 @@ export const CHANNELS = {
   listCollections: "desktop:list-collections",
   getCollection: "desktop:get-collection",
   queryCollectionRecords: "desktop:query-collection-records",
+  historyNamesChanged: "desktop:history-names-changed",
   getCollectionRecordHistory: "desktop:get-collection-record-history",
   locateRecordHistoryRun: "desktop:locate-record-history-run",
   readWorkspaceDatabase: "desktop:read-workspace-database",
@@ -216,7 +217,6 @@ export const CHANNELS = {
   joinSharedChannel: "desktop:join-shared-channel",
   leaveSharedChannel: "desktop:leave-shared-channel",
   openSharedView: "desktop:open-shared-view",
-  refreshSharedView: "desktop:refresh-shared-view",
   dismissShareSkips: "desktop:dismiss-share-skips",
   // An automation claim failed or a retry queued one: run history reads again.
   automationRunsChanged: "desktop:automation-runs-changed",
