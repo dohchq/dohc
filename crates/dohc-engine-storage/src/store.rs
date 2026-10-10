@@ -220,20 +220,8 @@ impl EngineStore {
         if let Some(checkpoints) = &self.checkpoints {
             checkpoints.checkpoint_on_writer_if_needed(&self.conn);
         }
-        if self
-            .checkpoints
-            .as_ref()
-            .is_some_and(|checkpoints| !checkpoints.request())
-        {
-            match crate::checkpoint::Checkpoints::start(&self.database_path) {
-                Ok(replacement) => {
-                    replacement.request();
-                    self.checkpoints.replace(replacement);
-                }
-                Err(error) => {
-                    eprintln!("checkpoint worker restart failed; next write retries: {error}")
-                }
-            }
+        if let Some(checkpoints) = &self.checkpoints {
+            checkpoints.request();
         }
     }
 
@@ -341,6 +329,9 @@ impl EngineStore {
                 crate::checkpoint::Checkpoints::start(&self.database_path).map_err(E::from)?;
             replacement.request();
             self.checkpoints.replace(replacement);
+        }
+        if let Some(checkpoints) = &self.checkpoints {
+            checkpoints.prepare_for_write(&self.conn).map_err(E::from)?;
         }
 
         let tx = self

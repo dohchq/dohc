@@ -46,7 +46,7 @@ pub(super) fn report_slow_tick(duration: Duration, phase: &str) {
 }
 
 fn open(path: &Path) -> EngineStore {
-    let mut store = EngineStore::open(path, 1).unwrap();
+    let mut store = EngineStore::open_for_actor(path, 1, None, None).unwrap();
     store.enable_background_checkpoints().unwrap();
     store
 }

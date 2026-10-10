@@ -280,6 +280,10 @@ fn open_engine_db_configured(
 
     // Step 2: session-scoped pragmas only — these do not touch the file.
     apply_session_pragmas(&conn)?;
+    if background_checkpoints {
+        conn.pragma_update(None, "wal_autocheckpoint", 0)
+            .map_err(StorageError::persist)?;
+    }
 
     // Step 3: classify from read-only queries. A rejected store returns here
     // before any persistent pragma runs, so the file is left byte-unchanged.
@@ -292,8 +296,6 @@ fn open_engine_db_configured(
         .map_err(StorageError::corrupt)?;
     apply_persistent_pragmas(&conn)?;
     let checkpoints = if background_checkpoints {
-        conn.pragma_update(None, "wal_autocheckpoint", 0)
-            .map_err(StorageError::persist)?;
         Some(crate::checkpoint::Checkpoints::start(path)?)
     } else {
         None
