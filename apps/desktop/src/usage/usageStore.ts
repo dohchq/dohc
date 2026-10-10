@@ -266,19 +266,37 @@ export function createUsageStore(deps: {
     setEnabled(value: boolean): Promise<void> {
       if (typeof value !== "boolean") return Promise.reject(new Error("Invalid usage setting"));
       return control(async () => {
+        const previous = enabled;
         if (enabled !== value) { enabled = value; incomplete(); changed(); }
         if (!enabled) { pending.length = 0; pendingOverflow = false; }
-        await write();
+        try {
+          await write();
+        } catch (error) {
+          // The file keeps the old setting, so memory keeps it too.
+          if (enabled !== previous) { enabled = previous; changed(); }
+          throw error;
+        }
       });
     },
     clear(): Promise<void> {
       return control(async () => {
+        const saved = { days: [...days], counts: [...counts], coverage: [...coverage] };
         pending.length = 0; pendingOverflow = false;
         counts.clear(); days.clear(); coverage.clear();
         coverage.set(appVersion, buildCoverage);
         refreshDay(); incomplete(); changed();
-        await io.rm(path + ".tmp", { force: true });
-        await write();
+        try {
+          await io.rm(path + ".tmp", { force: true });
+          await write();
+        } catch (error) {
+          // The file keeps the old counts, so memory keeps them too.
+          days.clear(); counts.clear(); coverage.clear();
+          for (const [key, row] of saved.days) days.set(key, row);
+          for (const [key, row] of saved.counts) counts.set(key, row);
+          for (const [key, row] of saved.coverage) coverage.set(key, row);
+          incomplete(); changed();
+          throw error;
+        }
       });
     },
     flush(): Promise<void> {

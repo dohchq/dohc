@@ -70,7 +70,9 @@ describe("usage record in Privacy", () => {
       "usage-record-row-version.create", "usage-record-row-file.kept.save", "usage-record-row-version.try", "usage-record-row-chat.export",
     ]);
     const created = within(rows[0]!).getAllByRole("cell");
-    expect(created.map(c => c.textContent)).toEqual(["3", "1", NOT_COUNTED, NOT_COUNTED, "today"]);
+    // An earlier version's count from a door this one does not count keeps its number and the mark.
+    expect(created.map(c => c.textContent)).toEqual(["3", `1${NOT_COUNTED}`, NOT_COUNTED, NOT_COUNTED, "today"]);
+    expect(within(created[1]!).getByTitle(NOT_COUNTED)).toBeTruthy();
     // A counted door at zero says 0; one this build does not count is marked.
     expect(within(rows[1]!).getAllByRole("cell").map(c => c.textContent)).toEqual(["0", "2", "0", NOT_COUNTED, "yesterday"]);
     expect(rows[3]!.dataset.counted).toBe("false");
@@ -126,12 +128,28 @@ describe("usage record in Privacy", () => {
     expect(bridge.setUsageRecordEnabled).toHaveBeenCalledWith({ enabled: false });
     expect(toggle().hasAttribute("disabled")).toBe(false);
 
+    // Main keeps the old setting when its write fails, so the next read is still Off.
     bridge.setUsageRecordEnabled.mockRejectedValueOnce(new Error("disk full"));
+    bridge.readUsageRecord.mockResolvedValueOnce({ ...RECORD, enabled: false });
     fireEvent.click(toggle());
     await waitFor(() => expect(onError).toHaveBeenCalledWith(expect.stringContaining("disk full"), expect.any(Error)));
-    expect(onError.mock.calls[0]![0]).toContain("dohc could not turn the usage record on.");
+    expect(onError.mock.calls[0]![0]).toBe("dohc could not turn the usage record on. disk full");
     await waitFor(() => expect(toggle().hasAttribute("disabled")).toBe(false));
-    expect(card().dataset.state).toBe("on");
+    expect(card().dataset.state).toBe("off");
+    expect(toggle().getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("reports a Clear that fails after Privacy closed", async () => {
+    const onError = vi.fn();
+    const clearing = deferred<undefined>();
+    bridge.clearUsageRecord.mockImplementationOnce(() => clearing.promise);
+    const view = render(<UsageRecordSettings onError={onError} />);
+    fireEvent.click(await screen.findByTestId("usage-record-clear"));
+    fireEvent.click(screen.getByTestId("usage-record-clear-action"));
+    view.unmount();
+    await act(async () => clearing.reject(new Error("file in use")));
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith("dohc could not clear the usage record. file in use", expect.any(Error));
   });
 
   it("copies the rows and coverage only, with no path", async () => {
@@ -145,7 +163,7 @@ describe("usage record in Privacy", () => {
       "Counting: on",
       "Since 2026-09-12. Partly counted days: 1.",
       "Capability\tdohc\tCLI\tMCP\tAutomation\tLast used",
-      "version.create\t3\t1\tnot counted\tnot counted\t2026-10-07",
+      "version.create\t3\t1 (not counted now)\tnot counted\tnot counted\t2026-10-07",
       "file.kept.save\t0\t2\t0\tnot counted\t2026-10-06",
       "chat.export\tnot counted\tnot counted\tnot counted\tnot counted\t",
       "version.try\t0\tnot counted\tnot counted\tnot counted\t",
@@ -177,7 +195,9 @@ describe("usage record in Privacy", () => {
 
   it("reports a Clear that failed and keeps the counts", async () => {
     const onError = vi.fn();
+    // Main keeps the counts when its write fails, so the next read still has them.
     bridge.clearUsageRecord.mockRejectedValueOnce(new Error("file in use"));
+    bridge.readUsageRecord.mockResolvedValueOnce(RECORD).mockResolvedValueOnce(RECORD);
     render(<UsageRecordSettings onError={onError} />);
     fireEvent.click(await screen.findByTestId("usage-record-clear"));
     fireEvent.click(screen.getByTestId("usage-record-clear-action"));
@@ -186,10 +206,14 @@ describe("usage record in Privacy", () => {
     expect(screen.getAllByRole("row")).toHaveLength(ROWS.length + 1);
   });
 
-  it("says an unreadable record stays as it is, and offers nothing that would write it", async () => {
+  it("says an unreadable record stays as it is, reports it once, and offers nothing that would write it", async () => {
+    const onError = vi.fn();
     bridge.readUsageRecord.mockResolvedValueOnce({ status: "unreadable", file: RECORD.file, code: "EACCES" });
-    render(<UsageRecordSettings />);
+    render(<UsageRecordSettings onError={onError} />);
     const unreadable = await screen.findByTestId("usage-record-unreadable");
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(
+      "dohc could not read the usage record (EACCES). dohc leaves the file as it is and counts nothing. Restart dohc to try again.");
     expect(unreadable.textContent).toContain("dohc could not read the usage record (EACCES).");
     expect(unreadable.textContent).toContain("dohc leaves the file as it is and counts nothing.");
     expect(screen.queryByRole("switch")).toBeNull();

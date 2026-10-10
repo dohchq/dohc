@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { readFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { activityPin, desktopPins, settingsNavPin, settingsSectionPin } from "../src/testPins";
 import { launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
@@ -51,6 +51,10 @@ test("@usage-record Privacy shows a counted action, keeps it while Off, and clea
 
     // Keyboard: the switch takes focus and Space turns the record Off.
     await toggle(page).focus();
+    await page.keyboard.press("Shift+Tab");
+    await page.keyboard.press("Tab");
+    await expect(toggle(page)).toBeFocused();
+    await capture(page, "focus");
     await page.keyboard.press("Space");
     await expect(record(page)).toHaveAttribute("data-state", "off");
     await expect(page.getByTestId("usage-record-off")).toBeVisible();
@@ -77,6 +81,33 @@ test("@usage-record Privacy shows a counted action, keeps it while Off, and clea
     await expect(page.getByTestId("usage-record-empty")).toBeVisible();
     await expect.poll(async () => (await saved()).counts).toEqual([]);
     await capture(page, "empty");
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+// A folder where the file should be is a record dohc cannot read.
+test("@usage-record Privacy says a record it cannot read stays as it is, and offers nothing that writes it", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: LaunchedDesktopApp | null = null;
+  const file = join(temp.homeDir, "dohc-usage.json");
+
+  try {
+    await mkdir(file);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const { page } = desktop;
+    await openWorkspaceFromFirstRun(page, temp);
+    await openPrivacy(page);
+    await expect(record(page)).toHaveAttribute("data-state", "unreadable");
+    await expect(page.getByTestId("usage-record-unreadable")).toContainText("dohc could not read the usage record (EISDIR).");
+    await expect(record(page).getByRole("switch")).toHaveCount(0);
+    await expect(record(page).getByTestId("usage-record-clear")).toHaveCount(0);
+    await expect(record(page).getByTestId("usage-record-copy")).toHaveCount(0);
+    // The shell's failure hook carries it too, so it stays in Notices after Settings closes.
+    await expect(page.getByTestId("notice-toasts")).toContainText("dohc could not read the usage record (EISDIR).");
+    await capture(page, "unreadable");
+    expect((await stat(file)).isDirectory()).toBe(true);
+    expect(await readdir(file)).toEqual([]);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

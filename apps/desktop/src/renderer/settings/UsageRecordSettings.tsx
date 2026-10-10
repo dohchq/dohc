@@ -24,6 +24,8 @@ const DOORS: readonly { door: Door; name: string }[] = [
 ];
 export const NOT_COUNTED = "Not counted by this version";
 const SWITCH_LABEL = "Keep a usage record";
+const UNREADABLE_HINT = "dohc leaves the file as it is and counts nothing. Restart dohc to try again.";
+const unreadableWords = (code: string) => `dohc could not read the usage record (${code}).`;
 
 function total(row: UsageRecordRow): number {
   return DOORS.reduce((sum, { door }) => sum + row.doors[door].count, 0);
@@ -57,8 +59,11 @@ function dayWords(day: string, today: string): string {
 /** What Copy puts on the clipboard: the rows and what this build counts. No
  * paths and no content. */
 export function usageRecordText(record: Readable): string {
-  const cell = (row: UsageRecordRow, door: Door) =>
-    row.doors[door].counted || row.doors[door].count > 0 ? String(row.doors[door].count) : "not counted";
+  const cell = (row: UsageRecordRow, door: Door) => {
+    const { count, counted } = row.doors[door];
+    if (counted) return String(count);
+    return count > 0 ? `${count} (not counted now)` : "not counted";
+  };
   return [
     "dohc usage record",
     `Counting: ${record.enabled ? "on" : "off"}`,
@@ -78,15 +83,18 @@ function NotCounted() {
   );
 }
 
+// A count an earlier version saved for a door this one does not count keeps
+// its number and takes the mark: no newer use adds to it.
 function Cell(props: { cell: UsageRecordRow["doors"][Door] }) {
   const { count, counted } = props.cell;
-  if (count > 0) return <>{count}</>;
-  if (!counted) return <NotCounted />;
-  return <span className="sr-only">0</span>;
+  if (counted) return count > 0 ? <>{count}</> : <span className="sr-only">0</span>;
+  if (count === 0) return <NotCounted />;
+  return <span className="inline-flex items-center gap-1.5">{count}<NotCounted /></span>;
 }
 
 function Table(props: { rows: readonly UsageRecordRow[]; today: string }) {
-  // A door this build never counts is marked in its heading too.
+  // A door this build never counts is marked in its heading too, whatever
+  // counts earlier versions saved there.
   const neverCounted = new Set(DOORS.filter(({ door }) => props.rows.every((row) => !row.doors[door].counted)).map(({ door }) => door));
   return (
     <div role="region" tabIndex={0} aria-label="Usage record counts" className="max-h-[320px] overflow-auto focus-visible:-outline-offset-2">
@@ -183,8 +191,7 @@ export function UsageRecordCard(props: {
       ) : view.status === "unreadable" ? (
         <div className="py-6">
           <EmptyState icon={TriangleAlert} tone="danger" data-testid="usage-record-unreadable"
-            title={`dohc could not read the usage record (${view.code}).`}
-            hint="dohc leaves the file as it is and counts nothing. Restart dohc to try again." />
+            title={unreadableWords(view.code)} hint={UNREADABLE_HINT} />
         </div>
       ) : used ? (
         <Table rows={view.rows} today={props.today} />
@@ -260,7 +267,10 @@ export function UsageRecordSettings(props: { onError?: ((message: string, cause?
     const current = () => live.current && attempt === reads.current;
     try {
       const result = await bridge().readUsageRecord({});
-      if (current()) setView(result);
+      if (!current()) return;
+      setView(result);
+      // The card keeps the record safe from writes; Notices keeps the problem.
+      if (result.status === "unreadable") onError.current?.(`${unreadableWords(result.code)} ${UNREADABLE_HINT}`);
     } catch (cause) {
       if (!current()) return;
       setView({ status: "failed" });
@@ -281,9 +291,10 @@ export function UsageRecordSettings(props: { onError?: ((message: string, cause?
     try {
       await run();
     } catch (cause) {
-      if (live.current) onError.current?.(withErrorWords(failure, cause), cause);
+      // Reported even after Privacy closed: the shell keeps it in Notices.
+      onError.current?.(withErrorWords(failure, cause), cause);
     }
-    // Read even after a failure: the record may have changed before it.
+    // Read after a failure too, so the card shows what main kept.
     await read();
     if (live.current) setBusy(false);
   };

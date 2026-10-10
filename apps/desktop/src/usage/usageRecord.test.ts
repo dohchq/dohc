@@ -94,6 +94,20 @@ describe("usage record bridge", () => {
     expect(JSON.parse(disk.get(FILE)!).counts).toEqual([]);
   });
 
+  it("reads back the unchanged record after a Clear or switch whose write failed", async () => {
+    const { store, io, call } = setup();
+    await store.load();
+    store.recordSuccess({ capabilityId: "version.try", door: "renderer" });
+    const tried = (read: unknown) => (read as Extract<UsageRecordResult, { status: "readable" }>)
+      .rows.find(row => row.capabilityId === "version.try")!.doors.renderer.count;
+    io.rename.mockRejectedValueOnce(new Error("disk unavailable"));
+    await expect(call("clearUsageRecord", {})).rejects.toThrow("disk unavailable");
+    expect(tried(await call("readUsageRecord", {}))).toBe(1);
+    io.rename.mockRejectedValueOnce(new Error("disk unavailable"));
+    await expect(call("setUsageRecordEnabled", { enabled: false })).rejects.toThrow("disk unavailable");
+    expect(await call("readUsageRecord", {})).toMatchObject({ status: "readable", enabled: true });
+  });
+
   it("says a record it cannot read is unreadable, and changes nothing on disk", async () => {
     const { io, call } = setup({ readError: Object.assign(new Error("denied"), { code: "EACCES" }) });
     await expect(call("readUsageRecord", {})).resolves.toEqual({ status: "unreadable", file: FILE, code: "EACCES" });
