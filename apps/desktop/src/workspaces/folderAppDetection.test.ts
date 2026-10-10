@@ -52,8 +52,8 @@ describe("folder app recognition", () => {
     await service.read(workspace, "app");
     service.settledEvents(workspace, [{ path: "app/dist/index.html", operation: "update" }]);
     expect((await service.read(workspace, "app")).run?.entryPath).toBe("app/dist/index.html");
-    expect(sources.mock.calls.length).toBeGreaterThan(1);
     await service.retire(workspace.attachmentId);
+    expect(sources.mock.calls.length).toBeGreaterThan(1);
   });
   it("isolates attachments reusing the workspace id and drains retirement", async () => {
     const sources = vi.fn(async () => ["app/index.html"]);
@@ -305,6 +305,75 @@ describe("renderer reads beside background scans", () => {
       await reading;
       await service.retire(workspace.attachmentId);
     }
+    expect(updated).toHaveBeenCalledExactlyOnceWith(workspace, expect.objectContaining({ folder: "app", isApp: false }));
+  });
+});
+
+describe("queued and running background scans", () => {
+  it.each(["resync", "events"])("retries an unanswered queued folder immediately after %s and skips its later turn", async trigger => {
+    let release!: (paths: string[]) => void;
+    let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    const sources = vi.fn().mockResolvedValue([]);
+    const service = createFolderAppDetection({ sources, updated: vi.fn(), failed: vi.fn() });
+    await service.read(workspace, "shared");
+    sources.mockRejectedValueOnce(new Error("first read failed"));
+    await expect(service.read(workspace, "app")).rejects.toThrow("first read failed");
+    sources.mockClear();
+    sources.mockImplementationOnce(() => {
+      started();
+      return new Promise<string[]>(resolve => { release = resolve; });
+    }).mockResolvedValue(["app/index.html"]);
+    if (trigger === "resync") service.invalidate(workspace);
+    else service.settledEvents(workspace, [
+      { path: "shared/file.md", operation: "update" }, { path: "app/index.html", operation: "update" },
+    ]);
+    await ready;
+    const resolved = vi.fn();
+    const retry = service.read(workspace, "app");
+    expect(service.read(workspace, "app")).toBe(retry);
+    const reading = retry.then(resolved);
+    let retiring: Promise<void> | undefined;
+    try {
+      await vi.waitFor(() => expect(resolved).toHaveBeenCalledWith(expect.objectContaining({ folder: "app", isApp: true })), { timeout: 1000 });
+      expect(sources.mock.calls.filter(([, folder]) => folder === "app")).toHaveLength(1);
+      let retired = false;
+      retiring = service.retire(workspace.attachmentId).then(() => { retired = true; });
+      await Promise.resolve();
+      expect(retired).toBe(false);
+    } finally {
+      release([]);
+      await reading;
+      await (retiring ?? service.retire(workspace.attachmentId));
+    }
+    expect(sources.mock.calls.filter(([, folder]) => folder === "app")).toHaveLength(1);
+  });
+  it("returns the previous answer during a running background scan", async () => {
+    let release!: (paths: string[]) => void;
+    let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    const sources = vi.fn().mockResolvedValue(["app/index.html"]);
+    const updated = vi.fn();
+    const service = createFolderAppDetection({ sources, updated, failed: vi.fn() });
+    const previous = await service.read(workspace, "app");
+    updated.mockClear();
+    sources.mockImplementationOnce(() => {
+      started();
+      return new Promise<string[]>(resolve => { release = resolve; });
+    });
+    service.invalidate(workspace);
+    await ready;
+    const resolved = vi.fn();
+    const reading = service.read(workspace, "app").then(resolved);
+    try {
+      await vi.waitFor(() => expect(resolved).toHaveBeenCalledWith(previous), { timeout: 1000 });
+      expect(updated).not.toHaveBeenCalled();
+    } finally {
+      release([]);
+      await reading;
+      await service.retire(workspace.attachmentId);
+    }
+    expect(sources).toHaveBeenCalledTimes(2);
     expect(updated).toHaveBeenCalledExactlyOnceWith(workspace, expect.objectContaining({ folder: "app", isApp: false }));
   });
 });

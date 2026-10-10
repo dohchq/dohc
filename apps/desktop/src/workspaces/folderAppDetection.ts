@@ -25,7 +25,7 @@ export function createFolderAppDetection<Workspace extends Attachment>(input: {
   updated(workspace: Workspace, answer: FolderAppAnswer): void;
   failed(error: unknown): void;
 }) {
-  interface Folder { answer?: FolderAppAnswer; dirty: boolean; readFailed?: boolean; pending?: Promise<FolderAppAnswer> }
+  interface Folder { answer?: FolderAppAnswer; dirty: boolean; readFailed?: boolean; pending?: Promise<FolderAppAnswer>; queued?: Promise<FolderAppAnswer> }
   interface Tracking { folders: Map<string, Folder>; pending: Set<Promise<FolderAppAnswer>>; queue: Promise<void> }
   const attachments = new Map<symbol, Tracking>();
   function read(workspace: Workspace, folder: string): Promise<FolderAppAnswer> {
@@ -41,13 +41,13 @@ export function createFolderAppDetection<Workspace extends Attachment>(input: {
     folders.set(folder, state);
     if (folders.size > MAX_REQUESTED_APP_FOLDERS) folders.delete(folders.keys().next().value!);
     // A pending refresh broadcasts its eventual answer through updated.
-    if (state.pending && state.answer) return Promise.resolve(state.answer);
+    if ((state.pending || state.queued) && state.answer) return Promise.resolve(state.answer);
     return scan(workspace, folder, tracking, state);
   }
-  function scan(workspace: Workspace, folder: string, tracking: Tracking, current: Folder, background = false): Promise<FolderAppAnswer> {
+  function scan(workspace: Workspace, folder: string, tracking: Tracking, current: Folder): Promise<FolderAppAnswer> {
     if (current.pending) return current.pending;
     if (!current.dirty && current.answer) return Promise.resolve(current.answer);
-    const pending = (background ? tracking.queue : Promise.resolve()).then(async () => {
+    const pending = Promise.resolve().then(async () => {
       let answer: FolderAppAnswer;
       do {
         current.dirty = false;
@@ -69,8 +69,19 @@ export function createFolderAppDetection<Workspace extends Attachment>(input: {
     });
     current.pending = pending;
     tracking.pending.add(pending);
-    if (background) tracking.queue = pending.then(() => undefined, () => undefined);
     return pending;
+  }
+  function queueScan(workspace: Workspace, folder: string, tracking: Tracking, current: Folder): Promise<FolderAppAnswer> {
+    if (current.pending) return current.pending;
+    if (current.queued) return current.queued;
+    const queued = tracking.queue.then(() => scan(workspace, folder, tracking, current)).finally(() => {
+      current.queued = undefined;
+      tracking.pending.delete(queued);
+    });
+    current.queued = queued;
+    tracking.pending.add(queued);
+    tracking.queue = queued.then(() => undefined, () => undefined);
+    return queued;
   }
   function settledEvents(workspace: Workspace, events: readonly WatcherEvent[]) {
     const tracking = attachments.get(workspace.attachmentId);
@@ -87,7 +98,7 @@ export function createFolderAppDetection<Workspace extends Attachment>(input: {
       const state = folders.get(folder);
       if (state) {
         state.dirty = true;
-        void scan(workspace, folder, tracking, state, true).catch(input.failed);
+        void queueScan(workspace, folder, tracking, state).catch(input.failed);
       }
     }
   }
@@ -102,7 +113,7 @@ export function createFolderAppDetection<Workspace extends Attachment>(input: {
     if (!tracking) return;
     for (const [folder, state] of tracking.folders) {
       state.dirty = true;
-      void scan(workspace, folder, tracking, state, true).catch(input.failed);
+      void queueScan(workspace, folder, tracking, state).catch(input.failed);
     }
   }
   return { read, settledEvents, retire, invalidate };
