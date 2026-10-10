@@ -18,3 +18,15 @@ export async function readFolderAppOffer(input: {
     throw error;
   }
 }
+
+export function observeFolderAppOffers(input: {
+  token: OfferWorkspaceToken; currentToken(): OfferWorkspaceToken;
+  subscribe(listener: (answer: FolderAppAnswer) => void): () => void;
+  onChanged(answer: FolderAppAnswer): void;
+}): () => void {
+  return input.subscribe(answer => {
+    const current = input.currentToken();
+    if (current.workspaceId === input.token.workspaceId && current.generation === input.token.generation
+      && answer.workspaceId === current.workspaceId) input.onChanged(answer);
+  });
+}

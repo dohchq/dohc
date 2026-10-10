@@ -216,7 +216,9 @@ export function MentionComposer(props: {
       const result = applyMentionCompletion(props.value, current, candidate);
       pendingCaret.current = result.caret;
       setMenuOpen(false);
-      const pick = props.onRosterPick && candidate.kind === "agent" ? { candidate, from: current.start, to: result.caret - 1 } : null;
+      const pick = !props.onRosterPick ? null : candidate.kind === "agent"
+        ? { candidate, from: current.start, to: result.caret - 1 }
+        : mapAgentRosterPick(rosterPick.current, { from: current.start, to: current.start + 1 + current.query.length, insertedLength: result.caret - current.start });
       rosterPick.current = pick;
       props.onChange(result.value);
       props.onRosterPick?.(pick);

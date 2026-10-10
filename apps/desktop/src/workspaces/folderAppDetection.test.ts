@@ -22,13 +22,14 @@ describe("folder app recognition", () => {
     const sources = vi.fn(async (_workspace, folder: string) => [folder + "/index.html"]);
     const updated = vi.fn();
     const service = createFolderAppDetection({ sources, updated, failed: vi.fn() });
+    const reading = service.read(workspace, "app");
     service.settledEvents(workspace, [{ path: "app/index.html", operation: "update" }, { path: "app/dohc.json", operation: "update" }]);
     service.settledEvents(workspace, [{ path: "app/index.html", operation: "update" }]);
-    expect((await service.read(workspace, "app")).isApp).toBe(true);
+    expect((await reading).isApp).toBe(true);
     expect(sources).toHaveBeenCalledExactlyOnceWith(workspace, "app");
     await service.read(workspace, "app");
     expect(sources).toHaveBeenCalledTimes(1);
-    expect(updated).toHaveBeenCalledTimes(1);
+    expect(updated).not.toHaveBeenCalled();
     await service.retire(workspace.attachmentId);
   });
   it("rescans after an event during an in-flight read before returning an answer", async () => {
@@ -67,5 +68,39 @@ describe("folder app recognition", () => {
   it("rejects traversal and accepts a root-folder read", () => {
     expect(FolderAppPayload.safeParse({ workspaceId: "one", folder: "../other" }).success).toBe(false);
     expect(FolderAppPayload.safeParse({ workspaceId: "one", folder: "." }).success).toBe(true);
+  });
+});
+
+describe("requested-folder observation", () => {
+  it("does no scan for saves in unrequested folders, including another folder beside a requested one", async () => {
+    const sources = vi.fn(async () => ["app/index.html"]);
+    const updated = vi.fn();
+    const service = createFolderAppDetection({ sources, updated, failed: vi.fn() });
+    service.settledEvents(workspace, [{ path: "notes/draft.md", operation: "update" }]);
+    await Promise.resolve();
+    expect(sources).not.toHaveBeenCalled();
+    await service.read(workspace, "app");
+    service.settledEvents(workspace, [{ path: "notes/draft.md", operation: "update" }]);
+    await Promise.resolve();
+    expect(sources).toHaveBeenCalledExactlyOnceWith(workspace, "app");
+    expect(updated).not.toHaveBeenCalled();
+    await service.retire(workspace.attachmentId);
+  });
+  it("signals only changes to an already returned answer", async () => {
+    const sources = vi.fn().mockResolvedValue(["app/index.html"]);
+    const updated = vi.fn();
+    const service = createFolderAppDetection({ sources, updated, failed: vi.fn() });
+    await service.read(workspace, "app");
+    service.settledEvents(workspace, [{ path: "app/index.html", operation: "update" }]);
+    await service.read(workspace, "app");
+    expect(updated).not.toHaveBeenCalled();
+    sources.mockResolvedValue([]);
+    service.settledEvents(workspace, [{ path: "app/index.html", operation: "delete" }]);
+    const answer = await service.read(workspace, "app");
+    expect(updated).toHaveBeenCalledExactlyOnceWith(workspace, answer);
+    service.settledEvents(workspace, [{ path: "app/notes.md", operation: "update" }]);
+    await service.read(workspace, "app");
+    expect(updated).toHaveBeenCalledTimes(1);
+    await service.retire(workspace.attachmentId);
   });
 });

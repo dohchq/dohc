@@ -14,8 +14,16 @@ describe("CSV offer observer", () => {
     const rendered = render(<CsvView {...props} />);
     expect(onCsvBoundOffer).toHaveBeenLastCalledWith(null);
     rendered.rerender(<CsvView {...props} csvSource="workspace-file" />);
-    expect(onCsvBoundOffer).toHaveBeenLastCalledWith({kind:"csv-bound",path:"data.csv",cap:500,totalRows:501,plainWorkspaceCsv:true});
+    expect(onCsvBoundOffer).toHaveBeenLastCalledWith({kind:"csv-bound",workspaceId:"one",path:"data.csv",cap:500,totalRows:501,plainWorkspaceCsv:true});
+    onCsvBoundOffer.mockClear();
+    rendered.rerender(<CsvView {...props} workspaceId="two" csvSource="workspace-file" />);
+    expect(onCsvBoundOffer.mock.calls[0]).toEqual([null]);
+    expect(onCsvBoundOffer).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: "two" }));
     rendered.rerender(<CsvView {...props} csvSource="received-share" />);
     expect(onCsvBoundOffer).toHaveBeenLastCalledWith(null);
+    rendered.rerender(<CsvView {...props} csvSource="workspace-file" />);
+    onCsvBoundOffer.mockClear();
+    rendered.unmount();
+    expect(onCsvBoundOffer).toHaveBeenCalledExactlyOnceWith(null);
   });
 });

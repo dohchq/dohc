@@ -20,7 +20,7 @@ interface Attachment { workspaceId: string; attachmentId: symbol }
 // and batches arriving before a folder's scan starts.
 export function createFolderAppDetection<Workspace extends Attachment>(input: {
   sources(workspace: Workspace, folder: string): Promise<readonly (string | WorkspaceSiteSource)[]>;
-  updated(workspace: Workspace): void;
+  updated(workspace: Workspace, answer: FolderAppAnswer): void;
   failed(error: unknown): void;
 }) {
   interface Folder { answer?: FolderAppAnswer; dirty: boolean; pending?: Promise<FolderAppAnswer> }
@@ -43,23 +43,21 @@ export function createFolderAppDetection<Workspace extends Attachment>(input: {
         current.dirty = false;
         answer = detectFolderApp(workspace.workspaceId, folder, await input.sources(workspace, folder));
       } while (current.dirty);
+      const previous = current.answer;
       current.answer = answer;
-      input.updated(workspace);
+      if (previous && JSON.stringify(previous) !== JSON.stringify(answer)) input.updated(workspace, answer);
       return answer;
     }).catch(error => { current.dirty = true; throw error; }).finally(() => { current.pending = undefined; });
     return current.pending;
   }
   function settledEvents(workspace: Workspace, events: readonly WatcherEvent[]) {
-    const folders = foldersFor(workspace);
+    const folders = attachments.get(workspace.attachmentId);
+    if (!folders) return;
     const affected = new Set<string>();
     for (const event of events) {
       const slash = event.path.lastIndexOf("/");
-      affected.add(slash < 0 ? "." : event.path.slice(0, slash));
-      const segments = event.path.split("/");
-      const output = segments.findIndex(segment => ["dist", "build", "out"].includes(segment));
-      if (output >= 0) affected.add(segments.slice(0, output).join("/") || ".");
       for (const folder of folders.keys()) {
-        if (folder === "." ? slash < 0 || folders.get(folder)?.answer?.isApp === true : event.path === folder || event.path.startsWith(folder + "/") || folder.startsWith(event.path + "/")) affected.add(folder);
+        if (folder === "." ? slash < 0 || ["dist", "build", "out"].includes(event.path.split("/")[0]!) || folders.get(folder)?.answer?.isApp === true : event.path === folder || event.path.startsWith(folder + "/") || folder.startsWith(event.path + "/")) affected.add(folder);
       }
     }
     for (const folder of affected) {

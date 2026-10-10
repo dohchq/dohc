@@ -40,6 +40,7 @@ import {
   CrashReportChangedEvent,
   NoticesChangedEvent,
   SearchResultsEvent,
+  FolderAppAnswer,
   ShareHandoffStatus,
   UpdateActionResult,
   UpdateCheckResult,
@@ -659,6 +660,7 @@ const bridge: DohcDesktopBridge = {
   // batches; the searchId round-trips so stale batches drop renderer-side.
   ...operationBridge(workspaceSearchOperations, invoke),
   ...operationBridge(folderAppOfferOperations, invoke),
+  onFolderAppChanged: listener => onEvent(CHANNELS.folderAppChanged, FolderAppAnswer, listener),
   onSearchResults: (listener) =>
     onEvent(CHANNELS.searchResults, SearchResultsEvent, listener),
   ...operationBridge(noticeOperations, invoke),

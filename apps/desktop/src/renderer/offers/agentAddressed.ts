@@ -17,6 +17,7 @@ export function mapAgentRosterPick(pick: AgentRosterPick | null, edit: { from: n
   return null;
 }
 export interface AddressedAgentFacts {
+  workspaceId: string;
   agentId: string;
   reach: readonly string[] | null;
   runnerAvailable: boolean;
@@ -29,7 +30,7 @@ export interface AgentAddressedOffer extends AddressedAgentFacts {
   tryInVersion: { available: false; reason: "no-recoverable-discard" };
 }
 // The input is a roster selection, never parsed composer text.
-export function detectAgentAddressed(pick: AgentRosterPick | null, facts: AddressedAgentFacts | null): AgentAddressedOffer | null {
-  if (pick?.candidate.kind !== "agent" || !facts || facts.agentId !== pick.candidate.id) return null;
+export function detectAgentAddressed(workspaceId: string, pick: AgentRosterPick | null, facts: AddressedAgentFacts | null): AgentAddressedOffer | null {
+  if (pick?.candidate.kind !== "agent" || !facts || facts.workspaceId !== workspaceId || facts.agentId !== pick.candidate.id) return null;
   return { kind: "agent-addressed", agent: pick.candidate, ...facts, tryInVersion: { available: false, reason: "no-recoverable-discard" } };
 }

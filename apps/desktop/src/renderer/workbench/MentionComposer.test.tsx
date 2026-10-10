@@ -356,3 +356,21 @@ describe("offer roster picks", () => {
     expect(onRosterPick).toHaveBeenLastCalledWith({ candidate: candidates[0], from: 3, to: 9 });
   });
 });
+
+describe("agent pick continuity", () => {
+  it("keeps the picked agent when a person is picked, and clears it when the agent mention is removed", async () => {
+    const onRosterPick = vi.fn();
+    const user = userEvent.setup();
+    render(<Harness onRosterPick={onRosterPick} />);
+    const composer = screen.getByTestId("chats-composer") as HTMLTextAreaElement;
+    await user.type(composer, "@ag");
+    await user.click(screen.getAllByTestId("chats-mention-option")[0]!);
+    await user.type(composer, "and @yo");
+    await user.click(screen.getAllByTestId("chats-mention-option").find(option => option.getAttribute("data-candidate-id") === "user:you")!);
+    expect(composer.value).toBe("@agent and @you ");
+    expect(onRosterPick).toHaveBeenLastCalledWith({ candidate: candidates[0], from: 0, to: 6 });
+    composer.focus(); composer.setSelectionRange(0, 7);
+    await user.keyboard("{Backspace}");
+    expect(onRosterPick).toHaveBeenLastCalledWith(null);
+  });
+});

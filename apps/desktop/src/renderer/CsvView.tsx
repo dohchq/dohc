@@ -236,10 +236,11 @@ export function CsvView({
       onCsvBoundOffer?.(null);
       return;
     }
-    onCsvBoundOffer?.(raw || !csvSource ? null : detectCsvBound({ path, totalRows: dataRowCount,
+    onCsvBoundOffer?.(raw || !csvSource ? null : detectCsvBound({ workspaceId, path, totalRows: dataRowCount,
       source: csvSource, complete: !truncated,
     }));
   }, [onCsvBoundOffer, csvSource, workspaceId, path, dataRowCount, rows, raw, truncated, switchReadPending, switchUnresyncedRef]);
+  useEffect(() => () => onCsvBoundOffer?.(null), [workspaceId, onCsvBoundOffer]);
   // Bounded preview: an unbounded <table> over 10,000+ rows
   // freezes the renderer for tens of seconds. The first rows are enough to
   // inspect and edit common CSVs; working with all of them is what Import to
