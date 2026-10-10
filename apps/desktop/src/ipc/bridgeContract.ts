@@ -1323,6 +1323,9 @@ const SYNC_STATUS_BASE_FIELDS = {
   // an omitted boolean reads as false, and a producer that cannot say which
   // cause it means must not compile.
   historyRecordingUnavailable: z.boolean(),
+  // A failed feed read or unavailable watcher does not establish that the
+  // history recorder stopped. Omitted once observation recovers.
+  fileObservationFailure: z.enum(["read-failed", "unavailable"]).optional(),
   // True when this workspace is a shared view, fed by the share's pull
   // and never a recorder of its own. A capability, not a failure. Required
   // for the same reason as its neighbour.
@@ -1446,6 +1449,18 @@ export const captureRecoveryOperations = {
     guard: "trusted-sender",
     scope: "workspace",
     handlerCheck: { check: "withRendererWorkspaceOperation", reason: "The handler clears recovery only in the sending window's active workspace." },
+  },
+} satisfies OperationTable;
+
+export const fileObservationOperations = {
+  retryFileObservation: {
+    capabilityId: "file.observation.retry",
+    channel: "desktop:retry-file-observation",
+    payload: WorkspaceIdPayload,
+    result: SyncStatusResult,
+    guard: "trusted-sender",
+    scope: "workspace",
+    handlerCheck: { check: "withRendererWorkspaceOperation", reason: "The read starts only for the sending window's active workspace." },
   },
 } satisfies OperationTable;
 
@@ -6536,6 +6551,7 @@ export interface DohcDesktopBridge
   extends OperationBridge<typeof accessOperations>,
     OperationBridge<typeof workspaceVersionOperations>,
     OperationBridge<typeof captureRecoveryOperations>,
+    OperationBridge<typeof fileObservationOperations>,
     OperationBridge<typeof workspaceSearchOperations>,
     OperationBridge<typeof crashReportOperations>,
     OperationBridge<typeof reportingOperations>,

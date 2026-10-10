@@ -10,7 +10,7 @@ import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createWorkspaceEngineIpc } from "./workspaceEngineIpc";
 import { CHANNELS } from "./channels";
 import type { EngineMomentRecord, RebuildEngineStoreResult, SyncStatusResult } from "./bridgeContract";
-import { GetCollectionRecordHistoryResult, captureRecoveryOperations, engineYDocAdmissionOperations, engineYDocSaveOperations } from "./bridgeContract";
+import { GetCollectionRecordHistoryResult, captureRecoveryOperations, fileObservationOperations, engineYDocAdmissionOperations, engineYDocSaveOperations } from "./bridgeContract";
 import { operationBridge } from "./operationTable";
 import { engineMomentSourceLabel } from "../renderer/workbench/EngineHistory";
 import { createWorkspaceAuthorityOwner, type WorkspaceAuthorityLease } from "../workspaces/workspaceAuthorityOwner";
@@ -46,7 +46,10 @@ const descriptor = { id: "image", mimeType: "image/png", created: 1, ref: "asset
 type SharedHistoryStore = Pick<ReturnType<ReturnType<typeof createReceivedShareEngineAccess>["storeFor"]>, "listHistoryPage" | "getMoment">;
 
 /** `sharedStore` makes the renderer's workspace a received share view backed by that store. */
-async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string) {
+async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, retry?: {
+  afterOperation(): Promise<void>;
+  read(): Promise<void>;
+}) {
   const workspace: RegistryEntry = { workspaceId: "workspace", rootPath: policyRoot ?? "C:/alias", kind: "personal", mode: "local-first",
     ...(sharedStore ? { shareView: {} as NonNullable<RegistryEntry["shareView"]> } : {}) };
   // Open and writable, but not the workspace this renderer shows.
@@ -80,6 +83,11 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string) {
     currentSession: (value: Sender) => renderers.current(value),
     withPhysicalOperation: authority.withOperation.bind(authority),
   });
+  const gatedWorkspaceOperation: typeof withRendererWorkspaceOperation = async (sender, workspaceId, message, work) => {
+    const result = await withRendererWorkspaceOperation(sender, workspaceId, message, work);
+    if (retry) await retry.afterOperation();
+    return result;
+  };
   const sessions = new EngineWorkspaceSessions({ currentClient: () => { throw new Error("daemon boundary"); } });
   const storeWorkspaces: unknown[] = [];
   const receivedShareEngine = createReceivedShareEngineAccess({
@@ -162,6 +170,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string) {
   const routed: unknown[] = [];
   const requireSessions = vi.fn(() => sessions);
   const retryOwnerLiveDelivery = vi.fn();
+  const retryFileObservation = vi.fn(async (_workspaceId: string) => undefined);
   const retryCloudSync = vi.fn(async (_workspaceId: string, _reason: "person" | "reconnect") => undefined);
   const automationRunOnThisComputer = vi.fn(async (_workspaceId: string, _automationId: string, claimId: string) => claimId === "claim-here");
   // The relay's owner-only routes. It answers 404 to anyone but the owner.
@@ -189,7 +198,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string) {
     localPerson: async () => ({ kind: "human", humanId: session.account ?? "install-local" }),
     registerHandler: (channel, handler) => { handlers.set(channel, handler); },
     assertTrustedSender: (event: { sender: Sender }) => { if (event.sender.id === -1) throw new Error("untrusted"); },
-    withRendererWorkspaceOperation, receivedShareEngine,
+    withRendererWorkspaceOperation: gatedWorkspaceOperation, receivedShareEngine,
     withEngineAdapter: async (_workspace, work) => {
       routed.push(_workspace);
       return missingAdapter ? null : work(adapter);
@@ -201,6 +210,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string) {
     namedAuthorLabels: () => ({ named: () => "Someone you shared with" }),
     automationPersonName,
     retryOwnerLiveDelivery, retryCloudSync,
+    retryFileObservation: retry ? id => { void retryFileObservation(id); return retry.read(); } : retryFileObservation,
     requireWorkspace, assertWritableWorkspace: writable, syncStatusWithOwnedProjection: syncProjection,
     activity: { getStatus, hasAgentRun }, workspaceAuthorities: authority, canonicalWorkspaceFor,
     requireEngineSessions: requireSessions, closeDispatchRunActivity: closeActivity,
@@ -220,7 +230,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string) {
     workspace, sender, physical, authority, renderers, sessions, ydoc, provider, openYDocSession,
     adapter, capture, requireEngineCapture, getStatus, hasAgentRun, closeActivity, probe, move, reopen,
     notify, writable, requireWorkspace, displayName, syncProjection, canonicalWorkspaceFor, requireSessions,
-    events, handlers, invoke, routed, retryOwnerLiveDelivery, retryCloudSync, automationRunOnThisComputer, relay, setMissingAdapter: () => { missingAdapter = true; },
+    events, handlers, invoke, routed, retryOwnerLiveDelivery, retryCloudSync, retryFileObservation, automationRunOnThisComputer, relay, setMissingAdapter: () => { missingAdapter = true; },
     storeWorkspaces, readPolicy,
     sent, automationPersonName,
     signIn: (account: string | null) => { session.account = account; session.generation += 1; },
@@ -239,7 +249,7 @@ const channels = [
   CHANNELS.listCollections, CHANNELS.getCollection, CHANNELS.queryCollectionRecords, CHANNELS.getCollectionRecordHistory,
   CHANNELS.locateRecordHistoryRun, CHANNELS.listEngineMoments, CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
   CHANNELS.getSyncStatus, captureRecoveryOperations.getCaptureRecoveryStatus.channel, captureRecoveryOperations.clearCaptureRecovery.channel,
-  CHANNELS.retryFileRecovery, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
+  fileObservationOperations.retryFileObservation.channel, CHANNELS.retryFileRecovery, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
   CHANNELS.rebuildEngineStore,
   engineYDocAdmissionOperations.waitForEngineYDocAdmission.channel, engineYDocSaveOperations.retryEngineYDocSave.channel, CHANNELS.engineYDocOpen, CHANNELS.engineYDocReadArtifactAsset, CHANNELS.engineYDocApplyUpdate,
   CHANNELS.engineYDocAcknowledgeLineageReplacement, CHANNELS.engineYDocClose,
@@ -247,6 +257,34 @@ const channels = [
 ];
 
 describe("workspace engine IPC registrations", () => {
+  it("handles a read rejection before workspace operation completion", async () => {
+    const completed = deferred<void>();
+    const read = deferred<void>();
+    const attached = vi.spyOn(read.promise, "then");
+    const h = await harness(undefined, undefined, { afterOperation: () => completed.promise, read: () => read.promise });
+    const result = expect(h.invoke("desktop:retry-file-observation")).rejects.toThrow("read failed");
+    try {
+      await vi.waitFor(() => expect(h.retryFileObservation).toHaveBeenCalledOnce());
+      expect(attached).toHaveBeenCalled();
+      expect(attached.mock.calls.some(([, rejected]) => typeof rejected === "function")).toBe(true);
+    } finally {
+      // Keep the failing baseline test from leaking an unhandled rejection.
+      void read.promise.catch(() => {});
+      read.reject(new Error("read failed"));
+      completed.resolve();
+      await result;
+    }
+  });
+  it("retries file observation only for this renderer's active workspace and propagates failure", async () => {
+    const h = await harness();
+    await h.invoke("desktop:retry-file-observation");
+    expect(h.retryFileObservation).toHaveBeenCalledExactlyOnceWith("workspace");
+    await expect(h.invoke("desktop:retry-file-observation", { workspaceId: "other" })).rejects.toThrow("no longer active");
+    await expect(h.invoke("desktop:retry-file-observation", null, new Sender(-1))).rejects.toThrow("untrusted");
+    expect(h.retryFileObservation).toHaveBeenCalledOnce();
+    h.retryFileObservation.mockRejectedValueOnce(new Error("read failed"));
+    await expect(h.invoke("desktop:retry-file-observation")).rejects.toThrow("read failed");
+  });
   it("releases the record History lease before background account lookup finishes", async () => {
     const { createHistoryLabels } = await import("../automations/shareRoster");
     const h = await harness();
