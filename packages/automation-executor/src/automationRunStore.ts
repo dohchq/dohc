@@ -294,12 +294,11 @@ const UndoCallSchema = z.union([
 // and saves each step beside the run's state, names each Collection by its
 // id, records when the run ended, qualifies formula-visible fields by
 // dataset and table, and keeps the deletes an Undo may use on each record
-// it added and the calls a dataset Undo saved. Shipped formats 11 and 12
-// read with no confirmed engine effects and become 13 on the next save. A run
-// in any other format cannot be read, and the claim fails instead of starting over or reading
+// it added and the calls a dataset Undo saved. Only version 13 is readable.
+// A run in another format fails instead of starting over or reading
 // bare field ids as current reach.
 const StoredRunSchema = z.object({
-  version: z.union([z.literal(11), z.literal(12), z.literal(13)]).transform(() => 13 as const),
+  version: z.literal(13),
   durableEffects: z.number().int().nonnegative().default(0),
   claimId: z.string().min(1),
   automationId: z.string().min(1),
@@ -361,8 +360,8 @@ export type PendingRestoreUpdate = Pick<PendingRestore, "id"> & Partial<Omit<Pen
 const RestoreReceiptSchema = z.object({path: z.string(), restoredMomentId: z.string(), removed: z.boolean().optional()});
 const RestoreLineSchema = z.discriminatedUnion("kind", [
   z.object({version: z.literal(2), kind: z.literal("restore"), entry: PendingRestoreSchema}),
-  z.object({version: z.literal(2), kind: z.literal("receipt"), id: z.string(), receipt: RestoreReceiptSchema}),
-  z.object({version: z.literal(2), kind: z.literal("undo-receipt"), id: z.string(), momentId: z.string()}),
+  z.object({version: z.literal(2), kind: z.literal("receipts"), id: z.string(), receipts: z.array(RestoreReceiptSchema)}),
+  z.object({version: z.literal(2), kind: z.literal("undo-receipts"), id: z.string(), momentIds: z.array(z.string())}),
 ]);
 
 /**
@@ -757,10 +756,10 @@ const tooLarge = () =>
 export interface AutomationRunStore {
   pendingRestores(): Promise<PendingRestore[]>;
   savePendingRestore(restore: PendingRestoreUpdate): Promise<void>;
-  recordRestoreReceipt(id: string, receipt: z.infer<typeof RestoreReceiptSchema>): Promise<void>;
-  undoRestoreReceipt(id: string, momentId: string): Promise<void>;
+  recordRestoreReceipts(id: string, receipts: readonly z.infer<typeof RestoreReceiptSchema>[]): Promise<void>;
+  undoRestoreReceipts(id: string, momentIds: readonly string[]): Promise<void>;
   removePendingRestore(id: string): Promise<void>;
-  recordUndoWrite(run: StoredRun, write: UndoWrite): Promise<void>;
+  recordUndoWrites(run: StoredRun, writes: readonly UndoWrite[]): Promise<void>;
   /**
    * Every run of one claim, one per run it was planned in. `unreadable` is
    * true when a saved run exists that cannot be read: the claim must not
@@ -852,7 +851,7 @@ type ProgressLine =
   | ({ kind: "replan" } & DatasetReplan)
   | ({ kind: "undo-request" } & DatasetUndoRequest)
   | { kind: "undo-calls"; covers: string[]; calls: DatasetUndoCall[] }
-  | { kind: "undo-write"; write: UndoWrite };
+  | { kind: "undo-writes"; writes: UndoWrite[] };
 
 const ProgressLineSchema = z.union([
   StepSchema.extend({ kind: z.literal("step") }),
@@ -861,7 +860,7 @@ const ProgressLineSchema = z.union([
   ReplanSchema.extend({ kind: z.literal("replan") }),
   UndoRequestSchema.extend({ kind: z.literal("undo-request") }),
   z.object({ kind: z.literal("undo-calls"), covers: z.array(z.string()), calls: z.array(UndoCallSchema) }),
-  z.object({ kind: z.literal("undo-write"), write: UndoWriteSchema }),
+  z.object({ kind: z.literal("undo-writes"), writes: z.array(UndoWriteSchema) }),
 ]);
 
 function progressText(run: StoredRun): string {
@@ -872,7 +871,7 @@ function progressText(run: StoredRun): string {
     ...run.applied.map((applied) => ({ kind: "effect" as const, ...applied })),
     ...run.undoRequests.map((request) => ({ kind: "undo-request" as const, ...request })),
     ...(run.undoCovers.length > 0 ? [{ kind: "undo-calls" as const, covers: run.undoCovers, calls: run.undoCalls }] : []),
-    ...(run.undoWrites ?? []).map(write => ({kind: "undo-write" as const, write})),
+    ...(run.undoWrites?.length ? [{kind: "undo-writes" as const, writes: run.undoWrites}] : []),
   ];
   return lines.map((line) => `${JSON.stringify(line)}\n`).join("");
 }
@@ -934,8 +933,8 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
         else {
           const session = entries.get(entry.id)?.session;
           if (!session) throw new Error("Restore receipt without a session");
-          if (entry.kind === "receipt") session.receipts.push(entry.receipt);
-          else session.receipts = session.receipts.filter(file => file.restoredMomentId !== entry.momentId);
+          if (entry.kind === "receipts") session.receipts = [...new Map([...session.receipts, ...entry.receipts].map(receipt => [receipt.restoredMomentId, receipt])).values()];
+          else session.receipts = session.receipts.filter(file => !entry.momentIds.includes(file.restoredMomentId));
         }
       }
       setRestores([...entries.values()]);
@@ -1021,9 +1020,8 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
         run.undoCovers.push(...entry.data.covers);
         run.undoCalls.push(...entry.data.calls);
       }
-      else if (entry.data.kind === "undo-write") {
-        const write = entry.data.write;
-        run.undoWrites = [...(run.undoWrites ?? []).filter(previous => previous.recordId !== write.recordId || previous.field !== write.field), write];
+      else if (entry.data.kind === "undo-writes") {
+        run.undoWrites = [...new Map([...(run.undoWrites ?? []), ...entry.data.writes].map(write => [JSON.stringify([write.recordId, write.field]), write])).values()];
       }
       else {
         // The newest line for a planned record is the record it created.
@@ -1264,26 +1262,26 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
       });
     },
     savePendingRestore(entry) { return changeRestore(entry.id, entry); },
-    recordRestoreReceipt(id, receipt) {
+    recordRestoreReceipts(id, receipts) {
       return serial(async () => {
         const known = await readRestores();
         const entry = known?.get(id);
         if (!entry?.session) throw new Error("dohc could not save this restore's progress.");
-        const saved = RestoreReceiptSchema.parse(receipt);
-        await appendDurableLine(await restoresFile(), {version: 2, kind: "receipt", id, receipt: saved}, MAX_RUN_FILE_BYTES);
-        entry.session.receipts.push(saved);
+        const saved = z.array(RestoreReceiptSchema).parse(receipts);
+        await appendDurableLine(await restoresFile(), {version: 2, kind: "receipts", id, receipts: saved}, MAX_RUN_FILE_BYTES);
+        entry.session.receipts = [...new Map([...entry.session.receipts, ...saved].map(receipt => [receipt.restoredMomentId, receipt])).values()];
       });
     },
     removePendingRestore(id) { return changeRestore(id); },
-    undoRestoreReceipt(id, momentId) {
+    undoRestoreReceipts(id, momentIds) {
       return serial(async () => {
         const session = (await readRestores())?.get(id)?.session;
         if (!session) throw new Error("dohc could not save this restore's progress.");
-        await appendDurableLine(await restoresFile(), {version: 2, kind: "undo-receipt", id, momentId}, MAX_RUN_FILE_BYTES);
-        session.receipts = session.receipts.filter(file => file.restoredMomentId !== momentId);
+        await appendDurableLine(await restoresFile(), {version: 2, kind: "undo-receipts", id, momentIds}, MAX_RUN_FILE_BYTES);
+        session.receipts = session.receipts.filter(file => !momentIds.includes(file.restoredMomentId));
       });
     },
-    recordUndoWrite(run, write) { return serial(() => appendLine(run, {kind: "undo-write", write})); },
+    recordUndoWrites(run, writes) { return serial(() => appendLine(run, {kind: "undo-writes", writes: [...writes]})); },
     appendStep(run, step) {
       return serial(() => appendLine(run, { kind: "step", ...step }));
     },

@@ -1,6 +1,7 @@
 import type { RecordEditSession } from "@dohc/automation-executor/collection-record-edits";
 import { isCaptureRecoveryOrigin } from "@dohc/workspace-contracts/engine";
 import { errorMessage } from "./workspaceError";
+import { findRestoreReceipt } from "./restoreWriteIdentity";
 import type {AppResponseUndoSelection,AppResponseUndoResult} from "./ownerAppResponseModeration";
 import type { WorkspacePolicyPath } from "@dohc/security-contract/effective-policy";
 import type { WatcherEvent } from "@dohc/workspace-core";
@@ -663,7 +664,7 @@ export interface WorkspaceEngineCapture {
   restoreFileToBeforeMoment(
     momentId: string,
     person: Extract<MomentWriteAuthor, { kind: "human" }>,
-    options?: { expectedHeadMomentId?: string; aloneInFolder?: true },
+    options?: { expectedHeadMomentId?: string; aloneInFolder?: true; requestId?: string },
   ): Promise<WorkspaceEngineRestoreResult>;
   // `author` names an agent's removal during a run an automation started, so
   // the removed record's claims carry the run's chain depth.
@@ -6451,6 +6452,10 @@ export function createWorkspaceEngineCapture(
         if (moment.operation === "rename") {
           throw new Error("A rename can't be restored directly.");
         }
+        if (restoreOptions.requestId) {
+          const receipt = await findRestoreReceipt(engine, moment, restoreOptions.requestId);
+          if (receipt) return receipt;
+        }
         const path = moment.path;
         try {
           let expectedSha256: string | undefined;
@@ -6484,7 +6489,7 @@ export function createWorkspaceEngineCapture(
               throw new RestoreLocalChangesError(path);
             }
           }
-          const correlationId = `restore-${createId()}`;
+          const correlationId = restoreOptions.requestId ?? `restore-${createId()}`;
           // Capture the file's latest disk state first so a restore can never
           // destroy an edit the engine has not recorded yet — the pre-restore
           // content stays one moment back in history.
@@ -6563,6 +6568,7 @@ export function createWorkspaceEngineCapture(
                       throw new Error(`Binary content for ${path} is no longer available.`);
                     }
                     return engine.writeBinaryFile({
+                      ...(restoreOptions.requestId ? {requestId: restoreOptions.requestId} : {}),
                       workspaceId,
                       versionId: activeVersionId,
                       path,
@@ -6574,6 +6580,7 @@ export function createWorkspaceEngineCapture(
                     });
                   })()
                 : await engine.writeTextFile({
+                    ...(restoreOptions.requestId ? {requestId: restoreOptions.requestId} : {}),
                     workspaceId,
                     versionId: activeVersionId,
                     path,
@@ -6603,6 +6610,7 @@ export function createWorkspaceEngineCapture(
             if (siblings.some((name) => name !== basename(path))) throw new RestoreFolderInUseError(path);
           }
           const result = await engine.deleteTextFile({
+            ...(restoreOptions.requestId ? {requestId: restoreOptions.requestId} : {}),
             workspaceId,
             versionId: activeVersionId,
             path,

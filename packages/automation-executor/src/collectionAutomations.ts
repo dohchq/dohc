@@ -2,6 +2,7 @@ import { writeConfirmed } from "./automationRunStore";
 import { datasetBaseFolder } from "@dohc/security-contract/dataset";
 import { createHash, randomUUID } from "node:crypto";
 import { posix } from "node:path";
+import { durableBatch } from "./durableBatch";
 import { isDeepStrictEqual } from "node:util";
 import {
   parseAutomationsFile,
@@ -1063,13 +1064,13 @@ export class CollectionAutomations {
   }
   pendingRestores() { return this.options.store.pendingRestores(); }
   savePendingRestore(entry: import("./automationRunStore").PendingRestoreUpdate) { return this.options.store.savePendingRestore(entry); }
-  async recordRestoreReceipt(id: string, receipt: {path: string; restoredMomentId: string; removed?: boolean}) {
+  async recordRestoreReceipts(id: string, receipts: readonly {path: string; restoredMomentId: string; removed?: boolean}[]) {
     await this.makeWritesDurable();
-    await this.options.store.recordRestoreReceipt(id, receipt);
+    await this.options.store.recordRestoreReceipts(id, receipts);
   }
-  async undoRestoreReceipt(id: string, momentId: string) {
+  async undoRestoreReceipts(id: string, momentIds: readonly string[]) {
     await this.makeWritesDurable();
-    await this.options.store.undoRestoreReceipt(id, momentId);
+    await this.options.store.undoRestoreReceipts(id, momentIds);
   }
   removePendingRestore(id: string) { return this.options.store.removePendingRestore(id); }
   /**
@@ -3472,11 +3473,21 @@ export class CollectionAutomations {
   }
 
   private undoDurability(runs: readonly StoredRun[], trash: (path: string) => Promise<void>) {
-    let pending = false;
-    const finish = async () => {
+    // A prior attempt may have committed a trash operation or an idempotent
+    // reversal which this attempt has nothing left to write.
+    let pending = true;
+    const receipts = durableBatch<UndoWrite>(async writes => {
+      await sync();
+      await this.recordUndoReversals(runs, writes);
+    });
+    const sync = async () => {
       if (!pending) return;
       await this.makeWritesDurable();
       pending = false;
+    };
+    const finish = async () => {
+      await receipts.flush();
+      await sync();
     };
     const withRecordWrites: CollectionAutomationsOptions["withUndoWrites"] = (signal, work) =>
       this.options.withUndoWrites(signal, writes => work({...writes, setFields: input => {
@@ -3487,18 +3498,15 @@ export class CollectionAutomations {
     return {
       withRecordWrites,
       trash: async (path: string) => {pending = true; await trash(path);},
-      recordReversal: async (write: UndoWrite) => {
-        await finish();
-        await this.recordUndoReversal(runs, write);
-      },
+      recordReversal: (write: UndoWrite) => receipts.add(write),
       finish,
     };
   }
 
-  private async recordUndoReversal(runs: readonly StoredRun[], write: UndoWrite): Promise<void> {
+  private async recordUndoReversals(runs: readonly StoredRun[], writes: readonly UndoWrite[]): Promise<void> {
     const holder = runs.reduce((latest, run) => run.startedAtMs > latest.startedAtMs ? run : latest);
-    await this.options.store.recordUndoWrite(holder, write);
-    holder.undoWrites = [...(holder.undoWrites ?? []).filter(prior => prior.recordId !== write.recordId || prior.field !== write.field), write];
+    await this.options.store.recordUndoWrites(holder, writes);
+    holder.undoWrites = [...new Map([...(holder.undoWrites ?? []), ...writes].map(write => [JSON.stringify([write.recordId, write.field]), write])).values()];
   }
 
   /** Undo again, for runs already undone, of only the fields it kept. */

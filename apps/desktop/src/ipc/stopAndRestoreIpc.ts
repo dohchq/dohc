@@ -1,5 +1,7 @@
 import { rmdir } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { durableBatch } from "@dohc/automation-executor/durable-batch";
+import { restoreRequestId } from "../workspaces/restoreWriteIdentity";
 import { isCaptureRecoveryOrigin } from "@dohc/workspace-contracts/engine";
 import { join } from "node:path";
 import { z } from "zod";
@@ -494,9 +496,12 @@ export function registerStopAndRestoreIpc<
             try { await automations.retainRunsForRestore(definitions, id); }
             catch (error) { retentionError = error instanceof Error ? error.message : String(error); }
           },
-          recordRestore: async receipt => {
-            await automations.recordRestoreReceipt(id, receipt);
-            progress.receipts.push(receipt);
+          replayRequestId: previous ? momentId => restoreRequestId(id, momentId) : undefined,
+          recordRestores: async receipts => {
+            const known = new Set(progress.receipts.map(receipt => receipt.restoredMomentId));
+            const added = receipts.filter(receipt => !known.has(receipt.restoredMomentId));
+            if (added.length) await automations.recordRestoreReceipts(id, added);
+            progress.receipts.push(...added);
           },
           reviewPath: path => dependencies.hasOtherWorkspaceWindow?.(event.sender, workspaceId)
             ? "Open in another window. Close that window and try again."
@@ -511,6 +516,7 @@ export function registerStopAndRestoreIpc<
           restore: async (momentId, expectedHeadMomentId, aloneInFolder) => {
             try {
               const { path, restoredMomentId } = await capture.restoreFileToBeforeMoment(momentId, person, {
+                requestId: restoreRequestId(id, momentId),
                 expectedHeadMomentId,
                 ...(aloneInFolder ? { aloneInFolder: true } : {}),
               });
@@ -560,6 +566,17 @@ export function registerStopAndRestoreIpc<
           await automations.savePendingRestore({id: pending.id, session: pending.session});
         }
         const files: UndoStopAndRestoreResult["files"] = [];
+        const receipts = durableBatch<UndoStopAndRestoreResult["files"][number]>(async batch => {
+          const successful = batch.filter(file => file.kind === "restored");
+          if (successful.length) {
+            if (pending?.session) {
+              const ids = successful.map(file => file.momentId);
+              await automations.undoRestoreReceipts(pending.id, ids);
+              pending.session.receipts = pending.session.receipts.filter(file => !ids.includes(file.restoredMomentId));
+            } else await automations.makeWritesDurable();
+          }
+          files.push(...batch);
+        });
         try {
           for (const momentId of [...input.restoredMomentIds].reverse()) {
             operation.assertCurrent();
@@ -568,22 +585,23 @@ export function registerStopAndRestoreIpc<
               const path = detail?.moment.path;
               if (dependencies.hasOtherWorkspaceWindow?.(event.sender, operation.workspace.workspaceId)) throw new RestoreLocalChangesError(path ?? "", "Open in another window. Close that window and try again.");
               if (path && input.reviewPaths?.includes(path)) throw new RestoreLocalChangesError(path);
-              const receipt = await capture.restoreFileToBeforeMoment(momentId, person, {expectedHeadMomentId: momentId});
-              if (pending?.session) {
-                await automations.undoRestoreReceipt(pending.id, momentId);
-                pending.session.receipts = pending.session.receipts.filter(file => file.restoredMomentId !== momentId);
-              } else await automations.makeWritesDurable();
-              files.push({ momentId, kind: "restored", receipt: { path: receipt.path, restoredMomentId: receipt.restoredMomentId } });
+              const receipt = await capture.restoreFileToBeforeMoment(momentId, person, {
+                expectedHeadMomentId: momentId, requestId: restoreRequestId(`undo:${operation.workspace.workspaceId}`, momentId),
+              });
+              await receipts.add({ momentId, kind: "restored", receipt: { path: receipt.path, restoredMomentId: receipt.restoredMomentId } });
             } catch (error) {
               if (!(error instanceof RestorePolicyRefusalError || error instanceof LiveDocumentMutationError ||
                 error instanceof RestoreHeadChangedError || error instanceof RestoreLocalChangesError || error instanceof RestoreFolderInUseError)) throw error;
-              files.push(error instanceof RestorePolicyRefusalError && error.reason === "policy-unreadable"
+              await receipts.add(error instanceof RestorePolicyRefusalError && error.reason === "policy-unreadable"
                 ? { momentId, kind: "rules-unreadable", unreadable: [...error.unreadable] }
                 : { momentId, kind: "refused", detail: refusalDetail(error).slice(0, 500) });
             }
           }
+          await receipts.flush();
           return UndoStopAndRestoreResult.parse({ files, errorMessage: null });
         } catch (error) {
+          try { await receipts.flush(); }
+          catch (flushError) { error = flushError; }
           return UndoStopAndRestoreResult.parse({ files, errorMessage: (error instanceof Error ? error.message : String(error)).slice(0, 2_000) });
         } finally {
           dependencies.notifyRenderer({ workspaceId: operation.workspace.workspaceId });

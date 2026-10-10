@@ -24,6 +24,7 @@ import {
   type WorkspaceEngineMomentDetail,
 } from "../workspaces/workspaceEngineCapture";
 import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
+import {restoreRequestId} from "../workspaces/restoreWriteIdentity";
 
 const KEPT = { id: "f".repeat(32), path: "trip/Tasks/Untitled.md", field: "Finished on", recordId: null };
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
@@ -67,6 +68,7 @@ function fixture(options: {
   runStore?: ReturnType<typeof createAutomationRunStore>;
   runStoreError?: Error;
   receiptError?: Error;
+  beforeReceipt?: () => Promise<void>;
   retainRunsForRestore?: CollectionAutomations["retainRunsForRestore"];
   releaseError?: () => Error | null;
   releaseWait?: () => Promise<void>;
@@ -153,23 +155,27 @@ function fixture(options: {
     }),
   };
   const queuePull = vi.fn();
+  const barrier = vi.fn(async () => undefined);
+  const receiptBatches: number[] = [];
   const sharesChanged = vi.fn();
   const automationsFor = (runStore = options.runStore) => ({ undoRunsOf: options.undoRunsOf,
-    makeWritesDurable: async () => undefined,
+    makeWritesDurable: barrier,
     retainRunsForRestore: options.retainRunsForRestore ?? (async () => undefined),
     pendingRestores: () => options.runStoreError ? Promise.reject(options.runStoreError) : runStore?.pendingRestores() ?? Promise.resolve(structuredClone([...pendingEntries.values()])),
     savePendingRestore: async (entry: Parameters<CollectionAutomations["savePendingRestore"]>[0]) => {
       if (runStore) await runStore.savePendingRestore(entry);
       else pendingEntries.set(entry.id, structuredClone({claims: [], ...pendingEntries.get(entry.id), ...entry}));
     },
-    recordRestoreReceipt: async (id: string, receipt: {path: string; restoredMomentId: string}) => {
+    recordRestoreReceipts: async (id: string, receipts: readonly {path: string; restoredMomentId: string}[]) => {
       if (options.receiptError) throw options.receiptError;
-      if (runStore) await runStore.recordRestoreReceipt(id, receipt);
-      else pendingEntries.get(id)?.session?.receipts.push(receipt);
+      await barrier(); await options.beforeReceipt?.(); receiptBatches.push(receipts.length);
+      if (runStore) await runStore.recordRestoreReceipts(id, receipts);
+      else pendingEntries.get(id)?.session?.receipts.push(...receipts);
     },
-    undoRestoreReceipt: async (id: string, momentId: string) => {
-      if (runStore) await runStore.undoRestoreReceipt(id, momentId);
-      else {const session = pendingEntries.get(id)?.session; if (session) session.receipts = session.receipts.filter(file => file.restoredMomentId !== momentId);}
+    undoRestoreReceipts: async (id: string, momentIds: readonly string[]) => {
+      await barrier(); await options.beforeReceipt?.(); receiptBatches.push(momentIds.length);
+      if (runStore) await runStore.undoRestoreReceipts(id, momentIds);
+      else {const session = pendingEntries.get(id)?.session; if (session) session.receipts = session.receipts.filter(file => !momentIds.includes(file.restoredMomentId));}
     },
     removePendingRestore: async (id: string) => {if (runStore) await runStore.removePendingRestore(id); else pendingEntries.delete(id);},
   } as unknown as CollectionAutomations);
@@ -211,7 +217,7 @@ function fixture(options: {
   });
   const call = (channel: string, payload: Record<string, unknown>) =>
     handlers.get(channel)!({ sender: "window" }, { workspaceId: WORKSPACE_ID, ...payload });
-  return { call, calls, bodies, capture, queuePull, sharesChanged, account, releases, recovery,
+  return { call, calls, bodies, capture, queuePull, sharesChanged, account, releases, recovery, barrier, receiptBatches,
     reopen: (store: ReturnType<typeof createAutomationRunStore>) => {const old = automations; automations = automationsFor(store); return old;} };
 }
 
@@ -242,6 +248,60 @@ async function capturedFiles(paths: string[]) {
 }
 
 describe("stop and restore in main", () => {
+  it.each(["before barrier", "before receipts"])("retries unjournaled file batches after a crash %s", async boundary => {
+    const root = await createTestScratch("dohc-restore-crash-batch-");
+    const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
+    const originals = Array.from({length: 3}, (_, i) => ({...schemaMoment, id: `m-${i}`, objectId: `o-${i}`, path: `notes/${i}.txt`}));
+    const all = [...originals]; const writes = new Map<string, {path: string; restoredMomentId: string; restored: "text"}>();
+    const capture = {
+      readMoment: async (id: string) => ({moment: all.find(m => m.id === id)!}),
+      listObjectMomentsAfter: async (objectId: string, id: string) => all.filter(m => m.objectId === objectId).slice(1).map(m => m.id).reverse(),
+      restoreFileToBeforeMoment: async (id: string, _person: unknown, options: {requestId: string}) => {
+        const prior = writes.get(options.requestId); if (prior) return prior;
+        const original = all.find(m => m.id === id)!;
+        const receipt = {path: original.path, restoredMomentId: `back-${id}`, restored: "text" as const};
+        writes.set(options.requestId, receipt);
+        all.push({...original, id: receipt.restoredMomentId, metadata: {origin: "restore", correlationId: options.requestId}});
+        return receipt;
+      },
+    } as unknown as WorkspaceEngineCapture;
+    const granted = [grant({})];
+    const ledger = {"grant-edit": [{writes: [{committedAtMs: 2, files: originals.map(m => ({path: m.path, objectId: m.objectId, momentId: m.id, created: false}))}], nextAfterOriginSeq: null}]};
+    const options = {rootPath: root, granted, ledger, engineCapture: capture};
+    const store = createAutomationRunStore(root, resolver);
+    const first = fixture({...options, runStore: store, beforeReceipt: async () => {if (boundary === "before receipts") throw Error("crash");}});
+    if (boundary === "before barrier") first.barrier.mockRejectedValueOnce(Error("crash"));
+    const target = {kind: "person", userId: "user_ana"};
+    expect(await first.call(CHANNELS.stopAndRestore, {target})).toMatchObject({restored: [], unfinished: {message: "crash"}});
+    expect(writes.size).toBe(3); expect((await store.pendingRestores())[0]?.session?.receipts).toEqual([]);
+    const restartedStore = createAutomationRunStore(root, resolver);
+    const restarted = fixture({...options, runStore: restartedStore});
+    const done = await restarted.call(CHANNELS.stopAndRestore, {target}) as {restored: unknown[]};
+    expect(done).toMatchObject({review: [], unfinished: null}); expect(done.restored).toHaveLength(3);
+    expect(writes.size).toBe(3); expect(restarted.receiptBatches).toEqual([3]);
+    // Undo has the same stable key for a pending journal and a completed restore.
+    const ids = originals.map(m => `back-${m.id}`);
+    await restartedStore.savePendingRestore({id: "undo-session", claims: [], session: {target: {kind: "person", userId: "user_ana"},
+      grants: [], label: "Ana", definitions: [], filesUndone: false, receipts: ids.map((id, i) => ({path: originals[i]!.path, restoredMomentId: id})), result: {status: "waiting"}}});
+    const undoneFirst = fixture({...options, runStore: restartedStore, beforeReceipt: async () => {if (boundary === "before receipts") throw Error("crash");}});
+    if (boundary === "before barrier") undoneFirst.barrier.mockRejectedValueOnce(Error("crash"));
+    expect(await undoneFirst.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: ids})).toMatchObject({files: [], errorMessage: "crash"});
+    expect((await restartedStore.pendingRestores())[0]?.session?.receipts).toHaveLength(3); expect(writes.size).toBe(6);
+    const undoneRetry = fixture({...options, runStore: createAutomationRunStore(root, resolver)});
+    const undo = await undoneRetry.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: ids}) as {files: unknown[]};
+    expect(undo).toMatchObject({errorMessage: null}); expect(undo.files).toHaveLength(3);
+    expect(undoneRetry.receiptBatches).toEqual([3]); expect(writes.size).toBe(6);
+    expect((await restartedStore.pendingRestores())[0]?.session?.receipts).toEqual([]);
+    const completed = fixture({...options, runStore: restartedStore});
+    expect(await completed.call(CHANNELS.undoStopAndRestore, {restoredMomentIds: ids})).toMatchObject({errorMessage: null});
+    expect(completed.barrier).toHaveBeenCalledOnce(); expect(writes.size).toBe(6);
+  });
+
+  it("batches 201 completed-restore reversals behind three barriers", async () => {
+    const f = fixture();
+    const result = await f.call(CHANNELS.undoStopAndRestore, {restoredMomentIds: Array.from({length: 201}, (_, i) => `m-${i}`)}) as {files: unknown[]};
+    expect(result.files).toHaveLength(201); expect(f.barrier).toHaveBeenCalledTimes(3);
+  });
   it("keeps an unflushed restore out of the result and the failure snapshot", async () => {
     const root = await createTestScratch("dohc-restore-barrier-");
     const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
@@ -547,7 +607,7 @@ describe("stop and restore in main", () => {
       keptFields: [], fieldsMissing: 0,
       unfinished: null,
     });
-    expect(f.capture.restoreFileToBeforeMoment).toHaveBeenCalledWith("m-schema", OWNER, { expectedHeadMomentId: "m-schema" });
+    expect(f.capture.restoreFileToBeforeMoment).toHaveBeenCalledWith("m-schema", OWNER, { expectedHeadMomentId: "m-schema", requestId: expect.any(String) });
     expect(f.calls.filter((call) => call.method === "POST").map((call) => call.path))
       .toEqual(["/sync/shares/share-1/grants/grant-edit/revoke"]);
     expect(f.sharesChanged).toHaveBeenCalledWith(WORKSPACE_ID);
@@ -977,13 +1037,13 @@ describe("stop and restore in main", () => {
       files: [{ momentId: "new", kind: "restored", receipt: { path: SCHEMA, restoredMomentId: "undo-new" } }],
       errorMessage: "The workspace engine is not running.",
     });
-    expect(f.capture.restoreFileToBeforeMoment.mock.calls).toEqual([["new", OWNER, {expectedHeadMomentId: "new"}], ["middle", OWNER, {expectedHeadMomentId: "middle"}]]);
+    expect(f.capture.restoreFileToBeforeMoment.mock.calls).toEqual([["new", OWNER, {expectedHeadMomentId: "new", requestId: restoreRequestId(`undo:${WORKSPACE_ID}`, "new")}], ["middle", OWNER, {expectedHeadMomentId: "middle", requestId: restoreRequestId(`undo:${WORKSPACE_ID}`, "middle")}]]);
   });
 
   it("undoes the restores newest first", async () => {
     const f = fixture();
     await f.call(CHANNELS.undoStopAndRestore, { restoredMomentIds: ["back-1", "back-2"] });
-    expect(f.capture.restoreFileToBeforeMoment.mock.calls).toEqual([["back-2", OWNER, {expectedHeadMomentId: "back-2"}], ["back-1", OWNER, {expectedHeadMomentId: "back-1"}]]);
+    expect(f.capture.restoreFileToBeforeMoment.mock.calls).toEqual([["back-2", OWNER, {expectedHeadMomentId: "back-2", requestId: restoreRequestId(`undo:${WORKSPACE_ID}`, "back-2")}], ["back-1", OWNER, {expectedHeadMomentId: "back-1", requestId: restoreRequestId(`undo:${WORKSPACE_ID}`, "back-1")}]]);
   });
 
   it("names the person signed in here when the request arrived, never one the renderer sends", async () => {
@@ -1001,7 +1061,7 @@ describe("stop and restore in main", () => {
     const restored = f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } });
     f.account.person = { kind: "human", humanId: "user_other" };
     await restored;
-    expect(f.capture.restoreFileToBeforeMoment).toHaveBeenCalledWith("m-schema", OWNER, { expectedHeadMomentId: "m-schema" });
+    expect(f.capture.restoreFileToBeforeMoment).toHaveBeenCalledWith("m-schema", OWNER, { expectedHeadMomentId: "m-schema", requestId: expect.any(String) });
   });
 });
 

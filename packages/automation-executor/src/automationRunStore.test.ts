@@ -106,16 +106,17 @@ describe("the automation run store", () => {
     const store = createAutomationRunStore(root, testMetadataDir);
     await store.savePendingRestore({id: "restore", claims: [], session: {grants: ["grant"], target: {kind: "person", userId: "ana"},
       label: "Ana", definitions: [], filesUndone: false, receipts: [], result: {status: "waiting"}}});
-    for (let index = 0; index < 20; index++) await store.recordRestoreReceipt("restore", {path: `Tasks/${index}.md`, restoredMomentId: `moment-${index}`});
-    await store.undoRestoreReceipt("restore", "moment-0");
+    await store.recordRestoreReceipts("restore", Array.from({length: 20}, (_, index) => ({path: `Tasks/${index}.md`, restoredMomentId: `moment-${index}`})));
+    await store.undoRestoreReceipts("restore", ["moment-0"]);
     const path = join(root, ".dohc", "automations", "restoring.json");
     const lines = (await readFile(path, "utf8")).trim().split("\n").map(line => JSON.parse(line));
-    expect(lines).toHaveLength(22);
-    expect(lines.filter(line => line.kind === "receipt").every(line => !Object.hasOwn(line, "entry"))).toBe(true);
-    await appendFile(path, '{"kind":"receipt"');
+    expect(lines).toHaveLength(3);
+    expect(lines.filter(line => line.kind === "receipts")).toHaveLength(1);
+    expect(lines.find(line => line.kind === "receipts")?.receipts).toHaveLength(20);
+    await appendFile(path, '{"kind":"receipts"');
     const restarted = createAutomationRunStore(root, testMetadataDir);
     expect((await restarted.pendingRestores())[0]?.session?.receipts).toHaveLength(19);
-    await restarted.recordRestoreReceipt("restore", {path: "Tasks/last.md", restoredMomentId: "last"});
+    await restarted.recordRestoreReceipts("restore", [{path: "Tasks/last.md", restoredMomentId: "last"}]);
     expect((await createAutomationRunStore(root, testMetadataDir).pendingRestores())[0]?.session?.receipts).toHaveLength(20);
     await restarted.removePendingRestore("restore");
     expect(await readFile(path, "utf8")).toBe("");
@@ -203,48 +204,26 @@ describe("the automation run store", () => {
     await store.updateState(saved, {sharedSettlements});
     await store.save({...saved, sharedSettlements: [{draft, state: "not-accepted"}]});
     const undoWrites = [{recordId: "rec_a", field: "A", draft: {...draft, appendKey: "undo/A"}}];
-    await store.recordUndoWrite(saved, undoWrites[0]!);
+    await store.recordUndoWrites(saved, undoWrites);
     const restarted = createAutomationRunStore(root, testMetadataDir);
     const loaded = (await restarted.runsOf(AUTOMATION, "settlement")).runs[0]!;
     expect(loaded).toMatchObject({sharedSettlements, undoWrites});
     await restarted.updateState(loaded, {sharedSettlements: [{draft: undoWrites[0]!.draft, state: "not-accepted"}]});
     expect((await restarted.runsOf(AUTOMATION, "settlement")).runs[0]?.sharedSettlements).toHaveLength(2);
   });
-  it.each([11, 12])("reads shipped format %s reversal receipts with a zero watermark and rewrites format 13", async version => {
-    const root = await createTestScratch("dohc-shipped-format-");
-    const store = createAutomationRunStore(root, testMetadataDir);
-    const saved = {...run("shipped", "done", 1), undoScope: "scope", undoKeptScope: "kept",
-      undoKeptRuns: ["0123456789abcdef"], undoWrites: [{recordId: "rec_a", field: "A", draft: {
-        outboxId: "outbox", appendKey: "undo/A", nativeHeadSequence: 2,
-        binding: {workspaceId: "ws", mainVersionId: "main", objectId: "rec_a", lineageClaimId: "a".repeat(64),
-          currentPath: "Tasks/a.md", selectorPaths: ["Tasks"], restoreFenceGeneration: 0}}}]};
-    await store.save(saved);
-    const folder = join(root, ".dohc", "automations", "runs", hashOf(AUTOMATION));
-    const path = join(folder, (await readdir(folder))[0]!);
-    const lines = (await readFile(path, "utf8")).split("\n");
-    const header = JSON.parse(lines[0]!); header.version = version; delete header.durableEffects;
-    if (version === 11) delete header.undoKeptRuns;
-    lines[0] = JSON.stringify(header); await writeFile(path, lines.join("\n"));
-    const loaded = (await createAutomationRunStore(root, testMetadataDir).runsOf(AUTOMATION, saved.claimId)).runs[0]!;
-    expect(loaded).toMatchObject({version: 13, durableEffects: 0, undoScope: "scope", undoKeptScope: "kept", undoWrites: saved.undoWrites});
-    if (version === 12) expect(loaded.undoKeptRuns).toEqual(saved.undoKeptRuns);
-    await store.save(loaded);
-    expect(JSON.parse((await readFile(path, "utf8")).split("\n")[0]!).version).toBe(13);
-  });
-
-  it("saves version 13 and refuses version 9 kept fields without a compatibility reader", async () => {
+  it.each([11, 12])("saves version 13 and refuses version %s without a compatibility reader", async version => {
     const root = await createTestScratch("dohc-automation-runs-");
     const store = createAutomationRunStore(root, testMetadataDir);
-    await store.save({ ...run("atc_one", "done", 1), undoKept: [{ recordId: "rec_a", field: "A", path: "Tasks/a.md", fieldName: "A", datasetRecordId: null }] });
+    await store.save({...run("atc_one", "done", 1), undoKept: [{recordId: "rec_a", field: "A", path: "Tasks/a.md", fieldName: "A", datasetRecordId: null}]});
     const folder = join(root, ".dohc", "automations", "runs", hashOf(AUTOMATION));
-    const headerName = (await readdir(folder)).find((file) => file.endsWith(".json"))!;
-    const headerPath = join(folder, headerName);
-    const header = JSON.parse((await readFile(headerPath, "utf8")).split("\n")[0]!);
+    const path = join(folder, (await readdir(folder)).find(file => file.endsWith(".json"))!);
+    const lines = (await readFile(path, "utf8")).split("\n");
+    const header = JSON.parse(lines[0]!);
     expect(header.version).toBe(13);
-    header.version = 9;
-    header.undoKept = [{ recordId: "rec_a", field: "A" }];
-    await writeFile(headerPath, JSON.stringify(header));
-    await expect(store.runsOf(AUTOMATION, "atc_one")).resolves.toEqual({ runs: [], unreadable: true });
+    header.version = version;
+    lines[0] = JSON.stringify(header);
+    await writeFile(path, lines.join("\n"));
+    await expect(store.runsOf(AUTOMATION, "atc_one")).resolves.toEqual({runs: [], unreadable: true});
   });
 
   it("preserves timing on appended progress lines across restart and whole saves", async () => {

@@ -1,4 +1,6 @@
 import { posix } from "node:path";
+import { durableBatch } from "@dohc/automation-executor/durable-batch";
+import { restoreReceiptOf } from "./restoreWriteIdentity";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import type { WorkspacePolicyPath } from "@dohc/security-contract/effective-policy";
@@ -51,7 +53,9 @@ export interface RestoreReceipt {
 
 export interface StopAndRestoreDependencies {
   recordDefinitions?(definitions: ReadonlyArray<{collectionPath: string; id: string; definitionHash: string}>): Promise<void>;
-  recordRestore?(receipt: RestoreReceipt): Promise<void>;
+  recordRestores?(receipts: readonly RestoreReceipt[]): Promise<void>;
+  /** The saved session's stable request key, when retrying unjournaled writes. */
+  replayRequestId?(momentId: string): string;
   /** A moment, `protected` when its contents are protected here, or null while it has not arrived. */
   moment(momentId: string): Promise<VersionedTextMoment | "protected" | null>;
   /** Throws when the window that asked has left the workspace. */
@@ -197,6 +201,7 @@ export async function restoreDirectWrites(
   // Everything must be here before anything changes. A file whose contents
   // are protected here cannot be restored here, so it goes to review.
   const review = new Map<string, ReviewFile>();
+  const recovered: RestoreReceipt[] = [];
   // A protected automations.yaml hides which automations they changed, so
   // their runs are neither found nor undone; the file's review says so.
   let protectedAutomations = false;
@@ -245,6 +250,20 @@ export async function restoreDirectWrites(
       if (later !== null) laterMoments.set(id, later);
       return later;
     };
+    const requestId = dependencies.replayRequestId?.(entry.first.momentId);
+    if (requestId) {
+      let receipt: RestoreReceipt | null = null;
+      for (const id of after) {
+        const later = await readLater(id);
+        if (later === null) return {status: "waiting"};
+        if (later !== "protected") receipt = restoreReceiptOf(later, entry.moments.get(entry.first.momentId)!, requestId);
+        if (receipt) break;
+      }
+      if (receipt) {
+        recovered.push({...receipt, ...(entry.first.created ? {removed: true} : {})});
+        continue;
+      }
+    }
     let snapshotHead = entry.first.momentId;
     for (const id of after) {
       const later = await readLater(id);
@@ -334,6 +353,10 @@ export async function restoreDirectWrites(
 
   restorable.sort((left, right) => restoreOrder(left.entry) - restoreOrder(right.entry));
   const restored: RestoreReceipt[] = [];
+  const receipts = durableBatch<RestoreReceipt>(async batch => {
+    await dependencies.recordRestores?.(batch);
+    restored.push(...batch);
+  });
   const outcome = () => ({ status: "restored" as const, restored, review: [...review.values()].sort((left, right) => left.path.localeCompare(right.path)) });
   let runs: Omit<UndoneRuns, "errorMessage"> = { undone: 0, left: 0, keptFields: [], missing: 0, otherKept: 0 };
   let step: "files" | "runs" = "files";
@@ -346,6 +369,7 @@ export async function restoreDirectWrites(
   });
   try {
     await dependencies.recordDefinitions?.(definitions);
+    for (const receipt of recovered) await receipts.add(receipt);
     for (const { entry, head } of restorable) {
       const folder = posix.dirname(entry.first.path);
       if (isCreatedSchema(entry)) {
@@ -376,10 +400,10 @@ export async function restoreDirectWrites(
         continue;
       }
       const receipt = { ...result.receipt, ...(entry.first.created ? { removed: true } : {}) };
-      await dependencies.recordRestore?.(receipt);
-      restored.push(receipt);
+      await receipts.add(receipt);
       if (isCreatedSchema(entry)) await dependencies.removeEmptyFolder(folder);
     }
+    await receipts.flush();
     if (definitions.length > 0) {
       step = "runs";
       const undone = await dependencies.undoRuns(definitions);
@@ -387,6 +411,8 @@ export async function restoreDirectWrites(
       if (undone.errorMessage !== null) return done(undone.errorMessage);
     }
   } catch (error) {
+    try { await receipts.flush(); }
+    catch (flushError) { error = flushError; }
     if (error instanceof UndoRunsStopped) runs = error.runs;
     return done(error instanceof Error ? error.message : String(error));
   }
