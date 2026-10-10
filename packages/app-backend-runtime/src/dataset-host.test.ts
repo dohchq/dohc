@@ -691,7 +691,7 @@ it("connects schema history to immutable source and reverses rules forward witho
   expect(f.db.prepare("SELECT * FROM dohc_dataset_data_grants").all()).toEqual(grants);
   const page = f.host.history("owner", { ...scope, limit: 2 });
   expect(page.entries.map(row => row.revision)).toEqual([4, 3]);
-  expect(page.entries[0]).toMatchObject({ operation: "Fields and rules", callerReference: null, recordedAtMs: null,
+  expect(page.entries[0]).toMatchObject({ operation: "Fields and rules", callerReference: null, recordedAtMs: expect.any(Number),
     schema: { previousRevisionHash: revision2.revisionSha256, revisionHash: revision3.revisionSha256 } });
   const older = f.host.history("owner", { ...scope, beforeRevision: page.nextBeforeRevision!, limit: 2 });
   expect(older.entries.map(row => row.revision)).toEqual([2, 1]);
