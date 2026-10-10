@@ -157,6 +157,7 @@ type ActorWork = Box<dyn FnOnce(&mut EngineStore, &mut WriterDocCache) + Send>;
 
 enum Command {
     Run(ActorWork),
+    WakeLinks,
     LiveApplication(Box<live_application::Request>),
     /// Break the loop and release the connection. Carries no reply: the caller
     /// joins the worker, and the join is the completion signal (so `close`
@@ -184,6 +185,7 @@ pub struct WorkspaceActor {
     worker: Option<JoinHandle<()>>,
     claims: ClaimAnnouncer,
     link_metrics: SharedMetrics,
+    capture_holds: Arc<AtomicU64>,
 }
 
 impl WorkspaceActor {
@@ -269,6 +271,8 @@ impl WorkspaceActor {
 
         let link_metrics = SharedMetrics::default();
         let worker_metrics = Arc::clone(&link_metrics);
+        let capture_holds = Arc::new(AtomicU64::new(0));
+        let worker_capture_holds = Arc::clone(&capture_holds);
         let worker_state = Arc::clone(&state);
         let worker = std::thread::Builder::new()
             .name("dohc-engine-actor".to_owned())
@@ -281,6 +285,7 @@ impl WorkspaceActor {
                     rx,
                     worker_state,
                     worker_metrics,
+                    worker_capture_holds,
                     startup_tx,
                     writer_lock,
                     work,
@@ -299,6 +304,7 @@ impl WorkspaceActor {
                 worker: Some(worker),
                 claims: ClaimAnnouncer::default(),
                 link_metrics,
+                capture_holds,
             }),
             Ok(Err(storage_err)) => {
                 let _ = worker.join();
@@ -319,6 +325,7 @@ impl WorkspaceActor {
             state: Arc::clone(&self.state),
             claims: self.claims.clone(),
             link_metrics: Arc::clone(&self.link_metrics),
+            capture_holds: Arc::clone(&self.capture_holds),
         }
     }
 
@@ -397,9 +404,40 @@ pub struct ActorHandle {
     state: Arc<AtomicU8>,
     claims: ClaimAnnouncer,
     link_metrics: SharedMetrics,
+    capture_holds: Arc<AtomicU64>,
+}
+
+/// Keeps derived link writes behind capture, including its queued commands.
+/// Dropping the last hold wakes an idle actor without polling.
+#[must_use]
+pub struct LinkDrainHold {
+    holds: Arc<AtomicU64>,
+    tx: mpsc::Sender<Command>,
+}
+impl Drop for LinkDrainHold {
+    fn drop(&mut self) {
+        if self.holds.fetch_sub(1, Ordering::AcqRel) == 1 {
+            // A full queue already has foreground work to wake the actor.
+            let _ = self.tx.try_send(Command::WakeLinks);
+        }
+    }
 }
 
 impl ActorHandle {
+    pub fn defer_link_drain_for_capture(&self) -> LinkDrainHold {
+        self.capture_holds.fetch_add(1, Ordering::AcqRel);
+        LinkDrainHold {
+            holds: Arc::clone(&self.capture_holds),
+            tx: self.tx.clone(),
+        }
+    }
+
+    #[cfg(feature = "fault-injection")]
+    pub async fn commit_count_for_harness(&self) -> Result<u64, RuntimeError> {
+        self.run(|store, _| Ok(store.commit_count_for_harness()))
+            .await
+    }
+
     /// Engine diagnostics for the derived index; no store read or drain.
     pub fn link_drain_metrics(&self) -> LinkDrainMetrics {
         self.link_metrics
@@ -530,6 +568,7 @@ fn worker_main(
     mut rx: mpsc::Receiver<Command>,
     state: Arc<AtomicU8>,
     link_metrics: SharedMetrics,
+    capture_holds: Arc<AtomicU64>,
     startup_tx: std::sync::mpsc::SyncSender<Result<bool, StorageError>>,
     writer_lock: Option<WriterLock>,
     work_count: Option<Arc<AtomicU64>>,
@@ -562,6 +601,9 @@ fn worker_main(
             return;
         }
     };
+    if !read_only && let Err(error) = store.enable_background_checkpoints() {
+        eprintln!("background checkpoints unavailable: {}", error.code());
+    }
     let store_freshly_created = store.was_freshly_created();
     // The open that asked for counting owns the counter. The actor keeps only
     // a weak reference, so counting ends with that open, whether it succeeds,
@@ -614,13 +656,14 @@ fn worker_main(
         None
     };
     loop {
+        store.pause_background_checkpoints(capture_holds.load(Ordering::Acquire) != 0);
         // Serve a queued foreground command before each background slice.
         // The timer runtime ends before synchronous commands execute.
         let cmd = match rx.try_recv() {
             Ok(cmd) => Some(cmd),
             Err(mpsc::error::TryRecvError::Disconnected) => break,
             Err(mpsc::error::TryRecvError::Empty) => match (&mut links, &timer) {
-                (Some(worker), Some(timer)) => {
+                (Some(worker), Some(timer)) if capture_holds.load(Ordering::Acquire) == 0 => {
                     let delay = worker.tick(&mut store);
                     let parser_pending = worker.waiting_for_parser();
                     if delay == std::time::Duration::MAX && !parser_pending {
@@ -664,6 +707,7 @@ fn worker_main(
         }
         match cmd {
             Command::Run(work) => work(&mut store, &mut doc_cache),
+            Command::WakeLinks => {}
             Command::LiveApplication(request) => {
                 request.execute(&mut live_applications, &mut store, &mut doc_cache);
             }
@@ -674,11 +718,9 @@ fn worker_main(
                 break;
             }
         }
+        store.request_checkpoint();
         if state.load(Ordering::Acquire) == LifecycleState::RecoveryRequired.as_u8() {
             break;
-        }
-        if let Some(worker) = links.as_mut() {
-            let _ = worker.tick(&mut store);
         }
     }
 

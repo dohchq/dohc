@@ -14,6 +14,7 @@ pub use worker::{LinkDrainMetrics, SharedMetrics};
 
 pub const PARSER_GENERATION: i64 = 1;
 const ROW_SLICE: usize = 16;
+const SOURCE_SLICE: usize = 16;
 pub const ACTOR_SLICE_BUDGET: Duration = Duration::from_millis(5);
 pub const SETTLE_TO_INDEX_BUDGET: Duration = Duration::from_millis(100);
 
@@ -94,19 +95,52 @@ fn head(conn: &Connection, w: &Work, hydrate: bool) -> Result<Option<Head>, Stor
     Ok(h)
 }
 
+type Prepared = (Work, Result<Option<Head>, StorageError>);
+
+#[cfg(test)]
 pub fn prepare(store: &EngineStore) -> Result<Option<(Work, Option<Head>)>, StorageError> {
+    prepare_batch(store, 1)?
+        .into_iter()
+        .next()
+        .map(|(w, h)| h.map(|h| (w, h)))
+        .transpose()
+}
+fn prepare_batch(store: &EngineStore, limit: usize) -> Result<Vec<Prepared>, StorageError> {
     store.read_with(|conn| {
-        let w=conn.query_row("SELECT pending_id,revision,workspace_id,version_id,object_id,queued_at_ms FROM link_pending WHERE retry_after_ms<=?1 ORDER BY pending_id LIMIT 1",[now_ms()],|r|Ok(Work {id:r.get(0)?,revision:r.get(1)?,workspace:r.get(2)?,version:r.get(3)?,object:r.get(4)?,queued_at_ms:r.get(5)?})).optional().map_err(sql)?;
-        w.map(|w| {
-            let mut h = head(conn,&w,false)?;
-            if let Some(h)=h.as_mut() {
-                let reason:Option<String>=conn.query_row("SELECT reason FROM link_sources WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND source_hash=?4 AND parser_generation=?5 AND status='unindexed'",params![w.workspace,w.version,w.object,h.hash,PARSER_GENERATION],|r|r.get(0)).optional().map_err(sql)?;
-                h.unindexed_reason=match reason.as_deref(){Some("byte-bound")=>Some("byte-bound"),Some("parse-refused")=>Some("parse-refused"),_=>None};
-            }
-            if h.as_ref().is_some_and(|h|h.unindexed_reason.is_none()) {h=head(conn,&w,true)?;}
-            Ok((w,h))
-        }).transpose()
+        let began = Instant::now();
+        let mut stmt = conn.prepare_cached("SELECT pending_id,revision,workspace_id,version_id,object_id,queued_at_ms FROM link_pending WHERE retry_after_ms<=?1 ORDER BY pending_id LIMIT ?2").map_err(sql)?;
+        let work = stmt.query_map(params![now_ms(), limit as i64],|r|Ok(Work {id:r.get(0)?,revision:r.get(1)?,workspace:r.get(2)?,version:r.get(3)?,object:r.get(4)?,queued_at_ms:r.get(5)?})).map_err(sql)?.collect::<Result<Vec<_>,_>>().map_err(sql)?;
+        let mut jobs = Vec::new();
+        let mut hydrated_bytes = 0;
+        for w in work {
+            let h = (|| {
+                let mut h = head(conn,&w,false)?;
+                if let Some(h)=h.as_mut() {
+                    let reason:Option<String>=conn.query_row("SELECT reason FROM link_sources WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND source_hash=?4 AND parser_generation=?5 AND status='unindexed'",params![w.workspace,w.version,w.object,h.hash,PARSER_GENERATION],|r|r.get(0)).optional().map_err(sql)?;
+                    h.unindexed_reason=match reason.as_deref(){Some("byte-bound")=>Some("byte-bound"),Some("parse-refused")=>Some("parse-refused"),_=>None};
+                }
+                if h.as_ref().is_some_and(|h|h.unindexed_reason.is_none()) {h=head(conn,&w,true)?;}
+                Ok::<_, StorageError>(h)
+            })();
+            if let Ok(Some(h)) = &h { hydrated_bytes += h.text.as_ref().map_or(0,String::len); }
+            jobs.push((w,h));
+            if hydrated_bytes >= MAX_DOCUMENT_BYTES || began.elapsed() >= ACTOR_SLICE_BUDGET / 2 { break; }
+        }
+        Ok(jobs)
     })
+}
+fn defer_sources(store: &mut EngineStore, work: &[Work]) -> Result<(), StorageError> {
+    store.write_with(&NoFaults, |tx| {
+        for w in work {
+            tx.execute(
+                "UPDATE link_pending SET retry_after_ms=?3 WHERE pending_id=?1 AND revision=?2",
+                params![w.id, w.revision, now_ms() + 1000],
+            )
+            .map_err(sql)?;
+        }
+        Ok::<_, StorageError>(())
+    })?;
+    Ok(())
 }
 fn current(conn: &Connection, p: &Parsed) -> Result<bool, StorageError> {
     let exists: bool = conn
@@ -266,53 +300,118 @@ impl Staged {
             target_offset: 0,
         }
     }
-    /// Each slice stages at most sixteen occurrences. Certification switches
-    /// only after all slices have committed and the head is rechecked.
-    pub fn step(
-        &mut self,
-        store: &mut EngineStore,
-        faults: &dyn FaultInjector,
-    ) -> Result<bool, StorageError> {
+    fn step_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        began: Instant,
+    ) -> Result<(bool, usize, usize), StorageError> {
         let p = &self.parsed;
         let w = &p.work;
         let key = w.index_key();
         let start = self.offset;
         let target_start = self.target_offset;
-        let outcome=store.write_with(faults,|tx| {
-            if !current(tx,p)? { return Ok((true,start,target_start)); }
-            tx.execute("INSERT OR IGNORE INTO link_gc VALUES(?1,?2,?3,?4)",params![w.workspace,w.version,w.object,key]).map_err(sql)?;
-            let mut insert_link=tx.prepare_cached("INSERT OR REPLACE INTO links VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)").map_err(sql)?;
-            let mut insert_occurrence_key=tx.prepare_cached("INSERT OR IGNORE INTO link_occurrence_keys VALUES(?1,?2,?3,?4,?5,?6,?7)").map_err(sql)?;
-            let began=Instant::now();
-            let mut end=start;
-            for (ordinal,(o,keys)) in self.rows.iter().enumerate().skip(start).take(ROW_SLICE) {
-                insert_link.execute(params![w.workspace,w.version,w.object,key,ordinal as i64,o.literal,o.kind,o.fragment,o.start_utf16 as i64,o.end_utf16 as i64,o.line as i64,o.snippet]).map_err(sql)?;
-                for (kind,value) in keys {
-                    insert_occurrence_key.execute(params![w.workspace,w.version,w.object,key,ordinal as i64,kind,value]).map_err(sql)?;
-                }
-                end=ordinal+1;
-                if began.elapsed()>=ACTOR_SLICE_BUDGET/2 {break;}
+
+        if !current(tx, p)? {
+            return Ok((true, start, target_start));
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO link_gc VALUES(?1,?2,?3,?4)",
+            params![w.workspace, w.version, w.object, key],
+        )
+        .map_err(sql)?;
+        let mut insert_link = tx
+            .prepare_cached(
+                "INSERT OR REPLACE INTO links VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            )
+            .map_err(sql)?;
+        let mut insert_occurrence_key = tx
+            .prepare_cached(
+                "INSERT OR IGNORE INTO link_occurrence_keys VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            )
+            .map_err(sql)?;
+
+        let mut end = start;
+        for (ordinal, (o, keys)) in self.rows.iter().enumerate().skip(start).take(ROW_SLICE) {
+            insert_link
+                .execute(params![
+                    w.workspace,
+                    w.version,
+                    w.object,
+                    key,
+                    ordinal as i64,
+                    o.literal,
+                    o.kind,
+                    o.fragment,
+                    o.start_utf16 as i64,
+                    o.end_utf16 as i64,
+                    o.line as i64,
+                    o.snippet
+                ])
+                .map_err(sql)?;
+            for (kind, value) in keys {
+                insert_occurrence_key
+                    .execute(params![
+                        w.workspace,
+                        w.version,
+                        w.object,
+                        key,
+                        ordinal as i64,
+                        kind,
+                        value
+                    ])
+                    .map_err(sql)?;
             }
-            if end<self.rows.len() {return Ok((false,end,target_start));}
-            let mut insert_target_key=tx.prepare_cached("INSERT OR IGNORE INTO link_target_keys VALUES(?1,?2,?3,?4,?5,?6)").map_err(sql)?;
-            let mut target_end=target_start;
-            for (kind,value) in self.targets.iter().skip(target_start).take(ROW_SLICE) {
-                insert_target_key.execute(params![w.workspace,w.version,w.object,key,kind,value]).map_err(sql)?;
-                target_end += 1;
-                if began.elapsed() >= ACTOR_SLICE_BUDGET/2 { break; }
+            end = ordinal + 1;
+            if began.elapsed() >= ACTOR_SLICE_BUDGET / 2 {
+                break;
             }
-            if target_end < self.targets.len() { return Ok((false, end, target_end)); }
-            tx.execute("INSERT OR IGNORE INTO link_gc SELECT workspace_id,version_id,object_id,index_key FROM link_sources WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![w.workspace,w.version,w.object]).map_err(sql)?;
-            if let Some(h)=&p.head {
-                tx.execute("INSERT INTO link_sources VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET source_hash=excluded.source_hash,path=excluded.path,title=excluded.title,parser_generation=excluded.parser_generation,status=excluded.status,reason=excluded.reason,index_key=excluded.index_key",params![w.workspace,w.version,w.object,h.hash,h.path,p.title,PARSER_GENERATION,if p.reason.is_some(){"unindexed"}else{"indexed"},p.reason,key]).map_err(sql)?;
-            } else {
-                tx.execute("DELETE FROM link_sources WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![w.workspace,w.version,w.object]).map_err(sql)?;
+        }
+        if end < self.rows.len() {
+            return Ok((false, end, target_start));
+        }
+        let mut insert_target_key = tx
+            .prepare_cached("INSERT OR IGNORE INTO link_target_keys VALUES(?1,?2,?3,?4,?5,?6)")
+            .map_err(sql)?;
+        let mut target_end = target_start;
+        for (kind, value) in self.targets.iter().skip(target_start).take(ROW_SLICE) {
+            insert_target_key
+                .execute(params![w.workspace, w.version, w.object, key, kind, value])
+                .map_err(sql)?;
+            target_end += 1;
+            if began.elapsed() >= ACTOR_SLICE_BUDGET / 2 {
+                break;
             }
-            tx.execute("DELETE FROM link_gc WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND index_key=?4 AND EXISTS(SELECT 1 FROM link_sources WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND index_key=?4)",params![w.workspace,w.version,w.object,key]).map_err(sql)?;
-            tx.execute("DELETE FROM link_pending WHERE pending_id=?1 AND revision=?2",params![w.id,w.revision]).map_err(sql)?;
-            Ok::<_,StorageError>((true,end,target_end))
-        })?;
-        match outcome {
+        }
+        if target_end < self.targets.len() {
+            return Ok((false, end, target_end));
+        }
+        tx.execute("INSERT OR IGNORE INTO link_gc SELECT workspace_id,version_id,object_id,index_key FROM link_sources WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![w.workspace,w.version,w.object]).map_err(sql)?;
+        if let Some(h) = &p.head {
+            tx.execute("INSERT INTO link_sources VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET source_hash=excluded.source_hash,path=excluded.path,title=excluded.title,parser_generation=excluded.parser_generation,status=excluded.status,reason=excluded.reason,index_key=excluded.index_key",params![w.workspace,w.version,w.object,h.hash,h.path,p.title,PARSER_GENERATION,if p.reason.is_some(){"unindexed"}else{"indexed"},p.reason,key]).map_err(sql)?;
+        } else {
+            tx.execute(
+                "DELETE FROM link_sources WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                params![w.workspace, w.version, w.object],
+            )
+            .map_err(sql)?;
+        }
+        tx.execute("DELETE FROM link_gc WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND index_key=?4 AND EXISTS(SELECT 1 FROM link_sources WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND index_key=?4)",params![w.workspace,w.version,w.object,key]).map_err(sql)?;
+        tx.execute(
+            "DELETE FROM link_pending WHERE pending_id=?1 AND revision=?2",
+            params![w.id, w.revision],
+        )
+        .map_err(sql)?;
+        Ok::<_, StorageError>((true, end, target_end))
+    }
+
+    #[cfg(test)]
+    pub fn step(
+        &mut self,
+        store: &mut EngineStore,
+        faults: &dyn FaultInjector,
+    ) -> Result<bool, StorageError> {
+        let began = Instant::now();
+        match store.write_with(faults, |tx| self.step_in_tx(tx, began))? {
             TxnOutcome::Committed((done, end, target_end)) => {
                 self.offset = end;
                 self.target_offset = target_end;
@@ -321,6 +420,55 @@ impl Staged {
             TxnOutcome::Crashed { .. } => Ok(true),
         }
     }
+}
+
+fn stage_batch(
+    staged: &mut std::collections::VecDeque<Staged>,
+    store: &mut EngineStore,
+    faults: &dyn FaultInjector,
+) -> Result<Vec<Work>, StorageError> {
+    let began = Instant::now();
+    let mut failed_source = None;
+    let outcome = store.write_with(faults, |tx| {
+        let mut results = Vec::new();
+        for item in staged.iter().take(SOURCE_SLICE) {
+            let (done, end, target_end) = match item.step_in_tx(tx, began) {
+                Ok(progress) => progress,
+                Err(error) => {
+                    failed_source = Some(item.parsed.work.clone());
+                    return Err(error);
+                }
+            };
+            let certified = done && tx.query_row("SELECT EXISTS(SELECT 1 FROM link_sources WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND index_key=?4)", params![item.parsed.work.workspace,item.parsed.work.version,item.parsed.work.object,item.parsed.work.index_key()], |r|r.get::<_,bool>(0)).map_err(sql)?;
+            results.push((done, end, target_end, certified));
+            if !done || began.elapsed() >= ACTOR_SLICE_BUDGET / 2 { break; }
+        }
+        Ok::<_, StorageError>(results)
+    });
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            if let Some(work) = failed_source {
+                let _ = defer_sources(store, &[work]);
+            }
+            return Err(error);
+        }
+    };
+    let mut certified = Vec::new();
+    if let TxnOutcome::Committed(results) = outcome {
+        for (done, end, target_end, was_certified) in results {
+            let item = staged.front_mut().expect("staged transaction input");
+            item.offset = end;
+            item.target_offset = target_end;
+            if done {
+                let item = staged.pop_front().expect("completed transaction input");
+                if was_certified {
+                    certified.push(item.parsed.work);
+                }
+            }
+        }
+    }
+    Ok(certified)
 }
 
 pub fn gc_step(store: &mut EngineStore) -> Result<bool, StorageError> {

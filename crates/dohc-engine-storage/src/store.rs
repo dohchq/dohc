@@ -27,6 +27,10 @@ fn is_safe_identifier(name: &str) -> bool {
 #[derive(Debug)]
 pub struct EngineStore {
     conn: Connection,
+    checkpoints: Option<crate::checkpoint::Checkpoints>,
+    checkpoint_changes: u64,
+    #[cfg(feature = "fault-injection")]
+    harness_commits: u64,
     freshly_created: bool,
     database_path: PathBuf,
 }
@@ -83,8 +87,12 @@ impl EngineStore {
         let opened = open_engine_db(path, now_ms, work)?;
         Ok(EngineStore {
             conn: opened.conn,
+            checkpoints: None,
+            checkpoint_changes: 0,
             freshly_created: opened.freshly_created,
             database_path: path.to_path_buf(),
+            #[cfg(feature = "fault-injection")]
+            harness_commits: 0,
         })
     }
 
@@ -101,8 +109,12 @@ impl EngineStore {
             crate::schema::open_engine_db_with_root_token(path, now_ms, Some(token), work)?;
         Ok(EngineStore {
             conn: opened.conn,
+            checkpoints: None,
+            checkpoint_changes: 0,
             freshly_created: opened.freshly_created,
             database_path: path.to_path_buf(),
+            #[cfg(feature = "fault-injection")]
+            harness_commits: 0,
         })
     }
 
@@ -121,8 +133,12 @@ impl EngineStore {
         let opened = open_engine_db_read_only(path, work)?;
         Ok(EngineStore {
             conn: opened.conn,
+            checkpoints: None,
+            checkpoint_changes: 0,
             freshly_created: false,
             database_path: path.to_path_buf(),
+            #[cfg(feature = "fault-injection")]
+            harness_commits: 0,
         })
     }
 
@@ -150,6 +166,59 @@ impl EngineStore {
     /// existing v2 store.
     pub fn was_freshly_created(&self) -> bool {
         self.freshly_created
+    }
+
+    /// Move WAL checkpoint I/O off the actor without changing commit durability.
+    pub fn enable_background_checkpoints(&mut self) -> Result<(), StorageError> {
+        if self
+            .conn
+            .is_readonly("main")
+            .map_err(StorageError::corrupt)?
+        {
+            return Err(StorageError::InvalidInput {
+                reason: "checkpoint owner must be writable",
+            });
+        }
+        if self.checkpoints.is_none() {
+            let checkpoints = crate::checkpoint::Checkpoints::start(&self.database_path)?;
+            self.conn
+                .pragma_update(None, "wal_autocheckpoint", 0)
+                .map_err(StorageError::persist)?;
+            self.checkpoint_changes = self.conn.total_changes();
+            self.checkpoints = Some(checkpoints);
+        }
+        Ok(())
+    }
+
+    /// Keep derived checkpoint I/O behind capture without moving it onto the writer.
+    pub fn pause_background_checkpoints(&self, paused: bool) {
+        if let Some(checkpoints) = &self.checkpoints {
+            checkpoints.set_paused(paused);
+        }
+    }
+
+    /// Coalesce checkpoint requests; the actor never waits for checkpoint I/O.
+    pub fn request_checkpoint(&mut self) {
+        let changes = self.conn.total_changes();
+        if self.checkpoints.is_none() || changes == self.checkpoint_changes {
+            return;
+        }
+        self.checkpoint_changes = changes;
+        if self
+            .checkpoints
+            .as_ref()
+            .is_some_and(|checkpoints| !checkpoints.request())
+        {
+            self.checkpoints.take();
+            let _ = self.conn.pragma_update(None, "wal_autocheckpoint", 1000);
+            eprintln!("background checkpoints stopped; restored SQLite autocheckpoint");
+        }
+    }
+
+    /// Committed writer transactions, excluding schema initialization.
+    #[cfg(feature = "fault-injection")]
+    pub fn commit_count_for_harness(&self) -> u64 {
+        self.harness_commits
     }
 
     /// The path used to open this store. Higher layers use the canonical
@@ -251,6 +320,11 @@ impl EngineStore {
         }
 
         tx.commit().map_err(StorageError::persist)?;
+        self.request_checkpoint();
+        #[cfg(feature = "fault-injection")]
+        {
+            self.harness_commits += 1;
+        }
 
         if should_crash(faults, FaultPoint::StorageAfterCommitBeforeAck) {
             return Ok(TxnOutcome::Crashed { committed: true });
@@ -557,5 +631,12 @@ impl EngineStore {
         self.conn
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
             .map_err(StorageError::corrupt)
+    }
+}
+
+impl Drop for EngineStore {
+    fn drop(&mut self) {
+        // Join the checkpointer before closing the writer and its ownership lock.
+        self.checkpoints.take();
     }
 }

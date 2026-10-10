@@ -1002,6 +1002,7 @@ impl CaptureDriver {
             events,
             apply_probe,
         } = params;
+        let initial_links_hold = actor.defer_link_drain_for_capture();
         let cancel = CancellationToken::new();
         let status = Arc::new(DriverStatus::default());
         let author_json = Arc::new(Mutex::new(initial_author_json));
@@ -1027,6 +1028,7 @@ impl CaptureDriver {
             let mut env = RealEnv {
                 observation,
                 root,
+                initial_links_hold: Some(initial_links_hold),
                 actor,
                 lease_releases_seen: leases.release_generation(&workspace_id),
                 workspace_id,
@@ -1911,6 +1913,7 @@ fn answer_flush(
 
 /// The real filesystem-backed environment.
 struct RealEnv {
+    initial_links_hold: Option<dohc_engine_runtime::actor::LinkDrainHold>,
     observation: Arc<crate::file_observation::FileObservation>,
     root: PathBuf,
     actor: ActorHandle,
@@ -2009,13 +2012,18 @@ impl DriverEnv for RealEnv {
     }
 
     async fn start_layer(&mut self, cancel: &CancellationToken) -> Result<FilesLayer, ()> {
+        let _links_hold = self.actor.defer_link_drain_for_capture();
         let initial_start = matches!(
             self.status.snapshot().phase,
             CapturePhase::Starting | CapturePhase::Importing
         );
         let _apply_guard = tokio::select! {
             biased;
-            () = cancel.cancelled() => return Err(()),
+            () = cancel.cancelled() => {
+                self.status.mark_initial_degraded();
+                self.initial_links_hold.take();
+                return Err(());
+            },
             guard = self.apply_gate.lock() => guard,
         };
         // REHYDRATE the scan manifest from the domain's captured state:
@@ -2054,7 +2062,10 @@ impl DriverEnv for RealEnv {
             &self.observation,
         )
         .await
-        .map_err(|_| ())?;
+        .map_err(|_| {
+            self.status.mark_initial_degraded();
+            self.initial_links_hold.take();
+        })?;
 
         // EARLY-OPEN PROOF. The binding watcher is attached before the
         // initial capture plan is prepared. Re-read every mutable prerequisite after
@@ -2178,6 +2189,7 @@ impl DriverEnv for RealEnv {
         } else {
             self.status.mark_initial_degraded();
         }
+        self.initial_links_hold.take();
         if initial_start && !initial_settle_timed_out {
             self.events.emit(
                 CAPTURE_INITIAL_SETTLED_EVENT,
@@ -2194,6 +2206,7 @@ impl DriverEnv for RealEnv {
     }
 
     async fn tick(&mut self, layer: &FilesLayer, cancel: &CancellationToken) -> TickIo {
+        let _links_hold = self.actor.defer_link_drain_for_capture();
         // A write, or a recovery at open, fell back since the last tick; its
         // own rename is what woke this tick.
         self.announce_no_atomic_placement();
@@ -2318,6 +2331,7 @@ pub(crate) async fn reconcile_full_for_switch(
     events: EngineEvents,
     token: CancellationToken,
 ) -> Result<bool, SwitchReconcileError> {
+    let _links_hold = actor.defer_link_drain_for_capture();
     if token.is_cancelled() {
         return Err(SwitchReconcileError::Cancelled);
     }
@@ -2530,6 +2544,7 @@ async fn apply_bound_run_with_handle(
     run: RootBoundRun,
     cancel: &CancellationToken,
 ) -> bool {
+    let _links_hold = context.actor.defer_link_drain_for_capture();
     let ApplyRunContext {
         root,
         actor,

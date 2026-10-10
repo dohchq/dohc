@@ -2379,3 +2379,141 @@ async fn a_quarantined_path_keeps_capture_flush_unsettled() {
         .await
         .expect("close");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "manual quiet-host 5000-file initial capture measurement"]
+async fn measure_five_thousand_file_initial_capture() {
+    for n in 0..3 {
+        let scratch = ScratchDir::new().unwrap();
+        write_root_binding(scratch.path(), TOKEN).unwrap();
+        for i in 0..5_000 {
+            write_file(
+                scratch.path(),
+                &format!("note-{i:04}.md"),
+                format!("# Note {i}\n[[note-{:04}]]\n", (i + 1) % 5_000).as_bytes(),
+            );
+        }
+        let service = Arc::new(EngineService::new());
+        let mut events = service.events().subscribe();
+        let transport = InProcessTransport::new(Arc::clone(&service));
+        let began = std::time::Instant::now();
+        let handle = open_workspace(&transport, &scratch, 1).await;
+        tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                if events.recv().await.unwrap().name == CAPTURE_INITIAL_SETTLED_EVENT {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let elapsed = began.elapsed();
+        let db = scratch.path().join(".dohc/engine/engine.db");
+        let actor = dohc_engine_runtime::WorkspaceSupervisor::global()
+            .open(&db, 1)
+            .unwrap()
+            .actor;
+        let commits = actor.commit_count_for_harness().await.unwrap();
+        let observer = EngineStore::open_read_only(&db).unwrap();
+        let snapshots = observer.table_row_count("snapshots").unwrap();
+        eprintln!(
+            "DRIVER_CAPTURE run={n} files={snapshots} capture_ms={} commits={commits}",
+            elapsed.as_millis()
+        );
+        assert_eq!(snapshots, 5_000);
+        if n == 0 {
+            use base64::Engine as _;
+            use dohc_engine_protocol::transport::EngineService as Service;
+            let opened = Service::call(
+                service.as_ref(),
+                RequestContext::unbounded().with_capability("blobs"),
+                request(
+                    200,
+                    "ydoc.open",
+                    Some(handle.clone()),
+                    json!({"versionId":"main","path":"note-0000.md","contentKind":"plaintext"}),
+                ),
+            )
+            .await
+            .unwrap();
+            let session = opened.response.result["sessionId"].clone();
+            let doc = dohc_engine_collab::Ydoc::wire();
+            doc.apply(&opened.blob_egress.unwrap().bytes).unwrap();
+            let mut samples = Vec::new();
+            for draining in [true, false] {
+                let pending = observer.table_row_count("link_pending").unwrap();
+                let certified = actor.link_drain_metrics().certified_sources;
+                assert_eq!(pending > 0, draining);
+                let mut timings = Vec::new();
+                for i in 0..200 {
+                    let update = doc.plaintext_insert(0, "x");
+                    let start = std::time::Instant::now();
+                    transport.call(RequestContext::unbounded(),request(300+i,"ydoc.recordUpdate",Some(handle.clone()),json!({"sessionId":session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(update)}))).await.unwrap();
+                    timings.push(start.elapsed().as_micros());
+                }
+                if draining {
+                    assert!(
+                        actor.link_drain_metrics().certified_sources > certified,
+                        "typing did not overlap drain progress"
+                    );
+                }
+                timings.sort();
+                eprintln!(
+                    "DRAIN_TYPING draining={draining} pending_before={pending} certified_during={} p95_us={} max_us={}",
+                    actor.link_drain_metrics().certified_sources - certified,
+                    timings[189],
+                    timings[199]
+                );
+                samples.push(timings);
+                let deadline = std::time::Instant::now() + Duration::from_secs(120);
+                let mut poll = tokio::time::interval(Duration::from_millis(10));
+                while observer.table_row_count("link_pending").unwrap() != 0 {
+                    assert!(std::time::Instant::now() < deadline, "drain deadline");
+                    poll.tick().await;
+                }
+            }
+            eprintln!(
+                "DRAIN_FINISHED commits={} metrics={:?}",
+                actor.commit_count_for_harness().await.unwrap(),
+                actor.link_drain_metrics()
+            );
+            let backlinks:i64=observer.read_with(|c|c.query_row("SELECT count(*) FROM (SELECT target.object_id FROM link_sources target JOIN link_target_keys t USING(workspace_id,version_id,object_id,index_key) JOIN link_occurrence_keys k ON k.workspace_id=t.workspace_id AND k.version_id=t.version_id AND k.key_kind=t.key_kind AND k.key=t.key JOIN link_sources source ON source.workspace_id=k.workspace_id AND source.version_id=k.version_id AND source.object_id=k.object_id AND source.index_key=k.index_key WHERE t.key_kind='stem' GROUP BY target.object_id HAVING count(*)=1)",[],|r|r.get(0))).unwrap();
+            assert_eq!(backlinks, 5_000);
+            assert!(
+                samples[0][189] <= samples[1][189] + 5_000,
+                "typing p95 exceeds the drain slice"
+            );
+            assert!(
+                samples[0][199] < 50_000,
+                "drain caused a long typing request"
+            );
+            transport
+                .call(
+                    RequestContext::unbounded(),
+                    request(
+                        900,
+                        "ydoc.close",
+                        Some(handle.clone()),
+                        json!({"sessionId":session}),
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        let mut drain_poll = tokio::time::interval(Duration::from_millis(10));
+        while observer.table_row_count("link_pending").unwrap() != 0 {
+            assert!(std::time::Instant::now() < deadline);
+            drain_poll.tick().await;
+        }
+        assert_eq!(observer.table_row_count("link_sources").unwrap(), 5_000);
+        drop(observer);
+        transport
+            .call(
+                RequestContext::unbounded(),
+                request(100, "workspace.close", Some(handle), json!({})),
+            )
+            .await
+            .unwrap();
+    }
+}

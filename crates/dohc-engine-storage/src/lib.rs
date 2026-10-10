@@ -37,6 +37,7 @@ pub mod materialize;
 pub mod remote_changes;
 pub mod store;
 
+mod checkpoint;
 pub(crate) mod migration;
 pub(crate) mod schema;
 mod search_generation;
