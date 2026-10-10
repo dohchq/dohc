@@ -32,6 +32,7 @@ import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords } from ".
 import { TreeRow, type VisibleRow } from "../workbench/Explorer";
 import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
 import { MomentRow } from "../workbench/EngineHistory";
+import { DiffCounts, UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "../workbench/unifiedDiff";
 import {
   AboutAccessView,
   AboutChatRow,
@@ -1314,9 +1315,47 @@ function Pane(props: { theme: "light" | "dark" }) {
           </div>
         </Specimen>
       </Section>
+
+      {/* Last, so the parts above keep their places. */}
+      <Section part="word-diff" title="Word diff">
+        {WORD_DIFFS.map((specimen) => (
+          <Specimen key={specimen.label} label={specimen.label}>
+            <div className="w-[520px] rounded-lg border border-line bg-bg">
+              <div className="flex h-9 items-center gap-2 border-b border-line px-4 text-[12px]">
+                <span className="min-w-0 flex-1 truncate font-mono text-ink">{specimen.path}</span>
+                {specimen.diff.counts ? <DiffCounts counts={specimen.diff.counts} /> : null}
+              </div>
+              <UnifiedDiffLines lines={buildUnifiedDiffLines(specimen.diff)} />
+            </div>
+          </Specimen>
+        ))}
+      </Section>
     </section>
   );
 }
+
+// The drawing's prose edit, a code edit, and a rewrite that keeps its lines
+// whole, through the same diff the History page runs.
+const WORD_DIFFS = [
+  {
+    label: "prose: a word replaced, words added",
+    path: "notes/product-plan.md",
+    before: "## Goals\n\n- Ship the chats feed to the first beta group\n- Get a new person to their first document in under 30 seconds\n- Make agent activity readable at a glance\n\n## Workstreams\n",
+    after: "## Goals\n\n- Ship the chats feed to the first beta group\n- Get a new person to their first document in under 20 seconds\n- Make agent activity readable at a glance, with who changed what\n\n## Workstreams\n",
+  },
+  {
+    label: "code: changed tokens",
+    path: "src/limits.ts",
+    before: "export function limitFor(kind: string) {\n  const limit = 800;\n  return kind === \"history\" ? limit : limit / 2;\n}\n",
+    after: "export function limitFor(kind: string, displayLimit?: number) {\n  const limit = displayLimit ?? 800;\n  return kind === \"history\" ? limit : Math.floor(limit / 2);\n}\n",
+  },
+  {
+    label: "a rewritten line stays whole; a new line has no pair",
+    path: "notes/trip.md",
+    before: "# Trip\n\nThe meeting moved to Tuesday.\n",
+    after: "# Trip\n\nBring snacks for everyone!\nTickets are in the shared folder.\n",
+  },
+].map((specimen) => ({ ...specimen, diff: computeTextDiff(specimen.before, specimen.after, 800) }));
 
 const SYNCED_STATUS: SyncStatusResult = {
   state: "synced",

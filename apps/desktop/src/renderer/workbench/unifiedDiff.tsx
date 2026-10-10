@@ -8,16 +8,24 @@
 // computeTextDiff does the work once per pair of bodies (both callers memoize
 // it); buildUnifiedDiffLines and the counts only read the result.
 
+import type { ReactNode } from "react";
+
 type DiffLine = {
   kind: "context" | "added" | "removed";
   text: string;
 };
+
+/// A changed span of a line's text: [start, end) in UTF-16 units.
+type WordRange = readonly [start: number, end: number];
 
 export type UnifiedDiffLine = {
   kind: DiffLine["kind"] | "note";
   text: string;
   oldLineNumber: number | null;
   newLineNumber: number | null;
+  /// The changed words of an added or removed line that pairs with a similar
+  /// line on the other side. Absent when the whole line is the change.
+  words?: readonly WordRange[];
 };
 
 /// One pair of bodies, diffed. Everything expensive happened when this was
@@ -374,6 +382,172 @@ function compactUnifiedDiffLines(
   ];
 }
 
+// Word marks are made only for the lines the page shows, so the display bound
+// already caps how many pairs there are. This caps their size. Past this many
+// characters across every paired line, the whole diff stays at line level:
+// one 10 MiB line would otherwise cost its whole length to split into words.
+// Measured on Windows 11 in Node 24: 602 marked lines of 240 characters add
+// 3 ms to the page's diff, and 11 ms when they also spend all of
+// WORD_DIFF_PAGE_CELLS below.
+export const WORD_DIFF_CHAR_LIMIT = 200_000;
+
+// Each pair compares only the words between its common start and end. Past
+// this many cells (about 125 words and spaces a side), or once the page has
+// spent its cells, that middle is marked as one change instead of word by
+// word.
+const WORD_DIFF_CELL_LIMIT = 16_000;
+const WORD_DIFF_PAGE_CELLS = 1_000_000;
+
+// A pair whose lines share less than half of the longer line is a rewrite:
+// marking nearly every word would hide the few that stayed.
+const WORD_DIFF_MIN_SHARED = 0.5;
+
+// One token: a CJK character (those scripts put no spaces between words), a
+// word, a run of whitespace, or any other single character.
+const WORD_TOKEN =
+  /[\p{sc=Han}\p{sc=Hiragana}\p{sc=Katakana}]|(?:(?![\p{sc=Han}\p{sc=Hiragana}\p{sc=Katakana}])[\p{L}\p{M}\p{N}_])+|\s+|[^]/gu;
+
+// The changed tokens as ranges of `text`. Two changes one space apart read as
+// one change, so "quick brown" -> "slow red" marks both words together.
+function changedRanges(text: string, tokens: string[], changed: Uint8Array): WordRange[] {
+  const ranges: [number, number][] = [];
+  let offset = 0;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const end = offset + tokens[index].length;
+    if (changed[index] === 1) {
+      const last = ranges[ranges.length - 1];
+      if (last && (last[1] === offset || /^\s+$/.test(text.slice(last[1], offset)))) last[1] = end;
+      else ranges.push([offset, end]);
+    }
+    offset = end;
+  }
+  return ranges;
+}
+
+function rangeLength(ranges: readonly WordRange[]): number {
+  let length = 0;
+  for (const [start, end] of ranges) length += end - start;
+  return length;
+}
+
+/// The changed words of one removed line and the added line it pairs with, or
+/// null when they share too little for word marks to help. A word-by-word
+/// comparison spends its cells from `budget`.
+export function changedWords(
+  before: string,
+  after: string,
+  budget: { cells: number } = { cells: WORD_DIFF_CELL_LIMIT },
+): { before: WordRange[]; after: WordRange[] } | null {
+  const a = before.match(WORD_TOKEN) ?? [];
+  const b = after.match(WORD_TOKEN) ?? [];
+  let prefix = 0;
+  while (prefix < a.length && prefix < b.length && a[prefix] === b[prefix]) prefix += 1;
+  let suffix = 0;
+  while (
+    suffix + prefix < a.length &&
+    suffix + prefix < b.length &&
+    a[a.length - 1 - suffix] === b[b.length - 1 - suffix]
+  ) {
+    suffix += 1;
+  }
+  const aChanged = new Uint8Array(a.length);
+  const bChanged = new Uint8Array(b.length);
+  const aEnd = a.length - suffix;
+  const bEnd = b.length - suffix;
+  const columns = bEnd - prefix + 1;
+  const cells = (aEnd - prefix + 1) * columns;
+  if (cells > Math.min(WORD_DIFF_CELL_LIMIT, budget.cells)) {
+    aChanged.fill(1, prefix, aEnd);
+    bChanged.fill(1, prefix, bEnd);
+  } else {
+    budget.cells -= cells;
+    // The same longest-common-subsequence walk as the line diff, over words.
+    // Each word becomes a number first, so a cell compares two integers.
+    const ids = new Map<string, number>();
+    const idOf = (token: string) => {
+      let id = ids.get(token);
+      if (id === undefined) ids.set(token, (id = ids.size));
+      return id;
+    };
+    const rows = aEnd - prefix;
+    const cols = bEnd - prefix;
+    const aIds = Int32Array.from({ length: rows }, (_, i) => idOf(a[prefix + i]));
+    const bIds = Int32Array.from({ length: cols }, (_, j) => idOf(b[prefix + j]));
+    const table = new Uint16Array((rows + 1) * columns);
+    for (let i = rows - 1; i >= 0; i -= 1) {
+      const row = i * columns;
+      const below = row + columns;
+      const id = aIds[i];
+      for (let j = cols - 1; j >= 0; j -= 1) {
+        if (id === bIds[j]) {
+          table[row + j] = table[below + j + 1] + 1;
+        } else {
+          const down = table[below + j];
+          const right = table[row + j + 1];
+          table[row + j] = down >= right ? down : right;
+        }
+      }
+    }
+    let i = 0;
+    let j = 0;
+    while (i < rows && j < cols) {
+      if (aIds[i] === bIds[j]) {
+        i += 1;
+        j += 1;
+      } else if (table[(i + 1) * columns + j] >= table[i * columns + j + 1]) {
+        aChanged[prefix + i] = 1;
+        i += 1;
+      } else {
+        bChanged[prefix + j] = 1;
+        j += 1;
+      }
+    }
+    aChanged.fill(1, prefix + i, aEnd);
+    bChanged.fill(1, prefix + j, bEnd);
+  }
+  const beforeRanges = changedRanges(before, a, aChanged);
+  const afterRanges = changedRanges(after, b, bChanged);
+  const shared = Math.min(
+    before.length - rangeLength(beforeRanges),
+    after.length - rangeLength(afterRanges),
+  );
+  if (shared < WORD_DIFF_MIN_SHARED * Math.max(before.length, after.length)) return null;
+  return { before: beforeRanges, after: afterRanges };
+}
+
+// Pairs each change block's removed and added lines in order, and marks their
+// changed words. All or nothing: past WORD_DIFF_CHAR_LIMIT no line is marked,
+// so a page never mixes the two levels.
+function markChangedWords(lines: UnifiedDiffLine[]): UnifiedDiffLine[] {
+  const pairs: [number, number][] = [];
+  let chars = 0;
+  let index = 0;
+  while (index < lines.length) {
+    const removed: number[] = [];
+    const added: number[] = [];
+    while (index < lines.length && (lines[index].kind === "removed" || lines[index].kind === "added")) {
+      (lines[index].kind === "removed" ? removed : added).push(index);
+      index += 1;
+    }
+    for (let pair = 0; pair < Math.min(removed.length, added.length); pair += 1) {
+      chars += lines[removed[pair]].text.length + lines[added[pair]].text.length;
+      if (chars > WORD_DIFF_CHAR_LIMIT) return lines;
+      pairs.push([removed[pair], added[pair]]);
+    }
+    if (removed.length === 0 && added.length === 0) index += 1;
+  }
+  if (pairs.length === 0) return lines;
+  const marked = lines.slice();
+  const budget = { cells: WORD_DIFF_PAGE_CELLS };
+  for (const [removedIndex, addedIndex] of pairs) {
+    const words = changedWords(lines[removedIndex].text, lines[addedIndex].text, budget);
+    if (!words) continue;
+    marked[removedIndex] = { ...lines[removedIndex], words: words.before };
+    marked[addedIndex] = { ...lines[addedIndex], words: words.after };
+  }
+  return marked;
+}
+
 export function buildUnifiedDiffLines(diff: TextDiff): UnifiedDiffLine[] {
   if (diff.note !== null) return [note(diff.note)];
 
@@ -395,11 +569,37 @@ export function buildUnifiedDiffLines(diff: TextDiff): UnifiedDiffLine[] {
     newLineNumber += 1;
     return out;
   });
-  return compactUnifiedDiffLines(numbered, 3, diff.displayLimit, diff.hiddenLines);
+  return markChangedWords(
+    compactUnifiedDiffLines(numbered, 3, diff.displayLimit, diff.hiddenLines),
+  );
 }
 
-// The shared diff-lines block (history diff page + versions compare page):
-// old/new gutters, +/- marker, wrapped code text — never raw markers.
+// A changed line's text, with its changed words inside <ins> or <del>, which
+// screen readers announce as an insertion or a deletion.
+function LineText({ line }: { line: UnifiedDiffLine }) {
+  if (line.text.length === 0) return " ";
+  if (!line.words || line.words.length === 0) return line.text;
+  const Mark = line.kind === "added" ? "ins" : "del";
+  const fill = line.kind === "added" ? "bg-success/30" : "bg-danger/30";
+  const parts: ReactNode[] = [];
+  let offset = 0;
+  for (const [start, end] of line.words) {
+    if (start > offset) parts.push(line.text.slice(offset, start));
+    parts.push(
+      <Mark key={start} className={`rounded-xs no-underline ${fill}`}>
+        {line.text.slice(start, end)}
+      </Mark>,
+    );
+    offset = end;
+  }
+  if (offset < line.text.length) parts.push(line.text.slice(offset));
+  return parts;
+}
+
+// The shared diff-lines block (history diff page, versions compare page,
+// proposal review): old/new gutters, then the text. A changed line is tinted
+// with a bar at its edge, and its number sits in only one gutter, so the
+// change reads without color too.
 export function UnifiedDiffLines(props: {
   lines: UnifiedDiffLine[];
   testId?: string;
@@ -407,7 +607,7 @@ export function UnifiedDiffLines(props: {
   return (
     <div
       data-testid={props.testId}
-      className="overflow-x-hidden py-1 font-mono text-[12px] leading-5"
+      className="overflow-x-hidden py-2 font-mono text-[12px] leading-5"
     >
       {props.lines.map((line, index) =>
         // Keyed by position alone. The list is rebuilt whole whenever the diff
@@ -418,7 +618,7 @@ export function UnifiedDiffLines(props: {
           <div
             key={index}
             data-kind={line.kind}
-            className="border-y border-line/70 bg-panel px-3 py-1.5 text-center text-[11px] text-subtle"
+            className="mx-4 my-0.5 flex min-h-6 items-center rounded-md px-2 font-sans text-[11px] text-subtle"
           >
             {line.text}
           </div>
@@ -426,35 +626,77 @@ export function UnifiedDiffLines(props: {
           <div
             key={index}
             data-kind={line.kind}
-            className={`grid min-w-0 grid-cols-[44px_44px_24px_minmax(0,1fr)] ${
+            className={`grid min-w-0 grid-cols-[40px_40px_minmax(0,1fr)] pl-3.5 ${
               line.kind === "added"
-                ? "bg-success/10 text-success"
+                ? "bg-success/8 text-ink shadow-[inset_2px_0_0_var(--color-success)]"
                 : line.kind === "removed"
-                  ? "bg-danger/10 text-danger"
+                  ? "bg-danger/8 text-ink shadow-[inset_2px_0_0_var(--color-danger)]"
                   : "text-muted"
             }`}
           >
-            <span
-              aria-hidden
-              className="select-none border-r border-line/60 px-2 text-right text-[11px] text-subtle"
-            >
+            <span aria-hidden className="select-none pr-3 text-right text-[11px] text-subtle">
               {line.oldLineNumber ?? ""}
             </span>
-            <span
-              aria-hidden
-              className="select-none border-r border-line/60 px-2 text-right text-[11px] text-subtle"
-            >
+            <span aria-hidden className="select-none pr-3 text-right text-[11px] text-subtle">
               {line.newLineNumber ?? ""}
             </span>
-            <span aria-hidden className="select-none text-center">
-              {line.kind === "added" ? "+" : line.kind === "removed" ? "-" : ""}
-            </span>
-            <code className="min-w-0 whitespace-pre-wrap break-words pr-3 font-inherit text-inherit">
-              {line.text.length > 0 ? line.text : " "}
+            <code className="min-w-0 whitespace-pre-wrap break-words pl-2.5 pr-3 font-inherit text-inherit">
+              {line.kind === "context" ? null : (
+                <span className="sr-only select-none">
+                  {line.kind === "added" ? "Added: " : "Removed: "}
+                </span>
+              )}
+              <LineText line={line} />
             </code>
           </div>
         ),
       )}
     </div>
+  );
+}
+
+/// The five cells of the bar beside a diff's counts: one per line while the
+/// change is five lines or fewer, else shared in proportion, with at least
+/// one cell for each side that has lines.
+export function diffStatCells(added: number, removed: number): ("added" | "removed" | "none")[] {
+  const total = added + removed;
+  let addedCells = added;
+  let removedCells = removed;
+  if (total > 5) {
+    addedCells = Math.round((added / total) * 5);
+    if (added > 0) addedCells = Math.max(1, addedCells);
+    if (removed > 0) addedCells = Math.min(4, addedCells);
+    removedCells = 5 - addedCells;
+  }
+  return Array.from({ length: 5 }, (_, cell) =>
+    cell < addedCells ? "added" : cell < addedCells + removedCells ? "removed" : "none",
+  );
+}
+
+/// A diff's size in lines: `+2 −2` and the bar. Screen readers hear the
+/// counts in words instead.
+export function DiffCounts(props: {
+  counts: { added: number; removed: number };
+  testId?: string;
+}) {
+  const { added, removed } = props.counts;
+  return (
+    <span data-testid={props.testId} className="inline-flex shrink-0 items-center gap-1.5 font-mono text-[11px]">
+      <span className="sr-only">
+        {added} {added === 1 ? "line" : "lines"} added, {removed} {removed === 1 ? "line" : "lines"} removed
+      </span>
+      <span aria-hidden className="text-success">+{added}</span>
+      <span aria-hidden className="text-danger">−{removed}</span>
+      <span aria-hidden className="flex gap-0.5">
+        {diffStatCells(added, removed).map((cell, index) => (
+          <span
+            key={index}
+            className={`size-[7px] rounded-xs ${
+              cell === "added" ? "bg-success" : cell === "removed" ? "bg-danger" : "bg-line"
+            }`}
+          />
+        ))}
+      </span>
+    </span>
   );
 }

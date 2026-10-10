@@ -186,6 +186,45 @@ describe("history diff page", () => {
     expect(computeTextDiffSpy).toHaveBeenCalledTimes(1);
   });
 
+  it("marks the changed words as an insertion and a deletion, not only in color", async () => {
+    renderPage(
+      momentDetail({
+        beforeText: "Goals\n- First document in under 30 seconds\n",
+        afterText: "Goals\n- First document in under 20 seconds\n",
+      }),
+    );
+    const body = await screen.findByTestId("engine-diff-lines");
+    expect(body.querySelector("del")?.textContent).toBe("30");
+    expect(body.querySelector("ins")?.textContent).toBe("20");
+    const removed = body.querySelector("[data-kind='removed'] code");
+    const added = body.querySelector("[data-kind='added'] code");
+    expect(removed?.textContent).toBe("Removed: - First document in under 30 seconds");
+    expect(added?.textContent).toBe("Added: - First document in under 20 seconds");
+    expect(screen.getByTestId("engine-diff-counts").querySelector(".sr-only")?.textContent).toBe(
+      "1 line added, 1 line removed",
+    );
+  });
+
+  const bytes = (byteLength: number) => ({ sha256: "a".repeat(64), byteLength });
+
+  it.each([
+    ["binary", { beforeText: null, afterText: null, beforeBinary: bytes(10), afterBinary: bytes(12) }, "engine-diff-binary"],
+    ["protected", { protected: true, beforeText: null, afterText: null }, "engine-diff-protected"],
+  ] as const)("keeps the %s page, with no lines and no counts", async (_kind, overrides, testId) => {
+    renderPage(momentDetail(overrides));
+    await screen.findByTestId(testId);
+    expect(screen.queryByTestId("engine-diff-lines")).toBeNull();
+    expect(screen.queryByTestId("engine-diff-counts")).toBeNull();
+    expect(screen.getByTestId("engine-diff-restore-file")).toBeTruthy();
+  });
+
+  it("keeps a text side readable when the other side became binary", async () => {
+    renderPage(momentDetail({ beforeText: "the old words\n", afterText: null, afterBinary: bytes(2048) }));
+    await screen.findByTestId("engine-diff-binary-side");
+    const lines = screen.getByTestId("engine-diff-lines").querySelectorAll("code");
+    expect([...lines].map((line) => line.textContent)).toEqual(["Removed: the old words"]);
+  });
+
   it("draws a 10 MiB moment without building a line per body line", async () => {
     renderPage(
       momentDetail({ beforeText: hugeBody("a"), afterText: hugeBody("b") }),
@@ -196,9 +235,12 @@ describe("history diff page", () => {
     // lines to render the same 801.
     expect(body.children).toHaveLength(801);
     expect(body.textContent).toContain("more diff lines hidden");
-    // The counts still describe the whole change.
-    expect(screen.getByTestId("engine-diff-counts").textContent).toBe(
-      "+250000 -250000",
+    // The counts still describe the whole change, in lines, and say so to a
+    // screen reader.
+    const counts = screen.getByTestId("engine-diff-counts");
+    expect(counts.textContent).toContain("+250000−250000");
+    expect(counts.querySelector(".sr-only")?.textContent).toBe(
+      "250000 lines added, 250000 lines removed",
     );
   });
 });
