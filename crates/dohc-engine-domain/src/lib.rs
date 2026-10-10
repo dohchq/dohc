@@ -137,9 +137,8 @@ pub use error::DomainError;
 pub use merge::{
     BinaryMergeWrite, CompareTextFileVersions, ComparisonSide, ComparisonStatus, MAX_MERGE_LINES,
     MarkdownMergeResult, MergeTextFileFromVersion, MergeTextFileResult, MergeUnchangedReason,
-    VersionFileChange, VersionFileChangeEntry, VersionFileChangePage, VersionFileChangeStatus,
-    VersionedTextComparison, comparison_sides_equal, comparison_status, file_states_equal,
-    merge_markdown,
+    VersionFileChangeEntry, VersionFileChangePage, VersionFileChangeStatus,
+    VersionedTextComparison, comparison_sides_equal, comparison_status, merge_markdown,
 };
 pub use normalize::NormalizedState;
 pub use records::{

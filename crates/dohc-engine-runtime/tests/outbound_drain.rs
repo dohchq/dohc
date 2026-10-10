@@ -1121,26 +1121,26 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
         )
         .await
         .expect("capture binary moment");
-    actor
-        .capture_retire(
-            CaptureRetire {
-                workspace_id: workspace_id.to_owned(),
-                version_id: "main".to_owned(),
-                path: "notes/captured.md".to_owned(),
-                metadata_summary: None,
-                metadata_correlation_id: None,
-                now_ms: 80,
-                request_id: None,
-                only_if_text_head: false,
-                only_if_capture_origin: false,
-                allow_ydoc_origin: true,
-            },
-            dohc_engine_collab::LeaseRegistry::new(),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .expect("retire captured text moment");
+    dohc_engine_testkit::capture::retire_captured_path(
+        actor,
+        CaptureRetire {
+            workspace_id: workspace_id.to_owned(),
+            version_id: "main".to_owned(),
+            path: "notes/captured.md".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            now_ms: 80,
+            request_id: None,
+            only_if_text_head: false,
+            only_if_capture_origin: false,
+            allow_ydoc_origin: true,
+        },
+        root_dir,
+        dohc_engine_collab::LeaseRegistry::new(),
+        Arc::new(NoFaults),
+    )
+    .await
+    .expect("retire captured text moment");
     actor
         .versioned_text_write_indexed(
             write_path_input(
@@ -1471,22 +1471,22 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
         )
         .await
         .expect("capture secret put");
-    actor
-        .capture_secret_retire(
-            CaptureSecretRetire {
-                workspace_id: workspace_id.to_owned(),
-                version_id: "main".to_owned(),
-                path: ".capture.env".to_owned(),
-                metadata_origin: "local-file".to_owned(),
-                metadata_correlation_id: None,
-                now_ms: 230,
-                only_if_own_origin: true,
-            },
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .expect("capture secret retire");
+    dohc_engine_testkit::capture::retire_captured_secret(
+        actor,
+        CaptureSecretRetire {
+            workspace_id: workspace_id.to_owned(),
+            version_id: "main".to_owned(),
+            path: ".capture.env".to_owned(),
+            metadata_origin: "local-file".to_owned(),
+            metadata_correlation_id: None,
+            now_ms: 230,
+            only_if_own_origin: true,
+        },
+        root_dir,
+        Arc::new(NoFaults),
+    )
+    .await
+    .expect("capture secret retire");
     actor
         .fork_secret_version(
             workspace_id.to_owned(),

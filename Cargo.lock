@@ -471,6 +471,7 @@ dependencies = [
 name = "dohc-engine-testkit"
 version = "0.1.0"
 dependencies = [
+ "dohc-engine-collab",
  "dohc-engine-crypto",
  "dohc-engine-domain",
  "dohc-engine-files",

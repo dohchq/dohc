@@ -344,7 +344,7 @@ fn candidates(
     conn: &rusqlite::Connection,
     root: &Path,
     query: &str,
-) -> Result<Option<Vec<SearchCandidate>>, dohc_engine_runtime::SearchError> {
+) -> Result<Vec<SearchCandidate>, dohc_engine_runtime::SearchError> {
     Ok(query_search_index_keyset(
         conn,
         root,
@@ -357,7 +357,7 @@ fn candidates(
         FILE_SEARCH_PAGE_SOURCE_BYTE_BUDGET,
         SHORT_QUERY_PAGE_ROW_BUDGET,
     )?
-    .map(|batch| batch.candidates))
+    .candidates)
 }
 
 fn granular(
@@ -368,6 +368,37 @@ fn granular(
     dohc_engine_runtime::SearchError,
 > {
     Ok(query_chat_messages_granular_bounded(conn, WS, query, 100, GRANULAR_BYTE_BUDGET)?.results)
+}
+
+#[test]
+fn nonpositive_candidate_limit_skips_sql_under_healthy_and_broken_file_policy() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let conn = rusqlite::Connection::open_in_memory().expect("connection without search tables");
+    for degraded in [false, true] {
+        if degraded {
+            std::fs::create_dir_all(scratch.path().join(".dohc")).expect("policy directory");
+            std::fs::write(scratch.path().join(".dohc/files.toml"), "[invalid")
+                .expect("broken policy");
+        }
+        for limit in [0, -1] {
+            let batch = query_search_index_keyset(
+                &conn,
+                scratch.path(),
+                WS,
+                V,
+                "needle",
+                limit,
+                None,
+                FILE_SEARCH_RESULT_SOURCE_BYTE_BUDGET,
+                FILE_SEARCH_PAGE_SOURCE_BYTE_BUDGET,
+                SHORT_QUERY_PAGE_ROW_BUDGET,
+            )
+            .expect("nonpositive limit must not query missing tables");
+            assert!(batch.candidates.is_empty());
+            assert!(!batch.has_more);
+            assert_eq!(batch.resume_after, None);
+        }
+    }
 }
 
 #[test]
@@ -509,8 +540,7 @@ fn short_query_scan_caps_every_row_examined_even_without_matches() {
                 2,
             )
         })
-        .expect("bounded short scan")
-        .expect("candidate batch");
+        .expect("bounded short scan");
     assert!(first.candidates.is_empty());
     assert!(first.has_more, "the two-row scan must expose continuation");
     let resume = first.resume_after.expect("exclusive scan cursor");
@@ -531,8 +561,7 @@ fn short_query_scan_caps_every_row_examined_even_without_matches() {
                 2,
             )
         })
-        .expect("continued short scan")
-        .expect("candidate batch");
+        .expect("continued short scan");
     assert_eq!(second.candidates.len(), 1);
     assert!(!second.has_more);
 }
@@ -611,8 +640,7 @@ fn short_query_file_scan_spends_its_row_budget_only_on_the_requested_scope() {
                 1,
             )
         })
-        .expect("scoped short query")
-        .expect("candidate batch");
+        .expect("scoped short query");
     assert_eq!(batch.candidates.len(), 1);
     assert!(matches!(
         &batch.candidates[0],
@@ -651,8 +679,7 @@ fn first_file_candidate_may_exceed_the_page_budget_when_it_fits_the_row_budget()
                 10,
             )
         })
-        .expect("first candidate should be served alone")
-        .expect("candidate batch");
+        .expect("first candidate should be served alone");
     assert_eq!(batch.candidates.len(), 1);
     assert!(matches!(
         &batch.candidates[0],
@@ -694,8 +721,7 @@ fn regular_fts_file_page_bounds_source_before_materializing_all_hits() {
                 100,
             )
         })
-        .expect("bounded regular FTS query")
-        .expect("candidate batch");
+        .expect("bounded regular FTS query");
     let owned_source_bytes: usize = batch
         .candidates
         .iter()
@@ -1387,8 +1413,7 @@ fn broken_file_policy_fails_closed_but_chat_search_survives() {
     // half is populated.
     let candidates = store
         .read_with(|conn| candidates(conn, &root, "needle"))
-        .expect("query")
-        .expect("some");
+        .expect("query");
     assert!(
         candidates
             .iter()
@@ -1440,7 +1465,7 @@ fn read_your_writes_same_txn_no_torn_index() {
         .write_with(&NO_FAULTS, |tx| {
             upsert_file_search_index(tx, &root, WS, V, "obj-d", "d.md", "delta needle")?;
             // Read-your-writes: the just-upserted row is visible in the same txn.
-            let candidates = candidates(tx, &root, "delta")?.unwrap_or_default();
+            let candidates = candidates(tx, &root, "delta")?;
             Ok::<bool, dohc_engine_runtime::SearchError>(
                 candidates
                     .iter()
@@ -1537,8 +1562,7 @@ fn bounds_query_length_and_limit() {
     write_file(&mut store, "obj-ok", "a.md", "needle needle needle", 10);
     ensure_index(&mut store, &root, 20);
 
-    // The orchestration consumes the primitive's fallback sentinel with a
-    // bounded linear scan.
+    // Short queries use a bounded linear scan.
     assert!(
         run_search(&store, &root, "ne")
             .iter()
@@ -1548,21 +1572,15 @@ fn bounds_query_length_and_limit() {
     // A pathologically long query is bounded (no results, no FTS blow-up).
     let long = "n".repeat(50_000);
     assert!(run_search(&store, &root, &long).is_empty());
-    // At the primitive: an over-long query fails closed (Some(empty)), never the
-    // `None` fallback sentinel — so an adapter cannot turn it into a linear scan.
+    // The candidate query also rejects an over-long query without scanning.
     let overlong = store
         .read_with(|conn| candidates(conn, &root, &long))
         .expect("q");
-    assert_eq!(
-        overlong,
-        Some(Vec::new()),
-        "over-long query must fail closed, not fall back"
-    );
+    assert!(overlong.is_empty(), "over-long query must fail closed");
     // A too-short query under a healthy policy is served by the bounded linear scan.
     let short = store
         .read_with(|conn| candidates(conn, &root, "ne"))
-        .expect("q")
-        .expect("some");
+        .expect("q");
     assert!(
         short
             .iter()
@@ -1609,8 +1627,7 @@ fn trigram_prefilter_is_case_insensitive_and_min_three() {
     // mixed-case text (the FTS prefilter must not drop the true match).
     let hits = store
         .read_with(|conn| candidates(conn, &root, "needle"))
-        .expect("query")
-        .expect("some");
+        .expect("query");
     assert!(
         hits.iter()
             .any(|c| matches!(c, SearchCandidate::File { path, .. } if path == "a.md"))
@@ -1621,11 +1638,14 @@ fn trigram_prefilter_is_case_insensitive_and_min_three() {
     let three = store
         .read_with(|conn| candidates(conn, &root, "cap"))
         .expect("q3");
-    assert!(three.is_some());
+    assert!(
+        three
+            .iter()
+            .any(|c| matches!(c, SearchCandidate::File { path, .. } if path == "a.md"))
+    );
     let two = store
         .read_with(|conn| candidates(conn, &root, "ca"))
-        .expect("q2")
-        .expect("some");
+        .expect("q2");
     assert!(
         two.iter()
             .any(|c| matches!(c, SearchCandidate::File { path, .. } if path == "a.md")),

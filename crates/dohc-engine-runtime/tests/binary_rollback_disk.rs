@@ -1581,26 +1581,26 @@ async fn pending_delete_rollback_restore_is_not_seeded_for_capture_retire_on_reo
         .expect("capture seed");
     for entry in seed {
         if !scratch.path().join(&entry.path).exists() {
-            reopened
-                .capture_retire(
-                    CaptureRetire {
-                        workspace_id: WORKSPACE.to_owned(),
-                        version_id: "main".to_owned(),
-                        path: entry.path,
-                        metadata_summary: None,
-                        metadata_correlation_id: None,
-                        now_ms: 41,
-                        request_id: None,
-                        only_if_text_head: false,
-                        only_if_capture_origin: true,
-                        allow_ydoc_origin: true,
-                    },
-                    dohc_engine_collab::LeaseRegistry::new(),
-                    Arc::new(NoFaults),
-                    CancellationToken::new(),
-                )
-                .await
-                .expect("emulated baseline retire");
+            dohc_engine_testkit::capture::retire_captured_path(
+                &reopened,
+                CaptureRetire {
+                    workspace_id: WORKSPACE.to_owned(),
+                    version_id: "main".to_owned(),
+                    path: entry.path,
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    now_ms: 41,
+                    request_id: None,
+                    only_if_text_head: false,
+                    only_if_capture_origin: true,
+                    allow_ydoc_origin: true,
+                },
+                scratch.path(),
+                dohc_engine_collab::LeaseRegistry::new(),
+                Arc::new(NoFaults),
+            )
+            .await
+            .expect("emulated baseline retire");
         }
     }
     let restored = reopened
