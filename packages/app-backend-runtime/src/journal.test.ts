@@ -6,6 +6,9 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
 import { createDatasetJournal, type CommitOperationInput, type DatasetCursor, type DatasetScope, type JournalOptions, type TransitionCheckpointInput } from "./journal.ts";
 
+import { readDatasetHistory } from "./dataset-history.ts";
+import type { DatasetRevision } from "@dohc/security-contract/dataset";
+
 const digest=(value:string|Uint8Array)=>createHash("sha256").update(value).digest("hex");
 // These probes use FULL durability on real files, including close/reopen recovery.
 const cleanups:Array<()=>void>=[];
@@ -542,4 +545,54 @@ it("commits approval provenance with each checkpoint and retains it after restar
   expect(history).toMatchObject([{kind:"checkpoint",approvalAgent:agent},{kind:"checkpoint",approvalAgent:{...agent,label:null}}]);
   expect(f.journal.transitionCheckpoint(input)).toEqual(next);
   expect(f.db.prepare("SELECT COUNT(*) n FROM dohc_dataset_approval_provenance").get()!.n).toBe(2);
+});
+
+function schemaHistory(f: ReturnType<typeof fixture>) {
+  f.db.exec("CREATE TABLE IF NOT EXISTS dohc_dataset_automation_revisions(workspace_id,dataset_id,revision,automation_id,depth)");
+  return readDatasetHistory(f.db,f.scope,{definition:{operations:[]}} as unknown as DatasetRevision,Number.MAX_SAFE_INTEGER,50).entries;
+}
+it("records checkpoint times atomically and keeps the first time on retry",()=>{
+  let time=100;
+  const f=fixture({nowMs:()=>time++}),input=migration(f,f.initial);
+  f.fault("before");
+  expect(()=>f.journal.transitionCheckpoint(input)).toThrow("power loss");
+  expect(f.db.prepare("SELECT revision FROM dohc_dataset_checkpoint_times WHERE revision>0").all()).toEqual([]);
+  expect(f.journal.head(f.scope,f.authorize).cursor).toEqual(f.initial);
+  const next=f.journal.transitionCheckpoint(input);
+  expect(schemaHistory(f)).toMatchObject([{revision:next.revision,recordedAtMs:102}]);
+  time=900;
+  expect(f.journal.transitionCheckpoint(input)).toEqual(next);
+  f.reopen();
+  expect(schemaHistory(f)).toMatchObject([{revision:next.revision,recordedAtMs:102}]);
+  const later=f.journal.transitionCheckpoint({...input,expected:next,approvedRevisionHash:digest("approved-v3"),source:"globalThis.operations={version:3};"});
+  expect(schemaHistory(f)).toMatchObject([{revision:later.revision,recordedAtMs:900},{revision:next.revision,recordedAtMs:102}]);
+});
+it("opens an older journal without changing its hashes or inventing checkpoint dates",()=>{
+  const f=fixture(),input=migration(f,f.initial),old=f.journal.transitionCheckpoint(input);
+  const legacy=f.journal.exportPage({scope:f.scope,through:old,afterRevision:-1,authorize:f.authorize}).map(record=>{
+    if(record.kind!=="checkpoint")return record;
+    const {recordedAtMs:_,...rest}=record;return rest;
+  });
+  // The pre-timestamp journal has the same existing tables, without the side table.
+  f.db.exec("DROP TABLE IF EXISTS dohc_dataset_checkpoint_times");
+  const saved=f.db.prepare("SELECT * FROM dohc_dataset_journals").all();
+  f.reopen();
+  expect(f.db.prepare("SELECT * FROM dohc_dataset_journals").all()).toEqual(saved);
+  expect(f.journal.head(f.scope,f.authorize).cursor).toEqual(old);
+  expect(schemaHistory(f)).toMatchObject([{revision:old.revision,recordedAtMs:null}]);
+  expect(f.journal.exportPage({scope:f.scope,through:old,afterRevision:-1,authorize:f.authorize})).toEqual(legacy);
+  const next=f.journal.transitionCheckpoint({...input,expected:old,approvedRevisionHash:digest("approved-v3"),source:"globalThis.operations={version:3};"});
+  expect(schemaHistory(f)).toMatchObject([{revision:next.revision,recordedAtMs:123},{revision:old.revision,recordedAtMs:null}]);
+  expect(f.db.prepare("SELECT revision FROM dohc_dataset_checkpoint_times").all()).toEqual([{revision:next.revision}]);
+});
+it("keeps checkpoint digests on the existing hashed shape independently of time",()=>{
+  const f=fixture({nowMs:()=>1}),other=fixture({nowMs:()=>999}),input=migration(f,f.initial),next=f.journal.transitionCheckpoint(input);
+  expect(other.initial).toEqual(f.initial);
+  expect(other.journal.transitionCheckpoint({...input,authorize:other.authorize})).toEqual(next);
+  const sha=digest(input.checkpoint as Uint8Array),previous=f.initial;
+  expect(next.digest).toBe(digest(JSON.stringify(["dohc-dataset-checkpoint-v1",next.workspaceId,next.datasetId,next.hostEpoch,next.approvedRevisionHash,next.revision,
+    [previous.workspaceId,previous.datasetId,previous.hostEpoch,previous.approvedRevisionHash,previous.revision,previous.digest],
+    sha,digest(input.source),digest(input.schemaSql),digest(input.definitionJson),128*1024*1024])));
+  const records=f.journal.exportPage({scope:f.scope,through:next,afterRevision:-1,authorize:f.authorize});
+  expect(records).toMatchObject([{kind:"checkpoint",recordedAtMs:1},{kind:"checkpoint",recordedAtMs:1}]);
 });

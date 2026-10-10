@@ -102,8 +102,9 @@ export interface NoticeStore {
   // Takes back a notice this computer posted: an unsent post goes, and a
   // sent one is dismissed.
   withdraw(noticeId: string): Promise<void>;
-  // Sends waiting posts and marks, then pulls changes. Never rejects.
-  sync(): Promise<void>;
+  // Sends waiting posts and marks, then pulls changes. A scoped pass stops
+  // when its caller is no longer current. Never rejects.
+  sync(isCurrent?: () => boolean): Promise<void>;
   refreshRefusals(openedWorkspaceId?: string): Promise<void>;
   // The failure notice the signed-in person sent themselves about one run,
   // dismissed or not, with the computer that posted it, or null. Only read,
@@ -434,11 +435,13 @@ export function createNoticeStore(deps: {
 
   // The server has no notice list. Waiting notices move to this computer's
   // list, and one local notice says why, once per account.
-  async function noteRoutesMissing(account: NoticeAccount): Promise<void> {
+  async function noteRoutesMissing(session: NoticeSession): Promise<void> {
     const changed = await locked(async () => {
+      const account = session.account;
       const file = await loadAccount(account);
-      if (file.routesMissing && file.posts.length === 0 && file.marks.length === 0) return false;
       const local = await loadLocal();
+      if (!session.isCurrent()) throw new SessionChanged();
+      if (file.routesMissing && file.posts.length === 0 && file.marks.length === 0) return false;
       for (const { request, workspaceId, createdAtMs } of file.posts) {
         addLocal(local, {
           noticeId: request.noticeId, kind: request.kind, workspaceId,
@@ -584,63 +587,82 @@ export function createNoticeStore(deps: {
     }
   }
 
-  async function syncAccount(session: NoticeSession): Promise<void> {
+  async function syncAccount(session: NoticeSession, accountIsCurrent: () => boolean): Promise<void> {
     const account = session.account;
-    if (await sendPosts(session) === "routes-missing") return await noteRoutesMissing(account);
-    if (await sendMarks(session) === "routes-missing") return await noteRoutesMissing(account);
+    if (await sendPosts(session) === "routes-missing") return await noteRoutesMissing(session);
+    if (await sendMarks(session) === "routes-missing") return await noteRoutesMissing(session);
 
     let changed = false;
-    for (let more = true; more;) {
-      const cursor = await locked(async () => (await loadAccount(account)).cursor);
-      const query = new URLSearchParams({ limit: String(NOTICE_PAGE_MAX), ...(cursor === null ? {} : { cursor }) });
-      let page: z.infer<typeof RelayPage>;
-      try {
-        page = RelayPage.parse(await (await relay(session, `/sync/notices?${query}`)).json());
-      } catch (error) {
-        if (error instanceof RelayRefusal && error.reason === "routes-missing") {
-          return await noteRoutesMissing(account);
+    try {
+      for (let more = true; more;) {
+        const cursor = await locked(async () => (await loadAccount(account)).cursor);
+        const query = new URLSearchParams({ limit: String(NOTICE_PAGE_MAX), ...(cursor === null ? {} : { cursor }) });
+        let page: z.infer<typeof RelayPage>;
+        try {
+          page = RelayPage.parse(await (await relay(session, `/sync/notices?${query}`)).json());
+        } catch (error) {
+          if (error instanceof RelayRefusal && error.reason === "routes-missing") {
+            return await noteRoutesMissing(session);
+          }
+          throw error;
         }
-        throw error;
+        changed = await locked(async () => {
+          const file = await loadAccount(account);
+          if (!session.isCurrent()) throw new SessionChanged();
+          const merged = merge(file, page);
+          if (!merged && file.cursor === page.nextCursor && !file.routesMissing) return false;
+          file.cursor = page.nextCursor;
+          file.routesMissing = false;
+          await saveAccount(account, file);
+          return merged;
+        }) || changed;
+        more = page.hasMore;
       }
+      // Every sent post went out before this pull began, so the pull has
+      // settled it: its row arrived, or the relay already had that notice.
       changed = await locked(async () => {
         const file = await loadAccount(account);
-        const merged = merge(file, page);
-        if (!merged && file.cursor === page.nextCursor && !file.routesMissing) return false;
-        file.cursor = page.nextCursor;
-        file.routesMissing = false;
-        await saveAccount(account, file);
-        return merged;
+        const waiting = file.posts.filter((post) => !post.sent);
+        const settled = waiting.length !== file.posts.length;
+        file.posts = waiting;
+        const pruned = pruneAccount(file);
+        if (settled || pruned) await saveAccount(account, file);
+        return pruned;
       }) || changed;
-      more = page.hasMore;
+    } finally {
+      // Saved rows outlive the share scope; announce them for this account.
+      if (changed && accountIsCurrent()) deps.onChanged();
     }
-    // Every sent post went out before this pull began, so the pull has
-    // settled it: its row arrived, or the relay already had that notice.
-    changed = await locked(async () => {
-      const file = await loadAccount(account);
-      const waiting = file.posts.filter((post) => !post.sent);
-      const settled = waiting.length !== file.posts.length;
-      file.posts = waiting;
-      const pruned = pruneAccount(file);
-      if (settled || pruned) await saveAccount(account, file);
-      return pruned;
-    }) || changed;
-    if (changed) deps.onChanged();
   }
 
   let running: Promise<void> | null = null;
   let again = false;
-  function sync(): Promise<void> {
+  let nextCurrent: (() => boolean) | undefined;
+  function sync(isCurrent?: () => boolean): Promise<void> {
     if (running) {
+      // An account-wide request must survive the closure of a share window.
+      if (!again) nextCurrent = isCurrent;
+      else if (nextCurrent && isCurrent) {
+        const waiting = nextCurrent;
+        nextCurrent = () => waiting() || isCurrent();
+      } else nextCurrent = undefined;
       again = true;
       return running;
     }
+    nextCurrent = isCurrent;
     running = (async () => {
       try {
         do {
           again = false;
+          const current = nextCurrent;
+          nextCurrent = undefined;
           try {
             const session = await deps.session();
-            if (session) await syncAccount(session);
+            if (current && !current()) continue;
+            if (session) await syncAccount(current ? {
+              ...session, isCurrent: () => current() && session.isCurrent(),
+            } : session, session.isCurrent);
+            if (current && !current()) continue;
             const pruned = await locked(async () => {
               const local = await loadLocal();
               if (!pruneLocal(local)) return false;
@@ -650,7 +672,7 @@ export function createNoticeStore(deps: {
             if (pruned) deps.onChanged();
           } catch (error) {
             // A pass for a session that ended stops; the next pass uses the new one.
-            if (error instanceof SessionChanged) again = true;
+            if (error instanceof SessionChanged) { if (!current) again = true; }
             else console.warn("[notices] sync failed; the next pass tries again", error);
           }
         } while (again);
@@ -819,7 +841,7 @@ export function createNoticeStore(deps: {
       if (!(error instanceof RelayRefusal)) throw error;
       switch (error.reason) {
         case "routes-missing":
-          await noteRoutesMissing(session.account);
+          await noteRoutesMissing(session);
           throw new NoticeNotSentError("Your server doesn't sync notices. Update the server, then try again.");
         case "refused":
           throw new NoticeNotSentError("This person can't open what the notice points to.");

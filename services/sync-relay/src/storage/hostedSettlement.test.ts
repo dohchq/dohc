@@ -564,7 +564,7 @@ it.each(["bytes", "events"])("acknowledges a singleton over the %s budget and pu
     expect(f.storage.hasRefusedSettlement(marker)).toBe(true);
     for (const changed of [{originId:"other"},{originSeq:0},{settlementId:"other"},{momentId:"other"},{workspaceId:"other"},{reason:"other"}])
       expect(f.storage.hasRefusedSettlement({...marker,...changed})).toBe(false);
-    const shared = createShareReadQueries(f.storage,500).filteredLogPage("workspace",
+    const shared = createShareReadQueries(f.storage,500).filteredLogPage("workspace", "share",
       {paths:[first.record.binding.currentPath],versionId:null,access:"view"},0,100,"authenticated");
     expect(shared.ops.find(op=>op.originId === "proof")?.payload)
       .toMatchObject({metadata:{origin:"sync",summary:"Attribution unavailable"}});

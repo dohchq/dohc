@@ -421,6 +421,39 @@ describe("the automation replicas", () => {
     expect(opens).toHaveLength(5);
   });
 
+  it("retries a lease-deferred collection reconciliation without advancing pulledHead or another relay write", async () => {
+    const {storage, log} = await relay();
+    const engine = fakeEngine();
+    let held = false;
+    const answer = spawn.getMockImplementation()!;
+    spawn.mockImplementation(async (options: Parameters<typeof answer>[0]) => {
+      const client = await answer(options);
+      const send = client.sendRequest.getMockImplementation()!;
+      client.sendRequest.mockImplementation(async (request: Sent) => {
+        if (request.method === "sync.commitCursor" && held) {
+          engine.sent.push(request);
+          throw Object.assign(new Error("collection reconciliation waits for a document lease"), {code: "OVERLOADED", retry: "afterBackoff"});
+        }
+        return send(request);
+      });
+      return client;
+    });
+    const {replicas: running} = await replicas(storage, () => [WORKSPACE], {ms: 0});
+    const replica = running.replica(WORKSPACE)!;
+    const before = replica.pulledHead;
+    held = true;
+    log(2);
+    await expect(replica.sync()).rejects.toMatchObject({code: "OVERLOADED"});
+    expect(replica.pulledHead).toBe(before);
+    expect(running.failedSyncs().has(WORKSPACE)).toBe(true);
+    const pulls = engine.methods().filter(method => method === "sync.pull").length;
+    held = false;
+    await running.settled();
+    expect(engine.methods().filter(method => method === "sync.pull").length).toBeGreaterThan(pulls);
+    expect(replica.pulledHead).toBe(storage.automationWorkspaceLogHead(WORKSPACE));
+    expect(running.failedSyncs().size).toBe(0);
+  });
+
   it("backs off a persistently failing step instead of retrying twice every 100 ms", async () => {
     vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
     vi.setSystemTime(0);

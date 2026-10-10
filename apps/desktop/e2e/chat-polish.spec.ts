@@ -31,8 +31,10 @@ test("emoji reactions and floating mentions stay visible without moving the comp
       const closedBox = await composer.boundingBox();
       expect(closedBox!.y).toBe(openBox!.y);
       await composer.fill("");
+      // The opening post's actions show, and take the pointer, on hover.
       const trigger = view.getByTestId("chats-add-reaction").first();
-      await expect(trigger).toHaveCSS("opacity", "1");
+      await view.locator('article[data-testid="chats-message"]').hover();
+      await expect(trigger).toBeVisible();
       await trigger.click();
       const search = page.getByRole("textbox", { name: "Search emoji or paste any emoji" });
       await search.fill("🧑🏽‍🚀");
@@ -40,7 +42,12 @@ test("emoji reactions and floating mentions stay visible without moving the comp
       await page.screenshot({ path: testInfo.outputPath(`reactions-${theme}.png`) });
       await page.getByRole("button", { name: "🧑🏽‍🚀", exact: true }).click();
     }
+    // The menu opens above only when the composer has no room for it below.
+    // A short thread leaves its composer high, so the window ends just
+    // under the composer, with less room than one row of the menu.
     await page.setViewportSize({ width: 1280, height: 480 });
+    const placed = await composer.boundingBox();
+    await page.setViewportSize({ width: 1280, height: Math.ceil(placed!.y + placed!.height + 30) });
     await composer.fill("@");
     const upperMenu = view.getByTestId("chats-mention-menu");
     await expect(upperMenu).toBeVisible();
@@ -53,20 +60,26 @@ test("emoji reactions and floating mentions stay visible without moving the comp
     await page.setViewportSize({ width: 1280, height: 800 });
     await view.getByTestId("chats-thread-back").click();
     const card = view.getByTestId("chats-post-card").first();
+    await card.hover();
     await card.getByTestId("chats-post-like").click();
     await page.getByRole("textbox", { name: "Search emoji or paste any emoji" }).fill("otter");
     await page.getByRole("button", { name: "🦦", exact: true }).click();
     await expect(card.locator('[data-testid="chats-post-reaction-pill"][data-emoji="🦦"]')).toBeVisible();
     await page.getByTestId("chats-feed-link").click();
     const homeTrigger = view.getByTestId("chats-feed-like").first();
+    // Home's actions sit in each row's toolbar, shown on hover and on focus.
+    const homeToolbar = view.getByTestId("chats-feed-message-toolbar").first();
     await page.mouse.move(0, 0);
+    await expect(homeToolbar).toHaveCSS("opacity", "0");
+    await view.getByTestId("chats-feed-item").first().hover();
+    await expect(homeToolbar).toHaveCSS("opacity", "1");
     await expect(homeTrigger).toBeVisible();
-    await expect(homeTrigger).toHaveCSS("opacity", "1");
     await homeTrigger.click();
     await page.getByRole("textbox", { name: "Search emoji or paste any emoji" }).fill("🦋");
     await page.getByRole("button", { name: "🦋", exact: true }).click();
     await expect(view.locator('[data-testid="chats-feed-reaction-pill"][data-emoji="🦋"]')).toBeVisible();
     for (const emoji of ["1️⃣", "🏴\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}"]) {
+      await view.getByTestId("chats-feed-item").first().hover();
       await homeTrigger.click();
       await page.getByRole("textbox", { name: "Search emoji or paste any emoji" }).fill(emoji);
       await page.getByRole("button", { name: emoji, exact: true }).click();
@@ -75,6 +88,9 @@ test("emoji reactions and floating mentions stay visible without moving the comp
     for (const theme of ["light", "dark"]) {
       await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
       const homeCard = view.getByTestId("chats-feed-item").first();
+      // Compared at rest: a hovered row takes a fill and rounded corners.
+      await page.mouse.move(0, 0);
+      await expect(homeCard).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
       const surface = await homeCard.evaluate(node => {
         const style = getComputedStyle(node);
         return { background: style.backgroundColor, radius: style.borderRadius, padding: style.paddingLeft };

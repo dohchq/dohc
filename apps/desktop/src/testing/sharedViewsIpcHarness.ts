@@ -32,13 +32,13 @@ export const ready: WatcherStatusResult = {
   noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [],
 };
 
-export async function createSharedViewsIpcHarness() {
+export async function createSharedViewsIpcHarness(options: { rootPath?: string; syncNotices?: (isCurrent: () => boolean) => Promise<void> } = {}) {
   const steps: string[] = [];
   const home = resolve("/shared-views-ipc-home").replace(/\\/g, "/");
   const rootPath = `${home}/received`;
   const roots = createWorkspaceRootApproval(() => home); roots.approveRoot(rootPath);
   const workspace: RegistryEntry = {
-    workspaceId: "existing", rootPath: `${home}/existing`, kind: "personal", mode: "local-first",
+    workspaceId: "existing", rootPath: options.rootPath ?? `${home}/existing`, kind: "personal", mode: "local-first",
     shareView: { shareId: "share", granterEmail: info.granterEmail, genericChatWritable: false, grantedSelector: { ...info.selector!, paths: [...info.selector!.paths] }, relayUrl: credentials.relayUrl, recipientUserId: credentials.userId },
   };
   const registry = new Map([[workspace.workspaceId, workspace]]);
@@ -47,7 +47,8 @@ export async function createSharedViewsIpcHarness() {
   });
   const attachmentId = await authorities.withOperation("existing", operation => operation.workspace.attachmentId);
   let rendererCurrent = true;
-  const session = { workspaceId: "existing", attachmentId, generation: 1, isCurrent: () => rendererCurrent };
+  let rendererClosed = false;
+  const session = { workspaceId: "existing", attachmentId, generation: 1, isCurrent: () => rendererCurrent && !rendererClosed };
   type Event = { sender: string; trusted: boolean };
   type Workspace = PhysicalWorkspace<RegistryEntry>;
   type Operation = ExactRendererWorkspaceOperation<Workspace, object, typeof session>;
@@ -73,6 +74,7 @@ export async function createSharedViewsIpcHarness() {
   });
   const cleanup = vi.fn(async () => { steps.push("cleanup"); });
   const notify = vi.fn<Dependencies["notifyRenderer"]>(() => { steps.push("notify"); });
+  const syncNotices = vi.fn(options.syncNotices ?? (async (_isCurrent: () => boolean) => undefined));
   const surfaces = vi.fn(() => { steps.push("surfaces"); });
   const createJoinedWorkspace = createJoinedWorkspaceRunner({
     reserve: input => authorities.reserveBinding(input), createFolder,
@@ -121,11 +123,14 @@ export async function createSharedViewsIpcHarness() {
     withStaleSensitiveWorkspaceOperation, shareViewFiles: { reconcile, end, narrow }, receivedShareEngine: { relayFor, storeFor },
     openWorkspaceActivity: open, requireWorkspace: registryRead, notifyRenderer: notify,
     recordShareViewStoreRefusal: recordRefusal,
+    syncNotices,
   });
   const invoke = (channel: string, payload: unknown, trusted = true) =>
     Promise.resolve().then(() => handlers.get(channel)!({ sender: "window", trusted }, payload));
   const openPayload = { rootPath, shareCode: buildShareCode({ relayUrl: credentials.relayUrl!, shareId: "share" }) };
   return { workspace, registry, authorities, attachmentId, roots, cache, load, warm, startup, fetchInfo, readDir,
     mkdir, createFolder, cleanup, notify, surfaces, setView, recordIdentity, relayFor, status, storeFor, reconcile,
-    probeLog, registryRead, workspaceOperation, open, end, narrow, fetchAccess, closed, recordRefusal, handlers, invoke, openPayload, steps, retireRenderer: () => { rendererCurrent = false; } };
+    syncNotices, probeLog, registryRead, workspaceOperation, open, end, narrow, fetchAccess, closed, recordRefusal, handlers, invoke, openPayload, steps,
+    closeRenderer: () => { rendererClosed = true; for (const close of [...closed]) close(); },
+    retireRenderer: () => { rendererCurrent = false; } };
 }
