@@ -565,13 +565,15 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
       automation: {receipt: automationAck, settlement: automationSettlement, admitted: [automationAdmitted], imported: [automation]},
     };
     // The service imports the admitted credit through its own background pull.
-    // Read its store only after its History shows that credit.
-    const serviceRpc: typeof rpc = async (method, params) => (await capture.client.sendRequest({id: capture.nextRequestId(),
-      workspace: capture.workspace, method, params, deadlineMs: capture.deadlineMs})).result as Awaited<ReturnType<typeof rpc>>;
-    await vi.waitFor(async () => {
-      expect(await momentAuthors(serviceRpc, settledMomentId)).toBeNull();
-      for (const {momentId, imported} of declaredCredit) expectAuthors(await momentAuthors(serviceRpc, momentId), imported);
-    }, {timeout: 30000});
+    // Poll its store until that credit lands. A missing row reads as undefined, not null.
+    const authorJson = (database: DatabaseSync, momentId = settledMomentId) => (database.prepare("SELECT author_json FROM moments WHERE moment_id=?").get(momentId) as {author_json: string | null} | undefined)?.author_json;
+    const serviceEngine = new DatabaseSync(join(workspace, ".dohc/engine/engine.db"), {readOnly: true});
+    try {
+      await vi.waitFor(() => {
+        expect(authorJson(serviceEngine)).toBeNull();
+        for (const {momentId, imported} of declaredCredit) expectAuthors(JSON.parse(authorJson(serviceEngine, momentId) ?? "null"), imported);
+      }, {timeout: 30000});
+    } finally {serviceEngine.close();}
     await supervisor!.close(); supervisor = undefined; active = undefined;
     const engine = new DatabaseSync(join(workspace, ".dohc/engine/engine.db"), {readOnly: true});
     try {results.persistedApplications = engine.prepare("SELECT delivery_id,update_digest FROM live_device_update_applications ORDER BY journal_cursor").all();
@@ -580,7 +582,6 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
       // relay-admitted authors. The service, the owner and the fresh peer hold
       // exactly those authors, and no author for the baseline moment that
       // admitted none.
-      const authorJson = (database: DatabaseSync, momentId = settledMomentId) => (database.prepare("SELECT author_json FROM moments WHERE moment_id=?").get(momentId) as {author_json: string | null} | undefined)?.author_json;
       const ownerEngine = new DatabaseSync(join(ownerRoot, ".dohc/engine/engine.db"), {readOnly: true});
       const peerEngine = new DatabaseSync(join(root, "peer", ".dohc/engine/engine.db"), {readOnly: true});
       try {
