@@ -308,8 +308,7 @@ export function registerSharedViewsIpcHandlers<
     cacheClosers.get(sender)?.();
     cacheClosers.delete(sender);
   };
-  function syncSharedViewNotices(event: Event,
-    session: NonNullable<ReturnType<typeof dependencies.currentRendererSession>>,
+  function syncSharedViewNotices(session: NonNullable<ReturnType<typeof dependencies.currentRendererSession>>,
     retirement: AbortSignal, credentialGeneration: number,
     share: { recipientUserId?: string; relayUrl?: string } | undefined) {
     const isCurrent = () => {
@@ -320,9 +319,7 @@ export function registerSharedViewsIpcHandlers<
         !!share.relayUrl && relayUrlsMatch(credentials.relayUrl, share.relayUrl);
     };
     if (!isCurrent()) return;
-    let closed = false;
-    const stopClose = dependencies.onSenderClosed(event.sender, () => { closed = true; });
-    void dependencies.syncNotices(() => !closed && isCurrent()).finally(stopClose);
+    void dependencies.syncNotices(isCurrent);
   }
 
   async function refreshSharedView(event: Event, input: RefreshSharedViewPayload, pressBurst: boolean): Promise<RefreshSharedViewResult> {
@@ -357,7 +354,7 @@ export function registerSharedViewsIpcHandlers<
         return { ok: false, probed: true, changedPaths: 0, errorKind: "unauthorized", errorMessage: "Sign in to the account that received this share." };
       }
       if (cached && cached.nextCursor === undefined) {
-        if (pressBurst) syncSharedViewNotices(event, session!, retirement!, credentialGeneration, cached);
+        if (pressBurst) syncSharedViewNotices(session!, retirement!, credentialGeneration, cached);
         return { ok: true, status: "unchanged", probed: true, changedPaths: 0,
           excludedPaths: [], unjournalablePaths: [], refusedOps: 0, refusedDetail: null };
       }
@@ -376,7 +373,7 @@ export function registerSharedViewsIpcHandlers<
           controller.signal.throwIfAborted();
           scoped.assertCurrent();
           if (probe.unchanged) {
-            if (pressBurst) syncSharedViewNotices(event, session!, retirement!, credentialGeneration, cached);
+            if (pressBurst) syncSharedViewNotices(session!, retirement!, credentialGeneration, cached);
             return { ok: true, status: "unchanged", probed: true,
               changedPaths: 0, excludedPaths: [], unjournalablePaths: [], refusedOps: 0, refusedDetail: null };
           }
@@ -405,9 +402,9 @@ export function registerSharedViewsIpcHandlers<
       (operation) => reportingShareStoreRefusal(operation, async () => {
         const summaryBefore = JSON.stringify(workspaceSummaryFor(operation.workspace));
         const summaryChanged = () => summaryBefore !== JSON.stringify(workspaceSummaryFor(requireWorkspace(input.workspaceId)));
-        const notifyPull = () => notifyRenderer({ workspaceId: input.workspaceId, ...(summaryChanged() ? { summaryChanged: true } : {}) });
+        const notifyPull = (changed: boolean) => notifyRenderer({ workspaceId: input.workspaceId, ...(changed ? { summaryChanged: true } : {}) });
         const noticeShare = operation.workspace.shareView;
-        const syncPullNotices = () => syncSharedViewNotices(event, session!, retirement!, credentialGeneration, noticeShare);
+        const syncPullNotices = () => syncSharedViewNotices(session!, retirement!, credentialGeneration, noticeShare);
         // The shell's on-open auto-refresh can run during the daemon handshake
         // now that the window loads during it; the reconcile needs sessions. The
         // physical operation is already held before this wait begins.
@@ -518,7 +515,7 @@ export function registerSharedViewsIpcHandlers<
           operation.assertCurrent();
           // A pull that failed on a later page still persisted the refusals its
           // earlier pages recorded, so the renderer is told once here too.
-          notifyPull();
+          notifyPull(summaryChanged());
           // A damaged pin does not heal on the next try, and re-asking the relay
           // for one would let it restate a wider scope. Say so instead of
           // reporting "refreshed, nothing new" forever.
@@ -530,13 +527,13 @@ export function registerSharedViewsIpcHandlers<
           }
           throw error;
         }
+        operation.assertCurrent();
+        const changedSummary = summaryChanged();
         if ("ok" in outcome && !outcome.ok) {
-          operation.assertCurrent();
-          if (pressBurst || outcome.changedPaths > 0 || summaryChanged()) syncPullNotices();
-          notifyPull();
+          if (pressBurst || outcome.changedPaths > 0 || changedSummary) syncPullNotices();
+          notifyPull(changedSummary);
           return RefreshSharedViewResult.parse(outcome);
         }
-        operation.assertCurrent();
         if (outcome.status !== "ended" &&
           workspace.shareView.recipientUserId && workspace.shareView.relayUrl) {
           pullCache.set(event.sender, { workspaceId: input.workspaceId, attachmentId: session!.attachmentId,
@@ -552,11 +549,11 @@ export function registerSharedViewsIpcHandlers<
           });
         } else clearCache(event.sender);
         if (outcome.status === "ended") refreshNativeWorkspaceSurfaces();
-        if (pressBurst || outcome.changedPaths > 0 || outcome.refusedOps > 0 || summaryChanged() ||
+        if (pressBurst || outcome.changedPaths > 0 || outcome.refusedOps > 0 || changedSummary ||
           nextCursor !== undefined && cached?.nextCursor !== undefined && nextCursor !== cached.nextCursor) {
           syncPullNotices();
         }
-        notifyPull();
+        notifyPull(changedSummary);
         return RefreshSharedViewResult.parse(outcome);
       }),
     );

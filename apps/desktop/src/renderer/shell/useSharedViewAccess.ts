@@ -46,8 +46,8 @@ export function useSharedViewAccess(input: {
       timer = window.setTimeout(() => {
         const pressBurst = (buttonPulls[0] ?? Infinity) <= Date.now();
         buttonPulls = buttonPulls.filter(at => at > Date.now());
-        // At most four probes also sync Notices. Later settlements wait for
-        // focus, a changed pull or sign-in after the 20-second probe.
+        // Keep all four Notice probes even after data changes. Settlements
+        // after 20 seconds wait for focus, a changed pull or sign-in.
         void request(false, true, pressBurst);
       }, Math.max(0, due - Date.now()));
     };
@@ -67,9 +67,8 @@ export function useSharedViewAccess(input: {
           const pullShare = async () => {
             if (!pull) return;
             lastPullAt = Date.now();
-            const changed = await latest.current.pull(pressBurst);
+            await latest.current.pull(pressBurst);
             if (!isCurrent() || startedEpoch !== epoch) return unverified();
-            if (changed) buttonPulls = [];
             failures = 0;
             nextPullAt = Date.now() + 30_000;
           };

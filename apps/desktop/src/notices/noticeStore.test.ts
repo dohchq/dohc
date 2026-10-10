@@ -315,6 +315,51 @@ async function titles(computer: Computer): Promise<string[]> {
 }
 
 describe("Notices passes requested by a shared view", () => {
+  it("checks the account inside the missing-route lock before moving Notices", async () => {
+    const server = await relay(); server.outdated = true;
+    const signedIn = account(server, "owner");
+    const recipient = await computer(signedIn);
+    const fetch = signedIn.relay.fetch!;
+    signedIn.relay.fetch = async (input, init) => {
+      const response = await fetch(input, init);
+      recipient.onAccountRead = () => {
+        recipient.onAccountRead = undefined;
+        switchTo(recipient, account(server, "ben"));
+        server.outdated = false;
+      };
+      return response;
+    };
+    await recipient.store.sync();
+    expect(recipient.changes).toBe(0);
+    expect((await recipient.store.list()).notices).toEqual([]);
+  });
+  it.each(["share", "account"] as const)("announces a saved page only for its current account after the %s closes during the next page", async change => {
+    const server = await relay();
+    const signedIn = account(server, "owner");
+    const owner = await computer(signedIn);
+    await owner.store.postNotice(notice()); await owner.store.sync();
+    const recipient = await computer(signedIn);
+    const fetch = signedIn.relay.fetch!;
+    const started = deferred(); const release = deferred();
+    let pages = 0;
+    signedIn.relay.fetch = async (input, init) => {
+      const response = await fetch(input, init);
+      const page = await response.json();
+      if (++pages === 1) return Response.json({ ...page, hasMore: true });
+      started.resolve(); await release.promise;
+      return Response.json(page);
+    };
+    let current = true;
+    const syncing = recipient.store.sync(() => current);
+    await started.promise;
+    expect((await recipient.store.list()).notices).toHaveLength(1);
+    current = false;
+    if (change === "account") switchTo(recipient, account(server, "ben"));
+    release.resolve(); await syncing;
+    expect(recipient.changes).toBe(change === "share" ? 1 : 0);
+    await recipient.store.sync();
+    expect(recipient.changes).toBe(change === "share" ? 1 : 0);
+  });
   it("drops a late missing-route response instead of moving Notices into another account's local list", async () => {
     const server = await relay(); server.outdated = true;
     const recipient = await computer(account(server, "owner"));
@@ -939,6 +984,40 @@ describe("notices that stay on this computer", () => {
 });
 
 describe("notices while the signed-in account changes", () => {
+  it.each(["switch", "sign-out"] as const)("resolves an accepted post once after %s before its answer arrives", async change => {
+    const server = await relay();
+    await createShare(server.handler, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });
+    const signedIn = account(server, "owner");
+    const laptop = await computer(signedIn);
+    const fetch = signedIn.relay.fetch!;
+    const requests = vi.fn();
+    server.onRequest = requests;
+    signedIn.relay.fetch = async (input, init) => {
+      const response = await fetch(input, init);
+      expect(response.ok).toBe(true);
+      switchTo(laptop, change === "switch" ? account(server, "ben") : null);
+      return response;
+    };
+    await expect(laptop.store.postNotice(notice({ kind: "automation-failed", recipientUserId: "ana", target: { path: "trip/tasks" } }))).resolves.toBeUndefined();
+    expect(requests).toHaveBeenCalledOnce();
+    const recipient = await computer(account(server, "ana")); await recipient.store.sync();
+    expect((await recipient.store.list()).notices.filter(row => row.kind === "automation-failed"))
+      .toEqual([expect.objectContaining({ noticeId: "from:owner:agent-run:1", senderLabel: "Name owner" })]);
+  });
+
+  it("keeps the relay's first-dismissal answer after the account changes", async () => {
+    const server = await relay();
+    const signedIn = account(server, "owner");
+    const laptop = await computer(signedIn);
+    await laptop.store.postNotice(notice()); await laptop.store.sync();
+    const fetch = signedIn.relay.fetch!;
+    signedIn.relay.fetch = async (input, init) => {
+      const response = await fetch(input, init);
+      if (new URL(String(input)).pathname === "/sync/notices/marks") switchTo(laptop, account(server, "ben"));
+      return response;
+    };
+    await expect(laptop.store.dismissFirst({ store: "account", noticeId: "agent-run:1" }, signedIn.key)).resolves.toBe("first");
+  });
   it("queues a notice for the account signed in when it is queued", async () => {
     const server = await relay();
     const laptop = await computer(account(server, "ana"));

@@ -301,13 +301,14 @@ it("measures 123 requests in an idle visible hour with one unchanged relayed pre
   console.info("one relayed Button in an idle hour: 123 requests vs 120 without a press; 4 burst probes, net +3");
 });
 
-it.each([1, 2, 3, 4])("stops the relayed Button burst when probe %s brings changes", async changedAt => {
+it.each([1, 2, 3, 4])("keeps all relayed Button probes when probe %s brings changes", async changedAt => {
   setup(); await flush(); pull.mockClear(); check.mockClear();
   for (let count = 1; count < changedAt; count++) pull.mockResolvedValueOnce(false);
   pull.mockResolvedValueOnce(true);
   await relayPress();
   await act(() => vi.advanceTimersByTimeAsync(20_000));
-  expect(pull).toHaveBeenCalledTimes(changedAt); expect(check).not.toHaveBeenCalled();
+  expect(pull).toHaveBeenCalledTimes(4); expect(check).not.toHaveBeenCalled();
+  expect(pull.mock.calls).toEqual([[true], [true], [true], [true]]);
 });
 
 it("coalesces overdue Button probes behind a slow pull without overlap", async () => {

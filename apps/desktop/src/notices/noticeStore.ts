@@ -413,40 +413,35 @@ export function createNoticeStore(deps: {
   async function relay(session: NoticeSession, path: string, body?: unknown): Promise<Response> {
     if (!session.isCurrent()) throw new SessionChanged();
     const refusal = (reason: RelayRefusal["reason"]) => () => new RelayRefusal(reason);
-    try {
-      const response = await relayRequest({
-        relay: session.account.relay,
-        path,
-        init: body === undefined ? undefined : {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(body),
-        },
-        // An older server answers 404 for every notice route.
-        errors: {
-          400: refusal("invalid"),
-          403: refusal("refused"),
-          404: refusal("routes-missing"),
-          409: refusal("list-full"),
-          429: refusal("rate-limited"),
-        },
-        label: "Notices",
-      });
-      if (!session.isCurrent()) throw new SessionChanged();
-      return response;
-    } catch (error) {
-      if (!session.isCurrent()) throw new SessionChanged();
-      throw error;
-    }
+    return relayRequest({
+      relay: session.account.relay,
+      path,
+      init: body === undefined ? undefined : {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      // An older server answers 404 for every notice route.
+      errors: {
+        400: refusal("invalid"),
+        403: refusal("refused"),
+        404: refusal("routes-missing"),
+        409: refusal("list-full"),
+        429: refusal("rate-limited"),
+      },
+      label: "Notices",
+    });
   }
 
   // The server has no notice list. Waiting notices move to this computer's
   // list, and one local notice says why, once per account.
-  async function noteRoutesMissing(account: NoticeAccount): Promise<void> {
+  async function noteRoutesMissing(session: NoticeSession): Promise<void> {
     const changed = await locked(async () => {
+      const account = session.account;
       const file = await loadAccount(account);
-      if (file.routesMissing && file.posts.length === 0 && file.marks.length === 0) return false;
       const local = await loadLocal();
+      if (!session.isCurrent()) throw new SessionChanged();
+      if (file.routesMissing && file.posts.length === 0 && file.marks.length === 0) return false;
       for (const { request, workspaceId, createdAtMs } of file.posts) {
         addLocal(local, {
           noticeId: request.noticeId, kind: request.kind, workspaceId,
@@ -592,48 +587,52 @@ export function createNoticeStore(deps: {
     }
   }
 
-  async function syncAccount(session: NoticeSession): Promise<void> {
+  async function syncAccount(session: NoticeSession, accountIsCurrent: () => boolean): Promise<void> {
     const account = session.account;
-    if (await sendPosts(session) === "routes-missing") return await noteRoutesMissing(account);
-    if (await sendMarks(session) === "routes-missing") return await noteRoutesMissing(account);
+    if (await sendPosts(session) === "routes-missing") return await noteRoutesMissing(session);
+    if (await sendMarks(session) === "routes-missing") return await noteRoutesMissing(session);
 
     let changed = false;
-    for (let more = true; more;) {
-      const cursor = await locked(async () => (await loadAccount(account)).cursor);
-      const query = new URLSearchParams({ limit: String(NOTICE_PAGE_MAX), ...(cursor === null ? {} : { cursor }) });
-      let page: z.infer<typeof RelayPage>;
-      try {
-        page = RelayPage.parse(await (await relay(session, `/sync/notices?${query}`)).json());
-      } catch (error) {
-        if (error instanceof RelayRefusal && error.reason === "routes-missing") {
-          return await noteRoutesMissing(account);
+    try {
+      for (let more = true; more;) {
+        const cursor = await locked(async () => (await loadAccount(account)).cursor);
+        const query = new URLSearchParams({ limit: String(NOTICE_PAGE_MAX), ...(cursor === null ? {} : { cursor }) });
+        let page: z.infer<typeof RelayPage>;
+        try {
+          page = RelayPage.parse(await (await relay(session, `/sync/notices?${query}`)).json());
+        } catch (error) {
+          if (error instanceof RelayRefusal && error.reason === "routes-missing") {
+            return await noteRoutesMissing(session);
+          }
+          throw error;
         }
-        throw error;
+        changed = await locked(async () => {
+          const file = await loadAccount(account);
+          if (!session.isCurrent()) throw new SessionChanged();
+          const merged = merge(file, page);
+          if (!merged && file.cursor === page.nextCursor && !file.routesMissing) return false;
+          file.cursor = page.nextCursor;
+          file.routesMissing = false;
+          await saveAccount(account, file);
+          return merged;
+        }) || changed;
+        more = page.hasMore;
       }
+      // Every sent post went out before this pull began, so the pull has
+      // settled it: its row arrived, or the relay already had that notice.
       changed = await locked(async () => {
         const file = await loadAccount(account);
-        if (!session.isCurrent()) throw new SessionChanged();
-        const merged = merge(file, page);
-        if (!merged && file.cursor === page.nextCursor && !file.routesMissing) return false;
-        file.cursor = page.nextCursor;
-        file.routesMissing = false;
-        await saveAccount(account, file);
-        return merged;
+        const waiting = file.posts.filter((post) => !post.sent);
+        const settled = waiting.length !== file.posts.length;
+        file.posts = waiting;
+        const pruned = pruneAccount(file);
+        if (settled || pruned) await saveAccount(account, file);
+        return pruned;
       }) || changed;
-      more = page.hasMore;
+    } finally {
+      // Saved rows outlive the share scope; announce them for this account.
+      if (changed && accountIsCurrent()) deps.onChanged();
     }
-    // Every sent post went out before this pull began, so the pull has
-    // settled it: its row arrived, or the relay already had that notice.
-    changed = await locked(async () => {
-      const file = await loadAccount(account);
-      const waiting = file.posts.filter((post) => !post.sent);
-      const settled = waiting.length !== file.posts.length;
-      file.posts = waiting;
-      const pruned = pruneAccount(file);
-      if (settled || pruned) await saveAccount(account, file);
-      return pruned;
-    }) || changed;
-    if (changed && session.isCurrent()) deps.onChanged();
   }
 
   let running: Promise<void> | null = null;
@@ -662,7 +661,7 @@ export function createNoticeStore(deps: {
             if (current && !current()) continue;
             if (session) await syncAccount(current ? {
               ...session, isCurrent: () => current() && session.isCurrent(),
-            } : session);
+            } : session, session.isCurrent);
             if (current && !current()) continue;
             const pruned = await locked(async () => {
               const local = await loadLocal();
@@ -842,7 +841,7 @@ export function createNoticeStore(deps: {
       if (!(error instanceof RelayRefusal)) throw error;
       switch (error.reason) {
         case "routes-missing":
-          await noteRoutesMissing(session.account);
+          await noteRoutesMissing(session);
           throw new NoticeNotSentError("Your server doesn't sync notices. Update the server, then try again.");
         case "refused":
           throw new NoticeNotSentError("This person can't open what the notice points to.");

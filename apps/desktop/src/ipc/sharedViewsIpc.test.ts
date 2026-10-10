@@ -497,10 +497,11 @@ describe("background share pulls", () => {
     const pass = deferred(); h.syncNotices.mockReturnValue(pass.promise);
     await h.invoke(channel, payload);
     expect(h.syncNotices).toHaveBeenCalledOnce();
+    expect(h.closed.size).toBe(1); // The pull cache owns the only close listener.
     const isCurrent = h.syncNotices.mock.calls[0]![0];
     if (change === "workspace") h.retireRenderer();
     else if (change === "account") h.cache.set({ ...credentials, userId: "another" });
-    else for (const close of [...h.closed]) close();
+    else h.closeRenderer();
     expect(isCurrent()).toBe(false);
     pass.resolve(); await pass.promise;
   });
@@ -509,13 +510,14 @@ describe("background share pulls", () => {
     const pass = deferred(); h.syncNotices.mockReturnValue(pass.promise);
     await h.invoke(channel, { ...payload, trigger: "press-burst" });
     expect(h.syncNotices).toHaveBeenCalledOnce();
+    expect(h.closed.size).toBe(1);
     expect(h.notify).not.toHaveBeenCalled();
     expect(h.storeFor).not.toHaveBeenCalled();
     const isCurrent = h.syncNotices.mock.calls[0]![0];
     expect(isCurrent()).toBe(true);
     if (change === "workspace") h.retireRenderer();
     else if (change === "account") h.cache.set({ ...credentials, userId: "another" });
-    else for (const close of [...h.closed]) close();
+    else h.closeRenderer();
     expect(isCurrent()).toBe(false);
     pass.resolve(); await pass.promise;
   });
