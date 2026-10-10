@@ -1,4 +1,5 @@
 {
+  "desktop:get-share-copy-details": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "shareCopyHandler.withRendererWorkspaceOperation" } },
   "desktop:get-object-access": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:list-sharing-access": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:request-access-refresh": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },

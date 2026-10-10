@@ -90,6 +90,8 @@ import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
 import { accessCliQueries, createAccessAcquisition, createAccessOwner } from "./access/accessOwner";
 import { hasAccessChat, locateAccessVersionPath, resolveAccessObject } from "./access/accessObjectResolution";
+import { createShareCopyHandler } from "./ipc/shareCopyHandler";
+import { shareCopyOperations } from "./ipc/shareCopyOperations";
 import { accessOperations } from "./ipc/accessOperations";
 import { assertResolvedWorkspacePath } from "./workspaces/workspaceRealPath";
 import {
@@ -5687,6 +5689,15 @@ async function currentDiagnostics(): Promise<string> {
 
 function registerIpcHandlers(): void {
   shareDirectWriteDelivery.register(operationBoundary);
+  const shareCopyHandler = createShareCopyHandler<WebContents, RegistryEntry, DesktopRendererWorkspaceOperation>({
+    currentSession: sender => rendererWorkspaceSessions.current(sender) ?? null,
+    withRendererWorkspaceOperation, remoteForWorkspace,
+    currentCredentialGeneration: () => credentialCacheGeneration,
+    relayJson: (credentials, path) => relayShareJsonWithCredentials(credentials, path),
+  });
+  registerOperations(operationBoundary, shareCopyOperations, {
+    getShareCopyDetails: (input, { event }) => shareCopyHandler(event.sender, input),
+  });
   registerOperations(operationBoundary, accessOperations, {
     getObjectAccess: (input, { operation }) => accessOwner.object(operation!, input),
     listSharingAccess: (input, { operation }) => accessOwner.sharing(operation!, input),

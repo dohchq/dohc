@@ -35,6 +35,7 @@ export const CAPABILITIES = {
   "access.object.read": capability("Read observed grants covering an object.", {ipc: ["getObjectAccess"], socket: ["accessObject"], public: ["access object"]}),
   "access.sharing.read": capability("Page observed granted and received shares.", {ipc: ["listSharingAccess"], socket: ["accessSharing"], public: ["access sharing"]}),
   "access.refresh": capability("Request paced observations when Sharing opens or Access expands.", {ipc: ["requestAccessRefresh"]}),
+  "share.copy.read": capability("Read one owned grant's copy details on an explicit renderer action.", {ipc: ["getShareCopyDetails"], mcpReason: "Invitation reads remain renderer-only pending Ice's decision on agent exposure."}),
   "share.access.read": capability("Check the current user's received share access.", {ipc: ["checkSharedViewAccess"]}),
   "share.direct.writes.feedback": capability("Subscribe to and acknowledge shared-view write feedback.", {ipc: ["updateShareDirectWriteDelivery"]}),
   "share.view.refresh": capability("Pull changes into a received share.", {ipc: ["refreshSharedView"]}),

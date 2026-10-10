@@ -70,7 +70,7 @@ import {
 import { z } from "zod";
 import { CHANNELS } from "./channels";
 import {OwnerRestoreRequest, OwnerRestoreActionResponse} from "./ownerRestoreContract";
-import { createOwnerRelayShareHandler } from "./ownerRelayShareHandler";
+import { assertOriginalWorkspace, createOwnerRelayShareHandler } from "./ownerRelayShareHandler";
 import { awaitCredentialGeneration, RelaySessionError } from "../mainChatIpcHandlers";
 import { requireCredentials } from "../workspaces/credentialScopedOperation";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
@@ -187,14 +187,6 @@ export function registerRelaySharesIpcHandlers<
       sharesChanged(workspaceId);
       return result;
     };
-  const assertOriginalWorkspace = (workspace: Workspace): void => {
-    if (shareViewIsPresent(workspace.shareView)) {
-      throw new Error(
-        "This is a shared view — only the original workspace can be shared.",
-      );
-    }
-  };
-
   registerHandler(CHANNELS.listOwnerLiveDocuments, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListOwnerLiveDocumentsPayload.parse(payload);

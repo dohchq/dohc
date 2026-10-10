@@ -523,6 +523,7 @@ function makeBaseBridge(
       shareCode: "dohc-share:relay-share-1:http://relay.test",
       recipientEmail: "friend@dohc.test",
     })),
+    getShareCopyDetails: vi.fn(async () => ({ status: "ended" as const })),
     listRelayShares: vi.fn(async () => ({ granted: [], received: [], removed: [] })),
     retryShareHandoff: vi.fn(async () => undefined),
     dismissShareHandoff: vi.fn(async () => undefined),

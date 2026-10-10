@@ -139,5 +139,6 @@
   "share.view.refresh",
   "usage.read",
   "usage.clear",
-  "usage.switch"
+  "usage.switch",
+  "share.copy.read"
 ]
