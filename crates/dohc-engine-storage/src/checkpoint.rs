@@ -8,6 +8,8 @@ use std::sync::{
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+const CAPTURE_CHECKPOINT_FRAMES: i64 = 16_384;
+
 /// Checkpoints have their own connection and never issue domain writes.
 /// PASSIVE never invokes SQLite's busy handler.
 #[derive(Debug)]
@@ -32,15 +34,19 @@ impl Checkpoints {
             .name("dohc-wal-checkpoint".into())
             .spawn(move || {
                 while rx.recv().is_ok() {
-                    if worker_paused.load(Ordering::Acquire) {
-                        continue;
-                    }
-                    // Keep SQLite's default 1000-frame threshold. Checkpointing
-                    // every small commit would force frequent WAL resets and syncs.
+                    // Capture postpones small checkpoints, but a large backlog
+                    // still checkpoints so a long import can recycle the WAL.
                     let frames = conn.query_row("PRAGMA main.wal_checkpoint(NOOP)", [], |row| {
                         Ok((row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
                     });
-                    if !frames.is_ok_and(|(frames, checkpointed)| frames - checkpointed >= 1000) {
+                    if !frames.is_ok_and(|(frames, checkpointed)| {
+                        frames - checkpointed
+                            >= if worker_paused.load(Ordering::Acquire) {
+                                CAPTURE_CHECKPOINT_FRAMES
+                            } else {
+                                1000
+                            }
+                    }) {
                         continue;
                     }
                     // One queued request covers commits during this checkpoint.
@@ -150,7 +156,7 @@ mod tests {
                     })
                 })
                 .unwrap();
-            if frames == checkpointed {
+            if frames >= 0 && frames == checkpointed {
                 break;
             }
             assert!(Instant::now() < deadline, "checkpoint did not finish");
@@ -197,10 +203,58 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let (frames, checkpointed) = backlog();
-            if frames == checkpointed {
+            if frames >= 0 && frames == checkpointed {
                 break;
             }
             assert!(Instant::now() < deadline, "checkpoint did not resume");
+            std::thread::yield_now();
+        }
+        assert_eq!(store.table_row_count("blobs").unwrap(), 1100);
+    }
+    #[test]
+    fn capture_pause_checkpoints_backlogs_above_the_high_water_mark() {
+        let scratch = ScratchDir::new().unwrap();
+        let mut store = EngineStore::open(&scratch.path().join("engine.db"), 1).unwrap();
+        store.enable_background_checkpoints().unwrap();
+        store.pause_background_checkpoints(true);
+        store
+            .write_with(&NoFaults, |tx| {
+                let mut insert = tx
+                    .prepare_cached("INSERT INTO blobs VALUES(?1,?2,?3)")
+                    .map_err(StorageError::persist)?;
+                for n in 0..1100 {
+                    let text = format!("{n:04}{}", "x".repeat(65_536));
+                    insert
+                        .execute(rusqlite::params![
+                            hex_sha256(text.as_bytes()),
+                            text.len() as i64,
+                            text
+                        ])
+                        .map_err(StorageError::persist)?;
+                }
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            store.request_checkpoint();
+            let (frames, checkpointed) = store
+                .read_with(|conn| {
+                    conn.query_row("PRAGMA main.wal_checkpoint(NOOP)", [], |row| {
+                        Ok((row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
+                    })
+                })
+                .unwrap();
+            if frames >= 0 {
+                assert!(frames > super::CAPTURE_CHECKPOINT_FRAMES);
+            }
+            if frames >= 0 && frames == checkpointed {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "capture backlog did not checkpoint"
+            );
             std::thread::yield_now();
         }
         assert_eq!(store.table_row_count("blobs").unwrap(), 1100);
