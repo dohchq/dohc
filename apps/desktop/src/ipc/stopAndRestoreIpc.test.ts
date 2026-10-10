@@ -490,6 +490,36 @@ describe("stop and restore in main", () => {
     expect(retry.calls.some(call => call.path.includes(`/collection-writes/${grantId}?`))).toBe(true);
   });
 
+  it.each(["person", "link"] as const)("recovers a reused %s grant when the first progress read fails", async kind => {
+    const {store, target, rootPath, resolver} = await pendingFileUndo(kind);
+    const entry = (await store.pendingRestores())[0]!;
+    entry.session!.undoingFiles = true;
+    await store.savePendingRestore(entry);
+    vi.spyOn(store, "pendingRestores").mockRejectedValueOnce(Error("Transient read failure"));
+    const grantId = entry.session!.grants[0]!;
+    const rows = [grant({})];
+    const links = [[{shareId: "share-link", grantId, status: "active", dependents: []}]];
+    const newMoment = {...schemaMoment, id: "later-write", objectId: "later-object", path: "notes/later.txt"};
+    const f = fixture({rootPath, runStore: store, granted: rows, links, moment: newMoment,
+      undoRunsOf: async () => NOTHING, ledger: {[grantId]: [{writes: [{committedAtMs: 4,
+        files: [{path: newMoment.path, objectId: newMoment.objectId, momentId: newMoment.id, created: false}]}], nextAfterOriginSeq: null}]}});
+    f.capture.restoreFileToBeforeMoment.mockImplementationOnce(async () => {
+      expect(kind === "person" ? rows[0]!.revokedAtMs : links[0]![0]!.status).toBe(kind === "person" ? 3 : "revoked");
+      const reopened = createAutomationRunStore(rootPath, resolver);
+      expect((await reopened.pendingRestores())[0]!.session!.nextGrants).toEqual([grantId]);
+      return {restored: "text", path: SCHEMA, restoredMomentId: "undo-old"};
+    }).mockImplementationOnce(async momentId => {
+      expect(momentId).toBe(newMoment.id);
+      return {restored: "text", path: newMoment.path, restoredMomentId: `back-${newMoment.id}`};
+    });
+    await expect(f.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({unfinished: {step: "files"}});
+    expect((await store.pendingRestores()).find(entry => entry.session)?.session!.restoreGrants).toEqual([grantId]);
+    await expect(f.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({unfinished: null,
+      restored: [{path: newMoment.path, restoredMomentId: `back-${newMoment.id}`}]});
+    expect(f.capture.restoreFileToBeforeMoment).toHaveBeenCalledTimes(2);
+    expect(f.calls.some(call => call.path.includes(`/collection-writes/${grantId}?`))).toBe(true);
+  });
+
   it.each(["person", "link"] as const)("does not revoke a reactivated %s grant when saving the follow-up intent fails", async kind => {
     const {store, target, rootPath} = await pendingFileUndo(kind);
     const entry = (await store.pendingRestores())[0]!;

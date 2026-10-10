@@ -326,9 +326,9 @@ export function registerStopAndRestoreIpc<
       // An unreadable store must still let Stop revoke access before reporting it.
       let entries = await automations.pendingRestores().then(pending => pending.filter(entry =>
         entry.session && restoreId(entry.session.target) === targetKey)).catch(() => undefined);
-      const interruptedUndo = entries?.find(entry => entry.session?.undoingFiles || entry.session?.nextGrants?.length);
-      const followingRestore = entries?.find(entry => entry.session?.restoreGrants?.length);
-      const nextRestoreId = interruptedUndo ? `${interruptedUndo.id}:next` : undefined;
+      let interruptedUndo = entries?.find(entry => entry.session?.undoingFiles || entry.session?.nextGrants?.length);
+      let followingRestore = entries?.find(entry => entry.session?.restoreGrants?.length);
+      let nextRestoreId = interruptedUndo ? `${interruptedUndo.id}:next` : undefined;
       const releaseTarget = async () => {
         for (const entry of await automations.pendingRestores()) {
           if (entry.session && restoreId(entry.session.target) === targetKey) await releasePending(workspaceId, automations, entry);
@@ -337,7 +337,7 @@ export function registerStopAndRestoreIpc<
       let fresh = false;
       let stoppedGrants: string[] = [];
       const rememberNextGrants = async (grants: string[]) => {
-        if (!interruptedUndo || grants.every(grant => interruptedUndo.session!.nextGrants?.includes(grant))) return;
+        if (!interruptedUndo || grants.every(grant => interruptedUndo?.session?.nextGrants?.includes(grant))) return;
         const progress = interruptedUndo.session!;
         progress.nextGrants = [...new Set([...(progress.nextGrants ?? []), ...grants])].sort();
         try { await automations.savePendingRestore({id: interruptedUndo.id, session: progress}); }
@@ -428,7 +428,12 @@ export function registerStopAndRestoreIpc<
 
       // Fresh Stop saves progress after revocation; resumed Undo also saves its next grants before it.
       try {
-        entries ??= (await automations.pendingRestores()).filter(entry => entry.session && restoreId(entry.session.target) === targetKey);
+        if (entries === undefined) {
+          entries = (await automations.pendingRestores()).filter(entry => entry.session && restoreId(entry.session.target) === targetKey);
+          interruptedUndo = entries.find(entry => entry.session?.undoingFiles || entry.session?.nextGrants?.length);
+          followingRestore = entries.find(entry => entry.session?.restoreGrants?.length);
+          nextRestoreId = interruptedUndo ? `${interruptedUndo.id}:next` : undefined;
+        }
       } catch (cause) {
         throw new Error("Access stopped. dohc could not read unfinished Stop and restore progress.", {cause});
       }
