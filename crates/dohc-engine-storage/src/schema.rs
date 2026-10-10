@@ -290,10 +290,13 @@ fn open_engine_db_configured(
     let disposition = classify_fingerprint(&conn)?;
     crate::migration::refuse_declared_v1_evidence(&conn)?;
 
-    // Step 4: the store is ours — closing may checkpoint again, and the
-    // file-mutating pragmas are now safe.
-    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, false)
-        .map_err(StorageError::corrupt)?;
+    // Step 4: the store is ours. Actor connections leave close checkpoints
+    // to the background connection, including failed startup and worker exits.
+    conn.set_db_config(
+        DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+        background_checkpoints,
+    )
+    .map_err(StorageError::corrupt)?;
     apply_persistent_pragmas(&conn)?;
     let checkpoints = if background_checkpoints {
         Some(crate::checkpoint::Checkpoints::start(path)?)

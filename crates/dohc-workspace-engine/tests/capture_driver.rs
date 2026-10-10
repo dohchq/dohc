@@ -2426,6 +2426,45 @@ async fn successful_first_capture_releases_hold_and_drains_exact_backlink_pairs(
         .unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn large_first_capture_retries_checkpoint_backpressure_without_losing_files() {
+    let scratch = ScratchDir::new().unwrap();
+    write_root_binding(scratch.path(), TOKEN).unwrap();
+    let body = |n| format!("{n}:{}", "x".repeat(5 * 1024 * 1024 - 2));
+    for n in 0..8 {
+        write_file(scratch.path(), &format!("large-{n}.md"), body(n).as_bytes());
+    }
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_until_capture_ready(&transport, &handle, 100).await;
+    let mut observer =
+        EngineStore::open_read_only(&scratch.path().join(".dohc/engine/engine.db")).unwrap();
+    assert_eq!(observer.table_row_count("snapshots").unwrap(), 8);
+    for n in 0..8 {
+        let snapshot = dohc_engine_domain::VersionedTextStore::new(&mut observer)
+            .read_text_inband(
+                WORKSPACE_ID,
+                "main",
+                &format!("large-{n}.md"),
+                6 * 1024 * 1024,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(
+            snapshot.text.as_deref() == Some(body(n).as_str()),
+            "wrong body for file {n}"
+        );
+    }
+    drop(observer);
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(300, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "manual quiet-host 5000-file initial capture measurement"]
 async fn measure_five_thousand_file_initial_capture() {

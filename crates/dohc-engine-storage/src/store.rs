@@ -242,6 +242,33 @@ impl EngineStore {
             .map_or((0, 0), |c| c.writer_work_for_test())
     }
 
+    fn prepare_write(&mut self) -> Result<(), StorageError> {
+        if self.checkpoints.as_ref().is_some_and(|c| c.has_stopped()) {
+            let replacement = crate::checkpoint::Checkpoints::start(&self.database_path)?;
+            replacement.request();
+            self.checkpoints.replace(replacement);
+        }
+        if let Some(checkpoints) = &self.checkpoints {
+            checkpoints.prepare_for_write(&self.conn)?;
+        }
+
+        Ok(())
+    }
+
+    /// Admit a connection-level mutation that manages its own savepoint.
+    pub fn mutate_with_connection<T, E>(
+        &mut self,
+        f: impl FnOnce(&Connection) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<StorageError>,
+    {
+        self.prepare_write().map_err(E::from)?;
+        let result = f(&self.conn);
+        self.request_checkpoint();
+        result
+    }
+
     /// Committed writer transactions, excluding schema initialization.
     #[cfg(feature = "fault-injection")]
     pub fn commit_count_for_harness(&self) -> u64 {
@@ -324,15 +351,7 @@ impl EngineStore {
     where
         E: From<StorageError>,
     {
-        if self.checkpoints.as_ref().is_some_and(|c| c.has_stopped()) {
-            let replacement =
-                crate::checkpoint::Checkpoints::start(&self.database_path).map_err(E::from)?;
-            replacement.request();
-            self.checkpoints.replace(replacement);
-        }
-        if let Some(checkpoints) = &self.checkpoints {
-            checkpoints.prepare_for_write(&self.conn).map_err(E::from)?;
-        }
+        self.prepare_write().map_err(E::from)?;
 
         let tx = self
             .conn

@@ -85,7 +85,23 @@ impl Checkpoints {
                 self.checkpoint_on_writer_if_needed(conn);
                 let (latest, finished) = frames(conn).map_err(crate::StorageError::persist)?;
                 if latest >= 0 && latest == finished {
-                    return Ok(());
+                    // Full backfill alone does not release readers at the
+                    // current header. Restart without waiting before admission.
+                    let timeout: u32 = conn
+                        .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+                        .map_err(crate::StorageError::persist)?;
+                    conn.busy_timeout(std::time::Duration::ZERO)
+                        .map_err(crate::StorageError::persist)?;
+                    let restart = conn.query_row("PRAGMA main.wal_checkpoint(RESTART)", [], |r| {
+                        r.get::<_, i64>(0)
+                    });
+                    conn.busy_timeout(std::time::Duration::from_millis(u64::from(timeout)))
+                        .map_err(crate::StorageError::persist)?;
+                    return match restart {
+                        Ok(0) => Ok(()),
+                        Ok(_) => Err(crate::StorageError::FileLocked),
+                        Err(error) => Err(crate::StorageError::persist(error)),
+                    };
                 }
             }
             if std::time::Instant::now() >= deadline {
@@ -398,6 +414,52 @@ mod tests {
     }
 
     #[test]
+    fn fully_backfilled_wal_refuses_writes_until_latest_reader_releases() {
+        let scratch = ScratchDir::new().unwrap();
+        let path = scratch.path().join("engine.db");
+        let mut s = store(&path);
+        // Seed a full generation above the cap without exercising admission.
+        s.read_with(|c| {
+            c.execute(
+                "INSERT INTO checkpoint_load VALUES(0,?1)",
+                [vec![42_u8; 28 * 1024 * 1024]],
+            )
+        })
+        .unwrap();
+        let reader = EngineStore::open_read_only(&path).unwrap();
+        reader
+            .read_with(|c| c.execute_batch("BEGIN; SELECT * FROM checkpoint_load"))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            s.request_checkpoint();
+            let (log, copied) = s.read_with(frames).unwrap();
+            if log >= MAX_PENDING_WAL_FRAMES && log == copied {
+                break;
+            }
+            assert!(Instant::now() < deadline, "full backfill did not complete");
+            std::thread::yield_now();
+        }
+        let before = s.read_with(frames).unwrap();
+        let mutated = std::sync::atomic::AtomicBool::new(false);
+        assert!(matches!(
+            s.write_with(&NoFaults, |_| {
+                mutated.store(true, Ordering::Relaxed);
+                Ok::<_, StorageError>(())
+            }),
+            Err(StorageError::FileLocked)
+        ));
+        assert!(!mutated.load(Ordering::Relaxed));
+        assert_eq!(s.read_with(frames).unwrap(), before);
+        reader.read_with(|c| c.execute_batch("ROLLBACK")).unwrap();
+        drop(reader);
+        write_after_checkpoint(&mut s, 1, 4096);
+        assert!(s.read_with(frames).unwrap().0 < before.0);
+        assert_eq!(s.table_row_count("checkpoint_load").unwrap(), 2);
+        assert!(s.checkpoint_work_for_test().1 <= MAX_WRITER_BACKFILL_FRAMES);
+    }
+
+    #[test]
     fn stopped_worker_restarts_without_enabling_unbounded_autocheckpoint() {
         let scratch = ScratchDir::new().unwrap();
         let mut s = store(&scratch.path().join("engine.db"));
@@ -522,6 +584,43 @@ mod tests {
     }
 
     #[test]
+    fn actor_close_never_checkpoints_a_large_wal_after_worker_exit() {
+        let scratch = ScratchDir::new().unwrap();
+        let path = scratch.path().join("engine.db");
+        let mut s = EngineStore::open_for_actor(&path, 1, None, None).unwrap();
+        s.stop_checkpoint_worker_for_test();
+        s.read_with(|c| {
+            c.execute_batch("CREATE TABLE checkpoint_load(id INTEGER PRIMARY KEY, body BLOB)")
+        })
+        .unwrap();
+        s.read_with(|c| {
+            c.execute(
+                "INSERT INTO checkpoint_load VALUES(0,?1)",
+                [vec![42_u8; 12 * 1024 * 1024]],
+            )
+        })
+        .unwrap();
+        assert!(s.read_with(frames).unwrap().0 > WRITER_CHECKPOINT_FRAMES);
+        let wal = path.with_file_name("engine.db-wal");
+        let before = std::fs::metadata(&wal).unwrap().len();
+        drop(s);
+        assert_eq!(
+            std::fs::metadata(&wal).unwrap().len(),
+            before,
+            "actor close performed a large checkpoint"
+        );
+        let s = EngineStore::open_for_actor(&path, 2, None, None).unwrap();
+        let body: Vec<u8> = s
+            .read_with(|c| {
+                c.query_row("SELECT body FROM checkpoint_load WHERE id=0", [], |r| {
+                    r.get(0)
+                })
+            })
+            .unwrap();
+        assert_eq!(body, vec![42_u8; 12 * 1024 * 1024]);
+    }
+
+    #[test]
     fn crash_during_background_catch_up_preserves_every_committed_row() {
         const CHILD: &str = "DOHC_CHECKPOINT_CRASH_CHILD";
         if let Some(root) = std::env::var_os(CHILD) {
@@ -559,7 +658,15 @@ mod tests {
                 backfilled > 0 && log > backfilled && log >= before,
                 "crash must retain the partially backfilled WAL generation"
             );
-            std::fs::write(path.with_file_name("committed"), b"130").unwrap();
+            s.read_with(|c| {
+                c.execute(
+                    "INSERT INTO checkpoint_load VALUES(130,?1)",
+                    [vec![42_u8; 28 * 1024 * 1024]],
+                )
+            })
+            .unwrap();
+            assert!(s.read_with(frames).unwrap().0 >= MAX_PENDING_WAL_FRAMES);
+            std::fs::write(path.with_file_name("committed"), b"131").unwrap();
             loop {
                 std::thread::park();
             }
@@ -591,7 +698,7 @@ mod tests {
         child.wait().unwrap();
         assert!(ready, "child never reached checkpoint catch-up");
         let path = scratch.path().join("engine.db");
-        let s = EngineStore::open_for_actor(&path, 2, None, None).unwrap();
+        let mut s = EngineStore::open_for_actor(&path, 2, None, None).unwrap();
         let actual: Vec<(i64, Vec<u8>)> = s
             .read_with(|c| {
                 c.prepare("SELECT id,body FROM checkpoint_load ORDER BY id")?
@@ -603,7 +710,24 @@ mod tests {
             actual,
             (0..130)
                 .map(|n| (n, vec![42_u8; 32 * 1024]))
+                .chain(std::iter::once((130, vec![42_u8; 28 * 1024 * 1024])))
                 .collect::<Vec<_>>()
         );
+        let before = s.read_with(frames).unwrap().0;
+        write_after_checkpoint(&mut s, 131, 4096);
+        assert!(
+            s.read_with(frames).unwrap().0 < before,
+            "recovered WAL did not recycle"
+        );
+        drop(s);
+        let s = EngineStore::open_for_actor(&path, 3, None, None).unwrap();
+        let rows: Vec<(i64, Vec<u8>)> = s
+            .read_with(|c| {
+                c.prepare("SELECT id,body FROM checkpoint_load WHERE id<131 ORDER BY id")?
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<rusqlite::Result<_>>()
+            })
+            .unwrap();
+        assert_eq!(rows, actual);
     }
 }
