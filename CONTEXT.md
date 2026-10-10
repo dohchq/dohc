@@ -18,6 +18,12 @@ _Avoid_: self-hosted Drive
 A device's authenticated connection to a dohc server. Workspace permissions determine which work the connection can access.
 _Avoid_: Drive connection (for a self-hosted server)
 
+### Offers
+
+**Offer**:
+A suggestion for a person at a relevant point in their work. Detection changes nothing; the person chooses whether to act.
+_Avoid_: Offering (what dohc sells), moment (a History term)
+
 ### Collections
 
 **Collection**:

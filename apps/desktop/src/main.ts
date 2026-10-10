@@ -141,6 +141,7 @@ import {
   type NoticeRef,
   type NoticeRow,
   workspaceSearchOperations,
+  folderAppOfferOperations,
   workspaceVersionOperations,
 } from "./ipc/bridgeContract";
 import { CHANNELS } from "./ipc/channels";
@@ -201,7 +202,7 @@ import {
   createWorkspaceFolder,
   type CreatedWorkspace,
 } from "./workspaces/createWorkspaceFolder";
-import { createFolder } from "./workspaces/workspaceFiles";
+import { createFolder, listFiles } from "./workspaces/workspaceFiles";
 import {
   completePendingEngineStoreMove,
   EngineStoreRecoveryFailedError,
@@ -434,6 +435,11 @@ import {
   createLiveAgentDispatchStore,
   type LiveAgentDispatchStoreHandle,
 } from "./agents/liveAgentDispatchStore";
+import { isSharedWithMePath } from "@dohc/workspace-core";
+import { matchesFileListingScope } from "./workspaces/workspaceFileListingScope";
+import { readFolderAppSources } from "./workspaces/folderAppSources";
+import { createFolderAppDetection } from "./workspaces/folderAppDetection";
+import { sourceForFile } from "./workspaces/sitePackage";
 import { createOwnedSiteCatalog } from "./workspaces/ownedSiteCatalog";
 import { createAppPreviewExecution } from "./workspaces/appPreviewExecution";
 import { resolveShutdownDeadlineExitCode, WILL_QUIT_BUDGET_MS } from "./shutdownBudgets";
@@ -1737,6 +1743,7 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
   canonicalizeRoot: (rootPath) => realpathSync.native(rootPath),
   createState: createDesktopWorkspaceAuthorityState,
   disposeState: async (state, binding, workspaceAtDisposal) => {
+    await folderAppDetection.retire(binding.attachmentId);
     const physicalWorkspace = {
       ...workspaceAtDisposal,
       rootPath: binding.canonicalRootPath,
@@ -2276,8 +2283,14 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
         ),
       },
     ),
-  onWatcherBatch,
-  onObservationResync,
+  onWatcherBatch: (workspace, events) => {
+    onWatcherBatch(workspace, events);
+    withWorkspaceAttachment(workspace, () => folderAppDetection.settledEvents(workspace, events));
+  },
+  onObservationResync: async workspace => {
+    await onObservationResync(workspace);
+    folderAppDetection.invalidate(workspace.attachmentId);
+  },
   observationFor: (workspace, callbacks) => {
     const daemon = desktopEngine.daemon;
     if (!daemon) throw new Error("Workspace file observation requires the engine daemon.");
@@ -5153,6 +5166,30 @@ const exactRendererWorkspaceReferences =
     ),
   );
 
+const folderAppDetection = createFolderAppDetection<Parameters<typeof ownedWorkspaceReadsFor>[0]>({
+  sources: (workspace, folder) => withWorkspaceAttachmentAsync(workspace, async lease => {
+    const current = canonicalWorkspaceFor(lease);
+    const reader = createOwnedWorkspaceFileReader({ workspace: current, files: shareViewFiles });
+    const routed = await reader.resolveShare(folder);
+    const ownerListing = routed ? await shareViewFiles.list(routed.target, { includeContentIdentity: false }) : null;
+    const prefix = routed?.target.kind === "mount" ? folder.split("/").slice(0, 2).join("/") + "/" : "";
+    return await readFolderAppSources(folder, {
+      list: async scope => {
+        if (ownerListing) return ownerListing.files.map(file => prefix + file.path).filter(path => matchesFileListingScope(path, scope));
+        return (await listFiles(current.rootPath, scope)).files.map(file => file.path).filter(path => !isSharedWithMePath(path));
+      },
+      source: async path => {
+        if (!routed) return await sourceForFile(current.rootPath, path);
+        if (!/(?:^|\/)(?:package|dohc)\.json$/.test(path)) return path;
+        const read = await reader.readText(path);
+        return { path, body: read.truncated || Buffer.byteLength(read.text, "utf8") > 1024 * 1024 ? null : read.text };
+      },
+    });
+  }),
+  updated: workspace => { withWorkspaceAttachment(workspace, () => notifyRenderer({ workspaceId: workspace.workspaceId, pathSetChanged: false })); },
+  failed: error => console.error("[desktop] folder app recognition:", error),
+});
+
 const ownedSiteCatalog = createOwnedSiteCatalog({
   reads: ownedWorkspaceReadsFor,
 });
@@ -6459,6 +6496,10 @@ function registerIpcHandlers(): void {
   const chatScope = createChatScopeCapability({
     workspaceAuthorities, canonicalWorkspaceFor, requireEngineCapture, linkedChatStoreFor,
     openWorkspaceActivity, receivedShareEngine, activeEngineFileIndex, readOwnedWorkspaceText,
+  });
+
+  registerOperations(operationBoundary, folderAppOfferOperations, {
+    getFolderApp: (payload, { operation }) => folderAppDetection.read(operation.workspace, payload.folder),
   });
 
   registerOperations(operationBoundary, workspaceVersionOperations, workspaceVersionHandlers({

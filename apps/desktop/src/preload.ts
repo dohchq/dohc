@@ -59,6 +59,7 @@ import {
   ScheduleHostChangedEvent,
   ChatDispatchNoticesEvent,
   workspaceSearchOperations,
+  folderAppOfferOperations,
   workspaceVersionOperations,
   engineYDocAdmissionOperations,
   engineYDocSaveOperations,
@@ -657,6 +658,7 @@ const bridge: DohcDesktopBridge = {
   // Content search: results stream main→renderer as bounded
   // batches; the searchId round-trips so stale batches drop renderer-side.
   ...operationBridge(workspaceSearchOperations, invoke),
+  ...operationBridge(folderAppOfferOperations, invoke),
   onSearchResults: (listener) =>
     onEvent(CHANNELS.searchResults, SearchResultsEvent, listener),
   ...operationBridge(noticeOperations, invoke),

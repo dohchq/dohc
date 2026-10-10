@@ -3139,6 +3139,27 @@ const SitePackageInfo = z
   });
 export type SitePackageInfo = z.infer<typeof SitePackageInfo>;
 
+export const FolderAppPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  folder: z.union([z.literal("."), PATH_STRING.refine(isNormalizedRelativePath)]),
+}).strict();
+export type FolderAppPayload = z.infer<typeof FolderAppPayload>;
+export const FolderAppAnswer = z.object({
+  workspaceId: WORKSPACE_ID,
+  folder: PATH_STRING,
+  isApp: z.boolean(),
+  run: z.object({ path: PATH_STRING, entryPath: PATH_STRING.nullable(), previewMode: z.enum(["static", "dev", "build"]).nullable() }).nullable(),
+});
+export type FolderAppAnswer = z.infer<typeof FolderAppAnswer>;
+export const folderAppOfferOperations = {
+  getFolderApp: {
+    capabilityId: "app.recognition.read", channel: "desktop:get-folder-app",
+    payload: FolderAppPayload, result: FolderAppAnswer,
+    guard: "active-workspace", scope: "workspace",
+    inactiveMessage: "Open this workspace to inspect its apps.",
+  },
+} as const satisfies OperationTable;
+
 export const ListSitesPayload = z.object({
   workspaceId: WORKSPACE_ID,
 });
@@ -6519,6 +6540,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof workspaceVersionOperations>,
     OperationBridge<typeof captureRecoveryOperations>,
     OperationBridge<typeof workspaceSearchOperations>,
+    OperationBridge<typeof folderAppOfferOperations>,
     OperationBridge<typeof crashReportOperations>,
     OperationBridge<typeof reportingOperations>,
     OperationBridge<typeof noticeOperations>,

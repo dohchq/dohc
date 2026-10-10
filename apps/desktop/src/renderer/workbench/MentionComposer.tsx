@@ -6,6 +6,7 @@ import {
   matchMentionCandidates,
   type MentionCandidate,
 } from "@dohc/workspace-contracts/chat-mentions";
+import { agentRosterPickIsPresent, mapAgentRosterPick, type AgentRosterPick } from "../offers/agentAddressed";
 import type { WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
 import { formatChatFileReferenceToken } from "./chatFileMentions";
 import { ChatAvatar } from "./ChatAvatar";
@@ -51,6 +52,8 @@ export function MentionComposer(props: {
   loadFileHeadings?: (path: string) => Promise<readonly WorkspaceHeadingRecord[]>;
   onChange: (value: string) => void;
   onSend: () => void;
+  onRosterPick?: (pick: AgentRosterPick | null) => void;
+  rosterScope?: string;
   onEscape?: () => void;
   // Decision resolution is the one composer mode where an empty submit is a
   // meaningful action: the caller records the literal fallback "Resolved ✓".
@@ -76,6 +79,25 @@ export function MentionComposer(props: {
     // Only on mount: a later render must not pull focus back.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  const rosterPick = useRef<AgentRosterPick | null>(null);
+  const beforeInput = useRef<{ from: number; to: number } | null>(null);
+  useEffect(() => {
+    const pick = rosterPick.current;
+    if (!pick) return;
+    if (agentRosterPickIsPresent(pick, props.value)) return;
+    rosterPick.current = null;
+    props.onRosterPick?.(null);
+  }, [props.value, props.onRosterPick]);
+  useEffect(() => {
+    const pick = rosterPick.current;
+    if (!pick || props.candidates.some(candidate => candidate.id === pick.candidate.id && candidate.handle === pick.candidate.handle)) return;
+    rosterPick.current = null;
+    props.onRosterPick?.(null);
+  }, [props.candidates, props.onRosterPick]);
+  useEffect(() => () => {
+    rosterPick.current = null;
+    props.onRosterPick?.(null);
+  }, [props.composerId, props.rosterScope]);
   const [caret, setCaret] = useState(0);
   const [menuOpen, setMenuOpen] = useState(false);
   const [highlight, setHighlight] = useState(0);
@@ -194,9 +216,12 @@ export function MentionComposer(props: {
       const result = applyMentionCompletion(props.value, current, candidate);
       pendingCaret.current = result.caret;
       setMenuOpen(false);
+      const pick = props.onRosterPick && candidate.kind === "agent" ? { candidate, from: current.start, to: result.caret - 1 } : null;
+      rosterPick.current = pick;
       props.onChange(result.value);
+      props.onRosterPick?.(pick);
     },
-    [caret, props.onChange, props.value],
+    [caret, props.onChange, props.value, props.onRosterPick],
   );
 
   const completeFile = useCallback(
@@ -532,9 +557,28 @@ export function MentionComposer(props: {
         aria-controls={showMenu ? listboxId : undefined}
         aria-activedescendant={activeDescendant}
         aria-autocomplete="list"
+        onBeforeInput={() => {
+          if (!rosterPick.current) return;
+          const node = textareaRef.current;
+          beforeInput.current = node ? { from: node.selectionStart, to: node.selectionEnd } : null;
+        }}
         onChange={(event) => {
           const nextValue = event.target.value;
           const nextCaret = event.target.selectionStart ?? nextValue.length;
+          const pick = rosterPick.current;
+          if (pick) {
+            const delta = nextValue.length - props.value.length;
+            const range = beforeInput.current;
+            const edit = range && (range.from !== range.to || delta >= 0)
+              ? { ...range, insertedLength: delta + range.to - range.from }
+              : delta >= 0
+                ? { from: nextCaret - delta, to: nextCaret - delta, insertedLength: delta }
+                : { from: nextCaret, to: nextCaret - delta, insertedLength: 0 };
+            const next = mapAgentRosterPick(pick, edit);
+            rosterPick.current = next;
+            if (next !== pick) props.onRosterPick?.(next);
+          }
+          beforeInput.current = null;
           setCaret(nextCaret);
           // Open the menu whenever the caret sits inside a mention token.
           setMenuOpen(activeMentionQuery(nextValue, nextCaret) !== null);
