@@ -48,7 +48,7 @@ fn compensated_settlement_does_not_inherit_relay_confirmation() {
         tx.execute("INSERT OR IGNORE INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES (?1,?2,'main','main',1)", rusqlite::params![key.workspace_id, key.version_id])
             .map_err(dohc_engine_storage::StorageError::persist_public)?;
         let sha = dohc_engine_storage::put_binary_blob(tx, b"edit")?;
-        tx.execute("INSERT INTO moments(workspace_id,moment_order,moment_id,version_id,object_id,path,recorded_at_ms,operation,after_blob_sha256,before_present,metadata_origin,author_json) VALUES (?1,1,?2,?3,?4,'authors.txt',3,'write',?5,0,'ydoc',?6)", rusqlite::params![key.workspace_id, moment_id, key.version_id, key.object_id, sha, confirmed.to_string()])
+        tx.execute("INSERT INTO moments(workspace_id,moment_order,moment_id,version_id,object_id,path,recorded_at_ms,operation,after_content_kind,after_binary_sha256,before_present,metadata_origin,author_json) VALUES (?1,1,?2,?3,?4,'authors.txt',3,'write','binary',?5,0,'ydoc',?6)", rusqlite::params![key.workspace_id, moment_id, key.version_id, key.object_id, sha, confirmed.to_string()])
             .map_err(dohc_engine_storage::StorageError::persist_public)?;
         author_coverage::advance_in(tx, &key, true)?;
         tx.execute("UPDATE ydoc_docs SET settle_seq=1 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3", rusqlite::params![key.workspace_id, key.version_id, key.object_id])
