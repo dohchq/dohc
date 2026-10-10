@@ -135,5 +135,6 @@
   "document.draft.list",
   "file.observation.retry",
   "share.restore.pending.read",
-  "share.restore.pending.dismiss"
+  "share.restore.pending.dismiss",
+  "share.view.refresh"
 ]

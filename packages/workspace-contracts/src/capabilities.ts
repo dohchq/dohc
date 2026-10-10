@@ -37,6 +37,7 @@ export const CAPABILITIES = {
   "access.refresh": capability("Request paced observations when Sharing opens or Access expands.", {ipc: ["requestAccessRefresh"]}),
   "share.access.read": capability("Check the current user's received share access.", {ipc: ["checkSharedViewAccess"]}),
   "share.direct.writes.feedback": capability("Subscribe to and acknowledge shared-view write feedback.", {ipc: ["updateShareDirectWriteDelivery"]}),
+  "share.view.refresh": capability("Pull changes into a received share.", {ipc: ["refreshSharedView"]}),
   "share.capture.notice.dismiss": capability("Dismiss a received share's capture Notice.", {ipc: ["dismissShareCaptureNotice"]}),
   "share.restore.pending.read": capability("Read unfinished Stop and restore progress.", {ipc: ["pendingStopAndRestores"]}),
   "share.restore.pending.dismiss": capability("Dismiss unfinished Stop and restore progress.", {ipc: ["dismissStopAndRestore"]}),
