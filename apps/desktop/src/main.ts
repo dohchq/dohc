@@ -8,7 +8,7 @@ import {ownerShareLabels, refreshOwnerShareLabels, createOwnerShareLabelRefresh}
 import { describeAutomationDataset } from "./workspaces/automationDatasetDescription";
 import { invalidateDatasetAddresses } from "./workspaces/datasetAddress";
 import { createChatDispatchNotices } from "./agents/chatDispatchNotices";
-import { hasRetainedLiveDraft, removeLiveDraftCopies, preserveLiveDraft, preserveUnsentLiveDraft, removeWorkspaceLiveDrafts } from "./workspaces/liveDraftRecovery";
+import { hasRetainedLiveDraft, listLiveDraftRecovery, removeLiveDraftCopies, preserveLiveDraft, preserveUnsentLiveDraft, removeWorkspaceLiveDrafts } from "./workspaces/liveDraftRecovery";
 import { createPhysicalWorkspaceRemoval, createWorkspaceForget } from "./workspaces/physicalWorkspaceRemoval";
 import { createNamedDesktopLiveCapture } from "./workspaces/namedDesktopLive";
 import {
@@ -6342,10 +6342,14 @@ function registerIpcHandlers(): void {
   inspectNamedForCli = buttonsIpc.inspectNamed;
 
   registerOperations(operationBoundary, liveDraftRecoveryOperations, {
+    listLiveDraftRecovery: (input, {operation}) => {
+      operation.assertCurrent();
+      return listLiveDraftRecovery(join(stateDir(), "live-draft-recovery"), input.workspaceId);
+    },
     discardLiveDraftRecovery: async (input, {event, operation}) => {
       operation.assertCurrent();
       if (desktopWindows.workspaceWindows.allLive().some(window => window.webContents !== event.sender && rendererWorkspaceSessions.current(window.webContents)?.workspaceId === input.workspaceId)) throw new Error("Close the other window for this workspace, then dismiss this draft again.");
-      await removeLiveDraftCopies(join(stateDir(), "live-draft-recovery"), operation.workspace.workspaceId, input.objectId, input.snapshotSha256, Math.min(input.discardedAtMs, Date.now()));
+      return removeLiveDraftCopies(join(stateDir(), "live-draft-recovery"), operation.workspace.workspaceId, input.objectId, input.snapshotSha256, Math.min(input.discardedAtMs, Date.now()), input.path, input.recordId);
     },
   });
 

@@ -164,6 +164,7 @@ export const CAPABILITIES = {
   "data.query": capability("Query the local database.", {mcp: {owner: ["dohc_query_database"], view: ["dohc_query_database"], comment: ["dohc_query_database"], edit: ["dohc_query_database"]}}),
   "document.shared.admission.wait": capability("Wait until a shared document is ready for live editing.", {ipc: ["waitForEngineYDocAdmission"]}),
   "document.draft.discard": capability("Discard the recovery copy of a set-aside draft.", {ipc: ["discardLiveDraftRecovery"]}),
+  "document.draft.list": capability("Read saved live drafts for review.", {ipc: ["listLiveDraftRecovery"]}),
   "document.save.retry": capability("Try again to save an open document to its file.", {ipc: ["retryEngineYDocSave"]}),
 } as const;
 
