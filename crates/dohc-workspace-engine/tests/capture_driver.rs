@@ -2677,7 +2677,7 @@ async fn open_and_edited_document_settle_retry_a_huge_first_capture_transaction(
             if log > 6000 {
                 break;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
@@ -2742,7 +2742,7 @@ async fn open_and_edited_document_settle_retry_a_huge_first_capture_transaction(
                                 || error.message == "Workspace is still updating. Try again.",
                             "{error:?}"
                         );
-                        tokio::task::yield_now().await;
+                        tokio::time::sleep(Duration::from_millis(10)).await;
                     }
                 }
             }

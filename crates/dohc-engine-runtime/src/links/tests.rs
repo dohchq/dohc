@@ -50,6 +50,7 @@ fn open(path: &Path) -> EngineStore {
 }
 fn write(s: &mut EngineStore, object: &str, path: &str, text: &str, n: i64) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut refusals = 0;
     loop {
         let result = (|| {
             let mut v = VersionedTextStore::new(s);
@@ -74,12 +75,17 @@ fn write(s: &mut EngineStore, object: &str, path: &str, text: &str, n: i64) {
             .map(|_| ())
         })();
         match result {
-            Ok(()) => return,
+            Ok(()) => {
+                assert_eq!(refusals, 0, "unpinned links fixture refused a write");
+                return;
+            }
             Err(error) if error.code() == "file-locked" => {
+                refusals += 1;
                 assert!(
                     std::time::Instant::now() < deadline,
                     "fixture write never admitted"
                 );
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
             Err(error) => panic!("fixture write failed: {error}"),
         }

@@ -255,8 +255,9 @@ mod tests {
             })
             .unwrap();
     }
-    fn write_after_checkpoint(store: &mut EngineStore, n: i64, bytes: usize) {
+    fn write_after_checkpoint(store: &mut EngineStore, n: i64, bytes: usize) -> usize {
         let deadline = Instant::now() + Duration::from_secs(20);
+        let mut refusals = 0;
         loop {
             let result = store.write_with(&NoFaults, |tx| {
                 tx.execute(
@@ -267,9 +268,11 @@ mod tests {
                 Ok::<_, StorageError>(())
             });
             match result {
-                Ok(_) => return,
+                Ok(_) => return refusals,
                 Err(StorageError::FileLocked) => {
-                    assert!(Instant::now() < deadline, "checkpoint never admitted write")
+                    refusals += 1;
+                    assert!(Instant::now() < deadline, "checkpoint never admitted write");
+                    std::thread::sleep(Duration::from_millis(10));
                 }
                 Err(error) => panic!("write failed: {error}"),
             }
@@ -371,13 +374,21 @@ mod tests {
         let mut maximum = 0;
         let mut previous = 0;
         let mut resets = 0;
+        let mut refusals = 0;
         for n in 0..1600 {
-            write_after_checkpoint(&mut s, n % 64, 16 * 1024);
+            refusals += write_after_checkpoint(&mut s, n % 64, 16 * 1024);
             let log = s.read_with(frames).unwrap().0;
             maximum = maximum.max(log);
             resets += usize::from(log < previous);
             previous = log;
         }
+        // The 5 ms handoff can expire while the shared gate schedules I/O.
+        // Cap transient refusals at 0.5% of writes, including every retry.
+        eprintln!("STEADY_WRITES refusals={refusals}/1600 (bound=8)");
+        assert!(
+            refusals <= 8,
+            "steady writes exceeded refusal bound: {refusals}"
+        );
         assert!(resets > 0, "sustained writes never recycled WAL");
         assert!(
             maximum < 4 * WRITER_CHECKPOINT_FRAMES,
