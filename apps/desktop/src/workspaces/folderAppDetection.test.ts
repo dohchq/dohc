@@ -146,7 +146,7 @@ describe("bounded folder tracking and resync", () => {
     updated.mockClear();
     let retired = false;
     const retiring = service.retire(workspace.attachmentId).then(() => { retired = true; });
-    await Promise.resolve();
+    await new Promise(resolve => setImmediate(resolve));
     expect(retired).toBe(false);
     release(["evicted/index.html"]);
     await reading;
@@ -339,7 +339,7 @@ describe("queued and running background scans", () => {
       expect(sources.mock.calls.filter(([, folder]) => folder === "app")).toHaveLength(1);
       let retired = false;
       retiring = service.retire(workspace.attachmentId).then(() => { retired = true; });
-      await Promise.resolve();
+      await new Promise(resolve => setImmediate(resolve));
       expect(retired).toBe(false);
     } finally {
       release([]);
