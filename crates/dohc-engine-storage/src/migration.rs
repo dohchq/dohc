@@ -16,36 +16,6 @@
 //! crash mid-apply rolls back to the prior consistent state and the next open
 //! re-runs from the ledger.
 
-const V2_YDOC_FILE_EXPORT_LANE_DDL: &str = "
-ALTER TABLE ydoc_docs ADD COLUMN file_export_lane INTEGER NOT NULL DEFAULT 0 CHECK (file_export_lane IN (0,1,2,3));
-UPDATE ydoc_docs SET file_export_lane=1 WHERE lineage_claim_status='unclaimed' AND sharing_declined_json IS NOT NULL;
-DROP TRIGGER ydoc_sharing_declined_head;
-CREATE TRIGGER ydoc_sharing_declined_head AFTER UPDATE ON snapshots
-WHEN NEW.blob_sha256 IS NOT OLD.blob_sha256
-    OR (NEW.latest_moment_id IS NOT OLD.latest_moment_id AND NEW.metadata_origin='restore')
-BEGIN
-    UPDATE ydoc_docs SET sharing_declined_json=NULL
-    WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id
-        AND file_export_lane NOT IN (1,2) AND sharing_declined_json IS NOT NULL;
-END;
-DROP TRIGGER ydoc_sharing_declined_restore;
-CREATE TRIGGER ydoc_sharing_declined_restore AFTER INSERT ON live_restore_fences
-BEGIN
-    UPDATE ydoc_docs SET sharing_declined_json=NULL
-    WHERE workspace_id=NEW.workspace_id AND version_id=NEW.main_version_id AND object_id=NEW.object_id
-        AND file_export_lane NOT IN (1,2) AND sharing_declined_json IS NOT NULL;
-END;
-CREATE TRIGGER ydoc_file_export_claimed AFTER UPDATE OF lineage_claim_status ON ydoc_docs
-WHEN NEW.lineage_claim_status != 'unclaimed' AND NEW.file_export_lane != 0
-BEGIN
-    UPDATE ydoc_docs SET file_export_lane=0 WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id;
-END;
-CREATE TRIGGER ydoc_file_export_deleted AFTER DELETE ON snapshots
-BEGIN
-    UPDATE ydoc_docs SET file_export_lane=3 WHERE workspace_id=OLD.workspace_id AND version_id=OLD.version_id AND object_id=OLD.object_id AND file_export_lane IN (1,2);
-END;
-";
-
 use crate::error::StorageError;
 use crate::faults::{FaultInjector, FaultPoint};
 use crate::limits::{ENGINE_BUILD, ENGINE_SCHEMA_VERSION, ENGINE_STORAGE_PROTOCOL_VERSION};
@@ -2880,6 +2850,36 @@ CREATE TABLE live_settlement_attribution_unavailable (
 /// delete or rename the `v2-baseline` ledger row, because an older build
 /// recognizes a newer store only by that row and would otherwise offer
 /// Rebuild for it.
+const V2_YDOC_FILE_EXPORT_LANE_DDL: &str = "
+ALTER TABLE ydoc_docs ADD COLUMN file_export_lane INTEGER NOT NULL DEFAULT 0 CHECK (file_export_lane IN (0,1,2,3));
+UPDATE ydoc_docs SET file_export_lane=1 WHERE lineage_claim_status='unclaimed' AND sharing_declined_json IS NOT NULL;
+DROP TRIGGER ydoc_sharing_declined_head;
+CREATE TRIGGER ydoc_sharing_declined_head AFTER UPDATE ON snapshots
+WHEN NEW.blob_sha256 IS NOT OLD.blob_sha256
+    OR (NEW.latest_moment_id IS NOT OLD.latest_moment_id AND NEW.metadata_origin='restore')
+BEGIN
+    UPDATE ydoc_docs SET sharing_declined_json=NULL
+    WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id
+        AND file_export_lane NOT IN (1,2) AND sharing_declined_json IS NOT NULL;
+END;
+DROP TRIGGER ydoc_sharing_declined_restore;
+CREATE TRIGGER ydoc_sharing_declined_restore AFTER INSERT ON live_restore_fences
+BEGIN
+    UPDATE ydoc_docs SET sharing_declined_json=NULL
+    WHERE workspace_id=NEW.workspace_id AND version_id=NEW.main_version_id AND object_id=NEW.object_id
+        AND file_export_lane NOT IN (1,2) AND sharing_declined_json IS NOT NULL;
+END;
+CREATE TRIGGER ydoc_file_export_claimed AFTER UPDATE OF lineage_claim_status ON ydoc_docs
+WHEN NEW.lineage_claim_status != 'unclaimed' AND NEW.file_export_lane != 0
+BEGIN
+    UPDATE ydoc_docs SET file_export_lane=0 WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id;
+END;
+CREATE TRIGGER ydoc_file_export_deleted AFTER DELETE ON snapshots
+BEGIN
+    UPDATE ydoc_docs SET file_export_lane=3 WHERE workspace_id=OLD.workspace_id AND version_id=OLD.version_id AND object_id=OLD.object_id AND file_export_lane IN (1,2);
+END;
+";
+
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     Migration {
         ordinal: 0,

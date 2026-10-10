@@ -220,8 +220,6 @@ fn backfill_moments_and_conflict_bundles(
     backfill_moments_between(tx, workspace_id, after_moment_order, None)
 }
 
-// Unary + removes the correlated keys' TEXT affinity, allowing SQLite to
-// use all columns of the JSON expression indexes.
 macro_rules! head_export_exclusions_sql {
     () => {
         "                     AND NOT EXISTS (SELECT 1 FROM live_device_application_bindings b \
@@ -248,6 +246,8 @@ macro_rules! head_export_exclusions_sql {
     };
 }
 
+// Unary + removes the correlated keys' TEXT affinity, allowing SQLite to
+// use all columns of the JSON expression indexes.
 const COVERED_HEADS_SQL: &str = concat!(
     "SELECT s.latest_moment_id,s.version_id,s.object_id,s.blob_sha256,d.content_kind, \
                      d.head_update_seq,d.head_snapshot_seq,d.lineage_claim_id FROM snapshots s JOIN ydoc_docs d \
