@@ -56,6 +56,7 @@ const PARTS = [
   "title-bar-status",
   "capture-recovery",
   "about",
+  "apps-shelf",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an
 // hour past it, so the real time that passes between installing and

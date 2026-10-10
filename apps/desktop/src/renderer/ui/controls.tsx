@@ -1,6 +1,6 @@
 import { forwardRef } from "react";
 import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode } from "react";
-import type { LucideIcon } from "lucide-react";
+import { TriangleAlert, type LucideIcon } from "lucide-react";
 import { DohcMark } from "@dohc/brand";
 
 // The dohc control primitives — the canonical implementations of the recipes
@@ -180,6 +180,20 @@ export function EmptyState({
         {hint ? <span className="text-[11px] text-subtle">{hint}</span> : null}
       </div>
       {children}
+    </div>
+  );
+}
+
+/** A list or section whose read failed. Its words are in the toast and its
+ * Notices row, reported through the shell's error hook; here the mark says it
+ * failed and Try again reads again. */
+export function RetryRow(props: { testId: string; onRetry: () => void }) {
+  return (
+    <div data-testid={props.testId} className="flex items-center gap-2 px-2 py-1">
+      <TriangleAlert size={12} aria-hidden className="shrink-0 text-danger" />
+      <SecondaryButton size="compact" onClick={props.onRetry}>
+        Try again
+      </SecondaryButton>
     </div>
   );
 }

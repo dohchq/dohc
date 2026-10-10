@@ -2,7 +2,6 @@ import type { AccessAnswer } from "@dohc/workspace-contracts/access";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
 import {
-  AppWindow,
   ChevronDown,
   ChevronRight,
   CloudOff,
@@ -16,7 +15,6 @@ import {
   MessageSquare,
   Pencil,
   Share2,
-  TriangleAlert,
   type LucideIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
@@ -25,8 +23,8 @@ import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import { basenameOf } from "../path";
 import { formatChatTime, formatShortTime } from "../time";
-import { SecondaryButton } from "../ui/controls";
-import { KindGlyph } from "../ui/KindGlyph";
+import { RetryRow, SecondaryButton } from "../ui/controls";
+import { AppGlyph, KindGlyph } from "../ui/KindGlyph";
 import { SkeletonLines } from "../ui/SkeletonRows";
 import { StateMark } from "../ui/StateMark";
 import { ChatAvatar } from "./ChatAvatar";
@@ -172,19 +170,6 @@ export function AboutNote(props: {
           {props.action.label}
         </SecondaryButton>
       ) : null}
-    </div>
-  );
-}
-
-// A section whose read failed. Its words are in the toast and its Notices
-// row; here the mark says it failed and Try again reads again.
-export function AboutRetry(props: { testId: string; onRetry: () => void }) {
-  return (
-    <div data-testid={props.testId} className="flex items-center gap-2 px-2 py-1">
-      <TriangleAlert size={12} aria-hidden className="shrink-0 text-danger" />
-      <SecondaryButton size="compact" onClick={props.onRetry}>
-        Try again
-      </SecondaryButton>
     </div>
   );
 }
@@ -374,7 +359,7 @@ export function AboutHistoryView(props: {
       {view.status === "loading" ? (
         <SkeletonLines rows={2} className="px-2 py-1" />
       ) : view.status === "failed" ? (
-        <AboutRetry testId="about-history-failed" onRetry={view.retry} />
+        <RetryRow testId="about-history-failed" onRetry={view.retry} />
       ) : view.status === "untracked" ? (
         <AboutNote testId="about-history-untracked">History does not track this file yet.</AboutNote>
       ) : view.status === "held" ? (
@@ -463,7 +448,7 @@ function AccessRowView(props: { row: AccessRow }) {
         {row.appId === null ? (
           <ChatAvatar name={row.principal} kind="human" size="strip" />
         ) : (
-          <AppWindow size={14} aria-hidden className="shrink-0 text-subtle" />
+          <AppGlyph size={14} className="text-subtle" />
         )}
         <span className="min-w-0 flex-1 truncate">{row.principal}</span>
       </div>
@@ -661,7 +646,7 @@ export function AboutAccessView(props: {
       {view.status === "loading" ? (
         <SkeletonLines rows={2} className="px-2 py-1" />
       ) : view.status === "failed" ? (
-        <AboutRetry testId="about-access-failed" onRetry={props.onRetry} />
+        <RetryRow testId="about-access-failed" onRetry={props.onRetry} />
       ) : (
         <div
           data-testid="about-access-answer"

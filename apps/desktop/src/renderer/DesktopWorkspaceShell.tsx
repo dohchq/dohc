@@ -5059,6 +5059,8 @@ export function DesktopWorkspaceShell(props: {
             openSearchResult={openSearchResult}
             workspaceId={workspaceId}
             activeDocumentPath={activeDocumentPath}
+            focusedTabPath={focusedTabPath}
+            appsNotices={aboutNotices}
             graphKey={graphKey}
             openPathWithHeading={openPathWithHeading}
             openGraphChatThread={openGraphChatThread}
