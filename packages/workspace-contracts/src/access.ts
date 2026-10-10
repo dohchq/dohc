@@ -26,6 +26,7 @@ export const AccessShareRow = z.object({
   selector: Selector.nullable(), access: z.enum(["view", "comment", "edit", "read-only", "read-write"]).nullable(),
   status: z.enum(["active", "revoked", "removed", "damaged"]), generation: z.number().int().positive().nullable(),
   fileScope: z.enum(["served", "not-served"]).optional(),
+  removalMessage: z.string().min(1).max(500).optional(),
 });
 export type AccessShareRow = z.infer<typeof AccessShareRow>;
 export const AccessCollectionRow = z.object({

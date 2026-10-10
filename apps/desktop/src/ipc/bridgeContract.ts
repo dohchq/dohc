@@ -1,4 +1,6 @@
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
+import { shareCopyOperations } from "./shareCopyOperations";
+export type { ShareCopyInput, ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
 import { accessOperations } from "./accessOperations";
 import { SaveStateSchema } from "@dohc/workspace-contracts/save-state-schema";
 import { nameByteLength } from "@dohc/workspace-contracts/names";
@@ -6515,7 +6517,8 @@ export const LaunchMarksResult = z.object({
 export type LaunchMarksResult = z.infer<typeof LaunchMarksResult>;
 
 export interface DohcDesktopBridge
-  extends OperationBridge<typeof accessOperations>,
+  extends OperationBridge<typeof shareCopyOperations>,
+    OperationBridge<typeof accessOperations>,
     OperationBridge<typeof workspaceVersionOperations>,
     OperationBridge<typeof captureRecoveryOperations>,
     OperationBridge<typeof workspaceSearchOperations>,

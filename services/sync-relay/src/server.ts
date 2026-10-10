@@ -479,6 +479,7 @@ export function createSyncRelayHandler({
     receivedShareSummary,
     independentGrantSummary,
     linkInventorySummary,
+    namedBrowserInvitation,
     publicEditRelease,
     shareSenderLabel,
   );
@@ -860,7 +861,7 @@ export function createSyncRelayHandler({
         return await respondToWorkspaceRegistration(request, actor);
       }
 
-      if (route.route === "shares-list" || route.route === "share" || route.route === "share-access") {
+      if (route.route === "shares-list" || route.route === "share" || route.route === "share-access" || route.route === "share-copy") {
         return await respondToShareInventory(request, route, actor);
       }
 

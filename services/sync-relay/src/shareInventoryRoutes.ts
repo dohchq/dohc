@@ -1,3 +1,5 @@
+import { readCurrentShareGrant } from "./storage/currentShareGrant";
+import { RelayShareCopyResult } from "@dohc/workspace-contracts/share-copy";
 import {normalizeShareLabel} from "@dohc/security-contract/share-labels";
 import {parseWorkspaceId, readJsonObject} from "./requestInputs";
 import { jsonResponse, TokenBucketLimiter } from "@dohc/service-http";
@@ -5,11 +7,12 @@ import type {PublicEditRelease} from "@dohc/security-contract";
 import { badRequest, notFound, relayError } from "./errors";
 import { cursorCodec } from "./requestInputs";
 import { resolveReceivedShareAuthority, selectorTargetsBlockedChannel, type AuthorizedShareAction } from "./shareAuthorization";
-import { fileSideOf, parseStoredAnyShareSelectorJson } from "./shareFilter";
+import { effectiveShareSelector, fileSideOf, parseStoredAnyShareSelectorJson } from "./shareFilter";
 import type { createShareSummaries } from "./shareSummaries";
 import type { SyncRelayGrantedInventoryCursor, SyncRelayReceivedInventoryCursor, SyncRelayIndependentGrantInventoryCursor, SyncRelayLinkInventoryCursor, SyncRelayShareWithGrantRow, SyncRelayStorage } from "./storage";
 
 export type ShareInventoryRoute =
+  | { route: "share-copy"; workspaceId: string; shareId: string; grantId: string }
   | { route: "shares-list" }
   | { route: "share-access"; shareId: string }
   | { route: "share"; shareId: string };
@@ -39,6 +42,7 @@ export function createShareInventoryRoutes(
   receivedShareSummary: ReturnType<typeof createShareSummaries>["receivedShareSummary"],
   independentGrantSummary: ReturnType<typeof createShareSummaries>["independentGrantSummary"],
   linkInventorySummary: ReturnType<typeof createShareSummaries>["linkInventorySummary"],
+  namedBrowserInvitation: ReturnType<typeof createShareSummaries>["namedBrowserInvitation"],
   publicEditRelease?: PublicEditRelease,
   senderLabel?: (userId: string, email: string | null) => Promise<string>,
   accessRateLimiter = new TokenBucketLimiter(30, 1, 10_000),
@@ -65,6 +69,23 @@ export function createShareInventoryRoutes(
     route: ShareInventoryRoute,
     actor: { userId: string },
   ): Promise<Response> {
+    if (route.route === "share-copy") {
+      if (request.method !== "GET") throw relayError("method_not_allowed");
+      const share = storage.getShare(route.shareId);
+      const grant = storage.getShareGrant(route.grantId);
+      if (!share || share.workspaceId !== route.workspaceId || share.granterUserId !== actor.userId ||
+          !storage.workspaceIsOwnedBy(route.workspaceId, actor.userId) || !grant || grant.shareId !== share.shareId ||
+          (grant.principalKind !== "user" && grant.principalKind !== "email")) throw notFound();
+      const coordinates = { workspaceId: share.workspaceId, shareId: share.shareId, grantId: grant.grantId };
+      const ended = readCurrentShareGrant(storage, { grantId: grant.grantId }) === null;
+      const selector = parseStoredAnyShareSelectorJson(share.selectorJson);
+      if (!ended && (!selector || !effectiveShareSelector(selector, grant.access))) throw notFound();
+      const result = ended ? { ...coordinates, status: "ended" as const } : {
+        ...coordinates, status: "active" as const,
+        ...(selector && grant.parentGrantId === null ? namedBrowserInvitation(grant.grantId, selector, grant.access) : {}),
+      };
+      return jsonResponse(RelayShareCopyResult.parse(result), 200, { "cache-control": "private, no-store" });
+    }
     if (route.route === "share-access") {
       if (request.method !== "GET") throw relayError("method_not_allowed");
       if (!accessRateLimiter.allow(actor.userId, nowMs())) throw relayError("share_access_rate_limited");
