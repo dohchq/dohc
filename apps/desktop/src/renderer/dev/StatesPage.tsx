@@ -455,7 +455,7 @@ const SHARING_UNKNOWN: Partial<AccessAnswer> = {
   freshness: "unknown",
 };
 const SHARING_MOUNTS = [{ shareId: "in-funnel", label: "funnel", granterEmail: "sam@hollis.studio", access: "view" as const }];
-const SHARING_WAITING = new Map([["share-plan", { count: 2, oldestProposalId: "proposal-1" }]]);
+const SHARING_WAITING = new Map([["share-plan", { count: 2, senders: ["sam@hollis.studio"], oldestProposalId: "proposal-1" }]]);
 const SHARING_ACTIONS: SharingActions = {
   retry: noop, more: noop, reviewChanges: noop, startEnd: noop, cancelEnd: noop, end: noop, mount: noop, unmount: noop, reviewConflicts: noop,
 };

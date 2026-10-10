@@ -39,7 +39,7 @@ import { ChatAvatar } from "./ChatAvatar";
 export type SharingLane = "granted" | "received";
 export type ShareMount = NonNullable<WorkspaceSummary["shareMounts"]>[number];
 export type ShareGroup = { shareId: string; rows: AccessShareRow[] };
-export type WaitingChanges = { count: number; oldestProposalId: string };
+export type WaitingChanges = { count: number; senders: string[]; oldestProposalId: string };
 
 const LANE = {
   granted: {
@@ -72,14 +72,17 @@ export function groupShares(rows: AccessAnswer["rows"]): ShareGroup[] {
   return groups;
 }
 
-/** Changes waiting per share: how many, and the oldest, which Review opens. */
+/** Changes waiting per share: how many, who sent them, and the oldest, which Review opens. */
 export function waitingByShare(proposals: readonly ShareProposalRow[]): Map<string, WaitingChanges> {
   const waiting = new Map<string, WaitingChanges & { at: number }>();
   for (const proposal of proposals) {
     const seen = waiting.get(proposal.shareId);
     const older = !seen || proposal.createdAtMs < seen.at;
+    // The relay may not know who sent a change; it stays counted.
+    const sender = proposal.proposedByEmail ?? "someone";
     waiting.set(proposal.shareId, {
       count: (seen?.count ?? 0) + 1,
+      senders: seen?.senders.includes(sender) ? seen.senders : [...(seen?.senders ?? []), sender],
       oldestProposalId: older ? proposal.proposalId : seen.oldestProposalId,
       at: older ? proposal.createdAtMs : seen.at,
     });
@@ -135,10 +138,12 @@ function liveGrant(group: ShareGroup): AccessShareRow {
 function recipientNames(group: ShareGroup): string[] {
   return [...new Set(group.rows.filter((row) => row.status === "active").map(recipientOf))];
 }
-function recipientsOf(group: ShareGroup): string {
-  const names = recipientNames(group);
+function namesOf(names: readonly string[], none: string): string {
   if (names.length > 3) return `${names.length} people`;
-  return names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : names[0] ?? "the recipient";
+  return names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : names[0] ?? none;
+}
+function recipientsOf(group: ShareGroup): string {
+  return namesOf(recipientNames(group), "the recipient");
 }
 
 // Settings ends a share it lists: a path or version share named to people.
@@ -149,13 +154,16 @@ function endable(group: ShareGroup): boolean {
     && group.rows.some((row) => row.status === "active");
 }
 
+// The plain question names who loses the share; with changes waiting, it
+// names who sent them.
 function endConfirmWords(group: ShareGroup, waiting: WaitingChanges | undefined): string {
-  const who = recipientsOf(group);
   if (!waiting) {
+    const who = recipientsOf(group);
     return recipientNames(group).length > 1
       ? `End this share? ${who} keep read-only copies and stop receiving updates.`
       : `End this share? ${who} keeps a read-only copy and stops receiving updates.`;
   }
+  const who = namesOf(waiting.senders, "someone");
   return waiting.count === 1
     ? `End this share and decline 1 change ${who} sent? Undo restores the share, not the declined change.`
     : `End this share and decline ${waiting.count} changes ${who} sent? Undo restores the share, not the declined changes.`;
@@ -504,6 +512,8 @@ export function SharingView(props: {
   onMounted: () => void;
   onUnmount: (path: string) => Promise<void>;
   shareRemovals: ShareRemovalNotices;
+  // Counts the shell's share removals and Undos.
+  sharesRevision: number;
   reportError: (fallback: string, error: unknown, retry: () => void) => void;
 }) {
   const { workspaceId, context } = props;
@@ -537,6 +547,14 @@ export function SharingView(props: {
       cancelReceived();
     };
   }, [cancelGranted, cancelReceived, connection, loadGranted, loadReceived, props.shareView, refresh]);
+  // A share ended or came back while the view was open, from any surface or
+  // from a Notices Try again or Undo.
+  const readRevision = useRef(props.sharesRevision);
+  useEffect(() => {
+    if (readRevision.current === props.sharesRevision) return;
+    readRevision.current = props.sharesRevision;
+    if (!props.shareView) void loadGranted({ refreshed: refresh() });
+  }, [loadGranted, props.shareView, props.sharesRevision, refresh]);
 
   const setupFor = useCallback(
     (lane: SharingLane): AccessSetup => ({ reason: accessReasonForLane(facts, lane), openSyncSettings, connect }),
@@ -553,19 +571,15 @@ export function SharingView(props: {
     setBusyShareId(group.shareId);
     try {
       const result = await bridge().revokeRelayShare({ shareId: group.shareId });
+      // The shell counts the removal and its Undo; the open view reads again then.
       props.shareRemovals.removed({
         workspaceId,
         shareId: group.shareId,
         undo: result.undo,
         message: result.undo ? `Ended ${subject}.` : `${subject[0]!.toUpperCase()}${subject.slice(1)} has already ended.`,
         restoredMessage: `Restored ${subject}.`,
-        restored: () => {
-          if (epoch.isCurrent(token)) void loadGranted({ refreshed: refresh() });
-        },
       });
-      if (!epoch.isCurrent(token)) return;
-      setConfirmShareId(null);
-      void loadGranted({ refreshed: refresh() });
+      if (epoch.isCurrent(token)) setConfirmShareId(null);
     } catch (cause) {
       props.shareRemovals.failed({ workspaceId, message: `dohc could not end ${subject}.`, cause, retry: () => void end(group) });
     } finally {

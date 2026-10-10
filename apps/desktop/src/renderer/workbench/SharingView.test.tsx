@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useMemo, useReducer } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import type { ShareProposalRow } from "../../ipc/bridgeContract";
@@ -84,12 +85,24 @@ function answerWith(answers: Partial<Record<Lane, AccessAnswer | Error>>) {
   });
 }
 
+// Stands in for the shell: its removal notices count each removal, and the
+// count outlives the view, which `open` closes and reopens.
 function View(props: {
   workspaceId?: string; facts?: AccessFacts; shareView?: boolean; conflictCount?: number | null;
-  proposals?: ShareProposalRow[]; mounts?: ShareMount[];
+  proposals?: ShareProposalRow[]; mounts?: ShareMount[]; open?: boolean;
 }) {
+  const [sharesRevision, sharesChanged] = useReducer((revision: number) => revision + 1, 0);
+  const removals = useMemo(() => ({
+    removed: (removal: Parameters<typeof shareRemovals.removed>[0]) => {
+      shareRemovals.removed(removal);
+      sharesChanged();
+    },
+    failed: shareRemovals.failed,
+  }), []);
+  if (props.open === false) return null;
   return (
     <SharingView
+      sharesRevision={sharesRevision}
       workspaceId={props.workspaceId ?? "workspace-a"}
       shareView={props.shareView ?? false}
       context={contextFor(props.facts ?? SYNCED)}
@@ -101,7 +114,7 @@ function View(props: {
       mounts={props.mounts ?? []}
       onMounted={callbacks.onMounted}
       onUnmount={callbacks.onUnmount}
-      shareRemovals={shareRemovals}
+      shareRemovals={removals}
       reportError={callbacks.reportError}
     />
   );
@@ -310,6 +323,43 @@ describe("the actions Settings offers on a share", () => {
     const row = await screen.findByTestId("sharing-granted-row");
     await userEvent.click(within(await openMenu(row)).getByRole("menuitem", { name: "End share…" }));
     expect(screen.getByTestId("sharing-end-confirm").textContent).toContain("End this share? 4 people keep read-only copies");
+  });
+
+  it("names who sent the waiting changes, not everyone the share reaches", async () => {
+    answerWith({ granted: answer("granted", { rows: [granted(), granted({ grantId: "grant-2", recipientEmail: "nova@example.com" })] }) });
+    const proposals = [{ proposalId: "p-1", shareId: "share-1", proposedByEmail: "nova@example.com", createdAtMs: 1, ops: 1 }];
+    const { rerender } = render(<View proposals={proposals} />);
+    const row = await screen.findByTestId("sharing-granted-row");
+    await userEvent.click(within(await openMenu(row)).getByRole("menuitem", { name: "End share…" }));
+    expect(screen.getByTestId("sharing-end-confirm").textContent).toContain("End this share and decline 1 change nova@example.com sent?");
+
+    // Past three senders, the question counts them.
+    rerender(<View proposals={["a", "b", "c", "d"].map((name, index) =>
+      ({ proposalId: `p-${index}`, shareId: "share-1", proposedByEmail: `${name}@example.com`, createdAtMs: index, ops: 1 }))} />);
+    expect(screen.getByTestId("sharing-end-confirm").textContent).toContain("decline 4 changes 4 people sent?");
+  });
+
+  it("follows a Notices Try again that ends the share after the view closed and reopened", async () => {
+    let rows = [granted()];
+    bridgeMock.listSharingAccess.mockImplementation(async ({ lane }) => answer(lane, { rows: lane === "granted" ? rows : [] }));
+    bridgeMock.revokeRelayShare.mockRejectedValueOnce(new Error("relay down"));
+    const { rerender } = render(<View />);
+    const row = await screen.findByTestId("sharing-granted-row");
+    await userEvent.click(within(await openMenu(row)).getByRole("menuitem", { name: "End share…" }));
+    await userEvent.click(screen.getByTestId("sharing-end"));
+    await waitFor(() => expect(shareRemovals.failed).toHaveBeenCalledOnce());
+
+    rerender(<View open={false} />);
+    rerender(<View />);
+    await waitFor(() => expect(screen.getByTestId("sharing-granted-row").getAttribute("data-status")).toBe("active"));
+
+    // The relay answers this time, and the list now has the share ended.
+    rows = [granted({ status: "revoked", selector: null, access: null })];
+    bridgeMock.revokeRelayShare.mockResolvedValue({});
+    const retry = shareRemovals.failed.mock.calls[0]![0].retry!;
+    await act(async () => retry());
+    await waitFor(() => expect(screen.getByTestId("sharing-granted-row").getAttribute("data-status")).toBe("revoked"));
+    expect(shareRemovals.removed).toHaveBeenCalledOnce();
   });
 
   it("reports an End share that fails after the view closed", async () => {
