@@ -931,12 +931,15 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
     identity: {kind: "join", replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity}});
   await peer.sync();
   const imported = (await peer.request("moments.list", {limit: 100}, peer.workspace)).moments as unknown as Array<{momentId: string; authors?: unknown}>;
-  expect(imported.find(moment => moment.momentId === recipientMoment.momentId)?.authors).toEqual(expect.arrayContaining(expectedAuthors));
+  // The peer stores the relay's admitted snapshot, so its people carry the relay's confirmation.
+  const confirmedAuthors = expectedAuthors.map(author => ({...author, relayConfirmed: true}));
+  expect(imported.find(moment => moment.momentId === recipientMoment.momentId)?.authors).toEqual(expect.arrayContaining(confirmedAuthors));
   const peerHistory = new VersionedLiveAdapter(peer.client, peer.workspace, {workspaceId: WORKSPACE});
   expect(await peerHistory.getMoment({workspaceId: WORKSPACE, momentId: recipientMoment.momentId}))
-    .toMatchObject({syncRecordOnly: true, authors: expect.arrayContaining(expectedAuthors)});
+    .toMatchObject({syncRecordOnly: true, authors: expect.arrayContaining(confirmedAuthors)});
+  // The owner's copy gains the same confirmation once the relay accepts the settlement.
   expect((await moments()).find(moment => moment.momentId === recipientMoment.momentId)?.authors)
-    .toEqual(recipientMoment.authors);
+    .toEqual((recipientMoment.authors as Array<Record<string, unknown>>).map(author => ({...author, relayConfirmed: true})));
   expect(await readFile(join(peer.root, "Tasks/one.md"), "utf8")).toContain("RecipientNote: Keep this text");
   await session.close({settle: false});
   const restore = async (side: typeof owner) => {
