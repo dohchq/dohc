@@ -10,7 +10,7 @@ const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {for (const close of cleanup.splice(0).reverse()) await close();});
 const key = new Uint8Array(32).fill(17), namespace = "service-provenance-test";
 
-async function fixture(provenance?: "native-settlements") {
+async function fixture() {
   const f = await ticketFixture(); cleanup.push(f.close);
   f.storage.claimWorkspaceIdentity({workspaceId: scope.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream"});
   f.raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_seq) VALUES (?,'owner',0,'moment.append','{}',1,1)").run(scope.workspaceId);
@@ -18,7 +18,7 @@ async function fixture(provenance?: "native-settlements") {
   const enrollment = f.storage.enrollServiceHostDocument({workspaceId: scope.workspaceId, ownerUserId: "owner-1", shareId: scope.shareId,
     path: binding.currentPath, nowMs: 10, guard() {}});
   const bearer = deriveServiceHostBearer(enrollment, {key, namespace});
-  const handle = createServiceHostReplication({storage: f.storage, prefix: "dohc-service-v1.", provenance,
+  const handle = createServiceHostReplication({storage: f.storage, prefix: "dohc-service-v1.",
     authorize: input => authorizeServiceHostReplication(f.storage, {key, namespace, ...input})});
   const post = (ops: unknown[], originId = "native-service") => handle(new Request(`https://relay.test/sync/${scope.workspaceId}/log`, {
     method: "POST", headers: {authorization: `Bearer ${bearer}`, "content-type": "application/json"},
@@ -28,7 +28,7 @@ async function fixture(provenance?: "native-settlements") {
 }
 
 it("publishes the native mixed batch beyond its cursor while refusing unproved authors", async () => {
-  const f = await fixture("native-settlements");
+  const f = await fixture();
   f.storage.appendLogBatch({workspaceId: scope.workspaceId, originId: "native-service", ops: [0, 1, 2].map(originSeq => parseLogOp({
     originSeq, opKind: "moment.append", recordedAtMs: 1, payload: {},
   }))});
@@ -53,25 +53,8 @@ it("publishes the native mixed batch beyond its cursor while refusing unproved a
   }
 });
 
-it("consumes unproved authored settlements on the client route without granting attribution", async () => {
-  const f = await fixture();
-  f.storage.appendLogBatch({workspaceId: scope.workspaceId, originId: "native-service", ops: [0, 1, 2].map(originSeq => parseLogOp({originSeq, opKind: "moment.append", recordedAtMs: 1, payload: {}}))});
-  for (const op of nativeAuthoredSettlement) {
-    for (const sha256 of referencedBlobShas(op.opKind, JSON.stringify(op.payload), {workspaceId: scope.workspaceId, recordedAtMs: op.recordedAtMs})) {
-      f.storage.putBlob({workspaceId: scope.workspaceId, sha256, content: new Uint8Array([0]), createdAtMs: 1});
-    }
-  }
-  const response = await f.post(nativeAuthoredSettlement);
-  expect(response.status).toBe(200);
-  expect(await response.json()).toMatchObject({currentMaxOriginSeq: 12});
-  for (const op of nativeAuthoredSettlement.filter(op => op.opKind === "moment.append")) {
-    const row = f.storage.fetchLogCoordinate({workspaceId: scope.workspaceId, originId: "native-service", originSeq: op.originSeq});
-    expect(JSON.parse(row!.payloadJson)).not.toHaveProperty("authors");
-  }
-});
-
 it("refuses unproved mixed service authors without stalling the next coordinate", async () => {
-  const f = await fixture("native-settlements");
+  const f = await fixture();
   const authors = [
     {kind: "human", humanId: "recipient", humanName: "Recipient"},
     {kind: "link", publicPrincipalId: "public-link", label: "Link editor"},
@@ -95,7 +78,7 @@ it("refuses unproved mixed service authors without stalling the next coordinate"
 });
 
 it("keeps chat validation and origin reservations on the trusted service route", async () => {
-  const f = await fixture("native-settlements");
+  const f = await fixture();
   for (const origin of ["relay:share-member:grant", "relay:collection-create:grant", "relay:collection-file:grant"]) {
     const response = await f.post([], origin);
     expect(response.status).toBe(400);

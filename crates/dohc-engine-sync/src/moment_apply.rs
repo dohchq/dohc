@@ -683,7 +683,7 @@ fn apply_moment_append(
         });
     }
 
-    let mut owner_settlement_committed = false;
+    let mut owner_settlement = None;
     if mode == MomentApplyMode::Ordinary {
         let key = DocKey::new(
             &envelope.workspace_id,
@@ -777,7 +777,7 @@ fn apply_moment_append(
             // predecessor may be history-only and was never materialized.
             head_fast_forward = false;
             content_fast_forward = true;
-            owner_settlement_committed = true;
+            owner_settlement = Some(owner);
         }
     }
 
@@ -927,7 +927,7 @@ fn apply_moment_append(
         upsert_snapshot(tx, &envelope.workspace_id, payload, after_kind, byte_length)?;
         // The audited host settlement is now this owner's committed head.
         // Complete its matching binding even while the editor retains its lease.
-        if owner_settlement_committed
+        if owner_settlement.is_some()
             && !dohc_engine_domain::collection_record_id_mismatch_in_tx(
                 tx,
                 &envelope.workspace_id,
@@ -972,22 +972,50 @@ fn apply_moment_append(
             // write is a suppressed self-write, so no capture apply indexes
             // it later: a bound record's index must ride this transaction.
             if let Some(text) = after_text.as_deref() {
-                // Moment-only edits diff the prior file snapshot. Audited owner
-                // settlements use the field index the live feed has advanced.
+                // Moment-only edits diff the prior file snapshot. Owner
+                // settlements preserve the visible draft over the checkpoint.
                 // Unparseable frontmatter must still clear the index.
                 let empty = || serde_json::Value::Object(serde_json::Map::new());
-                let before_frontmatter = if owner_settlement_committed {
-                    // Accepted frames advance the field index before the file.
-                    // Diff that index so only changes not indexed by the feed
-                    // (such as an enrolled restore checkpoint) get history.
-                    dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
+                let (mut frontmatter, provenance) =
+                    dohc_engine_domain::collections::markdown_frontmatter_json_with_provenance(
+                        text,
+                    )
+                    .unwrap_or_else(|| (empty(), Default::default()));
+                let before_frontmatter = if let Some(owner) = &owner_settlement {
+                    // The index follows the visible draft, including pending
+                    // edits that this settled checkpoint does not contain.
+                    let indexed = dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
                         tx,
                         &envelope.workspace_id,
                         &payload.version_id,
                         &payload.object_id,
                     )
-                    .map_err(crate::ydoc_apply::map_domain_hard_error)?
-                    .unwrap_or_else(empty)
+                    .map_err(crate::ydoc_apply::map_domain_hard_error)?;
+                    if let Some(indexed_fields) =
+                        indexed.as_ref().filter(|_| owner.pending_bytes > 0)
+                    {
+                        let key = DocKey::new(
+                            &envelope.workspace_id,
+                            &payload.version_id,
+                            &payload.object_id,
+                        )
+                        .map_err(SyncError::corrupt)?;
+                        let visible = dohc_engine_collab::load_doc_in(tx, &key)
+                            .map_err(SyncError::corrupt)?;
+                        frontmatter = match dohc_engine_collab::owner_outbox::draft::apply_pending_to_checkpoint_in(
+                            tx,
+                            &owner.binding,
+                            &visible,
+                        ) {
+                            Ok(()) => visible.frontmatter_json(),
+                            Err(dohc_engine_collab::OwnerOutboxError::Storage(error)) => {
+                                return Err(error.into());
+                            }
+                            // Replay-state errors must not invent an indexed change.
+                            Err(_) => indexed_fields.clone(),
+                        };
+                    }
+                    indexed.unwrap_or_else(empty)
                 } else {
                     local
                         .as_ref()
@@ -999,11 +1027,6 @@ fn apply_moment_append(
                         })
                         .unwrap_or_else(empty)
                 };
-                let (frontmatter, provenance) =
-                    dohc_engine_domain::collections::markdown_frontmatter_json_with_provenance(
-                        text,
-                    )
-                    .unwrap_or_else(|| (empty(), Default::default()));
                 record_facts = dohc_engine_domain::index_collection_frontmatter_apply_in_tx(
                     tx,
                     &envelope.workspace_id,

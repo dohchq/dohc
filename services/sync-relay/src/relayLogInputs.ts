@@ -1,5 +1,5 @@
 import { sha256Hex } from "@dohc/workspace-core/hash";
-import { MAX_LIVE_AUTHOR_BYTES, MAX_LIVE_AUTHOR_IDENTITIES, parseLiveAuthorContext, parseLiveAuthorSnapshot, type LiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
+import { parseLiveAuthorContext, parseLiveAuthorSnapshot, type LiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
 import { stableJsonStringify } from "./canonicalJson";
 import { badRequest, relayError } from "./errors";
 import { parseString } from "./requestInputs";
@@ -43,38 +43,6 @@ function assertUnreservedLogOrigin(originId: string): void {
   }
   if (originId.startsWith(COLLECTION_FILE_ORIGIN_PREFIX)) {
     throw badRequest("originId is reserved for relay collection file writes");
-  }
-}
-
-// A credential derived for the native service can publish the public authors
-// already recorded in its live settlements. Other moments keep client rules.
-export function assertServiceReplicaLogProvenance(originId: string, rawOps: unknown[], deferMomentRefusal = false): void {
-  assertUnreservedLogOrigin(originId);
-  for (const raw of rawOps) {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
-    const op = raw as Record<string, unknown>;
-    if (op.opKind !== "moment.append") continue;
-    const payload = op.payload as Record<string, unknown> | null;
-    if (deferMomentRefusal && payload && Object.hasOwn(payload, "settlementReference")) continue;
-    if (typeof payload?.momentId !== "string" || !/^moment-ydoc-[0-9a-f]{64}$/.test(payload.momentId)) {
-      assertClientLogProvenance(originId, [raw], deferMomentRefusal);
-      continue;
-    }
-    const authors = payload.authors;
-    if (authors == null) continue;
-    try {
-      if (!Array.isArray(authors) || authors.length === 0 || authors.length > MAX_LIVE_AUTHOR_IDENTITIES ||
-        Buffer.byteLength(JSON.stringify(authors), "utf8") > MAX_LIVE_AUTHOR_BYTES) throw new TypeError("Invalid settlement authors.");
-      // Settlement coverage combines many update snapshots, so it can exceed
-      // a single snapshot's two entries. Validate each public entry strictly.
-      for (const author of authors) {
-        if (author && typeof author === "object" && !Array.isArray(author)
-          && author.kind === "unattributed" && Object.keys(author).length === 1) continue;
-        parseLiveAuthorSnapshot([author]);
-      }
-    } catch {
-      throw relayError("authorship_mismatch");
-    }
   }
 }
 
@@ -141,7 +109,7 @@ export async function parseAuthenticatedLogOps(
     if (context?.kind !== "account" || context.accountId !== actorUserId) continue;
     ops[index]!.admittedAuthorSnapshot = parseLiveAuthorSnapshot([
       {kind: "human", humanId: actorUserId, humanName},
-      ...(context.agent ? [{kind: "agent", ...context.agent}] : []),
+      ...(context.agent ? [{kind: "agent", ...context.agent, onBehalfOf: actorUserId}] : []),
     ]);
   }
   return ops;

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { assertClientLogProvenance, assertServiceReplicaLogProvenance, namedShareOrigin, SHARE_MEMBER_ORIGIN_PREFIX, COLLECTION_CREATE_ORIGIN_PREFIX, COLLECTION_FILE_ORIGIN_PREFIX } from "./relayLogInputs";
+import { assertClientLogProvenance, namedShareOrigin, SHARE_MEMBER_ORIGIN_PREFIX, COLLECTION_CREATE_ORIGIN_PREFIX, COLLECTION_FILE_ORIGIN_PREFIX } from "./relayLogInputs";
 import { claimWorkspace, closeTestStorages, createShare, jsonBody, request, testHandler, testStorage } from "./testing";
 
 afterEach(closeTestStorages);
@@ -28,48 +28,6 @@ const publicLiveAuthors = [
   {kind: "unattributed"},
   {kind: "agent", agentId: "agent", agentName: "Agent", onBehalfOf: "owner", depth: 1},
 ];
-
-describe("native service settlement provenance", () => {
-  const moment = (authors: unknown, momentId: unknown = nativeMomentId) => [{opKind: "moment.append", payload: {momentId, authors}}];
-  it("preserves aggregate public live authors beyond one update snapshot", () => {
-    expect(() => assertServiceReplicaLogProvenance("native", moment(publicLiveAuthors))).not.toThrow();
-    expect(() => assertServiceReplicaLogProvenance("native", moment(null))).not.toThrow();
-  });
-  it("requires native settlement identities for human and public link authors", () => {
-    expect(() => assertServiceReplicaLogProvenance("native", [{opKind: "moment.append", payload: {authors: publicLiveAuthors}}])).toThrow();
-    for (const id of [null, "moment-local-write", `moment-ydoc-${"a".repeat(63)}`, `${nativeMomentId}x`, `moment-ydoc-${"A".repeat(64)}`]) {
-      expect(() => assertServiceReplicaLogProvenance("native", moment(publicLiveAuthors, id))).toThrow();
-    }
-  });
-  it("refuses private direct-write authors and malformed public entries in settlements", () => {
-    for (const author of [
-      ...RELAY_AUTHORS.slice(2),
-      {kind: "human", humanId: "recipient"},
-      {kind: "human", humanId: "recipient", humanName: "Recipient", grantId: "private"},
-      {kind: "link", publicPrincipalId: "public-link", label: "Link editor", principalId: "private"},
-      {kind: "link", publicPrincipalId: "", label: "Link editor"},
-      {kind: "agent", agentId: ""},
-      {kind: "unattributed", humanId: "forged"},
-      {kind: "agent", agentId: "agent", depth: 65},
-      {kind: "agent", agentId: "agent", grantId: "private"},
-      {kind: "automation", automationId: "collection:Tasks#stamp"},
-    ]) {
-      expect(() => assertServiceReplicaLogProvenance("native", moment([author]))).toThrow();
-      expect(() => assertServiceReplicaLogProvenance("native", moment([publicLiveAuthors[0], author]))).toThrow();
-    }
-    for (const authors of [[], {}, "human", Array(1025).fill(publicLiveAuthors[0]),
-      Array.from({length: 1024}, (_, i) => ({kind: "human", humanId: `human-${i}`, humanName: "n".repeat(200)}))]) {
-      expect(() => assertServiceReplicaLogProvenance("native", moment(authors))).toThrow();
-    }
-  });
-  it("retains origin reservations and ordinary agent and automation writes", () => {
-    for (const prefix of RELAY_ORIGIN_PREFIXES) {
-      expect(() => assertServiceReplicaLogProvenance(`${prefix}grant`, [])).toThrow();
-      expect(() => assertServiceReplicaLogProvenance(`${prefix}grant`, moment(publicLiveAuthors))).toThrow();
-    }
-    expect(() => assertServiceReplicaLogProvenance("native", moment([{kind: "automation", automationId: "stamp"}], "ordinary"))).not.toThrow();
-  });
-});
 
 describe("client log provenance", () => {
   it("does not acknowledge an altered retry as a refusal of an accepted moment", async () => {

@@ -11,6 +11,31 @@ import type { FormerEditor, ReachRoster, RosterGrant, RosterProblem } from "./au
 // check.
 const MAX_INVENTORY_PAGES = 50;
 
+const EndedHolder = z.object({
+  grantId: z.string().min(1).max(256), recipientUserId: z.string().min(1).max(256),
+  recipientEmail: z.string().min(1).max(320).nullable(), parentGrantId: z.string().min(1).max(256),
+});
+export type HistoryAccount = z.infer<typeof EndedHolder>;
+export type HistoryAccountIds = { grantIds: readonly string[]; userIds: readonly string[] };
+
+/** Owner-only History attribution, fetched separately from the reach roster. */
+export async function lookupHistoryAccounts(
+  workspaceId: string, get: (path: string) => Promise<{ status: number; body: unknown }>, ids: HistoryAccountIds,
+): Promise<HistoryAccount[] | null> {
+  if (ids.grantIds.length + ids.userIds.length === 0) return [];
+  if (ids.grantIds.length + ids.userIds.length > 200) return null;
+  const query = new URLSearchParams();
+  for (const id of ids.grantIds) query.append("historyGrantId", id);
+  for (const id of ids.userIds) query.append("historyUserId", id);
+  try {
+    const response = await get(`/sync/${encodeURIComponent(workspaceId)}/shares/links?${query}`);
+    if (response.status !== 200) return null;
+    const parsed = z.object({ holders: z.array(EndedHolder).max(200) }).safeParse(response.body);
+    if (!parsed.success || parsed.data.holders.some(holder => !ids.grantIds.includes(holder.grantId) && !ids.userIds.includes(holder.recipientUserId))) return null;
+    return parsed.data.holders;
+  } catch { return null; }
+}
+
 const ID = z.string().min(1).max(256);
 const PATHS = z.array(z.string().refine(isShareablePath)).max(MAX_SHARE_PATHS);
 const VERSION_ID = z.string().refine(isValidShareVersionId);
