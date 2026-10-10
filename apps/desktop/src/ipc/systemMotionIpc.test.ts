@@ -1,24 +1,25 @@
 import { expect, it, vi } from "vitest";
-import { CHANNELS } from "./channels";
-import { SystemReducedMotionResult } from "./bridgeContract";
+import { systemMotionOperations } from "./bridgeContract";
 import { registerSystemMotionIpc } from "./systemMotionIpc";
 
-it("checks the sender before reading the current native preference", () => {
-  let handle!: (trusted: boolean) => boolean;
+it("checks the sender and payload before reading and validating the native preference", async () => {
+  let handle!: (trusted: boolean, payload: unknown) => Promise<unknown>;
   const getAnimationSettings = vi.fn(() => ({ prefersReducedMotion: false }));
-  registerSystemMotionIpc<boolean>({
-    registerHandler(channel, handler) {
-      expect(channel).toBe(CHANNELS.getSystemReducedMotion);
+  registerSystemMotionIpc<boolean, never>({
+    handle(channel, handler) {
+      expect(channel).toBe(systemMotionOperations.getSystemReducedMotion.channel);
       handle = handler;
     },
     assertTrustedSender(trusted) { if (!trusted) throw new Error("Untrusted sender"); },
-    getAnimationSettings,
-  });
-  expect(() => handle(false)).toThrow("Untrusted sender");
+    withActiveWorkspace: vi.fn(() => { throw new Error("Device operation must not enter a workspace"); }),
+  }, getAnimationSettings);
+  await expect(handle(false, {})).rejects.toThrow("Untrusted sender");
   expect(getAnimationSettings).not.toHaveBeenCalled();
-  expect(handle(true)).toBe(false);
+  await expect(handle(true, null)).rejects.toThrow();
+  expect(getAnimationSettings).not.toHaveBeenCalled();
+  await expect(handle(true, {})).resolves.toBe(false);
   getAnimationSettings.mockReturnValue({ prefersReducedMotion: true });
-  expect(handle(true)).toBe(true);
-  expect(SystemReducedMotionResult.parse(true)).toBe(true);
-  expect(SystemReducedMotionResult.safeParse("true").success).toBe(false);
+  await expect(handle(true, {})).resolves.toBe(true);
+  getAnimationSettings.mockReturnValue({ prefersReducedMotion: "true" as never });
+  await expect(handle(true, {})).rejects.toThrow();
 });

@@ -26,7 +26,7 @@ export function initReducedMotion(): () => void {
     if (stopped || reading || !visible()) return;
     reading = true;
     try {
-      const reduced = await api.getSystemReducedMotion();
+      const reduced = await api.getSystemReducedMotion({});
       if (!stopped) document.documentElement.dataset.systemReducedMotion = String(reduced);
     } catch {
       // Keep the last native value, or the media query before the first read.

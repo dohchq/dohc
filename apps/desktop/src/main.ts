@@ -5743,11 +5743,7 @@ async function currentDiagnostics(): Promise<string> {
 }
 
 function registerIpcHandlers(): void {
-  registerSystemMotionIpc<IpcMainInvokeEvent>({
-    registerHandler: handleIpc,
-    assertTrustedSender,
-    getAnimationSettings: () => systemPreferences.getAnimationSettings(),
-  });
+  registerSystemMotionIpc(operationBoundary, () => systemPreferences.getAnimationSettings());
   shareDirectWriteDelivery.register(operationBoundary);
   const shareCopyHandler = createShareCopyHandler<WebContents, RegistryEntry, DesktopRendererWorkspaceOperation>({
     currentSession: sender => rendererWorkspaceSessions.current(sender) ?? null,

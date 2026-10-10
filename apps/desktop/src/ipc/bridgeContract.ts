@@ -6711,8 +6711,20 @@ export type LaunchMarksResult = z.infer<typeof LaunchMarksResult>;
 
 export const SystemReducedMotionResult = z.boolean();
 
+export const systemMotionOperations = {
+  getSystemReducedMotion: {
+    capabilityId: "device.motion.read",
+    scope: "device",
+    channel: "desktop:get-system-reduced-motion",
+    payload: z.object({}),
+    result: SystemReducedMotionResult,
+    guard: "trusted-sender",
+  },
+} as const satisfies OperationTable;
+
 export interface DohcDesktopBridge
   extends OperationBridge<typeof shareCopyOperations>,
+    OperationBridge<typeof systemMotionOperations>,
     OperationBridge<typeof accessOperations>,
     OperationBridge<typeof workspaceVersionOperations>,
     OperationBridge<typeof captureRecoveryOperations>,
@@ -6743,7 +6755,6 @@ export interface DohcDesktopBridge
   // Constant, not a call: the titlebar lays out around macOS traffic lights
   // on darwin vs the window-controls overlay everywhere else.
   platform: NodeJS.Platform;
-  getSystemReducedMotion(): Promise<boolean>;
   // Constant: which surface this window renders. "manager" is the workspace
   // manager window; "workspace" is an ordinary window. Read from the load
   // URL by the preload, never from the renderer.
