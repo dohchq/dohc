@@ -163,7 +163,7 @@ describe("usage record in Privacy", () => {
       "Counting: on",
       "Since 2026-09-12. Partly counted days: 1.",
       "Capability\tdohc\tCLI\tMCP\tAutomation\tLast used",
-      "version.create\t3\t1 (not counted now)\tnot counted\tnot counted\t2026-10-07",
+      "version.create\t3\t1 (not counted by this version)\tnot counted\tnot counted\t2026-10-07",
       "file.kept.save\t0\t2\t0\tnot counted\t2026-10-06",
       "chat.export\tnot counted\tnot counted\tnot counted\tnot counted\t",
       "version.try\t0\tnot counted\tnot counted\tnot counted\t",

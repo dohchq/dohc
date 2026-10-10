@@ -62,7 +62,7 @@ export function usageRecordText(record: Readable): string {
   const cell = (row: UsageRecordRow, door: Door) => {
     const { count, counted } = row.doors[door];
     if (counted) return String(count);
-    return count > 0 ? `${count} (not counted now)` : "not counted";
+    return count > 0 ? `${count} (not counted by this version)` : "not counted";
   };
   return [
     "dohc usage record",
