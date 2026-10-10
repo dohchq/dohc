@@ -4799,6 +4799,7 @@ export type OpenSharedViewResult = z.infer<typeof OpenSharedViewResult>;
 
 export const RefreshSharedViewPayload = z.object({
   workspaceId: WORKSPACE_ID,
+  trigger: z.enum(["manual", "background"]).optional(),
 });
 export type RefreshSharedViewPayload = z.infer<typeof RefreshSharedViewPayload>;
 
@@ -5284,6 +5285,7 @@ export type AutomationRunWaitingEvent = { workspaceId: string; claimId: string; 
 
 const RefreshSharedViewSuccessResult = z.object({
   ok: z.literal(true),
+  probed: z.literal(true).optional(),
   // "ended" means the granter revoked the share: the local view stays
   // readable but stops refreshing, and the UI says so honestly.
   status: z.enum(["updated", "unchanged", "ended"]),
@@ -5313,6 +5315,8 @@ const RefreshSharedViewSuccessResult = z.object({
 
 const RefreshSharedViewFailureResult = z.object({
   ok: z.literal(false),
+  probed: z.literal(true).optional(),
+  errorKind: z.enum(["unauthorized", "transient"]).optional(),
   // Capture runs before the pull. A failed pull can still leave repaired
   // projection files that the renderer must repaint.
   changedPaths: z.number().int().nonnegative(),
@@ -5335,6 +5339,13 @@ export type CheckSharedViewAccessResult = z.infer<typeof CheckSharedViewAccessRe
 
 // The handler owns its workspace operation so a stale check replies unverified.
 export const sharedViewAccessOperations = {
+  refreshSharedView: {
+    capabilityId: "share.view.refresh",
+    scope: "workspace",
+    handlerCheck: { check: "sharedViewsIpc.currentRendererSession/withRendererWorkspaceOperation", reason: "An unchanged probe checks the active session without opening the store. Full refreshes hold the workspace operation." },
+    channel: "desktop:refresh-shared-view",
+    payload: RefreshSharedViewPayload, result: RefreshSharedViewResult, guard: "trusted-sender",
+  },
   dismissShareCaptureNotice: {
     capabilityId: "share.capture.notice.dismiss",
     scope: "workspace",
@@ -6821,7 +6832,6 @@ export interface DohcDesktopBridge
   leaveSharedChannel(payload: LeaveSharedChannelPayload): Promise<void>;
   // Relay shares: receive side — read-only shared views.
   openSharedView(payload: OpenSharedViewPayload): Promise<OpenSharedViewResult>;
-  refreshSharedView(payload: RefreshSharedViewPayload): Promise<RefreshSharedViewResult>;
   dismissShareSkips(payload: DismissShareSkipsPayload): Promise<void>;
   // Collection automations, for the ⚡ panel.
   listCollectionAutomations(payload: ListCollectionAutomationsPayload): Promise<ListCollectionAutomationsResult>;

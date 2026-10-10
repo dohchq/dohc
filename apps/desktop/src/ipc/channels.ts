@@ -217,7 +217,6 @@ export const CHANNELS = {
   joinSharedChannel: "desktop:join-shared-channel",
   leaveSharedChannel: "desktop:leave-shared-channel",
   openSharedView: "desktop:open-shared-view",
-  refreshSharedView: "desktop:refresh-shared-view",
   dismissShareSkips: "desktop:dismiss-share-skips",
   // An automation claim failed or a retry queued one: run history reads again.
   automationRunsChanged: "desktop:automation-runs-changed",
