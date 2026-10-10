@@ -134,6 +134,7 @@ import {
   ShareHandoffStatus,
   crashReportOperations,
   reportingOperations,
+  usageRecordOperations,
   noticeOperations,
   scheduleHostOperations,
   chatDispatchNoticeOperations,
@@ -155,9 +156,10 @@ import { createRecordByHand, desktopRecordEditContext, type DesktopRecordEditHos
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
 import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
 import { registerOperations, type OperationBoundary } from "./ipc/operationTable";
-import { createUsageStore } from "./usage/usageStore";
+import { createUsageStore, USAGE_SNAPSHOT_NAME } from "./usage/usageStore";
 import { createRendererUsage } from "./usage/rendererUsage";
 import { DESKTOP_USAGE_COVERAGE } from "./usage/cliUsage";
+import { usageRecordHandlers } from "./usage/usageRecord";
 
 import { createPresencePollRegistry } from "./collab/presencePollRegistry";
 
@@ -6562,6 +6564,12 @@ function registerIpcHandlers(): void {
       telemetry.reportError({ kind: "renderer", origin, error });
     },
   });
+
+  registerOperations(operationBoundary, usageRecordOperations, usageRecordHandlers({
+    store: () => usageStore,
+    file: () => join(stateDir(), USAGE_SNAPSHOT_NAME),
+    coverage: DESKTOP_USAGE_COVERAGE,
+  }));
 
   registerOperations(operationBoundary, workspaceSearchOperations, workspaceSearchHandlers<
     IpcMainInvokeEvent,

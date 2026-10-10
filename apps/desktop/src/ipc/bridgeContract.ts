@@ -5938,6 +5938,53 @@ export const reportingOperations = {
   },
 } satisfies OperationTable;
 
+// The usage record: counts dohc keeps on this computer and never sends. Only
+// Privacy reads or changes it; no CLI, MCP or share-link door does. `counted`
+// is false where this build does not count that door, so a zero there means
+// nothing. `file` is for this computer's screen only, never for a copy.
+const UsageRecordCell = z.strictObject({ count: z.number().int().nonnegative(), counted: z.boolean() });
+export const UsageRecordRow = z.strictObject({
+  capabilityId: z.string().max(128),
+  label: z.string().max(200),
+  doors: z.strictObject({ renderer: UsageRecordCell, cli: UsageRecordCell, mcp: UsageRecordCell, automation: UsageRecordCell }),
+  lastUsed: z.iso.date().nullable(),
+});
+export type UsageRecordRow = z.infer<typeof UsageRecordRow>;
+export const UsageRecordResult = z.discriminatedUnion("status", [
+  z.strictObject({
+    status: z.literal("readable"),
+    enabled: z.boolean(),
+    file: z.string().max(4096),
+    since: z.iso.date().nullable(),
+    incompleteDays: z.number().int().nonnegative(),
+    rows: z.array(UsageRecordRow).max(500),
+  }),
+  // dohc leaves a record it cannot read as it is, and counts nothing.
+  z.strictObject({ status: z.literal("unreadable"), file: z.string().max(4096), code: z.string().max(64) }),
+]);
+export type UsageRecordResult = z.infer<typeof UsageRecordResult>;
+
+export const usageRecordOperations = {
+  readUsageRecord: {
+    capabilityId: "usage.read",
+    scope: "device",
+    channel: "desktop:read-usage-record",
+    payload: z.strictObject({}), result: UsageRecordResult, guard: "trusted-sender",
+  },
+  clearUsageRecord: {
+    capabilityId: "usage.clear",
+    scope: "device",
+    channel: "desktop:clear-usage-record",
+    payload: z.strictObject({}), guard: "trusted-sender",
+  },
+  setUsageRecordEnabled: {
+    capabilityId: "usage.switch",
+    scope: "device",
+    channel: "desktop:set-usage-record-enabled",
+    payload: z.strictObject({ enabled: z.boolean() }), guard: "trusted-sender",
+  },
+} satisfies OperationTable;
+
 // Notices sent to a person. "account" rows come from the signed-in account's
 // notice list on the relay and reach all of that person's computers. "local"
 // rows stay on this computer: nobody is signed in, the workspace does not sync
@@ -6521,6 +6568,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof workspaceSearchOperations>,
     OperationBridge<typeof crashReportOperations>,
     OperationBridge<typeof reportingOperations>,
+    OperationBridge<typeof usageRecordOperations>,
     OperationBridge<typeof noticeOperations>,
     OperationBridge<typeof scheduleHostOperations>,
     OperationBridge<typeof chatDispatchNoticeOperations>,

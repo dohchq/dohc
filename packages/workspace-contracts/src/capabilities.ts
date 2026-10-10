@@ -62,6 +62,10 @@ export const CAPABILITIES = {
   "reports.notice.read": capability("Read which reports the notice must name.", {ipc: ["readReportsNotice"]}),
   "reports.notice.acknowledge": capability("Record that a window showed the notice about reports.", {ipc: ["acknowledgeReportsNotice"]}),
   "reports.error.send": capability("Report an error a dohc window met.", {ipc: ["reportRendererError"]}),
+  // Privacy only. No agent door reads or changes the usage record.
+  "usage.read": capability("Read this computer's usage record.", {ipc: ["readUsageRecord"]}),
+  "usage.clear": capability("Clear this computer's usage record.", {ipc: ["clearUsageRecord"]}),
+  "usage.switch": capability("Turn this computer's usage record on or off.", {ipc: ["setUsageRecordEnabled"]}),
   "chat.dispatch.notices.read": capability("Read chat dispatch notices.", {ipc: ["registerChatDispatchNotices"]}),
   "chat.dispatch.notice.dismiss": capability("Dismiss a chat dispatch notice.", {ipc: ["dismissChatDispatchNotice"]}),
   "automation.host.read": capability("Read the computer that runs schedules.", {ipc: ["readScheduleHost"]}),

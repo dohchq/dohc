@@ -3,7 +3,14 @@ import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contrac
 import { AlertTriangle, Bot, CheckCircle2, Globe2, MessageSquare, MoreHorizontal, SearchX } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import type { ChatThreadRecord, EngineMomentRecord, HistoryPolicyUnreadableResult, SyncStatusResult } from "../../ipc/bridgeContract";
+import type {
+  ChatThreadRecord,
+  EngineMomentRecord,
+  HistoryPolicyUnreadableResult,
+  SyncStatusResult,
+  UsageRecordResult,
+  UsageRecordRow,
+} from "../../ipc/bridgeContract";
 import { readError, withErrorWords } from "../../ipc/errorWords";
 import { DocumentMenu } from "../DocumentMenu";
 import { FrontmatterAsWritten } from "../FrontmatterAsWritten";
@@ -14,6 +21,7 @@ import { buildTableMenu, type TableMenuRow } from "../editor/tableControls";
 import { OverlayFrame } from "../Overlay";
 import { CollectionUnavailable } from "../TransactionalCollectionPage";
 import { ColorControl, HueControl, SwitchControl, TextControl } from "../settings/SettingRow";
+import { UsageRecordCard, UsageRecordClearConfirm, type UsageRecordView } from "../settings/UsageRecordSettings";
 import { ConfirmDialogCard } from "../ui/ConfirmDialog";
 import { CopyButton, CopyField } from "../ui/CopyButton";
 import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
@@ -1314,7 +1322,67 @@ function Pane(props: { theme: "light" | "dark" }) {
           </div>
         </Specimen>
       </Section>
+
+      {/* Last, so the parts above keep their places. */}
+      <Section part="usage-record" title="Usage record">
+        <Specimen label="counts, with a row and a door this version does not count">
+          <UsageRecordSpecimen view={USAGE_RECORD} />
+        </Specimen>
+        <Specimen label="off, with saved counts">
+          <UsageRecordSpecimen view={{ ...USAGE_RECORD, enabled: false }} />
+        </Specimen>
+        <Specimen label="nothing counted yet">
+          <UsageRecordSpecimen view={{ ...USAGE_RECORD, since: USAGE_TODAY, rows: [] }} />
+        </Specimen>
+        <Specimen label="a record dohc cannot read">
+          <UsageRecordSpecimen view={{ status: "unreadable", file: USAGE_RECORD.file, code: "EACCES" }} />
+        </Specimen>
+        <Specimen label="loading, then a failed read: words in Notices">
+          <div className="flex flex-col gap-3">
+            <UsageRecordSpecimen view={{ status: "loading" }} />
+            <UsageRecordSpecimen view={{ status: "failed" }} />
+          </div>
+        </Specimen>
+        <Specimen label="Clear's confirm, with Copy first">
+          <div className={SHADOW_ROOM}>
+            <UsageRecordClearConfirm card record={USAGE_RECORD} onCancel={noop} onConfirm={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="keyboard focus on the switch">
+          <div data-force-state="focus focus-visible" data-force-target='[role="switch"]'>
+            <UsageRecordSpecimen view={{ ...USAGE_RECORD, rows: USAGE_RECORD.rows.slice(0, 2) }} />
+          </div>
+        </Specimen>
+      </Section>
     </section>
+  );
+}
+
+// A fixed day, so "today" and "since" never move the capture.
+const USAGE_TODAY = "2026-10-07";
+const usageCell = (count: number, counted = true) => ({ count, counted });
+const usageRow = (capabilityId: string, label: string, doors: Partial<UsageRecordRow["doors"]>, lastUsed: string | null = null): UsageRecordRow => ({
+  capabilityId, label, lastUsed,
+  doors: { renderer: usageCell(0, false), cli: usageCell(0, false), mcp: usageCell(0, false), automation: usageCell(0, false), ...doors },
+});
+const USAGE_RECORD: Extract<UsageRecordResult, { status: "readable" }> = {
+  status: "readable", enabled: true, file: "C:\\Users\\ada\\AppData\\Roaming\\dohc\\dohc-usage.json",
+  since: "2026-09-12", incompleteDays: 1,
+  rows: [
+    usageRow("version.create", "Create a workspace version", { renderer: usageCell(41), cli: usageCell(2, false) }, "2026-10-07"),
+    usageRow("file.kept.save", "Save a kept copy beside its file", { renderer: usageCell(3), cli: usageCell(1), mcp: usageCell(0) }, "2026-10-06"),
+    usageRow("version.try", "Try changes in a workspace version", { renderer: usageCell(1) }, "2026-09-03"),
+    usageRow("chat.post", "Post a chat message", { cli: usageCell(0), mcp: usageCell(0) }),
+    usageRow("chat.export", "Export a chat", {}),
+  ],
+};
+
+// Privacy's width for the card.
+function UsageRecordSpecimen(props: { view: UsageRecordView }) {
+  return (
+    <div className="w-[560px] [&>section]:mt-0">
+      <UsageRecordCard view={props.view} today={USAGE_TODAY} onSwitch={noop} onClear={noop} onRetry={noop} />
+    </div>
   );
 }
 
