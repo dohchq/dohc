@@ -40,8 +40,8 @@ function emptyExecutor(store: CollectionAutomationsOptions["store"], overrides: 
   return { executor, evaluator };
 }
 
-it("waits for the current run history prune batch on close without starting another", async () => {
-  const store = createAutomationRunStore(await createTestScratch("dohc-close-pruning-"), testMetadataDir);
+it.each(["close", "dispose"] as const)("waits for the current run history prune batch on %s without starting another", async (operation) => {
+  const store = createAutomationRunStore(await createTestScratch(`dohc-${operation}-pruning-`), testMetadataDir);
   const entered = Promise.withResolvers<void>();
   const batch = Promise.withResolvers<string | null>();
   const expire = vi.spyOn(store, "expire").mockImplementation(() => {
@@ -54,7 +54,7 @@ it("waits for the current run history prune batch on close without starting anot
     await executor.open();
     await entered.promise;
     await executor.idle();
-    closing = executor.close();
+    closing = executor[operation]();
     const state = await Promise.race([
       closing.then(() => "closed"),
       new Promise<"pending">((resolve) => setImmediate(() => resolve("pending"))),

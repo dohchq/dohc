@@ -1594,7 +1594,7 @@ export class CollectionAutomations {
     await Promise.allSettled([this.draining]);
     await this.payOwed(false);
     this.flushRunsFinished();
-    await Promise.allSettled([this.chain, this.verdictChain]);
+    await Promise.allSettled([this.chain, this.verdictChain, this.historyPruning]);
   }
 
   /**
