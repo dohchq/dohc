@@ -694,6 +694,8 @@ export const EditorTabs = memo(function EditorTabs(props: {
   ) => void;
   onCreateGroupRight: (groupId: string) => void;
   onCloseGroup?: (groupId: string) => void;
+  // The element the open document's actions render into (tabRowActions).
+  actionsRef?: (element: HTMLElement | null) => void;
 }) {
   const [listOpen, setListOpen] = useState(false);
   const latest = useRef(props);
@@ -913,6 +915,13 @@ export const EditorTabs = memo(function EditorTabs(props: {
             tab interrupts it. */}
         <div aria-hidden className="min-w-4 flex-1 border-b border-line" />
       </div>
+      {/* The open document's actions, after the tabs in the keyboard order
+          as they were after the tab row. Empty for a tab with none. */}
+      <div
+        ref={props.actionsRef}
+        data-testid="editor-tab-actions"
+        className="flex min-w-0 max-w-[60%] shrink-0 items-center justify-end gap-1 border-b border-line pl-2 pr-1 empty:hidden"
+      />
       {props.onCloseGroup ? (
         <button
           type="button"

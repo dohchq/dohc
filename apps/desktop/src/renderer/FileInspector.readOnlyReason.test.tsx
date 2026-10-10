@@ -41,7 +41,8 @@ describe("read-only reason on the text and CSV chips", () => {
   const SHARE = "This document is shared with you to read.";
   const TOO_LARGE = "This file is too large to edit in dohc.";
 
-  // The header says the file and nothing about its state: the chip says that.
+  // No header repeats the file above the page (its tab names it); the chip
+  // says its state.
   for (const [path, testId] of [
     ["notes.txt", "view-text-save-state"],
     ["main.ts", "view-text-save-state"],
@@ -54,7 +55,7 @@ describe("read-only reason on the text and CSV chips", () => {
       bridgeMock.readWorkspaceText.mockResolvedValue({ text: "a,b\n", truncated: false, contentHash: TEST_CONTENT_HASH });
       render(<FileInspector workspaceId="ws-1" path={path} readOnly />);
       const chip = await screen.findByTestId(testId);
-      expect(screen.getByTestId("file-inspector").querySelector("header")?.textContent).toBe(path);
+      expect(screen.getByTestId("file-inspector").querySelector("header")).toBeNull();
       expect(chip.textContent).toBe("Read-only");
       expect(chip.getAttribute("title")).toBe(SHARE);
       expect(chip.dataset.state).toBe("saved");
@@ -64,7 +65,7 @@ describe("read-only reason on the text and CSV chips", () => {
       bridgeMock.readWorkspaceText.mockResolvedValue({ text: "a,b\n", truncated: true, contentHash: null });
       render(<FileInspector workspaceId="ws-1" path={path} />);
       const chip = await screen.findByTestId(testId);
-      expect(screen.getByTestId("file-inspector").querySelector("header")?.textContent).toBe(path);
+      expect(screen.getByTestId("file-inspector").querySelector("header")).toBeNull();
       expect(chip.textContent).toBe("Read-only");
       expect(chip.getAttribute("title")).toBe(TOO_LARGE);
       expect(chip.dataset.state).toBe("saved");

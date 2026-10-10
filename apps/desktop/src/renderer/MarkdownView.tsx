@@ -7,7 +7,7 @@ import {
   DocumentControls,
   EngineMayHoldDocumentNotice,
   OPENING_TITLE,
-  ViewHeader,
+  ViewActions,
   OrphanedDraftNotices,
   EngineRemovalInProgressNotice,
 } from "./fileInspectorUi";
@@ -1954,13 +1954,13 @@ export function MarkdownView(props: {
   if (displayDoc) {
     return (
       <div className="flex min-h-0 flex-1 flex-col">
-        <ViewHeader
-          path={props.path}
+        <ViewActions
           onShare={onShareCurrentPath}
           status={
             <StateMark
               testId="markdown-save-state"
               truncate
+              quietWhenSettled
               state={engine.readOnlyWhileEditing || readOnlyCopy ? "read-only" : engineChipState}
               shown={engine.readOnlyWhileEditing || readOnlyCopy
                 ? orphanedDrafts.length > 0 ? "read-only-transition" : engine.readOnlyCause === "access-ended" ? "read-only" : "read-only-unavailable"
@@ -2112,8 +2112,7 @@ export function MarkdownView(props: {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <ViewHeader
-        path={props.path}
+      <ViewActions
         onShare={onShareCurrentPath}
         status={
           <>
@@ -2144,7 +2143,7 @@ export function MarkdownView(props: {
                 opening, `editing` is always false, so the chip appears there
                 only when the state is not "saved". */}
             {editing || chipState !== "saved" ? (
-              <StateMark testId="markdown-save-state" truncate state={chipState} shown={chipState} title={chipState === "read-only" ? "Your access to this document ended." : undefined} />
+              <StateMark testId="markdown-save-state" truncate quietWhenSettled state={chipState} shown={chipState} title={chipState === "read-only" ? "Your access to this document ended." : undefined} />
             ) : null}
           </>
         }

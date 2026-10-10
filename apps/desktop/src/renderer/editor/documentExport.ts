@@ -1,4 +1,4 @@
-// "Export as HTML" / "Export as PDF" (ViewHeader's document menu) both
+// "Export as HTML" / "Export as PDF" (the document menu) both
 // render through this one pure function: a SELF-CONTAINED HTML document —
 // title, the body rendered through the same tiptap schema the editor uses
 // (markdownBodyToHtml, import-export.ts), and an inline print-quality

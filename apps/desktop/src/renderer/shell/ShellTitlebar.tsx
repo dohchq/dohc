@@ -1,11 +1,16 @@
+import type { ReactNode } from "react";
 import type { SyncStatusResult, WorkspaceSummary } from "../../ipc/bridgeContract";
 import { Titlebar } from "../Titlebar";
 import { WorkspaceSyncStatus } from "../workbench/WorkspaceSyncStatus";
 import { toggleChats, type WorkbenchState } from "../workbench/workbenchState";
 
-// The shell's titlebar: the workspace switcher, the status label, and the
-// two side panel toggles.
+// The shell's titlebar: the workspace switcher, the version picker, the saved
+// dot, and the two side panel toggles.
 export function ShellTitlebar(props: {
+  // The version picker, when this workspace records versions.
+  version?: ReactNode;
+  // Whether any open editor holds edits that are not saved here.
+  unsaved: boolean;
   workspace: WorkspaceSummary;
   workspaces: WorkspaceSummary[];
   onSwitchWorkspace: (workspace: WorkspaceSummary) => void;
@@ -41,7 +46,8 @@ export function ShellTitlebar(props: {
       onOpenShare={() => setOpenShare("blank")}
       onManageWorkspaces={props.onManageWorkspaces ? manageWorkspaces : undefined}
       onQuickOpen={() => setQuickOpenOpen(true)}
-      workspaceStatus={<WorkspaceSyncStatus syncStatus={syncStatus} failedSaves={failedSaves} />}
+      version={props.version}
+      workspaceStatus={<WorkspaceSyncStatus syncStatus={syncStatus} failedSaves={failedSaves} unsaved={props.unsaved} />}
       onWorkspaceContextMenu={() => void showWorkbenchMenu("status")}
       agentActive={agentActive}
       primarySidebar={{

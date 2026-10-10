@@ -49,7 +49,7 @@ const PARTS = [
   "kind-glyph",
   "block-menu", "table-menu",
   "history",
-  "file-header",
+  "tab-row-actions",
   "slash-menu",
   "editor-group-focus",
   "frontmatter-as-written",
@@ -336,29 +336,24 @@ test("@states-page @states-baselines every shared part matches its baseline in b
       await capture(name, theme, box);
       await closeMenu(page, trigger, menu);
     }
-    // A file header keeps Share and the document's controls inside itself at
-    // any width, and its save state gives way before its file name: the path
-    // is cut only once the save state shows no more than one character and an
-    // ellipsis (13px of 11px mono). The narrow specimen must really have cut
-    // its save state short, or the check proves nothing.
+    // A tab row keeps Share and the document's controls inside itself at any
+    // width, and the save state beside them gives way first. The narrow
+    // specimen must really have cut its save state short, or the check
+    // proves nothing.
     for (const theme of THEMES) {
-      const part = page.getByTestId(`states-${theme}`).locator('[data-part="file-header"]');
-      for (const header of await part.locator("header").all()) {
-        const edge = await header.evaluate((el) => el.getBoundingClientRect().right - parseFloat(getComputedStyle(el).paddingRight));
-        const rights = await header.locator("button").evaluateAll((buttons) => buttons.map((button) => button.getBoundingClientRect().right));
-        if (rights.some((right) => right > edge + 0.5)) failures.push(`a file header control (${theme}) runs past its header`);
-        const order = await header.evaluate((el) => {
-          const path = el.querySelector(":scope > span");
-          const label = el.querySelector(":scope > div .truncate");
-          return { pathCut: !!path && path.scrollWidth > path.clientWidth, statusWidth: label?.clientWidth ?? 0 };
-        });
-        if (order.pathCut && order.statusWidth >= 13) {
-          failures.push(`a file header (${theme}) cut its file name while its save state still had ${order.statusWidth}px of words`);
-        }
+      const part = page.getByTestId(`states-${theme}`).locator('[data-part="tab-row-actions"]');
+      for (const row of await part.getByTestId("editor-tabs").all()) {
+        const edge = await row.evaluate((el) => el.getBoundingClientRect().right);
+        const rights = await row
+          .getByTestId("editor-tab-actions")
+          .locator("button")
+          .evaluateAll((buttons) => buttons.map((button) => button.getBoundingClientRect().right));
+        if (rights.length === 0) failures.push(`a tab row (${theme}) has no document actions`);
+        if (rights.some((right) => right > edge + 0.5)) failures.push(`a document control (${theme}) runs past its tab row`);
       }
-      const label = page.getByTestId(`states-file-header-pending-${theme}`).locator(".truncate");
+      const label = page.getByTestId(`states-tab-row-actions-pending-${theme}`).locator(".truncate");
       if (!(await label.evaluate((el) => el.scrollWidth > el.clientWidth))) {
-        failures.push(`the narrow file header's save state (${theme}) is not cut short`);
+        failures.push(`the narrow tab row's save state (${theme}) is not cut short`);
       }
     }
     expect(failures, "every part must equal its baseline").toEqual([]);

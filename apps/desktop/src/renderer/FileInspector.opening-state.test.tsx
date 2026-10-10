@@ -181,11 +181,13 @@ describe("markdown document opening state", () => {
     await advanceAutosaveDebounce();
   }
 
-  // The header after its icon and path, read left to right: the status
-  // slot (a save state, "Opening…"), then Share and the document's controls.
+  // The document's actions, read left to right: the status slot (a save
+  // state, "Opening…"), then Share and the document's controls. Outside an
+  // editor group they draw in a row of their own.
   function headerGroup() {
-    const header = screen.getByTestId("file-inspector").querySelector("header");
-    const [, , status, ...controls] = [...(header?.children ?? [])];
+    const children = [...screen.getByTestId("view-actions").children];
+    const status = children.find((el) => el.hasAttribute("data-view-status"));
+    const controls = children.filter((el) => el !== status);
     const control = (el: Element) => el.querySelector("button") ?? el;
     return {
       // A truncating save state sits in a wrapper beside its tooltip.
@@ -214,8 +216,10 @@ describe("markdown document opening state", () => {
     expect(headerGroup(), "a loading header without the toggle and the menu puts the menu where Share was once the text arrives").toEqual({
       status: [], controls: CONTROLS, disabled: [false, true, false],
     });
-    // The header names the file, never its kind in words: the icon says it.
-    expect(screen.getByTestId("file-inspector").querySelector("header")?.textContent).toBe("a.mdEdit");
+    // No header repeats the file above the page: its tab names it, and the
+    // actions say no kind in words.
+    expect(screen.getByTestId("file-inspector").querySelector("header")).toBeNull();
+    expect(screen.getByTestId("view-actions").textContent).toBe("Edit");
 
     // The text arrived and the engine open is held: the opening view.
     await act(async () => read.resolve({ text: DOC_MARKDOWN, truncated: false, contentHash: TEST_CONTENT_HASH }));
@@ -241,7 +245,7 @@ describe("markdown document opening state", () => {
       status: [], controls: CONTROLS, disabled: [false, true, true],
     });
     // A failed read never opens, so the toggle does not promise that it will.
-    expect(screen.getByTestId("file-inspector").querySelector("header button:not([aria-label])")?.getAttribute("title")).toBeNull();
+    expect(screen.getByTestId("view-actions").querySelector("button:not([aria-label])")?.getAttribute("title")).toBeNull();
   });
 
   it("keeps the document's header controls in their places, disabled, when the file is gone from its path", async () => {

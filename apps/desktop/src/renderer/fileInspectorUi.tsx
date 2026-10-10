@@ -1,5 +1,5 @@
 import type { SaveState } from "@dohc/workspace-contracts/save-state";
-import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
+import { createPortal } from "react-dom";
 import { CopyButton } from "./ui/CopyButton";
 import { restoreRecoveryDraftText } from "./collab/recoverySnapshot";
 import { dismissOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
@@ -10,39 +10,30 @@ import { bridge } from "./bridge";
 import type { EngineRemovalInProgress } from "./collab/useEngineDoc";
 import { DocumentMenu } from "./DocumentMenu";
 import { IconButton, SecondaryButton } from "./ui/controls";
-import { KindGlyph } from "./ui/KindGlyph";
+import { useTabRowActionsSlot } from "./workbench/tabRowActions";
 
-// The one header over every file view. It is final on the click frame: the
-// kind's glyph comes from the path, the same glyph Explorer draws, and it says
-// the kind, so loading, ready and
-// failed views of one file draw the same header. `actions` are the view's
-// controls, right of Share; a view that has controls draws them, disabled,
-// while it loads or when it cannot open (DocumentControls). Share and the
-// controls never shrink. `status` (a save state, "Opening…") sits left of
-// them and gives way first: its words can change width without moving a
-// control, and in a narrow pane it ends in an ellipsis. The status slot takes
-// only the room the path leaves (flex-1 from a zero basis), so the file name
-// stays whole until the status is down to its mark and an ellipsis; only then
-// does the path shrink.
-export function ViewHeader(props: {
-  path: string;
+// A file view's actions, at the right end of its editor group's tab row: the
+// tab already names the file, so no header repeats it above the page. They
+// are final on the click frame, so loading, ready and failed views of one
+// file draw the same actions. `actions` are the view's controls, right of
+// Share; a view that has controls draws them, disabled, while it loads or
+// when it cannot open (DocumentControls). Share and the controls never
+// shrink. `status` (a save state that needs the person, "Opening…") sits
+// left of them and gives way first: its words can change width without
+// moving a control, and in a narrow pane it ends in an ellipsis. Outside an
+// editor group, as on the states page, they draw in a row of their own.
+export function ViewActions(props: {
   onShare?: () => void;
   status?: ReactNode;
   actions?: ReactNode;
 }) {
-  // Breadcrumb weighting: the folder path recedes, the file name carries ink.
-  const slash = props.path.lastIndexOf("/");
-  const dir = slash >= 0 ? props.path.slice(0, slash + 1) : "";
-  const leaf = slash >= 0 ? props.path.slice(slash + 1) : props.path;
-  return (
-    <header className="flex items-center gap-2 border-b border-line px-4 py-1.5 text-[13px]">
-      <KindGlyph kind={fileKindForPath(props.path)} size={13} />
-      <span className="min-w-0 truncate font-mono">
-        {dir ? <span className="text-subtle">{dir}</span> : null}
-        <span className="font-medium text-ink">{leaf}</span>
-      </span>
+  const slot = useTabRowActionsSlot();
+  const content = (
+    <>
       {/* 25px: the widest mark (12px), its gap and an ellipsis. */}
-      <div className="flex min-w-[25px] flex-1 items-center justify-end gap-2 empty:min-w-0">{props.status}</div>
+      {props.status ? (
+        <div data-view-status="" className="flex min-w-[25px] shrink items-center justify-end gap-2 empty:min-w-0">{props.status}</div>
+      ) : null}
       {props.onShare ? (
         <IconButton
           data-testid="file-share"
@@ -51,12 +42,16 @@ export function ViewHeader(props: {
           onClick={props.onShare}
           className="shrink-0"
         >
-          <Share2 size={13} aria-hidden />
+          <Share2 size={14} aria-hidden />
         </IconButton>
       ) : null}
       {props.actions}
-    </header>
+    </>
   );
+  if (slot === undefined) {
+    return <div data-testid="view-actions" className="flex h-9 items-center justify-end gap-1 border-b border-line bg-panel pl-2 pr-1">{content}</div>;
+  }
+  return slot ? createPortal(content, slot) : null;
 }
 
 export const OPENING_TITLE = "You can edit this document when it finishes opening.";

@@ -171,7 +171,9 @@ function Mark(props: { kind: StateMarkKind }) {
  * runs out, such as a narrow file header. While the label is cut short, the
  * chip takes keyboard focus and shows the whole label and its explanation in
  * a tooltip, on focus or hover, in place of the title; with room to spare it
- * is not a tab stop and keeps its title. */
+ * is not a tab stop and keeps its title. `quietWhenSettled` keeps a settled
+ * chip for screen readers only, where the titlebar's saved dot already says
+ * it: words appear only when the state needs the person. */
 export function StateMark(props: {
   state: string | SaveState;
   shown: SaveStateKey | AccessStateKey | SaveState;
@@ -179,6 +181,7 @@ export function StateMark(props: {
   testId: string;
   className?: string;
   truncate?: boolean;
+  quietWhenSettled?: boolean;
 }) {
   const shownKey = typeof props.shown === "string" ? props.shown : saveStatePresentationKey(props.shown);
   const presentation = shownKey === null ? null : PRESENTATIONS[shownKey];
@@ -219,11 +222,15 @@ export function StateMark(props: {
     };
   }, [shown]);
   if (!presentation) return null;
+  const dataState = typeof props.state === "string" ? props.state : props.state.kind === "unknown" ? "unknown" : saveStatePresentationKey(props.state);
+  if (props.quietWhenSettled && presentation.mark === "settled") {
+    return <span data-testid={props.testId} data-state={dataState ?? undefined} className="sr-only">{presentation.label}</span>;
+  }
   const chip = (
     <span
       ref={chipRef}
       data-testid={props.testId}
-      data-state={typeof props.state === "string" ? props.state : props.state.kind === "unknown" ? "unknown" : saveStatePresentationKey(props.state)}
+      data-state={dataState ?? undefined}
       // Cut short, the tooltip says what the title would, so the browser's
       // own tooltip does not repeat it a moment later.
       title={cut ? undefined : title}
