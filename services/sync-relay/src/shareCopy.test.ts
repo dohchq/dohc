@@ -35,6 +35,25 @@ it("makes account, workspace, share and grant probes byte-identical to unknown i
   }
   expect((await handler(request(null, path()))).status).toBe(401);
 });
+it("refuses a real grant belonging to another share with the unknown-id response", async () => {
+  const { handler, storage, grant } = await fixture();
+  storage.createShare({ share: { shareId: "other-share", workspaceId: "workspace", granterUserId: "owner",
+    selectorJson: JSON.stringify({paths: ["docs"], versionId: null}), createdAtMs: 1 },
+    grant: { ...grant, shareId: "other-share", grantId: "other-grant" } });
+  expect(await denialBytes(await handler(request("owner", path("workspace", "share", "other-grant"))))).toBe(
+    await denialBytes(await handler(request("owner", path("workspace", "share", "unknown")))));
+});
+it("refuses a link grant on the owner's share with the unknown-id response", async () => {
+  const { handler, storage } = await fixture();
+  const db = inspectDatabase(storagePath(storage));
+  try {
+    db.prepare(`INSERT INTO sync_relay_share_grants
+      (grant_id, share_id, principal_kind, principal_user_id, principal_email, access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id)
+      VALUES ('link-grant', 'share', 'link', NULL, NULL, 'edit', 1, 'active', 1, NULL, NULL)`).run();
+  } finally { db.close(); }
+  expect(await denialBytes(await handler(request("owner", path("workspace", "share", "link-grant"))))).toBe(
+    await denialBytes(await handler(request("owner", path("workspace", "share", "unknown")))));
+});
 it("returns ended without copy data for an owned revoked grant, while strangers stay opaque", async () => {
   const { handler, storage } = await fixture();
   storage.revokeShare("share", 2);
