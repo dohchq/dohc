@@ -113,6 +113,7 @@ export type EngineYDocSaveStateName = (typeof ENGINE_YDOC_SAVE_STATES)[number];
 // Channels not yet in an operation table (operationTable.ts). A table row owns
 // its own channel name, so a migrated operation has no entry here.
 export const CHANNELS = {
+  getSystemReducedMotion: "desktop:get-system-reduced-motion",
   reloadRenderer: "desktop:reload-renderer",
   pickWorkspaceRoot: "desktop:pick-workspace-root",
   getWorkspaceRegistry: "desktop:get-workspace-registry",

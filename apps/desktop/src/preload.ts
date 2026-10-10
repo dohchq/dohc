@@ -20,6 +20,7 @@ import type {
   WorkspaceActivityEvent,
 } from "./ipc/bridgeContract";
 import {
+  SystemReducedMotionResult,
   SitePreviewReplacedEvent,
   ListOwnerLiveDocumentsPayload,
   ListOwnerLiveRefusalsPayload,
@@ -116,6 +117,7 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(shareCopyOperations, invoke),
   ...operationBridge(accessOperations, invoke),
   platform: process.platform,
+  getSystemReducedMotion: () => invokeParsed(CHANNELS.getSystemReducedMotion, SystemReducedMotionResult),
   devTools: devToolsGranted(process.argv),
   windowRole:
     new URLSearchParams(window.location.search).get("view") === "manager"

@@ -25,6 +25,7 @@ import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { readDatasetResponse } from "./ipc/readDatasetResponse";
 import { ipcWireError } from "./ipc/errorWords";
 import { createUpdateInstall, registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
+import { registerSystemMotionIpc } from "./ipc/systemMotionIpc";
 import { createWindowIpc } from "./ipc/windowIpc";
 import {
   devToolsEnabled,
@@ -117,6 +118,7 @@ import {
   powerMonitor,
   protocol,
   safeStorage,
+  systemPreferences,
   session,
   shell,
   Tray,
@@ -5741,6 +5743,11 @@ async function currentDiagnostics(): Promise<string> {
 }
 
 function registerIpcHandlers(): void {
+  registerSystemMotionIpc<IpcMainInvokeEvent>({
+    registerHandler: handleIpc,
+    assertTrustedSender,
+    getAnimationSettings: () => systemPreferences.getAnimationSettings(),
+  });
   shareDirectWriteDelivery.register(operationBoundary);
   const shareCopyHandler = createShareCopyHandler<WebContents, RegistryEntry, DesktopRendererWorkspaceOperation>({
     currentSession: sender => rendererWorkspaceSessions.current(sender) ?? null,

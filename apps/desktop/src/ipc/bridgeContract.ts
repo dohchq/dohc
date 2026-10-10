@@ -6709,6 +6709,8 @@ export const LaunchMarksResult = z.object({
 });
 export type LaunchMarksResult = z.infer<typeof LaunchMarksResult>;
 
+export const SystemReducedMotionResult = z.boolean();
+
 export interface DohcDesktopBridge
   extends OperationBridge<typeof shareCopyOperations>,
     OperationBridge<typeof accessOperations>,
@@ -6741,6 +6743,7 @@ export interface DohcDesktopBridge
   // Constant, not a call: the titlebar lays out around macOS traffic lights
   // on darwin vs the window-controls overlay everywhere else.
   platform: NodeJS.Platform;
+  getSystemReducedMotion(): Promise<boolean>;
   // Constant: which surface this window renders. "manager" is the workspace
   // manager window; "workspace" is an ordinary window. Read from the load
   // URL by the preload, never from the renderer.
