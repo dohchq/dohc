@@ -3101,6 +3101,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     },
     Migration {
         ordinal: 39,
+        id: "v2-retained-export-attempt-lineage",
+        sql: "ALTER TABLE ydoc_docs ADD COLUMN export_attempt_lineage_claim_id TEXT; ALTER TABLE ydoc_docs ADD COLUMN export_wait_asset_sha256 TEXT; ALTER TABLE ydoc_docs ADD COLUMN export_wait_asset_path TEXT CHECK (export_wait_asset_path IS NULL OR export_wait_asset_sha256 IS NOT NULL); CREATE INDEX idx_moments_version_path_order ON moments(workspace_id,version_id,path,moment_order DESC) WHERE path GLOB 'assets/excalidraw/*';",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 40,
         id: "v2-moments-history-time",
         sql: "CREATE INDEX idx_moments_history_time ON moments(workspace_id, version_id, recorded_at_ms, moment_order);",
         sets_user_version: None,
@@ -3582,6 +3588,10 @@ mod tests {
             (
                 "v2-live-settlement-publication",
                 "e37325b7a31bbba1c63cfd891cbecd6054809201002ac482c95ab41d54ad8458",
+            ),
+            (
+                "v2-retained-export-attempt-lineage",
+                "e971935dc8d67177407762aab1adae46e2c7def69762f4e0764239a28a5feed8",
             ),
             (
                 "v2-moments-history-time",
@@ -4831,6 +4841,67 @@ mod tests {
                 FaultAction::Continue
             }
         }
+    }
+
+    #[test]
+    fn retained_export_lineage_migration_upgrades_ordinal_38_without_backfill() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let ctx = MigrationContext::current(1_000);
+        let before = BASELINE_MIGRATIONS
+            .iter()
+            .take_while(|m| m.ordinal <= 38)
+            .count();
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 38);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main'); \
+            INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','main',0); \
+            INSERT INTO file_objects VALUES ('ws','doc',0);").unwrap();
+        let claim = "c".repeat(64);
+        conn.execute(
+            "INSERT INTO binary_blobs(sha256,byte_length,bytes) VALUES (?1,0,X'')",
+            [&claim],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ydoc_docs (workspace_id,version_id,object_id,content_kind,regime, \
+            head_update_seq,head_snapshot_seq,lineage_claim_status,lineage_claim_id,updated_at_ms, \
+            export_attempt_moment_id,export_attempt_update_seq,export_attempt_snapshot_seq) \
+            VALUES ('ws','main','doc','plaintext','replicated',1,0,'exact',?1,0,'moment',1,0)",
+            [&claim],
+        )
+        .unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let waiting: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT export_wait_asset_path,export_wait_asset_sha256 FROM ydoc_docs",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(waiting, (None, None), "existing rows have no asset wait");
+        let retry = || {
+            conn.query_row(
+                "SELECT export_attempt_lineage_claim_id IS NOT lineage_claim_id \
+            FROM ydoc_docs WHERE export_attempt_moment_id='moment' \
+            AND export_attempt_update_seq=1 AND export_attempt_snapshot_seq=0",
+                [],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap()
+        };
+        assert!(retry(), "NULL attempt lineage retries the existing row");
+        conn.execute(
+            "UPDATE ydoc_docs SET export_attempt_lineage_claim_id=lineage_claim_id",
+            [],
+        )
+        .unwrap();
+        assert!(
+            !retry(),
+            "recording the lineage suppresses the next unchanged attempt"
+        );
     }
 
     #[test]
