@@ -7,6 +7,7 @@ import type {
   ChatThreadRecord,
   EngineMomentRecord,
   HistoryPolicyUnreadableResult,
+  SitePackageInfo,
   SyncStatusResult,
   UsageRecordResult,
   UsageRecordRow,
@@ -24,7 +25,7 @@ import { ColorControl, HueControl, SwitchControl, TextControl } from "../setting
 import { UsageRecordCard, UsageRecordClearConfirm, type UsageRecordView } from "../settings/UsageRecordSettings";
 import { ConfirmDialogCard } from "../ui/ConfirmDialog";
 import { CopyButton, CopyField } from "../ui/CopyButton";
-import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
+import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, RetryRow, SecondaryButton, SectionLabel } from "../ui/controls";
 import { MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
 import { MoreMenu } from "../ui/MoreMenu";
 import { SegmentedControl } from "../ui/SegmentedControl";
@@ -32,6 +33,8 @@ import { SkeletonRows } from "../ui/SkeletonRows";
 import { SAVE_STATE, StateMark, type SaveStateKey } from "../ui/StateMark";
 import { FolderChip, Step } from "../ui/Step";
 import { AgentBadge } from "../workbench/AgentBadge";
+import { AppRows } from "../workbench/AppsView";
+import { siteTabPath } from "../workbench/workbenchState";
 import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { EditorGroupLayout } from "../workbench/EditorGroupLayout";
@@ -1461,7 +1464,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. */}
+      {/* After Usage record, so the parts above keep their places. */}
       <Section part="word-diff" title="Word diff">
         {WORD_DIFFS.map((specimen) => (
           <Specimen key={specimen.label} label={specimen.label}>
@@ -1474,6 +1477,30 @@ function Pane(props: { theme: "light" | "dark" }) {
             </div>
           </Specimen>
         ))}
+      </Section>
+
+      {/* Last, so the parts above keep their places. Its empty and loading
+          states are the shared ones above, in Empty ("create") and Loading. */}
+      <Section part="apps-shelf" title="Apps shelf">
+        <Specimen label="pinned; selected, with a warning; shared, hovered; low confidence">
+          <div className="w-60 rounded-lg border border-line bg-panel" data-force-state="hover" data-force-target="li:nth-child(3)">
+            <AppRows apps={SHELF_APPS} pinnedApps={["trip-planner"]} activePath={siteTabPath("apps/funnel-dashboard")}
+              onOpenPath={noop} onSetPinned={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="keyboard focus: a row, then a pin">
+          <div className="w-60 rounded-lg border border-line bg-panel" data-force-state="focus focus-visible"
+            data-force-target='li:nth-child(1) [data-testid="sites-row"]'>
+            <div data-force-state="focus focus-visible" data-force-target='li:nth-child(3) [data-testid="sites-pin"]'>
+              <AppRows apps={SHELF_APPS} pinnedApps={[]} activePath={null} onOpenPath={noop} onSetPinned={noop} />
+            </div>
+          </div>
+        </Specimen>
+        <Specimen label="failed read: words in Notices">
+          <div className="w-60 rounded-lg border border-line bg-panel p-1">
+            <RetryRow testId={`states-apps-failed-${theme}`} onRetry={noop} />
+          </div>
+        </Specimen>
       </Section>
     </section>
   );
@@ -1529,6 +1556,48 @@ const WORD_DIFFS = [
     after: "# Trip\n\nBring snacks for everyone!\nTickets are in the shared folder.\n",
   },
 ].map((specimen) => ({ ...specimen, diff: computeTextDiff(specimen.before, specimen.after, 800) }));
+
+const SHELF_APP: SitePackageInfo = {
+  root: "trip-planner",
+  title: "Trip planner",
+  kind: "static",
+  confidence: "high",
+  entryPath: "trip-planner/index.html",
+  configPath: null,
+  packagePath: null,
+  packageManager: null,
+  scripts: {},
+  configuredScripts: {},
+  configuredPreviewMode: null,
+  configuredBuildOutput: null,
+  buildOutputs: [],
+  sourceFiles: ["trip-planner/index.html"],
+  shareManifest: { ok: false, reason: "no-runnable-artifact" },
+  diagnostics: [],
+  authority: { kind: "workspace" },
+};
+
+const SHELF_APPS: SitePackageInfo[] = [
+  SHELF_APP,
+  {
+    ...SHELF_APP,
+    root: "apps/funnel-dashboard",
+    title: "Funnel dashboard",
+    diagnostics: [{
+      path: "apps/funnel-dashboard/dohc.json",
+      severity: "warning",
+      code: "invalid-config",
+      message: "Configured preview commands run only in dev mode.",
+    }],
+  },
+  {
+    ...SHELF_APP,
+    root: "shared-with-me/sam/signup-form",
+    title: "Signup form",
+    authority: { kind: "share", mountRoot: "shared-with-me/sam" },
+  },
+  { ...SHELF_APP, root: "notes/reading-list", title: "Reading list", confidence: "low" },
+];
 
 const SYNCED_STATUS: SyncStatusResult = {
   state: "synced",
