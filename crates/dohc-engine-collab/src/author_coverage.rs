@@ -377,6 +377,7 @@ fn check_admission_with_coverage_in(
         }
     }
     let mut covered = reserved_in(conn, key)?;
+    let introduced_unattributed = actorless && !covered.has_unattributed();
     let bytes = admit(&mut covered, &json)?;
     if actorless {
         retain_pending_in(conn, key, &[json])?;
@@ -385,7 +386,7 @@ fn check_admission_with_coverage_in(
         request_settlement: (bytes >= SETTLE_AUTHOR_BYTE_THRESHOLD
             || covered.len() >= SETTLE_AUTHOR_COUNT_THRESHOLD)
             && !unresolved_in(conn, key)?,
-        introduced_unattributed: actorless,
+        introduced_unattributed,
     })
 }
 
@@ -752,4 +753,82 @@ pub fn reconcile_workspace_in(
         reconcile_in(conn, &key, now_ms)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ContentKind, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc};
+    use dohc_engine_domain::{VersionedTextStore, WriteText};
+    use dohc_engine_storage::{EngineStore, NoFaults};
+
+    #[test]
+    fn remote_admission_does_not_introduce_a_reserved_unattributed_marker() {
+        let scratch = dohc_test_scratch::ScratchDir::new().unwrap();
+        let mut store = EngineStore::open(&scratch.join("engine.db"), 1).unwrap();
+        let key = DocKey::new("ws", "main", "object").unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .unwrap();
+        let moment = VersionedTextStore::new(&mut store)
+            .write_text(
+                &WriteText {
+                    workspace_id: key.workspace_id.clone(),
+                    version_id: key.version_id.clone(),
+                    object_id: key.object_id.clone(),
+                    path: "note.txt".into(),
+                    text: "unproven local edit".into(),
+                    moment_id: "local-settlement".into(),
+                    metadata_origin: "ydoc".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: Some(r#"[{"kind":"unattributed"}]"#.into()),
+                    now_ms: 3,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap()
+            .moment;
+        crate::record_local_update(
+            &mut store,
+            &mut WriterDocCache::new(),
+            &key,
+            &Ydoc::wire().plaintext_insert(0, "unproven local edit"),
+            LocalAppend {
+                marker: Some(MarkerCreation {
+                    path: Some("note.txt"),
+                    content_kind: ContentKind::Plaintext,
+                    regime: Regime::LocalOnly,
+                }),
+                ..LocalAppend::default()
+            },
+            &NoFaults,
+            2,
+            |_, _, _| Ok(()),
+        )
+        .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                // Model the reservation before materialization compensation.
+                advance_in(tx, &key, true)?;
+                tx.execute("UPDATE ydoc_docs SET settle_seq=?1", [moment.moment_order])
+                    .map_err(sql)?;
+                assert!(unresolved_in(tx, &key)?);
+                assert!(interval_in(tx, &key, i64::MAX)?.is_empty());
+                assert!(reserved_in(tx, &key)?.has_unattributed());
+                assert!(
+                    !check_remote_admission_in(tx, &key, "remote", 1, None, None)?,
+                    "the unresolved local settlement already reserves the marker"
+                );
+                assert!(interval_in(tx, &key, i64::MAX)?.has_unattributed());
+                assert!(!check_remote_admission_in(
+                    tx, &key, "remote", 2, None, None
+                )?);
+                compensate_in(tx, &key, None, 4)?;
+                assert!(interval_in(tx, &key, i64::MAX)?.has_unattributed());
+                Ok::<_, CollabError>(())
+            })
+            .unwrap();
+    }
 }
