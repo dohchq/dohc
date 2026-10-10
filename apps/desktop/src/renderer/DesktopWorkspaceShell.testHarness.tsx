@@ -334,6 +334,8 @@ function makeBaseBridge(
       }),
     ),
     openWorkspace: vi.fn(async () => SYNC_STATUS),
+    listLiveDraftRecovery: vi.fn(async (): Promise<import("../ipc/bridgeContract").LiveDraftRecoveryRecord[]> => []),
+    discardLiveDraftRecovery: vi.fn(async (_input: Parameters<import("../ipc/bridgeContract").DohcDesktopBridge["discardLiveDraftRecovery"]>[0]): Promise<import("../ipc/bridgeContract").LiveDraftRecoveryRecord[]> => []),
     getSyncStatus: vi.fn(async () => SYNC_STATUS),
     // Owner live documents and the live-delivery retry command. Typed to the
     // contracts, not to these empty defaults: the live-document tests swap in
@@ -369,6 +371,7 @@ function makeBaseBridge(
     retryCloudSync: vi.fn(
       async (_payload: { workspaceId: string; reason: "person" | "reconnect" }): Promise<SyncStatusResult> => SYNC_STATUS,
     ),
+    retryFileObservation: vi.fn(async (_payload: { workspaceId: string }): Promise<SyncStatusResult> => SYNC_STATUS),
     // The refused-store rebuild. Typed to the contract, not to this
     // default: the recovery tests swap in the no-clobber refusal.
     rebuildEngineStore: vi.fn(
@@ -719,6 +722,8 @@ export function makeBridge(
 ) {
   const bridge = makeBaseBridge(uiStatePromise, platform);
   return Object.assign(bridge, {
+    pendingStopAndRestores: vi.fn(async (): Promise<import("../ipc/bridgeContract").PendingStopAndRestoresResult> => []),
+    dismissStopAndRestore: vi.fn(async (): Promise<void> => undefined),
     onEngineYDocSaveState: vi.fn((_listener: (event: import("../ipc/bridgeContract").EngineYDocSaveStateEvent) => void) => () => undefined),
     // Collections: the flagged shell lists collections on
     // ready and on activity. Typed to the contract; the collection tests

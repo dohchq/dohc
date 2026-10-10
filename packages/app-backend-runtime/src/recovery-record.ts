@@ -31,7 +31,7 @@ export function equalRecoveryCursor(a: DatasetCursor, b: DatasetCursor): boolean
 export function parseRecoveryJournalRecord(value: unknown, maxEventBytes = 16 * 1024 * 1024): JournalExportRecord {
   const kind = (value as { kind?: unknown } | null)?.kind;
   if (kind === "checkpoint") {
-    const r = recoveryObject(value, ["kind", "cursor", "previous", "source", "schemaSql", "definitionJson", "capacityBytes", "byteLength", "sha256"], ["approvalAgent"]);
+    const r = recoveryObject(value, ["kind", "cursor", "previous", "source", "schemaSql", "definitionJson", "capacityBytes", "byteLength", "sha256"], ["approvalAgent", "recordedAtMs"]);
     const c = parseRecoveryCursor(r.cursor), p = r.previous === null ? null : parseRecoveryCursor(r.previous);
     const source = recoveryText(r.source, 256 * 1024), schemaSql = recoveryText(r.schemaSql, 256 * 1024), definitionJson = recoveryText(r.definitionJson, 256 * 1024);
     JSON.parse(definitionJson);
@@ -40,7 +40,8 @@ export function parseRecoveryJournalRecord(value: unknown, maxEventBytes = 16 * 
     const actual = hash(JSON.stringify(["dohc-dataset-checkpoint-v1", c.workspaceId, c.datasetId, c.hostEpoch, c.approvedRevisionHash, c.revision,
       p ? [p.workspaceId, p.datasetId, p.hostEpoch, p.approvedRevisionHash, p.revision, p.digest] : null, sha256, hash(source), hash(schemaSql), hash(definitionJson), capacityBytes]));
     if (actual !== c.digest) return invalidRecovery("checkpoint digest differs.");
-    return { kind, cursor: c, previous: p, source, schemaSql, definitionJson, capacityBytes, byteLength, sha256, ...(r.approvalAgent === undefined ? {} : {approvalAgent:parseApprovalAgent(r.approvalAgent)}) };
+    const recordedAtMs = r.recordedAtMs === undefined ? undefined : recoveryInteger(r.recordedAtMs);
+    return { kind, cursor: c, previous: p, source, schemaSql, definitionJson, capacityBytes, byteLength, sha256, ...(recordedAtMs === undefined ? {} : {recordedAtMs}), ...(r.approvalAgent === undefined ? {} : {approvalAgent:parseApprovalAgent(r.approvalAgent)}) };
   }
   if (kind !== "event") return invalidRecovery("unexpected journal record.");
   const r = recoveryObject(value, ["kind", "cursor", "previousDigest", "proposalId", "operation", "callerKey", "idempotencyKey", "payloadSha256", "resultJson", "changesetSha256", "attachedFileIds", "recordedAtMs", "byteLength"]);

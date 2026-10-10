@@ -16,6 +16,7 @@ import {
   type SyncRelayLinkInventoryCursor,
   type SyncRelayLinkInventoryPage,
   type SyncRelayLinkInventoryRow,
+  type SyncRelayHistoryAccount,
   type SyncRelayIndependentGrantInventoryCursor,
   type SyncRelayIndependentGrantInventoryPage,
 } from "./types";
@@ -931,6 +932,27 @@ export function listLinkGrantsByWorkspace(
           : null,
     };
   }
+
+// Owner-only account attribution. Primary grant ids and the account index bound the lookup.
+export function lookupHistoryAccounts(
+  storage: StorageContext, workspaceId: string, grantIds: readonly string[], userIds: readonly string[],
+): SyncRelayHistoryAccount[] {
+  if (grantIds.length + userIds.length > 200) throw new Error("History lookup exceeds its limit");
+  const join = `FROM sync_relay_share_grants dependent
+    JOIN sync_relay_share_grants link ON link.grant_id = dependent.parent_grant_id AND link.principal_kind = 'link'
+    JOIN sync_relay_shares s ON s.share_id = dependent.share_id AND s.share_id = link.share_id
+    WHERE s.workspace_id = ? AND dependent.status = 'revoked' AND dependent.principal_kind = 'user'`;
+  const rows = [
+    ...(grantIds.length ? storage.db.prepare(`SELECT dependent.grant_id, dependent.principal_user_id, dependent.parent_grant_id
+      ${join} AND dependent.grant_id IN (${grantIds.map(() => "?").join(",")})`).all(workspaceId, ...grantIds) : []),
+    ...(userIds.length ? storage.db.prepare(`SELECT MIN(dependent.grant_id) AS grant_id, dependent.principal_user_id, dependent.parent_grant_id
+      ${join} AND dependent.principal_user_id IN (${userIds.map(() => "?").join(",")})
+      GROUP BY dependent.principal_user_id`).all(workspaceId, ...userIds) : []),
+  ];
+  return [...new Map(rows.map(row => [String(row.grant_id), {
+    grantId: String(row.grant_id), recipientUserId: String(row.principal_user_id), parentGrantId: String(row.parent_grant_id),
+  }])).values()];
+}
 
 export function listActiveIndependentShareGrants(storage: StorageContext, input: {
     workspaceId: string;

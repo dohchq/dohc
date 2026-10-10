@@ -60,6 +60,7 @@ import {
 import { ReportsSettings } from "./ReportsSettings";
 import { UsageRecordSettings } from "./UsageRecordSettings";
 import { SegmentedControl } from "../ui/SegmentedControl";
+import { SecondaryButton } from "../ui/controls";
 import { SharedByMeList } from "./SharedByMeList";
 import { SharedWithMeList } from "./SharedWithMeList";
 import type { ShareRemovalNotices } from "../shell/useShareRemovalNotices";
@@ -108,6 +109,17 @@ function StatusPill(props: { state: SettingsSaveState }) {
   );
 }
 
+// The share lists are moving to the Sharing view. Until they leave Settings,
+// each says where they now live.
+function ManageInSharing(props: { lane: "granted" | "received"; onOpen: (() => void) | undefined }) {
+  if (!props.onOpen) return <span aria-hidden />;
+  return (
+    <SecondaryButton size="compact" data-testid={`settings-manage-sharing-${props.lane}`} onClick={props.onOpen}>
+      Manage in Sharing
+    </SecondaryButton>
+  );
+}
+
 export function SettingsDialog(props: {
   onError?: (message: string, cause?: unknown) => void;
   /** Each workspace settings answer, so the shell can say what the file ignored. */
@@ -144,6 +156,8 @@ export function SettingsDialog(props: {
     mutated: boolean;
   }) => void;
   onOpenCloud?: () => void;
+  /** Closes Settings and opens the Sharing view, where these share lists move. */
+  onOpenSharing?: () => void;
   /**
    * Opens this workspace's live documents. Owned workspaces only: a shared
    * view runs no owner live delivery, so it has no such list to manage.
@@ -830,7 +844,7 @@ export function SettingsDialog(props: {
               title="Shared by me"
               description="Read-only views you've shared with other dohc accounts. Ending a share stops their access on their next refresh."
             >
-              <span aria-hidden />
+              <ManageInSharing lane="granted" onOpen={props.onOpenSharing} />
             </SettingRow>
             <div className="px-1 pb-2">
               <SharedByMeList
@@ -842,7 +856,7 @@ export function SettingsDialog(props: {
               title="Shared with me"
               description="Files other dohc accounts shared to you. Adding one places it in this workspace under shared-with-me/ — read-only, kept up to date, readable by your agent."
             >
-              <span aria-hidden />
+              <ManageInSharing lane="received" onOpen={props.onOpenSharing} />
             </SettingRow>
             <div className="px-1 pb-2">
               <SharedWithMeList

@@ -49,16 +49,20 @@ export function useShareRemovalNotices(input: {
     cause?: unknown;
     retry?: (() => void) | null;
   }) => void;
+  // A share ended or came back, whichever surface or retry did it, so a list
+  // still open reads again.
+  onSharesChanged?: () => void;
 }): ShareRemovalNotices {
   const workspaceIdRef = useRef(input.workspaceId);
   workspaceIdRef.current = input.workspaceId;
-  const { showSuccessNotice, reportShellFailure } = input;
+  const { showSuccessNotice, reportShellFailure, onSharesChanged } = input;
   const removed = useCallback<ReportShareRemoval>(
     (removal) => {
       // A switch clears the shell's list, so an answer for the workspace this
       // removal came from must not land in another workspace's notices.
       const current = () => workspaceIdRef.current === removal.workspaceId;
       if (!current()) return;
+      onSharesChanged?.();
       const receipt = removal.undo;
       if (!receipt) {
         showSuccessNotice(removal.message);
@@ -79,6 +83,7 @@ export function useShareRemovalNotices(input: {
           });
           if (!current()) return;
           showSuccessNotice(removal.restoredMessage);
+          onSharesChanged?.();
           removal.restored?.();
         } catch (cause) {
           if (!current()) return;
@@ -93,7 +98,7 @@ export function useShareRemovalNotices(input: {
       };
       showSuccessNotice(`${removal.message} ${SHARE_UNDO_WINDOW}`, () => void undo());
     },
-    [reportShellFailure, showSuccessNotice],
+    [onSharesChanged, reportShellFailure, showSuccessNotice],
   );
   const failed = useCallback(
     (failure: ShareRemovalFailure) => {

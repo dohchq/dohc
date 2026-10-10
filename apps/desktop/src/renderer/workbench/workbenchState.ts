@@ -21,7 +21,9 @@ export type ViewId = (typeof VIEW_IDS)[number];
 // every path in a view or tab id.
 export const APP_VIEW_ID_PREFIX = "app-view:";
 export type AppViewId = `${typeof APP_VIEW_ID_PREFIX}${string}`;
-export type ActivityViewId = ViewId | AppViewId;
+// Sharing sits at the foot of the rail, so the person cannot hide or reorder it.
+export const SHARING_VIEW_ID = "sharing";
+export type ActivityViewId = ViewId | AppViewId | typeof SHARING_VIEW_ID;
 
 export function appViewId(appRoot: string): AppViewId {
   return `${APP_VIEW_ID_PREFIX}${encodeURIComponent(appRoot)}`;
@@ -54,6 +56,7 @@ function isActivityViewId(value: unknown): value is ActivityViewId {
   if (typeof value !== "string") return false;
   return (
     isViewId(value) ||
+    value === SHARING_VIEW_ID ||
     parseAppViewId(value) !== null
   );
 }

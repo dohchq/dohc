@@ -49,6 +49,24 @@ impl SelfWriteRecorder for () {
 }
 
 impl ActorHandle {
+    pub async fn recover_open_document_artifacts(
+        &self,
+        workspace_id: String,
+        leases: dohc_engine_collab::LeaseRegistry,
+    ) -> Result<(), RuntimeError> {
+        self.run(move |store, cache| {
+            dohc_engine_sync::drain_open_document_artifacts(
+                store,
+                cache,
+                &workspace_id,
+                &leases,
+                &NoFaults,
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
     /// The workspace's kept displacements, oldest first: files a replace
     /// moved aside that hold bytes the store does not have.
     pub async fn list_kept_displacements(

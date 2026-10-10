@@ -37,9 +37,13 @@ export const CAPABILITIES = {
   "access.refresh": capability("Request paced observations when Sharing opens or Access expands.", {ipc: ["requestAccessRefresh"]}),
   "share.access.read": capability("Check the current user's received share access.", {ipc: ["checkSharedViewAccess"]}),
   "share.direct.writes.feedback": capability("Subscribe to and acknowledge shared-view write feedback.", {ipc: ["updateShareDirectWriteDelivery"]}),
+  "share.view.refresh": capability("Pull changes into a received share.", {ipc: ["refreshSharedView"]}),
   "share.capture.notice.dismiss": capability("Dismiss a received share's capture Notice.", {ipc: ["dismissShareCaptureNotice"]}),
+  "share.restore.pending.read": capability("Read unfinished Stop and restore progress.", {ipc: ["pendingStopAndRestores"]}),
+  "share.restore.pending.dismiss": capability("Dismiss unfinished Stop and restore progress.", {ipc: ["dismissStopAndRestore"]}),
   "capture.recovery.read": capability("Read capture recovery status.", {ipc: ["getCaptureRecoveryStatus"]}),
   "capture.recovery.clear": capability("Clear a capture recovery notice persistently.", {ipc: ["clearCaptureRecovery"]}),
+  "file.observation.retry": capability("Retry reading a workspace's file changes.", {ipc: ["retryFileObservation"]}),
   "version.list": capability("List workspace versions.", {ipc: ["listWorkspaceVersions"]}),
   "version.create": capability("Create a workspace version.", {ipc: ["createWorkspaceVersion"]}),
   "version.switch": capability("Switch workspace versions.", {ipc: ["switchWorkspaceVersion"]}),
@@ -168,6 +172,7 @@ export const CAPABILITIES = {
   "data.query": capability("Query the local database.", {mcp: {owner: ["dohc_query_database"], view: ["dohc_query_database"], comment: ["dohc_query_database"], edit: ["dohc_query_database"]}}),
   "document.shared.admission.wait": capability("Wait until a shared document is ready for live editing.", {ipc: ["waitForEngineYDocAdmission"]}),
   "document.draft.discard": capability("Discard the recovery copy of a set-aside draft.", {ipc: ["discardLiveDraftRecovery"]}),
+  "document.draft.list": capability("Read saved live drafts for review.", {ipc: ["listLiveDraftRecovery"]}),
   "document.save.retry": capability("Try again to save an open document to its file.", {ipc: ["retryEngineYDocSave"]}),
 } as const;
 
