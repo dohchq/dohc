@@ -16,6 +16,7 @@ import clipboardIpc from "./ipcExposure.pr1639.json";
 import recipientRecordsIpc from "./ipcExposure.pr1688.json";
 import launchOpenIpc from "./ipcExposure.pr1701.json";
 import restartCaptureIpc from "./ipcExposure.pr1719.json";
+import earlyQuitIpc from "./ipcExposure.earlyQuit.json";
 import historyNamesIpc from "./ipcExposure.pr1785.json";
 import liveDraftRecoveryIpc from "./ipcExposure.pr1747.json";
 import liveDraftListingIpc from "./ipcExposure.liveDraftListing.json";
@@ -60,7 +61,8 @@ describe("B1 main inventories (a4be19d5b)", () => {
   it("preserves every IPC wire name and the 26 enforced table guards", () => {
     // Hand-reviewed #1639 removals and #1701, #1688, #1747, reports, save retry,
     // capture recovery, History names, shared write feedback, Stop and restore,
-    // usage record and share copy additions, separate from the hashed main baseline.
+    // usage record, share copy and early-quit typing recovery additions, separate
+    // from the hashed main baseline.
     const expectedNames = [...mainIpc.names];
     expectedNames.push("desktop:check-shared-view-access");
     expectedNames.push("desktop:dismiss-share-capture-notice");
@@ -68,7 +70,7 @@ describe("B1 main inventories (a4be19d5b)", () => {
       expect(expectedNames).toContain(name);
       expectedNames.splice(expectedNames.indexOf(name), 1);
     }
-    for (const name of [...launchOpenIpc.nameAdditions, ...recipientRecordsIpc.nameAdditions, ...liveDraftRecoveryIpc.nameAdditions, ...liveDraftListingIpc.nameAdditions, ...restartCaptureIpc.nameAdditions, ...historyNamesIpc.nameAdditions, ...reportsIpc.nameAdditions, ...saveRetryIpc.nameAdditions, ...accessExposure.nameAdditions, ...sharedWriteFeedback.nameAdditions, ...fileObservationIpc.nameAdditions, ...stopAndRestoreIpc.nameAdditions, ...usageRecordIpc.nameAdditions, ...shareCopyExposure.nameAdditions]) {
+    for (const name of [...launchOpenIpc.nameAdditions, ...recipientRecordsIpc.nameAdditions, ...liveDraftRecoveryIpc.nameAdditions, ...liveDraftListingIpc.nameAdditions, ...restartCaptureIpc.nameAdditions, ...historyNamesIpc.nameAdditions, ...reportsIpc.nameAdditions, ...saveRetryIpc.nameAdditions, ...accessExposure.nameAdditions, ...sharedWriteFeedback.nameAdditions, ...fileObservationIpc.nameAdditions, ...stopAndRestoreIpc.nameAdditions, ...usageRecordIpc.nameAdditions, ...shareCopyExposure.nameAdditions, ...earlyQuitIpc.nameAdditions]) {
       expect(expectedNames).not.toContain(name);
       expectedNames.push(name);
     }

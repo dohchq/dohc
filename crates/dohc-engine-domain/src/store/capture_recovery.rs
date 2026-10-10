@@ -35,6 +35,7 @@ pub struct CaptureRecovery {
     pub object_id: String,
     pub path: String,
     pub capture_moment_id: String,
+    pub deleted: bool,
 }
 
 /// The preimage is a document projection, not a former file head. Its producer
@@ -57,7 +58,29 @@ pub fn record_capture_recovery_in_tx(
         "moment-capture-recovery-{}",
         dohc_engine_storage::hex_sha256(fingerprint.as_bytes())
     );
-    if get_moment(tx, workspace_id, &moment_id)?.is_some() {
+    record_keyed_capture_recovery_in_tx(
+        tx,
+        workspace_id,
+        captured,
+        typing,
+        &moment_id,
+        author_json,
+        now_ms,
+    )
+}
+
+/// Imported checkpoint identity is independent of the current captured head.
+pub fn record_keyed_capture_recovery_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    captured: &TextSnapshot,
+    typing: &str,
+    moment_id: &str,
+    author_json: Option<&str>,
+    now_ms: i64,
+) -> Result<Option<i64>, DomainError> {
+    let typing_sha = dohc_engine_storage::hex_sha256(typing.as_bytes());
+    if get_moment(tx, workspace_id, moment_id)?.is_some() {
         return Ok(None);
     }
     tx.execute(
@@ -86,8 +109,9 @@ pub fn capture_recoveries_in(
     validate_identifier(workspace_id, "workspace_id")?;
     let mut query = conn
         .prepare(
-            "SELECT moment_id,version_id,object_id,path,metadata_correlation_id FROM moments
-         WHERE workspace_id=?1 AND metadata_origin=?2 ORDER BY moment_order",
+            "SELECT m.moment_id,m.version_id,m.object_id,m.path,m.metadata_correlation_id,
+             EXISTS(SELECT 1 FROM moments c WHERE c.workspace_id=m.workspace_id AND c.moment_id=m.metadata_correlation_id AND c.operation='delete')
+             FROM moments m WHERE m.workspace_id=?1 AND m.metadata_origin=?2 ORDER BY m.moment_order",
         )
         .map_err(DomainError::sql_corrupt)?;
     query
@@ -98,6 +122,7 @@ pub fn capture_recoveries_in(
                 object_id: row.get(2)?,
                 path: row.get(3)?,
                 capture_moment_id: row.get(4)?,
+                deleted: row.get(5)?,
             })
         })
         .map_err(DomainError::sql_corrupt)?
@@ -116,4 +141,44 @@ pub fn clear_capture_recovery_in(
         params![workspace_id, moment_id, CLEARED_CAPTURE_RECOVERY_ORIGIN, CAPTURE_RECOVERY_ORIGIN])
         .map_err(DomainError::sql_persist)?;
     Ok(())
+}
+
+/// A deleted object's History still holds its identity and delete moment.
+#[allow(clippy::too_many_arguments)]
+pub fn record_deleted_capture_recovery_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    typing: &str,
+    moment_id: &str,
+    author_json: Option<&str>,
+    now_ms: i64,
+) -> Result<bool, DomainError> {
+    use rusqlite::OptionalExtension;
+    let deleted: Option<(String,String,String)> = tx.query_row(
+        "SELECT path,moment_id,operation FROM moments WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND metadata_origin NOT IN ('capture-recovery','capture-recovery-cleared') ORDER BY moment_order DESC LIMIT 1",
+        params![workspace_id,version_id,object_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(DomainError::sql_corrupt)?;
+    let Some((path, delete_id, operation)) = deleted else {
+        return Ok(false);
+    };
+    if operation != "delete" {
+        return Ok(false);
+    }
+    let typing_sha = dohc_engine_storage::hex_sha256(typing.as_bytes());
+    tx.execute(
+        "INSERT OR IGNORE INTO blobs(sha256,byte_length,text) VALUES(?1,?2,?3)",
+        params![typing_sha, typing.len() as i64, typing],
+    )
+    .map_err(DomainError::sql_persist)?;
+    let empty_sha = dohc_engine_storage::hex_sha256(b"");
+    tx.execute(
+        "INSERT OR IGNORE INTO blobs(sha256,byte_length,text) VALUES(?1,0,'')",
+        [&empty_sha],
+    )
+    .map_err(DomainError::sql_persist)?;
+    let order = next_moment_order(tx)?;
+    tx.execute("INSERT INTO moments(workspace_id,moment_order,moment_id,version_id,object_id,path,recorded_at_ms,operation,after_blob_sha256,before_present,before_blob_sha256,metadata_origin,metadata_correlation_id,author_json,before_content_kind,payload_before_path,payload_before_content_kind,payload_before_blob_sha256,after_content_kind,payload_after_path,payload_after_content_kind,payload_after_blob_sha256) VALUES(?1,?2,?3,?4,?5,?6,?7,'write',?12,2,?8,?9,?10,?11,'text',?6,'text',?8,'text',?6,'text',?12)",
+        params![workspace_id,order,moment_id,version_id,object_id,path,now_ms,typing_sha,CAPTURE_RECOVERY_ORIGIN,delete_id,author_json,empty_sha]).map_err(DomainError::sql_persist)?;
+    Ok(true)
 }

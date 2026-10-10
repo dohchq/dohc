@@ -43,8 +43,8 @@ export type AboutSectionId = "chats" | "history" | "access";
 // The shell's error hook. A section read that fails is one Notices row per
 // section and file, with Try again. A read that succeeds clears it, and so
 // does the file leaving About. The section itself shows no error words, only
-// the way to read again. A read that fails again while its row is there
-// replaces the row without a second toast; with the row gone, it toasts.
+// the way to read again. An unchanged failure keeps an existing row's toast
+// state. A changed message, or a missing row, toasts again.
 export type AboutNotices = {
   report(failure: { identity: string; message: string; cause?: unknown; retry: () => void }): void;
   clear(identity: string): void;

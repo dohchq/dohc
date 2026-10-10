@@ -89,7 +89,7 @@ export function EngineMomentDiffPage({
   // hide the change.
   onPathResolved: (momentId: string, path: string | null) => void;
   registerActiveUndo: (handler: ActiveUndoHandler | null) => void;
-  onRestored: () => void;
+  onRestored: (momentId?: string) => void;
   // Opens the shell's Stop and restore for a person the owner shared with,
   // or for the Edit share link that wrote this change.
   onStopAndRestore: (target: StopTarget) => void;
@@ -248,7 +248,7 @@ export function EngineMomentDiffPage({
     try {
       releaseOperation = await onBeforeRestore();
       const result = await bridge().restoreEngineMomentFile({ workspaceId, momentId: target });
-      onRestored();
+      onRestored(target);
       onSettled(identity);
       if (!live()) return;
       setRestoreState({

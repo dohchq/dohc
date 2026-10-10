@@ -1428,7 +1428,7 @@ export type SyncStatusResult = z.infer<typeof SyncStatusResult>;
 
 export const CaptureRecoveryStatusResult = z.object({
   captureRecoveries: z.array(z.object({
-    momentId: z.string(), versionId: z.string(), objectId: z.string(), path: z.string(), captureMomentId: z.string(),
+    momentId: z.string(), versionId: z.string(), objectId: z.string(), path: z.string(), captureMomentId: z.string(), deleted: z.boolean(),
   })),
 });
 export type CaptureRecoveryStatusResult = z.infer<typeof CaptureRecoveryStatusResult>;
@@ -5000,7 +5000,21 @@ export const LiveDraftRecoveryRecord = z.object({
 }).strict();
 export type LiveDraftRecoveryRecord = z.infer<typeof LiveDraftRecoveryRecord>;
 export const DiscardLiveDraftRecoveryPayload = z.object({workspaceId: WORKSPACE_ID, path: PATH_STRING.refine(isNormalizedRelativePath), objectId: z.string().min(1).max(512), snapshotSha256: z.string().regex(/^[a-f0-9]{64}$/), discardedAtMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), recordId: LiveDraftRecoveryRecord.shape.recordId.optional()}).strict();
+export const TypingRecoveryFailureSchema = z.object({kind: z.enum(["checkpoint", "import"]), path: z.string(), detail: z.string(), checkpointId: z.string().min(1).optional(), reason: z.enum(["author-refused","invalid-author","history-missing","drawing-unavailable"]).optional(), retryable: z.boolean().optional()}).strict();
 export const liveDraftRecoveryOperations = {
+  typingRecovery: {
+    capabilityId: "document.typing.recovery",
+    channel: "desktop:typing-recovery",
+    payload: z.discriminatedUnion("action", [z.object({workspaceId: WORKSPACE_ID, action: z.enum(["read", "flush", "retry"])}).strict(), z.object({workspaceId: WORKSPACE_ID, action: z.enum(["copy", "discard", "dismiss"]), checkpointId: z.string().min(1).max(512)}).strict()]),
+    result: z.union([
+      z.object({failures: z.array(TypingRecoveryFailureSchema), outcome: z.enum(["copied", "discarded", "missing"]).optional()}).strict(),
+      z.object({failures: z.array(TypingRecoveryFailureSchema), outcome: z.enum(["replayed", "covered"]), momentId: z.null()}).strict(),
+      z.object({failures: z.array(TypingRecoveryFailureSchema), outcome: z.literal("imported"), momentId: OPAQUE_ID}).strict(),
+    ]),
+    guard: "active-workspace",
+    scope: "workspace",
+    inactiveMessage: "This window changed workspaces.",
+  },
   listLiveDraftRecovery: {
     capabilityId: "document.draft.list",
     channel: "desktop:list-live-draft-recovery",
@@ -6586,6 +6600,7 @@ export const ReadOnlyTransitionCause = z.enum(["access-ended", "reconnecting", "
 export type ReadOnlyTransitionCause = z.infer<typeof ReadOnlyTransitionCause>;
 
 export const EngineYDocSaveStateEvent = z.object({
+  typingUnresolved: z.boolean().optional(),
   readOnlyCause: ReadOnlyTransitionCause.optional(),
   authorCapacity: z.boolean().optional(),
   editRefusal: z.object({

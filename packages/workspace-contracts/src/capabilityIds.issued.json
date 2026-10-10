@@ -140,5 +140,6 @@
   "usage.read",
   "usage.clear",
   "usage.switch",
-  "share.copy.read"
+  "share.copy.read",
+  "document.typing.recovery"
 ]
