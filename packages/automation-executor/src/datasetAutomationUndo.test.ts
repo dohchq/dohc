@@ -55,7 +55,7 @@ const withAna: DatasetUndoReach = { roster: { ...OWNER, grants: [ANA] }, collect
 const anaMayDelete: ReachDatasetGrants = { workspaceId: "workspace", grants: [{ principalKey: datasetPrincipalKey("workspace", ANA.grantId, ANA.recipientUserId), operationIds: [REMOVE] }] };
 
 const run = (operationId: string): StoredRun => ({
-  version: 9, claimId: "claim", automationId: "collection:Budget#close", definitionHash: "h", keySeed: "h-1", startedAtMs: 1, finishedAtMs: 1,
+  version: 12, claimId: "claim", automationId: "collection:Budget#close", definitionHash: "h", keySeed: "h-1", startedAtMs: 1, finishedAtMs: 1,
   steps: [], created: [], replans: [], undoRequests: [], undoCalls: [], undoCovers: [], readableFields: null, collections: [], rules: null, superseded: false, undo: null, undoKept: [], settled: true, outcome: { state: "done" },
   applied: [{ ordinal: 0, writes: [
     { kind: "dataset-edit", rules, operationId, tableId: TABLE, recordId: "a", expectedVersion: 1, version: 2,

@@ -38,6 +38,8 @@ export const CAPABILITIES = {
   "share.access.read": capability("Check the current user's received share access.", {ipc: ["checkSharedViewAccess"]}),
   "share.direct.writes.feedback": capability("Subscribe to and acknowledge shared-view write feedback.", {ipc: ["updateShareDirectWriteDelivery"]}),
   "share.capture.notice.dismiss": capability("Dismiss a received share's capture Notice.", {ipc: ["dismissShareCaptureNotice"]}),
+  "share.restore.pending.read": capability("Read unfinished Stop and restore progress.", {ipc: ["pendingStopAndRestores"]}),
+  "share.restore.pending.dismiss": capability("Dismiss unfinished Stop and restore progress.", {ipc: ["dismissStopAndRestore"]}),
   "capture.recovery.read": capability("Read capture recovery status.", {ipc: ["getCaptureRecoveryStatus"]}),
   "capture.recovery.clear": capability("Clear a capture recovery notice persistently.", {ipc: ["clearCaptureRecovery"]}),
   "file.observation.retry": capability("Retry reading a workspace's file changes.", {ipc: ["retryFileObservation"]}),

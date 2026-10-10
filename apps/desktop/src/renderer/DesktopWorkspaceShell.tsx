@@ -655,7 +655,6 @@ export function DesktopWorkspaceShell(props: {
   } = useEditorRegistry(workspaceId, openTabs);
   const flushActiveDraft = useCallback(() => flushStableDrafts(), [flushStableDrafts]);
   const collectionLineage = useCollectionWriteLineage(workspaceId);
-  const stopAndRestore = useStopAndRestore(workspaceId);
 
   // `openWorkspace` installs main's exact renderer session before it waits
   // for watcher readiness. Its response is the renderer's existing proof that
@@ -816,6 +815,8 @@ export function DesktopWorkspaceShell(props: {
     runShellErrorAction,
     clearIdentity,
   } = useShellError(workspaceId);
+  const stopAndRestore = useStopAndRestore(workspaceId, {ready: workspaceIsReady && !props.workspace.shareView,
+    onError: (fallback, error, retry, identity) => reportShellError(fallback, error, retry, undefined, identity)});
   useChatDispatchNotices(workspaceId, workspaceIsReady, reportShellFailure, clearKind);
   useWorkspacePathOpenFailures(workspaceId, reportShellFailure);
   // Share removals from Chats, Settings and the share dialog: one notice
@@ -4778,7 +4779,18 @@ export function DesktopWorkspaceShell(props: {
   // Keep each notice kind's dismissal state across remounts.
   const dismissWorkspaceError = useCallback(
     (id: string) => {
-      const kind = shellErrors.find((error) => error.id === id)?.kind;
+      const notice = shellErrors.find((error) => error.id === id);
+      const kind = notice?.kind;
+      if (notice?.identity?.startsWith("stop-and-restore:") && !notice.identity.startsWith("stop-and-restore:recovery:")) {
+        const askedFor = workspaceId;
+        void stopAndRestore.dismiss(notice.identity).then(dismissed => {
+          if (dismissed && workspaceIdRef.current === askedFor) dismissShellError(id);
+        }).catch(error => {
+          if (workspaceIdRef.current === askedFor) reportShellError("dohc could not dismiss this Notice.", error,
+            () => dismissWorkspaceError(id));
+        });
+        return;
+      }
       if (kind === "cloud-sync") syncFailureNotice.noteDismissed();
       if (kind === "drive-no-atomic-placement") driveLimitNotice.noteDismissed();
       if (kind === "kept-files") keptFilesNotice.noteDismissed();
@@ -4800,7 +4812,7 @@ export function DesktopWorkspaceShell(props: {
         });
       } else dismissShellError(id);
     },
-    [dismissShellError, driveLimitNotice, keptFilesNotice, shellErrors, shareView, syncFailureNotice, props.sentNotices, workspaceId, reportShellError],
+    [dismissShellError, driveLimitNotice, keptFilesNotice, shellErrors, shareView, syncFailureNotice, props.sentNotices, workspaceId, reportShellError, stopAndRestore],
   );
   return (
     <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
