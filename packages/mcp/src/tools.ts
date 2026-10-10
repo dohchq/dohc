@@ -1,6 +1,7 @@
+import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import {normalizeShareLabel, shareSubjectFallback, shareSenderLabel} from "@dohc/security-contract/share-labels";
 import { sha256Hex } from "@dohc/workspace-core/hash";
-import { escapeHtml } from "@dohc/workspace-core/html";
+import { generateAppSource } from "@dohc/workspace-core/app-source";
 import { isRecord } from "@dohc/workspace-core/records";
 import { fileVersionError, fileVersionReason } from "@dohc/workspace-contracts/file-version";
 // Pure MCP tool implementations. Each operates on a workspace ROOT dir and a
@@ -15,9 +16,12 @@ import { fileVersionError, fileVersionReason } from "@dohc/workspace-contracts/f
 import { databaseSyncStrategy, DOHC_METADATA_GUARD, frameworkConfigName, hasIgnoredSegment, hasWebDependency, hasWebScript, mediaTypeForPath, notARealFolderRefusal, outsideWorkspaceRefusal, packageManagerFromFiles, validateUserMaterializePath, validateUserReadPath, type DohcPathGuard, type DohcSiteConfig, type PackageJson, type SiteConfidence, type SiteDiagnostic, type SiteKind, type SiteScripts, type WorkspaceSite, isSharedWithMePath, safeRelativeConfigPath } from "@dohc/workspace-core";
 import { sendCliRequest } from "@dohc/cli/client";
 import { DohcCliError } from "@dohc/cli/errors";
+import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
 import { DatasetRequest } from "@dohc/cli/dataset";
 import {
   CLI_PROTOCOL_VERSION,
+  DATASET_CAPABILITIES,
+  APP_PUBLICATION_CAPABILITIES,
   collectionCreateFieldsSchema,
   collectionQueryCursorSchema,
   collectionQueryFilterSchema,
@@ -50,6 +54,49 @@ import {
   stat,
 } from "node:fs/promises";
 import { basename, join } from "node:path";
+
+export const MCP_TOOL_CAPABILITIES = {
+  dohc_list_automations: ["automation.list"],
+  dohc_switch_automation: ["automation.switch"],
+  dohc_dataset: Object.values(DATASET_CAPABILITIES),
+  dohc_publish_app: Object.values(APP_PUBLICATION_CAPABILITIES),
+  dohc_list_workspaces: ["workspace.list"],
+  dohc_workspace_status: ["workspace.status"],
+  dohc_list_changes: ["history.list"],
+  dohc_list_kept_copies: ["file.kept.list"],
+  dohc_save_kept_copy: ["file.kept.save"],
+  dohc_read_change: ["history.read"],
+  dohc_list_files: ["file.list"],
+  dohc_read_file: ["file.read"],
+  dohc_search_files: ["file.search"],
+  dohc_read_document: ["document.read"],
+  dohc_edit_document: ["document.edit"],
+  dohc_create_document: ["document.create"],
+  dohc_write_file: ["file.write"],
+  dohc_create_directory: ["folder.create"],
+  dohc_move_path: ["file.move"],
+  dohc_delete_path: ["file.delete"],
+  dohc_detect_apps: ["app.detect"],
+  dohc_create_app: ["app.create"],
+  dohc_test_app: ["app.test"],
+  dohc_import_data: ["data.import"],
+  dohc_query_database: ["data.query"],
+  dohc_list_file_chats: ["file.chats.list"],
+  dohc_read_chat: ["chat.read"],
+  dohc_list_groups: ["group.list"],
+  dohc_start_group_chat: ["chat.post"],
+  dohc_start_file_chat: ["file.chat.start"],
+  dohc_reply_to_chat: ["chat.reply"],
+  dohc_query_collection: ["collection.query"],
+  dohc_read_record: ["collection.record.read"],
+  dohc_set_record_fields: ["collection.record.edit"],
+  dohc_create_record: ["collection.record.create"],
+  dohc_list_automation_runs: ["automation.runs.list"],
+  dohc_read_automation_run: ["automation.run.read"],
+  dohc_retry_automation_run: ["automation.run.retry"],
+  dohc_press_button: ["automation.button.press"],
+  dohc_inspect_buttons: ["automation.buttons.inspect"],
+} as const satisfies Record<string, readonly CapabilityId[]>;
 
 export interface ToolContext {
   // Workspace root the server is scoped to (the --workspace arg). All file
@@ -1090,15 +1137,6 @@ function siteTitleFromPath(root: string): string {
     .trim();
 }
 
-function packageNameFromPath(root: string): string {
-  const name = basename(root) || "app";
-  const slug = name
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return slug || "app";
-}
-
 function readPackageScripts(pkg: PackageJson | null): SiteScripts {
   if (!pkg || !isRecord(pkg.scripts)) return {};
   const scripts: SiteScripts = {};
@@ -1400,10 +1438,10 @@ async function detectSiteAt(
       severity: "warning",
       code: "invalid-type",
       path: configPath ?? relativeJoin(root, "dohc.json"),
-      message: 'dohc.json type should be "site".',
+      message: 'dohc.json type should be "app".',
     });
   }
-  const explicitNonSite = validType !== undefined && validType !== "site";
+  const explicitNonSite = validType !== undefined && validType !== "app";
 
   if (
     explicitNonSite &&
@@ -1420,7 +1458,7 @@ async function detectSiteAt(
       severity: "warning",
       code: "unexpected_dohc_type",
       path: configPath ?? relativeJoin(root, "dohc.json"),
-      message: "dohc.json has website signals but its type is not \"site\".",
+      message: "dohc.json has website signals but its type is not \"app\".",
     });
   }
 
@@ -1436,7 +1474,7 @@ async function detectSiteAt(
   // describe the same project the same way.
   const kind: SiteKind = configPath || hasPublishManifest || frameworkConfig ? "configured" : hasPackageSignal ? "package" : "static";
   // Mirrors workspace-core's own siteConfidence exactly: a dohc.json only
-  // counts toward high confidence when it explicitly declares type: "site"
+  // counts toward high confidence when it explicitly declares type: "app"
   // — a valid-but-empty config ({}) or one for another dohc feature isn't
   // itself a high-confidence website signal, even though it parsed
   // cleanly. The two detectors have to agree on the same dohc.json.
@@ -1447,7 +1485,7 @@ async function detectSiteAt(
   // — omitting uniqueBuildOutputs here left the two detectors disagreeing
   // on exactly that input despite this branch's own parity comment.
   const confidence: SiteConfidence =
-    validType === "site"
+    validType === "app"
       ? "high"
       : hasIndex || hasPublishManifest || frameworkConfig
         ? "high"
@@ -1569,136 +1607,11 @@ export async function createApp(
   }
 
   const title = args.title?.trim() || siteTitleFromPath(root.normalized);
-  const packageName = packageNameFromPath(root.normalized);
-  const files = [
-    {
-      path: relativeJoin(root.normalized, "index.html"),
-      content: `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>${escapeHtml(title)}</title>
-    <link rel="stylesheet" href="./styles.css">
-  </head>
-  <body>
-    <main>
-      <p class="eyebrow">New app</p>
-      <h1>${escapeHtml(title)}</h1>
-      <p>A clean local page, ready for the shape of the work.</p>
-    </main>
-    <script type="module" src="./script.js"></script>
-  </body>
-</html>
-`,
-    },
-    {
-      path: relativeJoin(root.normalized, "styles.css"),
-      content: `:root {
-  color: #151515;
-  background: #f7f6f1;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-}
-
-body {
-  margin: 0;
-  min-height: 100vh;
-  display: grid;
-  place-items: center;
-}
-
-main {
-  width: min(720px, calc(100vw - 48px));
-}
-
-.eyebrow {
-  margin: 0 0 12px;
-  color: #66635d;
-  font-size: 0.78rem;
-  font-weight: 700;
-  letter-spacing: 0;
-  text-transform: uppercase;
-}
-
-h1 {
-  margin: 0 0 16px;
-  font-size: 4rem;
-  line-height: 0.96;
-}
-
-p {
-  max-width: 56ch;
-  font-size: 1.08rem;
-  line-height: 1.6;
-}
-
-@media (max-width: 640px) {
-  h1 {
-    font-size: 2.25rem;
-  }
-}
-`,
-    },
-    {
-      path: relativeJoin(root.normalized, "script.js"),
-      content: `document.documentElement.dataset.siteReady = "true";
-`,
-    },
-    {
-      path: relativeJoin(root.normalized, "scripts/build-static.mjs"),
-      content: `import { existsSync } from "node:fs";
-import { copyFile, mkdir, rm } from "node:fs/promises";
-
-await rm("dist", { recursive: true, force: true });
-await mkdir("dist", { recursive: true });
-
-for (const file of ["index.html", "styles.css", "script.js"]) {
-  if (existsSync(file)) await copyFile(file, \`dist/\${file}\`);
-}
-`,
-    },
-    {
-      path: relativeJoin(root.normalized, "package.json"),
-      content: `${JSON.stringify(
-        {
-          name: packageName,
-          private: true,
-          type: "module",
-          engines: {
-            node: ">=14.8.0",
-          },
-          scripts: {
-            dev: "serve . --listen 127.0.0.1:4173",
-            build: "node scripts/build-static.mjs",
-            preview: "serve dist --listen 127.0.0.1:4173",
-          },
-          devDependencies: {
-            serve: "14.2.6",
-          },
-        },
-        null,
-        2,
-      )}\n`,
-    },
-    ...(args.withDohcJson === false
-      ? []
-      : [
-          {
-            path: relativeJoin(root.normalized, "dohc.json"),
-            content: `${JSON.stringify(
-              {
-                version: 1,
-                type: "site",
-                title,
-                preview: { mode: "static", entry: "index.html" },
-                build: { command: "npm run build", output: "dist" },
-              },
-              null,
-              2,
-            )}\n`,
-          },
-        ]),
-  ];
+  const files = generateAppSource({
+    title,
+    appRoot: root.normalized,
+    withDohcJson: args.withDohcJson !== false,
+  }).map((file) => ({ ...file, path: relativeJoin(root.normalized, file.path) }));
 
   const resolvedFiles = [];
   for (const file of files) {
@@ -1943,6 +1856,7 @@ async function requestCli<Verb extends CliVerb>(
 ): Promise<CliResultByVerb[Verb] | { ok: false; reason: string }> {
   const request = {
     protocolVersion: CLI_PROTOCOL_VERSION,
+    door: "mcp",
     verb,
     args: {
       cwd: ctx.root,
@@ -1953,11 +1867,19 @@ async function requestCli<Verb extends CliVerb>(
   try {
     const rawResult = ctx.request
       ? await ctx.request(request)
-      : await sendCliRequest(request, { stateDir: ctx.home, ...(verb === "dataset" ? {timeoutMs:90_000} : {}) });
+      : await sendCliRequest(request, { stateDir: ctx.home, ...(verb === "dataset" || verb === "appPublication" ? {timeoutMs:90_000} : {}) });
     return parseCliResult(verb, rawResult);
   } catch (error) {
     return { ok: false as const, reason: cliFailureReason(error, verb) };
   }
+}
+
+/** Publication uses the same owner-local attachment as the CLI. */
+export async function publishApp(ctx: ToolContext, input: unknown) {
+  if (ctx.shareAccess !== undefined) return {ok:false as const,reason:"App publication requires the owning workspace."};
+  const parsed = OwnerAppPublicationRequest.safeParse(input);
+  if (!parsed.success) return {ok:false as const,reason:"Invalid app publication request."};
+  return requestCli(ctx,"appPublication",{request:parsed.data});
 }
 
 /** Dataset authority comes from the owning desktop attachment, never a folder share. */

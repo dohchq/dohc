@@ -7,7 +7,7 @@ import {
   groupAgentAuthorName,
   groupEngineMoments,
 } from "./EngineHistory";
-import { chatAuthorLabel } from "./LinkedChats";
+import { chatAuthorLabel } from "./chatMessages";
 
 function moment(overrides: Partial<EngineMomentRecord> & { id: string }): EngineMomentRecord {
   return {
@@ -33,6 +33,11 @@ describe("engineMomentSummary", () => {
     ).toBe("Reconciled offline edits");
   });
 
+  it("names only the admitted after path for a rename", () => {
+    expect(engineMomentSummary(moment({ id: "rename", operation: "rename", path: "notes/b.md" })))
+      .toBe("Renamed to b.md");
+  });
+
   it("falls back to calm product copy from the operation", () => {
     expect(engineMomentSummary(moment({ id: "m1" }))).toBe("Edited plan.md");
     expect(
@@ -49,6 +54,11 @@ describe("engineOriginLabel", () => {
     expect(engineOriginLabel("api")).toBe("dohc");
     expect(engineOriginLabel("ydoc")).toBe("Live edit");
     expect(engineOriginLabel("unknown")).toBe("Unknown source");
+  });
+
+  it("names kept typing whether or not its notice is still open", () => {
+    expect(engineOriginLabel("capture-recovery")).toBe("Typing kept");
+    expect(engineOriginLabel("capture-recovery-cleared")).toBe("Typing kept");
   });
 });
 

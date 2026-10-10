@@ -25,6 +25,7 @@ mod model;
 mod moment_apply;
 mod outbound;
 mod owner_publication;
+mod settlement_publication;
 pub use owner_publication::{
     OwnerAdmissionPending, OwnerPublicationPrefix, owner_publication_prefix,
 };
@@ -40,6 +41,8 @@ mod share;
 mod share_grant;
 mod version_apply;
 mod ydoc_apply;
+mod ydoc_projection;
+pub use ydoc_projection::{UpdateProjectionError, project_ydoc_updates};
 mod ydoc_origination;
 mod ydoc_recovery;
 
@@ -76,7 +79,7 @@ pub use live_audit::{
 };
 pub use model::{
     MAX_BLOB_HAVE_BATCH, MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS, MAX_PUSH_OPS_PER_BATCH,
-    MAX_SHARE_PROPOSAL_OPS, MAX_WIRE_INTEGER, ReplicationEnvelope,
+    MAX_SHARE_PROPOSAL_OPS, MAX_WIRE_INTEGER, ReplicationEnvelope, SettlementAdmission,
 };
 pub use moment_apply::{
     MomentApplyResult, MomentMaterializationChange, apply_moment_envelope,
@@ -94,14 +97,15 @@ pub use relay::{
     DirectWriteStatus, EpochRequest, EpochResponse, KeyEnvelopeDownloadRequest,
     KeyEnvelopeDownloadResponse, KeyEnvelopeRequest, KeyEnvelopeResponse, LogCoordinateRequest,
     LogCoordinateResponse, MAX_BLOB_DOWNLOAD_BATCH, ProbeRequest, ProbeResponse, PullRequest,
-    PullResponse, PushRequest, PushResponse, RecoverResponse, RelaySyncClient, RelayTransport,
-    ShareBlobRequest, ShareBlobUploadRequest, ShareCollectionWriteRequest,
-    ShareCollectionWriteResponse, ShareLogPushRequest, ShareProposalChange,
-    ShareProposalSubmitOutcome, ShareProposalSubmitRequest, ShareProposalSubmitResponse,
-    ShareReplicationEnvelope, ShareViewChangedPath, ShareViewPullOutcome, ShareViewRefusal,
-    ShareViewRequest, ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome,
-    SharedChannelRejection, SharedChannelRequest, SharedChannelResponse, SyncPassOutcome,
-    WorkspacePushProgress, collision_key, read_direct_write_status,
+    PullResponse, PushRequest, PushResponse, PushWorkspaceProgress, RecoverResponse,
+    RelaySyncClient, RelayTransport, SettlementPublicationRefusal, ShareBlobRequest,
+    ShareBlobUploadRequest, ShareCollectionWriteRequest, ShareCollectionWriteResponse,
+    ShareLogPushRequest, ShareProposalChange, ShareProposalSubmitOutcome,
+    ShareProposalSubmitRequest, ShareProposalSubmitResponse, ShareReplicationEnvelope,
+    ShareViewChangedPath, ShareViewPullOutcome, ShareViewRefusal, ShareViewRequest,
+    ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRejection,
+    SharedChannelRequest, SharedChannelResponse, SyncPassOutcome, collision_key,
+    read_direct_write_status, read_record_creation_statuses,
 };
 pub use router::{RoutedApply, apply_replication_envelope};
 pub use secret_apply::apply_secret_envelope;
@@ -112,15 +116,16 @@ pub use share::{
 pub use share_grant::GrantBinding;
 pub use version_apply::{apply_version_envelope, apply_workspace_envelope};
 pub use ydoc_apply::{
-    AlwaysLive, LeaseProbe, NoLiveLeases, ResultingHead, YdocApplyResult, YdocDrainCleanup,
-    YdocDrainResult, YdocLineageReplacement, apply_ydoc_envelope,
-    complete_deferred_ydoc_drain_cleanup, drain_deferred_ydoc_for_key,
-    drain_deferred_ydoc_for_key_holding_cleanup, drain_deferred_ydoc_for_live_session,
-    ensure_no_adopted_owner_under_path, fold_resolution_into_ydoc_in_tx,
-    live_session_has_drainable_deferred_ydoc, open_sync_conflict_for_object,
-    project_and_write_in_tx, project_ydoc_with_store, reconcile_imported_resulting_head_in_tx,
-    reconcile_local_resulting_head_in_tx, retire_ydoc_lineage_in_tx,
-    validate_scene_asset_with_store, workspace_has_ydoc_state_in_tx,
+    AlwaysLive, LeaseProbe, NoLiveLeases, PreparedLocalYdocLineage, ResultingHead, YdocApplyResult,
+    YdocDrainCleanup, YdocDrainResult, YdocLineageReplacement, apply_ydoc_envelope,
+    complete_deferred_ydoc_drain_cleanup, current_ydoc_content_matches_in_tx,
+    drain_deferred_ydoc_for_key, drain_deferred_ydoc_for_key_holding_cleanup,
+    drain_deferred_ydoc_for_live_session, ensure_no_adopted_owner_under_path,
+    fold_resolution_into_ydoc_in_tx, live_session_has_drainable_deferred_ydoc,
+    open_sync_conflict_for_object, prepare_local_ydoc_lineage_in_tx, project_and_write_in_tx,
+    project_ydoc_with_store, reconcile_imported_resulting_head_in_tx,
+    reconcile_local_resulting_head_in_tx, reconcile_prepared_local_resulting_head_in_tx,
+    retire_ydoc_lineage_in_tx, validate_scene_asset_with_store, workspace_has_ydoc_state_in_tx,
 };
 pub use ydoc_origination::{
     BaseOrigination, SharingDeclined, lineage_originated_here, originate_appended_ydoc_base_in_tx,

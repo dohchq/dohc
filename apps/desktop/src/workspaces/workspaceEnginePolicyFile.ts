@@ -8,10 +8,12 @@ import {
   type FilesPolicyRule,
   type PolicyParseResult,
   type VisibilityPolicyRule,
+  type WorkspacePolicyPath,
 } from "@dohc/security-contract/effective-policy";
 import {
   type SearchVisibility,
   type TextFileSnapshot,
+  type VersionedTextMoment,
 } from "@dohc/workspace-contracts/engine";
 import { lstat, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -22,6 +24,8 @@ export interface WorkspaceEnginePolicySnapshot {
   filesPolicy: FilesPolicyRule[] | null;
   visibilityPolicy: VisibilityPolicyRule[] | null;
   errors: string[];
+  // Where `errors` came from, so a person can be told which file to fix.
+  unreadable: WorkspacePolicyPath[];
 }
 
 type PolicyReadResult<T> = { rules: T[] | null; errors: string[] };
@@ -92,6 +96,14 @@ export function historyPathAdmission(
       visibilityPolicy: policy.visibilityPolicy,
     }).tracked;
   };
+}
+
+export function historyMomentPathsAdmitted(
+  admitted: (path: string) => boolean,
+  moment: Pick<VersionedTextMoment, "path" | "payload">,
+): boolean {
+  return [moment.path, moment.payload.after.path, ...(moment.payload.before ? [moment.payload.before.path] : [])]
+    .every(admitted);
 }
 
 // Whether files.toml leaves every file under `directory` out of History, so
@@ -166,6 +178,7 @@ export async function readWorkspaceEnginePolicy(
       errors: [
         `workspace policy directory could not be resolved: ${errorMessage(error)}`,
       ],
+      unreadable: [".dohc"],
     };
   }
   const [files, visibility] = await Promise.all([
@@ -176,5 +189,9 @@ export async function readWorkspaceEnginePolicy(
     filesPolicy: files.rules,
     visibilityPolicy: visibility.rules,
     errors: [...files.errors, ...visibility.errors],
+    unreadable: [
+      ...(files.errors.length ? [".dohc/files.toml" as const] : []),
+      ...(visibility.errors.length ? [".dohc/visibility.toml" as const] : []),
+    ],
   };
 }

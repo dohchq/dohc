@@ -1,3 +1,4 @@
+import {initializeHostedSettlementSchema} from "./hostedSettlementSchema";
 import { initializeLiveAuthorshipSchema, originalLiveJournalSql, liveAuthorSchemaMarked, assertLiveAuthorColumns } from "./liveAuthorshipSchema";
 import { initializeAppPublicationSchema } from "./publicationSchema";
 import { initializeAppCollectionSchema } from "./appCollectionSchema";
@@ -23,6 +24,7 @@ import {
   LINK_DISCUSSION_BODY_CODE_POINT_LIMIT,
   LINK_DISCUSSION_BODY_INPUT_BYTE_LIMIT,
 } from "./limits";
+import { initializeLinkCreationSchema } from "./linkCreationSchema";
 import type { SqliteDb } from "./types";
 
 const NORMALIZED_SHARE_SCHEMA_SQL = `
@@ -1229,8 +1231,10 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeLiveCommittedDeliverySchema(db);
     initializeLiveTicketSchema(db);
     initializeAppPublicationSchema(db);
+    initializeLinkCreationSchema(db);
     initializeAppCollectionSchema(db);
     initializeLiveAuthorshipSchema(db);
+    initializeHostedSettlementSchema(db);
     initializeNoticeSchema(db);
     initializeShareNoticeDeliverySchema(db);
     initializeAutomationHostSchema(db);

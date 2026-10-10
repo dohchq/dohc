@@ -400,6 +400,8 @@ fn replay_into_clean_peer(
         let bytes = read_blob_bytes(source, &op.blob_sha());
         peer.put_binary_blob(&bytes).expect("peer blob");
         let envelope = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: workspace_id.to_owned(),
             origin_id: op.origin_id.clone(),
             origin_seq: op.origin_seq - first_origin_seq,
@@ -553,6 +555,8 @@ async fn capture_authored_edit_keeps_actor_in_receiving_store_history() {
         let bytes = read_blob_bytes(&source_store, &op.blob_sha());
         peer.put_binary_blob(&bytes).expect("copy Y.Doc blob");
         let envelope = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: WS.to_owned(),
             origin_id: op.origin_id.clone(),
             origin_seq: op.origin_seq - first_origin_seq,
@@ -685,6 +689,8 @@ fn remote_edit_envelope(
         .expect("store remote edit");
     let base_claim = dohc_engine_storage::hex_sha256(&fixture.base);
     ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: key.workspace_id.clone(),
         origin_id: "peer".to_owned(),
         origin_seq: 0,
@@ -968,6 +974,8 @@ async fn draining_a_delta_without_a_verified_base_keeps_it_parked() {
         .put_binary_blob(&predecessor)
         .expect("store predecessor blob");
     let envelope = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: WS.to_owned(),
         origin_id: "peer".to_owned(),
         origin_seq: 0,
@@ -1118,6 +1126,8 @@ async fn applying_a_delta_without_a_verified_base_stays_retryable() {
         .put_binary_blob(&predecessor)
         .expect("store predecessor blob");
     let envelope = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: WS.to_owned(),
         origin_id: "peer".to_owned(),
         origin_seq: 0,
@@ -1961,6 +1971,8 @@ async fn a_peer_base_that_lands_first_leaves_the_local_edit_a_delta() {
         let mut store = EngineStore::open(&db, 9_300).expect("open store");
         let sha = store.put_binary_blob(&peer_base).expect("peer base blob");
         let envelope = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: WS.to_owned(),
             origin_id: "peer".to_owned(),
             origin_seq: 0,
@@ -2074,6 +2086,8 @@ async fn redelivering_an_originated_base_is_idempotent() {
     let base_sha = dohc_engine_storage::hex_sha256(&base_bytes);
     let mut store = EngineStore::open(&db, 9_400).expect("open store");
     let envelope = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: WS.to_owned(),
         origin_id: "peer".to_owned(),
         origin_seq: 0,
@@ -2249,6 +2263,8 @@ fn relayed(
         .map(|(op, relay_seq)| {
             (
                 ReplicationEnvelope {
+                    settlement_admission: None,
+                    admitted_author_snapshot: None,
                     workspace_id: WS_TWO_DEVICES.to_owned(),
                     origin_id: origin.to_owned(),
                     origin_seq: op.origin_seq - first,
@@ -3157,6 +3173,8 @@ async fn ordinary_text_write_sends_one_canonical_rewrite_before_its_moment() {
             peer.put_binary_blob(&bytes).expect("copy update blob");
         }
         let envelope = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: WS.to_owned(),
             origin_id: op.origin_id.clone(),
             origin_seq: op.origin_seq,
@@ -4093,6 +4111,7 @@ impl dohc_engine_sync::RelayTransport for AcceptPushTransport {
         req: dohc_engine_sync::PushRequest,
     ) -> Result<dohc_engine_sync::PushResponse, dohc_engine_sync::RelayError> {
         Ok(dohc_engine_sync::PushResponse {
+            settlement_refusals: Vec::new(),
             accepted: req.ops.len(),
             inserted: req.ops.len(),
             skipped: 0,

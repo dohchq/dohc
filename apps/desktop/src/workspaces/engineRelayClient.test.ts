@@ -344,12 +344,23 @@ describe("EngineRelayClient", () => {
   });
 
 
+  it("preserves push continuation for the sync coordinator", async () => {
+    const daemon = new MockDaemon((request) => request.method === "sync.push" ? {
+      status: "complete", pushed: 64, fetched: 0, applied: 0, refused: 0, skipped: 0,
+      conflictsOpened: 0, hasMore: true, pendingCursor: null, changedPaths: [],
+      sharingDeclined: [], ownerAdmissionPending: [], refusals: [], recordFacts: [],
+    } : undefined);
+    const { client, sessions } = await harness(daemon);
+    await expect(client.push()).resolves.toMatchObject({ pushed: 64, hasMore: true });
+    await sessions.closeAll();
+  });
+
   it("routes push, pull, cursor commit, recover, claim, and probe through one daemon session", async () => {
     const { daemon, sessions, client } = await harness();
 
     await expect(client.push()).resolves.toEqual({
       pushed: 3, ownerAdmissionPending: [],
-      originsPushed: [],
+      hasMore: false, originsPushed: [],
       sharingDeclined: [],
     });
     const materializePage = vi.fn(async () => undefined);
@@ -685,7 +696,7 @@ describe("EngineRelayClient", () => {
 
     await expect(client.push()).resolves.toEqual({
       pushed: 0, ownerAdmissionPending: [],
-      originsPushed: [],
+      hasMore: false, originsPushed: [],
       sharingDeclined: [
         {
           path: "notes/oversized.md",
@@ -876,7 +887,7 @@ describe("EngineRelayClient", () => {
               {
                 paths: ["docs/ideas/collection.yaml", "docs/ideas/a.md"],
                 result: "stale",
-                stalePath: "docs/ideas",
+                stalePath: "docs/ideas", recoveredDraftPath: null,
                 currentBlobSha256: null,
               },
               { paths: ["docs/packing/automations.yaml"], result: "refused", reason: "" },
@@ -895,7 +906,7 @@ describe("EngineRelayClient", () => {
         {
           paths: ["docs/ideas/collection.yaml", "docs/ideas/a.md"],
           result: "stale",
-          stalePath: "docs/ideas",
+          stalePath: "docs/ideas", recoveredDraftPath: null,
           currentBlobSha256: null,
         },
         { paths: ["docs/packing/automations.yaml"], result: "refused", reason: "" },

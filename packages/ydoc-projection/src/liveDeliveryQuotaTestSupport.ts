@@ -7,7 +7,12 @@ export function journalMetadataBytes(db: DatabaseSync): number {
   const metadata = rows.map(row => Object.entries(row).filter(([key]) =>
     key !== "update_bytes" && key !== "validation_checkpoint_bytes").map(([, value]) => value));
   const provenance = db.prepare("SELECT * FROM sync_relay_live_update_struct_provenance WHERE workspace_id='workspace'").all().map(Object.values);
-  return [...metadata, ...provenance].reduce((total, row) => total + Buffer.byteLength(JSON.stringify(row)), 0);
+  const cuts = db.prepare(`SELECT state_sha256,markdown_sha256,state_byte_length,markdown_byte_length
+    FROM sync_relay_live_settlement_cuts JOIN sync_relay_live_update_journal USING(journal_cursor)
+    WHERE workspace_id='workspace'`).all();
+  const cutBytes = cuts.reduce((total, row) => total + Buffer.byteLength(String(row.state_sha256))
+    + Buffer.byteLength(String(row.markdown_sha256)) + 8 + 8, 0);
+  return cutBytes + [...metadata, ...provenance].reduce((total, row) => total + Buffer.byteLength(JSON.stringify(row)), 0);
 }
 
 export function liveDeliveryBookkeepingBytes(db: DatabaseSync): number {

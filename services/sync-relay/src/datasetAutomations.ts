@@ -1,3 +1,4 @@
+import { datasetBaseFolder } from "@dohc/security-contract/dataset";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
@@ -67,7 +68,7 @@ export function createDatasetAutomations(input: {
       const allowed = currentCollectionEditGrant(storage, { shareId: grant.shareId, grantId: grant.grantId,
         grantGeneration: grant.generation, userId: auth.userId });
       const definition = host.approvedRevision(owner(auth.workspaceId), { workspaceId: auth.workspaceId, datasetId }).definition;
-      if (allowed.share.workspaceId !== auth.workspaceId || !grantEditsCollection(storage, allowed, posix.dirname(definition.schemaPath))) throw notFound();
+      if (allowed.share.workspaceId !== auth.workspaceId || !grantEditsCollection(storage, allowed, datasetBaseFolder(definition))) throw notFound();
     }
     return host.describe(auth, { workspaceId: auth.workspaceId, datasetId });
   }
@@ -75,15 +76,17 @@ export function createDatasetAutomations(input: {
     /** Also enroll dataset-only workspaces when a computer hosts their schedules. */
     wantedWorkspaces(): string[] {
       current();
-      return storage.db.prepare(
-        `SELECT DISTINCT c.workspace_id FROM sync_relay_current_files f
+      const workspaces = new Set<string>();
+      for (const row of storage.db.prepare(
+        `SELECT c.workspace_id,json_extract(c.revision_json,'$.definition.schemaPath') AS schemaPath,f.path FROM sync_relay_current_files f
          CROSS JOIN dohc_dataset_catalog c ON c.workspace_id=f.workspace_id
            AND substr(json_extract(c.revision_json,'$.definition.schemaPath'),1,length(f.path)-length('automations.yaml')) = substr(f.path,1,length(f.path)-length('automations.yaml'))
          JOIN dohc_dataset_journals j ON j.workspace_id=c.workspace_id AND j.dataset_id=c.dataset_id
-         WHERE (f.path='automations.yaml' OR f.path GLOB '*/automations.yaml') AND j.active=1
-           AND instr(substr(json_extract(c.revision_json,'$.definition.schemaPath'),length(f.path)-length('automations.yaml')+1),'/')=0
-         ORDER BY c.workspace_id`
-      ).all().map(row => String(row.workspace_id));
+         WHERE (f.path='automations.yaml' OR f.path GLOB '*/automations.yaml') AND j.active=1`
+      ).all()) {
+        if (posix.join(datasetBaseFolder({ schemaPath: String(row.schemaPath) }), "automations.yaml") === row.path) workspaces.add(String(row.workspace_id));
+      }
+      return [...workspaces].sort();
     },
     /** Dataset metadata changes require re-indexing, ordinary claims require only a drain. */
     metadata(workspaceId: string): string {

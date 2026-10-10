@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 // Spawns the built desktop app for a few seconds and fails on fatal stderr
 // patterns (t3code's smoke pattern). Catches broken builds that unit tests
@@ -8,8 +8,12 @@ import { join } from "node:path";
 
 const repoRoot = process.cwd();
 const mainEntry = join(repoRoot, "apps/desktop/dist/main/main.js");
+const packagedProfile = process.env.DOHC_SMOKE_USER_DATA_DIR;
 
-if (!existsSync(mainEntry)) {
+if (packagedProfile && (!isAbsolute(packagedProfile) || !process.env.DOHC_SMOKE_ELECTRON)) {
+  throw new Error("Packaged smoke requires an absolute isolated profile and a packaged executable.");
+}
+if (!packagedProfile && !existsSync(mainEntry)) {
   console.error(`Desktop build missing: ${mainEntry} — run pnpm build:desktop first.`);
   process.exit(1);
 }
@@ -28,12 +32,13 @@ const FATAL_PATTERNS = [
 
 // --enable-logging routes renderer console/load errors to stderr so the
 // renderer-side fatal patterns can actually fire.
-const args = [mainEntry, "--enable-logging"];
+const args = packagedProfile
+  ? ["--dohc-isolated-test", `--user-data-dir=${packagedProfile}`, "--enable-logging"]
+  : [mainEntry, "--enable-logging"];
 if (process.env.DOHC_E2E_NO_CHROMIUM_SANDBOX === "1") args.push("--no-sandbox");
 
 const child = spawn(
-  // fuse-smoke.mjs points this at a fuse-flipped Electron copy whose
-  // resources/app.asar takes precedence over the argv entry path.
+  // Packaged smoke loads the release ASAR through its own executable.
   process.env.DOHC_SMOKE_ELECTRON ?? join(repoRoot, "node_modules/.bin/electron"),
   args,
   {

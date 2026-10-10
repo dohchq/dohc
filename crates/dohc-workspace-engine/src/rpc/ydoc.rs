@@ -290,6 +290,9 @@ struct YdocRecordUpdateParams {
     /// the update row and every history row the apply derives.
     #[serde(default)]
     attribution: Option<dohc_engine_domain::ChangeAttribution>,
+    /// Only the server delivery path supplies the automation declaration at admission.
+    #[serde(default)]
+    trusted_automation_draft: bool,
     /// The client declares this update as the SEED: a faithful import of the
     /// `seedContent` the open returned, built before any user input could
     /// reach the session. Only the adapter's seed path sends it; a
@@ -298,6 +301,19 @@ struct YdocRecordUpdateParams {
     /// head as the lineage's seed source.
     #[serde(default)]
     seed: bool,
+}
+
+impl YdocRecordUpdateParams {
+    fn automation_declaration(&self) -> Option<dohc_engine_domain::AutomationDeclaration> {
+        self.trusted_automation_draft
+            .then(|| {
+                dohc_engine_domain::AutomationDeclaration::from_change(
+                    self.actor_origin_id.as_deref(),
+                    self.attribution.as_ref(),
+                )
+            })
+            .flatten()
+    }
 }
 
 #[derive(Serialize)]
@@ -751,6 +767,7 @@ impl EngineService {
                     reason: params.reason,
                     observed_binding: params.observed_binding,
                 },
+                now_ms()?,
                 cancellation.token(),
             )
             .await
@@ -1074,7 +1091,7 @@ impl EngineService {
         };
         let (open, session) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
         let update = base64::engine::general_purpose::STANDARD
-            .decode(params.update_base64)
+            .decode(&params.update_base64)
             .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid update encoding"))?;
         if let Some(attribution) = &params.attribution
             && let Err(reason) = attribution.validate()
@@ -1129,6 +1146,7 @@ impl EngineService {
                     params.actor_origin_id.as_deref(),
                     params.attribution.as_ref(),
                 ),
+                automation_declaration: params.automation_declaration(),
             };
             let actor = open.actor.clone();
             let workspace = open.workspace_id.clone();
@@ -1844,6 +1862,22 @@ mod owner_draft_editor_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn desktop_automation_drafts_do_not_require_server_declarations() {
+        let value = serde_json::json!({"sessionId":"session","updateBase64":"AAA=","actorOriginId":"collection:Tasks#mark","attribution":{"actorKind":"automation","depth":1,"onBehalfOf":"presser"}});
+        let desktop: super::YdocRecordUpdateParams = serde_json::from_value(value.clone()).unwrap();
+        assert!(desktop.automation_declaration().is_none());
+        let mut server_value = value;
+        server_value["trustedAutomationDraft"] = serde_json::json!(true);
+        let server: super::YdocRecordUpdateParams = serde_json::from_value(server_value).unwrap();
+        let declaration = server.automation_declaration().unwrap();
+        assert_eq!(declaration.automation_id, "collection:Tasks#mark");
+        assert_eq!(
+            declaration.attribution.on_behalf_of.as_deref(),
+            Some("presser")
+        );
+    }
+
     use super::*;
     use crate::EngineService;
     use crate::rpc::error::map_owner_outbox;
@@ -2550,6 +2584,28 @@ mod tests {
             before,
             "native rename must roll back every mutation"
         );
+
+        let bytes = std::fs::read(root.join("notes/owner.md")).unwrap();
+        let request = serde_json::from_value(json!({"id":92,"method":"versionedText.delete","workspace":handle,
+            "params":{"versionId":"main","path":"notes/owner.md","origin":"restore","expectedSha256":dohc_engine_storage::hex_sha256(&bytes)}})).unwrap();
+        assert_eq!(
+            service
+                .versioned_text_delete(
+                    &RequestContext::unbounded(),
+                    &request,
+                    request.params.clone()
+                )
+                .await
+                .unwrap_err()
+                .message,
+            "live-document-binding-active"
+        );
+        assert_eq!(
+            std::fs::read(root.join("notes/owner.md")).unwrap(),
+            bytes,
+            "closing the owner's session must not let checked deletion unlink its adopted object"
+        );
+        assert_eq!(snapshot(), before);
 
         std::fs::rename(root.join("notes/owner.md"), root.join("moved.md")).unwrap();
         let actor = service.open(Some(handle)).unwrap().actor.clone();

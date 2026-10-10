@@ -1,4 +1,3 @@
-import { Check, Copy } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { CreateRelaySharePayload, CreateRelayShareResult, ShareAccess } from "../ipc/bridgeContract";
 import { AutomationShareNote, useAutomationShareCheck } from "./automationShareCheck";
@@ -6,6 +5,8 @@ import type { RelayShareTarget } from "./RelayShareDialog";
 import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
 import { PrimaryButton, SecondaryButton } from "./ui/controls";
+import { CopyField } from "./ui/CopyButton";
+import { BROWSER_INVITATION_SECRET, SHARE_CODE_SECRET } from "./shareCopySecrets";
 import { useRequestSequence } from "./useRequestSequence";
 
 const ACCESS_OPTIONS: ReadonlyArray<{
@@ -36,14 +37,12 @@ export function EmailShareForm(props: {
   const [phase, setPhase] = useState<"idle" | "checking" | "creating">("idle");
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<CreateRelayShareResult | null>(null);
-  const [copied, setCopied] = useState(false);
-  const [invitationCopied, setInvitationCopied] = useState(false);
   // RelayShareDialog keys this form by the canonical target. Switching panes
   // keeps pending work; changing the target unmounts and invalidates it.
   const requests = useRequestSequence([props.workspaceId]);
   const automations = useAutomationShareCheck(props.workspaceId, props.target);
   useEffect(() => {
-    setCreated(null); setPhase("idle"); setError(null); setCopied(false); setInvitationCopied(false);
+    setCreated(null); setPhase("idle"); setError(null);
   }, [props.workspaceId]);
 
   const busy = phase !== "idle";
@@ -90,28 +89,6 @@ export function EmailShareForm(props: {
       if (current()) setError(ipcErrorMessage(cause));
     } finally {
       if (current()) setPhase("idle");
-    }
-  }
-
-  async function copyCode() {
-    if (!created) return;
-    const token = requests.current();
-    try {
-      await bridge().writeClipboardText({ text: created.shareCode });
-      if (requests.isCurrent(token)) setCopied(true);
-    } catch {
-      // The code stays visible for manual selection.
-    }
-  }
-
-  async function copyInvitation() {
-    if (!created?.browserInvitationUrl) return;
-    const token = requests.current();
-    try {
-      await bridge().writeClipboardText({ text: created.browserInvitationUrl });
-      if (requests.isCurrent(token)) setInvitationCopied(true);
-    } catch {
-      // The invitation stays visible for manual selection.
     }
   }
 
@@ -202,13 +179,13 @@ export function EmailShareForm(props: {
               <p className="m-0 text-xs leading-relaxed text-muted">
                 Send this browser invitation to {created.recipientEmail}. The recipient must sign in with the invited account.
               </p>
-              <code data-testid="share-browser-invitation" data-grant-id={created.grantId}
-                className="min-w-0 break-all rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[11px] text-ink">
-                {created.browserInvitationUrl}
-              </code>
-              <SecondaryButton type="button" data-testid="share-browser-invitation-copy" onClick={() => void copyInvitation()}>
-                {invitationCopied ? "Browser invitation copied" : "Copy browser invitation"}
-              </SecondaryButton>
+              <CopyField label="Copy browser invitation" copiedLabel="Browser invitation copied"
+                sensitive={BROWSER_INVITATION_SECRET} copyTestId="share-browser-invitation-copy"
+                getText={() => created.browserInvitationUrl ?? null}>
+                <code data-testid="share-browser-invitation" data-grant-id={created.grantId} title={created.browserInvitationUrl}>
+                  {created.browserInvitationUrl}
+                </code>
+              </CopyField>
               <p className="m-0 text-xs leading-relaxed text-muted">
                 Browser editing lets them change shared Markdown files live when available. Other files use changes you accept.
               </p>
@@ -219,27 +196,9 @@ export function EmailShareForm(props: {
             <span className="font-medium text-ink">{created.recipientEmail}</span> —
             they paste it in dohc under “Open a share”.
           </p>
-          <div className="flex items-start gap-2">
-            <code
-              data-testid="share-code"
-              className="min-w-0 flex-1 break-all rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[11px] leading-snug text-ink"
-            >
-              {created.shareCode}
-            </code>
-            <button
-              type="button"
-              data-testid="share-code-copy"
-              onClick={() => void copyCode()}
-              className="flex shrink-0 items-center gap-1.5 rounded-md border border-line bg-transparent px-2.5 py-1.5 text-xs text-muted transition-colors hover:bg-hover hover:text-ink"
-            >
-              {copied ? (
-                <Check size={12} aria-hidden />
-              ) : (
-                <Copy size={12} aria-hidden />
-              )}
-              {copied ? "Copied" : "Copy"}
-            </button>
-          </div>
+          <CopyField copyTestId="share-code-copy" getText={() => created.shareCode} sensitive={SHARE_CODE_SECRET}>
+            <code data-testid="share-code" title={created.shareCode}>{created.shareCode}</code>
+          </CopyField>
           <p className="m-0 text-[11px] leading-relaxed text-subtle">
             You can end this share anytime from Settings → Cloud.
           </p>

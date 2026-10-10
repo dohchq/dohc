@@ -9,7 +9,7 @@ import { ErrorBoundary } from "../ErrorBoundary";
 import type { CustomizePart } from "../settings/customize";
 import { MoreMenu } from "../ui/MoreMenu";
 import { ChatsPanel, type ChatsPanelTab } from "../workbench/ChatsPanel";
-import { PanelLoading } from "../workbench/PanelLoading";
+import { SkeletonRows, SkeletonSlot } from "../ui/SkeletonRows";
 import {
   isChatsTabPath,
   setChatsWidth,
@@ -27,7 +27,7 @@ const LazyLinkedChatsPanel = lazy(() =>
 
 type LinkedChatsPanelProps = ComponentProps<typeof LazyLinkedChatsPanel>;
 
-// The right side panel: chats across the workspace, or the active file's.
+// The right side panel: chats across the workspace, or About the active file.
 export function ShellChatsPanel(props: {
   customize: (part: CustomizePart) => void;
   wb: WorkbenchState;
@@ -48,6 +48,10 @@ export function ShellChatsPanel(props: {
   openPathWithHeading: LinkedChatsPanelProps["onOpenPath"];
   onChatsThreadRead: LinkedChatsPanelProps["onThreadRead"];
   reportFailureMessage: LinkedChatsPanelProps["onError"];
+  historyRevision: number;
+  openMoment: NonNullable<LinkedChatsPanelProps["history"]>["onOpenMoment"];
+  aboutNotices: LinkedChatsPanelProps["notices"];
+  accessContext: LinkedChatsPanelProps["accessContext"];
   chatsNavigatorProps: ComponentProps<typeof LazyChatsView>;
 }) {
   const {
@@ -70,6 +74,10 @@ export function ShellChatsPanel(props: {
     openPathWithHeading,
     onChatsThreadRead,
     reportFailureMessage,
+    historyRevision,
+    openMoment,
+    aboutNotices,
+    accessContext,
     chatsNavigatorProps,
   } = props;
   return (
@@ -77,9 +85,9 @@ export function ShellChatsPanel(props: {
       width={wb.chatsWidth}
       onWidthChange={(width) => mutateWb((state) => setChatsWidth(state, width))}
       onCollapse={() => mutateWb(toggleChats)}
-      // A share view gets the file tab only: a workspace-wide listing
-      // would be a superset to filter, which is the shape #627 came from.
-      tabs={isShareView ? ["file"] : ["all", "file"]}
+      // A share view gets About only: a workspace-wide listing would be a
+      // superset to filter, which is the shape #627 came from.
+      tabs={isShareView ? ["about"] : ["all", "about"]}
       tab={chatsPanelActiveTab}
       onTabChange={setChatsPanelTab}
       actions={
@@ -112,6 +120,9 @@ export function ShellChatsPanel(props: {
         scope="rail"
         resetKeys={[chatsPanelActiveTab, focusedTabPath]}
       >
+        {/* Every loading state here puts its lines at the top of the panel,
+            so each one takes over from the last without blinking. */}
+        <SkeletonSlot>
         {!captureAvailable && !isShareView ? (
           // Main's capture cannot serve chats here, so mounting either
           // view below would issue calls it refuses and show the
@@ -122,9 +133,9 @@ export function ShellChatsPanel(props: {
           //
           // A shared view needs no capture and waits for no decision:
           // main answers its per-file chat from the share scope, and
-          // its only tab is the file tab.
+          // its only tab is About.
           !captureDecided ? (
-            <PanelLoading label="Chats" />
+            <SkeletonRows inSlot layout="panel" label="Loading Chats..." />
           ) : (
             <div
               data-testid="chats-panel-off"
@@ -133,25 +144,30 @@ export function ShellChatsPanel(props: {
               {chatsOffCopy(syncStatus)}
             </div>
           )
-        ) : chatsPanelActiveTab === "file" ? (
-          <Suspense fallback={<PanelLoading label="Chats" />}>
+        ) : chatsPanelActiveTab === "about" ? (
+          <Suspense fallback={<SkeletonRows inSlot layout="panel" label="Loading Chats..." />}>
             <LazyLinkedChatsPanel
               workspaceId={workspaceId}
               filePath={activeDocumentPath}
-              {...(shareView ? { shareReadOnly: true } : {})}
+              {...(shareView
+                ? { shareReadOnly: true }
+                : { history: { revision: historyRevision, onOpenMoment: openMoment } })}
               initialThread={searchChatTarget?.thread ?? null}
               initialFocusMessageId={searchChatTarget?.focusMessageId}
               onInitialThreadConsumed={() => setSearchChatTarget(null)}
               onOpenPath={openPathWithHeading}
               onThreadRead={onChatsThreadRead}
               onError={reportFailureMessage}
+              notices={aboutNotices}
+              accessContext={accessContext}
             />
           </Suspense>
         ) : (
-          <Suspense fallback={<PanelLoading label="Chats" />}>
+          <Suspense fallback={<SkeletonRows inSlot layout="panel" label="Loading Chats..." />}>
             <LazyChatsView key={workspaceId} {...chatsNavigatorProps} />
           </Suspense>
         )}
+        </SkeletonSlot>
       </ErrorBoundary>
     </ChatsPanel>
   );

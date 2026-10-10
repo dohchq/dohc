@@ -32,8 +32,8 @@ import {
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
-import { arch, platform } from "node:os";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { arch, platform, availableParallelism } from "node:os";
 import { RUST_ARCH, RUST_OS } from "../tools/rust-engine-program/native-target.mjs";
 import { requireCiPassVerdict } from "../tools/rust-engine-program/require-ci-pass-verdict.mjs";
 
@@ -326,17 +326,27 @@ test("the caps and the scratch root reach every cargo child", () => {
 test("split thread caps are both exported and both reported", () => {
   const stub = stubToolchain();
   try {
-    // A caller caps libtest while the budget caps nextest: the child must
-    // receive both values, and the evidence must name both instead of
-    // claiming a share one runner is not using.
-    const run = runGate(stub, { RUST_TEST_THREADS: "2" });
+    const jobs = Math.max(1, Math.floor(availableParallelism() / 4));
+    const libtest = Math.max(1, jobs - 1);
+    const run = runGate(stub, { RUST_TEST_THREADS: String(libtest), NEXTEST_TEST_THREADS: String(jobs) });
     const child = readFileSync(join(stub, "envdump.txt"), "utf8");
-    assert.match(child, /RUST_TEST_THREADS=2/);
-    assert.match(child, /NEXTEST_TEST_THREADS=\d+/);
-    assert.match(run.evidence, /, test-threads \d+ \(doctests 2\), head /);
+    assert.match(child, new RegExp(`RUST_TEST_THREADS=${libtest}`));
+    assert.match(child, new RegExp(`NEXTEST_TEST_THREADS=${jobs}`));
+    assert.match(run.evidence, new RegExp(`, test-threads ${jobs}${jobs === libtest ? "" : ` \\(doctests ${libtest}\\)`}, head `));
   } finally {
     rmSync(stub, { recursive: true, force: true });
   }
+});
+
+test("oversized inherited caps are clamped in every cargo child and the evidence", () => {
+  const stub = stubToolchain();
+  try {
+    const run = runGate(stub, { CARGO_BUILD_JOBS: "999", RUST_TEST_THREADS: "999", NEXTEST_TEST_THREADS: "999" });
+    const jobs = Math.max(1, Math.floor(availableParallelism() / 4));
+    const child = readFileSync(join(stub, "envdump.txt"), "utf8");
+    for (const name of ["CARGO_BUILD_JOBS", "RUST_TEST_THREADS", "NEXTEST_TEST_THREADS"]) assert.match(child, new RegExp(`${name}=${jobs}`));
+    assert.match(run.evidence, new RegExp(`, jobs ${jobs}, test-threads ${jobs}, head `));
+  } finally { rmSync(stub, {recursive: true, force: true}); }
 });
 
 test("the gate refuses to start under the disk floor, naming it", () => {
@@ -379,10 +389,22 @@ test("the verifier asks git which commit this checkout is, and refuses when it c
     // checkout's commit.
     writeFileSync(log, `${runGate(stub).evidence}\n`);
 
+    const adapter = join(dirname(log), "git-stub.mjs");
+    writeFileSync(adapter, `
+      import cp from 'node:child_process';
+      import {syncBuiltinESMExports} from 'node:module';
+      const spawn = cp.spawnSync;
+      cp.spawnSync = (command, args, options) => {
+        if (command !== 'git') return spawn(command, args, options);
+        return spawn('git ' + args.join(' '), {...options, shell:true});
+      };
+      syncBuiltinESMExports();
+    `);
+
     const verify = (pathDir) =>
       spawnSync(
         process.execPath,
-        ["tools/rust-engine-program/require-ci-pass-verdict.mjs", log],
+        [...(pathDir && platform() === "win32" ? ["--import", pathToFileURL(adapter).href] : []), "tools/rust-engine-program/require-ci-pass-verdict.mjs", log],
         { cwd: repoRoot, encoding: "utf8", env: withPath(pathDir) },
       );
 
@@ -437,7 +459,7 @@ test("the verifier asks git which commit this checkout is, and refuses when it c
       for (const dir of [junk, broken, stale]) {
         const refused = verify(dir);
         assert.notEqual(refused.status, 0);
-        assert.match(refused.stderr, /could not answer `git rev-parse HEAD`/);
+        assert.match(refused.stderr, dir === junk ? /could not answer `git rev-parse HEAD`/ : /git rev-parse HEAD failed after 4 attempts/);
       }
     } finally {
       for (const dir of [junk, broken, stale]) {
@@ -447,6 +469,44 @@ test("the verifier asks git which commit this checkout is, and refuses when it c
   } finally {
     rmSync(stub, { recursive: true, force: true });
     rmSync(dirname(log), { recursive: true, force: true });
+  }
+});
+
+test("Rust tree reads retry transient errors and retain persistent stderr in the failed summary", () => {
+  const stub = stubToolchain();
+  const root = mkdtempSync(join(tmpdir(), "dohc-git-gate-"));
+  try {
+    const adapter = join(root, "git-failure.mjs");
+    for (const persistent of [false, true]) {
+      writeFileSync(adapter, `
+        import cp from 'node:child_process';
+        import {syncBuiltinESMExports} from 'node:module';
+        const spawn = cp.spawnSync;
+        let failures = 0;
+        cp.spawnSync = (command, args, options) => {
+          if (command === 'git' && args[0] === 'status' && (${persistent} || failures === 0)) {
+            failures += 1;
+            return {status:128,stderr:'Permission denied: scratch config failure ' + failures};
+          }
+          return spawn(command, args, options);
+        };
+        syncBuiltinESMExports();
+      `);
+      const result = runGate(stub, {NODE_OPTIONS: `--import=${pathToFileURL(adapter).href}`});
+      if (persistent) {
+        assert.notEqual(result.code, 0);
+        assert.match(result.summary, /tree provenance.*git could not read the worktree status/);
+        assert.match(result.summary, /git status.*failed after 4 attempts/);
+        assert.match(result.summary, /Permission denied: scratch config failure 4/);
+        assert.match(result.summary, /tree UNATTRIBUTABLE/);
+      } else {
+        assert.equal(result.code, 0, result.summary);
+        assert.match(result.summary, /PASS tree provenance/);
+      }
+    }
+  } finally {
+    rmSync(stub, {recursive:true,force:true});
+    rmSync(root, {recursive:true,force:true});
   }
 });
 

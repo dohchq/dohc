@@ -1,4 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
+import { mockDaemonSessions } from "../testing/liveEngineSessions";
+import { createTestScratch } from "../workspaces/testTemp";
+import { createCaptureLiveStores } from "../workspaces/workspaceEngineCaptureLiveStore";
+import { createWorkspaceEngineCapture, type WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 import { createServerRuns } from "../automations/serverRuns";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { writeAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
@@ -10,6 +18,7 @@ import { KeptAutomationFieldShape } from "./bridgeContract";
 import {
   LiveDocumentMutationError,
   RestoreHeadChangedError,
+  RestoreLocalChangesError,
   type WorkspaceEngineMomentDetail,
 } from "../workspaces/workspaceEngineCapture";
 import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
@@ -35,6 +44,8 @@ const schemaMoment: VersionedTextMoment = {
 };
 
 function fixture(options: {
+  engineCapture?: WorkspaceEngineCapture;
+  rootPath?: string;
   granted?: unknown[];
   ledger?: Record<string, unknown[]>;
   links?: unknown[][];
@@ -45,6 +56,7 @@ function fixture(options: {
   moment?: VersionedTextMoment | null;
   protectedMoment?: boolean;
   changed?: boolean;
+  otherWindow?: boolean;
   restoreError?: Error;
   undoRunsOf?: CollectionAutomations["undoRunsOf"];
   serverRestore?: (definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>, again: boolean) => Promise<Pass>;
@@ -129,10 +141,11 @@ function fixture(options: {
     state: { collectionAutomations: CollectionAutomations };
     assertCurrent(): void;
   }, string>({
+    hasOtherWorkspaceWindow: () => options.otherWindow ?? false,
     registerHandler: (channel, handler) => handlers.set(channel, handler),
     assertTrustedSender: () => undefined,
     withRendererWorkspaceOperation: async (_sender, _workspaceId, _message, work) => await work({
-      workspace: { workspaceId: WORKSPACE_ID, rootPath: "/missing-root" },
+      workspace: { workspaceId: WORKSPACE_ID, rootPath: options.rootPath ?? "/missing-root" },
       state: { collectionAutomations: { undoRunsOf: options.undoRunsOf } as CollectionAutomations },
       assertCurrent: () => undefined,
     }),
@@ -141,7 +154,7 @@ function fixture(options: {
     relayJson: relayJson as <Result>(credentials: string, path: string, init?: RequestInit) => Promise<Result>,
     endLink,
     sharesChanged,
-    requireEngineCapture: async () => ({ capture }),
+    requireEngineCapture: async () => ({ capture: options.engineCapture ?? capture }),
     localPerson: async () => account.person,
     queuePull,
     deletePath: async () => undefined,
@@ -155,7 +168,93 @@ function fixture(options: {
   return { call, calls, bodies, capture, queuePull, sharesChanged, account };
 }
 
+async function capturedFiles(paths: string[]) {
+  const rootPath = await createTestScratch("dohc-stop-restore-policy-");
+  const attachmentId = Symbol("stop-restore-policy");
+  const sessions = mockDaemonSessions({ rootPath, workspaceId: WORKSPACE_ID, loopback: new VersionedLoopbackEngine() });
+  const store = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath, attachmentId }, sessions).store;
+  await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+  const files = [];
+  for (const path of paths) {
+    await mkdir(dirname(join(rootPath, path)), { recursive: true });
+    await writeFile(join(rootPath, path), "owner original");
+    const target = { workspaceId: WORKSPACE_ID, versionId: "main", path, metadata: { origin: "sync" as const } };
+    await store.writeTextFile({ ...target, text: "owner original" });
+    const changed = await store.writeTextFile({ ...target, text: "shared edit", publish: true });
+    files.push({ path, objectId: changed.moment.objectId, momentId: changed.moment.id, created: false });
+  }
+  const engineCapture = createWorkspaceEngineCapture({ workspaceId: WORKSPACE_ID, rootPath, attachmentId, rustEngineSessions: sessions, store });
+  const f = fixture({ engineCapture, rootPath, ledger: {
+    "grant-edit": [{ writes: [{ committedAtMs: 2, files }], nextAfterOriginSeq: null }],
+  } });
+  const writePolicy = async (policy: string) => {
+    await mkdir(join(rootPath, ".dohc"), { recursive: true });
+    await writeFile(join(rootPath, ".dohc/files.toml"), policy);
+  };
+  return { ...f, rootPath, store, engineCapture, writePolicy, files };
+}
+
 describe("stop and restore in main", () => {
+  it("reviews a retired file and restores the following admitted file", async () => {
+    const f = await capturedFiles(["notes/a.md", "docs/b.md"]);
+    try {
+      await f.writePolicy('[[rule]]\npath = "notes/**"\ntracked = false\n');
+      await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({
+        status: "restored", restored: [{ path: "docs/b.md" }],
+        review: [{ path: "notes/a.md", reason: "restore-refused", detail: "History no longer tracks this file. Track it in .dohc/files.toml, then try again." }], unfinished: null,
+      });
+      expect(await readFile(join(f.rootPath, "notes/a.md"), "utf8")).toBe("shared edit");
+      expect(await readFile(join(f.rootPath, "docs/b.md"), "utf8")).toBe("owner original");
+    } finally { await f.engineCapture.stop(); }
+  });
+
+  it("reports each Undo outcome and continues past a retired file", async () => {
+    const f = await capturedFiles(["docs/old.md", "notes/middle.md", "docs/new.md"]);
+    try {
+      const stopped = await f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } }) as { restored: { path: string; restoredMomentId: string }[] };
+      expect(stopped.restored).toHaveLength(3);
+      await f.writePolicy('[[rule]]\npath = "notes/**"\ntracked = false\n');
+      await expect(f.call(CHANNELS.undoStopAndRestore, { restoredMomentIds: stopped.restored.map(row => row.restoredMomentId) })).resolves.toMatchObject({ files: [
+        { momentId: stopped.restored[2]!.restoredMomentId, kind: "restored", receipt: { path: "docs/new.md" } },
+        { momentId: stopped.restored[1]!.restoredMomentId, kind: "refused", detail: "History no longer tracks this file. Track it in .dohc/files.toml, then try again." },
+        { momentId: stopped.restored[0]!.restoredMomentId, kind: "restored", receipt: { path: "docs/old.md" } },
+      ] });
+      expect(await readFile(join(f.rootPath, "docs/new.md"), "utf8")).toBe("shared edit");
+      expect(await readFile(join(f.rootPath, "notes/middle.md"), "utf8")).toBe("owner original");
+      expect(await readFile(join(f.rootPath, "docs/old.md"), "utf8")).toBe("shared edit");
+    } finally { await f.engineCapture.stop(); }
+  });
+
+  it.each([CHANNELS.stopAndRestore, CHANNELS.undoStopAndRestore])("reports unreadable policy for every file in %s", async channel => {
+    // The files dohc can't read, never the TOML parser's text.
+    const unreadable = [".dohc/files.toml"];
+    const f = await capturedFiles(["notes/a.md", "docs/b.md"]);
+    try {
+      await f.writePolicy("[[rule] invalid");
+      const result = await f.call(channel, channel === CHANNELS.stopAndRestore
+        ? { target: { kind: "person", userId: "user_ana" } }
+        : { restoredMomentIds: f.files.map(file => file.momentId) });
+      expect(result).toMatchObject(channel === CHANNELS.stopAndRestore
+        ? { restored: [], review: [{ path: "docs/b.md", reason: "rules-unreadable", unreadable }, { path: "notes/a.md", reason: "rules-unreadable", unreadable }], unfinished: null }
+        : { files: [{ kind: "rules-unreadable", unreadable }, { kind: "rules-unreadable", unreadable }] });
+      expect(await readFile(join(f.rootPath, "notes/a.md"), "utf8")).toBe("shared edit");
+      expect(await readFile(join(f.rootPath, "docs/b.md"), "utf8")).toBe("shared edit");
+    } finally { await f.engineCapture.stop(); }
+  });
+  it("refuses Undo after the owner untracks the restored path", async () => {
+    const f = await capturedFiles(["notes/a.md"]);
+    try {
+      const result = await f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } }) as { restored: { restoredMomentId: string }[] };
+      expect(result.restored).toHaveLength(1);
+      expect(await readFile(join(f.rootPath, "notes/a.md"), "utf8")).toBe("owner original");
+      await f.writePolicy('[[rule]]\npath = "notes/**"\ntracked = false\n');
+      const before = await f.store.listMoments({ workspaceId: WORKSPACE_ID, limit: 20 });
+      await expect(f.call(CHANNELS.undoStopAndRestore, { restoredMomentIds: result.restored.map(row => row.restoredMomentId) }))
+        .resolves.toEqual({ files: [{ momentId: result.restored[0]!.restoredMomentId, kind: "refused", detail: "History no longer tracks this file. Track it in .dohc/files.toml, then try again." }], errorMessage: null });
+      expect(await readFile(join(f.rootPath, "notes/a.md"), "utf8")).toBe("owner original");
+      expect(await f.store.listMoments({ workspaceId: WORKSPACE_ID, limit: 20 })).toEqual(before);
+    } finally { await f.engineCapture.stop(); }
+  });
   it("revokes only the person's grants on this workspace that can write, then restores from every grant's ledger", async () => {
     const f = fixture();
     await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toEqual({
@@ -323,6 +422,33 @@ describe("stop and restore in main", () => {
     });
   });
 
+  it.each(["local undo", "sync before local undo", "sync after local undo"] as const)(
+    "shows a readable sentence for a Zod error from %s", async source => {
+      const parsed = z.string().safeParse(42);
+      if (parsed.success) throw new Error("The test expected a validation failure.");
+      const error = parsed.error;
+      let syncs = 0;
+      const undoRunsOf = vi.fn(async () => {
+        if (source === "local undo") throw error;
+        return { ...NOTHING, undone: 1, reverted: 1 };
+      });
+      const f = fixture({
+        ...automationsFile(),
+        serverRestore: async () => ({ ...NOTHING, undone: 1, reverted: 1 }),
+        undoRunsOf,
+        syncNow: async () => {
+          syncs += 1;
+          if (source === "sync before local undo" || (source === "sync after local undo" && syncs === 2)) throw error;
+        },
+      });
+      await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({
+        runsUndone: source === "sync after local undo" ? 2 : 1,
+        unfinished: { step: "runs", message: "dohc could not finish undoing these runs." },
+      });
+      expect(undoRunsOf).toHaveBeenCalledTimes(source === "sync before local undo" ? 0 : 1);
+    },
+  );
+
   it.each(["../outside", "/outside", "C:/outside", "trip/../outside", "trip\\outside", "trip//outside"])("rejects kept field path %s", (path) => {
     expect(KeptAutomationFieldShape.safeParse({ ...KEPT, path }).success).toBe(false);
   });
@@ -442,6 +568,12 @@ describe("stop and restore in main", () => {
     expect(f.capture.restoreFileToBeforeMoment).not.toHaveBeenCalled();
   });
 
+  it.each(["capture-recovery", "capture-recovery-cleared"] as const)("excludes %s from the Stop and restore ledger lookup", async origin => {
+    const f = fixture({moment: {...schemaMoment, metadata: {origin}}});
+    await f.call(CHANNELS.stopAndRestore, {target: {kind: "person", userId: "user_ana"}});
+    expect(f.capture.restoreFileToBeforeMoment).not.toHaveBeenCalled();
+  });
+
   it("refuses a ledger path that leaves the workspace, and a person with no share here", async () => {
     const f = fixture({ ledger: { "grant-edit": [{ writes: [{ committedAtMs: 1, files: [{ path: "../outside", objectId: "o", momentId: "m", created: true }] }], nextAfterOriginSeq: null }] } });
     // Access already stopped, so the answer says what is still to finish.
@@ -458,6 +590,14 @@ describe("stop and restore in main", () => {
     await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({
       restored: [],
       review: [{ path: SCHEMA, reason: "changed-since" }],
+    });
+  });
+
+  it("keeps local content and unsettled drafts for review with the engine's reason", async () => {
+    const f = fixture({ restoreError: new RestoreLocalChangesError(SCHEMA) });
+    await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({
+      restored: [], review: [{ path: SCHEMA, reason: "restore-refused", detail: "Changed on this device since the last saved version" }],
+      unfinished: null,
     });
   });
 
@@ -550,10 +690,22 @@ describe("stop and restore in main", () => {
     expect(f.calls.filter((call) => call.method === "POST")).toEqual([]);
   });
 
+  it("returns completed Undo outcomes when an unexpected error stops later restores", async () => {
+    const f = fixture();
+    f.capture.restoreFileToBeforeMoment.mockImplementationOnce(async momentId => ({
+      restored: "text", restoredMomentId: `undo-${momentId}`, path: SCHEMA,
+    })).mockRejectedValueOnce(new Error("The workspace engine is not running."));
+    await expect(f.call(CHANNELS.undoStopAndRestore, { restoredMomentIds: ["old", "middle", "new"] })).resolves.toEqual({
+      files: [{ momentId: "new", kind: "restored", receipt: { path: SCHEMA, restoredMomentId: "undo-new" } }],
+      errorMessage: "The workspace engine is not running.",
+    });
+    expect(f.capture.restoreFileToBeforeMoment.mock.calls).toEqual([["new", OWNER, {expectedHeadMomentId: "new"}], ["middle", OWNER, {expectedHeadMomentId: "middle"}]]);
+  });
+
   it("undoes the restores newest first", async () => {
     const f = fixture();
     await f.call(CHANNELS.undoStopAndRestore, { restoredMomentIds: ["back-1", "back-2"] });
-    expect(f.capture.restoreFileToBeforeMoment.mock.calls).toEqual([["back-2", OWNER], ["back-1", OWNER]]);
+    expect(f.capture.restoreFileToBeforeMoment.mock.calls).toEqual([["back-2", OWNER, {expectedHeadMomentId: "back-2"}], ["back-1", OWNER, {expectedHeadMomentId: "back-1"}]]);
   });
 
   it("names the person signed in here when the request arrived, never one the renderer sends", async () => {
@@ -572,5 +724,25 @@ describe("stop and restore in main", () => {
     f.account.person = { kind: "human", humanId: "user_other" };
     await restored;
     expect(f.capture.restoreFileToBeforeMoment).toHaveBeenCalledWith("m-schema", OWNER, { expectedHeadMomentId: "m-schema" });
+  });
+});
+
+
+describe("renderer-held restore guards", () => {
+  it.each(["retained", "other-window"])("reviews files protected by %s state", async source => {
+    const f = fixture({otherWindow: source === "other-window"});
+    const result = await f.call(CHANNELS.stopAndRestore, {target: {kind: "person", userId: "user_ana"}, reviewPaths: source === "retained" ? [SCHEMA] : []});
+    expect(result).toMatchObject({status: "restored", restored: [], review: [{path: SCHEMA, reason: "restore-refused"}], unfinished: null});
+    expect(f.capture.restoreFileToBeforeMoment).not.toHaveBeenCalled();
+  });
+  it.each([{paths: ["../a.md"]}, {paths: ["C:/a.md"]}, {paths: Array.from({length: 4097}, () => "a.md")}])("rejects an invalid or unbounded retained-path list", async ({paths: reviewPaths}) => {
+    const f = fixture();
+    await expect(f.call(CHANNELS.stopAndRestore, {target: {kind: "person", userId: "user_ana"}, reviewPaths})).rejects.toThrow();
+    expect(f.calls).toEqual([]);
+  });
+  it("refuses Undo for renderer-held drafts and continues with other files", async () => {
+    const f = fixture();
+    await expect(f.call(CHANNELS.undoStopAndRestore, {restoredMomentIds: ["back"], reviewPaths: [SCHEMA]})).resolves.toMatchObject({files: [{kind: "refused"}], errorMessage: null});
+    expect(f.capture.restoreFileToBeforeMoment).not.toHaveBeenCalled();
   });
 });

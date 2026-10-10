@@ -317,7 +317,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     expect(ownerTarget).toBeDefined();
     const runOwnerPass = () => runNativeOwnerDeliveryPass({client: owner!, workspaceHandle: handle, document: ownerTarget,
       config: {...profile.owner, nativeConfigPath: ownerConfigPath, relayUrl, documents: [ownerTarget]},
-      signal: AbortSignal.timeout(30_000), bearer, assertCurrent() {expect(owner).toBeDefined();}});
+      signal: AbortSignal.timeout(30_000), bearer, accountId: ownerUser.id, assertCurrent() {expect(owner).toBeDefined();}});
     expect(["empty", "acknowledged"]).toContain(await runOwnerPass());
     const nativeRequest = () => ({id: 0, workspace: handle, deadlineMs: 30_000});
     const target = {binding: ownerTarget.binding, relayDatabaseNamespace: ownerTarget.relayDatabaseNamespace};

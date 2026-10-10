@@ -73,6 +73,9 @@ export function referencedBlobShas(
       const snapshot = asRecord(raw);
       if (snapshot) push(snapshot.blobSha256);
     }
+    const reference=asRecord(record.settlementReference);
+    const settlement=reference?asRecord(reference.record):null;
+    if(settlement)push(settlement.acceptedStateBlobSha256);
   } else if (opKind === "ydoc.update") {
     // A ydoc.update's Yjs bytes are content-addressed like any binary blob. The
     // relay stays content-agnostic (dumb log) but must count this reference so
@@ -90,7 +93,7 @@ export function referencedBlobShas(
     }
   } else if (opKind === "live.audit.settlement") {
     const audit = asRecord(record.record);
-    if (audit) push(audit.markdownDigest);
+    if (audit) {push(audit.markdownDigest);push(audit.acceptedStateBlobSha256);}
   } else if (opKind === "live.audit.base") {
     const audit = asRecord(record.record);
     const checkpoint = audit ? asRecord(audit.checkpoint) : null;

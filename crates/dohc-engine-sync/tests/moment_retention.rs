@@ -2,6 +2,9 @@ use quote::ToTokens;
 use std::path::Path;
 
 const ROLLBACK: &str = "dohc-engine-domain/src/store/rollback.rs";
+const CHECKED_DELETE_DISCARD: &str = "dohc-engine-domain/src/store/delete_rename.rs";
+const CHECKED_DELETE_DISCARD_SQL: &str =
+    "DELETE FROM moments WHERE workspace_id=?1 AND moment_id=?2";
 const PROJECTION: &str = "dohc-engine-domain/src/collections/projection.rs";
 const RETAINED_TABLES: [&str; 4] = [
     "moments",
@@ -126,6 +129,11 @@ fn audit(directory: &Path, crates: &Path, found: &mut Vec<(String, String)>) {
                 .to_string_lossy()
                 .replace('\\', "/");
             for statement in destructive_statements(&production) {
+                if relative == CHECKED_DELETE_DISCARD && statement == "delete moments" {
+                    // Failed disk publication discards its own prepared delete only
+                    // when no export or pending conflict shadow references it.
+                    assert_checked_delete_discard_site(&source);
+                }
                 if relative == PROJECTION && statement == "dynamic deletion" {
                     assert!(
                         !RETAINED_TABLES
@@ -140,8 +148,28 @@ fn audit(directory: &Path, crates: &Path, found: &mut Vec<(String, String)>) {
     }
 }
 
+fn assert_checked_delete_discard_site(source: &str) {
+    let file = syn::parse_file(source).unwrap();
+    let function = file
+        .items
+        .into_iter()
+        .find_map(|item| match item {
+            syn::Item::Fn(function) if function.sig.ident == "finish_checked_delete_in_tx" => {
+                Some(function)
+            }
+            _ => None,
+        })
+        .expect("checked delete discard must stay in its guarded function");
+    let body = function.block.into_token_stream().to_string();
+    assert_eq!(destructive_statements(&body), ["delete moments"]);
+    assert!(
+        body.contains(&format!("{CHECKED_DELETE_DISCARD_SQL:?}")),
+        "checked delete discard must delete only its named workspace moment"
+    );
+}
+
 #[test]
-fn rollback_is_the_only_production_moment_deleter_including_cascades() {
+fn production_moment_deleters_preserve_published_and_pinned_history() {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let mut found = Vec::new();
     for entry in std::fs::read_dir(crates).unwrap() {
@@ -154,10 +182,25 @@ fn rollback_is_the_only_production_moment_deleter_including_cascades() {
     assert_eq!(
         found,
         [
+            (
+                CHECKED_DELETE_DISCARD.to_owned(),
+                "delete moments".to_owned()
+            ),
             (ROLLBACK.to_owned(), "delete file_objects".to_owned()),
             (ROLLBACK.to_owned(), "delete moments".to_owned())
         ]
     );
+}
+
+#[test]
+fn checked_delete_inventory_entry_rejects_a_broader_or_moved_discard() {
+    for source in [
+        "fn finish_checked_delete_in_tx() { execute(\"DELETE FROM moments WHERE workspace_id=?1\"); }",
+        "fn another_function() { execute(\"DELETE FROM moments WHERE workspace_id=?1 AND moment_id=?2\"); }",
+        "fn finish_checked_delete_in_tx() { execute(\"DELETE FROM moments WHERE workspace_id=?1 AND moment_id=?2\"); execute(\"DELETE FROM moments\"); }",
+    ] {
+        assert!(std::panic::catch_unwind(|| assert_checked_delete_discard_site(source)).is_err());
+    }
 }
 
 #[test]

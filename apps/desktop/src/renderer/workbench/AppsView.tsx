@@ -12,7 +12,8 @@ import { APP_CHECK_FALLBACK_MESSAGE } from "../appCopy";
 import { AskAgentButton, type AskAgent } from "../askAgent";
 import type { SitePackageInfo } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
-import { IconButton, PrimaryButton } from "../ui/controls";
+import { EmptyState, IconButton, PrimaryButton } from "../ui/controls";
+import { SkeletonRows } from "../ui/SkeletonRows";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
 import { siteTabPath } from "./workbenchState";
 import { ipcErrorMessage } from "../ipcError";
@@ -119,34 +120,27 @@ export function AppsView(props: {
       </div>
 
       {state.status === "loading" ? (
-        <div className="flex flex-1 items-center justify-center px-4 text-xs text-subtle">
-          Loading apps…
-        </div>
+        <SkeletonRows inSlot layout="panel" label="Loading apps…" />
       ) : state.status === "error" ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
-          <AlertTriangle size={18} aria-hidden className="text-warning" />
-          <span className="max-w-sm text-xs text-muted">{state.message}</span>
-        </div>
+        <EmptyState icon={AlertTriangle} tone="danger" title={state.message} />
       ) : apps.length === 0 ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
-          <Globe2 size={18} aria-hidden className="text-subtle" />
-          <span className="text-xs font-medium text-ink">No apps yet</span>
-          <span className="max-w-52 text-xs leading-relaxed text-muted">
-            {props.receivedShareWorkspace
-              ? "This shared view cannot create an app. Ask the workspace owner to add one."
-              : "Start with one editable HTML file in your workspace."}
-          </span>
-          {!props.receivedShareWorkspace ? (
+        props.receivedShareWorkspace ? (
+          <EmptyState
+            icon={Globe2}
+            title="No apps in this workspace yet."
+            hint="This shared view cannot create an app. Ask the workspace owner to add one."
+          />
+        ) : (
+          <EmptyState icon={Globe2} title="No apps in this workspace yet.">
             <PrimaryButton
               data-testid="sites-create-first"
               disabled={creating}
               onClick={() => void createFirstApp()}
-              className="mt-1"
             >
               {creating ? "Creating app…" : "Create app"}
             </PrimaryButton>
-          ) : null}
-        </div>
+          </EmptyState>
+        )
       ) : (
         <ul className="m-0 flex min-h-0 flex-1 list-none flex-col gap-2 overflow-y-auto p-2">
           {apps.map((app) => {

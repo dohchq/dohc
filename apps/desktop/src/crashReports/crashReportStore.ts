@@ -1,4 +1,5 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { atomicReplaceFileSync } from "../atomicReplaceFile";
 import { dirname } from "node:path";
 import { z } from "zod";
 import {
@@ -127,8 +128,7 @@ export function createCrashReportStore(deps: {
   function save(report: Omit<PendingReport, "revision">): void {
     const next = { ...report, revision: load().revision + 1 };
     mkdirSync(dirname(deps.path), { recursive: true });
-    writeFileSync(`${deps.path}.tmp`, JSON.stringify(next), { mode: 0o600 });
-    renameSync(`${deps.path}.tmp`, deps.path);
+    atomicReplaceFileSync(deps.path, (temporary) => writeFileSync(temporary, JSON.stringify(next), { mode: 0o600 }));
     cached = next;
   }
 

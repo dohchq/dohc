@@ -45,6 +45,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { verifyNativeTarget } from "./native-target.mjs";
 import {
   acquireBuildSlot,
+  capBuildParallelism,
   freeDiskGb,
   resolveBuildBudget,
 } from "./build-slot.mjs";
@@ -54,6 +55,7 @@ import {
   readTreeState,
 } from "./tree-provenance.mjs";
 import { SCRATCH_SENTINEL, inspectScratchRun } from "./scratch-leak-report.mjs";
+import { readGit } from "./git-read.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "../..");
@@ -93,16 +95,13 @@ const slot = budget ? await acquireBuildSlot(budget) : null;
 // native-target probe, which spawns its own cargo. A snapshot handed to
 // spawnSync would REPLACE the child environment and silently drop whatever
 // this file exports after the snapshot; that defect shipped once and made
-// the scratch-leak row vacuous. Jobs and test threads honor an explicitly
-// set value; incremental is always off in the gate — a full-workspace run
+// the scratch-leak row vacuous. Jobs and test threads preserve stricter
+// caller caps and clamp larger or invalid values; incremental is always off — a full-workspace run
 // never reuses incremental caches, it only pays their disk.
 process.env.CARGO_INCREMENTAL = "0";
 if (budget) {
-  process.env.CARGO_BUILD_JOBS ??= String(budget.jobs);
-  // Both runners: nextest reads its own variable, libtest (the doctest
-  // step) reads RUST_TEST_THREADS.
-  process.env.RUST_TEST_THREADS ??= String(budget.jobs);
-  process.env.NEXTEST_TEST_THREADS ??= String(budget.jobs);
+  const capped = capBuildParallelism(process.env, budget.jobs);
+  for (const name of ["CARGO_BUILD_JOBS", "RUST_TEST_THREADS", "NEXTEST_TEST_THREADS"]) process.env[name] = capped[name];
 }
 // A caller's libtest cap carries to nextest unless the caller split them
 // deliberately: the evidence line must never claim a cap the child does
@@ -149,15 +148,12 @@ function run(cmd) {
   return { ok: res.status === 0, code: res.status, durationMs };
 }
 
-// The steps' own shell, so the provenance is read exactly where they ran.
+const gitReadFailures = [];
+// Match the JS gate: invoke git directly in the checkout that ran each step.
+// Git must be an executable; a Windows installation with only a .cmd shim is unsupported.
 function captureGit(cmd) {
-  const res = spawnSync(cmd, {
-    cwd: repoRoot,
-    shell: true,
-    encoding: "utf8",
-  });
-  if (res.error || res.status !== 0) return null;
-  return res.stdout;
+  try { return readGit(cmd.split(" ").slice(1), repoRoot); }
+  catch (error) { gitReadFailures.push(error.message); return null; }
 }
 
 function toolAvailable(probe) {
@@ -353,7 +349,7 @@ if (provenance.status === "FAIL") failed = true;
 results.unshift({
   name: "tree provenance",
   status: provenance.status,
-  reason: provenance.reason,
+  reason: [provenance.reason, ...gitReadFailures].filter(Boolean).join("\n") || undefined,
 });
 
 // The stamp comes from the judgement, not from the opening reading: a run the

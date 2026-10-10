@@ -190,6 +190,7 @@ describe("desktop CLI proxy", () => {
       });
       for (const request of requests) {
         expect(request.protocolVersion).toBe(CLI_PROTOCOL_VERSION);
+        expect(request.door).toBe("mcp");
         expect(request.args).toMatchObject({ cwd: base.root, actor: "agent" });
       }
     });

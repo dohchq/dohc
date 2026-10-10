@@ -3,6 +3,7 @@ import {
   type ErrorInfo,
   type ReactNode,
 } from "react";
+import { reportRendererError } from "../rendererErrorReport";
 
 type EditorErrorBoundaryProps = {
   children: ReactNode;
@@ -25,6 +26,7 @@ export class EditorErrorBoundary extends Component<
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
     console.error("[dohc] editor recovered from a rendering error", error, info);
+    reportRendererError("boundary", error);
   }
 
   componentDidUpdate(previousProps: EditorErrorBoundaryProps): void {

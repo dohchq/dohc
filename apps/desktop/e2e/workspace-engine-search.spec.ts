@@ -1,3 +1,4 @@
+import { activityPin } from "../src/testPins";
 import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -7,7 +8,7 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   explorerRow,
-  openFileChatsPanel,
+  openAboutPanel,
   openWorkspaceFromFirstRun,
   revealExplorerPath,
   seedWorkspaceManifest,
@@ -100,7 +101,7 @@ test("search finds file content and a chat message; .env.local content never sur
     // versioned-text store may open a second writable engine.db connection.
     await revealExplorerPath(page, "notes/roadmap.md");
     await explorerRow(page, "notes/roadmap.md").click();
-    await openFileChatsPanel(page);
+    await openAboutPanel(page);
     await page.getByTestId("linked-chat-new").click();
     const titleInput = page.getByTestId("linked-chat-new-title");
     await titleInput.fill("Roadmap sync");
@@ -112,7 +113,7 @@ test("search finds file content and a chat message; .env.local content never sur
       "quasar sync cadence",
     );
 
-    await page.getByTestId("activity-search").click();
+    await page.getByTestId(activityPin("search")).click();
     await expect(page.getByTestId("search-view")).toBeVisible();
 
     // 1. File content resolves through the engine index.
@@ -201,7 +202,7 @@ test("a newly saved editor change is searchable before relaunch", async () => {
       )
       .toContain(sentinel);
 
-    await page.getByTestId("activity-search").click();
+    await page.getByTestId(activityPin("search")).click();
     await expect(page.getByTestId("search-view")).toBeVisible();
     await page.getByTestId("search-input").fill(sentinel);
 
@@ -230,7 +231,7 @@ test("search excludes .env content from a workspace with no engine index yet", a
     const workspace = await openWorkspaceFromFirstRun(page, temp);
     await waitForWorkspaceFile(page, workspace.workspaceId, "docs/guide.md");
 
-    await page.getByTestId("activity-search").click();
+    await page.getByTestId(activityPin("search")).click();
     await expect(page.getByTestId("search-view")).toBeVisible();
 
     await page.getByTestId("search-input").fill("plainly-findable-needle");

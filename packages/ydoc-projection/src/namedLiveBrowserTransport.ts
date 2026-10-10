@@ -1,6 +1,7 @@
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import { parseLiveTicketToken } from "@dohc/live-session-contract/live-ticket";
 import {createLiveFrameSession} from "@dohc/live-session-contract/live-frame";
+import type { LiveAuthorContext } from "@dohc/live-session-contract";
 import { createNamedLiveProvider, type NamedLiveProviderLimits, type NamedLiveProviderState } from "@dohc/ydoc-projection/named-live-provider";
 
 /** Account ID is a stale-selection guard, never an authentication credential. */
@@ -25,6 +26,7 @@ type BrowserSocket = Pick<WebSocket, "readyState" | "bufferedAmount" | "protocol
   "send" | "close" | "addEventListener" | "removeEventListener">;
 export interface LiveSelection { objectId: string; workspaceId?: string }
 interface Options<Selection extends LiveSelection> {
+  recordingContext?(selection: Selection): LiveAuthorContext;
   authorize?(selection: Selection, signal: AbortSignal): Promise<{ticketToken: string; discriminator: string; websocketUrl: string}>;
   publicOrigin: string;
   limits: NamedLiveBrowserLimits;
@@ -66,7 +68,9 @@ export function createNamedLiveBrowserTransport<Selection extends LiveSelection 
   function session(selection: Selection) {
     const target = { ...selection };
     for (const value of Object.values(target)) parseLiveUpdateIdentifier(value);
-    const provider = createNamedLiveProvider(limits.provider, target);
+    const recordingContext = options.recordingContext;
+    const provider = createNamedLiveProvider(limits.provider, target,
+      recordingContext ? () => recordingContext(target) : undefined);
     const listeners = new Set<(state: NamedLiveBrowserState) => void>();
     let override: Override | undefined, closed = false, retiring = Promise.resolve();
     type Attempt = { controller: AbortController; route?: Route; socket?: BrowserSocket; timer?: ReturnType<typeof setTimeout>;

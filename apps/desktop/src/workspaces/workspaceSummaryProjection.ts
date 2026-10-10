@@ -70,22 +70,21 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
     // Present, so restricted — readable or not. A non-object value here is
     // still a share view that lost its marker, never an ordinary workspace.
     const raw = isRecord(rawShareView) ? rawShareView : {};
-    // AUTHORITATIVE fields only. `damaged` means "this grant cannot be read",
-    // and only two things can make that true: the share has no identity to
-    // act on, or its pinned grant is unreadable. Display metadata gets no
-    // vote — a malformed `ended` flag saying the GRANT is unreadable would be
-    // a false statement, and it would suppress the refresh as well.
+    // Identity and the pinned grant must be readable before this copy can sync.
     const shareId = boundedString(raw.shareId, 1, 200);
+    const recipientUserId = boundedString(raw.recipientUserId, 1, 200);
     const level = readableShareLevel(raw.grantedSelector);
     const genericChatWritable = raw.genericChatWritable === true;
-    const damaged = shareId === null || level === null;
+    const damaged = shareId === null || level === null || recipientUserId === null;
     // Ancillary metadata normalizes FAIL-SOFT and independently: each field
     // is kept when the wire schema will carry it and dropped when it will
     // not. Dropping one costs a line of display; rejecting the record costs
     // the whole workspace list.
     const skipped = ShareSkippedOpsSummary.safeParse(raw.skippedOps);
+    const unconfirmed = WorkspaceSummary.shape.shareView.unwrap().shape.unconfirmedChanges.safeParse(raw.unconfirmedChanges);
     shareView = {
       ...(shareId !== null ? { shareId } : {}),
+      ...(recipientUserId !== null ? { recipientUserId } : {}),
       granterEmail: shareViewGranterEmail(raw),
       ...(normalizeShareLabel(raw.subjectName) ? {subjectName: normalizeShareLabel(raw.subjectName)} : {}),
       ...(normalizeShareLabel(raw.sharerName, 320) ? {sharerName: normalizeShareLabel(raw.sharerName, 320)} : {}),
@@ -93,7 +92,12 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
         ? { damaged: true as const }
         : { access: level, genericChatWritable }),
       ...(raw.ended === true ? { ended: true } : {}),
+      ...(raw.unsavedPaths !== undefined ? {
+        unsavedPaths: Array.isArray(raw.unsavedPaths) && raw.unsavedPaths.every(path => typeof path === "string")
+          ? raw.unsavedPaths : null,
+      } : {}),
       ...(skipped.success ? { skippedOps: skipped.data } : {}),
+      ...(unconfirmed.success ? { unconfirmedChanges: unconfirmed.data } : {}),
     };
   }
 

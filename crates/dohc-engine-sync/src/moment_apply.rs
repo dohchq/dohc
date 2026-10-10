@@ -83,10 +83,14 @@ pub(crate) struct Metadata {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "kind")]
 enum MomentAuthor {
+    #[serde(rename = "unattributed")]
+    Unattributed {},
     #[serde(rename = "agent")]
     Agent {
         #[serde(rename = "agentId")]
         agent_id: String,
+        #[serde(rename = "agentName", skip_serializing_if = "Option::is_none")]
+        agent_name: Option<String>,
         #[serde(
             rename = "onBehalfOf",
             default,
@@ -109,6 +113,8 @@ enum MomentAuthor {
     Human {
         #[serde(rename = "humanId")]
         human_id: String,
+        #[serde(rename = "humanName", skip_serializing_if = "Option::is_none")]
+        human_name: Option<String>,
         #[serde(
             rename = "onBehalfOf",
             default,
@@ -140,12 +146,8 @@ enum MomentAuthor {
     /// the server-minted link principal is provenance, never a person.
     #[serde(rename = "link")]
     Link {
-        #[serde(rename = "grantId")]
-        grant_id: String,
-        #[serde(rename = "grantGeneration")]
-        grant_generation: i64,
-        #[serde(rename = "principalId")]
-        principal_id: String,
+        #[serde(flatten)]
+        identity: LinkMomentAuthor,
     },
     #[serde(rename = "automation")]
     Automation {
@@ -159,6 +161,24 @@ enum MomentAuthor {
         )]
         on_behalf_of: Option<String>,
         depth: u32,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged, deny_unknown_fields)]
+enum LinkMomentAuthor {
+    Direct {
+        #[serde(rename = "grantId")]
+        grant_id: String,
+        #[serde(rename = "grantGeneration")]
+        grant_generation: i64,
+        #[serde(rename = "principalId")]
+        principal_id: String,
+    },
+    Live {
+        #[serde(rename = "publicPrincipalId")]
+        public_principal_id: String,
+        label: String,
     },
 }
 
@@ -323,12 +343,40 @@ pub fn apply_moment_envelope_detailed(
     envelope.validate()?;
     let search_policy = search_policy_for_store(store);
     apply_envelope_with(store, envelope, faults, |tx, envelope| {
-        let payload: MomentAppendPayload =
-            Deserialize::deserialize(&envelope.payload).map_err(|_| SyncError::InvalidInput {
+        let mut payload: MomentAppendPayload = Deserialize::deserialize(&envelope.payload)
+            .map_err(|_| SyncError::InvalidInput {
                 reason: "moment.append payload is malformed",
             })?;
+        if matches!(
+            envelope.settlement_admission,
+            Some(crate::SettlementAdmission::Accepted { .. })
+        ) {
+            // The authenticated snapshot is stored by admission refresh.
+            // Ordinary client author shapes grant no authority to that snapshot.
+            crate::settlement_publication::admitted_moment_authors(envelope)?.ok_or(
+                SyncError::InvalidInput {
+                    reason: "accepted settlement has no authors",
+                },
+            )?;
+            payload.authors = None;
+        }
         validate_payload_bounds(&payload)?;
         validate_payload(&payload)?;
+        if payload.authors.iter().flatten().any(|author| {
+            matches!(
+                author,
+                MomentAuthor::Human {
+                    human_name: Some(_),
+                    ..
+                } | MomentAuthor::Link {
+                    identity: LinkMomentAuthor::Live { .. }
+                }
+            )
+        }) {
+            return Err(SyncError::InvalidInput {
+                reason: "hosted moment authors require relay settlement admission",
+            });
+        }
         if payload
             .authors
             .iter()
@@ -635,7 +683,7 @@ fn apply_moment_append(
         });
     }
 
-    let mut owner_settlement_committed = false;
+    let mut owner_settlement = None;
     if mode == MomentApplyMode::Ordinary {
         let key = DocKey::new(
             &envelope.workspace_id,
@@ -729,7 +777,7 @@ fn apply_moment_append(
             // predecessor may be history-only and was never materialized.
             head_fast_forward = false;
             content_fast_forward = true;
-            owner_settlement_committed = true;
+            owner_settlement = Some(owner);
         }
     }
 
@@ -879,7 +927,7 @@ fn apply_moment_append(
         upsert_snapshot(tx, &envelope.workspace_id, payload, after_kind, byte_length)?;
         // The audited host settlement is now this owner's committed head.
         // Complete its matching binding even while the editor retains its lease.
-        if owner_settlement_committed
+        if owner_settlement.is_some()
             && !dohc_engine_domain::collection_record_id_mismatch_in_tx(
                 tx,
                 &envelope.workspace_id,
@@ -924,22 +972,50 @@ fn apply_moment_append(
             // write is a suppressed self-write, so no capture apply indexes
             // it later: a bound record's index must ride this transaction.
             if let Some(text) = after_text.as_deref() {
-                // Moment-only edits diff the prior file snapshot. Audited owner
-                // settlements use the field index the live feed has advanced.
+                // Moment-only edits diff the prior file snapshot. Owner
+                // settlements preserve the visible draft over the checkpoint.
                 // Unparseable frontmatter must still clear the index.
                 let empty = || serde_json::Value::Object(serde_json::Map::new());
-                let before_frontmatter = if owner_settlement_committed {
-                    // Accepted frames advance the field index before the file.
-                    // Diff that index so only changes not indexed by the feed
-                    // (such as an enrolled restore checkpoint) get history.
-                    dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
+                let (mut frontmatter, provenance) =
+                    dohc_engine_domain::collections::markdown_frontmatter_json_with_provenance(
+                        text,
+                    )
+                    .unwrap_or_else(|| (empty(), Default::default()));
+                let before_frontmatter = if let Some(owner) = &owner_settlement {
+                    // The index follows the visible draft, including pending
+                    // edits that this settled checkpoint does not contain.
+                    let indexed = dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
                         tx,
                         &envelope.workspace_id,
                         &payload.version_id,
                         &payload.object_id,
                     )
-                    .map_err(crate::ydoc_apply::map_domain_hard_error)?
-                    .unwrap_or_else(empty)
+                    .map_err(crate::ydoc_apply::map_domain_hard_error)?;
+                    if let Some(indexed_fields) =
+                        indexed.as_ref().filter(|_| owner.pending_bytes > 0)
+                    {
+                        let key = DocKey::new(
+                            &envelope.workspace_id,
+                            &payload.version_id,
+                            &payload.object_id,
+                        )
+                        .map_err(SyncError::corrupt)?;
+                        let visible = dohc_engine_collab::load_doc_in(tx, &key)
+                            .map_err(SyncError::corrupt)?;
+                        frontmatter = match dohc_engine_collab::owner_outbox::draft::apply_pending_to_checkpoint_in(
+                            tx,
+                            &owner.binding,
+                            &visible,
+                        ) {
+                            Ok(()) => visible.frontmatter_json(),
+                            Err(dohc_engine_collab::OwnerOutboxError::Storage(error)) => {
+                                return Err(error.into());
+                            }
+                            // Replay-state errors must not invent an indexed change.
+                            Err(_) => indexed_fields.clone(),
+                        };
+                    }
+                    indexed.unwrap_or_else(empty)
                 } else {
                     local
                         .as_ref()
@@ -951,11 +1027,6 @@ fn apply_moment_append(
                         })
                         .unwrap_or_else(empty)
                 };
-                let (frontmatter, provenance) =
-                    dohc_engine_domain::collections::markdown_frontmatter_json_with_provenance(
-                        text,
-                    )
-                    .unwrap_or_else(|| (empty(), Default::default()));
                 record_facts = dohc_engine_domain::index_collection_frontmatter_apply_in_tx(
                     tx,
                     &envelope.workspace_id,
@@ -972,6 +1043,42 @@ fn apply_moment_append(
                     envelope.recorded_at_ms,
                 )
                 .map_err(crate::ydoc_apply::map_domain_hard_error)?;
+                if let Some(facts) = record_facts.as_mut() {
+                    // verify_direct_write_author already checked this relay
+                    // origin and the sole server-derived author together.
+                    facts.shared_author = match payload.authors.as_deref() {
+                        Some(
+                            [
+                                MomentAuthor::Named {
+                                    user_id,
+                                    grant_id,
+                                    grant_generation,
+                                },
+                            ],
+                        ) => Some(dohc_engine_domain::SharedChangeAuthor::Named {
+                            user_id: user_id.clone(),
+                            grant_id: grant_id.clone(),
+                            grant_generation: *grant_generation,
+                        }),
+                        Some(
+                            [
+                                MomentAuthor::Link {
+                                    identity:
+                                        LinkMomentAuthor::Direct {
+                                            grant_id,
+                                            grant_generation,
+                                            principal_id,
+                                        },
+                                },
+                            ],
+                        ) => Some(dohc_engine_domain::SharedChangeAuthor::Link {
+                            grant_id: grant_id.clone(),
+                            grant_generation: *grant_generation,
+                            principal_id: principal_id.clone(),
+                        }),
+                        _ => None,
+                    };
+                }
             }
         }
         upsert_search_row(
@@ -1501,11 +1608,14 @@ fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {
                             author,
                             MomentAuthor::Public { .. }
                                 | MomentAuthor::Named { .. }
-                                | MomentAuthor::Link { .. }
+                                | MomentAuthor::Link {
+                                    identity: LinkMomentAuthor::Direct { .. }
+                                }
                         )
                     }))
         })
         || payload.authors.iter().flatten().any(|author| match author {
+            MomentAuthor::Unattributed {} => false,
             MomentAuthor::Agent {
                 agent_id,
                 on_behalf_of,
@@ -1518,8 +1628,15 @@ fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {
             }
             MomentAuthor::Human {
                 human_id,
+                human_name,
                 on_behalf_of,
-            } => human_id.is_empty() || on_behalf_of.as_ref().is_some_and(String::is_empty),
+            } => {
+                human_id.is_empty()
+                    || human_name.as_ref().is_some_and(|name| {
+                        name.is_empty() || name.len() > dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES
+                    })
+                    || on_behalf_of.as_ref().is_some_and(String::is_empty)
+            }
             MomentAuthor::Public {
                 principal_id,
                 grant_id,
@@ -1537,15 +1654,27 @@ fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {
                     || *grant_generation < 1
             }
             MomentAuthor::Link {
-                grant_id,
-                grant_generation,
-                principal_id,
+                identity:
+                    LinkMomentAuthor::Direct {
+                        grant_id,
+                        grant_generation,
+                        principal_id,
+                    },
             } => {
                 [grant_id, principal_id]
                     .iter()
                     .any(|v| v.is_empty() || v.len() > 500)
                     || *grant_generation < 1
             }
+            MomentAuthor::Link {
+                identity:
+                    LinkMomentAuthor::Live {
+                        public_principal_id,
+                        label,
+                    },
+            } => [public_principal_id, label].iter().any(|value| {
+                value.is_empty() || value.len() > dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES
+            }),
             MomentAuthor::Automation {
                 automation_id,
                 on_behalf_of,
@@ -1593,7 +1722,13 @@ fn verify_direct_write_author(
             Some(grant_id.as_str()),
             &["kind", "userId", "grantId", "grantGeneration"],
         ),
-        Some([MomentAuthor::Link { grant_id, .. }]) => (
+        Some(
+            [
+                MomentAuthor::Link {
+                    identity: LinkMomentAuthor::Direct { grant_id, .. },
+                },
+            ],
+        ) => (
             Some(grant_id.as_str()),
             &["kind", "grantId", "grantGeneration", "principalId"],
         ),
@@ -2424,11 +2559,16 @@ fn local_branch_root(
     base_moment_id: Option<&str>,
 ) -> Result<Option<String>, SyncError> {
     tx.query_row(
-        "SELECT moment_id FROM moments \
+        concat!(
+            "SELECT moment_id FROM moments \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
            AND before_latest_moment_id IS ?4 \
            AND (sync_record_only IS NULL OR sync_record_only=0) \
-         ORDER BY moment_order LIMIT 1",
+           AND ",
+            dohc_engine_domain::exclude_capture_recovery_sql!(),
+            " \
+         ORDER BY moment_order LIMIT 1"
+        ),
         params![workspace_id, version_id, object_id, base_moment_id],
         |row| row.get(0),
     )

@@ -10,7 +10,7 @@ import {
   type RelayButtonInspection,
 } from "@dohc/workspace-contracts/relay";
 import { grantEditsCollection, namedCollectionEditGrant } from "./collectionEditGrant";
-import { SHARED_BUTTON_DENIED, SHARED_BUTTON_FIELD_CHANGED, SHARED_BUTTON_MOVED, SHARED_BUTTON_UNCHECKED } from "@dohc/automation-executor/button-presser";
+import { SHARED_BUTTON_DENIED, SHARED_BUTTON_FIELD_CHANGED, SHARED_BUTTON_MOVED, SHARED_BUTTON_UNCHECKED, SHARED_BUTTON_HELD } from "@dohc/automation-executor/button-presser";
 import { computerInstallId } from "./automationHostRoutes";
 import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, relayError } from "./errors";
@@ -195,7 +195,7 @@ export function createAutomationPressRoutes(input: {
       const safe: RelayButtonInspection = result.kind === "ready" ? { kind: "ready", automationId: line(result.automationId, "automationId", MAX_AUTOMATION_ID_CHARS),
         definitionHash: line(result.definitionHash, "definitionHash", 16), irreversible: irreversibleActions(result.irreversible) }
         : { kind: result.kind, reason: result.kind === "denied"
-          ? [SHARED_BUTTON_MOVED, SHARED_BUTTON_FIELD_CHANGED].includes(result.reason) ? result.reason : SHARED_BUTTON_DENIED
+          ? [SHARED_BUTTON_MOVED, SHARED_BUTTON_FIELD_CHANGED, SHARED_BUTTON_HELD].includes(result.reason) ? result.reason : SHARED_BUTTON_DENIED
           : SHARED_BUTTON_UNCHECKED };
       storage.answerButtonInspection({ ...scope, inspectionId }, safe);
       return jsonResponse({ ok: true });

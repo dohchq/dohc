@@ -226,7 +226,7 @@ it('cuts a complete checkpoint when the owner outbox introduces the 960th identi
     expect(checkpoint.cut).toMatchObject({highWater: 960, suffixCount: 0, checkpoint: {cursor: 960}})
     const coverage = checkpoint.cut.checkpoint.metadata!.checkpointCoverage!
     expect(coverage).toHaveLength(960)
-    expect(coverage).toContainEqual(expect.objectContaining({author: {kind: 'agent', agentId: 'owner-agent', depth: 0},
+    expect(coverage).toContainEqual(expect.objectContaining({author: {kind: 'agent', agentId: 'owner-agent', onBehalfOf: 'owner', depth: 0},
       structRanges: [{clientId: 70_000, startClock: 0, endClock: 1}]}))
     expect(hash(checkpoint.cut.checkpoint.bytes)).toBe(checkpoint.cut.checkpoint.digest)
     expect(await drain()).toEqual({admittedEntries: 1, hasMore: false})
@@ -237,7 +237,7 @@ it('cuts a complete checkpoint when the owner outbox introduces the 960th identi
     const advanced = f.storage.readLiveUpdateJournalCut({document})
     expect(advanced).toMatchObject({kind: 'cut', cut: {highWater: 961, suffixCount: 1, checkpoint: {cursor: 960},
       suffix: [{metadata: {authorSnapshot: [{kind: 'human', humanId: 'owner', humanName: 'Alice'},
-        {kind: 'agent', agentId: 'owner-agent', depth: 0}]}}]}})
+        {kind: 'agent', agentId: 'owner-agent', onBehalfOf: 'owner', depth: 0}]}}]}})
   } finally {await executor.close()}
 }, 600_000)
 

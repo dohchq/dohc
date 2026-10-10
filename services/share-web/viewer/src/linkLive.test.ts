@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import {afterEach, expect, it, vi} from "vitest";
 import {openLinkDocument} from "./linkLive";
+import * as browserTransport from "@dohc/ydoc-projection/named-live-browser-transport";
 import {LINK_REFUSALS, linkRefusalBody, type LinkRefusalCode} from "@dohc/security-contract/link-refusal";
 
 const limits = {provider: {frames: {receive: {maxFrameBytes: 1024, maxStateVectorBytes: 4096, maxUpdateBytes: 8192, maxSyncBytes: 16384},
@@ -13,6 +14,7 @@ it.each(Object.keys(LINK_REFUSALS) as LinkRefusalCode[])("shows the scoped refus
   await expect(openLinkDocument("abcdefghijkl", "docs/a.md", new AbortController().signal)).rejects.toThrow(LINK_REFUSALS[code].error);
 });
 it("opens the link socket with a one-use ticket and cookie credentials without account or capability material", async () => {
+  const create = vi.spyOn(browserTransport, "createNamedLiveBrowserTransport");
   const calls: {url: string; protocols: string[]}[] = [];
   class Socket extends EventTarget {
     readyState = 1; bufferedAmount = 0; protocol = "dohc-live-v1"; extensions = ""; binaryType = "arraybuffer";
@@ -27,7 +29,7 @@ it("opens the link socket with a one-use ticket and cookie credentials without a
       return Response.json({objectId: "object-a", limits});
     }
     expect(url).toBe("/api/live/link-ticket"); expect(JSON.parse(String(init?.body))).toEqual({discriminator: "abcdefghijkl", objectId: "object-a"});
-    return Response.json({token: "ab".repeat(32), expiresAtMs: Date.now() + 60_000});
+    return Response.json({token: "ab".repeat(32), publicPrincipalId: "public-link-a", expiresAtMs: Date.now() + 60_000});
   });
   vi.stubGlobal("fetch", fetch);
   const session = await openLinkDocument("abcdefghijkl", "docs/a.md", new AbortController().signal);
@@ -35,6 +37,11 @@ it("opens the link socket with a one-use ticket and cookie credentials without a
     await session.reconnect();
     expect(calls).toEqual([{url: "wss://share.example.test/api/live/link?session=abcdefghijkl", protocols: ["dohc-live-v1", `dohc-live-ticket.${"ab".repeat(32)}`]}]);
     expect(fetch).toHaveBeenCalledTimes(2); expect(session.state().status).toBe("connecting");
+    expect(create.mock.calls[0]![0].recordingContext!({objectId: "object-a"})).toEqual({kind: "link", publicPrincipalId: "public-link-a"});
+    fetch.mockImplementationOnce(async () => Response.json({token: "cd".repeat(32), publicPrincipalId: "public-link-b", expiresAtMs: Date.now() + 60_000}));
+    await session.reconnect();
+    expect(calls).toHaveLength(1);
+    expect(create.mock.calls[0]![0].recordingContext!({objectId: "object-a"})).toEqual({kind: "link", publicPrincipalId: "public-link-a"});
   } finally {session.close();}
 });
 it("refuses unexpected metadata fields and responses arriving after selection cancellation", async () => {

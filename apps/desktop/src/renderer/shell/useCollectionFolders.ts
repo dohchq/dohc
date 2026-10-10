@@ -13,6 +13,7 @@ export function useCollectionFolders(
   isShareView: boolean,
   // Healthy received shares read Collections within their pinned grant.
   shareViewReadsCollections = false,
+  shareViewEnded = false,
 ) {
   // Collection folders: the engine's collections.list result,
   // cached as the set of folder paths so the Explorer can route a click on a
@@ -24,8 +25,8 @@ export function useCollectionFolders(
   >(EMPTY_COLLECTION_FOLDERS);
   const collectionsRequest = useRef(0);
   const [dataState, setDataState] = useState<{ workspaceId: string; datasets: DatasetDescription[]; nextCursor: string | null } | null>(null);
-  const datasets = dataState?.workspaceId === workspaceId ? dataState.datasets : EMPTY_DATASETS;
-  const nextDataset = dataState?.workspaceId === workspaceId ? dataState.nextCursor : null;
+  const datasets = !shareViewEnded && dataState?.workspaceId === workspaceId ? dataState.datasets : EMPTY_DATASETS;
+  const nextDataset = !shareViewEnded && dataState?.workspaceId === workspaceId ? dataState.nextCursor : null;
   const datasetRequest = useRef(0);
   const [archiveView, setArchiveView] = useState<{ workspaceId: string; enabled: boolean }>({ workspaceId, enabled: false });
   const includeArchived = !isShareView && archiveView.workspaceId === workspaceId && archiveView.enabled;
@@ -61,6 +62,10 @@ export function useCollectionFolders(
   useEffect(() => {
     return () => { collectionsRequest.current++; datasetRequest.current++; };
   }, [workspaceId]);
+  useEffect(() => {
+    datasetRequest.current++;
+    if (shareViewEnded) setDataState(null);
+  }, [shareViewEnded]);
   useEffect(() => {
     if (!workspaceIsReady || (isShareView && !shareViewReadsCollections)) return;
     // First load; afterwards the list rides the files+history activity

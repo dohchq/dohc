@@ -1,7 +1,7 @@
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
-import { createApp, deleteWorkspacePath, importData, moveWorkspacePath, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
+import { createApp, deleteWorkspacePath, importData, moveWorkspacePath, startFileChat, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
 import { executeCli } from "@dohc/cli";
 import {
   CLI_PROTOCOL_VERSION,
@@ -33,6 +33,8 @@ import { createChatWrites } from "../workspaces/chatWrites";
 import { CredentialSessionCache } from "../workspaces/credentialSessionCache";
 import { createLocalAuthorship } from "../workspaces/localAuthorship";
 import { deferred } from "../testing/deferred";
+import { createUsageStore } from "../usage/usageStore";
+import { DESKTOP_USAGE_COVERAGE } from "../usage/cliUsage";
 import { createLiveLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -488,6 +490,118 @@ describe("CLI socket server", () => {
     await rm(tempRoot, { recursive: true, force: true });
   });
 
+  it("confines Access to the registered workspace and schema-parses every answer without secret fields", async () => {
+    const secret = { credentials: "secret", bearerUrl: "secret", invitationUrl: "secret", shareCode: "secret" };
+    const answer = { ...secret, ref: { kind: "path", path: "Notes/a.md", versionId: null }, rows: [], visibility: "visible",
+      coverage: { kind: "granted", complete: true, observation: "interval", ...secret }, checkedAtMs: 1, freshness: "stale", nextCursor: null };
+    const object = vi.fn(async () => answer as never), sharing = vi.fn(async () => ({ ...answer, ref: null }) as never);
+    context.access = { object, sharing }; context.readOnly = true;
+    const response = await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessObject",
+      args: { cwd: workspaceRoot, actor: "agent", ref: { kind: "path", path: "Notes/a.md" } } });
+    expect(response).toMatchObject({ ok: true, result: { freshness: "stale", coverage: { complete: true } } });
+    expect(JSON.stringify(response)).not.toContain("secret");
+    expect(object).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ref: { kind: "path", path: "Notes/a.md", versionId: null } }));
+    for (const args of [
+      { cwd: workspaceRoot, actor: "agent", lane: "received", workspaceId: "other" },
+      { cwd: workspaceRoot, actor: "agent", ref: { kind: "path", path: "a.md", workspaceId: "other" } },
+    ]) expect(await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessSharing", args })).toMatchObject({ ok: false });
+    expect(sharing).not.toHaveBeenCalled();
+    expect(await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessObject",
+      args: { cwd: workspaceRoot, actor: "agent", ref: { kind: "path", path: "../outside.md" } } })).toMatchObject({ ok: false });
+    expect(object).toHaveBeenCalledOnce();
+  });
+
+  it("labels success without changing token admission, read-only authority, actor gates or results", async () => {
+    const recordSuccess = vi.fn();
+    serverOptions.recordSuccess = recordSuccess;
+    const writeFiles = vi.fn<NonNullable<CliWorkspaceContext["writeFiles"]>>(async files => ({ ok: true, written: files.map(file => file.path) }));
+    context.writeFiles = writeFiles;
+    context.documents = { read: async () => ({ path: "a.md", markdown: "" }), edit: async () => ({ path: "a.md", changed: true }), create: async () => ({ path: "a.md" }) };
+    const args = { cwd: workspaceRoot, actor: "agent", requestId: "door", files: [{ path: "a.txt", contentBase64: "eA==" }] };
+    const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "fileWrite", args };
+    const results = [];
+    for (const door of ["cli", "mcp"] as const) {
+      results.push(await rawRequest({ ...request, door }));
+      expect(recordSuccess).toHaveBeenCalledTimes(1);
+      expect(await rawRequest({ ...request, door, token: "0".repeat(64) })).toMatchObject({ ok: false, error: "dohc: CLI authentication failed" });
+      registryWorkspace.readOnly = true;
+      expect(await rawRequest({ ...request, door })).toMatchObject({ ok: false, error: "dohc: This workspace is read-only. Write in the owning workspace." });
+      registryWorkspace.readOnly = false;
+      expect(await rawRequest({ ...request, door, verb: "documentEdit", args: { cwd: workspaceRoot, actor: "human", path: "a.md", replacement: "x" } }))
+        .toMatchObject({ ok: true, result: { ok: false } });
+    }
+    expect(results[0]).toEqual(results[1]);
+    expect(writeFiles).toHaveBeenCalledTimes(2);
+    expect(writeFiles.mock.calls[0]).toEqual(writeFiles.mock.calls[1]);
+    expect(recordSuccess.mock.calls).toEqual([
+      [{ capabilityId: "file.write", door: "cli" }],
+    ]);
+  });
+
+  it("counts only validated successful commands, defaults missing labels to CLI and rejects unknown labels", async () => {
+    const recordSuccess = vi.fn();
+    serverOptions.recordSuccess = recordSuccess;
+    context.keptCopies = { list: async () => ({ keptCopies: [], more: false }), save: vi.fn(async () => ({ status: "saved" as const, path: "kept.md" })) };
+    const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "saveKeptCopy", args: { cwd: workspaceRoot, actor: "agent", id: 1 } };
+    expect(await rawRequest(request)).toMatchObject({ ok: true, result: { status: "saved" } });
+    expect(recordSuccess).toHaveBeenLastCalledWith({ capabilityId: "file.kept.save", door: "cli" });
+    recordSuccess.mockClear();
+    for (const door of ["unknown", "automation", "renderer"]) expect(await rawRequest({ ...request, door })).toMatchObject({ ok: false, error: "dohc: invalid CLI request" });
+    for (const verb of ["usageRead", "usageQuery", "usageCopy"]) expect(await rawRequest({ ...request, verb })).toMatchObject({ ok: false });
+    await invoke("groups", { cwd: workspaceRoot, actor: "agent" });
+    await invoke("keptCopies", { cwd: workspaceRoot, actor: "agent" });
+    vi.mocked(context.keptCopies.save).mockResolvedValueOnce({ status: "gone" });
+    await rawRequest(request);
+    vi.mocked(context.keptCopies.save).mockResolvedValueOnce({ status: "saved" } as Awaited<ReturnType<NonNullable<CliWorkspaceContext["keptCopies"]>["save"]>>);
+    expect(await rawRequest(request)).toMatchObject({ ok: false });
+    vi.mocked(context.keptCopies.save).mockRejectedValueOnce(new Error("failed"));
+    await rawRequest(request);
+    expect(recordSuccess).not.toHaveBeenCalled();
+    recordSuccess.mockImplementationOnce(() => { throw new Error("measurement failed"); });
+    expect(await rawRequest(request)).toMatchObject({ ok: true, result: { status: "saved" } });
+  });
+
+  it("records once after a pending command settles and excludes concurrent and later request-id replays", async () => {
+    const recordSuccess = vi.fn();
+    serverOptions.recordSuccess = recordSuccess;
+    const entered = deferred(); const release = deferred();
+    const edit = vi.fn(async () => { entered.resolve(); await release.promise; return { path: "a.md", changed: true }; });
+    context.documents = { edit, read: async () => ({ path: "a.md", markdown: "x" }), create: async () => ({ path: "a.md" }) };
+    const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, door: "mcp", verb: "documentEdit",
+      args: { cwd: workspaceRoot, actor: "agent", path: "a.md", replacement: "PRIVATE", requestId: "edit" } };
+    const first = rawRequest(request); await entered.promise;
+    const replay = rawRequest({ ...request, door: "cli" });
+    expect(recordSuccess).not.toHaveBeenCalled();
+    release.resolve();
+    const results = await Promise.all([first, replay]);
+    expect(results[0]).toEqual(results[1]);
+    expect(await rawRequest(request)).toEqual(results[0]);
+    expect(edit).toHaveBeenCalledTimes(1);
+    expect(recordSuccess.mock.calls).toEqual([[{ capabilityId: "document.edit", door: "mcp" }]]);
+  });
+
+  it("stops both socket doors immediately when Off begins, including pending completions", async () => {
+    const usage = createUsageStore({ stateDir: () => stateDir, appVersion: "0.1.0", coverage: DESKTOP_USAGE_COVERAGE });
+    try {
+      await usage.load();
+      serverOptions.recordSuccess = invocation => usage.recordSuccess(invocation);
+      const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "saveKeptCopy", args: { cwd: workspaceRoot, actor: "agent", id: 1 } };
+      const entered = deferred(); const release = deferred();
+      context.keptCopies = { list: async () => ({ keptCopies: [], more: false }), save: async () => ({ status: "saved", path: "kept.md" }) };
+      await rawRequest({ ...request, door: "cli" });
+      const save = context.keptCopies.save;
+      context.keptCopies.save = async () => { entered.resolve(); await release.promise; return save(1); };
+      const pending = rawRequest({ ...request, door: "mcp" }); await entered.promise;
+      const off = usage.setEnabled(false);
+      release.resolve(); await pending;
+      await rawRequest({ ...request, door: "cli" });
+      await rawRequest({ ...request, door: "mcp" });
+      await off;
+      expect((await usage.read()).counts.map(({ capabilityId, door, count }) => ({ capabilityId, door, count })))
+        .toEqual([{ capabilityId: "file.kept.save", door: "cli", count: 1 }]);
+    } finally { await usage.close(); }
+  });
+
   it("rejects a wrong token over the live transport before request parsing", async (ctx) => {
     if (!server) ctx.skip();
     calls.listWorkspaces = 0;
@@ -582,7 +696,7 @@ describe("CLI socket server", () => {
     expect(await invoke("appPublication", { cwd, actor: "agent", request: {
       action: "prepare", workspaceId: WORKSPACE_ID, appRoot: "site", shareId: "share-site", grantId: "grant-site",
     } })).toMatchObject({ kind: "prepared", appRoot: "site", sourcePaths: ["site/index.html", "site/styles.css"] });
-    expect(publication).toHaveBeenCalledWith(expect.objectContaining({ appRoot: "app/site" }));
+    expect(publication).toHaveBeenCalledWith(expect.objectContaining({ appRoot: "app/site" }), {kind:"agent",label:null,labelSource:"agent-declared"});
     publication.mockResolvedValueOnce({ kind: "published", publicationId: "c".repeat(64), authorityRevision: 1 });
     expect(await invoke("appPublication", { cwd, actor: "agent", request: {
       action: "approve", workspaceId: WORKSPACE_ID, approvalId: "00000000-0000-4000-8000-000000000001", candidateDigest: "a".repeat(64),
@@ -729,6 +843,40 @@ describe("CLI socket server", () => {
     expect(calls).toHaveLength(2);
   });
 
+  it("requires owner-local authority and refuses all automation publication actions", async () => {
+    context.appPublication=vi.fn(async()=>({kind:"cancelled" as const}));
+    const request={action:"createLink" as const,workspaceId:WORKSPACE_ID,appRoot:"app",access:"view" as const,operationId:"00000000-0000-4000-8000-000000000101",agentLabel:"Builder"};
+    await invoke("appPublication",{cwd:workspaceRoot,actor:"human",request});
+    expect(context.appPublication).toHaveBeenLastCalledWith(request,null);
+    await invoke("appPublication",{cwd:workspaceRoot,actor:"agent",request});
+    expect(context.appPublication).toHaveBeenLastCalledWith(expect.objectContaining({agentLabel:"Builder"}),{kind:"agent",label:"Builder",labelSource:"agent-declared"});
+    await expect(invoke("appPublication",{cwd:workspaceRoot,actor:"agent",request:{...request,workspaceId:"other"}})).rejects.toThrow("owning workspace");
+    context.readOnly=true;
+    await expect(invoke("appPublication",{cwd:workspaceRoot,actor:"agent",request})).rejects.toThrow("owning workspace");
+    context.readOnly=false;agentRunDepth=1;
+    for (const actor of ["human", "agent"] as const) {
+      await expect(invoke("appPublication",{cwd:workspaceRoot,actor,request})).rejects.toThrow("Automations cannot use app publication");
+      await expect(invoke("appPublication",{cwd:workspaceRoot,actor,request:{action:"cancel",workspaceId:WORKSPACE_ID,approvalId:request.operationId}})).rejects.toThrow("Automations cannot use app publication");
+    }
+    expect(context.appPublication).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["approve", "approveMigration"] as const)("attributes owner-local dataset %s labels as agent-declared", async action => {
+    context.dataset=vi.fn(async()=>({kind:"refused" as const,code:"expired",message:"expired"}));
+    const request={...(action === "approveMigration" ? {action,approvalDigest:"b".repeat(64)} : {action}),workspaceId:WORKSPACE_ID,preparationId:"00000000-0000-4000-8000-000000000101",revisionSha256:"a".repeat(64),agentLabel:"Builder"};
+    await invoke("dataset",{cwd:workspaceRoot,actor:"human",request});
+    expect(context.dataset).toHaveBeenLastCalledWith(request,null);
+    await invoke("dataset",{cwd:workspaceRoot,actor:"agent",request});
+    expect(context.dataset).toHaveBeenLastCalledWith(request,{depth:0,approvalAgent:{kind:"agent",label:"Builder",labelSource:"agent-declared"}});
+    await expect(invoke("dataset",{cwd:workspaceRoot,actor:"agent",request:{...request,workspaceId:"other"}})).rejects.toThrow("owning workspace");
+    context.readOnly=true;
+    await expect(invoke("dataset",{cwd:workspaceRoot,actor:"agent",request})).rejects.toThrow("owning workspace");
+    expect(context.dataset).toHaveBeenCalledTimes(2);
+    context.readOnly=false; agentRunDepth=2;
+    await invoke("dataset",{cwd:workspaceRoot,actor:"human",request});
+    expect(context.dataset).toHaveBeenLastCalledWith(request,{depth:2,approvalAgent:{kind:"agent",label:"Builder",labelSource:"agent-declared"}});
+  });
+
   it("routes dataset actions through the same owner workspace attachment for humans and agents", async () => {
     context.dataset = vi.fn(async () => ({kind:"invoked" as const,result:{accepted:true},revision:1,replayed:false}));
     const request = {action:"invoke" as const,workspaceId:WORKSPACE_ID,datasetPath:"data/dataset.json",operationId:"00000000-0000-4000-8000-000000000002",revision:1,revisionSha256:"a".repeat(64),input:{name:"Equipment"},idempotencyKey:"create-1"};
@@ -864,7 +1012,7 @@ describe("CLI socket server", () => {
         files: [{ path: "primary.md", operation: "write" }],
       }],
     });
-    expect(moments.changes[0]).not.toHaveProperty("summary");
+    expect("changes" in moments && moments.changes[0]).not.toHaveProperty("summary");
     const moment = await invoke("moment", {
       cwd: workspaceRoot,
       actor: "agent",
@@ -1126,7 +1274,7 @@ describe("CLI socket server", () => {
       cwd: scopedRoot,
       actor: "agent",
     });
-    expect(moments.changes.map((change) => change.path)).toEqual(["scoped.md"]);
+    expect("changes" in moments && moments.changes.map((change) => change.path)).toEqual(["scoped.md"]);
     await expect(invoke("moment", {
       cwd: scopedRoot,
       actor: "agent",
@@ -2213,14 +2361,15 @@ describe("CLI socket server", () => {
 
   it("comments on a file through the chat write path a person's comment takes", async () => {
     if (!store) throw new Error("Store is not available");
-    const started = await invoke("fileChatStart", {
-      cwd: workspaceRoot,
-      actor: "agent",
-      agent: "claude-code",
-      path: "tracked.md",
-      title: "Budget",
-      body: "Is 400 enough for food?",
+    const comment = (path: string, title: string, body: string, flags: string[] = []) => executeCli({
+      argv: ["document", "comment", path, "--title", title, "--text", body, "--json", ...flags],
+      cwd: workspaceRoot, env: {}, request: (request) => invoke(request.verb, request.args),
     });
+    const output = await comment("tracked.md", "Budget", "Is 400 enough for food?", ["--agent", "claude-code"]);
+    expect(output.exitCode, output.stderr).toBe(0);
+    const { schemaVersion, ...startedResult } = JSON.parse(output.stdout);
+    expect(schemaVersion).toBe(2);
+    const started = parseCliResult("fileChatStart", startedResult);
     if (!started.ok) throw new Error(started.reason);
     expect(started.path).toBe("tracked.md");
 
@@ -2256,9 +2405,17 @@ describe("CLI socket server", () => {
     // A retry with the same request id returns the first chat instead of
     // starting a second; the id cannot be reused for a different comment.
     const once = { cwd: workspaceRoot, actor: "agent" as const, path: "tracked.md", title: "Once", body: "One chat.", requestId: "req-1" };
-    const first = await invoke("fileChatStart", once);
+    const retryFlags = ["--request-id", once.requestId];
+    const firstOutput = await comment(once.path, once.title, once.body, retryFlags);
+    expect(firstOutput.exitCode, firstOutput.stderr).toBe(0);
+    const { schemaVersion: retrySchemaVersion, ...firstResult } = JSON.parse(firstOutput.stdout);
+    expect(retrySchemaVersion).toBe(2);
+    const first = parseCliResult("fileChatStart", firstResult);
     if (!first.ok) throw new Error(first.reason);
-    await expect(invoke("fileChatStart", once)).resolves.toEqual(first);
+    await expect(comment(once.path, once.title, once.body, retryFlags)).resolves.toEqual(firstOutput);
+    await expect(comment(once.path, once.title, "Another.", retryFlags)).resolves.toEqual({
+      exitCode: 1, stdout: "", stderr: "dohc: request id req-1 was already used for a different request\n",
+    });
     await expect(invoke("fileChatStart", { ...once, body: "Another." })).resolves.toEqual({
       ok: false,
       reason: "request id req-1 was already used for a different request",
@@ -2270,12 +2427,70 @@ describe("CLI socket server", () => {
     await expect(store.listMessages({ workspaceId: WORKSPACE_ID, threadId: first.threadId }))
       .resolves.toMatchObject([{ author: { kind: "agent", displayName: "Nova" } }]);
 
+    for (const [path, reason] of [
+      ["untracked.md", "dohc does not track untracked.md yet, so it cannot have chats. Only text files dohc tracks can. Try again once dohc lists the file."],
+      ["../outside.md", "path rejected (traversal): ../outside.md"],
+      [".dohc/private.md", "path rejected (reserved): .dohc/private.md"],
+    ] as const) {
+      const denied = await comment(path, "T", "B");
+      expect(denied).toEqual({ exitCode: 1, stdout: "", stderr: `dohc: ${reason}\n` });
+    }
+    const beforeReadOnly = calls.writes;
     // A shared view refuses before the chat module is reached.
     registryWorkspace = { ...registryWorkspace, readOnly: true };
     context.readOnly = true;
     await expect(invoke("fileChatStart", {
       cwd: workspaceRoot, actor: "agent", path: "tracked.md", title: "T", body: "B",
     })).rejects.toThrow("chats are not available in a read-only shared view");
+    await expect(comment("tracked.md", "T", "B")).resolves.toEqual({
+      exitCode: 1, stdout: "", stderr: "dohc: chats are not available in a read-only shared view\n",
+    });
+    expect(calls.writes).toBe(beforeReadOnly);
+  });
+
+  it("refuses a 90 KB CJK first message through MCP without creating a file chat", async () => {
+    const create = vi.spyOn(store!, "createThread");
+    const ctx: ToolContext = { root: workspaceRoot, home: stateDir, request: request => invoke(request.verb, request.args) };
+    expect(await startFileChat(ctx, { path: "tracked.md", title: "Too large", body: "界".repeat(30_000) }, undefined))
+      .toEqual({ ok: false, reason: "The message is longer than 64 KiB. Shorten it." });
+    expect(create).not.toHaveBeenCalled();
+    expect(await invoke("fileChats", { cwd: workspaceRoot, actor: "agent", path: "tracked.md" }))
+      .toMatchObject({ ok: true, threads: [] });
+    expect(calls.writes).toBe(0);
+  });
+
+  it.each([
+    ["x".repeat(65_537), "The message is longer than 64 KiB. Shorten it."],
+    [" \r\n\t\uFEFF", "The message is empty. Enter a message."],
+  ])("refuses an invalid raw socket first message before creating its chat", async (body, reason) => {
+    const create = vi.spyOn(store!, "createThread");
+    expect(await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "fileChatStart",
+      args: { cwd: workspaceRoot, actor: "agent", path: "tracked.md", title: "Refused", body },
+    })).toMatchObject({ ok: true, result: { ok: false, reason } });
+    expect(create).not.toHaveBeenCalled();
+    expect(await invoke("fileChats", { cwd: workspaceRoot, actor: "agent", path: "tracked.md" }))
+      .toMatchObject({ ok: true, threads: [] });
+    expect(calls.writes).toBe(0);
+  });
+
+  it("lets a refused file-chat request id be retried and corrected before creating exactly one chat", async () => {
+    const args = { cwd: workspaceRoot, actor: "agent" as const, path: "tracked.md", title: "Retry", body: "界".repeat(30_000), requestId: "refused-body" };
+    const refusal = { ok: false, reason: "The message is longer than 64 KiB. Shorten it." };
+    expect(await invoke("fileChatStart", args)).toEqual(refusal);
+    expect(await invoke("fileChatStart", args)).toEqual(refusal);
+    expect(await invoke("fileChats", { cwd: workspaceRoot, actor: "agent", path: "tracked.md" }))
+      .toMatchObject({ ok: true, threads: [] });
+    const body = "界".repeat(21_844) + "\r\nx\r\ny\uFEFF ";
+    const normalized = "界".repeat(21_844) + "\nx\ny";
+    expect(Buffer.byteLength(normalized, "utf8")).toBe(65_536);
+    const corrected = { ...args, body };
+    const started = await invoke("fileChatStart", corrected);
+    if (!started.ok) throw new Error(started.reason);
+    expect(await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: started.threadId }))
+      .toMatchObject([{ body: normalized }]);
+    expect(await invoke("fileChatStart", corrected)).toEqual(started);
+    expect(await invoke("fileChats", { cwd: workspaceRoot, actor: "agent", path: "tracked.md" }))
+      .toMatchObject({ ok: true, threads: [{ title: "Retry" }] });
   });
 
   it("answers a resent document edit with its first result", async () => {

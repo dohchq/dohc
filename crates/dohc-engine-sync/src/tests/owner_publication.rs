@@ -94,6 +94,61 @@ fn candidate(
     )
 }
 #[test]
+fn pending_server_draft_does_not_enter_or_block_the_ordinary_publication_prefix() {
+    let (_dir, mut store, observed, checkpoint) = fixture();
+    let ordinary_before = store.table_row_count("replication_log").unwrap();
+    let doc = Ydoc::wire();
+    doc.apply(&checkpoint).unwrap();
+    let append = dohc_engine_collab::owner_outbox::draft::append_draft_cached(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        "ws",
+        dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
+            binding: observed.binding.clone(),
+            expected_revision: 1,
+            append_key: "offline-button".into(),
+            update: doc.richdoc_append_paragraph("waiting for an offline owner"),
+            now_ms: 3,
+            agent_declaration: None,
+            automation_declaration: Some(dohc_engine_domain::AutomationDeclaration {
+                automation_id: "collection:Tasks#mark".into(),
+                attribution: dohc_engine_domain::ChangeAttribution {
+                    actor_kind: dohc_engine_domain::ChangeActorKind::Automation,
+                    on_behalf_of: Some("presser".into()),
+                    depth: 1,
+                    run: None,
+                },
+            }),
+        },
+        &NoFaults,
+    )
+    .unwrap();
+    assert!(append.pending_bytes > 0);
+    assert_eq!(
+        store.table_row_count("replication_log").unwrap(),
+        ordinary_before
+    );
+    let digest = seed_text_head(&mut store, "independent", "new-record.md", "new record");
+    let ops = vec![
+        envelope("local", 0, "chat.message.append", json!({})),
+        envelope(
+            "local",
+            1,
+            "moment.append",
+            json!({"versionId":"main","objectId":"independent","path":"new-record.md","payloadAfterBlobSha256":digest}),
+        ),
+        envelope("local", 2, "chat.message.append", json!({})),
+    ];
+    let prefix = owner_publication_prefix(&store, "ws", &ops, 1_000_000).unwrap();
+    assert_eq!(prefix.allowed_ops, ops.len());
+    assert!(prefix.pending.is_none());
+    assert_eq!(
+        store.table_row_count("owner_ydoc_outbox_entries").unwrap(),
+        1
+    );
+}
+
+#[test]
 fn prefix_stops_before_private_bytes_then_releases_exact_contained_state() {
     let (_dir, mut store, observed, checkpoint) = fixture();
     let doc = Ydoc::wire();

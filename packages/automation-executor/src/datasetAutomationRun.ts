@@ -1,3 +1,4 @@
+import { datasetBaseFolder } from "@dohc/security-contract/dataset";
 import type { RunSource } from "./automationRecordBackend";
 import { coordinateSourceRun } from "./automationStepRun";
 import { isDeepStrictEqual } from "node:util";
@@ -122,7 +123,7 @@ export interface DatasetRunHost {
 export interface DatasetAutomationRunDependencies extends Pick<
   CollectionAutomationRunDependencies,
   "targets" | "evaluator" | "store" | "nowMs" | "personName" | "chat" | "postNotice" | "recipientVerdicts" | "readMessageBody" | "readCode"
->, Partial<Pick<CollectionAutomationRunDependencies, "withReads" | "withRecordWrites" | "collectionIdOf" | "collectionPathOf" | "checkReach">> {
+>, Partial<Pick<CollectionAutomationRunDependencies, "withReads" | "withRecordWrites" | "collectionIdOf" | "collectionPathOf" | "isIndexReading" | "checkReach">> {
   /** The dataset host; resolves null when it is not open. */
   withHost<T>(work: (host: DatasetRunHost) => T | Promise<T>): Promise<T | null>;
   /** Who can edit the workspace's Collections now, as last read, for the check before each record effect. */
@@ -310,7 +311,7 @@ export async function datasetRecordExists(
   recordId: DatasetRecordId,
 ): Promise<boolean> {
   const approved = host.revision(datasetId);
-  const { trigger } = datasetStepsOf(automation, { definition: approved.definition, generated: true, sourceCollection: approved.definition.schemaPath.slice(0, approved.definition.schemaPath.lastIndexOf("/")) });
+  const { trigger } = datasetStepsOf(automation, { definition: approved.definition, generated: true, sourceCollection: datasetBaseFolder(approved.definition) });
   if (trigger?.read == null) return false;
   const rules = { datasetId, revision: approved.revision, revisionSha256: approved.revisionSha256 };
   return (await readDatasetRecord((operationId, input) => host.invokeAsOwner({ ...rules, operationId, input, idempotencyKey: READ_KEY }), trigger.read, trigger.table, recordId)) !== null;

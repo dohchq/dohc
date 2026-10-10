@@ -54,6 +54,19 @@ describe("LazyMarkdownReadView", () => {
     await waitFor(() => expect(onRendered).toHaveBeenCalledOnce());
   });
 
+  it("renders a later document in its first commit once the chunk has loaded", async () => {
+    const first = render(<LazyMarkdownReadView body="# First document" resetKey="workspace-1:first.md" />);
+    expect(await screen.findByRole("heading", { name: "First document" })).toBeTruthy();
+    first.unmount();
+
+    render(<LazyMarkdownReadView body="# Second document" resetKey="workspace-1:second.md" />);
+    expect(
+      screen.queryByRole("heading", { name: "Second document" }),
+      "a fresh lazy per mount suspends again and shows the loading lines for a module already loaded",
+    ).toBeTruthy();
+    expect(screen.queryByTestId("markdown-read-loading")).toBeNull();
+  });
+
   it("marks completion only after the loaded child parses and commits", async () => {
     let resolve!: (
       module: typeof import("./IncrementalMarkdownDocument"),

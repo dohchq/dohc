@@ -1,4 +1,5 @@
-import { readFile, rename, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
+import { atomicReplaceFile } from "../atomicReplaceFile";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
@@ -120,9 +121,7 @@ async function writeRuns(rootPath: string, runs: AgentRunRecord[]): Promise<void
   // Atomic temp+rename so a crash never truncates the run log. A unique suffix
   // (not just pid) means a leftover temp from a crashed run can never be
   // reused/clobbered by a later write.
-  const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
-  await writeFile(tmp, `${JSON.stringify(runs, null, 2)}\n`);
-  await rename(tmp, path);
+  await atomicReplaceFile(path, (tmp) => writeFile(tmp, `${JSON.stringify(runs, null, 2)}\n`));
 }
 
 export function createAgentIntegration(options: AgentIntegrationOptions) {

@@ -11,6 +11,8 @@ import { detectCompleteEmojiShortcode, detectEmojiAutocomplete } from "./emojiTr
 import { makeTriggerPlugin } from "./triggerPlugin";
 import { makeBlockControlsPlugin } from "./blockControls";
 import { makeCodeBlockChromePlugin } from "./codeBlockChrome";
+import type { ReportShellFailure } from "../shell/useShellError";
+import { COPY_FEEDBACK_MS, COPY_WORDS } from "../ui/CopyButton";
 import { makeCalloutChromePlugin } from "./calloutChrome";
 import { makeSlashCommandPlugin, CLOSED_SLASH_COMMAND_STATE } from "./slashCommands";
 import { makeHeadingFlashPlugin } from "./OutlinePanel";
@@ -54,6 +56,7 @@ afterEach(() => {
   for (const view of views.splice(0)) { const parent = view.dom.parentElement; view.destroy(); parent?.remove(); }
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 describe("cursor-local trigger semantics", () => {
@@ -407,5 +410,42 @@ describe("editor chrome reuse", () => {
     readonlySelect.value = "rust";
     readonlySelect.dispatchEvent(new Event("change", { bubbles: true }));
     expect(view.state.doc.child(1).attrs.language).toBe("python");
+  });
+
+  // The code block's copy is the shared copy tile, drawn in ProseMirror's DOM:
+  // it keeps its name, says Copied, and reports a refused write through the
+  // shell's error hook with Try again.
+  it("answers a code block's copy in place and reports a refusal to the shell", async () => {
+    vi.useFakeTimers();
+    const refusal = new Error("Document is not focused.");
+    const writeText = vi.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(refusal).mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    const report = vi.fn<ReportShellFailure>();
+    const view = mount(doc(paragraph("lead"), codeBlock("const a = 1;", "javascript")), [makeCodeBlockChromePlugin(() => report)]);
+    const button = view.dom.querySelector<HTMLButtonElement>(".dohc-code-copy-btn")!;
+    const status = view.dom.querySelector(".dohc-code-block-toolbar [role='status']")!;
+    expect(button.getAttribute("aria-label")).toBe("copy code");
+
+    button.click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(writeText).toHaveBeenLastCalledWith("const a = 1;");
+    expect(button.title).toBe(COPY_WORDS.copied);
+    expect(status.textContent).toBe(COPY_WORDS.copied);
+    await vi.advanceTimersByTimeAsync(COPY_FEEDBACK_MS);
+    expect(button.title).toBe("Copy code");
+
+    button.click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(button.title).toBe(COPY_WORDS.failed);
+    expect(button.getAttribute("aria-label")).toBe("copy code");
+    expect(report).toHaveBeenCalledWith({
+      message: "dohc could not copy to the clipboard. Document is not focused.",
+      cause: refusal,
+      retry: expect.any(Function),
+    });
+    report.mock.calls[0]![0].retry!();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(writeText).toHaveBeenLastCalledWith("const a = 1;");
+    expect(button.title).toBe(COPY_WORDS.copied);
   });
 });

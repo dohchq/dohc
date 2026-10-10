@@ -1,3 +1,4 @@
+import { desktopPins, chatsPanelTabPin } from "../src/testPins";
 import { expect, test, type Page } from "@playwright/test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -33,14 +34,14 @@ const MEMBER_USER = "e2e-recipient";
 const MEMBER_EMAIL = "e2e-recipient@dohc.test";
 
 // The titlebar control toggles the Chats sidebar, and opening a file moves
-// the sidebar to its "This file" tab. Bring the panel up if it is hidden,
+// the sidebar to its About tab. Bring the panel up if it is hidden,
 // then select the Chats tab.
 async function openChats(page: Page): Promise<void> {
-  if (!(await page.getByTestId("chats-panel").isVisible())) {
-    await page.getByTestId("titlebar-chats-sidebar").click();
-    await expect(page.getByTestId("chats-panel")).toBeVisible();
+  if (!(await page.getByTestId(desktopPins.chatsPanel).isVisible())) {
+    await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
+    await expect(page.getByTestId(desktopPins.chatsPanel)).toBeVisible();
   }
-  const chatsTab = page.getByTestId("chats-panel-tab-all");
+  const chatsTab = page.getByTestId(chatsPanelTabPin("all"));
   if ((await chatsTab.getAttribute("aria-pressed")) !== "true") await chatsTab.click();
   await expect(chatsTab).toHaveAttribute("aria-pressed", "true");
 }

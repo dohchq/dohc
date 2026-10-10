@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import * as Y from "yjs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PageIdentity } from "./PageIdentity";
+import { NoticeCenter } from "./workbench/NoticeCenter";
 import { parseFrontmatter } from "./markdown/frontmatter";
 
 function ControlledPageIdentity(props: { initialBody: string; stem: string }) {
@@ -140,6 +141,75 @@ describe("PageIdentity", () => {
       await user.click(screen.getByTestId("page-icon-add"));
 
       expect(document.activeElement).toBe(screen.getByLabelText("Use 📄"));
+    });
+
+    // A toast sits above the picker. F6 reaches it and comes back to the
+    // emoji it left; Escape in the toast comes back without closing.
+    it("moves between the picker and a toast above it on F6", async () => {
+      const user = userEvent.setup();
+      render(
+        <>
+          <ControlledPageIdentity initialBody={"# Body\n"} stem="note" />
+          <div data-dohc-toasts>
+            <button type="button">Try again</button>
+          </div>
+        </>,
+      );
+      await user.click(screen.getByTestId("page-icon-add"));
+      const emoji = screen.getByLabelText("Use 📄");
+      expect(document.activeElement).toBe(emoji);
+
+      await user.keyboard("{F6}");
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Try again" }));
+      await user.keyboard("{Escape}");
+      expect(screen.getByTestId("page-icon-picker")).toBeTruthy();
+      expect(document.activeElement).toBe(emoji);
+      await user.keyboard("{F6}");
+      await user.keyboard("{F6}");
+      expect(document.activeElement).toBe(emoji);
+    });
+
+    // The picker is not an Overlay. A toast that goes away while it holds
+    // the focus F6 brought from the picker hands it back to the emoji F6
+    // left, not to the Notices button behind the page.
+    it("returns focus to the picker when the focused toast goes away", async () => {
+      vi.stubGlobal("dohcDesktop", {
+        platform: "win32",
+        getUpdateState: () => new Promise(() => {}),
+        onUpdateState: () => () => {},
+      });
+      const user = userEvent.setup();
+      const ignore = () => undefined;
+      const page = (toastShown: boolean) => (
+        <>
+          <ControlledPageIdentity initialBody={"# Body\n"} stem="note" />
+          <NoticeCenter
+            workspaceId="ws"
+            syncStatus={null}
+            agentActive={false}
+            conflictSummaries={[]}
+            onOpenHistory={ignore}
+            onOpenSettings={ignore}
+            onOpenConflicts={ignore}
+            onRefreshShareView={ignore}
+            onRebuildEngineStore={ignore}
+            workspaceErrors={[{ id: "e", message: "dohc could not reach this server.", details: "", atMs: 1, canRetry: true, seen: !toastShown }]}
+            onRetryWorkspaceError={ignore}
+            onHideWorkspaceError={ignore}
+          />
+        </>
+      );
+      const view = render(page(true));
+      await user.click(screen.getByTestId("page-icon-add"));
+      const emoji = screen.getByLabelText("Use 📄");
+      await user.keyboard("{F6}");
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Try again" }));
+
+      view.rerender(page(false));
+      expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+      await waitFor(() => expect(document.activeElement).toBe(emoji));
+      expect(screen.getByTestId("page-icon-picker")).toBeTruthy();
+      vi.unstubAllGlobals();
     });
 
     it("returns focus to the trigger button when Escape closes the picker", async () => {

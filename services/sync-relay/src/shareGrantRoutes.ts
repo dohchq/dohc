@@ -1,3 +1,4 @@
+import { parseApprovalAgent } from "@dohc/security-contract/approval-provenance";
 import { normalizeShareLabel } from "@dohc/security-contract/share-labels";
 import { jsonResponse } from "@dohc/service-http";
 import type {PublicEditRelease} from "@dohc/security-contract";
@@ -55,6 +56,7 @@ export function createShareGrantRoutes(
     | "revokeShare"
     | "removeShareAccess"
     | "undoShareRemoval"
+    | "readLinkCreation"
     | "createFileLinkShare"
     | "createLinkGrant"
     | "createShare"
@@ -407,10 +409,10 @@ export function createShareGrantRoutes(
       const input = await readJsonObject(request);
       if (
         Object.keys(input).some(
-          (key) => key !== "paths" && key !== "versionId" && key !== "access" && key !== "subjectName",
+          (key) => key !== "paths" && key !== "versionId" && key !== "access" && key !== "subjectName" && key !== "operationId" && key !== "agent",
         )
       ) {
-        throw badRequest("A link accepts only access, paths, versionId, and subjectName.");
+        throw badRequest("A link accepts only access, paths, versionId, subjectName, operationId, and agent.");
       }
       const access = validatePublicLinkAccess(input.access, publicEditRelease);
       const validation = validateShareSelector({
@@ -421,6 +423,17 @@ export function createShareGrantRoutes(
         throw relayError(validation.code, validation.message);
       }
       const selector = validation.selector;
+      let agent;
+      try { agent = parseApprovalAgent(input.agent); } catch { throw badRequest("Invalid link agent."); }
+      const operationId = input.operationId === undefined ? undefined : parseString(input.operationId, "operationId", 36);
+      if (operationId !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(operationId)) throw badRequest("Invalid link operation id.");
+      if (agent && !operationId) throw badRequest("An agent link requires an operation id.");
+      const requestJson = JSON.stringify({selector,access,subjectName:normalizeShareLabel(input.subjectName),agent});
+      const receipt = operationId && storage.readLinkCreation(route.workspaceId,operationId,actor.userId);
+      if (receipt) {
+        if (receipt.requestJson !== requestJson) throw relayError("conflict", "Link operation changed.");
+        return jsonResponse({ok:true,workspaceId:route.workspaceId,selector,access,shareId:receipt.shareId,grantId:receipt.grantId,urlUnavailable:true});
+      }
       requireEditableSelector(access, JSON.stringify(selector));
       const shareId = newShareId();
       const grantId = newGrantId();
@@ -448,6 +461,7 @@ export function createShareGrantRoutes(
         parentGrantId: null,
       };
       const created = storage.createFileLinkShare({
+        ...(operationId ? {operation: {operationId, requestJson}} : {}),
         share,
         grant,
         credential: {

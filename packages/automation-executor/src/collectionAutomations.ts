@@ -1,3 +1,4 @@
+import { datasetBaseFolder } from "@dohc/security-contract/dataset";
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -84,7 +85,7 @@ import {
   LOST_COLLECTION_ERROR,
 } from "./collectionAutomationRun";
 import { automationInventory, canPressInventory, irreversibleActionsOf, type AutomationInventory } from "./automationInventory";
-import { describeButtonPresser, SHARED_BUTTON_DENIED, SHARED_BUTTON_FIELD_CHANGED, SHARED_BUTTON_MOVED, SHARED_BUTTON_UNCHECKED, type DatasetOperationCeiling } from "./buttonPresser";
+import { describeButtonPresser, SHARED_BUTTON_DENIED, SHARED_BUTTON_FIELD_CHANGED, SHARED_BUTTON_HELD, SHARED_BUTTON_MOVED, SHARED_BUTTON_UNCHECKED, type DatasetOperationCeiling } from "./buttonPresser";
 import type { RelayButtonAuthority, RelayButtonInspection } from "@dohc/workspace-contracts/relay";
 import { AutomationRunWait } from "./automationRunWait";
 import { automationUndoReach, undoAutomationRuns } from "./automationUndo";
@@ -1169,6 +1170,8 @@ export class CollectionAutomations {
   private readonly groupSkipsTold: Record<GroupMessagesSkipped, number> = { ahead: 0, late: 0 };
   /** Serializes index loads and subscription reconciles. */
   private chain: Promise<void> = Promise.resolve();
+  /** Missing identities are inconclusive until queued index reads finish. */
+  private indexReads = 0;
   /** Serializes reach verdict updates. */
   private verdictChain: Promise<unknown> = Promise.resolve();
   /** Verdict changes remain unsaved until the store confirms the save. */
@@ -1314,7 +1317,7 @@ export class CollectionAutomations {
     }
     if (folders.size === 0 || this.opened === null) return;
     this.targetRevision += 1;
-    return this.enqueue(async () => {
+    return this.readingIndex(() => this.enqueue(async () => {
       let datasets: Promise<Map<string, IndexedDataset> | null> | undefined;
       let listed: Promise<Map<string, string>> | undefined;
       for (const folder of folders) {
@@ -1353,7 +1356,7 @@ export class CollectionAutomations {
       this.publishHolds();
       // A descriptor fixed or removed: its waiting due times and messages look again.
       this.wakeDatasetWaits();
-    })
+    }))
       // A new or changed step gets its verdict now, while the people who
       // could have written it can still edit the Collection.
       .then(() => {
@@ -1382,28 +1385,30 @@ export class CollectionAutomations {
       .catch((error: unknown) => this.options.onError("reload dataset automations", error));
   }
 
-  private async indexDatasets(open: boolean): Promise<void> {
-    this.targetRevision += 1;
-    const folders = await this.datasetFolders(open);
-    if (folders === null) return;
-    for (const path of this.datasets.keys()) {
-      if (folders.has(path)) continue;
-      this.datasets.delete(path);
-      this.files.delete(path);
-    }
-    for (const [path, dataset] of folders) {
-      if (this.collections.has(path)) continue;
-      this.datasets.set(path, dataset);
-      await this.readFile(path);
-    }
-    this.targetRevision += 1;
-    await this.noteSwitches();
-    // A schedule found now counts from now, as one switched on does.
-    this.noteEnabledSchedules(false);
-    await this.reconcile(false);
-    this.publishHolds();
-    this.options.onSchedulesChanged?.();
-    this.wakeDatasetWaits();
+  private indexDatasets(open: boolean): Promise<void> {
+    return this.readingIndex(async () => {
+      this.targetRevision += 1;
+      const folders = await this.datasetFolders(open);
+      if (folders === null) return;
+      for (const path of this.datasets.keys()) {
+        if (folders.has(path)) continue;
+        this.datasets.delete(path);
+        this.files.delete(path);
+      }
+      for (const [path, dataset] of folders) {
+        if (this.collections.has(path)) continue;
+        this.datasets.set(path, dataset);
+        await this.readFile(path);
+      }
+      this.targetRevision += 1;
+      await this.noteSwitches();
+      // A schedule found now counts from now, as one switched on does.
+      this.noteEnabledSchedules(false);
+      await this.reconcile(false);
+      this.publishHolds();
+      this.options.onSchedulesChanged?.();
+      this.wakeDatasetWaits();
+    });
   }
 
   /**
@@ -2755,18 +2760,28 @@ export class CollectionAutomations {
     describe?: (datasetId: string) => Promise<DatasetDescription>,
   ): Promise<CollectionAutomationPress> {
     await this.ready();
+    const collectionId = this.collectionIdOf(input.collectionPath);
+    const checkMoved = () => {
+      const current = collectionId === null ? null : this.collectionPathOf(collectionId);
+      if (current !== null && current !== input.collectionPath) throw new Error(MOVED_SINCE_PRESSED);
+    };
     const remembered = this.presses.get(input.pressId) ?? await this.pressInEngine(input);
     let automationId: string;
     if (remembered) {
-      if (parseCollectionAutomationId(remembered.automationId)?.collectionId !== this.collectionIdOf(input.collectionPath) || remembered.field !== input.field ||
+      if (parseCollectionAutomationId(remembered.automationId)?.collectionId !== collectionId || remembered.field !== input.field ||
         remembered.recordId !== input.recordId || remembered.pressedBy !== input.pressedBy) {
         throw new Error("This press id already names another press.");
       }
       automationId = remembered.automationId;
     } else {
-      await checkNew();
-      const state = await this.buttonState(input.collectionPath, input.field, await this.options.cachedRoster(), describe);
-      if (state.kind !== "ready") throw new Error(state.reason);
+      let state: AutomationButtonState;
+      try {
+        await checkNew();
+        state = await this.buttonState(input.collectionPath, input.field, await this.options.cachedRoster(), describe);
+      } catch (error) { checkMoved(); throw error; }
+      // Admission must still name this Collection before the engine receives a press.
+      checkMoved();
+      if (state.kind !== "ready") throw new Error(describe ? SHARED_BUTTON_DENIED : state.reason);
       if ((state.irreversible ?? []).some((action) => !input.confirmed.includes(action.name))) throw new Error(changedSincePressed(input.field));
       automationId = state.automationId;
     }
@@ -2781,8 +2796,9 @@ export class CollectionAutomations {
           throw error;
         }
       }
+      checkMoved();
       return engine.pressAutomation({ pressId: input.pressId, automationId, recordId: input.recordId, pressedBy: input.pressedBy, by: input.by });
-    });
+    }).catch(error => { checkMoved(); throw error; });
     if (pressed === null) throw new Error("The workspace engine is not running.");
     if (pressed.busy) return { busy: true };
     const { claim } = pressed;
@@ -3084,6 +3100,7 @@ export class CollectionAutomations {
       throw new Error(`${field} now runs another automation. Press it again.`);
     }
     const inspection = await this.inspectAuthority(authority);
+    if (this.locate(input.automationId)?.collectionPath !== input.collectionPath) throw new Error(MOVED_SINCE_PRESSED);
     if (inspection.kind === "unchecked") throw new AutomationRunWait(inspection.reason);
     if (inspection.kind !== "ready") throw new Error(inspection.reason);
     if (inspection.irreversible.some(action => !authority.confirmed.includes(action.name))) throw new Error(changedSincePressed(field));
@@ -3091,6 +3108,7 @@ export class CollectionAutomations {
     // bound to it through a restart; the run refuses any other.
     const pressId = relayedPressId(input.pressId, input.definitionHash, input.collectionPath);
     await this.markHostClaims();
+    if (this.locate(input.automationId)?.collectionPath !== input.collectionPath) throw new Error(MOVED_SINCE_PRESSED);
     // People and local agents both press with the stored signed-in person's authority.
     const pressed = await this.press({ collectionPath: id.collectionPath, field, recordId: authority.recordId!, pressId, pressedBy: authority.userId, by: { kind: "human" }, confirmed: authority.confirmed }, watch,
       async () => { await this.pressAuthority(input.pressId); }, async datasetId => this.presserDescription(await this.pressAuthority(input.pressId), datasetId));
@@ -3137,10 +3155,24 @@ export class CollectionAutomations {
   }
 
   private async inspectAuthority(authority: RelayButtonAuthority, schemas = new Map<string, Promise<ReturnType<typeof parseCollectionSchema> | null>>()): Promise<RelayButtonInspection> {
+    const moved = () => {
+      const current = this.locate(authority.automationId);
+      return current !== null && current.collectionPath !== authority.collectionPath;
+    };
+    const denied = (cause: string, reason: string): RelayButtonInspection => {
+      if (moved()) reason = SHARED_BUTTON_MOVED;
+      if (reason !== SHARED_BUTTON_FIELD_CHANGED) {
+        this.options.onError(`inspect shared Button "${authority.automationId}": ${cause}`, new Error(reason));
+      }
+      return {kind: "denied", reason: [SHARED_BUTTON_MOVED, SHARED_BUTTON_FIELD_CHANGED, SHARED_BUTTON_HELD].includes(reason) ? reason : SHARED_BUTTON_DENIED};
+    };
     try {
       const id = this.locate(authority.automationId), automation = this.definitionFor(authority.automationId);
-      if (!id || !automation || !automation.enabled || automation.when.kind !== "button" || automation.when.table !== null ||
-        id.collectionPath !== authority.collectionPath || definitionHash(automation) !== authority.definitionHash) return { kind: "denied", reason: SHARED_BUTTON_DENIED };
+      if (!id || !automation) return denied("definition-missing", "This Button's automation is unavailable. Refresh the Collection, then try again.");
+      if (!automation.enabled) return denied("switched-off", "This Button's automation is off.");
+      if (automation.when.kind !== "button" || automation.when.table !== null) return denied("trigger-changed", "This automation no longer runs from this Button.");
+      if (id.collectionPath !== authority.collectionPath) return denied("collection-moved", SHARED_BUTTON_MOVED);
+      if (definitionHash(automation) !== authority.definitionHash) return denied("definition-mismatch", "This Button's automation changed. Refresh the Collection, then try again.");
       let schemaRead = schemas.get(id.collectionPath);
       if (!schemaRead) {
         schemaRead = this.options.readText(`${id.collectionPath}/${COLLECTION_SCHEMA_FILENAME}`).then(read =>
@@ -3150,7 +3182,7 @@ export class CollectionAutomations {
       const schema = await schemaRead;
       const buttonField = automation.when.field;
       if (!schema?.schema.fields.some(field => field.name === buttonField && field.type === "button")) {
-        return { kind: "denied", reason: SHARED_BUTTON_FIELD_CHANGED };
+        return denied("field-changed", SHARED_BUTTON_FIELD_CHANGED);
       }
       const roster = await this.options.roster();
       if (roster.kind === "unknown") throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED);
@@ -3159,18 +3191,23 @@ export class CollectionAutomations {
       catch (error) {
         if (error instanceof AutomationRunWait) throw error;
         if (this.datasetStoreFailed) throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED);
-        throw new Error(SHARED_BUTTON_DENIED);
+        return denied(`inventory-unavailable: ${errorText(error)}`, SHARED_BUTTON_DENIED);
       }
-      if (this.cannotRun(id.collectionPath, automation) !== null) return { kind: "denied", reason: SHARED_BUTTON_DENIED };
+      const unsupported = this.cannotRun(id.collectionPath, automation);
+      if (unsupported !== null) return denied("unsupported-operation", unsupported);
       const descriptions = new Map<string, DatasetDescription>();
       for (const step of inventory.reach) if (step.kind === "dataset-operation" && !descriptions.has(step.datasetId)) {
         descriptions.set(step.datasetId, await this.presserDescription(authority, step.datasetId));
       }
-      if (!await canPressInventory(inventory, async datasetId => descriptions.get(datasetId)!)) return { kind: "denied", reason: SHARED_BUTTON_DENIED };
+      const canPress = await canPressInventory(inventory, async datasetId => descriptions.get(datasetId)!);
+      if (!canPress) return denied("presser-access", SHARED_BUTTON_DENIED);
       const state = await this.runnableButtonState(id.collectionPath, automation, roster, inventory.reach);
-      if (state.kind !== "ready") return { kind: "denied", reason: SHARED_BUTTON_DENIED };
+      if (state.kind !== "ready") {
+        return denied(state.denialCause ?? "reach-restricted", state.denialCause === "held-step" ? SHARED_BUTTON_HELD : state.reason);
+      }
+      if (moved()) return denied("collection-moved", SHARED_BUTTON_MOVED);
       return { kind: "ready", automationId: authority.automationId, definitionHash: authority.definitionHash, irreversible: irreversibleActionsOf(automation, id.collectionPath, inventory) };
-    } catch (error) { return buttonInspectionFailure(error); }
+    } catch (error) { return moved() ? denied("collection-moved", SHARED_BUTTON_MOVED) : buttonInspectionFailure(error); }
   }
 
   /**
@@ -3217,7 +3254,7 @@ export class CollectionAutomations {
     catch (error) { return { kind: "disabled", reason: errorText(error) }; }
     if (!await canPressInventory(inventory, describe)) return { kind: "disabled", reason: noAccessReason(accessName) };
     const state = await this.runnableButtonState(collectionPath, automation, roster, inventory.reach);
-    if (state.kind !== "ready") return state;
+    if (state.kind !== "ready") return {kind: state.kind, reason: state.reason};
     const irreversible = irreversibleActionsOf(automation, collectionPath, inventory);
     return irreversible.length === 0 ? state : { ...state, irreversible };
   }
@@ -3228,20 +3265,20 @@ export class CollectionAutomations {
    * editor to allow it. A dataset field formulas cannot see is hidden from
    * them, and stops nothing.
    */
-  private async runnableButtonState(collectionPath: string, automation: Automation, roster: ReachRoster, inventory?: readonly ReachStep[]): Promise<AutomationButtonState> {
+  private async runnableButtonState(collectionPath: string, automation: Automation, roster: ReachRoster, inventory?: readonly ReachStep[]): Promise<AutomationButtonState & {denialCause?: "unsupported-operation" | "inventory-unavailable" | "reach-restricted" | "held-step"}> {
     const unsupported = inventory === undefined ? this.cannotRun(collectionPath, automation) : null;
-    if (unsupported !== null) return { kind: "disabled", reason: unsupported };
+    if (unsupported !== null) return { kind: "disabled", reason: unsupported, denialCause: "unsupported-operation" };
     const automationId = this.automationIdIn(collectionPath, automation.id);
     if (roster.kind === "unknown") return { kind: "ready", automationId };
     let steps: readonly ReachStep[];
     try {
       steps = inventory ?? this.reachSteps(collectionPath, automation);
-    } catch (error) { return { kind: "disabled", reason: errorText(error) }; }
+    } catch (error) { return { kind: "disabled", reason: errorText(error), denialCause: "inventory-unavailable" }; }
     for (const [index, reach] of checkAutomationReach(roster, { id: automation.id, collection: collectionNamed(collectionPath), codeFiles: codeFilesOf(automation, collectionPath), steps }).entries()) {
-      if (!reach.allowed && steps[index]!.kind !== "dataset-field") return { kind: "disabled", reason: reach.reason };
+      if (!reach.allowed && steps[index]!.kind !== "dataset-field") return { kind: "disabled", reason: reach.reason, denialCause: "reach-restricted" };
     }
     if (await this.recordVerdicts(roster, [{ automationId, collectionPath, automation }], steps)) {
-      return { kind: "disabled", reason: `Automation "${automation.name}" is waiting. Allow its step in Notices.` };
+      return { kind: "disabled", reason: `Automation "${automation.name}" is waiting. Allow its step in Notices.`, denialCause: "held-step" };
     }
     return { kind: "ready", automationId };
   }
@@ -3274,6 +3311,11 @@ export class CollectionAutomations {
   ): Promise<CollectionAutomationUndo> {
     await this.ready();
     const parsed = this.locate(input.automationId);
+    const movedReason = () => {
+      const current = this.locate(input.automationId);
+      return parsed !== null && current !== null && current.collectionPath !== parsed.collectionPath
+        ? "This Collection moved. Open it where it is now. Undo this run there." : null;
+    };
     // Held from before the first read to the end, like Try again's.
     if (this.changing.has(input.claimId)) return { status: "refused", reason: BUSY_CLAIM_REFUSAL };
     this.changing.add(input.claimId);
@@ -3310,7 +3352,7 @@ export class CollectionAutomations {
       const codeFiles = definition === null ? [] : codeFilesOf(definition, parsed.collectionPath);
       const source = needsReverseReach ? { roster: await this.options.roster(), collection: collectionNamed(parsed.collectionPath), codeFiles } : null;
       for (const run of runs) {
-        if (rebaseRun(run, (id) => this.collectionPathOf(id)).lost) return { status: "refused", reason: LOST_COLLECTION_ERROR };
+        if (rebaseRun(run, (id) => this.collectionPathOf(id)).lost) return { status: "refused", reason: movedReason() ?? LOST_COLLECTION_ERROR };
       }
       let reverseReach: ReachStep[];
       try {
@@ -3319,7 +3361,9 @@ export class CollectionAutomations {
         if (checked === null) throw new Error("The dataset host is unavailable. Reopen the workspace, then try again.");
         reverseReach = checked;
       }
-      catch (error) { return { status: "refused", reason: errorText(error) }; }
+      catch (error) { return { status: "refused", reason: movedReason() ?? errorText(error) }; }
+      const moved = movedReason();
+      if (moved !== null) return { status: "refused", reason: moved };
       const denied = source && checkAutomationReach(source.roster, {
         id: parsed.id, collection: collectionNamed(parsed.collectionPath), codeFiles, steps: reverseReach,
       }).find((verdict) => !verdict.allowed);
@@ -3370,6 +3414,8 @@ export class CollectionAutomations {
         },
       }, host, collectionNamed(parsed.collectionPath), async () => {
         const roster = await this.options.cachedRoster();
+        const moved = movedReason();
+        if (moved !== null) throw new Error(moved);
         if (roster.kind === "unknown") throw new Error(rosterProblem(roster, collectionNamed(parsed.collectionPath)));
         return roster;
       }, input.claimId, runs, async (request) => {
@@ -3713,24 +3759,31 @@ export class CollectionAutomations {
     return new Map(listed.collections.map((collection) => [collection.path, collection.objectId]));
   }
 
-  private async loadIndex(): Promise<void> {
-    this.targetRevision += 1;
-    this.collections = await this.listedCollections();
-    this.files.clear();
-    this.schemaFields.clear();
-    for (const path of this.collections.keys()) await this.readFile(path);
-    // A dataset's schedules run with the host closed, so the index opens it
-    // whenever this workspace has a dataset store. It does so before the
-    // schedules are noted, so one seen now is not taken as switched on now.
-    const datasets = await this.datasetFolders(true);
-    if (datasets !== null) this.datasets.clear();
-    for (const [path, definition] of datasets ?? this.datasets) {
-      if (this.collections.has(path)) continue;
-      this.datasets.set(path, definition);
-      await this.readFile(path);
-    }
-    await this.readNamedSchemas();
-    this.targetRevision += 1;
+  private async readingIndex(work: () => Promise<void>): Promise<void> {
+    this.indexReads += 1;
+    try { await work(); } finally { if (--this.indexReads === 0) this.notifyClaimed(); }
+  }
+
+  private loadIndex(): Promise<void> {
+    return this.readingIndex(async () => {
+      this.targetRevision += 1;
+      this.collections = await this.listedCollections();
+      this.files.clear();
+      this.schemaFields.clear();
+      for (const path of this.collections.keys()) await this.readFile(path);
+      // A dataset's schedules run with the host closed, so the index opens it
+      // whenever this workspace has a dataset store. It does so before the
+      // schedules are noted, so one seen now is not taken as switched on now.
+      const datasets = await this.datasetFolders(true);
+      if (datasets !== null) this.datasets.clear();
+      for (const [path, definition] of datasets ?? this.datasets) {
+        if (this.collections.has(path)) continue;
+        this.datasets.set(path, definition);
+        await this.readFile(path);
+      }
+      await this.readNamedSchemas();
+      this.targetRevision += 1;
+    });
   }
 
   /** Reads the field names of every Collection an automation names that the index lacks. */
@@ -3951,7 +4004,7 @@ export class CollectionAutomations {
     const folders = new Map<string, IndexedDataset>();
     const unplaced = new Set<string>();
     for (const definition of listed.definitions) {
-      const folder = posix.dirname(definition.schemaPath);
+      const folder = datasetBaseFolder(definition);
       if (folder === "." || (await this.describedDatasetId(folder)) !== definition.datasetId) {
         unplaced.add(definition.datasetId);
         continue;
@@ -4812,16 +4865,28 @@ export class CollectionAutomations {
     // Found by its Collection id, so a claim made before its Collection
     // moved runs where the Collection is now.
     const id = this.locate(claim.automationId);
+    if (id === null && this.indexReads > 0) return release;
     // The definition is read before the roster: a pull that lands while the
     // roster lists cannot bring a step from an editor the roster lacks.
     const automation = this.definitionFor(claim.automationId);
     const definition = id ? this.datasets.get(id.collectionPath)?.definition : undefined;
+    const bound = held.source === "engine" ? boundPress(held.claim) : null;
+    const locationChanged = (): ClaimAction | null => {
+      const current = this.locate(claim.automationId);
+      if (bound !== null && current !== null && bound.place !== placeHash(current.collectionPath)) {
+        return { kind: "settle", input: { state: "failed", error: MOVED_SINCE_PRESSED }, outcome: "failed", settled: () => this.afterSettle() };
+      }
+      if (current === null && id !== null) return release;
+      return current?.collectionPath !== id?.collectionPath ? release : null;
+    };
     // A due time or a Group message names only its Collection, of either kind.
     const recordless = held.source === "engine" && (held.claim.change.kind === "schedule" || held.claim.change.kind === "message");
     const inCollection = id !== null && (held.source === "engine"
       ? recordless || (definition === undefined &&
         (this.inDocumentCollection(held.claim, id.collectionPath) || await this.hasSavedPlan(held.claim)))
       : definition?.datasetId === held.claim.datasetId);
+    let moved = locationChanged();
+    if (moved !== null) return moved;
     // A due time or a message for a dataset whose store failed to open, or
     // whose folder's descriptor no longer names it, waits for the dataset
     // instead of being lost.
@@ -4845,12 +4910,8 @@ export class CollectionAutomations {
     }
     // A relayed press runs only the automation its presser saw, and only in
     // the folder the relay allowed it in, however long it waited.
-    const bound = held.source === "engine" ? boundPress(held.claim) : null;
     if (bound !== null && bound.definition !== definitionHash(automation) && automation.when.kind === "button") {
       return { kind: "settle", input: { state: "failed", error: changedSincePressed(automation.when.field) }, outcome: "failed", settled: () => this.afterSettle() };
-    }
-    if (bound !== null && bound.place !== placeHash(id.collectionPath)) {
-      return { kind: "settle", input: { state: "failed", error: MOVED_SINCE_PRESSED }, outcome: "failed", settled: () => this.afterSettle() };
     }
     // A claim this version cannot run, or that names a field its Collection
     // lacks, fails with the reason the panel shows, so it reaches the failure
@@ -4870,6 +4931,8 @@ export class CollectionAutomations {
       }
       const unsupported = this.cannotRun(id.collectionPath, automation);
       if (unsupported !== null) {
+        moved = locationChanged();
+        if (moved !== null) return moved;
         return { kind: "settle", input: { state: "failed", error: unsupported }, outcome: "failed", settled: () => this.afterSettle() };
       }
     }
@@ -4878,6 +4941,8 @@ export class CollectionAutomations {
     const roster = await this.options.roster();
     if (stop.aborted) return release;
     if (roster.kind === "unknown") {
+      moved = locationChanged();
+      if (moved !== null) return moved;
       // A step that acts as you needs to know who you are now; waiting could
       // mean waiting for a sign-in, so it fails with the reason instead.
       if (wakesAgent(automation)) {
@@ -4891,7 +4956,11 @@ export class CollectionAutomations {
       return { kind: "release", waitsFor: "roster" };
     }
     // The host runs nothing until it took the last host's verdicts.
-    if (!(await this.takeHostVerdicts(await this.options.groupHost()))) return { kind: "release", waitsFor: "roster" };
+    const host = await this.options.groupHost();
+    const takenVerdicts = await this.takeHostVerdicts(host);
+    moved = locationChanged();
+    if (moved !== null) return moved;
+    if (!takenVerdicts) return { kind: "release", waitsFor: "roster" };
     // The coordinator follows saved destinations before it records reach.
     if (stop.aborted) return release;
     // A relayed press runs only on the computer that still runs the
@@ -4918,6 +4987,14 @@ export class CollectionAutomations {
       : runDatasetAutomation({ ...this.runDependencies({ automationId: claim.automationId, collectionPath: collection.path, automation }), withHost: (work) => this.withLiveHost(work), cachedRoster: () => this.options.cachedRoster() },
         { held: runner.held, automation, collection, roster, signal, stopped: stop }), hostHold);
     if (outcome === null) return null;
+    if (outcome.kind === "failed" || outcome.kind === "wait" || outcome.kind === "skipped") {
+      if (outcome.kind === "skipped" || this.locate(claim.automationId) !== null) {
+        moved = locationChanged();
+        if (moved !== null) return moved;
+      } else if (!await this.hasSavedPlan(claim)) {
+        return release;
+      }
+    }
     // A pause or close stopped the run; its progress is saved, and the next
     // drain resumes it.
     if (stop.aborted) return release;
@@ -5186,7 +5263,7 @@ export class CollectionAutomations {
               if (!described.operations.some(operation => operation.operationId === targetOperationId)) throw new Error(SHARED_BUTTON_DENIED);
               const revision = host.revision(targetId), operation = revision.definition.operations.find(value => value.operationId === targetOperationId);
               if (!operation || !owned) throw new Error(SHARED_BUTTON_DENIED);
-              const target: ReachStep = { kind: "dataset-operation", collection: collectionNamed(posix.dirname(revision.definition.schemaPath)), datasetId: targetId,
+              const target: ReachStep = { kind: "dataset-operation", collection: collectionNamed(datasetBaseFolder(revision.definition)), datasetId: targetId,
                 operations: revision.definition.operations, grants: host.dataGrants(targetId), operation };
               if (checkAutomationReach(roster, { id: owned.automation.id, collection: collectionNamed(owned.collectionPath), codeFiles: codeFilesOf(owned.automation, owned.collectionPath), steps: [target] }).some(verdict => !verdict.allowed)) throw new Error(SHARED_BUTTON_DENIED);
             };
@@ -5207,6 +5284,7 @@ export class CollectionAutomations {
       withRecordWrites: this.options.withRecordWrites,
       collectionIdOf: (path) => this.collections.get(path) ?? null,
       collectionPathOf: (collectionId) => this.collectionPathOf(collectionId),
+      isIndexReading: () => this.indexReads > 0,
       readCode: async (path) => {
         const read = await this.options.readText(path);
         return read === null ? null : { text: read.text, truncated: read.truncated };

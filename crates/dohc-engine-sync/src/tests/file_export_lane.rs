@@ -73,7 +73,7 @@ fn drain(store: &mut EngineStore) {
 fn exports(store: &EngineStore) -> Vec<ReplicationEnvelope> {
     store.read_with(|conn| {
         let mut s=conn.prepare("SELECT origin_id,origin_seq,payload_json,recorded_at_ms FROM replication_log WHERE imported=0 AND op_kind='moment.append' ORDER BY rowid")?;
-        s.query_map([],|r|Ok(ReplicationEnvelope {workspace_id:"ws".into(),origin_id:r.get(0)?,origin_seq:r.get(1)?,op_kind:"moment.append".into(),payload:serde_json::from_str(&r.get::<_,String>(2)?).unwrap(),recorded_at_ms:r.get(3)?,relay_seq:None}))?.collect::<Result<_,_>>()
+        s.query_map([],|r|Ok(ReplicationEnvelope { settlement_admission: None, admitted_author_snapshot: None, workspace_id:"ws".into(),origin_id:r.get(0)?,origin_seq:r.get(1)?,op_kind:"moment.append".into(),payload:serde_json::from_str(&r.get::<_,String>(2)?).unwrap(),recorded_at_ms:r.get(3)?,relay_seq:None}))?.collect::<Result<_,_>>()
     }).unwrap()
 }
 fn hydrate(from: &EngineStore, to: &mut EngineStore) {
@@ -1433,6 +1433,7 @@ impl RelayTransport for RecordingRelay {
         let accepted = req.ops.len();
         let current_max_origin_seq = req.ops.last().map_or(req.after_seq, |op| op.origin_seq);
         Ok(PushResponse {
+            settlement_refusals: Vec::new(),
             accepted,
             inserted: accepted,
             skipped: 0,

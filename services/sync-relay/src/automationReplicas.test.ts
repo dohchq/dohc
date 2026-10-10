@@ -1,5 +1,5 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -130,6 +130,31 @@ describe("the automation replica's credential", () => {
     }));
     expect(push.status, await push.clone().text()).toBe(200);
     expect(await push.json()).toMatchObject({ inserted: 1 });
+    // An automation replica retains the client author boundary, including native-shaped moments.
+    let originSeq = 1;
+    for (const author of [{kind: "human", humanId: "recipient", humanName: "Recipient"},
+      {kind: "link", publicPrincipalId: "public-link", label: "Link editor"}, {kind: "unattributed", humanId: "recipient"}]) {
+      const refused = await handler(new Request(`https://relay.test/sync/${WORKSPACE}/log`, {
+        method: "POST", headers: {authorization: `Bearer ${bearer}`, "content-type": "application/json"},
+        body: JSON.stringify({replicationEpoch: "epoch-1", streamIdentity: "stream-1", originId: "server-replica", ops: [
+          {originSeq, opKind: "moment.append", recordedAtMs: 10, payload: {momentId: `moment-ydoc-${"a".repeat(64)}`, authors: [author]}}]}),
+      }));
+      expect(refused.status).toBe(200);
+      expect(await refused.json()).toMatchObject({accepted: 1, inserted: 1,
+        settlementRefusals: [{originSeq, settlementId: "unavailable", reason: "authorship-mismatch"}]});
+      const stored = storage.fetchLogCoordinate({workspaceId: WORKSPACE, originId: "server-replica", originSeq})!;
+      expect(stored.settlementAdmission).toMatchObject({status: "refused"});
+      expect(stored.admittedAuthorSnapshot).toBeUndefined();
+      expect(JSON.parse(stored.payloadJson).authors).toBeUndefined();
+      originSeq++;
+    }
+    const later = await handler(new Request(`https://relay.test/sync/${WORKSPACE}/log`, {
+      method: "POST", headers: {authorization: `Bearer ${bearer}`, "content-type": "application/json"},
+      body: JSON.stringify({replicationEpoch: "epoch-1", streamIdentity: "stream-1", originId: "server-replica",
+        ops: [{originSeq, opKind: "moment.append", recordedAtMs: 11, payload: {operation: "write"}}]}),
+    }));
+    expect(later.status).toBe(200);
+    expect(await later.json()).toMatchObject({accepted: 1, inserted: 1, currentMaxOriginSeq: originSeq});
     // Waiting to leave, it reads but writes nothing.
     storage.unwantAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
     expect(authorize({}), "a read").toBe("owner");
@@ -150,6 +175,9 @@ describe("the automation replicas", () => {
     const engines: Array<{ exit(): void; close: ReturnType<typeof vi.fn>; waitForExit: ReturnType<typeof vi.fn> }> = [];
     spawn.mockImplementation(async (spawned: { env?: Record<string, string>; onExit?: () => void }) => {
       expect(spawned.env?.DOHC_ENGINE_LIVE_HOST_CONFIG, "a plain engine, not the live host's").toBeUndefined();
+      const configPath = spawned.env?.DOHC_ENGINE_OWNER_HOST_CONFIG;
+      expect(configPath).toBeTypeOf("string");
+      expect(JSON.parse(readFileSync(configPath!, "utf8"))).toHaveProperty("ingress.aggregateBytes");
       let handles = 0;
       const engine = {
         sendRequest: vi.fn(async (request: Sent) => {
@@ -266,6 +294,28 @@ describe("the automation replicas", () => {
     expect(running.unavailable).toBe(true);
   });
 
+  it("keeps the owner ingress configuration through replica cleanup and an engine restart", async () => {
+    const {storage, raw} = await relay();
+    const engine = fakeEngine();
+    let wanted = [WORKSPACE];
+    const {replicas: running, root} = await replicas(storage, () => wanted, {ms: 0});
+    const configPath = (spawn.mock.calls[0]![0] as {env: Record<string, string>}).env.DOHC_ENGINE_OWNER_HOST_CONFIG!;
+    expect(existsSync(configPath)).toBe(true);
+    await mkdir(join(root, "unused-replica"));
+    raw.prepare("DELETE FROM sync_relay_workspaces WHERE workspace_id = ?").run(WORKSPACE);
+    wanted = [];
+    running.reconcile();
+    await running.settled();
+    expect(readdirSync(root)).toEqual([configPath.slice(root.length + 1)]);
+    engine.engines[0]!.exit();
+    await running.settled();
+    expect(spawn).toHaveBeenCalledTimes(2);
+    expect((spawn.mock.calls[1]![0] as {env: Record<string, string>}).env.DOHC_ENGINE_OWNER_HOST_CONFIG).toBe(configPath);
+    expect(running.unavailable).toBe(false);
+    await running.close();
+    expect(existsSync(configPath)).toBe(false);
+  });
+
   it("reports an engine startup failure and recovers after a successful start", async () => {
     const { storage } = await relay();
     const errors: unknown[] = [];
@@ -298,6 +348,28 @@ describe("the automation replicas", () => {
     expect(engine.methods().filter(method => method === "sync.push")).toHaveLength(3);
   });
 
+  it("refreshes live checkpoints before syncing and still syncs when that lane fails", async () => {
+    const {storage} = await relay();
+    const engine = fakeEngine();
+    const calls: string[] = [];
+    const failure = new Error("The owner device is offline.");
+    const errors: unknown[] = [];
+    const running = await start(storage, {wanted: () => [WORKSPACE], onError: error => errors.push(error),
+      onBeforeSync: async workspaceId => {
+        expect(workspaceId).toBe(WORKSPACE);
+        calls.push("refresh");
+        throw failure;
+      }});
+    await running.settled();
+    const replica = running.replica(WORKSPACE)!;
+    const before = engine.sent.length;
+    await replica.sync();
+    expect(calls).toEqual(["refresh", "refresh"]);
+    expect(errors).toEqual([failure, failure]);
+    expect(engine.sent.slice(before).map(request => request.method).slice(0, 2)).toEqual(["sync.push", "sync.pull"]);
+    expect(running.failedSyncs().size).toBe(0);
+  });
+
   it("opens a replica for each wanted workspace, joins its identity, and pulls when its log moves", async () => {
     const { storage, log } = await relay();
     const engine = fakeEngine();
@@ -321,6 +393,63 @@ describe("the automation replicas", () => {
     running.reconcile();
     await running.settled();
     expect(engine.methods().filter((method) => method === "sync.pull")).toHaveLength(2);
+  });
+
+  it("runs direct and background sync while record draft delivery is held", async () => {
+    const {storage, log} = await relay();
+    const engine = fakeEngine();
+    const {replicas: running} = await replicas(storage, () => [WORKSPACE], {ms: 0});
+    const replica = running.replica(WORKSPACE)!;
+    const entered = gate(), held = gate();
+    const writing = replica.withRecordWork(async () => {
+      entered.resolve();
+      await held.promise;
+    });
+    await entered.promise;
+    try {
+      log(1);
+      running.reconcile();
+      await running.settled();
+      expect(engine.methods().filter(method => method === "sync.push")).toHaveLength(2);
+      await replica.sync();
+      expect(engine.methods().filter(method => method === "sync.push")).toHaveLength(3);
+    } finally {held.resolve(); await writing;}
+  });
+
+  it("prepares record drafts while an ordinary sync is held and waits for both on close", async () => {
+    const {storage} = await relay();
+    fakeEngine();
+    const answer = spawn.getMockImplementation()!;
+    const pushing = gate(), pushed = gate(), writing = gate(), written = gate();
+    let hold = false;
+    spawn.mockImplementation(async (spawned: Parameters<typeof answer>[0]) => {
+      const client = await answer(spawned);
+      const send = client.sendRequest.getMockImplementation()!;
+      client.sendRequest.mockImplementation(async (request: Sent) => {
+        if (request.method === "sync.push" && hold) {pushing.resolve(); await pushed.promise;}
+        return send(request);
+      });
+      return client;
+    });
+    const {replicas: running} = await replicas(storage, () => [WORKSPACE], {ms: 0});
+    const replica = running.replica(WORKSPACE)!;
+    hold = true;
+    const sync = replica.sync().catch(() => undefined);
+    await pushing.promise;
+    const draft = replica.withRecordWork(async () => {writing.resolve(); await written.promise;});
+    try {
+      await writing.promise;
+      let closed = false;
+      const closing = running.close().then(() => {closed = true;});
+      pushed.resolve();
+      await sync;
+      await turn();
+      expect(closed, "record preparation is still running").toBe(false);
+      written.resolve();
+      await draft;
+      await closing;
+      expect(closed).toBe(true);
+    } finally {pushed.resolve(); written.resolve(); await sync; await draft;}
   });
 
   it("stops pulling a replica nothing needs any more", async () => {
@@ -349,7 +478,7 @@ describe("the automation replicas", () => {
     expect(running.replica(WORKSPACE)).toBeUndefined();
     expect(replica.signal.aborted).toBe(true);
     expect(engine.methods()).toContain("workspace.close");
-    expect(readdirSync(root)).toEqual([]);
+    expect(readdirSync(root).filter(entry => !entry.startsWith("owner-ingress-"))).toEqual([]);
   });
 
   it("removes every copy and row when the server no longer runs automations", async () => {
@@ -368,7 +497,7 @@ describe("the automation replicas", () => {
     const clock = { ms: 0 };
     let wanted = [WORKSPACE];
     const { replicas: running, root } = await replicas(storage, () => wanted, clock);
-    const folder = readdirSync(root)[0]!;
+    const folder = readdirSync(root).find(entry => /^[0-9a-f]{64}$/u.test(entry))!;
     wanted = [];
     running.reconcile(); await running.settled();
     expect(running.replica(WORKSPACE), "it waits a day").toBeDefined();

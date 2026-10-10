@@ -74,7 +74,7 @@ async function harness() {
   const rotateAfterLookup = { value: false };
   const mount = vi.fn(async () => undefined);
   const sharesChanged = vi.fn<(workspaceId: string) => void>();
-  const reconcileReceivedShares = vi.fn<(listing: unknown) => void>();
+  const reconcileReceivedShares = vi.fn<(listing: unknown) => Promise<void>>(async () => undefined);
   const store = {
     listChannels: vi.fn(async (): Promise<ChatChannelSummary[]> => []),
     getChannelWireId: vi.fn(async (_input: { workspaceId: string; channelId: string }): Promise<string | null> => null),
@@ -231,7 +231,7 @@ describe("registered shared-channel handlers", () => {
       removed: [{ shareId: "gone", grantId: "grant", message: "The owner removed your access.", removedAtMs: 5 }],
     };
     h.relayListing.mockResolvedValue(listing);
-    h.reconcileReceivedShares.mockImplementation(() => {
+    h.reconcileReceivedShares.mockImplementation(async () => {
       // What main's reconcile does when the listing says the share is back.
       h.workspace.sharedChannels = h.workspace.sharedChannels!.map((row) =>
         row.shareId === "gone" ? { ...row, ended: false } : row,
@@ -243,6 +243,36 @@ describe("registered shared-channel handlers", () => {
     expect(h.reconcileReceivedShares).toHaveBeenCalledWith(listing);
     expect(result.relay).toMatchObject({ state: "answered", removed: ["gone"] });
     expect(result.joined).toEqual([{ channelWireId: "wire-gone", joined: expect.objectContaining({ ended: false }) }]);
+  });
+
+  it("waits for exact-share reconciliation before reading joined answers", async () => {
+    const h = await harness(), started = deferred(), reconciled = deferred();
+    h.workspace.sharedChannels = [{ ...joined("gone"), ended: true }];
+    h.reconcileReceivedShares.mockImplementation(async () => {
+      started.resolve();
+      await reconciled.promise;
+      h.workspace.sharedChannels = [joined("gone")];
+    });
+    let answered = false;
+    const pending = h.invoke(CHANNELS.listChatChannelShares, {
+      workspaceId: "workspace", channelWireIds: ["wire-gone"],
+    }).then(result => { answered = true; return result; });
+    await started.promise;
+    expect(answered).toBe(false);
+    reconciled.resolve();
+    expect(await pending).toMatchObject({ joined: [{ joined: { ended: false } }] });
+  });
+
+  it("refuses joined answers when credentials change during reconciliation", async () => {
+    const h = await harness(), started = deferred(), reconciled = deferred();
+    h.reconcileReceivedShares.mockImplementation(() => { started.resolve(); return reconciled.promise; });
+    const pending = h.invoke(CHANNELS.listChatChannelShares, {
+      workspaceId: "workspace", channelWireIds: ["wire-shown"],
+    });
+    await started.promise;
+    h.rotateCredentials();
+    reconciled.resolve();
+    await expect(pending).rejects.toThrow("session changed");
   });
 
   it("shares a channel's folder with it, as one group grant", async () => {

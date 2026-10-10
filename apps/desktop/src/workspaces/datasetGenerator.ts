@@ -1,5 +1,5 @@
 import { posix } from "node:path";
-import { datasetColumnFields, parseDatasetDefinition, type DatasetColumnField, type DatasetDefinition } from "@dohc/security-contract/dataset";
+import { datasetBaseFolder, datasetColumnFields, parseDatasetDefinition, type DatasetColumnField, type DatasetDefinition } from "@dohc/security-contract/dataset";
 
 import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
 export { hasGeneratedDatasetOperations } from "@dohc/security-contract/dataset-operations";
@@ -78,7 +78,7 @@ export function generateDatasetSources(value: DatasetDefinition): { definition: 
       }
     }
   }
-  const descriptor = posix.join(posix.dirname(definition.schemaPath), "dataset.json");
+  const descriptor = posix.join(datasetBaseFolder(definition), "dataset.json");
   return { definition, files: {
     [descriptor]: JSON.stringify(definition, null, 2) + "\n",
     [definition.schemaPath]: generateDatasetSchema(definition),

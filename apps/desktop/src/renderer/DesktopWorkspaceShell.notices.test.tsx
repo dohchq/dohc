@@ -13,6 +13,7 @@ import type { OpenOnSwitch } from "./shell/useSentNoticeProps";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
 import { deferred } from "../testing/deferred";
+import { COPY_FAILURE } from "./ui/CopyButton";
 import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, READY_UPDATE_STATE, storedStateWithTabs, makeBridge, renderShell, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
 
 // A data store the engine refuses gets a real recovery, not a dead
@@ -30,7 +31,7 @@ it("reports an edit refusal once through Notices, without an ineffective retry",
   await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
   const message = 'dohc could not save an edit to "a.md". The edit is too large. Copy it from recovery.';
   const event: EngineYDocSaveStateEvent = {
-    sessionId: "session-1", seq: 1, state: "error",
+    sessionId: "session-1", workspaceId: WORKSPACE.workspaceId, path: "a.md", seq: 1, state: { kind: "error", reason: "test failure", issueId: null },
     editRefusal: { workspaceId: WORKSPACE.workspaceId, path: "a.md", requestId: "request-1", message },
   };
   act(() => { for (const listener of listeners) listener(event); });
@@ -46,6 +47,25 @@ it("reports an edit refusal once through Notices, without an ineffective retry",
         message: "Another workspace refused an edit." } });
   });
   expect(screen.queryByText("Another workspace refused an edit.")).toBeNull();
+});
+
+it("shows unsent draft failures through the existing toast and Notices reporter with Copy", async () => {
+  const bridge = makeBridge(Promise.resolve(null));
+  const listeners = new Set<(event: EngineYDocSaveStateEvent) => void>();
+  bridge.onEngineYDocSaveState = vi.fn(listener => {listeners.add(listener); return () => {listeners.delete(listener);};});
+  renderShell(bridge);
+  await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+  const message = "Unsent changes to a.md are not saved. Draft storage refused. Copy them from the open document before you quit dohc.";
+  const event: EngineYDocSaveStateEvent = {sessionId: "session-1", workspaceId: WORKSPACE.workspaceId, path: "notes/a.md", seq: 1, state: { kind: "error", reason: "test failure", issueId: null },
+    editRefusal: {workspaceId: WORKSPACE.workspaceId, path: "notes/a.md", requestId: "draft-preservation", message}};
+  act(() => {for (const listener of listeners) listener(event);});
+  expect(await screen.findByText(message)).toBeTruthy();
+  await userEvent.setup().click(await screen.findByTestId("notice-center-toggle"));
+  const notices = await screen.findByTestId("notice-center");
+  expect(within(notices).getAllByText(message)).toHaveLength(1);
+  expect(within(notices).getByRole("button", {name: "Copy error details"})).toBeTruthy();
+  act(() => {for (const listener of listeners) listener({...event, editRefusal: {...event.editRefusal!, workspaceId: OTHER_WORKSPACE.workspaceId, message: "Wrong workspace draft."}});});
+  expect(screen.queryByText("Wrong workspace draft.")).toBeNull();
 });
 
 describe("engine store recovery", () => {
@@ -700,6 +720,38 @@ describe("engine store recovery", () => {
       "Cause: Error [EACCES]: EACCES: permission denied",
     ]);
     expect(screen.queryByTestId("engine-rebuild-dialog")).toBeNull();
+  });
+
+  // A copy refused from a toast is the newest error, so its own toast takes
+  // the place of the toast the button sat in. Try again still copies the
+  // details that failed, though the button that failed is gone.
+  it("reports a refused copy from a toast and copies the same details on Try again", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace = vi.fn(async () => refusedStatus);
+    bridge.getSyncStatus = vi.fn(async () => refusedStatus);
+    bridge.rebuildEngineStore = vi.fn(async () => {
+      throw new Error(
+        "Error invoking remote method 'desktop:rebuild-engine-store': Error [EACCES]: EACCES: permission denied",
+      );
+    });
+    const { user, dialog } = await openRebuildDialog(bridge);
+    await user.click(within(dialog).getByRole("button", { name: "Move and rebuild" }));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    const writeText = vi
+      .spyOn(navigator.clipboard, "writeText")
+      .mockRejectedValueOnce(new Error("Document is not focused."));
+
+    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell-error").textContent).toContain(COPY_FAILURE),
+    );
+    await user.click(
+      within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }),
+    );
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(2));
+    expect(writeText.mock.calls[1]![0].split("\n")[0]).toBe(
+      "Error: dohc could not move this workspace's data store. dohc does not have permission to use this file or folder.",
+    );
   });
 
   it("clears rebuild state in the first render for a new workspace and discards the old response", async () => {

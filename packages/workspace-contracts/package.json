@@ -5,6 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./actor-identity": "./src/actorIdentity.ts",
+    "./access": "./src/access.ts",
     "./automation-schedule": "./src/automationSchedule.ts",
     "./automations": "./src/automations.ts",
     "./automation-controls": "./src/automationControls.ts",
@@ -12,6 +14,7 @@
     "./chat-identity": "./src/chatIdentity.ts",
     "./chat-identity-values": "./src/chatIdentityValues.ts",
     "./names": "./src/names.ts",
+    "./chat-message-body": "./src/chatMessageBody.ts",
     "./chat-mentions": "./src/chatMentions.ts",
     "./collection": "./src/collection.ts",
     "./collection-data": "./src/collectionData.ts",
@@ -21,6 +24,7 @@
     "./domain-values": "./src/domainValues.ts",
     "./engine": "./src/engine.ts",
     "./file-version": "./src/fileVersion.ts",
+    "./kinds": "./src/kinds.ts",
     "./live-documents": "./src/liveDocuments.ts",
     "./path-floor": "./src/pathFloor.ts",
     "./relay": "./src/relay.ts",
@@ -28,7 +32,11 @@
     "./workspace-paths": "./src/workspacePaths.ts",
     "./dataset-path": "./src/datasetPath.ts",
     "./workspace-settings": "./src/workspaceSettings.ts",
-    "./workspace-settings-values": "./src/workspaceSettingsValues.ts"
+    "./workspace-settings-values": "./src/workspaceSettingsValues.ts",
+    "./capabilities": "./src/capabilities.ts",
+    "./save-state": "./src/saveState.ts",
+    "./save-state-schema": "./src/saveStateSchema.ts",
+    "./usage": "./src/usage.ts"
   },
   "scripts": {
     "test": "vitest run",

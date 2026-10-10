@@ -193,6 +193,15 @@ struct ShareDirectStatusParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ShareFileStatusesParams {
+    workspace_id: String,
+    share_id: String,
+    paths: Vec<String>,
+    granted_selector: GrantedSelectorParams,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct GrantedSelectorParams {
     paths: Vec<String>,
     #[serde(default)]
@@ -217,6 +226,7 @@ fn direct_write_json(write: &dohc_engine_sync::DirectWriteReport) -> Value {
             "paths": write.paths,
             "result": "stale",
             "stalePath": path,
+            "recoveredDraftPath": write.recovered_draft_path,
             "currentBlobSha256": current_blob_sha256,
         }),
         dohc_engine_sync::DirectWriteResult::Refused { reason } => json!({
@@ -634,36 +644,27 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: RelayWorkspaceParams = parse(params)?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
-        let progress = Arc::default();
         let push = || -> Result<RelayOperation, WireError> {
             Ok(RelayOperation::Push {
                 workspace_id: open.workspace_id.clone(),
                 now_ms: now_ms()?,
-                progress: Arc::clone(&progress),
                 max_read_bytes: self
                     .relay_sync_admission()
                     .map_or(0, |(policy, _)| policy.max_read_bytes),
             })
         };
         let mut outcome = self
-            .relay_execute(ctx, &open, configuration.clone(), push()?, "sync.push")
+            .relay_execute(ctx, &open, configuration, push()?, "sync.push")
             .await?;
         // A push can be what makes enrollment ready. The sweep inside it left
-        // each open document to its session, so claim those now and send
-        // them in this same push rather than waiting for the next one.
+        // each open document to its session. Claim those now, then request a
+        // fresh push budget for the newly queued bytes.
         let (claimed, declined) = self.originate_live_sessions(ctx, &open).await?;
         if claimed > 0
-            && let RelayOperationOutcome::Sync(SyncPassOutcome::Complete { pushed, .. }) = &outcome
-        {
-            let pushed_before = *pushed;
-            outcome = self
-                .relay_execute(ctx, &open, configuration, push()?, "sync.push")
-                .await?;
-            if let RelayOperationOutcome::Sync(SyncPassOutcome::Complete { pushed, .. }) =
+            && let RelayOperationOutcome::Sync(SyncPassOutcome::Complete { has_more, .. }) =
                 &mut outcome
-            {
-                *pushed += pushed_before;
-            }
+        {
+            *has_more = true;
         }
         if let RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
             sharing_declined, ..
@@ -1500,6 +1501,79 @@ impl EngineService {
             )
         })
     }
+
+    pub(super) async fn share_direct_statuses(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ShareFileStatusesParams = parse(params)?;
+        if params.paths.len() > 256 {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "too-many-share-status-paths",
+            ));
+        }
+        let granted = share_grant(params.granted_selector)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let mut statuses = serde_json::Map::new();
+        for path in params.paths {
+            let status = Self::read_under_ctx(
+                &cancellation,
+                "share.direct.statuses",
+                open.actor.share_direct_status(
+                    open.workspace_id.clone(),
+                    params.share_id.clone(),
+                    path.clone(),
+                    granted.clone(),
+                ),
+            )
+            .await?;
+            statuses.insert(
+                path,
+                serde_json::to_value(status).map_err(|_| {
+                    WireError::new(
+                        ErrorCode::Internal,
+                        "direct-write-status-serialization-failed",
+                    )
+                })?,
+            );
+        }
+        Ok(Value::Object(statuses))
+    }
+
+    pub(super) async fn share_record_creation_statuses(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ShareFileStatusesParams = parse(params)?;
+        let granted = share_grant(params.granted_selector)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let statuses = Self::read_under_ctx(
+            &cancellation,
+            "share.records.status",
+            open.actor.share_record_creation_statuses(
+                open.workspace_id.clone(),
+                params.share_id,
+                params.paths,
+                granted,
+            ),
+        )
+        .await?;
+        serde_json::to_value(statuses).map_err(|_| {
+            WireError::new(
+                ErrorCode::Internal,
+                "record-creation-status-serialization-failed",
+            )
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1540,7 +1614,58 @@ mod tests {
                 )
                 .await
                 .expect("offline status"),
-            json!({"contentHash": null, "state": "accepted"})
+            json!({"contentHash": null, "state": "accepted", "canDiscard": false})
+        );
+        let batch = json!({
+            "workspaceId": "offline-share", "shareId": "share",
+            "paths": ["data/automations.yaml", "data/draft.md"],
+            "grantedSelector": {"paths": ["data"], "access": "edit"},
+        });
+        let statuses = service
+            .share_direct_statuses(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                batch.clone(),
+            )
+            .await
+            .expect("offline batch");
+        assert_eq!(statuses["data/automations.yaml"]["state"], "accepted");
+        assert_eq!(statuses["data/draft.md"]["state"], "accepted");
+        let mut bad_batch = batch.clone();
+        bad_batch["workspaceId"] = json!("other");
+        assert!(
+            service
+                .share_direct_statuses(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    bad_batch
+                )
+                .await
+                .is_err()
+        );
+        let mut bad_batch = batch.clone();
+        bad_batch["paths"] = json!(["data/automations.yaml", "private/file.md"]);
+        assert!(
+            service
+                .share_direct_statuses(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    bad_batch
+                )
+                .await
+                .is_err()
+        );
+        let mut bad_batch = batch;
+        bad_batch["paths"] = json!(vec!["data/file.md"; 257]);
+        assert!(
+            service
+                .share_direct_statuses(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    bad_batch
+                )
+                .await
+                .is_err()
         );
         let mut wrong_workspace = params.clone();
         wrong_workspace["workspaceId"] = json!("other");
@@ -1758,10 +1883,12 @@ mod tests {
             dohc_engine_sync::DirectWritePushOutcome {
                 writes: vec![
                     dohc_engine_sync::DirectWriteReport {
+                        recovered_draft_path: None,
                         paths: vec!["trip/packing/collection.yaml".to_owned()],
                         result: dohc_engine_sync::DirectWriteResult::Written,
                     },
                     dohc_engine_sync::DirectWriteReport {
+                        recovered_draft_path: None,
                         paths: vec!["trip/ideas/collection.yaml".to_owned()],
                         result: dohc_engine_sync::DirectWriteResult::Stale {
                             path: "trip/ideas".to_owned(),
@@ -1769,6 +1896,7 @@ mod tests {
                         },
                     },
                     dohc_engine_sync::DirectWriteReport {
+                        recovered_draft_path: None,
                         paths: vec!["trip/packing/automations.yaml".to_owned()],
                         result: dohc_engine_sync::DirectWriteResult::Refused {
                             reason: "changes an automation with a personal step".to_owned(),
@@ -1788,6 +1916,7 @@ mod tests {
                         "paths": ["trip/ideas/collection.yaml"],
                         "result": "stale",
                         "stalePath": "trip/ideas",
+                        "recoveredDraftPath": null,
                         "currentBlobSha256": null,
                     },
                     {

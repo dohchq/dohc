@@ -3,6 +3,12 @@ import { parse as parseToml } from "smol-toml";
 import { classifyEngineFilePath } from "./enginePathFloor";
 import { fileVersionError } from "@dohc/workspace-contracts/file-version";
 
+// Where a workspace keeps the rules for which files History tracks and who
+// sees them: the folder, and its two rules files. A person is told which of
+// these dohc could not read.
+export const WORKSPACE_POLICY_PATHS = [".dohc", ".dohc/files.toml", ".dohc/visibility.toml"] as const;
+export type WorkspacePolicyPath = (typeof WORKSPACE_POLICY_PATHS)[number];
+
 export interface FilesPolicyRule {
   path: string;
   tracked?: boolean;

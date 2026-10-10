@@ -117,6 +117,7 @@ export interface SyncRelayLogInput {
   payloadJson: string;
   recordedAtMs: number;
   admittedAuthorSnapshot?: LiveAuthorSnapshot;
+  settlementAdmission?: import("./hostedSettlement").SettlementAdmission;
 }
 
 export interface SyncRelayLogRow extends SyncRelayLogInput {
@@ -129,6 +130,7 @@ export interface AppendLogBatchResult {
   inserted: number;
   skipped: number;
   currentMaxOriginSeq: number;
+  settlementRefusals?: {originId:string;originSeq:number;momentId:string;settlementId:string;reason:string}[];
 }
 
 export interface FetchLogPageResult {
@@ -167,6 +169,7 @@ export interface KeyEnvelopeRow {
 }
 
 export interface SyncRelayShareRow {
+  creationProvenance?: { agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null; selector: unknown; access: string };
   labels?: ShareLabels;
   shareId: string;
   workspaceId: string;
@@ -370,6 +373,21 @@ export interface SyncRelayGrantedShareRow extends SyncRelayShareWithGrantRow {
   automationsGeneration: number | null;
 }
 
+export interface SyncRelayGrantedInventoryCursor {
+  grantId: string;
+}
+
+export interface SyncRelayGrantedInventoryPage {
+  granted: SyncRelayGrantedShareRow[];
+  nextCursor: SyncRelayGrantedInventoryCursor | null;
+}
+
+export interface SyncRelayReceivedInventoryCursor { shareId: string }
+export interface SyncRelayReceivedInventoryPage {
+  shareIds: string[];
+  nextCursor: SyncRelayReceivedInventoryCursor | null;
+}
+
 export interface SyncRelayLinkInventoryRow extends SyncRelayShareWithGrantRow {
   dependents: SyncRelayShareGrantRow[];
   lastUsedAtMs: number | null;
@@ -552,12 +570,17 @@ export type LiveJournalValidation =
       readonly stateUpdate?: Uint8Array;
       readonly stateUpdateSha256: string;
       readonly stateUpdateByteLength: number;
+      readonly projectedMarkdownSha256: string;
+      readonly projectedMarkdownByteLength: number;
   } }
   | { readonly kind: "refused";
       readonly reason: "invalid-input" | "invalid-update" | "invalid-schema" | "projection-mutated" | "capacity-refused";
       readonly source: "call" | "admitted-cut" | "candidate" | "final" };
 export interface LiveUpdateJournalCommitInput {
   readonly trustedAccount?: {readonly accountId: string; readonly name: string};
+  readonly trustedAutomation?: import("@dohc/live-session-contract/live-authorship").AutomationDeclaration;
+  readonly trustedAutomationPress?: {readonly hostPressId: string; readonly automationId: string};
+  readonly trustedAutomationGrant?: {readonly grantId: string; readonly grantGeneration: number};
   readonly host: LiveHostConnectionCoordinate;
   readonly actor: CurrentLiveBindingRequest["actor"];
   readonly expectedAuthority: ServerDerivedLiveUpdateAuthority;
@@ -664,11 +687,16 @@ export interface SyncRelayStorage {
 
   close(): void;
   resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest, activation?: ServiceActivationAccess): CurrentLiveBindingResult;
+  automationRecordWriteAllowed(input: {workspaceId: string; ownerUserId: string; currentPath: string;
+    declaration: import("@dohc/live-session-contract/live-authorship").AutomationDeclaration;
+    authority: {readonly hostPressId: string; readonly automationId: string} | {readonly grantId: string; readonly grantGeneration: number}}): boolean;
+  automationRecordBinding(workspaceId: string, ownerUserId: string, path: string): {binding: LiveObjectBinding; shareId: string} | null;
+  automationRecordJournalCursor(binding: LiveObjectBinding): number;
   /** Groups synchronous authority checks in one current read snapshot. */
   readLiveAuthority<T>(run: () => T): T;
   resolveLiveObjectHostBinding(scope: LiveBrowserContext, objectId: string): import("./liveDocumentAuthority").LiveObjectHostBindingResult;
   registerLiveDocumentBaseline(input: LiveDocumentBaselineRegistrationInput): RelayBaselineRegistrationResult;
-  mintLiveTicket(input: LiveTicketMint): { expiresAtMs: number } | null;
+  mintLiveTicket(input: LiveTicketMint): { expiresAtMs: number; publicPrincipalId?: string } | null;
   readLiveTicketTarget(input: LiveTicketLookup): { workspaceId: string; objectId: string } | null;
   redeemLiveTicket(input: LiveTicketRedemption): RedeemedLiveTicket | null;
   getLiveHostControl(): HostControlSnapshot | null;
@@ -758,6 +786,7 @@ export interface SyncRelayStorage {
     expectedSha256: string | null;
   }): { sha256: string };
   getKeyEnvelope(workspaceId: string): KeyEnvelopeRow | null;
+  prepareHostedSettlements(input:{workspaceId:string;originId:string;ops:SyncRelayLogInput[]},signal?:AbortSignal):Promise<void>;
   appendLogBatch(input: {
     workspaceId: string;
     originId: string;
@@ -787,6 +816,10 @@ export interface SyncRelayStorage {
     originId: string;
     originSeq: number;
   }): SyncRelayLogRow | null;
+  hasRefusedSettlement(input: {
+    workspaceId: string; originId: string; originSeq: number;
+    settlementId: string; momentId: string; reason: string;
+  }): boolean;
   readCurrentFileState(input: {
     workspaceId: string;
     versionId: string;
@@ -807,6 +840,8 @@ export interface SyncRelayStorage {
     sha256: string;
     epochLogFloor: number;
   }): SyncRelayLogRow[];
+  captureReadRevisionMatches(): () => boolean;
+  currentObjectPath(input: { workspaceId: string; versionId: string; objectId: string }): string | null;
   currentObjectBlobByteLength(input: {
     workspaceId: string;
     versionId: string;
@@ -826,7 +861,9 @@ export interface SyncRelayStorage {
     share: SyncRelayShareRow;
     grant: SyncRelayShareGrantRow;
   }): void;
+  readLinkCreation(workspaceId: string, operationId: string, ownerUserId: string): { shareId: string; grantId: string; requestJson: string } | null;
   createFileLinkShare(input: {
+    operation?: { operationId: string; requestJson: string };
     share: SyncRelayShareRow;
     grant: SyncRelayShareGrantRow;
     credential: SyncRelayLinkCredentialRow;
@@ -967,6 +1004,7 @@ export interface SyncRelayStorage {
     recipientUserId: string,
   ): SyncRelayShareGrantRow[];
   listSharesGrantedBy(granterUserId: string): SyncRelayGrantedShareRow[];
+  listSharesGrantedPage(granterUserId: string, workspaceId: string, cursor?: SyncRelayGrantedInventoryCursor): SyncRelayGrantedInventoryPage;
   listLinkGrantsByWorkspace(
     workspaceId: string,
     cursor?: SyncRelayLinkInventoryCursor,
@@ -979,6 +1017,7 @@ export interface SyncRelayStorage {
   // Active listings never disclose revoked selectors. Removed named recipients
   // receive only their grant ID, share ID, removal time, and an explanation.
   listSharesReceivedBy(recipientUserId: string): SyncRelayShareWithGrantRow[];
+  listReceivedShareIdsPage(recipientUserId: string, cursor?: SyncRelayReceivedInventoryCursor): SyncRelayReceivedInventoryPage;
   removeShareAccess(input: import("./shareRemoval").ShareRemovalInput): ReturnType<typeof import("./shareRemoval").removeShareAccess>;
   undoShareRemoval(input: Parameters<typeof import("./shareRemoval").undoShareRemoval>[1]): void;
   purgeExpiredShareRemovals(nowMs: number): void;

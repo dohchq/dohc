@@ -1,3 +1,4 @@
+import { desktopPins, chatsPanelTabPin } from "../../testPins";
 import { PanelRight } from "lucide-react";
 import { useRef, type ReactNode } from "react";
 import { useFocusReturn } from "../ui/focusReturn";
@@ -9,17 +10,18 @@ import {
 } from "./workbenchState";
 
 // Which surface the right-hand Chats panel shows: every workspace chat
-// (channels, DMs, file threads) or the active file's chats. Runtime-only.
-export type ChatsPanelTab = "all" | "file";
+// (channels, DMs, file threads) or About, everything about the active file.
+// Runtime-only.
+export type ChatsPanelTab = "all" | "about";
 
 const CHATS_PANEL_TAB_LABELS: Record<ChatsPanelTab, string> = {
   all: "Chats",
-  file: "This file",
+  about: "About",
 };
 const CHATS_KEYBOARD_RESIZE_STEP = 16;
 const CHATS_KEYBOARD_RESIZE_PAGE_STEP = CHATS_KEYBOARD_RESIZE_STEP * 8;
-// Every workspace this machine owns offers both. A shared view offers the
-// file tab only: it has no workspace-wide chat listing, by design.
+// Every workspace this machine owns offers both. A shared view offers About
+// only: it has no workspace-wide chat listing, by design.
 
 // The right-hand Chats panel — dohc's secondary sidebar (VS Code grammar:
 // toggleable, resizable, persistent width, gone entirely while hidden).
@@ -44,7 +46,7 @@ export function ChatsPanel(props: {
       ref={panelRef}
       tabIndex={-1}
       data-focus-surface="panel"
-      data-testid="chats-panel"
+      data-testid={desktopPins.chatsPanel}
       aria-label="Chats"
       className="relative flex shrink-0 flex-col border-l border-line bg-panel"
       style={{ width }}
@@ -107,7 +109,7 @@ export function ChatsPanel(props: {
             <button
               key={tab}
               type="button"
-              data-testid={`chats-panel-tab-${tab}`}
+              data-testid={chatsPanelTabPin(tab)}
               aria-pressed={props.tab === tab}
               onClick={() => props.onTabChange(tab)}
               className={`h-7 rounded-md px-3 text-[12px] font-medium transition-colors dohc-focus-visible ${
@@ -124,7 +126,7 @@ export function ChatsPanel(props: {
           {props.actions}
           <button
             type="button"
-            data-testid="chats-panel-collapse"
+            data-testid={desktopPins.chatsPanelCollapse}
             aria-label="Hide chats"
             title="Hide chats"
             onClick={props.onCollapse}

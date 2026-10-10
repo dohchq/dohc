@@ -14,8 +14,11 @@ import { DevPanel } from "./DevPanel";
 import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
 import { ChevronRight } from "lucide-react";
 import { readError } from "../ipc/errorWords";
-import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
+import { errorDetails } from "./shell/copyDetails";
+import { StandaloneNotices } from "./shell/connectionNotices";
+import { CopyButton } from "./ui/CopyButton";
 import { useSentNotices } from "./shell/useSentNotices";
+import { useHeldWorkspacePathOpenFailures, WorkspacePathOpenFailures } from "./shell/workspacePathOpenFailures";
 import type { OpenOnSwitch } from "./shell/useSentNoticeProps";
 import { useStatesPageOpen } from "./dev/statesRoute";
 import { ReactionStoreProvider } from "./workbench/reactionStore";
@@ -44,6 +47,7 @@ export function DesktopRoot() {
   const userSettingsRequests = useRequestSequence();
   const shareHandoffRevision = useRef(0);
   const sentNotices = useSentNotices(!isManagerWindow);
+  const pathOpenFailures = useHeldWorkspacePathOpenFailures();
   // What to open once the workspace a notice's Open switched to is ready.
   const [openOnSwitch, setOpenOnSwitch] = useState<{
     workspaceId: string;
@@ -189,14 +193,13 @@ export function DesktopRoot() {
     };
   }, [acceptUserSettings, refreshUserSettings]);
 
-  useEffect(
-    () =>
-      bridge().onWorkspaceActivity((event) => {
-        if (event.workspaceId !== undefined) return;
-        void refreshWorkspaceRegistry().catch(() => undefined);
-      }),
-    [refreshWorkspaceRegistry],
-  );
+  const activeWorkspaceId = workspace?.workspaceId;
+  useEffect(() => {
+    return bridge().onWorkspaceActivity((event) => {
+      if (event.workspaceId !== undefined && (!event.summaryChanged || event.workspaceId !== activeWorkspaceId)) return;
+      void refreshWorkspaceRegistry().catch(() => undefined);
+    });
+  }, [activeWorkspaceId, refreshWorkspaceRegistry]);
 
   useEffect(() => {
     return bridge().onWorkspaceActivated((next) => {
@@ -234,6 +237,7 @@ export function DesktopRoot() {
       ["Platform", bridge().platform],
     ]);
     return (
+      <StandaloneNotices>
       <div className="flex h-screen flex-col items-center justify-center gap-2 bg-bg px-8 text-center">
         <span className="text-sm font-semibold text-ink">
           dohc couldn't read its workspace registry
@@ -266,7 +270,7 @@ export function DesktopRoot() {
           >
             <div className="flex items-center justify-between gap-2 border-b border-line px-3 py-2">
               <span className="dohc-section-label">Technical details</span>
-              <CopyDetailsButton label="Copy" iconOnly details={() => loadDetailsText} />
+              <CopyButton label="Copy" pinName iconOnly getText={() => loadDetailsText} />
             </div>
             <pre className="m-0 select-text cursor-text whitespace-pre-wrap break-words px-3 py-2.5 font-mono text-[12px] leading-snug text-ink">
               {loadDetailsText}
@@ -274,30 +278,34 @@ export function DesktopRoot() {
           </section>
         ) : null}
       </div>
+      </StandaloneNotices>
     );
   }
   if (isManagerWindow) {
     // The manager window: pick a workspace and it opens in its own window,
     // then this one closes. Nothing else ever renders here.
     return (
-      <WorkspaceManager
-        workspaces={workspaces}
-        current={null}
-        handoffStatus={shareHandoffStatus}
-        onDismissShareHandoff={dismissShareHandoff}
-        onShareHandoffOpened={dismissShareHandoff}
-        onForgot={refreshWorkspaceRegistry}
-        onOpenWorkspace={(next) =>
-          bridge()
-            .openWorkspaceWindow({ workspaceId: next.workspaceId })
-            .then(() => bridge().closeThisWindow())
-        }
-      />
+      <WorkspacePathOpenFailures.Provider value={pathOpenFailures}>
+        <WorkspaceManager
+          workspaces={workspaces}
+          current={null}
+          handoffStatus={shareHandoffStatus}
+          onDismissShareHandoff={dismissShareHandoff}
+          onShareHandoffOpened={dismissShareHandoff}
+          onForgot={refreshWorkspaceRegistry}
+          onOpenWorkspace={(next) =>
+            bridge()
+              .openWorkspaceWindow({ workspaceId: next.workspaceId })
+              .then(() => bridge().closeThisWindow())
+          }
+        />
+      </WorkspacePathOpenFailures.Provider>
     );
   }
   // The reaction owner stays mounted across first run and every workspace
   // switch, so a return finds its writes still in order.
   return (
+    <WorkspacePathOpenFailures.Provider value={pathOpenFailures}>
     <ReactionStoreProvider workspaceId={workspace?.workspaceId ?? null}>
       {!workspace ? (
         <>
@@ -353,5 +361,6 @@ export function DesktopRoot() {
         </>
       )}
     </ReactionStoreProvider>
+    </WorkspacePathOpenFailures.Provider>
   );
 }

@@ -1,3 +1,4 @@
+import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import {requireResumedBinding,retainedRestoreLifecycle} from "./liveRestoreLifecycleStorage";
 import {readServiceActivationOrigin} from "./serviceActivationOrigin";
 import {readServiceActivation} from "./serviceActivationAccess";
@@ -14,7 +15,7 @@ import { revokeShareGrantInTransaction } from "./shares";
 import { readCurrentShareGrant } from "./currentShareGrant";
 import { assertWorkspaceQuota } from "./workspaces";
 import { LIVE_RESTORE_OPERATIONS as table } from "./liveRestoreOperationSchema";
-import { effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson, visibleSharePath } from "../shareFilter";
+import { effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson } from "../shareFilter";
 import { canonicalLiveSelector, currentLiveDocumentMoment, decodeLiveDocumentAuthorityStructure } from "./liveDocumentAuthority";
 import { requireLiveJournalHistory, liveJournalHistoryNamespace } from "./liveJournalHistory";
 import type { StoredLiveDocumentAuthority } from "./types";

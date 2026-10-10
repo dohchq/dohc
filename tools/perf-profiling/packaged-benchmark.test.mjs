@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdir, mkdtemp, realpath, rm, readFile, writeFile } from 'node:fs/promises';
+import fsPromises from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -12,7 +13,7 @@ import { startWindowController, waitForVisibleWindow } from './window-controller
 import { closeOwnedPackage, observeExit, benchmarkCancellation, verifyRestartInput } from './packaged-process.mjs';
 import { summarize } from './summarize-packaged-benchmark.mjs';
 import { compareSummaries, DEFAULT_MARGIN } from './compare-packaged-benchmark.mjs';
-import { createRequire } from 'node:module';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
 import { observeSurface, observeSearchSubmit, seededPostThreadId, collectionFixtureFiles, recordId, classifyProcess, aggregateByKind } from './packaged-surfaces.mjs';
 import { automationCases, automationFixtureDigest, automationOf, busyShare, classifyOutcome, cpuByKind, DATASET_NAME, datasetAutomationDefinition, datasetListRequest, datasetRowValues, datasetSetupRequest, DEFAULT_LIMITS,
@@ -845,9 +846,9 @@ test('a press uses its own saved run', async t => {
   const folder = join(root, '.dohc', 'automations', 'runs', 'f1');
   await mkdir(folder, { recursive: true });
   const save = (claimId, startedAtMs) => writeFile(join(folder, `run-${claimId}.json`), JSON.stringify({
-    claimId, startedAtMs, automationId: `collection:object-a#${automation.name}`,
+    kind: 'header', version: 9, claimId, startedAtMs, automationId: `collection:object-a#${automation.name}`,
     collections: [{ collectionId: 'object-a', path: automation.collectionPath }], outcome: { state: 'failed' },
-  }));
+  }) + '\n');
   await save('old', 1000);
   const previousRuns = await readRunJournal(root, automation);
   const missing = runForPress(await readRunJournal(root, automation), previousRuns);
@@ -920,6 +921,57 @@ test('step-1 refusals in both Collections use the new Notice body with no saved 
   }
 });
 
+test('journal byte samples read only bounded headers and stat progress after appends and rewrites', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'dohc-automation-byte-sample-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const folder = join(root, '.dohc', 'automations', 'runs', 'f1');
+  await mkdir(folder, { recursive: true });
+  const path = join(folder, 'run-c1.json');
+  const automation = automationOf('document', 'baseline');
+  const header = extra => JSON.stringify({ kind: 'header', automationId: 'collection:object-a#bench-baseline',
+    collections: [{ collectionId: 'object-a', path: automation.collectionPath }], ...extra }) + '\n';
+  let headerText = header({ label: 'é', padding: 'x'.repeat(5000) });
+  let progress = 'x'.repeat(1024 * 1024);
+  await writeFile(path, headerText + progress);
+  const originalReadFile = fsPromises.readFile;
+  const originalOpen = fsPromises.open;
+  let bytesRead = 0, stats = 0;
+  t.mock.method(fsPromises, 'readFile', (file, ...args) => {
+    assert.notEqual(file, path, 'byte sampling must not read the whole run');
+    return originalReadFile(file, ...args);
+  });
+  t.mock.method(fsPromises, 'open', async (...args) => {
+    const handle = await originalOpen(...args);
+    const read = handle.read.bind(handle), stat = handle.stat.bind(handle);
+    handle.read = async (...readArgs) => {
+      const result = await read(...readArgs);
+      bytesRead += result.bytesRead;
+      return result;
+    };
+    handle.stat = async (...statArgs) => { stats++; return stat(...statArgs); };
+    return handle;
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const sample = async () => {
+    bytesRead = 0; stats = 0;
+    assert.deepEqual(await journalBytes(root, automation), {
+      headerBytes: Buffer.byteLength(headerText), progressBytes: Buffer.byteLength(progress),
+    });
+    assert.ok(stats > 0, 'sample must use stat for the total size');
+    assert.ok(bytesRead < 32 * 1024, `sample read ${bytesRead} bytes of progress`);
+  };
+  await sample();
+  await fsPromises.appendFile(path, '\nmore progress\n');
+  progress += '\nmore progress\n';
+  await sample();
+  headerText = header({ outcome: { state: 'done' } });
+  const replacement = join(folder, 'replacement.tmp');
+  await writeFile(replacement, headerText + progress);
+  await fsPromises.rename(replacement, path);
+  await sample();
+});
+
 test('run journal reads saved headers and progress, and a refused run leaves none', async t => {
   const root = await mkdtemp(join(tmpdir(), 'dohc-automation-journal-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -931,20 +983,19 @@ test('run journal reads saved headers and progress, and a refused run leaves non
   const runs = join(root, '.dohc', 'automations', 'runs');
   const elsewhere = join(runs, 'f0');
   await mkdir(elsewhere, { recursive: true });
-  await writeFile(join(elsewhere, 'run-x.json'), JSON.stringify({ automationId: 'collection:object-b#bench-baseline', collections: [{ collectionId: 'object-b', path: 'automation-data' }] }));
-  // A header caught mid-rewrite reads as partial JSON; the lookup skips it instead of stopping the run.
+  await writeFile(join(elsewhere, 'run-x.json'), JSON.stringify({ kind: 'header', version: 9, automationId: 'collection:object-b#bench-baseline', collections: [{ collectionId: 'object-b', path: 'automation-data' }] }) + '\n');
+  // An unreadable run is skipped instead of stopping the lookup.
   await writeFile(join(elsewhere, 'run-partial.json'), '{"automationId": "collection:obj');
   assert.deepEqual(await journalBytes(root, automation), { headerBytes: 0, progressBytes: 0 });
   const folder = join(runs, 'f1');
   await mkdir(folder, { recursive: true });
   const automationId = 'collection:object-a#bench-baseline';
-  const header = JSON.stringify({ version: 2, claimId: 'c1', automationId, collections: [{ collectionId: 'object-a', path: 'automation-bench' }], startedAtMs: 1000, finishedAtMs: 1600, plan: null, outcome: { state: 'done' } });
+  const header = JSON.stringify({ kind: 'header', version: 9, claimId: 'c1', automationId, collections: [{ collectionId: 'object-a', path: 'automation-bench' }], startedAtMs: 1000, finishedAtMs: 1600, outcome: { state: 'done' } }) + '\n';
   const progress = [{ kind: 'created', ordinal: 0, recordId: 'r', path: 'p' },
     { kind: 'effect', ordinal: 1, writes: [{ kind: 'field', field: 'A' }, { kind: 'field', field: 'B' }, { kind: 'created', recordId: 'r', path: 'p' }] },
     { kind: 'effect', ordinal: 2, writes: [{ kind: 'dataset-edit', fields: [{}, {}, {}] }, { kind: 'dataset-created' }] }].map(line => `${JSON.stringify(line)}\n`).join('');
-  await writeFile(join(folder, 'run-c1.json'), header);
-  await writeFile(join(folder, 'run-c1.progress.jsonl'), progress);
-  await writeFile(join(folder, 'other.json'), JSON.stringify({ automationId: 'collection:elsewhere#x', startedAtMs: 0 }));
+  await writeFile(join(folder, 'run-c1.json'), header + progress);
+  await writeFile(join(folder, 'other.json'), JSON.stringify({ kind: 'header', version: 9, automationId: 'collection:elsewhere#x', startedAtMs: 0 }) + '\n');
   const [run, ...others] = await readRunJournal(root, automation);
   assert.deepEqual(others, []);
   assert.deepEqual(run, { claimId: 'c1', startedAtMs: 1000, finishedAtMs: 1600, outcome: { state: 'done' }, headerBytes: Buffer.byteLength(header),
@@ -953,7 +1004,7 @@ test('run journal reads saved headers and progress, and a refused run leaves non
     progressBytes: Buffer.byteLength(progress), progressLines: 3, fieldWrites: 5, created: 2, createdPaths: ['p'] });
   const bytes = await journalBytes(root, automation);
   assert.equal(bytes.progressBytes, Buffer.byteLength(progress));
-  assert.ok(bytes.headerBytes > Buffer.byteLength(header));
+  assert.equal(bytes.headerBytes, Buffer.byteLength(header));
   const measured = [
     { kind: 'step', ordinal: 0, effects: [], findMs: 12, planMs: 3, appendMs: 0, appendCount: 0 },
     { kind: 'step', ordinal: 1, effects: [{}, {}], findMs: 8, planMs: 7, appendMs: 31, appendCount: 2 },
@@ -961,7 +1012,7 @@ test('run journal reads saved headers and progress, and a refused run leaves non
     { kind: 'effect', ordinal: 1, writes: [], writeMs: 0, writeCount: 1 },
   ];
   const timing = async lines => {
-    await writeFile(join(folder, 'run-c1.progress.jsonl'), lines.map(line => `${JSON.stringify(line)}\n`).join(''));
+    await writeFile(join(folder, 'run-c1.json'), header + lines.map(line => `${JSON.stringify(line)}\n`).join(''));
     const [saved] = await readRunJournal(root, automation);
     return { findMs: saved.findMs, planMs: saved.planMs, writeMs: saved.writeMs, writes: saved.writes };
   };
@@ -1348,4 +1399,282 @@ test('comparison checks a case whose fixture changed only within the candidate, 
   for (const run of old.runs) delete run.collectionAutomations.document.cases[0].fixtureSha256;
   const undigested = await summarize(old);
   assert.deepEqual(compareSummaries(undigested, await summarize(receipt())).problems, ['The document baseline case has no single fixture digest in both receipts.']);
+});
+
+
+const heapRequired = ['--binary', 'dohc.exe', '--package-commit', 'a'.repeat(40), '--output', 'heap-evidence', '--label', 'baseline'];
+const heapOptions = (...args) => parseOptions([...heapRequired, '--scenario', 'soak', '--soak-minutes', '60', ...args]);
+
+test('heap snapshots are opt-in and parse sorted, distinct minutes within the soak', () => {
+  assert.deepEqual(heapOptions().heapSnapshotMinutes, []);
+  assert.deepEqual(heapOptions('--heap-snapshot-minutes', '60,10').heapSnapshotMinutes, [10, 60]);
+  assert.deepEqual(heapOptions('--heap-snapshot-minutes', '1').heapSnapshotMinutes, [1]);
+});
+
+test('heap snapshots reject invalid schedules and other scenarios', () => {
+  for (const value of ['0', '-1', '1.5', '1e1', '10,', ',10', '10,,60', '10,10', '10, 60', '61', '9007199254740992']) {
+    assert.throws(() => heapOptions('--heap-snapshot-minutes', value), /heap-snapshot-minutes/);
+  }
+  assert.throws(() => parseOptions([...heapRequired, '--heap-snapshot-minutes', '10']), /requires --scenario soak/);
+});
+
+function heapClock() {
+  let time = 100;
+  return { now: () => time, advance(ms) { time += ms; } };
+}
+function deferred() { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
+async function heapFixture(t, minutes = [10, 60], extra = {}) {
+  const { EventEmitter } = await import('node:events');
+  const { startRendererHeapSnapshots } = await import('./renderer-heap-snapshots.mjs');
+  const output = await mkdtemp(join(tmpdir(), 'dohc-heap-capture-'));
+  t.after(() => rm(output, { recursive: true, force: true }));
+  const clock = heapClock(), calls = [], captures = [], started = [];
+  const session = new EventEmitter();
+  session.send = async (method, params) => {
+    calls.push({ method, params });
+    if (method !== 'HeapProfiler.takeHeapSnapshot') return;
+    const capture = deferred(); captures.push(capture);
+    started.shift()?.resolve();
+    return capture.promise;
+  };
+  session.detach = async () => { calls.push({ method: 'detach' }); for (const capture of captures) capture.reject(Error('session detached')); };
+  const nextCapture = () => { const gate = deferred(); started.push(gate); return gate.promise; };
+  const controller = await startRendererHeapSnapshots({ session, output, minutes, ...clock, ...extra });
+  t.after(() => controller.cancel(Error('test cleanup')).catch(() => {}));
+  const chunk = value => session.emit('HeapProfiler.addHeapSnapshotChunk', { chunk: value });
+  const beginBoundary = cycle => { const pending = controller.captureDue(cycle); void pending.catch(() => {}); return pending; };
+  return { controller, session, output, clock, calls, captures, nextCapture, chunk, beginBoundary };
+}
+
+test('heap snapshots serialize every due minute once at the same boundary', async t => {
+  const f = await heapFixture(t);
+  f.clock.advance(599999);
+  await f.beginBoundary(1);
+  assert.equal(f.captures.length, 0);
+  f.clock.advance(3000001);
+  const first = f.nextCapture(), second = f.nextCapture();
+  const boundary = f.beginBoundary(2);
+  await first;
+  assert.equal(f.captures.length, 1, 'snapshots on one renderer never overlap');
+  f.chunk('{"first":true}'); f.captures[0].resolve(); await second;
+  f.chunk('{"second":true}'); f.captures[1].resolve();
+  await boundary;
+  await f.beginBoundary(3);
+  await f.controller.finish();
+  assert.deepEqual(f.controller.records.map(r => [r.minute, r.status, r.cycle, r.requestedElapsedMs]),
+    [[10, 'complete', 2, 3600000], [60, 'complete', 2, 3600000]]);
+  assert.equal(f.captures.length, 2);
+  assert.equal(f.session.listenerCount('HeapProfiler.addHeapSnapshotChunk'), 0);
+  assert.equal(f.calls.at(-1).method, 'detach');
+});
+
+test('heap snapshots stream chunks in order and publish only after protocol and disk completion', async t => {
+  const { Writable } = await import('node:stream');
+  const final = deferred(), release = deferred();
+  const f = await heapFixture(t, [1], { createStream: path => {
+    const chunks = [];
+    return new Writable({ write(chunk, encoding, callback) { chunks.push(chunk); callback(); },
+      final(callback) { final.resolve(); void release.promise.then(() => writeFile(path, Buffer.concat(chunks))).then(() => callback(), callback); } });
+  } });
+  const began = f.nextCapture(); f.clock.advance(60000); f.beginBoundary(1); await began;
+  f.chunk('{"name":"'); f.chunk('λ"}');
+  assert.equal(f.controller.records[0].status, 'capturing');
+  await assert.rejects(readFile(f.controller.records[0].file), { code: 'ENOENT' });
+  f.captures[0].resolve(); await final.promise;
+  let finished = false; const completion = f.controller.finish().then(() => { finished = true; });
+  await Promise.resolve();
+  assert.equal(finished, false, 'protocol completion alone does not mean a complete snapshot');
+  release.resolve(); await completion;
+  const record = f.controller.records[0];
+  assert.equal(await readFile(record.file, 'utf8'), '{"name":"λ"}');
+  assert.equal(record.bytes, Buffer.byteLength('{"name":"λ"}'));
+  assert.equal(record.chunks, 2);
+  assert.equal(record.status, 'complete');
+  await assert.rejects(readFile(record.partialFile), { code: 'ENOENT' });
+});
+
+test('heap snapshots finish never starts a capture without a cycle boundary', async t => {
+  const f = await heapFixture(t, [60]);
+  f.clock.advance(3600000);
+  await assert.rejects(f.controller.finish(), /requested heap snapshot boundary/);
+  assert.equal(f.captures.length, 0);
+  assert.equal(f.controller.records[0].status, 'cancelled');
+});
+
+for (const empty of [false, true]) test('heap snapshots fail on ' + (empty ? 'empty output' : 'protocol failure') + ' and retain partial evidence', async t => {
+  const f = await heapFixture(t, [1, 2]);
+  const began = f.nextCapture(); f.clock.advance(60000); f.beginBoundary(1); await began;
+  if (empty) f.captures[0].resolve(); else { f.chunk('{"partial":'); f.captures[0].reject(Error('protocol failed')); }
+  await assert.rejects(f.controller.finish(), empty ? /empty/i : /protocol failed/);
+  const record = f.controller.records[0];
+  assert.equal(record.status, 'failed');
+  assert.equal(await readFile(record.partialFile, 'utf8'), empty ? '' : '{"partial":');
+  await assert.rejects(readFile(record.file), { code: 'ENOENT' });
+  assert.equal(f.session.listenerCount('HeapProfiler.addHeapSnapshotChunk'), 0);
+});
+
+test('heap snapshots surface asynchronous disk failure without waiting for a stuck protocol', async t => {
+  const { Writable } = await import('node:stream');
+  const f = await heapFixture(t, [1], { createStream: () => new Writable({ write(chunk, encoding, callback) { callback(Error('disk full')); } }) });
+  const began = f.nextCapture(); f.clock.advance(60000); f.beginBoundary(1); await began;
+  f.chunk('a chunk');
+  await assert.rejects(f.controller.finish(), /disk full/);
+  assert.equal(f.controller.records[0].status, 'failed');
+  assert.equal(f.calls.at(-1).method, 'detach');
+});
+
+test('heap snapshots cancellation closes an active stream and cancels future captures', async t => {
+  const abort = new AbortController();
+  const f = await heapFixture(t, [1, 2], { signal: abort.signal });
+  const began = f.nextCapture(); f.clock.advance(60000); f.beginBoundary(1); await began;
+  f.chunk('{"partial":'); abort.abort(Error('benchmark interrupted'));
+  await assert.rejects(f.controller.finish(), /benchmark interrupted/);
+  assert.deepEqual(f.controller.records.map(r => r.status), ['cancelled', 'cancelled']);
+  assert.equal(f.session.listenerCount('HeapProfiler.addHeapSnapshotChunk'), 0);
+  assert.equal(f.calls.at(-1).method, 'detach');
+});
+
+test('heap snapshots setup failure detaches its owned CDP session', async () => {
+  const { startRendererHeapSnapshots } = await import('./renderer-heap-snapshots.mjs');
+  let detached = false;
+  await assert.rejects(startRendererHeapSnapshots({ session: { send: async () => { throw Error('enable failed'); }, detach: async () => { detached = true; } }, minutes: [1], output: 'unused' }), /enable failed/);
+  assert.equal(detached, true);
+});
+
+test('heap snapshots mark summaries diagnostic and retain capture receipts', async () => {
+  const captures = [{ minute: 10, status: 'complete', file: 'renderer-heap-10m.heapsnapshot' }];
+  const summary = await summarize({ settings: { heapSnapshotMinutes: [10] }, runs: [{ soak: { minutes: 10, cycles: [], elapsedMs: 600000, samples: [], heapSnapshots: captures, heapSnapshotPauseMs: 2500 } }] });
+  assert.equal(summary.diagnostic, true);
+  const comparison = compareSummaries({ ...summary, status: 'complete' }, { ...summary, status: 'complete' });
+  assert.equal(comparison.pass, false);
+  assert.deepEqual(comparison.problems, ['A profiled receipt cannot serve as a performance comparison.']);
+  assert.deepEqual(summary.soak[0].heapSnapshots, captures);
+  assert.equal(summary.soak[0].heapSnapshotPauseMs, 2500);
+  assert.equal((await summarize({ settings: { heapSnapshotMinutes: [] }, runs: [] })).diagnostic, false);
+});
+
+test('heap snapshots cancellation interrupts file completion after finish has begun', async t => {
+  const { Writable } = await import('node:stream');
+  const final = deferred();
+  const f = await heapFixture(t, [1], { createStream: () => new Writable({
+    write(chunk, encoding, callback) { callback(); }, final() { final.resolve(); },
+  }) });
+  const began = f.nextCapture(); f.clock.advance(60000); f.beginBoundary(1); await began;
+  f.chunk('snapshot'); f.captures[0].resolve(); await final.promise;
+  const completion = f.controller.finish();
+  const cancelled = f.controller.cancel(Error('stop during disk close'));
+  await assert.rejects(completion, /stop during disk close/);
+  await assert.rejects(cancelled, /stop during disk close/);
+  assert.equal(f.controller.records[0].status, 'cancelled');
+  assert.equal(f.calls.at(-1).method, 'detach');
+});
+
+test('heap snapshots cancelled before their minute never send a capture command', async t => {
+  const f = await heapFixture(t);
+  await assert.rejects(f.controller.cancel(Error('soak failed')), /soak failed/);
+  f.clock.advance(3600000);
+  assert.equal(f.captures.length, 0);
+  assert.deepEqual(f.controller.records.map(r => r.status), ['cancelled', 'cancelled']);
+});
+
+test('heap snapshots soak waits for the cycle boundary and finishes before shutdown', { timeout: 120000 }, async t => {
+  const { runSoakCycles } = await import('./packaged-soak.mjs');
+  const firstCycle = deferred(), firstStep = deferred(), nextStep = deferred(), boundary = deferred();
+  const detaching = deferred(), releaseDetach = deferred(), events = [], captureStates = [];
+  t.after(() => { firstCycle.resolve(); releaseDetach.resolve(); });
+  const f = await heapFixture(t);
+  let activeStep = false, shutdown = false;
+  const send = f.session.send;
+  f.session.send = async (method, params) => {
+    if (method === 'HeapProfiler.takeHeapSnapshot') {
+      captureStates.push(activeStep);
+      events.push('capture');
+    }
+    return send(method, params);
+  };
+  const detach = f.session.detach;
+  f.session.detach = async () => { detaching.resolve(); await releaseDetach.promise; await detach(); };
+  const firstCapture = f.nextCapture();
+  const soak = runSoakCycles({ minutes: 60, heaps: f.controller, now: f.clock.now,
+    runCycle: async index => {
+      activeStep = true; events.push('step-' + index);
+      if (index === 1) { firstStep.resolve(); await firstCycle.promise; }
+      else { nextStep.resolve(); f.clock.advance(3000000); }
+      activeStep = false; events.push('boundary-' + index);
+    },
+    afterCycle: async index => { if (index === 1) boundary.resolve(); },
+  }).then(() => { shutdown = true; events.push('shutdown'); });
+  await firstStep.promise;
+  f.clock.advance(600000);
+  await Promise.resolve();
+  assert.equal(f.captures.length, 0, 'a due minute cannot interrupt an unfinished cycle');
+  firstCycle.resolve(); await firstCapture;
+  assert.equal(f.controller.records[0].cycle, 1);
+  assert.deepEqual(events, ['step-1', 'boundary-1', 'capture'], 'the next cycle waits for the capture');
+  f.clock.advance(2500);
+  const secondCapture = f.nextCapture();
+  f.chunk('{"first":true}'); f.captures[0].resolve();
+  await boundary.promise; await nextStep.promise; await secondCapture;
+  assert.equal(f.controller.records[1].cycle, 2);
+  assert.equal(f.controller.records[0].pauseMs, 2500);
+  f.clock.advance(4000);
+  f.chunk('{"second":true}'); f.captures[1].resolve();
+  await detaching.promise;
+  assert.equal(shutdown, false, 'soak must await finish, including session detach');
+  releaseDetach.resolve(); await soak;
+  assert.deepEqual(events, ['step-1', 'boundary-1', 'capture', 'step-2', 'boundary-2', 'capture', 'shutdown']);
+  assert.deepEqual(captureStates, [false, false], 'no browser step may run during either capture');
+  assert.deepEqual(f.controller.records.map(r => r.status), ['complete', 'complete']);
+  assert.equal(f.controller.records[1].pauseMs, 4000);
+});
+
+test('heap snapshots soak cancels remaining captures on a cycle error', { timeout: 120000 }, async t => {
+  const { runSoakCycles } = await import('./packaged-soak.mjs');
+  const f = await heapFixture(t);
+  const began = f.nextCapture();
+  let shutdown = false;
+  const error = Error('closePalette failed');
+  const soak = runSoakCycles({ minutes: 60, heaps: f.controller, now: f.clock.now,
+    runCycle: async index => {
+      if (index === 1) f.clock.advance(600000);
+      else { f.clock.advance(3000000); throw error; }
+    },
+  }).then(() => { shutdown = true; });
+  const rejected = assert.rejects(soak, value => value === error);
+  await began; f.chunk('{"first":true}'); f.captures[0].resolve(); await rejected;
+  assert.equal(shutdown, false);
+  assert.equal(f.captures.length, 1);
+  assert.deepEqual(f.controller.records.map(r => r.status), ['complete', 'cancelled']);
+  assert.equal(f.calls.at(-1).method, 'detach');
+});
+
+test('heap snapshots soak captures the final minute crossed during boundary bookkeeping', { timeout: 120000 }, async t => {
+  const { runSoakCycles } = await import('./packaged-soak.mjs');
+  const f = await heapFixture(t, [60]);
+  const began = f.nextCapture(), events = [];
+  const soak = runSoakCycles({ minutes: 60, heaps: f.controller, now: f.clock.now,
+    runCycle: async index => { events.push('cycle-' + index); f.clock.advance(3599999); },
+    afterCycle: async () => { events.push('bookkeeping'); f.clock.advance(1); },
+  }).then(() => events.push('shutdown'));
+  await began;
+  assert.deepEqual(events, ['cycle-1', 'bookkeeping']);
+  assert.equal(f.controller.records[0].cycle, 1);
+  f.chunk('{"final":true}'); f.captures[0].resolve(); await soak;
+  assert.deepEqual(events, ['cycle-1', 'bookkeeping', 'shutdown']);
+  assert.equal(f.controller.records[0].status, 'complete');
+});
+
+test('heap snapshots soak captures a later due minute crossed during the first pause without another cycle', { timeout: 120000 }, async t => {
+  const { runSoakCycles } = await import('./packaged-soak.mjs');
+  const f = await heapFixture(t);
+  const first = f.nextCapture(), second = f.nextCapture(), cycles = [];
+  const soak = runSoakCycles({ minutes: 60, heaps: f.controller, now: f.clock.now,
+    runCycle: async index => { cycles.push(index); f.clock.advance(600000); },
+  });
+  await first; f.clock.advance(3000000);
+  f.chunk('{"first":true}'); f.captures[0].resolve(); await second;
+  assert.deepEqual(cycles, [1]);
+  f.chunk('{"second":true}'); f.captures[1].resolve(); await soak;
+  assert.deepEqual(f.controller.records.map(r => r.cycle), [1, 1]);
+  assert.equal(f.controller.records[0].pauseMs, 3000000);
 });

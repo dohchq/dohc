@@ -4,9 +4,12 @@ import { request as httpRequest } from "node:http";
 import { createServer } from "node:net";
 import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { requireEngineBinaryOrSkip } from "../../../apps/desktop/src/testing/engineBinary";
+const projectionEngine = requireEngineBinaryOrSkip();
 import { buildRelay } from "../scripts/build.mjs";
 import { LINK_EXCHANGE_BUCKET_CAPACITY } from "./linkSecurity";
 import { initializeRelayDeployment } from "./relayDeployment";
@@ -99,6 +102,44 @@ function packageRoot(): string {
   return fileURLToPath(new URL("../", import.meta.url));
 }
 
+const PROJECTION_HANDSHAKE_BOOTSTRAP = `
+// Route coverage uses a fake isolated-engine handshake on every host.
+Object.defineProperty(process, "platform", {value: "linux"});
+const {default: childProcess} = await import("node:child_process");
+const {syncBuiltinESMExports} = await import("node:module");
+const originalSpawn = childProcess.spawn;
+childProcess.spawn = (command, args, options) => {
+  if (command === "/bin/sh" && args?.[1]?.includes("--projection-only")) {
+    return originalSpawn(process.execPath, ["--input-type=module", "--eval", ${JSON.stringify(`
+      const frame = row => {
+        const payload = Buffer.from(JSON.stringify(row));
+        const header = Buffer.alloc(12); header.write("DOP1"); header[4] = 1;
+        header.writeUInt32LE(payload.length, 8); return Buffer.concat([header, payload]);
+      };
+      let pending = Buffer.alloc(0);
+      process.stdin.on("data", bytes => {
+        pending = Buffer.concat([pending, bytes]);
+        while (pending.length >= 12 && pending.length >= 12 + pending.readUInt32LE(8)) {
+          const size = pending.readUInt32LE(8);
+          const row = JSON.parse(pending.subarray(12, 12 + size).toString());
+          pending = pending.subarray(12 + size);
+          if (row.type === "hello") {
+            process.stdout.write(frame({type:"helloAck",protocolVersion:2,sessionGeneration:1,capabilities:["projection-only"],
+              limits:{maxFrameBytes:14680064,maxStringBytes:14680064,maxCollectionLen:16384,maxBatchLen:64,maxJsonDepth:32,maxBlobChunkBytes:262144}}));
+          } else if (row.method === "engine.ping") {
+            process.stdout.write(frame({type:"response",id:row.id,result:{ok:true,mode:"projection-only"}}));
+          } else if (row.method === "ydoc.project" && row.params.contentKind === "plaintext" && row.params.updatesBase64[0] === "AAA=") {
+            process.stdout.write(frame({type:"response",id:row.id,result:{contentBase64:"",sourceStateVectorSha256:"a".repeat(64)}}), () => process.exit(0));
+          } else { throw new Error("Unexpected projection fixture request"); }
+        }
+      });
+    `)}], options);
+  }
+  return originalSpawn(command, args, options);
+};
+syncBuiltinESMExports();
+`;
+
 async function spawnRelay(
   dbPath: string,
   envOverrides: Record<string, string | undefined> = {},
@@ -109,7 +150,7 @@ async function spawnRelay(
 async function spawnRunningRelay(
   dbPath: string,
   envOverrides: Record<string, string | undefined> = {},
-  bootstrap: { rejectPoolEnd?: boolean; engineHandshake?: boolean; sourceEntry?: boolean } = {},
+  bootstrap: { rejectPoolEnd?: boolean; sourceEntry?: boolean; projectionHandshake?: boolean } = {},
 ): Promise<RunningRelay> {
   const mainUrl = bootstrap.sourceEntry
     ? new URL("./main.ts", import.meta.url)
@@ -143,36 +184,7 @@ async function spawnRunningRelay(
         throw new Error("injected pool shutdown failure");
       };
     }
-    if (${bootstrap.engineHandshake === true}) {
-      const { default: childProcess } = await import("node:child_process");
-      const { syncBuiltinESMExports } = await import("node:module");
-      const spawn = childProcess.spawn;
-      childProcess.spawn = (command, args, options) => {
-        if (command === process.execPath && args?.length === 0 && options?.env?.DOHC_ENGINE_AUTH_TOKEN) {
-          args = ["--import", ${JSON.stringify(process.platform === "win32" ? "tsx" : "tsx/esm")},
-            "--input-type=module", "--eval", ${JSON.stringify(`
-              import { FrameDecoder, encodeFrame } from "@dohc/workspace-engine-client/daemon";
-              const decoder = new FrameDecoder(1024 * 1024);
-              process.stdin.on("data", bytes => {
-                for (const frame of decoder.push(bytes)) {
-                  if (frame.kind !== "control") throw new Error("Unexpected engine frame");
-                  const message = JSON.parse(frame.payload.toString("utf8"));
-                  if (message.type !== "hello" || message.authToken !== process.env.DOHC_ENGINE_AUTH_TOKEN) {
-                    throw new Error("Expected authenticated engine hello");
-                  }
-                  process.stdout.write(encodeFrame(1, 0, Buffer.from(JSON.stringify({
-                    type: "helloAck", protocolVersion: 2, sessionGeneration: 1, capabilities: ["core", "blobs"],
-                    limits: { maxFrameBytes: 1024 * 1024, maxBlobChunkBytes: 64 * 1024,
-                      maxStringBytes: 64 * 1024, maxCollectionLen: 1024, maxBatchLen: 64, maxJsonDepth: 32 }
-                  })), 1024 * 1024));
-                }
-              });
-            `)}];
-        }
-        return spawn(command, args, options);
-      };
-      syncBuiltinESMExports();
-    }
+    ${bootstrap.projectionHandshake ? PROJECTION_HANDSHAKE_BOOTSTRAP : ""}
     await import(${JSON.stringify(mainUrl.href)});`,
   ];
   const child = spawn(process.execPath, childArguments, {
@@ -480,6 +492,16 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
     expect(collectionRefusal.status).toBe(404);
     expect(await collectionRefusal.json()).toEqual({ok: false, error: "not found"});
     expect((await postJson(enabled, "/sync/live/link-tickets", {})).status).toBe(404);
+  });
+
+  it("keeps the missing key envelope code through HTTP normalization for link-prefixed workspaces", async () => {
+    const relay = await spawnRelay(join(await tempRoot("link-prefixed-workspaces"), "relay.sqlite"));
+    for (const workspaceId of ["link-lane-owner", "linkx", "link-exchange-owner", "link-refresh", "link-handoff", "link-redeem"]) {
+      expect((await postJson(relay, "/sync/workspaces", {workspaceId})).status).toBe(200);
+      const missing = await fetch(`${relay}/sync/${workspaceId}/keys`, {headers: authHeaders()});
+      expect(missing.status).toBe(404);
+      expect(await missing.json()).toMatchObject({code: "key_envelope_not_found"});
+    }
   });
 
   it("refuses a relay API version it does not serve before it reads the credential", async () => {
@@ -937,12 +959,17 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
 // and captured stderr instead of a listening URL.
 async function spawnRelayExpectExit(
   envOverrides: Record<string, string | undefined>,
+  bootstrap: { projectionHandshake?: boolean } = {},
 ): Promise<{ code: number | null; stderr: string }> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries({ ...process.env, DOHC_RELAY_DEPLOYMENT_CONFIG: undefined, DOHC_RELAY_SERVICE_HOST_CONFIG: undefined, DOHC_RELAY_DEVICE_DELIVERY_CONFIG: undefined, ...envOverrides })) {
     if (value !== undefined) env[key] = value;
   }
-  const child = spawn(process.execPath, [join(buildDirectory, "main.js")], {
+  const mainPath = join(buildDirectory, "main.js");
+  const args = bootstrap.projectionHandshake
+    ? ["--input-type=module", "--eval", `${PROJECTION_HANDSHAKE_BOOTSTRAP}\nawait import(${JSON.stringify(pathToFileURL(mainPath).href)});`]
+    : [mainPath];
+  const child = spawn(process.execPath, args, {
     cwd: packageRoot(),
     env,
     stdio: ["ignore", "pipe", "pipe"],
@@ -1004,9 +1031,10 @@ describe("sync relay startup guards", () => {
     initializeRelayDeployment({configPath, relayPath, continuityDirectory: join(root, "continuity")});
     const relay = await spawnRunningRelay(relayPath, {DOHC_SELF_HOST_LIVE: "1", SYNC_RELAY_DB_PATH: undefined,
       DOHC_RELAY_DEPLOYMENT_CONFIG: configPath, DOHC_RELAY_SERVICE_HOST_ROOT: root,
-      DOHC_RELAY_ENGINE_EXECUTABLE: process.execPath, DOHC_RELAY_PUBLIC_ORIGIN: "https://relay.example.test",
+      DOHC_RELAY_ENGINE_EXECUTABLE: projectionEngine.require(), DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION: "1", DOHC_RELAY_PUBLIC_ORIGIN: "https://relay.example.test",
       DOHC_RELAY_SHARE_WEB_ORIGIN: "https://share.example.test", DOHC_RELAY_NAMED_LIVE_HOSTS: "relay.example.test",
-      DOHC_RELAY_EXCHANGE_KEY: "x".repeat(32), DOHC_RELAY_LINK_KEY: "y".repeat(32)}, {engineHandshake: true});
+      DOHC_RELAY_EXCHANGE_KEY: "x".repeat(32), DOHC_RELAY_LINK_KEY: "y".repeat(32)});
+    expect(relay.stderr()).toContain("WARNING: DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION=1");
     // The empty deployment must complete its engine handshake and first pass.
     await vi.waitFor(async () => {
       const response = await fetch(`${relay.baseUrl}/ready`);
@@ -1092,7 +1120,62 @@ describe("sync relay startup guards", () => {
     BETTER_AUTH_SECRET: "x".repeat(32),
     SYNC_RELAY_PORT: "0",
     FORCE_COLOR: "0",
+    DOHC_RELAY_ENGINE_EXECUTABLE: projectionEngine.path ?? undefined,
+    DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION: undefined,
   } as const;
+
+  it.each(["development", "test"])("warns when projection development opt-in is honored in %s", async nodeEnv => {
+    const root = await tempRoot("projection-warning");
+    const relay = await spawnRunningRelay(join(root,"relay.sqlite"), {NODE_ENV:nodeEnv,
+      DOHC_RELAY_ENGINE_EXECUTABLE:process.execPath, DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION:"1"}, {projectionHandshake:true});
+    expect(relay.stderr()).toContain("WARNING: DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION=1");
+  });
+
+  it.each(["production", "staging", undefined])("refuses the projection development flag outside development/test: %s", async nodeEnv => {
+    for (const flag of ["0", "1"]) {
+      const root = await tempRoot("projection-production-opt-in");
+      const configPath = join(root, "deployment.json"), relayPath = join(root, "relay", "relay.sqlite");
+      initializeRelayDeployment({configPath, relayPath, continuityDirectory: join(root, "continuity")});
+      const {code, stderr} = await spawnRelayExpectExit({...productionEnv, NODE_ENV:nodeEnv,
+        SYNC_RELAY_DB_PATH:undefined, DOHC_RELAY_DEPLOYMENT_CONFIG:configPath,
+        DOHC_RELAY_ENGINE_EXECUTABLE:process.execPath, DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION:flag}, {projectionHandshake:true});
+      expect(code).toBe(1);
+      expect(stderr).toContain("DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION is allowed only in development/test.");
+      const database = new DatabaseSync(relayPath, {readOnly: true});
+      try {
+        expect(database.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name").all())
+          .toEqual([{name: "sync_relay_continuity"}]);
+      } finally { database.close(); }
+    }
+  });
+
+  it.each(["true", "", "2"])("refuses invalid projection development opt-in before opening storage: %j", async value => {
+    const dbPath = join(await tempRoot("projection-invalid-opt-in"), "relay.sqlite");
+    const {code, stderr} = await spawnRelayExpectExit({NODE_ENV:"test", SYNC_RELAY_TEST_AUTH:"1", SYNC_RELAY_DB_PATH:dbPath, DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION:value});
+    expect(code).toBe(1); expect(stderr).toContain("DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION must be 0 or 1.");
+    await expect(access(dbPath)).rejects.toMatchObject({code:"ENOENT"});
+  });
+
+  it.each([
+    {executable: undefined, reason: "Document sharing requires DOHC_RELAY_ENGINE_EXECUTABLE outside development/test."},
+    {executable: "relative-engine", reason: process.platform === "linux"
+      ? "The projection engine must be an absolute executable file." : "Document projection requires Linux memory isolation"},
+    {executable: process.execPath, reason: process.platform === "linux"
+      ? "Projection engine did not pass startup probes:" : "Document projection requires Linux memory isolation"},
+  ])("refuses production projection startup for $executable: $reason", async ({executable, reason}) => {
+    const root = await tempRoot("projection-startup");
+    const configPath = join(root, "deployment.json"), relayPath = join(root, "relay", "relay.sqlite");
+    initializeRelayDeployment({configPath, relayPath, continuityDirectory: join(root, "continuity")});
+    const {code, stderr} = await spawnRelayExpectExit({...productionEnv, SYNC_RELAY_DB_PATH:undefined,
+      DOHC_RELAY_DEPLOYMENT_CONFIG:configPath, DOHC_RELAY_ENGINE_EXECUTABLE:executable});
+    expect(code).toBe(1);
+    expect(stderr).toContain(reason);
+  });
+  it.skipIf(process.platform==="linux" || projectionEngine.missing)("refuses non-Linux projection startup without development opt-in",async()=>{
+    const dbPath=join(await tempRoot("projection-platform"),"relay.sqlite");
+    const {code,stderr}=await spawnRelayExpectExit({NODE_ENV:"test",SYNC_RELAY_TEST_AUTH:"1",SYNC_RELAY_DB_PATH:dbPath,DOHC_RELAY_ENGINE_EXECUTABLE:projectionEngine.require(),DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION:undefined});
+    expect(code).toBe(1);expect(stderr).toContain("requires Linux memory isolation");await expect(access(dbPath)).rejects.toMatchObject({code:"ENOENT"});
+  });
 
   it.each([
     ["malformed JSON", "{", "SyntaxError"],
@@ -1112,11 +1195,13 @@ describe("sync relay startup guards", () => {
     const root = await tempRoot("closed-public-edit-release");
     const configPath = join(root, "deployment.json"), relayPath = join(root, "relay", "relay.sqlite");
     initializeRelayDeployment({configPath, relayPath, continuityDirectory: join(root, "continuity")});
-    const baseUrl = await spawnRelay(relayPath, {
-      ...productionEnv, SYNC_RELAY_DB_PATH: undefined, DOHC_RELAY_DEPLOYMENT_CONFIG: configPath,
+    const relay = await spawnRunningRelay(relayPath, {
+      ...productionEnv,
+      DOHC_RELAY_ENGINE_EXECUTABLE: process.execPath, SYNC_RELAY_DB_PATH: undefined, DOHC_RELAY_DEPLOYMENT_CONFIG: configPath,
       DOHC_PUBLIC_EDIT_RELEASE: undefined, DOHC_RELAY_LINK_LIVE: undefined,
       DOHC_RELAY_NAMED_LIVE_CONFIG: undefined, DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS: undefined,
-    });
+    }, {projectionHandshake: true});
+    const baseUrl = relay.baseUrl;
     expect((await fetch(baseUrl + "/health")).status).toBe(200);
     for (const path of ["/sync/live/link-tickets", "/sync/live/link-session", "/sync/live/link-document"]) {
       expect((await fetch(baseUrl + path, {method: "POST"})).status).toBe(404);
@@ -1128,12 +1213,12 @@ describe("sync relay startup guards", () => {
     const configPath = join(root, "deployment.json"), relayPath = join(root, "relay", "relay.sqlite");
     initializeRelayDeployment({configPath, relayPath, continuityDirectory: join(root, "continuity")});
     const {code, stderr} = await spawnRelayExpectExit({
-      ...productionEnv, SYNC_RELAY_DB_PATH: undefined, DOHC_RELAY_DEPLOYMENT_CONFIG: configPath,
+      ...productionEnv, DOHC_RELAY_ENGINE_EXECUTABLE: process.execPath, SYNC_RELAY_DB_PATH: undefined, DOHC_RELAY_DEPLOYMENT_CONFIG: configPath,
       DOHC_PUBLIC_EDIT_RELEASE: '{"version":1}', DOHC_RELAY_LINK_LIVE: undefined,
       DOHC_RELAY_NAMED_LIVE_CONFIG: undefined,
       DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS: JSON.stringify({maxSessions: 4, retentionMs: 60000,
         maxPendingRequests: 2, maxRequestBytes: 1038, maxResponseBytes: 4152, timeoutMs: 1000}),
-    });
+    }, {projectionHandshake: true});
     expect(code).toBe(1);
     expect(stderr).toContain("Public Edit release requires link live routes and the configured service host");
   });

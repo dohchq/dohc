@@ -1,6 +1,7 @@
 import { posix } from "node:path";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
+import type { WorkspacePolicyPath } from "@dohc/security-contract/effective-policy";
 import type { KeptAutomationField } from "@dohc/automation-executor/collection-automations";
 import type { SharedReversalsSchema } from "@dohc/workspace-contracts/shared-file-settlement";
 import type { z } from "zod";
@@ -31,17 +32,21 @@ export interface DirectWriteFile {
   objectId: string;
   momentId: string;
   created: boolean;
+  /** The relay's public identity for this direct write's link participant. */
+  publicPrincipalId?: string;
 }
 
 /** Why a file was left for the owner to check. */
 export type ReviewFile =
-  | { path: string; reason: "changed-since" }
+  | { path: string; reason: "changed-since"; changedBy?: string }
   | { path: string; reason: "folder-in-use" }
-  | { path: string; reason: "restore-refused"; detail: string };
+  | { path: string; reason: "restore-refused"; detail: string }
+  | { path: string; reason: "rules-unreadable"; unreadable: WorkspacePolicyPath[] };
 
 export interface RestoreReceipt {
   path: string;
   restoredMomentId: string;
+  removed?: boolean;
 }
 
 export interface StopAndRestoreDependencies {
@@ -49,6 +54,7 @@ export interface StopAndRestoreDependencies {
   moment(momentId: string): Promise<VersionedTextMoment | "protected" | null>;
   /** Throws when the window that asked has left the workspace. */
   assertCurrent(): void;
+  reviewPath?(path: string): string | null;
   /** The ids of a file's moments after `momentId`, newest first. */
   momentsAfter(objectId: string, momentId: string): Promise<string[]>;
   /**
@@ -62,6 +68,8 @@ export interface StopAndRestoreDependencies {
     | { kind: "changed" }
     | { kind: "folder-in-use" }
     | { kind: "refused"; detail: string }
+    // History's rules could not be read; `unreadable` names what to fix.
+    | { kind: "rules-unreadable"; unreadable: WorkspacePolicyPath[] }
   >;
   /** The names in a workspace folder, or none when it is gone. */
   folderEntries(path: string): Promise<string[]>;
@@ -203,6 +211,12 @@ export async function restoreDirectWrites(
   };
   const written: Written[] = [];
   for (const entry of objects.values()) {
+    const retained = dependencies.reviewPath?.(entry.last.path);
+    if (retained) {
+      review.set(entry.last.path, {path: entry.last.path, reason: "restore-refused", detail: posix.basename(entry.last.path) === AUTOMATIONS_FILE ? `${retained.replace(/\.$/, "")}. Runs from this file's automations were kept.` : retained});
+      protectedAutomations ||= posix.basename(entry.last.path) === AUTOMATIONS_FILE;
+      continue;
+    }
     let readable = true;
     for (const file of entry.all) {
       const moment = await dependencies.moment(file.momentId);
@@ -221,18 +235,77 @@ export async function restoreDirectWrites(
   for (const entry of written) {
     const theirs = new Set(entry.all.map((file) => file.momentId));
     const after = await dependencies.momentsAfter(entry.first.objectId, entry.first.momentId);
-    if (after.every((id) => theirs.has(id))) {
+    const laterMoments = new Map<string, VersionedTextMoment | "protected">();
+    const readLater = async (id: string) => {
+      const kept = laterMoments.get(id);
+      if (kept !== undefined) return kept;
+      const later = await dependencies.moment(id);
+      if (later !== null) laterMoments.set(id, later);
+      return later;
+    };
+    let snapshotHead = entry.first.momentId;
+    for (const id of after) {
+      const later = await readLater(id);
+      if (later === null) return { status: "waiting" };
+      if (later === "protected" || !later.syncRecordOnly) {
+        snapshotHead = id;
+        break;
+      }
+    }
+    const creator = entry.moments.get(entry.first.momentId)!.authors;
+    const sameRecipient = (moment: VersionedTextMoment) => {
+      if (creator?.length !== 1 || !moment.authors?.length
+        || moment.authors.some(author => author.kind === "unattributed")) return false;
+      const original = creator[0]!;
+      // Settlement exports keep their native IDs but encode "ydoc" as "local-file".
+      const liveSettlement = moment.metadata.origin === "ydoc" || (moment.metadata.origin === "local-file"
+        && /^moment-ydoc-(?:apply-)?[a-fA-F0-9]{64}$/u.test(moment.id));
+      return moment.authors.every(author => original.kind === "named"
+        ? (author.kind === "named" && author.userId === original.userId) || (liveSettlement && author.kind === "human" && author.humanId === original.userId)
+        : original.kind === "link" && "principalId" in original && author.kind === "link" && (
+          "publicPrincipalId" in author
+            ? entry.first.publicPrincipalId !== undefined && author.publicPrincipalId === entry.first.publicPrincipalId
+            : author.grantId === original.grantId && author.principalId === original.principalId));
+    };
+    let changedBy: string | undefined;
+    let allTheirs = true;
+    for (const id of after) {
+      if (theirs.has(id)) continue;
+      const later = await readLater(id);
+      if (later === null) return { status: "waiting" };
+      if (later !== "protected" && later.syncRecordOnly
+        && !later.authors?.some(author => author.kind === "unattributed")) {
+        const head = entry.moments.get(snapshotHead) ?? await readLater(snapshotHead);
+        if (!later.authors?.length || head !== null && head !== "protected"
+          && later.payload.after.path === head.payload.after.path
+          && sameContent(contentNow(later), contentNow(head))) continue;
+      }
+      // Opening a live document can settle its unchanged seed without an author.
+      if (later !== "protected" && later.operation === "write" && !later.authors?.length
+        && later.payload.before?.path === later.payload.after.path
+        && sameContent(contentBefore(later), contentNow(later))) continue;
+      if (later !== "protected" && sameRecipient(later)) continue;
+      allTheirs = false;
+      const author = later !== "protected" && later.authors?.length === 1 ? later.authors[0] : undefined;
+      changedBy = later !== "protected" && later.authors?.some(author => author.kind === "unattributed")
+        ? "An unrecorded author"
+        : author?.kind === "automation" ? "An automation" : author?.kind === "human" ? `Person ${author.humanId}`
+        : author?.kind === "named" ? `Person ${author.userId}` : author?.kind === "agent" ? `Agent ${author.agentId}`
+        : author?.kind === "link" ? "Another share link participant" : "Another author";
+      break;
+    }
+    if (allTheirs) {
       restorable.push({ entry, head: after[0] ?? entry.first.momentId });
       continue;
     }
-    const head = await dependencies.moment(after[0]!);
+    const head = entry.moments.get(snapshotHead) ?? await readLater(snapshotHead);
     if (head === "protected") {
       refuseProtected(entry.last.path, false);
       continue;
     }
     if (sameContent(contentBefore(entry.moments.get(entry.first.momentId)!), contentNow(head))) continue;
     const path = head !== null && head.operation !== "delete" ? head.path : entry.last.path;
-    review.set(path, { path, reason: "changed-since" });
+    review.set(path, { path, reason: "changed-since", changedBy });
   }
 
   // The automations the person wrote: in each of their writes, each
@@ -295,7 +368,11 @@ export async function restoreDirectWrites(
         review.set(entry.last.path, { path: entry.last.path, reason: "restore-refused", detail: result.detail.slice(0, 500) });
         continue;
       }
-      restored.push(result.receipt);
+      if (result.kind === "rules-unreadable") {
+        review.set(entry.last.path, { path: entry.last.path, reason: "rules-unreadable", unreadable: result.unreadable });
+        continue;
+      }
+      restored.push({ ...result.receipt, ...(entry.first.created ? { removed: true } : {}) });
       if (isCreatedSchema(entry)) await dependencies.removeEmptyFolder(folder);
     }
     if (definitions.length > 0) {

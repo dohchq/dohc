@@ -643,10 +643,10 @@ async fn first_push_backfills_an_api_text_write_from_the_rpc_surface() {
 
 // The document stays open and idle when sync turns on. Its last record came
 // before enrollment, so no record claimed it. The push that makes enrollment
-// ready claims it through its session and sends it, and the session's next
+// ready claims it through its session and requests a continuation. The session's next
 // write then succeeds under that claim.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn first_push_publishes_an_idle_open_document_and_its_next_edit_succeeds() {
+async fn bounded_push_publishes_an_idle_open_document_and_its_next_edit_succeeds() {
     let relay = FakeRelay::start(RelayState::default());
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
@@ -688,6 +688,16 @@ async fn first_push_publishes_an_idle_open_document_and_its_next_edit_succeeds()
         json!({ "workspaceId": workspace_id }),
     )
     .await;
+    assert_eq!(first["hasMore"], json!(true));
+    let continued = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.push",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    assert_eq!(continued["hasMore"], json!(false));
     assert!(
         relay
             .state
@@ -696,7 +706,7 @@ async fn first_push_publishes_an_idle_open_document_and_its_next_edit_succeeds()
             .pushed_workspace_ops
             .iter()
             .any(|op| op["opKind"] == "ydoc.update"),
-        "the first push must send the open document without another edit: {first}"
+        "the continuation must send the open document without another edit: {continued}"
     );
 
     // The open session writes and saves again, with nothing refused as stale.
@@ -757,6 +767,8 @@ async fn first_push_publishes_an_idle_open_document_and_its_next_edit_succeeds()
             &mut peer,
             &mut dohc_engine_collab::WriterDocCache::new(),
             &dohc_engine_sync::ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: workspace_id.to_owned(),
                 origin_id: origin_id.clone(),
                 origin_seq: op["originSeq"].as_i64().expect("origin seq"),
@@ -2985,6 +2997,8 @@ async fn refusal_notices_list_and_dismiss_without_a_relay() {
         let mut store = EngineStore::open(&db, 1).unwrap();
         store.bind_root_token(TOKEN, &NoFaults).unwrap();
         let envelope = dohc_engine_sync::ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "ws-refusal".into(),
             origin_id: "peer".into(),
             origin_seq: 0,

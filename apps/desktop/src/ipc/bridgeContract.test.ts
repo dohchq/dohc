@@ -1,6 +1,6 @@
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { describe, expect, it } from "vitest";
-import { activityPathsAffectWorkspaceListing } from "./bridgeContract";
+import { activityPathsAffectWorkspaceListing, WorkspacePathOpenFailure } from "./bridgeContract";
 
 import {
   ENGINE_YDOC_UPDATE_MAX_BYTES,
@@ -34,6 +34,8 @@ import {
   COLLECTION_VALUE_MAX_DEPTH,
   DesktopMarksResult,
   CreateWorkspaceFilePayload,
+  CreateWorkspaceFolderPayload,
+  DeleteWorkspacePathPayload,
   CreateFileChatPayload,
   CreateWorkspaceVersionPayload,
   EngineMomentDetailRecord,
@@ -101,7 +103,6 @@ import {
   MenuCommand,
   SearchResultsEvent,
   WorkbenchMenuCommand,
-  WriteClipboardTextPayload,
   ReadWorkspaceTextResult,
   WriteWorkspaceTextPayload,
   WriteWorkspaceTextResult,
@@ -2482,21 +2483,6 @@ describe("workspace UI state IPC contract", () => {
   });
 });
 
-describe("clipboard IPC contract", () => {
-  it("accepts bounded text and rejects empty or oversized writes", () => {
-    expect(WriteClipboardTextPayload.parse({ text: "copy me" }).text).toBe(
-      "copy me",
-    );
-    expect(WriteClipboardTextPayload.safeParse({ text: "" }).success).toBe(false);
-    expect(
-      WriteClipboardTextPayload.safeParse({ text: "x".repeat(20_001) }).success,
-    ).toBe(false);
-    expect(
-      WriteClipboardTextPayload.safeParse({ text: "copy", secret: "nope" }).success,
-    ).toBe(false);
-  });
-});
-
 // The preload boundary for main→renderer events. These cases are the review
 // attack set: a schema must accept only exact primitive members of its closed
 // set — not String objects, toString tricks, case variants, or lookalikes —
@@ -2778,8 +2764,8 @@ describe("engine Y.Doc event boundaries", () => {
 
   it("accept the deleted state that turns a live editor read-only", () => {
     expect(
-      EngineYDocSaveStateEvent.parse({ sessionId: "session-1", state: "deleted", seq: 4 }),
-    ).toEqual({ sessionId: "session-1", state: "deleted", seq: 4 });
+      EngineYDocSaveStateEvent.parse({ sessionId: "session-1", workspaceId: "ws-1", path: "notes/a.md", state: { kind: "unknown" }, access: "deleted", seq: 4 }),
+    ).toEqual({ sessionId: "session-1", workspaceId: "ws-1", path: "notes/a.md", state: { kind: "unknown" }, access: "deleted", seq: 4 });
   });
 });
 
@@ -3567,7 +3553,7 @@ describe("engine history and linked Chats IPC contract", () => {
     ).toBe("text");
   });
 
-  it("rejects empty paths, bad limits, and oversized chat bodies", () => {
+  it("rejects empty paths, bad limits, and empty chat bodies", () => {
     // Path CONTAINMENT is enforced main-side (validateUserWritePath and the
     // engine's own path normalization); the wire schema only bounds shape.
     expect(
@@ -3606,9 +3592,9 @@ describe("engine history and linked Chats IPC contract", () => {
       SendChatMessagePayload.safeParse({
         workspaceId: "ws-engine",
         threadId: "thread-1",
-        body: "x".repeat(65_537),
+        body: "x".repeat(65_536) + "\r\n\uFEFF ",
       }).success,
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("round-trips a sent chat message with main-derived authorship", () => {
@@ -4481,4 +4467,42 @@ it("uses the engine slug byte bound in feed, mentions, and graph results", () =>
     const graph = { nodes: [{ path: "chat-thread/thread", title: "Thread", outgoing: 0, incoming: 0, kind: "chat-thread", threadId: "thread", channelSlug: slug }], edges: [], unresolvedLinks: 0, scannedFileCount: 0, omittedFileCount: 0, truncatedFileCount: 0 };
     expect(WorkspaceGraphResult.safeParse(graph).success).toBe(valid);
   }
+});
+
+describe("launch path failure event", () => {
+  it.each([null, "selected"])("retains the attempt, path, and cause for workspace %j", (workspaceId) => {
+    const event = { attemptId: "attempt-1", path: "C:\\work\\attempted",
+      cause: "ReservedWorkspaceIdError: refused", workspaceId };
+    expect(WorkspacePathOpenFailure.parse({ ...event, authority: "ignored" })).toEqual(event);
+  });
+
+  it.each([
+    { attemptId: "" },
+    { workspaceId: "" },
+    { cause: null },
+    { path: "" },
+  ])("rejects malformed failure packets %j", (change) => {
+    expect(WorkspacePathOpenFailure.safeParse({ attemptId: "attempt-1", path: "attempted", cause: "refused",
+      workspaceId: null, ...change }).success).toBe(false);
+  });
+});
+
+
+describe("exclusive app creation IPC contract", () => {
+  const path = { workspaceId: "workspace", relativePath: "app" };
+  it("retains optional exclusive file and folder admission and rejects non-booleans", () => {
+    for (const [schema, base] of [
+      [CreateWorkspaceFilePayload, { ...path, initialText: "source" }],
+      [CreateWorkspaceFolderPayload, path],
+    ] as const) {
+      expect(schema.parse(base)).toEqual(base);
+      expect(schema.parse({ ...base, exclusive: true })).toEqual({ ...base, exclusive: true });
+      expect(schema.safeParse({ ...base, exclusive: "true" }).success).toBe(false);
+    }
+  });
+  it("retains the empty-only folder rollback constraint and rejects non-booleans", () => {
+    expect(DeleteWorkspacePathPayload.parse({ ...path, emptyFolderOnly: true }))
+      .toEqual({ ...path, emptyFolderOnly: true });
+    expect(DeleteWorkspacePathPayload.safeParse({ ...path, emptyFolderOnly: "true" }).success).toBe(false);
+  });
 });

@@ -20,7 +20,7 @@ use dohc_engine_protocol::{
 use dohc_engine_runtime::{RuntimeError, WorkspaceSupervisor};
 #[cfg(test)]
 use dohc_workspace_engine::EngineEventNotice;
-use dohc_workspace_engine::live_application_ingress::LiveApplicationIngress;
+use dohc_workspace_engine::live_application_ingress::{LiveApplicationIngress, UploadCompletion};
 use dohc_workspace_engine::{ConfiguredLiveHostConfig, EngineService, LiveApplicationInput};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
@@ -71,15 +71,30 @@ impl From<Envelope> for OutputItem {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), Box<dyn Error>> {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    if args == ["--projection-only"] {
+        if std::env::var_os("DOHC_ENGINE_LIVE_HOST_CONFIG").is_some()
+            || std::env::var_os("DOHC_ENGINE_OWNER_HOST_CONFIG").is_some()
+        {
+            return Err(io::Error::other("projection mode takes no configuration").into());
+        }
+        dohc_workspace_engine::projection_stdio::run(
+            &mut io::stdin().lock(),
+            &mut io::stdout().lock(),
+        )?;
+        return Ok(());
+    }
+    if !args.is_empty() {
+        return Err(io::Error::other("unknown engine arguments").into());
+    }
     let auth_token = std::env::var(AUTH_TOKEN_ENV)
         .ok()
         .filter(|token| !token.is_empty())
         .ok_or_else(|| {
             io::Error::new(io::ErrorKind::PermissionDenied, "engine auth token missing")
         })?;
-    run_stdio(auth_token).await
+    tokio::runtime::Runtime::new()?.block_on(run_stdio(auth_token))
 }
 
 async fn run_stdio(auth_token: String) -> Result<(), Box<dyn Error>> {
@@ -324,7 +339,7 @@ where
                         .expect("configured ingress")
                         .chunk(stream_id, fin, &bytes)
                     {
-                        Ok(Some((request, input))) => {
+                        Ok(Some(UploadCompletion::Admitted(request, input))) => {
                             lock(&active_requests).remove(&request.id);
                             if !dispatch_authenticated(
                                 Envelope::Request(request),
@@ -341,6 +356,22 @@ where
                                 Some(input),
                             )
                             .await
+                            {
+                                keep_running = false;
+                            }
+                        }
+                        Ok(Some(UploadCompletion::Refused(id, error))) => {
+                            lock(&active_requests).remove(&id);
+                            if output_tx
+                                .send(
+                                    Envelope::Error(ErrorEnvelope {
+                                        id: Some(id),
+                                        error,
+                                    })
+                                    .into(),
+                                )
+                                .await
+                                .is_err()
                             {
                                 keep_running = false;
                             }

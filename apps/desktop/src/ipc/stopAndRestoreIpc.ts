@@ -1,4 +1,5 @@
 import { rmdir } from "node:fs/promises";
+import { isCaptureRecoveryOrigin } from "@dohc/workspace-contracts/engine";
 import { join } from "node:path";
 import { z } from "zod";
 import { isNormalizedRelativePath } from "@dohc/workspace-contracts/collection-values";
@@ -8,6 +9,8 @@ import {
   LiveDocumentMutationError,
   RestoreFolderInUseError,
   RestoreHeadChangedError,
+  RestoreLocalChangesError,
+  RestorePolicyRefusalError,
   type WorkspaceEngineCapture,
 } from "../workspaces/workspaceEngineCapture";
 import { restoreDirectWrites, UndoRunsStopped, type DirectWriteFile, type UndoneRuns } from "../workspaces/stopAndRestore";
@@ -17,10 +20,19 @@ import {
   StopAndRestorePayload,
   StopAndRestoreResult,
   UndoStopAndRestorePayload,
+  UndoStopAndRestoreResult,
   type DeleteWorkspacePathPayload,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
+import { readError } from "./errorWords";
 import { createOwnerRelayShareHandler } from "./ownerRelayShareHandler";
+
+// A refused file's reason, as the person reads it. A file History no longer
+// tracks is refused in dohc's words. Unreadable rules are their own typed
+// outcome, which names the files and leaves the parser's text out.
+function refusalDetail(error: Error): string {
+  return error instanceof RestorePolicyRefusalError ? readError(error).words ?? error.message : error.message;
+}
 
 // Stop and restore (ADR 0013) in main. The renderer names a person or an
 // Edit share link; main finds the grants on this workspace from the relay's
@@ -75,6 +87,7 @@ const LedgerPage = z.object({
       objectId: ID,
       momentId: ID,
       created: z.boolean(),
+      publicPrincipalId: ID.optional(),
     })),
   })),
   nextAfterOriginSeq: z.number().int().nullable(),
@@ -93,6 +106,7 @@ export function registerStopAndRestoreIpc<
 >(dependencies: {
   registerHandler(channel: string, handler: (event: Event, payload: unknown) => unknown): void;
   assertTrustedSender(event: Event): void;
+  hasOtherWorkspaceWindow?(sender: Sender, workspaceId: string): boolean;
   withRendererWorkspaceOperation<Result>(
     sender: Sender, workspaceId: string, inactiveMessage: string,
     work: (operation: Operation) => Promise<Result>,
@@ -173,7 +187,10 @@ export function registerStopAndRestoreIpc<
     try {
       for (let pass = 0; pass < UNDO_PASSES; pass += 1) {
         const again = pass > 0;
-        const server = await dependencies.serverRuns.restore(workspaceId, definitions, again);
+        const server = await dependencies.serverRuns.restore(workspaceId, definitions, again).catch((error: unknown) => {
+          if (error instanceof z.ZodError) throw new Error("Your server runs a different version of dohc. Update it, then try again.");
+          throw error;
+        });
         add("server", server, again);
         // What the server put back reaches this computer, and what this one puts back reaches the server.
         await dependencies.syncNow(workspaceId);
@@ -185,7 +202,7 @@ export function registerStopAndRestoreIpc<
     } catch (error) {
       // What it undid before it stopped is reported with why it stopped.
       throw new UndoRunsStopped(error instanceof z.ZodError
-        ? "Your server runs a different version of dohc. Update it, then try again."
+        ? "dohc could not finish undoing these runs."
         : error instanceof Error ? error.message : String(error), total());
     }
     return total();
@@ -308,8 +325,12 @@ export function registerStopAndRestoreIpc<
         const { capture } = await dependencies.requireEngineCapture(workspaceId);
         const root = operation.workspace.rootPath;
         const outcome = await restoreDirectWrites({
+          reviewPath: path => dependencies.hasOtherWorkspaceWindow?.(event.sender, workspaceId)
+            ? "Open in another window. Close that window and try again."
+            : input.reviewPaths?.includes(path) ? "Changed on this device since the last saved version" : null,
           moment: async (momentId) => {
             const detail = await capture.readMoment(momentId);
+            if (detail && !detail.protected && isCaptureRecoveryOrigin(detail.moment.metadata.origin)) return null;
             return detail?.protected ? "protected" : detail?.moment ?? null;
           },
           momentsAfter: (objectId, momentId) => capture.listObjectMomentsAfter(objectId, momentId),
@@ -323,8 +344,12 @@ export function registerStopAndRestoreIpc<
               return { kind: "restored", receipt: { path, restoredMomentId } };
             } catch (error) {
               if (error instanceof RestoreHeadChangedError) return { kind: "changed" };
+              if (error instanceof RestoreLocalChangesError) return { kind: "refused", detail: error.message };
               if (error instanceof RestoreFolderInUseError) return { kind: "folder-in-use" };
-              if (error instanceof LiveDocumentMutationError) return { kind: "refused", detail: error.message };
+              if (error instanceof RestorePolicyRefusalError && error.reason === "policy-unreadable") {
+                return { kind: "rules-unreadable", unreadable: [...error.unreadable] };
+              }
+              if (error instanceof LiveDocumentMutationError || error instanceof RestorePolicyRefusalError) return { kind: "refused", detail: refusalDetail(error) };
               throw error;
             }
           },
@@ -348,15 +373,32 @@ export function registerStopAndRestoreIpc<
     assertTrustedSender(event);
     const input = UndoStopAndRestorePayload.parse(payload);
     const person = await dependencies.localPerson();
-    await dependencies.withRendererWorkspaceOperation(
+    return dependencies.withRendererWorkspaceOperation(
       event.sender, input.workspaceId, "Undo stopped because this window changed workspaces.",
       async (operation) => {
         const { capture } = await dependencies.requireEngineCapture(operation.workspace.workspaceId);
+        const files: UndoStopAndRestoreResult["files"] = [];
         try {
           for (const momentId of [...input.restoredMomentIds].reverse()) {
             operation.assertCurrent();
-            await capture.restoreFileToBeforeMoment(momentId, person);
+            try {
+              const detail = await capture.readMoment(momentId);
+              const path = detail?.moment.path;
+              if (dependencies.hasOtherWorkspaceWindow?.(event.sender, operation.workspace.workspaceId)) throw new RestoreLocalChangesError(path ?? "", "Open in another window. Close that window and try again.");
+              if (path && input.reviewPaths?.includes(path)) throw new RestoreLocalChangesError(path);
+              const receipt = await capture.restoreFileToBeforeMoment(momentId, person, {expectedHeadMomentId: momentId});
+              files.push({ momentId, kind: "restored", receipt: { path: receipt.path, restoredMomentId: receipt.restoredMomentId } });
+            } catch (error) {
+              if (!(error instanceof RestorePolicyRefusalError || error instanceof LiveDocumentMutationError ||
+                error instanceof RestoreHeadChangedError || error instanceof RestoreLocalChangesError || error instanceof RestoreFolderInUseError)) throw error;
+              files.push(error instanceof RestorePolicyRefusalError && error.reason === "policy-unreadable"
+                ? { momentId, kind: "rules-unreadable", unreadable: [...error.unreadable] }
+                : { momentId, kind: "refused", detail: refusalDetail(error).slice(0, 500) });
+            }
           }
+          return UndoStopAndRestoreResult.parse({ files, errorMessage: null });
+        } catch (error) {
+          return UndoStopAndRestoreResult.parse({ files, errorMessage: (error instanceof Error ? error.message : String(error)).slice(0, 2_000) });
         } finally {
           dependencies.notifyRenderer({ workspaceId: operation.workspace.workspaceId });
         }

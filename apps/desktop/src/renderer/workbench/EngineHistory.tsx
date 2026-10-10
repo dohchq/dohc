@@ -1,10 +1,11 @@
 import { formatChatTime } from "../time";
 import { basenameOf } from "../path";
-import { ChevronDown, ChevronRight, FileArchive, FileText, Lock, RotateCcw, Search, X, Zap } from "lucide-react";
+import { ChevronDown, ChevronRight, FileArchive, FileText, History, Lock, RotateCcw, Search, X, Zap } from "lucide-react";
+import { EmptyState } from "../ui/controls";
 import { useId, useMemo, useState } from "react";
 import { LegendList } from "@legendapp/list/react";
 import type { EngineMomentRecord } from "../../ipc/bridgeContract";
-import { chatAuthorLabel } from "./LinkedChats";
+import { chatAuthorLabel } from "./chatMessages";
 
 // Engine history timeline. Renders engine moments with their summaries
 // ("Saved latest edits", "Merged version X into Main", "Reconciled offline
@@ -26,6 +27,7 @@ export function engineMomentSummary(
   moment: Pick<EngineMomentRecord, "summary" | "operation" | "path" | "contentKind" | "byteLength">,
 ): string {
   if (moment.summary) return moment.summary;
+  if (moment.operation === "rename") return `Renamed to ${basenameOf(moment.path)}`;
   if (moment.operation === "delete") return `Deleted ${basenameOf(moment.path)}`;
   if (moment.contentKind === "binary") {
     return `Updated ${basenameOf(moment.path)} (${moment.byteLength ?? 0} bytes)`;
@@ -53,6 +55,11 @@ export function engineOriginLabel(origin: EngineMomentRecord["origin"]): string 
       return "dohc";
     case "ydoc":
       return "Live edit";
+    // Typing capture kept when its file changed outside dohc, in the words
+    // of its notice. Dismissing or restoring it leaves the same change.
+    case "capture-recovery":
+    case "capture-recovery-cleared":
+      return "Typing kept";
     default:
       return "Unknown source";
   }
@@ -189,7 +196,8 @@ function formatDay(recordedAtMs: number): { label: string; dateTime: string } {
   };
 }
 
-function MomentRow(props: {
+// One change in the timeline. The states page renders it too.
+export function MomentRow(props: {
   moment: EngineMomentRecord;
   nested?: boolean;
   onOpenMoment: (momentId: string, filePath: string) => void;
@@ -404,15 +412,13 @@ export function EngineHistoryView(props: {
   // A known page with no moments. The caller renders this view only when it
   // has a page: "No changes yet" states something about the workspace,
   // and a read still in flight or a read that failed may not state it.
-  if (props.moments.length === 0) {
+  if (props.moments.length === 0 && !props.hasMore) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
-        <span className="text-sm text-muted">No changes yet</span>
-        <span className="max-w-xs text-[11px] leading-5 text-subtle">
-          Edits — yours or your agent's — show up here as a timeline you can
-          review.
-        </span>
-      </div>
+      <EmptyState
+        icon={History}
+        title="No changes yet"
+        hint="Edits by you or your agent appear here as a timeline you can review."
+      />
     );
   }
 

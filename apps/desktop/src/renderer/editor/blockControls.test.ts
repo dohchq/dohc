@@ -15,9 +15,11 @@ import { Markdown } from "@tiptap/markdown";
 import { TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
 import { NodeSelection } from "@tiptap/pm/state";
+import { inListView, mockListLayout } from "../ui/listLayout.testSupport";
 import { DohcTaskItem, dohcMarkdownExtensions } from "./extensions";
 import {
   BlockMenu,
+  CLOSED_BLOCK_MENU_STATE,
   blockDragSlice,
   copyBlockAsMarkdown,
   deleteBlock,
@@ -124,6 +126,177 @@ describe("blockControls menu keyboard deletion", () => {
       );
     },
   );
+});
+
+describe("BlockMenu on the Menu part's recipe and rule", () => {
+  function openMenu(onSelect = vi.fn(), onClose = vi.fn()) {
+    const handle = document.createElement("button");
+    handle.setAttribute("aria-label", "block actions");
+    document.body.append(handle);
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    handle.focus();
+    render(
+      createElement(BlockMenu, {
+        state: { open: true, pos: 0, x: 20, y: 20, maxHeight: 400, placement: "below", trigger: handle },
+        onSelect,
+        onClose,
+      }),
+    );
+    const menu = screen.getByRole("menu", { name: "block actions" });
+    const rows = screen.getAllByRole("menuitem");
+    return { handle, outside, menu, rows, onSelect, onClose };
+  }
+  afterEach(() => {
+    document.body.replaceChildren();
+  });
+
+  it("keeps focus on its frame and names the active row, which the keys and a moving pointer move", () => {
+    const { handle, menu, rows } = openMenu();
+    expect(document.activeElement).toBe(menu);
+    expect(handle.getAttribute("aria-expanded")).toBe("true");
+    expect(menu.getAttribute("aria-activedescendant")).toBe(rows[0]?.id);
+    expect(rows[0]?.hasAttribute("data-active")).toBe(true);
+
+    fireEvent.keyDown(menu, { key: "End" });
+    expect(menu.getAttribute("aria-activedescendant")).toBe(rows.at(-1)?.id);
+    fireEvent.keyDown(menu, { key: "h" });
+    expect(menu.getAttribute("aria-activedescendant")).toBe(rows[1]?.id);
+
+    // A row that opens under a still pointer does not take the active row.
+    fireEvent.mouseMove(rows[4]!, { movementX: 0, movementY: 0 });
+    expect(rows[1]?.hasAttribute("data-active")).toBe(true);
+    fireEvent.mouseMove(rows[4]!, { movementX: 0, movementY: 2 });
+    expect(rows[4]?.hasAttribute("data-active")).toBe(true);
+    expect(rows[1]?.hasAttribute("data-active")).toBe(false);
+  });
+
+  it("returns focus to the handle before the pick runs, so an action that edits can take it", () => {
+    let focusedAtPick: Element | null = null;
+    const { handle, menu, rows } = openMenu(vi.fn(() => {
+      focusedAtPick = document.activeElement;
+    }));
+    fireEvent.keyDown(menu, { key: "ArrowDown" });
+    fireEvent.keyDown(menu, { key: " " });
+    expect(focusedAtPick).toBe(handle);
+    fireEvent.click(rows[2]!);
+    expect(focusedAtPick).toBe(handle);
+  });
+
+  it("closes on Escape without passing it on, on Tab, and on a press outside, but not on a press on its handle", () => {
+    const parentEscape = vi.fn();
+    document.addEventListener("keydown", parentEscape);
+    const { handle, outside, menu, onClose } = openMenu();
+    fireEvent.pointerDown(handle);
+    fireEvent.focusOut(menu, { relatedTarget: handle });
+    expect(onClose).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(menu, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(parentEscape).not.toHaveBeenCalled();
+    fireEvent.keyDown(menu, { key: "Tab" });
+    expect(onClose).toHaveBeenCalledTimes(2);
+    fireEvent.pointerDown(outside);
+    expect(onClose).toHaveBeenCalledTimes(3);
+    document.removeEventListener("keydown", parentEscape);
+  });
+
+  it("returns focus to the handle when a press on blank space that closed it ends", () => {
+    const handle = document.createElement("button");
+    document.body.append(handle);
+    handle.focus();
+    const open = { open: true, pos: 0, x: 20, y: 20, maxHeight: 400, placement: "below", trigger: handle } as const;
+    const onClose = vi.fn();
+    const { rerender } = render(createElement(BlockMenu, { state: open, onSelect: vi.fn(), onClose }));
+    fireEvent.pointerDown(document.body);
+    expect(onClose).toHaveBeenCalledOnce();
+    // The owner closes it; the browser's press puts focus on the page.
+    rerender(createElement(BlockMenu, { state: CLOSED_BLOCK_MENU_STATE, onSelect: vi.fn(), onClose }));
+    handle.blur();
+    fireEvent.pointerUp(document.body);
+    expect(document.activeElement).toBe(handle);
+  });
+
+  // The list is taller than its cap. jsdom has no layout: a 320px list over
+  // 28px rows, with the Actions label 22px tall before the ninth row.
+  it("keeps the active row inside the list's view as the keys move it past either end", () => {
+    vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (this: HTMLElement) {
+      const index = Number(/-row-(\d+)$/.exec(this.id)?.[1] ?? Number.NaN);
+      if (!Number.isNaN(index)) return 26 + index * 28 + (index >= 8 ? 22 : 0);
+      if (this.getAttribute("role") === "group") return this.previousElementSibling ? 250 : 4;
+      return 0;
+    });
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(28);
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(320);
+    const { menu, rows } = openMenu();
+    const inView = (row: HTMLElement) =>
+      row.offsetTop >= menu.scrollTop && row.offsetTop + row.offsetHeight <= menu.scrollTop + menu.clientHeight;
+    const remove = rows.at(-1)!;
+    expect(inView(remove)).toBe(false);
+
+    fireEvent.keyDown(menu, { key: "End" });
+    expect(inView(remove)).toBe(true);
+    fireEvent.keyDown(menu, { key: "Home" });
+    expect(inView(rows[0]!)).toBe(true);
+    // The first row brings its section label along.
+    expect(rows[0]!.parentElement!.offsetTop).toBeGreaterThanOrEqual(menu.scrollTop);
+    fireEvent.keyDown(menu, { key: "ArrowUp" });
+    expect(inView(remove)).toBe(true);
+  });
+
+  // The site's demo mounts the editor in a shadow root, where a document
+  // lookup by id finds nothing.
+  it("keeps the active row in view inside an embedded editor's shadow root", () => {
+    vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (this: HTMLElement) {
+      const index = Number(/-row-(\d+)$/.exec(this.id)?.[1] ?? Number.NaN);
+      if (!Number.isNaN(index)) return 26 + index * 28 + (index >= 8 ? 22 : 0);
+      if (this.getAttribute("role") === "group") return this.previousElementSibling ? 250 : 4;
+      return 0;
+    });
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(28);
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(320);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const container = document.createElement("div");
+    host.attachShadow({ mode: "open" }).append(container);
+    render(
+      createElement(BlockMenu, {
+        state: { open: true, pos: 0, x: 20, y: 20, maxHeight: 400, placement: "below" },
+        onSelect: vi.fn(),
+        onClose: vi.fn(),
+      }),
+      { container },
+    );
+    const menu = container.querySelector<HTMLElement>("[role='menu']")!;
+    const remove = [...menu.querySelectorAll<HTMLElement>("[role='menuitem']")].at(-1)!;
+    fireEvent.keyDown(menu, { key: "End" });
+    expect(menu.getAttribute("aria-activedescendant")).toBe(remove.id);
+    expect(remove.offsetTop).toBeGreaterThanOrEqual(menu.scrollTop);
+    expect(remove.offsetTop + remove.offsetHeight).toBeLessThanOrEqual(menu.scrollTop + menu.clientHeight);
+  });
+
+  it("returns focus to the handle when the window loses focus", async () => {
+    const handle = document.createElement("button");
+    document.body.append(handle);
+    handle.focus();
+    const open = { open: true, pos: 0, x: 20, y: 20, maxHeight: 400, placement: "below", trigger: handle } as const;
+    const onClose = vi.fn();
+    const { rerender } = render(createElement(BlockMenu, { state: open, onSelect: vi.fn(), onClose }));
+    expect(document.activeElement).toBe(screen.getByRole("menu"));
+    fireEvent.blur(window);
+    expect(onClose).toHaveBeenCalledOnce();
+    rerender(createElement(BlockMenu, { state: CLOSED_BLOCK_MENU_STATE, onSelect: vi.fn(), onClose }));
+    await waitFor(() => expect(document.activeElement).toBe(handle));
+  });
+
+  it("shows Del beside the destructive row without adding it to the row's name", () => {
+    const { rows } = openMenu();
+    const remove = screen.getByRole("menuitem", { name: "Delete" });
+    expect(remove).toBe(rows.at(-1));
+    expect(remove.getAttribute("aria-keyshortcuts")).toBe("Delete");
+    expect(within(remove).getByText("Del").getAttribute("aria-hidden")).toBe("true");
+    expect(remove.className).toContain("text-danger");
+  });
 });
 
 describe("blockControls duplicate", () => {
@@ -518,6 +691,59 @@ describe("TurnIntoMenu dropdown rendering", () => {
     fireEvent.keyDown(listbox, { key: "Escape" });
     expect(screen.queryByRole("listbox")).toBeNull();
     await waitFor(() => expect(editor.view.hasFocus()).toBe(true));
+  });
+});
+
+describe("TurnIntoMenu on the Menu part's recipe", () => {
+  it("names its active option, moves by the Menu keys, keeps it in view, and keeps the current type's fill", () => {
+    const restore = mockListLayout(150);
+    const editor = track(makeEditor("Hello world"));
+    editor.commands.setTextSelection(3);
+    try {
+      render(createElement(TurnIntoMenu, { editor, activeId: turnIntoIdAt(editor.state.selection.$from) }));
+      fireEvent.click(screen.getByTitle("Turn into"));
+      const listbox = screen.getByRole("listbox", { name: "turn into" });
+      const options = within(listbox).getAllByRole("option");
+      const text = options[0]!;
+      expect(document.activeElement).toBe(listbox);
+      expect(listbox.getAttribute("aria-activedescendant")).toBe(text.id);
+      expect(text.className.split(" ")).toContain("bg-selected");
+
+      fireEvent.keyDown(listbox, { key: "End" });
+      const quote = options.at(-1)!;
+      expect(listbox.getAttribute("aria-activedescendant")).toBe(quote.id);
+      expect(quote.hasAttribute("data-active")).toBe(true);
+      expect(inListView(listbox, quote)).toBe(true);
+      // The block's own type keeps its fill when the active option leaves it.
+      expect(text.className.split(" ")).toContain("bg-selected");
+      fireEvent.keyDown(listbox, { key: "h" });
+      expect(listbox.getAttribute("aria-activedescendant")).toBe(options[1]!.id);
+      expect(inListView(listbox, options[1]!)).toBe(true);
+
+      fireEvent.mouseMove(options[3]!, { movementX: 0, movementY: 0 });
+      expect(listbox.getAttribute("aria-activedescendant")).toBe(options[1]!.id);
+
+      // Ctrl+N is New file and Ctrl+B the files panel. They reach the shell,
+      // which skips a prevented key, and leave the active option alone.
+      const shell = vi.fn((event: KeyboardEvent) => event.defaultPrevented);
+      window.addEventListener("keydown", shell);
+      try {
+        for (const letter of ["n", "b"]) {
+          expect(fireEvent.keyDown(listbox, { key: letter, ctrlKey: true })).toBe(true);
+          expect(fireEvent.keyDown(listbox, { key: letter, metaKey: true })).toBe(true);
+        }
+      } finally {
+        window.removeEventListener("keydown", shell);
+      }
+      expect(shell).toHaveBeenCalledTimes(4);
+      expect(shell.mock.results.every((result) => result.value === false)).toBe(true);
+      expect(listbox.getAttribute("aria-activedescendant")).toBe(options[1]!.id);
+
+      fireEvent.keyDown(listbox, { key: " " });
+      expect(editor.getJSON().content?.[0]?.attrs?.level).toBe(1);
+    } finally {
+      restore();
+    }
   });
 });
 

@@ -1,4 +1,4 @@
-import { parseLiveAuthorContext, parseLiveAuthorSnapshot, type LiveAuthorContext, type LiveAuthorSnapshot, type LiveAuthorEntry } from "./liveAuthorship.js";
+import { liveAuthorIdentity, parseLiveAuthorContext, parseLiveAuthorSnapshot, type LiveAuthorContext, type LiveAuthorSnapshot, type LiveAuthorEntry } from "./liveAuthorship.js";
 import { parseHostEpoch, type HostEpoch } from "./hostControl.js";
 import {
   parseLiveObjectBinding,
@@ -110,7 +110,7 @@ function checkpointCoverage(value: unknown, parseRanges: typeof parseLiveUpdateS
   const coverage = Array.from(value, item => {
     const entry = exactRecord(item, "Checkpoint author coverage", ["author", "structRanges", "deletionRanges"]);
     const author = parseLiveAuthorSnapshot([entry.author])[0]!;
-    const identity = JSON.stringify([author.kind, author.kind === "agent" ? author.onBehalfOf ?? null : null, author.kind === "human" ? author.humanId : author.kind === "link" ? author.publicPrincipalId : author.agentId]);
+    const identity = liveAuthorIdentity(author);
     if (identities.has(identity)) throw new TypeError("Duplicate checkpoint author.");
     identities.add(identity);
     return { author, structRanges: parseRanges(entry.structRanges), deletionRanges: parseRanges(entry.deletionRanges) };

@@ -81,12 +81,12 @@ function engineMomentBaseForIpc(
       : {}),
     ...(personAuthorName !== undefined ? { personAuthorName } : {}),
     ...(author?.kind === "public" ? { publicAuthor: author } : {}),
-    ...(author?.kind === "link" ? { linkAuthor: author } : {}),
+    ...(author?.kind === "link" && "grantId" in author ? { linkAuthor: author } : {}),
     ...automationAuthorOf(author, names),
     ...(author?.kind === "named"
       ? { namedAuthor: { userId: author.userId, label: names.named(author) } }
       : {}),
-    ...(moment.metadata.summary !== undefined
+    ...(moment.operation !== "rename" && moment.metadata.summary !== undefined
       ? { summary: moment.metadata.summary }
       : {}),
     ...(moment.metadata.correlationId !== undefined

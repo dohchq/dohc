@@ -894,6 +894,9 @@ impl Fixture {
         Self::with_doc(doc, source)
     }
     fn with_doc(doc: Ydoc, source: &str) -> Self {
+        Self::with_doc_at(doc, source, "a.md")
+    }
+    fn with_doc_at(doc: Ydoc, source: &str, path: &str) -> Self {
         let dir = ScratchDir::new_named("native-restore-proposal").unwrap();
         let mut store = EngineStore::open(&dir.join("engine.db"), 0).unwrap();
         dohc_engine_domain::VersionedTextStore::new(&mut store)
@@ -905,8 +908,8 @@ impl Fixture {
             main_version_id: "main".into(),
             object_id: "object".into(),
             lineage_claim_id: hex_sha256(&bytes),
-            current_path: "a.md".into(),
-            selector_paths: vec!["a.md".into()],
+            current_path: path.into(),
+            selector_paths: vec![path.into()],
             restore_fence_generation: 0,
         };
         let host = ApplicationHostCoordinate {
@@ -1066,6 +1069,116 @@ impl Fixture {
             })
             .unwrap()
     }
+}
+
+#[test]
+fn desktop_automation_draft_without_server_declaration_can_stop_and_restore() {
+    use crate::owner_outbox::draft::{ObservedOwnerBinding, OwnerDraftAppendInput};
+    let mut f = Fixture::new("# Before automation\n");
+    let checkpoint = f.doc.encode_full_state();
+    let observed = ObservedOwnerBinding {
+        binding: f.binding.clone(),
+        relay_database_namespace: "namespace".into(),
+        revision: 1,
+        accepted_cursor: 0,
+        native_head_sequence: 0,
+        checkpoint_digest: hex_sha256(&checkpoint),
+        limits: crate::owner_outbox::OwnerOutboxLimits {
+            max_pending_bytes: 1_000_000,
+            max_pending_age_ms: 1_000_000,
+        },
+    };
+    f.store
+        .write_with(&NoFaults, |tx| {
+            crate::owner_outbox::draft::install_observed_binding_in_tx(
+                tx,
+                "workspace",
+                &observed,
+                &checkpoint,
+            )
+        })
+        .unwrap();
+    let update = f
+        .doc
+        .rewrite_content_to_markdown_preserving_source(
+            ContentKind::Richdoc,
+            "# Automation wrote this\n",
+        )
+        .unwrap();
+    let append = crate::owner_outbox::draft::append_draft_cached(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        "workspace",
+        OwnerDraftAppendInput {
+            binding: f.binding.clone(),
+            expected_revision: 1,
+            append_key: "desktop-automation".into(),
+            update: update.clone(),
+            now_ms: 10,
+            agent_declaration: None,
+            automation_declaration: None,
+        },
+        &NoFaults,
+    )
+    .unwrap();
+    let receipt = LiveUpdateReceipt {
+        delivery_id: append.delivery_id,
+        update_digest: append.update_digest,
+        journal_cursor: 1,
+        accepting_host_epoch: 1,
+    };
+    let event = AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: receipt.clone(),
+                binding: f.binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Owner {
+                    principal_id: "owner".into(),
+                },
+                received_at_ms: 11,
+            },
+            first_seen: vec![],
+            canonical_version: Some(2),
+            author_snapshot: Some(vec![
+                crate::live_update_application::LiveAuthorEntry::Human {
+                    human_id: "owner".into(),
+                    human_name: "Owner".into(),
+                },
+            ]),
+            first_seen_deletes: Some(vec![]),
+            checkpoint_coverage: None,
+        },
+        update_bytes: update,
+    };
+    let applied = apply_committed(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &f.handle,
+        event,
+        &NoFaults,
+        100_000_000,
+        |_, _, _, _| Ok(()),
+    )
+    .unwrap();
+    let ApplicationResult::Applied(ack, _) = applied else {
+        panic!("desktop automation refused")
+    };
+    f.sequence = ack.local_ydoc_sequence;
+    f.terminal = Some(receipt);
+    let input = f.freeze(f.baseline_point.clone());
+    let proposal = f.prepare(input).unwrap();
+    assert_eq!(proposal.receipt().native_sources.len(), 1);
+    assert!(proposal.receipt().native_sources[0]
+        .accepted_receipt
+        .is_some());
+    let restored = Ydoc::wire();
+    restored.apply(proposal.frozen_state_bytes()).unwrap();
+    restored.apply(proposal.candidate_bytes()).unwrap();
+    let projection = restored.project(ContentKind::Richdoc).unwrap().content;
+    assert_eq!(
+        restored.preserved_markdown_source(&projection).unwrap(),
+        "# Before automation\n"
+    );
 }
 
 #[test]
@@ -2535,6 +2648,7 @@ fn interval_keeps_declared_agents_through_dedupe_compaction_and_reopen() {
     let expected = json!([
         {"kind":"agent","agentId":"review-agent","onBehalfOf":"owner","depth":2},
         {"kind":"agent","agentId":"trip-agent","onBehalfOf":"owner","depth":0},
+        {"kind":"unattributed"},
     ]);
     assert_eq!(declared(&f), expected);
     let key = DocKey::new("workspace", "main", "object").unwrap();
@@ -3303,4 +3417,189 @@ fn resume_commit_boundaries_leave_a_stop_or_one_historical_receipt() {
                 .unwrap()
         );
     }
+}
+
+fn observed_collection_restore_fixture() -> Fixture {
+    use dohc_engine_domain::{VersionedTextStore, WriteText};
+    let doc = Ydoc::wire();
+    let fixtures: Value = serde_json::from_str(include_str!(
+        "../../../tests/live-bootstrap-fixtures/live-bootstrap.json"
+    ))
+    .unwrap();
+    let seed = fixtures
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == "rich-unicode")
+        .unwrap();
+    doc.apply(&serde_json::from_value::<Vec<u8>>(seed["bytes"].clone()).unwrap())
+        .unwrap();
+    doc.frontmatter_set("id", "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa")
+        .unwrap();
+    doc.frontmatter_set("status", "open").unwrap();
+    let text = doc.project(ContentKind::Richdoc).unwrap().content;
+    let mut f = Fixture::with_doc_at(doc, &text, "tasks/a.md");
+    VersionedTextStore::new(&mut f.store)
+        .write_text(
+            &WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "schema".into(),
+                path: "tasks/collection.yaml".into(),
+                text: "fields:\n  status:\n    type: text\n".into(),
+                moment_id: "schema".into(),
+                metadata_origin: "user".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_domain::reconcile_collections_in_tx(tx, "workspace", "main")
+        })
+        .unwrap();
+    // A device can retain its observed binding when it registers as host.
+    // Seed that retained observation alongside the production bootstrap.
+    f.store.write_with(&NoFaults, |tx| {
+        let checkpoint = f.doc.encode_full_state();
+        let digest = hex_sha256(&checkpoint);
+        dohc_engine_storage::put_binary_blob_with_sha(tx, &checkpoint, &digest)?;
+        tx.execute(
+            "INSERT INTO ydoc_owner_bindings (workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,relay_database_namespace,binding_revision,accepted_cursor,native_head_sequence,checkpoint_digest,max_pending_bytes,max_pending_age_ms) VALUES ('workspace','main','object',?1,?2,'namespace',1,0,0,?3,1000000,60000)",
+            params![f.binding.lineage_claim_id, serde_json::to_string(&f.binding).unwrap(), digest],
+        ).map_err(read_sql)?;
+        Ok::<_, ApplicationError>(())
+    }).unwrap();
+    // Registration accepts the retained observation rather than clearing it.
+    f.handle = f
+        .owner
+        .register(
+            &mut f.store,
+            "namespace".into(),
+            f.host.clone(),
+            f.binding.clone(),
+        )
+        .unwrap();
+    f
+}
+
+#[test]
+fn restore_fence_quarantines_observed_collection_drafts_with_history() {
+    use crate::owner_outbox::draft;
+    let mut f = observed_collection_restore_fixture();
+    let pending = Ydoc::wire();
+    pending.apply(&f.doc.encode_full_state()).unwrap();
+    let update = pending.frontmatter_set("status", "done").unwrap();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            draft::append_draft_in_tx(
+                tx,
+                "workspace",
+                &f.binding,
+                1,
+                "pending-status".into(),
+                update,
+                4,
+            )
+        })
+        .unwrap();
+    let operation = f.fence_input();
+    for now in [50, 51] {
+        f.owner
+            .fence_restore(
+                &mut f.store,
+                operation.clone(),
+                f.host.clone(),
+                now,
+                &NoFaults,
+            )
+            .unwrap();
+    }
+    f.store.read_with(|conn| {
+        let indexed = dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(conn, "workspace", "main", "object").unwrap().unwrap();
+        assert_eq!(indexed["status"], "open");
+        let state: String = conn.query_row("SELECT state FROM owner_ydoc_outboxes", [], |r| r.get(0))?;
+        assert_eq!(state, "quarantined");
+        let mut stmt = conn.prepare("SELECT previous_value_json,next_value_json,author_origin_id FROM collection_field_history WHERE field_name='status' ORDER BY history_id")?;
+        let history = stmt.query_map([], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?)))?.collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(history, vec![
+            (Some(serde_json::json!("open").to_string()), Some(serde_json::json!("done").to_string()), None),
+            (Some(serde_json::json!("done").to_string()), Some(serde_json::json!("open").to_string()), Some("owner-draft-quarantine".into())),
+        ]);
+        Ok::<_, rusqlite::Error>(())
+    }).unwrap();
+}
+
+#[test]
+fn restore_fence_keeps_host_progress_when_its_observed_checkpoint_is_stale() {
+    use crate::owner_outbox::draft;
+    let mut f = observed_collection_restore_fixture();
+    let pending = Ydoc::wire();
+    pending.apply(&f.doc.encode_full_state()).unwrap();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            draft::append_draft_in_tx(
+                tx,
+                "workspace",
+                &f.binding,
+                1,
+                "pending-body".into(),
+                pending.richdoc_append_paragraph("pending body"),
+                4,
+            )
+        })
+        .unwrap();
+    let update = f.doc.frontmatter_set("status", "review").unwrap();
+    f.accept(update, 1);
+    f.store
+        .read_with(|conn| {
+            let (observed_head, checkpoint_digest): (i64, String) = conn.query_row(
+                "SELECT native_head_sequence, checkpoint_digest FROM ydoc_owner_bindings",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let key = DocKey::new("workspace", "main", "object").unwrap();
+            let marker = crate::read_marker_in(conn, &key).unwrap().unwrap();
+            assert_ne!(observed_head, marker.head_update_seq);
+            let checkpoint = Ydoc::wire();
+            checkpoint
+                .apply(
+                    &dohc_engine_storage::get_binary_blob(conn, &checkpoint_digest)
+                        .unwrap()
+                        .unwrap(),
+                )
+                .unwrap();
+            assert_eq!(checkpoint.frontmatter_json()["status"], "open");
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+    let operation = f.fence_input();
+    for now in [50, 51] {
+        f.owner
+            .fence_restore(
+                &mut f.store,
+                operation.clone(),
+                f.host.clone(),
+                now,
+                &NoFaults,
+            )
+            .unwrap();
+    }
+    f.store.read_with(|conn| {
+        let indexed = dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(conn, "workspace", "main", "object").unwrap().unwrap();
+        assert_eq!(indexed["status"], "review");
+        let state: String = conn.query_row("SELECT state FROM owner_ydoc_outboxes", [], |r| r.get(0))?;
+        assert_eq!(state, "quarantined");
+        let mut stmt = conn.prepare("SELECT previous_value_json,next_value_json,author_origin_id FROM collection_field_history WHERE field_name='status' ORDER BY history_id")?;
+        let history = stmt.query_map([], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?)))?.collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(history, vec![
+            (Some(serde_json::json!("open").to_string()), Some(serde_json::json!("review").to_string()), None),
+        ]);
+        Ok::<_, rusqlite::Error>(())
+    }).unwrap();
 }

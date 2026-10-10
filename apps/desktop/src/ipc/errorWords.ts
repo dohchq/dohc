@@ -1,9 +1,11 @@
+import { RESERVED_WORKSPACE_ID_TITLE } from "@dohc/workspace-core";
 import type { DaemonErrorCode } from "@dohc/workspace-engine-client";
 
 // Electron hands a rejected handler's error to the renderer as one string,
 // `error.toString()`: the class survives, the code does not. `ipcWireError`
-// keeps the code (`DaemonRefusalError [OVERLOADED]: …`) and `readError` turns
-// that string back into words a person can act on.
+// keeps the code (`DaemonRefusalError [OVERLOADED]: …`), and a wait the error
+// sets (`… [dataset_reopen_wait] [retryAfterMs=5000]: …`), and `readError`
+// turns that string back into words a person can act on.
 
 // `null`: the error names nothing a person can act on, so the caller's own
 // sentence stands alone. Copy details still carry the error as it arrived.
@@ -15,6 +17,8 @@ const UNREADABLE_ANSWER = "The server sent an answer dohc could not read. Try ag
 const CONTENT_MISSING = "Some file contents are missing on the server.";
 const STOPPED = "It stopped before it finished. Try again.";
 const REINSTALL = "This copy of dohc is missing a file it needs. Reinstall dohc.";
+// Trying again cannot help with this one; updating dohc can.
+const NEWER_DOHC = "It needs a newer version of dohc. Update dohc to open it.";
 
 // Every code the engine refuses with: `ErrorCode` in dohc-engine-protocol.
 const ENGINE_CODE_WORDS = {
@@ -114,6 +118,26 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
     stale_revision: "The Collection changed while dohc was working on it. Try again.",
     "*": null,
   },
+  // A restore History's current rules refuse. An unreadable rules file's
+  // message leads with the files dohc can't read, then the parser's own text,
+  // which only Copy details carry. "It" is dohc, the caller's sentence's actor.
+  RestorePolicyRefusalError: {
+    ".dohc/files.toml": "It can't read .dohc/files.toml. Fix the file, then try again.",
+    ".dohc/visibility.toml": "It can't read .dohc/visibility.toml. Fix the file, then try again.",
+    ".dohc/files.toml and .dohc/visibility.toml":
+      "It can't read .dohc/files.toml and .dohc/visibility.toml. Fix the files, then try again.",
+    ".dohc": "It can't read this workspace's .dohc folder. Fix the folder, then try again.",
+    "path-not-admitted": "History no longer tracks this file. Track it in .dohc/files.toml, then try again.",
+    "*": null,
+  },
+  // A .dohc/manifest.json dohc will not adopt. Its message names the
+  // parser's reason, for Copy details only. "Its" and "it" are the folder
+  // the caller's sentence names.
+  WorkspaceManifestError: {
+    unreadable: "dohc can't read its .dohc/manifest.json. Fix the file, then try again.",
+    "newer-version": NEWER_DOHC,
+    "*": null,
+  },
   // The file system's codes. A plain error with no listed code keeps its
   // message, because dohc writes those for people.
   Error: {
@@ -135,7 +159,7 @@ export const UNKNOWN_ERROR_WORDS = "dohc could not finish that.";
 // A bare code such as `invalid-input` or `EACCES`, or one that leads a message.
 const RAW_CODE = /^(?:\S*[-_]\S*|[A-Z0-9]{3,})$|^[A-Z][A-Z0-9_]+: /;
 const IPC_PREFIX = /^Error invoking remote method '[^']*': /;
-const CLASS_PREFIX = /^((?:[A-Z][A-Za-z0-9]*)?Error)(?: \[([^\]\s]+)\])?: /;
+const CLASS_PREFIX = /^((?:[A-Z][A-Za-z0-9]*)?Error)(?: \[([^\]\s]+)\])?(?: \[retryAfterMs=(\d{1,15})\])?: /;
 
 // The engine client's `wireCode`, the dataset worker's `code`, the compiler's
 // `reason`.
@@ -147,13 +171,25 @@ function codeOf(error: Error): string | null {
   return null;
 }
 
-/** Main's IPC boundary: keeps the error's code in the one string Electron sends. */
+// How long the error says to wait before trying again, as a Collection's dataset worker sets it.
+function retryAfterOf(error: Error): number | null {
+  const value: unknown = Reflect.get(error, "retryAfterMs");
+  return Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : null;
+}
+
+// The class, the code, and the wait, as the wire carries them before the message.
+function wireName(error: Error, code: string): string {
+  const wait = retryAfterOf(error);
+  return `${error.name} [${code}]${wait === null ? "" : ` [retryAfterMs=${wait}]`}`;
+}
+
+/** Main's IPC boundary: keeps the error's code and wait in the one string Electron sends. */
 export function ipcWireError(error: unknown): unknown {
   if (!(error instanceof Error)) return error;
   const code = codeOf(error);
   if (code === null) return error;
   const wire = new Error(error.message, { cause: error });
-  wire.name = `${error.name} [${code}]`;
+  wire.name = wireName(error, code);
   return wire;
 }
 
@@ -164,7 +200,7 @@ function parse(error: unknown) {
     const code = codeOf(error);
     text = error.name === "Error" && code === null
       ? error.message
-      : `${error.name}${code === null ? "" : ` [${code}]`}: ${error.message}`;
+      : `${code === null ? error.name : wireName(error, code)}: ${error.message}`;
   }
   text = text.replace(IPC_PREFIX, "").trim();
   const match = CLASS_PREFIX.exec(text);
@@ -172,11 +208,13 @@ function parse(error: unknown) {
     text,
     name: match?.[1] ?? "Error",
     code: match?.[2],
+    retryAfterMs: match?.[3] === undefined ? undefined : Number(match[3]),
     message: (match ? text.slice(match[0].length) : text).trim(),
   };
 }
 
 export interface ReadError {
+  title?: string;
   /** What a person reads, or null when only the caller's sentence applies. */
   words: string | null;
   /**
@@ -190,6 +228,9 @@ export interface ReadError {
 
 export function readError(error: unknown): ReadError {
   const { text, name, code, message } = parse(error);
+  if (name === "ReservedWorkspaceIdError") {
+    return { title: RESERVED_WORKSPACE_ID_TITLE, words: message, mapped: false, cause: text };
+  }
   const plain = name === "Error" && code === undefined;
   const entry = ERROR_WORDS[name];
   const lead = message.split(": ")[0];
@@ -215,9 +256,43 @@ export function withErrorWords(sentence: string, error: unknown): string {
     : words || sentence;
 }
 
+/** A Collection that waits before it reopens, because reopening it kept failing: the supervisor's words and its wait. */
+export function readCollectionReopenWait(error: unknown): { words: string; waitMs: number } | null {
+  const { name, code, retryAfterMs, message } = parse(error);
+  return name === "DatasetReopenWaitError" && code === "dataset_reopen_wait" && retryAfterMs !== undefined
+    ? { words: message, waitMs: retryAfterMs } : null;
+}
+
+/** A refusal only a newer dohc can get past, so Try again would do nothing. */
+export function needsNewerDohc(error: unknown): boolean {
+  return readError(error).words === NEWER_DOHC;
+}
+
 /** The engine refuses reads this way while it reads a new workspace's files. */
 export function isWorkspaceUpdatingError(error: unknown): boolean {
   const { name, code, message } = parse(error);
   return name === "DaemonRefusalError" && code === "OVERLOADED" &&
     ERROR_WORDS.DaemonRefusalError?.[message] === UPDATING;
+}
+
+/** A share's refusal of a write: the file is read-only inside dohc, not on disk. */
+export function isShareReadOnlyRefusal(error: unknown): boolean {
+  const { name, code } = parse(error);
+  return name === "SharedFileReadOnlyError" || (name === "DaemonRefusalError" && code === "SHARE_READ_ONLY");
+}
+
+/** The engine refuses to move, delete or restore a shared live file this way. */
+export function isSharedLiveFileRefusal(error: unknown): boolean {
+  return parse(error).name === "LiveDocumentMutationError";
+}
+
+/** Access and connection failures can hide a changed grant behind an IPC error. */
+export function shouldRecheckShareAccess(error: unknown): boolean {
+  const { name, code, message } = parse(error);
+  if (["RelayUnauthorizedError", "RelayClaimRefusedError", "RelayWorkspaceUnavailableError",
+    "RelayUnreachableError", "SharedFileReadOnlyError", "ShareUnavailableError", "TimeoutError", "NetworkError"].includes(name)) return true;
+  if (name === "DaemonRefusalError" && code !== undefined &&
+    ["AUTH_FAILED", "FORBIDDEN", "SHARE_UNAVAILABLE", "SHARE_READ_ONLY", "SHARE_OPERATION_REJECTED",
+      "SESSION_EXPIRED", "WORKSPACE_UNAVAILABLE", "IDENTITY_NOT_RECOGNIZED"].includes(code)) return true;
+  return /\b(?:unauthorized|forbidden|authorization failed|does not have Edit access|access to this share (?:ended|changed)|shared file session changed|share is no longer available|network (?:error|request failed|failure)|fetch failed|failed to fetch|ECONN\w*|ENOTFOUND|ETIMEDOUT)\b|Share request failed \((?:401|403|404)\)/i.test(message);
 }

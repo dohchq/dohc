@@ -25,7 +25,8 @@ async function open(detail: WorkspaceEngineMomentDetail) {
     nextGrantCursor: null, nextBeforeCursor: null});
   vi.stubGlobal("dohcDesktop", {readEngineMoment: vi.fn().mockResolvedValue({moment}), ownerRestore});
   render(<EngineMomentDiffPage workspaceId="workspace" tabPath={momentDiffTabPath(moment.id)}
-    onBeforeRestore={async () => noop} onOpenFile={noop} onPathResolved={noop} registerActiveUndo={noop} onRestored={noop} onStopAndRestore={stopAndRestore} />);
+    onBeforeRestore={async () => noop} onOpenFile={noop} onPathResolved={noop} registerActiveUndo={noop} onRestored={noop} onStopAndRestore={stopAndRestore} onError={noop} onSettled={noop}
+    historyAnswer={null} onReopenRestore={noop} restoreRequested={false} onRestoreRequestTaken={noop} />);
   await screen.findByTestId("engine-diff-restore-file");
   return {moment, ownerRestore};
 }
@@ -36,6 +37,20 @@ it("opens shared restore for the text detail produced by the real IPC mapper", a
   fireEvent.click(screen.getByTestId("engine-diff-shared-restore"));
   await screen.findByTestId("owner-restore-dialog");
   expect(ownerRestore).toHaveBeenCalledWith({workspaceId: "workspace", action: "options", path: "docs/a.md"});
+});
+
+it("offers Copy your version on a recovery change only, and copies the kept file whole", async () => {
+  await open(textDetail);
+  expect(screen.queryByRole("button", {name: "Copy your version"})).toBeNull();
+  cleanup();
+  const writeText = vi.fn(async (_text: string) => undefined);
+  Object.defineProperty(navigator, "clipboard", {configurable: true, value: {writeText}});
+  for (const origin of ["capture-recovery", "capture-recovery-cleared"] as const) {
+    await open({protected: false, moment: {...base, metadata: {origin}, payload: {before: {...text, text: "# Plan\n\nKept typing.\n"}, after: text}}});
+    fireEvent.click(screen.getByRole("button", {name: "Copy your version"}));
+    await vi.waitFor(() => expect(writeText).toHaveBeenLastCalledWith("# Plan\n\nKept typing.\n"));
+    cleanup();
+  }
 });
 
 it("does not offer shared restore for a binary Markdown path", async () => {

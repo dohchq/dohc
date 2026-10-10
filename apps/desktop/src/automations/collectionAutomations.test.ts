@@ -10,6 +10,7 @@ import type { CollectionQueryFilter, CollectionRecord } from "@dohc/workspace-co
 import type { AutomationClaim, AutomationClaimMessage, AutomationGroupHandover, AutomationGroupRelayRecord, ChangeAttributionWire } from "@dohc/workspace-engine-client";
 import type { RelayAutomationHost, RelayButtonAuthority } from "@dohc/workspace-contracts/relay";
 import { derivedRecordId } from "@dohc/automation-executor/record-ids";
+import { AutomationRunWait } from "@dohc/automation-executor/button-presser";
 import { AUTOMATION_SWITCHED_OFF_BODY } from "@dohc/automation-executor/automation-failed-notice";
 import { parseReachHandover } from "@dohc/automation-executor/reach-verdicts";
 import { collectionRecordWrites } from "@dohc/automation-executor/collection-record-edits";
@@ -88,6 +89,8 @@ async function world(options: {
   evaluator?: AutomationFormulaEvaluator;
   deadline?: (abort: () => void) => () => void;
   withRecordWrites?: (signal: AbortSignal, events: string[]) => Promise<void>;
+  /** A controlled wake when testing a released claim. The engine RPC itself emits none. */
+  onClaimReleased?: (claim: AutomationClaim) => void;
   /** The engine gives no answer to settles until this is set false. */
   unanswered?: { settle: boolean };
   /** The engine refuses the next settle this many times: its recovery took the claim back. */
@@ -417,6 +420,7 @@ async function world(options: {
       pending.push(claim);
       events.push(`released ${claimId}`);
       wake();
+      options.onClaimReleased?.(claim);
       return claim;
     },
   };
@@ -2253,6 +2257,42 @@ describe("Collection automations", () => {
     expect(w.switchedOff).toEqual([]);
   });
 
+  it("retries a capacity-released recipient press without other workspace activity", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let preparations = 0;
+    const w = await world({
+      automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid by: '=person.id'}}]\n" },
+      withRecordWrites: async () => {
+        if (++preparations === 1) throw new AutomationRunWait("The shared file is busy. Try again.", "busy");
+      },
+    });
+    try {
+      const invoice = w.addRecord("Tasks", "invoice", {});
+      await w.executor.open();
+      const definitionHash = await hashOf(w.executor, "Tasks", "paid");
+      const relayed = await w.relayPress(w.executor, {
+        automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash,
+        recordId: invoice.id, pressId: "capacity-press", pressedBy: "user-ana", confirmed: [],
+      }, () => undefined);
+      if (relayed.pressed.busy) throw Error("Expected a claim");
+      const claim = w.claims.get(relayed.pressed.claimId)!;
+      await w.until(() => w.events.includes(`released ${claim.claimId}`));
+      expect(claim.state).toBe("pending");
+      expect(w.fieldsOf(invoice)).toEqual({});
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(preparations).toBe(1);
+      expect(claim.state).toBe("pending");
+      await vi.advanceTimersByTimeAsync(1);
+      await w.settledClaim(claim);
+      expect(claim.state).toBe("done");
+      expect(preparations).toBe(2);
+      expect(w.fieldsOf(invoice)).toEqual({ "Paid by": "user-ana" });
+    } finally {
+      await w.executor.dispose();
+      vi.useRealTimers();
+    }
+  });
+
   it("leaves a claim for the next drain when the evaluator is busy", async () => {
     let calls = 0;
     const w = await world({
@@ -2361,6 +2401,28 @@ describe("Collection automations", () => {
     expect(w.fieldsOf(task).Note).toBe("link");
     const [listed] = (await w.executor.runs("collection:Tasks#note")).runs;
     expect(listed!.trigger).toEqual({ kind: "changed", recordId: task.id, by: null, sharedAuthor: link, depth: 0 });
+  });
+
+  it.each(["record-added", '{starts-matching: record.Status == "Done"}'])("keeps the recipient author and person for a creation's %s run", async when => {
+    const rules = `  - id: null-person\n    name: Null person\n    when: ${when}\n    if: person == null\n    do: [{set: {Note: Should not run}}]\n  - id: who\n    name: Who\n    when: ${when}\n    do: [{set: {Note: '=person == null ? trigger.author.kind : person.id + ":" + trigger.author.userId'}}]\n`;
+    const w = await world({ automations: { Tasks: rules } });
+    const guarded = w.addRecord("Tasks", "guarded", { Status: "Done" });
+    const namedRecord = w.addRecord("Tasks", "named", { Status: "Done" });
+    const linkRecord = w.addRecord("Tasks", "link", { Status: "Done" });
+    const named = { kind: "named" as const, userId: "user-ana", grantId: "grant-ana", grantGeneration: 2 };
+    const link = { kind: "link" as const, principalId: "holder-1", grantId: "grant-link", grantGeneration: 2 };
+    const namedChange = { kind: "added" as const, actorKind: null, onBehalfOf: named.userId, sharedAuthor: named };
+    const claims = [
+      w.claim("collection:Tasks#null-person", guarded, namedChange),
+      w.claim("collection:Tasks#who", namedRecord, namedChange),
+      w.claim("collection:Tasks#who", linkRecord, { kind: "added", actorKind: null, onBehalfOf: null, sharedAuthor: link }),
+    ];
+    await w.executor.open();
+    for (const claim of claims) await w.settledClaim(claim);
+    expect(claims.map(claim => claim.state)).toEqual(["done", "done", "done"]);
+    expect(w.fieldsOf(guarded).Note).toBeUndefined();
+    expect(w.fieldsOf(namedRecord).Note).toBe("user-ana:user-ana");
+    expect(w.fieldsOf(linkRecord).Note).toBe("link");
   });
 
   const ITEMS = "  - id: tick\n    name: Tick\n    when: {field-changed: Status}\n    do:\n      - find: 'true'\n        collection: Items\n        as: items\n      - set: {Count: '=record.Count + 1'}\n        records: items\n";
@@ -3569,10 +3631,9 @@ describe("Collection automations", () => {
     for (const automation of await readdir(folder)) {
       for (const file of await readdir(join(folder, automation))) {
         if (!file.endsWith(".json")) continue;
-        const saved = JSON.parse(await readFile(join(folder, automation, file), "utf8")) as { definitionHash: string };
+        const saved = JSON.parse((await readFile(join(folder, automation, file), "utf8")).split("\n")[0]!) as { definitionHash: string };
         if (saved.definitionHash !== hashA) continue;
         await rm(join(folder, automation, file));
-        await rm(join(folder, automation, file.replace(/\.json$/, ".progress.jsonl")), { force: true });
       }
     }
     // A comes back, and a restart under it is confirmed.
@@ -6071,6 +6132,358 @@ describe("Collection automations that a Group message starts", () => {
       await gone.w.executor.automationsIn("Log");
       expect(await retried(gone.w, gone.claim)).toBe(LOST_COLLECTION_ERROR);
       expect(gone.w.authored).toEqual([]);
+    });
+
+    it.each(["saved plans", "roster", "host", "verdicts"] as const)("reports a moved relayed press while reading %s", async (reading) => {
+      const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid by: '=person.id'}}]\n" } });
+      const invoice = w.addRecord("Tasks", "invoice", {});
+      const reached = Promise.withResolvers<void>();
+      const resume = Promise.withResolvers<void>();
+      let heldRead = false;
+      let paused = false;
+      const pause = async (at: typeof reading) => {
+        if (at !== reading || !heldRead || paused) return;
+        paused = true;
+        reached.resolve();
+        await resume.promise;
+      };
+      const executor = w.makeExecutor({
+        store: { ...w.baseStore, runsOf: async (...args) => {
+          if ([...w.claims.values()].some(claim => claim.state === "running")) heldRead = true;
+          await pause("saved plans");
+          return w.baseStore.runsOf(...args);
+        } },
+        roster: async () => { await pause("roster"); return OWNER; },
+        groupHost: async () => { await pause("host"); return heldRead && reading === "verdicts" ? 1 : 0; },
+        reachRelayRecord: async generation => { await pause("verdicts"); return { generation: generation!, reach: null, everShared: false }; },
+      });
+      onTestFinished(async () => { resume.resolve(); await executor.dispose(); });
+      await executor.open();
+      const paid = await hashOf(executor, "Tasks", "paid");
+      const relayed = await w.relayPress(executor,
+        { automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: paid, recordId: invoice.id, pressId: "relay-read", pressedBy: "user-ana", confirmed: [] }, () => undefined);
+      if (relayed.pressed.busy) throw new Error("Expected a claim");
+      await reached.promise;
+      await w.renameCollection("Tasks", "Shared/Tasks", false);
+      executor.handleWatcherEvents(["collection.yaml", "automations.yaml"].flatMap(name => [
+        { operation: "delete" as const, path: `Tasks/${name}` },
+        { operation: "update" as const, path: `Shared/Tasks/${name}` },
+      ]));
+      await executor.automationsIn("Shared/Tasks");
+      expect(await executor.whereIs("collection:Tasks#paid")).toBe("Shared/Tasks");
+      resume.resolve();
+      const claim = await w.settledClaim(w.claims.get(relayed.pressed.claimId)!);
+      expect(claim).toMatchObject({ state: "failed", error: "This Collection moved after the button was pressed. Press it again." });
+      expect(w.fieldsOf(invoice)).toEqual({});
+      expect(w.journaled).toEqual([]);
+    });
+
+    it.each(["schema", "roster", "verdicts", "failed store"] as const)("reports a moved shared Button while inspecting its %s", async (reading) => {
+      const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid by: '=person.id'}}]\n" } });
+      const reached = Promise.withResolvers<void>();
+      const resume = Promise.withResolvers<void>();
+      let armed = false;
+      let storeFailed = false;
+      let paused = false;
+      let hash = "";
+      const pause = async (at: typeof reading) => {
+        if (at !== reading || !armed || paused) return;
+        paused = true;
+        reached.resolve();
+        await resume.promise;
+      };
+      const executor = w.makeExecutor({
+        resolveButtonInspection: async () => ({ workspaceId: "workspace", userId: "user-ana", grantId: "g-ana", grantGeneration: 1, hostGeneration: 1,
+          principals: [], confirmed: [], automationId: "paid", collectionPath: "Tasks", definitionHash: hash, recordId: "invoice" }),
+        readText: async path => {
+          const text = await readFile(join(w.root, path), "utf8");
+          if (path === "Tasks/collection.yaml") await pause("schema");
+          return { text, truncated: false, contentHash: sha256(text) };
+        },
+        roster: async () => { await pause(reading === "failed store" ? "failed store" : "roster"); return OWNER; },
+        withDatasetHost: async () => { if (storeFailed) throw new Error("Store failed"); return null; },
+      });
+      onTestFinished(async () => { resume.resolve(); await executor.dispose(); });
+      await executor.open();
+      hash = await hashOf(executor, "Tasks", "paid");
+      if (reading === "verdicts") {
+        const runnable = executor as unknown as { runnableButtonState: (...args: unknown[]) => Promise<unknown> };
+        const run = runnable.runnableButtonState.bind(executor);
+        vi.spyOn(runnable, "runnableButtonState").mockImplementation(async (...args) => {
+          const state = await run(...args);
+          await pause("verdicts");
+          return state;
+        });
+      }
+      armed = true;
+      const inspected = executor.inspectRelayed("inspection");
+      await reached.promise;
+      await w.renameCollection("Tasks", "Shared/Tasks", false);
+      storeFailed = reading === "failed store";
+      executor.handleWatcherEvents(["collection.yaml", "automations.yaml"].flatMap(name => [
+        { operation: "delete" as const, path: `Tasks/${name}` },
+        { operation: "update" as const, path: `Shared/Tasks/${name}` },
+      ]));
+      await expect.poll(() => executor.locate("collection:Tasks#paid")?.collectionPath).toBe("Shared/Tasks");
+      if (storeFailed) expect((executor as unknown as { datasetStoreFailed: boolean }).datasetStoreFailed).toBe(true);
+      resume.resolve();
+      await expect(inspected).resolves.toEqual({ kind: "denied", reason: "This Collection moved. Its files will update here soon." });
+      expect(w.journaled).toEqual([]);
+    });
+
+
+    it.each(["presser", "presser delete", "write", "new press", "inspection", "admission"] as const)("reports a moved Collection at the %s boundary", async boundary => {
+      const reached = Promise.withResolvers<void>();
+      const resume = Promise.withResolvers<void>();
+      let armed = false, paused = false;
+      const pause = async () => {
+        if (!armed || paused) return;
+        paused = true; reached.resolve(); await resume.promise;
+      };
+      const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid by: '=person.id'}}]\n" },
+        withRecordWrites: boundary === "write" ? pause : undefined });
+      const invoice = w.addRecord("Tasks", "invoice", {});
+      let hash = "";
+      const authority = () => ({ workspaceId: "workspace", userId: "user-ana", grantId: "g-ana", grantGeneration: 1, hostGeneration: 1,
+        principals: [], confirmed: [], automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: hash, recordId: invoice.id });
+      let relayReads = 0;
+      const executor = w.makeExecutor({
+        resolveRelayedPress: async () => {
+          relayReads++;
+          if (boundary === "new press" && relayReads === 2 || boundary.startsWith("presser") && [...w.claims.values()].some(c => c.state === "running")) await pause();
+          return authority();
+        },
+        roster: async () => { if (boundary === "inspection") await pause(); return OWNER; },
+        groupHost: async () => { if (boundary === "admission") await pause(); return 0; },
+      });
+      onTestFinished(async () => { resume.resolve(); await executor.dispose(); });
+      await executor.open();
+      hash = await hashOf(executor, "Tasks", "paid");
+      armed = true;
+      const pressing = executor.pressRelayed({ automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: hash,
+        recordId: invoice.id, pressId: "boundary", pressedBy: "user-ana", confirmed: [] }, () => undefined);
+      // Admission failures are observed immediately, including before the barrier resumes.
+      const answered = pressing.then(value => ({ value }), error => ({ error }));
+      await reached.promise;
+      const deleted = boundary === "presser delete";
+      if (deleted) await w.removeCollection("Tasks");
+      else await w.renameCollection("Tasks", "Shared/Tasks", false);
+      executor.handleWatcherEvents(["collection.yaml", "automations.yaml"].flatMap(name => [
+        { operation: "delete" as const, path: `Tasks/${name}` },
+        ...(deleted ? [] : [{ operation: "update" as const, path: `Shared/Tasks/${name}` }]),
+      ]));
+      await executor.automationsIn(deleted ? "Tasks" : "Shared/Tasks");
+      resume.resolve();
+      const answer = await answered;
+      const moved = "This Collection moved after the button was pressed. Press it again.";
+      if (boundary === "new press" || boundary === "inspection" || boundary === "admission") {
+        expect(answer).toEqual({ error: new Error(moved) });
+      } else {
+        if ("error" in answer) throw answer.error;
+        if (answer.value.pressed.busy) throw new Error("Expected a claim");
+        const claim = await w.settledClaim(w.claims.get(answer.value.pressed.claimId)!);
+        if (deleted) {
+          expect(claim.state).toBe("done");
+          await expect(executor.relayedClaim({ automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: hash, pressId: "boundary" }))
+            .resolves.toMatchObject({ settled: { outcome: "ended", error: null } });
+        }
+        else expect(claim).toMatchObject({ state: "failed", error: moved });
+      }
+      expect(w.fieldsOf(invoice)).toEqual({});
+      expect(w.journaled).toEqual([]);
+    });
+
+
+    it.each(["release wake", "second press", "delete"] as const)("releases a relayed press during a transient index gap with %s", async wakeBy => {
+      let wakeRelease = () => {};
+      const w = await world({ collections: ["Tasks", "Other"], onClaimReleased: () => wakeRelease(), automations: { Other: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: yes}}]\n", Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: yes}}]\n" } });
+      const invoice = w.addRecord("Tasks", "invoice", {});
+      const other = w.addRecord("Other", "other", {});
+      const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+      const indexReached = Promise.withResolvers<void>(), indexResume = Promise.withResolvers<void>();
+      let paused = false, indexing = false;
+      const executor = w.makeExecutor({
+        store: { ...w.baseStore, runsOf: async (...args) => {
+          if (!paused && [...w.claims.values()].some(c => c.state === "running")) {
+            paused = true; reached.resolve(); await resume.promise;
+          }
+          return w.baseStore.runsOf(...args);
+        } },
+        pathExists: async path => {
+          if (indexing && path === "Tasks/dataset.json") { indexReached.resolve(); await indexResume.promise; }
+          return stat(join(w.root, path)).then(() => true, () => false);
+        },
+      });
+      onTestFinished(async () => { resume.resolve(); indexResume.resolve(); await executor.dispose(); });
+      await executor.open();
+      const hash = await hashOf(executor, "Tasks", "paid");
+      const receipt = await w.relayPress(executor, { automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: hash,
+        recordId: invoice.id, pressId: "transient-index", pressedBy: "user-ana", confirmed: [] }, () => undefined);
+      if (receipt.pressed.busy) throw new Error("Expected a claim");
+      const claim = w.claims.get(receipt.pressed.claimId)!;
+      await reached.promise;
+      if (wakeBy === "delete") await w.removeCollection("Tasks");
+      else await w.renameCollection("Tasks", "Shared/Tasks", false);
+      indexing = true;
+      executor.handleWatcherEvents(["collection.yaml", "automations.yaml"].flatMap(name => [
+        { operation: "delete" as const, path: `Tasks/${name}` },
+        ...(wakeBy === "delete" ? [] : [{ operation: "update" as const, path: `Shared/Tasks/${name}` }]),
+      ]));
+      await indexReached.promise;
+      expect(executor.locate(claim.automationId)).toBeNull();
+      if (wakeBy === "release wake") wakeRelease = () => { wakeRelease = () => {}; executor.notifyClaimed(); };
+      resume.resolve();
+      await expect.poll(() => w.events.includes(`released ${claim.claimId}`) || claim.state === "done").toBe(true);
+      expect(claim.state).toBe("pending");
+      expect(w.events).toContain(`released ${claim.claimId}`);
+      if (wakeBy !== "release wake") {
+        const pressed = await executor.press({ collectionPath: "Other", field: "Mark paid", recordId: other.id, pressId: "mid-reread",
+          pressedBy: "user-ice", confirmed: [], by: { kind: "human" } }, () => undefined);
+        if (pressed.busy) throw new Error("Expected a second claim");
+        await w.settledClaim(w.claims.get(pressed.claimId)!);
+      }
+      await expect.poll(() => w.events.filter(event => event === `released ${claim.claimId}`).length >= 2 || claim.state === "done").toBe(true);
+      expect(claim.state).toBe("pending");
+      indexResume.resolve();
+      await w.settledClaim(claim);
+      if (wakeBy === "delete") expect(claim).toMatchObject({ state: "done" });
+      else expect(claim).toMatchObject({ state: "failed", error: "This Collection moved after the button was pressed. Press it again." });
+      expect(w.fieldsOf(invoice)).toEqual({});
+    });
+
+    it.each(["move", "delete"] as const)("classifies a skipped trigger read after a Collection %s", async change => {
+      const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: yes}}]\n" } });
+      const invoice = w.addRecord("Tasks", "invoice", {});
+      const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+      const read = w.engine.getCollectionRecord;
+      let paused = false;
+      w.engine.getCollectionRecord = async input => {
+        if (!paused && [...w.claims.values()].some(c => c.state === "running")) {
+          paused = true; reached.resolve(); await resume.promise;
+        }
+        return read(input);
+      };
+      const executor = w.makeExecutor();
+      onTestFinished(async () => { resume.resolve(); await executor.dispose(); });
+      await executor.open();
+      const hash = await hashOf(executor, "Tasks", "paid");
+      const receipt = await w.relayPress(executor, { automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: hash,
+        recordId: invoice.id, pressId: "trigger-read", pressedBy: "user-ana", confirmed: [] }, () => undefined);
+      if (receipt.pressed.busy) throw new Error("Expected a claim");
+      await reached.promise;
+      if (change === "move") await w.renameCollection("Tasks", "Shared/Tasks", false);
+      else await w.removeCollection("Tasks");
+      executor.handleWatcherEvents(["collection.yaml", "automations.yaml"].flatMap(name => [
+        { operation: "delete" as const, path: `Tasks/${name}` },
+        ...(change === "move" ? [{ operation: "update" as const, path: `Shared/Tasks/${name}` }] : []),
+      ]));
+      await executor.automationsIn(change === "move" ? "Shared/Tasks" : "Tasks");
+      resume.resolve();
+      const claim = await w.settledClaim(w.claims.get(receipt.pressed.claimId)!);
+      expect(claim).toMatchObject(change === "move"
+        ? { state: "failed", error: "This Collection moved after the button was pressed. Press it again." }
+        : { state: "done" });
+      await expect(executor.relayedClaim({ automationId: "collection:Tasks#paid", collectionPath: "Tasks",
+        definitionHash: hash, pressId: "trigger-read" }))
+        .resolves.toMatchObject({ settled: { outcome: change === "move" ? "failed" : "ended" } });
+      expect(w.journaled).toEqual([]);
+    });
+
+    it("reports a move during remembered press lookup without changing the press identity", async () => {
+      const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: yes}}]\n" } });
+      const invoice = w.addRecord("Tasks", "invoice", {});
+      await w.executor.open();
+      const input = { collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "remembered",
+        pressedBy: "user-ana", by: { kind: "human" as const }, confirmed: [] };
+      const receipt = await w.executor.press(input, () => undefined);
+      if (receipt.busy) throw new Error("Expected a claim");
+      await w.settledClaim(w.claims.get(receipt.claimId)!);
+      const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+      const executor = w.makeExecutor();
+      onTestFinished(async () => { resume.resolve(); await executor.dispose(); });
+      await executor.open();
+      const lookup = w.engine.getAutomationClaim;
+      let paused = false;
+      w.engine.getAutomationClaim = async input => {
+        const result = await lookup(input);
+        if (!paused && "key" in input && input.key === "press:remembered") { paused = true; reached.resolve(); await resume.promise; }
+        return result;
+      };
+      const pressing = executor.press(input, () => undefined);
+      const answered = pressing.then(value => ({ value }), error => ({ error }));
+      await reached.promise;
+      await w.renameCollection("Tasks", "Shared/Tasks", false);
+      executor.handleWatcherEvents(["collection.yaml", "automations.yaml"].flatMap(name => [
+        { operation: "delete" as const, path: `Tasks/${name}` }, { operation: "update" as const, path: `Shared/Tasks/${name}` },
+      ]));
+      await executor.automationsIn("Shared/Tasks");
+      resume.resolve();
+      expect(await answered).toEqual({ error: new Error("This Collection moved after the button was pressed. Press it again.") });
+      expect(w.claims.size).toBe(1);
+    });
+
+    it.each([false, true])("refuses undo when its source Collection moves during the saved-run read, lost destination=%s", async lostDestination => {
+      const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do:\n      - set: {Paid: yes}\n" + (lostDestination ? "      - add-record: {Title: Log entry}\n        collection: Log\n" : "") } });
+      const invoice = w.addRecord("Tasks", "invoice", {});
+      const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+      let armed = false, paused = false;
+      const executor = w.makeExecutor({ store: { ...w.baseStore, runsOf: async (...args) => {
+        if (armed && !paused && (executor as unknown as { changing: Set<string> }).changing.has(args[1]!)) { paused = true; reached.resolve(); await resume.promise; }
+        return w.baseStore.runsOf(...args);
+      } } });
+      onTestFinished(async () => { resume.resolve(); await executor.dispose(); });
+      await executor.open();
+      const pressed = await executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "undo-move",
+        pressedBy: "user-ana", by: { kind: "human" }, confirmed: [] }, () => undefined);
+      if (pressed.busy) throw new Error("Expected a claim");
+      await w.settledClaim(w.claims.get(pressed.claimId)!);
+      armed = true;
+      const undoing = executor.undo({ automationId: "collection:Tasks#paid", claimId: pressed.claimId, deletes: null }, async () => undefined);
+      await reached.promise;
+      await w.renameCollection("Tasks", "Shared/Tasks", false);
+      if (lostDestination) await w.removeCollection("Log");
+      executor.handleWatcherEvents(["collection.yaml", "automations.yaml"].flatMap(name => [
+        { operation: "delete" as const, path: `Tasks/${name}` }, { operation: "update" as const, path: `Shared/Tasks/${name}` },
+        ...(lostDestination ? [{ operation: "delete" as const, path: `Log/${name}` }] : []),
+      ]));
+      await executor.automationsIn("Shared/Tasks");
+      const writes = w.journaled.length;
+      resume.resolve();
+      await expect(undoing).resolves.toEqual({ status: "refused", reason: "This Collection moved. Open it where it is now. Undo this run there." });
+      expect(w.journaled).toHaveLength(writes);
+      expect(w.fieldsOf(invoice)).toEqual({ Paid: "yes" });
+      if (!lostDestination) {
+        await expect(executor.undo({ automationId: "collection:Tasks#paid", claimId: pressed.claimId, deletes: null }, async () => undefined))
+          .resolves.toMatchObject({ status: "undone", reverted: 1 });
+        expect(w.fieldsOf(invoice)).toEqual({ Paid: null });
+      }
+    });
+
+    it.each(["move", "delete"] as const)("settles a local claim correctly after a %s during admission", async change => {
+      const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: record-added\n    do: [{set: {Paid: yes}}]\n" } });
+      const invoice = w.addRecord("Tasks", "invoice", {});
+      const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+      let paused = false;
+      const executor = w.makeExecutor({ store: { ...w.baseStore, runsOf: async (...args) => {
+        if (!paused && [...w.claims.values()].some(c => c.state === "running")) { paused = true; reached.resolve(); await resume.promise; }
+        return w.baseStore.runsOf(...args);
+      } } });
+      onTestFinished(async () => { resume.resolve(); await executor.dispose(); });
+      const claim = w.claim("collection:Tasks#paid", invoice, { kind: "added", fields: [] });
+      await executor.open();
+      await reached.promise;
+      if (change === "move") await w.renameCollection("Tasks", "Shared/Tasks", false);
+      else await w.removeCollection("Tasks");
+      executor.handleWatcherEvents(["collection.yaml", "automations.yaml"].flatMap(name => [
+        { operation: "delete" as const, path: `Tasks/${name}` },
+        ...(change === "move" ? [{ operation: "update" as const, path: `Shared/Tasks/${name}` }] : []),
+      ]));
+      await executor.automationsIn(change === "move" ? "Shared/Tasks" : "Tasks");
+      resume.resolve();
+      await w.settledClaim(claim);
+      expect(claim.state).toBe("done");
+      expect(w.events).toContain(`released ${claim.claimId}`);
+      expect(w.journaled.map(write => write.path)).toEqual(change === "move" ? ["Shared/Tasks/invoice.md"] : []);
     });
 
     it("runs a relayed press that waited only while its Collection is where the relay allowed it", async () => {

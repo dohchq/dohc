@@ -84,6 +84,19 @@ describe("RendererWorkspaceSessionOwner", () => {
     expect(renderer.destroyedListenerCount()).toBe(1);
   });
 
+  it("counts each session a renderer is admitted, not each reopen of the same one", async () => {
+    const sessions = owner();
+    const renderer = sender(7);
+    expect(sessions.admittedCount(renderer.value)).toBe(0);
+
+    await sessions.open(renderer.value, physical("workspace-a"), "document-1");
+    await sessions.open(renderer.value, physical("workspace-a"), "document-1");
+    expect(sessions.admittedCount(renderer.value)).toBe(1);
+    await sessions.open(renderer.value, physical("workspace-b"), "document-1");
+    expect(sessions.admittedCount(renderer.value)).toBe(2);
+    expect(sessions.admittedCount(sender(8).value)).toBe(0);
+  });
+
   it("replaces a renderer lease when the same workspace id has a new attachment", async () => {
     const retireWorkspace = vi.fn(async () => undefined);
     const sessions = owner({ retireWorkspace });

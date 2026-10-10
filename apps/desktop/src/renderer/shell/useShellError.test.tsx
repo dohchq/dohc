@@ -4,6 +4,7 @@ import { StrictMode, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ipcErrorMessage } from "../ipcError";
 import { useShellError } from "./useShellError";
+import { shareCaptureNoticeState } from "../../workspaces/shareCaptureNotice";
 import { CreationPartialError } from "@dohc/cli/creation";
 import { errorDetails } from "./copyDetails";
 
@@ -14,6 +15,64 @@ const strict = ({ children }: { children: ReactNode }) => (
 );
 
 describe("useShellError", () => {
+  it("hides only the persisted dismissal's matching restriction key", () => {
+    const snapshot = { paths: ["tasks/local.yaml"], unchecked: false, checked: 1 };
+    const dismissed = { ...snapshot, dismissedKey: shareCaptureNoticeState([], snapshot, false).key };
+    const { result } = renderHook(() => useShellError("restriction-dismissal-key"));
+    act(() => result.current.reportShareCapture("share", [], dismissed, false));
+    expect(result.current.shellErrors).toHaveLength(0);
+    act(() => result.current.reportShareCapture("share", [], dismissed, true));
+    expect(result.current.shellErrors).toHaveLength(1);
+    expect(result.current.shellErrors[0]!.message).toContain("They are kept on this computer.");
+    expect(result.current.shellErrors[0]!.seen).toBe(false);
+    act(() => result.current.reportShareCapture("share", [], {
+      ...snapshot, dismissedKey: shareCaptureNoticeState([], snapshot, true).key,
+    }, true));
+    expect(result.current.shellErrors).toHaveLength(0);
+  });
+
+  it("keeps a dismissed capture Notice dismissed across remounts until the path set changes", () => {
+    const first = renderHook(() => useShellError("capture-notice-workspace"));
+    const paths = ["tasks/locked.md", "tasks/another.md"];
+    act(() => first.result.current.reportShareCapture("share-a", paths));
+    const notice = first.result.current.shellErrors[0]!;
+    expect(notice.identity).toBe("share-capture:capture-notice-workspace:share-a");
+    expect(notice.title).toBe("Changes kept on this computer");
+    expect(notice.message).toBe("dohc couldn't confirm these changes reached the share. They are kept on this computer. Copy these files to another workspace.");
+    expect(notice.message).not.toContain(paths[0]);
+    expect(errorDetails(notice.details!)).toContain("File: tasks/another.md\nFile: tasks/locked.md");
+    act(() => first.result.current.hideShellError(notice.id));
+    act(() => first.result.current.reportShareCapture("share-a", [...paths].reverse()));
+    expect(first.result.current.shellErrors[0]).toMatchObject({ id: notice.id, seen: true });
+    act(() => first.result.current.dismissShellError(notice.id));
+    act(() => first.result.current.reportShareCapture("share-a", [...paths, paths[0]!]));
+    expect(first.result.current.shellErrors).toHaveLength(0);
+    first.unmount();
+    const reopened = renderHook(() => useShellError("capture-notice-workspace"));
+    act(() => reopened.result.current.reportShareCapture("share-a", paths));
+    expect(reopened.result.current.shellErrors).toHaveLength(0);
+    act(() => reopened.result.current.reportShareCapture("share-a", [paths[0]!]));
+    expect(reopened.result.current.shellErrors).toHaveLength(1);
+    expect(reopened.result.current.shellErrors[0]!.seen).toBe(false);
+    act(() => reopened.result.current.reportShareCapture("share-a", []));
+    expect(reopened.result.current.shellErrors).toHaveLength(0);
+    act(() => reopened.result.current.reportShareCapture("share-a", null));
+    expect(reopened.result.current.shellErrors).toHaveLength(1);
+    expect(reopened.result.current.shellErrors[0]!.message).toBe("dohc couldn't check this share's files. Copy any files you changed to another workspace now.");
+    expect(reopened.result.current.shellErrors[0]!.details).toBeUndefined();
+    act(() => reopened.result.current.reportShareCapture("share-a", [], { paths: ["tasks/draft.md"], unchecked: true, checked: 0 }));
+    expect(reopened.result.current.shellErrors).toHaveLength(1);
+    expect(reopened.result.current.shellErrors[0]!.message).toBe("dohc checked only some of this share's files. dohc couldn't confirm these changes reached the share. They are kept on this computer. Copy these files and any others you changed to another workspace now.");
+    expect(reopened.result.current.shellErrors[0]!.details).toEqual([["File", "tasks/draft.md", "tasks/draft.md".length]]);
+  });
+
+  it("describes a partial check with no names without claiming changes exist", () => {
+    const { result } = renderHook(() => useShellError("partial-empty-share"));
+    act(() => result.current.reportShareCapture("share", [], { paths: [], unchecked: true, checked: 256 }, false));
+    expect(result.current.shellErrors[0]).toMatchObject({ title: "Share check incomplete",
+      message: "dohc checked only some of this share's files. Copy any files you changed to another workspace now.", details: undefined });
+  });
+
   it.each([true, false])("keeps separate partial creations and replaces only the retried creation (record: %s)", record => {
     const { result } = renderHook(() => useShellError("ws-a"));
     const firstRetry = vi.fn();
@@ -231,6 +290,50 @@ describe("useShellError", () => {
     act(() => result.current.reportShellFailure({ message: "Saved copy is stale." }));
     rerender({ id: "ws-b" });
     expect(result.current.shellErrors).toEqual([]);
+  });
+
+  it("replaces a repeated failure's row and keeps that row's toast, open or closed", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    act(() => result.current.reportShellFailure({ message: "Could not load History.", identity: "about-history:a.md" }));
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);
+    // Still open: the repeat keeps it open, as one row.
+    act(() => result.current.reportShellFailure({ message: "Could not load History.", identity: "about-history:a.md", repeat: true }));
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);
+    // Closed by the person: the repeat does not toast again.
+    act(() => result.current.hideShellError(result.current.shellErrors[0]!.id));
+    act(() => result.current.reportShellFailure({ message: "Could not load History.", identity: "about-history:a.md", repeat: true }));
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([true]);
+    // Another file's first failure is a toast of its own, repeat or not.
+    act(() => result.current.reportShellFailure({ message: "Could not load History.", identity: "about-history:b.md", repeat: true }));
+    expect(result.current.shellErrors.map((error) => [error.identity, error.seen])).toEqual([
+      ["about-history:a.md", true], ["about-history:b.md", false],
+    ]);
+  });
+
+  it("toasts a repeat again once Try again or Dismiss has removed its row", () => {
+    const retry = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const report = () => result.current.reportShellFailure({
+      message: "Could not load History.", identity: "about-history:a.md", retry, repeat: true,
+    });
+    act(report);
+    act(() => result.current.hideShellError(result.current.shellErrors[0]!.id));
+    // Try again removes the row, then reads; the read fails again.
+    act(() => result.current.retryShellError(result.current.shellErrors[0]!.id));
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(result.current.shellErrors).toEqual([]);
+    act(report);
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);
+    // Dismissed, then failing again: a toast, not a quiet row.
+    act(() => result.current.dismissShellError(result.current.shellErrors[0]!.id));
+    act(report);
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);
+  });
+
+  it("still files a sync failure that asks for no toast quietly when it has no predecessor", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    act(() => result.current.reportSyncFailure({ message: "Sync stopped.", detail: "relay", toast: false }, vi.fn()));
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([true]);
   });
 
   it("shows words instead of Electron's prefix, a class name or a code, and keeps them for Copy", () => {

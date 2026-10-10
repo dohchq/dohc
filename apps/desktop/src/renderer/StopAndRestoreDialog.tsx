@@ -1,9 +1,12 @@
+import { retainedCollectionFieldWritePaths } from "./collections/recordFieldWrites";
+import { retainedOrphanedDraftPaths } from "./orphanedDrafts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { StopAndRestoreResult, StopAndRestoreTarget } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { Overlay } from "./Overlay";
 import { DangerButton, PrimaryButton, SecondaryButton } from "./ui/controls";
 import { useRequestSequence } from "./useRequestSequence";
+import { restoreRulesUnreadableWords } from "./workbench/HistoryPolicyStates";
 
 // Stop and restore (ADR 0013): the owner picks a person they shared this
 // workspace with, or an Edit share link, and confirms once. dohc stops that
@@ -234,7 +237,7 @@ export function StopAndRestoreDialog({
   };
 
   const stop = (): Promise<void> => perform(stopFallback(), "stop", async (token) => {
-    const result = await bridge().stopAndRestore({ workspaceId, target: chosen.target });
+    const result = await bridge().stopAndRestore({ workspaceId, target: chosen.target, reviewPaths: [...new Set([...retainedCollectionFieldWritePaths(workspaceId), ...retainedOrphanedDraftPaths(workspaceId)])] });
     if (result.status === "waiting") {
       if (request.isCurrent(token)) setState((current) => ({ kind: "waiting", targets: listedTargets(current) }));
       return;
@@ -275,26 +278,43 @@ export function StopAndRestoreDialog({
 
   const undo = (): Promise<void> => perform("dohc could not undo the restore.", "undo", async (token) => {
     const restored = receipts.get(workspaceId, chosen.target);
-    if (restored.length > 0) {
-      await bridge().undoStopAndRestore({ workspaceId, restoredMomentIds: restored.map((file) => file.restoredMomentId) });
-    }
-    receipts.set(workspaceId, chosen.target, []);
+    const result = restored.length > 0
+      ? await bridge().undoStopAndRestore({ workspaceId, reviewPaths: [...new Set([...retainedCollectionFieldWritePaths(workspaceId), ...retainedOrphanedDraftPaths(workspaceId)])], restoredMomentIds: restored.map((file) => file.restoredMomentId) })
+      : { files: [], errorMessage: null };
+    const completed = new Set(result.files.flatMap(file => file.kind === "restored" ? [file.momentId] : []));
+    receipts.set(workspaceId, chosen.target, restored.filter(file => !completed.has(file.restoredMomentId)));
     onRestored();
-    // The row's Try again would restore the files again without asking.
-    onSettled(identity);
     const last = receipts.shown(workspaceId, chosen.target);
     const runs = receipts.runs(workspaceId, chosen.target);
+    const putBack = [...(last?.undone ? last.result.restored : []), ...restored.filter(file => completed.has(file.restoredMomentId))];
+    const review = new Map(last?.result.review.map(file => [file.path, file]) ?? []);
+    const originals = new Map(restored.map(file => [file.restoredMomentId, file]));
+    for (const file of result.files) {
+      const original = originals.get(file.momentId);
+      if (!original) continue;
+      if (file.kind === "restored") review.delete(original.path);
+      else if (file.kind === "rules-unreadable") {
+        review.set(original.path, { path: original.path, reason: "rules-unreadable", unreadable: file.unreadable });
+      } else review.set(original.path, { path: original.path, reason: "restore-refused", detail: file.detail });
+    }
+    const reviewed = [...review.values()].sort((left, right) => left.path.localeCompare(right.path));
     const outcome = {
       result: last
-        ? { ...last.result, restored }
+        ? { ...last.result, restored: putBack, review: reviewed }
         : {
-            status: "restored" as const, restored, review: [], runsLeft: 0, runsUndone: runs.runsUndone, fieldsMissing: runs.fieldsMissing,
+            status: "restored" as const, restored: putBack, review: reviewed, runsLeft: 0, runsUndone: runs.runsUndone, fieldsMissing: runs.fieldsMissing,
             runChangesKept: runs.otherKept + runs.fieldsMissing,
             keptFields: [], wroteAutomations: false, sendsMessages: false, unfinished: null,
           },
       undone: true,
     };
     receipts.show(workspaceId, chosen.target, outcome);
+    if (result.errorMessage !== null) {
+      onError("dohc could not undo the restore.", new Error(result.errorMessage), () => onRetry(workspaceId, chosen, "undo"), identity);
+    } else {
+      // Remove the retry notice after Undo finishes.
+      onSettled(identity);
+    }
     if (request.isCurrent(token)) setState((current) => ({ kind: "done", targets: listedTargets(current), ...outcome }));
   });
 
@@ -333,7 +353,7 @@ export function StopAndRestoreDialog({
       {state.kind === "done" ? <Outcome words={words} result={state.result} undone={state.undone} onOpenFile={onOpenFile} onOpenCollection={onOpenCollection} /> : null}
       <div className="mt-4 flex justify-end gap-2">
         <SecondaryButton onClick={onClose}>{state.kind === "choose" ? "Cancel" : "Close"}</SecondaryButton>
-        {state.kind === "done" && !state.undone && state.result.restored.length > 0 ? (
+        {state.kind === "done" && receipts.get(workspaceId, chosen.target).length > 0 ? (
           <SecondaryButton data-testid="stop-and-restore-undo" onClick={() => void undo()}>Undo</SecondaryButton>
         ) : null}
         {state.kind === "choose" ? (
@@ -415,6 +435,9 @@ function Outcome({ words, result, undone, onOpenFile, onOpenCollection }: {
   return (
     <div className="mt-3 space-y-3" data-testid="stop-and-restore-outcome">
       <p className="m-0 text-[13px] text-ink">{undone ? words.undone(files) : words.stopped(files)}</p>
+      {!undone && result.restored.some(file => file.removed) ? <p className="m-0 text-[13px] text-muted">
+        Removed {plural(result.restored.filter(file => file.removed).length, "created file", "created files")}.
+      </p> : null}
       {result.unfinished?.step === "files" && !undone ? (
         <p className="m-0 text-[13px] text-ink">dohc has not finished restoring files.</p>
       ) : null}
@@ -511,7 +534,8 @@ function Outcome({ words, result, undone, onOpenFile, onOpenCollection }: {
 }
 
 function reviewReason(file: Restored["review"][number], after: string): string {
-  if (file.reason === "changed-since") return `Someone changed it after ${after}.`;
+  if (file.reason === "changed-since") return `${file.changedBy ?? "Another author"} changed it after ${after}.`;
   if (file.reason === "folder-in-use") return "This Collection holds files someone else added.";
+  if (file.reason === "rules-unreadable") return restoreRulesUnreadableWords(file.unreadable);
   return `dohc could not restore it. ${file.detail}`;
 }

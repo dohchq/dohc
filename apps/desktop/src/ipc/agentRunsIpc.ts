@@ -18,7 +18,7 @@ export function createAgentRunsIpc<
   Sender,
   Event extends { sender: Sender },
   Workspace extends RegistryEntry,
-  Operation extends { readonly workspace: Workspace & { readonly attachmentId: symbol }; assertCurrent(): void },
+  Operation extends { readonly workspace: Workspace & { readonly attachmentId: symbol }; readonly signal: AbortSignal; assertCurrent(): void },
 >(dependencies: {
   registerHandler(channel: string, handler: (event: Event, payload: unknown) => unknown): void;
   assertTrustedSender(event: Event): void;
@@ -42,7 +42,7 @@ export function createAgentRunsIpc<
   chatDispatchService: Pick<ChatDispatchService, "stopAgentRun" | "dispatchStateForThread" | "resumeThreadDispatch" | "runnerSelfTest">;
   assertWritableWorkspace(workspace: Workspace): void;
   openWorkspaceActivity(workspace: Workspace): Promise<unknown>;
-  detectAgentTools(workspaceRoot: string): Promise<AgentToolsResult["tools"]>;
+  detectAgentTools(workspaceRoot: string, signal: AbortSignal): Promise<AgentToolsResult["tools"]>;
 }) {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
@@ -98,7 +98,7 @@ export function createAgentRunsIpc<
         "Agent detection stopped because this window changed workspaces.",
         async (operation) => AgentToolsResult.parse({
           workingDirectory: operation.workspace.rootPath,
-          tools: await dependencies.detectAgentTools(operation.workspace.rootPath),
+          tools: await dependencies.detectAgentTools(operation.workspace.rootPath, operation.signal),
         }));
     });
     // Enabling agents starts a local run: the workspace must already be open (the

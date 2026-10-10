@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { posix } from "node:path";
-import { DATASET_METADATA_MAX_BYTES, datasetDefinitionDigestContent, parseDatasetDefinition, parseDatasetRevision } from "@dohc/security-contract/dataset";
+import { datasetBaseFolder, DATASET_METADATA_MAX_BYTES, parseDatasetDefinition, parseDatasetRevision } from "@dohc/security-contract/dataset";
 import {
   MAX_AUTOMATIONS_FILE_BYTES,
   parseAutomationsFile,
@@ -8,7 +7,7 @@ import {
   type AutomationsFileParseResult,
 } from "@dohc/workspace-contracts/automations";
 import { pathCollisionKey } from "../pathCollisionKey";
-import { parseCollectionRecordFields, parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
+import { parseCollectionRecordIdentity, parseCollectionRecordFields, parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
 import { collectionVersionError } from "@dohc/workspace-contracts/collection";
 import { stableJsonStringify } from "../canonicalJson";
 import { notFound, relayError, RelayError } from "../errors";
@@ -217,6 +216,10 @@ export function commitCollectionWrite(
       throw new CollectionWriteStaleError(path, currentFile(storage, workspaceId, path)?.blobSha256 ?? null);
     }
     checkBases(storage, workspaceId, decision.write);
+    if (decision.write.kind === "new-record") {
+      checkRecordCreation(storage, workspaceId, decision.write, writer.kind === "link"
+        ? suppliedBytes(writer.content) : storedBytes(storage, workspaceId, decision.write));
+    }
 
     let addedBytes = 0;
     let principalId: string | null = null;
@@ -279,6 +282,24 @@ export function commitCollectionWrite(
 
 function changesOf(write: CollectionWrite): ProposedChange[] {
   return write.kind === "new-collection" ? write.changes : [write.change];
+}
+
+function checkRecordCreation(
+  storage: StorageContext, workspaceId: string,
+  write: Extract<CollectionWrite, { kind: "new-record" }>, bytesOf: ContentBytes,
+): void {
+  const schema = currentFile(storage, workspaceId, `${write.collectionPath}/${COLLECTION_SCHEMA_FILE}`);
+  const schemaText = schema && priorText(storage, workspaceId, schema.blobSha256);
+  if (!schemaText || schemaText === "unreadable" || parseCollectionSchema(schemaText).status !== "valid") {
+    throw refusal("This Collection does not have a current document schema.");
+  }
+  const bytes = bytesOf(write.change.afterBlobSha256!, write.change.afterByteLength!);
+  const id = bytes && parseCollectionRecordIdentity(utf8(bytes) ?? "");
+  if (!id) throw refusal("This record needs a valid record ID.");
+  if (storage.db.prepare(`SELECT 1 FROM sync_relay_current_record_ids
+    WHERE workspace_id = ? AND version_id = ? AND record_id = ? LIMIT 1`).get(workspaceId, MAIN_VERSION_ID, id)) {
+    throw refusal("The sync relay could not create this record. Choose a new name and record ID, then try again.");
+  }
 }
 
 // What a submit id stands for. The client's own clock is left out: the
@@ -448,7 +469,6 @@ type CachedDatasetDescriptor = {
   blobSha256: string;
   expiresAtMs: number;
   datasetId: string;
-  definitionSha256: string;
   approval?: { revisionSha256: string; canSwitch: boolean };
 };
 const datasetDescriptors = new WeakMap<StorageContext, Map<string, CachedDatasetDescriptor>>();
@@ -476,7 +496,6 @@ function datasetDescriptor(storage: StorageContext, workspaceId: string, folder:
     blobSha256: descriptor.blobSha256,
     expiresAtMs: now + DATASET_PREFLIGHT_CACHE_MS,
     datasetId: definition.datasetId,
-    definitionSha256: createHash("sha256").update(datasetDefinitionDigestContent(definition)).digest("hex"),
   };
   cache.delete(key);
   if (cache.size >= DATASET_PREFLIGHT_CACHE_ENTRIES) {
@@ -497,8 +516,7 @@ function approvedDatasetFolder(storage: StorageContext, workspaceId: string, fol
     const revisionSha256 = createHash("sha256").update(revisionJson).digest("hex");
     if (descriptor.approval?.revisionSha256 === revisionSha256) return descriptor.approval.canSwitch;
     const approved = parseDatasetRevision(JSON.parse(revisionJson));
-    const canSwitch = approved.datasetId === descriptor.datasetId && posix.dirname(approved.definition.schemaPath) === folder
-      && descriptor.definitionSha256 === approved.definitionSha256;
+    const canSwitch = approved.datasetId === descriptor.datasetId && datasetBaseFolder(approved.definition) === folder;
     descriptor.approval = { revisionSha256, canSwitch };
     return canSwitch;
   } catch { return false; }

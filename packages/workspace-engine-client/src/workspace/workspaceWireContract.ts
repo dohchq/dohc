@@ -31,6 +31,7 @@ export const WORKSPACE_METHOD = {
   searchQueryPage: "search.queryPage",
   searchQueryChatMessagesGranular: "search.queryChatMessagesGranular",
   watcherStatus: "watcher.status",
+  captureClearRecovery: "capture.clearRecovery",
   keptCopiesList: "keptCopies.list",
   keptCopiesSave: "keptCopies.save",
   captureFlush: "capture.flush",
@@ -438,6 +439,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.searchQueryPage]: SearchQueryPageParams;
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]: SearchQueryChatMessagesGranularParams;
   [WORKSPACE_METHOD.watcherStatus]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.captureClearRecovery]: WorkspaceJsonObject & { momentId: string };
   [WORKSPACE_METHOD.keptCopiesList]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.keptCopiesSave]: WorkspaceJsonObject & { id: number };
   [WORKSPACE_METHOD.captureFlush]: WorkspaceEmptyParams;
@@ -1014,6 +1016,8 @@ const CaptureFlushResultSchema = mutableStruct({
 });
 
 const automationClaimFields = {
+  /** The claim whose automation write triggered this run, when present. */
+  parentClaimId: Schema.optionalKey(Schema.NonEmptyString),
   claimId: Schema.NonEmptyString,
   automationId: Schema.NonEmptyString,
   /**
@@ -1252,7 +1256,15 @@ const WorkspaceResultSchemas = {
     noAtomicPlacement: Schema.Boolean,
     recoveryUnavailable: Schema.Boolean,
     keptFiles: Schema.Array(Schema.Tuple([Schema.String, Schema.String])),
+    captureRecoveries: Schema.mutable(Schema.Array(mutableStruct({
+      momentId: Schema.NonEmptyString,
+      versionId: Schema.NonEmptyString,
+      objectId: Schema.NonEmptyString,
+      path: Schema.NonEmptyString,
+      captureMomentId: Schema.NonEmptyString,
+    }))),
   }),
+  [WORKSPACE_METHOD.captureClearRecovery]: mutableStruct({ cleared: Schema.Boolean }),
   [WORKSPACE_METHOD.keptCopiesList]: mutableStruct({
     keptCopies: Schema.mutable(
       Schema.Array(

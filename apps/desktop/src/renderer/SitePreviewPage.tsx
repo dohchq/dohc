@@ -13,7 +13,8 @@ import {
 } from "lucide-react";
 import { needsBuiltArtifact, presentBuildOutput } from "@dohc/workspace-core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { IconButton, SecondaryButton } from "./ui/controls";
+import { EmptyState, IconButton, SecondaryButton } from "./ui/controls";
+import { SkeletonRows } from "./ui/SkeletonRows";
 import { useDismiss } from "./ui/useDismiss";
 import type {
   SitePackageInfo,
@@ -25,8 +26,9 @@ import { bridge } from "./bridge";
 import { openLinkExternally } from "./linkActivation";
 import { isLoopbackOrigin } from "../security/loopback";
 import { APP_CHECK_FALLBACK_MESSAGE } from "./appCopy";
-import { OwnerAppPublication } from "./OwnerAppPublication";
+import { OwnerAppEntry, OwnerAppPublication } from "./OwnerAppPublication";
 import { ipcErrorMessage } from "./ipcError";
+import { withErrorWords } from "../ipc/errorWords";
 
 const APP_MISSING_MESSAGE = "This app is no longer part of the workspace.";
 // Shown through the shell's error hook, with Try again.
@@ -237,6 +239,10 @@ export function SitePreviewPage(props: {
   // whichever one is set), so one field is the whole state instead of two
   // booleans that can only ever disagree by construction.
   const [idleReason, setIdleReason] = useState<"exited" | "stopped" | null>(null);
+  // Counts changes to this app's approval on this device, from either
+  // publication control, so the page entry reads the approval again.
+  const [localApprovals, setLocalApprovals] = useState(0);
+  const localApprovalChanged = useCallback(() => setLocalApprovals((value) => value + 1), []);
   const autoStartKeyRef = useRef<string | null>(null);
   const loadRequestRef = useRef(0);
   const previewStartRequestRef = useRef(0);
@@ -300,7 +306,8 @@ export function SitePreviewPage(props: {
       if (!isCurrent()) return;
       setLoad({
         status: "error",
-        message: ipcErrorMessage(error, "Could not load this app."),
+        // The pane shows only this line, so it says what failed itself.
+        message: withErrorWords("dohc could not load this app.", error),
       });
     }
   }, [props.workspaceId, props.siteRoot, siteContext]);
@@ -718,7 +725,7 @@ export function SitePreviewPage(props: {
           ) : null}
           {!props.sharedView && site?.authority.kind === "workspace" ? (
             <OwnerAppPublication workspaceId={props.workspaceId} appRoot={props.siteRoot} reportError={props.reportError}
-              onShareSource={props.onShareSite ? () => props.onShareSite?.({ paths: [props.siteRoot], label: site.title }) : undefined} />
+              onLocalChange={localApprovalChanged} onShareSource={props.onShareSite ? () => props.onShareSite?.({ paths: [props.siteRoot], label: site.title }) : undefined} />
           ) : null}
           {modes.length > 0 ? (
             <details
@@ -781,23 +788,13 @@ export function SitePreviewPage(props: {
       </header>
 
       {load.status === "loading" ? (
-        <div className="flex flex-1 items-center justify-center text-sm text-subtle">
-          Loading app…
-        </div>
+        <SkeletonRows layout="panel" label="Loading app…" />
       ) : load.status === "missing" ? (
-        <EmptyState
-          title="App not detected"
-          body="dohc no longer detects an app in this folder."
-          onUnpin={props.onUnpin}
-        />
+        <AppGone words="dohc no longer detects an app in this folder." onUnpin={props.onUnpin} />
       ) : load.status === "error" ? (
-        <EmptyState title="Could not load app" body={load.message} />
+        <EmptyState icon={AlertTriangle} tone="danger" title={load.message} />
       ) : load.status === "ready" && !site ? (
-        <EmptyState
-          title="App not detected"
-          body={APP_MISSING_MESSAGE}
-          onUnpin={props.onUnpin}
-        />
+        <AppGone words={APP_MISSING_MESSAGE} onUnpin={props.onUnpin} />
       ) : site ? (
         <>
           {site.diagnostics.length > 0 || actionError ? (
@@ -858,7 +855,9 @@ export function SitePreviewPage(props: {
           {!preview ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
               <Globe2 size={24} aria-hidden className="text-subtle" />
-              <div className="max-w-sm text-sm text-muted">
+              {needsPublication ? <OwnerAppEntry workspaceId={props.workspaceId} appRoot={props.siteRoot} reportError={props.reportError}
+                reload={localApprovals} onLocalChange={localApprovalChanged}
+                onShareSource={props.onShareSite ? () => props.onShareSite?.({ paths: [props.siteRoot], label: site.title }) : undefined} /> : <div className="max-w-sm text-sm text-muted">
                 {modes.length > 0
                   ? idleReason === "exited"
                     ? "Dev server exited. Use Preview options to run it again."
@@ -867,11 +866,8 @@ export function SitePreviewPage(props: {
                     : runningMode
                     ? `Starting ${modeLabel(runningMode).toLowerCase()} preview…`
                     : "This app did not start automatically. Choose another mode in Preview options."
-                  : needsPublication ? "Review this app to open it on this device or publish it to a shared link."
                   : "This app has no previewable entry, dev script, or build output yet."}
-              </div>
-              {needsPublication ? <OwnerAppPublication workspaceId={props.workspaceId} appRoot={props.siteRoot} triggerLabel="Review and open app" reportError={props.reportError}
-                onShareSource={props.onShareSite ? () => props.onShareSite?.({ paths: [props.siteRoot], label: site.title }) : undefined} /> : null}
+              </div>}
               {idleReason === "exited" && previewLogs.length > 0 ? (
                 <LogsDetails
                   logs={previewLogs}
@@ -912,17 +908,15 @@ function LogsDetails(props: {
   );
 }
 
-function EmptyState(props: { title: string; body: string; onUnpin?: (() => void) | undefined }) {
+// The folder no longer holds this app. A pinned tab can let it go.
+function AppGone(props: { words: string; onUnpin?: (() => void) | undefined }) {
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
-      <AlertTriangle size={20} aria-hidden className="text-warning" />
-      <span className="text-sm text-ink">{props.title}</span>
-      <span className="max-w-sm text-xs text-muted">{props.body}</span>
+    <EmptyState icon={Globe2} title={props.words}>
       {props.onUnpin ? (
-        <SecondaryButton data-testid="site-preview-unpin" onClick={props.onUnpin} className="mt-1">
+        <SecondaryButton data-testid="site-preview-unpin" onClick={props.onUnpin}>
           Unpin
         </SecondaryButton>
       ) : null}
-    </div>
+    </EmptyState>
   );
 }

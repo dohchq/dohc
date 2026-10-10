@@ -20,6 +20,7 @@ import type {
 import {
   DaemonRefusalError,
   VersionedLiveAdapter,
+  WorkspaceDaemonRequester,
   type AgentAuthor,
   type WriteAuthor,
   type CollectionPendingAdoptionCursor,
@@ -38,6 +39,9 @@ import {
 } from "@dohc/workspace-engine-client";
 import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
+import { z } from "zod";
+import type { ShareUnconfirmedChanges, ShareViewSelector } from "./shareViewInfo";
+import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import {
   EngineWorkspaceSessions,
   type AttachedEngineWorkspace,
@@ -46,12 +50,11 @@ import {
   type ShareMountEngineWorkspace,
 } from "@dohc/workspace-engine-client/daemon";
 
-// A manifest rebuild after a version switch costs one unsettled pass, so this
-// budget is generous by two orders of magnitude. It is bounded rather than
-// unbounded because a workspace under genuinely continuous mutation can keep
-// missing quiescence, and that must still surface as an error rather than hang.
+// Match the desktop relay pull's 30-second request deadline.
+const FLUSH_SETTLE_BUDGET_MS = 30_000;
 const FLUSH_SETTLE_ATTEMPTS = 50;
 const FLUSH_SETTLE_POLL_MS = 20;
+const ShareDeliveryStatus = z.object({ state: z.enum(["accepted", "pending", "refused"]) });
 
 // Every `VersionedTextStoreErrorCode`. The engine writes its domain code
 // verbatim into the wire MESSAGE (`map_runtime`,
@@ -143,6 +146,7 @@ export interface CaptureTextFileMetadata {
 }
 
 export type CaptureVersionedTextStore = VersionedTextStore & {
+  listUnconfirmedSharePaths(input: { workspaceId: string; shareId: string; grantedSelector: ShareViewSelector }): Promise<ShareUnconfirmedChanges>;
   // Preflight the author of the following rename or delete.
   checkMove(input: { workspaceId: string; versionId: string; path: string; author?: MomentWriteAuthor }): Promise<void>;
   listPendingCollectionAdoptions?(input?: {
@@ -155,6 +159,7 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
   }): Promise<CaptureTextFileMetadata[]>;
   listHistoryPage(input: {
     workspaceId: string;
+    objectId?: string;
     limit?: number;
     beforeMomentOrder?: number;
   }): Promise<{
@@ -221,7 +226,8 @@ function momentMetadataFromOrigin(
   supplied?: ActorNeutralWriteMetadata,
 ): MomentMetadata {
   const metadata = metadataFromOrigin(origin, supplied);
-  return origin === "ydoc" ? { ...metadata, origin } : metadata;
+  return origin === "ydoc" || origin === "capture-recovery" || origin === "capture-recovery-cleared"
+    ? { ...metadata, origin } : metadata;
 }
 
 function snapshotFromWire(
@@ -265,10 +271,12 @@ function authorFromWire(author: NonNullable<MomentRecord["authors"]>[number]): M
       "Engine moment contains corrupt author provenance.",
     );
   }
+  if (author.kind === "unattributed") return { kind: "unattributed" };
   if (author.kind === "human") {
     return {
       kind: "human",
       humanId: author.humanId,
+      ...(author.humanName !== undefined ? { humanName: author.humanName } : {}),
       ...(author.onBehalfOf !== undefined ? { onBehalfOf: author.onBehalfOf } : {}),
     };
   }
@@ -277,6 +285,9 @@ function authorFromWire(author: NonNullable<MomentRecord["authors"]>[number]): M
     return { kind: "named", userId: author.userId, grantId: author.grantId, grantGeneration: author.grantGeneration };
   }
   if (author.kind === "link") {
+    if ("publicPrincipalId" in author) {
+      return { kind: "link", publicPrincipalId: author.publicPrincipalId, label: author.label };
+    }
     return { kind: "link", grantId: author.grantId, grantGeneration: author.grantGeneration, principalId: author.principalId };
   }
   if (author.kind === "automation") {
@@ -607,6 +618,7 @@ function captureAuthor(author: MomentWriteAuthor): AgentAuthor {
 export function createCaptureLiveStores(
   workspace: AttachedEngineWorkspace | ShareMountEngineWorkspace,
   sessions: EngineWorkspaceSessions,
+  captureWaitSignal?: AbortSignal,
 ): CaptureLiveStores {
   const adapters = new WeakMap<object, Map<string, VersionedLiveAdapter>>();
   if (workspace.shareMount !== true) {
@@ -643,6 +655,21 @@ export function createCaptureLiveStores(
       async (binding) => await operation(adapterFor(binding)),
       { ...options, retryTransportErrors: true },
     );
+  }
+
+  async function waitForCapture<T>(operation: () => Promise<T>): Promise<T> {
+    const signal = captureWaitSignal;
+    signal?.throwIfAborted();
+    if (!signal) return await operation();
+    let rejectAbort!: (reason: unknown) => void;
+    const cancelled = new Promise<never>((_resolve, reject) => {rejectAbort = reject;});
+    const abort = () => rejectAbort(signal.reason);
+    signal.addEventListener("abort", abort, {once: true});
+    try {
+      return await Promise.race([operation(), cancelled]);
+    } finally {
+      signal.removeEventListener("abort", abort);
+    }
   }
 
   async function runRawMutation<T>(
@@ -856,6 +883,40 @@ export function createCaptureLiveStores(
   }
 
   const store = {
+    async listUnconfirmedSharePaths(input: { workspaceId: string; shareId: string; grantedSelector: ShareViewSelector }): Promise<ShareUnconfirmedChanges> {
+      return sessions.run(workspace, async binding => {
+        const adapter = adapterFor(binding);
+        const rows = (await adapter.listTextFileMetadata({ workspaceId: input.workspaceId, versionId: input.grantedSelector.versionId ?? "main" }))
+          .filter(row => classifyEngineFilePath(row.path).kind === "tracked"
+            && input.grantedSelector.paths.some(path => row.path === path || row.path.startsWith(`${path}/`))
+            && !(row.metadataOrigin === "sync" && row.latestMomentId.startsWith("moment-share-")));
+        const requester = new WorkspaceDaemonRequester(binding.client);
+        const paths: string[] = [];
+        // Bound the one-time check; owner-pull heads need no receipt query.
+        const deadline = Date.now() + 1_000;
+        let checked = 0;
+        for (let offset = 0; offset < rows.length; offset += 256) {
+          const remainingMs = deadline - Date.now();
+          if (offset === 8_192 || remainingMs <= 0) return { paths, unchecked: true, checked };
+          const batch = rows.slice(offset, offset + 256).map(row => row.path);
+          try {
+            const statuses = z.record(z.string(), ShareDeliveryStatus).parse(
+              await requester.request("share.direct.statuses", { ...input, grantedSelector: { ...input.grantedSelector }, paths: batch },
+                { workspace: binding.workspace, deadlineMs: remainingMs }),
+            );
+            for (const path of batch) {
+              const status = statuses[path];
+              if (!status) return { paths, unchecked: true, checked };
+              checked += 1;
+              if (status.state !== "accepted") paths.push(path);
+            }
+          } catch {
+            return { paths, unchecked: true, checked };
+          }
+        }
+        return { paths, unchecked: false, checked };
+      });
+    },
     ensureMainVersion: (input: { workspaceId: string }) =>
       runMutation(async (adapter) => await adapter.ensureMainVersion(input)),
     getMainVersion: (input: { workspaceId: string }) =>
@@ -1006,6 +1067,7 @@ export function createCaptureLiveStores(
       versionId: string;
       path: string;
       expectedObjectId?: string;
+      expectedSha256?: string;
       onlyIfAbsentOnDisk?: boolean;
       requestId?: string;
       metadata: ActorNeutralWriteMetadata;
@@ -1131,6 +1193,7 @@ export function createCaptureLiveStores(
 
     async listHistoryPage(input: {
       workspaceId: string;
+      objectId?: string;
       limit?: number;
       beforeMomentOrder?: number;
     }) {
@@ -1361,45 +1424,69 @@ export function createCaptureLiveStores(
     },
 
     async flushCapture() {
-      // `settled: false` is not an error. The daemon documents it as "state
-      // not comparable" — a layer down, a teardown race, or a workspace under
-      // continuous mutation — and expects the caller to poll. Every Rust-side
-      // consumer does (`flush_until_settled`); this one threw on the first
-      // unsettled answer.
-      //
-      // That made a normal sequence fail in the user's face. A version switch
-      // whose pre-switch reconcile saw change calls `request_manifest_refresh`,
-      // which bumps the driver's refresh epoch, so the next pass classifies the
-      // layer as PolicyChanged and drops it to rebuild the manifest — one
-      // deliberate unsettled pass, `running: false` with `degraded: false`.
-      // A second switch straight after the first therefore threw
-      // "did not settle" at whoever asked for it.
-      let outcome = await runRead(async (adapter) => await adapter.flushCapture());
-      if (!outcome.settled) {
-        const status = await runRead(async (adapter) => await adapter.watcherStatus());
-        if (status.phase === "starting" || status.phase === "importing") {
-          throw new DaemonRefusalError(
-            {
-              code: "OVERLOADED",
-              message: "Workspace is still updating. Try again.",
-              retry: "afterBackoff",
-            },
-            undefined,
-          );
+      captureWaitSignal?.throwIfAborted();
+      const deadline = performance.now() + FLUSH_SETTLE_BUDGET_MS;
+      let finished = false;
+      const didNotSettle = () => new Error(
+        `Engine capture for ${workspace.workspaceId} did not settle.`,
+      );
+      const assertActive = () => {
+        captureWaitSignal?.throwIfAborted();
+        if (finished) throw didNotSettle();
+      };
+      const request = <T>(operation: (adapter: VersionedLiveAdapter) => Promise<T>) => {
+        assertActive();
+        return runRead(adapter => {
+          assertActive();
+          return operation(adapter);
+        });
+      };
+      const settle = async () => {
+        // A manifest rebuild after switching versions needs an unsettled pass.
+        // Capture events report path progress or initial readiness, not quiescence.
+        let outcome = await request(adapter => adapter.flushCapture());
+        if (!outcome.settled) {
+          const status = await request(adapter => adapter.watcherStatus());
+          if (status.phase === "starting" || status.phase === "importing") {
+            throw new DaemonRefusalError(
+              {
+                code: "OVERLOADED",
+                message: "Workspace is still updating. Try again.",
+                retry: "afterBackoff",
+              },
+              undefined,
+            );
+          }
         }
-      }
-      for (
-        let attempt = 0;
-        !outcome.settled && attempt < FLUSH_SETTLE_ATTEMPTS;
-        attempt += 1
-      ) {
-        await delay(FLUSH_SETTLE_POLL_MS);
-        outcome = await runRead(async (adapter) => await adapter.flushCapture());
-      }
-      if (!outcome.settled) {
-        throw new Error(
-          `Engine capture for ${workspace.workspaceId} did not settle.`,
-        );
+        for (let attempt = 0; !outcome.settled && attempt < FLUSH_SETTLE_ATTEMPTS; attempt += 1) {
+          assertActive();
+          // Do not leave a poll scheduled beyond the total deadline.
+          await delay(Math.min(FLUSH_SETTLE_POLL_MS, Math.max(0, deadline - performance.now())), undefined, {
+            signal: captureWaitSignal,
+          }).catch(error => {
+            captureWaitSignal?.throwIfAborted();
+            throw error;
+          });
+          outcome = await request(adapter => adapter.flushCapture());
+        }
+        if (!outcome.settled) throw didNotSettle();
+      };
+      // Session binding and recovery also consume the same budget.
+      let timer!: ReturnType<typeof setTimeout>;
+      const expired = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(didNotSettle()), Math.max(0, deadline - performance.now()));
+      });
+      try {
+        await waitForCapture(() => Promise.race([settle(), expired]));
+      } catch (error) {
+        captureWaitSignal?.throwIfAborted();
+        if (error instanceof DaemonRefusalError && error.wireCode === "DEADLINE_EXCEEDED") {
+          throw didNotSettle();
+        }
+        throw error;
+      } finally {
+        finished = true;
+        clearTimeout(timer);
       }
     },
 

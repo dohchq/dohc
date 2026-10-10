@@ -1,12 +1,13 @@
+import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import { Suspense } from "react";
 import { LazySourceCodeEditor } from "./LazySourceCodeEditor";
 import type { PendingTextUndo } from "./fileEditorUndo";
 import type { SharedLocalDocument } from "./sharedLocalDocument";
+import { SkeletonRows } from "./ui/SkeletonRows";
 import { StateMark } from "./ui/StateMark";
 import {
   useAutosavedTextDraft,
   type DraftFlush,
-  type SaveState,
 } from "./useAutosavedTextDraft";
 
 export function TextEditorView({
@@ -89,13 +90,7 @@ export function TextEditorView({
           className="ml-auto"
         />
       </div>
-      <Suspense
-        fallback={
-          <div className="flex min-h-0 flex-1 items-center justify-center text-xs text-subtle">
-            Loading editor...
-          </div>
-        }
-      >
+      <Suspense fallback={<SkeletonRows layout="panel" label="Loading editor..." />}>
         <LazySourceCodeEditor
           testId={`${testId}-editor`}
           value={editor.draft}

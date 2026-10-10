@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_PRIVACY_SETTINGS,
   DEFAULT_RUNNER_SETTINGS,
   DEFAULT_SIDEBAR_SETTINGS,
   DEFAULT_USER_SETTINGS,
@@ -63,7 +64,17 @@ describe("desktop user settings model", () => {
       profile: {},
       runner: DEFAULT_RUNNER_SETTINGS,
       sidebar: DEFAULT_SIDEBAR_SETTINGS,
+      privacy: DEFAULT_PRIVACY_SETTINGS,
     });
+  });
+
+  it("reads report switches a person turned off, each on its own", () => {
+    const parsed = DesktopUserSettings.parse({
+      ...DEFAULT_USER_SETTINGS,
+      privacy: { usageReports: false, errorReports: true },
+    });
+    expect(parsed.privacy).toEqual({ usageReports: false, errorReports: true });
+    expect(DEFAULT_USER_SETTINGS.privacy).toEqual({ usageReports: true, errorReports: true });
   });
 
   it("adds the default zoom level to settings written before zoom support", () => {

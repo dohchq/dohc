@@ -66,6 +66,8 @@ struct MomentsListParams {
 struct HistoryPageParams {
     workspace_id: String,
     #[serde(default)]
+    object_id: Option<String>,
+    #[serde(default)]
     limit: Option<i64>,
     #[serde(default)]
     before_moment_order: Option<i64>,
@@ -185,6 +187,9 @@ fn parsed_moment_author(value: Value) -> Value {
     let Some(object) = value.as_object() else {
         return corrupt();
     };
+    if object.get("kind").and_then(Value::as_str) == Some("unattributed") {
+        return if object.len() == 1 { value } else { corrupt() };
+    }
     let bounded_ids = |keys: &[&str]| {
         keys.iter().all(|key| {
             object
@@ -198,6 +203,12 @@ fn parsed_moment_author(value: Value) -> Value {
         .is_none_or(|value| value.as_str().is_some_and(|value| !value.is_empty()));
     if object.get("kind").and_then(Value::as_str) == Some("public") {
         let valid = object.len() == 3 && bounded_ids(&["principalId", "grantId"]);
+        return if valid { value } else { corrupt() };
+    }
+    if object.get("kind").and_then(Value::as_str) == Some("link")
+        && object.contains_key("publicPrincipalId")
+    {
+        let valid = object.len() == 3 && bounded_ids(&["publicPrincipalId", "label"]);
         return if valid { value } else { corrupt() };
     }
     // A direct write names its grant and generation, and either the named
@@ -235,8 +246,11 @@ fn parsed_moment_author(value: Value) -> Value {
         return if valid { value } else { corrupt() };
     }
     if object.get("kind").and_then(Value::as_str) == Some("human") {
-        let valid = object.len() == 2 + usize::from(object.contains_key("onBehalfOf"))
+        let valid = object.len()
+            == 2 + usize::from(object.contains_key("onBehalfOf"))
+                + usize::from(object.contains_key("humanName"))
             && bounded_ids(&["humanId"])
+            && (!object.contains_key("humanName") || bounded_ids(&["humanName"]))
             && principal_ok;
         return if valid { value } else { corrupt() };
     }
@@ -338,6 +352,12 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: HistoryPageParams = parse(params)?;
+        if params.object_id.as_deref() == Some("") {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "objectId must not be empty",
+            ));
+        }
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
 
@@ -375,6 +395,7 @@ impl EngineService {
             "history.page",
             open.actor.history_page(
                 open.workspace_id.clone(),
+                params.object_id,
                 params.limit.unwrap_or(200).min(500),
                 params.before_moment_order,
                 HISTORY_PROTECTED_MOMENT_LIMIT + 1,
@@ -459,6 +480,25 @@ mod relay_author_tests {
             panic!("one author in, one author out: {authors}");
         };
         author.clone()
+    }
+
+    #[test]
+    fn reads_live_human_and_agent_snapshot_as_native_moment_authors() {
+        let human = json!({"kind":"human", "humanId":"owner", "humanName":"Owner proof"});
+        let agent =
+            json!({"kind":"agent", "agentId":"hosted-agent", "onBehalfOf":"owner", "depth":0});
+        assert_eq!(
+            parsed_moment_authors(&json!([human, agent]).to_string()),
+            json!([{"kind":"human", "humanId":"owner", "humanName":"Owner proof"}, {"kind":"agent", "agentId":"hosted-agent", "onBehalfOf":"owner"}])
+        );
+        for name in [json!(null), json!(""), json!("x".repeat(513))] {
+            assert_eq!(
+                parsed_moment_author(
+                    &json!({"kind":"human", "humanId":"owner", "humanName":name}).to_string()
+                ),
+                json!({"corrupt":true})
+            );
+        }
     }
 
     #[test]
@@ -588,6 +628,23 @@ mod relay_author_tests {
         ] {
             assert_eq!(
                 parsed_moment_author(&malformed.to_string()),
+                json!({"corrupt":true})
+            );
+        }
+    }
+
+    #[test]
+    fn preserves_live_authors_and_refuses_mixed_shapes() {
+        for author in [
+            json!({"kind":"human", "humanId":"ana", "humanName":"Ana"}),
+            json!({"kind":"unattributed"}),
+            json!({"kind":"link", "publicPrincipalId":"public-ana", "label":"Ana"}),
+        ] {
+            assert_eq!(parsed_moment_author(&author.to_string()), author);
+            let mut mixed = author.clone();
+            mixed["principalId"] = json!("private");
+            assert_eq!(
+                parsed_moment_author(&mixed.to_string()),
                 json!({"corrupt":true})
             );
         }

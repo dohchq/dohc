@@ -201,7 +201,7 @@ const VERSIONED_PARAM_SHAPES = {
   },
   [VERSIONED_METHOD.textDelete]: {
     requiredStrings: ["versionId", "path"],
-    optionalStrings: [...MUTATION_OPTIONAL_STRINGS, "expectedObjectId", "captureHoldId"],
+    optionalStrings: [...MUTATION_OPTIONAL_STRINGS, "expectedObjectId", "expectedSha256", "captureHoldId"],
     optionalI64: ["nowMs"],
     optionalJson: ["author"],
     // The engine checks the disk; a loopback has none, so it only validates.
@@ -330,6 +330,7 @@ const VERSIONED_PARAM_SHAPES = {
   [VERSIONED_METHOD.momentsGet]: { requiredStrings: ["momentId"] },
   [VERSIONED_METHOD.historyPage]: {
     requiredStrings: ["workspaceId"],
+    optionalStrings: ["objectId"],
     optionalI64: ["limit", "beforeMomentOrder"],
   },
   [VERSIONED_METHOD.searchEnsureIndex]: {
@@ -1778,6 +1779,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (replay) return replay;
     const before = this.file(version, path);
     if(params.expectedObjectId!==undefined && params.expectedObjectId!==null && before.objectId!==params.expectedObjectId)throw new Error("object-identity-mismatch");
+    if (params.expectedSha256 !== undefined && params.expectedSha256 !== null
+      && (before.binarySha ?? sha256(before.text ?? "")) !== params.expectedSha256) throw new Error("write-precondition-failed");
     this.assertFreshMoment(state, momentId);
     const now = nowMs ?? this.clock++;
     // The removed content, not an empty tombstone: a delete moment repeats it
@@ -2634,11 +2637,20 @@ export class VersionedLoopbackEngine implements EngineTransport {
     }
     const textMomentPage = this.momentsList(state, {
       versionId: activeVersionId,
+      ...(params.objectId !== undefined ? { objectId: params.objectId } : {}),
       ...(params.limit !== undefined ? { limit: params.limit } : {}),
       ...(params.beforeMomentOrder !== undefined
         ? { beforeMomentOrder: params.beforeMomentOrder }
         : {}),
     });
+    if (params.objectId !== undefined) {
+      return {
+        activeVersion: this.versionJson(this.version(state, activeVersionId)),
+        textMomentPage,
+        protectedMoments: [],
+        protectedTruncated: false,
+      };
+    }
     const textMoments = textMomentPage.moments;
     const beforeMomentOrder = optionalNumber(params, "beforeMomentOrder");
     const upperRecordedAtMs =
@@ -2901,6 +2913,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       metadataCorrelationId: params.correlationId ?? null,
       authorJson: this.writeAuthorFingerprint(params),
       ...(params.expectedObjectId!=null?{expectedObjectId:params.expectedObjectId}:{}),
+      ...(params.expectedSha256!=null?{expectedSha256:params.expectedSha256}:{}),
     });
   }
 

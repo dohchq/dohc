@@ -20,7 +20,6 @@ import {
 // longer matches the live one.
 
 interface PresenceLocalState {
-  displayName: string;
   typing: boolean;
 }
 
@@ -98,7 +97,7 @@ export function usePresence(input: UsePresenceInput): PresenceResult {
       transport,
       topic,
       clientId,
-      initialState: { displayName, typing: false } satisfies PresenceLocalState,
+      initialState: { typing: false } satisfies PresenceLocalState,
       onPeers: (next) => {
         // Drop a stale response: a newer channel (topic/workspace switch)
         // superseded this one, or the effect already cleaned up.
@@ -118,7 +117,7 @@ export function usePresence(input: UsePresenceInput): PresenceResult {
   }, [active, transport, topic, clientId, displayName, restartGeneration]);
 
   const others = useMemo(
-    () => peers.filter((peer) => peer.clientId !== clientId),
+    () => peers.filter((peer) => !peer.isSelf),
     [peers, clientId],
   );
   const typingNames = useMemo(
@@ -144,12 +143,12 @@ export function usePresence(input: UsePresenceInput): PresenceResult {
       // state on every character (the heartbeat re-sends it anyway).
       const changed = typing !== typingRef.current;
       typingRef.current = typing;
-      if (changed) channel.setState({ displayName, typing } satisfies PresenceLocalState);
+      if (changed) channel.setState({ typing } satisfies PresenceLocalState);
       if (typing) {
         // Self-clearing: a forgotten typing state clears on idle.
         typingTimerRef.current = setTimeout(() => {
           typingRef.current = false;
-          channelRef.current?.setState({ displayName, typing: false } satisfies PresenceLocalState);
+          channelRef.current?.setState({ typing: false } satisfies PresenceLocalState);
         }, typingIdleMs);
       }
     };

@@ -7,6 +7,22 @@ function fakeWindow(id: number) {
 }
 
 describe("broadcastWorkspaceActivity", () => {
+  it.each([true, false])("preserves a summary change beside file activity (summary first: %s)", async summaryFirst => {
+    vi.useFakeTimers();
+    try {
+      const send = vi.fn();
+      const notify = coalesceWorkspaceActivity(send);
+      const summary = { workspaceId: "ws-a", summaryChanged: true as const };
+      const file = { workspaceId: "ws-a", paths: ["note.md"] };
+      notify(summaryFirst ? summary : file);
+      notify(summaryFirst ? file : summary);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(send).toHaveBeenCalledExactlyOnceWith(summary);
+      const win = fakeWindow(1);
+      broadcastWorkspaceActivity({ windows: [win], activeWorkspaceIdOf: () => "ws-a", scope: summary });
+      expect(win.webContents.send).toHaveBeenCalledExactlyOnceWith(CHANNELS.workspaceActivity, summary);
+    } finally { vi.useRealTimers(); }
+  });
   it.each([true, false])("keeps pathless activity broad in either order (broad first: %s)", async captureFirst => {
     vi.useFakeTimers();
     try {

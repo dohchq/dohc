@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import type { StopAndRestoreResult } from "../ipc/bridgeContract";
+import type { StopAndRestoreResult, UndoStopAndRestorePayload, UndoStopAndRestoreResult } from "../ipc/bridgeContract";
 import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
+import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
+import { enqueueCollectionFieldWrite, resetCollectionFieldWritesForTests, setCollectionFieldWriteAccess } from "./collections/recordFieldWrites";
 
 const KEPT = { id: "f".repeat(32), path: "trip/Tasks/Untitled.md", field: "Finished on", recordId: null };
 const WORKSPACE = "workspace";
@@ -29,13 +31,26 @@ const row = (overrides: Record<string, unknown>) => ({
   ...overrides,
 });
 
+it("shows that runs from a reviewed automations file were kept", async () => {
+  fixture([{status: "restored", restored: [], review: [{path: "trip/automations.yaml", reason: "restore-refused", detail: "Changed on this device since the last saved version. Runs from this file's automations were kept."}], runsUndone: 0, runsLeft: 0, keptFields: [], fieldsMissing: 0, runChangesKept: 0, wroteAutomations: true, sendsMessages: false, unfinished: null}]);
+  fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
+  expect(await screen.findByText(/Runs from this file's automations were kept\./)).toBeTruthy();
+});
+
 function fixture(results: Array<StopAndRestoreResult | Error>, first: typeof ANA | typeof LINK = ANA) {
   const stopAndRestore = vi.fn(async () => {
     const next = results.shift()!;
     if (next instanceof Error) throw next;
     return next;
   });
-  const undoStopAndRestore = vi.fn(async () => undefined);
+  const restoredPaths = new Map(results.flatMap(result => !(result instanceof Error) && result.status === "restored"
+    ? result.restored.map(file => [file.restoredMomentId, file.path] as const) : []));
+  const undoStopAndRestore = vi.fn(async ({ restoredMomentIds }: UndoStopAndRestorePayload): Promise<UndoStopAndRestoreResult> => ({
+    errorMessage: null,
+    files: [...restoredMomentIds].reverse().map(momentId => ({ momentId, kind: "restored" as const,
+      receipt: { path: restoredPaths.get(momentId)!, restoredMomentId: `undo-${momentId}` },
+    })),
+  }));
   window.dohcDesktop = {
     listRelayShares: async () => ({
       granted: [
@@ -90,9 +105,39 @@ function fixture(results: Array<StopAndRestoreResult | Error>, first: typeof ANA
   return { props, release, stopAndRestore, undoStopAndRestore, shell: () => shell };
 }
 
+it("states that restoring a recipient creation removes its file and offers Undo", async () => {
+  fixture([{ status: "restored", restored: [{ path: "trip/Tasks/Socks.md", restoredMomentId: "removed", removed: true }],
+    review: [], runsUndone: 0, runsLeft: 0, keptFields: [], fieldsMissing: 0, runChangesKept: 0,
+    wroteAutomations: false, sendsMessages: false, unfinished: null }]);
+  fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
+  expect(await screen.findByText("Removed 1 created file.")).toBeTruthy();
+  expect(screen.getByTestId("stop-and-restore-undo")).toBeTruthy();
+});
+
 afterEach(() => {
   cleanup();
+  resetOrphanedDrafts();
+  resetCollectionFieldWritesForTests();
+  localStorage.clear();
   delete window.dohcDesktop;
+});
+
+it("passes queued, failed and set-aside paths to Stop and restore", async () => {
+  const result: StopAndRestoreResult = {status: "restored", restored: [], review: [], runsUndone: 0, runsLeft: 0, runChangesKept: 0,
+    wroteAutomations: false, sendsMessages: false, keptFields: [], fieldsMissing: 0, unfinished: null};
+  const f = fixture([result, result]);
+  act(() => {
+    enqueueCollectionFieldWrite(WORKSPACE, "trip", {recordId: "one", recordPath: "trip/queued.md", field: "Status", value: "KEEP"});
+    enqueueCollectionFieldWrite("other", "trip", {recordId: "two", recordPath: "trip/other.md", field: "Status", value: "KEEP"});
+    captureOrphanedDraft(WORKSPACE, "trip/draft.md", "Owner text KEEP");
+  });
+  fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
+  await waitFor(() => expect(f.stopAndRestore).toHaveBeenCalledWith({workspaceId: WORKSPACE, target: ANA.target, reviewPaths: ["trip/queued.md", "trip/draft.md"]}));
+  act(() => setCollectionFieldWriteAccess(WORKSPACE, "No connection"));
+  f.stopAndRestore.mockClear();
+  // A retained failure contributes the same path on a later attempt.
+  act(() => f.shell().retry(WORKSPACE, ANA, "stop"));
+  await waitFor(() => expect(f.stopAndRestore).toHaveBeenCalledWith({workspaceId: WORKSPACE, target: ANA.target, reviewPaths: ["trip/queued.md", "trip/draft.md"]}));
 });
 
 it("stops the chosen person after one confirm, lists files to check with why, and undoes the restores", async () => {
@@ -115,19 +160,98 @@ it("stops the chosen person after one confirm, lists files to check with why, an
 
   fireEvent.click(screen.getByTestId("stop-and-restore-confirm"));
   expect(await screen.findByText("Stopped ana@example.com's access and restored 1 file.")).toBeTruthy();
-  expect(f.stopAndRestore).toHaveBeenCalledWith({ workspaceId: WORKSPACE, target: { kind: "person", userId: "user_ana" } });
+  expect(f.stopAndRestore).toHaveBeenCalledWith({ workspaceId: WORKSPACE, target: { kind: "person", userId: "user_ana" }, reviewPaths: [] });
   expect(f.release).toHaveBeenCalledTimes(1);
   expect(f.props.onRestored).toHaveBeenCalledTimes(1);
   expect(screen.getByText("Undid 2 runs of automations ana@example.com changed.")).toBeTruthy();
   fireEvent.click(screen.getByText("trip/packing/automations.yaml"));
   expect(f.props.onOpenFile).toHaveBeenCalledWith("trip/packing/automations.yaml");
-  expect(screen.getByText("Someone changed it after ana@example.com.")).toBeTruthy();
+  expect(screen.getByText("Another author changed it after ana@example.com.")).toBeTruthy();
   expect(screen.getByText("This Collection holds files someone else added.")).toBeTruthy();
   expect(screen.getByText("dohc could not restore it. This action is unavailable for shared live files.")).toBeTruthy();
 
   fireEvent.click(screen.getByTestId("stop-and-restore-undo"));
   expect(await screen.findByText("Put back 1 file as ana@example.com left them. Their access stays stopped.")).toBeTruthy();
-  expect(f.undoStopAndRestore).toHaveBeenCalledWith({ workspaceId: WORKSPACE, restoredMomentIds: ["back-1"] });
+  expect(f.undoStopAndRestore).toHaveBeenCalledWith({ workspaceId: WORKSPACE, reviewPaths: [], restoredMomentIds: ["back-1"] });
+  expect(screen.queryByTestId("stop-and-restore-undo")).toBeNull();
+});
+
+it("lists Undo refusals and retries only the files not put back", async () => {
+  const f = fixture([{
+    status: "restored", restored: [{ path: "docs/old.md", restoredMomentId: "old" },
+      { path: "notes/middle.md", restoredMomentId: "middle" }, { path: "docs/new.md", restoredMomentId: "new" }],
+    review: [], runsUndone: 0, runsLeft: 0, keptFields: [], fieldsMissing: 0, runChangesKept: 0,
+    wroteAutomations: false, sendsMessages: false, unfinished: null,
+  }]);
+  f.undoStopAndRestore.mockResolvedValueOnce({ files: [
+    { momentId: "new", kind: "restored", receipt: { path: "docs/new.md", restoredMomentId: "undo-new" } },
+    { momentId: "middle", kind: "refused", detail: "This history moment is no longer available." },
+    { momentId: "old", kind: "restored", receipt: { path: "docs/old.md", restoredMomentId: "undo-old" } },
+  ], errorMessage: null });
+  fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
+  fireEvent.click(await screen.findByTestId("stop-and-restore-undo"));
+  expect(await screen.findByText("Put back 2 files as ana@example.com left them. Their access stays stopped.")).toBeTruthy();
+  expect(screen.getByText("dohc could not restore it. This history moment is no longer available.")).toBeTruthy();
+  expect(f.shell().receipts.get(WORKSPACE, ANA.target)).toEqual([{ path: "notes/middle.md", restoredMomentId: "middle" }]);
+  fireEvent.click(screen.getByTestId("stop-and-restore-undo"));
+  expect(await screen.findByText("Put back 3 files as ana@example.com left them. Their access stays stopped.")).toBeTruthy();
+  expect(f.undoStopAndRestore).toHaveBeenLastCalledWith({ workspaceId: WORKSPACE, reviewPaths: [], restoredMomentIds: ["middle"] });
+  expect(f.shell().receipts.get(WORKSPACE, ANA.target)).toEqual([]);
+  expect(screen.queryByText("dohc could not restore it. This history moment is no longer available.")).toBeNull();
+});
+
+it("names the rules file it can't read on the file's row, from a restore and from Undo", async () => {
+  const f = fixture([{
+    status: "restored", restored: [{ path: "docs/new.md", restoredMomentId: "new" }],
+    review: [{ path: "docs/old.md", reason: "rules-unreadable", unreadable: [".dohc/visibility.toml"] }],
+    runsUndone: 0, runsLeft: 0, keptFields: [], fieldsMissing: 0, runChangesKept: 0,
+    wroteAutomations: false, sendsMessages: false, unfinished: null,
+  }]);
+  f.undoStopAndRestore.mockResolvedValueOnce({ files: [
+    { momentId: "new", kind: "rules-unreadable", unreadable: [".dohc/files.toml", ".dohc/visibility.toml"] },
+  ], errorMessage: null });
+  fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
+  expect(await screen.findByText(
+    "dohc could not restore this file because it can't read .dohc/visibility.toml. Fix the file, then try again.",
+  )).toBeTruthy();
+  fireEvent.click(screen.getByTestId("stop-and-restore-undo"));
+  expect(await screen.findByText(
+    "dohc could not restore this file because it can't read .dohc/files.toml and .dohc/visibility.toml. Fix the files, then try again.",
+  )).toBeTruthy();
+  expect(f.shell().receipts.get(WORKSPACE, ANA.target)).toEqual([{ path: "docs/new.md", restoredMomentId: "new" }]);
+});
+
+it("keeps partial Undo outcomes on an unexpected error and retries only remaining receipts", async () => {
+  const f = fixture([{
+    status: "restored", restored: [{ path: "docs/old.md", restoredMomentId: "old" },
+      { path: "notes/middle.md", restoredMomentId: "middle" }, { path: "docs/new.md", restoredMomentId: "new" }],
+    review: [], runsUndone: 0, runsLeft: 0, keptFields: [], fieldsMissing: 0, runChangesKept: 0,
+    wroteAutomations: false, sendsMessages: false, unfinished: null,
+  }]);
+  f.undoStopAndRestore.mockResolvedValueOnce({ files: [
+    { momentId: "new", kind: "restored", receipt: { path: "docs/new.md", restoredMomentId: "undo-new" } },
+  ], errorMessage: "The workspace engine is not running." });
+  fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
+  fireEvent.click(await screen.findByTestId("stop-and-restore-undo"));
+  expect(await screen.findByText("Put back 1 file as ana@example.com left them. Their access stays stopped.")).toBeTruthy();
+  expect(f.shell().receipts.get(WORKSPACE, ANA.target)).toEqual([
+    { path: "docs/old.md", restoredMomentId: "old" }, { path: "notes/middle.md", restoredMomentId: "middle" },
+  ]);
+  expect(f.props.onError).toHaveBeenCalledTimes(1);
+  const [fallback, error, retry, identity] = f.props.onError.mock.calls[0]!;
+  expect(fallback).toBe("dohc could not undo the restore.");
+  expect((error as Error).message).toBe("The workspace engine is not running.");
+  // Only the initial Stop settled; the partial Undo keeps its retry notice.
+  expect(f.props.onSettled.mock.calls).toEqual([[identity]]);
+  act(() => f.shell().close());
+  act(() => retry());
+  expect(await screen.findByText("Put back 3 files as ana@example.com left them. Their access stays stopped.")).toBeTruthy();
+  expect(f.undoStopAndRestore.mock.calls).toEqual([
+    [{ workspaceId: WORKSPACE, reviewPaths: [], restoredMomentIds: ["old", "middle", "new"] }],
+    [{ workspaceId: WORKSPACE, reviewPaths: [], restoredMomentIds: ["old", "middle"] }],
+  ]);
+  expect(f.shell().receipts.get(WORKSPACE, ANA.target)).toEqual([]);
+  expect(f.props.onSettled.mock.calls).toEqual([[identity], [identity]]);
   expect(screen.queryByTestId("stop-and-restore-undo")).toBeNull();
 });
 
@@ -142,7 +266,7 @@ it("says access stopped while changes are still arriving, and tries again", asyn
   expect(f.props.onRestored).not.toHaveBeenCalled();
   fireEvent.click(screen.getByText("Try again"));
   expect(await screen.findByText("Stopped bob@example.com's access and restored 0 files.")).toBeTruthy();
-  expect(f.stopAndRestore).toHaveBeenLastCalledWith({ workspaceId: WORKSPACE, target: { kind: "person", userId: "user_bob" } });
+  expect(f.stopAndRestore).toHaveBeenLastCalledWith({ workspaceId: WORKSPACE, target: { kind: "person", userId: "user_bob" }, reviewPaths: [] });
 });
 
 it("reports failures through the shell, and a Try again after closing opens the dialog again with Undo for every file", async () => {
@@ -183,7 +307,7 @@ it("reports failures through the shell, and a Try again after closing opens the 
   act(() => f.props.onError.mock.calls[1]![2]());
   expect(await screen.findByText("Stopped ana@example.com's access and restored 2 files.")).toBeTruthy();
   fireEvent.click(screen.getByTestId("stop-and-restore-undo"));
-  await waitFor(() => expect(f.undoStopAndRestore).toHaveBeenCalledWith({ workspaceId: WORKSPACE, restoredMomentIds: ["back-1", "back-2"] }));
+  await waitFor(() => expect(f.undoStopAndRestore).toHaveBeenCalledWith({ workspaceId: WORKSPACE, reviewPaths: [], restoredMomentIds: ["back-1", "back-2"] }));
   expect(f.shell().receipts.get(WORKSPACE, ANA.target)).toEqual([]);
 });
 
@@ -200,17 +324,17 @@ it("ends a whole Edit link, says it stops for everyone, and never claims its aut
 
   fireEvent.click(screen.getByTestId("stop-and-restore-confirm"));
   expect(await screen.findByText("Ended Edit link to trip and restored 1 file.")).toBeTruthy();
-  expect(f.stopAndRestore).toHaveBeenCalledWith({ workspaceId: WORKSPACE, target: { kind: "link", grantId: "grant-link" } });
+  expect(f.stopAndRestore).toHaveBeenCalledWith({ workspaceId: WORKSPACE, target: { kind: "link", grantId: "grant-link" }, reviewPaths: [] });
   expect(screen.getByText("Undid 1 run of automations changed through Edit link to trip.")).toBeTruthy();
   expect(screen.getByText("dohc could not undo 1 run of automations changed through Edit link to trip. Undo each from its Collection's run history.")).toBeTruthy();
   expect(screen.getByText("Undo left 2 changes from those runs. Check each Collection's run history.")).toBeTruthy();
   expect(screen.getByText("Messages and notices from automations changed through Edit link to trip stay sent.")).toBeTruthy();
   expect(screen.getByText("Runs on your other computers are not undone here. Undo them from the run history on each computer.")).toBeTruthy();
-  expect(screen.getByText("Someone changed it after the link.")).toBeTruthy();
+  expect(screen.getByText("Another author changed it after the link.")).toBeTruthy();
 
   fireEvent.click(screen.getByTestId("stop-and-restore-undo"));
   expect(await screen.findByText("Put back 1 file as Edit link to trip left them. The link stays ended.")).toBeTruthy();
-  expect(f.undoStopAndRestore).toHaveBeenCalledWith({ workspaceId: WORKSPACE, restoredMomentIds: ["back-1"] });
+  expect(f.undoStopAndRestore).toHaveBeenCalledWith({ workspaceId: WORKSPACE, reviewPaths: [], restoredMomentIds: ["back-1"] });
 });
 
 it("carries forward what undoing runs found when a try stopped part way", async () => {

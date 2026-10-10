@@ -29,6 +29,7 @@ import { bridge } from "./bridge";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
 import { SecondaryButton } from "./ui/controls";
 import { MoreMenu } from "./ui/MoreMenu";
+import { SkeletonRows } from "./ui/SkeletonRows";
 import { CollectionCustomizeDialog, documentCollectionFiles } from "./collections/CollectionCustomizeDialog";
 import { FieldsDialog } from "./collections/FieldsDialog";
 import { ViewsDialog } from "./collections/ViewsDialog";
@@ -68,6 +69,8 @@ export const DRAIN_RECORD_LIMIT = 1000;
 
 export interface CollectionPageProps {
   readOnly?: boolean;
+  accessEnded?: boolean;
+  writeRefusal?: string;
   workspaceId: string;
   collectionPath: string;
   // Which view is open is per-user local state the shell persists in the
@@ -110,6 +113,8 @@ function NewRecordButton({ onClick }: { onClick: () => void }) {
 
 export function CollectionPage({
   readOnly = false,
+  accessEnded = false,
+  writeRefusal,
   workspaceId,
   collectionPath,
   activeViewName,
@@ -393,6 +398,49 @@ export function CollectionPage({
     (record: CollectionRecord) => onOpenRecord(record.path),
     [onOpenRecord],
   );
+  const recordDrafts = [...new Map([...state.records, ...(state.groups?.flatMap(group => group.records) ?? [])]
+    .filter(record => record.creationDelivery === "pending" || record.creationDelivery === "offline" || record.creationDelivery === "refused").map(record => [record.path, record])).values()];
+  const draftActions = useRequestSequence([workspaceId, collectionPath, readOnly]);
+  const draftAccess = useRef({ readOnly, accessEnded, writeRefusal });
+  draftAccess.current = { readOnly, accessEnded, writeRefusal };
+  const retryDrafts = async () => {
+    if (draftAccess.current.readOnly) {
+      const message = draftAccess.current.writeRefusal ?? (draftAccess.current.accessEnded ? "Your access to this share ended."
+        : "Your access to this share changed. Ask for Edit access, then reopen the share.");
+      onError(message, new Error(message));
+      return;
+    }
+    const request = draftActions.next();
+    try {
+      await bridge().pushShareDirectWrites({ workspaceId });
+      if (!draftActions.isCurrent(request)) return;
+      await store.refresh();
+    } catch (error) { if (draftActions.isCurrent(request)) onError("dohc could not send the record drafts.", error, () => void retryDrafts()); }
+  };
+  const discardDraft = async (record: CollectionRecord) => {
+    const request = draftActions.next();
+    try {
+      const latest = await bridge().queryCollectionRecords({ workspaceId, collectionPath, limit: 1000 });
+      if (!draftActions.isCurrent(request)) return;
+      const current = [...latest.records, ...(latest.groups?.flatMap(group => group.records) ?? [])].find(row => row.path === record.path);
+      if (!current?.creationCanDiscard || current.id !== record.id) {
+        await retryDrafts();
+        return;
+      }
+      const draft = await bridge().readWorkspaceText({ workspaceId, relativePath: record.path });
+      if (!draftActions.isCurrent(request)) return;
+      if (draft.truncated) throw new Error("This record draft is too large to discard with Undo.");
+      await bridge().deleteWorkspacePath({ workspaceId, relativePath: record.path });
+      if (!draftActions.isCurrent(request)) return;
+      await store.refresh();
+      if (draftActions.isCurrent(request)) onNotice("Record draft discarded on this device", () => {
+        if (!draftActions.isCurrent(request)) return;
+        void bridge().createWorkspaceFile({ workspaceId, relativePath: record.path, initialText: draft.text })
+          .then(() => { if (draftActions.isCurrent(request)) void store.refresh(); })
+          .catch(error => { if (draftActions.isCurrent(request)) onError("dohc could not restore this record draft.", error); });
+      });
+    } catch (error) { if (draftActions.isCurrent(request)) onError("dohc could not discard this record draft.", error, () => void discardDraft(record)); }
+  };
 
   // Schema authoring: fields and views change by rewriting the schema
   // through the authored write path (collections/schemaWrite). Returns a
@@ -513,11 +561,7 @@ export function CollectionPage({
     (state.status === "loading" || state.status === "idle") &&
     state.collection === null;
   if (details === null || neverLoaded) {
-    return (
-      <div className="flex min-h-0 flex-1 items-center justify-center px-4 text-xs text-subtle">
-        Loading collection...
-      </div>
-    );
+    return <SkeletonRows inSlot layout="panel" label="Loading collection..." />;
   }
 
   const schema = details.schema;
@@ -698,6 +742,14 @@ export function CollectionPage({
           This view shows only the first {state.records.length} records.
         </div>
       ) : null}
+      {recordDrafts.length > 0 ? <div className="shrink-0 border-b border-line px-3 py-2" data-testid="collection-record-drafts">
+        {recordDrafts.map(record => <div key={record.path} className="flex items-center gap-2 text-[12px] text-muted">
+          <button type="button" className="truncate text-ink hover:underline" onClick={() => onOpenRecord(record.path)}>{recordLabel(record)}</button>
+          <span>{accessEnded ? "Access ended. This draft cannot be sent. It is kept on this computer." : readOnly ? "This draft cannot be sent with the current share access. It is kept on this computer." : record.creationDelivery === "offline" ? "Saved on this computer. This computer is offline" : record.creationDelivery === "pending" ? "Saved on this computer. Waiting to send" : record.creationRefusal ?? "The sync relay did not accept this draft"}</span>
+          {!readOnly ? <SecondaryButton onClick={() => record.creationDelivery === "refused" ? onNewRecord(collectionPath) : void retryDrafts()}>Try again</SecondaryButton> : null}
+          {record.creationCanDiscard === true && !readOnly ? <SecondaryButton onClick={() => void discardDraft(record)}>Discard draft</SecondaryButton> : null}
+        </div>)}
+      </div> : null}
       <div className="flex min-h-0 flex-1">
       <div className="min-h-0 min-w-0 flex-1 overflow-auto">
         {boardReady ? (

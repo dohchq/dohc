@@ -46,7 +46,7 @@ const engineDocState: UseEngineDoc = {
   doc: null,
   objectId: null,
   versionId: null,
-  saveState: "saved",
+  saveState: { kind: "saved-here" },
   saveError: null,
     authorCapacity: false,
   notInVersion: false,
@@ -60,6 +60,7 @@ const engineDocState: UseEngineDoc = {
   recoveryAssets: null,
   permanentFailureWhileEditing: false,
   readOnlyWhileEditing: false,
+  readOnlyCause: null,
   removalInProgress: null,
   artifactAssets: [],
   readArtifactAsset: async () => {
@@ -91,6 +92,7 @@ describe("FileInspector renders markdown through the shared component map", () =
   const bridgeMock = {
     // A document over the WYSIWYG threshold opens in read mode, which is where
     // the rendered document — rather than the editor — is what this test reads.
+    onWorkspaceActivity: vi.fn(() => () => undefined),
     readWorkspaceText: vi.fn(async () => ({
       text: TABLE_DOCUMENT,
       truncated: false,

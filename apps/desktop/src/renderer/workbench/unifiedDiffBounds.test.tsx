@@ -53,6 +53,7 @@ afterEach(() => {
 
 describe("history diff page", () => {
   const bridgeMock = { readEngineMoment: vi.fn() };
+  const onError = vi.fn();
 
   beforeEach(() => {
     bridgeMock.readEngineMoment.mockReset();
@@ -70,6 +71,12 @@ describe("history diff page", () => {
       registerActiveUndo: () => {},
       onRestored: () => {},
       onStopAndRestore: () => {},
+      onError,
+      onSettled: noop,
+      historyAnswer: null,
+      onReopenRestore: noop,
+      restoreRequested: false,
+      onRestoreRequestTaken: noop,
     };
     return render(<EngineMomentDiffPage {...props} />);
   }
@@ -94,6 +101,12 @@ describe("history diff page", () => {
         registerActiveUndo={noop}
         onRestored={() => { order.push("restored"); }}
         onStopAndRestore={() => {}}
+        onError={noop}
+        onSettled={noop}
+        historyAnswer={null}
+        onReopenRestore={noop}
+        restoreRequested={false}
+        onRestoreRequestTaken={noop}
       />,
     );
     await act(async () => {});
@@ -110,6 +123,8 @@ describe("history diff page", () => {
     expect(order).toEqual(["restored", "release"]);
   });
 
+  // A failure is the shell's toast and Notices row, so the live region
+  // announces only a restore that happened.
   it.each([false, true])("updates an existing live region with the restore outcome (failure: %s)", async (failure) => {
     let resolve!: (result: { restored: "text"; restoredMomentId: string }) => void;
     let reject!: (error: Error) => void;
@@ -131,9 +146,13 @@ describe("history diff page", () => {
       await pending.catch(() => undefined);
     });
     expect(screen.getByRole("status")).toBe(status);
-    expect(status.textContent).toBe(failure
-      ? "Could not restore this file."
-      : "Restored the earlier state. Undo restore is available here.");
+    if (failure) {
+      expect(status.textContent).toBe("");
+      expect(onError).toHaveBeenCalledWith("dohc could not restore notes/plan.md.", expect.any(Error), expect.any(Function), "history-restore:notes/plan.md", "notes/plan.md");
+      return;
+    }
+    expect(onError).not.toHaveBeenCalled();
+    expect(status.textContent).toBe("Restored the earlier state. Undo restore is available here.");
     expect(status.contains(screen.getByTestId("engine-diff-restore-status"))).toBe(true);
   });
 
@@ -155,6 +174,12 @@ describe("history diff page", () => {
         registerActiveUndo={() => {}}
         onRestored={() => {}}
         onStopAndRestore={() => {}}
+        onError={noop}
+        onSettled={noop}
+        historyAnswer={null}
+        onReopenRestore={noop}
+        restoreRequested={false}
+        onRestoreRequestTaken={noop}
       />,
     );
     await screen.findByTestId("engine-diff-lines");

@@ -12,6 +12,7 @@ import type { ToolContext } from "./tools";
 // changes the granter's files; a chat write posts to a thread.
 const DOCUMENT_WRITE_TOOLS = [
   "dohc_dataset",
+  "dohc_publish_app",
   "dohc_write_file",
   "dohc_create_directory",
   "dohc_move_path",
@@ -191,9 +192,10 @@ describe("MCP tool results", () => {
     expect(result.structuredContent).toEqual(partial);
     expect(result.content).toEqual([{ type: "text", text: JSON.stringify(partial, null, 2) }]);
   });
-  it("omits tools that cannot perform the advertised action", async () => {
+  it("exposes owner publication and omits unsupported actions", async () => {
     const { names } = await connectedToolNames({ root: "/workspace", home: "/home" });
-    for (const name of ["build_app", "preview_app", "publish_app", "share", "open_in_dohc", "resolve_conflict"]) {
+    expect(names).toContain("dohc_publish_app");
+    for (const name of ["build_app", "preview_app", "share", "open_in_dohc", "resolve_conflict"]) {
       expect(names).not.toContain(`dohc_${name}`);
     }
   });
@@ -336,6 +338,33 @@ describe("MCP tool results", () => {
     });
   });
 
+  it("passes bodies at the normalized UTF-8 limit to the server for every chat write", async () => {
+    // CRLF becomes LF and trailing JS whitespace is removed before the cap.
+    const body = "x".repeat(65_534) + "\r\ny\uFEFF ";
+    const sent: unknown[] = [];
+    const root = await workspaceRoot();
+    const { client } = await connectedToolNames({ root, home: "/home",
+      request: async request => {
+        if (!("body" in request.args)) throw new Error("Expected a chat write");
+        sent.push(request.args.body);
+        return request.verb === "fileChatStart"
+          ? { ok: true, path: "tracked.md", threadId: "thread-1", messageId: "message-1" }
+          : request.verb === "post"
+            ? { group: { id: "ch_1", name: "general", slug: "general", kind: "group" }, threadId: "th_1", messageId: "msg_1", title: "" }
+            : { threadId: "th_1", messageId: "msg_2" };
+      },
+    });
+    for (const [name, args] of [
+      ["dohc_start_file_chat", { path: "tracked.md", title: "Limit" }],
+      ["dohc_start_group_chat", { group: "general" }],
+      ["dohc_reply_to_chat", { threadId: "thread-1" }],
+    ] as const) {
+      const result = await client.callTool({ name, arguments: { ...args, body } });
+      expect(result, JSON.stringify(result)).not.toHaveProperty("isError", true);
+    }
+    expect(sent).toEqual([body, body, body]);
+  });
+
   it("turns poll options into a decision even without needsDecision", async () => {
     const { client } = await connectedToolNames({
       root: "/workspace", home: "/home",
@@ -399,4 +428,19 @@ describe("file write handshake attribution", () => {
     expect(requests).toHaveLength(1);
     expect(requests[0]).toMatchObject({ verb: "fileWrite", args: { actor: "agent", agent: name === "Codex" ? name : undefined } });
   });
+});
+
+
+it("routes owner publication with a bearer warning and a stable link operation id", async () => {
+  const operationId="00000000-0000-4000-8000-000000000101";
+  const facts={kind:"linkCreated",shareId:"s",grantId:"g",selector:{paths:["app"],versionId:null},access:"view",url:"https://relay.example/s/#secret",bearerWarning:"This URL is a bearer credential at view access, usable by anyone who holds it."};
+  const {client}=await connectedToolNames({root:"/workspace",home:"/home",request:async request=>{
+    expect(request.verb).toBe("appPublication");
+    expect(request.args).toMatchObject({actor:"agent",request:{action:"createLink",workspaceId:"w",appRoot:"app",operationId,access:"view",agentLabel:"Builder"}});
+    return facts;
+  }});
+  const result=await client.callTool({name:"dohc_publish_app",arguments:{request:{action:"createLink",workspaceId:"w",appRoot:"app",operationId,agentLabel:"Builder"}}});
+  expect(result.structuredContent).toEqual(facts);
+  expect(result.content).toHaveLength(1);
+  expect(JSON.parse((result.content as Array<{type:string;text:string}>)[0]!.text)).toEqual(facts);
 });

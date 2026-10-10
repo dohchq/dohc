@@ -1,4 +1,6 @@
+import { bridge } from "./bridge";
 import { useSyncExternalStore } from "react";
+import { base64ToBytes } from "./base64";
 import {
   clearStoredDrafts,
   forgetStoredDraft,
@@ -7,6 +9,7 @@ import {
   remapStoredDraftPaths,
   replaceStoredDraft,
   storeDraft,
+  type DraftRecoveryIdentity,
 } from "./orphanedDraftStorage";
 
 // Set-aside drafts: text a reopen took out of the save pipeline, held
@@ -32,6 +35,7 @@ export type OrphanedDraft = {
   // A capture time is the same number on both sides of a restart, and storage
   // has carried it since #600.
   capturedAtMs: number;
+  recovery?: DraftRecoveryIdentity;
 };
 
 // The order every surface reads: oldest first. Capture time is the key, and
@@ -115,6 +119,7 @@ export function captureOrphanedDraft(
   workspaceId: string,
   path: string,
   text: string,
+  recovery?: DraftRecoveryIdentity,
 ): number {
   const key = keyFor(workspaceId, path);
   const id = allocateDraftId();
@@ -124,12 +129,12 @@ export function captureOrphanedDraft(
   // Durable before the notice exists. The write is synchronous, so the
   // answer the close guard needs is already true here — a draft is at risk
   // only when storage refused it.
-  if (storeDraft({ id, workspaceId, path, text, capturedAtMs })) {
+  if (storeDraft({ id, workspaceId, path, text, capturedAtMs, recovery })) {
     storedIds.add(id);
   }
   // Append, never overwrite: a second reopen with the first notice still up
   // must not destroy the first draft.
-  drafts.set(key, [...(drafts.get(key) ?? EMPTY), { id, text, capturedAtMs }]);
+  drafts.set(key, [...(drafts.get(key) ?? EMPTY), { id, text, capturedAtMs, recovery }]);
   scheduleNotify();
   return id;
 }
@@ -141,12 +146,13 @@ export function replaceOrphanedDraft(
   path: string,
   id: number,
   text: string,
+  recovery?: DraftRecoveryIdentity,
 ): void {
   const key = keyFor(workspaceId, path);
   const current = drafts.get(key) ?? EMPTY;
   const captured = current.find((draft) => draft.id === id);
-  if (!captured || captured.text === text) return;
-  const replacement = { ...captured, text };
+  if (!captured || (captured.text === text && recovery === undefined)) return;
+  const replacement = { ...captured, text, recovery: recovery ?? captured.recovery };
   drafts.set(
     key,
     current.map((draft) => (draft.id === id ? replacement : draft)),
@@ -158,6 +164,7 @@ export function replaceOrphanedDraft(
       path,
       text,
       capturedAtMs: captured.capturedAtMs,
+      recovery: replacement.recovery,
     })
   ) {
     storedIds.add(id);
@@ -182,7 +189,7 @@ export function restoreOrphanedDrafts(nowMs: number = Date.now()): void {
     const key = keyFor(row.workspaceId, row.path);
     drafts.set(key, [
       ...(drafts.get(key) ?? EMPTY),
-      { id: row.id, text: row.text, capturedAtMs: row.capturedAtMs },
+      { id: row.id, text: row.text, capturedAtMs: row.capturedAtMs, recovery: row.recovery },
     ]);
     storedIds.add(row.id);
     // Storage maps each local handle to its durable key. Reserve restored
@@ -191,12 +198,26 @@ export function restoreOrphanedDrafts(nowMs: number = Date.now()): void {
   }
 }
 
-export function dismissOrphanedDraft(
+export async function dismissOrphanedDraft(
   workspaceId: string,
   path: string,
   id: number,
-): void {
+): Promise<void> {
   const key = keyFor(workspaceId, path);
+  const captured = drafts.get(key)?.find(draft => draft.id === id);
+  if (!captured) return;
+  if (captured.recovery) {
+    const discardedAtMs = Date.now();
+    const bytes = base64ToBytes(captured.recovery.updateBase64);
+    const hash = await crypto.subtle.digest("SHA-256", new Uint8Array(bytes));
+    const snapshotSha256 = Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, "0")).join("");
+    await bridge().discardLiveDraftRecovery({
+      workspaceId, path, objectId: captured.recovery.objectId, snapshotSha256, discardedAtMs,
+    });
+    if (drafts.get(key)?.find(draft => draft.id === id) !== captured) {
+      throw new Error("This draft changed while dohc dismissed it. Review it and try again.");
+    }
+  }
   const remaining = (drafts.get(key) ?? EMPTY).filter(
     (draft) => draft.id !== id,
   );
@@ -265,6 +286,11 @@ export function useOrphanedDrafts(
 // Every path in one workspace that holds a set-aside draft. The tab strip
 // marks inactive tabs with it — only the mounted inspector
 // can report savable-dirty, but recovery is knowable for every tab.
+export function retainedOrphanedDraftPaths(workspaceId: string): string[] {
+  const paths = [...drafts.keys()].map(key => JSON.parse(key) as [string, string]).filter(([id]) => id === workspaceId).map(([, path]) => path);
+  return [...new Set([...paths, ...loadStoredDrafts(Date.now()).filter(draft => draft.workspaceId === workspaceId).map(draft => draft.path)])];
+}
+
 export function useOrphanedDraftPaths(workspaceId: string): ReadonlySet<string> {
   return useSyncExternalStore(subscribe, () => {
     const cached = pathSetCache.get(workspaceId);

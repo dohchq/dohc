@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
-import { lstat, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { lstat, readFile, writeFile } from "node:fs/promises";
+import { atomicReplaceFile } from "../atomicReplaceFile";
 import { join } from "node:path";
 import { decodeWorkspaceSettings } from "@dohc/workspace-contracts/workspace-settings";
 import {
@@ -239,8 +239,8 @@ async function writeSettingsContent(
   content: Record<string, unknown>,
 ): Promise<"folder" | "link" | null> {
   const path = await workspaceSettingsPath(rootPath);
-  const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
-  try {
+  let squatter: "folder" | "link" | null = null;
+  await atomicReplaceFile(path, async (tmp) => {
     await writeFile(tmp, `${JSON.stringify(content, null, 2)}\n`);
     // A directory or a link at the settings path reads as unreadable, and
     // Reset is what the refusal tells the user to reach for — but the atomic
@@ -251,15 +251,12 @@ async function writeSettingsContent(
     // reaches here after the file read as a regular file, so it never takes
     // this branch.
     const target = await lstat(path).catch(() => null);
-    const squatter = target && !target.isFile()
+    squatter = target && !target.isFile()
       ? target.isSymbolicLink()
         ? ("link" as const)
         : ("folder" as const)
       : null;
     if (squatter) await moveIntoWorkspaceTrash(rootPath, path);
-    await rename(tmp, path);
-    return squatter;
-  } finally {
-    await unlink(tmp).catch(() => undefined);
-  }
+  });
+  return squatter;
 }

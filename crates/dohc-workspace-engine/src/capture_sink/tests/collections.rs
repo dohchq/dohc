@@ -1,6 +1,61 @@
 use super::*;
 
 #[test]
+fn replicated_empty_record_refusal_is_a_failed_ingest_in_both_capture_routes() {
+    for batched in [false, true] {
+        let scratch = ScratchDir::new().unwrap();
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        let path = "tasks/empty.md";
+        write_file(
+            scratch.path(),
+            "tasks/collection.yaml",
+            b"fields:\n  Title:\n    type: text\n",
+        );
+        write_file(scratch.path(), path, b"");
+        ingest(&mut sink, "tasks/collection.yaml").unwrap();
+        ingest(&mut sink, path).unwrap();
+        sink.reconcile_collections().unwrap();
+        seed_captured_richdoc_lineage(&sink, path);
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO replication_log \
+             (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) \
+             SELECT workspace_id,'seed-origin',0,'ydoc.update', \
+               json_object('versionId',version_id,'objectId',object_id),4,0 \
+             FROM ydoc_docs WHERE path=?1",
+            [path],
+        )
+        .unwrap();
+        let completed = b"---\nTitle: Completed\n---\n- parent\n  - child\n";
+        write_file(scratch.path(), path, completed);
+        if batched {
+            write_file(scratch.path(), "tasks/sibling.md", b"Sibling\n");
+            let ops = [path, "tasks/sibling.md"].map(|path| CaptureOp::Ingest {
+                path: path.into(),
+                size: 0,
+                sha256: "advisory-sha".into(),
+                media_type: "text/markdown",
+                mtime_ms: 0,
+                reason: IngestReason::Added,
+            });
+            let BatchIngestResult::Committed(results) = sink.ingest_batch(&ops).unwrap() else {
+                panic!("batch must return per-file outcomes");
+            };
+            assert_eq!(results[0], Err(INGEST_FAILED));
+            assert!(matches!(results[1], Ok(IngestOutcome::Captured { .. })));
+        } else {
+            assert_eq!(ingest(&mut sink, path), Err(INGEST_FAILED));
+        }
+        assert_eq!(snapshot(&db, path).unwrap().text, "");
+        assert_eq!(std::fs::read(scratch.path().join(path)).unwrap(), completed);
+        drop(conn);
+        drop(sink);
+        supervisor.close(&db).unwrap();
+    }
+}
+
+#[test]
 fn unsupported_collection_keeps_record_bytes_and_ids_untouched() {
     let scratch = ScratchDir::new().expect("scratch");
     let supervisor = WorkspaceSupervisor::new();
@@ -2094,6 +2149,87 @@ fn disk_writes_to_a_record_claim_once_each_and_body_edits_claim_nothing() {
 
 /// A record whose Y.Doc lineage holds content folds a disk edit into the
 /// lineage, and the fold's field changes claim in the capture transaction.
+#[test]
+fn a_frontmatter_only_capture_keeps_a_nested_list_in_history_and_the_index() {
+    const RECORD_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let scratch = ScratchDir::new().expect("scratch");
+    let supervisor = WorkspaceSupervisor::new();
+    let (db, mut sink) = sink_for(&scratch, &supervisor);
+    let path = "tasks/nested.md";
+    let original = format!("---\nid: {RECORD_ID}\nstatus: open\n---\n- parent\n  - child\n");
+    write_file(
+        scratch.path(),
+        "tasks/collection.yaml",
+        b"name: Tasks\nfields:\n  status:\n    type: text\n",
+    );
+    write_file(scratch.path(), path, original.as_bytes());
+    ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
+    ingest(&mut sink, path).expect("capture record");
+    seed_captured_richdoc_lineage(&sink, path);
+    sink.reconcile_collections()
+        .expect("adopt nested-list record");
+    assert_eq!(adopted_record_id(&db, path), RECORD_ID);
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    let key = dohc_engine_collab::DocKey::new(
+        WORKSPACE_ID,
+        VERSION_ID,
+        snapshot(&db, path).unwrap().object_id,
+    )
+    .unwrap();
+    let retained = dohc_engine_sync::project_ydoc_with_store(
+        &connection,
+        &key,
+        &dohc_engine_collab::load_doc_in(&connection, &key).unwrap(),
+        ContentKind::Richdoc,
+    )
+    .unwrap()
+    .content;
+    drop(connection);
+    let before = moment_count(&db, path);
+    let chosen = original.replace("status: open", "status: done");
+    write_file(scratch.path(), path, chosen.as_bytes());
+    ingest(&mut sink, path).expect("capture frontmatter-only edit");
+    assert_eq!(snapshot(&db, path).unwrap().text, chosen);
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(path)).unwrap(),
+        chosen
+    );
+    assert_eq!(moment_count(&db, path), before + 2);
+    assert_eq!(
+        indexed_collection_field(&db, path, "status").unwrap().0,
+        "\"done\""
+    );
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    let recovery: (String, String, Option<String>) = connection
+        .query_row(
+            "SELECT before.text,after.text,m.before_latest_moment_id FROM moments m
+             JOIN blobs before ON before.sha256=m.before_blob_sha256
+             JOIN blobs after ON after.sha256=m.after_blob_sha256
+             WHERE m.workspace_id=?1 AND m.path=?2 AND m.metadata_origin='capture-recovery'",
+            [WORKSPACE_ID, path],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(recovery, (retained, chosen.clone(), None));
+    let key = dohc_engine_collab::DocKey::new(
+        WORKSPACE_ID,
+        VERSION_ID,
+        snapshot(&db, path).unwrap().object_id,
+    )
+    .unwrap();
+    let doc = dohc_engine_collab::load_doc_in(&connection, &key).unwrap();
+    assert_eq!(
+        dohc_engine_sync::project_ydoc_with_store(&connection, &key, &doc, ContentKind::Richdoc)
+            .unwrap()
+            .content,
+        chosen
+    );
+    drop(connection);
+    drop(sink);
+    supervisor.close(&db).expect("close actor");
+}
+
+/// A disk fold emits the field change in the capture transaction.
 #[test]
 fn a_disk_edit_folded_into_a_record_lineage_claims_once() {
     use dohc_engine_domain::{AutomationChangeKind, AutomationSubscription};

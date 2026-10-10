@@ -1,3 +1,4 @@
+import { activityPin, editorTabTestId } from "../src/testPins";
 import type { LiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -116,7 +117,7 @@ function settlementState(temp: TempWorkspace) {
 }
 
 async function openDocument(page: Page): Promise<void> {
-  const explorer = page.getByTestId("activity-explorer");
+  const explorer = page.getByTestId(activityPin("explorer"));
   if ((await explorer.getAttribute("aria-current")) !== "page") await explorer.click();
   await revealExplorerPath(page, PATH);
   await explorerRow(page, PATH).click();
@@ -382,7 +383,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await writeWorkspaceFiles(ownerTemp, [{ path: PATH, contents: SEED }, { path: HIDDEN, contents: `${HIDDEN_TEXT}\n` }]);
       owner = await launch(ownerTemp);
       const opened = await openWorkspaceFromFirstRun(owner.page, ownerTemp);
-      await owner.page.getByTestId("activity-cloud").click();
+      await owner.page.getByTestId(activityPin("cloud")).click();
       await expect(owner.page.getByTestId("cloud-sync-panel")).toBeVisible();
       const ownerPage = await ownerBrowser!.newPage();
       const approval = await openDesktopApproval(owner, ownerPage, origin);
@@ -460,7 +461,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       // the close has something to fold.
       expect(before).toMatchObject({ regime: "replicated" });
       expect(before!.head).toBeGreaterThan(before!.snapshot);
-      const tab = page.getByTestId(`tab-${PATH}`);
+      const tab = page.getByTestId(editorTabTestId(PATH));
       await tab.hover();
       await tab.getByRole("button", { name: /^Close / }).click();
       await expect(tab).toHaveCount(0);
@@ -509,8 +510,8 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
           (window as unknown as { dohcDesktop: Api }).dohcDesktop.readEngineMoment(payload), { workspaceId: recipientWorkspaceId, momentId })).toEqual({ moment: null });
       }
       await typeAfter(page, H1, ` ${R1}`);
-      // A shared session reports saved once the server's host accepted the edit.
-      await expect(saveState(page)).toHaveAttribute("data-state", "saved", { timeout: 60_000 });
+      // The recipient session reports host acceptance without a local artifact.
+      await expect(saveState(page)).toHaveAttribute("data-state", "saved-to-host", { timeout: 60_000 });
     });
 
     await test.step("the idle owner's editor and the agent see the recipient's edit", async () => {
@@ -537,7 +538,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await expect(dialog.getByRole("heading", { name: "Stop access before restoring?" })).toBeVisible();
       await expect(dialog.getByRole("listitem").filter({ hasText: recipientLabel })).toHaveCount(1);
       // The recipient can still edit, so read-only afterwards proves the stop.
-      await expect(saveState(recipient!.page)).toHaveAttribute("data-state", "saved");
+      await expect(saveState(recipient!.page)).toHaveAttribute("data-state", "saved-to-host");
       await expect(editor(recipient!.page)).toHaveAttribute("contenteditable", "true");
       await dialog.getByRole("button", { name: "Stop access" }).click();
       const current = dialog.getByLabel("Current file before restore");
@@ -637,7 +638,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       provenance.hostedNewRecipient = await expectDeclaredMoment(page, newRecipientWorkspaceId, HA, admittedAgent(hosted!.change.authorSnapshot));
       provenance.nextNewRecipient = await expectDeclaredMoment(page, newRecipientWorkspaceId, A2, admittedAgent(next!.change.authorSnapshot));
       await typeAfter(page, H2, ` ${R2}`);
-      await expect(saveState(page)).toHaveAttribute("data-state", "saved", { timeout: 60_000 });
+      await expect(saveState(page)).toHaveAttribute("data-state", "saved-to-host", { timeout: 60_000 });
       await expect(editor(owner!.page)).toContainText(R2, { timeout: 60_000 });
       await expect.poll(() => cliRead(ownerTemp), { timeout: 60_000 }).toContain(R2);
       await expect.poll(() => ownerSettled(ownerTemp, [H1, A1, HA, H2, A2, R2], [R1]), { timeout: 60_000 }).toBe(true);

@@ -310,6 +310,7 @@ function directWriteReport(value: JsonValue, method: string): DirectWriteReport 
         paths,
         result: "stale",
         stalePath: stringField(write, "stalePath", method),
+        recoveredDraftPath: nullableStringField(write, "recoveredDraftPath", method),
         currentBlobSha256: nullableStringField(write, "currentBlobSha256", method),
       };
     case "refused":
@@ -769,6 +770,7 @@ export class EngineRelayClient {
         );
         return {
           pushed: result.pushed,
+          hasMore: result.hasMore,
           // The daemon owns all origin selection; desktop callers only consume
           // the count, so no origin identifiers cross the process boundary.
           originsPushed: [],

@@ -1,5 +1,6 @@
 import { errorMessage } from "./workspaceError";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
+import { atomicReplaceFile } from "../atomicReplaceFile";
 import {
   lstat,
   mkdir,
@@ -81,6 +82,8 @@ export interface CaptureSharedViewLocalDivergenceOutcome {
   repairedPaths: number;
   unjournalablePaths: UnjournalablePath[];
   collisionRecordQuarantined: boolean;
+  failedPaths?: string[];
+  remainingPreservedPaths?: string[];
 }
 
 // Capture failing mid-pass still leaves whatever it fixed before the throw —
@@ -452,22 +455,21 @@ async function writeSidecarAtomically(
 ): Promise<void> {
   const metadataDir = await ensureRealMetadataDirectory(rootDir);
   const target = join(metadataDir, fileName);
-  const temp = join(
-    metadataDir,
-    `.${fileName}.${process.pid}.${randomUUID()}.tmp`,
-  );
+  let temp: string | undefined;
   try {
-    const handle = await open(temp, "w");
-    try {
-      await writeContent(handle);
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    await rename(temp, target);
+    await atomicReplaceFile(target, async (temporary) => {
+      temp = temporary;
+      const handle = await open(temporary, "w");
+      try {
+        await writeContent(handle);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+    });
     await syncMetadataDirectory(metadataDir);
   } finally {
-    await rm(temp, { force: true });
+    if (temp) await rm(temp, { force: true });
   }
 }
 
@@ -1388,6 +1390,8 @@ async function captureSharedViewLocalDivergence(input: {
   shareId: string;
   beforeCaptureWrite?: (path: string) => Promise<void>;
   paths?: readonly string[];
+  preservedPaths?: readonly string[] | null;
+  bestEffort?: boolean;
   workspaceLease?: WorkspaceOperationLease;
 }): Promise<CaptureSharedViewLocalDivergenceOutcome> {
   const {
@@ -1398,10 +1402,14 @@ async function captureSharedViewLocalDivergence(input: {
     shareId,
     beforeCaptureWrite,
     paths,
+    preservedPaths = [],
+    bestEffort = false,
     workspaceLease,
   } = input;
+  const preserved = new Set(preservedPaths ?? []);
   const realRoot = await realpath(rootDir).catch(() => null);
   if (realRoot === null) {
+    if (bestEffort || preservedPaths === null || preserved.size > 0) throw new Error("The share folder could not be read before access changed.");
     return {
       capturedPaths: 0,
       repairedPaths: 0,
@@ -1420,6 +1428,9 @@ async function captureSharedViewLocalDivergence(input: {
       versionId: main.id,
     })
   ).filter((entry) => pathIsInScope(entry.path));
+  if (preservedPaths === null) {
+    for (const entry of tracked) preserved.add(entry.path);
+  }
   const pendingState = await readPendingMaterializationPathsForCapture(
     rootDir,
     tracked.map((entry) => entry.path),
@@ -1433,6 +1444,9 @@ async function captureSharedViewLocalDivergence(input: {
       })),
     ].filter(pathIsInScope),
   );
+  if (preservedPaths === null) {
+    for (const path of [...pendingPaths, ...collisionRecordedPaths]) preserved.add(path);
+  }
   if (collisionRecordQuarantined) {
     // A quarantined record cannot identify which paths it protected. Do no
     // mutations in this pass so the caller can show the notice before the
@@ -1449,6 +1463,7 @@ async function captureSharedViewLocalDivergence(input: {
     // Heal structural obstructions first so that safety check cannot wedge a
     // read-only mount on a planted link or a file squatting on a directory.
     for (const entry of tracked) {
+      if (preserved.has(entry.path)) continue;
       await healTamperedProjectionPath(realRoot, entry.path);
     }
   }
@@ -1483,12 +1498,17 @@ async function captureSharedViewLocalDivergence(input: {
   for (const path of collisionRecordedPaths) {
     markDebt(path, "collision");
   }
+  for (const path of preserved) {
+    if (classifyEngineFilePath(path).kind === "secret") continue;
+    if (pathIsInScope(path) && !workByPath.has(path)) markDebt(path, "collision");
+  }
 
   const settlement = {
     capturedPaths: 0,
     repairedPaths: 0,
     unjournalablePaths: [] as UnjournalablePath[],
     resolvedCollisionPaths: [] as string[],
+    failedPaths: [] as string[],
   };
 
   const currentEntry = (
@@ -1689,6 +1709,25 @@ async function captureSharedViewLocalDivergence(input: {
   const executeWork = async (
     work: CaptureWorkItem,
   ): Promise<CaptureVerdict> => {
+    if (preserved.has(work.path)) {
+      // These bytes predate the restriction. Journal them locally before
+      // releasing protection, even when this copy is now read-only.
+      return withCaptureMutationLock(
+        rootDir, work.path, workspaceLease, async resolvedTarget => {
+          const disk = await readDiskContent(resolvedTarget);
+          if (disk.kind === "unreadable" || disk.kind === "untracked-content") {
+            return unjournalableVerdict(work.path, unjournalableFromDisk(work.path, disk).reason);
+          }
+          if (disk.kind === "absent" && !(await pathConfirmedAbsentOnDisk(resolvedTarget))) {
+            return unjournalableVerdict(work.path, "unreadable");
+          }
+          await applyAction(work.path, disk.kind === "absent"
+            ? work.tracked ? { kind: "delete-store" } : { kind: "none" }
+            : { kind: "write-store", content: disk, beforeWrite: false });
+          return { kind: "captured", action: { kind: "none" }, resolveCollision: false };
+        },
+      );
+    }
     const row = captureWorkRow(work);
     let ordinaryPreLock: IncomingPathState | undefined;
     if (row === "tracked-ordinary") {
@@ -1764,7 +1803,7 @@ async function captureSharedViewLocalDivergence(input: {
       default:
         unreachableCaptureState(verdict);
     }
-    if (verdict.resolveCollision) {
+    if (verdict.resolveCollision || (preserved.has(work.path) && verdict.kind !== "unjournalable")) {
       settlement.resolvedCollisionPaths.push(work.path);
       return;
     }
@@ -1782,7 +1821,12 @@ async function captureSharedViewLocalDivergence(input: {
   try {
     for (const work of workByPath.values()) {
       failurePath = work.path;
-      await settleWork(work, await executeWork(work));
+      try {
+        await settleWork(work, await executeWork(work));
+      } catch (error) {
+        if (!bestEffort) throw error;
+        settlement.failedPaths.push(work.path);
+      }
     }
 
     if (settlement.resolvedCollisionPaths.length > 0) {
@@ -1803,7 +1847,8 @@ async function captureSharedViewLocalDivergence(input: {
     if (
       paths === undefined &&
       pendingState.pullInFlight &&
-      settlement.unjournalablePaths.length === 0
+      settlement.unjournalablePaths.length === 0 &&
+      settlement.failedPaths.length === 0
     ) {
       // Only a full successful pass proves that broad crash debt is settled.
       failurePath = join(".dohc", PULL_IN_FLIGHT_FILE);
@@ -1821,11 +1866,16 @@ async function captureSharedViewLocalDivergence(input: {
     );
   }
 
+  const resolvedPaths = new Set(settlement.resolvedCollisionPaths);
   return {
     capturedPaths: settlement.capturedPaths,
     repairedPaths: settlement.repairedPaths,
     unjournalablePaths: settlement.unjournalablePaths,
     collisionRecordQuarantined,
+    ...(settlement.failedPaths.length > 0 ? { failedPaths: settlement.failedPaths } : {}),
+    ...(input.preservedPaths !== undefined && (preservedPaths !== null || paths === undefined) ? {
+      remainingPreservedPaths: [...preserved].filter(path => !resolvedPaths.has(path)),
+    } : {}),
   };
 }
 
@@ -1837,6 +1887,8 @@ async function captureStandaloneShareViewDivergence(input: {
   shareId: string;
   ended: boolean;
   paths?: readonly string[];
+  preservedPaths?: readonly string[] | null;
+  bestEffort?: boolean;
   workspaceLease?: WorkspaceOperationLease;
 }): Promise<CaptureSharedViewLocalDivergenceOutcome> {
   const grantedSelector = recordedShareSelector(input.pinnedSelector);
@@ -1852,6 +1904,8 @@ async function captureStandaloneShareViewDivergence(input: {
     allowLocalJournaling,
     shareId: input.shareId,
     paths: input.paths,
+    preservedPaths: input.preservedPaths,
+    bestEffort: input.bestEffort,
     workspaceLease: input.workspaceLease,
   });
 }
@@ -2068,7 +2122,7 @@ async function refreshSharedViewOnce(input: {
   };
 }
 
-type ShareViewRefreshCompositionInput = Omit<
+type ShareViewRefreshCompositionInput = { preservedPaths?: readonly string[] | null } & Omit<
   Parameters<typeof refreshSharedViewOnce>[0],
   | "excludeFromMaterialization"
   | "unjournalablePaths"
@@ -2081,7 +2135,7 @@ async function refreshCapturedShareView(
     captured: CaptureSharedViewLocalDivergenceOutcome;
   },
 ): Promise<RefreshSharedViewOutcome> {
-  const { captured, ...refreshInput } = input;
+  const { captured, preservedPaths = [], ...refreshInput } = input;
   const localChanges = captured.capturedPaths + captured.repairedPaths;
   const main = await refreshInput.store.ensureMainVersion({
     workspaceId: refreshInput.workspaceId,
@@ -2097,6 +2151,8 @@ async function refreshCapturedShareView(
   const outcome = await refreshSharedViewOnce({
     ...refreshInput,
     excludeFromMaterialization: new Set([
+      ...(preservedPaths ?? preTrackedPaths),
+      ...(captured.failedPaths ?? []),
       ...captured.unjournalablePaths.map((path) => path.path),
       ...(captured.collisionRecordQuarantined ? preTrackedPaths : []),
     ]),

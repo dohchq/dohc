@@ -1,23 +1,49 @@
-import { AlertTriangle, CheckCircle2, MoreHorizontal } from "lucide-react";
-import { useEffect, useRef } from "react";
+import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
+import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
+import { AlertTriangle, Bot, CheckCircle2, Globe2, MessageSquare, MoreHorizontal, SearchX } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import type { ChatThreadRecord, EngineMomentRecord, HistoryPolicyUnreadableResult, SyncStatusResult } from "../../ipc/bridgeContract";
+import { readError, withErrorWords } from "../../ipc/errorWords";
 import { DocumentMenu } from "../DocumentMenu";
+import { FrontmatterAsWritten } from "../FrontmatterAsWritten";
+import { DocumentControls, OPENING_TITLE, ViewHeader } from "../fileInspectorUi";
+import { BlockMenu } from "../editor/blockControls";
+import { SlashCommandMenu, type SlashCommandState } from "../editor/slashCommands";
+import { buildTableMenu, type TableMenuRow } from "../editor/tableControls";
 import { OverlayFrame } from "../Overlay";
+import { CollectionUnavailable } from "../TransactionalCollectionPage";
 import { ColorControl, HueControl, SwitchControl, TextControl } from "../settings/SettingRow";
-import { CopyDetailsButton } from "../shell/copyDetails";
 import { ConfirmDialogCard } from "../ui/ConfirmDialog";
-import { CopyButton } from "../ui/CopyButton";
+import { CopyButton, CopyField } from "../ui/CopyButton";
 import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
+import { MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
 import { MoreMenu } from "../ui/MoreMenu";
 import { SegmentedControl } from "../ui/SegmentedControl";
+import { SkeletonRows } from "../ui/SkeletonRows";
 import { SAVE_STATE, StateMark, type SaveStateKey } from "../ui/StateMark";
 import { FolderChip, Step } from "../ui/Step";
 import { AgentBadge } from "../workbench/AgentBadge";
 import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
+import { EditorGroupLayout } from "../workbench/EditorGroupLayout";
+import { EditorTabs } from "../workbench/EditorTabs";
+import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords } from "../workbench/HistoryPolicyStates";
 import { TreeRow, type VisibleRow } from "../workbench/Explorer";
 import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
-import { PanelLoading } from "../workbench/PanelLoading";
+import { MomentRow } from "../workbench/EngineHistory";
+import {
+  AboutAccessView,
+  AboutChatRow,
+  AboutHeader,
+  AboutHistoryView,
+  AboutSection,
+  type AccessReason,
+  type AccessSetup,
+  type AccessView,
+} from "../workbench/About";
+import { CAPTURE_RECOVERY_TITLE, captureRecoveryMessage } from "../shell/useCaptureRecoveryNotices";
+import { WorkspaceSyncStatus } from "../workbench/WorkspaceSyncStatus";
 import { closeStatesPage } from "./statesRoute";
 
 // Every shared part in every state, light beside dark, on one development
@@ -71,10 +97,12 @@ function useWholePixelHeight() {
   return { section, content };
 }
 
-function Section(props: { part: string; title: string; children: ReactNode }) {
+// A part whose subject is not a menu but which holds one, such as a header
+// with its document menu, is captured with its menus closed (`menusAtRest`).
+function Section(props: { part: string; title: string; children: ReactNode; menusAtRest?: boolean }) {
   const { section, content } = useWholePixelHeight();
   return (
-    <section ref={section} data-part={props.part}>
+    <section ref={section} data-part={props.part} data-menus={props.menusAtRest ? "rest" : undefined}>
       <div ref={content} className="flex flex-col gap-3">
         <SectionLabel as="h3" className="m-0">
           {props.title}
@@ -94,6 +122,11 @@ function Specimen(props: { label: string; children: ReactNode; className?: strin
   );
 }
 
+// A side panel's width, as Search, Apps and Chats give their empty states.
+function EmptyPanel(props: { children: ReactNode }) {
+  return <div className="flex h-44 w-64 flex-col rounded-lg border border-line bg-panel">{props.children}</div>;
+}
+
 function Swatch(props: { label: string; className: string }) {
   return (
     <Specimen label={props.label}>
@@ -103,6 +136,56 @@ function Swatch(props: { label: string; className: string }) {
 }
 
 const noop = () => undefined;
+
+const NO_RECOVERY: ReadonlySet<string> = new Set();
+
+// One group's strip over a strip of paper, as the shell lays a group out.
+function EditorGroupSpecimen(props: { groupId: string; groupNumber: number; tabs: string[]; active: string | null }) {
+  return (
+    <>
+      <EditorTabs
+        groupId={props.groupId}
+        groupNumber={props.groupNumber}
+        tabs={props.tabs.map((path) => ({ path }))}
+        activeTab={props.active}
+        activeTabDirty={false}
+        recoveryPaths={NO_RECOVERY}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+        onCloseGroup={noop}
+      />
+      {/* Tall enough to hold the tab list, which the capture opens, and its
+          shadow. */}
+      <div className="h-28 bg-bg" />
+    </>
+  );
+}
+
+// A split of two groups where one has tabs and the other none. A strip with
+// tabs carries the tab-list menu, and a part opens one menu, so each part
+// holds one strip with tabs.
+function EditorGroupsSpecimen(props: { activeHasTabs: boolean }) {
+  const tabbed = { tabs: ["plan.md", "notes.md"], active: "plan.md" };
+  const empty = { tabs: [], active: null };
+  const [first, second] = props.activeHasTabs ? [tabbed, empty] : [empty, tabbed];
+  return (
+    <div className="flex w-[640px] overflow-hidden rounded-lg border border-line">
+      <EditorGroupLayout
+        groups={[
+          { id: "first", size: 1, content: <EditorGroupSpecimen groupId="first" groupNumber={1} {...first} /> },
+          { id: "second", size: 1, content: <EditorGroupSpecimen groupId="second" groupNumber={2} {...second} /> },
+        ]}
+        activeGroupId="first"
+        onFocusGroup={noop}
+        onResizeGroups={noop}
+      />
+    </div>
+  );
+}
 
 function treeRow(name: string, folder = false): VisibleRow {
   return {
@@ -135,7 +218,6 @@ function Row(props: {
   folder?: boolean;
   selected?: boolean;
   active?: boolean;
-  focused?: boolean;
   drop?: boolean;
   force?: string;
 }) {
@@ -146,12 +228,51 @@ function Row(props: {
         collection={false}
         selected={props.selected ?? false}
         active={props.active ?? false}
-        focused={props.focused ?? false}
         tabbable={false}
         dropPreview={props.drop ? { kind: "move", role: "target" } : null}
         {...treeRowCallbacks}
       />
     </div>
+  );
+}
+
+// A file of every kind in the registry, so each glyph is drawn the way the
+// Explorer draws it. A `Record` over the kinds, so a new kind is a compile
+// error here until the page shows it.
+const KIND_SAMPLES: Record<FileDisplayKind, string> = {
+  markdown: "plan.md",
+  drawing: "flow.excalidraw",
+  csv: "budget.csv",
+  json: "package.json",
+  text: "notes.txt",
+  code: "app.ts",
+  image: "photo.png",
+  audio: "memo.m4a",
+  pdf: "report.pdf",
+  database: "ledger.sqlite",
+  binary: "archive.bin",
+};
+const KINDS = Object.values(FILE_KIND_RECORDS);
+
+function KindRows(props: { label: string; selected: boolean }) {
+  return (
+    <ul role="tree" aria-label={props.label} className="m-0 w-52 list-none rounded-lg border border-line bg-panel py-1">
+      {KINDS.map((kind) => (
+        <TreeRow
+          key={kind.displayKind}
+          row={{
+            ...treeRow(KIND_SAMPLES[kind.displayKind]),
+            kind: kind.displayKind === "database" ? "database" : "file",
+          }}
+          collection={false}
+          selected={props.selected}
+          active={false}
+          tabbable={false}
+          dropPreview={null}
+          {...treeRowCallbacks}
+        />
+      ))}
+    </ul>
   );
 }
 
@@ -168,6 +289,136 @@ function toast(tone: "danger" | "success") {
     seen: false,
     ...(tone === "success" ? { tone } : {}),
   };
+}
+
+const PARSER_TEXT = "visibility.toml: TOML parse error at line 3, column 9";
+const HIDDEN_HISTORY: HistoryPolicyUnreadableResult = {
+  status: "policy-unreadable",
+  unreadable: [".dohc/visibility.toml"],
+  policyErrors: [PARSER_TEXT],
+};
+// The toast a refused restore raises, in the words the shell builds for it.
+const REFUSED_RESTORE = new Error(
+  `Error invoking remote method 'desktop:restore-engine-moment-file': RestorePolicyRefusalError [policy-unreadable]: .dohc/visibility.toml: ${PARSER_TEXT}`,
+);
+const REFUSED_RESTORE_TOAST = {
+  id: "refused-restore",
+  message: withErrorWords("dohc could not restore notes/plan.md.", REFUSED_RESTORE),
+  details: `Cause: ${readError(REFUSED_RESTORE).cause ?? ""}`,
+  atMs: 0,
+  canRetry: true,
+  seen: false,
+};
+
+// Typing capture kept when its file changed outside dohc: the toast and the
+// rows the shell builds for it, and its change in History. The time is
+// local, so the row reads the same in every time zone.
+const RECOVERY_PATH = "trip/plan.md";
+const RECOVERY_DETAILS = `Notice: ${captureRecoveryMessage(RECOVERY_PATH, false)}\nTitle: ${CAPTURE_RECOVERY_TITLE}\nFile: ${RECOVERY_PATH}`;
+const RECOVERY_TOAST = {
+  id: "capture-recovery",
+  tone: "warning" as const,
+  title: CAPTURE_RECOVERY_TITLE,
+  message: captureRecoveryMessage(RECOVERY_PATH, false),
+  details: RECOVERY_DETAILS,
+  atMs: 0,
+  canRetry: false,
+  actionLabel: "Open History",
+  seen: false,
+};
+function recoveryNotice(id: string, shared: boolean) {
+  return {
+    id,
+    tone: "warning" as const,
+    title: CAPTURE_RECOVERY_TITLE,
+    body: captureRecoveryMessage(RECOVERY_PATH, shared),
+    Icon: AlertTriangle,
+    actions: [{ label: "Open History", onClick: noop }],
+    copyText: RECOVERY_DETAILS,
+    copyLabel: "Copy notice details",
+    onDismiss: noop,
+  };
+}
+const RECOVERY_MOMENT: EngineMomentRecord = {
+  id: "moment-capture-recovery",
+  versionId: "main",
+  path: RECOVERY_PATH,
+  recordedAtMs: new Date(2026, 6, 8, 9, 41).getTime(),
+  operation: "write",
+  origin: "capture-recovery",
+  momentOrder: 7,
+};
+
+// The About tab on the drawing's document: who wrote what, who has it.
+const ABOUT_PATH = "notes/product-plan.md";
+const ABOUT_THREADS: ChatThreadRecord[] = [
+  { id: "thread-scope", title: "Launch scope", createdAtMs: new Date(2026, 6, 6, 14, 5).getTime(), updatedAtMs: new Date(2026, 6, 8, 9, 12).getTime() },
+  { id: "thread-pricing", title: "Pricing questions", createdAtMs: new Date(2026, 6, 2, 11, 0).getTime(), updatedAtMs: new Date(2026, 6, 7, 16, 40).getTime() },
+];
+const aboutMoment = (moment: Partial<EngineMomentRecord> & { id: string; recordedAtMs: number; momentOrder: number }): EngineMomentRecord => ({
+  versionId: "main",
+  path: ABOUT_PATH,
+  operation: "write",
+  origin: "ydoc",
+  ...moment,
+});
+const ABOUT_MOMENTS: EngineMomentRecord[] = [
+  aboutMoment({ id: "about-agent", recordedAtMs: new Date(2026, 6, 8, 9, 30).getTime(), momentOrder: 9, agentAuthorName: "Nova", summary: "Tightened the launch list" }),
+  aboutMoment({ id: "about-person", recordedAtMs: new Date(2026, 6, 8, 8, 55).getTime(), momentOrder: 8, namedAuthor: { userId: "sam", label: "Sam Rivera" } }),
+  aboutMoment({ id: "about-local", recordedAtMs: new Date(2026, 6, 7, 17, 20).getTime(), momentOrder: 6, origin: "local-file" }),
+];
+const aboutGrant = (grant: Partial<AccessShareRow> & { grantId: string }): AccessShareRow => ({
+  kind: "share",
+  shareId: "share-plan",
+  via: "named",
+  granterUserId: "ice",
+  granterEmail: "ice@example.com",
+  recipientUserId: null,
+  recipientEmail: null,
+  subjectName: null,
+  sharerName: null,
+  selector: { paths: ["notes"], versionId: null },
+  access: "edit",
+  status: "active",
+  generation: 1,
+  ...grant,
+});
+const ABOUT_ACCESS: AccessAnswer = {
+  ref: { kind: "path", path: ABOUT_PATH, versionId: null },
+  rows: [
+    aboutGrant({ grantId: "grant-sam", recipientUserId: "sam", recipientEmail: "sam@example.com" }),
+    aboutGrant({ grantId: "grant-link", via: "link", access: "view" }),
+    aboutGrant({ grantId: "grant-kim", recipientUserId: "kim", recipientEmail: "kim@example.com", status: "revoked", access: null }),
+  ],
+  visibility: "visible",
+  coverage: { kind: "granted", complete: true, observation: "interval" },
+  checkedAtMs: new Date(2026, 6, 8, 9, 40).getTime(),
+  freshness: "fresh",
+  nextCursor: null,
+};
+const ABOUT_ACCESS_UNKNOWN: AccessAnswer = {
+  ...ABOUT_ACCESS,
+  rows: [],
+  coverage: { kind: "unavailable", complete: false, observation: "interval" },
+  checkedAtMs: null,
+  freshness: "unknown",
+};
+
+// The About tab at the drawing's 290px, on the chrome.
+function AboutPanelSpecimen(props: { children: ReactNode }) {
+  return <div className="flex w-[290px] flex-col rounded-lg border border-line bg-panel pb-2">{props.children}</div>;
+}
+
+const accessSetup = (reason: AccessReason): AccessSetup => ({ reason, openSyncSettings: noop, connect: noop });
+const ACCESS_UNEXPLAINED = accessSetup("unexplained");
+
+function AccessSpecimen(props: { view: AccessView; reason?: AccessReason }) {
+  return (
+    <AboutPanelSpecimen>
+      <AboutAccessView view={props.view} expanded onToggle={noop} onRetry={noop} onMore={noop}
+        setup={props.reason ? accessSetup(props.reason) : ACCESS_UNEXPLAINED} />
+    </AboutPanelSpecimen>
+  );
 }
 
 function notice(id: string, tone: "danger" | "success") {
@@ -229,6 +480,162 @@ const menuItems = [
 ];
 
 const avatarSizes = ["post", "comment", "strip"] as const;
+
+const SYNC_CODE = "dohc-sync:ws_7f3a:wss://relay.dohc.dev";
+
+function failToCopy(): never {
+  throw new Error("nothing to copy");
+}
+
+// One row per form: rest, hover, keyboard focus, then the two answers.
+function CopySpecimens(props: { theme: "light" | "dark"; form: "icon" | "words" }) {
+  const { theme, form } = props;
+  const iconOnly = form === "icon";
+  return (
+    <Specimen label={`${iconOnly ? "icon only" : "with words"}: rest, hover, focus-visible, copied, failed`}>
+      <CopyButton iconOnly={iconOnly} label="Copy details" pinName getText={() => RELAY_ERROR} />
+      <span data-force-state="hover" data-force-target="button">
+        <CopyButton iconOnly={iconOnly} label="Copy details" pinName getText={() => RELAY_ERROR} />
+      </span>
+      <span data-force-state="focus-visible" data-force-target="button">
+        <CopyButton iconOnly={iconOnly} label="Copy details" pinName getText={() => RELAY_ERROR} />
+      </span>
+      <CopyButton
+        iconOnly={iconOnly}
+        label="Copy details" pinName
+        getText={() => RELAY_ERROR}
+        testId={`states-copy-${form}-copied-${theme}`}
+      />
+      <CopyButton
+        iconOnly={iconOnly}
+        label="Copy details" pinName
+        getText={failToCopy}
+        testId={`states-copy-${form}-failed-${theme}`}
+      />
+    </Specimen>
+  );
+}
+
+// A shell menu as its owner holds it: the open state here, the rows given.
+function MenuSpecimen(props: { label: string; items: readonly MenuEntry[]; width: number; testId: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Menu
+      label={props.label}
+      testId={props.testId}
+      open={open}
+      onOpenChange={setOpen}
+      items={props.items}
+      width={props.width}
+      closeOnPick={false}
+    />
+  );
+}
+
+const versionRows: MenuEntry[] = [
+  { id: "main", label: "Main", checked: true, onSelect: noop },
+  { id: "draft", label: "Draft two", checked: false, onSelect: noop },
+  MENU_SEPARATOR,
+];
+const radioMenuItems: MenuEntry[] = [
+  ...versionRows,
+  { id: "try", label: "Try in a version…", icon: <Bot size={14} aria-hidden />, onSelect: noop },
+  { id: "compare", label: "Compare with Main", onSelect: noop },
+  { id: "merge", label: "Merge into Main…", disabled: true, onSelect: noop },
+];
+const fieldMenuItems: MenuEntry[] = [
+  ...versionRows,
+  {
+    id: "new",
+    field: {
+      label: "New version name",
+      value: "Draft three",
+      onChange: noop,
+      onSubmit: noop,
+      onCancel: noop,
+      hint: "Press Enter to create and start working in it.",
+    },
+  },
+];
+const overflowMenuItems: MenuEntry[] = [
+  { id: "plan", label: "plan.md", current: true, onSelect: noop },
+  { id: "long", label: "quarterly-planning-notes-for-the-whole-team.md", onSelect: noop },
+  { id: "notes", label: "notes.md", onSelect: noop },
+  { id: "budget", label: "budget.csv", onSelect: noop },
+];
+const dangerMenuItems: MenuEntry[] = [
+  { id: "reveal", label: "Reveal in folder", onSelect: noop },
+  { id: "forget", label: "Forget", danger: true, onSelect: noop },
+];
+
+// The editor's menus draw themselves at fixed places. Laid out inside a box
+// with `contain: layout`, which is the containing block for fixed children,
+// they land in their part. The box leaves room for the shadow.
+const EDITOR_MENU_BOX = "relative [contain:layout]";
+
+const BLOCK_MENU_OPEN = {
+  open: true,
+  pos: 0,
+  x: 0,
+  y: 0,
+  maxHeight: 420,
+  placement: "below",
+  trigger: null,
+} as const;
+
+const SLASH_MENU_OPEN: SlashCommandState = {
+  open: true,
+  from: 1,
+  to: 1,
+  query: "",
+  selected: 2,
+  x: 0,
+  y: 0,
+  bottom: null,
+  maxHeight: 260,
+  placement: "below",
+};
+
+const TABLE_MENU_ROWS: readonly TableMenuRow[] = [
+  { label: "Insert column left" },
+  { label: "Insert column right" },
+  { label: "Align left", separatorBefore: true },
+  { label: "Align center" },
+  { label: "Align right" },
+  { label: "Duplicate column" },
+  { label: "Delete column", destructive: true, separatorBefore: true },
+];
+
+// The grip menu is built from the DOM, as the table controls build it, with
+// its destructive row active.
+function TableMenuSpecimen(props: { menuId: string }) {
+  const host = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const element = host.current;
+    if (!element) return;
+    const { menu, buttons } = buildTableMenu(element.ownerDocument, TABLE_MENU_ROWS, props.menuId);
+    menu.style.left = "0px";
+    menu.style.top = "0px";
+    const active = buttons.at(-1);
+    if (active) {
+      active.toggleAttribute("data-active", true);
+      menu.setAttribute("aria-activedescendant", active.id);
+    }
+    element.append(menu);
+    return () => menu.remove();
+  }, [props.menuId]);
+  return <div ref={host} className={`${EDITOR_MENU_BOX} h-[300px] w-[260px]`} />;
+}
+
+// The section shows file text only. After `budget` is renamed `cost`, the
+// file holds the old name until the save lands.
+function AsWrittenSpecimen(props: { name: string }) {
+  return (
+    <div className="w-[420px] rounded-lg border border-line bg-bg">
+      <FrontmatterAsWritten markdown={`---\n# Monthly\n${props.name}: 100 # euros\n---\n\nBody`} propertiesShown />
+    </div>
+  );
+}
 
 function Pane(props: { theme: "light" | "dark" }) {
   const { theme } = props;
@@ -301,36 +708,23 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* The copied and refused ones are pressed by the capture; press them
-          yourself on the page. */}
+      {/* The copied and failed ones are pressed by the capture; press them
+          yourself on the page. A failed copy here says so in place only:
+          the page has no notice owner to report to. */}
       <Section part="copy" title="Copy">
-        <Specimen label="copy: rest, hover, copied, refused">
-          <CopyButton getText={() => ""} testId={`states-copy-${theme}`} />
-          <span data-force-state="hover" data-force-target="button">
-            <CopyButton getText={() => ""} testId={`states-copy-hover-${theme}`} />
-          </span>
-          <CopyButton getText={() => "wss://relay.dohc.dev"} testId={`states-copy-copied-${theme}`} />
-          <CopyButton
-            getText={() => {
-              throw new Error("nothing to copy");
-            }}
-            testId={`states-copy-refused-${theme}`}
-          />
-        </Specimen>
-        <Specimen label="copy details: rest, icon, copied, icon copied">
-          <CopyDetailsButton label="Copy details" details={() => ""} />
-          <CopyDetailsButton iconOnly label="Copy details" details={() => ""} />
-          <CopyDetailsButton
-            label="Copy details"
-            details={() => RELAY_ERROR}
-            data-testid={`states-copy-details-copied-${theme}`}
-          />
-          <CopyDetailsButton
-            iconOnly
-            label="Copy details"
-            details={() => RELAY_ERROR}
-            data-testid={`states-copy-details-icon-copied-${theme}`}
-          />
+        <CopySpecimens theme={theme} form="icon" />
+        <CopySpecimens theme={theme} form="words" />
+        <Specimen label="field: rest, copied">
+          <div className="w-64">
+            <CopyField getText={() => SYNC_CODE}>
+              <code title={SYNC_CODE}>{SYNC_CODE}</code>
+            </CopyField>
+          </div>
+          <div className="w-64">
+            <CopyField copyTestId={`states-copy-field-copied-${theme}`} getText={() => SYNC_CODE}>
+              <code title={SYNC_CODE}>{SYNC_CODE}</code>
+            </CopyField>
+          </div>
         </Specimen>
       </Section>
 
@@ -473,23 +867,25 @@ function Pane(props: { theme: "light" | "dark" }) {
         <ul role="tree" aria-label="Rows" className="m-0 w-64 list-none rounded-lg border border-line bg-panel py-1">
           <Row name="rest" folder />
           <Row name="hover" force="hover" />
+          <Row name="focused" force="focus-visible" />
           <Row name="selected" selected />
+          <Row name="focused, selected" selected force="focus-visible" />
           <Row name="active" active />
-          <Row name="focused" focused />
+          <Row name="focused, hover" force="hover focus-visible" />
           <Row name="drop target" folder drop />
         </ul>
       </Section>
 
       {/* Both menus are opened by the capture, one at a time, and their
           boxes are tall enough for the open menu and its shadow. A menu's
-          first row takes keyboard focus when it opens; forcing focus there
-          draws the same row the same way whether or not focus has since
-          moved on. */}
+          first row takes keyboard focus when it opens; forcing focus and
+          focus-visible there draws the row as a keyboard user sees it,
+          whether or not focus has since moved on. */}
       <Section part="menu" title="Menu">
         <Specimen label="rows: keyboard-active, hover, rest, disabled">
           <div
             className="flex h-56 w-56 items-start justify-end"
-            data-force-state="focus"
+            data-force-state="focus focus-visible"
             data-force-target="[role=menuitem]:nth-child(1)"
           >
             <div data-force-state="hover" data-force-target="[role=menuitem]:nth-child(2)">
@@ -502,7 +898,7 @@ function Pane(props: { theme: "light" | "dark" }) {
       <Section part="document-menu" title="Document menu">
         <div
           className="flex h-64 w-56 items-start justify-end"
-          data-force-state="focus"
+          data-force-state="focus focus-visible"
           data-force-target="[role=menuitem]:nth-child(1)"
         >
           <DocumentMenu workspaceId="states" suggestedName="states" getMarkdown={() => null} />
@@ -510,17 +906,60 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="empty" title="Empty">
-        <div className="flex h-40 w-64 flex-col rounded-lg border border-line bg-panel">
-          <EmptyState title='No files match "budget".' hint="Try a shorter search.">
-            <button type="button" className={KBD}>Clear search</button>
-          </EmptyState>
-        </div>
+        <Specimen label="glyph, line, action in focus">
+          <EmptyPanel>
+            <EmptyState icon={SearchX} title='No files or chats match "budget".'>
+              <SecondaryButton data-force-state="focus-visible">Clear filters</SecondaryButton>
+            </EmptyState>
+          </EmptyPanel>
+        </Specimen>
+        <Specimen label="create">
+          <EmptyPanel>
+            <EmptyState icon={Globe2} title="No apps in this workspace yet.">
+              <PrimaryButton>Create app</PrimaryButton>
+            </EmptyState>
+          </EmptyPanel>
+        </Specimen>
+        <Specimen label="mark, line, hint">
+          <EmptyPanel>
+            <EmptyState
+              title="No live documents in this workspace."
+              hint="Reload after a document starts live editing."
+            />
+          </EmptyPanel>
+        </Specimen>
+        <Specimen label="failed">
+          <EmptyPanel>
+            <EmptyState icon={AlertTriangle} tone="danger" title="Could not load Chats for this file.">
+              <SecondaryButton>Try again</SecondaryButton>
+            </EmptyState>
+          </EmptyPanel>
+        </Specimen>
+        <Specimen label="Collection waiting, Try again in focus">
+          <EmptyPanel>
+            <div className="contents" data-force-state="focus-visible" data-force-target="button">
+              <CollectionUnavailable waiting words="This Collection is waiting to reopen. Try again in 10 seconds." onRetry={noop} />
+            </div>
+          </EmptyPanel>
+        </Specimen>
+        <Specimen label="a long query wraps">
+          <EmptyPanel>
+            <EmptyState icon={SearchX} title='No files or chats match "quarterly-revenue-forecast-final-v3".' />
+          </EmptyPanel>
+        </Specimen>
       </Section>
 
       <Section part="loading" title="Loading">
-        <div className="flex h-40 w-64 flex-col rounded-lg border border-line bg-panel">
-          <PanelLoading label="files" />
-        </div>
+        <Specimen label="list">
+          <div className="flex h-40 w-64 flex-col rounded-lg border border-line bg-panel">
+            <SkeletonRows layout="panel" label="Loading files..." />
+          </div>
+        </Specimen>
+        <Specimen label="editor">
+          <div className="flex h-40 w-96 flex-col rounded-lg border border-line bg-bg">
+            <SkeletonRows layout="document" label="Loading…" className="pt-12" />
+          </div>
+        </Specimen>
       </Section>
 
       <Section part="toasts" title="Toasts">
@@ -549,9 +988,350 @@ function Pane(props: { theme: "light" | "dark" }) {
       <Section part="dialog" title="Dialog">
         <DialogSpecimen theme={theme} />
       </Section>
+
+      {/* The shell's menus, one part each, after the dialog so the parts
+          above keep their places. */}
+      <Section part="menu-radio" title="Menu with radio rows">
+        <Specimen label="checked: keyboard-active; unchecked: hover; icon; disabled">
+          <div
+            className="flex h-64 w-64 items-start justify-end"
+            data-force-state="focus focus-visible"
+            data-force-target="[role=menuitemradio]:nth-child(1)"
+          >
+            <div data-force-state="hover" data-force-target="[role=menuitemradio]:nth-child(2)">
+              <MenuSpecimen label="Versions" items={radioMenuItems} width={208} testId={`states-menu-radio-${theme}`} />
+            </div>
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="menu-field" title="Menu with a name field">
+        <Specimen label="field: focus, hint">
+          <div className="flex h-48 w-72 items-start justify-end" data-force-state="focus" data-force-target="input">
+            <MenuSpecimen label="Versions" items={fieldMenuItems} width={240} testId={`states-menu-field-${theme}`} />
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="menu-overflow" title="Overflow menu">
+        <Specimen label="current; long name: keyboard-active; rest">
+          <div
+            className="flex h-56 w-72 items-start justify-end"
+            data-force-state="focus focus-visible"
+            data-force-target="[role=menuitem]:nth-child(2)"
+          >
+            <MenuSpecimen
+              label="Tabs in editor group 1"
+              items={overflowMenuItems}
+              width={240}
+              testId={`states-menu-overflow-${theme}`}
+            />
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="menu-danger" title="Menu with a destructive row">
+        <Specimen label="rest; destructive: keyboard-active">
+          <div
+            className="flex h-36 w-56 items-start justify-end"
+            data-force-state="focus focus-visible"
+            data-force-target="[role=menuitem]:nth-child(2)"
+          >
+            <MenuSpecimen label="More for Research" items={dangerMenuItems} width={176} testId={`states-menu-danger-${theme}`} />
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* After the menus, so the parts above keep their places. The capture
+          opens each part's tab list. */}
+      <Section part="editor-groups" title="Editor groups">
+        <Specimen label="split: the active group with tabs, then an empty one">
+          <EditorGroupsSpecimen activeHasTabs />
+        </Specimen>
+      </Section>
+
+      <Section part="editor-groups-empty" title="Editor groups, empty active group">
+        <Specimen label="split: an empty active group, then one with tabs">
+          <EditorGroupsSpecimen activeHasTabs={false} />
+        </Specimen>
+      </Section>
+
+      {/* After the editor groups, so the parts above keep their places. */}
+      <Section part="kind-glyph" title="Kind glyph">
+        <Specimen label="kind">
+          <ul className="m-0 list-none border border-transparent py-1 font-mono text-[11px] text-subtle">
+            {KINDS.map((kind) => (
+              <li key={kind.displayKind} className="flex h-7 items-center">
+                {kind.displayKind} · {kind.name}
+              </li>
+            ))}
+          </ul>
+        </Specimen>
+        <Specimen label="rest">
+          <KindRows label="Kinds" selected={false} />
+        </Specimen>
+        <Specimen label="selected">
+          <KindRows label="Kinds, selected" selected />
+        </Specimen>
+      </Section>
+
+      {/* The editor's menus, after the shell's so the parts above keep their
+          places. Their active row is the one Enter acts on, keyboard or
+          pointer, and always draws the outline. */}
+      <Section part="block-menu" title="Block menu">
+        <Specimen label="sections; first row active; destructive with Del">
+          <div className={`${EDITOR_MENU_BOX} h-[410px] w-[270px]`}>
+            <BlockMenu state={BLOCK_MENU_OPEN} onSelect={noop} onClose={noop} />
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="table-menu" title="Table menu">
+        <Specimen label="separators; destructive row active, with Del">
+          <TableMenuSpecimen menuId={`states-table-menu-${theme}`} />
+        </Specimen>
+      </Section>
+
+      {/* Near the end, so a change here moves only the file header below it. */}
+      <Section part="history" title="History held back by its rules">
+        <Specimen label="panel: rules can't be read">
+          <div className="flex h-64 w-64 flex-col rounded-lg border border-line bg-panel">
+            <HistoryHiddenState testId={`states-history-hidden-${theme}`} result={HIDDEN_HISTORY} onRetry={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="diff: file no longer tracked">
+          <div className="flex h-64 w-96 flex-col rounded-lg border border-line bg-bg">
+            <HistoryUntrackedState testId={`states-history-untracked-${theme}`} onRetry={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="restore refused">
+          <div className={SHADOW_ROOM}>
+            <WorkspaceErrorToast error={REFUSED_RESTORE_TOAST} onRetry={noop} onHide={noop} />
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* After the history part, so the parts above keep their places. */}
+      <Section part="file-header" title="File header" menusAtRest>
+        {/* One document loading, ready, failed, and ready in a narrow pane:
+            Share, the toggle and the menu keep their places, and only the
+            save state gives way. No box clips them, so an overflow shows. */}
+        <Specimen label="loading" className="w-full">
+          <div className="w-full rounded-lg border border-line bg-bg">
+            <ViewHeader
+              path="trip/plan.md"
+              onShare={noop}
+              actions={
+                <DocumentControls
+                  toggle={{ label: "Edit", disabled: true, title: OPENING_TITLE }}
+                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => null }}
+                />
+              }
+            />
+          </div>
+        </Specimen>
+        <Specimen label="ready" className="w-full">
+          <div className="w-full rounded-lg border border-line bg-bg">
+            <ViewHeader
+              path="trip/plan.md"
+              onShare={noop}
+              status={<StateMark testId={`states-file-header-state-${theme}`} truncate state="saved" shown="saved" />}
+              actions={
+                <DocumentControls
+                  toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}
+                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => "# Plan" }}
+                />
+              }
+            />
+          </div>
+        </Specimen>
+        <Specimen label="failed" className="w-full">
+          <div className="w-full rounded-lg border border-line bg-bg">
+            <ViewHeader
+              path="trip/plan.md"
+              onShare={noop}
+              actions={
+                <DocumentControls
+                  toggle={{ label: "Edit", disabled: true }}
+                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => null, disabled: true }}
+                />
+              }
+            />
+          </div>
+        </Specimen>
+        <Specimen label="narrow, pending share">
+          <div data-testid={`states-file-header-narrow-${theme}`} className="w-[400px] rounded-lg border border-line bg-bg">
+            <ViewHeader
+              path="trip/plan.md"
+              onShare={noop}
+              status={
+                <StateMark testId={`states-file-header-pending-${theme}`} truncate state="pending-share" shown="pending-share" />
+              }
+              actions={
+                <DocumentControls
+                  toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}
+                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => "# Plan" }}
+                />
+              }
+            />
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* The editor's listboxes share these rows, after History so no part
+          above them moves. The editor keeps focus, and the option Enter acts
+          on draws the outline. The page link and emoji pickers are not here:
+          an open picker takes Enter from the whole window, which would take
+          it from this page's other parts. */}
+      <Section part="slash-menu" title="Slash menu">
+        <Specimen label="third option active; the list scrolls">
+          <div className={`${EDITOR_MENU_BOX} h-[272px] w-[330px]`}>
+            <SlashCommandMenu state={SLASH_MENU_OPEN} onSelect={noop} onHover={noop} />
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* After the file header, so the parts above keep their places. The
+          group a keyboard close leaves empty takes focus, and its ring shows
+          on all four edges above its tab strip. */}
+      <Section part="editor-group-focus" title="Editor group, focused" menusAtRest>
+        <Specimen label="split: the focused active group, empty, then one with tabs">
+          <div data-force-state="focus focus-visible" data-force-target='[data-editor-group-id="first"]'>
+            <EditorGroupsSpecimen activeHasTabs={false} />
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* After the parts above, so they keep their places. */}
+      <Section part="frontmatter-as-written" title="Frontmatter as written">
+        <Specimen label="rename saved">
+          <AsWrittenSpecimen name="cost" />
+        </Specimen>
+        <Specimen label="rename saving: the file keeps the old name">
+          <AsWrittenSpecimen name="budget" />
+        </Specimen>
+      </Section>
+
+      {/* After the others, so they keep their places. On the title bar's
+          own fill. */}
+      <Section part="title-bar-status" title="Title bar status">
+        {TITLE_BAR_STATUSES.map(({ label, syncStatus, failedSaves }) => (
+          <Specimen key={label} label={label}>
+            <span className="flex h-8 items-center rounded-md border border-line bg-panel px-3">
+              <WorkspaceSyncStatus syncStatus={syncStatus} failedSaves={failedSaves} />
+            </span>
+          </Specimen>
+        ))}
+      </Section>
+
+      {/* Last, so the parts above keep their places. */}
+      <Section part="capture-recovery" title="Typing kept in History">
+        <Specimen label="toast">
+          <div className={SHADOW_ROOM}>
+            <WorkspaceErrorToast error={RECOVERY_TOAST} onAction={noop} onHide={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="Notices: History Restore, then a shared live file">
+          <div className="w-[360px] rounded-lg border border-line bg-panel text-xs text-ink">
+            <ul className="m-0 list-none p-0">
+              <LocalNoticeRow notice={recoveryNotice("capture-recovery", false)} onKeyDown={noop} onAction={noop} onDismiss={noop} />
+              <LocalNoticeRow notice={recoveryNotice("capture-recovery-shared", true)} onKeyDown={noop} onAction={noop} onDismiss={noop} />
+            </ul>
+          </div>
+        </Specimen>
+        <Specimen label="History at its default width: the recovery change">
+          <ul className="m-0 w-[240px] list-none rounded-lg border border-line bg-panel p-0">
+            <li className="border-b border-line last:border-b-0">
+              <MomentRow moment={RECOVERY_MOMENT} onOpenMoment={noop} />
+            </li>
+          </ul>
+        </Specimen>
+      </Section>
+
+      {/* Last, so the parts above keep their places. */}
+      <Section part="about" title="About">
+        <Specimen label="a document: chats, history, access checked">
+          <AboutPanelSpecimen>
+            <AboutHeader path={ABOUT_PATH} />
+            <AboutSection id="chats" icon={MessageSquare} label="Chats" count="2" expanded onToggle={noop}>
+              <ul className="m-0 list-none p-0">
+                {ABOUT_THREADS.map((thread) => (
+                  <li key={thread.id}>
+                    <AboutChatRow thread={thread} onOpen={noop} />
+                  </li>
+                ))}
+              </ul>
+            </AboutSection>
+            <AboutHistoryView
+              view={{ status: "ready", moments: ABOUT_MOMENTS, more: true }}
+              expanded
+              onToggle={noop}
+              onOpenMoment={noop}
+            />
+            <AboutAccessView view={{ status: "ready", answer: ABOUT_ACCESS }} expanded onToggle={noop} onRetry={noop}
+              onMore={noop} setup={ACCESS_UNEXPLAINED} />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="access may be out of date">
+          <AccessSpecimen view={{ status: "ready", answer: { ...ABOUT_ACCESS, freshness: "stale" } }} />
+        </Specimen>
+        <Specimen label="no share within its coverage">
+          <AccessSpecimen view={{ status: "ready", answer: { ...ABOUT_ACCESS, rows: [] } }} />
+        </Specimen>
+        <Specimen label="unknown: the workspace does not sync">
+          <AccessSpecimen view={{ status: "ready", answer: ABOUT_ACCESS_UNKNOWN }} reason="not-synced" />
+        </Specimen>
+        <Specimen label="unknown: signed out">
+          <AccessSpecimen view={{ status: "ready", answer: ABOUT_ACCESS_UNKNOWN }} reason="signed-out" />
+        </Specimen>
+        <Specimen label="unknown: no cause dohc can name">
+          <AccessSpecimen view={{ status: "ready", answer: ABOUT_ACCESS_UNKNOWN }} />
+        </Specimen>
+        <Specimen label="loading, then failed reads: words in Notices">
+          <AboutPanelSpecimen>
+            <AboutHistoryView view={{ status: "loading" }} expanded onToggle={noop} onOpenMoment={noop} />
+            <AboutHistoryView view={{ status: "failed", retry: noop }} expanded onToggle={noop} onOpenMoment={noop} />
+            <AboutAccessView view={{ status: "failed" }} expanded onToggle={noop} onRetry={noop} onMore={noop} setup={ACCESS_UNEXPLAINED} />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="History held back by its rules: drawn here, no row">
+          <AboutPanelSpecimen>
+            <AboutHistoryView
+              view={{ status: "held", words: historyHiddenWords([".dohc/files.toml"]), retry: noop }}
+              expanded
+              onToggle={noop}
+              onOpenMoment={noop}
+            />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="keyboard focus on a closed section">
+          <div data-force-state="focus focus-visible" data-force-target='[data-testid="about-access-toggle"]'>
+            <AboutPanelSpecimen>
+              <AboutHistoryView view={{ status: "untracked" }} expanded onToggle={noop} onOpenMoment={noop} />
+              <AboutAccessView view={{ status: "loading" }} expanded={false} onToggle={noop} onRetry={noop} onMore={noop}
+                setup={ACCESS_UNEXPLAINED} />
+            </AboutPanelSpecimen>
+          </div>
+        </Specimen>
+      </Section>
     </section>
   );
 }
+
+const SYNCED_STATUS: SyncStatusResult = {
+  state: "synced",
+  pendingChangeCount: 0,
+  lastSyncedAtMs: null,
+  liveSessionsGeneration: 0,
+  historyRecordingUnavailable: false,
+  historyShareView: false,
+};
+
+const TITLE_BAR_STATUSES: { label: string; syncStatus: SyncStatusResult; failedSaves: number }[] = [
+  { label: "saved", syncStatus: SYNCED_STATUS, failedSaves: 0 },
+  { label: "a file couldn't save", syncStatus: SYNCED_STATUS, failedSaves: 1 },
+  { label: "files couldn't save, during a sync pass", syncStatus: { ...SYNCED_STATUS, state: "syncing" }, failedSaves: 2 },
+];
 
 export function StatesPage() {
   // The light pane has no rule of its own: it reads the document's light

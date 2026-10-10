@@ -231,6 +231,7 @@ async function executorFor(f: Awaited<ReturnType<typeof fixture>>, button = fals
     engine = adapter;
   }
   const errors: unknown[] = [];
+  const errorContexts: string[] = [];
   const waiting: string[] = [];
   const roster = () => ({ kind: "owner" as const, ownerUserId: "owner", grants: f.storage.getShareGrant(editor.grantId)?.status === "active" ? [{
     grantId: editor.grantId, recipientUserId: editor.userId, recipientEmail: null,
@@ -260,13 +261,13 @@ async function executorFor(f: Awaited<ReturnType<typeof fixture>>, button = fals
     chat: { directory: async () => null, write: async () => { throw Error("Unexpected chat"); } }, postNotice: async () => undefined,
     mayRetryPress: async () => false, onPressSettled: () => undefined, onPressWaiting: event => { waiting.push(event.reason); },
     onRunsChanged: () => undefined, reportFailure: async () => undefined, withdrawFailure: async () => undefined, onSwitchedOff: () => undefined, onHoldsChanged: () => undefined, onAutomationsChanged: () => undefined,
-    onError: (_context, error) => errors.push(error),
+    onError: (context, error) => {errorContexts.push(context); errors.push(error);},
   });
   makeExecutor();
   const stop = f.host.observeAutomationClaims(() => executor.notifyClaimed());
   cleanups.push(async () => { stop(); await executor.dispose(); await evaluator.close(); });
   await executor.open();
-  return { executor, makeExecutor, errors, store, claims, texts, waiting, engine, recipientEngine };
+  return { executor, makeExecutor, errors, errorContexts, store, claims, texts, waiting, engine, recipientEngine };
 }
 
 async function acceptedShared(f: Awaited<ReturnType<typeof fixture>>, steps: string, confirmed: string[] = [], extraFiles: Record<string, string> = {}) {
@@ -375,7 +376,11 @@ it.skipIf(nativeEngine.missing).each([true, false])("runs a relay-authenticated 
   }
   expect((await f.host.invoke(owner, { ...scope, ...rules, operationId: READ, input: {}, idempotencyKey: "native-result" })).result)
     .toMatchObject({ rows: allowed ? [{ id: "added", values: { [NAME]: "editor" } }] : [] });
-  expect(run.errors).toEqual([]);
+  expect(run.errors).toEqual(allowed ? [] : [new Error(SHARED_BUTTON_DENIED), new Error(SHARED_BUTTON_DENIED)]);
+  expect(run.errorContexts).toEqual(allowed ? [] : [
+    `inspect shared Button "${press.automationId}": presser-access`,
+    `inspect shared Button "${press.automationId}": presser-access`,
+  ]);
 }, 90_000);
 
 it.each([
@@ -695,4 +700,26 @@ it.each([false, true])("checks destination grants again before recording a press
     await expect(press).resolves.toMatchObject({ kind: "claimed" });
     expect(f.ledger.pressed(pressId)).not.toBeNull();
   }
+});
+
+it.each([2, 3])("enrolls base-folder schedules after revision %s", async number => {
+  const f = await fixture();
+  f.storage.tx(() => {
+    const approved = { ...revision, revision: number, definition: { ...definition, schemaPath: `People/revisions/${number}-00000000-0000-4000-8000-000000000099/schema.sql` } };
+    f.storage.db.prepare("UPDATE dohc_dataset_catalog SET revision_json=? WHERE workspace_id='w'").run(JSON.stringify(approved));
+    f.storage.db.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_seq) VALUES('w','test',1,'test','{}',1,1)").run();
+    f.storage.db.prepare("INSERT INTO sync_relay_current_files(workspace_id,version_id,path,blob_sha256,content_kind,state_relay_seq) VALUES('w','main','People/automations.yaml',?,'text',1)").run("a".repeat(64));
+  });
+  expect(f.host.automations.wantedWorkspaces()).toEqual(["w"]);
+});
+
+it.each(["schema.sql", "People/schema.sql"])("matches root automations to the schema base for %s", async schemaPath => {
+  const f = await fixture();
+  f.storage.tx(() => {
+    const approved = describeDatasetRevision({ definition: { ...definition, schemaPath }, revision: 1, schemaSql, operationSource });
+    f.storage.db.prepare("UPDATE dohc_dataset_catalog SET revision_json=? WHERE workspace_id='w'").run(JSON.stringify(approved));
+    f.storage.db.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_seq) VALUES('w','test',1,'test','{}',1,1)").run();
+    f.storage.db.prepare("INSERT INTO sync_relay_current_files(workspace_id,version_id,path,blob_sha256,content_kind,state_relay_seq) VALUES('w','main','automations.yaml',?,'text',1)").run("a".repeat(64));
+  });
+  expect(f.host.automations.wantedWorkspaces()).toEqual(schemaPath === "schema.sql" ? ["w"] : []);
 });

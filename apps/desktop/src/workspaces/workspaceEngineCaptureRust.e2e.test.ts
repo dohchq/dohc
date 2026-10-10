@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { join } from "node:path";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter";
 import pipelineFixture from "../../../../crates/dohc-engine-domain/tests/fixtures/collection-field-pipeline.json";
@@ -15,6 +15,8 @@ import type {
 import {
   VersionedLiveAdapter,
   YdocReleasedWithSettleFailureError,
+  openEngineYdocProviderSession,
+  type EngineTransport,
 } from "@dohc/workspace-engine-client";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import {
@@ -22,7 +24,9 @@ import {
   isYDocPathNotInVersionError,
   type WorkspaceEngineCaptureOptions,
   YDocUncapturedArtifactError,
+  DAEMON_CAPTURE_HEALTH_POLL_MS,
 } from "./workspaceEngineCapture";
+import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./workspaceActivity.testSupport";
 import { startWorkspaceFileObservation } from "./workspaceFileObservation";
 import { EngineFileObservation } from "@dohc/workspace-engine-client/daemon";
@@ -30,6 +34,7 @@ import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import {
   createRealDaemonLifecycle,
   createRealDaemonWorkspaceSessions,
+  REAL_DAEMON_DEADLINE_MS,
 } from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "./testTemp";
 import { waitForPathMoments } from "./waitForPathMoments";
@@ -73,11 +78,73 @@ function decodePipelineFixtureValue(value: unknown): unknown {
 // which is where the app under test and the staged-binary harnesses put it.
 const engine = requireEngineBinaryOrSkip();
 
+it.skipIf(engine.missing)("does not reopen deferred records from the real pending query on health polls", async () => {
+  const root = await createTestScratch("dohc-real-deferred-poll-");
+  await mkdir(join(root, "tasks"), { recursive: true });
+  await writeFile(join(root, "tasks/collection.yaml"), "fields: {}\n");
+  await writeFile(join(root, "tasks/record.md"), "Body\n");
+  const lifecycle = createRealDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
+  const sessions = createRealDaemonWorkspaceSessions(lifecycle);
+  const workspace = { workspaceId: "real-deferred-poll", rootPath: root, attachmentId: Symbol("deferred-poll") };
+  const seedCapture = createAttachedWorkspaceEngineCapture({ ...workspace, rustEngineSessions: sessions });
+  let pollingCapture: ReturnType<typeof createAttachedWorkspaceEngineCapture> | undefined;
+  await lifecycle.start();
+  try {
+    await waitForPathMoments(seedCapture, "tasks/record.md", 1);
+    const session = await sessions.run(workspace, ({ client, workspace: handle }) => {
+      if (typeof client.onEvent !== "function") throw new Error("Daemon fixture needs Y.Doc events");
+      return openEngineYdocProviderSession({ transport: client as EngineTransport, workspace: handle,
+        versionId: "main", path: "tasks/record.md", contentKind: "plaintext", onRemoteUpdate: () => undefined });
+    });
+    expect(session.contentKind).toBe("plaintext");
+    await session.evict();
+    await seedCapture.stop();
+    await sessions.closeWorkspace(workspace);
+    const adapter = await sessions.run(workspace, async ({ client, workspace: handle }) =>
+      new VersionedLiveAdapter(client, handle, { workspaceId: workspace.workspaceId }));
+    await adapter.reconcileCapture();
+    expect((await adapter.queryCollectionRecords({ collectionPath: "tasks" })).records).toHaveLength(1);
+    expect((await adapter.listPendingCollectionAdoptions()).adoptions).toEqual([]);
+
+    const liveStore = createCaptureLiveStores(workspace, sessions).store;
+    const pending = vi.spyOn(liveStore, "listPendingCollectionAdoptions");
+    const reconcile = vi.spyOn(liveStore, "reconcileCapture");
+    const open = vi.fn(async () => { throw new Error("deferred record must not open"); });
+    const errors = vi.fn();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    pollingCapture = createAttachedWorkspaceEngineCapture({ ...workspace, store: liveStore,
+      rustEngineSessions: sessions, openRustYDocProviderSession: open, onError: errors });
+    pollingCapture.start();
+    await pollingCapture.flush();
+    const initialPolls = pending.mock.calls.length;
+    const initialReconciles = reconcile.mock.calls.length;
+    for (let poll = 0; poll < 3; poll++) {
+      await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS);
+      await pollingCapture.flush();
+    }
+    expect(pending.mock.calls.length).toBeGreaterThan(initialPolls);
+    for (const result of pending.mock.results) {
+      expect((await result.value).adoptions).toEqual([]);
+    }
+    expect(reconcile).toHaveBeenCalledTimes(initialReconciles);
+    expect(open).not.toHaveBeenCalled();
+    expect(errors).not.toHaveBeenCalled();
+  } finally {
+    vi.useRealTimers();
+    await pollingCapture?.stop();
+    await seedCapture.stop();
+    await sessions.closeAll();
+    await lifecycle.stop();
+    vi.restoreAllMocks();
+  }
+}, 60_000);
+
 async function waitForDaemonCaptureDeferral(
   sessions: EngineWorkspaceSessions,
   workspace: AttachedEngineWorkspace,
 ): Promise<void> {
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+  const deadline = performance.now() + REAL_DAEMON_DEADLINE_MS;
+  while (performance.now() < deadline) {
     const outcome = await sessions.run(
       workspace,
       async ({ client, workspace: handle }) =>
@@ -842,7 +909,7 @@ it.skipIf(engine.missing || process.platform !== "win32")(
       // the editor gets its own state whose copy names the blocker instead
       // of advising another edit.
       await expect(session.settleNow()).rejects.toThrow();
-      expect(states).toEqual(["settling", "file-locked"]);
+      expect(states).toEqual(["saved", "settling", "file-locked"]);
       expect(errors).toEqual(["ydoc settle of note.md"]);
       expect(await readFile(absolute, "utf8")).toBe("base\n");
 
@@ -987,8 +1054,14 @@ it.skipIf(engine.missing)(
       // the queued disk edit without letting the failed Y.Doc close overwrite
       // it.
       await sessions.closeWorkspace(workspace);
-      const capturedMoments = await waitForPathMoments(capture, "note.md", 3);
-      expect(capturedMoments).toHaveLength(3);
+      const capturedMoments = await waitForPathMoments(capture, "note.md", 4);
+      expect(capturedMoments).toHaveLength(4);
+      const recovery = capturedMoments.find(moment => moment.metadata.origin === "capture-recovery");
+      expect(recovery).toBeDefined();
+      const detail = await capture.readMoment(recovery!.id);
+      if (!detail || detail.protected) throw new Error("recovery must have a readable History payload");
+      expect(detail.moment.payload.before?.text).toBe("never settled\ntyped in dohc\nbase\n");
+      expect(detail.moment.payload.after?.text).toBe(outside);
       expect(await readFile(join(root, "note.md"), "utf8")).toBe(outside);
     } finally {
       await capture.stop().catch(() => undefined);

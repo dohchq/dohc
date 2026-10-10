@@ -1,7 +1,9 @@
 import { expect, test } from "@playwright/test";
-import { readFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
+import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
+import { activityPin } from "../src/testPins";
 import {
   momentTextsForPath,
   replicationOpKindCount,
@@ -42,6 +44,58 @@ async function openEngineDoc(page: import("@playwright/test").Page, path: string
   // pre-open local editor.
   await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0, { timeout: 15_000 });
   await expect(page.getByTestId("markdown-editor")).toBeVisible();
+}
+
+// The kept typing's notice: its toast, then its row in Notices.
+function recoveryToast(page: import("@playwright/test").Page) {
+  return page.getByTestId("workspace-shell-notice").filter({hasText: "Typing kept in History"});
+}
+
+async function restoreRestartTyping(desktop: Awaited<ReturnType<typeof launchDesktopApp>>, rootPath: string, workspaceId: string, path: string, human: string, external: string, open: "notice" | "history") {
+  const {page, app} = desktop;
+  let recoveryId = "";
+  await expect.poll(async () => {
+    const status = await page.evaluate(async workspaceId => {
+      const api = (window as unknown as {dohcDesktop: DohcDesktopBridge}).dohcDesktop;
+      return api.getCaptureRecoveryStatus({workspaceId});
+    }, workspaceId);
+    recoveryId = status.captureRecoveries.find(recovery => recovery.path === path)?.momentId ?? "";
+    return recoveryId;
+  }, {timeout: 30_000}).not.toBe("");
+  const detail = await page.evaluate(async input => (window as unknown as {dohcDesktop: DohcDesktopBridge}).dohcDesktop.readEngineMoment(input), {workspaceId, momentId: recoveryId});
+  expect(detail.moment?.beforeText).toContain(human);
+  expect(detail.moment?.afterText).toContain(external);
+  await expect.poll(() => momentTextsForPath(rootPath, path)).toEqual(expect.arrayContaining([expect.stringContaining(external)]));
+  const orders = withEngineDb(rootPath, db => db.prepare("SELECT r.moment_order AS recoveryOrder,c.moment_order AS captureOrder FROM moments r JOIN moments c ON c.moment_id=r.metadata_correlation_id WHERE r.moment_id=?").get(recoveryId) as {recoveryOrder: number; captureOrder: number});
+  if (!orders) throw new Error("recovery must link to its committed outside capture");
+  expect(orders.captureOrder).toBeLessThan(orders.recoveryOrder);
+  expect(await readFile(join(rootPath,path), "utf8")).toContain(external);
+  if (open === "notice") {
+    const toast = recoveryToast(page);
+    await expect(toast).toContainText(`The file "${path}" changed outside dohc. Your typing is in History. Open the recovery change and choose Restore.`, {timeout: 30_000});
+    await toast.getByTestId("workspace-shell-error-action").click();
+    await expect(page.getByTestId(activityPin("history"))).toHaveAttribute("aria-current", "page");
+    await expect(page.getByTestId("engine-moment-diff-page")).toHaveAttribute("data-moment-id", recoveryId);
+    await expect(page.getByTestId("engine-diff-source")).toHaveText("Typing kept");
+  } else {
+    await openHistoryView(page);
+    await page.locator(`[data-testid="engine-moment-open"][data-moment-id="${recoveryId}"]`).click();
+  }
+  await expect(page.getByTestId("engine-diff-lines")).toContainText(human);
+  // A shared live file's way back: Copy your version copies the kept file whole.
+  await page.getByTestId("engine-diff-copy-typing").click();
+  // Windows hands clipboard text back with CRLF line endings.
+  await expect.poll(async () => (await app.evaluate(({clipboard}) => clipboard.readText())).replace(/\r\n/g, "\n")).toBe(detail.moment?.beforeText);
+  await page.getByTestId("engine-diff-restore-file").click();
+  await page.getByTestId("engine-diff-confirm-restore").click();
+  await expect(page.getByTestId("engine-diff-restore-status")).toContainText("Restored the earlier state");
+  await expect.poll(() => readFile(join(rootPath,path), "utf8")).toContain(human);
+  await expect.poll(() => page.evaluate(async workspaceId => (window as unknown as {dohcDesktop: DohcDesktopBridge}).dohcDesktop.getCaptureRecoveryStatus({workspaceId}), workspaceId)).toEqual({captureRecoveries: []});
+  // The restore cleared the recovery, so its notice goes too.
+  await expect(recoveryToast(page)).toHaveCount(0);
+  await page.getByTestId("notice-center-toggle").click();
+  await expect(page.locator("[data-notice-row]").filter({hasText: "Typing kept in History"})).toHaveCount(0);
+  await page.getByTestId("notice-center-toggle").click();
 }
 
 test("rich doc edits through the engine Y.Doc: settle lands on .md + engine.db, only ydoc.update journals, reopen resumes", async () => {
@@ -151,9 +205,27 @@ test("rich doc edits through the engine Y.Doc: settle lands on .md + engine.db, 
 });
 
 async function quitDesktop(desktop: Awaited<ReturnType<typeof launchDesktopApp>>) {
-  const exited = new Promise<void>(resolve => desktop.app.process().once("exit", () => resolve()));
-  await desktop.app.evaluate(({app}) => {app.quit();});
-  await exited;
+  const startedAt = process.hrtime.bigint();
+  const exited = new Promise<{ exitedAt: bigint; exitCode: number | null }>(resolve =>
+    desktop.app.process().once("exit", exitCode => resolve({exitedAt: process.hrtime.bigint(), exitCode})));
+  const streamsClosed = new Promise<void>(resolve => desktop.app.process().once("close", () => resolve()));
+  await desktop.app.evaluate(({app}) => {
+    process.env.DOHC_TEST_QUIT_TIMING = "1";
+    app.quit();
+  });
+  const {exitedAt, exitCode} = await exited;
+  // Child-process close follows stdout drain, so the main-process mark is complete.
+  await streamsClosed;
+  const output = desktop.logs.filter(entry => entry.source === "main" && entry.level === "stdout").map(entry => entry.text).join("");
+  const marks = [...output.matchAll(/DOHC_TEST_WILL_QUIT:(\d+)/g)];
+  expect(marks).toHaveLength(1);
+  const willQuitToExitMs = Number(exitedAt - BigInt(marks[0]![1]!)) / 1e6;
+  await test.info().attach("quit-duration", {
+    body: JSON.stringify({
+      requestToExitMs: Number(exitedAt - startedAt) / 1e6, willQuitToExitMs, exitCode,
+      budgetMs: 6000, budgetStartsAt: "will-quit", budgetMarginMs: 6000 - willQuitToExitMs,
+    }), contentType: "application/json",
+  });
   await desktop.close();
 }
 
@@ -203,12 +275,113 @@ test("an external edit to an open document remains recoverable after overlapping
     desktop = await launchDesktopApp({workspace: temp});
     await openWorkspaceFromFirstRun(desktop.page, temp);
     await waitForWorkspaceFile(desktop.page, workspace.workspaceId, path);
-    await expect(desktop.page.getByTestId("markdown-editor")).toContainText(human);
-    await expect(desktop.page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "error");
+    await expect(desktop.page.getByTestId("markdown-editor")).toContainText(external);
+    await restoreRestartTyping(desktop, temp.rootPath, workspace.workspaceId, path, human, external, "notice");
+    await quitDesktop(desktop);
+  } finally {await cleanupDesktopWorkspace(desktop, temp);}
+});
+
+test("kept typing survives capture before the renderer reopens after restart", async () => {
+  test.setTimeout(120_000);
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const external = "External agent wrote this straight to disk while the editor was open.";
+  const human = "Human continued typing in the open document.";
+  const path = "notes/rich.md";
+  try {
+    await writeWorkspaceFiles(temp, [{path, contents: "# Rich\n\nBase paragraph.\n"}]);
+    desktop = await launchDesktopApp({workspace: temp});
+    const {page} = desktop;
+    const workspace = await openWorkspaceFromFirstRun(page, temp);
+    await waitForWorkspaceFile(page, workspace.workspaceId, path);
+    await openEngineDoc(page, path);
+    await expect(page.getByTestId("markdown-editor")).toContainText("Base paragraph.");
+    await writeWorkspaceFiles(temp, [{path, contents: `# Rich\n\n${external}\n`}]);
+    // The live lease defers capture. Settlement must preserve the outside bytes.
+    await page.getByTestId("markdown-editor").click();
+    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.type(human);
+    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "error");
     expect(await readFile(join(temp.rootPath, path), "utf8")).toContain(external);
-    await desktop.page.getByTestId("markdown-source-toggle").click();
-    await desktop.page.getByTestId("markdown-source-copy").click();
-    await expect.poll(() => desktop!.app.evaluate(({clipboard}) => clipboard.readText())).toContain(human);
+    await expect(page.getByTestId("markdown-editor")).toContainText(human);
+    await quitDesktop(desktop);
+    // Workbench state lives in the workspace, independently of the Electron profile.
+    // Remove only this test's reopen intent so capture has no renderer lease.
+    await rm(join(temp.rootPath, ".dohc", "ui-state.json"), { force: true });
+    desktop = await launchDesktopApp({workspace: { ...temp, baseDir: join(temp.baseDir, "fresh-profile") }});
+    await openWorkspaceFromFirstRun(desktop.page, temp);
+    await expect(desktop.page.getByTestId("markdown-editor")).toHaveCount(0);
+    // This existing read flushes capture before an editor can hold a lease.
+    await desktop.page.evaluate(async ({ workspaceId, path }) => {
+      const api = (window as unknown as { dohcDesktop: {
+        listChatFileMentions(input: { workspaceId: string; path: string }): Promise<unknown>;
+      } }).dohcDesktop;
+      await api.listChatFileMentions({ workspaceId, path });
+    }, { workspaceId: workspace.workspaceId, path });
+    await expect(desktop.page.getByTestId("markdown-editor")).toHaveCount(0);
+    await openEngineDoc(desktop.page, path);
+    await waitForWorkspaceFile(desktop.page, workspace.workspaceId, path);
+    await expect(desktop.page.getByTestId("markdown-editor")).toContainText(external);
+    await restoreRestartTyping(desktop, temp.rootPath, workspace.workspaceId, path, human, external, "history");
+    await quitDesktop(desktop);
+  } finally {await cleanupDesktopWorkspace(desktop, temp);}
+});
+
+test("renaming a property of a live document keeps its place and comments through save and reopen", async () => {
+  test.setTimeout(180_000);
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  // One file with comments and quoting, and one in canonical form.
+  const files = [
+    {
+      path: "trip.md", to: "cost",
+      written: '---\n# Monthly\nbudget:  100 # euros\n# Wi-Fi password\n"wifi": hunter2\n---\n\n# Trip\n\nBase paragraph.',
+      renamed: '---\n# Monthly\ncost:  100 # euros\n# Wi-Fi password\n"wifi": hunter2\n---\n\n# Trip\n\nBase paragraph.',
+    },
+    {
+      // The properties show every line, so its section starts closed.
+      path: "plan.md", to: "yearly", collapsed: true,
+      written: "---\nbudget: 100\nwifi: hunter2\n---\n\n# Plan\n\nBase paragraph.",
+      renamed: "---\nyearly: 100\nwifi: hunter2\n---\n\n# Plan\n\nBase paragraph.",
+    },
+  ];
+  const fileText = (path: string) => readFile(join(temp.rootPath, path), "utf8");
+  // An open document stays mounted while hidden, so read the visible panel.
+  const panel = (page: import("@playwright/test").Page) => page.locator('[data-testid="properties-panel"]:visible');
+  const names = (page: import("@playwright/test").Page) =>
+    panel(page).getByTestId("property-key").evaluateAll(inputs => inputs.map(input => (input as HTMLInputElement).value));
+  const asWritten = (page: import("@playwright/test").Page) =>
+    page.locator('[data-testid="frontmatter-as-written"]:visible pre');
+  try {
+    await writeWorkspaceFiles(temp, files.map(({path, written}) => ({path, contents: written})));
+    desktop = await launchDesktopApp({workspace: temp});
+    const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
+    for (const {path, to, renamed, collapsed} of files) {
+      await waitForWorkspaceFile(desktop.page, workspace.workspaceId, path);
+      await openEngineDoc(desktop.page, path);
+      const name = panel(desktop.page).getByLabel("Property 1 name");
+      await expect(name).toHaveValue("budget");
+      await name.fill("");
+      // One key at a time, as a person types: each letter renames the property.
+      await name.pressSequentially(to);
+      await expect.poll(() => fileText(path), {timeout: 20_000}).toBe(renamed);
+      expect(await names(desktop.page)).toEqual([to, "wifi"]);
+      // Once saved, the block shown as written is the file's. A closed section
+      // reads the file when a person opens it.
+      if (collapsed) await desktop.page.locator('[data-testid="frontmatter-as-written"]:visible summary').click();
+      await expect(asWritten(desktop.page)).toHaveText(renamed.slice(0, renamed.indexOf("---\n\n") + 3));
+    }
+    await quitDesktop(desktop);
+
+    desktop = await launchDesktopApp({workspace: temp});
+    await openWorkspaceFromFirstRun(desktop.page, temp);
+    for (const {path, to, renamed} of files) {
+      await waitForWorkspaceFile(desktop.page, workspace.workspaceId, path);
+      await openEngineDoc(desktop.page, path);
+      await expect(panel(desktop.page).getByLabel(`Property ${to} value`)).toHaveValue("100");
+      expect(await names(desktop.page)).toEqual([to, "wifi"]);
+      expect(await fileText(path)).toBe(renamed);
+    }
     await quitDesktop(desktop);
   } finally {await cleanupDesktopWorkspace(desktop, temp);}
 });

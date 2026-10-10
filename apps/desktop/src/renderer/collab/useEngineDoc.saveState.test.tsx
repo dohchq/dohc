@@ -44,7 +44,7 @@ function Harness(props: {
   const drafts = useOrphanedDrafts(props.workspaceId, props.path);
   return (
     <div>
-      <span data-testid="state">{engine.saveState}</span>
+      <span data-testid="state">{engine.goneCause ?? engine.saveState.kind}</span>
       <span data-testid="save-error">{engine.saveError ?? "none"}</span>
       <span data-testid="available">{String(engine.available)}</span>
       <span data-testid="artifact-assets-invalid">
@@ -57,6 +57,7 @@ function Harness(props: {
       <span data-testid="read-only-transition">
         {String(engine.readOnlyWhileEditing)}
       </span>
+      <span data-testid="read-only-cause">{engine.readOnlyCause ?? "none"}</span>
       <span data-testid="permanent-failure-transition">
         {String(engine.permanentFailureWhileEditing)}
       </span>
@@ -213,6 +214,7 @@ it("keeps a failed lineage handoff visible and read-only", async () => {
   );
   expect(screen.getByTestId("available").textContent).toBe("true");
   expect(screen.getByTestId("read-only-transition").textContent).toBe("true");
+  expect(screen.getByTestId("read-only-cause").textContent).toBe("lineage-failure");
   expect(screen.getByTestId("save-error").textContent).toContain(
     "acknowledgement refused",
   );
@@ -797,7 +799,7 @@ it("sets aside a refused scene, freezes writes, and releases the session", async
   });
   await flushLocalBatch();
 
-  expect(screen.getByTestId("state").textContent).toBe("read-only");
+  expect(screen.getByTestId("state").textContent).toBe("unknown");
   expect(screen.getByTestId("read-only-transition").textContent).toBe("true");
   expect(harness.applyAttempts.map(({ seq }) => seq)).toEqual([1]);
   await waitFor(() => expect(harness.closed).toHaveLength(1));
@@ -1233,7 +1235,7 @@ it("degrades to not-engine-backed on a bridge without the save-state channel, in
   await waitFor(() =>
     expect(screen.getByTestId("available").textContent).toBe("false"),
   );
-  expect(screen.getByTestId("state").textContent).toBe("saved");
+  expect(screen.getByTestId("state").textContent).toBe("unknown");
 });
 
 

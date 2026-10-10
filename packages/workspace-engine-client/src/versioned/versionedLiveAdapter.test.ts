@@ -188,6 +188,7 @@ const WORKSPACE_REQUEST_CASES: WorkspaceRequestCase[] = [
   { method: WORKSPACE_METHOD.conflictsOpen, params: { conflict: {} } },
   { method: WORKSPACE_METHOD.conflictsResolve, params: { local: {} } },
   { method: WORKSPACE_METHOD.watcherStatus, params: {} },
+  { method: WORKSPACE_METHOD.captureClearRecovery, params: { momentId: "recovery" } },
   { method: WORKSPACE_METHOD.captureFlush, params: {} },
   { method: WORKSPACE_METHOD.captureSetAuthor, params: { author: null } },
 ];
@@ -365,8 +366,12 @@ const WORKSPACE_DECODER_CASES: Array<{
       degraded: false,
       terminal: false,
       phase: "ready",
-      noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [],
+      noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [],
     },
+  },
+  {
+    method: WORKSPACE_METHOD.captureClearRecovery,
+    valid: { cleared: true },
   },
   {
     method: WORKSPACE_METHOD.captureFlush,
@@ -452,7 +457,7 @@ describe("VersionedLiveAdapter", () => {
     expect(requests).toEqual([]);
   });
 
-  it("reads one aggregate history page with one daemon request", async () => {
+  it.each([undefined, "object-1"])("reads one aggregate history page for %s with one daemon request", async (objectId) => {
     const requests: Request[] = [];
     const client: MinimalDaemonClient = {
       close: () => undefined,
@@ -486,6 +491,7 @@ describe("VersionedLiveAdapter", () => {
     await expect(
       adapter.readHistoryPage({
         workspaceId: WORKSPACE,
+        ...(objectId !== undefined ? { objectId } : {}),
         limit: 200,
         beforeMomentOrder: 41,
       }),
@@ -500,6 +506,7 @@ describe("VersionedLiveAdapter", () => {
       method: VERSIONED_METHOD.historyPage,
       params: {
         workspaceId: WORKSPACE,
+        ...(objectId !== undefined ? { objectId } : {}),
         limit: 200,
         beforeMomentOrder: 41,
       },

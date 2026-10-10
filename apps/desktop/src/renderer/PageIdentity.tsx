@@ -6,7 +6,7 @@ import {
   patchFrontmatter,
   FRONTMATTER_EDIT_REFUSED_MESSAGE,
 } from "@dohc/ydoc-projection/frontmatter";
-import { modalFocusableElements, trapModalTabKey } from "./modalFocus";
+import { modalFocusableElements, switchModalRegion, trapModalTabKey } from "./modalFocus";
 import { Smile } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type * as Y from "yjs";
@@ -199,6 +199,9 @@ export function PageIdentity(props: PageIdentityProps) {
       }
     }
     function onKeyDown(event: KeyboardEvent) {
+      // F6 reaches a toast above the picker and comes back; Escape in a
+      // toast comes back too instead of closing the picker.
+      if (switchModalRegion(event, pickerRef.current)) return;
       if (event.key === "Escape") {
         setPickerOpen(false);
         return;
