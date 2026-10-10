@@ -590,10 +590,8 @@ fn worker_main(
 
     let mut store = match if read_only {
         EngineStore::open_read_only_counting(&db_path, work_count.clone())
-    } else if let Some(token) = &root_token {
-        EngineStore::open_with_root_token(&db_path, now_ms, token, work_count.clone())
     } else {
-        EngineStore::open_counting(&db_path, now_ms, work_count.clone())
+        EngineStore::open_for_actor(&db_path, now_ms, root_token.as_deref(), work_count.clone())
     } {
         Ok(store) => store,
         Err(err) => {
@@ -601,9 +599,6 @@ fn worker_main(
             return;
         }
     };
-    if !read_only && let Err(error) = store.enable_background_checkpoints() {
-        eprintln!("background checkpoints unavailable: {}", error.code());
-    }
     let store_freshly_created = store.was_freshly_created();
     // The open that asked for counting owns the counter. The actor keeps only
     // a weak reference, so counting ends with that open, whether it succeeds,

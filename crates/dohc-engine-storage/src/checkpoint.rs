@@ -247,12 +247,14 @@ mod tests {
             .unwrap();
         write(&mut s, 0, 12 * 1024 * 1024);
         let checkpoints = Checkpoints::start(&path).unwrap();
+        let unmodified = s.read_with(frames).unwrap();
         s.read_with(|c| {
             checkpoints.checkpoint_on_writer_if_needed(c);
             Ok::<_, rusqlite::Error>(())
         })
         .unwrap();
         assert_eq!(checkpoints.writer_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(s.read_with(frames).unwrap(), unmodified);
         assert!(s.read_with(frames).unwrap().0 > WRITER_CHECKPOINT_FRAMES);
         reader.read_with(|c| c.execute_batch("ROLLBACK")).unwrap();
         // Pin the latest WAL read mark before backfill. It permits checkpoint
@@ -328,21 +330,84 @@ mod tests {
     fn pinned_reader_does_not_block_shutdown_or_lose_commits() {
         let scratch = ScratchDir::new().unwrap();
         let path = scratch.path().join("engine.db");
-        let mut s = store(&path);
+        let mut s = EngineStore::open(&path, 1).unwrap();
+        s.read_with(|c| c.pragma_update(None, "wal_autocheckpoint", 0))
+            .unwrap();
+        s.write_with(&NoFaults, |tx| {
+            tx.execute_batch("CREATE TABLE checkpoint_load(id INTEGER PRIMARY KEY, body BLOB)")
+                .map_err(StorageError::persist)?;
+            Ok::<_, StorageError>(())
+        })
+        .unwrap();
+        for n in 0..64 {
+            write(&mut s, n, 32 * 1024);
+        }
         let reader = EngineStore::open_read_only(&path).unwrap();
         reader
             .read_with(|c| c.execute_batch("BEGIN; SELECT * FROM checkpoint_load"))
             .unwrap();
-        for n in 0..200 {
-            write(&mut s, n, 8192);
+        assert_eq!(reader.table_row_count("checkpoint_load").unwrap(), 64);
+        s.enable_background_checkpoints().unwrap();
+        for n in 64..256 {
+            write(&mut s, n, 32 * 1024);
         }
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let (log, backfilled) = s.read_with(frames).unwrap();
+            if backfilled > 0 && log - backfilled > MAX_WRITER_BACKFILL_FRAMES {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "reader did not pin a partial checkpoint"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(reader.table_row_count("checkpoint_load").unwrap(), 64);
         drop(s);
+        assert_eq!(reader.table_row_count("checkpoint_load").unwrap(), 64);
         reader.read_with(|c| c.execute_batch("ROLLBACK")).unwrap();
         drop(reader);
-        let mut s = EngineStore::open(&path, 2).unwrap();
-        s.enable_background_checkpoints().unwrap();
+        let mut s = EngineStore::open_for_actor(&path, 2, None, None).unwrap();
         assert_eq!(s.synchronous_setting().unwrap(), 1);
-        assert_eq!(s.table_row_count("checkpoint_load").unwrap(), 200);
+        assert_eq!(s.table_row_count("checkpoint_load").unwrap(), 256);
+        write(&mut s, 256, 4096);
+        let previous = s.read_with(frames).unwrap().0;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            write(&mut s, 256, 4096);
+            if s.read_with(frames).unwrap().0 < previous {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "WAL did not recycle after reader release"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn actor_open_requires_background_checkpoints_before_serving_writes() {
+        let scratch = ScratchDir::new().unwrap();
+        let path = scratch.path().join("engine.db");
+        let s = EngineStore::open_for_actor(&path, 1, Some("root-token"), None).unwrap();
+        assert!(s.was_freshly_created());
+        assert!(s.checkpoint_worker_running_for_test());
+        assert_eq!(
+            s.read_with(|c| c.query_row("PRAGMA wal_autocheckpoint", [], |r| r.get::<_, i64>(0)))
+                .unwrap(),
+            0
+        );
+        drop(s);
+        let s = EngineStore::open_for_actor(&path, 2, None, None).unwrap();
+        assert!(!s.was_freshly_created());
+        assert!(s.checkpoint_worker_running_for_test());
+        assert_eq!(
+            s.read_with(|c| c.query_row("PRAGMA wal_autocheckpoint", [], |r| r.get::<_, i64>(0)))
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -359,23 +424,29 @@ mod tests {
                 Ok::<_, StorageError>(())
             })
             .unwrap();
-            for n in 0..128 {
+            for n in 0..64 {
                 write(&mut s, n, 32 * 1024);
-            }
-            s.enable_background_checkpoints().unwrap();
-            write(&mut s, 128, 32 * 1024);
-            while !path.with_file_name("catch-up-started").exists() {
-                std::thread::yield_now();
             }
             let reader = EngineStore::open_read_only(&path).unwrap();
             reader
                 .read_with(|c| c.execute_batch("BEGIN; SELECT * FROM checkpoint_load"))
                 .unwrap();
+            s.enable_background_checkpoints().unwrap();
+            for n in 64..128 {
+                write(&mut s, n, 32 * 1024);
+            }
+            write(&mut s, 128, 32 * 1024);
+            while !path.with_file_name("catch-up-started").exists() {
+                std::thread::yield_now();
+            }
+            let (before, partial) = s.read_with(frames).unwrap();
+            assert!(partial > 0 && before > partial);
+            assert_eq!(reader.table_row_count("checkpoint_load").unwrap(), 64);
             write(&mut s, 129, 32 * 1024);
             let (log, backfilled) = s.read_with(frames).unwrap();
             assert!(
-                log > backfilled,
-                "crash must retain committed WAL work beyond the first pass"
+                backfilled > 0 && log > backfilled && log >= before,
+                "crash must retain the partially backfilled WAL generation"
             );
             std::fs::write(path.with_file_name("committed"), b"130").unwrap();
             loop {

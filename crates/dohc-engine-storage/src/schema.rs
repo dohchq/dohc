@@ -226,6 +226,7 @@ enum Disposition {
 pub(crate) struct OpenedEngineDb {
     pub conn: Connection,
     pub freshly_created: bool,
+    pub checkpoints: Option<crate::checkpoint::Checkpoints>,
 }
 
 /// `work`, when given, counts the SQLite work of the open as it runs.
@@ -242,6 +243,25 @@ pub(crate) fn open_engine_db_with_root_token(
     now_ms: i64,
     root_token: Option<&str>,
     work: Option<Arc<AtomicU64>>,
+) -> Result<OpenedEngineDb, StorageError> {
+    open_engine_db_configured(path, now_ms, root_token, work, false)
+}
+
+pub(crate) fn open_engine_db_for_actor(
+    path: &Path,
+    now_ms: i64,
+    root_token: Option<&str>,
+    work: Option<Arc<AtomicU64>>,
+) -> Result<OpenedEngineDb, StorageError> {
+    open_engine_db_configured(path, now_ms, root_token, work, true)
+}
+
+fn open_engine_db_configured(
+    path: &Path,
+    now_ms: i64,
+    root_token: Option<&str>,
+    work: Option<Arc<AtomicU64>>,
+    background_checkpoints: bool,
 ) -> Result<OpenedEngineDb, StorageError> {
     // Step 1: "is this file empty?" is our question, not the VFS's.
     reject_undersized_database(path)?;
@@ -271,6 +291,13 @@ pub(crate) fn open_engine_db_with_root_token(
     conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, false)
         .map_err(StorageError::corrupt)?;
     apply_persistent_pragmas(&conn)?;
+    let checkpoints = if background_checkpoints {
+        conn.pragma_update(None, "wal_autocheckpoint", 0)
+            .map_err(StorageError::persist)?;
+        Some(crate::checkpoint::Checkpoints::start(path)?)
+    } else {
+        None
+    };
 
     // Production uses `NoFaults`, so a `Crashed` outcome is unreachable here
     // (the migration fault points are exercised by `migration.rs`'s tests).
@@ -295,8 +322,12 @@ pub(crate) fn open_engine_db_with_root_token(
     integrity_check(&conn)?;
     stop_counting(&conn)?;
     crate::search_generation::install(&conn).map_err(StorageError::corrupt)?;
+    if let Some(checkpoints) = &checkpoints {
+        checkpoints.request();
+    }
     Ok(OpenedEngineDb {
         conn,
+        checkpoints,
         freshly_created: disposition == Disposition::Fresh,
     })
 }
@@ -324,6 +355,7 @@ pub(crate) fn open_engine_db_read_only(
     Ok(OpenedEngineDb {
         conn,
         freshly_created: false,
+        checkpoints: None,
     })
 }
 

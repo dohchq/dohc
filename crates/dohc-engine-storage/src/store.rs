@@ -96,6 +96,26 @@ impl EngineStore {
         })
     }
 
+    /// Open the actor's writer with automatic checkpoints disabled before migrations.
+    /// Startup fails if its background checkpoint connection cannot start.
+    pub fn open_for_actor(
+        path: &Path,
+        now_ms: i64,
+        root_token: Option<&str>,
+        work: Option<Arc<AtomicU64>>,
+    ) -> Result<Self, StorageError> {
+        let opened = crate::schema::open_engine_db_for_actor(path, now_ms, root_token, work)?;
+        Ok(EngineStore {
+            checkpoint_changes: opened.conn.total_changes(),
+            conn: opened.conn,
+            checkpoints: opened.checkpoints,
+            freshly_created: opened.freshly_created,
+            database_path: path.to_path_buf(),
+            #[cfg(feature = "fault-injection")]
+            harness_commits: 0,
+        })
+    }
+
     /// Open a store, recording a fresh root binding in its initial schema transaction.
     /// The caller must persist the matching root marker before calling this.
     /// An existing store is never rebound; verify its binding before use.
@@ -215,6 +235,11 @@ impl EngineStore {
                 }
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn checkpoint_worker_running_for_test(&self) -> bool {
+        self.checkpoints.as_ref().is_some_and(|c| !c.has_stopped())
     }
 
     #[cfg(test)]
