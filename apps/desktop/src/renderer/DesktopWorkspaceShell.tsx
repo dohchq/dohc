@@ -1550,14 +1550,14 @@ export function DesktopWorkspaceShell(props: {
     engineHistoryToken,
     null,
   );
-  const refreshShareViewRef = useRef<(trigger?: "manual" | "background") => Promise<ShareViewRefresh>>(async () => "current");
-  const shareRefreshFlight = useRef<{ admission: typeof workspaceAdmission; promise: Promise<ShareViewRefresh>; trigger: "manual" | "background"; followUp?: Promise<ShareViewRefresh> } | null>(null);
+  const refreshShareViewRef = useRef<(trigger?: "manual" | "background" | "press-burst") => Promise<ShareViewRefresh>>(async () => "current");
+  const shareRefreshFlight = useRef<{ admission: typeof workspaceAdmission; promise: Promise<ShareViewRefresh>; trigger: "manual" | "background" | "press-burst"; followUp?: Promise<ShareViewRefresh> } | null>(null);
   const checkShareAccess = useSharedViewAccess({
     workspaceId,
     enabled: workspaceIsReady && !!shareView && !shareViewDamaged && !shareViewEnded,
     admission: workspaceAdmission,
     relayFailed: captureDecidedFor !== workspaceId || syncStatus === null ? undefined : !!syncStatus.syncFailure,
-    pull: async () => await refreshShareViewRef.current("background") === "changed",
+    pull: async pressBurst => await refreshShareViewRef.current(pressBurst ? "press-burst" : "background") === "changed",
     onPersistentFailure: error => reportShellError("Couldn't refresh the shared view.", error,
       () => { if (!workspaceAdmission.superseded) void refreshShareViewRef.current(); }),
     onVerified: result => {
@@ -3995,7 +3995,7 @@ export function DesktopWorkspaceShell(props: {
     show: (reports) => showReportsNotice(reports, () => openSettings("privacy")),
   });
 
-  const refreshShareView = useCallback((trigger: "manual" | "background" = "manual"): Promise<ShareViewRefresh> => {
+  const refreshShareView = useCallback((trigger: "manual" | "background" | "press-burst" = "manual"): Promise<ShareViewRefresh> => {
     const active = shareRefreshFlight.current;
     if (active?.admission === workspaceAdmission) {
       if (trigger !== active.trigger) {
@@ -4006,7 +4006,7 @@ export function DesktopWorkspaceShell(props: {
       return active.promise;
     }
     const refresh = async (): Promise<ShareViewRefresh> => {
-      const background = trigger === "background";
+      const background = trigger !== "manual";
       if (!shareView) return "current";
       if (!workspaceIsReady || workspaceAdmission.superseded || shareViewDamaged) return "stale";
       if (shareViewEnded) return "ended";
