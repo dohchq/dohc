@@ -798,7 +798,7 @@ describe("ended Edit Collection shares", () => {
       expect(bridge.refreshSharedView).not.toHaveBeenCalled();
       await act(() => vi.advanceTimersByTimeAsync(20_000));
       expect(bridge.refreshSharedView).toHaveBeenCalledOnce();
-      expect(bridge.refreshSharedView).toHaveBeenCalledWith({ workspaceId: EDIT_SHARE.workspaceId, trigger: "background" });
+      expect(bridge.refreshSharedView).toHaveBeenCalledWith({ workspaceId: EDIT_SHARE.workspaceId, trigger: "press-burst" });
       view.unmount(); buttons.close();
     } finally { vi.useRealTimers(); }
   });

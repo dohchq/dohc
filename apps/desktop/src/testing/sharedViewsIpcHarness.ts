@@ -32,7 +32,7 @@ export const ready: WatcherStatusResult = {
   noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [],
 };
 
-export async function createSharedViewsIpcHarness() {
+export async function createSharedViewsIpcHarness(options: { syncNotices?: (isCurrent: () => boolean) => Promise<void> } = {}) {
   const steps: string[] = [];
   const home = resolve("/shared-views-ipc-home").replace(/\\/g, "/");
   const rootPath = `${home}/received`;
@@ -73,6 +73,7 @@ export async function createSharedViewsIpcHarness() {
   });
   const cleanup = vi.fn(async () => { steps.push("cleanup"); });
   const notify = vi.fn<Dependencies["notifyRenderer"]>(() => { steps.push("notify"); });
+  const syncNotices = vi.fn(options.syncNotices ?? (async (_isCurrent: () => boolean) => undefined));
   const surfaces = vi.fn(() => { steps.push("surfaces"); });
   const createJoinedWorkspace = createJoinedWorkspaceRunner({
     reserve: input => authorities.reserveBinding(input), createFolder,
@@ -121,11 +122,12 @@ export async function createSharedViewsIpcHarness() {
     withStaleSensitiveWorkspaceOperation, shareViewFiles: { reconcile, end, narrow }, receivedShareEngine: { relayFor, storeFor },
     openWorkspaceActivity: open, requireWorkspace: registryRead, notifyRenderer: notify,
     recordShareViewStoreRefusal: recordRefusal,
+    syncNotices,
   });
   const invoke = (channel: string, payload: unknown, trusted = true) =>
     Promise.resolve().then(() => handlers.get(channel)!({ sender: "window", trusted }, payload));
   const openPayload = { rootPath, shareCode: buildShareCode({ relayUrl: credentials.relayUrl!, shareId: "share" }) };
   return { workspace, registry, authorities, attachmentId, roots, cache, load, warm, startup, fetchInfo, readDir,
     mkdir, createFolder, cleanup, notify, surfaces, setView, recordIdentity, relayFor, status, storeFor, reconcile,
-    probeLog, registryRead, workspaceOperation, open, end, narrow, fetchAccess, closed, recordRefusal, handlers, invoke, openPayload, steps, retireRenderer: () => { rendererCurrent = false; } };
+    syncNotices, probeLog, registryRead, workspaceOperation, open, end, narrow, fetchAccess, closed, recordRefusal, handlers, invoke, openPayload, steps, retireRenderer: () => { rendererCurrent = false; } };
 }

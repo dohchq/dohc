@@ -329,7 +329,7 @@ describe("registered received-view handlers", () => {
     capture.resolve(ready);
     await expect(result).resolves.toEqual(outcome);
     expect(h.storeFor).toHaveBeenCalledWith({ engineWorkspaceId: "existing", rootPath: h.workspace.rootPath, attachmentId: h.attachmentId });
-    expect(h.notify).toHaveBeenCalledWith({ workspaceId: "existing" });
+    expect(h.notify).toHaveBeenCalledWith({ workspaceId: "existing", summaryChanged: true });
   });
 
   it.each(["renderer", "authority"] as const)("stops refresh when its %s retires during capture readiness", async (kind) => {
@@ -399,7 +399,7 @@ describe("registered received-view handlers", () => {
   it("notifies about partial pull work and preserves damaged-pin and ended outcomes", async () => {
     const h = await harness(); h.reconcile.mockResolvedValue({ kind: "refresh", outcome: { ok: false, changedPaths: 3, errorMessage: "later page failed" } });
     await expect(h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" })).resolves.toEqual({ ok: false, changedPaths: 3, errorMessage: "later page failed" });
-    expect(h.notify).toHaveBeenCalledWith({ workspaceId: "existing" }); h.notify.mockClear();
+    expect(h.notify).toHaveBeenCalledWith({ workspaceId: "existing", summaryChanged: true }); h.notify.mockClear();
     h.reconcile.mockRejectedValue(new SharePinInvalidError("share"));
     await expect(h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" })).rejects.toThrow("Remove it, then open");
     expect(h.notify).toHaveBeenCalledWith({ workspaceId: "existing" });
@@ -422,7 +422,7 @@ describe("background share pulls", () => {
     expect(h.workspaceOperation).not.toHaveBeenCalled();
     expect(h.registryRead).not.toHaveBeenCalled();
     for (const mock of [h.startup, h.relayFor, h.storeFor, h.status, h.reconcile,
-      h.fetchInfo, h.recordIdentity, h.notify, h.setView, h.recordRefusal, h.surfaces]) expect(mock).not.toHaveBeenCalled();
+      h.fetchInfo, h.recordIdentity, h.notify, h.setView, h.recordRefusal, h.surfaces, h.syncNotices]) expect(mock).not.toHaveBeenCalled();
   }
   it("uses one authenticated log request and no engine, registry, file or event work when unchanged", async () => {
     const h = await primed(); const reads = vi.spyOn(h.registry, "get");
@@ -450,6 +450,74 @@ describe("background share pulls", () => {
     h.probeLog.mockResolvedValue({ unchanged: true }); await h.invoke(channel, payload);
     expect(h.probeLog).toHaveBeenLastCalledWith(expect.objectContaining({ since: 57 }));
     expect(h.reconcile).toHaveBeenCalledOnce();
+  });
+  it.each(["manual", "background"] as const)("syncs Notices after a changed %s pull commits", async trigger => {
+    const h = await primed(); h.probeLog.mockResolvedValue({ unchanged: false });
+    h.syncNotices.mockImplementation(async isCurrent => {
+      expect(isCurrent()).toBe(true);
+      expect(h.reconcile).toHaveBeenCalledOnce();
+    });
+    await h.invoke(channel, { ...payload, trigger });
+    expect(h.syncNotices).toHaveBeenCalledOnce();
+    expect(h.notify).toHaveBeenLastCalledWith({ workspaceId: "existing" });
+  });
+  it("publishes a changed summary without claiming file changes", async () => {
+    const h = await primed(); h.probeLog.mockResolvedValue({ unchanged: false });
+    h.reconcile.mockImplementation(async () => {
+      h.workspace.shareView!.unsavedPaths = ["docs/local.md"];
+      return { kind: "refresh", outcome: { ...outcome, status: "unchanged", changedPaths: 0, refusedOps: 0 } };
+    });
+    await h.invoke(channel, payload);
+    expect(h.notify).toHaveBeenLastCalledWith({ workspaceId: "existing", summaryChanged: true });
+    expect(h.syncNotices).toHaveBeenCalledOnce();
+  });
+  it("syncs content-neutral journal changes but leaves an unchanged manual pull alone", async () => {
+    const h = await primed();
+    h.reconcile.mockImplementation(async (_lease, _target, _request, cursor) => {
+      cursor?.(42); return { kind: "refresh", outcome: { ...outcome, status: "unchanged", changedPaths: 0, refusedOps: 0 } };
+    });
+    await h.invoke(channel, { workspaceId: "existing", trigger: "manual" });
+    expect(h.syncNotices).not.toHaveBeenCalled();
+    expect(h.notify).toHaveBeenLastCalledWith({ workspaceId: "existing" });
+    h.probeLog.mockResolvedValue({ unchanged: false });
+    h.reconcile.mockImplementation(async (_lease, _target, _request, cursor) => {
+      cursor?.(57); return { kind: "refresh", outcome: { ...outcome, status: "unchanged", changedPaths: 0, refusedOps: 0 } };
+    });
+    await h.invoke(channel, payload);
+    expect(h.syncNotices).toHaveBeenCalledOnce();
+    expect(h.notify).toHaveBeenLastCalledWith({ workspaceId: "existing" });
+  });
+  it("does not sync Notices for a different account's manual local refresh", async () => {
+    const h = await primed(); h.cache.set({ ...credentials, userId: "another" });
+    await h.invoke(channel, { workspaceId: "existing", trigger: "manual" });
+    expect(h.syncNotices).not.toHaveBeenCalled();
+  });
+  it.each(["workspace", "account", "closed"] as const)("invalidates a share's Notices pass after %s changes", async change => {
+    const h = await primed(); h.probeLog.mockResolvedValue({ unchanged: false });
+    const pass = deferred(); h.syncNotices.mockReturnValue(pass.promise);
+    await h.invoke(channel, payload);
+    expect(h.syncNotices).toHaveBeenCalledOnce();
+    const isCurrent = h.syncNotices.mock.calls[0]![0];
+    if (change === "workspace") h.retireRenderer();
+    else if (change === "account") h.cache.set({ ...credentials, userId: "another" });
+    else for (const close of [...h.closed]) close();
+    expect(isCurrent()).toBe(false);
+    pass.resolve(); await pass.promise;
+  });
+  it.each(["workspace", "account", "closed"] as const)("invalidates an unchanged burst's Notices pass after %s changes", async change => {
+    const h = await primed();
+    const pass = deferred(); h.syncNotices.mockReturnValue(pass.promise);
+    await h.invoke(channel, { ...payload, trigger: "press-burst" });
+    expect(h.syncNotices).toHaveBeenCalledOnce();
+    expect(h.notify).not.toHaveBeenCalled();
+    expect(h.storeFor).not.toHaveBeenCalled();
+    const isCurrent = h.syncNotices.mock.calls[0]![0];
+    expect(isCurrent()).toBe(true);
+    if (change === "workspace") h.retireRenderer();
+    else if (change === "account") h.cache.set({ ...credentials, userId: "another" });
+    else for (const close of [...h.closed]) close();
+    expect(isCurrent()).toBe(false);
+    pass.resolve(); await pass.promise;
   });
   it("does a full refresh without a cached cursor and invalidates it after a failed full path", async () => {
     const h = await harness(); await h.invoke(channel, payload);
@@ -538,6 +606,17 @@ describe("background share pulls", () => {
     expect(h.reconcile).toHaveBeenCalledTimes(2);
     expect(h.fetchInfo).toHaveBeenCalledTimes(2);
     expect(h.probeLog).not.toHaveBeenCalled();
+  });
+  it("starts one scoped burst pass even when the cached share has no log cursor", async () => {
+    const h = await harness();
+    h.reconcile.mockResolvedValue({ kind: "refresh", outcome });
+    await h.invoke(channel, payload);
+    vi.clearAllMocks();
+    await h.invoke(channel, { ...payload, trigger: "press-burst" });
+    expect(h.syncNotices).toHaveBeenCalledOnce();
+    expect(h.syncNotices.mock.calls[0]![0]()).toBe(true);
+    expect(h.probeLog).not.toHaveBeenCalled(); expect(h.storeFor).not.toHaveBeenCalled();
+    expect(h.notify).not.toHaveBeenCalled();
   });
   it.each(["idle", "in flight"])("drops the probe cache when Forget retires the binding (%s)", async phase => {
     const h = await primed();

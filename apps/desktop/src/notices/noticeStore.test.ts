@@ -40,6 +40,7 @@ import {
 } from "../automations/automationNotices";
 import { createAutomationWakeConsumer, createAutomationWakeIntents } from "../automations/automationWakeIntents";
 import { createTestScratch } from "../workspaces/testTemp";
+import { deferred } from "../testing/deferred";
 import { NoticeNotSentError } from "@dohc/automation-executor/automation-chat";
 import {
   createNoticeStore,
@@ -312,6 +313,64 @@ function notice(overrides: Partial<PostNoticeInput> = {}): PostNoticeInput {
 async function titles(computer: Computer): Promise<string[]> {
   return (await computer.store.list()).notices.map((row) => `${row.store}:${row.title}${row.readAtMs === null ? "" : " (read)"}`);
 }
+
+describe("Notices passes requested by a shared view", () => {
+  it("drops a late missing-route response instead of moving Notices into another account's local list", async () => {
+    const server = await relay(); server.outdated = true;
+    const recipient = await computer(account(server, "owner"));
+    const started = deferred(); const release = deferred();
+    server.onRequest = async () => { started.resolve(); await release.promise; };
+    let current = true; const syncing = recipient.store.sync(() => current);
+    await started.promise; current = false; switchTo(recipient, account(server, "ben"));
+    release.resolve(); await syncing;
+    expect(recipient.changes).toBe(0);
+    expect((await recipient.store.list()).notices).toEqual([]);
+  });
+  it.each(["workspace", "account"] as const)("drops a late pull after the %s changes without starting a pass for another account", async change => {
+    const server = await relay();
+    const signedIn = account(server, "owner");
+    const owner = await computer(signedIn);
+    await owner.store.postNotice(notice()); await owner.store.sync();
+    const recipient = await computer(signedIn);
+    const started = deferred(); const response = deferred<Response>();
+    const fetch = signedIn.relay.fetch!;
+    signedIn.relay.fetch = async (input, init) => {
+      const result = await fetch(input, init); started.resolve(); return response.promise.then(() => result);
+    };
+    let current = true;
+    const changes = recipient.changes;
+    const syncing = recipient.store.sync(() => current);
+    await started.promise;
+    current = false;
+    if (change === "account") switchTo(recipient, account(server, "ben"));
+    response.resolve(Response.json({})); await syncing;
+    expect(recipient.changes).toBe(changes);
+    expect((await recipient.store.list()).notices).toEqual([]);
+    switchTo(recipient, signedIn);
+    expect((await recipient.store.list()).notices).toEqual([]);
+  });
+
+  it("coalesces bursts into one flight and one follow-up", async () => {
+    const server = await relay(); const recipient = await computer(account(server, "owner"));
+    const started = deferred(); const release = deferred(); let requests = 0;
+    server.onRequest = async () => { requests += 1; if (requests === 1) { started.resolve(); await release.promise; } };
+    const first = recipient.store.sync(() => true); await started.promise;
+    const burst = Array.from({ length: 20 }, () => recipient.store.sync(() => true));
+    expect(requests).toBe(1); release.resolve(); await Promise.all([first, ...burst]);
+    expect(requests).toBe(2);
+  });
+  it.each(["share", "account-wide"] as const)("keeps a queued %s pass when another share closes", async kind => {
+    const server = await relay(); const recipient = await computer(account(server, "owner"));
+    const started = deferred(); const release = deferred(); let requests = 0;
+    server.onRequest = async () => { requests += 1; if (requests === 1) { started.resolve(); await release.promise; } };
+    let current = true;
+    const first = recipient.store.sync(() => current); await started.promise;
+    const next = recipient.store.sync(kind === "share" ? () => true : undefined);
+    const closed = recipient.store.sync(() => false);
+    current = false; release.resolve(); await Promise.all([first, next, closed]);
+    expect(requests).toBe(2);
+  });
+});
 
 function shareNotice(shareId: string) {
   return expect.objectContaining({

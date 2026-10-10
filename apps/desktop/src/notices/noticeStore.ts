@@ -102,8 +102,9 @@ export interface NoticeStore {
   // Takes back a notice this computer posted: an unsent post goes, and a
   // sent one is dismissed.
   withdraw(noticeId: string): Promise<void>;
-  // Sends waiting posts and marks, then pulls changes. Never rejects.
-  sync(): Promise<void>;
+  // Sends waiting posts and marks, then pulls changes. A scoped pass stops
+  // when its caller is no longer current. Never rejects.
+  sync(isCurrent?: () => boolean): Promise<void>;
   refreshRefusals(openedWorkspaceId?: string): Promise<void>;
   // The failure notice the signed-in person sent themselves about one run,
   // dismissed or not, with the computer that posted it, or null. Only read,
@@ -412,24 +413,31 @@ export function createNoticeStore(deps: {
   async function relay(session: NoticeSession, path: string, body?: unknown): Promise<Response> {
     if (!session.isCurrent()) throw new SessionChanged();
     const refusal = (reason: RelayRefusal["reason"]) => () => new RelayRefusal(reason);
-    return relayRequest({
-      relay: session.account.relay,
-      path,
-      init: body === undefined ? undefined : {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      },
-      // An older server answers 404 for every notice route.
-      errors: {
-        400: refusal("invalid"),
-        403: refusal("refused"),
-        404: refusal("routes-missing"),
-        409: refusal("list-full"),
-        429: refusal("rate-limited"),
-      },
-      label: "Notices",
-    });
+    try {
+      const response = await relayRequest({
+        relay: session.account.relay,
+        path,
+        init: body === undefined ? undefined : {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        },
+        // An older server answers 404 for every notice route.
+        errors: {
+          400: refusal("invalid"),
+          403: refusal("refused"),
+          404: refusal("routes-missing"),
+          409: refusal("list-full"),
+          429: refusal("rate-limited"),
+        },
+        label: "Notices",
+      });
+      if (!session.isCurrent()) throw new SessionChanged();
+      return response;
+    } catch (error) {
+      if (!session.isCurrent()) throw new SessionChanged();
+      throw error;
+    }
   }
 
   // The server has no notice list. Waiting notices move to this computer's
@@ -604,6 +612,7 @@ export function createNoticeStore(deps: {
       }
       changed = await locked(async () => {
         const file = await loadAccount(account);
+        if (!session.isCurrent()) throw new SessionChanged();
         const merged = merge(file, page);
         if (!merged && file.cursor === page.nextCursor && !file.routesMissing) return false;
         file.cursor = page.nextCursor;
@@ -624,23 +633,37 @@ export function createNoticeStore(deps: {
       if (settled || pruned) await saveAccount(account, file);
       return pruned;
     }) || changed;
-    if (changed) deps.onChanged();
+    if (changed && session.isCurrent()) deps.onChanged();
   }
 
   let running: Promise<void> | null = null;
   let again = false;
-  function sync(): Promise<void> {
+  let nextCurrent: (() => boolean) | undefined;
+  function sync(isCurrent?: () => boolean): Promise<void> {
     if (running) {
+      // An account-wide request must survive the closure of a share window.
+      if (!again) nextCurrent = isCurrent;
+      else if (nextCurrent && isCurrent) {
+        const waiting = nextCurrent;
+        nextCurrent = () => waiting() || isCurrent();
+      } else nextCurrent = undefined;
       again = true;
       return running;
     }
+    nextCurrent = isCurrent;
     running = (async () => {
       try {
         do {
           again = false;
+          const current = nextCurrent;
+          nextCurrent = undefined;
           try {
             const session = await deps.session();
-            if (session) await syncAccount(session);
+            if (current && !current()) continue;
+            if (session) await syncAccount(current ? {
+              ...session, isCurrent: () => current() && session.isCurrent(),
+            } : session);
+            if (current && !current()) continue;
             const pruned = await locked(async () => {
               const local = await loadLocal();
               if (!pruneLocal(local)) return false;
@@ -650,7 +673,7 @@ export function createNoticeStore(deps: {
             if (pruned) deps.onChanged();
           } catch (error) {
             // A pass for a session that ended stops; the next pass uses the new one.
-            if (error instanceof SessionChanged) again = true;
+            if (error instanceof SessionChanged) { if (!current) again = true; }
             else console.warn("[notices] sync failed; the next pass tries again", error);
           }
         } while (again);

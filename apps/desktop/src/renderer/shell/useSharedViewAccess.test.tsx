@@ -288,6 +288,7 @@ it("adds four probes per relayed press at 2, 5, 10 and 20 seconds without access
     elapsed = at;
   }
   expect(pull).toHaveBeenCalledTimes(4); expect(check).not.toHaveBeenCalled();
+  expect(pull.mock.calls).toEqual([[true], [true], [true], [true]]);
   expect(vi.getTimerCount()).toBe(1);
   console.info("relayed Button: 4 added unchanged probes, 0 access requests, 1 timer");
 });
@@ -320,6 +321,7 @@ it("coalesces overdue Button probes behind a slow pull without overlap", async (
   expect(pull).toHaveBeenCalledTimes(2);
   await act(() => vi.advanceTimersByTimeAsync(10_000));
   expect(pull).toHaveBeenCalledTimes(3);
+  expect(pull.mock.calls).toEqual([[true], [true], [true]]);
 });
 
 it.each(["hidden", "credentials", "workspace", "failure"])("cancels a Button burst on %s", async reason => {

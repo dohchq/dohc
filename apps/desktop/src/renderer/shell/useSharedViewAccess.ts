@@ -14,7 +14,7 @@ export function useSharedViewAccess(input: {
   relayFailed?: boolean;
   admission: { readonly superseded: boolean };
   onVerified(result: CheckSharedViewAccessResult): void;
-  pull(): Promise<boolean>;
+  pull(pressBurst?: boolean): Promise<boolean>;
   onPersistentFailure(error: unknown): void;
 }): SharedViewAccessScheduler {
   const latest = useRef(input);
@@ -34,6 +34,7 @@ export function useSharedViewAccess(input: {
     let followUp: Promise<CheckSharedViewAccessResult> | null = null;
     let queuedAccess = false;
     let queuedPull = false;
+    let queuedBurst = false;
     const isCurrent = () => !disposed && !input.admission.superseded &&
       latest.current.workspaceId === input.workspaceId && latest.current.enabled;
     const visible = () => document.visibilityState !== "hidden";
@@ -43,11 +44,14 @@ export function useSharedViewAccess(input: {
       if (!isCurrent() || !visible() || paused) return;
       const due = Math.min(nextPullAt, buttonPulls[0] ?? Infinity);
       timer = window.setTimeout(() => {
+        const pressBurst = (buttonPulls[0] ?? Infinity) <= Date.now();
         buttonPulls = buttonPulls.filter(at => at > Date.now());
-        void request(false, true);
+        // At most four probes also sync Notices. Later settlements wait for
+        // focus, a changed pull or sign-in after the 20-second probe.
+        void request(false, true, pressBurst);
       }, Math.max(0, due - Date.now()));
     };
-    const check = (access: boolean, pull: boolean): Promise<CheckSharedViewAccessResult> => {
+    const check = (access: boolean, pull: boolean, pressBurst = false): Promise<CheckSharedViewAccessResult> => {
       if (!isCurrent() || !visible() || paused) return Promise.resolve(unverified());
       clearTimer();
       const startedEpoch = epoch;
@@ -63,7 +67,7 @@ export function useSharedViewAccess(input: {
           const pullShare = async () => {
             if (!pull) return;
             lastPullAt = Date.now();
-            const changed = await latest.current.pull();
+            const changed = await latest.current.pull(pressBurst);
             if (!isCurrent() || startedEpoch !== epoch) return unverified();
             if (changed) buttonPulls = [];
             failures = 0;
@@ -95,17 +99,20 @@ export function useSharedViewAccess(input: {
       })();
       return inFlight;
     };
-    const request = (access: boolean, pull: boolean): Promise<CheckSharedViewAccessResult> => {
+    const request = (access: boolean, pull: boolean, pressBurst = false): Promise<CheckSharedViewAccessResult> => {
       if (!isCurrent() || !visible() || paused) return Promise.resolve(unverified());
-      if (!inFlight) return check(access, pull);
+      if (!inFlight) return check(access, pull, pressBurst);
       queuedAccess ||= access;
       queuedPull ||= pull;
+      queuedBurst ||= pressBurst;
       if (!followUp) followUp = inFlight.then(() => {
         const access = queuedAccess;
         const pull = queuedPull;
+        const pressBurst = queuedBurst;
         queuedAccess = queuedPull = false;
+        queuedBurst = false;
         followUp = null;
-        return check(access, pull);
+        return check(access, pull, pressBurst);
       });
       return followUp;
     };
@@ -121,13 +128,14 @@ export function useSharedViewAccess(input: {
       }
       onReset();
     };
-    const onVisibility = () => { if (visible()) void request(true, true); else { buttonPulls = []; clearTimer(); } };
+    const onVisibility = () => { if (visible()) void request(true, true); else { buttonPulls = []; queuedBurst = false; clearTimer(); } };
     window.addEventListener("focus", onFocus);
     window.addEventListener("online", onReset);
     document.addEventListener("visibilitychange", onVisibility);
     const stopSession = bridge().onCloudSessionChanged(({ phase }) => {
       epoch += 1;
       buttonPulls = [];
+      queuedBurst = false;
       paused = phase === "changing";
       clearTimer();
       if (phase === "ready") onReset();

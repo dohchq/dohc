@@ -4799,7 +4799,7 @@ export type OpenSharedViewResult = z.infer<typeof OpenSharedViewResult>;
 
 export const RefreshSharedViewPayload = z.object({
   workspaceId: WORKSPACE_ID,
-  trigger: z.enum(["manual", "background"]).optional(),
+  trigger: z.enum(["manual", "background", "press-burst"]).optional(),
 });
 export type RefreshSharedViewPayload = z.infer<typeof RefreshSharedViewPayload>;
 
