@@ -78,10 +78,16 @@ export type AccessContext = {
 // can still go unanswered: the account or server the share went to differs,
 // or the list has not arrived. The renderer cannot tell those apart.
 export function accessReasonFor(facts: AccessFacts, path: string): AccessReason {
+  return accessReasonForLane(facts, facts.shareView || isSharedWithMePath(path) ? "received" : "granted");
+}
+
+// The same cause for a whole list: the workspace's own shares, or the
+// account's received ones.
+export function accessReasonForLane(facts: AccessFacts, lane: "granted" | "received"): AccessReason {
   const { cloud } = facts;
   if (cloud === "checking") return "checking";
   if (cloud === "unreadable") return "unexplained";
-  if (facts.shareView || isSharedWithMePath(path)) return cloud.connected ? "unexplained" : "signed-out";
+  if (lane === "received") return cloud.connected ? "unexplained" : "signed-out";
   if (!cloud.workspaceSynced) return "not-synced";
   if (!cloud.connected) return "signed-out";
   if (!cloud.workspaceSyncConnected) return "other-account";
@@ -197,7 +203,7 @@ export function AboutChatRow(props: { thread: ChatThreadRecord; onOpen: () => vo
 }
 
 // A share link has no face: a dashed ring around the link mark.
-function LinkMark() {
+export function LinkMark() {
   return (
     <span
       aria-hidden
@@ -217,7 +223,7 @@ const LOADING = { status: "loading" } as const;
 // is the newest read for the file still on screen. A failure files one
 // Notices row, and the row goes when the file leaves About, so every row
 // left has a Try again that reads.
-function useSectionRead<View>(key: string, identity: string, notices: AboutNotices) {
+export function useSectionRead<View>(key: string, identity: string, notices: AboutNotices) {
   const [state, setState] = useState<Keyed<View | typeof LOADING>>({ key: "", view: LOADING });
   const token = useRef(0);
   const currentKey = useRef(key);
@@ -411,7 +417,7 @@ type AccessRow = AccessAnswer["rows"][number];
 type ShareLevel = NonNullable<Extract<AccessRow, { kind: "share" }>["access"]>;
 
 // The level a share grants, in the words the share lists use.
-const LEVELS: Record<ShareLevel, { icon: LucideIcon; label: string }> = {
+export const LEVELS: Record<ShareLevel, { icon: LucideIcon; label: string }> = {
   view: { icon: Eye, label: "View" },
   "read-only": { icon: Eye, label: "View" },
   comment: { icon: MessageSquare, label: "Comment" },
@@ -569,16 +575,49 @@ export function AboutAccess(props: {
   );
 }
 
+// The freshness of an answer, when main checked it, and for a list, what it covers.
+export function AccessChecked(props: { testId: string; answer: AccessAnswer; scope?: string }) {
+  const { answer } = props;
+  return (
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 px-2 pb-1">
+      <StateMark testId={props.testId} state={answer.freshness} shown={`access-${answer.freshness}`} className="shrink-0" />
+      {answer.checkedAtMs !== null ? (
+        <time
+          dateTime={formatChatTime(answer.checkedAtMs).iso}
+          title={formatChatTime(answer.checkedAtMs).label}
+          className="shrink-0 font-mono text-[11px] text-subtle"
+        >
+          {formatShortTime(answer.checkedAtMs)}
+        </time>
+      ) : null}
+      {props.scope ? (
+        <span data-testid={`${props.testId}-scope`} className="whitespace-nowrap text-[11px] text-subtle">
+          {props.scope}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+const UNEXPLAINED_FILE = "Access information is unavailable for this file. This does not mean that no one has access.";
+
 // Why an answer covers nothing, in the words and the one action that can
-// change it. Only a cause dohc cannot name offers Try again.
-function AccessUnknown(props: { answer: AccessAnswer; setup: AccessSetup; onRetry: () => void }) {
-  const { answer, setup } = props;
+// change it. Only a cause dohc cannot name offers Try again. `testId` names
+// the surface; `unexplained` is what an answer dohc cannot explain means there.
+export function AccessUnknown(props: {
+  testId: string;
+  unexplained: string;
+  answer: AccessAnswer;
+  setup: AccessSetup;
+  onRetry: () => void;
+}) {
+  const { answer, setup, testId } = props;
   if (answer.visibility === "hidden") {
-    return <AboutNote testId="about-access-unknown" reason="hidden" icon={EyeOff}>Shares do not include this file.</AboutNote>;
+    return <AboutNote testId={`${testId}-unknown`} reason="hidden" icon={EyeOff}>Shares do not include this file.</AboutNote>;
   }
   if (answer.visibility === "missing") {
     return (
-      <AboutNote testId="about-access-unknown" reason="missing" icon={FileX}>
+      <AboutNote testId={`${testId}-unknown`} reason="missing" icon={FileX}>
         This file is no longer available at this path.
       </AboutNote>
     );
@@ -590,21 +629,21 @@ function AccessUnknown(props: { answer: AccessAnswer; setup: AccessSetup; onRetr
       return <SkeletonLines rows={2} className="px-2 py-1" />;
     case "not-synced":
       return (
-        <AboutNote testId="about-access-unknown" reason="not-synced" icon={CloudOff}
+        <AboutNote testId={`${testId}-unknown`} reason="not-synced" icon={CloudOff}
           action={{ label: "Sync and sharing", run: setup.openSyncSettings }}>
           Shares need sync, and this workspace does not sync.
         </AboutNote>
       );
     case "signed-out":
       return (
-        <AboutNote testId="about-access-unknown" reason="signed-out" icon={LogIn}
+        <AboutNote testId={`${testId}-unknown`} reason="signed-out" icon={LogIn}
           action={{ label: "Connect server", run: setup.connect }}>
           Connect your server to check who has access.
         </AboutNote>
       );
     case "other-account":
       return (
-        <AboutNote testId="about-access-unknown" reason="other-account" icon={LogIn}
+        <AboutNote testId={`${testId}-unknown`} reason="other-account" icon={LogIn}
           action={{ label: "Connect server", run: setup.connect }}>
           This workspace syncs with another account. Connect that account to check who has access.
         </AboutNote>
@@ -613,10 +652,10 @@ function AccessUnknown(props: { answer: AccessAnswer; setup: AccessSetup; onRetr
       return (
         <>
           <div className="px-2 pb-1">
-            <StateMark testId="about-access-freshness" state={answer.freshness} shown="access-unknown" />
+            <StateMark testId={`${testId}-freshness`} state={answer.freshness} shown="access-unknown" title={props.unexplained} />
           </div>
-          <AboutNote testId="about-access-unknown" reason="unexplained" action={{ label: "Try again", run: props.onRetry }}>
-            Access information is unavailable for this file. This does not mean that no one has access.
+          <AboutNote testId={`${testId}-unknown`} reason="unexplained" action={{ label: "Try again", run: props.onRetry }}>
+            {props.unexplained}
           </AboutNote>
         </>
       );
@@ -655,25 +694,11 @@ export function AboutAccessView(props: {
           data-visibility={view.answer.visibility}
         >
           {empty === null ? (
-            <AccessUnknown answer={view.answer} setup={props.setup} onRetry={props.onRetry} />
+            <AccessUnknown testId="about-access" unexplained={UNEXPLAINED_FILE}
+              answer={view.answer} setup={props.setup} onRetry={props.onRetry} />
           ) : (
             <>
-              <div className="flex items-center gap-2 px-2 pb-1">
-                <StateMark
-                  testId="about-access-freshness"
-                  state={view.answer.freshness}
-                  shown={`access-${view.answer.freshness}`}
-                />
-                {view.answer.checkedAtMs !== null ? (
-                  <time
-                    dateTime={formatChatTime(view.answer.checkedAtMs).iso}
-                    title={formatChatTime(view.answer.checkedAtMs).label}
-                    className="font-mono text-[11px] text-subtle"
-                  >
-                    {formatShortTime(view.answer.checkedAtMs)}
-                  </time>
-                ) : null}
-              </div>
+              <AccessChecked testId="about-access-freshness" answer={view.answer} />
               {view.answer.rows.length === 0 ? (
                 <AboutNote testId="about-access-empty">{empty}</AboutNote>
               ) : (

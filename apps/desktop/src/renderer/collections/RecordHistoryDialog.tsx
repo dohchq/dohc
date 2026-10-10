@@ -257,6 +257,48 @@ export function RecordHistoryDialog(props: {
     load(null);
   }, [load]);
 
+  const [namesRevision, setNamesRevision] = useState<{ workspaceId: string } | null>(null);
+  const namedRevision = useRef<typeof namesRevision>(null);
+  useEffect(() => bridge().onHistoryNamesChanged?.(event => {
+    if (event.workspaceId === workspaceId) setNamesRevision({ workspaceId });
+  }), [workspaceId]);
+  useEffect(() => {
+    if (
+      namesRevision?.workspaceId !== workspaceId || namedRevision.current === namesRevision ||
+      page === null || loading !== null || page.entries.length === 0
+    ) return;
+    let liveRequest = true;
+    const token = request.next();
+    const shown = page;
+    const live = () => liveRequest && request.isCurrent(token);
+    const scan = async () => {
+      const authors = new Map<number, RecordHistoryEntry["author"]>();
+      let before = Math.max(...shown.entries.map(entry => entry.historyId)) + 1;
+      const last = Math.min(...shown.entries.map(entry => entry.historyId));
+      do {
+        const result = await bridge().getCollectionRecordHistory({ workspaceId, collectionPath, recordId, beforeHistoryId: before });
+        if (!live()) return false;
+        for (const entry of result.entries) authors.set(entry.historyId, entry.author);
+        if (result.nextBeforeHistoryId === null || result.nextBeforeHistoryId <= last) break;
+        if (result.nextBeforeHistoryId >= before) return false;
+        before = result.nextBeforeHistoryId;
+      } while (live());
+      if (!live()) return false;
+      const next = { ...shown, entries: shown.entries.map(entry => authors.has(entry.historyId) ? { ...entry, author: authors.get(entry.historyId)! } : entry) };
+      // Older changes keeps the earlier entries. Only an applied scan
+      // completes the event, so pagination cannot lose their names.
+      namedRevision.current = namesRevision;
+      setPage(current => current === shown ? next : current);
+      return true;
+    };
+    void (async () => {
+      for (let attempt = 0; attempt < 2 && live(); attempt++) {
+        try { if (await scan()) return; } catch { /* Retry once while this page is still current. */ }
+      }
+    })();
+    return () => { liveRequest = false; };
+  }, [workspaceId, collectionPath, recordId, page, loading, request, namesRevision]);
+
   // Said once the reads and lookups settle, so Try again reads back to every
   // page shown, and said again only for a run newly left unplaced.
   useEffect(() => {
