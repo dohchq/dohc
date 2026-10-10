@@ -115,6 +115,14 @@ impl Authors {
     pub fn moment_json(&self) -> Option<String> {
         (!self.is_empty()).then(|| self.json())
     }
+
+    pub fn has_unattributed(&self) -> bool {
+        self.0.contains_key("unattributed")
+    }
+
+    pub fn remove_unattributed(&mut self) {
+        self.0.remove("unattributed");
+    }
 }
 
 /// Whether this lineage belongs to an adopted owner. Its native log also holds
@@ -356,6 +364,49 @@ pub fn check_admission_in(
         (bytes >= SETTLE_AUTHOR_BYTE_THRESHOLD || covered.len() >= SETTLE_AUTHOR_COUNT_THRESHOLD)
             && !unresolved_in(conn, key)?,
     )
+}
+
+/// A historical coordinate's verified snapshot owns its coverage, just as an
+/// accepted delivery's snapshot does. Raw replication rows cannot mint it.
+pub(crate) fn check_remote_admission_in(
+    conn: &Connection,
+    key: &DocKey,
+    origin_id: &str,
+    origin_seq: i64,
+    actor: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+) -> Result<(), CollabError> {
+    let verified: Option<(String, String)> = conn
+        .query_row(
+            "SELECT a.author_json,d.pending_authors_json FROM live_audit_projection_authors a JOIN ydoc_docs d \
+             ON d.workspace_id=a.workspace_id AND d.version_id=a.version_id AND d.object_id=a.object_id \
+             AND d.path=a.path AND d.lineage_claim_id=a.lineage_claim_id \
+             WHERE a.workspace_id=?1 AND a.origin_id=?2 AND a.origin_seq=?3 \
+             AND a.version_id=?4 AND a.object_id=?5",
+            params![key.workspace_id, origin_id, origin_seq, key.version_id, key.object_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(sql)?;
+    if let Some((verified, pending)) = verified {
+        let mut covered = Authors::default();
+        covered.union_json(&pending)?;
+        covered.union_json(&verified)?;
+        // Identical admitted snapshots add no identity or bytes. Catch-up must
+        // not scan the native interval again for every known coordinate.
+        if covered.json() == pending {
+            return Ok(());
+        }
+        let authors: Vec<Value> = serde_json::from_str(&verified)
+            .map_err(|_| corrupt("verified remote coverage is not an author list"))?;
+        let entries = authors
+            .into_iter()
+            .map(|author| Value::Array(vec![author]).to_string())
+            .collect::<Vec<_>>();
+        admit_accepted_in(conn, key, &entries)
+    } else {
+        check_admission_in(conn, key, actor, attribution).map(|_| ())
+    }
 }
 
 /// Admits the authors of one accepted delivery to the current interval, under

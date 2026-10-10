@@ -1978,7 +1978,7 @@ it("publishes hosted settlement at a verified closed restore fence and chains th
     expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [first.op]})).toMatchObject({inserted: 1});
     expect(first.op).toMatchObject({settlementAdmission: {status: "accepted"}});
     expect(f.raw.prepare("SELECT admission_state FROM sync_relay_live_documents").get()!.admission_state).toBe("closed");
-    expect(f.storage.fetchLogCoordinate({workspaceId: "workspace", originId: "proof", originSeq: 0})!.admittedAuthorSnapshot).toEqual([]);
+    expect(f.storage.fetchLogCoordinate({workspaceId: "workspace", originId: "proof", originSeq: 0})!.admittedAuthorSnapshot).toEqual([{kind: "unattributed"}]);
     f.complete();
     Y.applyUpdate(doc, bytes); doc.getMap("frontmatter").set("after", "continued work");
     const captured = f.journalCapture(Y.encodeStateAsUpdate(doc), "post-restore");

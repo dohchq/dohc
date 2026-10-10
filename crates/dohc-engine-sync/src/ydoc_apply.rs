@@ -3763,13 +3763,33 @@ pub fn project_and_write_in_tx(
         .map_or(Preimage::Absent, |snapshot| {
             Preimage::Present(snapshot.blob_sha256.clone())
         });
-    // Deterministic per-envelope moment id: a crash between commit and
-    // cursor advance redelivers the envelope, whose re-apply lands in the
-    // idempotent skip above (same projection) — the id can never collide.
+    // A deterministic per-envelope id keeps a retained drain's retry on its
+    // original History row, even after another write advances the head.
     let moment_id = ydoc_apply_moment_id(key, path, origin_id, origin_seq);
-    let authors = dohc_engine_collab::author_coverage::interval_in(tx, key, i64::MAX)
-        .map_err(map_collab_hard_error)?
-        .moment_json();
+    // A retained drain can replay after its coverage was consumed or audited.
+    // Reuse the recorded authors; the domain still checks all write identity fields.
+    let recorded_authors: Option<Option<String>> = tx
+        .query_row(
+            "SELECT author_json FROM moments WHERE workspace_id=?1 AND moment_id=?2 \
+             AND version_id=?3 AND object_id=?4 AND path=?5 AND metadata_origin='ydoc' \
+             AND operation='write' AND COALESCE(sync_record_only,0)=0",
+            params![
+                key.workspace_id,
+                moment_id,
+                key.version_id,
+                key.object_id,
+                path
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let authors = match recorded_authors {
+        Some(authors) => authors,
+        None => dohc_engine_collab::author_coverage::interval_in(tx, key, i64::MAX)
+            .map_err(map_collab_hard_error)?
+            .moment_json(),
+    };
     let result = write_projected_text_in_tx(
         tx,
         &WriteText {
@@ -4679,8 +4699,30 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
     let mut record_facts = None;
     let mut cache_probe = RemoteAppendProbe::default();
     let gate_cache: &WriterDocCache = cache;
-    let outcome_result =
-        crate::apply::apply_envelope_with_mutation_outcome(store, envelope, faults, |tx, op| {
+    let outcome_result = crate::apply::apply_envelope_with_mutation_outcome(
+        store,
+        envelope,
+        faults,
+        |tx, op| {
+            let provisional_author = if dohc_engine_domain::moment_author_json(
+                payload.actor_origin_id.as_deref(),
+                payload.attribution.as_ref(),
+            )
+            .is_none()
+            {
+                let pending: String = tx.query_row(
+                    "SELECT pending_authors_json FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    params![key.workspace_id, key.version_id, key.object_id],
+                    |row| row.get(0),
+                ).map_err(SyncError::corrupt)?;
+                let mut prior_authors = dohc_engine_collab::author_coverage::Authors::default();
+                prior_authors
+                    .union_json(&pending)
+                    .map_err(map_collab_hard_error)?;
+                !prior_authors.has_unattributed()
+            } else {
+                false
+            };
             let projected = apply_remote_update_in_transaction_with_projection(
                 tx,
                 gate_cache,
@@ -4704,6 +4746,22 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
             } else {
                 tx.execute_batch("SAVEPOINT dohc_ydoc_projection")
                     .map_err(SyncError::persist)?;
+                let projection_moment_id =
+                    ydoc_apply_moment_id(&key, &update_path, &op.origin_id, op.origin_seq);
+                let provisional_request_id =
+                    format!("sync-ydoc-provisional-author:{projection_moment_id}");
+                if provisional_author && matches!(applied, ReplicationApplyOutcome::Applied { .. })
+                {
+                    // Record that this coordinate alone introduced the marker.
+                    // Late proof may replace it without erasing other interval gaps.
+                    tx.execute(
+                        "INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) \
+                         SELECT ?1,'unattributed',?2,?3,'sync-ydoc-provisional-author' \
+                         WHERE NOT EXISTS(SELECT 1 FROM moments WHERE workspace_id=?4 AND moment_id=?5) \
+                         ON CONFLICT(request_id) DO NOTHING",
+                        params![provisional_request_id, op.origin_seq, op.recorded_at_ms, key.workspace_id, projection_moment_id],
+                    ).map_err(SyncError::persist)?;
+                }
                 match project_and_write_in_tx(
                     tx,
                     &key,
@@ -4716,6 +4774,13 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                     search_policy.as_ref(),
                 ) {
                     Ok(()) => {
+                        if provisional_author {
+                            tx.execute(
+                            "DELETE FROM engine_requests WHERE request_id=?1 AND kind='sync-ydoc-provisional-author' \
+                             AND NOT EXISTS(SELECT 1 FROM moments WHERE workspace_id=?2 AND moment_id=?3)",
+                            params![provisional_request_id, key.workspace_id, projection_moment_id],
+                        ).map_err(SyncError::persist)?;
+                        }
                         if let crate::BaseOrigination::Declined(declined) =
                             crate::originate_ydoc_base_in_tx(
                                 tx,
@@ -4766,7 +4831,8 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
             };
             cache_probe.capture_commit(tx, &key);
             Ok(mutation)
-        });
+        },
+    );
     let outcome = match outcome_result {
         Ok(outcome) => outcome,
         Err(error) => {

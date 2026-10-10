@@ -710,6 +710,21 @@ fn imported_authored_live_update_annotates_only_its_changed_projection() {
 }
 
 #[test]
+fn a_late_coordinate_audit_preserves_a_local_authorless_edit() {
+    import_authored_projection_with_local_gap(false, false, None, false, true, false);
+}
+
+#[test]
+fn an_audited_drain_preserves_a_local_authorless_edit() {
+    import_authored_projection_with_local_gap(true, false, None, false, true, false);
+}
+
+#[test]
+fn an_audited_drain_with_a_known_author_fits_a_full_author_interval() {
+    import_authored_projection_with_local_gap(true, false, None, false, false, true);
+}
+
+#[test]
 fn audited_authors_reach_a_deferred_projection_after_reopen() {
     import_authored_projection(true, false, None, false);
 }
@@ -762,6 +777,24 @@ fn import_authored_projection(
     mixed: bool,
     first_coordinate: Option<FirstDrainCoordinate>,
     late: bool,
+) {
+    import_authored_projection_with_local_gap(
+        deferred,
+        mixed,
+        first_coordinate,
+        late,
+        false,
+        false,
+    );
+}
+
+fn import_authored_projection_with_local_gap(
+    deferred: bool,
+    mixed: bool,
+    first_coordinate: Option<FirstDrainCoordinate>,
+    late: bool,
+    local_gap: bool,
+    at_capacity: bool,
 ) {
     use dohc_engine_collab::live_update_application::{
         AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, LiveUpdateReceipt, RelayAcceptedLiveUpdate,
@@ -876,6 +909,26 @@ fn import_authored_projection(
         .origin_seq;
     for mut op in ops {
         op.relay_seq = Some(op.origin_seq + 1);
+        if local_gap && op.op_kind == "ydoc.update" && op.origin_seq == first_delta_seq {
+            let key = DocKey::new("ws", "main", "object").unwrap();
+            let persisted = dohc_engine_collab::load_persisted(&receiver, &key)
+                .unwrap()
+                .unwrap();
+            let update = persisted
+                .doc
+                .richdoc_append_paragraph("Local authorless edit.");
+            dohc_engine_collab::record_local_update(
+                &mut receiver,
+                &mut cache,
+                &key,
+                &update,
+                dohc_engine_collab::LocalAppend::default(),
+                &NoFaults,
+                200,
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        }
         if first_coordinate == Some(FirstDrainCoordinate::Declared)
             && op.op_kind == "ydoc.update"
             && op.payload["isBaseState"] != true
@@ -964,7 +1017,14 @@ fn import_authored_projection(
                 assert!(moment.is_none());
             } else {
                 let moment = moment.unwrap();
-                assert!(moment.author_json.is_none());
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(
+                        moment.author_json.as_deref().unwrap()
+                    )
+                    .unwrap(),
+                    json!([{"kind":"unattributed"}]),
+                    "the content coordinate is not yet audited",
+                );
             }
             projection = Some(id);
         }
@@ -982,6 +1042,16 @@ fn import_authored_projection(
             count(&receiver, "live_audit_projection_authors"),
             i64::from(first_coordinate == Some(FirstDrainCoordinate::Verified)) + i64::from(!late)
         );
+        if at_capacity {
+            let entries = std::iter::once(authors[0].clone())
+                .chain((1..dohc_engine_collab::author_coverage::MAX_INTERVAL_AUTHORS).map(|index|
+                    json!({"kind":"human","humanId":format!("prior-{index}"),"humanName":"Prior author"})))
+                .collect::<Vec<_>>();
+            receiver.read_with(|conn| conn.execute(
+                "UPDATE ydoc_docs SET pending_authors_json=?1 WHERE workspace_id='ws' AND version_id='main' AND object_id='object'",
+                [serde_json::to_string(&entries).unwrap()],
+            )).unwrap();
+        }
         drop(receiver);
         receiver = EngineStore::open(&path, 250).unwrap();
         let drained = crate::drain_deferred_ydoc_for_key(
@@ -1021,7 +1091,32 @@ fn import_authored_projection(
             .expect("verified public authors"),
     )
     .unwrap();
-    if mixed {
+    if local_gap {
+        let text: String = receiver
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT text FROM blobs WHERE sha256=?1",
+                    [moment.after_blob_sha256.as_deref().unwrap()],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert!(text.contains("Local authorless edit."));
+        assert!(text.contains("Recipient changed this paragraph."));
+    }
+    if at_capacity {
+        assert_eq!(
+            stored.as_array().unwrap().len(),
+            dohc_engine_collab::author_coverage::MAX_INTERVAL_AUTHORS
+        );
+        assert!(stored.as_array().unwrap().contains(&authors[0]));
+        assert!(
+            !stored
+                .as_array()
+                .unwrap()
+                .contains(&json!({"kind":"unattributed"}))
+        );
+    } else if mixed {
         assert_eq!(stored.as_array().unwrap().len(), 3);
         for author in [authors[0].clone(), prior[0].clone(), other] {
             assert!(stored.as_array().unwrap().contains(&author));
@@ -1035,6 +1130,7 @@ fn import_authored_projection(
         first_coordinate,
         Some(FirstDrainCoordinate::Unattributed | FirstDrainCoordinate::RefusedPath)
     ) || late
+        || local_gap
     {
         assert_eq!(stored, json!([authors[0].clone(), {"kind":"unattributed"}]));
     } else {

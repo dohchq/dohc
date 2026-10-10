@@ -4756,8 +4756,9 @@ async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
         adoption["payloadAfterBlobSha256"],
         hex_sha256(settled.as_bytes())
     );
-    assert!(
-        adoption["authors"].is_null(),
+    assert_eq!(
+        adoption["authors"],
+        json!([{"kind":"unattributed"}]),
         "owner settlement must not impersonate the public voter"
     );
     let mut retry = EngineStore::open(&db, 3).expect("retry store");
