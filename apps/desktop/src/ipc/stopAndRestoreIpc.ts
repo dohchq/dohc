@@ -192,8 +192,8 @@ export function registerStopAndRestoreIpc<
       if (retryRequested.delete(workspaceId)) retryServerReleases(workspaceId);
     });
   };
-  const releasePending = async (workspaceId: string, automations: CollectionAutomations, entry: PendingRestore) => {
-    if (entry.session?.undoingFiles && (entry.session.receipts.length || entry.session.intents?.length)) {
+  const releasePending = async (workspaceId: string, automations: CollectionAutomations, entry: PendingRestore, reason: "complete" | "dismiss" = "complete") => {
+    if (reason !== "dismiss" && entry.session?.undoingFiles) {
       throw new Error("dohc has not finished undoing these files. Try again.");
     }
     const active = activeUndos.get(entry.id);
@@ -211,7 +211,7 @@ export function registerStopAndRestoreIpc<
       dependencies.assertOriginalWorkspace(operation.workspace);
       for (const entry of await operation.state.collectionAutomations.pendingRestores()) {
         if (entry.session && restoreId(entry.session.target) === restoreId(input.target)) {
-          await releasePending(operation.workspace.workspaceId, operation.state.collectionAutomations, entry);
+          await releasePending(operation.workspace.workspaceId, operation.state.collectionAutomations, entry, "dismiss");
           operation.assertCurrent();
         }
       }
@@ -322,6 +322,11 @@ export function registerStopAndRestoreIpc<
       const relay = <Result>(path: string, init?: RequestInit) => session.run(() => relayJson<Result>(credentials, path, init));
       const automations = operation.state.collectionAutomations;
       const targetKey = restoreId(input.target);
+      // Resume a file Undo against its saved session, even if access changed.
+      // An unreadable store must still let Stop revoke access before reporting it.
+      let entries = await automations.pendingRestores().then(pending => pending.filter(entry =>
+        entry.session && restoreId(entry.session.target) === targetKey)).catch(() => undefined);
+      const interruptedUndo = entries?.find(entry => entry.session?.undoingFiles);
       const releaseTarget = async () => {
         for (const entry of await automations.pendingRestores()) {
           if (entry.session && restoreId(entry.session.target) === targetKey) await releasePending(workspaceId, automations, entry);
@@ -331,7 +336,9 @@ export function registerStopAndRestoreIpc<
 
       // Stop first, so no write lands while the files go back.
       let grantIds: string[];
-      if (input.target.kind === "person") {
+      if (interruptedUndo) {
+        grantIds = interruptedUndo.session!.grants;
+      } else if (input.target.kind === "person") {
         const { userId } = input.target;
         const listing = GrantedListing.parse(await relay<unknown>("/sync/shares"));
         const grants = listing.granted.flatMap((row) => {
@@ -406,15 +413,14 @@ export function registerStopAndRestoreIpc<
         grantIds = [grantId];
       }
 
-      // Access is stopped before progress is read or written.
-      let entries: PendingRestore[];
+      // New access is stopped before progress is written.
       try {
-        entries = (await automations.pendingRestores()).filter(entry => entry.session && restoreId(entry.session.target) === targetKey);
+        entries ??= (await automations.pendingRestores()).filter(entry => entry.session && restoreId(entry.session.target) === targetKey);
       } catch (cause) {
         throw new Error("Access stopped. dohc could not read unfinished Stop and restore progress.", {cause});
       }
       const grants = [...grantIds].sort();
-      const previous = fresh ? undefined : entries.find(entry => JSON.stringify(entry.session!.grants) === JSON.stringify(grants));
+      const previous = interruptedUndo ?? (fresh ? undefined : entries.find(entry => JSON.stringify(entry.session!.grants) === JSON.stringify(grants)));
       try {
         for (const entry of entries) if (entry !== previous) await releasePending(workspaceId, automations, entry);
       } catch (cause) { throw new Error("Access stopped. dohc could not save Stop and restore progress.", {cause}); }
@@ -578,6 +584,7 @@ export function registerStopAndRestoreIpc<
     const automations = operation.state.collectionAutomations;
     const pending = input.target ? (await automations.pendingRestores()).find(entry => entry.session && restoreId(entry.session.target) === restoreId(input.target!)) : undefined;
     const publishedRecoveries: Array<{path: string; restoredMomentId: string; removed?: boolean}> = [];
+    const paths = new Map<string, string>();
     const files: UndoStopAndRestoreResult["files"] = [];
     const receipts = durableBatch<UndoStopAndRestoreResult["files"][number]>(async batch => {
       const successful = batch.filter(file => file.kind === "restored");
@@ -621,6 +628,7 @@ export function registerStopAndRestoreIpc<
           await automations.savePendingRestore({id: pending.id, session: pending.session});
         }
       }
+      for (const receipt of pending?.session?.receipts ?? []) paths.set(receipt.restoredMomentId, receipt.path);
       for (const momentId of [...ids].reverse()) {
         operation.assertCurrent();
         try {
@@ -641,7 +649,20 @@ export function registerStopAndRestoreIpc<
         }
       }
       await receipts.flush();
-      if (pending?.session?.undoingFiles && !pending.session.receipts.length && !pending.session.intents?.length && files.every(file => file.kind === "restored")) {
+      if (pending?.session?.undoingFiles && !pending.session.intents?.length) {
+        const before = StopAndRestoreResult.parse(pending.session.result);
+        if (before.status === "restored") {
+          const review = new Map(before.review.map(file => [file.path, file]));
+          for (const file of files) {
+            const path = paths.get(file.momentId);
+            if (!path) continue;
+            if (file.kind === "restored") review.delete(path);
+            else review.set(path, file.kind === "rules-unreadable"
+              ? {path, reason: "rules-unreadable", unreadable: file.unreadable}
+              : {path, reason: "restore-refused", detail: file.detail});
+          }
+          pending.session.result = {...before, review: [...review.values()].sort((a, b) => a.path.localeCompare(b.path))};
+        }
         pending.session.filesUndone = true;
         delete pending.session.undoingFiles;
         await automations.savePendingRestore({id: pending.id, session: pending.session});

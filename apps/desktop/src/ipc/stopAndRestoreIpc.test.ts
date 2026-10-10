@@ -253,6 +253,77 @@ async function capturedFiles(paths: string[]) {
 }
 
 describe("stop and restore in main", () => {
+  async function pendingFileUndo(kind: "person" | "link" = "person") {
+    const root = await createTestScratch("dohc-restore-undo-pass-");
+    const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
+    const store = createAutomationRunStore(root, resolver);
+    const target = kind === "person" ? {kind, userId: "user_ana"} : {kind, grantId: "grant-link"};
+    await store.savePendingRestore({id: "pending-pass", claims: ["held-run"], session: {
+      grants: [kind === "person" ? "grant-edit" : "grant-link"], target, label: "Ana",
+      definitions: [{collectionPath: "trip", id: "bump", definitionHash: "hash"}],
+      filesUndone: false, receipts: [{path: SCHEMA, restoredMomentId: "back-schema"}],
+      result: {status: "restored", restored: [{path: SCHEMA, restoredMomentId: "back-schema"}], review: [],
+        runsUndone: 0, runsLeft: 1, runChangesKept: 0, fieldsMissing: 0, keptFields: [],
+        wroteAutomations: true, sendsMessages: false, unfinished: {step: "files", message: "Interrupted"}},
+    }});
+    return {rootPath: root, resolver, store, target};
+  }
+
+  it.each(["retry", "dismiss"])("finishes a refused file Undo and releases the pending session on %s", async action => {
+    const {store, target, rootPath, resolver} = await pendingFileUndo();
+    const runs = vi.fn(async () => ({...NOTHING, undone: 1}));
+    const f = fixture({rootPath, runStore: store, granted: [grant({revokedAtMs: 3})],
+      restoreError: new RestoreHeadChangedError(SCHEMA), undoRunsOf: runs, releaseAllowed: () => false});
+    await expect(f.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: []})).resolves.toMatchObject({
+      files: [{momentId: "back-schema", kind: "refused"}], errorMessage: null,
+    });
+    const saved = (await createAutomationRunStore(rootPath, resolver).pendingRestores())[0]!.session!;
+    expect(saved.filesUndone).toBe(true);
+    expect(saved.undoingFiles).toBeUndefined();
+    expect(saved.receipts).toEqual([{path: SCHEMA, restoredMomentId: "back-schema"}]);
+    expect(saved.result).toMatchObject({review: [{path: SCHEMA, reason: "restore-refused"}]});
+    if (action === "retry") {
+      await expect(f.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({
+        unfinished: null, runsUndone: 1, review: [{path: SCHEMA, reason: "restore-refused"}],
+      });
+      expect(runs).toHaveBeenCalled();
+      expect(f.capture.restoreFileToBeforeMoment).toHaveBeenCalledTimes(1);
+    } else await expect(f.call(stopAndRestoreRecoveryOperations.dismissStopAndRestore.channel, {target})).resolves.toBeUndefined();
+    expect(await store.unfinishedUndos()).toEqual(new Set());
+    await vi.waitFor(() => expect(f.releases).toContain("pending-pass"));
+  });
+
+  it.each(["receipts", "intents"])("dismisses an interrupted file Undo with unresolved %s", async remaining => {
+    const {store, target, rootPath} = await pendingFileUndo();
+    const entry = (await store.pendingRestores())[0]!;
+    entry.session!.undoingFiles = true;
+    if (remaining === "intents") {entry.session!.receipts = []; entry.session!.intents = ["original-schema"];}
+    await store.savePendingRestore(entry);
+    const f = fixture({rootPath, runStore: store, releaseAllowed: () => false});
+    await expect(f.call(stopAndRestoreRecoveryOperations.dismissStopAndRestore.channel, {target})).resolves.toBeUndefined();
+    expect(await store.unfinishedUndos()).toEqual(new Set());
+    const released = (await store.pendingRestores())[0]!;
+    expect(released.session).toBeUndefined();
+    expect(released.serverRelease).toBe(true);
+    await vi.waitFor(() => expect(f.releases).toContain("pending-pass"));
+  });
+
+  it.each(["re-shared person", "deleted link"])("resumes an interrupted file Undo before checking the %s", async changed => {
+    const {store, target, rootPath, resolver} = await pendingFileUndo(changed === "deleted link" ? "link" : "person");
+    const first = fixture({rootPath, runStore: store, restoreError: Error("Interrupted Undo")});
+    await expect(first.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: []})).resolves.toMatchObject({errorMessage: "Interrupted Undo"});
+    expect((await createAutomationRunStore(rootPath, resolver).pendingRestores())[0]!.session).toMatchObject({undoingFiles: true, filesUndone: false});
+    const runs = vi.fn(async () => NOTHING);
+    const retry = fixture({rootPath, runStore: createAutomationRunStore(rootPath, resolver), undoRunsOf: runs,
+      granted: [grant({grantId: "new-grant", shareId: "new-share"})], links: [[]]});
+    await expect(retry.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({unfinished: null, restored: []});
+    expect(retry.capture.restoreFileToBeforeMoment).toHaveBeenCalledWith("back-schema", OWNER, expect.anything());
+    expect(runs).toHaveBeenCalled();
+    expect(retry.calls.some(call => call.path.includes("shares"))).toBe(false);
+    await vi.waitFor(async () => expect(await store.pendingRestores()).toEqual([]));
+    expect(retry.releases).toContain("pending-pass");
+  });
+
   it.each(["first batch", "mid-batch", "before barrier", "before receipts", "retry", "mid-Undo"])("keeps every file reversible after an unjournaled batch: %s", async boundary => {
     const root = await createTestScratch("dohc-restore-intents-");
     const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
