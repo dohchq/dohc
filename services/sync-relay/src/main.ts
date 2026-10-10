@@ -369,6 +369,12 @@ const relayApplication = createSyncRelayHandler({
   resolveActor,
   resolveUserIdByEmail: (email) => resolveUserIdByEmail(email),
   lookupUserEmail: (userId) => lookupUserEmail(userId),
+  lookupUserEmails: async userIds => {
+    if (userIds.length === 0) return new Map();
+    if (testAuthSeam) return new Map(userIds.map(id => [id, `${id}${TEST_EMAIL_SUFFIX}`]));
+    const result = await pool!.query<{ id: string; email: string }>('SELECT id, email FROM "user" WHERE id = ANY($1::text[])', [userIds]);
+    return new Map(result.rows.map(row => [row.id, row.email]));
+  },
   lookupVerifiedUserEmail: (userId) => lookupVerifiedUserEmail(userId),
   lookupUserDisplayName: (userId) => lookupUserDisplayName(userId),
   presence,

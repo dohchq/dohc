@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {checkAutomationReach, type ReachStep} from "./automationReach";
-import { listRosterGrants, ownerRoster, readStoredRoster } from "./rosterListing";
+import { listRosterGrants, lookupHistoryAccounts, ownerRoster, readStoredRoster } from "./rosterListing";
 
 const WORKSPACE = "ws-trip";
 
@@ -40,6 +40,35 @@ const unusable = { kind: "answered", listing: { grants: null, problem: { kind: "
 const serverDown = { status: 503, body: null };
 
 describe("listing from the relay", () => {
+  it("keeps reach requests and saved data identical to base despite ended-holder cursors", async () => {
+    const get = relay({
+      "/sync/shares?workspaceId=ws-trip": { status: 200, body: { granted: [row()] } },
+      "/sync/ws-trip/shares/links": { status: 200, body: { links: [link()], endedLinks: [], nextEndedHolderCursor: "history-only" } },
+      "/sync/ws-trip/shares/links?endedHolderCursor=history-only": { status: 200, body: { links: [], endedLinks: [] } },
+    });
+    const answer = await listRosterGrants(WORKSPACE, get);
+    expect(get.mock.calls.map(([path]) => path)).toEqual(["/sync/shares?workspaceId=ws-trip", "/sync/ws-trip/shares/links"]);
+    expect(answer).toEqual({ kind: "answered", listing: {
+      grants: [{ ...facts, grantId: "g-1", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", selector: { paths: ["Trip"], versionId: null }, access: "edit" },
+        { ...facts, grantId: "g-dep", recipientUserId: "u-ben", recipientEmail: "ben@dohc.test", selector: { paths: ["Trip"], versionId: null }, access: "edit" }],
+      links: [{ grant: { ...facts, grantId: "g-link", recipientUserId: null, recipientEmail: null, selector: { paths: ["Trip"], versionId: null }, access: "edit" }, ended: false, automationsGeneration: null }],
+      formerGrants: [], endedGrants: [],
+    } });
+  });
+  it("looks up only requested accounts and grants in one bounded request", async () => {
+    const get = relay({ "/sync/ws-trip/shares/links?historyGrantId=g-dep&historyUserId=u-ben": { status: 200, body: { holders: [{ grantId: "g-dep", recipientUserId: "u-ben", recipientEmail: "ben@test.example", parentGrantId: "g-link" }] } } });
+    expect(await lookupHistoryAccounts(WORKSPACE, get, { grantIds: ["g-dep"], userIds: ["u-ben"] })).toHaveLength(1);
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+  it("rejects oversized lookups and unsolicited identities", async () => {
+    const get = vi.fn(async () => ({ status: 200, body: { holders: [{ grantId: "other", recipientUserId: "other", recipientEmail: "other@test.example", parentGrantId: "g-link" }] } }));
+    expect(await lookupHistoryAccounts(WORKSPACE, get, { grantIds: Array(201).fill("g"), userIds: [] })).toBeNull();
+    expect(get).not.toHaveBeenCalled();
+    expect(await lookupHistoryAccounts(WORKSPACE, get, { grantIds: ["g-dep"], userIds: [] })).toBeNull();
+  });
+  it("keeps unavailable lookups out of the roster", async () => {
+    expect(await lookupHistoryAccounts(WORKSPACE, async () => serverDown, { grantIds: ["g-dep"], userIds: [] })).toBeNull();
+  });
   const noLinks = { "/sync/ws-trip/shares/links": { status: 200, body: { links: [], formerGrants: [] } } };
 
   it("pages through share links", async () => {

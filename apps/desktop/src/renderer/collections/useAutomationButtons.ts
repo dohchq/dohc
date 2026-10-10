@@ -75,6 +75,20 @@ export type AutomationButtons = ReturnType<typeof createAutomationButtons>;
 // report for a run that ends after its tab closed. The shell's toasts belong
 // to the workspace, so one reporter serves every Collection in it.
 const reporters = new Map<string, ButtonReporter>();
+type ButtonResult = "settled" | "relayed";
+const buttonResults = new Map<string, Set<(kind: ButtonResult) => void>>();
+export function onAutomationButtonResult(workspaceId: string, listener: (kind: ButtonResult) => void): () => void {
+  const listeners = buttonResults.get(workspaceId) ?? new Set();
+  listeners.add(listener);
+  buttonResults.set(workspaceId, listeners);
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0) buttonResults.delete(workspaceId);
+  };
+}
+function buttonResult(workspaceId: string, kind: ButtonResult): void {
+  for (const listener of buttonResults.get(workspaceId) ?? []) listener(kind);
+}
 // Rises when a workspace's buttons are torn down, so a reply or a Try again
 // from before does nothing.
 const generations = new Map<string, number>();
@@ -136,6 +150,7 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
 
   function settle(key: string, run: Run, outcome: Outcome): void {
     finish(key);
+    buttonResult(workspaceId, "settled");
     const { onNotice } = report();
     if (outcome.outcome === "done") onNotice(`Ran ${run.field} on ${run.label}`);
     else if (outcome.outcome === "skipped") onNotice(`${run.field} made no changes to ${run.label}`);
@@ -250,6 +265,7 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
           // edits, and a failure as that host's one notice, so this window
           // reports nothing and the button is free again.
           finish(key);
+          buttonResult(workspaceId, "relayed");
           return;
         }
         run.claimId = result.claimId;
