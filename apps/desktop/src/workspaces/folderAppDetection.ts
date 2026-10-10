@@ -26,12 +26,12 @@ export function createFolderAppDetection<Workspace extends Attachment>(input: {
   failed(error: unknown): void;
 }) {
   interface Folder { answer?: FolderAppAnswer; dirty: boolean; readFailed?: boolean; pending?: Promise<FolderAppAnswer> }
-  interface Tracking { folders: Map<string, Folder>; pending: Set<Promise<FolderAppAnswer>> }
+  interface Tracking { folders: Map<string, Folder>; pending: Set<Promise<FolderAppAnswer>>; queue: Promise<void> }
   const attachments = new Map<symbol, Tracking>();
   function read(workspace: Workspace, folder: string): Promise<FolderAppAnswer> {
     let tracking = attachments.get(workspace.attachmentId);
     if (!tracking) {
-      tracking = { folders: new Map(), pending: new Set() };
+      tracking = { folders: new Map(), pending: new Set(), queue: Promise.resolve() };
       attachments.set(workspace.attachmentId, tracking);
     }
     const { folders } = tracking;
@@ -45,7 +45,8 @@ export function createFolderAppDetection<Workspace extends Attachment>(input: {
   function scan(workspace: Workspace, folder: string, tracking: Tracking, current: Folder): Promise<FolderAppAnswer> {
     if (current.pending) return current.pending;
     if (!current.dirty && current.answer) return Promise.resolve(current.answer);
-    const pending = Promise.resolve().then(async () => {
+    // Serialize source reads per attachment, including rescans after resync.
+    const pending = tracking.queue.then(async () => {
       let answer: FolderAppAnswer;
       do {
         current.dirty = false;
@@ -67,6 +68,7 @@ export function createFolderAppDetection<Workspace extends Attachment>(input: {
     });
     current.pending = pending;
     tracking.pending.add(pending);
+    tracking.queue = pending.then(() => undefined, () => undefined);
     return pending;
   }
   function settledEvents(workspace: Workspace, events: readonly WatcherEvent[]) {

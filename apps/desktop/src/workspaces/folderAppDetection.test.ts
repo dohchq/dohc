@@ -140,7 +140,8 @@ describe("bounded folder tracking and resync", () => {
     const service = createFolderAppDetection({ sources, updated, failed: vi.fn() });
     const reading = service.read(workspace, "evicted");
     await ready;
-    for (let i = 0; i < MAX_REQUESTED_APP_FOLDERS; i++) await service.read(workspace, "missing" + i);
+    service.invalidate(workspace);
+    const queued = Array.from({ length: MAX_REQUESTED_APP_FOLDERS }, (_, i) => service.read(workspace, "missing" + i));
     updated.mockClear();
     let retired = false;
     const retiring = service.retire(workspace.attachmentId).then(() => { retired = true; });
@@ -148,8 +149,10 @@ describe("bounded folder tracking and resync", () => {
     expect(retired).toBe(false);
     release(["evicted/index.html"]);
     await reading;
+    await Promise.all(queued);
     await retiring;
-    expect(updated).not.toHaveBeenCalled();
+    expect(sources.mock.calls.filter(([, folder]) => folder === "evicted")).toHaveLength(1);
+    expect(updated).not.toHaveBeenCalledWith(workspace, expect.objectContaining({ folder: "evicted" }));
     expect(retired).toBe(true);
   });
   it.each([false, true])("signals recovery after a failed read (older successful answer: %s)", async previouslySuccessful => {
@@ -207,4 +210,40 @@ describe("bounded folder tracking and resync", () => {
     expect(updated).toHaveBeenCalledExactlyOnceWith(workspace, expect.objectContaining({ isApp: false }));
     await service.retire(workspace.attachmentId);
   });
+});
+
+it("serializes a many-folder resync and coalesces queued and in-flight invalidations", async () => {
+  let inFlight = 0;
+  let peak = 0;
+  let release!: () => void;
+  let started!: () => void;
+  const ready = new Promise<void>(resolve => { started = resolve; });
+  const sources = vi.fn(async (_workspace: typeof workspace, _folder: string) => [] as string[]);
+  const service = createFolderAppDetection({ sources, updated: vi.fn(), failed: vi.fn() });
+  for (let i = 0; i < MAX_REQUESTED_APP_FOLDERS; i++) await service.read(workspace, "folder" + i);
+  sources.mockClear();
+  sources.mockImplementation(async () => {
+    inFlight++;
+    peak = Math.max(peak, inFlight);
+    if (sources.mock.calls.length === 1) {
+      started();
+      await new Promise<void>(resolve => { release = resolve; });
+    } else await Promise.resolve();
+    inFlight--;
+    return [];
+  });
+  service.invalidate(workspace);
+  service.invalidate(workspace);
+  await ready;
+  service.invalidate(workspace);
+  service.invalidate(workspace);
+  service.settledEvents(workspace, [{ path: "folder0/index.html", operation: "update" }]);
+  release();
+  await service.retire(workspace.attachmentId);
+  expect(peak).toBe(1);
+  expect(inFlight).toBe(0);
+  expect(sources).toHaveBeenCalledTimes(MAX_REQUESTED_APP_FOLDERS + 1);
+  for (let i = 0; i < MAX_REQUESTED_APP_FOLDERS; i++) {
+    expect(sources.mock.calls.filter(([, folder]) => folder === "folder" + i)).toHaveLength(i === 0 ? 2 : 1);
+  }
 });

@@ -76,7 +76,7 @@ it("guards offer-specific signals with the workspace generation", () => {
   let listener!: (answer: { workspaceId: string; folder: string; isApp: boolean; run: null }) => void;
   const changed = (answer: unknown) => received.push(answer);
   const received: unknown[] = [];
-  const dispose = observeFolderAppOffers({ token, currentToken: () => token,
+  const dispose = observeFolderAppOffers({ token, currentToken: () => token, folder: "app",
     subscribe: callback => { listener = callback; return () => { received.push("disposed"); }; }, onChanged: changed });
   const answer = { workspaceId: "one", folder: "app", isApp: false, run: null };
   listener({ ...answer, workspaceId: "two" });
@@ -87,4 +87,19 @@ it("guards offer-specific signals with the workspace generation", () => {
   expect(received).toEqual([answer]);
   dispose();
   expect(received.at(-1)).toBe("disposed");
+});
+
+it("ignores answers for other folders in the same workspace", () => {
+  const token = { workspaceId: "one", generation: 1 };
+  let listener!: (answer: { workspaceId: string; folder: string; isApp: boolean; run: null }) => void;
+  const received: unknown[] = [];
+  const dispose = observeFolderAppOffers({ token, currentToken: () => token, folder: "app",
+    subscribe: callback => { listener = callback; return () => {}; }, onChanged: answer => received.push(answer) });
+  const answer = { workspaceId: "one", folder: "other", isApp: false, run: null };
+  listener(answer);
+  listener({ ...answer, folder: "app/nested" });
+  expect(received).toEqual([]);
+  listener({ ...answer, folder: "app" });
+  expect(received).toEqual([{ ...answer, folder: "app" }]);
+  dispose();
 });

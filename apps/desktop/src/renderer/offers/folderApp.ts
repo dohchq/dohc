@@ -20,13 +20,13 @@ export async function readFolderAppOffer(input: {
 }
 
 export function observeFolderAppOffers(input: {
-  token: OfferWorkspaceToken; currentToken(): OfferWorkspaceToken;
+  token: OfferWorkspaceToken; currentToken(): OfferWorkspaceToken; folder: string;
   subscribe(listener: (answer: FolderAppAnswer) => void): () => void;
   onChanged(answer: FolderAppAnswer): void;
 }): () => void {
   return input.subscribe(answer => {
     const current = input.currentToken();
     if (current.workspaceId === input.token.workspaceId && current.generation === input.token.generation
-      && answer.workspaceId === current.workspaceId) input.onChanged(answer);
+      && answer.workspaceId === current.workspaceId && answer.folder === input.folder) input.onChanged(answer);
   });
 }
