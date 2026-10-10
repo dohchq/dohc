@@ -2846,10 +2846,6 @@ CREATE TABLE live_settlement_attribution_unavailable (
 ) STRICT;
 ";
 
-/// The frozen, ordered list of migrations this build knows. No build may
-/// delete or rename the `v2-baseline` ledger row, because an older build
-/// recognizes a newer store only by that row and would otherwise offer
-/// Rebuild for it.
 const V2_YDOC_FILE_EXPORT_LANE_DDL: &str = "
 ALTER TABLE ydoc_docs ADD COLUMN file_export_lane INTEGER NOT NULL DEFAULT 0 CHECK (file_export_lane IN (0,1,2,3));
 UPDATE ydoc_docs SET file_export_lane=1 WHERE lineage_claim_status='unclaimed' AND sharing_declined_json IS NOT NULL;
@@ -2880,6 +2876,10 @@ BEGIN
 END;
 ";
 
+/// The frozen, ordered list of migrations this build knows. No build may
+/// delete or rename the `v2-baseline` ledger row, because an older build
+/// recognizes a newer store only by that row and would otherwise offer
+/// Rebuild for it.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     Migration {
         ordinal: 0,
@@ -5032,6 +5032,7 @@ mod tests {
                 .is_err()
         );
     }
+
     #[test]
     fn retained_export_lineage_migration_upgrades_ordinal_38_without_backfill() {
         let mut conn = Connection::open_in_memory().unwrap();
