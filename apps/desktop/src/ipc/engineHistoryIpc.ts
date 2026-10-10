@@ -87,7 +87,7 @@ export async function listEngineMomentsForIpc(
 ): Promise<ListEngineMomentsResponse> {
   try {
     const page = await read();
-    names.prepare?.(page.moments.flatMap(moment => moment.authors?.length === 1 ? moment.authors : []));
+    names.prepare?.(page.moments.flatMap(moment => moment.authors ?? []));
     return ListEngineMomentsResponseSchema.parse({
       moments: page.moments.map((moment) =>
         engineMomentForIpc(moment, names),

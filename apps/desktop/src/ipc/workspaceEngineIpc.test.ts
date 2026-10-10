@@ -10,6 +10,7 @@ import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createWorkspaceEngineIpc } from "./workspaceEngineIpc";
 import { CHANNELS } from "./channels";
 import type { EngineMomentRecord, RebuildEngineStoreResult, SyncStatusResult } from "./bridgeContract";
+import type { EngineMomentAuthorNames } from "./engineHistoryIpc";
 import { GetCollectionRecordHistoryResult, captureRecoveryOperations, fileObservationOperations, engineYDocAdmissionOperations, engineYDocSaveOperations } from "./bridgeContract";
 import { operationBridge } from "./operationTable";
 import { engineMomentSourceLabel } from "../renderer/workbench/EngineHistory";
@@ -190,6 +191,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
   const readPolicy = vi.fn<(rootPath: string) => Promise<WorkspaceEnginePolicySnapshot>>(async () => ({ filesPolicy: null, visibilityPolicy: null, errors: [], unreadable: [] }));
   if (policyRoot) readPolicy.mockImplementation(readWorkspaceEnginePolicy);
   const automationPersonName = vi.fn((_workspaceId: string, userId: string, _sender: Sender): string | null => userId === "person-local" ? null : userId);
+  const prepareNamed = vi.fn<NonNullable<EngineMomentAuthorNames["prepare"]>>();
   const registrations = createWorkspaceEngineIpc({
     readWorkspaceEnginePolicy: readPolicy,
     localPersonId: () => "person-local",
@@ -207,7 +209,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     automationAuthor: (_workspaceId, automationId) => ({ name: automationId, collection: "Tasks" }),
     automationRunOnThisComputer, serverRuns, signedInAccount: () => session.account,
     notifyRenderer: notify,
-    namedAuthorLabels: () => ({ named: () => "Someone you shared with" }),
+    namedAuthorLabels: () => ({ prepare: prepareNamed, named: () => "Someone you shared with" }),
     automationPersonName,
     retryOwnerLiveDelivery, retryCloudSync,
     retryFileObservation: retry ? id => { void retryFileObservation(id); return retry.read(); } : retryFileObservation,
@@ -227,7 +229,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     return handler({ sender: value }, payload);
   };
   return {
-    workspace, sender, physical, authority, renderers, sessions, ydoc, provider, openYDocSession,
+    workspace, sender, physical, authority, renderers, sessions, ydoc, provider, openYDocSession, prepareNamed,
     adapter, capture, requireEngineCapture, getStatus, hasAgentRun, closeActivity, probe, move, reopen,
     notify, writable, requireWorkspace, displayName, syncProjection, canonicalWorkspaceFor, requireSessions,
     events, handlers, invoke, routed, retryOwnerLiveDelivery, retryCloudSync, retryFileObservation, automationRunOnThisComputer, relay, setMissingAdapter: () => { missingAdapter = true; },
@@ -690,6 +692,22 @@ describe("workspace engine IPC registrations", () => {
     expect(h.capture.listMoments).toHaveBeenLastCalledWith({ objectId: "object-1", limit: 7, beforeMomentOrder: 19 });
     await expect(h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", objectId: "" })).rejects.toThrow();
     await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "moment" })).resolves.toEqual({ moment: null });
+  });
+
+  it("prepares every author of a History detail several people wrote", async () => {
+    const h = await harness();
+    const authors = [
+      { kind: "named", userId: "u-ana", grantId: "g-1", grantGeneration: 1 },
+      { kind: "named", userId: "u-ben", grantId: "g-dep", grantGeneration: 1 },
+    ] as const;
+    h.capture.readMoment.mockResolvedValueOnce({ protected: false, moment: {
+      id: "m-both", workspaceId: "workspace", versionId: "main", objectId: "o-1", path: "notes/a.md", recordedAtMs: 1,
+      operation: "write", metadata: { origin: "sync" }, authors: [...authors],
+      payload: { before: null, after: { path: "notes/a.md", contentKind: "text", sha256: "a".repeat(64), byteLength: 3, text: "new" } },
+    } });
+    const result = await h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "m-both" });
+    expect(h.prepareNamed).toHaveBeenCalledWith([...authors]);
+    expect(result).toMatchObject({ moment: { authorLabels: ["Someone you shared with", "Someone you shared with"] } });
   });
 
   it("reads a shared view's imported history from its registered share mount without a capture", async () => {
