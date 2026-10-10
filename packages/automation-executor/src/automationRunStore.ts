@@ -350,6 +350,7 @@ const PendingRestoreSchema = z.object({
     label: z.string(),
     definitions: z.array(z.object({collectionPath: z.string(), id: z.string(), definitionHash: z.string()})),
     filesUndone: z.boolean(),
+    undoingFiles: z.boolean().optional(),
     receipts: z.array(z.object({path: z.string(), restoredMomentId: z.string(), removed: z.boolean().optional()})),
     intents: z.array(z.string().min(1)).optional(),
     // The desktop validates its outcome with the bridge contract on recovery.

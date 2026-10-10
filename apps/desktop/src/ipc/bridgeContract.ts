@@ -5053,6 +5053,7 @@ export const StopAndRestoreResult = z.discriminatedUnion("status", [
     // The step a failure stopped, with why; what the fields above count happened.
     // At files, this try undid no run.
     unfinished: z.object({ step: z.enum(["files", "runs"]), message: z.string() }).strict().nullable(),
+    canUndoFiles: z.boolean().optional(),
   }).strict(),
   // Access stopped, but this computer has not received every change the
   // person wrote yet. Nothing was restored; trying again continues.
@@ -5063,6 +5064,7 @@ export const PendingStopAndRestoresPayload = z.object({workspaceId: WORKSPACE_ID
 export type PendingStopAndRestoresPayload = z.infer<typeof PendingStopAndRestoresPayload>;
 export const PendingStopAndRestoresResult = z.array(z.object({
   target: StopAndRestoreTarget, label: z.string(), filesUndone: z.boolean(),
+  undoingFiles: z.boolean().optional(),
   receipts: z.array(z.object({path: PATH_STRING, restoredMomentId: OPAQUE_ID, removed: z.boolean().optional()})),
   result: StopAndRestoreResult,
 }));

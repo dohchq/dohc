@@ -253,11 +253,12 @@ async function capturedFiles(paths: string[]) {
 }
 
 describe("stop and restore in main", () => {
-  it.each(["first batch", "mid-batch", "before barrier", "before receipts", "retry"])("keeps every file reversible after an unjournaled batch: %s", async boundary => {
+  it.each(["first batch", "mid-batch", "before barrier", "before receipts", "retry", "mid-Undo"])("keeps every file reversible after an unjournaled batch: %s", async boundary => {
     const root = await createTestScratch("dohc-restore-intents-");
     const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
     const originals = Array.from({length: 150}, (_, i) => ({...schemaMoment, id: `intent-${i}`, objectId: `object-${i}`, path: `notes/${i}.txt`}));
     const all = [...originals], writes = new Map<string, {path: string; restoredMomentId: string; restored: "text"}>();
+    let undoCrash = false;
     const capture = {
       readMoment: async (id: string) => ({moment: all.find(m => m.id === id)!}),
       listObjectMomentsAfter: async (objectId: string) => all.filter(m => m.objectId === objectId).slice(1).map(m => m.id).reverse(),
@@ -268,6 +269,7 @@ describe("stop and restore in main", () => {
       },
       restoreFileToBeforeMoment: async (id: string, _person: unknown, options: {requestId: string}) => {
         const prior = writes.get(options.requestId); if (prior) return prior;
+        if (undoCrash && id.startsWith("back-") && writes.size === 170) throw Error("crash");
         if (boundary === "mid-batch" && !id.startsWith("back-") && writes.size === 125) throw Error("crash");
         const original = all.find(m => m.id === id)!;
         const receipt = {path: original.path, restoredMomentId: `back-${id}`, restored: "text" as const};
@@ -276,11 +278,11 @@ describe("stop and restore in main", () => {
         return receipt;
       },
     } as unknown as WorkspaceEngineCapture;
-    const options = {rootPath: root, granted: [grant({})], engineCapture: capture,
+    const options = {rootPath: root, granted: [grant({})], engineCapture: capture, undoRunsOf: async () => NOTHING,
       ledger: {"grant-edit": [{writes: [{committedAtMs: 2, files: originals.map(m => ({path: m.path, objectId: m.objectId, momentId: m.id, created: false}))}], nextAfterOriginSeq: null}]}};
     const store = createAutomationRunStore(root, resolver);
     let appends = 0;
-    const first = fixture({...options, runStore: store, beforeReceipt: async () => {if ((boundary === "before receipts" || boundary === "retry") && ++appends === 2) throw Error("crash");}});
+    const first = fixture({...options, runStore: store, beforeReceipt: async () => {if ((boundary === "before receipts" || boundary === "retry" || boundary === "mid-Undo") && ++appends === 2) throw Error("crash");}});
     if (boundary === "before barrier" || boundary === "mid-batch") first.barrier.mockResolvedValueOnce(undefined).mockRejectedValueOnce(Error("crash"));
     if (boundary === "first batch") first.barrier.mockRejectedValueOnce(Error("crash"));
     const target = {kind: "person", userId: "user_ana"};
@@ -290,6 +292,21 @@ describe("stop and restore in main", () => {
     expect(writes.size).toBe(committed);
     const restartedStore = createAutomationRunStore(root, resolver), restarted = fixture({...options, runStore: restartedStore});
     let ids = failed.restored.map(r => r.restoredMomentId);
+    if (boundary === "mid-Undo") {
+      undoCrash = true;
+      restarted.barrier.mockResolvedValueOnce(undefined).mockRejectedValueOnce(Error("crash"));
+      expect(await restarted.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: ids})).toMatchObject({errorMessage: "crash"});
+      expect(writes.size).toBe(170);
+      const interrupted = (await createAutomationRunStore(root, resolver).pendingRestores())[0]!.session!;
+      expect(interrupted).toMatchObject({filesUndone: false, undoingFiles: true, intents: []});
+      expect(interrupted.receipts).toHaveLength(150);
+      undoCrash = false;
+      const retry = fixture({...options, runStore: createAutomationRunStore(root, resolver)});
+      expect(await retry.call(CHANNELS.stopAndRestore, {target})).toMatchObject({unfinished: null});
+      expect(writes.size).toBe(300);
+      expect((await createAutomationRunStore(root, resolver).pendingRestores()).every(entry => !entry.session)).toBe(true);
+      return;
+    }
     if (boundary === "retry") {
       const retried = await restarted.call(CHANNELS.stopAndRestore, {target}) as {restored: {restoredMomentId: string}[]};
       expect(retried).toMatchObject({unfinished: null, review: []}); expect(retried.restored).toHaveLength(50);
@@ -299,6 +316,18 @@ describe("stop and restore in main", () => {
     expect(undone).toMatchObject({errorMessage: null}); expect(undone.files).toHaveLength(committed); expect(writes.size).toBe(committed * 2);
     const pending = (await restartedStore.pendingRestores())[0]?.session;
     if (boundary !== "retry") {expect(pending?.receipts).toEqual([]); expect(pending?.intents).toEqual([]);}
+  });
+
+  it("keeps file restore available after an empty Undo of a failed ledger read", async () => {
+    let unreadable = true;
+    const f = fixture({ledgerError: () => unreadable ? Error("Cannot read changes") : null});
+    const target = {kind: "person", userId: "user_ana"};
+    expect(await f.call(CHANNELS.stopAndRestore, {target})).toMatchObject({restored: [], unfinished: {step: "files"}});
+    expect(await f.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: []})).toMatchObject({files: [], errorMessage: null});
+    const pending = await f.call(stopAndRestoreRecoveryOperations.pendingStopAndRestores.channel, {}) as {filesUndone: boolean}[];
+    expect(pending[0]?.filesUndone).toBe(false);
+    unreadable = false;
+    expect(await f.call(CHANNELS.stopAndRestore, {target})).toMatchObject({restored: [{restoredMomentId: "back-m-schema"}], unfinished: null});
   });
 
   it.each(["before barrier", "before receipts"])("retries unjournaled file batches after a crash %s", async boundary => {

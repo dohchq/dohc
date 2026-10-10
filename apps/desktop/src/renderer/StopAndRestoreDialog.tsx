@@ -146,7 +146,7 @@ export function useStopAndRestore(workspaceId: string, recovery?: {
           const message = entry.result.status === "restored" && entry.result.unfinished?.step === "runs"
             ? "dohc has not finished undoing runs."
             : "dohc stopped before restoring every file.";
-          recoveryRef.current?.onError(message, new Error(message), () => retry(workspaceId, target, "stop"),
+          recoveryRef.current?.onError(message, new Error(message), () => retry(workspaceId, target, entry.undoingFiles ? "undo" : "stop"),
             `stop-and-restore:${JSON.stringify([workspaceId, keyOf(entry.target)])}`);
         }
       } catch (error) {
@@ -348,7 +348,7 @@ export function StopAndRestoreDialog({
 
   const undo = (): Promise<void> => perform("dohc could not undo the restore.", "undo", async (token) => {
     let restored = receipts.get(workspaceId, chosen.target);
-    const result: UndoStopAndRestoreResult = restored.length > 0 || receipts.shown(workspaceId, chosen.target)?.result.unfinished?.step === "files"
+    const result: UndoStopAndRestoreResult = restored.length > 0 || receipts.shown(workspaceId, chosen.target)?.result.canUndoFiles === true
       ? await bridge().undoStopAndRestore({ workspaceId, target: chosen.target, reviewPaths: [...new Set([...retainedCollectionFieldWritePaths(workspaceId), ...retainedOrphanedDraftPaths(workspaceId)])], restoredMomentIds: restored.map((file) => file.restoredMomentId) })
       : { files: [], errorMessage: null };
     restored = [...new Map([...restored, ...(result.recovered ?? [])].map(file => [file.restoredMomentId, file])).values()];
@@ -371,7 +371,7 @@ export function StopAndRestoreDialog({
     const reviewed = [...review.values()].sort((left, right) => left.path.localeCompare(right.path));
     const outcome = {
       result: last
-        ? { ...last.result, restored: putBack, review: reviewed }
+        ? { ...last.result, restored: putBack, review: reviewed, canUndoFiles: receipts.get(workspaceId, chosen.target).length > 0 || result.errorMessage !== null }
         : {
             status: "restored" as const, restored: putBack, review: reviewed, runsLeft: 0, runsUndone: runs.runsUndone, fieldsMissing: runs.fieldsMissing,
             runChangesKept: runs.otherKept + runs.fieldsMissing,
@@ -428,7 +428,7 @@ export function StopAndRestoreDialog({
       {state.kind === "done" ? <Outcome words={words} result={state.result} undone={state.undone} onOpenFile={onOpenFile} onOpenCollection={onOpenCollection} /> : null}
       <div className="mt-4 flex justify-end gap-2">
         <SecondaryButton onClick={onClose}>{state.kind === "choose" ? "Cancel" : "Close"}</SecondaryButton>
-        {state.kind === "done" && (receipts.get(workspaceId, chosen.target).length > 0 || state.result.unfinished?.step === "files") ? (
+        {state.kind === "done" && (receipts.get(workspaceId, chosen.target).length > 0 || state.result.canUndoFiles === true) ? (
           <SecondaryButton data-testid="stop-and-restore-undo" onClick={() => void undo()}>Undo</SecondaryButton>
         ) : null}
         {state.kind === "choose" ? (
