@@ -890,6 +890,7 @@ fn append_local_update(
     marker: &Marker,
     update: &[u8],
     sha: &str,
+    index_frontmatter: bool,
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
     now_ms: i64,
@@ -917,7 +918,7 @@ fn append_local_update(
         &base,
         update,
         sha,
-        true,
+        index_frontmatter,
         actor_origin_id,
         attribution,
         None,
@@ -1766,6 +1767,7 @@ pub fn replace_lineage_with_successor(
 }
 
 /// Transaction-composable form of [`replace_lineage_with_successor`].
+/// The caller must write the successor's result snapshot in this transaction.
 pub fn replace_lineage_with_successor_in_tx(
     tx: &Transaction<'_>,
     replacement: SuccessorReplacement<'_>,
@@ -1776,6 +1778,7 @@ pub fn replace_lineage_with_successor_in_tx(
 /// Install a reviewed successor while guarding the receiver's alternate lineage.
 /// The successor retains its author's causal parent. The caller must establish
 /// that the alternate lineage belongs to the same review and its visible edits are preserved.
+/// It must also write the successor's result snapshot in this transaction.
 pub fn replace_reviewed_lineage_with_successor_in_tx(
     tx: &Transaction<'_>,
     replacement: SuccessorReplacement<'_>,
@@ -2152,7 +2155,18 @@ fn validate_successor_base(
             .collect();
         folded.portable_json_with_asset_bytes(&asset_bytes)?
     } else {
-        doc.project(successor.content_kind)?.content
+        let projection = doc.project(successor.content_kind)?.content;
+        if successor.content_kind == ContentKind::Richdoc {
+            let result = doc
+                .markdown_source_reference()
+                .and_then(|reference| doc.markdown_source(&reference));
+            // The same transaction installs this result as last_settled_sha.
+            // Matching digests alone cannot prove that source rebuilds the doc.
+            doc.settled_markdown_source(&projection, || Ok::<_, CollabError>(result))?
+                .unwrap_or(projection)
+        } else {
+            projection
+        }
     };
     let observed_result = crate::hex_sha256(projected.as_bytes());
     if observed_result != successor.result_sha256 {
@@ -2182,7 +2196,7 @@ pub fn record_update_in_tx(
     if crate::owner_outbox::has_adopted_owner_in(tx, key)? {
         return Err(CollabError::OwnerOutboxFrozen);
     }
-    record_authorized_update_in_tx(tx, key, update, actor_origin_id, attribution, now_ms)
+    record_authorized_update_in_tx(tx, key, update, true, actor_origin_id, attribution, now_ms)
 }
 
 /// The receipt application owner has checked its full binding in this transaction.
@@ -2190,6 +2204,7 @@ pub(crate) fn record_authorized_update_in_tx(
     tx: &Transaction<'_>,
     key: &DocKey,
     update: &[u8],
+    index_frontmatter: bool,
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
     now_ms: i64,
@@ -2203,6 +2218,7 @@ pub(crate) fn record_authorized_update_in_tx(
         &marker,
         update,
         &sha,
+        index_frontmatter,
         actor_origin_id,
         attribution,
         now_ms,
@@ -3102,6 +3118,113 @@ mod successor_validation_tests {
         encode_scene_asset_record, import_portable_scene, scene_asset_ref, SceneAsset,
         SuccessorIdentity, SuccessorIdentityInput,
     };
+
+    fn markdown_successor(artifact: &str) -> SuccessorBase {
+        let key = DocKey::new("ws", "main", "markdown-object").expect("key");
+        let identity = SuccessorIdentity::derive(SuccessorIdentityInput {
+            key: &key,
+            predecessor_claim_id: &"a".repeat(64),
+            predecessor_state_vector_sha256: &"b".repeat(64),
+            artifact_op_kind: "conflict.resolve",
+            artifact_id: "conflict",
+            artifact_preimage_sha256: &"c".repeat(64),
+            content_kind: ContentKind::Richdoc,
+            result_sha256: &crate::hex_sha256(artifact.as_bytes()),
+        });
+        let base = crate::fresh_successor_base(&identity, artifact).expect("Markdown successor");
+        assert_eq!(
+            base,
+            crate::fresh_successor_base(&identity, artifact).expect("deterministic replay")
+        );
+        base
+    }
+
+    fn assert_markdown_successor_roundtrip(artifact: &str) {
+        let base = markdown_successor(artifact);
+        validate_successor_base(&base, None).expect("validate Markdown successor");
+        let doc = Ydoc::wire();
+        doc.apply(&base.update).expect("load successor");
+        let projected = doc
+            .project(ContentKind::Richdoc)
+            .expect("projection")
+            .content;
+        let settled = doc
+            .settled_markdown_source(&projected, || Ok::<_, ()>(Some(artifact.to_owned())))
+            .expect("settled source")
+            .unwrap_or(projected);
+        assert_eq!(settled.as_bytes(), artifact.as_bytes());
+    }
+
+    #[test]
+    fn markdown_successor_roundtrips_nested_list() {
+        assert_markdown_successor_roundtrip("- parent\n  - child\n");
+    }
+
+    #[test]
+    fn markdown_successor_roundtrips_quote_nested_200_deep() {
+        assert_markdown_successor_roundtrip(&format!("{}quoted\n", "> ".repeat(200)));
+    }
+
+    #[test]
+    fn markdown_successor_roundtrips_crlf_with_frontmatter() {
+        assert_markdown_successor_roundtrip(
+            "---\r\ntitle: 'Trip'\r\n---\r\n\r\n- parent\r\n  - child\r\n",
+        );
+    }
+
+    #[test]
+    fn markdown_successor_rejects_foreign_source_with_current_projection_digest() {
+        use yrs::updates::decoder::Decode;
+        use yrs::{Map, ReadTxn, Transact};
+
+        let valid = markdown_successor("Visible body");
+        let raw = yrs::Doc::new();
+        raw.get_or_insert_xml_fragment(crate::ROOT_BODY);
+        raw.get_or_insert_map(crate::ROOT_FRONTMATTER);
+        let meta = raw.get_or_insert_map(crate::ROOT_META);
+        raw.transact_mut()
+            .apply_update(yrs::Update::decode_v1(&valid.update).expect("decode base"))
+            .expect("load base");
+        let foreign = "Foreign body";
+        {
+            let mut txn = raw.transact_mut();
+            meta.insert(&mut txn, "dohcMarkdownSource", foreign);
+            meta.insert(
+                &mut txn,
+                "dohcMarkdownSourceSha256",
+                crate::hex_sha256(foreign.as_bytes()),
+            );
+            meta.insert(
+                &mut txn,
+                "dohcMarkdownSourceProjectionSha256",
+                crate::hex_sha256(b"Visible body"),
+            );
+        }
+        let update = raw
+            .transact()
+            .encode_state_as_update_v1(&yrs::StateVector::default());
+        let loaded = Ydoc::wire();
+        loaded.apply(&update).expect("load crafted successor");
+        let tampered = SuccessorBase {
+            lineage_claim_id: crate::hex_sha256(&update),
+            state_vector: loaded.encode_state_vector(),
+            update,
+            result_sha256: crate::hex_sha256(foreign.as_bytes()),
+            ..valid
+        };
+        let error =
+            validate_successor_base(&tampered, None).expect_err("foreign source must be rejected");
+        assert!(
+            matches!(
+                error,
+                CollabError::InvalidSuccessorBase {
+                    constraint: "successor canonical result",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
 
     #[test]
     fn document_sql_resource_failures_keep_storage_class() {

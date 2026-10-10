@@ -569,7 +569,7 @@ pub(super) fn refuse_dependent_entries_in_tx(
     tx: &rusqlite::Transaction<'_>,
     outbox_id: &str,
     checkpoint_digest: &str,
-) -> Result<(), OwnerOutboxError> {
+) -> Result<Ydoc, OwnerOutboxError> {
     let entries = {
         let mut stmt = tx.prepare("SELECT sequence,update_digest,byte_length,accepted_receipt_json FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 ORDER BY sequence").map_err(read_sql)?;
         let entries = stmt
@@ -584,14 +584,16 @@ pub(super) fn refuse_dependent_entries_in_tx(
             .map_err(read_sql)?;
         entries.collect::<Result<Vec<_>, _>>().map_err(read_sql)?
     };
-    let mut accepted = bounded_blob(tx, checkpoint_digest)?;
+    let mut accepted_bytes = bounded_blob(tx, checkpoint_digest)?;
+    let mut accepted = Ydoc::wire();
+    accepted.apply(&accepted_bytes).map_err(collab)?;
     for (sequence, digest, length, receipt) in entries {
         let update = bounded_blob(tx, &digest)?;
         if update.len() as i64 != length {
             return Err(OwnerOutboxError::Corrupt);
         }
         let candidate = Ydoc::wire();
-        candidate.apply(&accepted).map_err(collab)?;
+        candidate.apply(&accepted_bytes).map_err(collab)?;
         candidate.apply(&update).map_err(collab)?;
         if candidate.has_pending_dependencies() {
             if receipt.is_some() {
@@ -599,10 +601,11 @@ pub(super) fn refuse_dependent_entries_in_tx(
             }
             tx.execute("UPDATE owner_ydoc_outbox_entries SET pending=0,terminal_blob_digest=update_blob_digest,update_blob_digest=NULL,terminal_reason='An earlier write was not accepted.' WHERE outbox_id=?1 AND sequence=?2 AND pending=1", params![outbox_id,sequence]).map_err(write_sql)?;
         } else {
-            accepted = bounded(&candidate)?;
+            accepted_bytes = bounded(&candidate)?;
+            accepted = candidate;
         }
     }
-    Ok(())
+    Ok(accepted)
 }
 
 /// The caller holds one transaction through opening or appending a draft.
@@ -629,9 +632,58 @@ pub fn open_draft_in(
     let doc = Ydoc::wire();
     doc.apply(&bounded_blob(conn, &observed.checkpoint_digest)?)
         .map_err(collab)?;
+    apply_pending_in(
+        conn,
+        binding,
+        &doc,
+        observed.limits.max_pending_bytes,
+        PendingReplay::Draft,
+    )?;
+    Ok(OwnerDraft { observed, doc })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PendingReplay {
+    Draft,
+    Checkpoint,
+}
+
+/// Merge active drafts into an accepted checkpoint for Collection indexing.
+/// Quarantined work stays frozen and cannot block accepted state advancing.
+pub fn apply_pending_to_checkpoint_in(
+    conn: &Connection,
+    binding: &LiveObjectBinding,
+    doc: &Ydoc,
+) -> Result<(), OwnerOutboxError> {
+    let observed = read_observed_in(conn, binding)?.ok_or(OwnerOutboxError::NotFound)?;
+    apply_pending_in(
+        conn,
+        binding,
+        doc,
+        observed.limits.max_pending_bytes,
+        PendingReplay::Checkpoint,
+    )
+}
+
+pub(super) fn apply_pending_in(
+    conn: &Connection,
+    binding: &LiveObjectBinding,
+    doc: &Ydoc,
+    max_pending_bytes: i64,
+    replay: PendingReplay,
+) -> Result<(), OwnerOutboxError> {
     if let Some(parent) = find_parent_for_binding(conn, binding)? {
-        if parent.binding != *binding || parent.state == OwnerOutboxState::Quarantined {
+        if parent.binding != *binding {
             return Err(OwnerOutboxError::Frozen);
+        }
+        if parent.state == OwnerOutboxState::Quarantined {
+            return match replay {
+                PendingReplay::Draft => Err(OwnerOutboxError::Frozen),
+                PendingReplay::Checkpoint => Ok(()),
+            };
+        }
+        if replay == PendingReplay::Checkpoint && parent.pending_bytes == 0 {
+            return Ok(());
         }
         let mut stmt = conn.prepare("SELECT update_digest,byte_length FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 ORDER BY sequence").map_err(read_sql)?;
         let rows = stmt
@@ -639,9 +691,7 @@ pub fn open_draft_in(
                 Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
             })
             .map_err(read_sql)?;
-        let mut remaining = observed
-            .limits
-            .max_pending_bytes
+        let mut remaining = max_pending_bytes
             .checked_add(crate::limits::MAX_YDOC_UPDATE_BYTES as i64)
             .ok_or(OwnerOutboxError::Corrupt)?;
         for row in rows {
@@ -655,13 +705,16 @@ pub fn open_draft_in(
                 return Err(OwnerOutboxError::Corrupt);
             }
             doc.apply(&bytes).map_err(collab)?;
-            bounded(&doc)?;
+            if replay == PendingReplay::Draft {
+                bounded(doc)?;
+            }
         }
     }
     if doc.has_pending_dependencies() {
         return Err(OwnerOutboxError::ParentMismatch);
     }
-    Ok(OwnerDraft { observed, doc })
+    // Indexing reads fields only; it does not persist the merged document.
+    Ok(())
 }
 
 /// Enrollment and restore capture queue merged native state, which declares
@@ -744,6 +797,13 @@ fn append_prepared_draft_in_tx(
         agent_declaration,
         automation_declaration,
     )?;
+    let attribution = automation_declaration
+        .map(|declaration| declaration.attribution.clone())
+        .or_else(|| agent_declaration.map(AgentDeclaration::attribution));
+    let actor = automation_declaration
+        .map(|declaration| declaration.automation_id.as_str())
+        .or_else(|| agent_declaration.map(|declaration| declaration.agent_id.as_str()));
+    index_frontmatter_in_tx(tx, binding, &draft.doc, actor, attribution.as_ref(), now_ms)?;
     Ok((result, encoded_len))
 }
 
@@ -809,7 +869,7 @@ mod tests {
         for _ in 0..2 {
             store
                 .write_with(&NoFaults, |tx| {
-                    refuse_entry_in_tx(tx, "workspace", &refusal)
+                    refuse_entry_in_tx(tx, "workspace", &refusal, 12)
                 })
                 .unwrap();
         }
@@ -905,12 +965,17 @@ mod tests {
         let mut wrong = refusal.clone();
         wrong.update_digest = "cd".repeat(32);
         assert!(store
-            .write_with(&NoFaults, |tx| refuse_entry_in_tx(tx, "workspace", &wrong))
+            .write_with(&NoFaults, |tx| refuse_entry_in_tx(
+                tx,
+                "workspace",
+                &wrong,
+                12
+            ))
             .is_err());
         for _ in 0..2 {
             store
                 .write_with(&NoFaults, |tx| {
-                    refuse_entry_in_tx(tx, "workspace", &refusal)
+                    refuse_entry_in_tx(tx, "workspace", &refusal, 12)
                 })
                 .unwrap();
         }

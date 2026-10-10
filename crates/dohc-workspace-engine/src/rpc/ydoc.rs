@@ -776,6 +776,7 @@ impl EngineService {
                     reason: params.reason,
                     observed_binding: params.observed_binding,
                 },
+                now_ms()?,
                 cancellation.token(),
             )
             .await

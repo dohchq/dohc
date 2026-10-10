@@ -224,6 +224,78 @@ fn finish(store: &mut EngineStore, relay: &mut Relay) {
 }
 
 #[test]
+fn deferred_conflict_rewind_refetches_the_relay_maximum() {
+    let (_scratch, _path, mut store) = fixture_with_files(3);
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE sync_relay_push_state SET pushed_seq=1", [])
+                .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .unwrap();
+    let transport = DeferredRelayTransport::default();
+    let mut cache = WriterDocCache::new();
+    let mut relay = Relay::default();
+    let mut probes = 0;
+    let mut restored_prefixes = 0;
+    for _ in 0..20 {
+        match execute_relay_operation(
+            &mut store,
+            &mut cache,
+            transport.clone(),
+            push_operation(),
+            &LeaseRegistry::default(),
+            &ClaimAnnouncer::default(),
+        ) {
+            Err(RuntimeError::Relay(RelayError::OriginDiverged)) => {
+                assert_eq!(probes, 2, "the second conflict must recheck the relay");
+                assert_eq!(restored_prefixes, 1);
+                assert_eq!(read_pushed_seq(&store, WORKSPACE, ORIGIN).unwrap(), 1);
+                return;
+            }
+            Err(RuntimeError::Relay(RelayError::Local(reason))) if reason == RELAY_IO_PENDING => {}
+            other => panic!("unexpected rewind result: {other:?}"),
+        }
+        let request = transport.take_pending().expect("deferred rewind request");
+        let response = match &request {
+            RelayIoRequest::Push(push) if push.ops.is_empty() => {
+                assert_eq!(push.after_seq, 1);
+                probes += 1;
+                Ok(RelayIoResponse::Push(PushResponse {
+                    settlement_refusals: Vec::new(),
+                    accepted: 0,
+                    inserted: 0,
+                    skipped: 0,
+                    current_max_origin_seq: if probes == 1 { 0 } else { 1 },
+                }))
+            }
+            RelayIoRequest::Push(push) if push.after_seq == 1 => Err(RelayError::Conflict),
+            RelayIoRequest::Push(push) if push.ops.len() > 1 => {
+                // Force one acknowledged prefix before retrying the original conflicting suffix.
+                Err(RelayError::SettlementProofBudget)
+            }
+            RelayIoRequest::Push(push) => {
+                assert_eq!(push.after_seq, 0);
+                assert_eq!(push.ops[0].origin_seq, 1);
+                restored_prefixes += 1;
+                Ok(RelayIoResponse::Push(PushResponse {
+                    settlement_refusals: Vec::new(),
+                    accepted: 1,
+                    inserted: 1,
+                    skipped: 0,
+                    current_max_origin_seq: 1,
+                }))
+            }
+            _ => Ok(relay.answer(&request)),
+        };
+        transport.complete(request, response);
+    }
+    panic!(
+        "cached conflict probe repeated the rewind: probes={probes}, restored_prefixes={restored_prefixes}"
+    );
+}
+
+#[test]
 fn deferred_push_returns_one_acknowledged_prefix_and_resumes_without_reuploading() {
     let (_scratch, _path, mut store) = fixture();
     let mut relay = Relay::default();

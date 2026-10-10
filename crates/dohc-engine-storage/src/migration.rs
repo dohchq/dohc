@@ -3101,6 +3101,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     },
     Migration {
         ordinal: 39,
+        id: "v2-retained-export-attempt-lineage",
+        sql: "ALTER TABLE ydoc_docs ADD COLUMN export_attempt_lineage_claim_id TEXT; ALTER TABLE ydoc_docs ADD COLUMN export_wait_asset_sha256 TEXT; ALTER TABLE ydoc_docs ADD COLUMN export_wait_asset_path TEXT CHECK (export_wait_asset_path IS NULL OR export_wait_asset_sha256 IS NOT NULL); CREATE INDEX idx_moments_version_path_order ON moments(workspace_id,version_id,path,moment_order DESC) WHERE path GLOB 'assets/excalidraw/*';",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 40,
         id: "v2-open-document-artifacts",
         sql: V2_OPEN_DOCUMENT_ARTIFACTS_DDL,
         sets_user_version: None,
@@ -3661,6 +3667,10 @@ mod tests {
             (
                 "v2-live-settlement-publication",
                 "e37325b7a31bbba1c63cfd891cbecd6054809201002ac482c95ab41d54ad8458",
+            ),
+            (
+                "v2-retained-export-attempt-lineage",
+                "e971935dc8d67177407762aab1adae46e2c7def69762f4e0764239a28a5feed8",
             ),
             (
                 "v2-open-document-artifacts",
@@ -4913,12 +4923,73 @@ mod tests {
     }
 
     #[test]
-    fn open_document_artifacts_upgrade_from_38_backfills_local_tails() {
+    fn retained_export_lineage_migration_upgrades_ordinal_38_without_backfill() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let ctx = MigrationContext::current(1_000);
+        let before = BASELINE_MIGRATIONS
+            .iter()
+            .take_while(|m| m.ordinal <= 38)
+            .count();
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 38);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main'); \
+            INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','main',0); \
+            INSERT INTO file_objects VALUES ('ws','doc',0);").unwrap();
+        let claim = "c".repeat(64);
+        conn.execute(
+            "INSERT INTO binary_blobs(sha256,byte_length,bytes) VALUES (?1,0,X'')",
+            [&claim],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ydoc_docs (workspace_id,version_id,object_id,content_kind,regime, \
+            head_update_seq,head_snapshot_seq,lineage_claim_status,lineage_claim_id,updated_at_ms, \
+            export_attempt_moment_id,export_attempt_update_seq,export_attempt_snapshot_seq) \
+            VALUES ('ws','main','doc','plaintext','replicated',1,0,'exact',?1,0,'moment',1,0)",
+            [&claim],
+        )
+        .unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let waiting: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT export_wait_asset_path,export_wait_asset_sha256 FROM ydoc_docs",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(waiting, (None, None), "existing rows have no asset wait");
+        let retry = || {
+            conn.query_row(
+                "SELECT export_attempt_lineage_claim_id IS NOT lineage_claim_id \
+            FROM ydoc_docs WHERE export_attempt_moment_id='moment' \
+            AND export_attempt_update_seq=1 AND export_attempt_snapshot_seq=0",
+                [],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap()
+        };
+        assert!(retry(), "NULL attempt lineage retries the existing row");
+        conn.execute(
+            "UPDATE ydoc_docs SET export_attempt_lineage_claim_id=lineage_claim_id",
+            [],
+        )
+        .unwrap();
+        assert!(
+            !retry(),
+            "recording the lineage suppresses the next unchanged attempt"
+        );
+    }
+
+    #[test]
+    fn open_document_artifacts_upgrade_from_39_backfills_local_tails() {
         let mut conn = Connection::open_in_memory().unwrap();
         let ctx = MigrationContext::current(1);
         let before = migration_index("v2-open-document-artifacts");
-        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 38);
-        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 39);
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 39);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 40);
         assert_eq!(before + 1, BASELINE_MIGRATIONS.len());
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         conn.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main'); INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','main',0); INSERT INTO file_objects VALUES ('ws','doc',0),('ws','settled',0); INSERT INTO blobs(sha256,byte_length,text) VALUES ('old',3,'old'),('new',3,'new'); INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,regime,lineage_claim_status,head_update_seq,head_snapshot_seq,settled_update_seq,updated_at_ms) VALUES ('ws','main','doc','plaintext','local-only','unclaimed',2,0,1,0),('ws','main','settled','plaintext','local-only','unclaimed',2,0,2,0); INSERT INTO snapshots(workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES ('ws','main','doc','doc.md','old',0,'m0','sync'); INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES ('ws','peer',0,'moment.append','{}',0,1); INSERT INTO replication_pending_refusals VALUES ('ws','peer',0,'moment.append','invalid-input','Existing refusal','report');").unwrap();

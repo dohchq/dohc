@@ -207,11 +207,20 @@ fn apply_ordered_in_tx(
         return Err(OwnerOutboxError::ParentMismatch);
     }
     let key = key(b)?;
+    let indexed_before =
+        dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
+            tx,
+            workspace_id,
+            &b.main_version_id,
+            &b.object_id,
+        )
+        .map_err(index_error)?;
     // No ordinary publication callback runs. Frame attribution is unknown here.
     crate::durable::record_authorized_update_in_tx(
         tx,
         &key,
         &input.update_bytes,
+        false,
         None,
         None,
         now_ms,
@@ -220,7 +229,8 @@ fn apply_ordered_in_tx(
     let marker = crate::read_marker_in(tx, &key)
         .map_err(collab)?
         .ok_or(OwnerOutboxError::NotFound)?;
-    let checkpoint = bounded(&crate::load_doc_in(tx, &key).map_err(collab)?)?;
+    let visible = crate::load_doc_in(tx, &key).map_err(collab)?;
+    let checkpoint = bounded(&visible)?;
     let checkpoint_digest = hex_sha256(&checkpoint);
     put_binary_blob_with_sha(tx, &checkpoint, &checkpoint_digest)?;
     let revision = input.expected_revision + 1;
@@ -244,6 +254,24 @@ fn apply_ordered_in_tx(
         ],
     )
     .map_err(write_sql)?;
+    if let Some(before) = indexed_before {
+        // Equal checkpoint fields can still replace a pending map entry.
+        // With no active drafts, replay returns without reading any entries.
+        match draft::apply_pending_in(
+            tx,
+            b,
+            &visible,
+            observed.limits.max_pending_bytes,
+            draft::PendingReplay::Checkpoint,
+        ) {
+            Ok(()) => {
+                index_frontmatter_from_in_tx(tx, b, &before, &visible, None, None, now_ms)?;
+            }
+            Err(OwnerOutboxError::Storage(error)) => return Err(error.into()),
+            // Replay-state errors preserve the index; storage errors abort the transaction.
+            Err(_) => {}
+        }
+    }
     // A frame another computer wrote is a change from elsewhere; this
     // owner's own accepted draft is not. A sync can carry either, so it
     // counts.

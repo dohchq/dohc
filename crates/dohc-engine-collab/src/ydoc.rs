@@ -257,7 +257,7 @@ pub struct SuccessorBase {
     pub state_vector: Vec<u8>,
 }
 
-/// Build a fresh Y.Doc from a canonical artifact without merging predecessor items.
+/// Build a fresh Y.Doc from an exact artifact without merging predecessor items.
 pub fn fresh_successor_base(
     identity: &SuccessorIdentity,
     artifact: &str,
@@ -294,7 +294,18 @@ pub fn fresh_successor_base(
             .portable_json_with_asset_bytes(&asset_bytes)?
     } else {
         doc.rewrite_content_to_markdown(identity.content_kind, artifact)?;
-        doc.project(identity.content_kind)?.content
+        let projection = doc.project(identity.content_kind)?.content;
+        if identity.content_kind == ContentKind::Richdoc && projection != artifact {
+            // Write with the deterministic client, not a staged edit's random
+            // client. Installation makes this artifact the settled body.
+            doc.record_validated_markdown_source_reference(artifact)?;
+            doc.settled_markdown_source(&projection, || {
+                Ok::<_, CollabError>(Some(artifact.to_owned()))
+            })?
+            .unwrap_or(projection)
+        } else {
+            projection
+        }
     };
     if projected != artifact {
         return Err(CollabError::SuccessorProjectionMismatch {
@@ -383,7 +394,7 @@ impl Ydoc {
         Self::from_doc(doc)
     }
 
-    fn with_client_id(client_id: u64) -> Self {
+    pub(crate) fn with_client_id(client_id: u64) -> Self {
         let doc = Doc::with_options(Options {
             client_id: yrs::ClientID::new(client_id),
             offset_kind: yrs::OffsetKind::Utf16,
