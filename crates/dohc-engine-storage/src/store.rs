@@ -190,14 +190,7 @@ impl EngineStore {
         Ok(())
     }
 
-    /// Postpone small background checkpoints while capture holds the actor.
-    pub fn pause_background_checkpoints(&self, paused: bool) {
-        if let Some(checkpoints) = &self.checkpoints {
-            checkpoints.set_paused(paused);
-        }
-    }
-
-    /// Coalesce background checkpoints, with a writer fallback for oversized WALs.
+    /// Request background work and finish only bounded writer-side tails.
     pub fn request_checkpoint(&mut self) {
         let changes = self.conn.total_changes();
         if self.checkpoints.is_none() || changes == self.checkpoint_changes {
@@ -212,10 +205,28 @@ impl EngineStore {
             .as_ref()
             .is_some_and(|checkpoints| !checkpoints.request())
         {
-            self.checkpoints.take();
-            let _ = self.conn.pragma_update(None, "wal_autocheckpoint", 1000);
-            eprintln!("background checkpoints stopped; restored SQLite autocheckpoint");
+            match crate::checkpoint::Checkpoints::start(&self.database_path) {
+                Ok(replacement) => {
+                    replacement.request();
+                    self.checkpoints.replace(replacement);
+                }
+                Err(error) => {
+                    eprintln!("checkpoint worker restart failed; next write retries: {error}")
+                }
+            }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stop_checkpoint_worker_for_test(&mut self) {
+        self.checkpoints.as_mut().unwrap().stop_for_test();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn checkpoint_work_for_test(&self) -> (u64, i64) {
+        self.checkpoints
+            .as_ref()
+            .map_or((0, 0), |c| c.writer_work_for_test())
     }
 
     /// Committed writer transactions, excluding schema initialization.
@@ -300,6 +311,13 @@ impl EngineStore {
     where
         E: From<StorageError>,
     {
+        if self.checkpoints.as_ref().is_some_and(|c| c.has_stopped()) {
+            let replacement =
+                crate::checkpoint::Checkpoints::start(&self.database_path).map_err(E::from)?;
+            replacement.request();
+            self.checkpoints.replace(replacement);
+        }
+
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)

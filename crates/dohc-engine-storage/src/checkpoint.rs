@@ -6,103 +6,113 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::thread::JoinHandle;
-use std::time::Duration;
 
-const CAPTURE_CHECKPOINT_FRAMES: i64 = 32_768;
-const WRITER_CHECKPOINT_FRAMES: i64 = 65_536;
+const BACKGROUND_CHECKPOINT_FRAMES: i64 = 1000;
+const WRITER_CHECKPOINT_FRAMES: i64 = 2000;
+const MAX_WRITER_BACKFILL_FRAMES: i64 = 1000;
 
-/// Background checkpoints have their own connection and never issue domain writes.
-/// PASSIVE never invokes SQLite's busy handler.
+/// PASSIVE checkpoints use a separate connection, including during capture.
 #[derive(Debug)]
 pub(crate) struct Checkpoints {
     requests: Option<SyncSender<()>>,
     thread: Option<JoinHandle<()>>,
-    paused: Arc<AtomicBool>,
     stopped: Arc<AtomicBool>,
-    writer_needed: Arc<AtomicBool>,
+    #[cfg(test)]
+    writer_max: std::sync::atomic::AtomicI64,
+    #[cfg(test)]
+    writer_calls: std::sync::atomic::AtomicU64,
+}
+
+fn frames(conn: &Connection) -> rusqlite::Result<(i64, i64)> {
+    conn.query_row("PRAGMA main.wal_checkpoint(NOOP)", [], |row| {
+        Ok((row.get(1)?, row.get(2)?))
+    })
 }
 
 impl Checkpoints {
     pub(crate) fn start(path: &Path) -> Result<Self, crate::StorageError> {
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
             .map_err(crate::StorageError::persist)?;
-        conn.busy_timeout(Duration::ZERO)
+        conn.busy_timeout(std::time::Duration::ZERO)
             .map_err(crate::StorageError::persist)?;
         conn.pragma_update(None, "synchronous", "NORMAL")
             .map_err(crate::StorageError::persist)?;
         let (requests, rx) = mpsc::sync_channel(1);
-        let paused = Arc::new(AtomicBool::new(false));
-        let worker_paused = Arc::clone(&paused);
         let stopped = Arc::new(AtomicBool::new(false));
         let worker_stopped = Arc::clone(&stopped);
-        let writer_needed = Arc::new(AtomicBool::new(false));
-        let worker_writer_needed = Arc::clone(&writer_needed);
         let thread = std::thread::Builder::new()
             .name("dohc-wal-checkpoint".into())
             .spawn(move || {
                 while rx.recv().is_ok() {
-                    // Capture postpones small checkpoints, but a large backlog
-                    // still checkpoints so a long import can recycle the WAL.
-                    let frames = conn.query_row("PRAGMA main.wal_checkpoint(NOOP)", [], |row| {
-                        Ok((row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
-                    });
-                    if frames
-                        .as_ref()
-                        .is_ok_and(|(frames, _)| *frames >= WRITER_CHECKPOINT_FRAMES)
-                    {
-                        worker_writer_needed.store(true, Ordering::Release);
-                    }
-                    if worker_writer_needed.load(Ordering::Acquire) {
-                        continue;
-                    }
-                    if !frames.is_ok_and(|(frames, checkpointed)| {
-                        frames - checkpointed
-                            >= if worker_paused.load(Ordering::Acquire) {
-                                CAPTURE_CHECKPOINT_FRAMES
-                            } else {
-                                1000
-                            }
+                    if frames(&conn).is_ok_and(|(log, backfilled)| {
+                        log - backfilled >= BACKGROUND_CHECKPOINT_FRAMES
                     }) {
-                        continue;
+                        catch_up(&conn, &worker_stopped);
                     }
-                    catch_up(&conn, &worker_stopped, &worker_writer_needed);
                 }
             })
             .map_err(crate::StorageError::persist)?;
         Ok(Self {
             requests: Some(requests),
             thread: Some(thread),
-            paused,
             stopped,
-            writer_needed,
+            #[cfg(test)]
+            writer_max: std::sync::atomic::AtomicI64::new(0),
+            #[cfg(test)]
+            writer_calls: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
-    pub(crate) fn set_paused(&self, paused: bool) {
-        if self.paused.swap(paused, Ordering::AcqRel) && !paused {
-            self.request();
+    // The writer finishes only a small tail. With one domain writer, no new
+    // WAL frames can appear between this probe and its PASSIVE checkpoint.
+    // The background connection can only reduce that tail.
+    pub(crate) fn checkpoint_on_writer_if_needed(&self, conn: &Connection) {
+        let Ok((log, backfilled)) = frames(conn) else {
+            return;
+        };
+        if log < WRITER_CHECKPOINT_FRAMES
+            || !(0..=MAX_WRITER_BACKFILL_FRAMES).contains(&(log - backfilled))
+        {
+            return;
+        }
+        if let Ok((latest, finished)) =
+            conn.query_row("PRAGMA main.wal_checkpoint(PASSIVE)", [], |row| {
+                Ok((row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
+            })
+        {
+            #[cfg(test)]
+            {
+                self.writer_calls.fetch_add(1, Ordering::Relaxed);
+                self.writer_max
+                    .fetch_max((finished - backfilled).max(0), Ordering::Relaxed);
+                assert!(latest < 0 || finished - backfilled <= MAX_WRITER_BACKFILL_FRAMES);
+            }
+            #[cfg(not(test))]
+            let _ = (latest, finished);
         }
     }
 
-    // Only an oversized WAL falls back to SQLite's writer-side checkpoint.
-    // Occupying the writer thread through backfill lets its next transaction reset the log.
-    pub(crate) fn checkpoint_on_writer_if_needed(&self, conn: &Connection) {
-        if !self.writer_needed.load(Ordering::Acquire) {
-            return;
-        }
-        let result = conn.query_row("PRAGMA main.wal_checkpoint(PASSIVE)", [], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        });
-        if result.is_ok_and(|(busy, frames, backfilled)| {
-            busy == 0 && frames >= 0 && frames == backfilled
-        }) {
-            self.writer_needed.store(false, Ordering::Release);
+    pub(crate) fn has_stopped(&self) -> bool {
+        self.thread.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stop_for_test(&mut self) {
+        self.stopped.store(true, Ordering::Release);
+        self.requests.take();
+        if let Some(thread) = self.thread.take() {
+            thread.join().unwrap();
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn writer_work_for_test(&self) -> (u64, i64) {
+        (
+            self.writer_calls.load(Ordering::Relaxed),
+            self.writer_max.load(Ordering::Relaxed),
+        )
+    }
+
     pub(crate) fn request(&self) -> bool {
         self.requests.as_ref().is_some_and(|requests| {
             !matches!(
@@ -122,21 +132,17 @@ impl Drop for Checkpoints {
     }
 }
 
-// A PASSIVE result describes its starting header. Probe again to include writes
-// committed during its I/O, then backfill that tail without another threshold.
-fn catch_up(conn: &Connection, stopped: &AtomicBool, writer_needed: &AtomicBool) {
+// A PASSIVE result describes its starting header. Include writes that arrived
+// during its I/O, and leave a bounded tail for the writer to recycle the WAL.
+fn catch_up(conn: &Connection, stopped: &AtomicBool) {
     while !stopped.load(Ordering::Acquire) {
-        let before = conn.query_row("PRAGMA main.wal_checkpoint(NOOP)", [], |row| {
-            Ok((row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
-        });
-        let Ok((frames, checkpointed)) = before else {
+        let Ok((log, backfilled)) = frames(conn) else {
             break;
         };
-        if frames >= WRITER_CHECKPOINT_FRAMES {
-            writer_needed.store(true, Ordering::Release);
+        if log < 0 || log == backfilled {
             break;
         }
-        if frames < 0 || frames == checkpointed {
+        if log >= WRITER_CHECKPOINT_FRAMES && log - backfilled <= MAX_WRITER_BACKFILL_FRAMES {
             break;
         }
         if conn
@@ -147,327 +153,276 @@ fn catch_up(conn: &Connection, stopped: &AtomicBool, writer_needed: &AtomicBool)
         {
             break;
         }
-        let after = conn.query_row("PRAGMA main.wal_checkpoint(NOOP)", [], |row| {
-            Ok((row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
-        });
-        let Ok((latest, backfilled)) = after else {
+        #[cfg(test)]
+        checkpoint_crash_barrier();
+        let Ok((latest, finished)) = frames(conn) else {
             break;
         };
-        if latest < 0 || latest == backfilled {
-            break;
-        }
-        // A pinned reader prevents progress. A WAL restart changes frame numbers.
-        if latest >= frames && backfilled <= checkpointed {
+        if latest < 0 || latest == finished || (latest >= log && finished <= backfilled) {
             break;
         }
     }
 }
+
+#[cfg(test)]
+fn checkpoint_crash_barrier() {
+    if let Some(root) = std::env::var_os("DOHC_CHECKPOINT_CRASH_CHILD") {
+        std::fs::write(
+            std::path::PathBuf::from(root).join("catch-up-started"),
+            b"first PASSIVE completed; catch-up still active",
+        )
+        .unwrap();
+        loop {
+            std::thread::park();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::{EngineStore, NoFaults, StorageError, hex_sha256};
+    use super::*;
+    use crate::{EngineStore, NoFaults, StorageError};
     use dohc_test_scratch::ScratchDir;
     use std::time::{Duration, Instant};
 
-    #[test]
-    fn a_pinned_reader_does_not_block_checkpoint_shutdown_or_lose_commits() {
-        let scratch = ScratchDir::new().unwrap();
-        let path = scratch.path().join("engine.db");
-        let mut store = EngineStore::open(&path, 1).unwrap();
-        store.enable_background_checkpoints().unwrap();
-        let reader = EngineStore::open_read_only(&path).unwrap();
-        reader
-            .read_with(|conn| conn.execute_batch("BEGIN"))
-            .unwrap();
-        assert_eq!(reader.table_row_count("blobs").unwrap(), 0);
+    fn write(store: &mut EngineStore, n: i64, bytes: usize) {
         store
             .write_with(&NoFaults, |tx| {
-                let mut insert = tx
-                    .prepare_cached("INSERT INTO blobs VALUES(?1,?2,?3)")
-                    .map_err(StorageError::persist)?;
-                for n in 0..1100 {
-                    let text = format!("{n:04}{}", "x".repeat(4096));
-                    insert
-                        .execute(rusqlite::params![
-                            hex_sha256(text.as_bytes()),
-                            text.len() as i64,
-                            text
-                        ])
-                        .map_err(StorageError::persist)?;
-                }
+                tx.execute(
+                    "INSERT OR REPLACE INTO checkpoint_load VALUES(?1,?2)",
+                    rusqlite::params![n, vec![42_u8; bytes]],
+                )
+                .map_err(StorageError::persist)?;
                 Ok::<_, StorageError>(())
             })
             .unwrap();
-        assert_eq!(store.table_row_count("blobs").unwrap(), 1100);
-        assert_eq!(reader.table_row_count("blobs").unwrap(), 0);
-        // A passive checkpoint may leave frames pinned. Shutdown still joins.
-        drop(store);
-        reader
-            .read_with(|conn| conn.execute_batch("ROLLBACK"))
-            .unwrap();
-        drop(reader);
-        let mut store = EngineStore::open(&path, 2).unwrap();
-        assert_eq!(store.synchronous_setting().unwrap(), 1);
-        assert_eq!(store.table_row_count("blobs").unwrap(), 1100);
-        store.enable_background_checkpoints().unwrap();
-        // Keep this WAL above the threshold after releasing the old reader.
-        store
-            .write_with(&NoFaults, |tx| {
-                tx.execute("UPDATE blobs SET text=text", [])
-                    .map_err(StorageError::persist)?;
-                Ok::<_, StorageError>(())
-            })
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(30);
+    }
+    fn store(path: &Path) -> EngineStore {
+        let mut s = EngineStore::open(path, 1).unwrap();
+        s.write_with(&NoFaults, |tx| {
+            tx.execute_batch("CREATE TABLE checkpoint_load(id INTEGER PRIMARY KEY, body BLOB)")
+                .map_err(StorageError::persist)?;
+            Ok::<_, StorageError>(())
+        })
+        .unwrap();
+        s.enable_background_checkpoints().unwrap();
+        s
+    }
+    fn wait_checkpoint(conn: &Connection, checkpoints: &Checkpoints) {
+        let deadline = Instant::now() + Duration::from_secs(20);
         loop {
-            store.request_checkpoint();
-            let (frames, checkpointed) = store
-                .read_with(|conn| {
-                    conn.query_row("PRAGMA main.wal_checkpoint(NOOP)", [], |row| {
-                        Ok((row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
-                    })
-                })
-                .unwrap();
-            if frames >= 0 && frames == checkpointed {
-                break;
+            checkpoints.request();
+            let (log, backfilled) = frames(conn).unwrap();
+            if log >= 0 && log == backfilled {
+                return;
             }
-            assert!(Instant::now() < deadline, "checkpoint did not finish");
+            assert!(
+                Instant::now() < deadline,
+                "background checkpoint did not finish"
+            );
             std::thread::yield_now();
         }
     }
 
     #[test]
-    fn capture_pause_leaves_wal_work_for_the_background_resume() {
-        let scratch = ScratchDir::new().unwrap();
-        let mut store = EngineStore::open(&scratch.path().join("engine.db"), 1).unwrap();
-        store.enable_background_checkpoints().unwrap();
-        store.pause_background_checkpoints(true);
-        store
-            .write_with(&NoFaults, |tx| {
-                let mut insert = tx
-                    .prepare_cached("INSERT INTO blobs VALUES(?1,?2,?3)")
-                    .map_err(StorageError::persist)?;
-                for n in 0..1100 {
-                    let text = format!("{n:04}{}", "x".repeat(4096));
-                    insert
-                        .execute(rusqlite::params![
-                            hex_sha256(text.as_bytes()),
-                            text.len() as i64,
-                            text
-                        ])
-                        .map_err(StorageError::persist)?;
-                }
-                Ok::<_, StorageError>(())
-            })
-            .unwrap();
-        let backlog = || {
-            store
-                .read_with(|conn| {
-                    conn.query_row("PRAGMA main.wal_checkpoint(NOOP)", [], |row| {
-                        Ok((row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
-                    })
-                })
-                .unwrap()
-        };
-        let (frames, checkpointed) = backlog();
-        assert!(frames - checkpointed >= 1000);
-        store.pause_background_checkpoints(false);
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            let (frames, checkpointed) = backlog();
-            if frames >= 0 && frames == checkpointed {
-                break;
-            }
-            assert!(Instant::now() < deadline, "checkpoint did not resume");
-            std::thread::yield_now();
-        }
-        assert_eq!(store.table_row_count("blobs").unwrap(), 1100);
+    fn writer_refuses_large_backlogs_and_finishes_only_a_bounded_tail() {
+        exercise_background_writer_handoff();
     }
-    #[test]
-    fn capture_pause_checkpoints_backlogs_above_the_high_water_mark() {
-        let scratch = ScratchDir::new().unwrap();
-        let mut store = EngineStore::open(&scratch.path().join("engine.db"), 1).unwrap();
-        store.enable_background_checkpoints().unwrap();
-        store.pause_background_checkpoints(true);
-        store
-            .write_with(&NoFaults, |tx| {
-                let mut insert = tx
-                    .prepare_cached("INSERT INTO blobs VALUES(?1,?2,?3)")
-                    .map_err(StorageError::persist)?;
-                for n in 0..1100 {
-                    let text = format!("{n:04}{}", "x".repeat(131_072));
-                    insert
-                        .execute(rusqlite::params![
-                            hex_sha256(text.as_bytes()),
-                            text.len() as i64,
-                            text
-                        ])
-                        .map_err(StorageError::persist)?;
-                }
-                Ok::<_, StorageError>(())
-            })
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            store.request_checkpoint();
-            let (frames, checkpointed) = store
-                .read_with(|conn| {
-                    conn.query_row("PRAGMA main.wal_checkpoint(NOOP)", [], |row| {
-                        Ok((row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
-                    })
-                })
-                .unwrap();
-            if frames >= 0 {
-                assert!(frames > super::CAPTURE_CHECKPOINT_FRAMES);
-            }
-            if frames >= 0 && frames == checkpointed {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "capture backlog did not checkpoint"
-            );
-            std::thread::yield_now();
-        }
-        assert_eq!(store.table_row_count("blobs").unwrap(), 1100);
-    }
-    #[test]
-    fn writer_backstop_keeps_pinned_frames_then_recycles_after_release() {
+
+    fn exercise_background_writer_handoff() {
         let scratch = ScratchDir::new().unwrap();
         let path = scratch.path().join("engine.db");
-        let mut store = EngineStore::open(&path, 1).unwrap();
-        store
-            .read_with(|conn| conn.pragma_update(None, "wal_autocheckpoint", 0))
+        let mut s = EngineStore::open(&path, 1).unwrap();
+        s.read_with(|c| c.pragma_update(None, "wal_autocheckpoint", 0))
             .unwrap();
-        let checkpoints = super::Checkpoints::start(&path).unwrap();
+        s.write_with(&NoFaults, |tx| {
+            tx.execute_batch("CREATE TABLE checkpoint_load(id INTEGER PRIMARY KEY, body BLOB)")
+                .map_err(StorageError::persist)?;
+            Ok::<_, StorageError>(())
+        })
+        .unwrap();
         let reader = EngineStore::open_read_only(&path).unwrap();
         reader
-            .read_with(|conn| conn.execute_batch("BEGIN"))
+            .read_with(|c| c.execute_batch("BEGIN; SELECT * FROM checkpoint_load"))
             .unwrap();
-        assert_eq!(reader.table_row_count("blobs").unwrap(), 0);
-        store
-            .write_with(&NoFaults, |tx| {
-                for n in 0..64 {
-                    let text = format!("{n:04}{}", "x".repeat(4096));
-                    tx.execute(
-                        "INSERT INTO blobs VALUES(?1,?2,?3)",
-                        rusqlite::params![hex_sha256(text.as_bytes()), text.len() as i64, text],
-                    )
-                    .map_err(StorageError::persist)?;
-                }
-                Ok::<_, StorageError>(())
-            })
-            .unwrap();
-        checkpoints
-            .writer_needed
-            .store(true, std::sync::atomic::Ordering::Release);
-        store
-            .read_with(|conn| {
-                checkpoints.checkpoint_on_writer_if_needed(conn);
-                Ok::<_, rusqlite::Error>(())
-            })
-            .unwrap();
-        assert!(
-            checkpoints
-                .writer_needed
-                .load(std::sync::atomic::Ordering::Acquire)
-        );
-        let old_frames: i64 = store
-            .read_with(|conn| {
-                conn.query_row("PRAGMA main.wal_checkpoint(NOOP)", [], |row| row.get(1))
-            })
-            .unwrap();
+        write(&mut s, 0, 12 * 1024 * 1024);
+        let checkpoints = Checkpoints::start(&path).unwrap();
+        s.read_with(|c| {
+            checkpoints.checkpoint_on_writer_if_needed(c);
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+        assert_eq!(checkpoints.writer_calls.load(Ordering::Relaxed), 0);
+        assert!(s.read_with(frames).unwrap().0 > WRITER_CHECKPOINT_FRAMES);
+        reader.read_with(|c| c.execute_batch("ROLLBACK")).unwrap();
+        // Pin the latest WAL read mark before backfill. It permits checkpoint
+        // progress but keeps the log from resetting until the reader releases.
         reader
-            .read_with(|conn| conn.execute_batch("ROLLBACK"))
+            .read_with(|c| c.execute_batch("BEGIN; SELECT * FROM checkpoint_load"))
             .unwrap();
-        store
-            .read_with(|conn| {
-                checkpoints.checkpoint_on_writer_if_needed(conn);
-                Ok::<_, rusqlite::Error>(())
-            })
-            .unwrap();
+        s.read_with(|c| {
+            wait_checkpoint(c, &checkpoints);
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+        write(&mut s, 1, 4096);
+        let (before, backfilled) = s.read_with(frames).unwrap();
+        assert!(before >= WRITER_CHECKPOINT_FRAMES);
+        assert!((1..=MAX_WRITER_BACKFILL_FRAMES).contains(&(before - backfilled)));
+        reader.read_with(|c| c.execute_batch("ROLLBACK")).unwrap();
+        s.read_with(|c| {
+            checkpoints.checkpoint_on_writer_if_needed(c);
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+        assert_eq!(checkpoints.writer_calls.load(Ordering::Relaxed), 1);
+        assert!(checkpoints.writer_max.load(Ordering::Relaxed) <= MAX_WRITER_BACKFILL_FRAMES);
+        write(&mut s, 2, 4096);
         assert!(
-            !checkpoints
-                .writer_needed
-                .load(std::sync::atomic::Ordering::Acquire)
+            s.read_with(frames).unwrap().0 < before,
+            "bounded handoff did not recycle WAL"
         );
-        store
-            .write_with(&NoFaults, |tx| {
-                tx.execute("INSERT INTO blobs VALUES(?1,3,'new')", [hex_sha256(b"new")])
+    }
+
+    #[test]
+    fn sustained_writes_recycle_wal_and_never_backfill_a_large_tail_on_writer() {
+        let scratch = ScratchDir::new().unwrap();
+        let mut s = store(&scratch.path().join("engine.db"));
+        let mut maximum = 0;
+        let mut previous = 0;
+        let mut resets = 0;
+        for n in 0..1600 {
+            write(&mut s, n % 64, 16 * 1024);
+            let log = s.read_with(frames).unwrap().0;
+            maximum = maximum.max(log);
+            resets += usize::from(log < previous);
+            previous = log;
+        }
+        assert!(resets > 0, "sustained writes never recycled WAL");
+        assert!(
+            maximum < 4 * WRITER_CHECKPOINT_FRAMES,
+            "WAL grew past combined checkpoint bound: {maximum}"
+        );
+        let (_, writer_max) = s.checkpoint_work_for_test();
+        assert!(writer_max <= MAX_WRITER_BACKFILL_FRAMES);
+        assert_eq!(s.table_row_count("checkpoint_load").unwrap(), 64);
+        exercise_background_writer_handoff();
+    }
+
+    #[test]
+    fn stopped_worker_restarts_without_enabling_unbounded_autocheckpoint() {
+        let scratch = ScratchDir::new().unwrap();
+        let mut s = store(&scratch.path().join("engine.db"));
+        s.stop_checkpoint_worker_for_test();
+        write(&mut s, 0, 4096);
+        assert_eq!(
+            s.read_with(|c| c.query_row("PRAGMA wal_autocheckpoint", [], |r| r.get::<_, i64>(0)))
+                .unwrap(),
+            0
+        );
+        write(&mut s, 1, 4096);
+        assert_eq!(s.table_row_count("checkpoint_load").unwrap(), 2);
+    }
+
+    #[test]
+    fn pinned_reader_does_not_block_shutdown_or_lose_commits() {
+        let scratch = ScratchDir::new().unwrap();
+        let path = scratch.path().join("engine.db");
+        let mut s = store(&path);
+        let reader = EngineStore::open_read_only(&path).unwrap();
+        reader
+            .read_with(|c| c.execute_batch("BEGIN; SELECT * FROM checkpoint_load"))
+            .unwrap();
+        for n in 0..200 {
+            write(&mut s, n, 8192);
+        }
+        drop(s);
+        reader.read_with(|c| c.execute_batch("ROLLBACK")).unwrap();
+        drop(reader);
+        let mut s = EngineStore::open(&path, 2).unwrap();
+        s.enable_background_checkpoints().unwrap();
+        assert_eq!(s.synchronous_setting().unwrap(), 1);
+        assert_eq!(s.table_row_count("checkpoint_load").unwrap(), 200);
+    }
+
+    #[test]
+    fn crash_during_background_catch_up_preserves_every_committed_row() {
+        const CHILD: &str = "DOHC_CHECKPOINT_CRASH_CHILD";
+        if let Some(root) = std::env::var_os(CHILD) {
+            let path = std::path::PathBuf::from(root).join("engine.db");
+            let mut s = EngineStore::open(&path, 1).unwrap();
+            s.read_with(|c| c.pragma_update(None, "wal_autocheckpoint", 0))
+                .unwrap();
+            s.write_with(&NoFaults, |tx| {
+                tx.execute_batch("CREATE TABLE checkpoint_load(id INTEGER PRIMARY KEY, body BLOB)")
                     .map_err(StorageError::persist)?;
                 Ok::<_, StorageError>(())
             })
             .unwrap();
-        let frames: i64 = store
-            .read_with(|conn| {
-                conn.query_row("PRAGMA main.wal_checkpoint(NOOP)", [], |row| row.get(1))
+            for n in 0..128 {
+                write(&mut s, n, 32 * 1024);
+            }
+            s.enable_background_checkpoints().unwrap();
+            write(&mut s, 128, 32 * 1024);
+            while !path.with_file_name("catch-up-started").exists() {
+                std::thread::yield_now();
+            }
+            let reader = EngineStore::open_read_only(&path).unwrap();
+            reader
+                .read_with(|c| c.execute_batch("BEGIN; SELECT * FROM checkpoint_load"))
+                .unwrap();
+            write(&mut s, 129, 32 * 1024);
+            let (log, backfilled) = s.read_with(frames).unwrap();
+            assert!(
+                log > backfilled,
+                "crash must retain committed WAL work beyond the first pass"
+            );
+            std::fs::write(path.with_file_name("committed"), b"130").unwrap();
+            loop {
+                std::thread::park();
+            }
+        }
+        let scratch = ScratchDir::new().unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "checkpoint::tests::crash_during_background_catch_up_preserves_every_committed_row",
+                "--nocapture",
+            ])
+            .env(CHILD, scratch.path())
+            .spawn()
+            .unwrap();
+        std::fs::write(scratch.path().join("child-pid"), child.id().to_string()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let ready = loop {
+            if scratch.path().join("catch-up-started").exists()
+                && scratch.path().join("committed").exists()
+            {
+                break true;
+            }
+            if Instant::now() >= deadline || child.try_wait().unwrap().is_some() {
+                break false;
+            }
+            std::thread::yield_now();
+        };
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(ready, "child never reached checkpoint catch-up");
+        let path = scratch.path().join("engine.db");
+        let mut s = EngineStore::open(&path, 2).unwrap();
+        s.enable_background_checkpoints().unwrap();
+        let actual: Vec<(i64, Vec<u8>)> = s
+            .read_with(|c| {
+                c.prepare("SELECT id,body FROM checkpoint_load ORDER BY id")?
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<rusqlite::Result<_>>()
             })
             .unwrap();
-        assert!(
-            frames >= 0 && frames < old_frames,
-            "writer did not reset the WAL"
+        assert_eq!(
+            actual,
+            (0..130)
+                .map(|n| (n, vec![42_u8; 32 * 1024]))
+                .collect::<Vec<_>>()
         );
-        assert_eq!(store.table_row_count("blobs").unwrap(), 65);
-    }
-    #[test]
-    #[ignore = "manual sustained-write checkpoint diagnostic"]
-    fn measure_wal_growth_under_sustained_capture() {
-        for background in [false, true] {
-            let scratch = ScratchDir::new().unwrap();
-            let path = scratch.path().join("engine.db");
-            let mut store = EngineStore::open(&path, 1).unwrap();
-            if background {
-                store.enable_background_checkpoints().unwrap();
-                store.pause_background_checkpoints(true);
-            }
-            store
-                .write_with(&NoFaults, |tx| {
-                    tx.execute_batch(
-                        "CREATE TABLE checkpoint_load(id INTEGER PRIMARY KEY, body BLOB)",
-                    )
-                    .map_err(StorageError::persist)?;
-                    Ok::<_, StorageError>(())
-                })
-                .unwrap();
-            let body = vec![42_u8; 65536];
-            let mut maximum = 0_i64;
-            let mut previous = 0_i64;
-            let mut resets = 0;
-            let started = Instant::now();
-            for n in 0..12_000 {
-                store
-                    .write_with(&NoFaults, |tx| {
-                        tx.execute(
-                            "INSERT OR REPLACE INTO checkpoint_load VALUES(?1,?2)",
-                            rusqlite::params![n % 256, body],
-                        )
-                        .map_err(StorageError::persist)?;
-                        Ok::<_, StorageError>(())
-                    })
-                    .unwrap();
-                if n % 32 == 0 {
-                    let frames: i64 = store
-                        .read_with(|conn| {
-                            conn.query_row("PRAGMA main.wal_checkpoint(NOOP)", [], |row| row.get(1))
-                        })
-                        .unwrap();
-                    if frames >= 0 {
-                        maximum = maximum.max(frames);
-                        resets += usize::from(frames < previous);
-                        previous = frames;
-                    }
-                }
-            }
-            if background {
-                assert!(resets > 0, "sustained writes never recycled the WAL");
-                assert!(maximum < 2 * super::WRITER_CHECKPOINT_FRAMES);
-            }
-            let wal_bytes = std::fs::metadata(path.with_extension("db-wal"))
-                .unwrap()
-                .len();
-            eprintln!(
-                "WAL_SUSTAINED background={background} writes=12000 max_frames={maximum} resets={resets} wal_bytes={wal_bytes} elapsed_ms={}",
-                started.elapsed().as_millis()
-            );
-        }
     }
 }

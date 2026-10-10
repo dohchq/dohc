@@ -2380,6 +2380,52 @@ async fn a_quarantined_path_keeps_capture_flush_unsettled() {
         .expect("close");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn successful_first_capture_releases_hold_and_drains_exact_backlink_pairs() {
+    let scratch = ScratchDir::new().unwrap();
+    write_root_binding(scratch.path(), TOKEN).unwrap();
+    for n in 0..8 {
+        write_file(
+            scratch.path(),
+            &format!("note-{n}.md"),
+            format!("[[note-{}]]", (n + 1) % 8).as_bytes(),
+        );
+    }
+    let service = Arc::new(EngineService::new());
+    let mut events = service.events().subscribe();
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_for_initial_settled_event(&mut events).await;
+    let observer =
+        EngineStore::open_read_only(&scratch.path().join(".dohc/engine/engine.db")).unwrap();
+    tokio::time::timeout(WAIT, async {
+        let mut poll = tokio::time::interval(Duration::from_millis(10));
+        while observer.table_row_count("link_pending").unwrap() != 0
+            || observer.table_row_count("link_sources").unwrap() != 8
+        {
+            poll.tick().await;
+        }
+    })
+    .await
+    .unwrap();
+    let actual:Vec<(String,String)>=observer.read_with(|c| {
+        c.prepare("SELECT source.path,target.path FROM link_sources ts JOIN link_target_keys t USING(workspace_id,version_id,object_id,index_key) JOIN link_occurrence_keys k ON k.workspace_id=t.workspace_id AND k.version_id=t.version_id AND k.key_kind=t.key_kind AND k.key=t.key JOIN link_sources ss ON ss.workspace_id=k.workspace_id AND ss.version_id=k.version_id AND ss.object_id=k.object_id AND ss.index_key=k.index_key JOIN snapshots source ON source.workspace_id=ss.workspace_id AND source.version_id=ss.version_id AND source.object_id=ss.object_id JOIN snapshots target ON target.workspace_id=ts.workspace_id AND target.version_id=ts.version_id AND target.object_id=ts.object_id WHERE t.key_kind='stem' ORDER BY source.path,target.path")?
+            .query_map([],|row|Ok((row.get(0)?,row.get(1)?)))?.collect::<rusqlite::Result<_>>()
+    }).unwrap();
+    let expected = (0..8)
+        .map(|n| (format!("note-{n}.md"), format!("note-{}.md", (n + 1) % 8)))
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+    drop(observer);
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(100, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "manual quiet-host 5000-file initial capture measurement"]
 async fn measure_five_thousand_file_initial_capture() {

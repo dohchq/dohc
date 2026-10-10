@@ -46,7 +46,9 @@ pub(super) fn report_slow_tick(duration: Duration, phase: &str) {
 }
 
 fn open(path: &Path) -> EngineStore {
-    EngineStore::open(path, 1).unwrap()
+    let mut store = EngineStore::open(path, 1).unwrap();
+    store.enable_background_checkpoints().unwrap();
+    store
 }
 fn write(s: &mut EngineStore, object: &str, path: &str, text: &str, n: i64) {
     let mut v = VersionedTextStore::new(s);
@@ -1061,8 +1063,13 @@ fn drain_resumes_after_abrupt_process_exit() {
     drain(&mut store);
     assert_eq!(count(&store, "link_pending"), 0);
     assert_eq!(count(&store, "link_sources"), 33);
-    let backlinks: i64 = store.read_with(|c| c.query_row(
-        "SELECT count(*) FROM link_sources target JOIN link_target_keys t USING(workspace_id,version_id,object_id,index_key) JOIN link_occurrence_keys k ON k.workspace_id=t.workspace_id AND k.version_id=t.version_id AND k.key_kind=t.key_kind AND k.key=t.key JOIN link_sources source ON source.workspace_id=k.workspace_id AND source.version_id=k.version_id AND source.object_id=k.object_id AND source.index_key=k.index_key WHERE target.object_id='target' AND t.key_kind='stem'",
-        [], |r| r.get(0))).unwrap();
-    assert_eq!(backlinks, 32);
+    let actual:Vec<(String,String)>=store.read_with(|c| {
+        c.prepare("SELECT source.object_id,target.object_id FROM link_sources target JOIN link_target_keys t USING(workspace_id,version_id,object_id,index_key) JOIN link_occurrence_keys k ON k.workspace_id=t.workspace_id AND k.version_id=t.version_id AND k.key_kind=t.key_kind AND k.key=t.key JOIN link_sources source ON source.workspace_id=k.workspace_id AND source.version_id=k.version_id AND source.object_id=k.object_id AND source.index_key=k.index_key WHERE t.key_kind='stem' ORDER BY source.object_id,target.object_id")?
+            .query_map([],|row|Ok((row.get(0)?,row.get(1)?)))?.collect::<rusqlite::Result<_>>()
+    }).unwrap();
+    let mut expected = (0..32)
+        .map(|n| (format!("note-{n}"), "target".to_string()))
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(actual, expected);
 }

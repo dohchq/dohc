@@ -656,7 +656,6 @@ fn worker_main(
         None
     };
     loop {
-        store.pause_background_checkpoints(capture_holds.load(Ordering::Acquire) != 0);
         // Serve a queued foreground command before each background slice.
         // The timer runtime ends before synchronous commands execute.
         let cmd = match rx.try_recv() {
