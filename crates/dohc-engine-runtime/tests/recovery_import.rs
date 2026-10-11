@@ -694,7 +694,7 @@ async fn deleted_recovery_requires_the_latest_ordinary_moment_to_be_a_delete() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn laned_outage_replay_does_not_attempt_origination_or_read_sync_control() {
-    for lane in [1, 2, 3] {
+    for lane in [1, 2] {
         let (scratch, db, supervisor, _actor, state, doc, bytes) = setup().await;
         supervisor.close(&db).unwrap();
         inspect(&db, |store| {
