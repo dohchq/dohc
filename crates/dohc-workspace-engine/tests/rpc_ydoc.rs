@@ -3317,6 +3317,37 @@ async fn a_settle_past_the_inband_cap_still_lands_on_disk_and_reports_no_content
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
+    async fn call_after_backfill(
+        transport: &InProcessTransport<EngineService>,
+        workspace: &WorkspaceHandle,
+        id: u64,
+        method: &str,
+        params: Value,
+    ) -> Value {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                match transport
+                    .call(
+                        RequestContext::unbounded(),
+                        request(id, method, Some(workspace.clone()), params.clone()),
+                    )
+                    .await
+                {
+                    Ok(response) => break response.result,
+                    Err(error)
+                        if error.code == ErrorCode::Overloaded
+                            && error.message == "engine-store-busy" =>
+                    {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    Err(error) => panic!("{method} failed: {error:?}"),
+                }
+            }
+        })
+        .await
+        .expect("capture backfill must admit the request")
+    }
+
     // AUDIT-SILENTSAVE round 5. This is the race that made
     // `a_settle_past_the_inband_cap…` fail under `cargo test --workspace`
     // while passing in isolation — the capture pass only gets scheduled
@@ -3357,33 +3388,14 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
         json!({ "sessionId": session_id, "updateBase64": plaintext_update(&huge) }),
     )
     .await;
-    let settled = tokio::time::timeout(Duration::from_secs(60), async {
-        loop {
-            match transport
-                .call(
-                    RequestContext::unbounded(),
-                    request(
-                        4,
-                        "ydoc.settle",
-                        Some(handle.clone()),
-                        json!({ "sessionId": session_id, "summary": "paste" }),
-                    ),
-                )
-                .await
-            {
-                Ok(response) => break response.result,
-                Err(error)
-                    if error.code == ErrorCode::Overloaded
-                        && error.message == "engine-store-busy" =>
-                {
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                }
-                Err(error) => panic!("large settle failed: {error:?}"),
-            }
-        }
-    })
-    .await
-    .expect("capture backfill must admit the large settle");
+    let settled = call_after_backfill(
+        &transport,
+        &handle,
+        4,
+        "ydoc.settle",
+        json!({ "sessionId": session_id, "summary": "paste" }),
+    )
+    .await;
 
     write_file(scratch.path(), "load/scan-confirmed.md", b"capture barrier");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
@@ -3461,7 +3473,7 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
 
     // And the close — which settles by default — succeeds instead of failing
     // ConflictStaleTarget against a head capture moved underneath it.
-    call(
+    call_after_backfill(
         &transport,
         &handle,
         7,
