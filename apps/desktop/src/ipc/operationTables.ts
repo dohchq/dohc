@@ -14,6 +14,7 @@ import {
   shareDirectWriteDeliveryOperations,
   usageRecordOperations,
   workspaceSearchOperations,
+  folderAppOfferOperations,
   workspaceVersionOperations,
 } from "./bridgeContract";
 import type { OperationTable } from "./operationTable";
@@ -26,6 +27,7 @@ export const OPERATION_TABLES = [
   accessOperations,
   workspaceVersionOperations,
   workspaceSearchOperations,
+  folderAppOfferOperations,
   crashReportOperations,
   reportingOperations,
   usageRecordOperations,

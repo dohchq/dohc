@@ -28,6 +28,12 @@ _Avoid_: usage report, telemetry, analytics
 A small count of events that a packaged build sends to its report service while the person's switch in Privacy allows it.
 _Avoid_: usage record (that stays on the computer)
 
+### Offers
+
+**Offer**:
+A suggestion for a person at a relevant point in their work. Detection changes nothing; the person chooses whether to act.
+_Avoid_: Offering (what dohc sells), moment (a History term)
+
 ### Collections
 
 **Collection**:
