@@ -3112,20 +3112,21 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
         .await
         .expect("commit drawing delete rollback");
     assert!(!committed.materialized);
-    let original_restore_job_id: String = EngineStore::open(&db, 7)
-        .expect("inspect original restore job")
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT j.job_id FROM moments m JOIN materialization_jobs j \
-                 ON j.workspace_id = m.workspace_id AND j.job_id = m.moment_id \
-                 WHERE m.workspace_id = ?1 AND m.version_id = ?2 \
-                 AND m.metadata_correlation_id = ?3 \
-                 AND m.metadata_summary = 'Restored drawing asset'",
-                params![workspace_id, "main", rollback_moment_id],
-                |row| row.get(0),
-            )
-        })
-        .expect("original restore job exists");
+    let (original_restore_moment_id, original_restore_job_id): (String, String) =
+        EngineStore::open(&db, 7)
+            .expect("inspect original restore job")
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT m.moment_id, j.job_id FROM moments m JOIN materialization_jobs j \
+                     ON j.workspace_id = m.workspace_id AND j.job_id = 'binary-mat_' || m.moment_id \
+                     WHERE m.workspace_id = ?1 AND m.version_id = ?2 \
+                     AND m.metadata_correlation_id = ?3 \
+                     AND m.metadata_summary = 'Restored drawing asset'",
+                    params![workspace_id, "main", rollback_moment_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .expect("original restore job exists");
     let mut inspection = EngineStore::open(&db, 7).expect("open restore summary drift store");
     inspection
         .write_with(&NoFaults, |tx| {
@@ -3133,7 +3134,7 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
                 .execute(
                     "UPDATE moments SET metadata_summary = 'Drawing asset restore copy changed' \
                  WHERE workspace_id = ?1 AND moment_id = ?2",
-                    params![workspace_id, original_restore_job_id],
+                    params![workspace_id, original_restore_moment_id],
                 )
                 .map_err(StorageError::persist_public)?;
             assert_eq!(changed, 1, "one owned asset restore changed copy");
@@ -3218,7 +3219,9 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
     assert_eq!(
         EngineStore::open(&db, 9)
             .expect("inspect later job")
-            .load_materialization_job("moment-scene-asset-rollback-later")
+            .load_materialization_job(&dohc_engine_domain::binary_write_job_id(
+                "moment-scene-asset-rollback-later",
+            ))
             .expect("load later job")
             .expect("later job exists")
             .status,

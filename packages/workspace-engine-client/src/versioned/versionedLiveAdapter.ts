@@ -1168,6 +1168,18 @@ export class VersionedLiveAdapter {
     });
   }
 
+  async publicationApplied(input: {
+    workspaceId: string;
+    requestId: string;
+    momentId: string;
+  }): Promise<boolean> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(VERSIONED_METHOD.publicationApplied, {
+      requestId: input.requestId,
+      momentId: input.momentId,
+    });
+  }
+
   async ensureSearchIndex(input: {
     workspaceId: string;
     versionId: string;

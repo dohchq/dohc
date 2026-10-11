@@ -773,9 +773,6 @@ pub fn run_pending_jobs(
     let jobs = store.list_pending_materialization_jobs()?;
     let mut results = Vec::with_capacity(jobs.len());
     for job in jobs {
-        if job.job_id.starts_with("restore-delete-mat_") {
-            continue;
-        }
         let outcome = materialize_one(store, root, &job, options)?;
         let crashed = matches!(outcome, JobOutcome::Crashed(_));
         results.push(JobResult {
@@ -840,6 +837,8 @@ pub fn materialize_one_ordinary(
     // Generation staleness gate: if a newer generation has already been
     // materialized at this path, this job is superseded — never regress the path
     // to older content (concurrent / out-of-order jobs). No-op; mark complete.
+    // A keyed write's request records the supersession first, so a complete
+    // job with no recorded outcome always reached disk.
     if !job.job_id.starts_with("version-switch-")
         && let Some(done_gen) =
             store.max_completed_generation_for_path(&job.workspace_id, &job.target_path)?
@@ -848,6 +847,7 @@ pub fn materialize_one_ordinary(
         if job.job_id.starts_with("ydoc-mat_") {
             store.mark_materialization_cancelled(&job.job_id, now_ms)?;
         } else {
+            store.record_superseded_publication(job)?;
             store.mark_materialization_complete(&job.job_id, now_ms)?;
         }
         return Ok(JobOutcome::Superseded);

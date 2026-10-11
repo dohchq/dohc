@@ -37,6 +37,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
                 | "versionedText.delete"
                 | "versionedText.rollback"
                 | "versionedText.merge"
+                | "versionedText.publicationApplied"
                 | "versionedBinary.read"
                 | "versionedBinary.readBlob"
                 | "moments.list"
@@ -575,6 +576,10 @@ impl EngineService {
             }
             "moments.get" => {
                 self.moments_get(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "versionedText.publicationApplied" => {
+                self.publication_applied(&ctx, request.workspace, request.params)
                     .await?
             }
             "secrets.list" => {
@@ -1482,6 +1487,7 @@ mod tests {
             "versionedText.list",
             "versionedText.captureSources",
             "versionedText.merge",
+            "versionedText.publicationApplied",
             "versionedText.read",
             "versionedText.readBlob",
             "versionedText.rename",

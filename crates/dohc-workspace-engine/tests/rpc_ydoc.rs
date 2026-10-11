@@ -1428,7 +1428,7 @@ async fn deleting_a_forked_scene_retires_inherited_asset_heads_without_touching_
                 conn.query_row(
                     "SELECT COUNT(*) FROM materialization_jobs WHERE workspace_id = ?1 \
              AND target_path = ?2 AND operation = 'write' AND status = 'pending' \
-             AND job_id LIKE 'moment-scene-asset-rollback-%'",
+             AND job_id LIKE 'binary-mat_moment-scene-asset-rollback-%'",
                     rusqlite::params![workspace_id, asset_path],
                     |row| row.get(0),
                 )

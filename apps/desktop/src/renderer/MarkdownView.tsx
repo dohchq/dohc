@@ -210,6 +210,8 @@ export function MarkdownView(props: {
   chatMentionsAvailable?: boolean;
   onSharePath?: (path: string) => void;
   onSaveStateChange?: (state: SaveState) => void;
+  // A live document became read-only while it was open.
+  onLiveReadOnly?: () => void;
   registerDraftFlush?: (flush: DraftFlush | null) => void;
   knownFiles?: ReadonlyArray<WikilinkFile>;
   pendingUndo?: PendingTextUndo;
@@ -778,6 +780,13 @@ export function MarkdownView(props: {
   }, [surfaceMode, props.path]);
 
   const { onSaveStateChange } = props;
+  const onLiveReadOnly = useRef(props.onLiveReadOnly);
+  onLiveReadOnly.current = props.onLiveReadOnly;
+  // Once each time the live document turns read-only, with or without an
+  // edit waiting: the shell asks whether the share behind it ended.
+  useEffect(() => {
+    if (engine.readOnlyWhileEditing) onLiveReadOnly.current?.();
+  }, [engine.readOnlyWhileEditing]);
 
   // Parse-once + visible-first: the memo stops re-parses on
   // unrelated re-renders (collab status flips, save-state ticks), and the
@@ -1917,6 +1926,10 @@ export function MarkdownView(props: {
   // The restore half of #567: each set-aside draft stays copyable until the
   // user takes it or dismisses it. Rendered in both branches below — the
   // reopen can resolve into either editor.
+  // The read-only view that follows an ended share closes the live session,
+  // so the draft that turn set aside is remembered here to keep its words.
+  const readOnlyDraftId = useRef<number | null>(null);
+  if (engine.readOnlyDraftId !== null) readOnlyDraftId.current = engine.readOnlyDraftId;
   const documentNotices = (
     <>
       {engine.deletedWhileEditing ? (
@@ -1925,7 +1938,12 @@ export function MarkdownView(props: {
           hasSetAsideEdit={hasSetAsideEdit}
         />
       ) : null}
-      <OrphanedDraftNotices workspaceId={props.workspaceId} path={props.path} />
+      <OrphanedDraftNotices
+        workspaceId={props.workspaceId}
+        path={props.path}
+        message="This document became read-only. Copy your text to keep it."
+        messageDraftId={readOnlyDraftId.current}
+      />
     </>
   );
 

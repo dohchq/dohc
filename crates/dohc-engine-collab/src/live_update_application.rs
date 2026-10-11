@@ -1232,16 +1232,34 @@ pub fn apply_committed(
                     _ => None,
                 })).or_else(|| event.metadata.admitted_declaration().map(|declaration| (Some(declaration.agent_id.clone()), Some(declaration.attribution()))))
             } else { None };
-            let authors = event.metadata.author_snapshot.as_ref()
-                .map(|authors| authors.iter().map(|author| match author {
+            // A person the owner shared with, or an Edit share link, is named
+            // from the relay's authority, never the frame, whether or not
+            // their client sent a recording context. That entry carries the
+            // grant, so it stands in for the same principal's snapshot entry.
+            // A declared agent stays beside it.
+            let shared = event.metadata.accepted.authority.shared_author();
+            let snapshot = event.metadata.author_snapshot.as_deref().unwrap_or_default();
+            let mut authors = snapshot.iter()
+                .filter(|author| shared.is_none() || !matches!(author, LiveAuthorEntry::Human { .. } | LiveAuthorEntry::Link { .. }))
+                .map(|author| match author {
                     LiveAuthorEntry::Automation { automation_id, attribution } => Ok(dohc_engine_domain::moment_author_json(Some(automation_id), Some(attribution)).expect("validated automation author")),
                     _ => serde_json::to_string(&[author]),
-                }).collect::<Result<Vec<_>, _>>())
-                .transpose().map_err(|_| ApplicationError::Corrupt)?
-                .unwrap_or_default();
+                })
+                .collect::<Result<Vec<_>, _>>().map_err(|_| ApplicationError::Corrupt)?;
+            // A delivery without recording context keeps that gap in coverage,
+            // even when the relay's authority names who sent it. A delivery
+            // that adds no content leaves no gap.
             let adds_content = !event.metadata.first_seen.is_empty()
                 || event.metadata.first_seen_deletes.as_ref().is_some_and(|ranges| !ranges.is_empty());
-            match if authors.is_empty() && !adds_content { Ok(()) } else {
+            if snapshot.is_empty() && adds_content {
+                authors.push(r#"[{"kind":"unattributed"}]"#.to_owned());
+            }
+            // A full interval refuses before anything is written, so nothing
+            // is truncated.
+            if let Some(shared) = shared {
+                authors.push(crate::author_coverage::shared_json(&shared)?);
+            }
+            match if authors.is_empty() { Ok(()) } else {
                 crate::author_coverage::admit_accepted_in(tx, &key, &authors)
             } {
                 Err(CollabError::AuthorCapacity)
@@ -3682,6 +3700,73 @@ mod tests {
         assert_eq!(remote_changes(&store), 1, "a replayed frame counts once");
     }
 
+    /// A person the owner shared with, or a link holder, whose client sent
+    /// recording context is one author: the grant the relay accepted the
+    /// frame under. The admitted snapshot keeps their public entry, and a
+    /// declared agent is credited beside them.
+    #[test]
+    fn a_recorded_shared_principal_is_credited_once_beside_its_agent() {
+        let (_dir, mut store, mut cache, _owner, handle) = fixture();
+        let agent = serde_json::json!({"kind":"agent","agentId":"guest-agent","agentName":"Guest agent","onBehalfOf":"guest-1","depth":1});
+        let snapshot = |entries: Vec<serde_json::Value>| -> Vec<LiveAuthorEntry> {
+            entries
+                .into_iter()
+                .map(|entry| serde_json::from_value(entry).unwrap())
+                .collect()
+        };
+        let source = Ydoc::wire();
+        let frames = [
+            (
+                "named-recorded",
+                ServerDerivedLiveUpdateAuthority::Named {
+                    principal_id: "guest-1".into(),
+                    grant_id: "grant-1".into(),
+                    grant_generation: 1,
+                },
+                snapshot(vec![
+                    serde_json::json!({"kind":"human","humanId":"guest-1","humanName":"Guest"}),
+                    agent.clone(),
+                ]),
+                source.plaintext_insert(0, "a"),
+            ),
+            (
+                "link-recorded",
+                ServerDerivedLiveUpdateAuthority::Link {
+                    principal_id: "holder-1".into(),
+                    grant_id: "grant-link".into(),
+                    grant_generation: 2,
+                },
+                snapshot(vec![
+                    serde_json::json!({"kind":"link","publicPrincipalId":"public-holder-1","label":"Anonymous"}),
+                ]),
+                source.plaintext_insert(1, "b"),
+            ),
+        ];
+        for (cursor, (delivery, authority, authors, bytes)) in (1..).zip(frames) {
+            let mut update = event(delivery, cursor, bytes);
+            update.metadata.canonical_version = Some(2);
+            update.metadata.author_snapshot = Some(authors);
+            update.metadata.first_seen_deletes = Some(Vec::new());
+            update.metadata.accepted.authority = authority;
+            ack(apply(&mut store, &mut cache, &handle, update.clone()));
+            // A replay matches the stored event, admitted snapshot included.
+            assert!(ack(apply(&mut store, &mut cache, &handle, update)).application_replayed);
+        }
+        let interval = store
+            .read_with(|conn| crate::author_coverage::interval_in(conn, &key(), i64::MAX))
+            .unwrap()
+            .json();
+        // Each person is one author, by grant, beside their declared agent.
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&interval).unwrap(),
+            serde_json::json!([
+                agent,
+                {"kind":"link","grantId":"grant-link","grantGeneration":2,"principalId":"holder-1"},
+                {"kind":"named","userId":"guest-1","grantId":"grant-1","grantGeneration":1}
+            ])
+        );
+    }
+
     /// A live-shared record: the session host commits each accepted frame,
     /// the owner's and a collaborator's alike, so it claims the frame's field
     /// changes once, as the principal the relay accepted it from.
@@ -3701,8 +3786,27 @@ mod tests {
     }
 
     fn host_claims_each_accepted_field_change(canonical_version: Option<u8>, capped_agent: bool) {
+        // Each frame first sees what the source wrote since the previous
+        // frame, so the same bytes delivered again see nothing new.
+        let source = Ydoc::wire();
+        let seen = std::cell::RefCell::new(source.state_vector());
         let event = |delivery: &str, cursor: i64, bytes: Vec<u8>| {
             let mut admitted = event(delivery, cursor, bytes);
+            let after = source.state_vector();
+            let mut first_seen: Vec<_> = after
+                .iter()
+                .filter_map(|(client, clock)| {
+                    let start = seen.borrow().get(client);
+                    (*clock > start).then_some(LiveUpdateStructRange {
+                        client_id: client.get() as i64,
+                        start_clock: i64::from(start),
+                        end_clock: i64::from(*clock),
+                    })
+                })
+                .collect();
+            first_seen.sort_by_key(|range| range.client_id);
+            admitted.metadata.first_seen = first_seen;
+            *seen.borrow_mut() = after;
             admitted.metadata.canonical_version = canonical_version;
             if canonical_version == Some(2) {
                 admitted.metadata.author_snapshot = Some(if capped_agent {
@@ -3750,7 +3854,6 @@ mod tests {
                 .collect()
         };
 
-        let source = Ydoc::wire();
         let owner_edit = event(
             "owner-edit",
             1,
@@ -3790,6 +3893,13 @@ mod tests {
             grant_id: "grant-1".into(),
             grant_generation: 1,
         };
+        // Recording context names the account the relay accepted the edit from.
+        if capped_agent {
+            guest_edit.metadata.author_snapshot = Some(vec![LiveAuthorEntry::Human {
+                human_id: "guest-1".into(),
+                human_name: "Guest".into(),
+            }]);
+        }
         guest_edit.metadata.accepted.received_at_ms = 20;
         ack(apply(&mut store, &mut cache, &handle, guest_edit));
         assert_eq!(
@@ -3813,6 +3923,13 @@ mod tests {
             grant_id: "grant-link".into(),
             grant_generation: 2,
         };
+        // A link holder's context names its public principal, not the grant.
+        if capped_agent {
+            link_edit.metadata.author_snapshot = Some(vec![serde_json::from_value(
+                serde_json::json!({"kind":"link","publicPrincipalId":"public-holder-1","label":"Anonymous"}),
+            )
+            .unwrap()]);
+        }
         link_edit.metadata.accepted.received_at_ms = 25;
         ack(apply(&mut store, &mut cache, &handle, link_edit));
         assert_eq!(claims(&store).len(), 3);
@@ -3848,6 +3965,31 @@ mod tests {
         assert_eq!(
             persons(&store),
             vec![None, Some("guest-1".to_owned()), None]
+        );
+        // The moment that settles these frames names the collaborator and the
+        // link once, from the same authority, so History says who changed the
+        // file, even when their own snapshot named them too. The owner's
+        // snapshot person stays. Frames without recording context also keep
+        // the unattributed gap.
+        let interval = store
+            .read_with(|conn| crate::author_coverage::interval_in(conn, &key(), i64::MAX))
+            .unwrap()
+            .json();
+        let snapshot_author = capped_agent
+            .then(|| serde_json::json!({"kind":"human","humanId":"owner-1","humanName":"Owner"}));
+        let missing_context = (!capped_agent).then(|| serde_json::json!({"kind":"unattributed"}));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&interval).unwrap(),
+            serde_json::Value::Array(
+                snapshot_author
+                    .into_iter()
+                    .chain([
+                        serde_json::json!({"kind":"link","grantId":"grant-link","grantGeneration":2,"principalId":"holder-1"}),
+                        serde_json::json!({"kind":"named","userId":"guest-1","grantId":"grant-1","grantGeneration":1}),
+                    ])
+                    .chain(missing_context)
+                    .collect()
+            ),
         );
 
         let body_only = event("body-only", 4, source.plaintext_insert(0, "body"));
@@ -4278,9 +4420,12 @@ mod tests {
             .read_with(|conn| crate::author_coverage::interval_in(conn, &key(), 1))
             .unwrap()
             .json();
-        assert!(
-            authors.contains("Ana"),
-            "canonical names survive: {authors}"
+        // The relay's grant names the person once, in place of their snapshot entry.
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&authors).unwrap(),
+            serde_json::json!([
+                {"kind":"named","userId":"guest-1","grantId":"grant-1","grantGeneration":1}
+            ])
         );
     }
 
@@ -4335,9 +4480,13 @@ mod tests {
             .read_with(|conn| crate::author_coverage::interval_in(conn, &key(), 1))
             .unwrap()
             .json();
-        assert!(
-            authors.contains("Helper") && authors.contains("Ana"),
-            "canonical names survive: {authors}"
+        // The agent keeps its canonical name beside the person's grant.
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&authors).unwrap(),
+            serde_json::json!([
+                {"kind":"agent","agentId":"agent-1","agentName":"Helper","onBehalfOf":"guest-1","depth":0},
+                {"kind":"named","userId":"guest-1","grantId":"grant-1","grantGeneration":1}
+            ])
         );
     }
 

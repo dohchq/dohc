@@ -272,11 +272,18 @@ function authorFromWire(author: NonNullable<MomentRecord["authors"]>[number]): M
     );
   }
   if (author.kind === "unattributed") return { kind: "unattributed" };
+  if (author.kind === "human" && "humanName" in author) {
+    return {
+      kind: "human",
+      humanId: author.humanId,
+      humanName: author.humanName,
+      ...(author.relayConfirmed === true ? { relayConfirmed: true } : {}),
+    };
+  }
   if (author.kind === "human") {
     return {
       kind: "human",
       humanId: author.humanId,
-      ...(author.humanName !== undefined ? { humanName: author.humanName } : {}),
       ...(author.relayConfirmed === true ? { relayConfirmed: true } : {}),
       ...(author.onBehalfOf !== undefined ? { onBehalfOf: author.onBehalfOf } : {}),
     };
@@ -302,6 +309,7 @@ function authorFromWire(author: NonNullable<MomentRecord["authors"]>[number]): M
   return {
     kind: "agent",
     agentId: author.agentId,
+    ...(author.agentName !== undefined ? { agentName: author.agentName } : {}),
     ...(author.onBehalfOf !== undefined ? { onBehalfOf: author.onBehalfOf } : {}),
     ...(author.agentRunId !== undefined
       ? { agentRunId: author.agentRunId }
@@ -1221,6 +1229,10 @@ export function createCaptureLiveStores(
       return moment === null
         ? null
         : momentFromWire(input.workspaceId, await hydratedMoment(moment));
+    },
+
+    async publicationApplied(input: { workspaceId: string; requestId: string; momentId: string }) {
+      return await runRead(async (adapter) => await adapter.publicationApplied(input));
     },
 
     async compareTextFileVersions(input: {

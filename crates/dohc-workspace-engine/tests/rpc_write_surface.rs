@@ -6072,8 +6072,12 @@ async fn over_cap_text_read_blob_hydrates_a_workspace_referenced_store_write() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let workspace = "ws-rpcd-text-blob";
     let other_workspace = "ws-rpcd-text-blob-other";
+    let other_scratch = ScratchDir::new().expect("other workspace scratch");
     let db_path = scratch.path().join(".dohc/engine/engine.db");
-    std::fs::create_dir_all(db_path.parent().expect("engine dir")).expect("engine dir");
+    let other_db_path = other_scratch.path().join(".dohc/engine/engine.db");
+    for path in [&db_path, &other_db_path] {
+        std::fs::create_dir_all(path.parent().expect("engine dir")).expect("engine dir");
+    }
     let text = "x".repeat(128 * 1024 + 1);
     let sha256 = dohc_engine_storage::hex_sha256(text.as_bytes());
     let other_text = "referenced only by the other workspace";
@@ -6105,6 +6109,12 @@ async fn over_cap_text_read_blob_hydrates_a_workspace_referenced_store_write() {
                 &faults,
             )
             .expect("normal text write");
+    }
+    {
+        let mut store = EngineStore::open(&other_db_path, 1).expect("other store");
+        store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
+        let faults = NoFaults;
+        let mut versioned = VersionedTextStore::new(&mut store);
         versioned
             .ensure_main_version(other_workspace, "main", 3, &faults)
             .expect("other main");
@@ -6127,6 +6137,24 @@ async fn over_cap_text_read_blob_hydrates_a_workspace_referenced_store_write() {
                 &faults,
             )
             .expect("other workspace text write");
+    }
+    // The other workspace's text reaches this root only as a raw payload:
+    // nothing versioned here references it.
+    {
+        let connection = rusqlite::Connection::open(&db_path).expect("sqlite");
+        connection
+            .execute(
+                "ATTACH DATABASE ?1 AS other_root",
+                [other_db_path.to_string_lossy().into_owned()],
+            )
+            .expect("attach other root");
+        let copied = connection
+            .execute(
+                "INSERT INTO blobs SELECT * FROM other_root.blobs WHERE sha256 = ?1",
+                [&other_sha],
+            )
+            .expect("copy unreferenced text payload");
+        assert_eq!(copied, 1);
     }
 
     let service = Arc::new(EngineService::new());
@@ -6214,7 +6242,7 @@ async fn over_cap_text_read_blob_hydrates_a_workspace_referenced_store_write() {
         request(
             6,
             "versionedText.readBlob",
-            Some(handle),
+            Some(handle.clone()),
             json!({ "workspaceId": workspace, "sha256": sha256 }),
         ),
     )
@@ -6222,6 +6250,28 @@ async fn over_cap_text_read_blob_hydrates_a_workspace_referenced_store_write() {
     .expect("historical over-cap text stays readable");
     let historical_egress = historical.blob_egress.expect("history egress");
     assert_eq!(historical_egress.bytes, text.as_bytes());
+
+    call(&transport, &handle, 7, "workspace.close", json!({})).await;
+    let connection = rusqlite::Connection::open(&db_path).expect("sqlite");
+    let (payloads, references): (i64, i64) = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM blobs WHERE sha256 = ?1), \
+                    (SELECT COUNT(*) FROM snapshots WHERE blob_sha256 = ?1) + \
+                    (SELECT COUNT(*) FROM fork_base_snapshots WHERE blob_sha256 = ?1) + \
+                    (SELECT COUNT(*) FROM moments \
+                     WHERE after_blob_sha256 = ?1 OR before_blob_sha256 = ?1) + \
+                    (SELECT COUNT(*) FROM conflicts \
+                     WHERE base_blob_sha256 = ?1 OR current_blob_sha256 = ?1 \
+                        OR incoming_blob_sha256 = ?1)",
+            [&other_sha],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("count the refused payload and its references");
+    assert_eq!(
+        (payloads, references),
+        (1, 0),
+        "the refused text payload exists in this root without a reference"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6593,18 +6643,38 @@ async fn read_blob_requires_a_reference_from_the_handle_workspace() {
     assert_eq!(conflict_happy["bytesBase64"], "CAYHBQMACQ==");
     call(&transport, &handle_a, 9, "workspace.close", json!({})).await;
 
+    // Workspace B owns its own root. A's snapshot and conflict payload bytes
+    // exist in B's blob table, but nothing versioned in B references them.
+    let scratch_b = ScratchDir::new().expect("workspace B scratch");
+    write_root_binding(scratch_b.path(), TOKEN).expect("workspace B root binding");
+    let db_path_b = scratch_b.path().join(".dohc/engine/engine.db");
+    let open_b = json!({
+        "rootDir": scratch_b.path().to_string_lossy(),
+        "workspaceId": "ws-rpcd-blob-scope-b",
+    });
+    let created_b = transport
+        .call(
+            RequestContext::unbounded(),
+            request(10, "workspace.open", None, open_b.clone()),
+        )
+        .await
+        .expect("create workspace B");
+    let created_b: WorkspaceHandle =
+        serde_json::from_value(created_b.result["workspace"].clone()).expect("workspace B handle");
+    call(&transport, &created_b, 11, "workspace.close", json!({})).await;
+    let connection = rusqlite::Connection::open(&db_path_b).expect("sqlite");
+    let snapshot_payload =
+        dohc_engine_storage::put_binary_blob(&connection, &[4, 3, 2, 1]).expect("snapshot payload");
+    assert_eq!(snapshot_payload, sha256.as_str().expect("snapshot sha"));
+    let conflict_payload = dohc_engine_storage::put_binary_blob(&connection, &conflict_bytes)
+        .expect("conflict payload");
+    assert_eq!(conflict_payload, conflict_sha);
+    drop(connection);
+
     let opened_b = transport
         .call(
             RequestContext::unbounded(),
-            request(
-                10,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": "ws-rpcd-blob-scope-b",
-                }),
-            ),
+            request(12, "workspace.open", None, open_b),
         )
         .await
         .expect("open workspace B");
@@ -6614,7 +6684,7 @@ async fn read_blob_requires_a_reference_from_the_handle_workspace() {
         .call(
             RequestContext::unbounded(),
             request(
-                11,
+                13,
                 "versionedBinary.readBlob",
                 Some(handle_b.clone()),
                 json!({
@@ -6630,9 +6700,9 @@ async fn read_blob_requires_a_reference_from_the_handle_workspace() {
         .call(
             RequestContext::unbounded(),
             request(
-                12,
+                14,
                 "versionedBinary.readBlob",
-                Some(handle_b),
+                Some(handle_b.clone()),
                 json!({
                     "workspaceId": "ws-rpcd-blob-scope-b",
                     "sha256": conflict_sha,
@@ -6642,6 +6712,29 @@ async fn read_blob_requires_a_reference_from_the_handle_workspace() {
         .await
         .expect_err("workspace B must not read workspace A's conflict-only blob");
     assert_eq!(conflict_refused.message, "file-not-found");
+
+    call(&transport, &handle_b, 15, "workspace.close", json!({})).await;
+    let connection = rusqlite::Connection::open(&db_path_b).expect("sqlite");
+    let (payloads, references): (i64, i64) = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM binary_blobs WHERE sha256 IN (?1, ?2)), \
+                    (SELECT COUNT(*) FROM snapshots WHERE binary_sha256 IN (?1, ?2)) + \
+                    (SELECT COUNT(*) FROM moments \
+                     WHERE after_binary_sha256 IN (?1, ?2) \
+                        OR before_binary_sha256 IN (?1, ?2)) + \
+                    (SELECT COUNT(*) FROM conflicts \
+                     WHERE base_binary_sha256 IN (?1, ?2) \
+                        OR current_binary_sha256 IN (?1, ?2) \
+                        OR incoming_binary_sha256 IN (?1, ?2))",
+            rusqlite::params![sha256.as_str().expect("snapshot sha"), conflict_sha],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("count B's payloads and references");
+    assert_eq!(
+        (payloads, references),
+        (2, 0),
+        "B holds both payloads without a reference to either"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

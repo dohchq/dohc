@@ -187,6 +187,27 @@ describe("roster from the relay's listings", () => {
     expect(listing.grants !== null && listing.endedGrants).toEqual([]);
     expect(get).toHaveBeenCalledTimes(1);
   });
+  it("names an author missing from the roster on a moment several people wrote once the lookup finishes", async () => {
+    const listing = await listed({ granted: [row()] });
+    const get = relay({ "/sync/ws-trip/shares/links?historyGrantId=g-dep": { status: 200, body: { holders: [{ grantId: "g-dep", recipientUserId: "u-ben", recipientEmail: "ben@dohc.test", parentGrantId: "g-link" }] } } });
+    const names = createHistoryLabels({ snapshot: () => ({ roster: listing, owner: true, context: "window", inventory: 1 }),
+      lookupAccounts: (_workspaceId, ids) => lookupHistoryAccounts(WORKSPACE, get, ids) });
+    const readHistory = () => listEngineMomentsForIpc(async () => ({
+      moments: [{ id: "m-both", workspaceId: WORKSPACE, versionId: "main", objectId: "o-1", path: "Trip/a.md", recordedAtMs: 1,
+        operation: "write", metadata: { origin: "sync" }, momentOrder: 0, protected: false,
+        authors: [
+          { kind: "named", userId: "u-ana", grantId: "g-1", grantGeneration: 1 },
+          { kind: "agent", agentId: "agent" },
+          { kind: "named", userId: "u-ben", grantId: "g-dep", grantGeneration: 1 },
+        ] }],
+      nextBeforeMomentOrder: null, latestMomentOrder: 0, activeVersionId: "main", protectedTruncated: false,
+    }), { agent: () => undefined, person: () => undefined, automation: () => null,
+      prepare: authors => names.prepare(WORKSPACE, authors.filter(author => author.kind === "named")), named: author => names.author(WORKSPACE, author) });
+    expect(await readHistory()).toMatchObject({ moments: [{ authorLabels: ["ana@dohc.test (Edit)", "Agent", "Someone you shared with"] }] });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(await readHistory()).toMatchObject({ moments: [{ authorLabels: ["ana@dohc.test (Edit)", "Agent", "ben@dohc.test (via share link)"] }] });
+    expect(get).toHaveBeenCalledTimes(1);
+  });
   it("keeps the owner's active grants on this workspace, and only the person of a revoked one", async () => {
     const group = { kind: "group", channelWireId: "wire-trip", paths: ["Trip"], versionId: null };
     const listing = await listed({

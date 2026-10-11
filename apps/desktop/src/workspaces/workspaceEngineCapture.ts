@@ -648,6 +648,8 @@ export interface WorkspaceEngineCapture {
   }): Promise<WorkspaceEngineMomentPage>;
   readMoment(momentId: string): Promise<WorkspaceEngineMomentDetail | null>;
   findRestoreReceipt(momentId: string, requestId: string): Promise<WorkspaceEngineRestoreResult | null>;
+  // Whether keyed restore `requestId`, which recorded `momentId`, reached disk.
+  publicationApplied(momentId: string, requestId: string): Promise<boolean>;
   // The ids of a file's moments in the active version after `momentId`,
   // newest first, deletes and renames included. Record-only sync rows never
   // touched the file, so they are passed over.
@@ -665,10 +667,13 @@ export interface WorkspaceEngineCapture {
   // otherwise it throws RestoreFolderInUseError. `person` is who restores, as
   // desktop main read them when the request arrived; the restore moment names
   // them. A protected file's restore names nobody, as its other moments do.
+  // A keyed restore names its expected head, so its delete publishes through
+  // the engine's checked preimage and a retry can confirm it reached disk.
   restoreFileToBeforeMoment(
     momentId: string,
     person: Extract<MomentWriteAuthor, { kind: "human" }>,
-    options?: { expectedHeadMomentId?: string; aloneInFolder?: true; requestId?: string },
+    options?: { expectedHeadMomentId?: string; aloneInFolder?: true; requestId?: undefined }
+      | { expectedHeadMomentId: string; aloneInFolder?: true; requestId: string },
   ): Promise<WorkspaceEngineRestoreResult>;
   // `author` names an agent's removal during a run an automation started, so
   // the removed record's claims carry the run's chain depth.
@@ -4005,6 +4010,8 @@ export function createWorkspaceEngineCapture(
           } else {
             pendingCollectionAdoptionProviders.delete(adoptionKey);
           }
+          // A refusal that clears by itself leaves the adoption pending; a
+          // later drain pass retries it.
           if (isTransientEngineRefusal(error)) {
             continue;
           }
@@ -6435,6 +6442,11 @@ export function createWorkspaceEngineCapture(
       const engine = await engineStore();
       const original = await engine.getMoment({workspaceId, momentId});
       return original ? findRestoreReceipt(engine, original, requestId) : null;
+    },
+
+    async publicationApplied(momentId, requestId) {
+      await chain;
+      return (await engineStore()).publicationApplied({workspaceId, requestId, momentId});
     },
 
     async listObjectMomentsAfter(objectId, momentId) {

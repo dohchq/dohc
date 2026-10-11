@@ -3157,6 +3157,21 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_FIELD_HISTORY_LINK_AUTHOR_DDL,
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 43,
+        id: "v2-audited-projection-contributions",
+        sql: "CREATE TABLE live_audit_projection_contributions ( \
+                workspace_id TEXT NOT NULL, origin_id TEXT NOT NULL, origin_seq INTEGER NOT NULL, \
+                record_digest TEXT NOT NULL, author_json TEXT NOT NULL \
+                  CHECK (json_valid(author_json) AND json_type(author_json)='array' \
+                    AND json_array_length(author_json) BETWEEN 1 AND 1024 \
+                    AND length(CAST(author_json AS BLOB))<=131072), \
+                PRIMARY KEY(workspace_id,origin_id,origin_seq,record_digest), \
+                FOREIGN KEY(workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE \
+              ) STRICT; \
+              ALTER TABLE live_audit_projection_authors ADD COLUMN moment_base_json TEXT;",
+        sets_user_version: None,
+    },
 ];
 
 const V2_OPEN_DOCUMENT_ARTIFACTS_DDL: &str = "\
@@ -3803,6 +3818,10 @@ mod tests {
             (
                 "v2-field-history-link-author",
                 "459b1b741b2a2ae0ee53c7c4696a6935ad651ae5905c1e3da42642f88ee413f0",
+            ),
+            (
+                "v2-audited-projection-contributions",
+                "ffe123de3b71b3874993b68c764c0f939d081ec784a982d8dc8b359152955d55",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

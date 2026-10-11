@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
+import type { EngineMomentRecord } from "../../../src/ipc/bridgeContract";
 import { OwnerRestoreDialog } from "../../../src/renderer/OwnerRestoreDialog";
+import { EngineHistoryView } from "../../../src/renderer/workbench/EngineHistory";
 import { NoticeCenter, type WorkspaceErrorNotice } from "../../../src/renderer/workbench/NoticeCenter";
 import { ConnectionNotices } from "../../../src/renderer/shell/connectionNotices";
 import { Overlay } from "../../../src/renderer/Overlay";
@@ -17,7 +19,7 @@ const receipt = (cursor: number) => ({ deliveryId: `change-${cursor}`, updateDig
 const text = (label: string) => Array.from({ length: 6 }, (_, index) => `${label} ${index + 1}`).join("\n");
 const review = {
   operationId: "restore", workspaceId: "workspace", binding, proposalDigest, candidateDigest: digest, recordedAtMs: 9,
-  point: { journalCursor: 0, receiptDigest: digest, markdownDigest: digest }, selectedPointReceivedAtMs: null,
+  point: { journalCursor: 0, receiptDigest: digest, markdownDigest: digest }, selectedPointReceivedAtMs: null, selectedPointAuthority: null,
   frozenTerminal: receipt(20), selectedEventCount: 0, acceptedEventCount: 20,
   selectedHistoryDigest: digest, acceptedHistoryDigest: digest, nativeSourceManifestDigest: digest,
   content: { frozenMarkdown: text("Shared edit"), restoredMarkdown: text("Launch step"), frozenMarkdownDigest: digest,
@@ -38,7 +40,7 @@ let status = { operationId: "restore", document: documentKey, path, phase: "nati
   onUpdateState: () => () => {},
   async ownerRestore(input: { action: string }) {
     if (input.action === "options") {
-      return { document: documentKey, path, grants: [], points: [], nextBeforeCursor: null, nextGrantCursor: null,
+      return { document: documentKey, path, grants: [], points: [], authors: [], nextBeforeCursor: null, nextGrantCursor: null,
         pendingOperation: { operationId: "restore", phase: "native-fenced", proposalDigest: null } };
     }
     if (input.action === "status") return status;
@@ -62,6 +64,16 @@ const workspaceError: WorkspaceErrorNotice = {
   details: "Notice: Sharing refresh failed", atMs: 1_788_922_800_000, canRetry: true, seen: false,
 };
 const ignore = () => {};
+// Several days of History, so a day heading sticks at the top of the list.
+const moments: EngineMomentRecord[] = Array.from({ length: 40 }, (_, index) => ({
+  id: `moment-${index}`,
+  versionId: "main",
+  path,
+  recordedAtMs: new Date(2026, 8, 17, 18).getTime() - index * 3 * 3_600_000,
+  operation: "write",
+  origin: "local-file",
+  momentOrder: 40 - index,
+}));
 
 function SharedRestoreFixture() {
   const [open, setOpen] = useState(false);
@@ -112,6 +124,19 @@ function SharedRestoreFixture() {
           onDismissWorkspaceError={ignore}
         />
       </nav>
+      {/* The History panel at the desktop sidebar's width. Its top offset
+          stands in for the window and panel headers above it, which puts a
+          day heading level with the review's title. */}
+      <aside className="flex w-60 shrink-0 flex-col border-r border-line bg-panel-2 pt-20">
+        <EngineHistoryView
+          moments={moments}
+          hasMore={false}
+          loadingMore={false}
+          protectedTruncated={false}
+          onLoadMore={ignore}
+          onOpenMoment={ignore}
+        />
+      </aside>
       <section className="flex-1 p-6">
         <button type="button" onClick={() => setOpen(true)}>Open restore review</button>
         <output aria-label="Restore result">{restored ? "restored" : ""}</output>

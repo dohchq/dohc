@@ -1441,13 +1441,13 @@ fn seed_scene_from_artifact_on_store(
             .as_bytes()
         )
     );
-    // Only the moment ids whose head writes were actually enqueued: a planned
+    // Only the jobs of head writes that were actually enqueued: a planned
     // asset whose content-addressed path already holds matching content takes
     // the `continue` below and creates no moment, and counting it as a
     // materialization job would reject the open as pending forever. The
     // guarded closure can run again after a crash retry, so it rebuilds the
     // list from scratch each attempt.
-    let mut created_moment_ids: Vec<String> = Vec::new();
+    let mut created_job_ids: Vec<String> = Vec::new();
     let outcome = dohc_engine_collab::record_local_update(
         store,
         doc_cache,
@@ -1467,7 +1467,7 @@ fn seed_scene_from_artifact_on_store(
         faults,
         now_ms,
         |tx, _, _update_sha| {
-            created_moment_ids.clear();
+            created_job_ids.clear();
             // The drawing's file is the artifact this seed imported, so the
             // lineage is not ahead of it until another update lands.
             dohc_engine_collab::author_coverage::advance_in(tx, key, false)?;
@@ -1536,7 +1536,7 @@ fn seed_scene_from_artifact_on_store(
                     .map_err(|error| CollabError::Corrupt {
                         reason: format!("scene asset outbound journal failed: {error}"),
                     })?;
-                created_moment_ids.push(asset.moment_id.clone());
+                created_job_ids.push(dohc_engine_domain::binary_write_job_id(&asset.moment_id));
             }
             Ok(())
         },
@@ -1544,7 +1544,7 @@ fn seed_scene_from_artifact_on_store(
     if matches!(outcome, TxnOutcome::Crashed { .. }) {
         return Err(RuntimeError::OperationCrashed);
     }
-    Ok(created_moment_ids)
+    Ok(created_job_ids)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3921,14 +3921,14 @@ mod scene_seed_transaction_tests {
             &NoFaults,
         )
         .expect("seed scene");
-        // Every returned moment id must name a job that actually exists.
+        // Every returned job id must name a job that actually exists.
         for job_id in &jobs {
             assert!(
                 store
                     .load_materialization_job(job_id)
                     .expect("load job")
                     .is_some(),
-                "returned moment id {job_id} has no materialization job",
+                "returned job id {job_id} has no materialization job",
             );
         }
     }

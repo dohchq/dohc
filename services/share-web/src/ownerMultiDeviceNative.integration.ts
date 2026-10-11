@@ -209,7 +209,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
         const delivery = startDesktopOwnerDelivery({config: deliveryConfig,
           async runPass(document, signal) {
             const result = await runNativeOwnerDeliveryPass({client, workspaceHandle, document, config: deliveryConfig,
-              signal: AbortSignal.any([lifetime, signal]), bearer, accountId: ownerUser.id, assertCurrent() {expect(storage.unavailable.aborted).toBe(false);}});
+              signal: AbortSignal.any([lifetime, signal]), bearer, accountId: signedIn.user.id, assertCurrent() {expect(storage.unavailable.aborted).toBe(false);}});
             if (result !== "retry") completed(result);
             return result;
           },

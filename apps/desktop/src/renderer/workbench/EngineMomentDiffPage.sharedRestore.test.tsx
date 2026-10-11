@@ -21,7 +21,7 @@ async function open(detail: WorkspaceEngineMomentDetail) {
     person: () => undefined,
     automation: (automationId) => ({ name: automationId, collection: "Tasks" }),
   });
-  const ownerRestore = vi.fn().mockResolvedValue({document: {workspaceId: "workspace"}, grants: [], points: [], pendingOperation: null,
+  const ownerRestore = vi.fn().mockResolvedValue({document: {workspaceId: "workspace"}, grants: [], points: [], authors: [], pendingOperation: null,
     nextGrantCursor: null, nextBeforeCursor: null});
   vi.stubGlobal("dohcDesktop", {readEngineMoment: vi.fn().mockResolvedValue({moment}), ownerRestore});
   render(<EngineMomentDiffPage workspaceId="workspace" tabPath={momentDiffTabPath(moment.id)}
@@ -75,7 +75,9 @@ it("offers Stop and restore only for a change a person the owner shared with, or
   await open(textDetail);
   expect(screen.queryByTestId("engine-diff-stop-and-restore")).toBeNull();
   cleanup();
+  // The relay carries a direct write in as "sync".
   const named: WorkspaceEngineMomentDetail = {protected: false, moment: {...base, path: "docs/collection.yaml",
+    metadata: {origin: "sync"},
     authors: [{kind: "named", userId: "user_ana", grantId: "grant-1", grantGeneration: 1}],
     payload: {before: null, after: {...text, path: "docs/collection.yaml"}}}};
   const {moment} = await open(named);
@@ -84,9 +86,25 @@ it("offers Stop and restore only for a change a person the owner shared with, or
   expect(stopAndRestore).toHaveBeenCalledWith({target: {kind: "person", userId: "user_ana"}, label: "Someone you shared with"});
   cleanup();
   const linked: WorkspaceEngineMomentDetail = {protected: false, moment: {...base, path: "docs/collection.yaml",
+    metadata: {origin: "sync"},
     authors: [{kind: "link", grantId: "grant-link", grantGeneration: 2, principalId: "holder"}],
     payload: {before: null, after: {...text, path: "docs/collection.yaml"}}}};
   await open(linked);
   fireEvent.click(screen.getByTestId("engine-diff-stop-and-restore"));
   expect(stopAndRestore).toHaveBeenLastCalledWith({target: {kind: "link", grantId: "grant-link"}, label: "Edit link"});
+});
+
+// A live document's settlement names the collaborator whose edit it holds.
+// The direct-write ledger has nothing of it, so the page names them and
+// offers the shared restore instead.
+it("names a live document's collaborator without offering Stop and restore", async () => {
+  for (const author of [
+    {kind: "named" as const, userId: "user_ana", grantId: "grant-1", grantGeneration: 1},
+    {kind: "link" as const, grantId: "grant-link", grantGeneration: 2, principalId: "holder"},
+  ]) {
+    await open({protected: false, moment: {...base, authors: [author], payload: {before: null, after: text}}});
+    expect(screen.queryByTestId("engine-diff-stop-and-restore")).toBeNull();
+    expect(screen.getByTestId("engine-diff-shared-restore")).toBeTruthy();
+    cleanup();
+  }
 });

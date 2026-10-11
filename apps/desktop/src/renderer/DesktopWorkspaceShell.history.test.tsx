@@ -288,6 +288,23 @@ describe("history page", () => {
     expect((await screen.findByTestId("engine-diff-summary")).textContent).toBe("Renamed to b.md");
   });
 
+  it("finds a moment by an author its shortened source label leaves out", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(async () => historyPage([
+      {...historyMoment("many", "Revised the plan"), authorLabels: ["You", "trip-agent", "ana@example.com", "ben@example.com"]},
+      historyMoment("other", "Wrote the outline"),
+    ]));
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await screen.findByTestId("titlebar-about-sidebar");
+    await user.click(screen.getByTestId("activity-history"));
+    expect(await screen.findByText("Wrote the outline")).toBeTruthy();
+    expect(screen.getByText("You, trip-agent, ana@example.com and 1 more")).toBeTruthy();
+    await user.type(screen.getByTestId("engine-history-search"), "ben@example.com");
+    await waitFor(() => expect(screen.queryByText("Wrote the outline")).toBeNull());
+    expect(screen.getByText("Revised the plan")).toBeTruthy();
+  });
+
   it("keeps earlier History reachable when the bounded policy scan returns no rows", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn()

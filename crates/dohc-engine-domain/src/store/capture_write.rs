@@ -881,7 +881,7 @@ pub fn capture_ingest_binary_with_admission_in_tx<E>(
 where
     E: From<DomainError>,
 {
-    use crate::conflicts::{PersistBinaryHead, persist_binary_head_in_tx};
+    use crate::conflicts::{PersistBinaryHead, binary_write_job_id, persist_binary_head_in_tx};
 
     validate_identifier(&input.workspace_id, "workspace_id")?;
     validate_identifier(&input.version_id, "version_id")?;
@@ -1010,7 +1010,7 @@ where
             dohc_engine_storage::record_completed_job(
                 tx,
                 &MaterializationJobSpec {
-                    job_id: moment.moment_id.clone(),
+                    job_id: binary_write_job_id(&moment.moment_id),
                     workspace_id: input.workspace_id.clone(),
                     target_path: path.clone(),
                     content_sha256: result_sha.clone(),
@@ -1119,7 +1119,7 @@ where
     dohc_engine_storage::record_completed_job(
         tx,
         &MaterializationJobSpec {
-            job_id: moment_id.clone(),
+            job_id: binary_write_job_id(&moment_id),
             workspace_id: input.workspace_id.clone(),
             target_path: path.clone(),
             content_sha256: binary_sha256.clone(),
