@@ -21,7 +21,7 @@ function deriveImportTarget(sourcePath: string): { dbPath: string; tableName: st
   return { dbPath: `${dir}${base}.sqlite`, tableName };
 }
 
-const MAX_CSV_PREVIEW_ROWS = 500;
+import { MAX_CSV_PREVIEW_ROWS, detectCsvBound, type CsvBoundOffer } from "./offers/csvBound";
 
 const CsvTableHeader = memo(function CsvTableHeader({
   header,
@@ -150,6 +150,8 @@ export function CsvView({
   onSaveStateChange,
   registerDraftFlush,
   localBuffer,
+  onCsvBoundOffer,
+  csvSource,
 }: {
   reopenKey?: number;
   switchReadPending: boolean;
@@ -171,6 +173,8 @@ export function CsvView({
   onSaveStateChange?: (state: SaveState) => void;
   registerDraftFlush?: (flush: DraftFlush | null) => void;
   localBuffer: SharedLocalDocument;
+  onCsvBoundOffer?: (offer: CsvBoundOffer | null) => void;
+  csvSource?: "workspace-file" | "received-share" | "dataset";
 }) {
   const locked = Boolean(truncated || readOnly);
   const [raw, setRaw] = useState(false);
@@ -227,6 +231,16 @@ export function CsvView({
 
   const header = rows[0];
   const dataRowCount = Math.max(0, rows.length - 1);
+  useEffect(() => {
+    if (rows !== rowsRef.current || switchReadPending || switchUnresyncedRef.current) {
+      onCsvBoundOffer?.(null);
+      return;
+    }
+    onCsvBoundOffer?.(raw || !csvSource ? null : detectCsvBound({ workspaceId, path, totalRows: dataRowCount,
+      source: csvSource, complete: !truncated,
+    }));
+  }, [onCsvBoundOffer, csvSource, workspaceId, path, dataRowCount, rows, raw, truncated, switchReadPending, switchUnresyncedRef]);
+  useEffect(() => () => onCsvBoundOffer?.(null), [workspaceId, onCsvBoundOffer]);
   // Bounded preview: an unbounded <table> over 10,000+ rows
   // freezes the renderer for tens of seconds. The first rows are enough to
   // inspect and edit common CSVs; working with all of them is what Import to

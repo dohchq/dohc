@@ -141,5 +141,6 @@
   "usage.clear",
   "usage.switch",
   "share.copy.read",
-  "document.typing.recovery"
+  "document.typing.recovery",
+  "app.recognition.read"
 ]

@@ -1099,7 +1099,7 @@ mod collection_adoption_update_tests {
     }
 
     #[test]
-    fn relation_cleanup_propagates_a_symlink_refusal_then_reconciles_siblings() {
+    fn relation_cleanup_skips_a_symlink_referrer_then_retries_after_replacement() {
         let (scratch, mut store, mut cache) = fixture();
         seed_relation_referrers(&mut store, &mut cache, scratch.path());
         let target = scratch.path().join("symlink-target.md");
@@ -1110,17 +1110,6 @@ mod collection_adoption_update_tests {
             eprintln!("file symlink privilege unavailable; skipping symlink referrer test");
             return;
         }
-        assert!(matches!(
-            reconcile(&mut store, &mut cache, scratch.path()),
-            Err(RuntimeError::Materialize(
-                dohc_engine_files::MaterializeError::SymlinkTarget
-            ))
-        ));
-        assert!(
-            std::fs::read_to_string(scratch.path().join("tasks/z.md"))
-                .unwrap()
-                .contains("related:")
-        );
         assert_relation_cleanup_skips_only_broken_referrer(&mut store, &mut cache, scratch.path());
         assert!(
             std::fs::symlink_metadata(&path)
@@ -1128,7 +1117,49 @@ mod collection_adoption_update_tests {
                 .file_type()
                 .is_symlink()
         );
-        assert_eq!(std::fs::read_to_string(target).unwrap(), original);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), original);
+        assert_relation_referrer_is_retried(&mut store, &mut cache, scratch.path());
+        let indexed = store
+            .read_with(|conn| {
+                query_collection_records(conn, "workspace", "tasks", &CollectionQuery::default())
+            })
+            .unwrap()
+            .unwrap();
+        let referrer = indexed
+            .records
+            .iter()
+            .find(|record| record.path == "tasks/a.md")
+            .unwrap();
+        assert!(referrer.values.iter().any(|value| {
+            value.field == "related" && value.value == "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }));
+        cache.clear();
+        let state = ydoc_open_state_on_store(
+            &mut store,
+            &mut cache,
+            "workspace",
+            10,
+            false,
+            None,
+            "main",
+            "tasks/a.md",
+            Some(ContentKind::Richdoc),
+            false,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        let doc = Ydoc::wire();
+        doc.apply(&state.initial_update).unwrap();
+        assert_eq!(
+            doc.frontmatter_json()["related"],
+            "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::rename(&target, &path).unwrap();
+        let result = reconcile(&mut store, &mut cache, scratch.path()).unwrap();
+        assert_eq!(result.changed_paths, ["tasks/a.md"]);
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("related:"));
         assert!(
             reconcile(&mut store, &mut cache, scratch.path())
                 .unwrap()
@@ -1682,6 +1713,16 @@ fn cleanup_collection_relation_on_store(
     token: &CancellationToken,
     root_guard: Option<&dyn WorkspaceRootGuard>,
 ) -> Result<CollectionRelationCleanupExecution, RuntimeError> {
+    match dohc_engine_files::materialize::write_precondition_sha256(
+        root_dir,
+        &candidate.source_file_path,
+    ) {
+        Ok(_) => {}
+        Err(dohc_engine_files::MaterializeError::SymlinkTarget) => {
+            return Ok(CollectionRelationCleanupExecution::Skipped);
+        }
+        Err(error) => return Err(error.into()),
+    }
     let probe = ydoc_open_state_on_store(
         store,
         doc_cache,

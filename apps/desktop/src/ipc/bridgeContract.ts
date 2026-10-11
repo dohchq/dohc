@@ -1542,6 +1542,7 @@ const EngineMomentAuthor = z.union([
     kind: z.literal("human"),
     humanId: z.string().min(1),
     humanName: z.string().min(1).max(500).optional(),
+    relayConfirmed: z.literal(true).optional(),
     onBehalfOf: z.string().min(1).optional(),
   }).strict(),
   z.object({
@@ -3156,6 +3157,27 @@ const SitePackageInfo = z
     }
   });
 export type SitePackageInfo = z.infer<typeof SitePackageInfo>;
+
+export const FolderAppPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  folder: z.union([z.literal("."), PATH_STRING.refine(isNormalizedRelativePath)]),
+}).strict();
+export type FolderAppPayload = z.infer<typeof FolderAppPayload>;
+export const FolderAppAnswer = z.object({
+  workspaceId: WORKSPACE_ID,
+  folder: PATH_STRING,
+  isApp: z.boolean(),
+  run: z.object({ path: PATH_STRING, entryPath: PATH_STRING.nullable(), previewMode: z.enum(["static", "dev", "build"]).nullable() }).nullable(),
+});
+export type FolderAppAnswer = z.infer<typeof FolderAppAnswer>;
+export const folderAppOfferOperations = {
+  getFolderApp: {
+    capabilityId: "app.recognition.read", channel: "desktop:get-folder-app",
+    payload: FolderAppPayload, result: FolderAppAnswer,
+    guard: "active-workspace", scope: "workspace",
+    inactiveMessage: "Open this workspace to inspect its apps.",
+  },
+} as const satisfies OperationTable;
 
 export const ListSitesPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -6659,6 +6681,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof captureRecoveryOperations>,
     OperationBridge<typeof fileObservationOperations>,
     OperationBridge<typeof workspaceSearchOperations>,
+    OperationBridge<typeof folderAppOfferOperations>,
     OperationBridge<typeof crashReportOperations>,
     OperationBridge<typeof reportingOperations>,
     OperationBridge<typeof usageRecordOperations>,
@@ -7183,6 +7206,7 @@ export interface DohcDesktopBridge
   // Streamed result batches, validated batch-by-batch in the preload. Returns
   // an unsubscribe function. The searchId round-trips so the renderer drops
   // batches that belong to a superseded search.
+  onFolderAppChanged(listener: (answer: FolderAppAnswer) => void): () => void;
   onSearchResults(listener: (batch: SearchResultsEvent) => void): () => void;
   // WS-G2-C-2 engine Y.Doc editor binding. The renderer mints a sessionId and
   // opens a live engine Y.Doc session for a supported live file; main constructs the

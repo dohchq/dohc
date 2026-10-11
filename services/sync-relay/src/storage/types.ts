@@ -792,7 +792,7 @@ export interface SyncRelayStorage {
     expectedSha256: string | null;
   }): { sha256: string };
   getKeyEnvelope(workspaceId: string): KeyEnvelopeRow | null;
-  prepareHostedSettlements(input:{workspaceId:string;originId:string;ops:SyncRelayLogInput[]},signal?:AbortSignal):Promise<void>;
+  prepareLogAppend(input:{workspaceId:string;originId:string;ops:SyncRelayLogInput[]},signal?:AbortSignal):Promise<void>;
   appendLogBatch(input: {
     workspaceId: string;
     originId: string;

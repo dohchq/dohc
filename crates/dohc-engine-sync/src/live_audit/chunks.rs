@@ -35,15 +35,6 @@ pub(super) fn require_blob_length(
     Ok(())
 }
 
-fn read_error(error: SyncError) -> io::Error {
-    let kind = match &error {
-        SyncError::BlobInvalid => io::ErrorKind::NotFound,
-        SyncError::InvalidInput { .. } => io::ErrorKind::InvalidData,
-        _ => io::ErrorKind::Other,
-    };
-    io::Error::new(kind, error)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct Chunk {
@@ -169,6 +160,7 @@ pub(super) struct ChunkReader<'a> {
     token_length: usize,
     depth: usize,
     bounded_container: Option<(usize, u64)>,
+    storage_failure: Option<dohc_engine_storage::StorageError>,
 }
 
 impl<'a> ChunkReader<'a> {
@@ -187,7 +179,17 @@ impl<'a> ChunkReader<'a> {
             token_length: 0,
             depth: 0,
             bounded_container: None,
+            storage_failure: None,
         })
+    }
+
+    pub fn take_storage_failure(&mut self) -> Option<dohc_engine_storage::StorageError> {
+        self.storage_failure.take()
+    }
+
+    fn record_storage_failure(&mut self, error: dohc_engine_storage::StorageError) -> io::Error {
+        self.storage_failure = Some(error);
+        io::Error::other("live audit storage read failed")
     }
 
     fn token(&mut self, byte: u8, position: u64) -> io::Result<()> {
@@ -283,12 +285,20 @@ impl Read for ChunkReader<'_> {
             let Some(chunk) = self.manifest.chunks.get(self.next) else {
                 return Ok(0);
             };
-            require_blob_length(self.conn, &chunk.sha256, chunk.byte_length).map_err(read_error)?;
+            require_blob_length(self.conn, &chunk.sha256, chunk.byte_length).map_err(|error| {
+                match error {
+                    SyncError::Storage(error) => self.record_storage_failure(error),
+                    error @ SyncError::InvalidInput { .. } => {
+                        io::Error::new(io::ErrorKind::InvalidData, error)
+                    }
+                    error => io::Error::other(error),
+                }
+            })?;
             // Drop the previous allocation before the bounded blob read.
             self.buffer = Vec::new();
             self.buffer = dohc_engine_storage::get_binary_blob(self.conn, &chunk.sha256)
-                .map_err(io::Error::other)?
-                .ok_or_else(|| read_error(SyncError::BlobInvalid))?;
+                .map_err(|error| self.record_storage_failure(error))?
+                .ok_or_else(|| io::Error::other("live audit chunk unavailable"))?;
             self.offset = 0;
             self.next += 1;
         }
