@@ -330,7 +330,9 @@ impl EngineStore {
         E: From<StorageError>,
     {
         self.prepare_write().map_err(E::from)?;
-        Self::write_on_connection(&self.conn, faults, f)
+        let outcome = Self::write_on_connection(&self.conn, faults, f)?;
+        self.record_write_outcome(&outcome);
+        Ok(outcome)
     }
 
     /// One FULL commit syncs this transaction and every earlier WAL commit.
@@ -343,9 +345,24 @@ impl EngineStore {
         E: From<StorageError>,
     {
         self.prepare_write().map_err(E::from)?;
-        crate::durability::with_full_synchronous(&self.conn, |conn| {
+        let outcome = crate::durability::with_full_synchronous(&self.conn, |conn| {
             Self::write_on_connection(conn, faults, f)
-        })
+        })?;
+        self.record_write_outcome(&outcome);
+        Ok(outcome)
+    }
+
+    fn record_write_outcome<T>(&mut self, outcome: &TxnOutcome<T>) {
+        if matches!(
+            outcome,
+            TxnOutcome::Committed(_) | TxnOutcome::Crashed { committed: true }
+        ) {
+            self.request_checkpoint();
+            #[cfg(feature = "fault-injection")]
+            {
+                self.harness_commits += 1;
+            }
+        }
     }
 
     fn write_on_connection<T, E>(
@@ -377,11 +394,6 @@ impl EngineStore {
         }
 
         tx.commit().map_err(StorageError::persist)?;
-        self.request_checkpoint();
-        #[cfg(feature = "fault-injection")]
-        {
-            self.harness_commits += 1;
-        }
 
         if should_crash(faults, FaultPoint::StorageAfterCommitBeforeAck) {
             return Ok(TxnOutcome::Crashed { committed: true });
