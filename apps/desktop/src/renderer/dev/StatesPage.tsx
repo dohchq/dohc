@@ -8,6 +8,7 @@ import type {
   ChatChannelRecord,
   ChatMessageRecord,
   ChatThreadRecord,
+  CloudStatusResult,
   EngineMomentRecord,
   HistoryPolicyUnreadableResult,
   SitePackageInfo,
@@ -24,6 +25,7 @@ import { SlashCommandMenu, type SlashCommandState } from "../editor/slashCommand
 import { buildTableMenu, type TableMenuRow } from "../editor/tableControls";
 import { OverlayFrame } from "../Overlay";
 import { CollectionUnavailable } from "../TransactionalCollectionPage";
+import { CloudSyncSettings, type CloudSettings } from "../settings/CloudSyncSettings";
 import { ColorControl, HueControl, SettingRow, StepperControl, SwitchControl, TextControl, ThemeControl } from "../settings/SettingRow";
 import { PreferredNameControl } from "../settings/PreferredNameControl";
 import { SettingsNav } from "../settings/SettingsNav";
@@ -1743,9 +1745,45 @@ function Pane(props: { theme: "light" | "dark" }) {
           </div>
         </Specimen>
       </Section>
+
+      {/* After Rails, so the parts above keep their places. */}
+      <Section part="settings-sync" title="Settings: Sync and sharing">
+        <Specimen label="signed in, syncing, on a private server; keyboard focus on Disconnect">
+          <div className="w-[640px]" data-force-state="focus focus-visible" data-force-target='[data-testid="cloud-disconnect"]'>
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, networkAccess: "private", workspaceSynced: true, workspaceSyncConnected: true })} />
+          </div>
+        </Specimen>
+        <Specimen label="signed in, not syncing">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud(CLOUD_SIGNED_IN)} />
+          </div>
+        </Specimen>
+        <Specimen label="paused until dohc verifies this account">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, workspaceSynced: true })} />
+          </div>
+        </Specimen>
+        <Specimen label="signed out">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ connected: false })} />
+          </div>
+        </Specimen>
+      </Section>
     </section>
   );
 }
+
+const CLOUD_SIGNED_IN: CloudStatusResult = {
+  connected: true,
+  email: "sam@hollis.studio",
+  serverUrl: "https://dohc.hollis.studio",
+  relayUrl: "https://relay.hollis.studio",
+  workspaceSynced: false,
+  workspaceSyncConnected: false,
+};
+const settingsCloud = (status: CloudStatusResult): CloudSettings => ({
+  status, unreadable: false, onChanged: noop, onConnect: noop, onError: noop,
+});
 
 const SETTINGS_WORKSPACE = "C:\\Users\\ada\\Documents\\trip";
 const EDITOR_FONT_OPTIONS = [

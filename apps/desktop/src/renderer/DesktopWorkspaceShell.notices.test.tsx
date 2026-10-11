@@ -2095,20 +2095,25 @@ describe("owner live documents", () => {
     );
     expect(screen.queryByTestId("settings-row-live-documents")).toBeNull();
     expect(
-      screen.getByRole("button", { name: "Open sync and sharing" }),
-    ).toBeTruthy();
+      (await screen.findByRole("switch", { name: "Sync this workspace" })).getAttribute("aria-checked"),
+    ).toBe("false");
   });
 
-  // Closing the connection dialog re-reads the status this gate is derived
-  // from, so the list arrives without a restart or a workspace switch.
+  // Turning sync on re-reads the status this gate is derived from, so the
+  // list arrives without a restart or a workspace switch.
   it("offers the live document list once this workspace syncs", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
     let workspaceSynced = false;
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      cloudEnableSync: vi.fn(async () => {
+        workspaceSynced = true;
+      }),
+    });
     bridge.cloudStatus = vi.fn(async () => ({
       connected: true,
       email: "me@dohc.test",
       serverUrl: "https://cloud.dohc.test",
       workspaceSynced,
+      workspaceSyncConnected: workspaceSynced,
     }));
     const user = userEvent.setup();
     renderShell(bridge);
@@ -2117,14 +2122,98 @@ describe("owner live documents", () => {
     await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalled());
     expect(screen.queryByTestId("settings-row-live-documents")).toBeNull();
 
-    await user.click(screen.getByRole("button", { name: "Open sync and sharing" }));
-    await screen.findByTestId("cloud-sync-panel");
-    workspaceSynced = true;
+    await user.click(await screen.findByRole("switch", { name: "Sync this workspace" }));
+
+    expect(bridge.cloudEnableSync).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId });
+    expect(await screen.findByTestId("settings-row-live-documents")).toBeTruthy();
+  });
+});
+
+// Connect server is one path: signed in, the account and the sync switch are
+// settings; signed out, connecting is the Cloud dialog.
+describe("Connect server", () => {
+  const SIGNED_OUT = { connected: false, email: "", serverUrl: "", workspaceSynced: false };
+  const openFromPalette = async (user: ReturnType<typeof userEvent.setup>) => {
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Connect server"));
+  };
+
+  it("opens Settings' Sync and sharing page while signed in", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn(async () => ({
+      connected: true,
+      email: "me@dohc.test",
+      serverUrl: "https://cloud.dohc.test",
+      workspaceSynced: false,
+    }));
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalled());
+
+    await openFromPalette(user);
+
+    const section = await screen.findByTestId("settings-section-cloud");
+    expect(within(section).getByTestId("settings-row-account").textContent).toContain("me@dohc.test");
+    expect(screen.queryByTestId("cloud-sync-panel")).toBeNull();
+  });
+
+  it("opens the Cloud dialog while signed out, from the palette and from Settings", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn(async () => SIGNED_OUT);
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalled());
+
+    await openFromPalette(user);
+    expect(await screen.findByTestId("cloud-server-url")).toBeTruthy();
+    expect(screen.queryByTestId("settings-dialog")).toBeNull();
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByTestId("cloud-sync-panel")).toBeNull());
 
-    await openCloudSettings(user);
-    expect(await screen.findByTestId("settings-row-live-documents")).toBeTruthy();
+    await user.click(await screen.findByTestId("activity-settings"));
+    await user.click(await screen.findByTestId("settings-nav-cloud"));
+    await user.click(await screen.findByTestId("settings-cloud-connect"));
+    expect(await screen.findByTestId("cloud-server-url")).toBeTruthy();
+    expect(screen.queryByTestId("settings-dialog")).toBeNull();
+  });
+
+  // The next step after signing in is the sync switch, so the dialog hands
+  // over to the page that holds it.
+  it("moves on to Settings' Sync and sharing page once sign-in completes", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let connected = false;
+      const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+        cloudLoginStart: vi.fn(async () => ({ userCode: "ABCD", verificationUri: "https://cloud.dohc.test/device" })),
+        cloudLoginPoll: vi.fn(async () => {
+          connected = true;
+          return { status: "complete" as const, email: "me@dohc.test" };
+        }),
+      });
+      bridge.cloudStatus = vi.fn(async () =>
+        connected
+          ? { connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: false }
+          : SIGNED_OUT,
+      );
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      renderShell(bridge);
+      await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalled());
+
+      await openFromPalette(user);
+      await user.type(await screen.findByTestId("cloud-server-url"), "https://cloud.dohc.test");
+      await user.click(screen.getByTestId("cloud-connect-start"));
+      await screen.findByTestId("cloud-user-code");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+
+      const section = await screen.findByTestId("settings-section-cloud");
+      expect(screen.queryByTestId("cloud-sync-panel")).toBeNull();
+      expect((await within(section).findByTestId("settings-row-account")).textContent).toContain("me@dohc.test");
+      expect(within(section).getByRole("switch", { name: "Sync this workspace" })).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

@@ -164,19 +164,19 @@ If it fails, inspect the sync-relay logs and verify disk space and the relay's p
 
 ## Connect the desktop app
 
-1. Open **Settings → Sync and sharing**.
+1. Open **Settings → Sync and sharing** and select **Connect server**.
 2. Enter the HTTPS address you configured above.
 3. Follow the browser sign-in flow.
 4. Create an account on your server and verify your email.
 5. Approve the device after checking the displayed code.
-6. Return to dohc and select **Sync this workspace**.
+6. Return to dohc. Settings opens on **Sync and sharing**; turn on **Sync this workspace**.
 
 The server account belongs to your server.
 A dohc Drive account is not required.
 The connection applies to this dohc installation; workspace permissions still determine what it can access.
 
 On another device, connect to the same server and sign in to the same account.
-Use the workspace's sync code to join the existing workspace in a local folder.
+Copy the workspace code from **Settings → Sync and sharing**, then use it to join the existing workspace in a local folder.
 
 ## Share work
 
