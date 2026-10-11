@@ -34,9 +34,10 @@ const MAX_KEY_ENVELOPE_ACK_BYTES: u64 = 64 * 1024;
 const RELAY_API_VERSION_HEADER: &str = "x-dohc-api-version";
 const RELAY_API_VERSION: &str = "1";
 const CANCELLABLE_BODY_READ_POLL_INTERVAL: Duration = Duration::from_millis(25);
-/// A canceled synchronous ureq read may live until its transport timeout;
-/// match the runtime's download concurrency so those readers stay bounded.
+/// Canceled synchronous reads may live until their transport timeout;
+/// match each runtime batch's concurrency so those readers stay bounded.
 const MAX_CANCELLABLE_BODY_READ_WORKERS: usize = 4;
+const MAX_CANCELLABLE_COORDINATE_READ_WORKERS: usize = 8;
 /// The largest blob body a response may carry: the loosest ingest ceiling plus
 /// the one byte that lets ingest observe an overage and refuse it by name.
 const MAX_BLOB_BODY_BYTES: usize = MAX_INGEST_BLOB_BYTES + 1;
@@ -68,16 +69,20 @@ fn map_body_read_error(error: std::io::Error, overflow: &RelayError) -> RelayErr
     }
 }
 
-static CANCELLABLE_BODY_READ_WORKERS: std::sync::LazyLock<(
-    std::sync::Mutex<usize>,
-    std::sync::Condvar,
-)> = std::sync::LazyLock::new(|| (std::sync::Mutex::new(0), std::sync::Condvar::new()));
+type ReadWorkerBudget = (std::sync::Mutex<usize>, std::sync::Condvar);
 
-struct BodyReadWorkerPermit;
+static CANCELLABLE_BODY_READ_WORKERS: std::sync::LazyLock<ReadWorkerBudget> =
+    std::sync::LazyLock::new(|| (std::sync::Mutex::new(0), std::sync::Condvar::new()));
+static CANCELLABLE_COORDINATE_READ_WORKERS: std::sync::LazyLock<ReadWorkerBudget> =
+    std::sync::LazyLock::new(|| (std::sync::Mutex::new(0), std::sync::Condvar::new()));
 
-impl Drop for BodyReadWorkerPermit {
+struct ReadWorkerPermit {
+    workers: &'static ReadWorkerBudget,
+}
+
+impl Drop for ReadWorkerPermit {
     fn drop(&mut self) {
-        let (active, available) = &*CANCELLABLE_BODY_READ_WORKERS;
+        let (active, available) = self.workers;
         let mut active = active
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -86,19 +91,34 @@ impl Drop for BodyReadWorkerPermit {
     }
 }
 
-fn acquire_body_read_worker<C>(cancelled: &C) -> Result<BodyReadWorkerPermit, RelayError>
+fn acquire_body_read_worker<C>(cancelled: &C) -> Result<ReadWorkerPermit, RelayError>
 where
     C: Fn() -> bool + ?Sized,
 {
-    let (active, available) = &*CANCELLABLE_BODY_READ_WORKERS;
+    acquire_read_worker(
+        &CANCELLABLE_BODY_READ_WORKERS,
+        MAX_CANCELLABLE_BODY_READ_WORKERS,
+        cancelled,
+    )
+}
+
+fn acquire_read_worker<C>(
+    workers: &'static ReadWorkerBudget,
+    limit: usize,
+    cancelled: &C,
+) -> Result<ReadWorkerPermit, RelayError>
+where
+    C: Fn() -> bool + ?Sized,
+{
+    let (active, available) = workers;
     let mut active = active.lock().map_err(|_| RelayError::InvalidResponse)?;
     loop {
         if cancelled() {
             return Err(cancelled_relay_request());
         }
-        if *active < MAX_CANCELLABLE_BODY_READ_WORKERS {
+        if *active < limit {
             *active += 1;
-            return Ok(BodyReadWorkerPermit);
+            return Ok(ReadWorkerPermit { workers });
         }
         (active, _) = available
             .wait_timeout(active, CANCELLABLE_BODY_READ_POLL_INTERVAL)
@@ -189,6 +209,70 @@ impl HttpRelayTransport {
             base_url,
             token,
             agent: configured_agent(Duration::from_secs(30), allow_insecure_loopback, None),
+        })
+    }
+
+    /// Look up a coordinate while cooperatively observing request cancellation.
+    pub fn lookup_log_coordinate_cancellable<C>(
+        &self,
+        req: LogCoordinateRequest,
+        cancelled: C,
+    ) -> Result<LogCoordinateResponse, RelayError>
+    where
+        C: Fn() -> bool,
+    {
+        self.lookup_log_coordinate_with_cancellation(req, Some(&cancelled))
+    }
+
+    fn lookup_log_coordinate_with_cancellation(
+        &self,
+        req: LogCoordinateRequest,
+        cancelled: Option<&dyn Fn() -> bool>,
+    ) -> Result<LogCoordinateResponse, RelayError> {
+        if req.origin_seq < 0 || req.origin_seq > dohc_engine_sync::MAX_WIRE_INTEGER {
+            return Err(RelayError::InvalidResponse);
+        }
+        let suffix = format!("/log/{}/{}", encode_segment(&req.origin_id), req.origin_seq);
+        let url = self.workspace_url(
+            &req.workspace_id,
+            &suffix,
+            &req.replication_epoch,
+            &req.stream_identity,
+            &[],
+        );
+        let request = self
+            .agent
+            .get(&url)
+            .header("authorization", &self.authorization());
+        let wire: WireLogCoordinateResponse = match cancelled {
+            Some(cancelled) => {
+                self.json_cancellable(move || request.call(), RequestContext::Workspace, cancelled)?
+            }
+            None => self.json(request.call(), RequestContext::Workspace)?,
+        };
+        let (mut op, below_epoch_floor) = match wire {
+            WireLogCoordinateResponse::Absent => return Ok(LogCoordinateResponse::Absent),
+            WireLogCoordinateResponse::Present { op } => (op, false),
+            WireLogCoordinateResponse::PresentBelowEpochFloor { op } => (op, true),
+        };
+        let workspace_id = op.workspace_id.take().ok_or(RelayError::InvalidResponse)?;
+        if workspace_id != req.workspace_id
+            || op.origin_id != req.origin_id
+            || op.origin_seq != req.origin_seq
+        {
+            return Err(RelayError::InvalidResponse);
+        }
+        let envelope = op.into_workspace_envelope(workspace_id);
+        if envelope
+            .relay_seq
+            .is_none_or(|relay_seq| !(0..=dohc_engine_sync::MAX_WIRE_INTEGER).contains(&relay_seq))
+        {
+            return Err(RelayError::InvalidResponse);
+        }
+        Ok(if below_epoch_floor {
+            LogCoordinateResponse::PresentBelowEpochFloor(envelope)
+        } else {
+            LogCoordinateResponse::Present(envelope)
         })
     }
 
@@ -351,16 +435,53 @@ impl HttpRelayTransport {
         response: Result<Response<Body>, ureq::Error>,
         context: RequestContext,
     ) -> Result<T, RelayError> {
-        let mut response = response.map_err(map_transport_error)?;
-        if !response.status().is_success() {
-            return Err(map_http_error(&mut response, context));
+        decode_json_response(response, context)
+    }
+
+    fn json_cancellable<T, C, F>(
+        &self,
+        request: F,
+        context: RequestContext,
+        cancelled: &C,
+    ) -> Result<T, RelayError>
+    where
+        T: DeserializeOwned + Send + 'static,
+        C: Fn() -> bool + ?Sized,
+        F: FnOnce() -> Result<Response<Body>, ureq::Error> + Send + 'static,
+    {
+        let permit = acquire_read_worker(
+            &CANCELLABLE_COORDINATE_READ_WORKERS,
+            MAX_CANCELLABLE_COORDINATE_READ_WORKERS,
+            cancelled,
+        )?;
+        let (response_tx, response_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::Builder::new()
+            .name("dohc-relay-json-read".to_owned())
+            .spawn(move || {
+                let _permit = permit;
+                let _ = response_tx.send(decode_json_response(request(), context));
+            })
+            .map_err(|_| RelayError::InvalidResponse)?;
+        loop {
+            if cancelled() {
+                return Err(cancelled_relay_request());
+            }
+            match response_rx.recv_timeout(CANCELLABLE_BODY_READ_POLL_INTERVAL) {
+                Ok(result) => {
+                    worker.join().map_err(|_| RelayError::InvalidResponse)?;
+                    return if cancelled() {
+                        Err(cancelled_relay_request())
+                    } else {
+                        result
+                    };
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    worker.join().map_err(|_| RelayError::InvalidResponse)?;
+                    return Err(RelayError::InvalidResponse);
+                }
+            }
         }
-        response
-            .body_mut()
-            .with_config()
-            .limit(MAX_JSON_RESPONSE_BYTES)
-            .read_json()
-            .map_err(|_| RelayError::InvalidResponse)
     }
 
     fn bytes(
@@ -491,6 +612,22 @@ impl HttpRelayTransport {
     }
 }
 
+fn decode_json_response<T: DeserializeOwned>(
+    response: Result<Response<Body>, ureq::Error>,
+    context: RequestContext,
+) -> Result<T, RelayError> {
+    let mut response = response.map_err(map_transport_error)?;
+    if !response.status().is_success() {
+        return Err(map_http_error(&mut response, context));
+    }
+    response
+        .body_mut()
+        .with_config()
+        .limit(MAX_JSON_RESPONSE_BYTES)
+        .read_json()
+        .map_err(|_| RelayError::InvalidResponse)
+}
+
 fn configured_agent(
     timeout: Duration,
     allow_insecure_loopback: bool,
@@ -602,48 +739,7 @@ impl RelayTransport for HttpRelayTransport {
         &self,
         req: LogCoordinateRequest,
     ) -> Result<LogCoordinateResponse, RelayError> {
-        if req.origin_seq < 0 || req.origin_seq > dohc_engine_sync::MAX_WIRE_INTEGER {
-            return Err(RelayError::InvalidResponse);
-        }
-        let suffix = format!("/log/{}/{}", encode_segment(&req.origin_id), req.origin_seq);
-        let url = self.workspace_url(
-            &req.workspace_id,
-            &suffix,
-            &req.replication_epoch,
-            &req.stream_identity,
-            &[],
-        );
-        let wire: WireLogCoordinateResponse = self.json(
-            self.agent
-                .get(&url)
-                .header("authorization", &self.authorization())
-                .call(),
-            RequestContext::Workspace,
-        )?;
-        let (mut op, below_epoch_floor) = match wire {
-            WireLogCoordinateResponse::Absent => return Ok(LogCoordinateResponse::Absent),
-            WireLogCoordinateResponse::Present { op } => (op, false),
-            WireLogCoordinateResponse::PresentBelowEpochFloor { op } => (op, true),
-        };
-        let workspace_id = op.workspace_id.take().ok_or(RelayError::InvalidResponse)?;
-        if workspace_id != req.workspace_id
-            || op.origin_id != req.origin_id
-            || op.origin_seq != req.origin_seq
-        {
-            return Err(RelayError::InvalidResponse);
-        }
-        let envelope = op.into_workspace_envelope(workspace_id);
-        if envelope
-            .relay_seq
-            .is_none_or(|relay_seq| !(0..=dohc_engine_sync::MAX_WIRE_INTEGER).contains(&relay_seq))
-        {
-            return Err(RelayError::InvalidResponse);
-        }
-        Ok(if below_epoch_floor {
-            LogCoordinateResponse::PresentBelowEpochFloor(envelope)
-        } else {
-            LogCoordinateResponse::Present(envelope)
-        })
+        self.lookup_log_coordinate_with_cancellation(req, None)
     }
 
     fn probe(&self, req: ProbeRequest) -> Result<ProbeResponse, RelayError> {

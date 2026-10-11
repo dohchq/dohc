@@ -61,10 +61,6 @@ impl Relay {
                     has_more: false,
                 })
             }
-            RelayIoRequest::LookupCoordinate(request) => {
-                self.lookups += 1;
-                RelayIoResponse::LookupCoordinate(self.coordinate(request))
-            }
             RelayIoRequest::LookupCoordinates(requests) => {
                 assert!(requests.len() <= 256);
                 self.lookups += requests.len();
@@ -393,7 +389,7 @@ async fn base_repair_lookup_batch_has_at_most_eight_in_flight_and_preserves_orde
     let task = tokio::spawn(execute_coordinate_lookup_batch(
         requests,
         CancellationToken::new(),
-        move |request| {
+        move |request, _worker_token| {
             let in_flight = worker_active.fetch_add(1, Ordering::SeqCst) + 1;
             worker_peak.fetch_max(in_flight, Ordering::SeqCst);
             assert!(in_flight <= 8);
@@ -478,4 +474,251 @@ fn base_repair_deferred_benchmark() {
             "transport":"deferred bridge with immediate in-process Absent replies; empty pull page", "build":"debug"})
         );
     }
+}
+
+fn lookup_requests(count: i64) -> Vec<LogCoordinateRequest> {
+    (0..count)
+        .map(|origin_seq| LogCoordinateRequest {
+            workspace_id: "ws".into(),
+            replication_epoch: "epoch".into(),
+            stream_identity: "stream".into(),
+            origin_id: "peer".into(),
+            origin_seq,
+        })
+        .collect()
+}
+
+#[test]
+#[ignore = "manual HTTP coordinate benchmark; run alone with --ignored --nocapture"]
+fn base_repair_coordinate_http_batch_benchmark() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    for coordinates in [50_usize, 500, 2_000] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for _ in 0..coordinates * 6 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut bytes = [0; 4096];
+                while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                    let read = stream.read(&mut bytes).unwrap();
+                    assert_ne!(read, 0);
+                    request.extend_from_slice(&bytes[..read]);
+                }
+                let body = r#"{"status":"absent"}"#;
+                write!(stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+        let transport = Arc::new(
+            HttpRelayTransport::new_insecure_loopback_for_tests(
+                format!("http://{address}"),
+                "token",
+            )
+            .unwrap(),
+        );
+        let requests = lookup_requests(coordinates as i64);
+        let mut samples = Vec::new();
+        for sample in 0..=5 {
+            let started = std::time::Instant::now();
+            for chunk in requests.chunks(MAX_BASE_REPAIR_LOOKUPS) {
+                let result = runtime
+                    .block_on(execute_http_request(
+                        Arc::clone(&transport),
+                        RelayIoRequest::LookupCoordinates(chunk.to_vec()),
+                        CancellationToken::new(),
+                    ))
+                    .unwrap();
+                assert!(matches!(result, RelayIoResponse::LookupCoordinates(replies)
+                    if replies == vec![LogCoordinateResponse::Absent; chunk.len()]));
+            }
+            if sample > 0 {
+                samples.push(started.elapsed().as_micros());
+            }
+        }
+        server.join().unwrap();
+        let mut sorted = samples.clone();
+        sorted.sort_unstable();
+        println!(
+            "{}",
+            serde_json::json!({"benchmark":"base_repair_coordinate_http", "coordinates":coordinates,
+                "samples_us":samples, "median_us":sorted[2], "lookup_rounds":coordinates.div_ceil(MAX_BASE_REPAIR_LOOKUPS),
+                "relay_requests":coordinates, "transport":"immediate loopback HTTP Absent replies; no pull/store", "build":"debug"})
+        );
+    }
+}
+
+#[test]
+fn base_repair_single_missing_coordinate_uses_the_batch_path() {
+    let transport = DeferredRelayTransport::default();
+    let requests = lookup_requests(1);
+    assert!(transport.lookup_log_coordinates(requests.clone()).is_err());
+    let pending = transport.take_pending().unwrap();
+    assert!(matches!(&pending, RelayIoRequest::LookupCoordinates(batch) if batch == &requests));
+    transport.complete(
+        pending,
+        Ok(RelayIoResponse::LookupCoordinates(vec![
+            LogCoordinateResponse::Absent,
+        ])),
+    );
+    assert_eq!(
+        transport
+            .lookup_log_coordinate(requests[0].clone())
+            .unwrap(),
+        LogCoordinateResponse::Absent
+    );
+    assert!(transport.take_pending().is_none());
+}
+
+#[test]
+fn base_repair_cancelled_lookup_batch_stops_workers_and_returns_promptly() {
+    stalled_lookup_batch(false);
+}
+
+#[test]
+fn base_repair_first_lookup_error_stops_other_workers_and_returns_promptly() {
+    stalled_lookup_batch(true);
+}
+
+fn stalled_lookup_batch(first_error: bool) {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::{Duration, Instant};
+
+    static STALLED_BATCH: Mutex<()> = Mutex::new(());
+    let _stalled_batch = STALLED_BATCH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let gate = Arc::new((Mutex::new((false, false)), std::sync::Condvar::new()));
+    let server_gate = Arc::clone(&gate);
+    let (received_tx, received_rx) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let mut handlers = Vec::new();
+        let mut coordinates = Vec::new();
+        loop {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut bytes = [0; 4096];
+            while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                let read = stream.read(&mut bytes).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&bytes[..read]);
+            }
+            // An empty connection ends the server after the request runtime stops.
+            if request.is_empty() {
+                break;
+            }
+            let request = String::from_utf8(request).unwrap();
+            let path = request.split_whitespace().nth(1).unwrap();
+            let coordinate: i64 = path
+                .split('?')
+                .next()
+                .unwrap()
+                .rsplit('/')
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap();
+            let first = coordinates.is_empty();
+            coordinates.push(coordinate);
+            received_tx.send(()).unwrap();
+            let gate = Arc::clone(&server_gate);
+            handlers.push(std::thread::spawn(move || {
+                let (lock, wake) = &*gate;
+                let state = lock.lock().unwrap();
+                drop(wake.wait_while(state, |state| {
+                    !(state.0 || first_error && first && state.1)
+                }).unwrap());
+                let status = if first_error && first { 400 } else { 200 };
+                let body = if first_error && first {
+                    r#"{"code":"bad_request"}"#
+                } else {
+                    r#"{"status":"absent"}"#
+                };
+                let _ = write!(stream,
+                    "HTTP/1.1 {status} Answer\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+                let _ = stream.flush();
+            }));
+        }
+        for handler in handlers {
+            handler.join().unwrap();
+        }
+        coordinates
+    });
+    let transport = Arc::new(
+        HttpRelayTransport::new_insecure_loopback_for_tests(format!("http://{address}"), "token")
+            .unwrap(),
+    );
+    let token = CancellationToken::new();
+    let operation_token = token.clone();
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    let operation = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime.block_on(execute_http_request(
+            transport,
+            RelayIoRequest::LookupCoordinates(lookup_requests(32)),
+            operation_token,
+        ));
+        // Dropping the runtime also waits for its blocking lookup workers.
+        drop(runtime);
+        finished_tx.send(result).unwrap();
+    });
+    for _ in 0..8 {
+        received_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    }
+    let started = Instant::now();
+    if first_error {
+        gate.0.lock().unwrap().1 = true;
+        gate.1.notify_all();
+    } else {
+        token.cancel();
+    }
+    let before_release = finished_rx.recv_timeout(Duration::from_secs(1));
+    let shutdown_us = started.elapsed().as_micros();
+    // Always release the server before asserting, including against the broken base.
+    gate.0.lock().unwrap().0 = true;
+    gate.1.notify_all();
+    operation.join().unwrap();
+    drop(TcpStream::connect(address).unwrap());
+    let coordinates = server.join().unwrap();
+    assert!(coordinates.iter().all(|coordinate| *coordinate < 8));
+    assert_eq!(
+        coordinates.len(),
+        8,
+        "no next wave may issue after stopping"
+    );
+    let result =
+        before_release.expect("lookup workers must stop before stalled headers are released");
+    if first_error {
+        assert!(matches!(result, Err(RelayError::BadRequest)));
+        assert!(
+            !token.is_cancelled(),
+            "batch failure must not cancel its parent"
+        );
+    } else {
+        assert!(matches!(result, Err(RelayError::Local(reason)) if reason == RELAY_IO_CANCELLED));
+    }
+    println!(
+        "lookup batch first_error={first_error} shutdown_us={shutdown_us} requests={}",
+        coordinates.len()
+    );
 }

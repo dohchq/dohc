@@ -154,7 +154,6 @@ const RELAY_IO_ABORTED: &str = "relay-io-aborted";
 enum RelayIoRequest {
     Push(PushRequest),
     Pull(PullRequest),
-    LookupCoordinate(LogCoordinateRequest),
     LookupCoordinates(Vec<LogCoordinateRequest>),
     Probe(ProbeRequest),
     Claim(ClaimRequest),
@@ -177,7 +176,6 @@ enum RelayIoRequest {
 enum RelayIoResponse {
     Push(PushResponse),
     Pull(PullResponse),
-    LookupCoordinate(LogCoordinateResponse),
     LookupCoordinates(Vec<LogCoordinateResponse>),
     Probe(ProbeResponse),
     Claim(ClaimResponse),
@@ -376,13 +374,14 @@ impl RelayTransport for DeferredRelayTransport {
 
     relay_transport_method!(push, PushRequest, Push, PushResponse, Push);
     relay_transport_method!(pull, PullRequest, Pull, PullResponse, Pull);
-    relay_transport_method!(
-        lookup_log_coordinate,
-        LogCoordinateRequest,
-        LookupCoordinate,
-        LogCoordinateResponse,
-        LookupCoordinate
-    );
+    fn lookup_log_coordinate(
+        &self,
+        request: LogCoordinateRequest,
+    ) -> Result<LogCoordinateResponse, RelayError> {
+        self.lookup_log_coordinates(vec![request])?
+            .pop()
+            .ok_or(RelayError::InvalidResponse)
+    }
     fn lookup_log_coordinates(
         &self,
         requests: Vec<LogCoordinateRequest>,
@@ -411,19 +410,8 @@ impl RelayTransport for DeferredRelayTransport {
                             known.insert(coordinate_cache_key(coordinate), response);
                         }
                     }
-                    (
-                        RelayIoRequest::LookupCoordinate(coordinate),
-                        Ok(RelayIoResponse::LookupCoordinate(response)),
-                    ) => {
-                        known.insert(coordinate_cache_key(coordinate), response);
-                    }
                     (RelayIoRequest::LookupCoordinates(batch), Err(error))
                         if requests.iter().any(|request| batch.contains(request)) =>
-                    {
-                        return Err(error.clone());
-                    }
-                    (RelayIoRequest::LookupCoordinate(coordinate), Err(error))
-                        if requests.contains(coordinate) =>
                     {
                         return Err(error.clone());
                     }
@@ -446,17 +434,13 @@ impl RelayTransport for DeferredRelayTransport {
             .map(|(request, _)| request.clone())
             .collect::<Vec<_>>();
         if !missing.is_empty() {
-            let resolved = if missing.len() == 1 {
-                vec![self.lookup_log_coordinate(missing[0].clone())?]
-            } else {
-                self.resolve(
-                    RelayIoRequest::LookupCoordinates(missing),
-                    |response| match response {
-                        RelayIoResponse::LookupCoordinates(values) => Some(values.clone()),
-                        _ => None,
-                    },
-                )?
-            };
+            let resolved = self.resolve(
+                RelayIoRequest::LookupCoordinates(missing),
+                |response| match response {
+                    RelayIoResponse::LookupCoordinates(values) => Some(values.clone()),
+                    _ => None,
+                },
+            )?;
             let mut resolved = resolved.into_iter();
             for answer in &mut answers {
                 if answer.is_none() {
@@ -850,17 +834,6 @@ mod deferred_relay_tests {
                                 inserted: 0,
                                 skipped: 0,
                                 current_max_origin_seq: 0,
-                            })
-                        }
-                        RelayIoRequest::LookupCoordinate(coordinate) => {
-                            lookups += 1;
-                            RelayIoResponse::LookupCoordinate(if coordinate.origin_id == "local" {
-                                let mut op = committed.clone();
-                                op.origin_seq = coordinate.origin_seq;
-                                op.relay_seq = Some(100 + coordinate.origin_seq);
-                                LogCoordinateResponse::Present(op)
-                            } else {
-                                LogCoordinateResponse::Absent
                             })
                         }
                         RelayIoRequest::LookupCoordinates(coordinates) => {
@@ -1927,8 +1900,8 @@ async fn execute_http_request(
     token: CancellationToken,
 ) -> Result<RelayIoResponse, RelayError> {
     if let RelayIoRequest::LookupCoordinates(requests) = request {
-        return execute_coordinate_lookup_batch(requests, token, move |request| {
-            transport.lookup_log_coordinate(request)
+        return execute_coordinate_lookup_batch(requests, token, move |request, worker_token| {
+            transport.lookup_log_coordinate_cancellable(request, || worker_token.is_cancelled())
         })
         .await
         .map(RelayIoResponse::LookupCoordinates);
@@ -1953,7 +1926,7 @@ async fn execute_coordinate_lookup_batch<F>(
     lookup: F,
 ) -> Result<Vec<LogCoordinateResponse>, RelayError>
 where
-    F: Fn(LogCoordinateRequest) -> Result<LogCoordinateResponse, RelayError>
+    F: Fn(LogCoordinateRequest, CancellationToken) -> Result<LogCoordinateResponse, RelayError>
         + Clone
         + Send
         + 'static,
@@ -1961,6 +1934,8 @@ where
     if requests.is_empty() || requests.len() > MAX_BASE_REPAIR_LOOKUPS {
         return Err(RelayError::InvalidResponse);
     }
+    let workers = token.child_token();
+    let _cancel_workers = workers.clone().drop_guard();
     let mut results = vec![None; requests.len()];
     let mut tasks = tokio::task::JoinSet::new();
     let mut requests = requests.into_iter().enumerate();
@@ -1973,7 +1948,15 @@ where
                 break;
             };
             let lookup = lookup.clone();
-            tasks.spawn_blocking(move || (index, lookup(request)));
+            let worker_token = workers.clone();
+            tasks.spawn_blocking(move || {
+                let result = if worker_token.is_cancelled() {
+                    Err(relay_io_cancelled())
+                } else {
+                    lookup(request, worker_token)
+                };
+                (index, result)
+            });
         }
         if tasks.is_empty() {
             break;
@@ -2085,9 +2068,6 @@ fn execute_blocking_http_request(
     match request {
         RelayIoRequest::Push(request) => transport.push(request).map(RelayIoResponse::Push),
         RelayIoRequest::Pull(request) => transport.pull(request).map(RelayIoResponse::Pull),
-        RelayIoRequest::LookupCoordinate(request) => transport
-            .lookup_log_coordinate(request)
-            .map(RelayIoResponse::LookupCoordinate),
         RelayIoRequest::LookupCoordinates(_) => Err(RelayError::InvalidResponse),
         RelayIoRequest::Probe(request) => transport.probe(request).map(RelayIoResponse::Probe),
         RelayIoRequest::Claim(request) => transport

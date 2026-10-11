@@ -1179,9 +1179,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             .min_by_key(|(_, relay_seq)| *relay_seq);
                         let (chosen, relay_seq) = match resolved {
                             Some((repair, relay_seq)) => (repair, Some(relay_seq)),
-                            None if candidates.iter().any(|(_, _, unresolved)| *unresolved) => {
-                                continue;
-                            }
                             None => (&candidates[0].0, None),
                         };
                         dohc_engine_collab::record_base_coordinate_in_tx(
