@@ -61,6 +61,9 @@ const PARTS = [
   "word-diff",
   "apps-shelf",
   "chat-rows",
+  "settings-frame",
+  "theme-picker",
+  "zoom-stepper",
   "rails",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an

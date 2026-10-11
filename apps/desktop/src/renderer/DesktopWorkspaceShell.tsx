@@ -3868,7 +3868,7 @@ export function DesktopWorkspaceShell(props: {
       },
       {
         id: "settings-agents",
-        label: "Settings: Open Agents & MCP",
+        label: "Settings: Open Agents (MCP)",
         run: () => openSettings("agents"),
       },
       {

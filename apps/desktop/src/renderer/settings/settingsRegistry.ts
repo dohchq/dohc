@@ -2,7 +2,6 @@ import {
   Bot,
   Cloud,
   FolderOpen,
-  Keyboard,
   MonitorCog,
   Settings,
   Shield,
@@ -13,10 +12,15 @@ import {
 
 type SettingsScope = "User" | "Workspace" | "Mixed";
 
+// Where a section sits in the nav: yours on every workspace, this workspace's
+// under its folder, or Advanced on its own.
+type SettingsGroup = "you" | "workspace" | "advanced";
+
 type SettingsSection = {
   id: string;
   label: string;
   scope: SettingsScope;
+  group: SettingsGroup;
   keywords: readonly string[];
   Icon: LucideIcon;
 };
@@ -26,6 +30,7 @@ export const SETTINGS_SECTIONS = [
     id: "general",
     label: "General",
     scope: "User",
+    group: "you",
     keywords: ["workspace", "path", "version", "name", "identity"],
     Icon: Settings,
   },
@@ -33,55 +38,55 @@ export const SETTINGS_SECTIONS = [
     id: "appearance",
     label: "Appearance",
     scope: "User",
+    group: "you",
     keywords: ["theme", "light", "dark", "system", "zoom", "accent", "color", "font", "editor", "text", "size", "sidebar", "views", "order", "hide"],
     Icon: MonitorCog,
   },
   {
-    id: "workbench",
-    label: "Workbench",
-    scope: "Workspace",
-    keywords: ["layout", "tabs", "history", "sidebar", "recent", "apps", "preview"],
-    Icon: SlidersHorizontal,
+    id: "agents",
+    label: "Agents",
+    scope: "Mixed",
+    group: "you",
+    keywords: ["agent", "identity", "name", "mcp", "claude", "codex", "server", "runner", "dispatch", "timeout"],
+    Icon: Bot,
   },
   {
     id: "files",
     label: "Files",
     scope: "Workspace",
+    group: "workspace",
     keywords: ["attachment", "attachments", "image", "images", "assets", "paste", "upload", "folder"],
     Icon: FolderOpen,
   },
   {
-    id: "agents",
-    label: "Agents & MCP",
-    scope: "Mixed",
-    keywords: ["agent", "identity", "name", "mcp", "claude", "codex", "server", "runner", "dispatch", "timeout"],
-    Icon: Bot,
-  },
-  {
-    id: "cloud",
-    label: "Sync and sharing",
+    id: "workbench",
+    label: "Workbench",
     scope: "Workspace",
-    keywords: ["sync", "share", "server", "connect", "cloud", "members"],
-    Icon: Cloud,
+    group: "workspace",
+    keywords: ["layout", "tabs", "history", "sidebar", "recent", "apps", "preview"],
+    Icon: SlidersHorizontal,
   },
   {
     id: "privacy",
     label: "Privacy",
     scope: "Mixed",
+    group: "workspace",
     keywords: ["permission", "external", "links", "safety", "usage", "error", "reports", "telemetry", "diagnostics", "crash"],
     Icon: Shield,
   },
   {
-    id: "keyboard",
-    label: "Keyboard",
-    scope: "User",
-    keywords: ["shortcut", "command", "accelerator", "keys"],
-    Icon: Keyboard,
+    id: "cloud",
+    label: "Sync and sharing",
+    scope: "Workspace",
+    group: "workspace",
+    keywords: ["sync", "share", "server", "connect", "cloud", "members"],
+    Icon: Cloud,
   },
   {
     id: "advanced",
     label: "Advanced",
     scope: "Mixed",
+    group: "advanced",
     keywords: ["reset", "json", "file", "diagnostics", "defaults", "experimental", "engine", "alpha", "schedule", "schedules", "computer"],
     Icon: Wrench,
   },
