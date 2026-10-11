@@ -34,8 +34,9 @@ const MAX_KEY_ENVELOPE_ACK_BYTES: u64 = 64 * 1024;
 const RELAY_API_VERSION_HEADER: &str = "x-dohc-api-version";
 const RELAY_API_VERSION: &str = "1";
 const CANCELLABLE_BODY_READ_POLL_INTERVAL: Duration = Duration::from_millis(25);
-/// Canceled synchronous reads may live until their transport timeout;
-/// match each runtime batch's concurrency so those readers stay bounded.
+/// A canceled synchronous read may live until its transport timeout. Each
+/// limit matches the runtime's concurrency for that kind of read and is
+/// shared by every workspace in the process, so those readers stay bounded.
 const MAX_CANCELLABLE_BODY_READ_WORKERS: usize = 4;
 const MAX_CANCELLABLE_COORDINATE_READ_WORKERS: usize = 8;
 /// The largest blob body a response may carry: the loosest ingest ceiling plus
