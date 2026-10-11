@@ -24,6 +24,7 @@ import {
   type WorkspaceEngineMomentDetail,
 } from "../workspaces/workspaceEngineCapture";
 import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
+import {restoreRequestId, restoreReceiptOf} from "../workspaces/restoreWriteIdentity";
 
 const KEPT = { id: "f".repeat(32), path: "trip/Tasks/Untitled.md", field: "Finished on", recordId: null };
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
@@ -55,6 +56,7 @@ function fixture(options: {
   revokeConflicts?: number;
   // A link revoke that fails for another reason.
   revokeError?: Error;
+  afterRevoke?: () => Promise<void>;
   moment?: VersionedTextMoment | null;
   protectedMoment?: boolean;
   changed?: boolean;
@@ -66,6 +68,8 @@ function fixture(options: {
   ledgerError?: () => Error | null;
   runStore?: ReturnType<typeof createAutomationRunStore>;
   runStoreError?: Error;
+  receiptError?: Error;
+  beforeReceipt?: () => Promise<void>;
   retainRunsForRestore?: CollectionAutomations["retainRunsForRestore"];
   releaseError?: () => Error | null;
   releaseWait?: () => Promise<void>;
@@ -114,6 +118,7 @@ function fixture(options: {
         const row = value as {grantId: string; revokedAtMs: number | null};
         if (path.includes(`/grants/${row.grantId}/`)) row.revokedAtMs = 3;
       }
+      await options.afterRevoke?.();
     }
     return {};
   });
@@ -126,11 +131,13 @@ function fixture(options: {
       return "dependents-changed";
     }
     for (const list of links) for (const link of list as Array<{ status: string }>) link.status = "revoked";
+    await options.afterRevoke?.();
     return "ended";
   });
   // Each restore's own moment, which puts the file back as it was before the person.
   const restores = new Map<string, VersionedTextMoment>();
   const capture = {
+    findRestoreReceipt: vi.fn(async () => null),
     readMoment: vi.fn(async (momentId: string): Promise<WorkspaceEngineMomentDetail | null> => {
       if (options.protectedMoment) return { protected: true, moment: { ...schemaMoment, momentOrder: 1, protected: true } as never };
       const restore = restores.get(momentId);
@@ -152,21 +159,31 @@ function fixture(options: {
     }),
   };
   const queuePull = vi.fn();
+  const barrier = vi.fn(async () => undefined);
+  const receiptBatches: number[] = [];
   const sharesChanged = vi.fn();
   const automationsFor = (runStore = options.runStore) => ({ undoRunsOf: options.undoRunsOf,
+    makeWritesDurable: barrier,
     retainRunsForRestore: options.retainRunsForRestore ?? (async () => undefined),
     pendingRestores: () => options.runStoreError ? Promise.reject(options.runStoreError) : runStore?.pendingRestores() ?? Promise.resolve(structuredClone([...pendingEntries.values()])),
-    savePendingRestore: async (entry: Parameters<CollectionAutomations["savePendingRestore"]>[0]) => {
-      if (runStore) await runStore.savePendingRestore(entry);
+    savePendingRestore: async (entry: Parameters<CollectionAutomations["savePendingRestore"]>[0], whilePending?: string) => {
+      if (runStore) await runStore.savePendingRestore(entry, whilePending);
       else pendingEntries.set(entry.id, structuredClone({claims: [], ...pendingEntries.get(entry.id), ...entry}));
     },
-    recordRestoreReceipt: async (id: string, receipt: {path: string; restoredMomentId: string}) => {
-      if (runStore) await runStore.recordRestoreReceipt(id, receipt);
-      else pendingEntries.get(id)?.session?.receipts.push(receipt);
+    recordRestoreIntents: async (id: string, momentIds: readonly string[]) => {
+      if (runStore) await runStore.recordRestoreIntents(id, momentIds);
+      else {const session = pendingEntries.get(id)?.session; if (session) session.intents = [...new Set([...(session.intents ?? []), ...momentIds])];}
     },
-    undoRestoreReceipt: async (id: string, momentId: string) => {
-      if (runStore) await runStore.undoRestoreReceipt(id, momentId);
-      else {const session = pendingEntries.get(id)?.session; if (session) session.receipts = session.receipts.filter(file => file.restoredMomentId !== momentId);}
+    recordRestoreReceipts: async (id: string, receipts: readonly {path: string; restoredMomentId: string}[], originalMomentIds: readonly string[] = []) => {
+      if (options.receiptError) throw options.receiptError;
+      await barrier(); await options.beforeReceipt?.(); receiptBatches.push(receipts.length);
+      if (runStore) await runStore.recordRestoreReceipts(id, receipts, originalMomentIds);
+      else {const session = pendingEntries.get(id)?.session; if (session) {session.receipts.push(...receipts); session.intents = session.intents?.filter(id => !originalMomentIds.includes(id));}}
+    },
+    undoRestoreReceipts: async (id: string, momentIds: readonly string[], originalMomentIds: readonly string[] = []) => {
+      await barrier(); await options.beforeReceipt?.(); receiptBatches.push(momentIds.length);
+      if (runStore) await runStore.undoRestoreReceipts(id, momentIds, originalMomentIds);
+      else {const session = pendingEntries.get(id)?.session; if (session) {session.receipts = session.receipts.filter(file => !momentIds.includes(file.restoredMomentId)); session.intents = session.intents?.filter(id => !originalMomentIds.includes(id));}}
     },
     removePendingRestore: async (id: string) => {if (runStore) await runStore.removePendingRestore(id); else pendingEntries.delete(id);},
   } as unknown as CollectionAutomations);
@@ -208,7 +225,7 @@ function fixture(options: {
   });
   const call = (channel: string, payload: Record<string, unknown>) =>
     handlers.get(channel)!({ sender: "window" }, { workspaceId: WORKSPACE_ID, ...payload });
-  return { call, calls, bodies, capture, queuePull, sharesChanged, account, releases, recovery,
+  return { call, calls, bodies, capture, queuePull, sharesChanged, account, releases, recovery, barrier, receiptBatches,
     reopen: (store: ReturnType<typeof createAutomationRunStore>) => {const old = automations; automations = automationsFor(store); return old;} };
 }
 
@@ -239,6 +256,445 @@ async function capturedFiles(paths: string[]) {
 }
 
 describe("stop and restore in main", () => {
+  async function pendingFileUndo(kind: "person" | "link" = "person") {
+    const root = await createTestScratch("dohc-restore-undo-pass-");
+    const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
+    const store = createAutomationRunStore(root, resolver);
+    const target = kind === "person" ? {kind, userId: "user_ana"} : {kind, grantId: "grant-link"};
+    await store.savePendingRestore({id: "pending-pass", claims: ["held-run"], session: {
+      grants: [kind === "person" ? "grant-edit" : "grant-link"], target, label: "Ana",
+      definitions: [{collectionPath: "trip", id: "bump", definitionHash: "hash"}],
+      filesUndone: false, receipts: [{path: SCHEMA, restoredMomentId: "back-schema"}],
+      result: {status: "restored", restored: [{path: SCHEMA, restoredMomentId: "back-schema"}], review: [],
+        runsUndone: 0, runsLeft: 1, runChangesKept: 0, fieldsMissing: 0, keptFields: [],
+        wroteAutomations: true, sendsMessages: false, unfinished: {step: "files", message: "Interrupted"}},
+    }});
+    return {rootPath: root, resolver, store, target};
+  }
+
+  it.each(["retry", "dismiss"])("finishes a refused file Undo and releases the pending session on %s", async action => {
+    const {store, target, rootPath, resolver} = await pendingFileUndo();
+    const runs = vi.fn(async () => ({...NOTHING, undone: 1}));
+    const f = fixture({rootPath, runStore: store, granted: [grant({revokedAtMs: 3})],
+      restoreError: new RestoreHeadChangedError(SCHEMA), undoRunsOf: runs, releaseAllowed: () => false});
+    await expect(f.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: []})).resolves.toMatchObject({
+      files: [{momentId: "back-schema", kind: "refused"}], errorMessage: null,
+    });
+    const saved = (await createAutomationRunStore(rootPath, resolver).pendingRestores())[0]!.session!;
+    expect(saved.filesUndone).toBe(true);
+    expect(saved.undoingFiles).toBeUndefined();
+    expect(saved.receipts).toEqual([{path: SCHEMA, restoredMomentId: "back-schema"}]);
+    expect(saved.result).toMatchObject({review: [{path: SCHEMA, reason: "restore-refused"}]});
+    if (action === "retry") {
+      await expect(f.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({
+        unfinished: null, runsUndone: 1, review: [{path: SCHEMA, reason: "restore-refused"}],
+      });
+      expect(runs).toHaveBeenCalled();
+      expect(f.capture.restoreFileToBeforeMoment).toHaveBeenCalledTimes(1);
+    } else await expect(f.call(stopAndRestoreRecoveryOperations.dismissStopAndRestore.channel, {target})).resolves.toBeUndefined();
+    expect(await store.unfinishedUndos()).toEqual(new Set());
+    await vi.waitFor(() => expect(f.releases).toContain("pending-pass"));
+  });
+
+  it.each(["receipts", "intents"])("dismisses an interrupted file Undo with unresolved %s", async remaining => {
+    const {store, target, rootPath} = await pendingFileUndo();
+    const entry = (await store.pendingRestores())[0]!;
+    entry.session!.undoingFiles = true;
+    if (remaining === "intents") {entry.session!.receipts = []; entry.session!.intents = ["original-schema"];}
+    await store.savePendingRestore(entry);
+    const f = fixture({rootPath, runStore: store, releaseAllowed: () => false});
+    await expect(f.call(stopAndRestoreRecoveryOperations.dismissStopAndRestore.channel, {target})).resolves.toBeUndefined();
+    expect(await store.unfinishedUndos()).toEqual(new Set());
+    const released = (await store.pendingRestores())[0]!;
+    expect(released.session).toBeUndefined();
+    expect(released.serverRelease).toBe(true);
+    await vi.waitFor(() => expect(f.releases).toContain("pending-pass"));
+  });
+
+  it.each(["missing person", "deleted link"])("resumes an interrupted file Undo after checking the %s", async changed => {
+    const {store, target, rootPath, resolver} = await pendingFileUndo(changed === "deleted link" ? "link" : "person");
+    const first = fixture({rootPath, runStore: store, restoreError: Error("Interrupted Undo")});
+    await expect(first.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: []})).resolves.toMatchObject({errorMessage: "Interrupted Undo"});
+    expect((await createAutomationRunStore(rootPath, resolver).pendingRestores())[0]!.session).toMatchObject({undoingFiles: true, filesUndone: false});
+    const runs = vi.fn(async () => NOTHING);
+    const retry = fixture({rootPath, runStore: createAutomationRunStore(rootPath, resolver), undoRunsOf: runs,
+      granted: [], links: [[]]});
+    await expect(retry.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({unfinished: null, restored: []});
+    expect(retry.capture.restoreFileToBeforeMoment).toHaveBeenCalledWith("back-schema", OWNER, expect.anything());
+    expect(runs).toHaveBeenCalled();
+    expect(retry.calls.some(call => call.path.includes("shares"))).toBe(true);
+    await vi.waitFor(async () => expect(await store.pendingRestores()).toEqual([]));
+    expect(retry.releases).toContain("pending-pass");
+  });
+
+  it.each(["person", "link"] as const)("revokes current %s access before resuming Undo and queues a new restore", async kind => {
+    const {store, target, rootPath, resolver} = await pendingFileUndo(kind);
+    const entry = (await store.pendingRestores())[0]!;
+    entry.session!.undoingFiles = true;
+    await store.savePendingRestore(entry);
+    const newMoment = {...schemaMoment, id: "new-write", objectId: "new-object", path: "notes/new.txt"};
+    const newGrant = kind === "person" ? "new-grant" : "grant-link";
+    const rows = [grant({revokedAtMs: 3}), grant({grantId: "new-grant", shareId: "new-share"})];
+    const f = fixture({rootPath, runStore: store, undoRunsOf: async () => NOTHING, moment: newMoment,
+      granted: rows, links: [[{shareId: "new-link", grantId: "grant-link", status: "active", dependents: []}]],
+      ledger: {"grant-edit": [{writes: [], nextAfterOriginSeq: null}], [newGrant]: [{writes: [{committedAtMs: 4,
+        files: [{path: newMoment.path, objectId: newMoment.objectId, momentId: newMoment.id, created: false}]}], nextAfterOriginSeq: null}]}});
+    f.capture.restoreFileToBeforeMoment.mockImplementationOnce(async () => {
+      expect(f.calls.some(call => call.method === "POST" && call.path.endsWith("/revoke"))).toBe(true);
+      return {restored: "text", path: SCHEMA, restoredMomentId: "undo-old"};
+    }).mockImplementationOnce(async momentId => {
+      expect(momentId).toBe(newMoment.id);
+      return {restored: "text", path: newMoment.path, restoredMomentId: "back-new-write"};
+    });
+    await expect(f.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({
+      restored: [], unfinished: {step: "files"},
+    });
+    expect(f.calls.filter(call => call.method === "POST").map(call => call.path)).toEqual([
+      kind === "person" ? "/sync/shares/new-share/grants/new-grant/revoke" : "/sync/shares/new-link/revoke",
+    ]);
+    const pending = (await createAutomationRunStore(rootPath, resolver).pendingRestores()).find(entry => entry.session)!;
+    expect(pending.id).not.toBe("pending-pass");
+    expect(pending.session).toMatchObject({filesUndone: false, receipts: []});
+    expect(pending.session!.grants).toContain(newGrant);
+    expect(pending.session!.restoreGrants).toEqual([newGrant]);
+    if (kind === "person") rows.splice(0, 1);
+    await expect(f.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({
+      restored: [{path: newMoment.path, restoredMomentId: "back-new-write"}], unfinished: null,
+    });
+    expect(f.calls.some(call => call.path.includes(`/collection-writes/${newGrant}?`))).toBe(true);
+    if (kind === "person") expect(f.calls.some(call => call.path.includes("/collection-writes/grant-edit?"))).toBe(false);
+    await vi.waitFor(async () => expect(await store.pendingRestores()).toEqual([]));
+    expect(f.releases).toContain("pending-pass");
+    expect(f.releases).toContain(pending.id);
+  });
+
+  it("keeps a waiting session's refused file in review on the next Stop", async () => {
+    const {store, target, rootPath, resolver} = await pendingFileUndo();
+    const f = fixture({rootPath, runStore: store, granted: [grant({revokedAtMs: 3})],
+      restoreError: new RestoreHeadChangedError(SCHEMA), undoRunsOf: async () => NOTHING});
+    f.capture.readMoment.mockResolvedValueOnce(null);
+    await expect(f.call(CHANNELS.stopAndRestore, {target})).resolves.toEqual({status: "waiting"});
+    expect((await store.pendingRestores())[0]!.session!.receipts).toHaveLength(1);
+    await expect(f.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: []})).resolves.toMatchObject({
+      files: [{kind: "refused"}], errorMessage: null,
+    });
+    expect((await createAutomationRunStore(rootPath, resolver).pendingRestores())[0]!.session!.result).toMatchObject({
+      status: "restored", review: [{path: SCHEMA, reason: "restore-refused"}],
+    });
+    await expect(f.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({
+      review: [{path: SCHEMA, reason: "restore-refused"}], unfinished: null,
+    });
+    await vi.waitFor(async () => expect(await store.pendingRestores()).toEqual([]));
+  });
+
+  it("carries old Undo refusals through a waiting follow-up restore", async () => {
+    const {store, target, rootPath} = await pendingFileUndo();
+    const entry = (await store.pendingRestores())[0]!;
+    entry.session!.undoingFiles = true;
+    await store.savePendingRestore(entry);
+    const moment = {...schemaMoment, id: "new-write", objectId: "new-object", path: "notes/new.txt"};
+    const f = fixture({rootPath, runStore: store, undoRunsOf: async () => NOTHING, moment,
+      granted: [grant({revokedAtMs: 3}), grant({grantId: "new-grant", shareId: "new-share"})],
+      ledger: {"new-grant": [{writes: [{committedAtMs: 4, files: [{path: moment.path, objectId: moment.objectId,
+        momentId: moment.id, created: false}]}], nextAfterOriginSeq: null}]}});
+    f.capture.restoreFileToBeforeMoment.mockRejectedValueOnce(new RestoreHeadChangedError(SCHEMA))
+      .mockResolvedValueOnce({restored: "text", path: moment.path, restoredMomentId: "back-new-write"});
+    await expect(f.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({
+      review: [{path: SCHEMA, reason: "restore-refused"}], unfinished: {step: "files"},
+    });
+    f.capture.readMoment.mockResolvedValueOnce(null);
+    await expect(f.call(CHANNELS.stopAndRestore, {target})).resolves.toEqual({status: "waiting"});
+    expect((await store.pendingRestores()).find(entry => entry.session)?.session!.result).toMatchObject({
+      review: [{path: SCHEMA, reason: "restore-refused"}],
+    });
+    await expect(f.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({
+      restored: [{path: moment.path}], review: [{path: SCHEMA, reason: "restore-refused"}], unfinished: null,
+    });
+    expect(f.calls.some(call => call.path.includes("/collection-writes/grant-edit?"))).toBe(false);
+    await vi.waitFor(async () => expect(await store.pendingRestores()).toEqual([]));
+  });
+
+  it.each(["Undo", "runs", "handoff"])("keeps the follow-up Stop after an interrupted %s", async boundary => {
+    const {store, target, rootPath, resolver} = await pendingFileUndo();
+    const entry = (await store.pendingRestores())[0]!;
+    entry.session!.undoingFiles = true;
+    await store.savePendingRestore(entry);
+    const rows = [grant({revokedAtMs: 3}), grant({grantId: "new-grant", shareId: "new-share"})];
+    const f = fixture({rootPath, runStore: store, granted: rows, undoRunsOf: async () => NOTHING});
+    if (boundary === "Undo") f.barrier.mockRejectedValueOnce(Error("Interrupted Undo"));
+    if (boundary === "runs") {
+      const failing = fixture({rootPath, runStore: store, granted: rows, undoRunsOf: async () => {throw Error("Interrupted runs");}});
+      await expect(failing.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({unfinished: {step: "runs"}});
+    } else {
+      if (boundary === "handoff") {
+        const save = store.savePendingRestore;
+        let interrupted = false;
+        vi.spyOn(store, "savePendingRestore").mockImplementation(async update => {
+          if (update.id === "pending-pass" && update.serverRelease && !interrupted) {
+            interrupted = true; throw Error("Interrupted handoff");
+          }
+          await save(update);
+        });
+      }
+      if (boundary === "handoff") await expect(f.call(CHANNELS.stopAndRestore, {target})).rejects.toThrow("Interrupted handoff");
+      else await expect(f.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({unfinished: {message: `Interrupted ${boundary}`}});
+    }
+    expect(rows[1]).toMatchObject({revokedAtMs: 3});
+    const restartedStore = createAutomationRunStore(rootPath, resolver);
+    const saved = (await restartedStore.pendingRestores()).find(entry => entry.id === "pending-pass")!;
+    expect(saved.session).toMatchObject({nextGrants: ["new-grant"]});
+    if (boundary === "handoff") {
+      expect((await restartedStore.pendingRestores()).find(entry => entry.id === "pending-pass:next")?.session).toBeDefined();
+      rows.push(grant({grantId: "third-grant", shareId: "third-share"}));
+    }
+    const retry = fixture({rootPath, runStore: restartedStore, granted: rows, undoRunsOf: async () => NOTHING,
+      ledger: {"grant-edit": [{writes: [], nextAfterOriginSeq: null}], "new-grant": [{writes: [], nextAfterOriginSeq: null}]}});
+    await expect(retry.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({unfinished: {step: "files"}});
+    const next = (await restartedStore.pendingRestores()).find(entry => entry.session)!;
+    expect(next.id).toBe("pending-pass:next");
+    expect(next.session!.grants).toEqual(boundary === "handoff" ? ["grant-edit", "new-grant", "third-grant"] : ["grant-edit", "new-grant"]);
+    expect(next.session!.restoreGrants).toEqual(boundary === "handoff" ? ["new-grant", "third-grant"] : ["new-grant"]);
+    await expect(retry.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({unfinished: null});
+    expect(retry.calls.some(call => call.path.includes("/collection-writes/new-grant?"))).toBe(true);
+    if (boundary === "handoff") expect(retry.calls.some(call => call.path.includes("/collection-writes/third-grant?"))).toBe(true);
+    await vi.waitFor(async () => expect(await restartedStore.pendingRestores()).toEqual([]));
+  });
+
+  it.each(["person", "link"] as const)("keeps a reactivated %s grant after a crash immediately after revocation", async kind => {
+    const {store, target, rootPath, resolver} = await pendingFileUndo(kind);
+    const entry = (await store.pendingRestores())[0]!;
+    entry.session!.undoingFiles = true;
+    await store.savePendingRestore(entry);
+    const grantId = entry.session!.grants[0]!;
+    const rows = [grant({})];
+    const links = [[{shareId: "share-link", grantId, status: "active", dependents: []}]];
+    const f = fixture({rootPath, runStore: store, granted: rows, links,
+      afterRevoke: async () => {throw Error("Crash after revocation");}});
+    await expect(f.call(CHANNELS.stopAndRestore, {target})).rejects.toThrow("Crash after revocation");
+    expect(kind === "person" ? rows[0]!.revokedAtMs : links[0]![0]!.status).toBe(kind === "person" ? 3 : "revoked");
+    const reopened = createAutomationRunStore(rootPath, resolver);
+    expect((await reopened.pendingRestores())[0]!.session!.nextGrants).toEqual([grantId]);
+    const newMoment = {...schemaMoment, id: "reactivated-write", objectId: "reactivated-object", path: "notes/reactivated.txt"};
+    const retry = fixture({rootPath, runStore: reopened, granted: rows, links, moment: newMoment,
+      undoRunsOf: async () => NOTHING, ledger: {[grantId]: [{writes: [{committedAtMs: 4,
+        files: [{path: newMoment.path, objectId: newMoment.objectId, momentId: newMoment.id, created: false}]}], nextAfterOriginSeq: null}]}});
+    retry.capture.restoreFileToBeforeMoment.mockImplementationOnce(async () => ({restored: "text", path: SCHEMA, restoredMomentId: "undo-old"}))
+      .mockImplementationOnce(async momentId => {
+        expect(momentId).toBe(newMoment.id);
+        return {restored: "text", path: newMoment.path, restoredMomentId: `back-${newMoment.id}`};
+      });
+    await expect(retry.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({unfinished: {step: "files"}});
+    expect((await reopened.pendingRestores()).find(entry => entry.session)?.session!.restoreGrants).toEqual([grantId]);
+    await expect(retry.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({unfinished: null,
+      restored: [{path: newMoment.path, restoredMomentId: `back-${newMoment.id}`}]});
+    expect(retry.calls.some(call => call.path.includes(`/collection-writes/${grantId}?`))).toBe(true);
+  });
+
+  it.each(["person", "link"] as const)("recovers a reused %s grant when the first progress read fails", async kind => {
+    const {store, target, rootPath, resolver} = await pendingFileUndo(kind);
+    const entry = (await store.pendingRestores())[0]!;
+    entry.session!.undoingFiles = true;
+    await store.savePendingRestore(entry);
+    vi.spyOn(store, "pendingRestores").mockRejectedValueOnce(Error("Transient read failure"));
+    const grantId = entry.session!.grants[0]!;
+    const rows = [grant({})];
+    const links = [[{shareId: "share-link", grantId, status: "active", dependents: []}]];
+    const newMoment = {...schemaMoment, id: "later-write", objectId: "later-object", path: "notes/later.txt"};
+    const f = fixture({rootPath, runStore: store, granted: rows, links, moment: newMoment,
+      undoRunsOf: async () => NOTHING, ledger: {[grantId]: [{writes: [{committedAtMs: 4,
+        files: [{path: newMoment.path, objectId: newMoment.objectId, momentId: newMoment.id, created: false}]}], nextAfterOriginSeq: null}]}});
+    f.capture.restoreFileToBeforeMoment.mockImplementationOnce(async () => {
+      expect(kind === "person" ? rows[0]!.revokedAtMs : links[0]![0]!.status).toBe(kind === "person" ? 3 : "revoked");
+      const reopened = createAutomationRunStore(rootPath, resolver);
+      expect((await reopened.pendingRestores())[0]!.session!.nextGrants).toEqual([grantId]);
+      return {restored: "text", path: SCHEMA, restoredMomentId: "undo-old"};
+    }).mockImplementationOnce(async momentId => {
+      expect(momentId).toBe(newMoment.id);
+      return {restored: "text", path: newMoment.path, restoredMomentId: `back-${newMoment.id}`};
+    });
+    await expect(f.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({unfinished: {step: "files"}});
+    expect((await store.pendingRestores()).find(entry => entry.session)?.session!.restoreGrants).toEqual([grantId]);
+    await expect(f.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({unfinished: null,
+      restored: [{path: newMoment.path, restoredMomentId: `back-${newMoment.id}`}]});
+    expect(f.capture.restoreFileToBeforeMoment).toHaveBeenCalledTimes(2);
+    expect(f.calls.some(call => call.path.includes(`/collection-writes/${grantId}?`))).toBe(true);
+  });
+
+  it.each(["person", "link"] as const)("does not revoke a reactivated %s grant when saving the follow-up intent fails", async kind => {
+    const {store, target, rootPath} = await pendingFileUndo(kind);
+    const entry = (await store.pendingRestores())[0]!;
+    entry.session!.undoingFiles = true;
+    await store.savePendingRestore(entry);
+    vi.spyOn(store, "savePendingRestore").mockRejectedValueOnce(Error("Save failed"));
+    const f = fixture({rootPath, runStore: store, granted: [grant({})],
+      links: [[{shareId: "share-link", grantId: "grant-link", status: "active", dependents: []}]]});
+    await expect(f.call(CHANNELS.stopAndRestore, {target})).rejects.toThrow("dohc could not save Stop and restore progress.");
+    expect(f.calls.filter(call => call.method === "POST" && call.path.endsWith("/revoke"))).toEqual([]);
+  });
+
+  it("does not offer Try again when the owner dismisses during run Undo", async () => {
+    const {store, target, rootPath} = await pendingFileUndo();
+    const entry = (await store.pendingRestores())[0]!;
+    entry.session!.undoingFiles = true;
+    await store.savePendingRestore(entry);
+    const rows = [grant({revokedAtMs: 3}), grant({grantId: "new-grant", shareId: "new-share"})];
+    let reached!: () => void, resume!: () => void;
+    const entered = new Promise<void>(resolve => {reached = resolve;});
+    const blocked = new Promise<void>(resolve => {resume = resolve;});
+    const f = fixture({rootPath, runStore: store, granted: rows, undoRunsOf: async () => NOTHING,
+      serverRestore: async () => {reached(); await blocked; return NOTHING;}});
+    const trying = Promise.resolve(f.call(CHANNELS.stopAndRestore, {target}));
+    try {
+      await entered;
+      expect(rows[1]).toMatchObject({revokedAtMs: 3});
+      await f.call(stopAndRestoreRecoveryOperations.dismissStopAndRestore.channel, {target});
+    } finally {resume();}
+    await expect(trying).resolves.toMatchObject({status: "restored", unfinished: null});
+    await vi.waitFor(async () => expect(await store.pendingRestores()).toEqual([]));
+    expect(f.releases).toContain("pending-pass");
+  });
+
+  it.each(["first batch", "mid-batch", "before barrier", "before receipts", "retry", "mid-Undo"])("keeps every file reversible after an unjournaled batch: %s", async boundary => {
+    const root = await createTestScratch("dohc-restore-intents-");
+    const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
+    const originals = Array.from({length: 150}, (_, i) => ({...schemaMoment, id: `intent-${i}`, objectId: `object-${i}`, path: `notes/${i}.txt`}));
+    const all = [...originals], writes = new Map<string, {path: string; restoredMomentId: string; restored: "text"}>();
+    let undoCrash = false;
+    const capture = {
+      readMoment: async (id: string) => ({moment: all.find(m => m.id === id)!}),
+      listObjectMomentsAfter: async (objectId: string) => all.filter(m => m.objectId === objectId).slice(1).map(m => m.id).reverse(),
+      findRestoreReceipt: async (id: string, key: string) => {
+        const original = all.find(m => m.id === id)!;
+        for (const saved of all) {const receipt = restoreReceiptOf(saved, original, key); if (receipt) return {...receipt, restored: "text"};}
+        return null;
+      },
+      restoreFileToBeforeMoment: async (id: string, _person: unknown, options: {requestId: string}) => {
+        const prior = writes.get(options.requestId); if (prior) return prior;
+        if (undoCrash && id.startsWith("back-") && writes.size === 170) throw Error("crash");
+        if (boundary === "mid-batch" && !id.startsWith("back-") && writes.size === 125) throw Error("crash");
+        const original = all.find(m => m.id === id)!;
+        const receipt = {path: original.path, restoredMomentId: `back-${id}`, restored: "text" as const};
+        writes.set(options.requestId, receipt);
+        all.push({...original, id: receipt.restoredMomentId, metadata: {origin: "restore", correlationId: options.requestId}});
+        return receipt;
+      },
+    } as unknown as WorkspaceEngineCapture;
+    const options = {rootPath: root, granted: [grant({})], engineCapture: capture, undoRunsOf: async () => NOTHING,
+      ledger: {"grant-edit": [{writes: [{committedAtMs: 2, files: originals.map(m => ({path: m.path, objectId: m.objectId, momentId: m.id, created: false}))}], nextAfterOriginSeq: null}]}};
+    const store = createAutomationRunStore(root, resolver);
+    let appends = 0;
+    const first = fixture({...options, runStore: store, beforeReceipt: async () => {if ((boundary === "before receipts" || boundary === "retry" || boundary === "mid-Undo") && ++appends === 2) throw Error("crash");}});
+    if (boundary === "before barrier" || boundary === "mid-batch") first.barrier.mockResolvedValueOnce(undefined).mockRejectedValueOnce(Error("crash"));
+    if (boundary === "first batch") first.barrier.mockRejectedValueOnce(Error("crash"));
+    const target = {kind: "person", userId: "user_ana"};
+    const failed = await first.call(CHANNELS.stopAndRestore, {target}) as {restored: {restoredMomentId: string}[]};
+    expect(failed).toMatchObject({unfinished: {message: "crash"}}); expect(failed.restored).toHaveLength(boundary === "first batch" ? 0 : 100);
+    const committed = boundary === "first batch" ? 100 : boundary === "mid-batch" ? 125 : 150;
+    expect(writes.size).toBe(committed);
+    const restartedStore = createAutomationRunStore(root, resolver), restarted = fixture({...options, runStore: restartedStore});
+    let ids = failed.restored.map(r => r.restoredMomentId);
+    if (boundary === "mid-Undo") {
+      undoCrash = true;
+      restarted.barrier.mockResolvedValueOnce(undefined).mockRejectedValueOnce(Error("crash"));
+      expect(await restarted.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: ids})).toMatchObject({errorMessage: "crash"});
+      expect(writes.size).toBe(170);
+      const interrupted = (await createAutomationRunStore(root, resolver).pendingRestores())[0]!.session!;
+      expect(interrupted).toMatchObject({filesUndone: false, undoingFiles: true, intents: []});
+      expect(interrupted.receipts).toHaveLength(150);
+      undoCrash = false;
+      const retry = fixture({...options, runStore: createAutomationRunStore(root, resolver)});
+      expect(await retry.call(CHANNELS.stopAndRestore, {target})).toMatchObject({unfinished: null});
+      expect(writes.size).toBe(300);
+      expect((await createAutomationRunStore(root, resolver).pendingRestores()).every(entry => !entry.session)).toBe(true);
+      return;
+    }
+    if (boundary === "retry") {
+      const retried = await restarted.call(CHANNELS.stopAndRestore, {target}) as {restored: {restoredMomentId: string}[]};
+      expect(retried).toMatchObject({unfinished: null, review: []}); expect(retried.restored).toHaveLength(50);
+      ids = [...ids, ...retried.restored.map(r => r.restoredMomentId)]; expect(new Set(ids).size).toBe(150);
+    }
+    const undone = await restarted.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: boundary === "retry" ? [...ids, ...ids] : ids}) as {files: unknown[]};
+    expect(undone).toMatchObject({errorMessage: null}); expect(undone.files).toHaveLength(committed); expect(writes.size).toBe(committed * 2);
+    const pending = (await restartedStore.pendingRestores())[0]?.session;
+    if (boundary !== "retry") {expect(pending?.receipts).toEqual([]); expect(pending?.intents).toEqual([]);}
+  });
+
+  it("keeps file restore available after an empty Undo of a failed ledger read", async () => {
+    let unreadable = true;
+    const f = fixture({ledgerError: () => unreadable ? Error("Cannot read changes") : null});
+    const target = {kind: "person", userId: "user_ana"};
+    expect(await f.call(CHANNELS.stopAndRestore, {target})).toMatchObject({restored: [], unfinished: {step: "files"}});
+    expect(await f.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: []})).toMatchObject({files: [], errorMessage: null});
+    const pending = await f.call(stopAndRestoreRecoveryOperations.pendingStopAndRestores.channel, {}) as {filesUndone: boolean}[];
+    expect(pending[0]?.filesUndone).toBe(false);
+    unreadable = false;
+    expect(await f.call(CHANNELS.stopAndRestore, {target})).toMatchObject({restored: [{restoredMomentId: "back-m-schema"}], unfinished: null});
+  });
+
+  it.each(["before barrier", "before receipts"])("retries unjournaled file batches after a crash %s", async boundary => {
+    const root = await createTestScratch("dohc-restore-crash-batch-");
+    const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
+    const originals = Array.from({length: 3}, (_, i) => ({...schemaMoment, id: `m-${i}`, objectId: `o-${i}`, path: `notes/${i}.txt`}));
+    const all = [...originals]; const writes = new Map<string, {path: string; restoredMomentId: string; restored: "text"}>();
+    const capture = {
+      readMoment: async (id: string) => ({moment: all.find(m => m.id === id)!}),
+      listObjectMomentsAfter: async (objectId: string, id: string) => all.filter(m => m.objectId === objectId).slice(1).map(m => m.id).reverse(),
+      restoreFileToBeforeMoment: async (id: string, _person: unknown, options: {requestId: string}) => {
+        const prior = writes.get(options.requestId); if (prior) return prior;
+        const original = all.find(m => m.id === id)!;
+        const receipt = {path: original.path, restoredMomentId: `back-${id}`, restored: "text" as const};
+        writes.set(options.requestId, receipt);
+        all.push({...original, id: receipt.restoredMomentId, metadata: {origin: "restore", correlationId: options.requestId}});
+        return receipt;
+      },
+    } as unknown as WorkspaceEngineCapture;
+    const granted = [grant({})];
+    const ledger = {"grant-edit": [{writes: [{committedAtMs: 2, files: originals.map(m => ({path: m.path, objectId: m.objectId, momentId: m.id, created: false}))}], nextAfterOriginSeq: null}]};
+    const options = {rootPath: root, granted, ledger, engineCapture: capture};
+    const store = createAutomationRunStore(root, resolver);
+    const first = fixture({...options, runStore: store, beforeReceipt: async () => {if (boundary === "before receipts") throw Error("crash");}});
+    if (boundary === "before barrier") first.barrier.mockRejectedValueOnce(Error("crash"));
+    const target = {kind: "person", userId: "user_ana"};
+    expect(await first.call(CHANNELS.stopAndRestore, {target})).toMatchObject({restored: [], unfinished: {message: "crash"}});
+    expect(writes.size).toBe(3); expect((await store.pendingRestores())[0]?.session?.receipts).toEqual([]);
+    const restartedStore = createAutomationRunStore(root, resolver);
+    const restarted = fixture({...options, runStore: restartedStore});
+    const done = await restarted.call(CHANNELS.stopAndRestore, {target}) as {restored: unknown[]};
+    expect(done).toMatchObject({review: [], unfinished: null}); expect(done.restored).toHaveLength(3);
+    expect(writes.size).toBe(3); expect(restarted.receiptBatches).toEqual([3]);
+    // Undo has the same stable key for a pending journal and a completed restore.
+    const ids = originals.map(m => `back-${m.id}`);
+    await restartedStore.savePendingRestore({id: "undo-session", claims: [], session: {target: {kind: "person", userId: "user_ana"},
+      grants: [], label: "Ana", definitions: [], filesUndone: false, receipts: ids.map((id, i) => ({path: originals[i]!.path, restoredMomentId: id})), result: {status: "waiting"}}});
+    const undoneFirst = fixture({...options, runStore: restartedStore, beforeReceipt: async () => {if (boundary === "before receipts") throw Error("crash");}});
+    if (boundary === "before barrier") undoneFirst.barrier.mockRejectedValueOnce(Error("crash"));
+    expect(await undoneFirst.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: ids})).toMatchObject({files: [], errorMessage: "crash"});
+    expect((await restartedStore.pendingRestores())[0]?.session?.receipts).toHaveLength(3); expect(writes.size).toBe(6);
+    const undoneRetry = fixture({...options, runStore: createAutomationRunStore(root, resolver)});
+    const undo = await undoneRetry.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: ids}) as {files: unknown[]};
+    expect(undo).toMatchObject({errorMessage: null}); expect(undo.files).toHaveLength(3);
+    expect(undoneRetry.receiptBatches).toEqual([3]); expect(writes.size).toBe(6);
+    expect((await restartedStore.pendingRestores())[0]?.session?.receipts).toEqual([]);
+    const completed = fixture({...options, runStore: restartedStore});
+    expect(await completed.call(CHANNELS.undoStopAndRestore, {restoredMomentIds: ids})).toMatchObject({errorMessage: null});
+    expect(completed.barrier).toHaveBeenCalledOnce(); expect(writes.size).toBe(6);
+  });
+
+  it("batches 201 completed-restore reversals behind three barriers", async () => {
+    const f = fixture();
+    const result = await f.call(CHANNELS.undoStopAndRestore, {restoredMomentIds: Array.from({length: 201}, (_, i) => `m-${i}`)}) as {files: unknown[]};
+    expect(result.files).toHaveLength(201); expect(f.barrier).toHaveBeenCalledTimes(3);
+  });
+  it("keeps an unflushed restore out of the result and the failure snapshot", async () => {
+    const root = await createTestScratch("dohc-restore-barrier-");
+    const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
+    const store = createAutomationRunStore(root, resolver);
+    const f = fixture({runStore: store, receiptError: Error("WAL sync failed")});
+    expect(await f.call(CHANNELS.stopAndRestore, {target: {kind: "person", userId: "user_ana"}}))
+      .toMatchObject({restored: [], unfinished: {step: "files", message: "WAL sync failed"}});
+    expect((await store.pendingRestores())[0]?.session?.receipts).toEqual([]);
+  });
+
   it("acknowledges an in-flight release through the reopened attachment without losing a new restore", async () => {
     const root = await createTestScratch("dohc-release-reopen-");
     const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
@@ -534,7 +990,7 @@ describe("stop and restore in main", () => {
       keptFields: [], fieldsMissing: 0,
       unfinished: null,
     });
-    expect(f.capture.restoreFileToBeforeMoment).toHaveBeenCalledWith("m-schema", OWNER, { expectedHeadMomentId: "m-schema" });
+    expect(f.capture.restoreFileToBeforeMoment).toHaveBeenCalledWith("m-schema", OWNER, { expectedHeadMomentId: "m-schema", requestId: expect.any(String) });
     expect(f.calls.filter((call) => call.method === "POST").map((call) => call.path))
       .toEqual(["/sync/shares/share-1/grants/grant-edit/revoke"]);
     expect(f.sharesChanged).toHaveBeenCalledWith(WORKSPACE_ID);
@@ -964,13 +1420,13 @@ describe("stop and restore in main", () => {
       files: [{ momentId: "new", kind: "restored", receipt: { path: SCHEMA, restoredMomentId: "undo-new" } }],
       errorMessage: "The workspace engine is not running.",
     });
-    expect(f.capture.restoreFileToBeforeMoment.mock.calls).toEqual([["new", OWNER, {expectedHeadMomentId: "new"}], ["middle", OWNER, {expectedHeadMomentId: "middle"}]]);
+    expect(f.capture.restoreFileToBeforeMoment.mock.calls).toEqual([["new", OWNER, {expectedHeadMomentId: "new", requestId: restoreRequestId(`undo:${WORKSPACE_ID}`, "new")}], ["middle", OWNER, {expectedHeadMomentId: "middle", requestId: restoreRequestId(`undo:${WORKSPACE_ID}`, "middle")}]]);
   });
 
   it("undoes the restores newest first", async () => {
     const f = fixture();
     await f.call(CHANNELS.undoStopAndRestore, { restoredMomentIds: ["back-1", "back-2"] });
-    expect(f.capture.restoreFileToBeforeMoment.mock.calls).toEqual([["back-2", OWNER, {expectedHeadMomentId: "back-2"}], ["back-1", OWNER, {expectedHeadMomentId: "back-1"}]]);
+    expect(f.capture.restoreFileToBeforeMoment.mock.calls).toEqual([["back-2", OWNER, {expectedHeadMomentId: "back-2", requestId: restoreRequestId(`undo:${WORKSPACE_ID}`, "back-2")}], ["back-1", OWNER, {expectedHeadMomentId: "back-1", requestId: restoreRequestId(`undo:${WORKSPACE_ID}`, "back-1")}]]);
   });
 
   it("names the person signed in here when the request arrived, never one the renderer sends", async () => {
@@ -988,7 +1444,7 @@ describe("stop and restore in main", () => {
     const restored = f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } });
     f.account.person = { kind: "human", humanId: "user_other" };
     await restored;
-    expect(f.capture.restoreFileToBeforeMoment).toHaveBeenCalledWith("m-schema", OWNER, { expectedHeadMomentId: "m-schema" });
+    expect(f.capture.restoreFileToBeforeMoment).toHaveBeenCalledWith("m-schema", OWNER, { expectedHeadMomentId: "m-schema", requestId: expect.any(String) });
   });
 });
 

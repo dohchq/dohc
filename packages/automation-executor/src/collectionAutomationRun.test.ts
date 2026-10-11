@@ -22,6 +22,8 @@ import {
 import { createTestScratch, testMetadataDir } from "./testScratch";
 import { createAutomationTargets } from "./automationTargets";
 import { MAX_FOUND_RECORDS } from "./automationPlan";
+import { chatDirectoryOf } from "./automationChat";
+import { undoAutomationRuns } from "./automationUndo";
 
 // A document Collection's run against an in-memory engine: each step reads
 // what the steps before it wrote, and a run that stops at any durable point
@@ -363,6 +365,7 @@ function workspace(docs: readonly Doc[], fault: Fault | null = null, files = new
       },
     }),
     dependencies: (store: AutomationRunStore): CollectionAutomationRunDependencies => ({
+      makeDurable: async () => {},
       withReads: async (work) => await work(reads),
       withRecordWrites: async (_signal, work) => await work(writes),
       // Each Collection's id is its name here; none moves unless a test moves it.
@@ -380,7 +383,7 @@ function workspace(docs: readonly Doc[], fault: Fault | null = null, files = new
       evaluator: shared.forWorkspace("workspace"),
       store: guard(store),
       nowMs: () => 1_000,
-      chat: {
+      chat: { hasMessage: async () => false,
         directory: async () => { throw new Error("This automation sends no messages."); },
         write: async () => { throw new Error("This automation sends no messages."); },
       },
@@ -409,6 +412,180 @@ const task = (id: string, values: Record<string, JsonValue>): Doc => ({ id, path
  * engine hands a crashed claim out again under the same run.
  */
 const scratchStore = async () => createAutomationRunStore(await createTestScratch("dohc-stepwise-"), testMetadataDir);
+
+it("Undo reverses confirmed fields and finds an unconfirmed creation only if it exists", async () => {
+  const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {A: 1}}]");
+  const space = workspace([task("rec_t", { A: 1 }), task("lost", { A: 1 })]);
+  const run = newRun(added(), definition, "key", 1);
+  run.outcome = { state: "failed", error: "refused", run: 1, step: 1 };
+  run.durableEffects = 1;
+  run.applied = [
+    { ordinal: 0, writes: [{ kind: "field", recordId: "rec_t", path: "Tasks/rec_t.md", field: "A", before: 0, after: 1 }] },
+    { ordinal: 1, writes: [{ kind: "created", recordId: "lost", path: "Tasks/lost.md" }] },
+  ];
+  run.created = [{ ordinal: 1, planned: "lost", recordId: "lost", path: "Tasks/lost.md" }];
+  const trashed: string[] = [];
+  const result = await undoAutomationRuns(space.undo(trashed), null, { path: "Tasks", name: "Tasks" },
+    async () => ({ kind: "owner", ownerUserId: null, grants: [] }), "atc_one", [run], async () => {}, new AbortController().signal);
+  expect(result.undone.reverted).toBe(1);
+  expect(result.undone.removed).toBe(1);
+  expect(space.records.get("rec_t")?.values.A).toBe(0);
+  expect(trashed).toEqual(["Tasks/lost.md"]);
+});
+
+it.each(["document", "shared"] as const)("%s Undo includes all ten crash receipts after replay stops at effect 3", async kind => {
+  const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {A: 1}}]");
+  for (const current of [3, 10, 99]) {
+    const space = workspace([task("rec_t", { A: current })]);
+    const run = newRun(added(), definition, "crash", 1);
+    run.durableEffects = 3;
+    run.outcome = { state: "failed", error: "reach refused", run: 1, step: 3 };
+    run.applied = Array.from({ length: 10 }, (_, index) => ({ ordinal: index, writes: [{ kind: "field" as const,
+      recordId: "rec_t", path: "Tasks/rec_t.md", field: "A", before: index, after: index + 1 }] }));
+    const result = kind === "document" ? await undoCollectionAutomationRuns(space.undo([]), [run], new AbortController().signal)
+      : await undoAutomationRuns(space.undo([]), null, { path: "Tasks", name: "Tasks" },
+        async () => ({ kind: "owner", ownerUserId: null, grants: [] }), "atc_one", [run], async () => {}, new AbortController().signal);
+    expect(result.undone.reverted).toBe(current === 99 ? 0 : 1);
+    expect(space.records.get("rec_t")!.values.A).toBe(current === 99 ? 99 : 0);
+  }
+});
+
+it.each(["document", "shared"] as const)("%s Undo restores all ten retained writes after an actual resume fails at effect 3", async kind => {
+  const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [" +
+    Array.from({ length: 10 }, (_, index) => `{set: {F${index}: 1}}`).join(", ") + "]");
+  const values = Object.fromEntries(Array.from({ length: 10 }, (_, index) => [`F${index}`, 1]));
+  const space = workspace([task("rec_t", values)]), store = await scratchStore();
+  const run = newRun(added(), definition, `${definitionHash(definition)}-1`, 1);
+  run.steps = Array.from({ length: 10 }, (_, ordinal) => ({ ordinal, effects: [{ kind: "set" as const,
+    target: { recordId: "rec_t", path: "Tasks/rec_t.md", collectionPath: "Tasks" }, fields: [{ field: `F${ordinal}`, before: 0, after: 1 }] }] }));
+  run.applied = run.steps.map(step => ({ ordinal: step.ordinal, writes: [{ kind: "field" as const, recordId: "rec_t",
+    path: "Tasks/rec_t.md", field: `F${step.ordinal}`, before: 0, after: 1 }] }));
+  await store.save(run);
+  const deps = space.dependencies(store);
+  // The WAL retained these writes and their idempotency keys after the crash.
+  const retained: CollectionRecordWrites = { create: async () => { throw Error("unexpected creation"); },
+    setFields: async () => ({ replaced: {}, kept: {} }) };
+  let replayed = 0;
+  deps.withRecordWrites = async (signal, work) => {
+    if (replayed++ === 3) throw Error("reach refused");
+    return work(retained);
+  };
+  const signal = new AbortController().signal;
+  expect(await runCollectionAutomation(deps, { claim: added(), automation: definition, collection: { path: "Tasks", name: "Tasks" },
+    roster: { kind: "owner", ownerUserId: null, grants: [] }, signal, stopped: signal })).toMatchObject({ kind: "failed", error: "reach refused" });
+  const saved = (await store.runsOf(added().automationId, added().claimId)).runs[0]!;
+  expect(saved.durableEffects).toBe(3);
+  expect(saved.applied).toHaveLength(10);
+  const result = kind === "document" ? await undoCollectionAutomationRuns(space.undo([]), [saved], signal)
+    : await undoAutomationRuns(space.undo([]), null, { path: "Tasks", name: "Tasks" },
+      async () => ({ kind: "owner", ownerUserId: null, grants: [] }), "atc_one", [saved], async () => {}, signal);
+  expect(result.undone.reverted).toBe(10);
+  expect(space.records.get("rec_t")!.values).toEqual(Object.fromEntries(Object.keys(values).map(field => [field, 0])));
+});
+
+it.each(["document", "shared"] as const)("%s Undo keeps a teammate's intermediate value after a later confirmed write", async kind => {
+  const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {A: Done}}]");
+  for (const current of ["Doing", "Done"]) {
+    const space = workspace([task("rec_t", { A: current })]);
+    const earlier = newRun(added(), definition, "earlier", 1);
+    earlier.applied = [{ ordinal: 0, writes: [{ kind: "field", recordId: "rec_t", path: "Tasks/rec_t.md", field: "A", before: "Todo", after: "Doing" }] }];
+    const later = newRun(added(), definition, "later", 2);
+    later.durableEffects = 1;
+    later.applied = [{ ordinal: 0, writes: [{ kind: "field", recordId: "rec_t", path: "Tasks/rec_t.md", field: "A", before: "Doing", after: "Done" }] }];
+    const signal = new AbortController().signal;
+    const result = kind === "document" ? await undoCollectionAutomationRuns(space.undo([]), [earlier, later], signal)
+      : await undoAutomationRuns(space.undo([]), null, { path: "Tasks", name: "Tasks" },
+        async () => ({ kind: "owner", ownerUserId: null, grants: [] }), "atc_one", [earlier, later], async () => {}, signal);
+    expect(result.undone.reverted).toBe(current === "Done" ? 1 : 0);
+    expect(space.records.get("rec_t")!.values.A).toBe(current === "Done" ? "Todo" : "Doing");
+  }
+});
+
+it("an early preparation refusal leaves crash receipts available to Undo without claiming confirmation", async () => {
+  const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {A: 1}}]");
+  const space = workspace([task("rec_t", { A: 10 })]), store = await scratchStore();
+  const run = newRun(added(), definition, `${definitionHash(definition)}-1`, 1);
+  run.applied = Array.from({ length: 10 }, (_, index) => ({ ordinal: index, writes: [{ kind: "field" as const,
+    recordId: "rec_t", path: "Tasks/rec_t.md", field: "A", before: index, after: index + 1 }] }));
+  run.steps = run.applied.map((entry, index) => ({ ordinal: entry.ordinal, effects: [{ kind: "set" as const,
+    target: { recordId: "rec_t", path: "Tasks/rec_t.md", collectionPath: "Tasks" }, fields: [{ field: "A", before: index, after: index + 1 }] }] }));
+  await store.save(run);
+  const deps = space.dependencies(store);
+  deps.checkPresser = async () => { throw Error("reach refused"); };
+  const signal = new AbortController().signal;
+  expect(await runCollectionAutomation(deps, { claim: added(), automation: definition, collection: { path: "Tasks", name: "Tasks" },
+    roster: { kind: "owner", ownerUserId: null, grants: [] }, signal, stopped: signal })).toMatchObject({ kind: "failed" });
+  const saved = (await store.runsOf(added().automationId, added().claimId)).runs[0]!;
+  expect(saved.durableEffects).toBe(0);
+  expect((await undoCollectionAutomationRuns(space.undo([]), [saved], signal)).undone.reverted).toBe(1);
+  expect(space.records.get("rec_t")!.values.A).toBe(0);
+});
+
+it.each([true, false])("replays only recorded messages when the roster and direct-message membership changed, recorded=%s", async recorded => {
+  const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{direct-message: Hello, to: [friend]}]");
+  const space = workspace([task("rec_t", {})]), store = await scratchStore();
+  const run = newRun(added(), definition, `${definitionHash(definition)}-1`, 1);
+  run.steps = [{ ordinal: 0, effects: [{ kind: "message", effectId: "effect", messageId: "message", threadId: "thread", body: "Hello", name: "Friend",
+    to: { kind: "direct-message", userId: "friend", threadId: "thread" }, channelWireId: "dm", byFormula: false }] }];
+  run.applied = [{ ordinal: 0, writes: [{ kind: "message", messageId: "message", name: "Friend" }] }];
+  await store.save(run);
+  const roster = { kind: "owner" as const, ownerUserId: "owner", grants: [{ grantId: "editor", recipientUserId: "editor", recipientEmail: null,
+    files: { paths: ["Tasks"], versionId: null, access: "edit" as const }, channel: null }] };
+  const dependencies = space.dependencies(store);
+  const sent: string[] = [];
+  dependencies.chat = { hasMessage: async messageId => recorded && messageId === "message", directory: async () => chatDirectoryOf([], roster), write: async (_signal, effect) => { sent.push(effect.effectId); } };
+  const signal = new AbortController().signal;
+  const outcome = await runCollectionAutomation(dependencies, { claim: added(), automation: definition, collection: { path: "Tasks", name: "Tasks" }, roster, signal, stopped: signal });
+  expect(outcome.kind).toBe(recorded ? "done" : "failed");
+  expect(sent).toEqual([]);
+});
+
+it.each([false, true])("checks membership before a lost message is sent and avoids duplicate fresh directory reads, resumed=%s", async resumed => {
+  const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{direct-message: Hello, to: [friend]}]");
+  const space = workspace([task("rec_t", {})]), store = await scratchStore();
+  if (resumed) {
+    const run = newRun(added(), definition, `${definitionHash(definition)}-1`, 1);
+    run.steps = [{ ordinal: 0, effects: [{ kind: "message", effectId: "effect", messageId: "message", threadId: "thread", body: "Hello", name: "Ice",
+      to: { kind: "direct-message", userId: "friend", threadId: "thread" }, channelWireId: "dm", byFormula: false }] }];
+    run.applied = [{ ordinal: 0, writes: [{ kind: "message", messageId: "message", name: "Ice" }] }];
+    await store.save(run);
+  }
+  const roster = { kind: "owner" as const, ownerUserId: "owner", grants: [{ grantId: "friend", recipientUserId: "friend", recipientEmail: null,
+    files: null, channel: { wireId: "dm", canPost: true } }] };
+  let directories = 0;
+  const sent: string[] = [], dependencies = space.dependencies(store);
+  dependencies.chat = { hasMessage: async () => false, directory: async () => {
+    directories++;
+    return chatDirectoryOf([{ id: "dm", wireId: "dm", name: "Ice", slug: "ice", kind: "dm", type: "chat", runningThreadId: "thread" }], roster);
+  }, write: async (_signal, effect) => { sent.push(effect.messageId); } };
+  const signal = new AbortController().signal;
+  expect(await runCollectionAutomation(dependencies, { claim: added(), automation: definition, collection: { path: "Tasks", name: "Tasks" },
+    roster, signal, stopped: signal })).toMatchObject({ kind: "done" });
+  expect(sent).toHaveLength(1);
+  expect(directories).toBe(2);
+});
+
+it("holds an unsent resumed post that now needs Allow, but never reauthorizes an existing message", async () => {
+  for (const exists of [false, true]) {
+    const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{post: Hello, group: Trip}]");
+    const space = workspace([task("rec_t", {})]), store = await scratchStore();
+    const run = newRun(added(), definition, `${definitionHash(definition)}-1`, 1);
+    run.steps = [{ ordinal: 0, effects: [{ kind: "message", effectId: "effect", messageId: "message", threadId: "thread", body: "Hello", name: "Trip",
+      to: { kind: "group", channelId: "trip", lane: "posts" }, channelWireId: "trip", byFormula: false }] }];
+    run.applied = [{ ordinal: 0, writes: [{ kind: "message", messageId: "message", name: "Trip" }] }];
+    await store.save(run);
+    const deps = space.dependencies(store);
+    let sends = 0, postChecks = 0;
+    deps.chat = { hasMessage: async () => exists, directory: async () => chatDirectoryOf([], { kind: "owner", ownerUserId: null, grants: [] }),
+      write: async () => { sends++; } };
+    deps.checkReach = async reach => { if (reach.some(step => step.kind === "post")) { postChecks++; return true; } return false; };
+    const signal = new AbortController().signal;
+    expect(await runCollectionAutomation(deps, { claim: added(), automation: definition, collection: { path: "Tasks", name: "Tasks" },
+      roster: { kind: "owner", ownerUserId: null, grants: [] }, signal, stopped: signal })).toMatchObject(exists ? { kind: "done" } : { kind: "wait", reason: "held" });
+    expect(sends).toBe(0);
+    expect(postChecks).toBe(exists ? 0 : 1);
+  }
+});
 
 async function runToEnd(
   space: ReturnType<typeof workspace>,
@@ -821,7 +998,7 @@ describe("a run and its Undo", () => {
   it("undoes an older run's unrecorded change after a newer run's recorded one", async () => {
     const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {Count: 3}}]");
     const target = { recordId: "rec_t", collectionPath: "Tasks", path: "Tasks/rec_t.md" };
-    const base = newRun(added(), definition, `${definitionHash(definition)}-1`, 1);
+    const base = { ...newRun(added(), definition, `${definitionHash(definition)}-1`, 1), durableEffects: 1 };
     // The older run set 1 to 2 and stopped before recording it; a start-over then recorded 2 to 3.
     const older = { ...base, startedAtMs: 1, superseded: true, steps: [{ ordinal: 0, effects: [{ kind: "set" as const, target, fields: [{ field: "Count", before: 1, after: 2 }] }] }] };
     const newer = { ...base, keySeed: `${base.keySeed}-2`, startedAtMs: 2, outcome: { state: "done" as const },
@@ -833,7 +1010,7 @@ describe("a run and its Undo", () => {
 
   it("keeps a person's change made after the runs, over every run's write, and goes on after an Undo that stopped", async () => {
     const definition = automation(["id: chain", "name: Chain", "when: record-added", "do: [{set: {Count: 3}}]"].join("\n"));
-    const base = newRun(added(), definition, `${definitionHash(definition)}-1`, 1);
+    const base = { ...newRun(added(), definition, `${definitionHash(definition)}-1`, 1), durableEffects: 1 };
     const write = (before: JsonValue, after: JsonValue) => ({ kind: "field" as const, recordId: "rec_t", path: "Tasks/rec_t.md", field: "Count", before, after });
     // The older run set 1 to 2; someone set 10; a start-over set 10 to 3; then a person set 2.
     const older = { ...base, startedAtMs: 1, superseded: true, applied: [{ ordinal: 0, writes: [write(1, 2)] }] };
@@ -931,4 +1108,19 @@ describe("a saved run's Collections", () => {
     expect(run!.collections).toEqual([{ collectionId: "Tasks", path: "Tasks" }, { collectionId: "Log", path: "Log" }]);
     expect(run!.finishedAtMs).toBe(1_000);
   });
+});
+
+
+it("skips the engine barrier when planned fields already hold their value", async () => {
+  const space = workspace([task("rec_t", { Note: "saved" })]);
+  const store = await scratchStore();
+  const dependencies = space.dependencies(store);
+  let barriers = 0;
+  dependencies.makeDurable = async () => { barriers++; };
+  const signal = new AbortController().signal;
+  await expect(runCollectionAutomation(dependencies, { claim: added(),
+    automation: automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {Note: saved}}]"),
+    collection: { path: "Tasks", name: "Tasks" }, roster: {kind: "owner", ownerUserId: null, grants: []}, signal, stopped: signal }))
+    .resolves.toEqual({ kind: "done" });
+  expect(barriers).toBe(0);
 });

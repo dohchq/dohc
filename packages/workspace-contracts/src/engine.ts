@@ -460,6 +460,7 @@ interface VersionedTextMomentPayload {
 }
 
 interface VersionedTextWriteResult {
+  deduped?: boolean;
   materialized?: boolean;
   materializeOutcome?: "applied" | "skipped" | "conflict" | "superseded" | "error";
   object: FileObjectRecord;
@@ -965,6 +966,7 @@ interface LinkedChatProjection {
 }
 
 export interface LinkedChatStore {
+  getMessage(input: { workspaceId: WorkspaceId; messageId: ChatMessageId }): Promise<ChatMessage>;
   // Creates a FILE-LINKED thread. linkedFile is required (exactly-one-owner
   // at creation): an ownerless thread would be readable and indexed but
   // unreachable by navigation. Channel threads go through startChannelThread.

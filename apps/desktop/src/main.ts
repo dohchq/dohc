@@ -289,7 +289,7 @@ import { automationFailedNoticeId } from "@dohc/automation-executor/automation-f
 import { createAutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
 import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
 import { resolveWorkspaceMetadataDir } from "./workspaces/workspaceMetadata";
-import { readChatDirectory } from "@dohc/automation-executor/automation-chat";
+import { hasChatMessage, readChatDirectory } from "@dohc/automation-executor/automation-chat";
 import { wakeAgent } from "./automations/automationAgentWake";
 import { createAutomationWakeConsumer, createAutomationWakeIntents } from "./automations/automationWakeIntents";
 import type { AutomationChatMessage } from "@dohc/automation-executor/automation-chat";
@@ -4415,6 +4415,8 @@ function createCollectionAutomationsFor(
     onHoldsChanged: () => notifyAutomationHoldsChanged(workspaceId),
     onAutomationsChanged: () => notifyCollectionAutomationsChanged(workspaceId),
     chat: {
+      hasMessage: (messageId) => withWorkspaceAttachmentAsync(workspace, (lease) =>
+        hasChatMessage(linkedChatStoreFor(lease), workspaceId, messageId)),
       // A joined Group this computer may only read is marked, as a chat write refuses it (assertJoinedChannelWritable).
       directory: (roster, needs) => withWorkspaceAttachmentAsync(workspace, (lease) =>
         readChatDirectory(linkedChatStoreFor(lease), workspaceId, roster, needs, (wireId) => {

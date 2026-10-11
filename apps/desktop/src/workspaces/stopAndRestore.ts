@@ -1,4 +1,6 @@
 import { posix } from "node:path";
+import { durableBatch, DURABLE_BATCH_ITEMS } from "@dohc/automation-executor/durable-batch";
+import { restoreReceiptOf } from "./restoreWriteIdentity";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import type { WorkspacePolicyPath } from "@dohc/security-contract/effective-policy";
@@ -51,7 +53,12 @@ export interface RestoreReceipt {
 
 export interface StopAndRestoreDependencies {
   recordDefinitions?(definitions: ReadonlyArray<{collectionPath: string; id: string; definitionHash: string}>): Promise<void>;
-  recordRestore?(receipt: RestoreReceipt): Promise<void>;
+  recordRestoreIntents?(momentIds: readonly string[]): Promise<void>;
+  recordRestores?(receipts: readonly RestoreReceipt[], originalMomentIds: readonly string[]): Promise<void>;
+  recordedRestores?: readonly RestoreReceipt[];
+  findRestoreReceipt?(momentId: string, requestId: string): Promise<RestoreReceipt | null>;
+  /** The saved session's stable request key, when retrying unjournaled writes. */
+  replayRequestId?(momentId: string): string;
   /** A moment, `protected` when its contents are protected here, or null while it has not arrived. */
   moment(momentId: string): Promise<VersionedTextMoment | "protected" | null>;
   /** Throws when the window that asked has left the workspace. */
@@ -197,6 +204,10 @@ export async function restoreDirectWrites(
   // Everything must be here before anything changes. A file whose contents
   // are protected here cannot be restored here, so it goes to review.
   const review = new Map<string, ReviewFile>();
+  type Receipt = {receipt: RestoreReceipt; originalMomentId: string; folder?: string};
+  const recovered: Receipt[] = [];
+  const known = new Set(dependencies.recordedRestores?.map(receipt => receipt.restoredMomentId));
+  const recoveredFolders = new Set<string>();
   // A protected automations.yaml hides which automations they changed, so
   // their runs are neither found nor undone; the file's review says so.
   let protectedAutomations = false;
@@ -245,6 +256,25 @@ export async function restoreDirectWrites(
       if (later !== null) laterMoments.set(id, later);
       return later;
     };
+    const requestId = dependencies.replayRequestId?.(entry.first.momentId);
+    if (requestId) {
+      let receipt: RestoreReceipt | null = null;
+      for (const id of after) {
+        const later = await readLater(id);
+        if (later === null) return {status: "waiting"};
+        if (later !== "protected") receipt = restoreReceiptOf(later, entry.moments.get(entry.first.momentId)!, requestId);
+        if (receipt) break;
+      }
+      if (!receipt && entry.moments.get(entry.first.momentId)!.payload.before?.contentKind === "binary") {
+        receipt = await dependencies.findRestoreReceipt?.(entry.first.momentId, requestId) ?? null;
+      }
+      if (receipt) {
+        const folder = isCreatedSchema(entry) ? posix.dirname(entry.first.path) : undefined;
+        if (known.has(receipt.restoredMomentId)) {if (folder) recoveredFolders.add(folder);}
+        else recovered.push({receipt: {...receipt, ...(entry.first.created ? {removed: true} : {})}, originalMomentId: entry.first.momentId, folder});
+        continue;
+      }
+    }
     let snapshotHead = entry.first.momentId;
     for (const id of after) {
       const later = await readLater(id);
@@ -334,6 +364,15 @@ export async function restoreDirectWrites(
 
   restorable.sort((left, right) => restoreOrder(left.entry) - restoreOrder(right.entry));
   const restored: RestoreReceipt[] = [];
+  const receipts = durableBatch<Receipt>(async batch => {
+    await dependencies.recordRestores?.(batch.map(item => item.receipt), batch.map(item => item.originalMomentId));
+    restored.push(...batch.map(item => item.receipt));
+    for (const item of batch) if (item.folder) await dependencies.removeEmptyFolder(item.folder);
+  });
+  const removeRecoveredFolders = async () => {
+    for (const folder of recoveredFolders) await dependencies.removeEmptyFolder(folder);
+    recoveredFolders.clear();
+  };
   const outcome = () => ({ status: "restored" as const, restored, review: [...review.values()].sort((left, right) => left.path.localeCompare(right.path)) });
   let runs: Omit<UndoneRuns, "errorMessage"> = { undone: 0, left: 0, keptFields: [], missing: 0, otherKept: 0 };
   let step: "files" | "runs" = "files";
@@ -346,39 +385,47 @@ export async function restoreDirectWrites(
   });
   try {
     await dependencies.recordDefinitions?.(definitions);
-    for (const { entry, head } of restorable) {
-      const folder = posix.dirname(entry.first.path);
-      if (isCreatedSchema(entry)) {
-        // Only the schema may be left now. A record History would not
-        // restore, or a file someone added since, keeps the Collection.
-        const entries = await dependencies.folderEntries(folder);
-        if (entries.some((name) => name !== SCHEMA_FILE) || [...review.keys()].some((path) => posix.dirname(path) === folder)) {
-          review.set(entry.last.path, { path: entry.last.path, reason: "folder-in-use" });
+    for (const receipt of recovered) await receipts.add(receipt);
+    await receipts.flush();
+    for (let start = 0; start < restorable.length; start += DURABLE_BATCH_ITEMS) {
+      const batch = restorable.slice(start, start + DURABLE_BATCH_ITEMS);
+      await dependencies.recordRestoreIntents?.(batch.map(({entry}) => entry.first.momentId));
+      for (const { entry, head } of batch) {
+        const folder = posix.dirname(entry.first.path);
+        if (isCreatedSchema(entry)) {
+          // Only the schema may be left now. A record History would not
+          // restore, or a file someone added since, keeps the Collection.
+          const entries = await dependencies.folderEntries(folder);
+          if (entries.some((name) => name !== SCHEMA_FILE) || [...review.keys()].some((path) => posix.dirname(path) === folder)) {
+            review.set(entry.last.path, { path: entry.last.path, reason: "folder-in-use" });
+            continue;
+          }
+        }
+        dependencies.assertCurrent();
+        // The engine checks the folder again in its own queue before it
+        // removes the schema.
+        const result = await dependencies.restore(entry.first.momentId, head, isCreatedSchema(entry));
+        if (result.kind === "changed" || result.kind === "folder-in-use") {
+          const reason = result.kind === "changed" ? "changed-since" : "folder-in-use";
+          review.set(entry.last.path, { path: entry.last.path, reason });
           continue;
         }
+        if (result.kind === "refused") {
+          // History refuses some files, such as a shared live document.
+          review.set(entry.last.path, { path: entry.last.path, reason: "restore-refused", detail: result.detail.slice(0, 500) });
+          continue;
+        }
+        if (result.kind === "rules-unreadable") {
+          review.set(entry.last.path, { path: entry.last.path, reason: "rules-unreadable", unreadable: result.unreadable });
+          continue;
+        }
+        const receipt = { ...result.receipt, ...(entry.first.created ? { removed: true } : {}) };
+        await receipts.add({receipt, originalMomentId: entry.first.momentId, ...(isCreatedSchema(entry) ? {folder} : {})});
       }
-      dependencies.assertCurrent();
-      // The engine checks the folder again in its own queue before it
-      // removes the schema.
-      const result = await dependencies.restore(entry.first.momentId, head, isCreatedSchema(entry));
-      if (result.kind === "changed" || result.kind === "folder-in-use") {
-        const reason = result.kind === "changed" ? "changed-since" : "folder-in-use";
-        review.set(entry.last.path, { path: entry.last.path, reason });
-        continue;
-      }
-      if (result.kind === "refused") {
-        // History refuses some files, such as a shared live document.
-        review.set(entry.last.path, { path: entry.last.path, reason: "restore-refused", detail: result.detail.slice(0, 500) });
-        continue;
-      }
-      if (result.kind === "rules-unreadable") {
-        review.set(entry.last.path, { path: entry.last.path, reason: "rules-unreadable", unreadable: result.unreadable });
-        continue;
-      }
-      restored.push({ ...result.receipt, ...(entry.first.created ? { removed: true } : {}) });
-      await dependencies.recordRestore?.(restored.at(-1)!);
-      if (isCreatedSchema(entry)) await dependencies.removeEmptyFolder(folder);
+      await receipts.flush();
     }
+    await receipts.flush();
+    await removeRecoveredFolders();
     if (definitions.length > 0) {
       step = "runs";
       const undone = await dependencies.undoRuns(definitions);
@@ -386,6 +433,8 @@ export async function restoreDirectWrites(
       if (undone.errorMessage !== null) return done(undone.errorMessage);
     }
   } catch (error) {
+    try { await receipts.flush(); await removeRecoveredFolders(); }
+    catch (flushError) { error = flushError; }
     if (error instanceof UndoRunsStopped) runs = error.runs;
     return done(error instanceof Error ? error.message : String(error));
   }

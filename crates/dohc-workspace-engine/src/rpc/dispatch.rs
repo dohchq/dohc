@@ -133,6 +133,7 @@ impl EngineService {
         request: Request,
         input: crate::LiveApplicationInput,
     ) -> Result<ServiceResponse, WireError> {
+        super::request::validate_request_ids(&request)?;
         self.ensure_configured_host_method(&ctx, &request)?;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
         self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
@@ -155,6 +156,7 @@ impl EngineService {
         request: Request,
     ) -> Result<ServiceResponse, WireError> {
         let id = request.id;
+        super::request::validate_request_ids(&request)?;
         self.ensure_admissible_author(&request)?;
         self.ensure_configured_host_method(&ctx, &request)?;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
@@ -946,6 +948,10 @@ impl EngineService {
                 self.automations_prune_history(&ctx, request.workspace, request.params)
                     .await?
             }
+            "automations.makeDurable" => {
+                self.automations_make_durable(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "automations.settle" => {
                 self.automations_settle(&ctx, request.workspace, request.params)
                     .await?
@@ -1339,6 +1345,7 @@ mod tests {
             "automations.retry",
             "automations.runNow",
             "automations.scheduleMarks",
+            "automations.makeDurable",
             "automations.settle",
             "automations.subscribe",
             "automations.unsubscribe",

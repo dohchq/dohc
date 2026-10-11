@@ -88,6 +88,29 @@ function sha256Utf8(text: string): string {
 const WORKSPACE_ID = "engine-capture-test";
 const WORKSPACE_ATTACHMENT_ID = Symbol("workspace-engine-capture-test");
 
+it.each(["text", "delete"])("replays a keyed %s restore without reversing a later edit", async kind => {
+  const root = await createTestScratch("dohc-keyed-restore-");
+  const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+  const store = createCaptureLiveStores({workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID}, sessions).store;
+  const target = {workspaceId: WORKSPACE_ID, versionId: "main", path: "notes/file.txt", metadata: {origin: "api" as const}};
+  await store.ensureMainVersion({workspaceId: WORKSPACE_ID});
+  if (kind === "text") await store.writeTextFile({...target, text: "old"});
+  const changed = await store.writeTextFile({...target, text: "new"});
+  await write(root, target.path, "new");
+  const engine = capture(root, {store, rustEngineSessions: sessions});
+  const options = {expectedHeadMomentId: changed.moment.id, requestId: "restore/saved-session-file"};
+  const first = await engine.restoreFileToBeforeMoment(changed.moment.id, RESTORER, options);
+  const newer = await store.writeTextFile({...target, text: "teammate"});
+  await write(root, target.path, "teammate");
+  await expect(engine.restoreFileToBeforeMoment(changed.moment.id, RESTORER, {...options, requestId: "another-session"})).rejects.toMatchObject({name: "RestoreHeadChangedError"});
+  expect(await engine.restoreFileToBeforeMoment(changed.moment.id, {kind: "human", humanId: "another-owner"}, options)).toEqual(first);
+  const moments = await store.listMoments({workspaceId: WORKSPACE_ID, versionId: "main", objectId: changed.moment.objectId, limit: 100});
+  expect(moments.moments.filter(m => m.metadata.correlationId === options.requestId && m.metadata.origin === "restore")).toHaveLength(1);
+  expect((await store.readTextFile(target))?.objectId).toBe(newer.moment.objectId);
+  expect(await readFile(join(root, target.path), "utf8")).toBe("teammate");
+  await engine.stop();
+});
+
 // chmod/ACL-based fixtures cannot make a path unreadable for root (root
 // ignores file modes), so every test that needs an unreadable path skips
 // under uid 0.

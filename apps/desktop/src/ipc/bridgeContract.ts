@@ -5092,6 +5092,7 @@ export const StopAndRestoreResult = z.discriminatedUnion("status", [
     // The step a failure stopped, with why; what the fields above count happened.
     // At files, this try undid no run.
     unfinished: z.object({ step: z.enum(["files", "runs"]), message: z.string() }).strict().nullable(),
+    canUndoFiles: z.boolean().optional(),
   }).strict(),
   // Access stopped, but this computer has not received every change the
   // person wrote yet. Nothing was restored; trying again continues.
@@ -5102,6 +5103,7 @@ export const PendingStopAndRestoresPayload = z.object({workspaceId: WORKSPACE_ID
 export type PendingStopAndRestoresPayload = z.infer<typeof PendingStopAndRestoresPayload>;
 export const PendingStopAndRestoresResult = z.array(z.object({
   target: StopAndRestoreTarget, label: z.string(), filesUndone: z.boolean(),
+  undoingFiles: z.boolean().optional(),
   receipts: z.array(z.object({path: PATH_STRING, restoredMomentId: OPAQUE_ID, removed: z.boolean().optional()})),
   result: StopAndRestoreResult,
 }));
@@ -5128,12 +5130,13 @@ export const stopAndRestoreRecoveryOperations = {
 export const UndoStopAndRestorePayload = z.object({
   workspaceId: WORKSPACE_ID,
   target: StopAndRestoreTarget.optional(),
-  restoredMomentIds: z.array(OPAQUE_ID).min(1).max(20_000),
+  restoredMomentIds: z.array(OPAQUE_ID).max(20_000),
   reviewPaths: z.array(PATH_STRING.refine(isNormalizedRelativePath)).max(4096).optional(),
-}).strict();
+}).strict().refine(input => input.restoredMomentIds.length > 0 || input.target !== undefined);
 export type UndoStopAndRestorePayload = z.infer<typeof UndoStopAndRestorePayload>;
 export const UndoStopAndRestoreResult = z.object({
   errorMessage: z.string().max(2_000).nullable(),
+  recovered: z.array(z.object({path: PATH_STRING, restoredMomentId: OPAQUE_ID, removed: z.boolean().optional()})).optional(),
   // Outcomes identify the submitted restore moment, newest first.
   files: z.array(z.discriminatedUnion("kind", [
     z.object({ momentId: OPAQUE_ID, kind: z.literal("restored"),

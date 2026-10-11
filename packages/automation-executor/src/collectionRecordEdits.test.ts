@@ -6,6 +6,8 @@ import * as Y from "yjs";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import type { ChangeAttributionWire } from "@dohc/workspace-engine-client";
 import {
+  AutomationCreationCommitted,
+  AutomationCreationSkipped,
   actorOriginIdFor,
   attributionFor,
   createCollectionRecord,
@@ -1632,4 +1634,18 @@ describe("partial record retry", () => {
     await expect(retry).resolves.toEqual({ path: "tasks/retry.md", recordId: partial.retry.recordId });
     expect(await readdir(join(root, "tasks"))).toEqual(["retry.md"]);
   });
+});
+
+it.each(["missing", "other", "unreadable"] as const)("checks a committed creation's %s file before skipping it", async state => {
+  const root = await createTestScratch("dohc-committed-record-");
+  const { session } = fakeSession();
+  const context = contextFor(root, session, fakeEngine().overrides);
+  const recordId = derivedRecordId("committed");
+  if (state === "other") { await mkdir(join(root, "tasks")); await writeFile(join(root, "tasks", "two.md"), `---\nid: ${derivedRecordId("other")}\n---\n`); }
+  context.createFile = async () => { throw new AutomationCreationCommitted(); };
+  if (state === "unreadable") context.readText = async () => { throw Error("read refused"); };
+  const result = createCollectionRecord(context, { collectionPath: "tasks", name: "two", recordId, author: AGENT });
+  if (state === "unreadable") await expect(result).rejects.toThrow("read refused");
+  else await expect(result).rejects.toBeInstanceOf(AutomationCreationSkipped);
+  expect(context.openedPaths).toEqual([]);
 });

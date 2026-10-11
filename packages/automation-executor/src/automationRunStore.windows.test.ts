@@ -35,7 +35,7 @@ async function savedRun(withWake = false) {
   const root = await createTestScratch("dohc-run-store-windows-");
   const store = createAutomationRunStore(root, testMetadataDir);
   const run: StoredRun = {
-    version: 12, claimId: "reader", automationId: "collection:Tasks#bump",
+    durableEffects: 0, version: 13, claimId: "reader", automationId: "collection:Tasks#bump",
     definitionHash: "0123456789abcdef", keySeed: "0123456789abcdef",
     startedAtMs: 1, finishedAtMs: 1, steps: [], applied: [], created: [], replans: [],
     undoRequests: [], undoCalls: [], undoCovers: [], readableFields: null,

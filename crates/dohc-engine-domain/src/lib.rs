@@ -57,11 +57,12 @@ pub use automations::{
     claim_automation_schedule, claim_automation_triggers_in_tx, claim_group_message_in_tx,
     claim_next_pending_automation, claim_record_lifecycle_in_tx, get_automation_claim,
     is_collection_automation_id, list_automation_claims, list_automation_failures,
-    list_automation_schedule_marks, list_running_automation_attempts, press_automation,
-    prune_automation_history, read_automation_group_skips, reclaim_running_automations,
-    release_automation_claim, release_automation_groups, retry_automation_claim,
-    settle_automation_claim, subscribe_automation, subscribe_automation_in_tx,
-    unsubscribe_automation, watch_automation_groups,
+    list_automation_schedule_marks, list_running_automation_attempts,
+    make_automation_writes_durable, press_automation, prune_automation_history,
+    read_automation_group_skips, reclaim_running_automations, release_automation_claim,
+    release_automation_groups, retry_automation_claim, settle_automation_claim,
+    subscribe_automation, subscribe_automation_in_tx, unsubscribe_automation,
+    watch_automation_groups,
 };
 pub use chats::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, AgentRunRecord, AgentUnreadThreadRow, BookmarkMode,

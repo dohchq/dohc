@@ -3854,6 +3854,30 @@ pub fn list_automation_schedule_marks(
     store.read_with(|conn| list_automation_schedule_marks_in_tx(conn, workspace_id))
 }
 
+/// Sync earlier engine writes without changing claim recovery timestamps.
+/// A dataset or a relay copy can write for a claim held outside this engine.
+pub fn make_automation_writes_durable(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    faults: &dyn FaultInjector,
+) -> Result<(), DomainError> {
+    committed(store.write_durable_with(faults, |tx| {
+        let rows = tx.execute(
+            "INSERT INTO engine_requests (request_id, payload_hash, result_seq, committed_at, kind) \
+             VALUES (?1, '', -1, 0, 'automation-durability') \
+             ON CONFLICT(request_id) DO UPDATE SET result_seq = CASE result_seq WHEN -1 THEN -2 ELSE -1 END \
+             WHERE engine_requests.kind = 'automation-durability'",
+            params![format!("\0automation-durability:{workspace_id}")],
+        ).map_err(DomainError::sql_persist)?;
+        if rows != 1 {
+            return Err(DomainError::StateCorrupt {
+                reason: "automation durability marker collides with a request",
+            });
+        }
+        Ok(())
+    })?)
+}
+
 pub fn settle_automation_claim(
     store: &mut EngineStore,
     workspace_id: &str,

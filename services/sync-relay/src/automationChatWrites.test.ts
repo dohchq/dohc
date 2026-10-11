@@ -44,7 +44,7 @@ function chatStore(options: { refuse?: Error; sent?: Sent[] } = {}) {
     },
     getMessage: async ({ messageId }) => {
       const sent = options.sent?.find((row) => row.id === messageId);
-      if (!sent) throw new Error("chat-message-not-found");
+      if (!sent) throw new Error("message-not-found");
       return sent as Awaited<ReturnType<ReplicaChatStore["getMessage"]>>;
     },
     findThreadChannelId: async ({ threadId }) => threadId === "thread-auto-1" ? "channel-planning" : "channel-other",
@@ -57,7 +57,7 @@ const message = (target: AutomationChatMessage["target"]): AutomationChatMessage
 });
 
 const savedRun = (): StoredRun => ({
-  version: 12, rules: null, collections: [], undoCalls: [], undoCovers: [], claimId: "claim", automationId: automation.automationId, definitionHash: "hash", keySeed: "hash",
+  durableEffects: 0, version: 13, rules: null, collections: [], undoCalls: [], undoCovers: [], claimId: "claim", automationId: automation.automationId, definitionHash: "hash", keySeed: "hash",
   startedAtMs: 10_000, finishedAtMs: 10_000, steps: [], applied: [], created: [], replans: [], undoRequests: [],
   readableFields: null, superseded: false, undo: null, undoKept: [], settled: true, outcome: { state: "done" },
 });

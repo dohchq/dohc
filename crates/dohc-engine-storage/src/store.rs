@@ -228,9 +228,32 @@ impl EngineStore {
     where
         E: From<StorageError>,
     {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+        Self::write_on_connection(&self.conn, faults, f)
+    }
+
+    /// One FULL commit syncs this transaction and every earlier WAL commit.
+    pub fn write_durable_with<T, E>(
+        &mut self,
+        faults: &dyn FaultInjector,
+        f: impl FnOnce(&Transaction<'_>) -> Result<T, E>,
+    ) -> Result<TxnOutcome<T>, E>
+    where
+        E: From<StorageError>,
+    {
+        crate::durability::with_full_synchronous(&self.conn, |conn| {
+            Self::write_on_connection(conn, faults, f)
+        })
+    }
+
+    fn write_on_connection<T, E>(
+        conn: &Connection,
+        faults: &dyn FaultInjector,
+        f: impl FnOnce(&Transaction<'_>) -> Result<T, E>,
+    ) -> Result<TxnOutcome<T>, E>
+    where
+        E: From<StorageError>,
+    {
+        let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
             .map_err(StorageError::persist)?;
 
         let value = match f(&tx) {

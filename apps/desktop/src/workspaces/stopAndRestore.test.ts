@@ -3,6 +3,7 @@ import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { definitionHash } from "@dohc/automation-executor/automation-plan";
 import { restoreDirectWrites, type DirectWriteFile, type StopAndRestoreDependencies } from "./stopAndRestore";
+import { restoreRequestId } from "./restoreWriteIdentity";
 
 const KEPT = { id: "f".repeat(32), path: "trip/Tasks/Untitled.md", field: "Finished on", recordId: null };
 const SCHEMA = "name: Packing\nfields:\n  Title:\n    type: text\n";
@@ -13,6 +14,82 @@ const WIPE_TWO = "  - id: wipe\n    name: Wipe\n    when: record-added\n    do:\
 const OWNERS = "  - id: owners\n    name: Owners\n    when: record-added\n    do:\n      - set:\n          Title: mine\n";
 const automations = (...items: string[]) => `version: 1\nautomations:\n${items.join("")}`;
 const RECORD = "---\nTitle: Tent\n---\n";
+
+it("writes no file when the batch intent cannot be saved", async () => {
+  const original = moment("one", "object", "notes/one.txt", "old", "new"), e = engine([original]);
+  expect(await restoreDirectWrites({...e.dependencies, recordRestoreIntents: async () => {throw Error("intent failed");}}, [file(original.id, original.objectId, original.path)]))
+    .toMatchObject({restored: [], unfinished: {message: "intent failed"}});
+  expect(e.restored).toEqual([]);
+});
+
+it("recovers a recreated binary outside the original object's history", async () => {
+  const original = moment("deleted", "old-object", "image.png", "binary", null);
+  original.payload.before!.contentKind = "binary";
+  const key = restoreRequestId("session", original.id), e = engine([original]);
+  const recovered = {path: original.path, restoredMomentId: "binary-restore"};
+  const outcome = await restoreDirectWrites({...e.dependencies, replayRequestId: () => key,
+    findRestoreReceipt: async () => recovered}, [file(original.id, original.objectId, original.path)]);
+  expect(outcome).toMatchObject({restored: [recovered], review: [], unfinished: null});
+  expect(e.restored).toEqual([]);
+});
+
+it("removes a created Collection folder only after its schema receipt is durable, including recovery", async () => {
+  const original = moment("schema", "object", "Tasks/collection.yaml", null, SCHEMA);
+  const e = engine([original]), events: string[] = [];
+  const restore = e.dependencies.restore;
+  const key = restoreRequestId("session", original.id);
+  const deps = {...e.dependencies, folderEntries: async () => ["collection.yaml"],
+    restore: async (...args: Parameters<typeof restore>) => {events.push("write"); const result = await restore(...args);
+      if (result.kind === "restored") e.all.at(-1)!.metadata = {origin: "restore", correlationId: key}; return result;},
+    recordRestores: async () => {events.push("durable");}, removeEmptyFolder: async () => {events.push("folder");}};
+  await restoreDirectWrites(deps, [{...file(original.id, original.objectId, original.path), created: true}]);
+  expect(events).toEqual(["write", "durable", "folder"]);
+  events.length = 0;
+  await restoreDirectWrites({...deps, replayRequestId: () => key}, [{...file(original.id, original.objectId, original.path), created: true}]);
+  expect(events).toEqual(["durable", "folder"]);
+});
+
+it.each(["before barrier", "before receipts"])("recovers every restored file after a crash %s", async boundary => {
+  const originals = Array.from({length: 3}, (_, i) => moment(`m-${i}`, `o-${i}`, `notes/${i}.txt`, "old", "new"));
+  originals.forEach(m => {m.authors = [{kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1}];});
+  const e = engine(originals);
+  const requestId = (id: string) => restoreRequestId("saved-session", id);
+  const restore = e.dependencies.restore;
+  const durable: string[] = [];
+  let fail = true;
+  const deps = {...e.dependencies,
+    restore: async (...args: Parameters<typeof restore>) => {
+      const result = await restore(...args);
+      if (result.kind === "restored") e.all.find(m => m.id === result.receipt.restoredMomentId)!.metadata = {origin: "restore", correlationId: requestId(args[0])};
+      return result;
+    },
+    recordRestores: async (receipts: readonly {restoredMomentId: string}[]) => {
+      if (fail && boundary === "before barrier") throw Error("crash before barrier");
+      if (fail) throw Error("crash before receipts");
+      durable.push(...receipts.map(r => r.restoredMomentId));
+    },
+  };
+  const files = originals.map(m => file(m.id, m.objectId, m.path));
+  expect(await restoreDirectWrites(deps, files)).toMatchObject({restored: [], unfinished: {step: "files"}});
+  expect(e.restored).toHaveLength(3); expect(durable).toEqual([]);
+  // A later edit is not overwritten when recovery finds the keyed restore.
+  e.all.push(moment("teammate", originals[0]!.objectId, originals[0]!.path, "old", "teammate"));
+  fail = false;
+  const result = await restoreDirectWrites({...deps, replayRequestId: requestId}, files);
+  expect(result).toMatchObject({review: [], unfinished: null});
+  expect(result.status === "restored" && result.restored).toHaveLength(3);
+  expect(durable).toHaveLength(3); expect(e.restored).toHaveLength(3);
+  expect(e.all.at(-1)?.payload.after.text).toBe("teammate");
+});
+
+it("flushes earlier restore successes before reporting a later file error", async () => {
+  const originals = Array.from({length: 3}, (_, i) => moment(`m-${i}`, `o-${i}`, `notes/${i}.txt`, "old", "new"));
+  const e = engine(originals); e.failing.set("m-2", Error("disk error"));
+  const batches: number[] = [];
+  const result = await restoreDirectWrites({...e.dependencies, recordRestores: async receipts => {batches.push(receipts.length);}}, originals.map(m => file(m.id, m.objectId, m.path)));
+  expect(result).toMatchObject({restored: [{path: "notes/0.txt"}, {path: "notes/1.txt"}], unfinished: {message: "disk error"}});
+  expect(batches).toEqual([2]);
+});
 
 function moment(id: string, objectId: string, path: string, before: string | null, after: string | null): VersionedTextMoment {
   return {

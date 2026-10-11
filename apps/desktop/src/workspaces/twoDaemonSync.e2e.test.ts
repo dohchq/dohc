@@ -631,7 +631,8 @@ it.skipIf(engine.missing).each([
           targets: createAutomationTargets({ isCollection: path => path === "tasks", readText: async () => null,
             readSchemaFields: async () => new Set(["Name"]), withHost: async () => null }),
           readCode: async () => null, personName: () => "Owner", evaluator: formula.forWorkspace(workspaceId), store, nowMs: Date.now,
-          chat: { directory: async () => null, write: async () => { throw new Error("No chat in this test"); } },
+          chat: { hasMessage: async () => false, directory: async () => null, write: async () => { throw new Error("No chat in this test"); } },
+          makeDurable: async () => { await adapter.makeAutomationWritesDurable(); },
           postNotice: async () => { throw new Error("No notices in this test"); }, readMessageBody: async () => null, recipientVerdicts: async () => [],
         };
         await expect(runCollectionAutomation(dependencies, { claim, automation, collection: {path: "tasks", name: "Tasks"},

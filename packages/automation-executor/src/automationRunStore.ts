@@ -289,16 +289,17 @@ const UndoCallSchema = z.union([
     idempotencyKey: z.string(),
   }),
 ]);
-// Version 12 records the exact members of a kept-field Undo attempt. It uses
-// the engine journal for document reversals and plans
+// Version 13 adds the engine durability watermark to version 12's
+// run-scoped reversal receipts and kept-field Undo members. It plans
 // and saves each step beside the run's state, names each Collection by its
 // id, records when the run ended, qualifies formula-visible fields by
 // dataset and table, and keeps the deletes an Undo may use on each record
-// it added and the calls a dataset Undo saved. A run in any other format
-// cannot be read, and the claim fails instead of starting over or reading
+// it added and the calls a dataset Undo saved. Only version 13 is readable.
+// A run in another format fails instead of starting over or reading
 // bare field ids as current reach.
 const StoredRunSchema = z.object({
-  version: z.literal(12),
+  version: z.literal(13),
+  durableEffects: z.number().int().nonnegative().default(0),
   claimId: z.string().min(1),
   automationId: z.string().min(1),
   definitionHash: z.string().min(1),
@@ -349,7 +350,11 @@ const PendingRestoreSchema = z.object({
     label: z.string(),
     definitions: z.array(z.object({collectionPath: z.string(), id: z.string(), definitionHash: z.string()})),
     filesUndone: z.boolean(),
+    undoingFiles: z.boolean().optional(),
+    restoreGrants: z.array(z.string().min(1)).optional(),
+    nextGrants: z.array(z.string().min(1)).optional(),
     receipts: z.array(z.object({path: z.string(), restoredMomentId: z.string(), removed: z.boolean().optional()})),
+    intents: z.array(z.string().min(1)).optional(),
     // The desktop validates its outcome with the bridge contract on recovery.
     result: z.unknown(),
   }).optional(),
@@ -359,8 +364,9 @@ export type PendingRestoreUpdate = Pick<PendingRestore, "id"> & Partial<Omit<Pen
 const RestoreReceiptSchema = z.object({path: z.string(), restoredMomentId: z.string(), removed: z.boolean().optional()});
 const RestoreLineSchema = z.discriminatedUnion("kind", [
   z.object({version: z.literal(2), kind: z.literal("restore"), entry: PendingRestoreSchema}),
-  z.object({version: z.literal(2), kind: z.literal("receipt"), id: z.string(), receipt: RestoreReceiptSchema}),
-  z.object({version: z.literal(2), kind: z.literal("undo-receipt"), id: z.string(), momentId: z.string()}),
+  z.object({version: z.literal(2), kind: z.literal("intents"), id: z.string(), momentIds: z.array(z.string().min(1))}),
+  z.object({version: z.literal(2), kind: z.literal("receipts"), id: z.string(), receipts: z.array(RestoreReceiptSchema), originalMomentIds: z.array(z.string()).default([])}),
+  z.object({version: z.literal(2), kind: z.literal("undo-receipts"), id: z.string(), momentIds: z.array(z.string()), originalMomentIds: z.array(z.string()).default([])}),
 ]);
 
 /**
@@ -368,7 +374,7 @@ const RestoreLineSchema = z.discriminatedUnion("kind", [
  * field someone else had changed since the plan (kept as they left it), or a
  * record it could no longer find.
  */
-export type RunWrite = z.infer<typeof WriteSchema>;
+export type RunWrite = z.infer<typeof WriteSchema> & { unconfirmed?: true };
 /** A planned effect on a dataset record, through one of its approved operations. */
 export type DatasetEffect = Extract<z.infer<typeof EffectSchema>, { kind: "dataset-edit" | "dataset-create" | "dataset-action" }>;
 export type DatasetReplan = z.infer<typeof ReplanSchema>;
@@ -395,9 +401,21 @@ export interface StoredStep {
   collections?: Array<{ collectionId: string; path: string }>;
 }
 
+/** Writes whose durability depends on the engine WAL barrier. */
+export function engineWrite(write: RunWrite): boolean {
+  return write.kind === "field" || write.kind === "created" || write.kind === "message";
+}
+
+/** Whether History and Undo can trust this recorded write. */
+export function writeConfirmed(run: StoredRun, index: number, write: RunWrite): boolean {
+  return index < run.durableEffects || !engineWrite(write);
+}
+
 /** One run of one claim under one definition of its automation. */
 export interface StoredRun {
-  version: 12;
+  version: 13;
+  /** Recorded effects whose writes survived the engine durability barrier. */
+  durableEffects: number;
   claimId: string;
   /** The engine automation id, "collection:<collection id>#<id>". */
   automationId: string;
@@ -413,7 +431,7 @@ export interface StoredRun {
   finishedAtMs: number | null;
   /** The steps planned so far, in the order they ran, each saved before its first effect. */
   steps: StoredStep[];
-  /** What each effect that landed did, in step order, one entry per effect. */
+  /** Effect receipts in step order. The watermark confirms their durability. */
   applied: Array<z.infer<typeof AppliedSchema>>;
   /**
    * Records the run created, each under the id its plan gave it and the id
@@ -742,11 +760,12 @@ const tooLarge = () =>
 
 export interface AutomationRunStore {
   pendingRestores(): Promise<PendingRestore[]>;
-  savePendingRestore(restore: PendingRestoreUpdate): Promise<void>;
-  recordRestoreReceipt(id: string, receipt: z.infer<typeof RestoreReceiptSchema>): Promise<void>;
-  undoRestoreReceipt(id: string, momentId: string): Promise<void>;
+  savePendingRestore(restore: PendingRestoreUpdate, whilePending?: string): Promise<void>;
+  recordRestoreIntents(id: string, momentIds: readonly string[]): Promise<void>;
+  recordRestoreReceipts(id: string, receipts: readonly z.infer<typeof RestoreReceiptSchema>[], originalMomentIds?: readonly string[]): Promise<void>;
+  undoRestoreReceipts(id: string, momentIds: readonly string[], originalMomentIds?: readonly string[]): Promise<void>;
   removePendingRestore(id: string): Promise<void>;
-  recordUndoWrite(run: StoredRun, write: UndoWrite): Promise<void>;
+  recordUndoWrites(run: StoredRun, writes: readonly UndoWrite[]): Promise<void>;
   /**
    * Every run of one claim, one per run it was planned in. `unreadable` is
    * true when a saved run exists that cannot be read: the claim must not
@@ -838,7 +857,7 @@ type ProgressLine =
   | ({ kind: "replan" } & DatasetReplan)
   | ({ kind: "undo-request" } & DatasetUndoRequest)
   | { kind: "undo-calls"; covers: string[]; calls: DatasetUndoCall[] }
-  | { kind: "undo-write"; write: UndoWrite };
+  | { kind: "undo-writes"; writes: UndoWrite[] };
 
 const ProgressLineSchema = z.union([
   StepSchema.extend({ kind: z.literal("step") }),
@@ -847,7 +866,7 @@ const ProgressLineSchema = z.union([
   ReplanSchema.extend({ kind: z.literal("replan") }),
   UndoRequestSchema.extend({ kind: z.literal("undo-request") }),
   z.object({ kind: z.literal("undo-calls"), covers: z.array(z.string()), calls: z.array(UndoCallSchema) }),
-  z.object({ kind: z.literal("undo-write"), write: UndoWriteSchema }),
+  z.object({ kind: z.literal("undo-writes"), writes: z.array(UndoWriteSchema) }),
 ]);
 
 function progressText(run: StoredRun): string {
@@ -858,7 +877,7 @@ function progressText(run: StoredRun): string {
     ...run.applied.map((applied) => ({ kind: "effect" as const, ...applied })),
     ...run.undoRequests.map((request) => ({ kind: "undo-request" as const, ...request })),
     ...(run.undoCovers.length > 0 ? [{ kind: "undo-calls" as const, covers: run.undoCovers, calls: run.undoCalls }] : []),
-    ...(run.undoWrites ?? []).map(write => ({kind: "undo-write" as const, write})),
+    ...(run.undoWrites?.length ? [{kind: "undo-writes" as const, writes: run.undoWrites}] : []),
   ];
   return lines.map((line) => `${JSON.stringify(line)}\n`).join("");
 }
@@ -920,8 +939,12 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
         else {
           const session = entries.get(entry.id)?.session;
           if (!session) throw new Error("Restore receipt without a session");
-          if (entry.kind === "receipt") session.receipts.push(entry.receipt);
-          else session.receipts = session.receipts.filter(file => file.restoredMomentId !== entry.momentId);
+          if (entry.kind === "intents") session.intents = [...new Set([...(session.intents ?? []), ...entry.momentIds])];
+          else {
+            if (entry.kind === "receipts") session.receipts = [...new Map([...session.receipts, ...entry.receipts].map(receipt => [receipt.restoredMomentId, receipt])).values()];
+            else session.receipts = session.receipts.filter(file => !entry.momentIds.includes(file.restoredMomentId));
+            session.intents = session.intents?.filter(id => !entry.originalMomentIds.includes(id));
+          }
         }
       }
       setRestores([...entries.values()]);
@@ -930,11 +953,15 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
   };
   const readRestores = async (refresh = false): Promise<Map<string, PendingRestore> | null> =>
     !refresh && restores !== undefined ? restores : parseRestores(await readBounded(await restoresFile()));
-  const changeRestore = (id: string, entry?: PendingRestoreUpdate) => serial(async () => {
+  const changeRestore = (id: string, entry?: PendingRestoreUpdate, whilePending?: string) => serial(async () => {
     const path = await restoresFile();
     return withFile(path, async () => {
       const known = parseRestores(await readBoundedUnlocked(path));
       if (known === null) throw new Error("dohc could not read unfinished Stop and restore progress. Reopen the workspace, then try again.");
+      if (whilePending !== undefined) {
+        const parent = known.get(whilePending);
+        if (!parent?.session || parent.serverRelease) return;
+      }
       if (entry && releasedRestores.has(id) && !entry.serverRelease) return;
       const next = new Map(known);
       if (entry) next.set(id, PendingRestoreSchema.parse({claims: [], ...known.get(id), ...entry}));
@@ -1007,9 +1034,8 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
         run.undoCovers.push(...entry.data.covers);
         run.undoCalls.push(...entry.data.calls);
       }
-      else if (entry.data.kind === "undo-write") {
-        const write = entry.data.write;
-        run.undoWrites = [...(run.undoWrites ?? []).filter(previous => previous.recordId !== write.recordId || previous.field !== write.field), write];
+      else if (entry.data.kind === "undo-writes") {
+        run.undoWrites = [...new Map([...(run.undoWrites ?? []), ...entry.data.writes].map(write => [JSON.stringify([write.recordId, write.field]), write])).values()];
       }
       else {
         // The newest line for a planned record is the record it created.
@@ -1020,6 +1046,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     // Steps run in order, and an effect lands only after its step was saved.
     const planned = run.steps.reduce((count, step) => count + step.effects.length, 0);
     if (run.steps.some((step, index) => index > 0 && step.ordinal <= run.steps[index - 1]!.ordinal)) return null;
+    if (run.durableEffects > run.applied.length) return null;
     if (run.applied.length > planned || run.replans.some((replan) => replan.effect >= planned)) return null;
     return run;
   };
@@ -1248,27 +1275,38 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
         return structuredClone([...known.values()]);
       });
     },
-    savePendingRestore(entry) { return changeRestore(entry.id, entry); },
-    recordRestoreReceipt(id, receipt) {
+    savePendingRestore(entry, whilePending) { return changeRestore(entry.id, entry, whilePending); },
+    recordRestoreIntents(id, momentIds) {
+      return serial(async () => {
+        const session = (await readRestores())?.get(id)?.session;
+        if (!session) throw new Error("dohc could not save this restore's progress.");
+        const saved = z.array(z.string().min(1)).parse(momentIds);
+        await appendDurableLine(await restoresFile(), {version: 2, kind: "intents", id, momentIds: saved}, MAX_RUN_FILE_BYTES);
+        session.intents = [...new Set([...(session.intents ?? []), ...saved])];
+      });
+    },
+    recordRestoreReceipts(id, receipts, originalMomentIds = []) {
       return serial(async () => {
         const known = await readRestores();
         const entry = known?.get(id);
         if (!entry?.session) throw new Error("dohc could not save this restore's progress.");
-        const saved = RestoreReceiptSchema.parse(receipt);
-        await appendDurableLine(await restoresFile(), {version: 2, kind: "receipt", id, receipt: saved}, MAX_RUN_FILE_BYTES);
-        entry.session.receipts.push(saved);
+        const saved = z.array(RestoreReceiptSchema).parse(receipts);
+        await appendDurableLine(await restoresFile(), {version: 2, kind: "receipts", id, receipts: saved, originalMomentIds}, MAX_RUN_FILE_BYTES);
+        entry.session.receipts = [...new Map([...entry.session.receipts, ...saved].map(receipt => [receipt.restoredMomentId, receipt])).values()];
+        entry.session.intents = entry.session.intents?.filter(id => !originalMomentIds.includes(id));
       });
     },
     removePendingRestore(id) { return changeRestore(id); },
-    undoRestoreReceipt(id, momentId) {
+    undoRestoreReceipts(id, momentIds, originalMomentIds = []) {
       return serial(async () => {
         const session = (await readRestores())?.get(id)?.session;
         if (!session) throw new Error("dohc could not save this restore's progress.");
-        await appendDurableLine(await restoresFile(), {version: 2, kind: "undo-receipt", id, momentId}, MAX_RUN_FILE_BYTES);
-        session.receipts = session.receipts.filter(file => file.restoredMomentId !== momentId);
+        await appendDurableLine(await restoresFile(), {version: 2, kind: "undo-receipts", id, momentIds, originalMomentIds}, MAX_RUN_FILE_BYTES);
+        session.receipts = session.receipts.filter(file => !momentIds.includes(file.restoredMomentId));
+        session.intents = session.intents?.filter(id => !originalMomentIds.includes(id));
       });
     },
-    recordUndoWrite(run, write) { return serial(() => appendLine(run, {kind: "undo-write", write})); },
+    recordUndoWrites(run, writes) { return serial(() => appendLine(run, {kind: "undo-writes", writes: [...writes]})); },
     appendStep(run, step) {
       return serial(() => appendLine(run, { kind: "step", ...step }));
     },
