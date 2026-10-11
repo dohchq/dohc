@@ -126,6 +126,8 @@ jobs:
               - 'examples/stock-orders/**'
               # The desktop daemon prebuild reads Cargo configuration.
               - '.cargo/**'
+              # build-artifacts.test.mjs reads the desktop ignore rules.
+              - 'apps/desktop/.gitignore'
               - '.npmrc'
               - '.pnpmfile.cjs'
               - '.pnpmfile.mjs'
