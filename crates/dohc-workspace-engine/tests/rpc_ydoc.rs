@@ -120,6 +120,124 @@ fn plaintext_update(text: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, text))
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn captured_seeds_are_uncredited_but_headless_recovery_keeps_the_marker() {
+    for flow in [
+        "headless-recovery",
+        "created-document",
+        "created-empty-document",
+        "recovered-edit",
+    ] {
+        let scratch = ScratchDir::new().expect("scratch");
+        let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+        let handle = open_workspace_with_capture_mode(
+            &transport,
+            &scratch,
+            "seed-coverage",
+            1,
+            Some("none"),
+        )
+        .await;
+        if flow == "created-document" {
+            call(
+                &transport,
+                &handle,
+                2,
+                "versionedText.write",
+                json!({
+                    "versionId":"main", "path":"new.txt", "text":"starting state",
+                    "origin":"api", "publish":true, "requestId":"create-document"
+                }),
+            )
+            .await;
+        }
+        if flow == "created-empty-document" {
+            // Desktop file creation can precede capture of the empty file.
+            write_file(scratch.path(), "new.txt", b"");
+        }
+        let opened = call(
+            &transport,
+            &handle,
+            3,
+            "ydoc.open",
+            json!({
+                "versionId":"main", "path":"new.txt", "contentKind":"plaintext"
+            }),
+        )
+        .await;
+        assert_eq!(opened["lineage"], "absent", "{flow}");
+        assert_eq!(
+            opened["head"],
+            if flow == "created-document" {
+                "present"
+            } else {
+                "absent"
+            },
+            "{flow}"
+        );
+        let doc = Ydoc::wire();
+        if flow != "created-empty-document" {
+            call(&transport, &handle, 4, "ydoc.recordUpdate", json!({
+            "sessionId":opened["sessionId"],
+            "updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0,"starting state")),
+            "seed":true
+        })).await;
+        }
+        if flow == "recovered-edit" {
+            // Recovery replays edits separately from the acknowledged starting state.
+            call(&transport, &handle, 5, "ydoc.recordUpdate", json!({
+                "sessionId":opened["sessionId"],
+                "updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(14," edit"))
+            })).await;
+        }
+        let store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 6).unwrap();
+        let pending: String = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COALESCE((SELECT pending_authors_json FROM ydoc_docs WHERE object_id=?1),'[]')",
+                    [opened["objectId"].as_str().unwrap()],
+                    |row| row.get(0),
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+        assert_eq!(
+            pending,
+            if matches!(flow, "headless-recovery" | "recovered-edit") {
+                r#"[{"kind":"unattributed"}]"#
+            } else {
+                "[]"
+            },
+            "{flow}"
+        );
+        drop(store);
+        call(
+            &transport,
+            &handle,
+            7,
+            "ydoc.close",
+            json!({"sessionId":opened["sessionId"]}),
+        )
+        .await;
+        let store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 8).unwrap();
+        let settled: String = store.read_with(|conn| conn.query_row(
+            "SELECT COALESCE((SELECT author_json FROM moments ORDER BY moment_order DESC LIMIT 1),'null')",
+            [], |row| row.get(0)
+        ).map_err(dohc_engine_storage::StorageError::persist_public)).unwrap();
+        assert_eq!(
+            settled,
+            if matches!(flow, "headless-recovery" | "recovered-edit") {
+                r#"[{"kind":"unattributed"}]"#
+            } else {
+                "null"
+            },
+            "settled {flow}"
+        );
+        drop(store);
+        call(&transport, &handle, 8, "workspace.close", json!({})).await;
+    }
+}
+
 fn png_crc32(bytes: &[u8]) -> u32 {
     let mut crc = u32::MAX;
     for byte in bytes {
@@ -6119,7 +6237,19 @@ async fn attributed_declared_seed_does_not_credit_opening() {
     let handle =
         open_workspace_with_capture_mode(&transport, &scratch, "seed-authors", 1, Some("none"))
             .await;
+    call(
+        &transport,
+        &handle,
+        10,
+        "versionedText.write",
+        json!({"versionId":"main","path":"seed.txt","text":"seed","origin":"api","publish":true,"requestId":"create-seed-source"}),
+    )
+    .await;
     let opened=call(&transport,&handle,2,"ydoc.open",json!({"versionId":"main","path":"seed.txt","contentKind":"plaintext","seedFromArtifact":false})).await;
+    assert_eq!(
+        opened["head"], "present",
+        "ordinary opening has a captured seed source"
+    );
     let doc = Ydoc::wire();
     call(&transport,&handle,3,"ydoc.recordUpdate",json!({"sessionId":opened["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0,"seed")),"seed":true,"actorOriginId":"opener","attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0}})).await;
     call(

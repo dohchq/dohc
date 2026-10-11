@@ -359,6 +359,7 @@ pub fn nonnull_optional<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
     deny_unknown_fields
 )]
 pub enum LiveAuthorEntry {
+    Unattributed {},
     Automation {
         automation_id: String,
         attribution: dohc_engine_domain::ChangeAttribution,
@@ -406,6 +407,7 @@ impl From<AgentDeclaration> for LiveAuthorEntry {
 impl LiveAuthorEntry {
     pub fn validate(&self) -> Result<(), ApplicationError> {
         match self {
+            Self::Unattributed {} => {}
             Self::Automation {
                 automation_id,
                 attribution,
@@ -459,6 +461,7 @@ impl LiveAuthorEntry {
     }
     pub fn identity(&self) -> (&'static str, Option<&str>, &str) {
         match self {
+            Self::Unattributed {} => ("unattributed", None, ""),
             Self::Automation {
                 automation_id,
                 attribution,
@@ -1162,7 +1165,11 @@ pub fn apply_committed(
                 }).collect::<Result<Vec<_>, _>>())
                 .transpose().map_err(|_| ApplicationError::Corrupt)?
                 .unwrap_or_default();
-            match crate::author_coverage::admit_accepted_in(tx, &key, &authors) {
+            let adds_content = !event.metadata.first_seen.is_empty()
+                || event.metadata.first_seen_deletes.as_ref().is_some_and(|ranges| !ranges.is_empty());
+            match if authors.is_empty() && !adds_content { Ok(()) } else {
+                crate::author_coverage::admit_accepted_in(tx, &key, &authors)
+            } {
                 Err(CollabError::AuthorCapacity)
                     if crate::author_coverage::unresolved_in(tx, &key)? =>
                 {
@@ -1189,6 +1196,7 @@ pub fn apply_committed(
                 true,
                 native_actor.and_then(|(actor, _)| actor.as_deref()),
                 native_actor.and_then(|(_, attribution)| attribution.as_ref()),
+                true,
                 event.metadata.accepted.received_at_ms,
             )?;
             // A new delivery can reuse old bytes and an older local sequence.
@@ -2321,6 +2329,38 @@ mod tests {
             .read_with(|conn| crate::author_coverage::interval_in(conn, &key(), i64::MAX))
             .unwrap()
             .len()
+    }
+
+    #[test]
+    fn empty_snapshot_credits_content_but_not_no_op_deliveries() {
+        for content in ["none", "structs", "deletes"] {
+            let (_dir, mut store, mut cache, _owner, handle) = fixture();
+            let mut update = event("empty-snapshot", 1, Ydoc::wire().encode_full_state());
+            snapshot(&mut update.metadata, None);
+            update.metadata.author_snapshot = Some(vec![]);
+            let range = LiveUpdateStructRange {
+                client_id: 7,
+                start_clock: 0,
+                end_clock: 1,
+            };
+            match content {
+                "structs" => update.metadata.first_seen.push(range),
+                "deletes" => update.metadata.first_seen_deletes = Some(vec![range]),
+                _ => {}
+            }
+            ack(apply(&mut store, &mut cache, &handle, update.clone()));
+            assert_eq!(
+                interval_len(&store),
+                usize::from(content != "none"),
+                "{content}"
+            );
+            assert!(ack(apply(&mut store, &mut cache, &handle, update)).application_replayed);
+            assert_eq!(
+                interval_len(&store),
+                usize::from(content != "none"),
+                "replay {content}"
+            );
+        }
     }
 
     /// Accepted deliveries' declared agents and local edits' authors share

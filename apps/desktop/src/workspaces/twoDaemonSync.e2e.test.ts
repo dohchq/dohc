@@ -567,12 +567,13 @@ it.skipIf(engine.missing).each([
     console.log(`native owner delivery ${name}: ${resyncSignals} resync signals recovered on the original session`);
     const ownerSettlement = (await capture.listMoments({limit: 100})).moments.find(moment => moment.path === path);
     expect(ownerSettlement).toBeDefined();
-    expect(ownerSettlement!.authors).toBeUndefined();
+    // Native owner delivery sends no recording context for an undeclared edit, so no author is verified.
+    expect(ownerSettlement!.authors).toEqual([{kind: "unattributed"}]);
     const publicationDb = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH), {readOnly: true});
     try {
       expect(publicationDb.prepare("SELECT admission_json,authors_json FROM live_settlement_publication_admissions WHERE workspace_id=? AND moment_id=?")
         .get(workspaceId, ownerSettlement!.id)).toMatchObject({
-          admission_json: expect.stringContaining('"status":"accepted"'), authors_json: "[]",
+          admission_json: expect.stringContaining('"status":"accepted"'), authors_json: '[{"kind":"unattributed"}]',
         });
     } finally {publicationDb.close();}
     // Publish owner operations before the peer imports settlement coverage.
@@ -601,7 +602,7 @@ it.skipIf(engine.missing).each([
     await pullAndExpect(peer, rootB, path, markdown);
     const imported = (await peer.capture.listMoments({limit: 100})).moments.find(moment => moment.id === ownerSettlement?.id);
     expect(imported).toBeDefined();
-    expect(imported!.authors).toBeUndefined();
+    expect(imported!.authors).toEqual([{kind: "unattributed"}]);
     if (hasId) {
       await delivery.stop();
       delivery = undefined;

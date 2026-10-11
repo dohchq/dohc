@@ -3634,32 +3634,55 @@ mod tests {
             |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("record live edit");
-        write_text(
-            &mut store,
-            "main",
-            "live-object",
-            "moment-live-settle",
-            "edited in the live session",
-            "ydoc",
-            12,
-        );
-        if !close_before_enrollment {
-            store
-                .write_with(&NoFaults, |tx| {
+        store
+            .write_with(&NoFaults, |tx| {
+                let authors = dohc_engine_collab::author_coverage::interval_in(tx, &key, i64::MAX)
+                    .map_err(SyncError::corrupt)?;
+                dohc_engine_domain::write_projected_text_in_tx(
+                    tx,
+                    &WriteText {
+                        workspace_id: "ws".into(),
+                        version_id: "main".into(),
+                        object_id: "live-object".into(),
+                        path: "live-object.md".into(),
+                        text: "edited in the live session".into(),
+                        moment_id: "moment-live-settle".into(),
+                        metadata_origin: "ydoc".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: authors.moment_json(),
+                        now_ms: 12,
+                        request_id: None,
+                    },
+                )
+                .map_err(SyncError::corrupt)?;
+                dohc_engine_collab::author_coverage::advance_in(tx, &key, false)
+                    .map_err(SyncError::corrupt)?;
+                // The close case still has to materialize its first saved artifact.
+                if !close_before_enrollment {
                     tx.execute(
-                        "UPDATE ydoc_docs SET settled_update_seq=head_update_seq, \
-                     last_settled_sha=(SELECT blob_sha256 FROM snapshots s \
+                        "UPDATE ydoc_docs SET last_settled_sha=(SELECT blob_sha256 FROM snapshots s \
                        WHERE s.workspace_id=ydoc_docs.workspace_id \
                          AND s.version_id=ydoc_docs.version_id AND s.object_id=ydoc_docs.object_id)",
                         [],
                     )
                     .map_err(SyncError::persist)?;
-                    Ok::<_, SyncError>(())
-                })
-                .expect("record settlement coverage");
-        }
+                }
+                Ok::<_, SyncError>(())
+            })
+            .expect("record settlement coverage");
 
         if close_before_enrollment {
+            assert_eq!(
+                VersionedTextStore::new(&mut store)
+                    .get_moment("ws", "moment-live-settle")
+                    .unwrap()
+                    .unwrap()
+                    .author_json
+                    .as_deref(),
+                Some(r#"[{"kind":"unattributed"}]"#),
+                "the saved History moment covers the actorless live edit",
+            );
             let settled =
                 match dohc_engine_collab::settle(&mut store, &key, "live-object.md", &NoFaults, 13)
                     .expect("settle the live document")
@@ -3671,6 +3694,11 @@ mod tests {
                 .load_materialization_job(&settled.job_id)
                 .expect("load settlement job")
                 .expect("settlement queues materialization");
+            assert_eq!(
+                job.preimage,
+                dohc_engine_storage::Preimage::Absent,
+                "the first saved artifact has not been materialized yet",
+            );
             assert_eq!(
                 dohc_engine_files::materialize_one(
                     &store,

@@ -707,6 +707,16 @@ pub(crate) fn annotate_projected_moment_in_tx(
     if let Some(existing) = existing {
         authors.union_json(&existing).map_err(SyncError::corrupt)?;
     }
+    // Only a marker introduced by this one coordinate can become verified.
+    // A local gap or an aggregate drain's earlier gap remains unattributed.
+    let provisional = tx.execute(
+        "DELETE FROM engine_requests WHERE request_id='sync-ydoc-provisional-author:'||json_array(?1,?2,?3) \
+         AND payload_hash=?4 AND kind='sync-ydoc-provisional-author'",
+        params![key.workspace_id,key.version_id,key.object_id,moment_id],
+    ).map_err(SyncError::persist)?;
+    if provisional != 0 {
+        authors.remove_unattributed();
+    }
     authors.union_json(&verified).map_err(SyncError::corrupt)?;
     tx.execute(
         "UPDATE moments SET author_json=?3 WHERE workspace_id=?1 AND moment_id=?2",

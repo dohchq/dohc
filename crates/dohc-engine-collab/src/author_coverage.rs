@@ -123,6 +123,14 @@ impl Authors {
     pub fn moment_json(&self) -> Option<String> {
         (!self.is_empty()).then(|| self.json())
     }
+
+    pub fn has_unattributed(&self) -> bool {
+        self.0.contains_key("unattributed")
+    }
+
+    pub fn remove_unattributed(&mut self) {
+        self.0.remove("unattributed");
+    }
 }
 
 /// Whether this lineage belongs to an adopted owner. Its native log also holds
@@ -143,6 +151,7 @@ pub fn accepted_only_in(conn: &Connection, key: &DocKey) -> Result<bool, CollabE
 
 /// Read only authors above the settled boundary, including rows a fold already
 /// consumed and authors that accepted deliveries admitted.
+/// `through` bounds native rows; pending coverage, including the marker, is interval-wide.
 pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Authors, CollabError> {
     let (boundary, pending): (Option<i64>, String) = conn
         .query_row(
@@ -157,8 +166,8 @@ pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Auth
     if accepted_only_in(conn, key)? {
         return Ok(authors);
     }
-    // Admission caps distinct identities, so this returns at most
-    // MAX_INTERVAL_AUTHORS rows from the retained rows above the boundary.
+    // Actorless edits and accepted snapshots retain coverage at admission.
+    // Admission caps the named identities retained above the boundary.
     let mut stmt = conn
         .prepare_cached(
             "SELECT actor_origin_id, actor_kind, on_behalf_of, MAX(chain_depth) FROM ydoc_updates \
@@ -332,22 +341,112 @@ pub fn check_admission_in(
     actor: Option<&str>,
     attribution: Option<&ChangeAttribution>,
 ) -> Result<bool, CollabError> {
-    let Some(json) = dohc_engine_domain::moment_author_json(actor, attribution) else {
-        return Ok(false);
-    };
+    check_admission_with_coverage_in(conn, key, actor, attribution)
+        .map(|admission| admission.request_settlement)
+}
+
+struct Admission {
+    request_settlement: bool,
+    introduced_unattributed: bool,
+}
+
+fn check_admission_with_coverage_in(
+    conn: &Connection,
+    key: &DocKey,
+    actor: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+) -> Result<Admission, CollabError> {
+    let json = dohc_engine_domain::moment_author_json(actor, attribution);
+    let actorless = json.is_none();
+    let json = json.unwrap_or_else(|| r#"[{"kind":"unattributed"}]"#.to_owned());
     // An adopted owner's edit is private until the relay accepts it. Its
     // author joins the interval with that acceptance, where a settlement can
     // always make room, so only the entry itself is bounded here.
     if accepted_only_in(conn, key)? {
         entry(&json)?;
-        return Ok(false);
+        return Ok(Admission {
+            request_settlement: false,
+            introduced_unattributed: false,
+        });
+    }
+    if actorless {
+        let pending: String = conn
+            .query_row(
+                "SELECT pending_authors_json FROM ydoc_docs \
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                params![key.workspace_id, key.version_id, key.object_id],
+                |row| row.get(0),
+            )
+            .map_err(sql)?;
+        let mut admitted = Authors::default();
+        admitted.union_json(&pending)?;
+        // Repeated actorless edits add no identity or bytes. Only a new named
+        // identity needs room; its admission checks capacity again, and
+        // AuthorCapacity queues a settlement.
+        if admitted.has_unattributed() {
+            return Ok(Admission {
+                request_settlement: false,
+                introduced_unattributed: false,
+            });
+        }
     }
     let mut covered = reserved_in(conn, key)?;
+    let introduced_unattributed = actorless && !covered.has_unattributed();
     let bytes = admit(&mut covered, &json)?;
-    Ok(
-        (bytes >= SETTLE_AUTHOR_BYTE_THRESHOLD || covered.len() >= SETTLE_AUTHOR_COUNT_THRESHOLD)
+    if actorless {
+        retain_pending_in(conn, key, &[json])?;
+    }
+    Ok(Admission {
+        request_settlement: (bytes >= SETTLE_AUTHOR_BYTE_THRESHOLD
+            || covered.len() >= SETTLE_AUTHOR_COUNT_THRESHOLD)
             && !unresolved_in(conn, key)?,
-    )
+        introduced_unattributed,
+    })
+}
+
+/// A historical coordinate's verified snapshot owns its coverage, just as an
+/// accepted delivery's snapshot does. Raw replication rows cannot mint it.
+/// Returns whether admission introduced the unknown-author marker.
+pub(crate) fn check_remote_admission_in(
+    conn: &Connection,
+    key: &DocKey,
+    origin_id: &str,
+    origin_seq: i64,
+    actor: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+) -> Result<bool, CollabError> {
+    let verified: Option<(String, String)> = conn
+        .query_row(
+            "SELECT a.author_json,d.pending_authors_json FROM live_audit_projection_authors a JOIN ydoc_docs d \
+             ON d.workspace_id=a.workspace_id AND d.version_id=a.version_id AND d.object_id=a.object_id \
+             AND d.path=a.path AND d.lineage_claim_id=a.lineage_claim_id \
+             WHERE a.workspace_id=?1 AND a.origin_id=?2 AND a.origin_seq=?3 \
+             AND a.version_id=?4 AND a.object_id=?5",
+            params![key.workspace_id, origin_id, origin_seq, key.version_id, key.object_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(sql)?;
+    if let Some((verified, pending)) = verified {
+        let mut covered = Authors::default();
+        covered.union_json(&pending)?;
+        covered.union_json(&verified)?;
+        // Identical admitted snapshots add no identity or bytes. Catch-up must
+        // not scan the native interval again for every known coordinate.
+        if covered.json() == pending {
+            return Ok(false);
+        }
+        let authors: Vec<Value> = serde_json::from_str(&verified)
+            .map_err(|_| corrupt("verified remote coverage is not an author list"))?;
+        let entries = authors
+            .into_iter()
+            .map(|author| Value::Array(vec![author]).to_string())
+            .collect::<Vec<_>>();
+        admit_accepted_in(conn, key, &entries).map(|_| false)
+    } else {
+        check_admission_with_coverage_in(conn, key, actor, attribution)
+            .map(|admission| admission.introduced_unattributed)
+    }
 }
 
 /// Admits the authors of one accepted delivery to the current interval, under
@@ -372,6 +471,14 @@ pub fn admit_accepted_in(
     for json in authors {
         admit(&mut covered, json)?;
     }
+    retain_pending_in(conn, key, authors)
+}
+
+fn retain_pending_in(
+    conn: &Connection,
+    key: &DocKey,
+    authors: &[String],
+) -> Result<(), CollabError> {
     let pending: String = conn
         .query_row(
             "SELECT pending_authors_json FROM ydoc_docs \
@@ -385,15 +492,14 @@ pub fn admit_accepted_in(
     for json in authors {
         admitted.union_json(json)?;
     }
+    let json = admitted.json();
+    if json == pending {
+        return Ok(());
+    }
     conn.execute(
         "UPDATE ydoc_docs SET pending_authors_json=?4 \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-        params![
-            key.workspace_id,
-            key.version_id,
-            key.object_id,
-            admitted.json()
-        ],
+        params![key.workspace_id, key.version_id, key.object_id, json],
     )
     .map_err(sql)?;
     Ok(())
@@ -453,6 +559,18 @@ fn advance(
             reserve_attempt,
             keep_boundary
         ],
+    )
+    .map_err(sql)?;
+    clear_provisional_author_in(conn, key)?;
+    Ok(())
+}
+
+/// Only the latest covered interval can still replace its provisional marker.
+fn clear_provisional_author_in(conn: &Connection, key: &DocKey) -> Result<(), CollabError> {
+    conn.execute(
+        "DELETE FROM engine_requests WHERE request_id='sync-ydoc-provisional-author:'||json_array(?1,?2,?3) \
+         AND kind='sync-ydoc-provisional-author'",
+        params![key.workspace_id, key.version_id, key.object_id],
     )
     .map_err(sql)?;
     Ok(())
@@ -544,6 +662,7 @@ pub fn reset_in(conn: &Connection, key: &DocKey, retain_content: bool) -> Result
     if retain_content {
         fold_in(conn, key, i64::MAX)?;
     }
+    clear_provisional_author_in(conn, key)?;
     conn.execute(
         "UPDATE ydoc_docs SET settled_update_seq=NULL,settle_prior_update_seq=NULL, \
          last_settled_sha=CASE WHEN ?4 THEN last_settled_sha ELSE NULL END, \
@@ -651,6 +770,87 @@ pub fn reconcile_workspace_in(
 }
 
 #[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ContentKind, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc};
+    use dohc_engine_domain::{VersionedTextStore, WriteText};
+    use dohc_engine_storage::{EngineStore, NoFaults};
+
+    #[test]
+    fn remote_admission_does_not_introduce_a_reserved_unattributed_marker() {
+        let scratch = dohc_test_scratch::ScratchDir::new().unwrap();
+        let mut store = EngineStore::open(&scratch.join("engine.db"), 1).unwrap();
+        let key = DocKey::new("ws", "main", "object").unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .unwrap();
+        let moment = VersionedTextStore::new(&mut store)
+            .write_text(
+                &WriteText {
+                    workspace_id: key.workspace_id.clone(),
+                    version_id: key.version_id.clone(),
+                    object_id: key.object_id.clone(),
+                    path: "note.txt".into(),
+                    text: "unproven local edit".into(),
+                    moment_id: "local-settlement".into(),
+                    metadata_origin: "ydoc".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: Some(r#"[{"kind":"human","humanId":"recipient","relayConfirmed":true},{"kind":"unattributed"}]"#.into()),
+                    now_ms: 3,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap()
+            .moment;
+        crate::record_local_update(
+            &mut store,
+            &mut WriterDocCache::new(),
+            &key,
+            &Ydoc::wire().plaintext_insert(0, "unproven local edit"),
+            LocalAppend {
+                marker: Some(MarkerCreation {
+                    path: Some("note.txt"),
+                    content_kind: ContentKind::Plaintext,
+                    regime: Regime::LocalOnly,
+                }),
+                ..LocalAppend::default()
+            },
+            &NoFaults,
+            2,
+            |_, _, _| Ok(()),
+        )
+        .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                // Model the reservation before materialization compensation.
+                advance_in(tx, &key, true)?;
+                tx.execute("UPDATE ydoc_docs SET settle_seq=?1", [moment.moment_order])
+                    .map_err(sql)?;
+                assert!(unresolved_in(tx, &key)?);
+                assert!(interval_in(tx, &key, i64::MAX)?.is_empty());
+                let reserved = reserved_in(tx, &key)?;
+                assert!(reserved.has_unattributed());
+                let reserved_json: Value = serde_json::from_str(&reserved.json()).unwrap();
+                assert_eq!(reserved_json, serde_json::json!([{ "kind": "human", "humanId": "recipient" }, { "kind": "unattributed" }]));
+                assert!(
+                    !check_remote_admission_in(tx, &key, "remote", 1, None, None)?,
+                    "the unresolved local settlement already reserves the marker"
+                );
+                assert!(interval_in(tx, &key, i64::MAX)?.has_unattributed());
+                assert!(!check_remote_admission_in(
+                    tx, &key, "remote", 2, None, None
+                )?);
+                compensate_in(tx, &key, None, 4)?;
+                assert!(interval_in(tx, &key, i64::MAX)?.has_unattributed());
+                Ok::<_, CollabError>(())
+            })
+            .unwrap();
+    }
+}
+
+#[cfg(test)]
 mod confirmation_tests {
     use super::Authors;
     use serde_json::json;
@@ -666,8 +866,12 @@ mod confirmation_tests {
             assert_eq!(authors.json(), plain.to_string());
         }
         let mut authors = Authors::default();
+        authors.union_json(r#"[{"kind":"unattributed"}]"#).unwrap();
         authors.union_json(&confirmed.to_string()).unwrap();
         authors.union_json(&confirmed.to_string()).unwrap();
-        assert_eq!(authors.json(), confirmed.to_string());
+        assert_eq!(
+            authors.json(),
+            json!([confirmed[0].clone(), {"kind":"unattributed"}]).to_string()
+        );
     }
 }
