@@ -52,15 +52,246 @@ fn ordinary_publisher_fixture() -> (ScratchDir, std::path::PathBuf, EngineStore)
 }
 
 fn ordinary_saved_head(store: &mut EngineStore, id: &str, text: &str, now: i64) {
+    ordinary_saved_head_at_path(store, id, "doc.md", text, now);
+}
+
+fn ordinary_saved_head_at_path(
+    store: &mut EngineStore,
+    id: &str,
+    path: &str,
+    text: &str,
+    now: i64,
+) {
     store.write_with(&NoFaults, |tx| {
         dohc_engine_domain::write_projected_text_in_tx(tx, &WriteText {
             workspace_id:"ws".into(),version_id:"main".into(),object_id:"doc".into(),
-            moment_id:id.into(),path:"doc.md".into(),text:text.into(),metadata_origin:"ydoc".into(),
+            moment_id:id.into(),path:path.into(),text:text.into(),metadata_origin:"ydoc".into(),
             metadata_summary:None,metadata_correlation_id:None,author_json:None,now_ms:now,request_id:None,
         }).map_err(SyncError::corrupt)?;
         tx.execute("UPDATE ydoc_docs SET last_settled_sha=(SELECT blob_sha256 FROM snapshots WHERE workspace_id='ws' AND object_id='doc'),settle_seq=(SELECT moment_order FROM moments WHERE workspace_id='ws' AND moment_id=?1)", [id]).map_err(SyncError::persist)?;
         Ok::<_,SyncError>(())
     }).unwrap();
+}
+
+#[test]
+fn fix4_throttled_local_save_survives_rename_then_projection() {
+    let (_scratch, _, mut store) = ordinary_publisher_fixture();
+    let client = RelaySyncClient::new(FakeRelay::default());
+    ordinary_saved_head(&mut store, "moment-ydoc-published", "published", 10);
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_000, 0)
+        .unwrap();
+    ordinary_saved_head(&mut store, "moment-ydoc-local-save", "local save", 20);
+    let held = client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_001, 0)
+        .unwrap();
+    assert!(matches!(
+        held,
+        SyncPassOutcome::Complete {
+            next_settled_head_publish_at_ms: Some(90_000),
+            ..
+        }
+    ));
+    VersionedTextStore::new(&mut store)
+        .rename_text_file(
+            &RenameTextFile {
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                from_path: "doc.md".into(),
+                to_path: "renamed.md".into(),
+                moment_id: "renamed".into(),
+                request_id: None,
+                metadata_origin: "local-file".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 30,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_002, 0)
+        .unwrap();
+    assert_eq!(publication_checked(&store).0, publication_checked(&store).1);
+    ordinary_saved_head_at_path(
+        &mut store,
+        "moment-ydoc-apply-concurrent",
+        "renamed.md",
+        "local save + peer edit",
+        40,
+    );
+    let held = client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_003, 0)
+        .unwrap();
+    assert!(
+        matches!(
+            held,
+            SyncPassOutcome::Complete {
+                next_settled_head_publish_at_ms: Some(90_000),
+                ..
+            }
+        ),
+        "{held:?}"
+    );
+    assert!(publication_checked(&store).0 < publication_checked(&store).1);
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 90_000, 0)
+        .unwrap();
+    let published = exports(&store);
+    assert_eq!(
+        published.last().unwrap().payload["momentId"],
+        "moment-ydoc-apply-concurrent"
+    );
+    assert_eq!(
+        published.last().unwrap().payload["payloadAfterPath"],
+        "renamed.md"
+    );
+    assert_eq!(publication_checked(&store).0, publication_checked(&store).1);
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 120_000, 0)
+        .unwrap();
+    assert_eq!(exports(&store).len(), published.len());
+}
+
+#[test]
+fn fix4_oversized_local_save_survives_a_shrinking_projection() {
+    let (_scratch, _, mut store) = ordinary_publisher_fixture();
+    let client = RelaySyncClient::new(FakeRelay::default());
+    // Persist 10.5 MiB heads as an upgraded store can, beyond the current write limit.
+    let persisted_head = |store: &mut EngineStore, id: &str, text: &str, now| {
+        ordinary_saved_head(store, id, &text[..7 * 1024 * 1024], now);
+        let sha = dohc_engine_storage::hex_sha256(text.as_bytes());
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO blobs(sha256,byte_length,text) VALUES (?1,?2,?3)",
+                    params![sha, i64::try_from(text.len()).unwrap(), text],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "UPDATE moments SET payload_after_blob_sha256=?1 WHERE moment_id=?2",
+                    params![sha, id],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "UPDATE snapshots SET blob_sha256=?1 WHERE object_id='doc'",
+                    [&sha],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "UPDATE ydoc_docs SET last_settled_sha=?1 WHERE object_id='doc'",
+                    [&sha],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+    };
+    let initial = "a".repeat(21 * 1024 * 1024 / 2);
+    persisted_head(&mut store, "moment-ydoc-published", &initial, 10);
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 5_000_000, 0)
+        .unwrap();
+    assert_eq!(exports(&store).len(), 2);
+    let local = format!("local edit\n{}", &initial[11..]);
+    persisted_head(&mut store, "moment-ydoc-local-save", &local, 20);
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 15_000_000, 0)
+        .unwrap();
+    assert_eq!(
+        exports(&store).len(),
+        2,
+        "two 10.5 MiB blobs exceed the pass budget"
+    );
+    assert_eq!(publication_checked(&store).0, publication_checked(&store).1);
+    ordinary_saved_head(
+        &mut store,
+        "moment-ydoc-apply-shrunk",
+        &local[..15 * 1024 * 1024 / 2],
+        30,
+    );
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 30_000_000, 0)
+        .unwrap();
+    let published = exports(&store);
+    assert_eq!(
+        published.len(),
+        3,
+        "the 18 MiB projection must carry the local edit"
+    );
+    assert_eq!(published[2].payload["momentId"], "moment-ydoc-apply-shrunk");
+    let after: String = store
+        .read_with(|c| {
+            c.query_row(
+                "SELECT text FROM blobs WHERE sha256=?1",
+                [published[2].payload["payloadAfterBlobSha256"]
+                    .as_str()
+                    .unwrap()],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert!(after.starts_with("local edit\n"));
+    assert_eq!(publication_checked(&store).0, publication_checked(&store).1);
+}
+
+#[test]
+fn fix4_compensated_settle_is_checked_until_a_new_settle() {
+    for reserved in [false, true] {
+        let (_scratch, _, mut store) = ordinary_publisher_fixture();
+        ordinary_saved_head(&mut store, "moment-ydoc-failed", "failed write", 10);
+        store
+            .write_with(&NoFaults, |tx| {
+                if reserved {
+                    tx.execute(
+                        "UPDATE ydoc_docs SET settle_prior_update_seq=-1 WHERE object_id='doc'",
+                        [],
+                    )
+                    .map_err(SyncError::persist)?;
+                }
+                dohc_engine_collab::author_coverage::compensate_in(
+                    tx,
+                    &DocKey::new("ws", "main", "doc").unwrap(),
+                    Some("moment-ydoc-failed"),
+                    11,
+                )
+                .map_err(SyncError::corrupt)
+            })
+            .unwrap();
+        let last: Option<String> = store
+            .read_with(|c| {
+                c.query_row(
+                    "SELECT last_settled_sha FROM ydoc_docs WHERE object_id='doc'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert!(last.is_none());
+        assert!(publication_checked(&store).0 < publication_checked(&store).1);
+        let client = RelaySyncClient::new(FakeRelay::default());
+        for now in [60_000, 60_001] {
+            client
+                .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, now, 0)
+                .unwrap();
+            assert_eq!(
+                publication_checked(&store).0,
+                publication_checked(&store).1,
+                "reserved={reserved}"
+            );
+            assert_eq!(exports(&store).len(), 1);
+        }
+        ordinary_saved_head(&mut store, "moment-ydoc-recovered", "saved again", 20);
+        assert!(publication_checked(&store).0 < publication_checked(&store).1);
+        client
+            .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 90_000, 0)
+            .unwrap();
+        assert_eq!(
+            exports(&store).last().unwrap().payload["momentId"],
+            "moment-ydoc-recovered"
+        );
+    }
 }
 
 #[test]

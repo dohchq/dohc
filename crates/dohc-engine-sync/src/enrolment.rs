@@ -289,7 +289,8 @@ pub(crate) fn publish_ordinary_settled_heads_in_tx(
            AND (EXISTS(SELECT 1 FROM snapshots s LEFT JOIN moments h
              ON h.workspace_id=s.workspace_id AND h.moment_id=s.latest_moment_id
              WHERE s.workspace_id=d.workspace_id AND s.version_id=d.version_id AND s.object_id=d.object_id
-               AND (s.content_kind<>'text' OR d.settle_seq<h.moment_order))
+               AND (s.content_kind<>'text' OR d.settle_seq<h.moment_order
+                 OR (d.last_settled_sha IS NULL AND d.settle_seq=h.moment_order)))
            OR (d.last_settled_sha IS NOT NULL AND NOT EXISTS(SELECT 1 FROM snapshots s
              WHERE s.workspace_id=d.workspace_id AND s.version_id=d.version_id AND s.object_id=d.object_id)))",
     ).map_err(SyncError::corrupt)?.execute([workspace_id]).map_err(SyncError::persist)?;
@@ -307,7 +308,9 @@ pub(crate) fn publish_ordinary_settled_heads_in_tx(
                    AND m.version_id=h.version_id AND m.object_id=h.object_id
                    AND m.metadata_origin='ydoc' AND m.moment_id GLOB 'moment-ydoc-*'
                    AND m.moment_id NOT GLOB 'moment-ydoc-apply-*' AND COALESCE(m.sync_record_only,0)=0
-                   AND m.moment_order>MAX(COALESCE(p.moment_order,-1),d.published_checked_settle_seq) AND m.moment_order<=h.moment_order
+                   AND m.moment_order>COALESCE(p.moment_order,-1) AND m.moment_order<=h.moment_order
+                   AND (m.payload_after_blob_sha256 IS NOT p.payload_after_blob_sha256
+                     OR m.payload_after_path IS NOT p.payload_after_path)
                    AND NOT EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=m.workspace_id
                      AND r.imported=1 AND r.op_kind='moment.append'
                      AND json_extract(r.payload_json,'$.momentId')=+m.moment_id
