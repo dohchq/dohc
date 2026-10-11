@@ -573,8 +573,10 @@ pub fn probe_projection_target(
         Ok(target) => target,
         Err(_) => return ProjectionTargetState::UntrackedContent,
     };
-    if ensure_target_symlink_free(&canonical_root, &target).is_err() {
-        return ProjectionTargetState::UntrackedContent;
+    match projection_has_file_ancestor(&canonical_root, &target) {
+        Ok(true) => return ProjectionTargetState::Absent,
+        Ok(false) => {}
+        Err(_) => return ProjectionTargetState::UntrackedContent,
     }
     let metadata = match std::fs::symlink_metadata(&target) {
         Ok(metadata) => metadata,
@@ -3410,10 +3412,30 @@ fn walk_target_components(
 /// Refuse every symlink/reparse point strictly below the already-canonicalized
 /// workspace root through a target. Capture never owns paths reached through
 /// aliased directories, even when the alias resolves elsewhere inside the
-/// workspace, so projection probes and every materialization lane share this
-/// component walk.
+/// workspace. This validator shares the component walk with projection probes
+/// and parent creation.
 fn ensure_target_symlink_free(root: &Path, target: &Path) -> Result<(), MaterializeError> {
     walk_target_components(root, target, reject_link_or_reparse)
+}
+
+fn projection_has_file_ancestor(root: &Path, target: &Path) -> Result<bool, MaterializeError> {
+    let mut blocked = false;
+    walk_target_components(root, target, |path| {
+        if blocked {
+            return Ok(());
+        }
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(MaterializeError::io(path, &err)),
+        };
+        if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
+            return Err(MaterializeError::SymlinkTarget);
+        }
+        blocked = path != target && metadata.is_file();
+        Ok(())
+    })?;
+    Ok(blocked)
 }
 
 /// Validate existing ordinary ancestors and create missing ones without ever
@@ -6424,14 +6446,61 @@ mod tests {
     }
 
     #[test]
+    fn projection_probe_treats_a_leaf_under_an_ordinary_file_as_absent() {
+        let scratch = Scratch::new("projection-file-ancestor");
+        std::fs::create_dir(scratch.root.join("parent")).unwrap();
+        for ancestor in ["notes", "parent/notes"] {
+            let obstacle = scratch.root.join(ancestor);
+            std::fs::write(&obstacle, b"owned obstacle").unwrap();
+            for kind in [
+                ProjectionTargetKind::Plaintext,
+                ProjectionTargetKind::Secret,
+            ] {
+                assert_eq!(
+                    probe_projection_target(
+                        &scratch.root,
+                        &format!("{ancestor}/nested/doc.md"),
+                        kind
+                    ),
+                    ProjectionTargetState::Absent,
+                );
+            }
+            assert_eq!(std::fs::read(&obstacle).unwrap(), b"owned obstacle");
+            assert_eq!(
+                probe_projection_target(&scratch.root, ancestor, ProjectionTargetKind::Plaintext),
+                ProjectionTargetState::Binary {
+                    sha256: hex_sha256(b"owned obstacle"),
+                },
+            );
+        }
+        assert_eq!(
+            probe_projection_target(
+                &scratch.root,
+                "../notes/doc.md",
+                ProjectionTargetKind::Plaintext
+            ),
+            ProjectionTargetState::UntrackedContent,
+        );
+    }
+
+    #[test]
     fn projection_probe_rejects_an_in_workspace_symlinked_ancestor() {
         let scratch = Scratch::new("projection-ancestor-alias");
         let real = scratch.root.join("real");
         std::fs::create_dir_all(&real).expect("create real directory");
         std::fs::write(real.join("owned.md"), b"real content").expect("write aliased target");
+        std::fs::write(real.join("obstacle"), b"owned obstacle").unwrap();
         let alias = scratch.root.join("alias");
         create_directory_alias(&alias, &real);
 
+        assert_eq!(
+            probe_projection_target(
+                &scratch.root,
+                "alias/obstacle/doc.md",
+                ProjectionTargetKind::Plaintext,
+            ),
+            ProjectionTargetState::UntrackedContent,
+        );
         assert_eq!(
             probe_projection_target(
                 &scratch.root,
