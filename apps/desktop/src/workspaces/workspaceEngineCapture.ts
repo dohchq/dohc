@@ -3,6 +3,7 @@ import { DrawingCheckpointUnavailable, registerTypingCheckpoint, typingRecoveryS
 import type { RecordEditSession } from "@dohc/automation-executor/collection-record-edits";
 import { isCaptureRecoveryOrigin } from "@dohc/workspace-contracts/engine";
 import { errorMessage } from "./workspaceError";
+import { findRestoreReceipt } from "./restoreWriteIdentity";
 import type {AppResponseUndoSelection,AppResponseUndoResult} from "./ownerAppResponseModeration";
 import type { WorkspacePolicyPath } from "@dohc/security-contract/effective-policy";
 import type { WatcherEvent } from "@dohc/workspace-core";
@@ -504,7 +505,7 @@ export interface WorkspaceEngineCapture {
     content: string | Uint8Array,
     author: MomentWriteAuthor,
     options?: { createOnly?: boolean; signal?: AbortSignal; expectedContentHash?: string; requestId?: string; correlationId?: string; beforeWrite?: (resolvedAbsolutePath: string) => Promise<void> },
-  ): Promise<{ resolvedAbsolutePath: string; materializeOutcome: string | undefined }>;
+  ): Promise<{ resolvedAbsolutePath: string; materializeOutcome: string | undefined; deduped?: boolean }>;
   // WS-G2-C-2 editor binding: open a live engine Y.Doc session for one rich
   // file through this capture's Rust workspace sessions. The session journals
   // editor edits as ydoc.update ops and, on each debounced settle, projects the
@@ -646,6 +647,7 @@ export interface WorkspaceEngineCapture {
     objectId?: string;
   }): Promise<WorkspaceEngineMomentPage>;
   readMoment(momentId: string): Promise<WorkspaceEngineMomentDetail | null>;
+  findRestoreReceipt(momentId: string, requestId: string): Promise<WorkspaceEngineRestoreResult | null>;
   // The ids of a file's moments in the active version after `momentId`,
   // newest first, deletes and renames included. Record-only sync rows never
   // touched the file, so they are passed over.
@@ -666,7 +668,7 @@ export interface WorkspaceEngineCapture {
   restoreFileToBeforeMoment(
     momentId: string,
     person: Extract<MomentWriteAuthor, { kind: "human" }>,
-    options?: { expectedHeadMomentId?: string; aloneInFolder?: true },
+    options?: { expectedHeadMomentId?: string; aloneInFolder?: true; requestId?: string },
   ): Promise<WorkspaceEngineRestoreResult>;
   // `author` names an agent's removal during a run an automation started, so
   // the removed record's claims carry the run's chain depth.
@@ -5692,7 +5694,7 @@ export function createWorkspaceEngineCapture(
           const result = typeof decoded === "string"
             ? await engine.writeTextFile({ ...input, text: decoded, publish: true })
             : await engine.writeBinaryFile({ ...input, bytes: decoded });
-          return { resolvedAbsolutePath: resolvedAbsolute, materializeOutcome: result.materializeOutcome };
+          return { resolvedAbsolutePath: resolvedAbsolute, materializeOutcome: result.materializeOutcome, ...(result.deduped ? { deduped: true } : {}) };
         } catch (error) {
           if (error instanceof VersionedTextStoreError && error.code === "write-precondition-failed") {
             throw new AuthoredTextChangedError(path);
@@ -6430,6 +6432,13 @@ export function createWorkspaceEngineCapture(
       return null;
     },
 
+    async findRestoreReceipt(momentId, requestId) {
+      await chain;
+      const engine = await engineStore();
+      const original = await engine.getMoment({workspaceId, momentId});
+      return original ? findRestoreReceipt(engine, original, requestId) : null;
+    },
+
     async listObjectMomentsAfter(objectId, momentId) {
       await chain;
       const engine = await engineStore();
@@ -6572,6 +6581,10 @@ export function createWorkspaceEngineCapture(
         if (moment.operation === "rename") {
           throw new Error("A rename can't be restored directly.");
         }
+        if (restoreOptions.requestId) {
+          const receipt = await findRestoreReceipt(engine, moment, restoreOptions.requestId);
+          if (receipt) return receipt;
+        }
         const path = moment.path;
         try {
           let expectedSha256: string | undefined;
@@ -6605,7 +6618,7 @@ export function createWorkspaceEngineCapture(
               throw new RestoreLocalChangesError(path);
             }
           }
-          const correlationId = `restore-${createId()}`;
+          const correlationId = restoreOptions.requestId ?? `restore-${createId()}`;
           // Capture the file's latest disk state first so a restore can never
           // destroy an edit the engine has not recorded yet — the pre-restore
           // content stays one moment back in history.
@@ -6684,6 +6697,7 @@ export function createWorkspaceEngineCapture(
                       throw new Error(`Binary content for ${path} is no longer available.`);
                     }
                     return engine.writeBinaryFile({
+                      ...(restoreOptions.requestId ? {requestId: restoreOptions.requestId} : {}),
                       workspaceId,
                       versionId: activeVersionId,
                       path,
@@ -6695,6 +6709,7 @@ export function createWorkspaceEngineCapture(
                     });
                   })()
                 : await engine.writeTextFile({
+                    ...(restoreOptions.requestId ? {requestId: restoreOptions.requestId} : {}),
                     workspaceId,
                     versionId: activeVersionId,
                     path,
@@ -6724,6 +6739,7 @@ export function createWorkspaceEngineCapture(
             if (siblings.some((name) => name !== basename(path))) throw new RestoreFolderInUseError(path);
           }
           const result = await engine.deleteTextFile({
+            ...(restoreOptions.requestId ? {requestId: restoreOptions.requestId} : {}),
             workspaceId,
             versionId: activeVersionId,
             path,

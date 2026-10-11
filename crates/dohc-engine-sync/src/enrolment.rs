@@ -17,8 +17,9 @@
 //! moments whose object has retained or claimed CRDT state, except its current
 //! head when durable coverage proves it is the lineage's file artifact. Deferred
 //! CRDT input still reserves the path. A pruned local marker has no such state:
-//! its saved artifact history, including settled Y.Doc projections, remains
-//! the source for enrollment.
+//! its saved artifact history remains the source for enrollment. A declined
+//! lineage instead exports one current saved version; its intermediate settles
+//! stay local after prune, claim, and later enrollment.
 //!
 //! A live append stores its path on `ydoc_docs`, so enrollment can originate
 //! the lineage before any settle creates a snapshot. Once a snapshot exists,
@@ -96,7 +97,7 @@ pub(crate) fn originate_unclaimed_ydoc_bases_in_tx(
          FROM ydoc_docs d LEFT JOIN snapshots s \
            ON s.workspace_id=d.workspace_id AND s.version_id=d.version_id \
           AND s.object_id=d.object_id \
-         WHERE d.workspace_id=?1 AND d.lineage_claim_status = 'unclaimed' \
+         WHERE d.workspace_id=?1 AND d.lineage_claim_status = 'unclaimed' AND d.file_export_lane!=1 \
          ORDER BY d.version_id, d.object_id",
         workspace_id,
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -155,7 +156,7 @@ pub fn originate_live_ydoc_base_in_tx(
                ON s.workspace_id=d.workspace_id AND s.version_id=d.version_id \
               AND s.object_id=d.object_id \
              WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3 \
-               AND d.lineage_claim_status = 'unclaimed'",
+               AND d.lineage_claim_status = 'unclaimed' AND d.file_export_lane IN (0,3)",
             params![key.workspace_id, key.version_id, key.object_id],
             |row| row.get(0),
         )
@@ -184,7 +185,7 @@ pub fn originate_closing_ydoc_base_in_tx(
              ON s.workspace_id=d.workspace_id AND s.version_id=d.version_id \
              AND s.object_id=d.object_id \
              WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3 \
-             AND d.lineage_claim_status = 'unclaimed'",
+             AND d.lineage_claim_status = 'unclaimed' AND d.file_export_lane IN (0,3)",
             params![key.workspace_id, key.version_id, key.object_id],
             |row| row.get(0),
         )
@@ -217,6 +218,32 @@ fn backfill_moments_and_conflict_bundles(
         after_moment_order = bundle.pre_effect_moment_order;
     }
     backfill_moments_between(tx, workspace_id, after_moment_order, None)
+}
+
+macro_rules! head_export_exclusions_sql {
+    () => {
+        "                     AND NOT EXISTS (SELECT 1 FROM live_device_application_bindings b \
+                       WHERE b.workspace_id=s.workspace_id AND b.main_version_id=s.version_id \
+                         AND b.object_id=s.object_id) \
+                     AND NOT EXISTS (SELECT 1 FROM ydoc_owner_bindings b \
+                       WHERE b.workspace_id=s.workspace_id AND b.main_version_id=s.version_id \
+                         AND b.object_id=s.object_id) \
+                     AND NOT EXISTS (SELECT 1 FROM conflicts c \
+                       WHERE c.workspace_id=s.workspace_id AND c.status='open' \
+                         AND (c.target_version_id=s.version_id OR c.source_version_id=s.version_id) \
+                         AND (c.path=s.path OR s.object_id IN \
+                           (c.base_object_id,c.current_object_id,c.incoming_object_id))) \
+                     AND COALESCE((SELECT j.status='conflict' AND j.content_sha256=s.blob_sha256 \
+                       FROM materialization_jobs j \
+                       WHERE j.workspace_id IN (?1,'') AND j.target_path=s.path \
+                       ORDER BY j.created_at_ms DESC,j.rowid DESC LIMIT 1),0)=0 \
+                     AND NOT EXISTS (SELECT 1 FROM replication_pending_conflict_moments p \
+                       WHERE p.workspace_id=?1 AND p.moment_id=s.latest_moment_id) \
+                     AND NOT EXISTS (SELECT 1 FROM ydoc_deferred_updates u \
+                       WHERE u.workspace_id=s.workspace_id AND u.version_id=s.version_id \
+                         AND u.object_id=s.object_id) \
+"
+    };
 }
 
 // Unary + removes the correlated keys' TEXT affinity, allowing SQLite to
@@ -271,27 +298,12 @@ const COVERED_HEADS_SQL: &str = concat!(
                        AND NOT EXISTS (SELECT 1 FROM ydoc_snapshots b \
                          WHERE b.workspace_id=d.workspace_id AND b.version_id=d.version_id \
                            AND b.object_id=d.object_id AND b.up_to_seq NOT IN (0,1)))) \
-                     AND NOT EXISTS (SELECT 1 FROM live_device_application_bindings b \
-                       WHERE b.workspace_id=d.workspace_id AND b.main_version_id=d.version_id \
-                         AND b.object_id=d.object_id) \
-                     AND NOT EXISTS (SELECT 1 FROM ydoc_owner_bindings b \
-                       WHERE b.workspace_id=d.workspace_id AND b.main_version_id=d.version_id \
-                         AND b.object_id=d.object_id) \
-                     AND NOT EXISTS (SELECT 1 FROM conflicts c \
-                       WHERE c.workspace_id=d.workspace_id AND c.status='open' \
-                         AND (c.target_version_id=d.version_id OR c.source_version_id=d.version_id) \
-                         AND (c.path=s.path OR d.object_id IN \
-                           (c.base_object_id,c.current_object_id,c.incoming_object_id))) \
-                     AND COALESCE((SELECT j.status='conflict' AND j.content_sha256=s.blob_sha256 \
-                       FROM materialization_jobs j \
-                       WHERE j.workspace_id IN (?1,'') AND j.target_path=s.path \
-                       ORDER BY j.created_at_ms DESC,j.rowid DESC LIMIT 1),0)=0 \
-                     AND NOT EXISTS (SELECT 1 FROM replication_log r \
+",
+    head_export_exclusions_sql!(),
+    "                     AND NOT EXISTS (SELECT 1 FROM replication_log r \
                        WHERE r.workspace_id=?1 AND r.op_kind='moment.append' \
                          AND json_extract(r.payload_json,'$.versionId')=+s.version_id \
                          AND json_extract(r.payload_json,'$.objectId')=+s.object_id) \
-                     AND NOT EXISTS (SELECT 1 FROM replication_pending_conflict_moments p \
-                       WHERE p.workspace_id=?1 AND p.moment_id=s.latest_moment_id) \
                      AND NOT EXISTS (SELECT 1 FROM replication_log r \
                        WHERE r.workspace_id=?1 AND r.op_kind='moment.append' \
                          AND json_extract(r.payload_json,'$.momentId')=+s.latest_moment_id \
@@ -299,9 +311,6 @@ const COVERED_HEADS_SQL: &str = concat!(
                            SELECT 1 FROM replication_pending_refusals p \
                            WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id \
                              AND p.origin_seq=r.origin_seq))) \
-                     AND NOT EXISTS (SELECT 1 FROM ydoc_deferred_updates u \
-                       WHERE u.workspace_id=d.workspace_id AND u.version_id=d.version_id \
-                         AND u.object_id=d.object_id) \
                      ORDER BY h.moment_order"
 );
 
@@ -442,12 +451,13 @@ fn backfill_moments_between(
                      SELECT 1 FROM ydoc_docs p \
                      WHERE p.workspace_id=m.workspace_id AND p.version_id=m.version_id \
                        AND p.object_id=m.object_id AND p.lineage_claim_status='unclaimed' \
-                       AND p.head_update_seq=0 AND p.head_snapshot_seq=0)) \
+                       AND p.head_update_seq=0 AND p.head_snapshot_seq=0 AND p.file_export_lane=0 \
+                       AND EXISTS(SELECT 1 FROM snapshots s WHERE s.workspace_id=p.workspace_id AND s.version_id=p.version_id AND s.object_id=p.object_id))) \
                      AND NOT EXISTS (SELECT 1 FROM ydoc_docs d \
                        WHERE d.workspace_id=m.workspace_id AND d.version_id=m.version_id \
                          AND d.object_id=m.object_id \
                          AND (d.head_update_seq>0 OR d.head_snapshot_seq>0 \
-                           OR d.lineage_claim_status != 'unclaimed'))) \
+                           OR d.lineage_claim_status != 'unclaimed' OR d.file_export_lane IN (1,2)))) \
                    AND m.moment_order > ?2 \
                    AND (?3 IS NULL OR m.moment_order <= ?3) \
                    AND NOT EXISTS (SELECT 1 FROM replication_pending_conflict_moments p \
@@ -478,6 +488,229 @@ fn backfill_moments_between(
         journal_moment_append_in_tx(tx, workspace_id, &moment_id)?;
     }
     Ok(())
+}
+
+pub(crate) fn file_version_is_publishable_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    moment_id: &str,
+) -> Result<bool, SyncError> {
+    tx.query_row(
+        concat!("SELECT EXISTS(SELECT 1 FROM moments h JOIN snapshots s USING(workspace_id,version_id,object_id)
+           WHERE h.workspace_id=?1 AND h.version_id=?2 AND h.object_id=?3 AND h.moment_id=?4
+             AND s.latest_moment_id=h.moment_id AND s.content_kind='text'
+             AND h.payload_after_blob_sha256=s.blob_sha256 AND h.payload_after_path=s.path ",
+             head_export_exclusions_sql!(), " AND ", dohc_engine_domain::exclude_capture_recovery_sql!("h"), ")"),
+        params![key.workspace_id,key.version_id,key.object_id,moment_id],|r|r.get(0)
+    ).map_err(SyncError::corrupt)
+}
+
+/// The cut and all candidate admissions share the actor's writer transaction.
+pub(crate) fn backfill_file_versions_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+) -> Result<(), SyncError> {
+    if !crate::ydoc_origination::can_originate_local_bases_in_tx(tx, workspace_id)? {
+        return Ok(());
+    }
+    let cut: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(moment_order),-1) FROM moments WHERE workspace_id=?1",
+            [workspace_id],
+            |r| r.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    let mut file_budget = FileExportBudget::default();
+    let candidates: Vec<(String, String, String)> = {
+        let mut statement = tx.prepare(concat!(
+            "SELECT m.moment_id,m.version_id,m.object_id
+             FROM moments m JOIN snapshots s USING(workspace_id,version_id,object_id)
+             JOIN ydoc_docs d USING(workspace_id,version_id,object_id)
+             WHERE m.workspace_id=?1 AND d.file_export_lane IN (1,2) AND d.lineage_claim_status='unclaimed'
+               AND s.latest_moment_id=m.moment_id AND s.content_kind='text'
+               AND m.payload_after_blob_sha256=s.blob_sha256 AND m.payload_after_path=s.path
+               AND m.moment_order<=?2
+               AND NOT EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=m.workspace_id AND r.op_kind='moment.append' AND json_extract(r.payload_json,'$.momentId')=+m.moment_id AND (r.imported=0 OR NOT EXISTS(SELECT 1 FROM replication_pending_refusals p WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id AND p.origin_seq=r.origin_seq)))
+             AND ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " ORDER BY m.moment_order"
+        )).map_err(SyncError::corrupt)?;
+        statement
+            .query_map(params![workspace_id, cut], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .map_err(SyncError::corrupt)?
+            .collect::<Result<_, _>>()
+            .map_err(SyncError::corrupt)?
+    };
+    for (moment_id, version_id, object_id) in candidates {
+        let key = DocKey {
+            workspace_id: workspace_id.to_owned(),
+            version_id,
+            object_id,
+        };
+        if file_version_is_publishable_in_tx(tx, &key, &moment_id)? {
+            journal_file_version_in_tx(tx, &key, &moment_id, &mut file_budget)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) const LAST_FILE_EXPORT_SQL: &str = concat!("SELECT r.payload_json,m.moment_order,r.rowid FROM replication_log r
+         JOIN moments m ON m.workspace_id=r.workspace_id
+           AND m.moment_id=json_extract(r.payload_json,'$.momentId')
+         WHERE r.workspace_id=?1 AND r.op_kind='moment.append'
+           AND json_extract(r.payload_json,'$.versionId')=+?2
+           AND json_extract(r.payload_json,'$.objectId')=+?3
+           AND (r.imported=0 OR (COALESCE(m.sync_record_only,0)=0 AND NOT EXISTS(SELECT 1 FROM replication_pending_refusals p
+             WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id AND p.origin_seq=r.origin_seq)))
+         AND ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " ORDER BY m.moment_order DESC,r.rowid DESC LIMIT 1");
+
+pub(crate) enum LastFileExport {
+    Known(Option<serde_json::Value>),
+    UnexplainedGap,
+}
+
+pub(crate) fn last_file_export_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+) -> Result<LastFileExport, SyncError> {
+    let mut last: Option<(String, (i64, bool, i64))> = tx
+        .query_row(
+            LAST_FILE_EXPORT_SQL,
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| Ok((row.get(0)?, (row.get(1)?, true, row.get(2)?))),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    // Rollback replaces its target moment but leaves the published operation.
+    // Its compensating moment orders that export immediately before the replacement.
+    let mut missing = tx.prepare(
+        "SELECT r.payload_json,r.rowid,json_extract(r.payload_json,'$.momentId')
+         FROM replication_log r LEFT JOIN moments m ON m.workspace_id=r.workspace_id
+           AND m.moment_id=json_extract(r.payload_json,'$.momentId')
+         WHERE r.workspace_id=?1 AND r.op_kind='moment.append'
+           AND json_extract(r.payload_json,'$.versionId')=+?2 AND json_extract(r.payload_json,'$.objectId')=+?3
+           AND m.moment_id IS NULL AND (r.imported=0 OR NOT EXISTS(SELECT 1 FROM replication_pending_refusals p
+             WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id AND p.origin_seq=r.origin_seq))"
+    ).map_err(SyncError::corrupt)?;
+    let rows = missing
+        .query_map(
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .map_err(SyncError::corrupt)?;
+    for row in rows {
+        let (json, rowid, id) = row.map_err(SyncError::corrupt)?;
+        let replacement = dohc_engine_domain::rollback_compensating_moment_id(
+            &key.workspace_id,
+            &key.version_id,
+            &id,
+        );
+        let order: Option<i64> = tx
+            .query_row(
+                "SELECT moment_order FROM moments WHERE workspace_id=?1 AND moment_id=?2",
+                params![key.workspace_id, replacement],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(SyncError::corrupt)?;
+        let Some(order) = order else {
+            eprintln!(
+                "engine: published moment {id} is missing without its rollback compensator in {}/{}/{}; publishing the real preimage",
+                key.workspace_id, key.version_id, key.object_id
+            );
+            return Ok(LastFileExport::UnexplainedGap);
+        };
+        let rank = (order, false, rowid);
+        if last.as_ref().is_none_or(|(_, previous)| rank > *previous) {
+            last = Some((json, rank));
+        }
+    }
+    last.map(|(json, _)| serde_json::from_str(&json).map_err(SyncError::corrupt))
+        .transpose()
+        .map(LastFileExport::Known)
+}
+
+pub(crate) fn file_version_before_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    last: Option<&serde_json::Value>,
+) -> Result<crate::outbound::PortableBefore, SyncError> {
+    if let Some(last) = last {
+        return Ok(crate::outbound::PortableBefore::published(last));
+    }
+    let first: String = tx.query_row(concat!("SELECT m.moment_id FROM moments m WHERE ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND NOT EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=m.workspace_id AND r.op_kind='moment.append' AND r.imported=1 AND json_extract(r.payload_json,'$.momentId')=+m.moment_id AND NOT EXISTS(SELECT 1 FROM replication_pending_refusals p WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id AND p.origin_seq=r.origin_seq)) ORDER BY m.moment_order LIMIT 1"), params![key.workspace_id,key.version_id,key.object_id], |r|r.get(0)).map_err(SyncError::corrupt)?;
+    let (bootstrap, _) =
+        crate::outbound::moment_append_payload_in_tx(tx, &key.workspace_id, &first)?;
+    Ok(crate::outbound::PortableBefore::bootstrap(&bootstrap))
+}
+
+#[derive(Default)]
+pub(crate) struct FileExportBudget {
+    blobs: std::collections::BTreeMap<String, i64>,
+}
+
+pub(crate) fn journal_file_version_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    moment_id: &str,
+    budget: &mut FileExportBudget,
+) -> Result<bool, SyncError> {
+    let last = last_file_export_in_tx(tx, key)?;
+    let (current, _) =
+        crate::outbound::moment_append_payload_in_tx(tx, &key.workspace_id, moment_id)?;
+    if let LastFileExport::Known(Some(last)) = &last
+        && last["operation"] != "delete"
+        && [
+            "payloadAfterBlobSha256",
+            "payloadAfterPath",
+            "payloadAfterContentKind",
+        ]
+        .iter()
+        .all(|field| last[*field] == current[*field])
+    {
+        return Ok(true);
+    }
+    let before = match &last {
+        LastFileExport::Known(last) => file_version_before_in_tx(tx, key, last.as_ref())?,
+        LastFileExport::UnexplainedGap => crate::outbound::PortableBefore::bootstrap(&current),
+    };
+    let payload = crate::outbound::moment_append_payload_from_in_tx(
+        tx,
+        &key.workspace_id,
+        moment_id,
+        &before,
+    )?;
+    let mut blobs = budget.blobs.clone();
+    for (field, kind) in [
+        ("payloadBeforeBlobSha256", "payloadBeforeContentKind"),
+        ("payloadAfterBlobSha256", "payloadAfterContentKind"),
+        ("beforeBlobSha256", "beforeContentKind"),
+    ] {
+        if payload[kind] == "text"
+            && let Some(sha) = payload[field].as_str()
+        {
+            let length: i64 = tx
+                .query_row(
+                    "SELECT byte_length FROM blobs WHERE sha256=?1",
+                    [sha],
+                    |r| r.get(0),
+                )
+                .map_err(SyncError::corrupt)?;
+            blobs.insert(sha.to_owned(), length);
+        }
+    }
+    if blobs.values().sum::<i64>() > 20 * 1024 * 1024 {
+        return Ok(false);
+    }
+    crate::outbound::journal_moment_append_from_in_tx(tx, &key.workspace_id, moment_id, &before)?;
+    budget.blobs = blobs;
+    Ok(true)
 }
 
 fn backfill_versions(tx: &Transaction<'_>, workspace_id: &str) -> Result<(), SyncError> {
@@ -4322,11 +4555,14 @@ mod tests {
             dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
         };
 
+        store
+            .write_with(&NoFaults, |tx| backfill_file_versions_in_tx(tx, "ws"))
+            .unwrap();
         assert!(
             local_ops(&store)
                 .iter()
-                .all(|(kind, _)| kind != "moment.append"),
-            "a declined lineage must not export its file"
+                .any(|(kind, _)| kind == "moment.append"),
+            "a declined lineage exports its saved file version at the next push cut"
         );
         assert_eq!(declines.len(), 1, "the caller receives the declined base");
         assert_eq!(declines[0].constraint, "MAX_YDOC_UPDATE_BYTES");

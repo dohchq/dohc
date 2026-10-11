@@ -3213,12 +3213,111 @@ mod doc_cache_reset_tests {
         (scratch, store, input, hex_sha256(bytes))
     }
 
+    #[test]
+    fn checked_delete_discard_refuses_a_moment_exported_before_disk_publication() {
+        for via_sync in [false, true] {
+            let (root, mut store, input, expected) = checked_delete_fixture(true);
+            crash_checked_delete(
+                &root,
+                &mut store,
+                &input,
+                &expected,
+                FaultPoint::StorageAfterCommitBeforeAck,
+            );
+            dohc_engine_sync::adopt_join_identity(
+                &mut store,
+                "workspace",
+                "local",
+                "epoch",
+                "stream",
+                4,
+                &NoFaults,
+            )
+            .unwrap();
+            if via_sync {
+                // Completing the initial sync pull backfills the durable prepared moment.
+                dohc_engine_sync::commit_relay_cursor(
+                    &mut store,
+                    "workspace",
+                    &dohc_engine_sync::RelayCursor {
+                        cursor: 1,
+                        replication_epoch: "epoch".into(),
+                        stream_identity: "stream".into(),
+                        bootstrap_complete: true,
+                        settlement_report_id: None,
+                    },
+                    &NoFaults,
+                    &dohc_engine_sync::NoLiveLeases,
+                    5,
+                )
+                .unwrap();
+            } else {
+                store
+                    .write_with(&NoFaults, |tx| {
+                        dohc_engine_sync::journal_moment_append_in_tx(
+                            tx,
+                            "workspace",
+                            &input.moment_id,
+                        )
+                    })
+                    .unwrap();
+            }
+            assert!(store.read_with(|conn| conn.query_row("SELECT EXISTS(SELECT 1 FROM replication_log WHERE workspace_id='workspace' AND op_kind='moment.append' AND json_extract(payload_json,'$.momentId')='restore-delete')", [], |r| r.get::<_, bool>(0))).unwrap());
+            assert_checked_delete_discard_retains_referenced_moment(&mut store);
+        }
+    }
+
+    #[test]
+    fn checked_delete_discard_refuses_a_moment_pinned_by_a_pending_shadow() {
+        let (root, mut store, input, expected) = checked_delete_fixture(true);
+        crash_checked_delete(
+            &root,
+            &mut store,
+            &input,
+            &expected,
+            FaultPoint::StorageAfterCommitBeforeAck,
+        );
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO replication_pending_conflict_bundles(workspace_id,conflict_id,format_version,pre_effect_moment_order,created_at_ms) VALUES ('workspace','pin',1,0,4)", []).unwrap();
+            let bundle = tx.last_insert_rowid();
+            tx.execute("INSERT INTO replication_pending_conflict_ops VALUES (?1,1,'moment.append','{}',4)", [bundle]).unwrap();
+            tx.execute("INSERT INTO replication_pending_conflict_moments VALUES ('workspace',?1,1,'restore-delete')", [bundle]).unwrap();
+            Ok::<_, RuntimeError>(())
+        }).unwrap();
+        assert_checked_delete_discard_retains_referenced_moment(&mut store);
+    }
+
+    fn assert_checked_delete_discard_retains_referenced_moment(store: &mut EngineStore) {
+        let before = checked_delete_state(store);
+        let result = store.write_with(&NoFaults, |tx| {
+            finish_checked_delete_effects_in_tx(tx, "workspace", "restore-delete", false)
+        });
+        assert!(
+            matches!(
+                result,
+                Err(RuntimeError::Domain(DomainError::InvalidInput {
+                    reason: "checked delete moment has replication dependents"
+                }))
+            ),
+            "{result:?}"
+        );
+        assert_eq!(
+            checked_delete_state(store),
+            before,
+            "refusal preserves the moment, journal, request, and pending disk intent"
+        );
+        assert!(store.read_with(|conn| conn.query_row("SELECT EXISTS(SELECT 1 FROM moments WHERE workspace_id='workspace' AND moment_id='restore-delete')", [], |r| r.get::<_, bool>(0))).unwrap());
+    }
+
     fn checked_delete_state(store: &EngineStore) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
         store
             .read_with(|conn| {
                 [
                     "moments",
                     "replication_log",
+                    "replication_pending_conflict_bundles",
+                    "replication_pending_conflict_ops",
+                    "replication_pending_conflict_moments",
                     "snapshots",
                     "path_aliases",
                     "ydoc_docs",

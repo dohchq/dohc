@@ -443,10 +443,12 @@ dependencies = [
  "dohc-engine-files",
  "dohc-engine-storage",
  "dohc-engine-testkit",
+ "quote",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
+ "syn 2.0.119",
  "thiserror",
 ]
 

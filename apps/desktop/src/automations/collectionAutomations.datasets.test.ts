@@ -456,6 +456,7 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
     releaseAutomationGroups: async () => ({ watchedGeneration: 0, handover: { floorMs: 0, automations: [] } }),
     watchAutomationGroups: async (input: { subscriptions: unknown[] }) => { watched.splice(0, watched.length, ...input.subscriptions); return { needsHandover: false }; },
     // Serves the oldest pending claim, as the engine drains its queue.
+    makeAutomationWritesDurable: async () => {},
     claimNextAutomation: async () => {
       const next = engineClaims.filter((claim) => claim.state === "pending").sort((left, right) => left.createdAtMs - right.createdAtMs)[0];
       if (next === undefined) return null;
@@ -589,7 +590,7 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
     requestHost: async () => undefined,
     readMessageBody: async () => { throw new Error("These test messages carry their whole body."); },
     postNotice: async (notice) => { notices.push(notice); wake(); },
-    chat: {
+    chat: { hasMessage: async () => false,
       directory: async (current) => chatDirectoryOf([TEAM], current),
       write: async (_signal, message) => { await options.onMessage?.(message); messages.push(message); wake(); },
     },
@@ -2330,7 +2331,7 @@ describe("dataset automation claims in both ledgers", () => {
     const store = createAutomationRunStore(f.root, resolveWorkspaceMetadataDir);
     const old = Date.now() - 31 * 24 * 60 * 60 * 1000;
     const saved = (claimId: string, outcome: StoredRun["outcome"], rest: Partial<StoredRun> = {}): StoredRun => ({
-      version: 12, claimId, automationId: AUTOMATION, definitionHash: "h", keySeed: "h-1", startedAtMs: old, finishedAtMs: old, steps: [],
+      durableEffects: 0, version: 13, claimId, automationId: AUTOMATION, definitionHash: "h", keySeed: "h-1", startedAtMs: old, finishedAtMs: old, steps: [],
       applied: [], created: [], replans: [], undoRequests: [], undoCalls: [], undoCovers: [], readableFields: null, collections: [], rules: null,
       superseded: false, undo: null, undoKept: [], settled: outcome?.state === "done", outcome, ...rest,
     });

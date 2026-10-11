@@ -33,7 +33,7 @@ export type PersonWriter = Exclude<ChatWriter, { via: "automation" }>;
 
 export type ChatWriteStore = ChatRelayIdentityStore & Pick<LinkedChatStore,
   "createThread" | "sendMessage" | "startChannelThread" | "resolveChatDecision" |
-  "listReactions" | "setReaction">;
+  "listReactions" | "setReaction" | "getMessage" | "listChannelThreads">;
 
 export interface ChatWritePlace {
   workspaceId: string;
@@ -275,18 +275,37 @@ export function createChatWrites(dependencies: {
     return thread;
   }
 
+  async function replayedMessage(place: ChatWritePlace, input: ChatMessageInput, target: ChatRelayIdentityTarget) {
+    ownedWorkspace(place.workspaceId);
+    if (input.writer.via !== "automation" || !input.messageId || !input.idempotencyKey) return null;
+    const sent = await place.store.getMessage({ workspaceId: place.workspaceId, messageId: input.messageId }).catch(() => null);
+    if (!sent || sent.author.kind !== "automation" || sent.automation?.automationId !== input.writer.automationId ||
+      sent.body !== normalizeChatMessageBody(input.body)) return null;
+    const where = "channelId" in target
+      ? await place.store.findThreadChannelId({ workspaceId: place.workspaceId, threadId: sent.threadId }).catch(() => null) === target.channelId
+      : sent.threadId === target.threadId;
+    return where ? sent : null;
+  }
+
   async function sendMessage(place: ChatWritePlace, input: ChatMessageInput & {
     threadId: string;
     parentMessageId?: string;
   }) {
     const target = { threadId: input.threadId };
-    const { admission, fields } = await prepareMessage(place, target, input);
-    const message = await commit(place, admission, () => place.store.sendMessage({
-      workspaceId: place.workspaceId,
-      threadId: input.threadId,
-      ...(input.parentMessageId ? { parentMessageId: input.parentMessageId } : {}),
-      ...fields,
-    }), admission, input.signal);
+    let message;
+    try {
+      const { admission, fields } = await prepareMessage(place, target, input);
+      message = await commit(place, admission, () => place.store.sendMessage({
+        workspaceId: place.workspaceId,
+        threadId: input.threadId,
+        ...(input.parentMessageId ? { parentMessageId: input.parentMessageId } : {}),
+        ...fields,
+      }), admission, input.signal);
+    } catch (error) {
+      const sent = await replayedMessage(place, input, target);
+      if (!sent) throw error;
+      message = sent;
+    }
     afterWrite(place.workspaceId, target, true, input.writer);
     return message;
   }
@@ -299,15 +318,24 @@ export function createChatWrites(dependencies: {
     threadId?: string;
   }) {
     const target = { channelId: input.channelId };
-    const { admission, fields } = await prepareMessage(place, target, input);
-    const started = await commit(place, admission, () => place.store.startChannelThread({
-      workspaceId: place.workspaceId,
-      channelId: input.channelId,
-      ...(input.lane ? { lane: input.lane } : {}),
-      ...(input.title ? { title: input.title } : {}),
-      ...(input.threadId ? { threadId: input.threadId } : {}),
-      ...fields,
-    }), admission, input.signal);
+    let started;
+    try {
+      const { admission, fields } = await prepareMessage(place, target, input);
+      started = await commit(place, admission, () => place.store.startChannelThread({
+        workspaceId: place.workspaceId,
+        channelId: input.channelId,
+        ...(input.lane ? { lane: input.lane } : {}),
+        ...(input.title ? { title: input.title } : {}),
+        ...(input.threadId ? { threadId: input.threadId } : {}),
+        ...fields,
+      }), admission, input.signal);
+    } catch (error) {
+      const sent = await replayedMessage(place, input, target);
+      if (!sent) throw error;
+      const thread = (await place.store.listChannelThreads({ workspaceId: place.workspaceId, channelId: input.channelId, ...(input.lane ? { lane: input.lane } : {}) })).find(entry => entry.thread.id === sent.threadId)?.thread;
+      if (!thread) throw error;
+      started = { thread, message: sent };
+    }
     afterWrite(place.workspaceId, target, true, input.writer);
     return started;
   }

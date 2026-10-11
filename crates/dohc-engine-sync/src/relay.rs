@@ -669,6 +669,7 @@ pub struct PushWorkspaceProgress {
     acknowledged: usize,
     page: Option<PreparedPushPage>,
     batch_size: usize,
+    file_versions_selected: bool,
 }
 
 impl Default for PushWorkspaceProgress {
@@ -678,7 +679,35 @@ impl Default for PushWorkspaceProgress {
             acknowledged: 0,
             page: None,
             batch_size: crate::MAX_PUSH_OPS_PER_BATCH,
+            file_versions_selected: false,
         }
+    }
+}
+
+fn select_file_versions(
+    selection: &mut bool,
+    store: &mut EngineStore,
+    workspace_id: &str,
+    faults: &dyn FaultInjector,
+) -> Result<(), RelayError> {
+    if *selection {
+        return Ok(());
+    }
+    match store
+        .write_with(faults, |tx| {
+            if !crate::ydoc_origination::can_originate_local_bases_in_tx(tx, workspace_id)? {
+                return Ok::<_, SyncError>(false);
+            }
+            crate::enrolment::backfill_file_versions_in_tx(tx, workspace_id)?;
+            Ok(true)
+        })
+        .map_err(local)?
+    {
+        TxnOutcome::Committed(selected) => {
+            *selection = selected;
+            Ok(())
+        }
+        TxnOutcome::Crashed { .. } => Err(local(SyncError::FaultCrash)),
     }
 }
 
@@ -1160,6 +1189,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             now_ms,
         )
         .map_err(local)?;
+        select_file_versions(
+            &mut progress.file_versions_selected,
+            store,
+            workspace_id,
+            faults,
+        )?;
         let mut origins = list_workspace_origins(store, workspace_id).map_err(local)?;
         let mut pushed = 0_usize;
         let mut owner_admission_pending = Vec::new();
@@ -1208,6 +1243,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 .map_err(local)?,
             );
             enrollment_prepared = true;
+            select_file_versions(
+                &mut progress.file_versions_selected,
+                store,
+                workspace_id,
+                faults,
+            )?;
             // Re-read so the probe's backfill enters the push loop.
             origins = list_workspace_origins(store, workspace_id).map_err(local)?;
         }
@@ -1379,6 +1420,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             .map_err(local)?,
                         );
                         enrollment_prepared = true;
+                        select_file_versions(
+                            &mut progress.file_versions_selected,
+                            store,
+                            workspace_id,
+                            faults,
+                        )?;
                         for added in list_workspace_origins(store, workspace_id).map_err(local)? {
                             if seen_origins.insert(added.clone()) {
                                 origins.push_back(added);
@@ -5589,6 +5636,7 @@ mod conflict_resolve_blob_ref_tests {
                 result_object_created_at_ms: Some(1),
             },
             effects: Vec::new(),
+            exported_before: None,
             lineage_transition: Some(LineageTransitionV1 {
                 predecessor_claim_id: dohc_engine_storage::hex_sha256(b"predecessor"),
                 predecessor_state_vector_sha256: dohc_engine_storage::hex_sha256(

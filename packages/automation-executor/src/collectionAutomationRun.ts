@@ -1,4 +1,5 @@
 import type { RunSource } from "./automationRecordBackend";
+import { AutomationCreationSkipped } from "./collectionRecordEdits";
 import { coordinateSourceRun } from "./automationStepRun";
 import { posix } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -138,7 +139,11 @@ export interface CollectionRecordWrites {
 }
 
 export interface CollectionAutomationRunDependencies {
+  /** Sync earlier writes in this workspace's engine before saving run completion. */
+  makeDurable(claimId?: string): Promise<void>;
   checkPresser?(): Promise<void>;
+  /** Whether the document Collection still has this Button field. */
+  isButtonField(path: string, field: string): Promise<boolean>;
   authorizeDataset?(datasetId: string, operationId: string): Promise<import("./buttonPresser").DatasetOperationCeiling>;
   withHost?: import("./datasetAutomationRun").DatasetAutomationRunDependencies["withHost"];
   cachedRoster?(): Promise<ReachRoster>;
@@ -199,6 +204,8 @@ interface RecipientReach {
 
 /** Where an automation's posts and direct messages go, and how they are written. */
 export interface AutomationChatDependencies {
+  /** Whether this effect's message already exists. Only called while resuming. */
+  hasMessage(messageId: string): Promise<boolean>;
   /** What `needs` names under this roster; null when the engine is unavailable. */
   directory(roster: Exclude<ReachRoster, { kind: "unknown" }>, needs: ChatNeeds): Promise<ChatDirectory | null>;
   /**
@@ -325,7 +332,8 @@ export async function savedRunOf(
 /** A new run's record, before anything of it is saved. */
 export function newRun(claim: Pick<AutomationClaim, "automationId" | "claimId">, automation: Automation, keySeed: string, nowMs: number): StoredRun {
   return {
-    version: 12,
+    version: 13,
+    durableEffects: 0,
     claimId: claim.claimId,
     automationId: claim.automationId,
     definitionHash: definitionHash(automation),
@@ -581,7 +589,8 @@ export async function applyDocumentEffect(
         run.created = [...run.created.filter(existing => existing.planned !== effect.recordId), entry];
       }
     };
-    const created = await dependencies.withRecordWrites(signal, (edit) =>
+    let created;
+    try { created = await dependencies.withRecordWrites(signal, (edit) =>
       edit.create({
         collectionPath: effect.collectionPath,
         name: effect.name,
@@ -589,7 +598,12 @@ export async function applyDocumentEffect(
         recordId: known?.recordId ?? effect.recordId,
         onPartial: remember,
       }),
-    );
+    ); }
+    catch (error) {
+      if (error instanceof AutomationCreationSkipped) return [{ kind: "skipped", recordId: known?.recordId ?? effect.recordId,
+        path: known?.path ?? `${effect.collectionPath}/${effect.name}.md`, reason: error.message }];
+      throw error;
+    }
     await remember(created);
     const fields = effect.fields.map(({ field, value }) => ({ field, before: null, after: value }));
     const writes: RunWrite[] = [{ kind: "created", recordId: created.recordId, path: created.path }];

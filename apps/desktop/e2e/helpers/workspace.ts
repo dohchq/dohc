@@ -167,6 +167,8 @@ export async function seedWorkspaceRegistry(
       serverUrl: string;
       ownerUserId: string;
     };
+    // Mount records as the registry stores them (`ShareMountRecord`).
+    shareMounts?: ReadonlyArray<Record<string, unknown>>;
   }>,
 ): Promise<void> {
   await mkdir(workspace.homeDir, { recursive: true });
@@ -182,6 +184,7 @@ export async function seedWorkspaceRegistry(
           rootPath: normalizeAbsolutePath(entry.rootPath),
           ...SEEDED_WORKSPACE_SHAPE,
           ...(entry.remote ? { remote: entry.remote } : {}),
+          ...(entry.shareMounts ? { shareMounts: entry.shareMounts } : {}),
         })),
       },
       null,

@@ -150,6 +150,18 @@ it("recovers unfinished runs after relaunch and opens Try again from the Notice"
   expect(f.undoStopAndRestore).not.toHaveBeenCalled();
 });
 
+it("resumes a saved file Undo from the Notice after relaunch", async () => {
+  const result: StopAndRestoreResult = {status: "restored", restored: [], review: [], runsUndone: 0, runsLeft: 0,
+    keptFields: [], fieldsMissing: 0, runChangesKept: 0, wroteAutomations: false, sendsMessages: false,
+    unfinished: {step: "files", message: "Interrupted Undo"}};
+  const f = fixture([], ANA, [{target: ANA.target, label: ANA.label, result,
+    receipts: [{path: "trip/a.txt", restoredMomentId: "a"}], filesUndone: false, undoingFiles: true}]);
+  await waitFor(() => expect(f.props.onError).toHaveBeenCalled());
+  act(() => f.props.onError.mock.calls[0]![2]());
+  await waitFor(() => expect(f.undoStopAndRestore).toHaveBeenCalled());
+  expect(f.stopAndRestore).not.toHaveBeenCalled();
+});
+
 it("states that restoring a recipient creation removes its file and offers Undo", async () => {
   fixture([{ status: "restored", restored: [{ path: "trip/Tasks/Socks.md", restoredMomentId: "removed", removed: true }],
     review: [], runsUndone: 0, runsLeft: 0, keptFields: [], fieldsMissing: 0, runChangesKept: 0,
@@ -165,6 +177,29 @@ afterEach(() => {
   resetCollectionFieldWritesForTests();
   localStorage.clear();
   delete window.dohcDesktop;
+});
+
+it("undoes intended files even when the first receipt batch was not saved, and lists recovered files", async () => {
+  const f = fixture([{status: "restored", restored: [], review: [], runsUndone: 0, runsLeft: 0,
+    keptFields: [], fieldsMissing: 0, runChangesKept: 0, wroteAutomations: false, sendsMessages: false,
+    canUndoFiles: true, unfinished: {step: "files", message: "Barrier failed"}}]);
+  f.undoStopAndRestore.mockResolvedValueOnce({errorMessage: null,
+    recovered: [{path: "trip/unconfirmed.txt", restoredMomentId: "unconfirmed"}],
+    files: [{kind: "restored", momentId: "unconfirmed", receipt: {path: "trip/unconfirmed.txt", restoredMomentId: "undo-unconfirmed"}}]});
+  fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
+  fireEvent.click(await screen.findByTestId("stop-and-restore-undo"));
+  await waitFor(() => expect(f.undoStopAndRestore).toHaveBeenCalledWith({workspaceId: WORKSPACE, target: ANA.target, reviewPaths: [], restoredMomentIds: []}));
+  await waitFor(() => expect(f.shell().receipts.shown(WORKSPACE, ANA.target)?.result.restored).toEqual([{path: "trip/unconfirmed.txt", restoredMomentId: "unconfirmed"}]));
+});
+
+it("does not offer Undo when reading the changes failed before any file intent", async () => {
+  const f = fixture([{status: "restored", restored: [], review: [], runsUndone: 0, runsLeft: 0,
+    keptFields: [], fieldsMissing: 0, runChangesKept: 0, wroteAutomations: false, sendsMessages: false,
+    unfinished: {step: "files", message: "Could not read their changes."}}]);
+  fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
+  await screen.findByRole("button", {name: "Try again"});
+  expect(screen.queryByTestId("stop-and-restore-undo")).toBeNull();
+  expect(f.undoStopAndRestore).not.toHaveBeenCalled();
 });
 
 it("passes queued, failed and set-aside paths to Stop and restore", async () => {

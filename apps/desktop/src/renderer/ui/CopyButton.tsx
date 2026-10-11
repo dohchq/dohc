@@ -1,4 +1,4 @@
-import { Check, Copy, TriangleAlert } from "lucide-react";
+import { Check, Copy, TriangleAlert, type LucideIcon } from "lucide-react";
 import { useContext, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import { withErrorWords } from "../../ipc/errorWords";
 import { ShellErrorReporter, type ReportShellFailure } from "../shell/useShellError";
@@ -179,6 +179,8 @@ export function CopyButton(props: {
   pinName?: boolean;
   // The tile alone; what it says is the tooltip.
   iconOnly?: boolean;
+  // The mark at rest, where a row offers more than one copy. Default Copy.
+  icon?: LucideIcon | undefined;
   // The worded button's size. Default "row".
   size?: keyof typeof WORDS_SIZE;
   // Marks the text secret, such as a share link, a share code or a sync
@@ -234,7 +236,7 @@ export function CopyButton(props: {
   }, []);
 
   const shown = feedback ? words[feedback] : label;
-  const Icon = feedback ? ICON[feedback] : Copy;
+  const Icon = feedback ? ICON[feedback] : props.icon ?? Copy;
   return (
     <>
       <button

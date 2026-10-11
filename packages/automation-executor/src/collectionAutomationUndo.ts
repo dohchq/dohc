@@ -1,3 +1,4 @@
+import { writeConfirmed } from "./automationRunStore";
 import { posix } from "node:path";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -105,11 +106,11 @@ export function documentUndoChanges(runs: readonly StoredRun[]): { added: Map<st
     // A record is listed as created before its fields are written, so one a
     // run stopped after creating is still found.
     if (run.undo !== "done") for (const created of run.created) if (!completedCreations.has(created.recordId)) added.set(created.recordId, created.path);
-    for (const { writes } of run.applied) {
+    for (const [index, { writes }] of run.applied.entries()) {
       for (const write of writes) {
         if (write.kind === "created" && run.undo !== "done" && !completedCreations.has(write.recordId)) added.set(write.recordId, write.path);
         if (write.kind === "field" && !completedCreations.has(write.recordId) && (refused === null || refused.has(JSON.stringify([write.recordId, write.field])))) {
-          wrote(write.recordId, write.path, write.field, { before: write.before, after: write.after, sure: true, scope });
+          wrote(write.recordId, write.path, write.field, { before: write.before, after: write.after, sure: writeConfirmed(run, index, write), scope });
         }
       }
     }
@@ -135,10 +136,15 @@ export function documentUndoChanges(runs: readonly StoredRun[]): { added: Map<st
 function wayBack(writes: readonly FieldWrite[]): { to: JsonValue; from: JsonValue[]; scope: string } {
   const last = writes.at(-1)!;
   const from = last.sure ? [last.after] : [last.after, last.before];
+  let uncertain = !last.sure;
   let value = last.before;
   for (let index = writes.length - 2; index >= 0; index -= 1) {
     const earlier = writes[index]!;
-    if (isDeepStrictEqual(earlier.after, value)) value = earlier.before;
+    if (isDeepStrictEqual(earlier.after, value)) {
+      uncertain &&= !earlier.sure;
+      if (uncertain) from.push(earlier.after, earlier.before);
+      value = earlier.before;
+    }
     // An unrecorded write the next one did not find never landed.
     else if (!earlier.sure && isDeepStrictEqual(earlier.before, value)) continue;
     else break;

@@ -30,8 +30,6 @@ vi.mock("./renderer/bridge", async () => {
 });
 vi.mock("./renderer/settings/AgentsMcpSettings", () => ({ AgentsMcpSettings: () => null }));
 vi.mock("./renderer/settings/ScheduleHostRow", () => ({ ScheduleHostRow: () => null }));
-vi.mock("./renderer/settings/SharedByMeList", () => ({ SharedByMeList: () => null }));
-vi.mock("./renderer/settings/SharedWithMeList", () => ({ SharedWithMeList: () => null }));
 
 beforeEach(() => { Element.prototype.scrollIntoView = vi.fn(); });
 afterEach(cleanup);

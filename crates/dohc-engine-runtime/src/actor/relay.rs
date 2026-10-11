@@ -486,6 +486,164 @@ mod deferred_relay_tests {
     use super::*;
 
     #[test]
+    fn a_lane_drain_is_not_repeated_when_a_push_resumes_after_blob_io() {
+        use dohc_engine_domain::{VersionedTextStore, WriteText};
+        use dohc_engine_testkit::{ScratchDir, engine_db_path};
+        let scratch = ScratchDir::new().unwrap();
+        let path = engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&path, 1).unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .unwrap();
+        dohc_engine_sync::adopt_join_identity(
+            &mut store, "ws", "local", "epoch", "stream", 1, &NoFaults,
+        )
+        .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO sync_relay_push_state VALUES ('ws','local',-1)",
+                    [],
+                )
+                .unwrap();
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })
+            .unwrap();
+        let write = |store: &mut EngineStore, id: &str, text: &str, now| {
+            VersionedTextStore::new(store)
+                .write_text(
+                    &WriteText {
+                        workspace_id: "ws".into(),
+                        version_id: "main".into(),
+                        object_id: "doc".into(),
+                        moment_id: id.into(),
+                        path: "doc.md".into(),
+                        text: text.into(),
+                        metadata_origin: "ydoc".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: now,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        };
+        write(&mut store, "a", "A", 10);
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,regime,lineage_claim_status,updated_at_ms,file_export_lane,path) VALUES ('ws','main','doc','plaintext','local-only','unclaimed',1,1,'doc.md')", []).unwrap();
+            Ok::<_, dohc_engine_storage::StorageError>(())
+        }).unwrap();
+        let transport = DeferredRelayTransport::default();
+        let operation = RelayOperation::Push {
+            workspace_id: "ws".into(),
+            now_ms: 20,
+            max_read_bytes: 0,
+        };
+        let mut cache = WriterDocCache::new();
+        let run = |store: &mut EngineStore, cache: &mut WriterDocCache| {
+            execute_relay_operation(
+                store,
+                cache,
+                transport.clone(),
+                operation.clone(),
+                &LeaseRegistry::default(),
+                &ClaimAnnouncer::default(),
+            )
+        };
+        assert!(matches!(run(&mut store, &mut cache),
+            Err(RuntimeError::Relay(RelayError::Local(reason))) if reason == RELAY_IO_PENDING));
+        let pending = transport.take_pending().unwrap();
+        assert!(matches!(pending, RelayIoRequest::BlobsHave(_)));
+        write(&mut store, "b", "B", 30);
+        transport.complete(
+            pending,
+            Ok(RelayIoResponse::BlobsHave(BlobHaveResponse {
+                missing: Vec::new(),
+            })),
+        );
+        assert!(matches!(run(&mut store, &mut cache),
+            Err(RuntimeError::Relay(RelayError::Local(reason))) if reason == RELAY_IO_PENDING));
+        let exported: Vec<String> = store.read_with(|conn| {
+            conn.prepare("SELECT json_extract(payload_json,'$.momentId') FROM replication_log WHERE imported=0 AND op_kind='moment.append' ORDER BY rowid")?
+                .query_map([], |row| row.get(0))?.collect::<Result<_, rusqlite::Error>>()
+        }).unwrap();
+        assert_eq!(
+            exported,
+            ["a"],
+            "a sync continuation must not select a newer settle"
+        );
+        for continuation in 0..8 {
+            let pending = transport.take_pending().unwrap();
+            let response = match &pending {
+                RelayIoRequest::BlobsHave(_) => RelayIoResponse::BlobsHave(BlobHaveResponse {
+                    missing: Vec::new(),
+                }),
+                RelayIoRequest::Push(request) => RelayIoResponse::Push(PushResponse {
+                    settlement_refusals: Vec::new(),
+                    accepted: request.ops.len(),
+                    inserted: request.ops.len(),
+                    skipped: 0,
+                    current_max_origin_seq: request.ops.last().unwrap().origin_seq,
+                }),
+                other => panic!("unexpected I/O: {other:?}"),
+            };
+            transport.complete(pending, Ok(response));
+            match run(&mut store, &mut cache) {
+                Ok(_) => break,
+                Err(RuntimeError::Relay(RelayError::Local(reason)))
+                    if reason == RELAY_IO_PENDING =>
+                {
+                    assert!(continuation < 7, "the push did not finish");
+                }
+                other => panic!("unexpected outcome: {other:?}"),
+            }
+        }
+        let count = || {
+            store.read_with(|conn| conn.query_row(
+            "SELECT count(*) FROM replication_log WHERE imported=0 AND op_kind='moment.append'", [], |row| row.get::<_, i64>(0))).unwrap()
+        };
+        assert_eq!(count(), 1);
+        let second_phase = execute_relay_operation(
+            &mut store,
+            &mut cache,
+            transport.clone(),
+            operation.clone(),
+            &LeaseRegistry::default(),
+            &ClaimAnnouncer::default(),
+        );
+        assert!(
+            second_phase.is_ok(),
+            "a second phase must keep the same selection"
+        );
+        let next_operation = RelayOperation::Push {
+            workspace_id: "ws".into(),
+            now_ms: 40,
+            max_read_bytes: 0,
+        };
+        let next = execute_relay_operation(
+            &mut store,
+            &mut cache,
+            DeferredRelayTransport::default(),
+            next_operation,
+            &LeaseRegistry::default(),
+            &ClaimAnnouncer::default(),
+        );
+        assert!(matches!(next,
+            Err(RuntimeError::Relay(RelayError::Local(reason))) if reason == RELAY_IO_PENDING));
+        let exported: Vec<String> = store.read_with(|conn| {
+            conn.prepare("SELECT json_extract(payload_json,'$.momentId') FROM replication_log WHERE imported=0 AND op_kind='moment.append' ORDER BY rowid")?
+                .query_map([], |row| row.get(0))?.collect::<Result<_, rusqlite::Error>>()
+        }).unwrap();
+        assert_eq!(
+            exported,
+            ["a", "b"],
+            "the next pass selects the later settle"
+        );
+    }
+
+    #[test]
     fn base_repair_probe_is_sent_once_across_pull_replays_without_cursor_advance() {
         base_repair_probe_across_replays(false);
     }

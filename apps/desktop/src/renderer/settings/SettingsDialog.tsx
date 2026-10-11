@@ -60,10 +60,8 @@ import {
 import { ReportsSettings } from "./ReportsSettings";
 import { UsageRecordSettings } from "./UsageRecordSettings";
 import { SegmentedControl } from "../ui/SegmentedControl";
-import { SecondaryButton } from "../ui/controls";
-import { SharedByMeList } from "./SharedByMeList";
-import { SharedWithMeList } from "./SharedWithMeList";
-import type { ShareRemovalNotices } from "../shell/useShareRemovalNotices";
+import type { SharingFocus } from "../workbench/SharingView";
+import { SharingSearchResults, useSharingSearch } from "./SharingSearchResults";
 import { SidebarViewsControl } from "./SidebarViewsControl";
 import {
   DEFAULT_SETTINGS_SECTION,
@@ -109,17 +107,6 @@ function StatusPill(props: { state: SettingsSaveState }) {
   );
 }
 
-// The share lists are moving to the Sharing view. Until they leave Settings,
-// each says where they now live.
-function ManageInSharing(props: { lane: "granted" | "received"; onOpen: (() => void) | undefined }) {
-  if (!props.onOpen) return <span aria-hidden />;
-  return (
-    <SecondaryButton size="compact" data-testid={`settings-manage-sharing-${props.lane}`} onClick={props.onOpen}>
-      Manage in Sharing
-    </SecondaryButton>
-  );
-}
-
 export function SettingsDialog(props: {
   onError?: (message: string, cause?: unknown) => void;
   /** Each workspace settings answer, so the shell can say what the file ignored. */
@@ -156,20 +143,13 @@ export function SettingsDialog(props: {
     mutated: boolean;
   }) => void;
   onOpenCloud?: () => void;
-  /** Closes Settings and opens the Sharing view, where these share lists move. */
-  onOpenSharing?: () => void;
+  /** Closes Settings and opens the Sharing view on a lane or a share search found. */
+  onOpenSharing?: (target: SharingFocus) => void;
   /**
    * Opens this workspace's live documents. Owned workspaces only: a shared
    * view runs no owner live delivery, so it has no such list to manage.
    */
   onOpenLiveDocuments?: () => void;
-  onWorkspaceFilesChanged?: (outcome?: {
-    // The removal cleaned up the record but left its folder on disk. The
-    // shell needs the id before its reload sees the record vanish.
-    folderLeftShareId?: string;
-  }) => void;
-  // Ending a share under Shared by me: the shell shows the notice and its Undo.
-  shareRemovals?: ShareRemovalNotices;
 }) {
   const { onWorkspaceSettingsRead } = props;
   const dialogRef = useRef<HTMLDivElement | null>(null);
@@ -316,6 +296,7 @@ export function SettingsDialog(props: {
     () => SETTINGS_SECTIONS.filter((section) => sectionMatches(section, query)),
     [query],
   );
+  const sharingResults = useSharingSearch(props.workspaceId, !!props.sharedView, props.onOpenSharing ? query : "");
 
   useEffect(() => {
     if (
@@ -573,6 +554,7 @@ export function SettingsDialog(props: {
 
   const renderSection = () => {
     if (query.trim() && filteredSections.length === 0) {
+      if (sharingResults.length > 0) return null;
       return (
         <div
           data-testid={desktopPins.settingsEmptySearch}
@@ -812,7 +794,7 @@ export function SettingsDialog(props: {
           <div data-testid={settingsSectionPin("cloud")}>
             <SettingRow
               title="Sync and sharing"
-              description="Connect a server, sync this workspace, and manage who you share it with."
+              description="Connect a server and sync this workspace."
             >
               <button
                 type="button"
@@ -840,32 +822,6 @@ export function SettingsDialog(props: {
                 </button>
               </SettingRow>
             ) : null}
-            <SettingRow
-              title="Shared by me"
-              description="Read-only views you've shared with other dohc accounts. Ending a share stops their access on their next refresh."
-            >
-              <ManageInSharing lane="granted" onOpen={props.onOpenSharing} />
-            </SettingRow>
-            <div className="px-1 pb-2">
-              <SharedByMeList
-                workspaceId={props.workspaceId}
-                {...(props.shareRemovals ? { shareRemovals: props.shareRemovals } : {})}
-              />
-            </div>
-            <SettingRow
-              title="Shared with me"
-              description="Files other dohc accounts shared to you. Adding one places it in this workspace under shared-with-me/ — read-only, kept up to date, readable by your agent."
-            >
-              <ManageInSharing lane="received" onOpen={props.onOpenSharing} />
-            </SettingRow>
-            <div className="px-1 pb-2">
-              <SharedWithMeList
-                workspaceId={props.workspaceId}
-                {...(props.onWorkspaceFilesChanged
-                  ? { onWorkspaceFilesChanged: props.onWorkspaceFilesChanged }
-                  : {})}
-              />
-            </div>
           </div>
         );
       case "workbench":
@@ -1323,7 +1279,9 @@ export function SettingsDialog(props: {
         ) : null}
 
         <section className="min-h-0 flex-1 overflow-auto px-6 py-5 max-[720px]:px-4">
-          <div className="mb-5 flex items-center gap-2.5">
+          {/* Only Sharing matched: no section's heading stands over its results. */}
+          <div hidden={!!query.trim() && filteredSections.length === 0 && sharingResults.length > 0}
+            className="mb-5 flex items-center gap-2.5">
             <h3 className="m-0 text-sm font-semibold text-ink">
               {activeMeta.label}
             </h3>
@@ -1340,6 +1298,7 @@ export function SettingsDialog(props: {
               </button>
             ) : null}
           </div>
+          {props.onOpenSharing ? <SharingSearchResults results={sharingResults} onOpen={props.onOpenSharing} /> : null}
           {renderSection()}
         </section>
       </main>

@@ -409,26 +409,26 @@ describe("notice center", () => {
     expect(screen.queryByTestId("notice-center")).toBeNull();
   });
 
-  // Changes made in dohc stay local in this state. Sync cannot
-  // clear the refusal, so the notice offers the document, never Try again.
-  it("says dohc edits do not reach others and offers to open the document", async () => {
+  // Saved edits still reach others, never live ones. Sync cannot clear the
+  // refusal, so the notice offers the document, never Try again.
+  it("says saved edits reach others when dohc syncs and offers to open the document", async () => {
     const onOpenSharingDeclined = vi.fn();
     const user = userEvent.setup();
     renderNotices({ syncStatus: declinedStatus(declined()), onOpenSharingDeclined });
 
     await user.click(screen.getByTestId("notice-center-toggle"));
     const notice = screen.getByTestId("notice-sharing-declined-main:object-1");
-    expect(notice.textContent).toContain("Too large to share your edits");
+    expect(notice.textContent).toContain("Too large to edit live with others");
     expect(notice.textContent).toContain(
-      "People you share large.md with don't get the edits you make in dohc while it is this large. Make it smaller, then open it again to share your edits.",
+      "People you share large.md with get your saved edits when dohc syncs. If they have it open in dohc, they see your edits after they close it. Close large.md and open it again to fix this.",
     );
     expect(within(notice).queryByRole("button", { name: "Try again" })).toBeNull();
 
     await user.click(within(notice).getByRole("button", { name: "Copy error details" }));
     const copied = await navigator.clipboard.readText();
-    expect(copied).toContain("Notice: Too large to share your edits");
+    expect(copied).toContain("Notice: Too large to edit live with others");
     expect(copied).toContain(
-      "Detail: People you share large.md with don't get the edits you make in dohc while it is this large. Make it smaller, then open it again to share your edits.",
+      "Detail: People you share large.md with get your saved edits when dohc syncs. If they have it open in dohc, they see your edits after they close it. Close large.md and open it again to fix this.",
     );
     expect(copied).toContain("File: notes/large.md");
     expect(copied).toContain("Size: 280001 bytes");
@@ -448,7 +448,7 @@ describe("notice center", () => {
 
     const toast = screen.getByTestId("sharing-declined-toast");
     expect(toast.textContent).toContain(
-      "Too large to share your edits. People you share large.md with don't get the edits you make in dohc while it is this large. Make it smaller, then open it again to share your edits.",
+      "Too large to edit live with others. People you share large.md with get your saved edits when dohc syncs. If they have it open in dohc, they see your edits after they close it. Close large.md and open it again to fix this.",
     );
   });
 

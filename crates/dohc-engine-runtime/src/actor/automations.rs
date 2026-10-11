@@ -135,6 +135,52 @@ impl ActorHandle {
         .await
     }
 
+    pub async fn automation_make_durable_batch(
+        &self,
+        workspace_id: String,
+        claims: Vec<(Option<String>, CancellationToken)>,
+        faults: Arc<dyn FaultInjector>,
+    ) -> Result<Vec<Result<(), RuntimeError>>, RuntimeError> {
+        self.run(move |store, _cache| {
+            let checked: Vec<_> = claims
+                .into_iter()
+                .map(|(claim_id, token)| {
+                    if token.is_cancelled() {
+                        return Err(RuntimeError::Cancelled);
+                    }
+                    if let Some(claim_id) = claim_id {
+                        let claim = dohc_engine_domain::get_automation_claim(
+                            store,
+                            &workspace_id,
+                            &dohc_engine_domain::AutomationClaimLookup::Id(claim_id),
+                        )?
+                        .ok_or(
+                            dohc_engine_domain::DomainError::InvalidInput {
+                                reason: "Automation claim not found.",
+                            },
+                        )?;
+                        if claim.state != dohc_engine_domain::AutomationClaimState::Running {
+                            return Err(dohc_engine_domain::DomainError::InvalidInput {
+                                reason: "Automation claim is not running.",
+                            }
+                            .into());
+                        }
+                    }
+                    Ok(())
+                })
+                .collect();
+            if checked.iter().any(Result::is_ok) {
+                dohc_engine_domain::make_automation_writes_durable(
+                    store,
+                    &workspace_id,
+                    faults.as_ref(),
+                )?;
+            }
+            Ok(checked)
+        })
+        .await
+    }
+
     pub async fn automation_settle(
         &self,
         workspace_id: String,

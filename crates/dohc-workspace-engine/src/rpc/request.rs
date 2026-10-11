@@ -86,8 +86,26 @@ impl Drop for OperationCancellation {
 
 pub(super) fn required_idempotency_key(request_id: Option<String>) -> Result<String, WireError> {
     request_id
-        .filter(|request_id| !request_id.is_empty())
+        .filter(|request_id| !request_id.is_empty() && !request_id.chars().any(char::is_control))
         .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "idempotency-key-required"))
+}
+
+pub(super) fn validate_request_ids(
+    request: &dohc_engine_protocol::wire::Request,
+) -> Result<(), WireError> {
+    if request
+        .idempotency_key
+        .as_deref()
+        .into_iter()
+        .chain(request.params.get("requestId").and_then(Value::as_str))
+        .any(|key| key.chars().any(char::is_control))
+    {
+        return Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "invalid-request-id",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn deserialize_optional_non_null<'de, D, T>(
@@ -264,7 +282,21 @@ impl EngineService {
 
 #[cfg(test)]
 mod tests {
-    use super::validated_author;
+    use super::{required_idempotency_key, validated_author};
+
+    #[test]
+    fn request_ids_cannot_claim_internal_durability_markers() {
+        assert!(required_idempotency_key(Some("ordinary-id".into())).is_ok());
+        for key in [
+            None,
+            Some(String::new()),
+            Some("\0automation-durability:ws".into()),
+            Some("id\n".into()),
+            Some("id\u{0085}".into()),
+        ] {
+            assert!(required_idempotency_key(key).is_err());
+        }
+    }
     use serde_json::json;
 
     #[test]
