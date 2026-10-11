@@ -1277,18 +1277,51 @@ describe("shared view chats surface", () => {
     expect(bridge.syncDms).not.toHaveBeenCalled();
   });
 
-  it("shows the Explorer when a shared view's saved layout selected Chats", async () => {
-    const bridge = makeShareBridge(Promise.resolve(STORED_CHATS_STATE));
-    renderShell(bridge, SHARE_VIEW);
+  it("shows the Explorer, never Chats, when a shared view's saved layout selected Chats", async () => {
+    // Every node the shell adds, from its first commit: Chats must never
+    // render, not even for the frame before the saved state is corrected.
+    const chatsRendered: string[] = [];
+    const sidePanelTitle = (node: Node) =>
+      node.parentElement?.closest('[data-testid="side-panel"] header') ? node.textContent : null;
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        if (record.type === "characterData" && sidePanelTitle(record.target) === "Chats") {
+          chatsRendered.push("title");
+        }
+        for (const node of record.addedNodes) {
+          if (!(node instanceof Element)) {
+            if (sidePanelTitle(node) === "Chats") chatsRendered.push("title");
+            continue;
+          }
+          if (node.matches('[data-testid="chats-view"], [data-testid="chats-off"]') ||
+            node.querySelector('[data-testid="chats-view"], [data-testid="chats-off"]')) {
+            chatsRendered.push("view");
+          }
+          const headers = [
+            ...(node.matches('[data-testid="side-panel"] header') ? [node] : []),
+            ...node.querySelectorAll('[data-testid="side-panel"] header'),
+          ];
+          if (headers.some((header) => header.textContent?.startsWith("Chats"))) chatsRendered.push("title");
+        }
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    try {
+      const bridge = makeShareBridge(Promise.resolve(STORED_CHATS_STATE));
+      renderShell(bridge, SHARE_VIEW);
 
-    await settleShareView();
-    await waitFor(() =>
-      expect(screen.getByTestId("activity-explorer").getAttribute("aria-current")).toBe("page"),
-    );
-    expect(await within(screen.getByTestId("side-panel")).findByTestId("file-tree")).toBeTruthy();
-    expect(screen.queryByTestId("chats-off")).toBeNull();
-    expect(bridge.listChatChannels).not.toHaveBeenCalled();
-    expect(bridge.syncDms).not.toHaveBeenCalled();
+      await settleShareView();
+      await waitFor(() =>
+        expect(screen.getByTestId("activity-explorer").getAttribute("aria-current")).toBe("page"),
+      );
+      expect(await within(screen.getByTestId("side-panel")).findByTestId("file-tree")).toBeTruthy();
+      await act(async () => {});
+      expect(chatsRendered).toEqual([]);
+      expect(bridge.listChatChannels).not.toHaveBeenCalled();
+      expect(bridge.syncDms).not.toHaveBeenCalled();
+    } finally {
+      observer.disconnect();
+    }
   });
 
   it("states the capability for a persisted Chats tab instead of a page that can only fail", async () => {

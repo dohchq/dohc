@@ -74,18 +74,17 @@ export const SIDE_PANEL_VIEWS: Readonly<Record<ViewId, SidePanelView>> = {
           <Suspense fallback={<SkeletonRows inSlot layout="panel" label="Loading Chats..." />}>
             <LazyChatsView key={context.workspaceId} {...context.chatsNavigatorProps} />
           </Suspense>
-        ) : context.shareView || context.captureDecided ? (
-          // Mounting the list would issue calls main refuses, so the view
-          // states the fact with the one next step that can change it. A
-          // shared view has chat per file, in About, and no workspace-wide
-          // listing to filter (the shape #627 came from).
+        ) : context.captureDecided ? (
+          // Main's capture cannot serve chats here, so mounting the list
+          // would issue calls it refuses. The view states the fact, with the
+          // one next step that can change it. A shared view never shows this
+          // view: it has chat per file, in About, and no workspace-wide
+          // listing (the shape #627 came from).
           <div
             data-testid="chats-off"
             className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
           >
-            {context.shareView
-              ? "A shared view lists no chats. Open a shared file to chat about it."
-              : chatsOffCopy(context.syncStatus)}
+            {chatsOffCopy(context.syncStatus)}
           </div>
         ) : (
           // Main has not decided yet — a load state, not a claim.

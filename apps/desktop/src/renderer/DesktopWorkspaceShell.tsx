@@ -1153,8 +1153,16 @@ export function DesktopWorkspaceShell(props: {
     () => sidebarViews(sidebarSettings).filter((view) => !(isShareView && view === "chats")),
     [isShareView, sidebarSettings],
   );
-  // A shared view restored with Chats selected shows the Explorer instead.
+  // A shared view restored with Chats selected shows the Explorer from its
+  // first frame. The rail, the panel and its title read the shown view; the
+  // write below then corrects the saved one, so the rail's own buttons act
+  // on what the person sees.
   const restoredSharedChats = isShareView && wb.activeView === "chats";
+  const shownView: ActivityViewId = restoredSharedChats ? "explorer" : wb.activeView;
+  const shownWb = useMemo(
+    () => (restoredSharedChats ? { ...wb, activeView: shownView } : wb),
+    [restoredSharedChats, shownView, wb],
+  );
   useEffect(() => {
     if (!restoredSharedChats) return;
     mutateWb((state) => (state.activeView === "chats" ? { ...state, activeView: "explorer" } : state));
@@ -1167,9 +1175,9 @@ export function DesktopWorkspaceShell(props: {
   const selectedAppRoot = parseAppViewId(wb.activeView);
   const selectedApp = pinnedApps.find((app) => app.root === selectedAppRoot) ?? null;
   // The panel's header names dohc's own view or the pinned app.
-  const sidePanelTitle = isViewId(wb.activeView)
-    ? SIDE_PANEL_VIEWS[wb.activeView].label
-    : wb.activeView === SHARING_VIEW_ID ? "Sharing" : selectedApp?.label ?? "App";
+  const sidePanelTitle = isViewId(shownView)
+    ? SIDE_PANEL_VIEWS[shownView].label
+    : shownView === SHARING_VIEW_ID ? "Sharing" : selectedApp?.label ?? "App";
 
   // Every view on the rail, in its order: dohc's own, pinned apps, then
   // Sharing at the rail's foot.
@@ -5095,7 +5103,7 @@ export function DesktopWorkspaceShell(props: {
       <div className="flex min-h-0 flex-1">
         <ActivityBar
           views={railViews}
-          activeView={wb.activeView}
+          activeView={shownView}
           pinnedApps={pinnedApps}
           onPinnedAppMenu={(appRoot) => void showPinnedAppMenu(appRoot)}
           sidebarVisible={wb.sidebarVisible}
@@ -5161,7 +5169,7 @@ export function DesktopWorkspaceShell(props: {
           <ShellSidePanel
             customize={customize}
             {...(askAgent ? { askAgent } : {})}
-            wb={wb}
+            wb={shownWb}
             mutateWb={mutateWb}
             sidePanelTitle={sidePanelTitle}
             openHistoryTab={openHistoryTab}

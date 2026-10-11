@@ -436,7 +436,7 @@ export function LinkedChatsPanel(props: {
         icon={Info}
         title={
           props.fileTabOpen
-            ? `About covers files for now. Switch to a file's tab to see its ${sections}.`
+            ? `About covers files. Switch to a file's tab to see its ${sections}.`
             : `Open a file to see its ${sections}.`
         }
       />
