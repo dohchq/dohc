@@ -530,7 +530,7 @@ it.skipIf(engine.missing).each([
     expect((await adapter.listPendingCollectionAdoptions()).adoptions).toEqual([]);
     const ownerSettlement = (await capture.listMoments({limit: 100})).moments.find(moment => moment.path === path);
     expect(ownerSettlement).toBeDefined();
-    // This owner has no authenticated account, so its accepted edits have no verified author.
+    // Native owner delivery sends no recording context for an undeclared edit, so no author is verified.
     expect(ownerSettlement!.authors).toEqual([{kind: "unattributed"}]);
     const publicationDb = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH), {readOnly: true});
     try {
