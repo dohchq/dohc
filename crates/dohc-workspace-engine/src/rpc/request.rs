@@ -155,6 +155,13 @@ pub(super) fn validated_author(author: Option<&Value>) -> Result<Option<String>,
                 && object
                     .get("depth")
                     .is_none_or(|value| depth_within(value, 1))
+                // Only the relay attests an author; a local caller names no more.
+                && object.keys().all(|key| {
+                    matches!(
+                        key.as_str(),
+                        "kind" | "agentId" | "onBehalfOf" | "agentRunId" | "depth"
+                    )
+                })
         }
         // An automation writing a file, so the moment carries its identity
         // and chain depth into the claims the write causes. It names the
@@ -187,8 +194,6 @@ pub(super) fn validated_author(author: Option<&Value>) -> Result<Option<String>,
         "humanId",
         "onBehalfOf",
         "agentRunId",
-        "principalId",
-        "grantId",
     ] {
         if object
             .get(field)
@@ -199,9 +204,6 @@ pub(super) fn validated_author(author: Option<&Value>) -> Result<Option<String>,
         }
     }
     let authors = dohc_engine_domain::moment_author_list_json(value);
-    if authors.len() > dohc_engine_domain::MAX_AUTHOR_JSON_BYTES {
-        return Err(WireError::new(ErrorCode::InvalidParams, "invalid-metadata"));
-    }
     Ok(Some(authors))
 }
 
@@ -269,7 +271,7 @@ mod tests {
     fn locally_supplied_author_fields_refuse_control_characters() {
         let agent = json!({"kind":"agent", "agentId":"runner", "onBehalfOf":"person"});
         assert!(validated_author(Some(&agent)).is_ok());
-        for field in ["agentId", "onBehalfOf", "agentRunId", "name"] {
+        for field in ["agentId", "onBehalfOf", "agentRunId"] {
             for control in ['\0', '\n'].into_iter().chain('\u{0080}'..='\u{009f}') {
                 let mut invalid = agent.clone();
                 invalid[field] = json!(format!("local{control}author"));
@@ -284,13 +286,7 @@ mod tests {
     #[test]
     fn locally_supplied_authors_fit_the_moment_identity_and_json_budgets() {
         let agent = json!({"kind":"agent", "agentId":"runner", "onBehalfOf":"person"});
-        for field in [
-            "agentId",
-            "onBehalfOf",
-            "agentRunId",
-            "principalId",
-            "grantId",
-        ] {
+        for field in ["agentId", "onBehalfOf", "agentRunId"] {
             let mut bounded = agent.clone();
             bounded[field] = json!("é".repeat(dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES / 2));
             assert!(validated_author(Some(&bounded)).is_ok());
@@ -299,9 +295,6 @@ mod tests {
         }
         let automation = json!({"kind":"automation", "automationId":"x".repeat(dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES + 1), "depth":1});
         assert!(validated_author(Some(&automation)).is_err());
-        let mut oversized = agent;
-        oversized["name"] = json!("x".repeat(dohc_engine_domain::MAX_AUTHOR_JSON_BYTES));
-        assert!(validated_author(Some(&oversized)).is_err());
     }
 
     #[test]
@@ -344,5 +337,32 @@ mod tests {
         ] {
             assert!(validated_author(Some(&invalid)).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn an_agent_author_names_only_its_contract_fields() {
+        let agent = json!({"kind": "agent", "agentId": "agent", "onBehalfOf": "person"});
+        let mut run = agent.clone();
+        run["agentRunId"] = json!("run");
+        run["depth"] = json!(2);
+        assert_eq!(
+            validated_author(Some(&run)).expect("a valid agent run"),
+            Some(json!([run]).to_string())
+        );
+        for (field, value) in [
+            ("relayConfirmed", json!(true)),
+            ("relayConfirmed", json!(false)),
+            ("principalId", json!("principal")),
+            ("grantId", json!("grant")),
+            ("humanId", json!("person")),
+            ("name", json!("Agent")),
+        ] {
+            let mut invalid = agent.clone();
+            invalid[field] = value;
+            let error = validated_author(Some(&invalid)).expect_err("extra agent field refused");
+            assert_eq!(error.message, "invalid-metadata", "{invalid}");
+        }
+        let human = json!({"kind": "human", "humanId": "person", "relayConfirmed": true});
+        assert!(validated_author(Some(&human)).is_err());
     }
 }
