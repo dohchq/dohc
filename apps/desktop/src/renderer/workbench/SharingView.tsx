@@ -9,7 +9,7 @@ import { ipcErrorMessage } from "../ipcError";
 import { basenameOf } from "../path";
 import { shareSenderParts } from "../ShareSender";
 import type { ShareRemovalNotices } from "../shell/useShareRemovalNotices";
-import { DangerButton, SecondaryButton } from "../ui/controls";
+import { DangerButton, RetryRow, SecondaryButton } from "../ui/controls";
 import { KindGlyph } from "../ui/KindGlyph";
 import { MoreMenu, type MoreMenuItem } from "../ui/MoreMenu";
 import { SkeletonLines } from "../ui/SkeletonRows";
@@ -17,7 +17,6 @@ import { useRequestSequence } from "../useRequestSequence";
 import {
   ABOUT_ROW,
   AboutNote,
-  AboutRetry,
   AccessChecked,
   accessReasonForLane,
   AccessUnknown,
@@ -390,7 +389,7 @@ function Section(props: {
         {view.status === "loading" ? (
           <SkeletonLines rows={2} className="px-2 py-1" />
         ) : view.status === "failed" ? (
-          <AboutRetry testId={`sharing-${lane}-failed`} onRetry={() => actions.retry(lane)} />
+          <RetryRow testId={`sharing-${lane}-failed`} onRetry={() => actions.retry(lane)} />
         ) : (
           <div data-testid={`sharing-${lane}-answer`} data-freshness={view.answer.freshness} data-coverage={view.answer.coverage.kind}>
             {!known ? (

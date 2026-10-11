@@ -2,6 +2,7 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { StrictMode, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { CHECKPOINT_FAILURE_MESSAGE, IMPORT_FAILURE_MESSAGE } from "../../workspaces/typingRecoveryWords";
 import { ipcErrorMessage } from "../ipcError";
 import { useShellError } from "./useShellError";
 import { shareCaptureNoticeState } from "../../workspaces/shareCaptureNotice";
@@ -15,6 +16,13 @@ const strict = ({ children }: { children: ReactNode }) => (
 );
 
 describe("useShellError", () => {
+  it("routes an additional Notice action independently of its primary action", () => {
+    const first=vi.fn();const discard=vi.fn();const {result}=renderHook(()=>useShellError("workspace"));
+    act(()=>result.current.reportShellFailure({message:"Kept typing",action:{label:"Copy your typing",run:first,additional:[{label:"Discard your typing",run:discard}]}}));
+    const id=result.current.shellErrors[0]!.id;
+    act(()=>result.current.runShellErrorAction(id,1));expect(discard).toHaveBeenCalledOnce();expect(first).not.toHaveBeenCalled();
+    act(()=>result.current.runShellErrorAction(id));expect(first).toHaveBeenCalledOnce();
+  });
   it("hides only the persisted dismissal's matching restriction key", () => {
     const snapshot = { paths: ["tasks/local.yaml"], unchecked: false, checked: 1 };
     const dismissed = { ...snapshot, dismissedKey: shareCaptureNoticeState([], snapshot, false).key };
@@ -420,4 +428,40 @@ it("retries unavailable recovery through the supplied action", () => {
   act(() => result.current.retryShellError(result.current.shellErrors[0].id));
   expect(retry).toHaveBeenCalledOnce();
   expect(result.current.shellErrors).toEqual([]);
+});
+
+it.each([["typing-checkpoint", CHECKPOINT_FAILURE_MESSAGE], ["typing-import", IMPORT_FAILURE_MESSAGE]] as const)("files one %s Notice with retry and copy details", (kind, message) => {
+ const retry = vi.fn(); const {result} = renderHook(() => useShellError("workspace"));
+ act(() => {result.current.reportShellFailure({kind, message, details: [["Reason", "disk or author refusal"]], retry}); result.current.reportShellFailure({kind, message, details: [["Reason", "retry refused"]], retry});});
+ expect(result.current.shellErrors).toHaveLength(1); const row = result.current.shellErrors[0]!;
+ expect(row).toMatchObject({kind, message, seen: false, retry}); expect(row.details).toEqual([["Reason", "retry refused"]]);
+ act(() => result.current.retryShellError(row.id)); expect(retry).toHaveBeenCalledOnce();
+});
+
+it("toasts a first repeated report and retains the toast identity and seen state on refresh",()=>{
+ const {result}=renderHook(()=>useShellError("typing-refresh"));
+ const report=()=>result.current.reportShellFailure({identity:"typing-import:one",kind:"typing-import",message:IMPORT_FAILURE_MESSAGE,repeat:true});
+ act(report);const first=result.current.shellErrors[0]!;expect(first.seen).toBe(false);
+ act(report);expect(result.current.shellErrors[0]).toMatchObject({id:first.id,atMs:first.atMs,seen:false});
+ act(()=>result.current.hideShellError(first.id));act(report);
+ expect(result.current.shellErrors).toHaveLength(1);expect(result.current.shellErrors[0]).toMatchObject({id:first.id,atMs:first.atMs,seen:true});
+});
+
+it("toasts a changed reason even when the prior repeated toast was closed", () => {
+ const {result}=renderHook(()=>useShellError("typing-new-reason"));
+ act(()=>result.current.reportShellFailure({identity:"typing-import:one",kind:"typing-import",message:IMPORT_FAILURE_MESSAGE,repeat:true}));
+ const first=result.current.shellErrors[0]!;
+ act(()=>result.current.hideShellError(first.id));
+ act(()=>result.current.reportShellFailure({identity:"typing-import:one",kind:"typing-import",message:"This file is no longer in History.",repeat:true}));
+ expect(result.current.shellErrors).toHaveLength(1);
+ expect(result.current.shellErrors[0]).toMatchObject({message:"This file is no longer in History.",seen:false});
+ expect(result.current.shellErrors[0]!.id).not.toBe(first.id);
+});
+
+it("gives a success Notice its Open History action without reporting a failure", () => {
+ const open=vi.fn();const {result}=renderHook(()=>useShellError("typing-recovered"));
+ act(()=>result.current.showSuccessNotice('dohc recovered your typing in "note.md".',undefined,undefined,{label:"Open History",run:open}));
+ const row=result.current.shellErrors[0]!;
+ expect(row).toMatchObject({tone:"success",retry:null,seen:false,action:{label:"Open History"}});
+ act(()=>result.current.runShellErrorAction(row.id));expect(open).toHaveBeenCalledOnce();
 });

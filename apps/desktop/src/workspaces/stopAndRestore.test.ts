@@ -141,7 +141,7 @@ describe("recipient record restoration", () => {
     created.authors = [{ kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1 }];
     const filled = moment("filled", "record", "trip/One.md", created.payload.after.text, "---\nid: rec_one\nTitle: Tent\n---\n");
     filled.metadata.origin = "ydoc";
-    filled.authors = [{ kind: "human", humanId: "ana" }];
+    filled.authors = [{ kind: "human", humanId: "ana", relayConfirmed: true }];
     const seed = moment("seed", "record", "trip/One.md", created.payload.after.text, created.payload.after.text);
     const exported = moment("exported", "record", "trip/One.md", seed.payload.after.text, filled.payload.after.text);
     exported.syncRecordOnly = true;
@@ -165,7 +165,7 @@ describe("recipient record restoration", () => {
     created.authors = [{ kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1 }];
     const edit = moment(id, "record", "trip/One.md", RECORD, "Changed");
     edit.metadata.origin = origin;
-    edit.authors = [{ kind: "human", humanId: "ana" }];
+    edit.authors = [{ kind: "human", humanId: "ana", relayConfirmed: true }];
     const e = engine([created, edit]);
     const outcome = await restoreDirectWrites(e.dependencies, [file("created", "record", "trip/One.md", true)]);
     if (removes) {

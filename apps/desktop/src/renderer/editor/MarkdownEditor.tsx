@@ -53,6 +53,7 @@ import {
   pickAndInsertImages,
   type ImagePasteContext,
 } from "./imagePaste";
+import { handleUrlPaste, type UrlPasteOffer } from "./urlPaste";
 import { bridge } from "../bridge";
 import { FindReplaceBar } from "./FindReplaceBar";
 import { findReplaceExtension } from "./findReplace";
@@ -172,6 +173,7 @@ export type MarkdownEditorProps = {
   value: string;
   onDirty: (materialize?: () => string) => void;
   onFocus?: () => void;
+  onUrlPasteOffer?: (offer: UrlPasteOffer) => void;
   workspaceId: string;
   path: string;
   knownFiles: ReadonlyArray<WikilinkFile>;
@@ -466,6 +468,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       value,
       onDirty,
       onFocus,
+      onUrlPasteOffer,
       knownFiles,
       onOpenWikilink,
       onOpenWorkspaceLink,
@@ -520,6 +523,8 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     const onOpenWorkspaceLinkRef = useRef<
       ((target: WorkspaceLinkTarget) => void) | null
     >(onOpenWorkspaceLink ?? null);
+    const urlPasteOfferRef = useRef(onUrlPasteOffer);
+    urlPasteOfferRef.current = onUrlPasteOffer;
     const onFocusRef = useRef(onFocus);
     onFocusRef.current = onFocus;
     // The shell's error hook, for a code block's copy the clipboard refused.
@@ -815,8 +820,10 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             class: "dohc-notion-editor",
             "data-testid": "markdown-editor",
           },
-          handlePaste: (view, event) =>
-            handleImagePaste(view, event, pasteContextRef.current),
+          handlePaste: (view, event) => {
+            if (handleImagePaste(view, event, pasteContextRef.current)) return true;
+            return handleUrlPaste(view, event, urlPasteOfferRef.current);
+          },
           handleDrop: (view, event) =>
             handleImageDrop(view, event as DragEvent, pasteContextRef.current),
           handleKeyDown: readCaretBeforeKey,

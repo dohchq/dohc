@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
+import { shareCopyOperations } from "./ipc/shareCopyOperations";
 import { accessOperations } from "./ipc/accessOperations";
 import { devToolsGranted } from "./ipc/devToolsIpc";
 import {OwnerRestoreRequest, OwnerRestoreActionResponse, type OwnerRestoreAction, type OwnerRestoreResult} from "./ipc/ownerRestoreContract";
@@ -40,6 +41,7 @@ import {
   CrashReportChangedEvent,
   NoticesChangedEvent,
   SearchResultsEvent,
+  FolderAppAnswer,
   ShareHandoffStatus,
   UpdateActionResult,
   UpdateCheckResult,
@@ -52,6 +54,7 @@ import {
   captureRecoveryOperations,
   fileObservationOperations,
   reportingOperations,
+  usageRecordOperations,
   noticeOperations,
   liveDraftRecoveryOperations,
   stopAndRestoreRecoveryOperations,
@@ -61,6 +64,7 @@ import {
   ScheduleHostChangedEvent,
   ChatDispatchNoticesEvent,
   workspaceSearchOperations,
+  folderAppOfferOperations,
   workspaceVersionOperations,
   engineYDocAdmissionOperations,
   engineYDocSaveOperations,
@@ -109,6 +113,7 @@ const rendererDocumentId = crypto.randomUUID();
 
 const bridge: DohcDesktopBridge = {
   ...operationBridge(shareDirectWriteDeliveryOperations, invoke),
+  ...operationBridge(shareCopyOperations, invoke),
   ...operationBridge(accessOperations, invoke),
   platform: process.platform,
   devTools: devToolsGranted(process.argv),
@@ -412,6 +417,7 @@ const bridge: DohcDesktopBridge = {
   },
   ...operationBridge(crashReportOperations, invoke),
   ...operationBridge(reportingOperations, invoke),
+  ...operationBridge(usageRecordOperations, invoke),
   onCrashReportChanged: (listener) =>
     onEvent(CHANNELS.crashReportChanged, CrashReportChangedEvent, () => listener()),
   onAutomationHoldsChanged: (
@@ -661,6 +667,8 @@ const bridge: DohcDesktopBridge = {
   // Content search: results stream main→renderer as bounded
   // batches; the searchId round-trips so stale batches drop renderer-side.
   ...operationBridge(workspaceSearchOperations, invoke),
+  ...operationBridge(folderAppOfferOperations, invoke),
+  onFolderAppChanged: listener => onEvent(CHANNELS.folderAppChanged, FolderAppAnswer, listener),
   onSearchResults: (listener) =>
     onEvent(CHANNELS.searchResults, SearchResultsEvent, listener),
   ...operationBridge(noticeOperations, invoke),

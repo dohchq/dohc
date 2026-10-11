@@ -29,7 +29,8 @@ pub use binary_write::{write_binary_in_tx, write_published_binary_in_tx};
 pub use capture_recovery::{
     CAPTURE_RECOVERY_ORIGIN, CLEARED_CAPTURE_RECOVERY_ORIGIN, CaptureRecovery,
     capture_recoveries_in, clear_capture_recovery_in, is_capture_recovery_origin,
-    record_capture_recovery_in_tx,
+    record_capture_recovery_in_tx, record_deleted_capture_recovery_in_tx,
+    record_keyed_capture_recovery_in_tx,
 };
 pub use capture_write::{
     CAPTURE_ORIGIN, CaptureIngestBatchContext, CaptureManifestSeedEntry,
@@ -1785,6 +1786,25 @@ fn get_snapshot_meta(
     )
     .optional()
     .map_err(DomainError::sql_corrupt)
+}
+
+/// Resolve a recovery target by object, including its current rename.
+pub fn recovery_snapshot_in(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+) -> Result<Option<TextSnapshot>, DomainError> {
+    validate_identifier(workspace_id, "workspace_id")?;
+    validate_identifier(version_id, "version_id")?;
+    validate_identifier(object_id, "object_id")?;
+    let Some(snapshot) = get_snapshot(conn, workspace_id, version_id, object_id)? else {
+        return Ok(None);
+    };
+    if snapshot.content_kind == "binary" {
+        return Err(DomainError::BinaryHeadNotText);
+    }
+    Ok(Some(snapshot_text_view(&snapshot)))
 }
 
 fn get_snapshot(

@@ -3332,12 +3332,12 @@ function hasTraversalSegment(relativePath: string): boolean {
 // would be machinery without a matching cost to bound.
 const MAX_METADATA_FILE_BYTES = 1024 * 1024;
 
-async function sourceForFile(rootPath: string, path: string): Promise<string | WorkspaceSiteSource> {
+export async function sourceForFile(rootPath: string, path: string, metadata?: () => Promise<{ size: number; read(): Promise<string> }>): Promise<string | WorkspaceSiteSource> {
   const name = posix.basename(path);
   if (name !== "package.json" && name !== "dohc.json") return path;
   const absolute = join(rootPath, path);
   try {
-    const info = await stat(absolute);
+    const info = metadata ? await metadata() : { size: (await stat(absolute)).size, read: () => readFile(absolute, "utf8") };
     if (info.size > MAX_METADATA_FILE_BYTES) {
       return {
         path,
@@ -3352,7 +3352,7 @@ async function sourceForFile(rootPath: string, path: string): Promise<string | W
         ],
       };
     }
-    return { path, body: await readFile(absolute, "utf8") };
+    return { path, body: await info.read() };
   } catch {
     return { path, body: null };
   }

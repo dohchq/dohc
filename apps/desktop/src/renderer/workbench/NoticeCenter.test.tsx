@@ -8,11 +8,17 @@ import type {
   UpdateActionResult,
   UpdateStateEvent,
 } from "../../ipc/bridgeContract";
-import { NoticeCenter, SENT_NOTICE_PAGE, type SentNotice } from "./NoticeCenter";
+import { NoticeCenter, WorkspaceErrorToast, SENT_NOTICE_PAGE, type SentNotice } from "./NoticeCenter";
 import { deferred } from "../../testing/deferred";
 import { useEffect, useRef } from "react";
 import { Overlay } from "../Overlay";
 import { switchModalRegion } from "../modalFocus";
+
+it("offers Discard as a separate toast action without dismissing the Notice",()=>{
+  const action=vi.fn();const hide=vi.fn();render(<WorkspaceErrorToast error={{id:"typing",message:"Kept typing",details:"",atMs:0,canRetry:false,seen:false,actionLabel:"Copy your typing",additionalActionLabels:["Discard your typing"]}} onAction={action} onHide={hide}/>);
+  fireEvent.click(screen.getByRole("button",{name:"Discard your typing"}));
+  expect(action).toHaveBeenCalledExactlyOnceWith("typing",1);expect(hide).not.toHaveBeenCalled();
+});
 
 // Captures the renderer-side update listener exactly as the preload would
 // install it — the auto-updater itself never runs in dev/test (gated on

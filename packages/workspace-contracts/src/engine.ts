@@ -140,6 +140,8 @@ interface HumanMomentAuthor {
   kind: "human";
   humanId: string;
   humanName?: string;
+  // Set only when the engine installs the relay's admitted settlement snapshot.
+  relayConfirmed?: true;
   onBehalfOf?: string;
 }
 
@@ -196,7 +198,7 @@ export type MomentAuthor =
 // person, and none when its run has none.
 export type MomentWriteAuthor =
   | (AgentMomentAuthor & { onBehalfOf: string })
-  | Omit<HumanMomentAuthor, "onBehalfOf" | "humanName">
+  | Omit<HumanMomentAuthor, "onBehalfOf" | "humanName" | "relayConfirmed">
   | AutomationMomentAuthor;
 
 type VersionedFileContentKind = "text" | "binary";

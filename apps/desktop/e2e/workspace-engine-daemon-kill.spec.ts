@@ -2,6 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
+import { mainProcessCrashText } from "./helpers/mainProcessCrashText";
 import {
   engineDaemonPids,
   hardKillAppTree,
@@ -45,20 +46,6 @@ async function openEngineDoc(page: Page, path: string): Promise<void> {
     timeout: 15_000,
   });
   await expect(page.getByTestId("markdown-editor")).toBeVisible();
-}
-
-function mainProcessCrashText(
-  logs: ReadonlyArray<{ source: string; level: string; text: string }>,
-): string[] {
-  return logs
-    .filter((entry) => entry.source === "main")
-    .map((entry) => entry.text)
-    .filter(
-      (text) =>
-        /Uncaught Exception/i.test(text) ||
-        /A JavaScript error occurred in the main process/i.test(text) ||
-        /EPIPE/.test(text),
-    );
 }
 
 interface KilledSession {

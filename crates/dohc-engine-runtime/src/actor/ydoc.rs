@@ -1987,105 +1987,21 @@ pub(super) fn ydoc_record_update_on_store(
         },
         faults,
         now_ms,
-        |tx, outcome, update_sha| {
-            dohc_engine_collab::owner_outbox::append_adopted_local_update_in_tx(
+        |tx, outcome, _update_sha| {
+            if !journal_local_append_in_tx(
                 tx,
                 &journal_key,
                 &journal_path,
-                outcome.seq,
+                journal_kind,
                 update,
-                now_ms,
-            )?;
-            if dohc_engine_collab::owner_outbox::has_adopted_owner_in(tx, &journal_key)? {
-                outcome.emit_outbound = false;
-                return Ok(());
-            }
-            // Origination is asked first and owns the base-once decision: it
-            // originates only a lineage that has no base yet. The base is a
-            // full state, so it already carries this append and every row the
-            // lineage held before it — a delta beside it would be redundant.
-            // Everything else journals its delta.
-            let base_originated = match dohc_engine_sync::originate_appended_ydoc_base_in_tx(
-                tx,
-                &journal_key,
-                &journal_path,
                 actor_origin_id.as_deref(),
                 attribution.as_ref(),
-                seed_source.is_some(),
+                seed_source.as_ref(),
+                &mut sharing_declined,
+                outcome,
                 now_ms,
-            )
-            .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
-                reason: format!("outbound ydoc.update base origination failed: {error}"),
-            })? {
-                dohc_engine_sync::BaseOrigination::Originated { base_snapshot_sha } => {
-                    if let Some(source) = &seed_source {
-                        dohc_engine_collab::owner_base_source::retain_owner_base_source_in_tx(
-                            tx,
-                            &journal_key,
-                            &journal_path,
-                            &base_snapshot_sha,
-                            source,
-                        )?;
-                    }
-                    true
-                }
-                dohc_engine_sync::BaseOrigination::Declined(reason) => {
-                    sharing_declined = Some(reason);
-                    false
-                }
-                dohc_engine_sync::BaseOrigination::NothingToDo => false,
-            };
-            if !base_originated && outcome.emit_outbound {
-                let lineage_claim_id = dohc_engine_collab::read_marker_in(tx, &journal_key)?
-                    .and_then(|marker| marker.lineage_claim_id)
-                    .ok_or_else(|| dohc_engine_collab::CollabError::Corrupt {
-                        reason: "exact Y.Doc lineage has no claim id".to_owned(),
-                    })?;
-                let origin_seq = dohc_engine_sync::journal_local_op_in_tx(
-                    tx,
-                    &journal_key.workspace_id,
-                    "ydoc.update",
-                    &ydoc_update_payload(
-                        &journal_key,
-                        &journal_path,
-                        journal_kind,
-                        update_sha,
-                        &lineage_claim_id,
-                        actor_origin_id.as_deref(),
-                        attribution.as_ref(),
-                        false,
-                    ),
-                    now_ms,
-                )
-                .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
-                    // Named explicitly: an exact replicated lineage
-                    // with NO sync identity is a half-initialized state
-                    // (every real replicated flow runs sync init first —
-                    // pulls require the identity and the TS driver creates
-                    // it when journaling the base). Fail closed with a
-                    // diagnosable reason rather than a generic failure; an
-                    // identity cannot be seeded down here (origin identity
-                    // is minted by sync init, not the collab layer).
-                    reason: format!("outbound ydoc.update journal append failed: {error}"),
-                })?;
-                // The op's replication coordinate exists only now, after the
-                // journal assigned it. Thread it into the facts so record
-                // events and the automation trigger key see the same
-                // coordinate every peer derives from the envelope. A
-                // base-originated or never-synced apply keeps `None`; its
-                // per-change key is the history row id.
-                if let Some(facts) = outcome.record_facts.as_mut() {
-                    let origin_id: String = tx
-                        .query_row(
-                            "SELECT origin_id FROM sync_identity WHERE workspace_id=?1",
-                            [&journal_key.workspace_id],
-                            |row| row.get(0),
-                        )
-                        .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
-                            reason: format!("journaled ydoc.update has no sync identity: {error}"),
-                        })?;
-                    facts.source = Some((origin_id, origin_seq));
-                }
+            )? {
+                return Ok(());
             }
             // The origin-device automation trigger (ADR 0008). This hook runs
             // only for ops this device journals — the sync apply path never
@@ -4269,4 +4185,152 @@ mod collection_adoption_settlement_tests {
             .expect("other binding");
         assert_eq!(other, "pending");
     }
+}
+
+/// Returns false for an adopted owner, whose appends must not claim local automations.
+#[allow(clippy::too_many_arguments)]
+fn journal_local_append_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    content_kind: ContentKind,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+    seed_source: Option<&dohc_engine_collab::owner_base_source::OwnerSeedSource>,
+    sharing_declined: &mut Option<SharingDeclined>,
+    outcome: &mut AppendOutcome,
+    now_ms: i64,
+) -> Result<bool, CollabError> {
+    let update_sha = &hex_sha256(update);
+    dohc_engine_collab::owner_outbox::append_adopted_local_update_in_tx(
+        tx,
+        key,
+        path,
+        outcome.seq,
+        update,
+        now_ms,
+    )?;
+    if dohc_engine_collab::owner_outbox::has_adopted_owner_in(tx, key)? {
+        outcome.emit_outbound = false;
+        return Ok(false);
+    }
+    // Origination is asked first and owns the base-once decision: it
+    // originates only a lineage that has no base yet. The base is a
+    // full state, so it already carries this append and every row the
+    // lineage held before it — a delta beside it would be redundant.
+    // Everything else journals its delta.
+    let base_originated = match dohc_engine_sync::originate_appended_ydoc_base_in_tx(
+        tx,
+        key,
+        path,
+        actor_origin_id,
+        attribution,
+        seed_source.is_some(),
+        now_ms,
+    )
+    .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
+        reason: format!("outbound ydoc.update base origination failed: {error}"),
+    })? {
+        dohc_engine_sync::BaseOrigination::Originated { base_snapshot_sha } => {
+            if let Some(source) = seed_source {
+                dohc_engine_collab::owner_base_source::retain_owner_base_source_in_tx(
+                    tx,
+                    key,
+                    path,
+                    &base_snapshot_sha,
+                    source,
+                )?;
+            }
+            true
+        }
+        dohc_engine_sync::BaseOrigination::Declined(reason) => {
+            *sharing_declined = Some(reason);
+            false
+        }
+        dohc_engine_sync::BaseOrigination::NothingToDo => false,
+    };
+    if !base_originated && outcome.emit_outbound {
+        let lineage_claim_id = dohc_engine_collab::read_marker_in(tx, key)?
+            .and_then(|marker| marker.lineage_claim_id)
+            .ok_or_else(|| dohc_engine_collab::CollabError::Corrupt {
+                reason: "exact Y.Doc lineage has no claim id".to_owned(),
+            })?;
+        let origin_seq = dohc_engine_sync::journal_local_op_in_tx(
+            tx,
+            &key.workspace_id,
+            "ydoc.update",
+            &ydoc_update_payload(
+                key,
+                path,
+                content_kind,
+                update_sha,
+                &lineage_claim_id,
+                actor_origin_id,
+                attribution,
+                false,
+            ),
+            now_ms,
+        )
+        .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
+            // Named explicitly: an exact replicated lineage
+            // with NO sync identity is a half-initialized state
+            // (every real replicated flow runs sync init first —
+            // pulls require the identity and the TS driver creates
+            // it when journaling the base). Fail closed with a
+            // diagnosable reason rather than a generic failure; an
+            // identity cannot be seeded down here (origin identity
+            // is minted by sync init, not the collab layer).
+            reason: format!("outbound ydoc.update journal append failed: {error}"),
+        })?;
+        // The op's replication coordinate exists only now, after the
+        // journal assigned it. Thread it into the facts so record
+        // events and the automation trigger key see the same
+        // coordinate every peer derives from the envelope. A
+        // base-originated or never-synced apply keeps `None`; its
+        // per-change key is the history row id.
+        if let Some(facts) = outcome.record_facts.as_mut() {
+            let origin_id: String = tx
+                .query_row(
+                    "SELECT origin_id FROM sync_identity WHERE workspace_id=?1",
+                    [&key.workspace_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
+                    reason: format!("journaled ydoc.update has no sync identity: {error}"),
+                })?;
+            facts.source = Some((origin_id, origin_seq));
+        }
+    }
+    Ok(true)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn journal_recovery_append_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    content_kind: ContentKind,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+    outcome: &mut AppendOutcome,
+    now_ms: i64,
+) -> Result<bool, CollabError> {
+    if outcome.deduped {
+        return Ok(false);
+    }
+    journal_local_append_in_tx(
+        tx,
+        key,
+        path,
+        content_kind,
+        update,
+        actor_origin_id,
+        attribution,
+        None,
+        &mut None,
+        outcome,
+        now_ms,
+    )
 }

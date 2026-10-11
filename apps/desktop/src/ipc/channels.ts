@@ -341,6 +341,7 @@ export const CHANNELS = {
   userSettingsChanged: "desktop:user-settings-changed",
   getWorkspaceUiState: "desktop:get-workspace-ui-state",
   setWorkspaceUiState: "desktop:set-workspace-ui-state",
+  folderAppChanged: "desktop:folder-app-changed",
   searchResults: "desktop:search-results",
   engineYDocOpen: "desktop:engine-ydoc-open",
   engineYDocReadArtifactAsset: "desktop:engine-ydoc-read-artifact-asset",
