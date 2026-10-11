@@ -366,6 +366,22 @@ describe("two-client presence over a real relay child", () => {
     });
     expect(memberView).toHaveLength(2);
     expect(memberView.filter(p => p.isSelf)).toHaveLength(1);
+    const memberPoll = await fetch(
+      `${baseUrl}/sync/shares/${shareId}/presence?topic=${encodeURIComponent(wireId)}&clientId=member-1&hold=0`,
+      { headers: bearer("member") },
+    );
+    expect(memberPoll.status).toBe(200);
+    const memberPolled = ((await memberPoll.json()) as { peers: Peer[] }).peers;
+    for (const peers of [memberView, memberPolled]) {
+      expect(peers.find((p) => !p.isSelf)?.displayName).toBe("owner");
+      expect(peers.find((p) => p.isSelf)?.displayName).toBe("member");
+      expect(peers.map((p) => p.sessionToken)).toEqual(memberView.map((p) => p.sessionToken));
+      for (const peer of peers) {
+        expect(peer).not.toHaveProperty("userId");
+        expect(peer).not.toHaveProperty("clientId");
+        expect(peer.state).not.toHaveProperty("displayName");
+      }
+    }
     expect(memberView.every(p => !Object.hasOwn(p, "userId") && !Object.hasOwn(p, "clientId"))).toBe(true);
 
     // …and the OWNER, reading its workspace scope, now sees the PARTICIPANT —
