@@ -2,20 +2,18 @@ import { isVirtualTabPath } from "./renderer/workbench/workbenchState";
 
 // Shared selector values for renderer producers and desktop e2e readers.
 export const desktopPins = {
+  aboutRail: "about-rail",
   activityBar: "activity-bar",
-  chatsPanel: "chats-panel",
-  chatsPanelCollapse: "chats-panel-collapse",
   settingsDialog: "settings-dialog",
   settingsEmptySearch: "settings-empty-search",
   settingsSearch: "settings-search",
   settingsWarning: "settings-warning",
   sidePanel: "side-panel",
   titlebar: "titlebar",
-  titlebarChatsSidebar: "titlebar-chats-sidebar",
+  titlebarAboutSidebar: "titlebar-about-sidebar",
 } as const;
 
 export const activityPin = (view: string): string => `activity-${view}`;
-export const chatsPanelTabPin = (tab: string): string => `chats-panel-tab-${tab}`;
 export const settingsNavPin = (section: string): string => `settings-nav-${section}`;
 export const settingsSectionPin = (section: string): string => `settings-section-${section}`;
 

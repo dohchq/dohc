@@ -74,7 +74,7 @@ export function Titlebar(props: {
   onSwitchWorkspace?: (workspace: WorkspaceSummary) => void;
   onQuickOpen?: () => void;
   primarySidebar?: TitlebarPanelToggle;
-  chatsSidebar?: TitlebarPanelToggle;
+  aboutSidebar?: TitlebarPanelToggle;
   workspaceStatus?: ReactNode;
   onWorkspaceContextMenu?: () => void;
   agentActive?: boolean;
@@ -228,7 +228,7 @@ export function Titlebar(props: {
         </button>
       ) : null}
 
-      {props.primarySidebar || props.chatsSidebar ? (
+      {props.primarySidebar || props.aboutSidebar ? (
         <div
           data-testid="titlebar-layout-controls"
           role="group"
@@ -244,12 +244,12 @@ export function Titlebar(props: {
               Icon={PanelLeft}
             />
           ) : null}
-          {props.chatsSidebar ? (
+          {props.aboutSidebar ? (
             <LayoutToggle
-              testId={desktopPins.titlebarChatsSidebar}
-              label="Toggle chats sidebar"
-              pressed={props.chatsSidebar.visible}
-              onClick={props.chatsSidebar.onToggle}
+              testId={desktopPins.titlebarAboutSidebar}
+              label="Toggle About"
+              pressed={props.aboutSidebar.visible}
+              onClick={props.aboutSidebar.onToggle}
               Icon={PanelRight}
               agentActive={props.agentActive}
             />
@@ -262,7 +262,7 @@ export function Titlebar(props: {
       <div
         aria-hidden
         className={`${
-          props.primarySidebar || props.chatsSidebar ? "ml-2" : "ml-auto"
+          props.primarySidebar || props.aboutSidebar ? "ml-2" : "ml-auto"
         } h-full shrink-0`}
         style={{
           width: isMac

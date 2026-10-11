@@ -55,7 +55,7 @@ describe("history page", () => {
 
     // Wait for the shell's engine surfaces to mount before anything is
     // asserted, so the pins below cannot pass vacuously.
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
 
     await user.click(screen.getByTestId("activity-history"));
     const placeholder = await screen.findByTestId("history-off-placeholder");
@@ -89,7 +89,7 @@ describe("history page", () => {
     const user = userEvent.setup();
     renderShell(bridge);
 
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     await user.click(screen.getByTestId("activity-history"));
     act(() => {
       bridge.emitWorkspaceActivity();
@@ -127,7 +127,7 @@ describe("history page", () => {
 
     // The premise: the renderer's own read said engine-ON, and the decision
     // has not landed.
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
     await user.click(screen.getByTestId("activity-history"));
 
@@ -280,7 +280,7 @@ describe("history page", () => {
     bridge.readEngineMoment = vi.fn(async () => ({ moment: { ...renamed, beforeText: "body", afterText: "body" } }));
     const user = userEvent.setup();
     renderShell(bridge);
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     await user.click(screen.getByTestId("activity-history"));
     expect(await screen.findByText("Renamed to b.md")).toBeTruthy();
     await user.type(screen.getByTestId("engine-history-search"), "Renamed to");
@@ -312,7 +312,7 @@ describe("history page", () => {
       .mockResolvedValue(historyPage([historyMoment("older", "Older admitted edit")]));
     const user = userEvent.setup();
     renderShell(bridge);
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     await user.click(screen.getByTestId("activity-history"));
     await user.click(await screen.findByTestId("engine-history-load-more"));
     expect(await screen.findByText("Older admitted edit")).toBeTruthy();
@@ -331,7 +331,7 @@ describe("history page", () => {
       .mockResolvedValue(historyPage([historyMoment("m-1", "Wrote the plan")]));
     const user = userEvent.setup();
     renderShell(bridge);
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     await user.click(screen.getByTestId("activity-history"));
 
     const hidden = await screen.findByTestId("history-policy-hidden");
@@ -360,7 +360,7 @@ describe("history page", () => {
     Object.assign(bridge, { restoreEngineMomentFile });
     const user = userEvent.setup();
     renderShell(bridge);
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     await user.click(screen.getByTestId("activity-history"));
     await user.click(await screen.findByTestId("engine-moment-open"));
     await user.click(await screen.findByTestId("engine-diff-restore-file"));
@@ -409,7 +409,7 @@ describe("history page", () => {
     Object.assign(bridge, { restoreEngineMomentFile });
     const user = userEvent.setup();
     renderShell(bridge);
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     await user.click(screen.getByTestId("activity-history"));
     await user.click(await screen.findByTestId("engine-moment-open"));
     await user.click(await screen.findByTestId("engine-diff-restore-file"));
@@ -453,7 +453,7 @@ describe("history page", () => {
       : { moment: { ...moment, beforeText: "one\n", afterText: "two\n" } });
     const user = userEvent.setup();
     renderShell(bridge);
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     await user.click(screen.getByTestId("activity-history"));
     await user.click(await screen.findByTestId("engine-moment-open"));
     await screen.findByTestId("engine-diff-lines");
@@ -3373,7 +3373,7 @@ describe("versions surface after a failed capture build", () => {
     // own read said engine-ON (this control renders on that read alone), and
     // main's status has landed carrying the failure. Without them the no-call
     // below passes vacuously in the pre-read window.
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     await waitFor(() =>
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
@@ -3420,7 +3420,7 @@ describe("versions surface after a failed capture build", () => {
     // Both halves of the premise. The titlebar Chats button renders on the
     // renderer's own read alone, so it proves that read answered engine-ON;
     // `data-ready` proves the open has not resolved.
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
 
     expect(screen.queryByTestId("version-menu-button")).toBeNull();
@@ -3498,7 +3498,7 @@ describe("versions surface after a failed capture build", () => {
       });
       await settings.promise;
     });
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
 
     expect(screen.queryByTestId("version-menu-button")).toBeNull();
     expect(bridge.listWorkspaceVersions).not.toHaveBeenCalled();
@@ -3532,7 +3532,7 @@ describe("versions surface after a failed capture build", () => {
 
     // Before the decision lands, the tab mounts no page and claims nothing:
     // the renderer's own read proves nothing about what main recorded.
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     expect(screen.queryByTestId("version-compare-page")).toBeNull();
     expect(screen.queryByTestId("version-compare-off")).toBeNull();
     expect(bridge.listWorkspaceVersions).not.toHaveBeenCalled();
@@ -3660,7 +3660,7 @@ describe("moment-diff tab after a failed capture build", () => {
 
     // Before the decision lands the tab mounts no page and claims nothing:
     // the renderer's own read proves nothing about what main recorded.
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     expect(screen.queryByTestId("engine-moment-diff-page")).toBeNull();
     expect(screen.queryByTestId("moment-diff-off")).toBeNull();
     expect(bridge.readEngineMoment).not.toHaveBeenCalled();

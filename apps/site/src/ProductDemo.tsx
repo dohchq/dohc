@@ -562,17 +562,9 @@ export function ProductDemo() {
       </header>
 
       <div className="demo-workbench">
-        {/* The demo's chats panel is currently unreachable: this prop was the
-            only thing that could select it, and ActivityBar stopped accepting
-            a chats prop in eb2c578b when chats became the app's right-side
-            panel. React silently drops unknown props, so the toggle has been
-            dead ever since -- only the typecheck noticed. Restoring the
-            affordance means giving the demo a real right-side panel like
-            Titlebar's titlebar-chats-sidebar control, which is UI work in its
-            own right, not a drive-by on a typecheck fix. */}
         <ActivityBar
           views={VIEW_IDS}
-          activeView={activeActivity === "chats" ? "explorer" : activeActivity}
+          activeView={activeActivity}
           sidebarVisible={sidebarVisible}
           hasConflict={false}
           onSelectView={(view) => {

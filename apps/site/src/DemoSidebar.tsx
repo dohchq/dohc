@@ -21,7 +21,7 @@ import {
   type PendingTreeChange,
 } from "../../desktop/src/renderer/workbench/file-tree-optimistic";
 
-export type DemoPanelId = ViewId | "chats";
+export type DemoPanelId = ViewId;
 
 // The demo has no editing pipeline, so no path ever holds a set-aside draft.
 const NO_PATHS: ReadonlySet<string> = new Set();

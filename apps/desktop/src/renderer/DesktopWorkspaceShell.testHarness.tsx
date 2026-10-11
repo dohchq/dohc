@@ -173,9 +173,12 @@ export const STORED_STATE: WorkspaceUiState = {
     { id: "primary", tabs: ["b.md"], activeTab: "b.md", size: 1 },
   ],
   activeEditorGroup: "primary",
-  chatsVisible: true,
-  chatsWidth: 360,
+  aboutVisible: true,
+  aboutWidth: 360,
 };
+
+// The stored state with the chat list showing in the left side panel.
+export const STORED_CHATS_STATE: WorkspaceUiState = { ...STORED_STATE, activeView: "chats" };
 
 export function storedStateWithTabs(
   tabs: string[],

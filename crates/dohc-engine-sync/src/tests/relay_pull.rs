@@ -1476,6 +1476,50 @@ fn pull_base_repair(client: &RelaySyncClient<PagedRelay>, engine: &mut EngineSto
         .expect("pull base repair");
 }
 
+#[test]
+fn base_repair_uses_pulled_coordinate_without_lookup() {
+    page_base_repair(false);
+}
+
+#[test]
+fn base_repair_repeated_page_coordinate_keeps_lowest_sequence() {
+    page_base_repair(true);
+}
+
+fn page_base_repair(repeat_coordinate: bool) {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let mut base = seed_base_repair_candidate(&mut engine, "page-base", "peer", 0);
+    base.relay_seq = Some(10);
+    let mut ops = vec![base.clone()];
+    if repeat_coordinate {
+        base.relay_seq = Some(20);
+        ops.push(base);
+    }
+    let mut relay = PagedRelay::new([(
+        0,
+        PullResponse {
+            ops,
+            next_cursor: if repeat_coordinate { 20 } else { 10 },
+            has_more: false,
+        },
+    )]);
+    // The fixture assigns contiguous positions; this page has sparse positions.
+    relay.pages.get_mut(&0).unwrap().ops[0].relay_seq = Some(10);
+    let client = RelaySyncClient::new(relay);
+    pull_base_repair(&client, &mut engine);
+    assert_eq!(base_repair_state(&engine, "page-base"), (Some(10), 0, 0));
+    assert!(
+        client
+            .transport()
+            .coordinate_lookups
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+}
+
 fn add_base_candidate(engine: &mut EngineStore, op: &ReplicationEnvelope) {
     engine.write_with(&NoFaults, |tx| {
         tx.execute("INSERT INTO replication_log (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported,apply_disposition) VALUES ('ws',?1,?2,'ydoc.update',?3,?4,?5,'applied')", params![op.origin_id,op.origin_seq,op.payload.to_string(),op.recorded_at_ms,i64::from(op.origin_id != "local")]).map_err(SyncError::persist)?;
@@ -1723,9 +1767,14 @@ fn base_repair_crash_commit_survives_empty_publication_push_and_later_lower_base
     pull_base_repair(&client, &mut engine);
     assert_eq!(base_repair_state(&engine, "crash-scope"), (Some(100), 0, 0));
     assert_eq!(read_pushed_seq(&engine, "ws", "local").unwrap(), -1);
-    assert_eq!(
-        *client.transport().coordinate_lookups.lock().unwrap(),
-        [("local".to_owned(), 1)]
+    assert!(
+        client
+            .transport()
+            .coordinate_lookups
+            .lock()
+            .unwrap()
+            .is_empty(),
+        "the fetched own echo resolves the crash coordinate"
     );
     assert_eq!(
         client.transport().pushes.lock().unwrap().len(),

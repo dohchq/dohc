@@ -1,5 +1,4 @@
-import { desktopPins, chatsPanelTabPin } from "../src/testPins";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
@@ -8,6 +7,7 @@ import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import {
   createTempWorkspace,
   explorerRow,
+  openChatsView,
   openWorkspaceFromFirstRun,
   revealExplorerPath,
   seedCloudCredentials,
@@ -32,19 +32,6 @@ const OWNER_EMAIL = "e2e-granter@dohc.test";
 const MEMBER_TOKEN = "test:e2e-recipient";
 const MEMBER_USER = "e2e-recipient";
 const MEMBER_EMAIL = "e2e-recipient@dohc.test";
-
-// The titlebar control toggles the Chats sidebar, and opening a file moves
-// the sidebar to its About tab. Bring the panel up if it is hidden,
-// then select the Chats tab.
-async function openChats(page: Page): Promise<void> {
-  if (!(await page.getByTestId(desktopPins.chatsPanel).isVisible())) {
-    await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
-    await expect(page.getByTestId(desktopPins.chatsPanel)).toBeVisible();
-  }
-  const chatsTab = page.getByTestId(chatsPanelTabPin("all"));
-  if ((await chatsTab.getAttribute("aria-pressed")) !== "true") await chatsTab.click();
-  await expect(chatsTab).toHaveAttribute("aria-pressed", "true");
-}
 
 test("@two-client a group shares its channel and folder together, and both sides post", async () => {
   test.setTimeout(300_000);
@@ -98,7 +85,7 @@ test("@two-client a group shares its channel and folder together, and both sides
     await openWorkspaceFromFirstRun(owner.page, ownerTemp);
 
     // --- The owner creates a group that holds posts and chat -------------
-    await openChats(owner.page);
+    await openChatsView(owner.page);
     await owner.page.getByTestId("chats-new-channel").click();
     await owner.page.getByTestId("chats-new-channel-name").fill("Launch team");
     await owner.page.getByTestId("chats-new-channel-purpose").fill("Ship the launch.");
@@ -166,7 +153,7 @@ test("@two-client a group shares its channel and folder together, and both sides
     member = await launchDesktopApp({ workspace: memberTemp, env: syncEnv });
     expect(member.app.process().pid).not.toBe(owner.app.process().pid);
     await openWorkspaceFromFirstRun(member.page, memberTemp);
-    await openChats(member.page);
+    await openChatsView(member.page);
     await expect(member.page.getByTestId("chats-shared-with-you")).toBeVisible({ timeout: 60_000 });
     await member.page.getByTestId("chats-join-shared").click();
 
@@ -188,8 +175,8 @@ test("@two-client a group shares its channel and folder together, and both sides
     await expect(member.page.getByText("The lighthouse memo.")).toBeVisible();
 
     // --- The member posts back in the group's chat lane ------------------
-    // The panel comes back where it was left: inside the group.
-    await openChats(member.page);
+    // The Chats tab comes back where it was left: inside the group.
+    await openChatsView(member.page);
     if (!(await member.page.getByTestId("chats-channel-view").isVisible())) {
       await joinedChannel.click();
     }

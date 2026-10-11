@@ -107,6 +107,27 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+describe("LinkedChatsPanel with no file focused", () => {
+  it.each([
+    [true, false, "About covers files. Switch to a file's tab to see its chats, history, and access."],
+    [true, true, "About covers files. Switch to a file's tab to see its chats and access."],
+    [false, false, "Open a file to see its chats, history, and access."],
+    [false, true, "Open a file to see its chats and access."],
+  ] as const)("fileTabOpen %s, shared %s", (fileTabOpen, shared, copy) => {
+    render(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath={null}
+        fileTabOpen={fileTabOpen}
+        {...(shared ? { shareReadOnly: true } : { history: { revision: 0, onOpenMoment: () => undefined } })}
+        onError={() => undefined}
+      />,
+    );
+    expect(screen.getByTestId("linked-chats-empty").textContent).toBe(copy);
+    expect(bridgeMock.listFileChats).not.toHaveBeenCalled();
+  });
+});
+
 describe("LinkedChatsPanel startup", () => {
   it("keeps loading and retries while the workspace import is still settling", async () => {
     vi.useFakeTimers();

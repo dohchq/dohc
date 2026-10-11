@@ -38,9 +38,11 @@ import { SegmentedControl } from "../ui/SegmentedControl";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { SAVE_STATE, StateMark, type SaveStateKey } from "../ui/StateMark";
 import { FolderChip, Step } from "../ui/Step";
+import { Titlebar } from "../Titlebar";
+import { ActivityBar } from "../workbench/ActivityBar";
 import { AgentBadge } from "../workbench/AgentBadge";
 import { AppRows } from "../workbench/AppsView";
-import { siteTabPath } from "../workbench/workbenchState";
+import { siteTabPath, VIEW_IDS } from "../workbench/workbenchState";
 import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { ThreadMessages } from "../workbench/ChatPosts";
@@ -503,7 +505,7 @@ function ChatThreadSpecimen() {
   );
 }
 
-// The About tab at the drawing's 290px, on the chrome.
+// The About rail at the drawing's 290px, on the chrome.
 function AboutPanelSpecimen(props: { children: ReactNode }) {
   return <div className="flex w-[290px] flex-col rounded-lg border border-line bg-panel pb-2">{props.children}</div>;
 }
@@ -1715,6 +1717,29 @@ function Pane(props: { theme: "light" | "dark" }) {
             <SettingRow title="Zoom" modified onReset={noop}>
               <ZoomSpecimen percent={110} />
             </SettingRow>
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* Last, so the parts above keep their places. */}
+      <Section part="rails" title="Rails">
+        <Specimen label="activity bar: Chats beside Files, selected; Search hovered; Graph focused">
+          <div className="flex h-[400px] overflow-hidden rounded-lg border border-line">
+            <div className="flex" data-force-state="hover" data-force-target={`[data-testid="activity-search"]`}>
+              <div className="flex" data-force-state="focus-visible" data-force-target={`[data-testid="activity-graph"]`}>
+                <ActivityBar views={VIEW_IDS} activeView="chats" sidebarVisible hasConflict={false} onSelectView={noop} onOpenSettings={noop} />
+              </div>
+            </div>
+          </div>
+        </Specimen>
+        <Specimen label="layout toggles: side panel and About shown; About hidden">
+          <div className="flex w-[480px] flex-col gap-2">
+            <div className="overflow-hidden rounded-lg border border-line">
+              <Titlebar primarySidebar={{ visible: true, onToggle: noop }} aboutSidebar={{ visible: true, onToggle: noop }} />
+            </div>
+            <div className="overflow-hidden rounded-lg border border-line">
+              <Titlebar primarySidebar={{ visible: true, onToggle: noop }} aboutSidebar={{ visible: false, onToggle: noop }} />
+            </div>
           </div>
         </Specimen>
       </Section>
