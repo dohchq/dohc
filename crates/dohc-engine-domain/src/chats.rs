@@ -2635,6 +2635,7 @@ impl<'a> LinkedChatStore<'a> {
                 ],
             )
             .map_err(DomainError::sql_persist)?;
+            dispatch::queue_local_dispatch_discovery(tx, &input.workspace_id, &input.message_id, now)?;
             index_message_mentions_in_tx(
                 tx,
                 &input.workspace_id,
@@ -2908,6 +2909,7 @@ impl<'a> LinkedChatStore<'a> {
                 ],
             )
             .map_err(DomainError::sql_persist)?;
+            dispatch::queue_local_dispatch_discovery(tx, &input.workspace_id, &input.message_id, now)?;
             index_message_mentions_in_tx(
                 tx,
                 &input.workspace_id,

@@ -172,6 +172,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "chat_bookmark_outbox",
     "chat_dispatch_ledger",
     "chat_dispatch_scan_cursor",
+    "chat_dispatch_local_discovery",
     "agent_run_records",
     "run_message_links",
     "chat_dispatch_pause",
