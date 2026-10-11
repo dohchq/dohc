@@ -118,11 +118,8 @@ export function buildMenuTemplate(options: {
         ),
         { type: "separator" },
         command("Toggle Sidebar", "toggle-sidebar", "CommandOrControl+B"),
-        command(
-          "Toggle Chats Panel",
-          "toggle-chats",
-          "CommandOrControl+Alt+B",
-        ),
+        command("Toggle About", "toggle-about", "CommandOrControl+Alt+B"),
+        command("Chats", "show-chats"),
         command("Toggle Theme", "toggle-theme"),
         { type: "separator" },
         // Main-owned zoom, not the Electron zoom roles: the zoomIn role only

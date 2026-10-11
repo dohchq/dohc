@@ -77,7 +77,7 @@ describe("apps pinned to the sidebar", () => {
     await user.click(screen.getByTestId("activity-search"));
     await waitFor(() =>
       expect(within(screen.getByTestId("side-panel")).getByText("Search")).toBeTruthy());
-    view.rerender(shellWith(withSidebar(["history", "explorer", "search"])));
+    view.rerender(shellWith(withSidebar(["history", "explorer", "chats", "search"])));
     await waitFor(() =>
       expect(within(screen.getByTestId("side-panel")).getByText("Graph")).toBeTruthy());
   });

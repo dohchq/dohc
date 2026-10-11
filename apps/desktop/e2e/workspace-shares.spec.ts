@@ -1309,8 +1309,8 @@ test("Comment handoff opens files without creating a second generic chat", async
     );
     await revealExplorerPath(page, "docs/shared.md");
     await explorerRow(page, "docs/shared.md").click();
-    if ((await page.getByTestId(desktopPins.chatsPanel).count()) === 0) {
-      await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
+    if ((await page.getByTestId(desktopPins.aboutRail).count()) === 0) {
+      await page.getByTestId(desktopPins.titlebarAboutSidebar).click();
     }
     await expect(page.getByTestId("linked-chat-readonly-note")).toBeVisible();
     await expect(page.getByTestId("linked-chat-composer")).toHaveCount(0);
@@ -1437,8 +1437,8 @@ test("direct named Comment keeps desktop generic chat read-only", async () => {
 
     await revealExplorerPath(page, "docs/shared.md");
     await explorerRow(page, "docs/shared.md").click();
-    if ((await page.getByTestId(desktopPins.chatsPanel).count()) === 0) {
-      await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
+    if ((await page.getByTestId(desktopPins.aboutRail).count()) === 0) {
+      await page.getByTestId(desktopPins.titlebarAboutSidebar).click();
     }
     await expect(page.getByTestId("linked-chat-readonly-note")).toBeVisible();
     await expect(page.getByTestId("linked-chat-composer")).toHaveCount(0);

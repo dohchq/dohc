@@ -2261,7 +2261,7 @@ describe("workspace UI state IPC contract", () => {
       },
     ],
     activeEditorGroup: "primary",
-    chatsVisible: true,
+    aboutVisible: true,
   };
 
   it("drops invalid open editor heights without rejecting the saved state", () => {

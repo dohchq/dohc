@@ -5,7 +5,7 @@ import { StrictMode, useCallback, useRef, useState } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import { useFocusReturn, useFocusSurface } from "./focusReturn";
 import { SidePanel } from "../workbench/SidePanel";
-import { ChatsPanel } from "../workbench/ChatsPanel";
+import { AboutRail } from "../workbench/AboutRail";
 
 afterEach(() => {
   cleanup();
@@ -68,20 +68,21 @@ it("lands in the new workspace when the focused workspace is replaced", async ()
   view.rerender(<Workspace key="B" name="B" />);
   await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("B")));
 });
-it.each(["side", "chats"])("returns focus when the %s panel closes", async (kind) => {
+it.each(["side", "about"])("returns focus when the %s panel closes", async (kind) => {
   function Panels() {
     const [open, setOpen] = useState(false);
-    return <><button data-testid={kind === "side" ? "titlebar-primary-sidebar" : "titlebar-chats-sidebar"} onClick={() => setOpen(true)}>Open panel</button>
+    const close = <button onClick={() => setOpen(false)}>Close panel</button>;
+    return <><button data-testid={kind === "side" ? "titlebar-primary-sidebar" : "titlebar-about-sidebar"} onClick={() => setOpen(true)}>Open panel</button>
       {open && (kind === "side"
-        ? <SidePanel width={240} title="Files" onWidthChange={() => {}}><button onClick={() => setOpen(false)}>Close panel</button></SidePanel>
-        : <ChatsPanel width={240} tabs={["all"]} tab="all" onTabChange={() => {}} onWidthChange={() => {}} onCollapse={() => setOpen(false)}>Chats</ChatsPanel>)}
+        ? <SidePanel width={240} title="Files" onWidthChange={() => {}}>{close}</SidePanel>
+        : <AboutRail width={240} onWidthChange={() => {}}>{close}</AboutRail>)}
     </>;
   }
   render(<Panels />);
   const opener = screen.getByText("Open panel");
   opener.focus();
   fireEvent.click(opener);
-  const close = screen.getByRole("button", { name: kind === "side" ? "Close panel" : "Hide chats" });
+  const close = screen.getByRole("button", { name: "Close panel" });
   close.focus();
   fireEvent.click(close);
   await waitFor(() => expect(document.activeElement).toBe(opener));

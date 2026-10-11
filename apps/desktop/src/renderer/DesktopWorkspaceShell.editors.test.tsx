@@ -896,6 +896,7 @@ describe("editor groups", () => {
       destination: "Chats",
       tabPath: "dohc://chats",
       navigate: async (user: ReturnType<typeof userEvent.setup>) => {
+        await user.click(screen.getByTestId("activity-chats"));
         await user.click(await screen.findByTestId("chats-open-tab"));
       },
     },
@@ -1293,20 +1294,32 @@ describe("editor groups", () => {
 });
 
 describe("application menu command routing", () => {
-  it("toggles the Chats panel when the command exists", async () => {
+  it("toggles the About rail when the command exists", async () => {
     const bridge = makeBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge);
-    await screen.findByTestId("chats-panel");
+    await screen.findByTestId("about-rail");
     // Flush the commit's passive effects before emitting: the menu-command
     // listener subscribes in an effect, and under load the panel's DOM node
     // appears before that effect runs.
     await act(async () => {});
 
-    act(() => bridge.emitMenuCommand("toggle-chats"));
-    await waitFor(() => expect(screen.queryByTestId("chats-panel")).toBeNull());
+    act(() => bridge.emitMenuCommand("toggle-about"));
+    await waitFor(() => expect(screen.queryByTestId("about-rail")).toBeNull());
 
-    act(() => bridge.emitMenuCommand("toggle-chats"));
-    expect(await screen.findByTestId("chats-panel")).toBeTruthy();
+    act(() => bridge.emitMenuCommand("toggle-about"));
+    expect(await screen.findByTestId("about-rail")).toBeTruthy();
+  });
+
+  it("shows the Chats list in the side panel from the menu", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    renderShell(bridge);
+    const panel = await screen.findByTestId("side-panel");
+    await act(async () => {});
+
+    act(() => bridge.emitMenuCommand("show-chats"));
+    expect(await within(panel).findByTestId("chats-view")).toBeTruthy();
+    expect(within(screen.getByTestId("about-rail")).queryByTestId("chats-view")).toBeNull();
+    expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page");
   });
 
 });
@@ -2328,7 +2341,7 @@ describe("ui-state merge-on-load", () => {
     const bridge = makeBridge(
       Promise.resolve({
         ...storedStateWithTabs(["b.md", "pulled.md"], "b.md"),
-        chatsVisible: false,
+        aboutVisible: false,
       }),
     );
     bridge.listWorkspaceFiles = vi.fn(() =>
@@ -2420,7 +2433,7 @@ describe("ui-state merge-on-load", () => {
     const bridge = makeBridge(
       Promise.resolve({
         ...storedStateWithTabs(["b.md", "gone.md"], "b.md"),
-        chatsVisible: false,
+        aboutVisible: false,
       }),
     );
     bridge.listWorkspaceFiles = vi.fn(() => {
@@ -2489,14 +2502,15 @@ describe("ui-state merge-on-load", () => {
     }>();
     let issued = 0;
     // The subscriber count below pins the shell's listing refresh listener
-    // (notifications subscribes first). The Chats panel subscribes too, from
-    // a lazy chunk whose load time depends on whether an earlier test already
-    // imported it, so this stored state keeps the panel closed.
+    // (notifications subscribes first). The Chats view and About subscribe
+    // too, from lazy chunks whose load time depends on whether an earlier test
+    // already imported them, so this stored state shows Files and keeps About
+    // closed.
     const bridge = holdHistory(
       makeBridge(
         Promise.resolve({
           ...storedStateWithTabs(["b.md", "pulled.md"], "b.md"),
-          chatsVisible: false,
+          aboutVisible: false,
         }),
       ),
     );
@@ -2697,10 +2711,10 @@ describe("ui-state merge-on-load", () => {
     await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
 
     // The user picks a different conversation. It has no channel metadata, so
-    // it opens in the panel — no tab moves.
+    // it opens in About — no tab moves.
     const afterNav = await screen.findAllByTestId("graph-file-row");
     await user.click(afterNav.find((row) => row.dataset.path === fileThreadNode.path)!);
-    expect(await screen.findByTestId("chats-panel")).toBeTruthy();
+    expect(await screen.findByTestId("about-rail")).toBeTruthy();
     expect(screen.queryByTestId(`tab-dohc://chats/dm/${encodeURIComponent(CANONICAL_DM.channelId)}`)).toBeNull();
 
     await act(async () => {
@@ -3015,7 +3029,7 @@ describe("ui-state merge-on-load", () => {
     const bridge = makeBridge(
       Promise.resolve({
         ...storedStateWithTabs([CHATS_TAB_PATH], CHATS_TAB_PATH),
-        chatsVisible: false,
+        aboutVisible: false,
       }),
     );
     bridge.onCloudSessionChanged = vi.fn(
@@ -3068,9 +3082,17 @@ describe("ui-state merge-on-load", () => {
 
     // Select a channel from the sidebar: presence engages in the editor.
     await screen.findByTestId("chats-personal-feed");
-    await user.click(screen.getByTestId("titlebar-chats-sidebar"));
+    await user.click(screen.getByTestId("activity-chats"));
     await user.click(await screen.findByTestId("chats-channel"));
     await waitFor(() => expect(presence.presencePublish).toHaveBeenCalled());
+    // The list stays mounted beside the live tab and holds no transport of
+    // its own: the channel topic has exactly one publisher, the page.
+    expect(screen.getByTestId("side-panel").querySelector('[data-testid="chats-view"]')).toBeTruthy();
+    const channelPublishes = (presence.presencePublish.mock.calls as unknown as [{ topic: string; incarnationId: string }][])
+      .map(([payload]) => payload)
+      .filter((payload) => payload.topic === "channel-team");
+    expect(channelPublishes.length).toBeGreaterThan(0);
+    expect(new Set(channelPublishes.map((payload) => payload.incarnationId)).size).toBe(1);
     const statusQueries = bridge.cloudStatus.mock.calls.length;
 
     // Sign out. The signal alone must tear presence down — the collaboration
@@ -3181,7 +3203,7 @@ describe("ui-state merge-on-load", () => {
 
   const CHATS_PAGE_STATE: WorkspaceUiState = {
     ...storedStateWithTabs([CHATS_TAB_PATH], CHATS_TAB_PATH),
-    chatsVisible: false,
+    aboutVisible: false,
   };
 
   it.each([false, true])("offers the local agent mention only after opting in (runner enabled: %s)", async (enabled) => {
@@ -3205,7 +3227,7 @@ describe("ui-state merge-on-load", () => {
       onSwitchWorkspace={() => {}}
     />);
     await screen.findByTestId("chats-personal-feed");
-    await user.click(screen.getByTestId("titlebar-chats-sidebar"));
+    await user.click(screen.getByTestId("activity-chats"));
     await user.click(await screen.findByTestId("chats-channel"));
     await user.type(await screen.findByTestId("chats-new-thread-composer"), "@");
     const options = await screen.findAllByTestId("chats-new-thread-mention-option");
@@ -3335,15 +3357,7 @@ describe("ui-state merge-on-load", () => {
     const bridge = chatsPageBridge(CHATS_PAGE_STATE);
     renderShell(bridge);
 
-    // New message lives in the sidebar; the editor holds only a destination.
     await screen.findByTestId("chats-personal-feed");
-    await user.click(screen.getByTestId("titlebar-chats-sidebar"));
-    await screen.findByTestId("chats-view");
-    await act(async () => {
-      for (const answer of bridge.syncAnswers) answer(dmSyncResult());
-      await Promise.resolve();
-    });
-    const newDmButton = await screen.findByTestId("chats-new-dm");
 
     // Start a canonical DM navigation from the graph and leave it in flight.
     await user.click(screen.getByTestId("activity-graph"));
@@ -3354,12 +3368,23 @@ describe("ui-state merge-on-load", () => {
     await waitFor(() =>
       expect(bridge.syncDms.mock.calls.length).toBe(dmCallsBefore + 1),
     );
-    await user.click(screen.getByTestId("activity-graph"));
+    const navigation = bridge.syncAnswers.at(-1)!;
+
+    // New message lives in the Chats view; the editor holds only a destination.
+    await user.click(screen.getByTestId("activity-chats"));
+    await screen.findByTestId("chats-view");
+    await act(async () => {
+      for (const answer of bridge.syncAnswers) {
+        if (answer !== navigation) answer(dmSyncResult());
+      }
+      await Promise.resolve();
+    });
+    const newDmButton = await screen.findByTestId("chats-new-dm");
 
     // The DM answers in the same tick the user clicks "New message".
     const overviewLoadsBefore = bridge.listChatChannels.mock.calls.length;
     await act(async () => {
-      bridge.syncAnswers.at(-1)!(dmSyncResult([CANONICAL_DM]));
+      navigation(dmSyncResult([CANONICAL_DM]));
       newDmButton.dispatchEvent(
         new MouseEvent("click", { bubbles: true, cancelable: true }),
       );
@@ -3500,7 +3525,7 @@ describe("ui-state merge-on-load", () => {
     const bridge = makeBridge(
       Promise.resolve({
         ...storedStateWithTabs(["a.md"], "a.md"),
-        chatsVisible: false,
+        aboutVisible: false,
       }),
     );
     bridge.readWorkspaceGraph = vi.fn(async () => ({
@@ -3609,7 +3634,7 @@ describe("ui-state merge-on-load", () => {
     const bridge = makeBridge(
       Promise.resolve({
         ...storedStateWithTabs(["b.md", "live.md"], "b.md"),
-        chatsVisible: false,
+        aboutVisible: false,
       }),
     );
     bridge.listWorkspaceFiles = vi.fn(() =>
@@ -3731,6 +3756,6 @@ describe("ui-state merge-on-load", () => {
     expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
     expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
     expect((await screen.findByTestId("side-panel")).style.width).toBe("320px");
-    expect(await screen.findByTestId("chats-panel")).toBeTruthy();
+    expect((await screen.findByTestId("about-rail")).style.width).toBe("360px");
   });
 });

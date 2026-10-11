@@ -27,7 +27,7 @@ test("installed tool cards save profiles, Check replies through PATH, and a grou
     await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;
     await openMyAgent(page);
-    await page.getByTestId(desktopPins.chatsPanel).getByTestId("chats-add-agent-open").click();
+    await page.getByTestId(desktopPins.sidePanel).getByTestId("chats-add-agent-open").click();
     await page.getByTestId("chats-add-agent-agent-name").fill("Nova");
     for (const name of ["Claude Code", "Codex"]) {
       await page.getByRole("button", { name, exact: true }).click();
@@ -36,7 +36,7 @@ test("installed tool cards save profiles, Check replies through PATH, and a grou
     }
     await page.getByTestId("chats-add-agent-submit").click();
     await expect(page.getByTestId("chats-add-agent")).toHaveCount(0);
-    await page.getByTestId(desktopPins.chatsPanel).getByTestId("chats-channel").filter({ hasText: "general" }).click();
+    await page.getByTestId(desktopPins.sidePanel).getByTestId("chats-channel").filter({ hasText: "general" }).click();
     await page.getByTestId("chats-new-thread-composer").fill("@agent check the exports");
     await page.getByTestId("chats-new-thread-composer").press("Enter");
     await expect(page.getByTestId("chats-message").filter({ hasText: REPORT })).toHaveCount(1);
@@ -96,7 +96,7 @@ async function openMyAgent(page: Page): Promise<void> {
     )
     .toBe(true);
 
-  await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
+  await page.getByTestId(activityPin("chats")).click();
   await expect(page.getByTestId("chats-view")).toBeVisible();
   await page.getByTestId("chats-my-agent").click();
   await expect(page.getByTestId("chats-channel-title")).toHaveText("My agent");

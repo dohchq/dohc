@@ -1,30 +1,29 @@
-import { Maximize2, RefreshCw } from "lucide-react";
-import { Suspense, lazy, useState, type ComponentProps, type ReactNode } from "react";
-import type { WorkspaceSummary } from "../../ipc/bridgeContract";
+import { Suspense, useState, type ComponentProps, type ReactNode } from "react";
+import type { SyncStatusResult, WorkspaceSummary } from "../../ipc/bridgeContract";
 import { ErrorBoundary } from "../ErrorBoundary";
 import type { CustomizePart } from "../settings/customize";
 import { MoreMenu } from "../ui/MoreMenu";
 import type { RelayShareTarget } from "../RelayShareDialog";
-import { SkeletonRows, SkeletonSlot } from "../ui/SkeletonRows";
-// Eager on purpose. Behind lazy(), the search input did not exist until the
-// chunk resolved, and every character typed in that gap went to whatever the
-// user clicked to open the panel — queries arrived with their first letters
-// missing. The view carries no dependency the shell does not already load.
-import { SearchView } from "../workbench/SearchView";
+import { SkeletonRows } from "../ui/SkeletonRows";
+// Type-only: erased at compile time, so these chunks stay lazy.
+import type { AppsView } from "../workbench/AppsView";
+import type { SearchView } from "../workbench/SearchView";
 import { SidePanel } from "../workbench/SidePanel";
-import { setView, setSidebarWidth, SHARING_VIEW_ID, type WorkbenchState } from "../workbench/workbenchState";
-import { LazyGraphView, LazySharingView, LazySitePreviewPage } from "./lazyViews";
-
-const LazyAppsView = lazy(() =>
-  import("../workbench/AppsView").then((mod) => ({ default: mod.AppsView })),
-);
+import {
+  isViewId,
+  setView,
+  setSidebarWidth,
+  SHARING_VIEW_ID,
+  type WorkbenchState,
+} from "../workbench/workbenchState";
+import { LazyChatsView, LazyGraphView, LazySharingView, LazySitePreviewPage } from "./lazyViews";
+import { SIDE_PANEL_VIEWS } from "./sidePanelViews";
 
 type GraphViewProps = ComponentProps<typeof LazyGraphView>;
-type AppsViewProps = ComponentProps<typeof LazyAppsView>;
+type AppsViewProps = ComponentProps<typeof AppsView>;
 type SitePreviewPageProps = ComponentProps<typeof LazySitePreviewPage>;
 
-// The left side panel: the view the activity bar selected, or a pinned app.
-export function ShellSidePanel(props: {
+export interface ShellSidePanelProps {
   askAgent?: AppsViewProps["askAgent"];
   customize: (part: CustomizePart) => void;
   wb: WorkbenchState;
@@ -32,6 +31,7 @@ export function ShellSidePanel(props: {
   sidePanelTitle: string;
   openHistoryTab: () => void;
   openGraphTab: () => void;
+  openChatsTab: () => void;
   refreshSites: () => void;
   explorerView: ReactNode;
   search: ComponentProps<typeof SearchView>["search"];
@@ -44,6 +44,9 @@ export function ShellSidePanel(props: {
   openPathWithHeading: GraphViewProps["onOpenPath"] & AppsViewProps["onOpenPath"];
   openGraphChatThread: GraphViewProps["onOpenChatThread"];
   captureAvailable: boolean;
+  captureDecided: boolean;
+  syncStatus: SyncStatusResult | null;
+  chatsNavigatorProps: ComponentProps<typeof LazyChatsView>;
   pinnedRoots: AppsViewProps["pinnedApps"];
   setAppPinned: (appRoot: string, pinned: boolean) => Promise<void>;
   listingsSettled: AppsViewProps["filesSettledRevision"];
@@ -55,41 +58,34 @@ export function ShellSidePanel(props: {
   openAppTab: SitePreviewPageProps["onOpenApp"];
   reportShellError: SitePreviewPageProps["reportError"];
   setShareTarget: (target: RelayShareTarget) => void;
-}) {
+}
+
+// What a registered view renders from: the panel's props, plus the slot the
+// Apps view fills in the panel header.
+export type SidePanelContext = ShellSidePanelProps & {
+  appsHead: HTMLSpanElement | null;
+  setAppsHead: (node: HTMLSpanElement | null) => void;
+};
+
+// The left side panel: the view the activity bar selected, or a pinned app.
+export function ShellSidePanel(props: ShellSidePanelProps) {
   const {
-    askAgent,
     customize,
     wb,
     mutateWb,
     sidePanelTitle,
-    openHistoryTab,
-    openGraphTab,
-    refreshSites,
-    explorerView,
-    search,
-    openSearchResult,
     workspaceId,
-    activeDocumentPath,
-    focusedTabPath,
-    appsNotices,
-    graphKey,
-    openPathWithHeading,
-    openGraphChatThread,
-    captureAvailable,
-    pinnedRoots,
-    setAppPinned,
-    listingsSettled,
-    createFirstApp,
     shareView,
-    historyTimeline,
     sharing,
     selectedAppRoot,
     openAppTab,
     reportShellError,
+    setAppPinned,
     setShareTarget,
   } = props;
-  // Where the Apps view puts its count and create button, ahead of Refresh.
   const [appsHead, setAppsHead] = useState<HTMLSpanElement | null>(null);
+  const context: SidePanelContext = { ...props, appsHead, setAppsHead };
+  const view = isViewId(wb.activeView) ? SIDE_PANEL_VIEWS[wb.activeView] : null;
   return (
     <SidePanel
       title={sidePanelTitle}
@@ -97,48 +93,12 @@ export function ShellSidePanel(props: {
       onWidthChange={(width) => mutateWb((state) => setSidebarWidth(state, width))}
       actions={
         <>
-          {wb.activeView === "history" ? (
-            <button
-              type="button"
-              data-testid="history-open-tab"
-              aria-label="Open history in tab"
-              title="Open history in tab"
-              onClick={openHistoryTab}
-              className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
-            >
-              <Maximize2 size={13} aria-hidden />
-            </button>
-          ) : wb.activeView === "graph" ? (
-            <button
-              type="button"
-              data-testid="graph-open-tab"
-              aria-label="Open graph in tab"
-              title="Open graph in tab"
-              onClick={openGraphTab}
-              className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
-            >
-              <Maximize2 size={13} aria-hidden />
-            </button>
-          ) : wb.activeView === "sites" ? (
-            <>
-              <span ref={setAppsHead} className="contents" />
-              <button
-                type="button"
-                data-testid="sites-refresh"
-                aria-label="Refresh apps"
-                title="Refresh apps"
-                onClick={refreshSites}
-                className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
-              >
-                <RefreshCw size={13} aria-hidden />
-              </button>
-            </>
-          ) : null}
+          {view?.actions?.(context)}
           <MoreMenu
             label="Sidebar actions"
             testId="side-panel-menu"
             items={[
-              { label: "Customize…", onSelect: () => customize("sidebar") },
+              { label: "Customize…", onSelect: () => customize(view?.customize ?? "sidebar") },
               // Pinned apps open here. The Apps view pins one or makes one.
               ...(wb.activeView === "sites"
                 ? []
@@ -153,42 +113,8 @@ export function ShellSidePanel(props: {
           the editor, tabs, and rail keep working. Switching views
           clears it. */}
       <ErrorBoundary scope="side-panel" resetKeys={[wb.activeView]}>
-      {wb.activeView === "explorer" ? (
-        explorerView
-      ) : wb.activeView === "search" ? (
-        <SearchView search={search} onOpenResult={openSearchResult} />
-      ) : wb.activeView === "graph" ? (
-        <Suspense fallback={<SkeletonRows layout="panel" label="Loading graph..." />}>
-          <LazyGraphView
-            workspaceId={workspaceId}
-            activePath={activeDocumentPath}
-            refreshKey={graphKey}
-            onOpenPath={openPathWithHeading}
-            onOpenChatThread={openGraphChatThread}
-            chatMentionsAvailable={captureAvailable}
-            variant="panel"
-          />
-        </Suspense>
-      ) : wb.activeView === "sites" ? (
-        <SkeletonSlot>
-        <Suspense fallback={<SkeletonRows inSlot layout="panel" label="Loading apps…" />}>
-          <LazyAppsView
-            workspaceId={workspaceId}
-            head={appsHead}
-            activePath={focusedTabPath}
-            notices={appsNotices}
-            pinnedApps={pinnedRoots}
-            onSetPinned={(appRoot, pinned) => void setAppPinned(appRoot, pinned)}
-            filesSettledRevision={listingsSettled}
-            onOpenPath={openPathWithHeading}
-            onCreateFirstApp={createFirstApp}
-            receivedShareWorkspace={shareView !== null}
-            {...(askAgent ? { askAgent } : {})}
-          />
-        </Suspense>
-        </SkeletonSlot>
-      ) : wb.activeView === "history" ? (
-        historyTimeline
+      {view ? (
+        view.render(context)
       ) : wb.activeView === SHARING_VIEW_ID ? (
         <Suspense fallback={<SkeletonRows layout="panel" label="Loading sharing..." />}>
           <LazySharingView {...sharing} />

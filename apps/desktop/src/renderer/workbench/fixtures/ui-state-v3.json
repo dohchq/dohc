@@ -3,8 +3,8 @@
   "activeView": "app-view:apps%2Ftrip",
   "sidebarVisible": false,
   "sidebarWidth": 333,
-  "chatsVisible": true,
-  "chatsWidth": 444,
+  "aboutVisible": true,
+  "aboutWidth": 444,
   "openEditorsHeight": 210,
   "editorGroups": [
     {

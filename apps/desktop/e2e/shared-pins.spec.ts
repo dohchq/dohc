@@ -15,8 +15,10 @@ test("shared pins find literal frame controls and generated file, chat, and Coll
     await expect(page.getByTestId(desktopPins.activityBar)).toBeVisible();
     await explorerRow(page, "pin fixture.md").click();
     await expect(page.getByTestId(editorTabTestId("pin fixture.md"))).toBeVisible();
-    await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
-    await expect(page.getByTestId(desktopPins.chatsPanel)).toBeVisible();
+    await page.getByTestId(desktopPins.titlebarAboutSidebar).click();
+    await expect(page.getByTestId(desktopPins.aboutRail)).toBeVisible();
+    await page.getByTestId(activityPin("chats")).click();
+    await expect(page.getByTestId(desktopPins.sidePanel).getByTestId("chats-view")).toBeVisible();
     await page.getByTestId("chats-feed-link").click();
     await expect(page.getByTestId(editorTabTestId("tab://chats"))).toBeVisible();
     await desktop.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.webContents.send("desktop:menu-command", "new-collection"));
