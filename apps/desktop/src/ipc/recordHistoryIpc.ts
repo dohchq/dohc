@@ -8,15 +8,20 @@ type Author = GetCollectionRecordHistoryResult["entries"][number]["author"];
 /** How main names a record history's authors, in one workspace. */
 export interface RecordHistoryAuthors {
   /** Prepare account labels together, without waiting on network I/O. */
-  prepare?(userIds: readonly string[]): void;
+  prepare(userIds: readonly string[]): void;
   /** An agent, by the person it acted for: this computer's agent by name, any other as "Agent". */
   agent(onBehalfOf: string | null): string;
-  /** Null for the workspace owner, whose ordinary automation rows need no extra label. */
+  /** Null for the workspace owner and device-local people, whose rows need no extra label. */
   person(userId: string): string | null;
   /** An automation's name in its Collection's automations.yaml now, or null. */
   automationName(automationId: string): string | null;
   /** Whether the person can open the run without asking the server. */
   runAvailable(automationId: string, claimId: string): Promise<boolean>;
+}
+
+/** Device-local identities stay on this computer; the owner's rows need no person label. */
+export function recordHistoryPersonIsNamed(userId: string, ownerId: string | null = null): boolean {
+  return !userId.startsWith("local:") && userId !== ownerId;
 }
 
 /**
@@ -64,12 +69,14 @@ export async function recordHistoryForIpc(
   page: Pick<CollectionGetRecordResult, "history" | "nextBeforeHistoryId">,
   authors: RecordHistoryAuthors,
 ): Promise<GetCollectionRecordHistoryResult> {
-  authors.prepare?.([...new Set(page.history.flatMap(entry => {
+  authors.prepare([...new Set(page.history.flatMap(entry => {
     if (entry.authorOriginId === null) return [];
-    return entry.actorKind === "human" ? [entry.authorOriginId] : entry.onBehalfOf === null ? [] : [entry.onBehalfOf];
+    const userId = entry.actorKind === "human" ? entry.authorOriginId : entry.onBehalfOf;
+    return userId !== null && recordHistoryPersonIsNamed(userId) ? [userId] : [];
   }))]);
   const people = new Map<string, string | null>();
   const personOf = (userId: string): string | null => {
+    if (!recordHistoryPersonIsNamed(userId)) return null;
     if (!people.has(userId)) people.set(userId, authors.person(userId));
     return people.get(userId)!;
   };

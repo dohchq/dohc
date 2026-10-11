@@ -189,7 +189,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
   });
   const readPolicy = vi.fn<(rootPath: string) => Promise<WorkspaceEnginePolicySnapshot>>(async () => ({ filesPolicy: null, visibilityPolicy: null, errors: [], unreadable: [] }));
   if (policyRoot) readPolicy.mockImplementation(readWorkspaceEnginePolicy);
-  const automationPersonName = vi.fn((_workspaceId: string, userId: string, _sender: Sender): string | null => userId === "person-local" ? null : userId);
+  const recordHistoryPersonName = vi.fn((_workspaceId: string, userId: string, _sender: Sender): string | null => userId === "person-local" ? null : userId);
   const prepareRecordHistoryPeople = vi.fn<(_workspaceId: string, userIds: readonly string[], _sender: Sender) => void>();
   const registrations = createWorkspaceEngineIpc({
     readWorkspaceEnginePolicy: readPolicy,
@@ -209,7 +209,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     automationRunOnThisComputer, serverRuns, signedInAccount: () => session.account,
     notifyRenderer: notify,
     namedAuthorLabels: () => ({ named: () => "Someone you shared with" }),
-    automationPersonName,
+    recordHistoryPersonName,
     prepareRecordHistoryPeople,
     retryOwnerLiveDelivery, retryCloudSync,
     retryFileObservation: retry ? id => { void retryFileObservation(id); return retry.read(); } : retryFileObservation,
@@ -234,7 +234,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     notify, writable, requireWorkspace, displayName, syncProjection, canonicalWorkspaceFor, requireSessions,
     events, handlers, invoke, routed, retryOwnerLiveDelivery, retryCloudSync, retryFileObservation, automationRunOnThisComputer, relay, setMissingAdapter: () => { missingAdapter = true; },
     storeWorkspaces, readPolicy,
-    sent, automationPersonName, prepareRecordHistoryPeople,
+    sent, recordHistoryPersonName, prepareRecordHistoryPeople,
     signIn: (account: string | null) => { session.account = account; session.generation += 1; },
     /** A credential load begins: no account is known until it reads the store. Resolves the load with its account. */
     loading: () => {
@@ -293,7 +293,7 @@ describe("workspace engine IPC registrations", () => {
     const held = deferred<null>();
     const lookupAccounts = vi.fn(() => held.promise);
     const labels = createHistoryLabels({ snapshot: () => ({ roster: { grants: [], links: [], endedGrants: [], formerGrants: [] }, owner: true, context: 1, inventory: 1 }), lookupAccounts });
-    h.automationPersonName.mockImplementation((workspaceId, userId) => {
+    h.recordHistoryPersonName.mockImplementation((workspaceId, userId) => {
       return labels.person(workspaceId, userId);
     });
     h.prepareRecordHistoryPeople.mockImplementation((workspaceId, userIds) => labels.prepare(workspaceId, userIds.map(userId => ({ userId }))));
@@ -310,6 +310,27 @@ describe("workspace engine IPC registrations", () => {
     await h.authority.retireBinding(h.authority.currentBinding("workspace")!, { removeBinding: removed });
     expect(removed).toHaveBeenCalledTimes(1);
     held.resolve(null);
+  });
+  it.each(["human", "agent"] as const)("keeps a %s row's local person out of relay account lookup", async actorKind => {
+    const { createHistoryLabels } = await import("../automations/shareRoster");
+    const h = await harness();
+    const lookupAccounts = vi.fn(async () => null);
+    const labels = createHistoryLabels({ snapshot: () => ({ roster: { grants: [], links: [], endedGrants: [], formerGrants: [] }, owner: true, context: 1, inventory: 1 }), lookupAccounts });
+    h.recordHistoryPersonName.mockImplementation((workspaceId, userId) => labels.person(workspaceId, userId));
+    h.prepareRecordHistoryPeople.mockImplementation((workspaceId, userIds) => labels.prepare(workspaceId, userIds.map(userId => ({ userId }))));
+    h.adapter.getCollectionRecord.mockResolvedValue({
+      collection: { path: "tasks", objectId: "tasks", status: "valid", reasons: [] },
+      record: { id: "a", path: "tasks/a.md", conflicted: false, values: [] }, nextBeforeHistoryId: null,
+      history: [{ historyId: 1, field: "Status", previous: { present: false, value: null }, next: { present: true, value: "Done" },
+        authorOriginId: actorKind === "human" ? "local:installation-1" : "helper", actorKind, onBehalfOf: "local:installation-1", depth: 0, recordedAtMs: 1, automationRun: null }],
+    });
+    const page = await h.invoke(CHANNELS.getCollectionRecordHistory, { workspaceId: "workspace", collectionPath: "tasks", recordId: "a" });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect.soft(page).toMatchObject({ entries: [{ author: actorKind === "human" ? null : { kind: "agent", name: "Agent" } }] });
+    if (actorKind === "agent") expect.soft(GetCollectionRecordHistoryResult.parse(page).entries[0]?.author).not.toHaveProperty("person");
+    expect.soft(h.prepareRecordHistoryPeople).toHaveBeenCalledExactlyOnceWith("workspace", [], expect.any(Sender));
+    expect.soft(h.recordHistoryPersonName).not.toHaveBeenCalled();
+    expect(lookupAccounts).not.toHaveBeenCalled();
   });
   it("reads and persistently dismisses capture recovery only for this renderer's workspace", async () => {
     const h = await harness();

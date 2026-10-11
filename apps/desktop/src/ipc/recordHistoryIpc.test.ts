@@ -7,11 +7,22 @@ const change = (actorKind: "human" | "agent"): CollectionGetRecordResult["histor
   recordedAtMs: 1, actorKind, authorOriginId: actorKind === "human" ? "ana" : "helper", onBehalfOf: "ana", depth: 0, automationRun: null,
 });
 const names = (): RecordHistoryAuthors => ({
+  prepare: () => {},
   person: id => id === "ana" ? "Ana" : null,
   agent: () => "Agent", automationName: () => null, runAvailable: async () => false,
 });
 
 describe("Record History live authors", () => {
+  it.each(["human", "agent"] as const)("keeps a %s row's local person unnamed and off account lookups", async actorKind => {
+    const localId = "local:installation-1";
+    const prepare = vi.fn();
+    const person = vi.fn(() => "Someone you shared with");
+    const row = { ...change(actorKind), onBehalfOf: localId, ...(actorKind === "human" ? { authorOriginId: localId } : {}) };
+    const page = await recordHistoryForIpc({ history: [row], nextBeforeHistoryId: null }, { ...names(), person, prepare });
+    expect.soft(page.entries[0]?.author).toEqual(actorKind === "human" ? null : { kind: "agent", name: "Agent" });
+    expect.soft(prepare).toHaveBeenCalledExactlyOnceWith([]);
+    expect(person).not.toHaveBeenCalled();
+  });
   it("names a confirmed person", async () => {
     const page = await recordHistoryForIpc({ history: [change("human")], nextBeforeHistoryId: null }, names());
     expect(page.entries[0]?.author).toEqual({ kind: "human", name: "Ana" });

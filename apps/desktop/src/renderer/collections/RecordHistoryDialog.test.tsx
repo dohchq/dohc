@@ -63,6 +63,8 @@ describe("RecordHistoryDialog", () => {
     stub(async () => ({ entries: [entry(1, { kind: "agent", name: "Agent", person: "Ana" })], nextBeforeHistoryId: null }));
     render(dialog());
     expect((await screen.findByTestId("record-history-entry")).textContent).toContain("Agent for Ana");
+    expect(screen.getByText("Agent").classList.contains("text-agent")).toBe(true);
+    expect(screen.getByText("for Ana").classList.contains("text-muted")).toBe(true);
   });
 
   it("names an automation for its changes, one row per run, and opens the run this computer keeps", async () => {

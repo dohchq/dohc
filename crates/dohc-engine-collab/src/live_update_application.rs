@@ -4110,6 +4110,35 @@ mod tests {
     }
 
     #[test]
+    fn field_history_duplicate_bytes_keep_the_earlier_author() {
+        let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+        let bytes = Ydoc::wire().frontmatter_set("status", "done").unwrap();
+        ack(apply(
+            &mut store,
+            &mut cache,
+            &handle,
+            account_frame("first-person", 1, bytes.clone(), false),
+        ));
+        let first_author = newest_field_author(&store);
+        assert_eq!(count(&store, "collection_field_history"), 1);
+        assert_eq!(first_author.1.as_deref(), Some("guest-1"));
+
+        let mut duplicate = account_frame("other-person", 2, bytes, false);
+        duplicate.metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Named {
+            principal_id: "guest-2".into(),
+            grant_id: "grant-2".into(),
+            grant_generation: 1,
+        };
+        duplicate.metadata.author_snapshot = Some(vec![LiveAuthorEntry::Human {
+            human_id: "guest-2".into(),
+            human_name: "Ben".into(),
+        }]);
+        ack(apply(&mut store, &mut cache, &handle, duplicate));
+        assert_eq!(count(&store, "collection_field_history"), 1);
+        assert_eq!(newest_field_author(&store), first_author);
+    }
+
+    #[test]
     fn field_history_names_the_accepted_agent_and_person() {
         let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
         let update = account_frame(
