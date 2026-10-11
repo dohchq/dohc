@@ -20,10 +20,13 @@ fn destructive_statements(source: &str) -> Vec<String> {
         .replace("\\t", " ")
         .replace('=', " = ")
         .replace(';', " ; ");
-    let words: Vec<_> = source
-        .split(|c: char| !c.is_ascii_alphanumeric() && !matches!(c, '_' | '=' | ';'))
+    let tokens: Vec<_> = source
+        .split(|c: char| !c.is_ascii_alphanumeric() && !matches!(c, '_' | '=' | ';' | '\''))
         .filter(|word| !word.is_empty())
-        .map(str::to_ascii_lowercase)
+        .collect();
+    let words: Vec<_> = tokens
+        .iter()
+        .map(|word| word.trim_matches('\'').to_ascii_lowercase())
         .collect();
     let mut found = Vec::new();
     for (index, word) in words.iter().enumerate() {
@@ -51,6 +54,9 @@ fn destructive_statements(source: &str) -> Vec<String> {
             (word.as_str(), rest.get(1).map(String::as_str)),
             ("delete", Some("from")) | ("drop", Some("table")) | ("replace", Some("into"))
         ) {
+            continue;
+        }
+        if index > 0 && words[index - 1] == "=" && tokens[index].starts_with('\'') {
             continue;
         }
         if let Some(target) = rest.get(2) {
@@ -220,12 +226,15 @@ fn retention_audit_recognizes_other_deleters_and_cascading_parents() {
         "UPDATE moments SET moment_id = ?1",
         "UPDATE main.moments SET path = ?1, moment_id = ?2",
         "UPDATE \"moments\" SET \"moment_id\"=?1 WHERE moment_id=?2",
+        r#"fn writer() { let sql = "DELETE FROM moments"; execute(sql); }"#,
+        "SELECT EXISTS(SELECT 1 FROM moments c WHERE c.operation='delete')\n FROM moments m; DELETE FROM moments",
     ] {
         assert!(!destructive_statements(sql).is_empty(), "missed {sql}");
     }
     for sql in [
         "UPDATE moments SET path=moment_id WHERE moment_id=?1",
         "UPDATE moments SET path=?1; SELECT moment_id=?2",
+        "SELECT EXISTS(SELECT 1 FROM moments c WHERE c.operation='delete')\n FROM moments m",
     ] {
         assert!(
             destructive_statements(sql).is_empty(),
