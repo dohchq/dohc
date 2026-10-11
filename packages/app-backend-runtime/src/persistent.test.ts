@@ -537,11 +537,12 @@ describe("persistent dataset worker",()=>{
   it("charges a journal replay's app work to the CPU budget",async()=>{
     await fixture(async({root,open})=>{
       const writer=await open({schemaSql:cpuBudgetSchema});
+      // Schema validation needs room before the much heavier replay spends this budget.
       const checkpointPath=join(root,"empty.sqlite");await writer.snapshot(checkpointPath);
       const prepared=await writer.prepare({...operation(),source:insertRows(1,20_000)});
       const committed=event(prepared);
-      await expect((await open({schemaSql:cpuBudgetSchema,checkpointPath,limits:{cpuBudgetMs:1}})).apply(committed)).rejects.toMatchObject({code:"worker_budget",
-        message:"The app's code ran too long: it used more than 1 ms of CPU time while reapplying a saved change. Try again."});
+      await expect((await open({schemaSql:cpuBudgetSchema,checkpointPath,limits:{cpuBudgetMs:100}})).apply(committed)).rejects.toMatchObject({code:"worker_budget",
+        message:"The app's code ran too long: it used more than 100 ms of CPU time while reapplying a saved change. Try again."});
       await expect((await open({schemaSql:cpuBudgetSchema})).apply(committed)).resolves.toMatchObject({revision:1});
     });
   },60_000);
