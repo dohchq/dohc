@@ -17,19 +17,37 @@ const admitted = (authorSnapshot: LiveAuthorSnapshot, firstSeen = [range(1)], fi
   ({accepted: {} as AdmittedLiveUpdateMetadata["accepted"], canonicalVersion: 2, authorSnapshot, firstSeen, firstSeenDeletes});
 const authors = (count: number) => Array.from({length: count}, (_, index) => admitted([human(String(index))], [range(index)]));
 
-it("credits new structs and deletion-only edits, but no-op or unnamed rows credit nobody", () => {
+it("counts empty content snapshots at the author limit and checkpoint band", () => {
+  const marker = {kind: "unattributed"} as const;
+  expect(assessLiveAuthorWindow(authors(1024), candidate([])).refused).toBe(true);
+  const full = assessLiveAuthorWindow(authors(1023), candidate([]));
+  expect(full.refused).toBe(false);
+  expect(full.identityCount).toBe(1024);
+  expect(full.coverage.filter(entry => entry.author.kind === "unattributed")).toEqual([
+    {author: marker, structRanges: [range(1)], deletionRanges: []},
+  ]);
+  expect(assessLiveAuthorWindow([...authors(1023), admitted([])], candidate([])).refused).toBe(false);
+  expect(assessLiveAuthorWindow([...authors(1023), admitted([])], candidate([human("new")])).refused).toBe(true);
+  expect(liveAuthorCheckpointAnticipated(authors(958), [])).toBe(true);
+  expect(liveAuthorCheckpointAnticipated([...authors(957), admitted([])], [human("new")])).toBe(true);
+  expect(liveAuthorCheckpointAnticipated([...authors(957), admitted([])], [])).toBe(false);
+  expect(assessLiveAuthorWindow(authors(1024), candidate([], [], [])).refused).toBe(false);
+});
+
+it("credits new structs and deletion-only edits, including unnamed content, but not no-ops", () => {
   const result = assessLiveAuthorWindow([
     admitted([human("alice")], [range(3)]),
     admitted([human("bob")], [], [range(3, 1, 2)]),
     admitted([human("forwarder")], [], []),
     {accepted: {} as AdmittedLiveUpdateMetadata["accepted"], firstSeen: [range(4)]},
   ], candidate([human("opener")], [], []));
-  expect(result.identityCount).toBe(2);
+  expect(result.identityCount).toBe(3);
   expect(result.coverage).toEqual([
     {author: human("alice"), structRanges: [range(3)], deletionRanges: []},
     {author: human("bob"), structRanges: [], deletionRanges: [range(3, 1, 2)]},
+    {author: {kind: "unattributed"}, structRanges: [range(4)], deletionRanges: []},
   ]);
-  expect(assessLiveAuthorWindow([], candidate([], [range(4)])).identityCount).toBe(0);
+  expect(assessLiveAuthorWindow([], candidate([], [range(4)])).identityCount).toBe(1);
 });
 
 it("unions and normalizes ranges without changing admitted rows", () => {
@@ -105,7 +123,7 @@ it("uses escaped UTF-8 author bytes at the 96 KiB checkpoint threshold", () => {
   const parked = [...suffix, admitted([smaller])];
   expect(liveAuthorCheckpointAnticipated(parked, [human("new")])).toBe(true);
   expect(liveAuthorCheckpointAnticipated(parked, [smaller])).toBe(false);
-  expect(liveAuthorCheckpointAnticipated(parked, [])).toBe(false);
+  expect(liveAuthorCheckpointAnticipated(parked, [])).toBe(true);
   expect(liveAuthorCheckpointAnticipated([], [human("new")])).toBe(false);
 });
 
@@ -113,7 +131,7 @@ it("does not retain state in the identity band for known accounts, links or scop
   const link: LiveAuthorEntry = {kind: "link", publicPrincipalId: "public_link", label: "Sam"};
   const agent: LiveAuthorEntry = {kind: "agent", agentId: "writer", onBehalfOf: "0", depth: 1};
   const suffix = [...authors(956), admitted([link, agent])];
-  expect(liveAuthorCheckpointAnticipated(suffix, [])).toBe(false);
+  expect(liveAuthorCheckpointAnticipated(suffix, [])).toBe(true);
   expect(liveAuthorCheckpointAnticipated(suffix, [human("0", "Renamed")])).toBe(false);
   expect(liveAuthorCheckpointAnticipated(suffix, [{...link, label: "Renamed"}, {...agent, agentName: "Renamed", depth: 64}])).toBe(false);
   expect(liveAuthorCheckpointAnticipated(suffix, [human("new")])).toBe(true);

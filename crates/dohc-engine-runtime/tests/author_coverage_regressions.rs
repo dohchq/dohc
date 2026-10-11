@@ -441,7 +441,7 @@ async fn sync_projection_cannot_replace_an_unresolved_local_attempt_marker() {
             )
         })
         .expect("sync after local completion");
-    assert!(matches!(projected, TxnOutcome::Committed(())));
+    assert!(matches!(projected, TxnOutcome::Committed(_)));
     assert!(
         coverage(&store, &state.key).0 > pending.0,
         "sync can advance its own marker after local completion"

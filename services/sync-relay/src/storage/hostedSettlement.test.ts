@@ -3,9 +3,16 @@ import {
   registered,
   cleanupLiveDeliveryFixtures,
 } from "../../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js";
-import { prepareHostedSettlements } from "./hostedSettlement.js";
+import { prepareHostedSettlements, parseSettlementAuthors } from "./hostedSettlement.js";
 import type { StorageContext } from "./context.js";
 afterEach(cleanupLiveDeliveryFixtures);
+
+it("fits 1023 named authors and the window's marker in a settlement snapshot", () => {
+  const authors = Array.from({length: 1023}, (_, index) => ({kind: "human", humanId: String(index), humanName: "Reader"}));
+  const marker = {kind: "unattributed"};
+  expect(parseSettlementAuthors([...authors, marker])).toHaveLength(1024);
+  expect(() => parseSettlementAuthors([...authors, {kind: "human", humanId: "new", humanName: "Reader"}, marker])).toThrow();
+});
 it("records deterministic settlement refusal and advances later origin operations without publishing its moment", async () => {
   const f = registered({ deployment: true });
   try {
@@ -249,6 +256,41 @@ function append(
     ops,
   });
 }
+it("keeps one unattributed marker beside named settlement contributors", async () => {
+  const f = registered({deployment: true});
+  try {
+    f.doc.gc = false;
+    for (const id of ["actorless-first", "actorless-second"]) {
+      const accepted = f.storage.commitLiveUpdateJournal(f.capture(f.update("title", id), id, {
+        kind: "named", userId: "reader", grantId: "grant",
+      }));
+      expect(accepted.result.kind).toBe("accepted");
+      expect(accepted.admitted!.metadata.authorSnapshot).toEqual([]);
+    }
+    const last = publication(f, "mixed-coverage");
+    await prepare(f, [last.op]);
+    expect(last.op).toMatchObject({settlementAdmission: {status: "accepted"}});
+    expect(append(f, [last.op]).inserted).toBe(1);
+    expect(f.storage.fetchLogCoordinate({workspaceId: "workspace", originId: "proof", originSeq: 0})!.admittedAuthorSnapshot)
+      .toEqual([
+        {kind: "unattributed"},
+        {kind: "human", humanId: "reader", humanName: "Reader"},
+        {kind: "agent", agentId: "trip", agentName: "Trip", onBehalfOf: "reader", depth: 2},
+      ]);
+  } finally { f.close(); }
+});
+
+it("refuses a client-supplied unattributed marker on settlement publication", async () => {
+  const f = registered({deployment: true});
+  try {
+    const first = publication(f, "client-marker");
+    first.op.payloadJson = stableJsonStringify({...first.payload, authors: [{kind: "unattributed"}]});
+    await prepare(f, [first.op]);
+    expect(append(f, [first.op]).settlementRefusals).toMatchObject([{reason: "authorship-mismatch"}]);
+    expect(f.raw.prepare("SELECT 1 FROM sync_relay_object_moments WHERE moment_id='client-marker'").get()).toBeUndefined();
+  } finally { f.close(); }
+});
+
 it("authenticates full accepted state and publishes exact journal contributors twice, preserving payload and exact retry", async () => {
   const f = registered({ deployment: true });
   try {

@@ -88,6 +88,8 @@ pub struct RemoteApplyProjection {
     pub outcome: ReplicationApplyOutcome,
     pub doc: Ydoc,
     pub content_kind: ContentKind,
+    /// This admission added the interval's first unknown-author marker.
+    pub introduced_unattributed: bool,
     /// What this apply did to a bound collection record (`None` for a dedup,
     /// an unbound document, or an apply that changed no field). The record
     /// events every device emits at apply time derive from this.
@@ -283,7 +285,14 @@ fn apply_remote_update_in_transaction(
     if let Some(existing) = blob_seq_in_log(tx, key, &sha, &remote.bytes)? {
         return Ok((ReplicationApplyOutcome::Deduped { seq: existing }, None));
     }
-    crate::author_coverage::check_admission_in(tx, key, origin.actor_id(), attribution)?;
+    crate::author_coverage::check_remote_admission_in(
+        tx,
+        key,
+        &remote.origin_id,
+        remote.origin_seq,
+        origin.actor_id(),
+        attribution,
+    )?;
     let base = load_doc_in(tx, key)?;
     *candidate = Some(crate::replay_parity::validate_replay_parity_with_delta(
         &base,
@@ -355,11 +364,19 @@ pub fn apply_remote_update_in_transaction_with_projection(
             outcome: ReplicationApplyOutcome::Deduped { seq: existing },
             doc: load_doc_in(tx, key)?,
             content_kind: marker.content_kind,
+            introduced_unattributed: false,
             record_facts: None,
         });
     }
 
-    crate::author_coverage::check_admission_in(tx, key, origin.actor_id(), attribution)?;
+    let introduced_unattributed = crate::author_coverage::check_remote_admission_in(
+        tx,
+        key,
+        &remote.origin_id,
+        remote.origin_seq,
+        origin.actor_id(),
+        attribution,
+    )?;
     let (projection, validation, source, seq, record_facts) = match cache
         .base_frontier_and_scratch_for_gate(tx, key, &marker)?
     {
@@ -450,6 +467,7 @@ pub fn apply_remote_update_in_transaction_with_projection(
         },
         doc: projection,
         content_kind: marker.content_kind,
+        introduced_unattributed,
         record_facts,
     })
 }

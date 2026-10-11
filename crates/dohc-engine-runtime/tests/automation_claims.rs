@@ -943,20 +943,50 @@ async fn a_record_created_in_a_document_session_credits_its_interval_authors() {
             "{}: an automation does not claim a record it created",
             case.name
         );
+        let has_unattributed = case.creator.is_none() || case.editor == Some(None);
+        let recorded: String = rusqlite::Connection::open(&db)
+            .expect("read history")
+            .query_row(
+                "SELECT author_json FROM moments WHERE workspace_id=?1 AND object_id=?2 AND metadata_origin='ydoc' ORDER BY moment_order DESC LIMIT 1",
+                rusqlite::params![WS, format!("{}-object", case.name)],
+                |row| row.get(0),
+            )
+            .expect("settled interval authors");
+        let authors = dohc_engine_domain::moment_author_entries(Some(&recorded));
+        assert_eq!(authors.len(), 1 + usize::from(has_unattributed));
+        let automation_author = authors
+            .iter()
+            .find(|author| author["automationId"] == AUTOMATION)
+            .expect("the automation remains credited in the full list");
+        assert_eq!(
+            automation_author["onBehalfOf"].as_str(),
+            case.principal
+                .or_else(|| case.editor.flatten().map(|_| "user:ice")),
+        );
+        assert_eq!(
+            authors
+                .iter()
+                .filter(|author| author["kind"] == "unattributed")
+                .count(),
+            usize::from(has_unattributed),
+        );
+        assert_eq!(
+            dohc_engine_domain::moment_author_depth(Some(&recorded)),
+            case.depth
+        );
         for claim in &claims {
             assert_eq!(claim.record_id.as_deref(), Some(case.record_id));
             assert_eq!(claim.change.kind, AutomationChangeKind::Added);
             assert_eq!(
                 claim.change.author_origin_id.as_deref(),
-                case.creator.or(case.editor.flatten()).map(|_| AUTOMATION),
-                "{}: the interval records the automation author",
+                (!has_unattributed).then_some(AUTOMATION),
+                "{}: only a sole author supplies the singular attribution",
                 case.name
             );
             assert_eq!(claim.depth, case.depth, "{}", case.name);
             assert_eq!(
                 claim.change.on_behalf_of.as_deref(),
-                case.principal
-                    .or_else(|| case.editor.flatten().map(|_| "user:ice")),
+                (!has_unattributed).then_some(case.principal).flatten(),
             );
             assert_eq!(claim.chain_stopped(), case.depth == cap);
         }

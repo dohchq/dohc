@@ -691,6 +691,7 @@ where
                 index_frontmatter,
                 actor_origin_id,
                 attribution,
+                is_seed,
                 now_ms,
                 !is_seed,
                 cache,
@@ -917,6 +918,7 @@ fn append_local_update(
     index_frontmatter: bool,
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
+    authors_admitted: bool,
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
     if let Some(actor_origin_id) = actor_origin_id {
@@ -932,8 +934,8 @@ fn append_local_update(
             record_facts: None,
         });
     }
-    let settlement_requested =
-        crate::author_coverage::check_admission_in(conn, key, actor_origin_id, attribution)?;
+    let settlement_requested = !authors_admitted
+        && crate::author_coverage::check_admission_in(conn, key, actor_origin_id, attribution)?;
     let base = load_doc_in(conn, key)?;
     let (_, seq, record_facts) = append_and_index_update(
         conn,
@@ -975,6 +977,7 @@ fn append_local_update_cached(
     index_frontmatter: bool,
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
+    is_seed: bool,
     now_ms: i64,
     local_edit: bool,
     cache: &WriterDocCache,
@@ -994,8 +997,8 @@ fn append_local_update_cached(
             record_facts: None,
         });
     }
-    let settlement_requested =
-        crate::author_coverage::check_admission_in(conn, key, actor_origin_id, attribution)?;
+    let settlement_requested = !is_seed
+        && crate::author_coverage::check_admission_in(conn, key, actor_origin_id, attribution)?;
     let (seq, record_facts) = match cache.base_frontier_and_scratch_for_gate(conn, key, marker)? {
         Some((base, frontier, scratch)) => {
             let validation = crate::replay_parity::validate_replay_parity_for_cached_gate(
@@ -2220,10 +2223,21 @@ pub fn record_update_in_tx(
     if crate::owner_outbox::has_adopted_owner_in(tx, key)? {
         return Err(CollabError::OwnerOutboxFrozen);
     }
-    record_authorized_update_in_tx(tx, key, update, true, actor_origin_id, attribution, now_ms)
+    record_authorized_update_in_tx(
+        tx,
+        key,
+        update,
+        true,
+        actor_origin_id,
+        attribution,
+        false,
+        now_ms,
+    )
 }
 
 /// The receipt application owner has checked its full binding in this transaction.
+/// `authors_admitted` skips native admission when accepted snapshot coverage owns it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn record_authorized_update_in_tx(
     tx: &Transaction<'_>,
     key: &DocKey,
@@ -2231,6 +2245,7 @@ pub(crate) fn record_authorized_update_in_tx(
     index_frontmatter: bool,
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
+    authors_admitted: bool,
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
     validate_update_bytes(update)?;
@@ -2245,6 +2260,7 @@ pub(crate) fn record_authorized_update_in_tx(
         index_frontmatter,
         actor_origin_id,
         attribution,
+        authors_admitted,
         now_ms,
     )
 }

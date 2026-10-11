@@ -2,6 +2,7 @@ import { createTypingQuitRecovery } from "./workspaces/typingQuitRecovery";
 import { writeTypingCheckpointSync, typingRecoveryFailure, hasUnresolvedTypingCheckpoints, flushTypingCheckpoints, writeTypingCheckpoint, readTypingCheckpoints, retireTypingCheckpoint, importTypingCheckpoints, type TypingRecoveryFailure } from "./workspaces/outageTypingRecovery";
 import { actOnTypingCopy, type TypingCopyResult } from "./workspaces/typingRecoveryActions";
 import { liveDraftRecoveryOperations } from "./ipc/bridgeContract";
+import { recordHistoryPersonIsNamed } from "./ipc/recordHistoryIpc";
 import { SharedDocumentWaitingError } from "./ipc/sharedDocumentOpenState";
 import { net, clipboard } from "electron";
 import { writeWorkspaceFilesAs } from "./workspaces/workspaceFileWrites";
@@ -5904,12 +5905,15 @@ function registerIpcHandlers(): void {
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
     withEngineAdapter, requireEngineCapture, readWorkspaceEnginePolicy, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
     localPersonName: localUserDisplayName, localPerson,
-    automationPersonName: (workspaceId, userId, sender) => {
+    recordHistoryPersonName: (workspaceId, userId, sender) => {
       const workspace = findWorkspace(workspaceId);
-      if (userId === (workspace?.remote?.ownerUserId ?? localUserId())) return null;
-      const historyLabels = historyLabelsFor(sender);
-      historyLabels.prepare(workspaceId, [{ userId }]);
-      return historyLabels.person(workspaceId, userId);
+      if (!recordHistoryPersonIsNamed(userId, workspace?.remote?.ownerUserId ?? localUserId())) return null;
+      return historyLabelsFor(sender).person(workspaceId, userId);
+    },
+    prepareRecordHistoryPeople: (workspaceId, userIds, sender) => {
+      const workspace = findWorkspace(workspaceId);
+      const ownerId = workspace?.remote?.ownerUserId ?? localUserId();
+      historyLabelsFor(sender).prepare(workspaceId, userIds.filter(userId => recordHistoryPersonIsNamed(userId, ownerId)).map(userId => ({ userId })));
     },
     namedAuthorLabels: (workspaceId, sender) => {
       const historyLabels = historyLabelsFor(sender);

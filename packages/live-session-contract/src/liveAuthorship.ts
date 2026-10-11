@@ -33,6 +33,7 @@ export function parseAutomationDeclaration(value: unknown): AutomationDeclaratio
     ...(run ? {run: {claimId: parseLiveUpdateIdentifier(run.claimId), automationName: run.automationName as string}} : {})}};
 }
 export type LiveAuthorEntry =
+  | { readonly kind: "unattributed" }
   | ({readonly kind: "automation"} & AutomationDeclaration)
   | { readonly kind: "human"; readonly humanId: string; readonly humanName: string }
   | { readonly kind: "link"; readonly publicPrincipalId: string; readonly label: string }
@@ -77,7 +78,10 @@ export function parseLiveAuthorSnapshot(value: unknown): LiveAuthorSnapshot {
   const result = Array.from(value, item => {
     const entry = record(item, ["kind"], ["humanId", "humanName", "publicPrincipalId", "label", "agentId", "agentName", "onBehalfOf", "depth", "automationId", "attribution"]);
     let author: LiveAuthorEntry;
-    if (entry.kind === "automation") {
+    if (entry.kind === "unattributed") {
+      record(item, ["kind"]);
+      author = {kind: "unattributed"};
+    } else if (entry.kind === "automation") {
       const {kind: _kind, ...fields} = entry;
       author = {kind: "automation", ...parseAutomationDeclaration(fields)};
     } else if (entry.kind === "human") {
@@ -97,6 +101,7 @@ export function parseLiveAuthorSnapshot(value: unknown): LiveAuthorSnapshot {
   return result;
 }
 export function liveAuthorIdentity(entry: LiveAuthorEntry): string {
+  if (entry.kind === "unattributed") return JSON.stringify([entry.kind, null, ""]);
   if (entry.kind === "automation") return JSON.stringify([entry.kind, entry.attribution.run?.claimId ?? null, entry.automationId]);
   return JSON.stringify([entry.kind, entry.kind === "agent" ? entry.onBehalfOf ?? null : null, entry.kind === "human" ? entry.humanId : entry.kind === "link" ? entry.publicPrincipalId : entry.agentId]);
 }

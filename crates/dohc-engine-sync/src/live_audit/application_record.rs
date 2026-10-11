@@ -733,12 +733,27 @@ pub(crate) fn annotate_projected_moment_in_tx(
     let Some((existing, verified, base)) = entries else {
         return Ok(());
     };
+    // Only a marker introduced by this one coordinate can become verified.
+    // A local gap or an aggregate drain's earlier gap remains unattributed.
+    let provisional = tx.execute(
+        "DELETE FROM engine_requests WHERE request_id='sync-ydoc-provisional-author:'||json_array(?1,?2,?3) \
+         AND payload_hash=?4 AND kind='sync-ydoc-provisional-author'",
+        params![key.workspace_id,key.version_id,key.object_id,moment_id],
+    ).map_err(SyncError::persist)?;
     // The base holds every author this coordinate's audit did not supply, so a
     // recomputed row raises the moment's confirmation without erasing a gap.
     let base = match base {
         Some(base) => base,
         None => {
-            let base = existing.unwrap_or_else(|| "[]".to_owned());
+            let base = match existing {
+                Some(existing) if provisional != 0 => {
+                    let mut prior = dohc_engine_collab::author_coverage::Authors::default();
+                    prior.union_json(&existing).map_err(SyncError::corrupt)?;
+                    prior.remove_unattributed();
+                    prior.json()
+                }
+                existing => existing.unwrap_or_else(|| "[]".to_owned()),
+            };
             tx.execute(
                 "UPDATE live_audit_projection_authors SET moment_base_json=?4 \
                  WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
