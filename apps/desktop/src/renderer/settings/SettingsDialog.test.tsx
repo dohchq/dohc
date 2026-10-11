@@ -216,6 +216,43 @@ describe("SettingsDialog", () => {
     expect(screen.getByTestId("settings-empty-search")).toBeTruthy();
   });
 
+  it("groups the nav by where settings apply, under the workspace's folder", async () => {
+    render(<SettingsDialog workspaceId="ws-1" workspacePath={"C:\\Users\\sam\\dohc\\trip"} onClose={() => {}} />);
+
+    const nav = (await screen.findByTestId("settings-sidebar")).querySelector("nav")!;
+    const order = [...nav.children].map((child) =>
+      child.getAttribute("data-testid") ?? (child.getAttribute("aria-hidden") ? "hairline" : child.tagName));
+    expect(order).toEqual([
+      "settings-nav-general",
+      "settings-nav-appearance",
+      "settings-nav-agents",
+      "settings-row-current-workspace",
+      "settings-nav-files",
+      "settings-nav-workbench",
+      "settings-nav-privacy",
+      "settings-nav-cloud",
+      "hairline",
+      "settings-nav-advanced",
+    ]);
+    const folder = screen.getByTestId("settings-row-current-workspace");
+    expect(folder.textContent).toBe("trip");
+    expect(folder.getAttribute("title")).toBe("C:\\Users\\sam\\dohc\\trip");
+    // Position says where a section applies; no item carries a scope tag.
+    expect(nav.textContent).not.toMatch(/User|Workspace|Mixed/);
+    expect(screen.getByTestId("settings-nav-general").getAttribute("aria-current")).toBe("page");
+  });
+
+  it("names the section Agents and still finds it by MCP", async () => {
+    const user = userEvent.setup();
+    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+
+    expect((await screen.findByTestId("settings-nav-agents")).textContent).toBe("Agents");
+    await user.type(screen.getByTestId("settings-search"), "MCP");
+    expect(screen.getByTestId("settings-nav-agents").getAttribute("aria-current")).toBe("page");
+    expect(screen.getByTestId(settingsSectionPin("agents"))).toBeTruthy();
+    expect(screen.queryByTestId("settings-row-current-workspace")).toBeNull();
+  });
+
   it("closes from Escape", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
@@ -287,7 +324,7 @@ describe("SettingsDialog", () => {
     expect(bridge.setTitlebarTheme).toHaveBeenCalledWith({ theme: "dark" });
   });
 
-  it("saves your colors, the accent, and the editor type, and opens the settings file", async () => {
+  it("saves your colors, the accent, and the editor type", async () => {
     const user = userEvent.setup();
     render(
       <SettingsDialog
@@ -328,8 +365,196 @@ describe("SettingsDialog", () => {
     expect(document.documentElement.style.getPropertyValue("--dohc-editor-font-size"))
       .toBe(`${DEFAULT_USER_SETTINGS.editor.fontSize + 1}px`);
 
-    await user.click(screen.getByRole("button", { name: "Open settings file" }));
-    expect(bridge.openUserSettingsFile).toHaveBeenCalledOnce();
+    // The settings file opens from Advanced only.
+    expect(screen.queryByRole("button", { name: "Open settings file" })).toBeNull();
+  });
+
+  it("shows a modified setting as a dot and resets it from an icon", async () => {
+    const user = userEvent.setup();
+    render(
+      <SettingsDialog
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="appearance"
+        onClose={() => {}}
+      />,
+    );
+
+    const row = await screen.findByTestId("settings-row-theme");
+    expect(within(row).queryByTitle("Modified")).toBeNull();
+    expect(within(row).queryByRole("button", { name: "Reset" })).toBeNull();
+
+    await user.click(within(row).getByRole("radio", { name: "Dark" }));
+    await waitFor(() => expect(within(row).getByTitle("Modified")).toBeTruthy());
+    const reset = within(row).getByRole("button", { name: "Reset" });
+    // An icon, not a word: the name is for assistive technology and the tooltip.
+    expect(reset.textContent).toBe("");
+    expect(reset.querySelector("svg")).toBeTruthy();
+    await user.click(reset);
+    expect(bridge.setUserSettings).toHaveBeenLastCalledWith({
+      base: expect.any(Object),
+      settings: expect.objectContaining({
+        appearance: expect.objectContaining({ themeMode: DEFAULT_USER_SETTINGS.appearance.themeMode }),
+      }),
+    });
+    await waitFor(() => expect(within(row).queryByTitle("Modified")).toBeNull());
+  });
+
+  it("draws the theme as a radiogroup of three windows", async () => {
+    render(
+      <SettingsDialog
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="appearance"
+        onClose={() => {}}
+      />,
+    );
+
+    const group = await screen.findByRole("radiogroup", { name: "Theme" });
+    const radios = within(group).getAllByRole("radio");
+    expect(radios.map((radio) => radio.textContent)).toEqual(["System", "Light", "Dark"]);
+    // Only the chosen window is a tab stop, and it carries the ring.
+    expect(radios.map((radio) => radio.tabIndex)).toEqual([0, -1, -1]);
+    expect(radios[0]!.getAttribute("aria-checked")).toBe("true");
+    expect(radios[0]!.querySelector(".outline-accent")).toBeTruthy();
+    expect(radios[2]!.querySelector(".outline-accent")).toBeNull();
+  });
+
+  it("resets the window zoom from its value, and names its keys", async () => {
+    const user = userEvent.setup();
+    bridge.getUserSettings.mockResolvedValueOnce({
+      settings: {
+        ...DEFAULT_USER_SETTINGS,
+        appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel: 1 },
+      },
+      source: "default" as const,
+    });
+    render(
+      <SettingsDialog
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="appearance"
+        onClose={() => {}}
+      />,
+    );
+
+    const row = await screen.findByTestId("settings-row-zoom");
+    // The value names the setting, the action, and where it stands.
+    const value = await within(row).findByRole("button", { name: "Reset zoom to 100%, now 120%" });
+    await user.hover(within(row).getByRole("button", { name: "Zoom in" }));
+    const tip = within(row).getByRole("tooltip");
+    expect(tip.textContent).toBe("Zoom inCtrl=");
+    expect([...tip.querySelectorAll("kbd")].map((key) => key.textContent)).toEqual(["Ctrl", "="]);
+
+    await user.click(value);
+    expect(bridge.stepWindowZoom).toHaveBeenCalledWith({ step: "reset" });
+    await waitFor(() => expect(row.textContent).toContain("100%"));
+    expect(within(row).getByRole("button", { name: "Reset zoom to 100%, now 100%" })).toBeTruthy();
+    const size = screen.getByTestId("settings-row-editor-size");
+    expect(within(size).getByRole("button", {
+      name: `Reset editor text size to ${DEFAULT_USER_SETTINGS.editor.fontSize}px, now ${DEFAULT_USER_SETTINGS.editor.fontSize}px`,
+    })).toBeTruthy();
+  });
+
+  it("keeps a stepper under the pointer when its row becomes changed", async () => {
+    const user = userEvent.setup();
+    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="appearance" onClose={() => {}} />);
+
+    const row = await screen.findByTestId("settings-row-editor-size");
+    const larger = within(row).getByRole("button", { name: "Larger editor text" });
+    const controls = larger.closest("div.rounded-md")!.parentElement!;
+    const slots = () => [...controls.children].map((child) => `${child.tagName}${child.getAttribute("aria-hidden") === "true" ? ":hidden" : ""}.${child.className.includes("size-6") ? "24" : "control"}`);
+    // Unchanged, the reset's place is held by an empty box nobody can reach.
+    expect(slots()).toEqual(["DIV.control", "SPAN:hidden.24"]);
+    expect(within(row).queryByRole("button", { name: "Reset" })).toBeNull();
+
+    await user.click(larger);
+    await waitFor(() => expect(within(row).getByRole("button", { name: "Reset" })).toBeTruthy());
+    expect(slots()).toEqual(["DIV.control", "BUTTON.24"]);
+    // The dot hangs outside the title's line, so the title does not move either.
+    expect(within(row).getByTitle("Modified").className).toContain("absolute");
+    // A second quick click still lands on +.
+    await user.click(larger);
+    expect(bridge.setUserSettings.mock.lastCall?.[0].settings.editor.fontSize)
+      .toBe(DEFAULT_USER_SETTINGS.editor.fontSize + 2);
+  });
+
+  it("shows a stepper's tooltip on hover and on keyboard focus, each on its own", async () => {
+    const user = userEvent.setup();
+    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="appearance" onClose={() => {}} />);
+
+    const row = await screen.findByTestId("settings-row-zoom");
+    const zoomIn = within(row).getByRole("button", { name: "Zoom in" });
+    const zoomOut = within(row).getByRole("button", { name: "Zoom out" });
+    // A click focuses the button but opens no tooltip once the pointer leaves.
+    await user.click(zoomIn);
+    await user.unhover(zoomIn);
+    expect(within(row).queryByRole("tooltip")).toBeNull();
+
+    // From the keyboard, the focused part keeps its tooltip while the pointer
+    // passes over another part and leaves.
+    zoomIn.blur();
+    await user.keyboard("{Tab}");
+    zoomIn.focus();
+    await waitFor(() => expect(within(row).getByRole("tooltip").textContent).toContain("Zoom in"));
+    await user.hover(zoomOut);
+    expect(within(row).getByRole("tooltip").textContent).toContain("Zoom out");
+    await user.unhover(zoomOut);
+    const tip = within(row).getByRole("tooltip");
+    expect(tip.textContent).toContain("Zoom in");
+    expect(zoomIn.getAttribute("aria-describedby")).toBe(tip.id);
+
+    // A click on the part the keyboard focused leaves no tooltip once the pointer leaves.
+    await user.click(zoomIn);
+    await user.unhover(zoomIn);
+    expect(within(row).queryByRole("tooltip")).toBeNull();
+    expect(zoomIn.getAttribute("aria-describedby")).toBeNull();
+  });
+
+  it("keeps the reset's place on a row that cannot reset, so controls share a right edge", async () => {
+    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+
+    const updates = await screen.findByTestId("settings-row-desktop-updates");
+    const last = within(updates).getByTestId("install-update-button").parentElement!.lastElementChild!;
+    expect(last.tagName).toBe("SPAN");
+    expect(last.getAttribute("aria-hidden")).toBe("true");
+    expect(last.className).toContain("size-6");
+  });
+
+  it("closes a stepper's tooltip with the first Escape and Settings with the next", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(
+      <Overlay onClose={onClose}>
+        <SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="appearance" onClose={onClose} />
+      </Overlay>,
+    );
+
+    const row = await screen.findByTestId("settings-row-zoom");
+    const zoomIn = within(row).getByRole("button", { name: "Zoom in" });
+    await user.keyboard("{Tab}");
+    zoomIn.focus();
+    await waitFor(() => expect(within(row).getByRole("tooltip")).toBeTruthy());
+
+    await user.keyboard("{Escape}");
+    expect(within(row).queryByRole("tooltip")).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+    await user.keyboard("{Escape}");
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("drops the History rail and Current workspace rows, and the Keyboard section", async () => {
+    const view = render(
+      <SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="workbench" onClose={() => {}} />,
+    );
+    const workbench = await screen.findByTestId(settingsSectionPin("workbench"));
+    expect(workbench.textContent).not.toContain("History rail");
+    view.unmount();
+
+    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    const general = await screen.findByTestId(settingsSectionPin("general"));
+    expect(general.textContent).not.toContain("Current workspace");
+    expect(screen.queryByTestId("settings-nav-keyboard")).toBeNull();
   });
 
   it("shows the window zoom as a percentage and steps it through settings", async () => {
