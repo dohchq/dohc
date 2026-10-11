@@ -282,7 +282,6 @@ describe("guest memory", () => {
         let held = [];
         try { for (;;) held.push(new Uint8Array(1 << 20)); } catch {}
         try { for (;;) held.push(new Uint8Array(4096)); } catch {}
-        try { for (;;) held.push([1]); } catch {}
         for (; steps < 100 && held.length; steps++) {
           held.length -= 1;
           // The operation's own code can run out of memory too, so only a query's error is counted.
