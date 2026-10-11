@@ -8,7 +8,7 @@ use dohc_engine_runtime::{
     RuntimeError, WorkspaceSupervisor,
 };
 use dohc_engine_storage::EngineStore;
-use dohc_engine_testkit::harness::wal_sidecar;
+
 use dohc_engine_testkit::{
     PanicFaults, ScratchDir, engine_db_path, make_hardlink, try_make_dir_alias,
     try_make_file_symlink,
@@ -208,10 +208,8 @@ async fn restart_bumps_generation_and_preserves_state() {
     assert_eq!(read(&reopened, "more.md").await.as_deref(), Some("again"));
 }
 
-// oracle: close deterministically releases the connection. A second open alone
-// does not prove release (SQLite permits concurrent connections), so we assert
-// the WAL sidecar was checkpointed away — which only happens when the last
-// connection closes — and, on Windows, that the file is now deletable.
+// Close joins the writer and checkpoint worker. Retained WAL bytes are durable
+// data, not an open connection; Windows exclusive opens prove handle release.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn close_releases_the_connection() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -227,26 +225,37 @@ async fn close_releases_the_connection() {
     assert_eq!(handle.lifecycle(), LifecycleState::Closed);
     assert_eq!(sup.actor_count(), 0);
 
-    // Last-connection close checkpoints and removes the -wal sidecar; a still-
-    // open connection would leave it behind.
-    let wal = wal_sidecar(&db);
-    assert!(
-        !wal.exists(),
-        "-wal must be gone once the last writer closed"
-    );
-
-    // On Windows an open handle blocks deletion; being able to rename the file
-    // proves no handle remains. (POSIX allows unlink of open files, so this is
-    // a Windows-specific release proof.)
     #[cfg(windows)]
     {
-        let moved = db.with_extension("moved");
-        std::fs::rename(&db, &moved).expect("db must be movable after release");
-        std::fs::rename(&moved, &db).expect("restore");
+        use std::os::windows::fs::OpenOptionsExt;
+        for path in [
+            db.clone(),
+            db.with_extension("db-wal"),
+            db.with_extension("db-shm"),
+        ] {
+            if path.exists() {
+                let exclusive = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .share_mode(0)
+                    .open(&path)
+                    .expect("close must release every database and sidecar handle");
+                drop(exclusive);
+            }
+        }
     }
 
-    // And a brand-new writer opens cleanly and sees the committed state.
-    assert_eq!(moments(&db), 1);
+    // A fresh writer reads the committed row through any retained WAL.
+    let mut reopened = EngineStore::open(&db, 99).expect("fresh writer after close");
+    assert_eq!(reopened.table_row_count("moments").unwrap(), 1);
+    assert_eq!(
+        dohc_engine_domain::VersionedTextStore::new(&mut reopened)
+            .read_text(WS, "main", "d.md")
+            .unwrap()
+            .unwrap()
+            .text,
+        "x"
+    );
 }
 
 // oracle: dropping the supervisor closes every actor (deterministic Drop, no

@@ -1,4 +1,6 @@
+mod common;
 use base64::Engine as _;
+use common::call_with_busy_retry;
 use dohc_engine_collab::{ContentKind, DocKey, Ydoc, load_persisted};
 use dohc_engine_domain::VersionedTextStore;
 use dohc_engine_protocol::{
@@ -33,18 +35,18 @@ async fn open_bound_root(
     scratch: &ScratchDir,
     request_id: u64,
 ) -> WorkspaceHandle {
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                request_id,
-                "workspace.open",
-                None,
-                json!({ "rootDir": root_string(scratch), "workspaceId": "ws-shadow" }),
-            ),
-        )
-        .await
-        .expect("workspace open");
+    let opened = call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(
+            request_id,
+            "workspace.open",
+            None,
+            json!({ "rootDir": root_string(scratch), "workspaceId": "ws-shadow" }),
+        ),
+    )
+    .await
+    .expect("workspace open");
     serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle")
 }
 
@@ -506,22 +508,22 @@ async fn open_error(
     request_id: u64,
     read_only: bool,
 ) -> dohc_engine_protocol::error::WireError {
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                request_id,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": root_string(scratch),
-                    "workspaceId": "ws-shadow",
-                    "skipStartupMaintenance": read_only,
-                }),
-            ),
-        )
-        .await
-        .expect_err("open must be refused")
+    call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(
+            request_id,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": root_string(scratch),
+                "workspaceId": "ws-shadow",
+                "skipStartupMaintenance": read_only,
+            }),
+        ),
+    )
+    .await
+    .expect_err("open must be refused")
 }
 
 fn engine_files(scratch: &ScratchDir) -> Vec<String> {

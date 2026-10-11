@@ -2,6 +2,7 @@
 //! body integrity checks, parsing and lexical key construction run off it.
 mod parser;
 #[cfg(test)]
+#[path = "link_tests.rs"]
 mod tests;
 mod worker;
 
@@ -485,8 +486,12 @@ pub fn gc_step(store: &mut EngineStore) -> Result<bool, StorageError> {
     let outcome=store.write_with(&NoFaults,|tx| {
         let work=tx.query_row("SELECT workspace_id,version_id,object_id,index_key FROM link_gc LIMIT 1",[],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?))).optional().map_err(sql)?;
         let Some((ws,v,o,k))=work else {return Ok(false);};
-        for table in ["link_occurrence_keys","links","link_target_keys"] {
-            let n=tx.execute(&format!("DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND index_key=?4 LIMIT 32)"),params![ws,v,o,k]).map_err(sql)?;
+        for statement in [
+            "DELETE FROM link_occurrence_keys WHERE rowid IN (SELECT rowid FROM link_occurrence_keys WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND index_key=?4 LIMIT 32)",
+            "DELETE FROM links WHERE rowid IN (SELECT rowid FROM links WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND index_key=?4 LIMIT 32)",
+            "DELETE FROM link_target_keys WHERE rowid IN (SELECT rowid FROM link_target_keys WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND index_key=?4 LIMIT 32)",
+        ] {
+            let n=tx.execute(statement,params![ws,v,o,k]).map_err(sql)?;
             if n>0 {return Ok(true);}
         }
         tx.execute("DELETE FROM link_gc WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND index_key=?4",params![ws,v,o,k]).map_err(sql)?;

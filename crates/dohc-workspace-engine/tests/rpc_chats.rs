@@ -23,21 +23,21 @@ async fn open_workspace(
     workspace_id: &str,
 ) -> WorkspaceHandle {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                id,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace_id,
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(
+            id,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace_id,
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle")
 }
 
@@ -49,14 +49,14 @@ async fn call(
     params: Value,
 ) -> Value {
     *id += 1;
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(*id, method, Some(handle.clone()), params),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
-        .result
+    call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(*id, method, Some(handle.clone()), params),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
+    .result
 }
 
 async fn call_error(
@@ -67,13 +67,13 @@ async fn call_error(
     params: Value,
 ) -> dohc_engine_protocol::error::WireError {
     *id += 1;
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(*id, method, Some(handle.clone()), params),
-        )
-        .await
-        .unwrap_err()
+    call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(*id, method, Some(handle.clone()), params),
+    )
+    .await
+    .unwrap_err()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -164,8 +164,7 @@ async fn call_with_idempotency(
     *id += 1;
     let mut request = request(*id, method, Some(handle.clone()), params);
     request.idempotency_key = Some(idempotency_key.to_owned());
-    transport
-        .call(RequestContext::unbounded(), request)
+    call_with_busy_retry(transport, RequestContext::unbounded(), request)
         .await
         .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
         .result
@@ -182,8 +181,7 @@ async fn call_error_with_idempotency(
     *id += 1;
     let mut request = request(*id, method, Some(handle.clone()), params);
     request.idempotency_key = Some(idempotency_key.to_owned());
-    transport
-        .call(RequestContext::unbounded(), request)
+    call_with_busy_retry(transport, RequestContext::unbounded(), request)
         .await
         .unwrap_err()
 }

@@ -39,41 +39,41 @@ async fn fixture_with_service(
     let workspace_id = format!("ws-conflicts-{name}");
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(Arc::clone(&service));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace_id,
-                }),
-            ),
-        )
-        .await
-        .expect("open");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace_id,
+            }),
+        ),
+    )
+    .await
+    .expect("open");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                2,
-                "versionedText.write",
-                Some(handle.clone()),
-                json!({
-                    "versionId": "main",
-                    "path": "bootstrap.md",
-                    "text": "bootstrap",
-                    "origin": "api",
-                    "requestId": format!("{name}-bootstrap"),
-                }),
-            ),
-        )
-        .await
-        .expect("bootstrap versioned workspace");
+    call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            2,
+            "versionedText.write",
+            Some(handle.clone()),
+            json!({
+                "versionId": "main",
+                "path": "bootstrap.md",
+                "text": "bootstrap",
+                "origin": "api",
+                "requestId": format!("{name}-bootstrap"),
+            }),
+        ),
+    )
+    .await
+    .expect("bootstrap versioned workspace");
     (scratch, service, transport, handle, workspace_id)
 }
 
@@ -130,18 +130,18 @@ async fn seed_conflicts(
     text: &str,
 ) {
     for index in 0..count {
-        let opened = transport
-            .call(
-                RequestContext::unbounded(),
-                request(
-                    index as u64 + 2,
-                    "conflicts.open",
-                    Some(handle.clone()),
-                    conflict_payload(workspace_id, index, text),
-                ),
-            )
-            .await
-            .unwrap_or_else(|error| panic!("seed conflict {index}: {error:?}"));
+        let opened = call_with_busy_retry(
+            transport,
+            RequestContext::unbounded(),
+            request(
+                index as u64 + 2,
+                "conflicts.open",
+                Some(handle.clone()),
+                conflict_payload(workspace_id, index, text),
+            ),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("seed conflict {index}: {error:?}"));
         assert_eq!(opened.result["inserted"], true);
     }
 }
@@ -153,18 +153,18 @@ async fn open_conflict(
     index: usize,
     text: &str,
 ) {
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                index as u64 + 2,
-                "conflicts.open",
-                Some(handle.clone()),
-                conflict_payload(workspace_id, index, text),
-            ),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("seed conflict {index}: {error:?}"));
+    let opened = call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(
+            index as u64 + 2,
+            "conflicts.open",
+            Some(handle.clone()),
+            conflict_payload(workspace_id, index, text),
+        ),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("seed conflict {index}: {error:?}"));
     assert_eq!(opened.result["inserted"], true);
 }
 
@@ -174,41 +174,41 @@ async fn open_workspace(
     workspace_id: &str,
     request_id: u64,
 ) -> WorkspaceHandle {
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                request_id,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace_id,
-                }),
-            ),
-        )
-        .await
-        .expect("open");
+    let opened = call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(
+            request_id,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace_id,
+            }),
+        ),
+    )
+    .await
+    .expect("open");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                request_id + 1,
-                "versionedText.write",
-                Some(handle.clone()),
-                json!({
-                    "versionId": "main",
-                    "path": "bootstrap.md",
-                    "text": "bootstrap",
-                    "origin": "api",
-                    "requestId": format!("{workspace_id}-bootstrap"),
-                }),
-            ),
-        )
-        .await
-        .expect("bootstrap versioned workspace");
+    call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(
+            request_id + 1,
+            "versionedText.write",
+            Some(handle.clone()),
+            json!({
+                "versionId": "main",
+                "path": "bootstrap.md",
+                "text": "bootstrap",
+                "origin": "api",
+                "requestId": format!("{workspace_id}-bootstrap"),
+            }),
+        ),
+    )
+    .await
+    .expect("bootstrap versioned workspace");
     handle
 }
 
@@ -1131,27 +1131,27 @@ async fn open_conflict_against_seeded_head_with(
     shape: impl FnOnce(&mut Value),
 ) -> String {
     let path = "conflict-000.md".to_owned();
-    let current = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                request_id,
-                "versionedText.write",
-                Some(handle.clone()),
-                json!({
-                    "versionId": "main",
-                    "objectId": "seeded-conflict-object",
-                    "path": path,
-                    "text": "recorded current",
-                    "momentId": "seeded-conflict-recorded",
-                    "origin": "api",
-                    "nowMs": 10,
-                    "requestId": "seed-conflict-current",
-                }),
-            ),
-        )
-        .await
-        .expect("seed current head");
+    let current = call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(
+            request_id,
+            "versionedText.write",
+            Some(handle.clone()),
+            json!({
+                "versionId": "main",
+                "objectId": "seeded-conflict-object",
+                "path": path,
+                "text": "recorded current",
+                "momentId": "seeded-conflict-recorded",
+                "origin": "api",
+                "nowMs": 10,
+                "requestId": "seed-conflict-current",
+            }),
+        ),
+    )
+    .await
+    .expect("seed current head");
     let snapshot = &current.result["snapshot"];
     let mut payload = conflict_payload(workspace_id, 0, side_text);
     payload["conflict"]["current"]["snapshot"] = json!({
@@ -1166,18 +1166,18 @@ async fn open_conflict_against_seeded_head_with(
         "metadataOrigin": snapshot["metadataOrigin"],
     });
     shape(&mut payload);
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                request_id + 1,
-                "conflicts.open",
-                Some(handle.clone()),
-                payload,
-            ),
-        )
-        .await
-        .expect("open conflict against current head");
+    call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(
+            request_id + 1,
+            "conflicts.open",
+            Some(handle.clone()),
+            payload,
+        ),
+    )
+    .await
+    .expect("open conflict against current head");
     path
 }
 

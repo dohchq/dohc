@@ -49,26 +49,47 @@ fn open(path: &Path) -> EngineStore {
     EngineStore::open_for_actor(path, 1, None, None).unwrap()
 }
 fn write(s: &mut EngineStore, object: &str, path: &str, text: &str, n: i64) {
-    let mut v = VersionedTextStore::new(s);
-    v.ensure_main_version("ws", "main", 1, &NoFaults).unwrap();
-    v.write_text(
-        &WriteText {
-            workspace_id: "ws".into(),
-            version_id: "main".into(),
-            object_id: object.into(),
-            path: path.into(),
-            text: text.into(),
-            moment_id: format!("m-{object}-{n}"),
-            metadata_origin: "test".into(),
-            metadata_summary: None,
-            metadata_correlation_id: None,
-            author_json: None,
-            now_ms: n,
-            request_id: None,
-        },
-        &NoFaults,
-    )
-    .unwrap();
+    let input = WriteText {
+        workspace_id: "ws".into(),
+        version_id: "main".into(),
+        object_id: object.into(),
+        path: path.into(),
+        text: text.into(),
+        moment_id: format!("m-{object}-{n}"),
+        metadata_origin: "test".into(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms: n,
+        request_id: None,
+    };
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut backoff = Duration::from_millis(5);
+    loop {
+        let mut versions = VersionedTextStore::new(s);
+        let result = versions
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .and_then(|_| versions.write_text(&input, &NoFaults));
+        match result {
+            Ok(_) => return,
+            Err(dohc_engine_domain::DomainError::Storage(
+                dohc_engine_storage::StorageError::FileLocked,
+            )) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                assert!(
+                    !remaining.is_zero(),
+                    "link fixture write stayed locked until its deadline"
+                );
+                std::thread::sleep(backoff.min(remaining));
+                assert!(
+                    Instant::now() < deadline,
+                    "link fixture write stayed locked until its deadline"
+                );
+                backoff = (backoff * 2).min(Duration::from_millis(200));
+            }
+            Err(error) => panic!("link fixture write failed: {error:?}"),
+        }
+    }
 }
 
 fn count(s: &EngineStore, table: &str) -> i64 {

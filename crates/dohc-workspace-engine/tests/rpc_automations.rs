@@ -78,14 +78,14 @@ async fn call(
     params: Value,
 ) -> Value {
     *id += 1;
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(*id, method, Some(handle.clone()), params),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
-        .result
+    call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(*id, method, Some(handle.clone()), params),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
+    .result
 }
 
 async fn call_error(
@@ -96,13 +96,13 @@ async fn call_error(
     params: Value,
 ) -> dohc_engine_protocol::error::WireError {
     *id += 1;
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(*id, method, Some(handle.clone()), params),
-        )
-        .await
-        .unwrap_err()
+    call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(*id, method, Some(handle.clone()), params),
+    )
+    .await
+    .unwrap_err()
 }
 
 fn facts(origin_seq: i64) -> CollectionRecordApplyFacts {

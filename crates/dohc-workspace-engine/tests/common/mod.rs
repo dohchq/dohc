@@ -14,6 +14,58 @@ use std::time::Duration;
 
 pub const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+/// Retry only a transaction's busy refusal; other errors retain their meaning.
+/// Test hosts may be loaded, so allow a minute with the client's 100–1000 ms ladder.
+pub async fn retry_engine_store_busy<T, F>(mut operation: impl FnMut() -> F) -> Result<T, WireError>
+where
+    F: std::future::Future<Output = Result<T, WireError>>,
+{
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let mut delay = Duration::from_millis(100);
+    loop {
+        match operation().await {
+            Err(error)
+                if error.code == dohc_engine_protocol::error::ErrorCode::Overloaded
+                    && error.message == "engine-store-busy" =>
+            {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(error);
+                }
+                tokio::time::sleep(delay.min(remaining)).await;
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(error);
+                }
+                delay = (delay * 2).min(Duration::from_secs(1));
+            }
+            result => return result,
+        }
+    }
+}
+
+pub async fn call_with_busy_retry(
+    transport: &InProcessTransport<EngineService>,
+    context: RequestContext,
+    input: Request,
+) -> Result<dohc_engine_protocol::wire::Response, WireError> {
+    retry_engine_store_busy(|| transport.call(context.clone(), input.clone())).await
+}
+
+pub async fn service_call_with_busy_retry(
+    service: &EngineService,
+    context: RequestContext,
+    input: Request,
+) -> Result<dohc_engine_protocol::transport::ServiceResponse, WireError> {
+    retry_engine_store_busy(|| {
+        dohc_engine_protocol::transport::EngineService::call(
+            service,
+            context.clone(),
+            input.clone(),
+        )
+    })
+    .await
+}
+
 pub fn request(
     id: u64,
     method: &str,
@@ -38,14 +90,14 @@ pub async fn call(
     method: &str,
     params: Value,
 ) -> Value {
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(id, method, Some(handle.clone()), params),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{method} request {id} failed: {error:?}"))
-        .result
+    call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(id, method, Some(handle.clone()), params),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{method} request {id} failed: {error:?}"))
+    .result
 }
 
 pub async fn call_error(
@@ -55,13 +107,13 @@ pub async fn call_error(
     method: &str,
     params: Value,
 ) -> WireError {
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(id, method, Some(handle.clone()), params),
-        )
-        .await
-        .unwrap_err()
+    call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(id, method, Some(handle.clone()), params),
+    )
+    .await
+    .unwrap_err()
 }
 
 pub fn write_file(root: &Path, path: &str, bytes: &[u8]) {
