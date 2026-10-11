@@ -26,9 +26,10 @@ export function SettingRow(props: {
       }`}
     >
       <div className="min-w-0">
-        <div className="flex items-center gap-2">
+        {/* The dot hangs left of the title, so marking a row moves nothing in it. */}
+        <div className="relative flex items-center">
           {props.modified ? (
-            <span title="Modified" className="relative size-1.5 shrink-0 rounded-full bg-accent">
+            <span title="Modified" className="absolute right-full top-1/2 mr-2 size-1.5 -translate-y-1/2 rounded-full bg-accent">
               <span className="sr-only">Modified</span>
             </span>
           ) : null}
@@ -41,16 +42,22 @@ export function SettingRow(props: {
       </div>
       <div className="flex min-w-0 items-center justify-end gap-2 max-[720px]:justify-start">
         {props.children}
-        {props.modified && props.onReset ? (
-          <button
-            type="button"
-            aria-label="Reset"
-            title="Reset"
-            onClick={props.onReset}
-            className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
-          >
-            <RotateCcw size={14} strokeWidth={1.9} aria-hidden />
-          </button>
+        {/* A resettable row keeps the reset's place while unchanged, so its
+            control stays under the pointer when the reset appears. */}
+        {props.onReset ? (
+          props.modified ? (
+            <button
+              type="button"
+              aria-label="Reset"
+              title="Reset"
+              onClick={props.onReset}
+              className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
+            >
+              <RotateCcw size={14} strokeWidth={1.9} aria-hidden />
+            </button>
+          ) : (
+            <span aria-hidden className="size-6 shrink-0" />
+          )
         ) : null}
       </div>
     </div>
@@ -123,7 +130,7 @@ export function ThemeControl(props: { value: ThemeMode; onChange: (value: ThemeM
 }
 
 type StepperPart = {
-  // The button's name, and the first words of its tooltip.
+  // The tooltip's words. For − and + it is also the button's name.
   label: string;
   // The keys that do the same, shown as chips in the tooltip.
   keys?: readonly string[];
@@ -131,49 +138,70 @@ type StepperPart = {
   onClick: () => void;
 };
 
+type StepperPartName = "decrease" | "reset" | "increase";
+
 /**
  * One bordered stepper: −, the value, +. Clicking the value resets it. Each
- * part's tooltip names it and its keys, on hover or keyboard focus.
+ * part's tooltip names it and its keys while the pointer is over it or the
+ * keyboard focused it. A click does not open one.
  */
 export function StepperControl(props: {
+  // The setting's name in a sentence, such as "zoom".
+  setting: string;
   value: string;
   decrease: StepperPart;
-  reset: StepperPart;
+  reset: StepperPart & { to: string };
   increase: StepperPart;
 }) {
-  const [tip, setTip] = useState<"decrease" | "reset" | "increase" | null>(null);
+  const [hovered, setHovered] = useState<StepperPartName | null>(null);
+  const [focused, setFocused] = useState<StepperPartName | null>(null);
+  // The part whose tooltip Escape put away, until the pointer or focus moves.
+  const [dismissed, setDismissed] = useState<StepperPartName | null>(null);
+  const shown = hovered ?? focused;
+  const tip = shown === dismissed ? null : shown;
   const tipId = useId();
-  const part = (name: "decrease" | "reset" | "increase", className: string, content: ReactNode) => {
+  const part = (name: StepperPartName, className: string, content: ReactNode) => {
     const spec = props[name];
+    const open = tip === name;
     return (
       <span
         className="relative flex"
-        onMouseEnter={() => setTip(name)}
-        onMouseLeave={(event) => {
-          if (!event.currentTarget.contains(document.activeElement)) setTip(null);
+        onMouseEnter={() => {
+          setHovered(name);
+          setDismissed(null);
+        }}
+        onMouseLeave={() => {
+          setHovered(null);
+          setDismissed(null);
         }}
       >
         <button
           type="button"
-          aria-label={name === "reset" ? undefined : spec.label}
-          aria-describedby={tip === name ? tipId : undefined}
+          aria-label={name === "reset" ? `Reset ${props.setting} to ${props.reset.to}, now ${props.value}` : spec.label}
+          aria-describedby={open ? `${tipId}-${name}` : undefined}
+          // Overlay leaves this Escape to the control: it closes the tooltip.
+          data-tooltip-open={open ? "" : undefined}
           disabled={spec.disabled}
           onClick={spec.onClick}
-          onFocus={() => setTip(name)}
-          onBlur={() => setTip(null)}
+          onFocus={(event) => {
+            if (!event.currentTarget.matches(":focus-visible")) return;
+            setFocused(name);
+            setDismissed(null);
+          }}
+          onBlur={() => setFocused((current) => (current === name ? null : current))}
           onKeyDown={(event) => {
-            if (event.key === "Escape" && tip) {
+            if (event.key === "Escape" && open) {
               event.stopPropagation();
-              setTip(null);
+              setDismissed(name);
             }
           }}
           className={`grid h-[26px] place-items-center transition-colors focus-visible:-outline-offset-2 enabled:hover:bg-hover enabled:hover:text-ink disabled:opacity-50 ${className}`}
         >
           {content}
         </button>
-        {tip === name ? (
+        {open ? (
           <span
-            id={tipId}
+            id={`${tipId}-${name}`}
             role="tooltip"
             className="dohc-popover dohc-pop-in pointer-events-none absolute right-0 top-full z-50 mt-2 flex w-max items-center gap-1.5 rounded-md border border-line bg-panel px-2 py-1 text-[11px] text-ink"
           >

@@ -1611,12 +1611,10 @@ describe("runner note reaches the card through the shell's own wiring", () => {
     const user = userEvent.setup();
     renderShell(bridge);
 
+    // The docs send people to Agents to turn on MCP, so the palette finds it by "mcp".
     await user.keyboard("{Control>}k{/Control}");
-    await user.click(
-      await within(await screen.findByTestId("command-palette")).findByText(
-        "Settings: Open Agents",
-      ),
-    );
+    await screen.findByTestId("command-palette");
+    await user.keyboard("mcp{Enter}");
 
     const note = await screen.findByTestId("runner-self-test-engine-note");
     await waitFor(() =>
@@ -1633,7 +1631,7 @@ describe("runner note reaches the card through the shell's own wiring", () => {
     await user.keyboard("{Control>}k{/Control}");
     await user.click(
       await within(await screen.findByTestId("command-palette")).findByText(
-        "Settings: Open Agents",
+        "Settings: Open Agents (MCP)",
       ),
     );
 

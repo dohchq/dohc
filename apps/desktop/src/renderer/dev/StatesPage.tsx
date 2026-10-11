@@ -1702,7 +1702,7 @@ function Pane(props: { theme: "light" | "dark" }) {
           </div>
         </Specimen>
         <Specimen label="keyboard focus on the value">
-          <div data-force-state="focus focus-visible" data-force-target="button:not([aria-label])">
+          <div data-force-state="focus focus-visible" data-force-target='[aria-label^="Reset zoom"]'>
             <ZoomSpecimen percent={110} />
           </div>
         </Specimen>
@@ -1732,9 +1732,10 @@ const EDITOR_FONT_OPTIONS = [
 function ZoomSpecimen(props: { percent: number; atMost?: boolean }) {
   return (
     <StepperControl
+      setting="zoom"
       value={`${props.percent}%`}
       decrease={{ label: "Zoom out", keys: ["Ctrl", "-"], onClick: noop }}
-      reset={{ label: "Reset to 100%", keys: ["Ctrl", "0"], onClick: noop }}
+      reset={{ label: "Reset to 100%", to: "100%", keys: ["Ctrl", "0"], onClick: noop }}
       increase={{ label: "Zoom in", keys: ["Ctrl", "="], disabled: props.atMost, onClick: noop }}
     />
   );

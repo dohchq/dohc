@@ -603,6 +603,7 @@ export function SettingsDialog(props: {
               testId="settings-row-zoom"
             >
               <StepperControl
+                setting="zoom"
                 value={`${zoomPercent(userSettings.appearance.zoomLevel)}%`}
                 decrease={{
                   label: "Zoom out",
@@ -612,6 +613,7 @@ export function SettingsDialog(props: {
                 }}
                 reset={{
                   label: `Reset to ${zoomPercent(DEFAULT_USER_SETTINGS.appearance.zoomLevel)}%`,
+                  to: `${zoomPercent(DEFAULT_USER_SETTINGS.appearance.zoomLevel)}%`,
                   keys: [modifierKey, "0"],
                   onClick: () => {
                     if (zoomModified) void stepZoomSetting("reset");
@@ -696,6 +698,7 @@ export function SettingsDialog(props: {
               testId="settings-row-editor-size"
             >
               <StepperControl
+                setting="editor text size"
                 value={`${userSettings.editor.fontSize}px`}
                 decrease={{
                   label: "Smaller editor text",
@@ -704,6 +707,7 @@ export function SettingsDialog(props: {
                 }}
                 reset={{
                   label: `Reset to ${DEFAULT_USER_SETTINGS.editor.fontSize}px`,
+                  to: `${DEFAULT_USER_SETTINGS.editor.fontSize}px`,
                   onClick: () => {
                     if (editorSizeModified) void saveEditor({ fontSize: DEFAULT_USER_SETTINGS.editor.fontSize });
                   },
