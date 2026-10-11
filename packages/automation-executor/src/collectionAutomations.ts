@@ -3181,6 +3181,17 @@ export class CollectionAutomations {
     } catch (error) { return buttonInspectionFailure(error); }
   }
 
+  private async isButtonField(path: string, field: string, schemas = new Map<string, Promise<ReturnType<typeof parseCollectionSchema> | null>>()): Promise<boolean> {
+    let schemaRead = schemas.get(path);
+    if (!schemaRead) {
+      schemaRead = this.options.readText(`${path}/${COLLECTION_SCHEMA_FILENAME}`).then(read =>
+        !read || read.truncated ? null : parseCollectionSchema(read.text));
+      schemas.set(path, schemaRead);
+    }
+    const schema = await schemaRead;
+    return schema?.schema.fields.some(candidate => candidate.name === field && candidate.type === "button") ?? false;
+  }
+
   private async inspectAuthority(authority: RelayButtonAuthority, schemas = new Map<string, Promise<ReturnType<typeof parseCollectionSchema> | null>>()): Promise<RelayButtonInspection> {
     const moved = () => {
       const current = this.locate(authority.automationId);
@@ -3200,15 +3211,7 @@ export class CollectionAutomations {
       if (automation.when.kind !== "button" || automation.when.table !== null) return denied("trigger-changed", "This automation no longer runs from this Button.");
       if (id.collectionPath !== authority.collectionPath) return denied("collection-moved", SHARED_BUTTON_MOVED);
       if (definitionHash(automation) !== authority.definitionHash) return denied("definition-mismatch", "This Button's automation changed. Refresh the Collection, then try again.");
-      let schemaRead = schemas.get(id.collectionPath);
-      if (!schemaRead) {
-        schemaRead = this.options.readText(`${id.collectionPath}/${COLLECTION_SCHEMA_FILENAME}`).then(read =>
-          !read || read.truncated ? null : parseCollectionSchema(read.text));
-        schemas.set(id.collectionPath, schemaRead);
-      }
-      const schema = await schemaRead;
-      const buttonField = automation.when.field;
-      if (!schema?.schema.fields.some(field => field.name === buttonField && field.type === "button")) {
+      if (!await this.isButtonField(id.collectionPath, automation.when.field, schemas)) {
         return denied("field-changed", SHARED_BUTTON_FIELD_CHANGED);
       }
       const roster = await this.options.roster();
@@ -5409,6 +5412,7 @@ export class CollectionAutomations {
         },
       }),
       targets: this.targetResolver(),
+      isButtonField: (path, field) => this.isButtonField(path, field),
       withHost: (work) => this.withLiveHost(work),
       cachedRoster: () => this.options.cachedRoster(),
       checkReach: async (steps, roster) => {

@@ -142,6 +142,8 @@ export interface CollectionAutomationRunDependencies {
   /** Sync earlier writes in this workspace's engine before saving run completion. */
   makeDurable(claimId?: string): Promise<void>;
   checkPresser?(): Promise<void>;
+  /** Whether the document Collection still has this Button field. */
+  isButtonField(path: string, field: string): Promise<boolean>;
   authorizeDataset?(datasetId: string, operationId: string): Promise<import("./buttonPresser").DatasetOperationCeiling>;
   withHost?: import("./datasetAutomationRun").DatasetAutomationRunDependencies["withHost"];
   cachedRoster?(): Promise<ReachRoster>;

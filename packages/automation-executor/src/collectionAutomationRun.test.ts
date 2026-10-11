@@ -366,6 +366,7 @@ function workspace(docs: readonly Doc[], fault: Fault | null = null, files = new
     }),
     dependencies: (store: AutomationRunStore): CollectionAutomationRunDependencies => ({
       makeDurable: async () => {},
+      isButtonField: async () => true,
       withReads: async (work) => await work(reads),
       withRecordWrites: async (_signal, work) => await work(writes),
       // Each Collection's id is its name here; none moves unless a test moves it.
@@ -519,6 +520,45 @@ it("an early preparation refusal leaves crash receipts available to Undo without
   expect(saved.durableEffects).toBe(0);
   expect((await undoCollectionAutomationRuns(space.undo([]), [saved], signal)).undone.reverted).toBe(1);
   expect(space.records.get("rec_t")!.values.A).toBe(0);
+});
+
+it("refuses a Button claim before writing when its field is no longer a Button", async () => {
+  const definition = automation("id: chain\nname: Chain\nwhen: {button: Finish}\ndo: [{set: {A: 1}}]");
+  const claim: AutomationClaim = { ...added(), change: { ...added().change, kind: "button", onBehalfOf: "presser" } };
+  const space = workspace([task("rec_t", { A: 0 })]), store = await scratchStore();
+  const checks: string[] = [];
+  const deps = Object.assign(space.dependencies(store), { isButtonField: async (path: string, field: string) => {
+    checks.push(`${path}/${field}`);
+    return false;
+  } });
+  const signal = new AbortController().signal;
+  const outcome = await runCollectionAutomation(deps, { claim, automation: definition, collection: { path: "Tasks", name: "Tasks" },
+    roster: { kind: "owner", ownerUserId: null, grants: [] }, signal, stopped: signal });
+  expect({ outcome, values: space.records.get("rec_t")!.values, writes: space.keys.size }).toEqual({
+    outcome: { kind: "failed", error: "Finish changed after it was pressed. Press it again.", timedOut: false },
+    values: { A: 0 }, writes: 0,
+  });
+  expect(checks).toEqual(["Tasks/Finish"]);
+  expect((await store.runsOf(claim.automationId, claim.claimId)).runs).toEqual([]);
+});
+
+it("continues a Button run with a saved step after its field stops being a Button", async () => {
+  const definition = automation("id: chain\nname: Chain\nwhen: {button: Finish}\ndo: [{set: {A: 1}}, {set: {B: 2}}]");
+  const claim: AutomationClaim = { ...added(), change: { ...added().change, kind: "button", onBehalfOf: "presser" } };
+  const space = workspace([task("rec_t", { A: 1, B: 0 })]), store = await scratchStore();
+  const run = newRun(claim, definition, `${definitionHash(definition)}-1`, 1);
+  run.steps = [{ ordinal: 0, effects: [{ kind: "set", target: { recordId: "rec_t", path: "Tasks/rec_t.md", collectionPath: "Tasks" },
+    fields: [{ field: "A", before: 0, after: 1 }] }] }];
+  run.applied = [{ ordinal: 0, writes: [{ kind: "field", recordId: "rec_t", path: "Tasks/rec_t.md", field: "A", before: 0, after: 1 }] }];
+  run.durableEffects = 1;
+  await store.save(run);
+  let checks = 0;
+  const deps = Object.assign(space.dependencies(store), { isButtonField: async () => { checks++; return false; } });
+  const signal = new AbortController().signal;
+  expect(await runCollectionAutomation(deps, { claim, automation: definition, collection: { path: "Tasks", name: "Tasks" },
+    roster: { kind: "owner", ownerUserId: null, grants: [] }, signal, stopped: signal })).toEqual({ kind: "done" });
+  expect(space.records.get("rec_t")!.values).toEqual({ A: 1, B: 2 });
+  expect(checks).toBe(0);
 });
 
 it.each([true, false])("replays only recorded messages when the roster and direct-message membership changed, recorded=%s", async recorded => {
