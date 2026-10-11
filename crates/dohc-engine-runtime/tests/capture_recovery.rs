@@ -401,7 +401,7 @@ async fn recovery_after_pruning_and_reenrollment_never_exports_private_typing() 
         assert_eq!(exported, 0);
         store
             .write_with(&NoFaults, |tx| {
-                dohc_engine_sync::journal_moment_append_in_tx(tx, WS, &id)
+                dohc_engine_sync::journal_moment_append_in_tx(tx, WS, &id, 1)
             })
             .unwrap();
         let private:i64=store.read_with(|conn| conn.query_row("SELECT COUNT(*) FROM replication_log WHERE payload_json LIKE '%human%' OR payload_json LIKE '%writer%'",[],|row|row.get(0))).unwrap();

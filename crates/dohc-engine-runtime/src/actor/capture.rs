@@ -676,12 +676,14 @@ fn capture_ingest_in_tx(
             &result.moment.moment_id,
             result.deduped,
             &mut batch.journals_file_moments,
+            input.now_ms,
         ),
         None => journal_moment_outbound_in_tx(
             tx,
             &input.workspace_id,
             &result.moment.moment_id,
             result.deduped,
+            input.now_ms,
         ),
     }
     .map_err(RuntimeError::from)?;
@@ -1093,8 +1095,14 @@ fn capture_ingest_binary_on_store(
             )
             .map_err(RuntimeError::from)?;
         }
-        journal_moment_outbound_in_tx(tx, &input.workspace_id, &result.moment_id, result.deduped)
-            .map_err(RuntimeError::from)?;
+        journal_moment_outbound_in_tx(
+            tx,
+            &input.workspace_id,
+            &result.moment_id,
+            result.deduped,
+            input.now_ms,
+        )
+        .map_err(RuntimeError::from)?;
         Ok::<_, RuntimeError>(result)
     })?;
     match outcome {
@@ -1316,9 +1324,10 @@ fn capture_retire_on_store(
                     &input.workspace_id,
                     &retired.moment.moment_id,
                     false,
+                    input.now_ms,
                 )
                 .map_err(RuntimeError::from)?;
-                asset_jobs = delete_owned_scene_assets_in_tx(tx, retired)?;
+                asset_jobs = delete_owned_scene_assets_in_tx(tx, retired, input.now_ms)?;
                 dohc_engine_sync::retire_ydoc_lineage_in_tx(
                     tx,
                     &input.workspace_id,
@@ -1332,6 +1341,7 @@ fn capture_retire_on_store(
                     &input.workspace_id,
                     &retired.moment.moment_id,
                     true,
+                    input.now_ms,
                 )
                 .map_err(RuntimeError::from)?;
             }

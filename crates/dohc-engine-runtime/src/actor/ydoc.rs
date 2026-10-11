@@ -1532,10 +1532,16 @@ fn seed_scene_from_artifact_on_store(
                 .map_err(|error| CollabError::Corrupt {
                     reason: format!("scene asset head write failed: {error}"),
                 })?;
-                journal_moment_outbound_in_tx(tx, &key.workspace_id, &asset.moment_id, false)
-                    .map_err(|error| CollabError::Corrupt {
-                        reason: format!("scene asset outbound journal failed: {error}"),
-                    })?;
+                journal_moment_outbound_in_tx(
+                    tx,
+                    &key.workspace_id,
+                    &asset.moment_id,
+                    false,
+                    now_ms,
+                )
+                .map_err(|error| CollabError::Corrupt {
+                    reason: format!("scene asset outbound journal failed: {error}"),
+                })?;
                 created_moment_ids.push(asset.moment_id.clone());
             }
             Ok(())
@@ -2973,7 +2979,7 @@ pub(super) fn ydoc_settle_on_store(
                 tx,
                 &key.workspace_id,
                 &result.moment.moment_id,
-                result.deduped,
+                result.deduped, now_ms
             )?;
         }
         let reconcile_required = settled_collection_record_reconcile_required_in_tx(

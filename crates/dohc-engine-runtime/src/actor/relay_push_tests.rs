@@ -67,7 +67,7 @@ fn append_file(store: &mut EngineStore, index: usize) {
         .expect("write content-bearing moment");
     store
         .write_with(&NoFaults, |tx| {
-            journal_moment_append_in_tx(tx, WORKSPACE, &moment_id)
+            journal_moment_append_in_tx(tx, WORKSPACE, &moment_id, 1)
         })
         .expect("journal moment");
 }

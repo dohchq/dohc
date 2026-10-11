@@ -716,7 +716,7 @@ fn select_file_versions(
             if !crate::ydoc_origination::can_originate_local_bases_in_tx(tx, workspace_id)? {
                 return Ok::<_, SyncError>((false, None));
             }
-            crate::enrolment::backfill_file_versions_in_tx(tx, workspace_id)?;
+            crate::enrolment::backfill_file_versions_in_tx(tx, workspace_id, now_ms)?;
             let next =
                 crate::enrolment::publish_ordinary_settled_heads_in_tx(tx, workspace_id, now_ms)?;
             Ok((true, next))

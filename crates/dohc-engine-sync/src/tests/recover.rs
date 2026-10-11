@@ -353,7 +353,7 @@ fn cloned_engines_capture_distinct_moments_and_converge_after_origin_recovery() 
             .expect("capture cloned path");
         let journaled = engine
             .write_with(&NoFaults, |tx| {
-                journal_moment_append_in_tx(tx, "ws", &result.moment.moment_id)
+                journal_moment_append_in_tx(tx, "ws", &result.moment.moment_id, 1)
             })
             .expect("journal captured moment");
         assert_eq!(journaled, TxnOutcome::Committed(()));

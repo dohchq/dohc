@@ -33,9 +33,17 @@ pub(super) fn journal_moment_outbound_in_tx(
     workspace_id: &str,
     moment_id: &str,
     deduped: bool,
+    published_at_ms: i64,
 ) -> Result<(), DomainError> {
     let mut eligibility = None;
-    journal_moment_outbound_with_batch_in_tx(tx, workspace_id, moment_id, deduped, &mut eligibility)
+    journal_moment_outbound_with_batch_in_tx(
+        tx,
+        workspace_id,
+        moment_id,
+        deduped,
+        &mut eligibility,
+        published_at_ms,
+    )
 }
 
 pub(super) fn journal_moment_outbound_with_batch_in_tx(
@@ -44,6 +52,7 @@ pub(super) fn journal_moment_outbound_with_batch_in_tx(
     moment_id: &str,
     deduped: bool,
     eligibility: &mut Option<bool>,
+    published_at_ms: i64,
 ) -> Result<(), DomainError> {
     if deduped {
         return Ok(());
@@ -61,7 +70,7 @@ pub(super) fn journal_moment_outbound_with_batch_in_tx(
     if !journals_file_moments {
         return Ok(());
     }
-    dohc_engine_sync::journal_moment_append_in_tx(tx, workspace_id, moment_id)
+    dohc_engine_sync::journal_moment_append_in_tx(tx, workspace_id, moment_id, published_at_ms)
         .map_err(outbound_domain)
 }
 

@@ -2858,10 +2858,47 @@ fn first_bootstrap_settlement_rejects_another_objects_baseline() {
     );
 }
 
+#[test]
+fn fix1a_delayed_audit_stamps_publication_time() {
+    delayed_audit_publication(true);
+}
+#[test]
+fn fix1a_unproven_audit_stamps_publication_time() {
+    delayed_audit_publication(false);
+}
+fn delayed_audit_publication(proof_ready: bool) {
+    let mut f = fixture(true);
+    bootstrap(&mut f, false).unwrap();
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(&f.bytes).unwrap();
+    doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "Later text.")
+        .unwrap();
+    f.bytes = doc.encode_full_state();
+    accept_enrollment_event(&mut f, 1);
+    settle_bootstrap_publication_at(&mut f, 1, "delayed-audit", 1_000_000, proof_ready).unwrap();
+    let published: i64 = f.store.read_with(|c| c.query_row("SELECT last_published_at_ms FROM ydoc_docs WHERE workspace_id='ws' AND object_id='object'", [], |r| r.get(0))).unwrap();
+    assert_eq!(published, 1_000_000);
+    let op = operations(&f.store)
+        .into_iter()
+        .find(|op| op.op_kind == "moment.append" && op.payload["momentId"] == "delayed-audit")
+        .unwrap();
+    assert_eq!(op.recorded_at_ms, 301);
+}
+
 fn settle_bootstrap_publication(
     f: &mut Fixture,
     cursor: i64,
     moment: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    settle_bootstrap_publication_at(f, cursor, moment, 300 + cursor, true)
+}
+
+fn settle_bootstrap_publication_at(
+    f: &mut Fixture,
+    cursor: i64,
+    moment: &str,
+    published_at_ms: i64,
+    proof_ready: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use dohc_engine_collab::live_update_application::{
         LiveUpdateReceipt, NativeHistoryReconstruction, with_settlement,
@@ -2921,8 +2958,8 @@ fn settle_bootstrap_publication(
                     &hex_sha256(&doc.encode_state_vector()),
                     300 + cursor,
                 )?;
-                audit.record_publication_state_in_tx(tx, &id, &doc.encode_full_state())?;
-                assert!(journal_live_settlement_in_tx(tx, "ws", &id, 300 + cursor)?.is_some());
+                if proof_ready { audit.record_publication_state_in_tx(tx, &id, &doc.encode_full_state())?; }
+                assert!(journal_live_settlement_in_tx(tx, "ws", &id, published_at_ms)?.is_some());
                 Ok(())
             })?;
             Ok(())
@@ -2959,7 +2996,7 @@ fn imported_activation_publication(foreign_baseline: bool, preserve_baseline: bo
         source.bytes.clone(),
         &NoFaults,
         |tx, _, namespace, binding| {
-            crate::journal_moment_append_in_tx(tx, "ws", "bootstrap-moment")?;
+            crate::journal_moment_append_in_tx(tx, "ws", "bootstrap-moment", 1)?;
             journal_live_base_in_tx(tx, namespace, binding, 100)?;
             Ok(())
         },

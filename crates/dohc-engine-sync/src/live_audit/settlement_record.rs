@@ -356,6 +356,7 @@ pub(super) fn journal_ready_in_tx(
             workspace,
             &moment,
             before.as_ref(),
+            now_ms,
         )
         .map(Some);
     }
@@ -383,8 +384,9 @@ pub(super) fn journal_ready_in_tx(
                 workspace,
                 &record.moment_id,
                 &before,
+                now_ms,
             )?,
-            None => crate::journal_moment_append_in_tx(tx, workspace, &record.moment_id)?,
+            None => crate::journal_moment_append_in_tx(tx, workspace, &record.moment_id, now_ms)?,
         }
         tx.execute(
         "UPDATE replication_log SET payload_json=json_set(json_remove(payload_json,'$.authors','$.attributionUnavailable'),'$.settlementReference',json(?3)) WHERE workspace_id=?1 AND op_kind='moment.append' AND json_extract(payload_json,'$.momentId')=?2 AND imported=0",

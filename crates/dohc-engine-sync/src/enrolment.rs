@@ -53,8 +53,8 @@ pub(crate) fn backfill_enrolment_window_in_tx(
     crate::live_audit::enrollment::queue_history_in_tx(tx, workspace_id)?;
     let sharing_declined = if !crate::live_audit::enrollment::pending_in_tx(tx, workspace_id)? {
         let declined = originate_unclaimed_ydoc_bases_in_tx(tx, workspace_id, leases, now_ms)?;
-        export_covered_heads_in_tx(tx, workspace_id, leases)?;
-        backfill_moments_and_conflict_bundles(tx, workspace_id)?;
+        export_covered_heads_in_tx(tx, workspace_id, leases, now_ms)?;
+        backfill_moments_and_conflict_bundles(tx, workspace_id, now_ms)?;
         declined
     } else {
         Vec::new()
@@ -70,8 +70,8 @@ pub(crate) fn finish_live_history_enrolment_in_tx(
     now_ms: i64,
 ) -> Result<Vec<SharingDeclined>, SyncError> {
     let declined = originate_unclaimed_ydoc_bases_in_tx(tx, workspace_id, leases, now_ms)?;
-    export_covered_heads_in_tx(tx, workspace_id, leases)?;
-    backfill_moments_and_conflict_bundles(tx, workspace_id)?;
+    export_covered_heads_in_tx(tx, workspace_id, leases, now_ms)?;
+    backfill_moments_and_conflict_bundles(tx, workspace_id, now_ms)?;
     Ok(declined)
 }
 
@@ -200,6 +200,7 @@ pub fn originate_closing_ydoc_base_in_tx(
 fn backfill_moments_and_conflict_bundles(
     tx: &Transaction<'_>,
     workspace_id: &str,
+    now_ms: i64,
 ) -> Result<(), SyncError> {
     let bundles = crate::conflict_outbox::pending_conflict_bundle_cuts_in_tx(tx, workspace_id)?;
     let mut after_moment_order = -1;
@@ -209,6 +210,7 @@ fn backfill_moments_and_conflict_bundles(
             workspace_id,
             after_moment_order,
             Some(bundle.pre_effect_moment_order),
+            now_ms,
         )?;
         crate::conflict_outbox::journal_pending_conflict_bundle_in_tx(
             tx,
@@ -217,7 +219,7 @@ fn backfill_moments_and_conflict_bundles(
         )?;
         after_moment_order = bundle.pre_effect_moment_order;
     }
-    backfill_moments_between(tx, workspace_id, after_moment_order, None)
+    backfill_moments_between(tx, workspace_id, after_moment_order, None, now_ms)
 }
 
 macro_rules! head_export_exclusions_sql {
@@ -252,15 +254,16 @@ pub(crate) fn publish_ordinary_settled_heads_in_tx(
     workspace_id: &str,
     now_ms: i64,
 ) -> Result<Option<i64>, SyncError> {
-    let candidates: Vec<(String, i64, Option<i64>, bool)> = {
+    let candidates: Vec<(String, i64, Option<i64>, bool, bool)> = {
         let mut statement = tx.prepare(concat!(
-            "SELECT h.moment_id,b.byte_length,d.last_published_at_ms,
+            "SELECT h.moment_id,b.byte_length+COALESCE((SELECT byte_length FROM blobs WHERE sha256=h.payload_before_blob_sha256),0),d.last_published_at_ms,
                EXISTS(SELECT 1 FROM moments m WHERE m.workspace_id=h.workspace_id
                  AND m.version_id=h.version_id AND m.object_id=h.object_id
                  AND m.metadata_origin='ydoc' AND m.moment_id GLOB 'moment-ydoc-*'
                  AND COALESCE(m.sync_record_only,0)=0
                  AND m.moment_order>COALESCE(p.moment_order,-1)
-                 AND m.moment_order<=h.moment_order LIMIT 1 OFFSET 1)
+                 AND m.moment_order<=h.moment_order LIMIT 1 OFFSET 1),
+               h.payload_before_blob_sha256 IS h.payload_after_blob_sha256
              FROM ydoc_docs d JOIN snapshots s USING(workspace_id,version_id,object_id)
              JOIN moments h ON h.workspace_id=s.workspace_id AND h.moment_id=s.latest_moment_id
                AND h.version_id=s.version_id AND h.object_id=s.object_id
@@ -273,7 +276,21 @@ pub(crate) fn publish_ordinary_settled_heads_in_tx(
                AND h.payload_after_blob_sha256=s.blob_sha256 AND h.payload_after_path=s.path
                AND (p.moment_id IS NULL OR p.operation='delete'
                  OR p.payload_after_blob_sha256 IS NOT h.payload_after_blob_sha256
-                 OR p.payload_after_path IS NOT h.payload_after_path)
+                 OR p.payload_after_path IS NOT h.payload_after_path
+                 OR EXISTS(SELECT 1 FROM moments m WHERE m.workspace_id=h.workspace_id
+                   AND m.version_id=h.version_id AND m.object_id=h.object_id
+                   AND m.moment_order>p.moment_order AND m.moment_order<=h.moment_order
+                   AND (m.moment_id GLOB 'moment-ydoc-apply-*'
+                     OR EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=m.workspace_id
+                       AND r.imported=1 AND r.op_kind='moment.append'
+                       AND json_extract(r.payload_json,'$.momentId')=+m.moment_id
+                       AND json_extract(r.payload_json,'$.versionId')=+m.version_id
+                       AND json_extract(r.payload_json,'$.objectId')=+m.object_id
+                       AND NOT EXISTS(SELECT 1 FROM replication_pending_refusals f
+                         WHERE f.workspace_id=r.workspace_id AND f.origin_id=r.origin_id
+                           AND f.origin_seq=r.origin_seq)))))
+               AND NOT EXISTS(SELECT 1 FROM live_audit_pending_exports a
+                 WHERE a.workspace_id=h.workspace_id AND a.main_version_id=h.version_id AND a.object_id=h.object_id)
                AND NOT EXISTS(SELECT 1 FROM live_device_settlements a
                  WHERE a.workspace_id=h.workspace_id AND a.moment_id=h.moment_id)
                AND NOT EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=h.workspace_id
@@ -286,7 +303,13 @@ pub(crate) fn publish_ordinary_settled_heads_in_tx(
         )).map_err(SyncError::corrupt)?;
         statement
             .query_map([workspace_id], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
             })
             .map_err(SyncError::corrupt)?
             .collect::<Result<_, _>>()
@@ -294,7 +317,12 @@ pub(crate) fn publish_ordinary_settled_heads_in_tx(
     };
     let mut next = None;
     let mut budget = FileExportBudget::default();
-    for (moment, bytes, last_ms, coalesced) in candidates {
+    for (moment, bytes, last_ms, coalesced, same_blob) in candidates {
+        // The pass budget counts each blob once; the throttle charges before plus after.
+        let budget_bytes = if same_blob { bytes / 2 } else { bytes };
+        if budget_bytes > FILE_EXPORT_BUDGET_BYTES {
+            continue;
+        }
         let interval =
             30_000.max(bytes.saturating_mul(3_600_000).saturating_add(9_999_999) / 10_000_000);
         if let Some(last) = last_ms
@@ -305,14 +333,15 @@ pub(crate) fn publish_ordinary_settled_heads_in_tx(
             next = Some(next.map_or(due, |previous: i64| previous.min(due)));
             continue;
         }
-        if !crate::outbound::journal_ordinary_settled_head_in_tx(
+        if crate::outbound::journal_ordinary_settled_head_in_tx(
             tx,
             workspace_id,
             &moment,
             coalesced,
             now_ms,
             &mut budget,
-        )? {
+        )? == crate::outbound::OrdinaryHeadPublication::PassFull
+        {
             next = Some(now_ms);
         }
     }
@@ -394,6 +423,7 @@ pub(crate) fn export_covered_heads_in_tx(
     tx: &Transaction<'_>,
     workspace_id: &str,
     leases: &dyn LeaseProbe,
+    now_ms: i64,
 ) -> Result<(), SyncError> {
     let candidates = {
         let mut statement = tx
@@ -484,7 +514,7 @@ pub(crate) fn export_covered_heads_in_tx(
             projection = source;
         }
         if dohc_engine_storage::hex_sha256(projection.as_bytes()) == sha {
-            match journal_moment_append_in_tx(tx, workspace_id, &moment_id) {
+            match journal_moment_append_in_tx(tx, workspace_id, &moment_id, now_ms) {
                 Ok(()) => {}
                 Err(error @ SyncError::Storage(_)) => return Err(error),
                 Err(_) => continue,
@@ -499,6 +529,7 @@ fn backfill_moments_between(
     workspace_id: &str,
     after_moment_order: i64,
     through_moment_order: Option<i64>,
+    now_ms: i64,
 ) -> Result<(), SyncError> {
     // `metadata_origin` alone cannot tell a locally-authored moment from an
     // imported one: `moment_apply.rs`'s `INSERT INTO moments` stores the
@@ -558,7 +589,7 @@ fn backfill_moments_between(
             .map_err(SyncError::corrupt)?
     };
     for moment_id in moment_ids {
-        journal_moment_append_in_tx(tx, workspace_id, &moment_id)?;
+        journal_moment_append_in_tx(tx, workspace_id, &moment_id, now_ms)?;
     }
     Ok(())
 }
@@ -582,6 +613,7 @@ pub(crate) fn file_version_is_publishable_in_tx(
 pub(crate) fn backfill_file_versions_in_tx(
     tx: &Transaction<'_>,
     workspace_id: &str,
+    now_ms: i64,
 ) -> Result<(), SyncError> {
     if !crate::ydoc_origination::can_originate_local_bases_in_tx(tx, workspace_id)? {
         return Ok(());
@@ -621,7 +653,7 @@ pub(crate) fn backfill_file_versions_in_tx(
             object_id,
         };
         if file_version_is_publishable_in_tx(tx, &key, &moment_id)? {
-            journal_file_version_in_tx(tx, &key, &moment_id, &mut file_budget)?;
+            journal_file_version_in_tx(tx, &key, &moment_id, &mut file_budget, now_ms)?;
         }
     }
     Ok(())
@@ -723,6 +755,8 @@ pub(crate) fn file_version_before_in_tx(
     Ok(crate::outbound::PortableBefore::bootstrap(&bootstrap))
 }
 
+pub(crate) const FILE_EXPORT_BUDGET_BYTES: i64 = 20 * 1024 * 1024;
+
 #[derive(Default)]
 pub(crate) struct FileExportBudget {
     blobs: std::collections::BTreeMap<String, i64>,
@@ -753,7 +787,7 @@ impl FileExportBudget {
                 blobs.insert(sha.to_owned(), length);
             }
         }
-        if blobs.values().sum::<i64>() > 20 * 1024 * 1024 {
+        if blobs.values().sum::<i64>() > FILE_EXPORT_BUDGET_BYTES {
             return Ok(false);
         }
         self.blobs = blobs;
@@ -766,6 +800,7 @@ pub(crate) fn journal_file_version_in_tx(
     key: &DocKey,
     moment_id: &str,
     budget: &mut FileExportBudget,
+    now_ms: i64,
 ) -> Result<bool, SyncError> {
     let last = last_file_export_in_tx(tx, key)?;
     let (current, _) =
@@ -795,7 +830,13 @@ pub(crate) fn journal_file_version_in_tx(
     if !budget.include_payload(tx, &payload)? {
         return Ok(false);
     }
-    crate::outbound::journal_moment_append_from_in_tx(tx, &key.workspace_id, moment_id, &before)?;
+    crate::outbound::journal_moment_append_from_in_tx(
+        tx,
+        &key.workspace_id,
+        moment_id,
+        &before,
+        now_ms,
+    )?;
     Ok(true)
 }
 
@@ -2937,7 +2978,7 @@ mod tests {
     fn export_pass(store: &mut EngineStore) {
         store
             .write_with(&NoFaults, |tx| {
-                export_covered_heads_in_tx(tx, "ws", &crate::NoLiveLeases)
+                export_covered_heads_in_tx(tx, "ws", &crate::NoLiveLeases, 1)
             })
             .expect("export pass");
     }
@@ -2983,7 +3024,7 @@ mod tests {
             originate_unclaimed_ydoc_bases_in_tx(tx, "ws", &crate::NoLiveLeases, 100)?;
             tx.execute("UPDATE moments SET author_json='invalid' WHERE moment_id='seed-moment'", [])
                 .map_err(SyncError::persist)?;
-            export_covered_heads_in_tx(tx, "ws", &crate::NoLiveLeases)
+            export_covered_heads_in_tx(tx, "ws", &crate::NoLiveLeases, 1)
         }).expect("attempt cannot journal malformed author");
         observe_export_attempts(&mut store);
         let coordinates = |store: &EngineStore| {
@@ -3665,7 +3706,7 @@ mod tests {
                     .map_err(SyncError::persist)?;
                     tx.execute(invalidate, []).map_err(SyncError::persist)?;
                     originate_live_ydoc_base_in_tx(tx, &key, 101)?;
-                    export_covered_heads_in_tx(tx, "ws", &crate::NoLiveLeases)
+                    export_covered_heads_in_tx(tx, "ws", &crate::NoLiveLeases, 1)
                 })
                 .expect("backfill unproved artifact");
             assert!(
@@ -4670,7 +4711,7 @@ mod tests {
         };
 
         store
-            .write_with(&NoFaults, |tx| backfill_file_versions_in_tx(tx, "ws"))
+            .write_with(&NoFaults, |tx| backfill_file_versions_in_tx(tx, "ws", 1))
             .unwrap();
         assert!(
             local_ops(&store)

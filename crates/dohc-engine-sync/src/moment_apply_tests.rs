@@ -172,7 +172,7 @@ fn maximum_live_author_summary_journals_with_payload_headroom() {
         .expect("maximum author moment");
     store
         .write_with(&NoFaults, |tx| {
-            crate::journal_moment_append_in_tx(tx, "ws", "limit-moment")
+            crate::journal_moment_append_in_tx(tx, "ws", "limit-moment", 1)
         })
         .expect("maximum author moment journals");
     let bytes: i64 = store.read_with(|conn| conn.query_row(
@@ -243,7 +243,7 @@ fn outbound_moment_authors_keep_local_people_and_replicate_agents_and_automation
                 .expect("source moment");
             source
                 .write_with(&NoFaults, |tx| {
-                    crate::outbound::journal_moment_append_in_tx(tx, "ws", "created-moment")
+                    crate::outbound::journal_moment_append_in_tx(tx, "ws", "created-moment", 1)
                 })
                 .expect("journal source moment");
             let op = source

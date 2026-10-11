@@ -953,7 +953,7 @@ fn resync_requests(
 fn journal_editor_settlement(scratch: &ScratchDir, workspace: &str, moment: &str) {
     let mut conn = Connection::open(engine_db_path(scratch).unwrap()).unwrap();
     let tx = conn.transaction().unwrap();
-    dohc_engine_sync::journal_moment_append_in_tx(&tx, workspace, moment).unwrap();
+    dohc_engine_sync::journal_moment_append_in_tx(&tx, workspace, moment, 1).unwrap();
     tx.commit().unwrap();
 }
 

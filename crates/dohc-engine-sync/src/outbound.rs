@@ -273,6 +273,7 @@ pub fn journal_moment_append_in_tx(
     tx: &Transaction<'_>,
     workspace_id: &str,
     moment_id: &str,
+    published_at_ms: i64,
 ) -> Result<(), SyncError> {
     let recovery: bool = tx
         .query_row(
@@ -292,7 +293,14 @@ pub fn journal_moment_append_in_tx(
         published_moment_append_payload_in_tx(tx, workspace_id, moment_id)?;
     let sequence =
         journal_local_op_in_tx(tx, workspace_id, "moment.append", &payload, recorded_at_ms)?;
-    mark_export_in_tx(tx, workspace_id, sequence, payload, recorded_at_ms)
+    mark_export_in_tx(
+        tx,
+        workspace_id,
+        sequence,
+        payload,
+        recorded_at_ms,
+        published_at_ms,
+    )
 }
 
 pub(crate) fn lane_before_in_tx(
@@ -371,12 +379,20 @@ pub(crate) fn journal_moment_append_from_in_tx(
     workspace_id: &str,
     moment_id: &str,
     before: &PortableBefore,
+    published_at_ms: i64,
 ) -> Result<(), SyncError> {
     let (payload, recorded_at_ms) =
         moment_payload_in_tx(tx, workspace_id, moment_id, Some(before))?;
     let sequence =
         journal_local_op_in_tx(tx, workspace_id, "moment.append", &payload, recorded_at_ms)?;
-    mark_export_in_tx(tx, workspace_id, sequence, payload, recorded_at_ms)
+    mark_export_in_tx(
+        tx,
+        workspace_id,
+        sequence,
+        payload,
+        recorded_at_ms,
+        published_at_ms,
+    )
 }
 
 pub(crate) fn journal_saved_settlement_moment_in_tx(
@@ -384,6 +400,7 @@ pub(crate) fn journal_saved_settlement_moment_in_tx(
     workspace: &str,
     moment: &str,
     before: Option<&PortableBefore>,
+    published_at_ms: i64,
 ) -> Result<i64, SyncError> {
     use rusqlite::OptionalExtension;
     let prior:Option<i64>=tx.query_row("SELECT origin_seq FROM replication_log WHERE workspace_id=?1 AND op_kind='moment.append' AND imported=0 AND json_extract(payload_json,'$.momentId')=?2 LIMIT 1",params![workspace,moment],|r|r.get(0)).optional().map_err(SyncError::corrupt)?;
@@ -392,7 +409,7 @@ pub(crate) fn journal_saved_settlement_moment_in_tx(
     }
     let (payload, recorded) = moment_payload_in_tx(tx, workspace, moment, before)?;
     let sequence = journal_local_op_in_tx(tx, workspace, "moment.append", &payload, recorded)?;
-    mark_export_in_tx(tx, workspace, sequence, payload, recorded)?;
+    mark_export_in_tx(tx, workspace, sequence, payload, recorded, published_at_ms)?;
     Ok(sequence)
 }
 
@@ -419,8 +436,9 @@ fn mark_export_in_tx(
     sequence: i64,
     payload: serde_json::Value,
     recorded: i64,
+    published_at_ms: i64,
 ) -> Result<(), SyncError> {
-    record_published_moment_in_tx(tx, workspace, &payload, recorded)?;
+    record_published_moment_in_tx(tx, workspace, &payload, published_at_ms)?;
     if payload.get("attributionUnavailable").is_none() {
         return Ok(());
     }
@@ -470,6 +488,13 @@ fn record_published_moment_in_tx(
     Ok(())
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum OrdinaryHeadPublication {
+    Published,
+    PassFull,
+    Oversized,
+}
+
 pub(crate) fn journal_ordinary_settled_head_in_tx(
     tx: &Transaction<'_>,
     workspace: &str,
@@ -477,18 +502,24 @@ pub(crate) fn journal_ordinary_settled_head_in_tx(
     coalesced: bool,
     now_ms: i64,
     budget: &mut crate::enrolment::FileExportBudget,
-) -> Result<bool, SyncError> {
+) -> Result<OrdinaryHeadPublication, SyncError> {
     let (payload, recorded) = moment_payload_with_authors_in_tx(tx, workspace, moment, None, true)?;
     let mut payload = payload;
     if coalesced {
         payload["authors"] = serde_json::json!([{"kind":"unattributed"}]);
     }
     if !budget.include_payload(tx, &payload)? {
-        return Ok(false);
+        return Ok(
+            if crate::enrolment::FileExportBudget::default().include_payload(tx, &payload)? {
+                OrdinaryHeadPublication::PassFull
+            } else {
+                OrdinaryHeadPublication::Oversized
+            },
+        );
     }
-    journal_local_op_in_tx(tx, workspace, "moment.append", &payload, recorded)?;
-    record_published_moment_in_tx(tx, workspace, &payload, now_ms)?;
-    Ok(true)
+    let sequence = journal_local_op_in_tx(tx, workspace, "moment.append", &payload, recorded)?;
+    mark_export_in_tx(tx, workspace, sequence, payload, recorded, now_ms)?;
+    Ok(OrdinaryHeadPublication::Published)
 }
 
 fn moment_payload_in_tx(

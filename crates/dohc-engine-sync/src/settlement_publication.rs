@@ -354,7 +354,7 @@ mod tests {
             .unwrap();
         store
             .write_with(&NoFaults, |tx| {
-                crate::journal_moment_append_in_tx(tx, "ws", "moment")
+                crate::journal_moment_append_in_tx(tx, "ws", "moment", 1)
             })
             .unwrap();
         list_replication_ops(store, "ws", "source", -1, 500)

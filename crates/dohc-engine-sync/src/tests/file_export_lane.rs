@@ -36,7 +36,7 @@ fn ordinary_publisher_fixture() -> (ScratchDir, std::path::PathBuf, EngineStore)
     let claim = store.put_binary_blob(&doc.encode_full_state()).unwrap();
     store.write_with(&NoFaults, |tx| {
         tx.execute("UPDATE ydoc_docs SET file_export_lane=0,regime='replicated',lineage_claim_status='exact',lineage_claim_id=?1,base_origin_id='local',settled_update_seq=head_update_seq", [claim]).map_err(SyncError::persist)?;
-        journal_moment_append_in_tx(tx, "ws", "seed")
+        journal_moment_append_in_tx(tx, "ws", "seed", 1)
     }).unwrap();
     (scratch, path, store)
 }
@@ -51,6 +51,256 @@ fn ordinary_saved_head(store: &mut EngineStore, id: &str, text: &str, now: i64) 
         tx.execute("UPDATE ydoc_docs SET last_settled_sha=(SELECT blob_sha256 FROM snapshots WHERE workspace_id='ws' AND object_id='doc'),settle_seq=(SELECT moment_order FROM moments WHERE workspace_id='ws' AND moment_id=?1)", [id]).map_err(SyncError::persist)?;
         Ok::<_,SyncError>(())
     }).unwrap();
+}
+
+#[test]
+fn fix1a_oversized_head_does_not_schedule_an_endless_push() {
+    let (_scratch, _, mut store) = ordinary_publisher_fixture();
+    ordinary_saved_head(
+        &mut store,
+        "moment-ydoc-before",
+        &"a".repeat(7 * 1024 * 1024),
+        10,
+    );
+    ordinary_saved_head(
+        &mut store,
+        "moment-ydoc-too-big",
+        &"b".repeat(7 * 1024 * 1024),
+        20,
+    );
+    // Exercise a persisted oversized head without passing the current 10 MiB write limit.
+    store
+        .write_with(&NoFaults, |tx| {
+            for (field, letter) in [
+                ("payload_before_blob_sha256", 'a'),
+                ("payload_after_blob_sha256", 'b'),
+            ] {
+                let text = letter.to_string().repeat(11 * 1024 * 1024);
+                let sha = dohc_engine_storage::hex_sha256(text.as_bytes());
+                tx.execute(
+                    "INSERT INTO blobs(sha256,byte_length,text) VALUES (?1,?2,?3)",
+                    params![sha, i64::try_from(text.len()).unwrap(), text],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    &format!("UPDATE moments SET {field}=?1 WHERE moment_id='moment-ydoc-too-big'"),
+                    [&sha],
+                )
+                .map_err(SyncError::persist)?;
+                if letter == 'b' {
+                    tx.execute(
+                        "UPDATE snapshots SET blob_sha256=?1 WHERE object_id='doc'",
+                        [&sha],
+                    )
+                    .map_err(SyncError::persist)?;
+                    tx.execute(
+                        "UPDATE ydoc_docs SET last_settled_sha=?1 WHERE object_id='doc'",
+                        [&sha],
+                    )
+                    .map_err(SyncError::persist)?;
+                }
+            }
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let client = RelaySyncClient::new(FakeRelay::default());
+    for now in [10_000_000, 10_000_001, 60_000] {
+        let outcome = client
+            .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, now, 0)
+            .unwrap();
+        assert!(
+            matches!(
+                outcome,
+                SyncPassOutcome::Complete {
+                    next_settled_head_publish_at_ms: None,
+                    ..
+                }
+            ),
+            "{outcome:?}"
+        );
+        assert_eq!(exports(&store).len(), 1);
+    }
+    ordinary_saved_head(&mut store, "moment-ydoc-small", "small", 30);
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 20_000_000, 0)
+        .unwrap();
+    assert_eq!(
+        exports(&store).last().unwrap().payload["momentId"],
+        "moment-ydoc-small"
+    );
+}
+
+#[test]
+fn fix1a_full_charge_50kb() {
+    full_before_and_after_charge(50_000);
+}
+#[test]
+fn fix1a_full_charge_1mb() {
+    full_before_and_after_charge(1_000_000);
+}
+fn full_before_and_after_charge(bytes: usize) {
+    let (_scratch, _, mut store) = ordinary_publisher_fixture();
+    let client = RelaySyncClient::new(RecordingRelay::default());
+    ordinary_saved_head(&mut store, "moment-ydoc-x", &"a".repeat(bytes), 10);
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 10_000_000, 0)
+        .unwrap();
+    ordinary_saved_head(&mut store, "moment-ydoc-y", &"b".repeat(bytes), 20);
+    let interval = 30_000.max(2 * bytes as i64 * 3_600_000 / 10_000_000);
+    let outcome = client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 10_000_001, 0)
+        .unwrap();
+    assert!(
+        matches!(outcome, SyncPassOutcome::Complete { next_settled_head_publish_at_ms: Some(due), .. } if due == 10_000_000 + interval),
+        "{outcome:?}"
+    );
+    client
+        .push_workspace(
+            &mut store,
+            "ws",
+            &NoFaults,
+            &AlwaysLive,
+            10_000_000 + interval - 1,
+            0,
+        )
+        .unwrap();
+    assert_eq!(exports(&store).len(), 2);
+    client
+        .push_workspace(
+            &mut store,
+            "ws",
+            &NoFaults,
+            &AlwaysLive,
+            10_000_000 + interval,
+            0,
+        )
+        .unwrap();
+    assert_eq!(exports(&store).len(), 3);
+}
+
+#[test]
+fn fix1a_imported_peer_edit_then_local_undo() {
+    peer_edit_then_local_undo(false, false);
+}
+#[test]
+fn fix1a_projected_peer_edit_then_local_undo() {
+    peer_edit_then_local_undo(true, false);
+}
+#[test]
+fn fix1a_refused_import_does_not_invalidate_same_content_dedupe() {
+    peer_edit_then_local_undo(false, true);
+}
+fn peer_edit_then_local_undo(projected: bool, refused: bool) {
+    let (_scratch, _, mut laptop) = ordinary_publisher_fixture();
+    ordinary_saved_head(&mut laptop, "moment-ydoc-laptop-x", "X", 10);
+    let client = RelaySyncClient::new(FakeRelay::default());
+    client
+        .push_workspace(&mut laptop, "ws", &NoFaults, &AlwaysLive, 60_000, 0)
+        .unwrap();
+    let (_desktop_scratch, _, mut desktop) = ordinary_publisher_fixture();
+    ordinary_saved_head(&mut desktop, "moment-ydoc-desktop-y", "Y", 20);
+    let peer = RelaySyncClient::new(FakeRelay::default());
+    peer.push_workspace(&mut desktop, "ws", &NoFaults, &AlwaysLive, 90_000, 0)
+        .unwrap();
+    let published_y = exports(&desktop).last().unwrap().clone();
+    let peer_moment = if projected {
+        "moment-ydoc-apply-desktop"
+    } else {
+        "moment-ydoc-desktop-y"
+    };
+    ordinary_saved_head(&mut laptop, peer_moment, "Y", 20);
+    if !projected {
+        laptop.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES ('ws','desktop',0,'moment.append',?1,20,1)", [published_y.payload.to_string()]).map_err(SyncError::persist)?;
+            if refused {
+                tx.execute("INSERT INTO replication_pending_refusals(workspace_id,origin_id,origin_seq,op_kind,reason_code,reason_message) VALUES ('ws','desktop',0,'moment.append','invalid-input','test refusal')", []).map_err(SyncError::persist)?;
+            }
+            Ok::<_,SyncError>(())
+        }).unwrap();
+    }
+    ordinary_saved_head(&mut laptop, "moment-ydoc-laptop-undo", "X", 30);
+    client
+        .push_workspace(&mut laptop, "ws", &NoFaults, &AlwaysLive, 120_000, 0)
+        .unwrap();
+    let last = exports(&laptop).last().unwrap().clone();
+    assert_eq!(
+        last.payload["momentId"],
+        if refused {
+            "moment-ydoc-laptop-x"
+        } else {
+            "moment-ydoc-laptop-undo"
+        },
+        "X -> peer Y -> undo X must reach share readers unless Y was refused"
+    );
+    assert_eq!(
+        last.payload["payloadAfterBlobSha256"],
+        dohc_engine_storage::hex_sha256(b"X")
+    );
+}
+
+#[test]
+fn fix1a_pending_audit_history_keeps_the_newer_head_pending() {
+    let (_scratch, _, mut store) = ordinary_publisher_fixture();
+    ordinary_saved_head(&mut store, "moment-ydoc-audit", "audit", 10);
+    ordinary_saved_head(&mut store, "moment-ydoc-latest", "latest", 20);
+    store.write_with(&NoFaults, |tx| {
+        tx.execute("INSERT INTO live_audit_pending_exports VALUES ('relay','ws','main','doc','claim',0,-1)", []).map_err(SyncError::persist)?;
+        crate::enrolment::publish_ordinary_settled_heads_in_tx(tx, "ws", 60_000)
+    }).unwrap();
+    assert_eq!(
+        exports(&store).len(),
+        1,
+        "do not overtake pending audit history"
+    );
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM live_audit_pending_exports", [])
+                .map_err(SyncError::persist)?;
+            journal_moment_append_in_tx(tx, "ws", "moment-ydoc-audit", 60_000)?;
+            crate::enrolment::publish_ordinary_settled_heads_in_tx(tx, "ws", 120_000)
+        })
+        .unwrap();
+    assert_eq!(exports(&store).len(), 3);
+    assert_eq!(exports(&store)[1].payload["momentId"], "moment-ydoc-audit");
+    assert_eq!(exports(&store)[2].payload["momentId"], "moment-ydoc-latest");
+}
+
+#[test]
+fn fix1a_delayed_enrolment_stamps_publication_time_and_throttles() {
+    let (_scratch, _, mut store) = ordinary_publisher_fixture();
+    store.write_with(&NoFaults, |tx| {
+        tx.execute("DELETE FROM replication_log", []).map_err(SyncError::persist)?;
+        tx.execute("UPDATE ydoc_docs SET last_published_moment_id=NULL,last_published_at_ms=NULL,last_settled_sha=(SELECT blob_sha256 FROM snapshots WHERE object_id='doc'),settled_update_seq=head_update_seq,export_attempt_moment_id=NULL", []).map_err(SyncError::persist)?;
+        crate::enrolment::backfill_enrolment_window_in_tx(tx, "ws", &NoLiveLeases, 1_000_000)
+    }).unwrap();
+    assert_eq!(exports(&store).len(), 1);
+    let published: i64 = store
+        .read_with(|c| {
+            c.query_row("SELECT last_published_at_ms FROM ydoc_docs", [], |r| {
+                r.get(0)
+            })
+        })
+        .unwrap();
+    assert_eq!(published, 1_000_000);
+    assert_eq!(
+        exports(&store)[0].recorded_at_ms,
+        1,
+        "History time is unchanged"
+    );
+    ordinary_saved_head(&mut store, "moment-ydoc-later", "later", 20);
+    let outcome = RelaySyncClient::new(FakeRelay::default())
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 1_000_001, 0)
+        .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            SyncPassOutcome::Complete {
+                next_settled_head_publish_at_ms: Some(1_030_000),
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
 }
 
 #[test]
@@ -202,7 +452,7 @@ fn ordinary_publisher_keeps_the_saved_head_when_newer_edits_are_unsettled() {
 
 #[test]
 fn ordinary_publisher_throttles_by_size_and_accepts_a_backward_clock() {
-    for (bytes, interval) in [(50_000, 30_000), (1_000_000, 360_000)] {
+    for (bytes, interval) in [(50_000, 36_000), (1_000_000, 720_000)] {
         let first_push_ms = 1_000_000;
         let (_scratch, _, mut store) = ordinary_publisher_fixture();
         let first = "a".repeat(bytes);
@@ -271,7 +521,7 @@ fn ordinary_publisher_defers_whole_heads_at_the_blob_budget_and_wakes_the_remain
         lane(&mut store, &object);
         store.write_with(&NoFaults, |tx| {
             tx.execute("UPDATE ydoc_docs SET file_export_lane=0,regime='replicated',lineage_claim_status='exact',lineage_claim_id=(SELECT lineage_claim_id FROM ydoc_docs WHERE object_id='doc'),base_origin_id='local' WHERE object_id=?1", [&object]).map_err(SyncError::persist)?;
-            journal_moment_append_in_tx(tx,"ws",&seed)
+            journal_moment_append_in_tx(tx,"ws",&seed, 1)
         }).unwrap();
         write(&mut store, &object, &head, &path, &after, "ydoc", 10);
         store.write_with(&NoFaults, |tx| {
@@ -296,10 +546,17 @@ fn ordinary_publisher_defers_whole_heads_at_the_blob_budget_and_wakes_the_remain
         .unwrap();
     assert_eq!(published(&store), 10);
     assert!(format!("{first:?}").contains("next_settled_head_publish_at_ms: Some(1000000)"));
-    client
+    let second = client
         .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 1_000_000, 0)
         .unwrap();
     assert_eq!(published(&store), 11);
+    assert!(matches!(
+        second,
+        SyncPassOutcome::Complete {
+            next_settled_head_publish_at_ms: None,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -377,7 +634,7 @@ fn ordinary_publisher_dedupes_content_without_advancing_the_marker() {
     assert_eq!(exports(&store).len(), 3);
     store
         .write_with(&NoFaults, |tx| {
-            journal_moment_append_in_tx(tx, "ws", "seed")
+            journal_moment_append_in_tx(tx, "ws", "seed", 1)
         })
         .unwrap();
     let marker: String = store
@@ -597,7 +854,7 @@ fn drain(store: &mut EngineStore) {
     assert_eq!(
         store
             .write_with(&NoFaults, |tx| {
-                crate::enrolment::backfill_file_versions_in_tx(tx, "ws")
+                crate::enrolment::backfill_file_versions_in_tx(tx, "ws", 1)
             })
             .unwrap(),
         TxnOutcome::Committed(())
@@ -710,7 +967,7 @@ fn unsynced_settle_then_ordinary_publication(operation: &str) {
         }
         source
             .write_with(&NoFaults, |tx| {
-                journal_moment_append_in_tx(tx, "ws", "outside")
+                journal_moment_append_in_tx(tx, "ws", "outside", 1)
             })
             .unwrap();
         let all = exports(&source);
@@ -786,7 +1043,7 @@ fn retired_lane_restore_blocked_reopen_settle_then_write_uses_the_exported_preim
         .unwrap();
     source
         .write_with(&NoFaults, |tx| {
-            journal_moment_append_in_tx(tx, "ws", "deleted")
+            journal_moment_append_in_tx(tx, "ws", "deleted", 1)
         })
         .unwrap();
     VersionedTextStore::new(&mut source)
@@ -806,7 +1063,7 @@ fn retired_lane_restore_blocked_reopen_settle_then_write_uses_the_exported_preim
     let restored = dohc_engine_domain::rollback_compensating_moment_id("ws", "main", "deleted");
     source
         .write_with(&NoFaults, |tx| {
-            journal_moment_append_in_tx(tx, "ws", &restored)
+            journal_moment_append_in_tx(tx, "ws", &restored, 1)
         })
         .unwrap();
     let key = DocKey::new("ws", "main", "doc").unwrap();
@@ -843,7 +1100,7 @@ fn retired_lane_restore_blocked_reopen_settle_then_write_uses_the_exported_preim
     );
     source
         .write_with(&NoFaults, |tx| {
-            journal_moment_append_in_tx(tx, "ws", "outside")
+            journal_moment_append_in_tx(tx, "ws", "outside", 1)
         })
         .unwrap();
     let all = exports(&source);
@@ -916,7 +1173,7 @@ fn lane_conflict_resolution_after_unsynced_settle_uses_the_exported_preimage() {
         30,
     );
     peer.write_with(&NoFaults, |tx| {
-        journal_moment_append_in_tx(tx, "ws", "peer-edit")
+        journal_moment_append_in_tx(tx, "ws", "peer-edit", 1)
     })
     .unwrap();
     hydrate(&peer, &mut source);
@@ -1065,7 +1322,7 @@ fn lane_conflict_resolution_after_unsynced_settle_uses_the_exported_preimage() {
         50,
     );
     peer.write_with(&NoFaults, |tx| {
-        journal_moment_append_in_tx(tx, "ws", "continued-peer-edit")
+        journal_moment_append_in_tx(tx, "ws", "continued-peer-edit", 1)
     })
     .unwrap();
     hydrate(&peer, &mut source);
@@ -1088,7 +1345,7 @@ fn lane_conflict_resolution_after_unsynced_settle_uses_the_exported_preimage() {
     );
     source
         .write_with(&NoFaults, |tx| {
-            journal_moment_append_in_tx(tx, "ws", "later-publication")?;
+            journal_moment_append_in_tx(tx, "ws", "later-publication", 1)?;
             let duplicate = crate::conflict_resolve_v1::durable_effect_shadow_in_tx(
                 tx,
                 "ws",
@@ -1455,7 +1712,7 @@ fn import_peer_edit(source: &mut EngineStore, peer: &mut EngineStore) {
         20,
     );
     peer.write_with(&NoFaults, |tx| {
-        journal_moment_append_in_tx(tx, "ws", "peer-edit")
+        journal_moment_append_in_tx(tx, "ws", "peer-edit", 1)
     })
     .unwrap();
     hydrate(peer, source);
@@ -1539,7 +1796,9 @@ fn ordinary_trimmed_lineage_backfills_after_a_published_ydoc_moment() {
     let (_scratch, _, mut source) = owner();
     write(&mut source, "doc", "a", "doc.md", "A", "ydoc", 10);
     source
-        .write_with(&NoFaults, |tx| journal_moment_append_in_tx(tx, "ws", "a"))
+        .write_with(&NoFaults, |tx| {
+            journal_moment_append_in_tx(tx, "ws", "a", 1)
+        })
         .unwrap();
     lane(&mut source, "doc");
     source
@@ -1619,7 +1878,7 @@ fn former_lane_delete_restore_never_backfills_intermediate_settles() {
         .unwrap();
     source
         .write_with(&NoFaults, |tx| {
-            journal_moment_append_in_tx(tx, "ws", "deleted")
+            journal_moment_append_in_tx(tx, "ws", "deleted", 1)
         })
         .unwrap();
     VersionedTextStore::new(&mut source)
@@ -1700,7 +1959,7 @@ fn lane_journal_transaction_survives_crash_and_offline_restart() {
         assert!(matches!(
             source
                 .write_with(crash.as_ref(), |tx| {
-                    crate::enrolment::backfill_file_versions_in_tx(tx, "ws")
+                    crate::enrolment::backfill_file_versions_in_tx(tx, "ws", 1)
                 })
                 .unwrap(),
             TxnOutcome::Crashed { .. }
@@ -1796,7 +2055,7 @@ fn lane_uses_genuine_present_bootstrap_and_intervening_publications() {
             write(&mut source, "doc", id, path, text, origin, 30);
         }
         source
-            .write_with(&NoFaults, |tx| journal_moment_append_in_tx(tx, "ws", id))
+            .write_with(&NoFaults, |tx| journal_moment_append_in_tx(tx, "ws", id, 1))
             .unwrap();
         write(
             &mut source,
@@ -1864,7 +2123,7 @@ fn unexplained_export_gap_does_not_block_local_write_or_push() {
     source
         .write_with(&NoFaults, |tx| {
             dohc_engine_domain::write_text_in_tx(tx, &input).map_err(SyncError::corrupt)?;
-            journal_moment_append_in_tx(tx, "ws", "outside")
+            journal_moment_append_in_tx(tx, "ws", "outside", 1)
         })
         .expect("sync metadata must not block the local write transaction");
     assert_eq!(exports(&source)[2].payload["beforeLatestMomentId"], "v3");
@@ -2601,7 +2860,7 @@ fn lane_drain_and_promotion_keep_deferred_and_owner_binding_exclusions() {
                 "audit"=>{tx.execute("INSERT INTO live_device_application_bindings VALUES ('relay','ws','main','doc','claim','doc.md','[]',0,'host',1,'instance','connection',1)",[]).map_err(SyncError::persist)?;}
                 _=>unreachable!(),
             }
-            crate::enrolment::backfill_file_versions_in_tx(tx,"ws")?;assert_eq!(originate_ydoc_base_in_tx(tx,&key,"doc.md",None,None,30)?,BaseOrigination::NothingToDo);Ok::<_,SyncError>(())
+            crate::enrolment::backfill_file_versions_in_tx(tx,"ws", 1)?;assert_eq!(originate_ydoc_base_in_tx(tx,&key,"doc.md",None,None,30)?,BaseOrigination::NothingToDo);Ok::<_,SyncError>(())
         }).unwrap();
         assert!(exports(&source).is_empty(), "{blocker}");
     }
@@ -2759,7 +3018,9 @@ fn lane_first_local_export_uses_the_imported_state_as_its_bootstrap_preimage() {
     let (_owner_scratch, _, mut original) = owner();
     write(&mut original, "doc", "a", "doc.md", "A", "api", 10);
     original
-        .write_with(&NoFaults, |tx| journal_moment_append_in_tx(tx, "ws", "a"))
+        .write_with(&NoFaults, |tx| {
+            journal_moment_append_in_tx(tx, "ws", "a", 1)
+        })
         .unwrap();
     let (_peer_scratch, _, mut peer) = open_store();
     seed_replication_version(&mut peer, "main", "main");

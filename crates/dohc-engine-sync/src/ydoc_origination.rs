@@ -253,6 +253,7 @@ pub fn originate_ydoc_base_in_tx(
             key,
             &moment_id,
             &mut crate::enrolment::FileExportBudget::default(),
+            now_ms,
         )?
     {
         return Ok(BaseOrigination::NothingToDo);

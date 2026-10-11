@@ -2060,7 +2060,7 @@ async fn terminal_native_seed_publishes_only_accepted_content_and_unblocks_ordin
         .unwrap();
     f.store
         .write_with(&NoFaults, |tx| {
-            dohc_engine_sync::journal_moment_append_in_tx(tx, "workspace", "later")
+            dohc_engine_sync::journal_moment_append_in_tx(tx, "workspace", "later", 1)
         })
         .unwrap();
     let later: serde_json::Value=f.store.read_with(|conn|conn.query_row("SELECT payload_json FROM replication_log WHERE op_kind='moment.append' AND json_extract(payload_json,'$.momentId')='later'",[],|r|r.get::<_,String>(0))).map(|s|serde_json::from_str(&s).unwrap()).unwrap();

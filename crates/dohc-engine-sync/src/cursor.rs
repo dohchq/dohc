@@ -126,7 +126,7 @@ pub fn commit_relay_cursor(
                     leases,
                     now_ms,
                 )?;
-                crate::enrolment::export_covered_heads_in_tx(tx, workspace_id, leases)?;
+                crate::enrolment::export_covered_heads_in_tx(tx, workspace_id, leases, now_ms)?;
                 declined
             } else {
                 crate::enrolment::backfill_enrolment_window_in_tx(

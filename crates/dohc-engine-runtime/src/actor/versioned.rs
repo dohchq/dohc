@@ -373,6 +373,13 @@ impl ActorHandle {
         token: CancellationToken,
     ) -> Result<RollbackExecutionResult, RuntimeError> {
         self.run(move |store, cache| {
+            let published_at_ms = i64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis(),
+            )
+            .unwrap_or(i64::MAX);
             with_local_file_mutation_cache_reset(cache, || {
                 versioned_text_rollback_on_store(
                     store,
@@ -381,6 +388,7 @@ impl ActorHandle {
                     self_writes.as_ref(),
                     faults.as_ref(),
                     &token,
+                    published_at_ms,
                 )
             })
         })
@@ -833,6 +841,7 @@ fn versioned_text_write_with_publication_on_store(
             &input.workspace_id,
             &result.moment.moment_id,
             result.deduped,
+            input.now_ms,
         )
         .map_err(RuntimeError::from)?;
         Ok::<_, RuntimeError>(result)
@@ -943,6 +952,7 @@ fn versioned_binary_write_conditioned_on_store(
             &input.workspace_id,
             &result.moment.moment_id,
             result.deduped,
+            input.now_ms,
         )
         .map_err(RuntimeError::from)?;
         Ok::<_, RuntimeError>(result)
@@ -1127,6 +1137,7 @@ fn versioned_text_rename_on_store(
                 &input.workspace_id,
                 &result.moment.moment_id,
                 result.deduped,
+                input.now_ms,
             )?;
             Ok(())
         })
@@ -1214,9 +1225,9 @@ fn versioned_text_delete_on_store(
             )
             .map_err(RuntimeError::from)?;
             enqueue_binary_delete(tx, &result).map_err(RuntimeError::from)?;
-            journal_moment_outbound_in_tx(tx, &input.workspace_id, &result.moment.moment_id, false)
+            journal_moment_outbound_in_tx(tx, &input.workspace_id, &result.moment.moment_id, false, input.now_ms)
                 .map_err(RuntimeError::from)?;
-            let asset_jobs = delete_owned_scene_assets_in_tx(tx, &result)?;
+            let asset_jobs = delete_owned_scene_assets_in_tx(tx, &result, input.now_ms)?;
             dohc_engine_sync::retire_ydoc_lineage_in_tx(
                 tx,
                 &input.workspace_id,
@@ -1226,7 +1237,7 @@ fn versioned_text_delete_on_store(
             .map_err(RuntimeError::from)?;
             asset_jobs
         } else {
-            journal_moment_outbound_in_tx(tx, &input.workspace_id, &result.moment.moment_id, true)
+            journal_moment_outbound_in_tx(tx, &input.workspace_id, &result.moment.moment_id, true, input.now_ms)
                 .map_err(RuntimeError::from)?;
             scene_asset_delete_jobs_in_tx(tx, &result)?
         };
@@ -1359,7 +1370,7 @@ pub(super) fn publish_checked_delete_on_store(
                 moment_id,
                 now_ms,
             )?;
-            finish_checked_delete_effects_in_tx(tx, workspace_id, moment_id, false)?;
+            finish_checked_delete_effects_in_tx(tx, workspace_id, moment_id, false, now_ms)?;
             Ok::<_, RuntimeError>(repair_job)
         })?;
         return match discarded {
@@ -1407,7 +1418,7 @@ pub(super) fn publish_checked_delete_on_store(
                 tx.execute_batch("SAVEPOINT checked_delete_finish")
                     .map_err(StorageError::persist_public)?;
                 let checked =
-                    finish_checked_delete_effects_in_tx(tx, workspace_id, moment_id, true);
+                    finish_checked_delete_effects_in_tx(tx, workspace_id, moment_id, true, now_ms);
                 let rolled_back = tx
                     .execute_batch(
                         "ROLLBACK TO checked_delete_finish; RELEASE checked_delete_finish",
@@ -1483,7 +1494,8 @@ pub(super) fn publish_checked_delete_on_store(
         } else {
             enqueue_discarded_delete_projection_in_tx(tx, root, workspace_id, moment_id, now_ms)?
         };
-        let asset_jobs = finish_checked_delete_effects_in_tx(tx, workspace_id, moment_id, applied)?;
+        let asset_jobs =
+            finish_checked_delete_effects_in_tx(tx, workspace_id, moment_id, applied, now_ms)?;
         Ok::<_, RuntimeError>((asset_jobs, repair_job))
     })?;
     match finalized {
@@ -1601,6 +1613,7 @@ fn finish_checked_delete_effects_in_tx(
     workspace_id: &str,
     moment_id: &str,
     applied: bool,
+    published_at_ms: i64,
 ) -> Result<Vec<(String, i64)>, RuntimeError> {
     let mut asset_jobs = Vec::new();
     if let Some(result) =
@@ -1612,14 +1625,14 @@ fn finish_checked_delete_effects_in_tx(
             &result.moment.version_id,
             &result.object.object_id,
         )?;
-        asset_jobs = delete_owned_scene_assets_in_tx(tx, &result)?;
+        asset_jobs = delete_owned_scene_assets_in_tx(tx, &result, published_at_ms)?;
         dohc_engine_sync::retire_ydoc_lineage_in_tx(
             tx,
             workspace_id,
             &result.moment.version_id,
             &result.object.object_id,
         )?;
-        journal_moment_outbound_in_tx(tx, workspace_id, moment_id, false)?;
+        journal_moment_outbound_in_tx(tx, workspace_id, moment_id, false, published_at_ms)?;
         tx.execute("UPDATE engine_requests SET publication_outcome='applied' WHERE result_seq=?1 AND kind='versioned'",[result.moment.moment_order]).map_err(StorageError::persist_public)?;
     }
     Ok(asset_jobs)
@@ -1658,6 +1671,7 @@ fn check_restore_content_in_tx(
 pub(super) fn delete_owned_scene_assets_in_tx(
     tx: &rusqlite::Transaction<'_>,
     drawing_delete: &DeleteResult,
+    published_at_ms: i64,
 ) -> Result<Vec<(String, i64)>, RuntimeError> {
     if drawing_delete.moment.before_content_kind != "text" {
         return Ok(Vec::new());
@@ -1730,6 +1744,7 @@ pub(super) fn delete_owned_scene_assets_in_tx(
             &asset_delete.before.workspace_id,
             &asset_delete.moment.moment_id,
             false,
+            published_at_ms,
         )
         .map_err(RuntimeError::from)?;
     }
@@ -1959,6 +1974,7 @@ fn versioned_text_rollback_on_store(
     self_writes: &dyn SelfWriteRecorder,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
+    published_at_ms: i64,
 ) -> Result<RollbackExecutionResult, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
@@ -2047,6 +2063,7 @@ fn versioned_text_rollback_on_store(
                 object_id,
                 compensating_moment_id,
                 input.author_json.as_deref(),
+                published_at_ms,
             )?;
             let resulting = restored_text.map_or(
                 dohc_engine_sync::ResultingHead::BinaryOrAbsent,
@@ -2087,7 +2104,13 @@ fn versioned_text_rollback_on_store(
                 )
                 .map_err(search_domain)?;
             }
-            journal_moment_outbound_in_tx(tx, &input.workspace_id, compensating_moment_id, false)?;
+            journal_moment_outbound_in_tx(
+                tx,
+                &input.workspace_id,
+                compensating_moment_id,
+                false,
+                published_at_ms,
+            )?;
             Ok(())
         },
     )?;
@@ -2381,6 +2404,7 @@ fn versioned_text_rollback_on_store(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn restore_deleted_scene_assets_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
@@ -2389,6 +2413,7 @@ fn restore_deleted_scene_assets_in_tx(
     drawing_object_id: &str,
     drawing_rollback_moment_id: &str,
     author_json: Option<&str>,
+    published_at_ms: i64,
 ) -> Result<Vec<String>, DomainError> {
     let has_authority: bool = tx
         .query_row(
@@ -2486,7 +2511,13 @@ fn restore_deleted_scene_assets_in_tx(
             ],
         )
         .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
-        journal_moment_outbound_in_tx(tx, workspace_id, &restore_moment_id, false)?;
+        journal_moment_outbound_in_tx(
+            tx,
+            workspace_id,
+            &restore_moment_id,
+            false,
+            published_at_ms,
+        )?;
         let materializes: bool = tx
             .query_row(
                 "SELECT EXISTS (SELECT 1 FROM materialization_jobs WHERE job_id = ?1)",
@@ -2730,7 +2761,13 @@ fn versioned_text_merge_on_store(
             let Some((moment_id, deduped)) = merge_moment_outbound_identity(result) else {
                 return Ok(());
             };
-            journal_moment_outbound_in_tx(tx, &input.workspace_id, moment_id, deduped)?;
+            journal_moment_outbound_in_tx(
+                tx,
+                &input.workspace_id,
+                moment_id,
+                deduped,
+                input.now_ms,
+            )?;
             Ok(())
         })
         .map_err(RuntimeError::from)?;
@@ -3258,6 +3295,7 @@ mod doc_cache_reset_tests {
                             tx,
                             "workspace",
                             &input.moment_id,
+                            1,
                         )
                     })
                     .unwrap();
@@ -3290,7 +3328,7 @@ mod doc_cache_reset_tests {
     fn assert_checked_delete_discard_retains_referenced_moment(store: &mut EngineStore) {
         let before = checked_delete_state(store);
         let result = store.write_with(&NoFaults, |tx| {
-            finish_checked_delete_effects_in_tx(tx, "workspace", "restore-delete", false)
+            finish_checked_delete_effects_in_tx(tx, "workspace", "restore-delete", false, 1)
         });
         assert!(
             matches!(

@@ -765,6 +765,7 @@ fn create_recovery_with_correlation_in_tx(
                 tx,
                 &key.workspace_id,
                 &result.moment.moment_id,
+                recorded_at_ms,
             )?;
         }
     }
@@ -861,6 +862,7 @@ pub(crate) fn recover_inactive_projection_in_tx(
                 tx,
                 &key.workspace_id,
                 &result.moment.moment_id,
+                now_ms,
             )?;
         }
     }
