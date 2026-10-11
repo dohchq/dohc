@@ -74,6 +74,16 @@ function AuthorName(props: { author: Author; id: string }) {
       {author.person ? <span className="truncate text-muted">{` for ${author.person}`}</span> : null}
     </span>;
   }
+  // A link holder has no name dohc can confirm, so the row names the role.
+  if (author.kind === "link") {
+    if (author.agentName !== undefined) {
+      return <span id={props.id} className="inline-flex min-w-0 items-center gap-1 text-[12px]">
+        <span className="truncate text-agent">{author.agentName}</span>
+        <span className="truncate text-muted"> for a link holder</span>
+      </span>;
+    }
+    return <span id={props.id} className="min-w-0 truncate text-[12px] text-muted">Link holder</span>;
+  }
   if (author.kind === "human") {
     return <span id={props.id} className="min-w-0 truncate text-[12px] text-muted">{author.name}</span>;
   }

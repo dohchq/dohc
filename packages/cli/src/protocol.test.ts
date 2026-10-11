@@ -282,16 +282,17 @@ describe("collection result schemas", () => {
             next: { present: true, value: "open" },
             authorOriginId: "origin_agent",
             actorKind: "agent",
-            onBehalfOf: "user:ice",
+            onBehalfOf: "public-holder",
             depth: 0,
             recordedAtMs: 12,
             automationRun: null,
+            linkAuthor: { kind: "link", grantId: "link", grantGeneration: 2, publicPrincipalId: "public-holder" },
           },
         ],
       }),
     ).toMatchObject({
       ok: true,
-      history: [{ historyId: 3, actorKind: "agent", onBehalfOf: "user:ice" }],
+      history: [{ historyId: 3, actorKind: "agent", onBehalfOf: "public-holder", linkAuthor: { publicPrincipalId: "public-holder" } }],
     });
   });
 

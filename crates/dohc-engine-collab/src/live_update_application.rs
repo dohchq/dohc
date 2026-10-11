@@ -545,17 +545,52 @@ pub fn validate_checkpoint_coverage(
     Ok(())
 }
 impl AdmittedLiveUpdateMetadata {
-    fn field_history_account_actor(
-        &self,
-    ) -> Option<(String, dohc_engine_domain::ChangeAttribution)> {
-        use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
-        if self.canonical_version != Some(2)
-            || matches!(
-                self.accepted.authority,
-                ServerDerivedLiveUpdateAuthority::Link { .. }
-            )
-        {
+    fn field_history_link_author(&self) -> Option<dohc_engine_domain::CollectionLiveLinkAuthor> {
+        if self.canonical_version != Some(2) {
             return None;
+        }
+        let ServerDerivedLiveUpdateAuthority::Link {
+            grant_id,
+            grant_generation,
+            ..
+        } = &self.accepted.authority
+        else {
+            return None;
+        };
+        let public_principal_id =
+            self.author_snapshot
+                .as_ref()?
+                .iter()
+                .find_map(|author| match author {
+                    LiveAuthorEntry::Link {
+                        public_principal_id,
+                        ..
+                    } => Some(public_principal_id),
+                    _ => None,
+                })?;
+        Some(dohc_engine_domain::CollectionLiveLinkAuthor::Link {
+            grant_id: grant_id.clone(),
+            grant_generation: *grant_generation,
+            public_principal_id: public_principal_id.clone(),
+        })
+    }
+
+    fn field_history_actor(&self) -> Option<(String, dohc_engine_domain::ChangeAttribution)> {
+        use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
+        if self.canonical_version != Some(2) {
+            return None;
+        }
+        if matches!(
+            self.accepted.authority,
+            ServerDerivedLiveUpdateAuthority::Link { .. }
+        ) {
+            let agent = self.admitted_declaration()?;
+            let dohc_engine_domain::CollectionLiveLinkAuthor::Link {
+                public_principal_id,
+                ..
+            } = self.field_history_link_author()?;
+            return (agent.on_behalf_of.as_ref() == Some(&public_principal_id))
+                .then(|| (agent.agent_id.clone(), agent.attribution()));
         }
         let authors = self.author_snapshot.as_ref()?;
         let (_, principal, _, _) = self.accepted.authority.fields();
@@ -1241,9 +1276,20 @@ pub fn apply_committed(
             // Keep canonical snapshot names in coverage instead of synthesizing
             // native authors. Only the field rows created by this append change.
             if own.is_none() && native_actor.is_none() {
+                if let (Some(facts), Some(author)) = (
+                    append.record_facts.as_ref(), event.metadata.field_history_link_author(),
+                ) {
+                    let json = serde_json::to_string(&author).map_err(|_| ApplicationError::Corrupt)?;
+                    let mut statement = tx.prepare_cached(
+                        "UPDATE collection_field_history SET link_author_json=?1 WHERE workspace_id=?2 AND history_id=?3",
+                    ).map_err(StorageError::persist_public)?;
+                    for field in &facts.fields {
+                        statement.execute(params![json, key.workspace_id, field.history_id]).map_err(StorageError::persist_public)?;
+                    }
+                }
                 if let (Some(facts), Some((actor, attribution))) = (
                     append.record_facts.as_ref(),
-                    event.metadata.field_history_account_actor(),
+                    event.metadata.field_history_actor(),
                 ) {
                     let mut statement = tx.prepare_cached(
                         "UPDATE collection_field_history SET actor_kind=?1,author_origin_id=?2,\
@@ -4079,6 +4125,135 @@ mod tests {
         )).unwrap()
     }
 
+    fn link_frame(delivery: &str, cursor: i64, bytes: Vec<u8>) -> AdmittedLiveUpdate {
+        let mut update = account_frame(delivery, cursor, bytes, false);
+        update.metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Link {
+            principal_id: "private-holder-1".into(),
+            grant_id: "link-1".into(),
+            grant_generation: 2,
+        };
+        update.metadata.author_snapshot = Some(vec![LiveAuthorEntry::Link {
+            public_principal_id: "public-holder-1".into(),
+            label: "Self claimed".into(),
+        }]);
+        update
+    }
+
+    #[test]
+    fn field_history_names_the_accepted_link_and_preserves_duplicate_author() {
+        let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+        let bytes = Ydoc::wire().frontmatter_set("status", "done").unwrap();
+        let update = link_frame("link", 1, bytes.clone());
+        ack(apply(&mut store, &mut cache, &handle, update.clone()));
+        let read = |store: &EngineStore| {
+            store.read_with(|conn| conn.query_row(
+            "SELECT link_author_json FROM collection_field_history ORDER BY history_id DESC LIMIT 1",
+            [], |row| row.get::<_, Option<String>>(0),
+        )).unwrap()
+        };
+        let expected = serde_json::json!({"kind":"link","grantId":"link-1","grantGeneration":2,"publicPrincipalId":"public-holder-1"});
+        assert_eq!(
+            serde_json::from_str::<Value>(&read(&store).unwrap()).unwrap(),
+            expected
+        );
+        assert_eq!(newest_field_author(&store), (None, None, None));
+        assert!(ack(apply(&mut store, &mut cache, &handle, update)).application_replayed);
+        ack(apply(
+            &mut store,
+            &mut cache,
+            &handle,
+            account_frame("duplicate", 2, bytes, false),
+        ));
+        assert_eq!(count(&store, "collection_field_history"), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&read(&store).unwrap()).unwrap(),
+            expected
+        );
+        for kind in ["legacy", "unattributed", "named", "owner", "link-agent"] {
+            let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+            let bytes = Ydoc::wire().frontmatter_set("status", "done").unwrap();
+            let mut update = if kind == "named" || kind == "owner" {
+                account_frame(kind, 1, bytes, false)
+            } else {
+                link_frame(kind, 1, bytes)
+            };
+            match kind {
+                "legacy" => {
+                    update.metadata.canonical_version = None;
+                    update.metadata.author_snapshot = None;
+                    update.metadata.first_seen_deletes = None;
+                }
+                "unattributed" => {
+                    update.metadata.author_snapshot = Some(vec![LiveAuthorEntry::Unattributed {}])
+                }
+                "owner" => {
+                    update.metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Owner {
+                        principal_id: "guest-1".into(),
+                    }
+                }
+                "link-agent" => {
+                    update
+                        .metadata
+                        .author_snapshot
+                        .as_mut()
+                        .unwrap()
+                        .push(LiveAuthorEntry::Agent {
+                            agent_id: "agent-1".into(),
+                            agent_name: None,
+                            on_behalf_of: Some("public-holder-1".into()),
+                            depth: None,
+                        })
+                }
+                _ => {}
+            }
+            ack(apply(&mut store, &mut cache, &handle, update));
+            if kind == "link-agent" {
+                assert_eq!(
+                    newest_field_author(&store),
+                    (
+                        Some("agent".into()),
+                        Some("agent-1".into()),
+                        Some("public-holder-1".into())
+                    )
+                );
+                assert_eq!(
+                    serde_json::from_str::<Value>(&read(&store).unwrap()).unwrap(),
+                    expected
+                );
+            } else {
+                assert_eq!(read(&store), None, "{kind}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual per-frame timing, 30 accepted link field edits"]
+    fn field_history_link_frame_cost() {
+        let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+        let source = Ydoc::wire();
+        let mut samples = Vec::new();
+        for cursor in 1..=35 {
+            let update = link_frame(
+                &format!("cost-{cursor}"),
+                cursor,
+                source
+                    .frontmatter_set("status", &format!("value-{cursor}"))
+                    .unwrap(),
+            );
+            let start = std::time::Instant::now();
+            ack(apply(&mut store, &mut cache, &handle, update));
+            if cursor > 5 {
+                samples.push(start.elapsed().as_nanos());
+            }
+        }
+        samples.sort_unstable();
+        println!(
+            "field_history_link_frame_cost: n={} median_ns={}",
+            samples.len(),
+            (samples[14] + samples[15]) / 2
+        );
+    }
+
     #[test]
     fn field_history_names_the_accepted_person() {
         let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
@@ -4175,7 +4350,7 @@ mod tests {
             "wrong-person",
             "wrong-agent-person",
             "legacy",
-            "link",
+            "wrong-link-agent-principal",
         ] {
             let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
             let mut update = account_frame(
@@ -4210,7 +4385,7 @@ mod tests {
                     update.metadata.author_snapshot = None;
                     update.metadata.first_seen_deletes = None;
                 }
-                "link" => {
+                "wrong-link-agent-principal" => {
                     update.metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Link {
                         principal_id: "holder-1".into(),
                         grant_id: "link-1".into(),
@@ -4224,7 +4399,7 @@ mod tests {
                         LiveAuthorEntry::Agent {
                             agent_id: "agent-1".into(),
                             agent_name: None,
-                            on_behalf_of: Some("public-1".into()),
+                            on_behalf_of: Some("holder-1".into()),
                             depth: None,
                         },
                     ]);
