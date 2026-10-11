@@ -512,22 +512,11 @@ fn require_content(conn: &Connection, record: &ParsedRecord) -> Result<(), SyncE
     {
         return Err(invalid("live audit content coordinate differs"));
     }
-    let lengths: Option<(i64, i64)> = conn
-        .query_row(
-            "SELECT byte_length,length(bytes) FROM binary_blobs WHERE sha256=?1",
-            [&record.accepted.receipt.update_digest],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()
-        .map_err(SyncError::corrupt)?;
-    if lengths
-        != Some((
-            record.header.update_byte_length as i64,
-            record.header.update_byte_length as i64,
-        ))
-    {
-        return Err(SyncError::BlobInvalid);
-    }
+    super::chunks::require_blob_length(
+        conn,
+        &record.accepted.receipt.update_digest,
+        record.header.update_byte_length,
+    )?;
     // The content operation already validated the Y.Doc. Recheck its address
     // without decoding it or materializing the full audit record.
     let mut hash = Sha256::new();

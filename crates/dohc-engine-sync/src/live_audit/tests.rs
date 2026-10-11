@@ -168,6 +168,473 @@ fn published(f: &Fixture) -> ReplicationEnvelope {
         .unwrap()
 }
 
+#[derive(Clone, Copy)]
+enum LengthClaim {
+    Valid,
+    Chunk,
+    Update,
+}
+
+fn length_claim_pull(
+    claim: LengthClaim,
+) -> (
+    ScratchDir,
+    EngineStore,
+    crate::RelaySyncClient<crate::tests::FakeRelay>,
+    i64,
+) {
+    use std::io::{Read, Write};
+    let mut source = fixture(true);
+    bootstrap(&mut source, false).unwrap();
+    accept_enrollment_event(&mut source, 1);
+    let mut audit = operations(&source.store)
+        .into_iter()
+        .find(|op| op.op_kind == application_record::EVENT_OP)
+        .unwrap();
+    let mut manifest: chunks::Manifest =
+        serde_json::from_value(audit.payload["manifest"].clone()).unwrap();
+    match claim {
+        LengthClaim::Valid => {}
+        LengthClaim::Chunk => {
+            manifest.byte_length -= 1;
+            manifest.chunks[0].byte_length -= 1;
+        }
+        LengthClaim::Update => {
+            manifest = source
+                .store
+                .read_with(|conn| {
+                    let mut reader = chunks::ChunkReader::new(conn, &manifest).unwrap();
+                    let mut text = String::new();
+                    reader.read_to_string(&mut text).unwrap();
+                    reader.finish().unwrap();
+                    let original = format!("\"updateByteLength\":{}", source.bytes.len());
+                    assert!(text.contains(&original));
+                    let changed = text.replace(
+                        &original,
+                        &format!("\"updateByteLength\":{}", source.bytes.len() + 1),
+                    );
+                    let mut writer = chunks::ChunkWriter::new(conn);
+                    writer.write_all(changed.as_bytes()).unwrap();
+                    writer.finish()
+                })
+                .unwrap();
+        }
+    }
+    audit.payload["manifest"] = serde_json::to_value(manifest).unwrap();
+    source.store.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE replication_log SET payload_json=?1 WHERE workspace_id='ws' AND origin_id='owner-origin' AND origin_seq=?2",
+            params![audit.payload.to_string(), audit.origin_seq]).map_err(SyncError::persist)?;
+        Ok::<_, SyncError>(())
+    }).unwrap();
+    crate::journal_local_replication_op(&mut source.store, "ws", "owner-origin", "epoch", "stream",
+        "chat.channel.create", &json!({"channelId":"after-audit","name":"Later","slug":"later","kind":"channel","createdAtMs":300}), 300, &NoFaults).unwrap();
+    let writer = crate::RelaySyncClient::new(crate::tests::FakeRelay::default());
+    writer
+        .claim_workspace(
+            &mut source.store,
+            crate::ClaimRequest {
+                workspace_id: "ws".into(),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+            },
+            None,
+            &NoFaults,
+        )
+        .unwrap();
+    writer
+        .push_workspace(
+            &mut source.store,
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            301,
+            100_000_000,
+        )
+        .unwrap();
+    let pushed: Vec<_> = writer
+        .transport()
+        .pushed_requests()
+        .into_iter()
+        .flat_map(|req| req.ops)
+        .collect();
+    assert!(pushed.iter().any(|op| op == &audit));
+    let (scratch, _path, mut receiver) = open_store();
+    crate::journal_local_replication_op(
+        &mut receiver,
+        "ws",
+        "recipient",
+        "epoch",
+        "stream",
+        "workspace.init",
+        &json!({}),
+        0,
+        &NoFaults,
+    )
+    .unwrap();
+    contact(&mut receiver);
+    let blobs: Vec<Vec<u8>> = source
+        .store
+        .read_with(|conn| {
+            conn.prepare("SELECT bytes FROM binary_blobs")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .unwrap();
+    receiver
+        .write_with(&NoFaults, |tx| {
+            for bytes in &blobs {
+                put_binary_blob(tx, bytes)?;
+            }
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let mut pending = Vec::new();
+    for mut op in pushed {
+        op.relay_seq = Some(op.origin_seq + 1);
+        if op.origin_seq < audit.origin_seq {
+            let result = crate::apply_replication_envelope(
+                &mut receiver,
+                &mut WriterDocCache::new(),
+                &op,
+                &NoFaults,
+                &NoLiveLeases,
+            )
+            .unwrap();
+            assert!(
+                matches!(result.primary, ApplyDisposition::Applied(_)),
+                "{op:?}: {result:?}"
+            );
+        } else {
+            pending.push(op);
+        }
+    }
+    let final_seq = pending.last().unwrap().origin_seq;
+    let relay = crate::tests::FakeRelay::default();
+    *relay.pull.lock().unwrap() = Some(crate::PullResponse {
+        ops: pending,
+        next_cursor: final_seq + 1,
+        has_more: false,
+    });
+    (
+        scratch,
+        receiver,
+        crate::RelaySyncClient::new(relay),
+        final_seq,
+    )
+}
+
+fn assert_length_claim_refused(claim: LengthClaim) {
+    let (_scratch, mut receiver, client, final_seq) = length_claim_pull(claim);
+    let result = client
+        .pull_chat_workspace(
+            &mut receiver,
+            &mut WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            302,
+        )
+        .unwrap();
+    let crate::SyncPassOutcome::Complete {
+        applied,
+        refused,
+        refusals,
+        pending_cursor: Some(cursor),
+        ..
+    } = result
+    else {
+        panic!("{result:?}");
+    };
+    assert_eq!((applied, refused), (1, 1));
+    assert_eq!(refusals.len(), 1);
+    assert_eq!(refusals[0].reason.code(), "invalid-input");
+    assert_eq!(count(&receiver, "live_audit_events"), 0);
+    assert_eq!(
+        crate::read_replication_acked_seq(&receiver, "ws", "owner-origin").unwrap(),
+        final_seq
+    );
+    receiver.read_with(|conn| {
+        assert_eq!(conn.query_row("SELECT name FROM chat_channels WHERE workspace_id='ws' AND channel_id='after-audit'", [], |r| r.get::<_, String>(0)).unwrap(), "Later");
+        assert_eq!(conn.query_row("SELECT apply_disposition FROM replication_log WHERE workspace_id='ws' AND origin_id='owner-origin' AND origin_seq=?1", [final_seq - 1], |r| r.get::<_, String>(0)).unwrap(), "refused");
+        Ok::<_, SyncError>(())
+    }).unwrap();
+    client
+        .commit_pull_cursor(&mut receiver, "ws", &cursor, &NoFaults, &NoLiveLeases, 303)
+        .unwrap();
+}
+
+#[test]
+fn relay_pull_live_audit_wrong_chunk_length_refuses_and_applies_later_op() {
+    assert_length_claim_refused(LengthClaim::Chunk);
+}
+
+#[test]
+fn relay_pull_live_audit_wrong_update_length_refuses_and_applies_later_op() {
+    assert_length_claim_refused(LengthClaim::Update);
+}
+
+#[test]
+fn relay_pull_live_audit_missing_chunk_retries_without_ack() {
+    let (_scratch, mut receiver, client, final_seq) = length_claim_pull(LengthClaim::Valid);
+    let audit = client
+        .transport()
+        .pull
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .ops[0]
+        .clone();
+    let sha = audit.payload["manifest"]["chunks"][0]["sha256"]
+        .as_str()
+        .unwrap();
+    let bytes = receiver.get_binary_blob(sha).unwrap().unwrap();
+    receiver
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM binary_blobs WHERE sha256=?1", [sha])
+                .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            client.pull_chat_workspace(
+                &mut receiver,
+                &mut WriterDocCache::new(),
+                "ws",
+                &NoFaults,
+                &NoLiveLeases,
+                302
+            ),
+            Err(crate::RelayError::BlobMissing)
+        ));
+        assert_eq!(
+            crate::read_replication_acked_seq(&receiver, "ws", "owner-origin").unwrap(),
+            audit.origin_seq - 1
+        );
+    }
+    receiver.put_binary_blob(&bytes).unwrap();
+    let result = client
+        .pull_chat_workspace(
+            &mut receiver,
+            &mut WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            303,
+        )
+        .unwrap();
+    assert!(matches!(
+        result,
+        crate::SyncPassOutcome::Complete {
+            applied: 2,
+            refused: 0,
+            ..
+        }
+    ));
+    assert_eq!(
+        crate::read_replication_acked_seq(&receiver, "ws", "owner-origin").unwrap(),
+        final_seq
+    );
+}
+
+fn assert_corrupt_length_is_storage(update: bool) {
+    let (_scratch, mut receiver, client, _) = length_claim_pull(LengthClaim::Valid);
+    let audit = client
+        .transport()
+        .pull
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .ops[0]
+        .clone();
+    let sha = if update {
+        audit.payload["updateBlobSha256"].as_str().unwrap()
+    } else {
+        audit.payload["manifest"]["chunks"][0]["sha256"]
+            .as_str()
+            .unwrap()
+    };
+    receiver
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE binary_blobs SET byte_length=byte_length+1 WHERE sha256=?1",
+                [sha],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let error = apply_audit_envelope(&mut receiver, &audit, &NoFaults).unwrap_err();
+    assert!(
+        matches!(&error, SyncError::Storage(dohc_engine_storage::StorageError::BlobIntegrity { sha256 }) if sha256 == sha),
+        "{error:?}"
+    );
+    assert_eq!(
+        crate::read_replication_acked_seq(&receiver, "ws", "owner-origin").unwrap(),
+        audit.origin_seq - 1
+    );
+    assert_eq!(count(&receiver, "live_audit_events"), 0);
+}
+
+#[test]
+fn audit_apply_live_audit_corrupt_chunk_length_is_storage() {
+    assert_corrupt_length_is_storage(false);
+}
+
+#[test]
+fn audit_apply_live_audit_corrupt_update_length_is_storage() {
+    assert_corrupt_length_is_storage(true);
+}
+
+#[test]
+fn audit_apply_live_audit_missing_chunk_retries_without_ack() {
+    let (_scratch, mut receiver, client, _) = length_claim_pull(LengthClaim::Valid);
+    let audit = client
+        .transport()
+        .pull
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .ops[0]
+        .clone();
+    let sha = audit.payload["manifest"]["chunks"][0]["sha256"]
+        .as_str()
+        .unwrap();
+    let bytes = receiver.get_binary_blob(sha).unwrap().unwrap();
+    receiver
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM binary_blobs WHERE sha256=?1", [sha])
+                .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            apply_audit_envelope(&mut receiver, &audit, &NoFaults),
+            Err(SyncError::BlobInvalid)
+        ));
+        assert_eq!(
+            crate::read_replication_acked_seq(&receiver, "ws", "owner-origin").unwrap(),
+            audit.origin_seq - 1
+        );
+        assert_eq!(count(&receiver, "live_audit_events"), 0);
+        assert_eq!(count(&receiver, "replication_pending_refusals"), 0);
+    }
+    receiver.put_binary_blob(&bytes).unwrap();
+    let result = apply_audit_envelope(&mut receiver, &audit, &NoFaults).unwrap();
+    assert!(matches!(result.primary, ApplyDisposition::Applied(_)));
+    assert_eq!(
+        crate::read_replication_acked_seq(&receiver, "ws", "owner-origin").unwrap(),
+        audit.origin_seq
+    );
+}
+
+fn assert_checksum_precedes_length_refusal(claim: LengthClaim) {
+    let (_scratch, mut receiver, client, _) = length_claim_pull(claim);
+    let audit = client
+        .transport()
+        .pull
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .ops[0]
+        .clone();
+    let sha = if matches!(claim, LengthClaim::Update) {
+        audit.payload["updateBlobSha256"].as_str().unwrap()
+    } else {
+        audit.payload["manifest"]["chunks"][0]["sha256"]
+            .as_str()
+            .unwrap()
+    };
+    let original = receiver.get_binary_blob(sha).unwrap().unwrap();
+    let mut damaged = original.clone();
+    damaged[0] ^= 1;
+    receiver
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE binary_blobs SET bytes=?1 WHERE sha256=?2",
+                params![damaged, sha],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let error = apply_audit_envelope(&mut receiver, &audit, &NoFaults).unwrap_err();
+    assert!(
+        matches!(&error, SyncError::Storage(dohc_engine_storage::StorageError::BlobIntegrity { sha256 }) if sha256 == sha),
+        "{error:?}"
+    );
+    assert_eq!(
+        crate::read_replication_acked_seq(&receiver, "ws", "owner-origin").unwrap(),
+        audit.origin_seq - 1
+    );
+    assert_eq!(count(&receiver, "live_audit_events"), 0);
+    assert_eq!(count(&receiver, "replication_pending_refusals"), 0);
+    receiver
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE binary_blobs SET bytes=?1 WHERE sha256=?2",
+                params![original, sha],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let result = apply_audit_envelope(&mut receiver, &audit, &NoFaults).unwrap();
+    assert!(matches!(result.primary, ApplyDisposition::Refused(_)));
+    assert_eq!(
+        crate::read_replication_acked_seq(&receiver, "ws", "owner-origin").unwrap(),
+        audit.origin_seq
+    );
+}
+
+#[test]
+fn audit_apply_live_audit_checksum_precedes_wrong_chunk_length_refusal() {
+    assert_checksum_precedes_length_refusal(LengthClaim::Chunk);
+}
+
+#[test]
+fn audit_apply_live_audit_checksum_precedes_wrong_update_length_refusal() {
+    assert_checksum_precedes_length_refusal(LengthClaim::Update);
+}
+
+#[test]
+#[ignore = "manual valid live audit import measurement"]
+fn relay_pull_live_audit_valid_import_measurement() {
+    for sample in 0..21 {
+        let (_scratch, mut receiver, client, _) = length_claim_pull(LengthClaim::Valid);
+        let started = std::time::Instant::now();
+        let result = client
+            .pull_chat_workspace(
+                &mut receiver,
+                &mut WriterDocCache::new(),
+                "ws",
+                &NoFaults,
+                &NoLiveLeases,
+                302,
+            )
+            .unwrap();
+        let micros = started.elapsed().as_micros();
+        assert!(matches!(
+            result,
+            crate::SyncPassOutcome::Complete {
+                applied: 2,
+                refused: 0,
+                ..
+            }
+        ));
+        if sample > 0 {
+            println!("AUDITSTALL valid_import sample={sample} micros={micros}");
+        }
+    }
+}
+
 #[test]
 fn deferred_settlement_exports_its_companion_moment_after_evidence_once() {
     deferred_settlement_export(true);
