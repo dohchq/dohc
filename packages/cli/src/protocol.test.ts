@@ -86,8 +86,12 @@ describe("moment author results", () => {
       { kind: "link", publicPrincipalId: "public_1", label: "Anonymous" },
     ]);
     expect(parseCliResult("moments", result)).toEqual(result);
+    const fullHuman = momentsResult([
+      { kind: "human", humanId: "owner", humanName: "Owner", relayConfirmed: true, onBehalfOf: "owner" },
+    ]);
+    expect(parseCliResult("moments", fullHuman)).toEqual(fullHuman);
     for (const author of [
-      { kind: "human", humanId: "owner", humanName: "Owner", onBehalfOf: "owner" },
+      { kind: "human", humanId: "owner", humanName: "Owner", agentName: "Writer" },
       { kind: "link", publicPrincipalId: "public_1", label: "Anonymous", grantId: "grant" },
     ]) expect(() => parseCliResult("moments", momentsResult([author]))).toThrow();
   });
