@@ -72,6 +72,14 @@ function fixture() {
   return {directory,path,owner,input,write,get storage(){return storage;},get raw(){return (storage as StorageContext).db;},restart(){storage.close();storage=openSyncRelayStorage(path);},accept(patch:Partial<AcceptAppCollectionInput>={},maxCreatesPerGrant=100){return storage.acceptAppCollection({...input,...patch},{maxCreatesPerGrant});}};
 }
 
+it("reports a published app collection's file reader demand until its grant is revoked",async()=>{
+  const f=fixture(),handler=createSyncRelayHandler({storage:f.storage,resolveActor:()=>({workspaceId:"w",userId:"owner"})});
+  const read=async()=>await (await handler(new Request("http://relay.test/sync/w/log"))).json();
+  expect(await read()).toMatchObject({settledHeadReaders:true});
+  f.storage.revokeShareGrant({shareId:"s",grantId:"g",revokedAtMs:30});
+  expect(await read()).toMatchObject({settledHeadReaders:false});
+});
+
 it("names the sync service when collection approval needs a newer reader",()=>{
   const f=fixture();
   const newer="version: 2\n"+schemaText;

@@ -33,6 +33,7 @@ export interface SharingDeclined {
 }
 
 export interface PullWorkspaceFromRelayResult {
+  nextSettledHeadPublishAtMs?: number | null;
   fetched: number;
   applied: number;
   skipped: number;

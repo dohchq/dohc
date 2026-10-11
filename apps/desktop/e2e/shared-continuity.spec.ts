@@ -727,7 +727,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
 });
 
 
-for (const delivery of ["typing", "upgrade", "declined"] as const) {
+for (const delivery of ["typing", "late-share", "upgrade", "declined"] as const) {
   test(`@settled-heads a View share receives settled ${delivery} while the owner's editor stays open`, async ({ browser }, testInfo) => {
     test.setTimeout(300_000);
     const ownerTemp = await createTempWorkspace();
@@ -761,6 +761,12 @@ for (const delivery of ["typing", "upgrade", "declined"] as const) {
       await expect(owner.page.getByTestId("cloud-workspace-synced")).toBeVisible();
       await owner.page.keyboard.press("Escape");
       await waitForWorkspaceFile(owner.page, workspace.workspaceId, PATH);
+      if (delivery === "late-share") {
+        await openDocument(owner.page);
+        await typeAfter(owner.page, "The person writes here.", ` ${settledText}`);
+        await expect(saveState(owner.page)).toHaveAttribute("data-state", "saved");
+        await expect.poll(() => readFile(join(ownerTemp.rootPath, PATH), "utf8"), { timeout: 30_000 }).toContain(settledText);
+      }
       const share = await owner.page.evaluate(({ workspaceId, recipientEmail, path }) =>
         (window as unknown as { dohcDesktop: Api }).dohcDesktop.createRelayShare({ workspaceId, recipientEmail, paths: [path], access: "view" }),
       { workspaceId: workspace.workspaceId, recipientEmail: recipientAccount.email, path: PATH });
@@ -769,7 +775,7 @@ for (const delivery of ["typing", "upgrade", "declined"] as const) {
       const recipientWorkspaceId = await openShare(recipient, recipientTemp, recipientApproval, stack.relayUrl, recipientAccount, share.shareCode, true);
       await expect(recipient.page.getByText("The person writes here.", { exact: false })).toBeVisible();
       const before = await momentIds(recipient.page, recipientWorkspaceId, PATH);
-      if (delivery !== "typing") {
+      if (delivery === "upgrade" || delivery === "declined") {
         await owner.close();
         apps.splice(apps.indexOf(owner), 1);
         const offline = await openLiveDaemonWorkspace(workspace);
@@ -802,7 +808,7 @@ for (const delivery of ["typing", "upgrade", "declined"] as const) {
             database.prepare("UPDATE ydoc_docs SET file_export_lane=1,regime='local-only',lineage_claim_status='unclaimed',lineage_claim_id=NULL WHERE object_id=?").run(head.object_id);
           } else {
             if (database.prepare("PRAGMA table_info(ydoc_docs)").all().some(column => column.name === "last_published_moment_id")) {
-              database.exec("BEGIN; DROP INDEX idx_live_device_settlements_moment; ALTER TABLE ydoc_docs DROP COLUMN last_published_moment_id; ALTER TABLE ydoc_docs DROP COLUMN last_published_at_ms; DELETE FROM engine_migrations WHERE ordinal=42; COMMIT;");
+              database.exec("BEGIN; DROP INDEX idx_live_device_settlements_moment; DROP INDEX IF EXISTS idx_ydoc_unchecked_publication; ALTER TABLE ydoc_docs DROP COLUMN last_published_moment_id; ALTER TABLE ydoc_docs DROP COLUMN last_published_at_ms; ALTER TABLE ydoc_docs DROP COLUMN published_checked_settle_seq; ALTER TABLE sync_identity DROP COLUMN settled_head_readers; ALTER TABLE sync_identity DROP COLUMN settled_head_activation_pending; DELETE FROM engine_migrations WHERE ordinal=42; COMMIT;");
             }
             expect(database.prepare("SELECT max(ordinal) AS ordinal FROM engine_migrations").get()?.ordinal).toBe(41);
           }
@@ -811,7 +817,7 @@ for (const delivery of ["typing", "upgrade", "declined"] as const) {
         apps.push(owner);
         expect((await activeWorkspace(owner.page, ownerTemp.rootPath)).workspaceId).toBe(workspace.workspaceId);
         await openDocument(owner.page);
-      } else {
+      } else if (delivery === "typing") {
         await openDocument(owner.page);
         await typeAfter(owner.page, "The person writes here.", ` ${settledText}`);
       }
@@ -819,7 +825,9 @@ for (const delivery of ["typing", "upgrade", "declined"] as const) {
       await expect.poll(() => readFile(join(ownerTemp.rootPath, PATH), "utf8"), { timeout: 30_000 }).toContain(settledText);
       await expect.poll(() => readFile(join(recipientTemp.rootPath, PATH), "utf8"), { timeout: 90_000 }).toContain(settledText);
       await expect(recipient.page.getByText(settledText, { exact: false })).toBeVisible({ timeout: 30_000 });
-      await expect.poll(() => momentIds(recipient.page, recipientWorkspaceId, PATH), { timeout: 30_000 }).not.toEqual(before);
+      if (delivery !== "late-share") {
+        await expect.poll(() => momentIds(recipient.page, recipientWorkspaceId, PATH), { timeout: 30_000 }).not.toEqual(before);
+      }
       await expect(editor(owner.page)).toBeVisible();
       await expect(editor(owner.page)).toContainText(settledText);
       for (const app of apps) assertDesktopEngineHealthy(app.logs);

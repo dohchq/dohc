@@ -670,6 +670,7 @@ mod deferred_relay_tests {
                     missing: Vec::new(),
                 }),
                 RelayIoRequest::Push(request) => RelayIoResponse::Push(PushResponse {
+                    settled_head_readers: None,
                     settlement_refusals: Vec::new(),
                     accepted: request.ops.len(),
                     inserted: request.ops.len(),
@@ -821,6 +822,7 @@ mod deferred_relay_tests {
                     let request = transport.take_pending().unwrap();
                     let response = match &request {
                         RelayIoRequest::Pull(_) => RelayIoResponse::Pull(PullResponse {
+                            settled_head_readers: None,
                             ops: Vec::new(),
                             next_cursor: 0,
                             has_more: false,
@@ -829,6 +831,7 @@ mod deferred_relay_tests {
                             assert!(push.ops.is_empty());
                             probes += 1;
                             RelayIoResponse::Push(PushResponse {
+                                settled_head_readers: None,
                                 settlement_refusals: Vec::new(),
                                 accepted: 0,
                                 inserted: 0,
@@ -890,6 +893,7 @@ mod deferred_relay_tests {
                                         RelayIoRequest::Push(push) => {
                                             assert_eq!(push.ops.len(), 2);
                                             RelayIoResponse::Push(PushResponse {
+                                                settled_head_readers: None,
                                                 settlement_refusals: Vec::new(),
                                                 accepted: 2,
                                                 inserted: 1,
@@ -1087,6 +1091,7 @@ mod deferred_relay_tests {
             limit: 10,
         };
         let response = PullResponse {
+            settled_head_readers: None,
             ops: Vec::new(),
             next_cursor: 1,
             has_more: false,
@@ -1130,6 +1135,7 @@ mod deferred_relay_tests {
         transport.complete(
             RelayIoRequest::Push(request.clone()),
             Ok(RelayIoResponse::Push(PushResponse {
+                settled_head_readers: None,
                 settlement_refusals: Vec::new(),
                 accepted: request.ops.len(),
                 inserted: request.ops.len(),
@@ -1141,6 +1147,7 @@ mod deferred_relay_tests {
         assert_eq!(
             transport.push(request).expect("consume completed push"),
             PushResponse {
+                settled_head_readers: None,
                 settlement_refusals: Vec::new(),
                 accepted: dohc_engine_sync::MAX_PUSH_OPS_PER_BATCH,
                 inserted: dohc_engine_sync::MAX_PUSH_OPS_PER_BATCH,
@@ -1338,6 +1345,7 @@ mod deferred_relay_tests {
                     transport.complete(
                         pending,
                         Ok(RelayIoResponse::Pull(PullResponse {
+                            settled_head_readers: None,
                             ops: Vec::new(),
                             next_cursor: cursor + 1,
                             has_more: cursor < 3,

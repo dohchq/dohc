@@ -22,7 +22,8 @@ import {
 } from "./types";
 import { type StorageContext } from "./context";
 import { nextShareDiscussionRevision } from "./discussion";
-import { readCurrentShareGrant } from "./currentShareGrant";
+import { currentShareGrantSql, readCurrentShareGrant } from "./currentShareGrant";
+import { effectiveShareSelector, fileSideOf, parseStoredAnyShareSelectorJson } from "../shareFilter";
 import {
   rowToShareGrantRow,
   rowToLinkCredentialRow,
@@ -46,6 +47,19 @@ function dependentGrantIdsMatch(
     expected.size === dependents.length &&
     dependents.every((dependent) => expected.has(dependent.grantId))
   );
+}
+
+export function workspaceHasSettledHeadReaders(storage: StorageContext, workspaceId: string): boolean {
+  const shares = storage.db.prepare(`SELECT DISTINCT s.selector_json,g.access FROM sync_relay_shares s
+    JOIN sync_relay_share_grants g ON g.share_id=s.share_id
+    WHERE s.workspace_id=? AND ${currentShareGrantSql("g", "s")}
+      AND (g.principal_kind='link' OR (g.principal_kind='user' AND g.principal_user_id<>s.granter_user_id))`)
+    .all(workspaceId) as Array<{ selector_json: string; access: string }>;
+  return shares.some((share) => {
+    const stored = parseStoredAnyShareSelectorJson(share.selector_json);
+    const selector = stored && effectiveShareSelector(stored, share.access);
+    return selector !== null && fileSideOf(selector) !== null;
+  });
 }
 
 export function createShare(storage: StorageContext, input: {

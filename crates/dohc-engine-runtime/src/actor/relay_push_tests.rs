@@ -137,6 +137,7 @@ impl Relay {
                 self.inserted += inserted;
                 self.skipped += skipped;
                 RelayIoResponse::Push(PushResponse {
+                    settled_head_readers: None,
                     settlement_refusals: Vec::new(),
                     accepted: request.ops.len(),
                     inserted,
@@ -262,6 +263,7 @@ fn deferred_conflict_rewind_refetches_the_relay_maximum() {
                 assert_eq!(push.after_seq, 1);
                 probes += 1;
                 Ok(RelayIoResponse::Push(PushResponse {
+                    settled_head_readers: None,
                     settlement_refusals: Vec::new(),
                     accepted: 0,
                     inserted: 0,
@@ -279,6 +281,7 @@ fn deferred_conflict_rewind_refetches_the_relay_maximum() {
                 assert_eq!(push.ops[0].origin_seq, 1);
                 restored_prefixes += 1;
                 Ok(RelayIoResponse::Push(PushResponse {
+                    settled_head_readers: None,
                     settlement_refusals: Vec::new(),
                     accepted: 1,
                     inserted: 1,

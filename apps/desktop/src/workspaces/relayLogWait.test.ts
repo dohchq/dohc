@@ -21,10 +21,22 @@ function fakeRelay(answers: Array<{ status: number; body: unknown; afterMs?: num
 }
 
 describe("held relay log reads", () => {
+  it("requests a pull once when reader demand changes without a log operation", async () => {
+    const relay = fakeRelay([
+      { status: 200, body: { ok: true, hasMore: false, settledHeadReaders: true }, afterMs: 25_000 },
+      { status: 200, body: { ok: true, hasMore: false, settledHeadReaders: true }, afterMs: 25_000 },
+      { status: 200, body: { ok: true, hasMore: false, settledHeadReaders: false }, afterMs: 25_000 },
+    ]);
+    const wait = createRelayLogWait({ workspaceId: "workspace", ...relay });
+    const signal = new AbortController().signal;
+    await expect(wait(0, signal)).resolves.toBe(true);
+    await expect(wait(0, signal)).resolves.toBe(false);
+    await expect(wait(0, signal)).resolves.toBe(true);
+  });
   it("names the relay's coordinate once and reports whether the log moved past the cursor", async () => {
     const relay = fakeRelay([
-      { status: 200, body: { ok: true, ops: [], nextCursor: 4, hasMore: true }, afterMs: 3 },
-      { status: 200, body: { ok: true, ops: [], nextCursor: 9, hasMore: false }, afterMs: 25_000 },
+      { status: 200, body: { ok: true, settledHeadReaders: false, ops: [], nextCursor: 4, hasMore: true }, afterMs: 3 },
+      { status: 200, body: { ok: true, settledHeadReaders: false, ops: [], nextCursor: 9, hasMore: false }, afterMs: 25_000 },
     ]);
     const wait = createRelayLogWait({ workspaceId: "work space", ...relay, holdMs: 25_000 });
     const signal = new AbortController().signal;
@@ -39,7 +51,7 @@ describe("held relay log reads", () => {
 
   it("refuses a relay that answers early with no change, so the caller backs off", async () => {
     const relay = fakeRelay([
-      { status: 200, body: { ok: true, ops: [], nextCursor: 4, hasMore: false }, afterMs: 10 },
+      { status: 200, body: { ok: true, settledHeadReaders: false, ops: [], nextCursor: 4, hasMore: false }, afterMs: 10 },
     ]);
     const wait = createRelayLogWait({ workspaceId: "workspace", ...relay, holdMs: 25_000 });
     await expect(wait(4, new AbortController().signal)).rejects.toThrow(/early/u);
@@ -48,7 +60,7 @@ describe("held relay log reads", () => {
   it("reads the coordinate again after the relay refuses it", async () => {
     const relay = fakeRelay([
       { status: 409, body: { ok: false, code: "epoch_superseded" } },
-      { status: 200, body: { ok: true, ops: [], nextCursor: 4, hasMore: true } },
+      { status: 200, body: { ok: true, settledHeadReaders: false, ops: [], nextCursor: 4, hasMore: true } },
     ]);
     const wait = createRelayLogWait({ workspaceId: "workspace", ...relay, holdMs: 25_000 });
     const signal = new AbortController().signal;
@@ -64,7 +76,7 @@ describe("held relay log reads", () => {
       signals.push(init?.signal);
       return String(resource).endsWith("/bootstrap")
         ? Response.json({ ok: true, hasContent: true, ...IDENTITY })
-        : Response.json({ ok: true, hasMore: true });
+        : Response.json({ ok: true, settledHeadReaders: false, hasMore: true });
     };
     const wait = createRelayLogWait({
       workspaceId: "workspace",

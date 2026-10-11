@@ -26,6 +26,16 @@ fn owner() -> (ScratchDir, std::path::PathBuf, EngineStore) {
 
 fn ordinary_publisher_fixture() -> (ScratchDir, std::path::PathBuf, EngineStore) {
     let (scratch, path, mut store) = owner();
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE sync_identity SET settled_head_readers=1 WHERE workspace_id='ws'",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
     write(&mut store, "doc", "seed", "doc.md", "seed", "local-file", 1);
     lane(&mut store, "doc");
     let doc = fresh_seed(
@@ -51,6 +61,248 @@ fn ordinary_saved_head(store: &mut EngineStore, id: &str, text: &str, now: i64) 
         tx.execute("UPDATE ydoc_docs SET last_settled_sha=(SELECT blob_sha256 FROM snapshots WHERE workspace_id='ws' AND object_id='doc'),settle_seq=(SELECT moment_order FROM moments WHERE workspace_id='ws' AND moment_id=?1)", [id]).map_err(SyncError::persist)?;
         Ok::<_,SyncError>(())
     }).unwrap();
+}
+
+#[test]
+fn fix1b_gate_off_holds_the_settled_head() {
+    let (_scratch, _, mut store) = ordinary_publisher_fixture();
+    ordinary_saved_head(&mut store, "moment-ydoc-held", "held", 10);
+    // A workspace starts with no external reader demand.
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE sync_identity SET settled_head_readers=0 WHERE workspace_id='ws'",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            crate::enrolment::publish_ordinary_settled_heads_in_tx(tx, "ws", 60_000)
+        })
+        .unwrap();
+    assert_eq!(
+        exports(&store).len(),
+        1,
+        "owner-only syncing must not export live text"
+    );
+}
+
+fn publication_checked(store: &EngineStore) -> (i64, i64) {
+    store.read_with(|c| c.query_row("SELECT published_checked_settle_seq,settle_seq FROM ydoc_docs WHERE object_id='doc'", [], |r| Ok((r.get(0)?,r.get(1)?)))).unwrap()
+}
+
+#[test]
+fn fix1b_the_first_settle_is_unchecked_and_publication_checks_it() {
+    let (_scratch, _, mut store) = owner();
+    write(
+        &mut store,
+        "doc",
+        "moment-ydoc-first",
+        "doc.md",
+        "first",
+        "ydoc",
+        1,
+    );
+    lane(&mut store, "doc");
+    store.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE sync_identity SET settled_head_readers=1", []).map_err(SyncError::persist)?;
+        tx.execute("UPDATE ydoc_docs SET file_export_lane=0,last_settled_sha=(SELECT blob_sha256 FROM snapshots WHERE object_id='doc'),settle_seq=(SELECT moment_order FROM moments WHERE moment_id='moment-ydoc-first')", []).map_err(SyncError::persist)?;
+        Ok::<_,SyncError>(())
+    }).unwrap();
+    assert_eq!(publication_checked(&store).0, -1);
+    store
+        .write_with(&NoFaults, |tx| {
+            crate::enrolment::publish_ordinary_settled_heads_in_tx(tx, "ws", 60_000)
+        })
+        .unwrap();
+    assert_eq!(exports(&store).len(), 1);
+    assert_eq!(publication_checked(&store).0, publication_checked(&store).1);
+}
+
+#[test]
+fn fix1b_push_activation_survives_a_crash_before_cursor_ack() {
+    let (_scratch, path, mut store) = ordinary_publisher_fixture();
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE sync_identity SET settled_head_readers=0", [])
+                .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    ordinary_saved_head(&mut store, "moment-ydoc-held", "held", 10);
+    let client = RelaySyncClient::new(RecordingRelay {
+        settled_head_readers: Some(true),
+        ..Default::default()
+    });
+    let crash = ScriptedFaults::crash_at(FaultPoint::SyncAfterPushBeforeCursorPersist);
+    let outcome = client
+        .push_workspace(&mut store, "ws", crash.as_ref(), &AlwaysLive, 60_000, 0)
+        .unwrap();
+    assert!(matches!(outcome, SyncPassOutcome::CrashedAfterRemoteCommit));
+    drop(store);
+    let mut store = EngineStore::open(&path, 60_001).unwrap();
+    let pending: bool = store
+        .read_with(|c| {
+            c.query_row(
+                "SELECT settled_head_activation_pending FROM sync_identity",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert!(pending);
+    let outcome = client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 90_000, 0)
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        SyncPassOutcome::Complete {
+            next_settled_head_publish_at_ms: None,
+            ..
+        }
+    ));
+    assert_eq!(exports(&store).len(), 2);
+}
+
+#[test]
+fn fix1b_late_share_activation_survives_restart_and_revocation() {
+    let (_scratch, path, mut store) = ordinary_publisher_fixture();
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE sync_identity SET settled_head_readers=0", [])
+                .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    ordinary_saved_head(
+        &mut store,
+        "moment-ydoc-before-share",
+        "held current text",
+        10,
+    );
+    let client = RelaySyncClient::new(FakeRelay::default());
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_000, 0)
+        .unwrap();
+    assert_eq!(exports(&store).len(), 1);
+    assert!(publication_checked(&store).0 < publication_checked(&store).1);
+    *client.transport().pull.lock().unwrap() = Some(PullResponse {
+        settled_head_readers: Some(true),
+        ops: vec![],
+        next_cursor: 0,
+        has_more: false,
+    });
+    let outcome = client
+        .pull_chat_workspace(
+            &mut store,
+            &mut WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &AlwaysLive,
+            70_000,
+        )
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        SyncPassOutcome::Complete {
+            fetched: 0,
+            next_settled_head_publish_at_ms: Some(70_000),
+            ..
+        }
+    ));
+    drop(store);
+    let mut store = EngineStore::open(&path, 70_001).unwrap();
+    let durable: (bool, bool) = store
+        .read_with(|c| {
+            c.query_row(
+                "SELECT settled_head_readers,settled_head_activation_pending FROM sync_identity",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(durable, (true, true));
+    for now in [70_001, 100_001] {
+        client
+            .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, now, 0)
+            .unwrap();
+        assert_eq!(exports(&store).len(), 2, "held head publishes once");
+    }
+    assert_eq!(
+        exports(&store)[1].payload["momentId"],
+        "moment-ydoc-before-share"
+    );
+    assert_eq!(publication_checked(&store).0, publication_checked(&store).1);
+    *client.transport().pull.lock().unwrap() = Some(PullResponse {
+        settled_head_readers: Some(false),
+        ops: vec![],
+        next_cursor: 0,
+        has_more: false,
+    });
+    client
+        .pull_chat_workspace(
+            &mut store,
+            &mut WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &AlwaysLive,
+            110_000,
+        )
+        .unwrap();
+    ordinary_saved_head(&mut store, "moment-ydoc-revoked", "no readers", 110_001);
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 150_000, 0)
+        .unwrap();
+    assert_eq!(exports(&store).len(), 2);
+    assert!(publication_checked(&store).0 < publication_checked(&store).1);
+}
+
+#[test]
+fn fix1b_checked_heads_preserve_throttled_and_temporarily_excluded_work() {
+    let (_scratch, _, mut store) = ordinary_publisher_fixture();
+    let publish = |store: &mut EngineStore, now| {
+        store
+            .write_with(&NoFaults, |tx| {
+                crate::enrolment::publish_ordinary_settled_heads_in_tx(tx, "ws", now)
+            })
+            .unwrap()
+    };
+    ordinary_saved_head(&mut store, "moment-ydoc-first", "first", 10);
+    publish(&mut store, 60_000);
+    let checked = publication_checked(&store).0;
+    ordinary_saved_head(&mut store, "moment-ydoc-throttled", "second", 20);
+    publish(&mut store, 60_001);
+    assert_eq!(publication_checked(&store).0, checked);
+    store.write_with(&NoFaults, |tx| {
+        tx.execute("INSERT INTO live_audit_pending_exports VALUES ('relay','ws','main','doc','claim',0,-1)", []).map_err(SyncError::persist)?;
+        Ok::<_,SyncError>(())
+    }).unwrap();
+    publish(&mut store, 90_000);
+    assert_eq!(publication_checked(&store).0, checked);
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM live_audit_pending_exports", [])
+                .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    publish(&mut store, 90_001);
+    assert_eq!(exports(&store).len(), 3);
+    assert_eq!(publication_checked(&store).0, publication_checked(&store).1);
+    ordinary_saved_head(&mut store, "moment-ydoc-same", "second", 30);
+    publish(&mut store, 90_002);
+    assert_eq!(exports(&store).len(), 3);
+    assert_eq!(publication_checked(&store).0, publication_checked(&store).1);
+    ordinary_saved_head(&mut store, "moment-ydoc-apply-peer", "peer", 40);
+    publish(&mut store, 90_003);
+    assert_eq!(exports(&store).len(), 3);
+    assert_eq!(publication_checked(&store).0, publication_checked(&store).1);
+    let plan: Vec<String> = store.read_with(|c| {
+        c.prepare("EXPLAIN QUERY PLAN SELECT object_id FROM ydoc_docs INDEXED BY idx_ydoc_unchecked_publication WHERE workspace_id='ws' AND file_export_lane=0 AND settle_seq>published_checked_settle_seq")?.query_map([], |r| r.get(3))?.collect::<Result<_,rusqlite::Error>>()
+    }).unwrap();
+    assert!(
+        plan.iter()
+            .any(|line| line.contains("idx_ydoc_unchecked_publication")),
+        "{plan:?}"
+    );
 }
 
 #[test]
@@ -670,6 +922,13 @@ fn ordinary_companion_keeps_a_peer_n_updates_ahead_including_richdoc_source() {
     for kind in [ContentKind::Plaintext, ContentKind::Richdoc] {
         for open in [false, true] {
             let (_scratch, _, mut source) = owner();
+            source
+                .write_with(&NoFaults, |tx| {
+                    tx.execute("UPDATE sync_identity SET settled_head_readers=1", [])
+                        .map_err(SyncError::persist)?;
+                    Ok::<_, SyncError>(())
+                })
+                .unwrap();
             let key = DocKey::new("ws", "main", "doc").unwrap();
             let doc = Ydoc::wire();
             doc.rewrite_content_to_markdown(kind, "seed").unwrap();
@@ -696,6 +955,8 @@ fn ordinary_companion_keeps_a_peer_n_updates_ahead_including_richdoc_source() {
             )
             .unwrap();
             peer.write_with(&NoFaults, |tx| {
+                tx.execute("UPDATE sync_identity SET settled_head_readers=1", [])
+                    .map_err(SyncError::persist)?;
                 tx.execute(
                     "INSERT INTO sync_relay_push_state VALUES ('ws','device-b',-1)",
                     [],
@@ -1633,6 +1894,7 @@ fn lane_recovery_copies_unpushed_export_and_next_preimage_follows_it() {
     let recovery = RelaySyncClient::new(PagedRelay::new([(
         0,
         PullResponse {
+            settled_head_readers: None,
             ops: shared.clone(),
             next_cursor: 1,
             has_more: false,
@@ -2212,6 +2474,7 @@ fn lane_divergence_uses_existing_conflict_and_never_echoes_imports() {
 
 #[derive(Default)]
 struct RecordingRelay {
+    settled_head_readers: Option<bool>,
     pushes: Mutex<Vec<PushRequest>>,
     pull: Mutex<Option<PullResponse>>,
     haves: Mutex<Vec<BlobHaveRequest>>,
@@ -2225,6 +2488,7 @@ impl RelayTransport for RecordingRelay {
         let accepted = req.ops.len();
         let current_max_origin_seq = req.ops.last().map_or(req.after_seq, |op| op.origin_seq);
         Ok(PushResponse {
+            settled_head_readers: self.settled_head_readers,
             settlement_refusals: Vec::new(),
             accepted,
             inserted: accepted,
@@ -2745,6 +3009,7 @@ fn lane_open_recipient_retains_pending_pull_across_restart_and_local_edits_survi
         (
             0,
             PullResponse {
+                settled_head_readers: None,
                 ops: vec![exports(&source)[1].clone()],
                 next_cursor: 2,
                 has_more: false,
@@ -2753,6 +3018,7 @@ fn lane_open_recipient_retains_pending_pull_across_restart_and_local_edits_survi
         (
             2,
             PullResponse {
+                settled_head_readers: None,
                 ops: Vec::new(),
                 next_cursor: 2,
                 has_more: false,

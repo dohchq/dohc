@@ -1314,6 +1314,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return logStorage.maxOriginSeq(this, workspaceId, originId);
   }
 
+  workspaceHasSettledHeadReaders(workspaceId: string): boolean {
+    return sharesStorage.workspaceHasSettledHeadReaders(this, workspaceId);
+  }
+
   fetchLogPage(input: {
     workspaceId: string;
     sinceRelaySeq: number;

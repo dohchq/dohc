@@ -807,6 +807,7 @@ export interface SyncRelayStorage {
     // transaction opens.
     guard?: (context: AppendLogBatchGuardContext) => void;
   }): AppendLogBatchResult;
+  workspaceHasSettledHeadReaders(workspaceId: string): boolean;
   fetchLogPage(input: {
     workspaceId: string;
     sinceRelaySeq: number;

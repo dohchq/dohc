@@ -313,6 +313,7 @@ fn length_claim_pull(
     let final_seq = pending.last().unwrap().origin_seq;
     let relay = crate::tests::FakeRelay::default();
     *relay.pull.lock().unwrap() = Some(crate::PullResponse {
+        settled_head_readers: None,
         ops: pending,
         next_cursor: final_seq + 1,
         has_more: false,
@@ -1011,6 +1012,7 @@ fn origin_recovery_keeps_pending_live_exports_publishable() {
     let ops = operations(&f.store);
     let relay = crate::tests::FakeRelay::default();
     *relay.pull.lock().unwrap() = Some(crate::PullResponse {
+        settled_head_readers: None,
         next_cursor: ops.len() as i64,
         ops,
         has_more: false,
@@ -3550,6 +3552,7 @@ fn pull_refused_audit(receiver: &mut EngineStore, mut audit: ReplicationEnvelope
     contact(receiver);
     let relay = crate::tests::FakeRelay::default();
     *relay.pull.lock().unwrap() = Some(crate::PullResponse {
+        settled_head_readers: None,
         ops: vec![audit, later],
         next_cursor: 101,
         has_more: false,

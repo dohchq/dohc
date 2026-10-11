@@ -19,7 +19,7 @@ describe("ordinary native sync contract", () => {
 
   it("preserves producing versions, full refusal evidence and the issued token", () => {
     expect(decodeOrdinarySyncResult("sync.pull", { ...pull, ignored: true,
-      pendingCursor: { ...pull.pendingCursor, ignored: true } })).toEqual({ status: "complete", fetched: 2, applied: 1,
+      pendingCursor: { ...pull.pendingCursor, ignored: true } })).toEqual({ status: "complete", nextSettledHeadPublishAtMs: null, fetched: 2, applied: 1,
       refused: 1, skipped: 0, conflictsOpened: 0, hasMore: false, nextCursor: 9, pendingCursor: pull.pendingCursor,
       changedPaths: [change], refusals: [refusal], sharingDeclined: [decline] });
   });
@@ -39,6 +39,7 @@ describe("ordinary native sync contract", () => {
   );
 
   it.each([
+    { nextSettledHeadPublishAtMs: undefined }, { nextSettledHeadPublishAtMs: 1.5 },
     { fetched: undefined }, { applied: "1" }, { refused: null }, { nextCursor: -1 },
     { skipped: Number.MAX_SAFE_INTEGER + 1 }, { conflictsOpened: 0.5 }, { hasMore: null },
     { status: "crashedAfterApply" }, { status: "crashedAfterRemoteCommit" },

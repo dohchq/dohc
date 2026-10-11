@@ -176,6 +176,7 @@ fn relay_large_blob_pull_benchmark() {
             let mut relay = PagedRelay::new([(
                 0,
                 PullResponse {
+                    settled_head_readers: None,
                     ops: vec![op.clone()],
                     next_cursor: 1,
                     has_more: false,

@@ -4111,6 +4111,7 @@ impl dohc_engine_sync::RelayTransport for AcceptPushTransport {
         req: dohc_engine_sync::PushRequest,
     ) -> Result<dohc_engine_sync::PushResponse, dohc_engine_sync::RelayError> {
         Ok(dohc_engine_sync::PushResponse {
+            settled_head_readers: None,
             settlement_refusals: Vec::new(),
             accepted: req.ops.len(),
             inserted: req.ops.len(),

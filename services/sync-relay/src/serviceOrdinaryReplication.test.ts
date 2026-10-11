@@ -12,7 +12,7 @@ const decline = {
 
 const attachment = () => ({relay: {baseUrl: "https://relay.example", bearerToken: "owner-credential"},
   identity: {kind: "join" as const, replicationEpoch: "actual-epoch", streamIdentity: "actual-stream"}, maxPagesPerPull: 2});
-const page = (nextCursor = 1, hasMore = false) => ({status: "complete", nextCursor, hasMore,
+const page = (nextCursor = 1, hasMore = false) => ({status: "complete", nextSettledHeadPublishAtMs: null, nextCursor, hasMore,
   pendingCursor: {kind: "relay", token: `issued-${nextCursor}`}, fetched: 1, applied: 1, refused: 0, skipped: 0, conflictsOpened: 0,
   changedPaths: [{versionId: "main", path: "work.md", operation: "write", contentKind: "text"}], refusals: [], sharingDeclined: []} satisfies OrdinarySyncMethodResultMap["sync.pull"]);
 function fixture(config = attachment()) {

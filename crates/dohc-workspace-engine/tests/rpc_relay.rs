@@ -99,6 +99,7 @@ impl TestResponse {
 
 #[derive(Default)]
 struct RelayState {
+    settled_head_readers: bool,
     workspace_ops: Vec<Value>,
     workspace_blobs: HashMap<String, Vec<u8>>,
     share_ops: HashMap<String, Vec<Value>>,
@@ -280,6 +281,7 @@ fn handle_request(state: &Arc<Mutex<RelayState>>, request: TestRequest) -> TestR
                 .and_then(|op| op["originSeq"].as_i64())
                 .unwrap_or(-1);
             return TestResponse::json(json!({
+                "settledHeadReaders": state.settled_head_readers,
                 "accepted": ops.len(),
                 "inserted": ops.len(),
                 "skipped": 0,
@@ -313,6 +315,7 @@ fn handle_request(state: &Arc<Mutex<RelayState>>, request: TestRequest) -> TestR
             "ops": rows,
             "nextCursor": next,
             "hasMore": has_more,
+            "settledHeadReaders": state.settled_head_readers,
         }));
     }
     panic!("unexpected fake relay request: {method} {path}");
@@ -604,6 +607,66 @@ fn absent_moment_payload(
         "metadata": {"origin": "sync"},
         "beforePresent": "absent"
     })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reader_activation_from_an_empty_pull_survives_close_and_starts_one_push() {
+    let relay = FakeRelay::start(RelayState {
+        settled_head_readers: true,
+        ..Default::default()
+    });
+    let scratch = ScratchDir::new().unwrap();
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let workspace_id = "rpc-reader-activation";
+    let handle = open_uncaptured_workspace(&transport, &scratch, &relay, workspace_id).await;
+    let mut id = 1;
+    seed_main(&transport, &handle, &mut id, workspace_id).await;
+    seed_sync_identity(&transport, &handle, &mut id, workspace_id).await;
+    let pull = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.pull",
+        json!({"workspaceId":workspace_id}),
+    )
+    .await;
+    assert_eq!(pull["fetched"], 0);
+    assert!(pull["nextSettledHeadPublishAtMs"].is_i64());
+    call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+    drop(transport);
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_uncaptured_workspace(&transport, &scratch, &relay, workspace_id).await;
+    let db = Connection::open(engine_db_path(&scratch).unwrap()).unwrap();
+    let durable: (bool, bool) = db
+        .query_row(
+            "SELECT settled_head_readers,settled_head_activation_pending FROM sync_identity",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(durable, (true, true));
+    let pushed = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.push",
+        json!({"workspaceId":workspace_id}),
+    )
+    .await;
+    assert!(pushed["nextSettledHeadPublishAtMs"].is_null());
+    let pulled = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.pull",
+        json!({"workspaceId":workspace_id}),
+    )
+    .await;
+    assert!(
+        pulled["nextSettledHeadPublishAtMs"].is_null(),
+        "the unchanged true hint cannot rearm a consumed wake"
+    );
+    close(&transport, &handle, &mut id).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

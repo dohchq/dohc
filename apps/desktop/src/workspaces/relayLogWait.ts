@@ -9,7 +9,7 @@ import { probeRelayWorkspace } from "./relayWorkspaceProbe";
 // Under the relay's 30 s cap and under the idle timeouts of common proxies.
 export const RELAY_LOG_HOLD_MS = 25_000;
 
-const HeldLogRead = z.object({ ok: z.literal(true), hasMore: z.boolean() });
+const HeldLogRead = z.object({ ok: z.literal(true), hasMore: z.boolean(), settledHeadReaders: z.boolean() });
 
 // Waits on the relay until the workspace log holds an op past `since`, and
 // resolves whether it does. The relay holds the read for at most `holdMs` and
@@ -26,6 +26,7 @@ export function createRelayLogWait(input: {
   const nowMs = input.nowMs ?? (() => Date.now());
   // The relay's current coordinate. A held read names it the way a pull does;
   // the relay refuses a stale one, and the next read asks for it again.
+  let settledHeadReaders = false;
   let identity: RelayWorkspaceIdentity | null | undefined;
   return async (since, abort) => {
     // One deadline bounds the coordinate read and the held read together.
@@ -56,7 +57,10 @@ export function createRelayLogWait(input: {
       },
       label: "Held relay log read",
     });
-    const { hasMore } = HeldLogRead.parse(await response.json());
+    const hint = HeldLogRead.parse(await response.json());
+    const readersChanged = hint.settledHeadReaders !== settledHeadReaders;
+    settledHeadReaders = hint.settledHeadReaders;
+    const hasMore = hint.hasMore || readersChanged;
     if (!hasMore && nowMs() - startedAtMs < holdMs / 2) {
       throw new Error("The relay answered a held read early without a change.");
     }

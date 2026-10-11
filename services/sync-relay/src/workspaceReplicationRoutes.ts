@@ -32,6 +32,7 @@ export function createWorkspaceReplicationRoutes(
     | "verifyWorkspaceIdentity"
     | "getEpochLogFloor"
     | "workspaceIsOwnedBy"
+    | "workspaceHasSettledHeadReaders"
   >,
   nowMs: () => number,
   discussionActivity: Pick<DiscussionActivityHub, "wakeLog" | "wait">,
@@ -155,6 +156,7 @@ export function createWorkspaceReplicationRoutes(
         inserted: result.inserted,
         skipped: result.skipped,
         currentMaxOriginSeq: result.currentMaxOriginSeq,
+        settledHeadReaders: storage.workspaceHasSettledHeadReaders(route.workspaceId),
         ...(result.settlementRefusals ? {settlementRefusals:result.settlementRefusals} : {}),
       });
     }
@@ -207,6 +209,7 @@ export function createWorkspaceReplicationRoutes(
         // relaySeq, or the requested cursor when no row was served.
         nextCursor: page.rows.length === 0 ? requestedSince : page.nextCursor,
         hasMore: page.hasMore,
+        settledHeadReaders: storage.workspaceHasSettledHeadReaders(route.workspaceId),
       });
     }
 
@@ -307,6 +310,7 @@ export function createWorkspaceReplicationRoutes(
       ops: [],
       nextCursor: input.requestedSince,
       hasMore: hasMore(),
+      settledHeadReaders: storage.workspaceHasSettledHeadReaders(workspaceId),
     });
   }
 

@@ -427,6 +427,11 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     // Only a fully successful pull (materialized + cursor committed inside
     // runRelaySync) completes the bootstrap; a throw above leaves the next
     // retry pull-only.
+    const pullPublishAtMs = pullResult.nextSettledHeadPublishAtMs;
+    if (pullPublishAtMs != null) {
+      nextSettledHeadPublishAtMs = nextSettledHeadPublishAtMs === null
+        ? pullPublishAtMs : Math.min(nextSettledHeadPublishAtMs, pullPublishAtMs);
+    }
     bootstrapPullPending = false;
     pulled = { cursor: pullResult.nextCursor, servedChange };
     if (options.afterSuccessfulPull) {
@@ -468,7 +473,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     nextBackoffMs = initialBackoffMs;
     setSyncFailure(null);
     if (ownerAdmissionPending.length > 0 && !pushHasMore) scheduleBackoff();
-    if (nextSettledHeadPublishAtMs !== null && !pushHasMore && !stopped && !authExpired && backoffTimer === undefined) {
+    if (nextSettledHeadPublishAtMs !== null && !pushHasMore && !bootstrapPass && !stopped && !authExpired && backoffTimer === undefined) {
       settledHeadTimer = setTimeout(() => {
         settledHeadTimer = undefined;
         void runPass(false, true);

@@ -785,6 +785,7 @@ export class EngineRelayClient {
         let skipped = 0;
         let conflictsOpened = 0;
         let nextCursor = 0;
+        let nextSettledHeadPublishAtMs: number | null = null;
         let previousCursor: number | null = null;
         const declines: SharingDeclined[] = [];
         const changed = new Map<
@@ -809,6 +810,7 @@ export class EngineRelayClient {
           );
           previousCursor = pageCursor;
           nextCursor = pageCursor;
+          nextSettledHeadPublishAtMs = result.nextSettledHeadPublishAtMs ?? nextSettledHeadPublishAtMs;
           fetched += result.fetched;
           applied += result.applied;
           skipped += result.skipped;
@@ -828,6 +830,7 @@ export class EngineRelayClient {
         }
         return {
           fetched,
+          nextSettledHeadPublishAtMs,
           applied,
           skipped,
           conflictsOpened,

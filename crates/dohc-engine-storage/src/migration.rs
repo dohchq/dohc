@@ -3168,6 +3168,10 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
 const V2_YDOC_PUBLISHED_MOMENT_DDL: &str = "\
 ALTER TABLE ydoc_docs ADD COLUMN last_published_moment_id TEXT;
 ALTER TABLE ydoc_docs ADD COLUMN last_published_at_ms INTEGER;
+ALTER TABLE sync_identity ADD COLUMN settled_head_readers INTEGER NOT NULL DEFAULT 0 CHECK (settled_head_readers IN (0,1));
+ALTER TABLE sync_identity ADD COLUMN settled_head_activation_pending INTEGER NOT NULL DEFAULT 0 CHECK (settled_head_activation_pending IN (0,1));
+ALTER TABLE ydoc_docs ADD COLUMN published_checked_settle_seq INTEGER NOT NULL DEFAULT -1;
+CREATE INDEX idx_ydoc_unchecked_publication ON ydoc_docs(workspace_id,version_id,object_id) WHERE file_export_lane=0 AND settle_seq>published_checked_settle_seq;
 CREATE INDEX idx_live_device_settlements_moment ON live_device_settlements(workspace_id,moment_id);
 UPDATE ydoc_docs SET last_published_moment_id=(
     SELECT m.moment_id FROM moments m
@@ -3829,7 +3833,7 @@ mod tests {
             ),
             (
                 "v2-ydoc-published-moment",
-                "767db867370bcf7008a35177aaa3b6c837e0d2485f7ac13740528c365a1c9e03",
+                "4502eba7ed3dc6eef74c1968b7c553c0bcadc7872fc1554ed28959af7aef588b",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

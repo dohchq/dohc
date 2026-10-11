@@ -43,7 +43,7 @@ describe("held device log reads", () => {
     await appendLog(h, "owner", "workspace", [firstOp], { originId: "origin-b" });
     const response = await held;
     expect(response.status).toBe(200);
-    expect(await json(response)).toEqual({ ok: true, ops: [], nextCursor: 1, hasMore: true });
+    expect(await json(response)).toEqual({ ok: true, ops: [], nextCursor: 1, hasMore: true, settledHeadReaders: false });
     expect(activity.stats()).toEqual({ shares: 0, waiters: 0 });
   });
 
@@ -65,7 +65,7 @@ describe("held device log reads", () => {
   it("answers at once when the log already has an op past the cursor", async () => {
     const { h, activity } = await ownedLog();
     const response = await h(request("owner", "/sync/workspace/log?since=0&hold=30000"));
-    expect(await json(response)).toEqual({ ok: true, ops: [], nextCursor: 0, hasMore: true });
+    expect(await json(response)).toEqual({ ok: true, ops: [], nextCursor: 0, hasMore: true, settledHeadReaders: false });
     expect(activity.stats()).toEqual({ shares: 0, waiters: 0 });
   });
 
@@ -81,7 +81,7 @@ describe("held device log reads", () => {
       expect(activity.stats().waiters).toBe(1);
       expect(answered).toBe(false);
       await vi.advanceTimersByTimeAsync(1);
-      expect(await json(await held)).toEqual({ ok: true, ops: [], nextCursor: 1, hasMore: false });
+      expect(await json(await held)).toEqual({ ok: true, ops: [], nextCursor: 1, hasMore: false, settledHeadReaders: false });
       expect(activity.stats()).toEqual({ shares: 0, waiters: 0 });
     } finally {
       vi.useRealTimers();
@@ -136,7 +136,7 @@ describe("held device log reads", () => {
     const parked = h(request("owner", "/sync/workspace/log?since=1&hold=30000"));
     await vi.waitFor(() => expect(activity.stats().waiters).toBe(1));
     const capped = await h(request("owner", "/sync/workspace/log?since=1&hold=30000"));
-    expect(await json(capped)).toEqual({ ok: true, ops: [], nextCursor: 1, hasMore: false });
+    expect(await json(capped)).toEqual({ ok: true, ops: [], nextCursor: 1, hasMore: false, settledHeadReaders: false });
     expect(activity.stats().waiters).toBe(1);
 
     await appendLog(h, "owner", "workspace", [firstOp], { originId: "origin-b" });

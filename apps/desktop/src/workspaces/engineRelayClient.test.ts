@@ -250,10 +250,20 @@ function expectStatefulRequestsScoped(requests: Request[]): void {
 }
 
 describe("EngineRelayClient", () => {
+  it("carries an empty pull's durable publication wake through cursor commit", async () => {
+    const daemon = new MockDaemon(request => request.method === "sync.pull" ? {
+      status: "complete", nextSettledHeadPublishAtMs: 12345, refused: 0, fetched: 0, applied: 0, skipped: 0,
+      conflictsOpened: 0, hasMore: false, nextCursor: 0, pendingCursor: { kind: "relay", token: "cursor-0" },
+      changedPaths: [], sharingDeclined: [], refusals: [],
+    } : undefined);
+    const { client } = await harness(daemon);
+    await expect(client.pull(async () => undefined)).resolves.toMatchObject({ nextSettledHeadPublishAtMs: 12345, fetched: 0 });
+    expect(daemon.requests.some(request => request.method === "sync.commitCursor")).toBe(true);
+  });
   it("commits engine-owned refusals before notifying Notices", async () => {
     const refusal = { workspaceId: "workspace-a", originId: "peer", originSeq: 1, opKind: "conflict.resolve", code: "invalid-input", reason: "Review this conflict." };
     const daemon = new MockDaemon(request => request.method === "sync.pull" ? {
-      status: "complete", refused: 1, fetched: 1, applied: 0, skipped: 0, conflictsOpened: 0, hasMore: false,
+      status: "complete", nextSettledHeadPublishAtMs: null, refused: 1, fetched: 1, applied: 0, skipped: 0, conflictsOpened: 0, hasMore: false,
       nextCursor: 9, pendingCursor: {kind: "relay", token: "cursor-9"}, changedPaths: [], sharingDeclined: [], refusals: [refusal],
     } : undefined);
     const changed = vi.fn(() => expect(daemon.requests.some(request => request.method === "sync.commitCursor")).toBe(true));

@@ -277,6 +277,7 @@ impl RelayTransport for FakeRelay {
         let accepted = req.ops.len();
         let current_max_origin_seq = req.ops.last().map_or(req.after_seq, |op| op.origin_seq);
         Ok(PushResponse {
+            settled_head_readers: None,
             settlement_refusals,
             accepted,
             inserted: accepted,
@@ -589,6 +590,7 @@ impl RelayTransport for PagedRelay {
                 .push(started.elapsed());
         }
         Ok(PushResponse {
+            settled_head_readers: None,
             settlement_refusals: Vec::new(),
             accepted,
             inserted,
@@ -866,6 +868,7 @@ impl RelayTransport for PagedShareRelay {
             .expect("shared push calls")
             .push(req);
         Ok(PushResponse {
+            settled_head_readers: None,
             settlement_refusals: Vec::new(),
             accepted,
             inserted: accepted,
@@ -1123,6 +1126,7 @@ fn refused_malformed_proof_with_phantom_blobs_does_not_block_the_next_pull_opera
         let next = envelope("malicious", 1, "workspace.init", json!({}));
         let client = RelaySyncClient::new(FakeRelay {
             pull: Mutex::new(Some(PullResponse {
+                settled_head_readers: None,
                 ops: vec![refused, next],
                 next_cursor: 2,
                 has_more: false,

@@ -53,6 +53,7 @@ pub struct PushRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushResponse {
+    pub settled_head_readers: Option<bool>,
     pub settlement_refusals: Vec<SettlementPublicationRefusal>,
     pub accepted: usize,
     pub inserted: usize,
@@ -80,6 +81,7 @@ pub struct PullRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullResponse {
+    pub settled_head_readers: Option<bool>,
     pub ops: Vec<ReplicationEnvelope>,
     pub next_cursor: i64,
     pub has_more: bool,
@@ -670,6 +672,61 @@ pub struct RelaySyncClient<T> {
     automation_claims: std::sync::Mutex<Vec<dohc_engine_domain::AutomationClaim>>,
 }
 
+fn record_settled_head_readers(
+    store: &mut EngineStore,
+    workspace: &str,
+    readers: Option<bool>,
+    faults: &dyn FaultInjector,
+) -> Result<(), RelayError> {
+    let Some(readers) = readers else {
+        return Ok(());
+    };
+    let current: Option<bool> = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT settled_head_readers FROM sync_identity WHERE workspace_id=?1",
+                [workspace],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(SyncError::corrupt)
+        })
+        .map_err(local)?;
+    if current == Some(readers) {
+        return Ok(());
+    }
+    match store.write_with(faults, |tx| {
+        tx.execute("UPDATE sync_identity SET settled_head_activation_pending=CASE
+          WHEN ?2=0 THEN 0 WHEN settled_head_readers=0 THEN 1 ELSE settled_head_activation_pending END,
+          settled_head_readers=?2 WHERE workspace_id=?1", params![workspace, readers])
+          .map_err(SyncError::persist)?;
+        Ok::<_, SyncError>(())
+    }).map_err(local)? {
+        TxnOutcome::Committed(()) => Ok(()),
+        TxnOutcome::Crashed { .. } => Err(local(SyncError::FaultCrash)),
+    }
+}
+
+fn settled_head_activation_deadline(
+    store: &EngineStore,
+    workspace: &str,
+    now_ms: i64,
+) -> Result<Option<i64>, RelayError> {
+    store
+        .read_with(|conn| {
+            let pending: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sync_identity
+          WHERE workspace_id=?1 AND settled_head_readers=1 AND settled_head_activation_pending=1)",
+                    [workspace],
+                    |r| r.get(0),
+                )
+                .map_err(SyncError::corrupt)?;
+            Ok::<_, SyncError>(pending.then_some(now_ms))
+        })
+        .map_err(local)
+}
+
 const MAX_PUSH_OPS_PER_PASS: usize = crate::MAX_PUSH_OPS_PER_BATCH;
 // Soft limit on preparation and blob uploads, reserving 10 seconds of the
 // desktop's 30-second RPC deadline for append and durable acknowledgement.
@@ -982,6 +1039,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 -1,
             ))?;
             validate_probe_response(&probe)?;
+            record_settled_head_readers(store, workspace_id, probe.settled_head_readers, faults)?;
             probe.current_max_origin_seq
         } else {
             local_pushed_seq
@@ -1335,6 +1393,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 -1,
             ))?;
             validate_probe_response(&response)?;
+            record_settled_head_readers(
+                store,
+                workspace_id,
+                response.settled_head_readers,
+                faults,
+            )?;
             if response.current_max_origin_seq != -1 {
                 return Err(RelayError::OriginDiverged);
             }
@@ -1498,6 +1562,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         Err(error) => return Err(error),
                     };
                     validate_push_response(&response, batch, local_max)?;
+                    record_settled_head_readers(
+                        store,
+                        workspace_id,
+                        response.settled_head_readers,
+                        faults,
+                    )?;
                     if response.current_max_origin_seq > local_max {
                         return Err(RelayError::OriginDiverged);
                     }
@@ -1583,6 +1653,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     cursor,
                 ))?;
                 validate_probe_response(&probe)?;
+                record_settled_head_readers(
+                    store,
+                    workspace_id,
+                    probe.settled_head_readers,
+                    faults,
+                )?;
                 if probe.current_max_origin_seq > local_max
                     || probe.current_max_origin_seq >= cursor
                 {
@@ -1610,7 +1686,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
 
         Ok(SyncPassOutcome::Complete {
             owner_admission_pending,
-            next_settled_head_publish_at_ms: progress.next_settled_head_publish_at_ms,
+            next_settled_head_publish_at_ms: settled_head_activation_deadline(
+                store,
+                workspace_id,
+                now_ms,
+            )?
+            .or(progress.next_settled_head_publish_at_ms),
             pushed,
             fetched: 0,
             has_more: resume_needed
@@ -1676,6 +1757,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 limit,
             })?;
             validate_pull_page(&response, workspace_id, cursor)?;
+            record_settled_head_readers(
+                store,
+                workspace_id,
+                response.settled_head_readers,
+                faults,
+            )?;
             if response.ops.len() > limit {
                 return Err(RelayError::InvalidResponse);
             }
@@ -1939,7 +2026,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         Ok(SyncPassOutcome::Complete {
             owner_admission_pending: Vec::new(),
-            next_settled_head_publish_at_ms: None,
+            next_settled_head_publish_at_ms: settled_head_activation_deadline(
+                store,
+                workspace_id,
+                now_ms,
+            )?,
             pushed: 0,
             fetched,
             has_more,
@@ -5509,6 +5600,7 @@ mod pull_page_validation_tests {
     fn pull_page_allows_gaps_but_requires_one_global_order_before_apply() {
         validate_pull_page(
             &PullResponse {
+                settled_head_readers: None,
                 ops: vec![op(Some(12)), op(Some(15))],
                 next_cursor: 15,
                 has_more: false,
@@ -5520,26 +5612,31 @@ mod pull_page_validation_tests {
 
         for invalid in [
             PullResponse {
+                settled_head_readers: None,
                 ops: vec![op(None)],
                 next_cursor: 11,
                 has_more: false,
             },
             PullResponse {
+                settled_head_readers: None,
                 ops: vec![op(Some(10))],
                 next_cursor: 10,
                 has_more: false,
             },
             PullResponse {
+                settled_head_readers: None,
                 ops: vec![op(Some(12)), op(Some(11))],
                 next_cursor: 11,
                 has_more: false,
             },
             PullResponse {
+                settled_head_readers: None,
                 ops: vec![op(Some(12))],
                 next_cursor: 11,
                 has_more: false,
             },
             PullResponse {
+                settled_head_readers: None,
                 ops: vec![op(Some(12))],
                 next_cursor: 13,
                 has_more: false,

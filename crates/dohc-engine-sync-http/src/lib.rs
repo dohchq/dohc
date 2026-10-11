@@ -689,6 +689,10 @@ impl RelayTransport for HttpRelayTransport {
             RequestContext::Workspace,
         )?;
         Ok(PushResponse {
+            settled_head_readers: Some(
+                wire.settled_head_readers
+                    .ok_or(RelayError::InvalidResponse)?,
+            ),
             settlement_refusals: wire.settlement_refusals,
             accepted: wire.accepted,
             inserted: wire.inserted,
@@ -730,6 +734,10 @@ impl RelayTransport for HttpRelayTransport {
             ops.push(envelope);
         }
         Ok(PullResponse {
+            settled_head_readers: Some(
+                wire.settled_head_readers
+                    .ok_or(RelayError::InvalidResponse)?,
+            ),
             ops,
             next_cursor: wire.next_cursor,
             has_more: wire.has_more,
@@ -958,6 +966,7 @@ impl RelayTransport for HttpRelayTransport {
             RequestContext::Share,
         )?;
         Ok(PushResponse {
+            settled_head_readers: wire.settled_head_readers,
             settlement_refusals: wire.settlement_refusals,
             accepted: wire.accepted,
             inserted: wire.inserted,
@@ -1482,6 +1491,7 @@ struct WireCollectionWriteError {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WirePushResponse {
+    settled_head_readers: Option<bool>,
     #[serde(default)]
     settlement_refusals: Vec<dohc_engine_sync::SettlementPublicationRefusal>,
     accepted: usize,
@@ -1493,6 +1503,7 @@ struct WirePushResponse {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WireLogPage {
+    settled_head_readers: Option<bool>,
     own_origin_id: Option<String>,
     ops: Vec<WireLogRow>,
     next_cursor: i64,
@@ -1701,6 +1712,53 @@ mod tests {
     const TEST_CERT_DER_BASE64: &str = "MIIDJTCCAg2gAwIBAgIUEHQ492IM8Ral38aCrsQtLAty8wAwDQYJKoZIhvcNAQELBQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDcyNjIyMzQyNloXDTI2MDcyODIyMzQyNlowFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAlas3XDBWs7j98PENiunFPUWT5X7I+PKLO7A+HFd3JMBwtYVtWBvxmBsLcZ+2Rx4eVJXtAjR4xxBHekNs3z44Ao9didAx485uOPPO8Ksj+cWNgZ4bAYrJrqF7sWEvhP7dilFLKT/vi0BnG/zrac8CEaHl5LzxpBZDOvsQ0mDY0RWXysq6QV37woJIY6wxJ0zJP93T5fl/a3sHE29WkSPgNIEBz85jVkbmmQBWXPEH4sQ0Ey7dOC2q+qZPOrfkgQrbXMHnPxO6LKrwVwRGnFgjIxqnjaOnBEsxyhVzgxe9oXoAIgooibIx7lZUFg72D+Wo9cRs2wTL3ZLJji8z0HD1JQIDAQABo28wbTAdBgNVHQ4EFgQU91mseAS1pHPttIK0/FAofXtrkIkwHwYDVR0jBBgwFoAU91mseAS1pHPttIK0/FAofXtrkIkwDwYDVR0TAQH/BAUwAwEB/zAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEwDQYJKoZIhvcNAQELBQADggEBAAgv1+SbYGUsfw7FpwATOjt4lLSZYItTel9FtszmWsCnD2l9NaFaOeGLjHN/A/maczv3QGEIDu5ZD9jkNkabsPQeOsV2aR/266AW4OjbCCQ8GujSZxZzdoaUhjTumwI9sIkni6Z7FJuCL0ch8ljGh9YxIvtgmX05E9k1md9wsXOT56pCvQ8jmcdkxROpoGZOkJqyqmJ5P/rEf+bHsnjR9PGv2YqvS/984MaYBKmgZ4BhRd8QksAum7KHSczJ/pZL/YEg8AQowEf6vXgS7reXDjOQfc+Er+Lh9im01E56Fqp78RlnEo5ifGw/sn8vM0FescNxLs9pqZRX6haaYjT5S7o=";
     const TEST_KEY_DER_BASE64: &str = "MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCVqzdcMFazuP3w8Q2K6cU9RZPlfsj48os7sD4cV3ckwHC1hW1YG/GYGwtxn7ZHHh5Ule0CNHjHEEd6Q2zfPjgCj12J0DHjzm44887wqyP5xY2BnhsBismuoXuxYS+E/t2KUUspP++LQGcb/OtpzwIRoeXkvPGkFkM6+xDSYNjRFZfKyrpBXfvCgkhjrDEnTMk/3dPl+X9rewcTb1aRI+A0gQHPzmNWRuaZAFZc8QfixDQTLt04Lar6pk86t+SBCttcwec/E7osqvBXBEacWCMjGqeNo6cESzHKFXODF72hegAiCiiJsjHuVlQWDvYP5aj1xGzbBMvdksmOLzPQcPUlAgMBAAECggEAAv3QL/QGL5zRdCWyEkyedOoombKUiSetfiZrv2MSJ9zLnYOXgWZuYdtpUz6Qq2nTMl6cXtBpeS6x0KRIKOTt93ZVG/v0Abkh1w3GEGWWfpei8ewukjPR2L80ITUvkkMKO4lpBqyKX0HZlCO65ggz4uIina7j54mYYDWEPkHR45ZSj5UAxhvTGoY+AdECQy7J96+czeKf2qsciBOtfwQDeivO+BHLFCKWYcgmMb+Dq91eXL4vdWZr29duWpr/7WXLmPfo9/4B6dkZbKxPxDg4PBUOSUsi4B0L2lXOBQY++To0FUdfFB9EiBBNHD9RrAqXHpNvLD77CFd4xsVzCUPScQKBgQDPuDZT2JYchrrdvBue8JS21JrMw2IHzQ5zIhMTWhFcGSNF/YhuLrVSsSFdYrmOFJ1aE5d7NQ1p7G19Pe/OcSoEkxeqMZaMjki1UAxqMoAmdC/lgYSkPsxZYjSw1VqpvHGlbyyg/FNbQC9U2mrYP+oo6lCxrYTwprDpApsbUfSELQKBgQC4dNnxwIL/loKoEXe8SuC7apTqvSfJwvAlBC3QH/hURHgIBpQ4R+ZzpT2+WPY3YY92ZxCSWJfySHaoHj/Dls1Q5wmQdrw5bn/sJ7dNGFSf7fdUoiHoydl0mdHgjhC5ZN76jFqiuAtboOA8MvpCo9xRApuhIVA7qDbPPadTMyx32QKBgQCZKbfFc3qcZiv7u+yR8ct2VKYgPiFWpzj0ZDe0mUEbq916ikvDEuXYp4t2lIlF3qV3+eJEkwXlCNRi+PyOOJtG7D8S26Wq1m9+YhwFYl9j+2Al1q67fSKo9eTsTyWe6rjRx3wc6HF+Y4GDC9qkwdwjd0MxAEV6PS9NYQKFzpSBsQKBgBWpIy7QfJGnCxDRfE4QPPPFQFeQfuuiiLDQHNEj7/V1VOMcYqt5RgaukOGZcNBwFHjDAZ8t6Cn7eHOlmbdOLi4h822Tg+b6ousIfu3+vXFKcJDvuSutCGw44/yKskwTHFwvvzT8h9jqu2pWUi0hMO4ScFQrpVBcIJOVmeCbUc2BAoGBALy89w8VTTKbHZ9EMHthbOF1DLxu939/li1J+q9vHh7Ie7T37CKZ+XZFS2od54g451QSDeaYHCihcC7YR2y/EfefPRRRjio157ULeZ2avB4Gd7tvVntYPv9+HG5pxLXkbgZL7b077vSL4kFi9m32V8Vo5SRsI8J722Npyq7q2spR";
 
+    #[test]
+    fn workspace_reader_hint_is_decoded_on_push_and_empty_pull() {
+        for readers in [false, true] {
+            let (base, server) = answer_once(200, serde_json::json!({
+                "settledHeadReaders": readers, "accepted":0,"inserted":0,"skipped":0,"currentMaxOriginSeq":-1,
+            }).to_string());
+            let transport =
+                HttpRelayTransport::new_insecure_loopback_for_tests(base, "token").unwrap();
+            let response = transport
+                .push(PushRequest {
+                    workspace_id: "ws".into(),
+                    replication_epoch: "epoch".into(),
+                    stream_identity: "stream".into(),
+                    origin_id: "origin".into(),
+                    after_seq: -1,
+                    ops: vec![],
+                })
+                .unwrap();
+            assert!(
+                format!("{response:?}").contains(&format!("settled_head_readers: Some({readers})"))
+            );
+            server.join().unwrap();
+            let (base, server) = answer_once(
+                200,
+                serde_json::json!({
+                    "settledHeadReaders":readers,"ops":[],"nextCursor":0,"hasMore":false,
+                })
+                .to_string(),
+            );
+            let transport =
+                HttpRelayTransport::new_insecure_loopback_for_tests(base, "token").unwrap();
+            let response = transport
+                .pull(PullRequest {
+                    workspace_id: "ws".into(),
+                    replication_epoch: "epoch".into(),
+                    stream_identity: "stream".into(),
+                    cursor: 0,
+                    limit: 10,
+                })
+                .unwrap();
+            assert!(
+                format!("{response:?}").contains(&format!("settled_head_readers: Some({readers})"))
+            );
+            server.join().unwrap();
+        }
+    }
+
     /// Answers one request on loopback with a canned status and JSON body,
     /// and hands back the request it read.
     fn answer_once(status: u16, body: impl Into<String>) -> (String, thread::JoinHandle<String>) {
@@ -1771,7 +1829,7 @@ mod tests {
                 "settlementAdmission":admission,"admittedAuthorSnapshot":authors});
             let (base, server) = answer_once(
                 200,
-                serde_json::json!({"ops":[row.clone()],"nextCursor":1,"hasMore":false}).to_string(),
+                serde_json::json!({"settledHeadReaders":false,"ops":[row.clone()],"nextCursor":1,"hasMore":false}).to_string(),
             );
             let transport =
                 HttpRelayTransport::new_insecure_loopback_for_tests(base, "token").unwrap();
@@ -1835,7 +1893,7 @@ mod tests {
         };
         let (base, server) = answer_once(
             200,
-            r#"{"accepted":1,"inserted":1,"skipped":0,"currentMaxOriginSeq":0,"settlementRefusals":[{"originId":"origin","originSeq":0,"momentId":"unavailable","settlementId":"unavailable","reason":"authorship-mismatch"}]}"#,
+            r#"{"settledHeadReaders":false,"accepted":1,"inserted":1,"skipped":0,"currentMaxOriginSeq":0,"settlementRefusals":[{"originId":"origin","originSeq":0,"momentId":"unavailable","settlementId":"unavailable","reason":"authorship-mismatch"}]}"#,
         );
         let transport = HttpRelayTransport::new_insecure_loopback_for_tests(base, "token").unwrap();
         let response = transport

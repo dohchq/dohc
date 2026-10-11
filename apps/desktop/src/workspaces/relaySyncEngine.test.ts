@@ -155,6 +155,17 @@ afterEach(() => {
 });
 
 describe("relaySyncEngine", () => {
+  it("starts one serialized push when an empty pull activates publication", async () => {
+    pullMock.mockResolvedValueOnce(pullResult({ nextSettledHeadPublishAtMs: 12345 } as Partial<PullWorkspaceFromRelayResult>));
+    const sync = engine({ capture: capture() });
+    await sync.start();
+    expect(pushMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(pushMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(pushMock).toHaveBeenCalledTimes(2);
+    await sync.stop();
+  });
   it("pushes a throttled settled head at its deadline without another local change", async () => {
     vi.setSystemTime(0);
     pushMock.mockImplementationOnce(async () => ({

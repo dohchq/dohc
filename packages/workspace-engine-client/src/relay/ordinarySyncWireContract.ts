@@ -49,6 +49,7 @@ const OrdinarySyncResultSchemas = {
     sharingDeclined: Schema.mutable(Schema.Array(SharingDeclined)),
   }),
   "sync.pull": mutableStruct({
+    nextSettledHeadPublishAtMs: Schema.NullOr(Schema.Number.check(Schema.isInt())),
     status: Schema.Literal("complete"),
     fetched: Count,
     applied: Count,

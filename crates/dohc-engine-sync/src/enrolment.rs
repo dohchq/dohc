@@ -248,13 +248,34 @@ macro_rules! head_export_exclusions_sql {
     };
 }
 
+struct OrdinarySettledHead {
+    moment: String,
+    bytes: i64,
+    last_ms: Option<i64>,
+    coalesced: bool,
+    same_blob: bool,
+    version: String,
+    object: String,
+    settle_seq: i64,
+    permanent: bool,
+}
+
 /// Publish saved local heads without projecting the live doc or closing its lease.
 pub(crate) fn publish_ordinary_settled_heads_in_tx(
     tx: &Transaction<'_>,
     workspace_id: &str,
     now_ms: i64,
 ) -> Result<Option<i64>, SyncError> {
-    let candidates: Vec<(String, i64, Option<i64>, bool, bool)> = {
+    let readers: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sync_identity WHERE workspace_id=?1 AND settled_head_readers=1)", [workspace_id], |r| r.get(0)).map_err(SyncError::corrupt)?;
+    if !readers {
+        return Ok(None);
+    }
+    tx.execute(
+        "UPDATE sync_identity SET settled_head_activation_pending=0 WHERE workspace_id=?1 AND settled_head_activation_pending=1",
+        [workspace_id],
+    )
+    .map_err(SyncError::persist)?;
+    let candidates: Vec<OrdinarySettledHead> = {
         let mut statement = tx.prepare(concat!(
             "SELECT h.moment_id,b.byte_length+COALESCE((SELECT byte_length FROM blobs WHERE sha256=h.payload_before_blob_sha256),0),d.last_published_at_ms,
                EXISTS(SELECT 1 FROM moments m WHERE m.workspace_id=h.workspace_id
@@ -263,18 +284,8 @@ pub(crate) fn publish_ordinary_settled_heads_in_tx(
                  AND COALESCE(m.sync_record_only,0)=0
                  AND m.moment_order>COALESCE(p.moment_order,-1)
                  AND m.moment_order<=h.moment_order LIMIT 1 OFFSET 1),
-               h.payload_before_blob_sha256 IS h.payload_after_blob_sha256
-             FROM ydoc_docs d JOIN snapshots s USING(workspace_id,version_id,object_id)
-             JOIN moments h ON h.workspace_id=s.workspace_id AND h.moment_id=s.latest_moment_id
-               AND h.version_id=s.version_id AND h.object_id=s.object_id
-             JOIN blobs b ON b.sha256=s.blob_sha256
-             LEFT JOIN moments p ON p.workspace_id=d.workspace_id AND p.moment_id=d.last_published_moment_id
-             WHERE d.workspace_id=?1 AND d.file_export_lane=0 AND s.content_kind='text'
-               AND h.metadata_origin='ydoc' AND h.moment_id GLOB 'moment-ydoc-*'
-               AND h.moment_id NOT GLOB 'moment-ydoc-apply-*'
-               AND d.last_settled_sha=s.blob_sha256 AND d.settle_seq=h.moment_order
-               AND h.payload_after_blob_sha256=s.blob_sha256 AND h.payload_after_path=s.path
-               AND (p.moment_id IS NULL OR p.operation='delete'
+               h.payload_before_blob_sha256 IS h.payload_after_blob_sha256,
+               d.version_id,d.object_id,d.settle_seq,(h.metadata_origin<>'ydoc' OR h.moment_id NOT GLOB 'moment-ydoc-*' OR h.moment_id GLOB 'moment-ydoc-apply-*' OR NOT (p.moment_id IS NULL OR p.operation='delete'
                  OR p.payload_after_blob_sha256 IS NOT h.payload_after_blob_sha256
                  OR p.payload_after_path IS NOT h.payload_after_path
                  OR EXISTS(SELECT 1 FROM moments m WHERE m.workspace_id=h.workspace_id
@@ -289,27 +300,40 @@ pub(crate) fn publish_ordinary_settled_heads_in_tx(
                        AND NOT EXISTS(SELECT 1 FROM replication_pending_refusals f
                          WHERE f.workspace_id=r.workspace_id AND f.origin_id=r.origin_id
                            AND f.origin_seq=r.origin_seq)))))
-               AND NOT EXISTS(SELECT 1 FROM live_audit_pending_exports a
-                 WHERE a.workspace_id=h.workspace_id AND a.main_version_id=h.version_id AND a.object_id=h.object_id)
-               AND NOT EXISTS(SELECT 1 FROM live_device_settlements a
+               OR EXISTS(SELECT 1 FROM live_device_settlements a
                  WHERE a.workspace_id=h.workspace_id AND a.moment_id=h.moment_id)
-               AND NOT EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=h.workspace_id
+               OR EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=h.workspace_id
                  AND r.op_kind='moment.append' AND json_extract(r.payload_json,'$.momentId')=+h.moment_id
                  AND (r.imported=0 OR NOT EXISTS(SELECT 1 FROM replication_pending_refusals f
-                   WHERE f.workspace_id=r.workspace_id AND f.origin_id=r.origin_id AND f.origin_seq=r.origin_seq))) ",
+                   WHERE f.workspace_id=r.workspace_id AND f.origin_id=r.origin_id AND f.origin_seq=r.origin_seq))))
+             FROM ydoc_docs d INDEXED BY idx_ydoc_unchecked_publication CROSS JOIN snapshots s USING(workspace_id,version_id,object_id)
+             JOIN moments h ON h.workspace_id=s.workspace_id AND h.moment_id=s.latest_moment_id
+               AND h.version_id=s.version_id AND h.object_id=s.object_id
+             JOIN blobs b ON b.sha256=s.blob_sha256
+             LEFT JOIN moments p ON p.workspace_id=d.workspace_id AND p.moment_id=d.last_published_moment_id
+             WHERE d.workspace_id=?1 AND d.file_export_lane=0 AND d.settle_seq>d.published_checked_settle_seq AND s.content_kind='text'
+               AND d.last_settled_sha=s.blob_sha256 AND d.settle_seq=h.moment_order
+               AND h.payload_after_blob_sha256=s.blob_sha256 AND h.payload_after_path=s.path
+               AND NOT EXISTS(SELECT 1 FROM live_audit_pending_exports a
+                 WHERE a.workspace_id=h.workspace_id AND a.main_version_id=h.version_id AND a.object_id=h.object_id)
+             ",
             head_export_exclusions_sql!(), " AND ",
             dohc_engine_domain::exclude_capture_recovery_sql!("h"),
             " ORDER BY h.moment_order"
         )).map_err(SyncError::corrupt)?;
         statement
             .query_map([workspace_id], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
+                Ok(OrdinarySettledHead {
+                    moment: row.get(0)?,
+                    bytes: row.get(1)?,
+                    last_ms: row.get(2)?,
+                    coalesced: row.get(3)?,
+                    same_blob: row.get(4)?,
+                    version: row.get(5)?,
+                    object: row.get(6)?,
+                    settle_seq: row.get(7)?,
+                    permanent: row.get(8)?,
+                })
             })
             .map_err(SyncError::corrupt)?
             .collect::<Result<_, _>>()
@@ -317,7 +341,22 @@ pub(crate) fn publish_ordinary_settled_heads_in_tx(
     };
     let mut next = None;
     let mut budget = FileExportBudget::default();
-    for (moment, bytes, last_ms, coalesced, same_blob) in candidates {
+    for OrdinarySettledHead {
+        moment,
+        bytes,
+        last_ms,
+        coalesced,
+        same_blob,
+        version,
+        object,
+        settle_seq,
+        permanent,
+    } in candidates
+    {
+        if permanent {
+            check_settled_head_in_tx(tx, workspace_id, &version, &object, settle_seq)?;
+            continue;
+        }
         // The pass budget counts each blob once; the throttle charges before plus after.
         let budget_bytes = if same_blob { bytes / 2 } else { bytes };
         if budget_bytes > FILE_EXPORT_BUDGET_BYTES {
@@ -333,19 +372,33 @@ pub(crate) fn publish_ordinary_settled_heads_in_tx(
             next = Some(next.map_or(due, |previous: i64| previous.min(due)));
             continue;
         }
-        if crate::outbound::journal_ordinary_settled_head_in_tx(
+        match crate::outbound::journal_ordinary_settled_head_in_tx(
             tx,
             workspace_id,
             &moment,
             coalesced,
             now_ms,
             &mut budget,
-        )? == crate::outbound::OrdinaryHeadPublication::PassFull
-        {
-            next = Some(now_ms);
+        )? {
+            crate::outbound::OrdinaryHeadPublication::Published => {
+                check_settled_head_in_tx(tx, workspace_id, &version, &object, settle_seq)?;
+            }
+            crate::outbound::OrdinaryHeadPublication::PassFull => next = Some(now_ms),
+            crate::outbound::OrdinaryHeadPublication::Oversized => {}
         }
     }
     Ok(next)
+}
+
+fn check_settled_head_in_tx(
+    tx: &Transaction<'_>,
+    workspace: &str,
+    version: &str,
+    object: &str,
+    sequence: i64,
+) -> Result<(), SyncError> {
+    tx.execute("UPDATE ydoc_docs SET published_checked_settle_seq=MAX(published_checked_settle_seq,?4) WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3", params![workspace, version, object, sequence]).map_err(SyncError::persist)?;
+    Ok(())
 }
 
 // Unary + removes the correlated keys' TEXT affinity, allowing SQLite to
@@ -2414,6 +2467,7 @@ mod tests {
         .expect("peer receives the base before opening its editor");
         let client = crate::RelaySyncClient::new(crate::tests::FakeRelay::default());
         *client.transport().pull.lock().expect("page") = Some(crate::PullResponse {
+            settled_head_readers: None,
             next_cursor: ops.len() as i64,
             ops,
             has_more: false,
@@ -2457,6 +2511,7 @@ mod tests {
         let ops =
             crate::list_replication_ops(&source, "ws", "local", -1, 100).expect("exported ops");
         *client.transport().pull.lock().expect("page") = Some(crate::PullResponse {
+            settled_head_readers: None,
             next_cursor: ops.len() as i64,
             ops: ops.into_iter().skip(1).collect(),
             has_more: false,
@@ -2490,6 +2545,7 @@ mod tests {
             .expect("deferred file moment");
         assert_eq!(pending, 0, "an already projected artifact is history only");
         *client.transport().pull.lock().expect("page") = Some(crate::PullResponse {
+            settled_head_readers: None,
             next_cursor: 2,
             ops: Vec::new(),
             has_more: false,

@@ -1300,6 +1300,7 @@ fn observed_owner_settlement_scenario(fields: OwnerSettlementFields) {
     ));
     let client = crate::RelaySyncClient::new(crate::tests::FakeRelay::default());
     *client.transport().pull.lock().unwrap() = Some(crate::PullResponse {
+        settled_head_readers: None,
         ops: vec![future_moment.clone(), unrelated],
         next_cursor: 2,
         has_more: false,
@@ -1409,6 +1410,7 @@ fn observed_owner_settlement_scenario(fields: OwnerSettlementFields) {
         text_sha(&future_text)
     );
     *client.transport().pull.lock().unwrap() = Some(crate::PullResponse {
+        settled_head_readers: None,
         ops: vec![],
         next_cursor: 2,
         has_more: false,

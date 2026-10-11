@@ -248,6 +248,7 @@ fn recover_local_origin(engine: &mut EngineStore, new_origin_id: &str) {
     RelaySyncClient::new(PagedRelay::new([(
         0,
         PullResponse {
+            settled_head_readers: None,
             ops: vec![ReplicationEnvelope {
                 settlement_admission: None,
                 admitted_author_snapshot: None,
@@ -298,6 +299,7 @@ fn recover_origin_continues_an_advancing_stream_past_the_pull_page_ceiling() {
             (
                 cursor,
                 PullResponse {
+                    settled_head_readers: None,
                     ops: vec![envelope(
                         &format!("unrelated-{cursor}"),
                         0,
@@ -384,6 +386,7 @@ fn cloned_engines_capture_distinct_moments_and_converge_after_origin_recovery() 
     let recovery = RelaySyncClient::new(PagedRelay::new([(
         0,
         PullResponse {
+            settled_head_readers: None,
             next_cursor: i64::try_from(original_stream.len()).expect("stream cursor"),
             has_more: false,
             ops: original_stream.clone(),
@@ -652,6 +655,7 @@ fn recover_origin_rebases_ydoc_suffix_coordinates_before_repair_and_arbitration(
     let relay = PagedRelay::new([(
         0,
         PullResponse {
+            settled_head_readers: None,
             ops: shared_prefix,
             next_cursor: 2,
             has_more: false,
@@ -788,6 +792,7 @@ fn recover_origin_rebases_each_current_lww_projection_coordinate() {
     let recovery = RelaySyncClient::new(PagedRelay::new([(
         0,
         PullResponse {
+            settled_head_readers: None,
             ops: vec![ReplicationEnvelope {
                 settlement_admission: None,
                 admitted_author_snapshot: None,
@@ -926,6 +931,7 @@ fn recover_origin_clears_shared_push_positions_before_rebased_ops_are_scanned() 
     let recovery = RelaySyncClient::new(PagedRelay::new([(
         0,
         PullResponse {
+            settled_head_readers: None,
             ops: Vec::new(),
             next_cursor: 0,
             has_more: false,

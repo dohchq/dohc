@@ -166,6 +166,7 @@ fn queued_human_authors_are_durably_repaired_before_push_and_echo() {
             .unwrap();
         assert_eq!(client.transport().pushes.lock().unwrap()[1].ops, first);
         *client.transport().pull.lock().unwrap() = Some(PullResponse {
+            settled_head_readers: None,
             ops: first,
             next_cursor: 2,
             has_more: false,
@@ -200,6 +201,7 @@ fn queued_agent_and_automation_authors_push_and_echo_unchanged() {
         assert_eq!(pushed, stored);
         assert_eq!(pushed[1].payload, legacy);
         *client.transport().pull.lock().unwrap() = Some(PullResponse {
+            settled_head_readers: None,
             ops: stored,
             next_cursor: 2,
             has_more: false,
@@ -369,6 +371,7 @@ fn assert_unproven_authors_marked_before_first_push(authors: serde_json::Value) 
         let pushed = client.transport().pushes.lock().unwrap()[0].ops.clone();
         assert_eq!(pushed, ops);
         *client.transport().pull.lock().unwrap() = Some(PullResponse {
+            settled_head_readers: None,
             ops: pushed,
             next_cursor: 2,
             has_more: false,
