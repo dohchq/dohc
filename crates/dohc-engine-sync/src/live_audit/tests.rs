@@ -491,6 +491,76 @@ fn relay_pull_live_audit_corrupt_update_length_is_storage() {
     assert_corrupt_length_is_storage(true);
 }
 
+fn assert_checksum_precedes_length_refusal(claim: LengthClaim) {
+    let (_scratch, mut receiver, client, _) = length_claim_pull(claim);
+    let audit = client
+        .transport()
+        .pull
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .ops[0]
+        .clone();
+    let sha = if matches!(claim, LengthClaim::Update) {
+        audit.payload["updateBlobSha256"].as_str().unwrap()
+    } else {
+        audit.payload["manifest"]["chunks"][0]["sha256"]
+            .as_str()
+            .unwrap()
+    };
+    let original = receiver.get_binary_blob(sha).unwrap().unwrap();
+    let mut damaged = original.clone();
+    damaged[0] ^= 1;
+    receiver
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE binary_blobs SET bytes=?1 WHERE sha256=?2",
+                params![damaged, sha],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let error = apply_audit_envelope(&mut receiver, &audit, &NoFaults).unwrap_err();
+    assert!(
+        matches!(&error, SyncError::Storage(dohc_engine_storage::StorageError::BlobIntegrity { sha256 }) if sha256 == sha),
+        "{error:?}"
+    );
+    assert_eq!(
+        crate::read_replication_acked_seq(&receiver, "ws", "owner-origin").unwrap(),
+        audit.origin_seq - 1
+    );
+    assert_eq!(count(&receiver, "live_audit_events"), 0);
+    assert_eq!(count(&receiver, "replication_pending_refusals"), 0);
+    receiver
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE binary_blobs SET bytes=?1 WHERE sha256=?2",
+                params![original, sha],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let result = apply_audit_envelope(&mut receiver, &audit, &NoFaults).unwrap();
+    assert!(matches!(result.primary, ApplyDisposition::Refused(_)));
+    assert_eq!(
+        crate::read_replication_acked_seq(&receiver, "ws", "owner-origin").unwrap(),
+        audit.origin_seq
+    );
+}
+
+#[test]
+fn audit_apply_live_audit_checksum_precedes_wrong_chunk_length_refusal() {
+    assert_checksum_precedes_length_refusal(LengthClaim::Chunk);
+}
+
+#[test]
+fn audit_apply_live_audit_checksum_precedes_wrong_update_length_refusal() {
+    assert_checksum_precedes_length_refusal(LengthClaim::Update);
+}
+
 #[test]
 #[ignore = "manual valid live audit import measurement"]
 fn relay_pull_live_audit_valid_import_measurement() {

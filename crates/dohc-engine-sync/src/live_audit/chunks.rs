@@ -30,6 +30,7 @@ pub(super) fn require_blob_length(
         .into());
     }
     if usize::try_from(stored).ok() != Some(claimed) {
+        dohc_engine_storage::get_binary_blob(conn, sha256)?.ok_or(SyncError::BlobInvalid)?;
         return Err(invalid("live audit blob length differs"));
     }
     Ok(())
