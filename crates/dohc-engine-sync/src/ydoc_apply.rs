@@ -759,10 +759,23 @@ fn complete_drain_cleanup(
             .map_err(SyncError::persist)?;
         }
         if let Some((key, _)) = recovery {
-            let waiting: bool = tx.query_row("SELECT settle_prior_update_seq IS NOT NULL FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![key.workspace_id,key.version_id,key.object_id],|row|row.get(0)).map_err(SyncError::corrupt)?;
+            let (waiting, path): (bool, Option<String>) = tx.query_row("SELECT settle_prior_update_seq IS NOT NULL,path FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![key.workspace_id,key.version_id,key.object_id],|row|Ok((row.get(0)?,row.get(1)?))).map_err(SyncError::corrupt)?;
             if !waiting {
                 crate::moment_apply::open_artifacts::clear_settled_mark_in_tx(tx,key)?;
                 crate::moment_apply::open_artifacts::remember_attempt_in_tx(tx,key)?;
+                let pending_artifact: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM ydoc_pending_artifacts WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
+                    params![key.workspace_id,key.version_id,key.object_id], |row|row.get(0),
+                ).map_err(SyncError::corrupt)?;
+                if pending_artifact {
+                    let pending_job: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM materialization_jobs WHERE workspace_id=?1 AND target_path=?2 AND status='pending')",
+                        params![key.workspace_id,path], |row|row.get(0),
+                    ).map_err(SyncError::corrupt)?;
+                    if !pending_job {
+                        crate::moment_apply::open_artifacts::record_recovery_failure_in_tx(tx,key)?;
+                    }
+                }
             }
         }
         Ok::<_, SyncError>(())
