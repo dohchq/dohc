@@ -29,6 +29,7 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
   syncStatus: SyncStatusResult | null;
   workspaceId: string;
   activeDocumentPath: string | null;
+  fileTabOpen: boolean;
   shareView: NonNullable<WorkspaceSummary["shareView"]> | null;
   searchChatTarget: { thread: ChatThreadRecord; focusMessageId?: string } | null;
   setSearchChatTarget: (target: null) => void;
@@ -49,6 +50,7 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
     syncStatus,
     workspaceId,
     activeDocumentPath,
+    fileTabOpen,
     shareView,
     searchChatTarget,
     setSearchChatTarget,
@@ -95,6 +97,7 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
             <LazyLinkedChatsPanel
               workspaceId={workspaceId}
               filePath={activeDocumentPath}
+              fileTabOpen={fileTabOpen}
               {...(shareView
                 ? { shareReadOnly: true }
                 : { history: { revision: historyRevision, onOpenMoment: openMoment } })}

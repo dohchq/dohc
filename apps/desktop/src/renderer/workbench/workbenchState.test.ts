@@ -49,6 +49,7 @@ import {
   setAboutWidth,
   setOpenEditorsHeight,
   setView,
+  showView,
   OPEN_EDITORS_DEFAULT_HEIGHT,
   OPEN_EDITORS_MAX_HEIGHT,
   OPEN_EDITORS_MIN_HEIGHT,
@@ -735,6 +736,15 @@ describe("views and panels", () => {
     // Choosing Chats again hides the left panel, as every rail view does.
     expect(setView(chats, "chats").sidebarVisible).toBe(false);
     expect(setView(setView(chats, "chats"), "chats")).toEqual(chats);
+  });
+
+  it("showView shows a view and never hides it", () => {
+    const chats = showView(defaultWorkbenchState(), "chats");
+    expect(chats.activeView).toBe("chats");
+    expect(chats.sidebarVisible).toBe(true);
+    expect(showView(chats, "chats")).toBe(chats);
+    const hidden = toggleSidebar(chats);
+    expect(showView(hidden, "chats")).toEqual(chats);
   });
 });
 

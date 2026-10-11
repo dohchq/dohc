@@ -3085,6 +3085,14 @@ describe("ui-state merge-on-load", () => {
     await user.click(screen.getByTestId("activity-chats"));
     await user.click(await screen.findByTestId("chats-channel"));
     await waitFor(() => expect(presence.presencePublish).toHaveBeenCalled());
+    // The list stays mounted beside the live tab and holds no transport of
+    // its own: the channel topic has exactly one publisher, the page.
+    expect(screen.getByTestId("side-panel").querySelector('[data-testid="chats-view"]')).toBeTruthy();
+    const channelPublishes = (presence.presencePublish.mock.calls as unknown as [{ topic: string; incarnationId: string }][])
+      .map(([payload]) => payload)
+      .filter((payload) => payload.topic === "channel-team");
+    expect(channelPublishes.length).toBeGreaterThan(0);
+    expect(new Set(channelPublishes.map((payload) => payload.incarnationId)).size).toBe(1);
     const statusQueries = bridge.cloudStatus.mock.calls.length;
 
     // Sign out. The signal alone must tear presence down — the collaboration

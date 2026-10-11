@@ -187,6 +187,66 @@ describe("Chats in the left side panel", () => {
     expect(bridge.syncDms.mock.calls.length).toBe(dmSyncs);
   });
 
+  it("shows Chats from View > Chats and the palette, and never hides it from there", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_CHATS_STATE));
+    const user = userEvent.setup();
+    renderShell(bridge);
+    const panel = await screen.findByTestId("side-panel");
+    await within(panel).findByTestId("chats-view");
+    await act(async () => {});
+
+    act(() => bridge.emitMenuCommand("show-chats"));
+    await act(async () => {});
+    expect(within(screen.getByTestId("side-panel")).getByTestId("chats-view")).toBeTruthy();
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(within(await screen.findByTestId("command-palette")).getByText("View: Chats"));
+    expect(within(screen.getByTestId("side-panel")).getByTestId("chats-view")).toBeTruthy();
+
+    // From Files, the same command switches to Chats.
+    await user.click(screen.getByTestId("activity-explorer"));
+    await screen.findByTestId("file-tree");
+    act(() => bridge.emitMenuCommand("show-chats"));
+    expect(await within(screen.getByTestId("side-panel")).findByTestId("chats-view")).toBeTruthy();
+    // The rail's own button still toggles.
+    await user.click(screen.getByTestId("activity-chats"));
+    expect(screen.queryByTestId("side-panel")).toBeNull();
+  });
+
+  it("stops reading while Files shows and reloads the list once on return; open conversations stay", async () => {
+    const bridge = bridgeWithChannels(STORED_STATE);
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await screen.findByTestId("file-tree");
+
+    await user.click(screen.getByTestId("activity-chats"));
+    const panel = screen.getByTestId("side-panel");
+    await within(panel).findAllByTestId("chats-channel");
+    await user.click(within(panel).getAllByTestId("chats-channel")[0]!);
+    const tab = await screen.findByTestId(`tab-dohc://chats/channel/${encodeURIComponent("channel-1")}`);
+    // A half-typed group name is the list's own state.
+    await user.click(within(panel).getByTestId("chats-new-channel"));
+    await user.type(within(panel).getByTestId("chats-new-channel-name"), "draft group");
+    // Back to the document, so no conversation page reads either.
+    await user.click(screen.getByTestId("tab-b.md"));
+    await act(async () => {});
+    const firstOpen = bridge.listChatChannels.mock.calls.length;
+
+    await user.click(screen.getByTestId("activity-explorer"));
+    await screen.findByTestId("file-tree");
+    act(() => bridge.emitWorkspaceActivity());
+    await act(async () => {});
+    expect(bridge.listChatChannels.mock.calls.length).toBe(firstOpen);
+
+    await user.click(screen.getByTestId("activity-chats"));
+    await within(screen.getByTestId("side-panel")).findAllByTestId("chats-channel");
+    await waitFor(() => expect(bridge.listChatChannels.mock.calls.length).toBe(firstOpen + 1));
+    // The conversation tab lives in the editor and survives; the list
+    // remounts, so its unsent group form starts over.
+    expect(screen.getByTestId(`tab-dohc://chats/channel/${encodeURIComponent("channel-1")}`).textContent).toBe(tab.textContent);
+    expect(screen.queryByTestId("chats-new-channel-name")).toBeNull();
+  });
+
   it("customizes chats from the panel menu while Chats is selected", async () => {
     const bridge = makeBridge(Promise.resolve(STORED_CHATS_STATE));
     const user = userEvent.setup();

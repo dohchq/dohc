@@ -1253,18 +1253,40 @@ describe("shared view chats surface", () => {
     expect(bridge.listChatChannels).not.toHaveBeenCalled();
   });
 
-  // The command still names Chats, so it opens the view and states why a
-  // shared view lists nothing, instead of mounting a listing to refuse.
-  it("states the capability when a command opens Chats on a shared view", async () => {
+  // A shared view has no Chats view, so no command reaches one: the palette
+  // offers none and View > Chats does nothing.
+  it("offers no way into Chats on a shared view", async () => {
     const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
     const user = userEvent.setup();
     renderShell(bridge, SHARE_VIEW);
 
     await settleShareView();
+    expect(screen.queryByTestId("activity-chats")).toBeNull();
     await user.keyboard("{Control>}k{/Control}");
-    await user.click(within(await screen.findByTestId("command-palette")).getByText("View: Chats"));
-    const off = await within(screen.getByTestId("side-panel")).findByTestId("chats-off");
-    expect(off.textContent).toBe("A shared view lists no chats. Open a shared file to chat about it.");
+    const palette = await screen.findByTestId("command-palette");
+    expect(within(palette).getByText("View: Search")).toBeTruthy();
+    expect(within(palette).queryByText("View: Chats")).toBeNull();
+    await user.keyboard("{Escape}");
+
+    act(() => bridge.emitMenuCommand("show-chats"));
+    await act(async () => {});
+    expect(screen.getByTestId("activity-explorer").getAttribute("aria-current")).toBe("page");
+    expect(screen.queryByTestId("chats-view")).toBeNull();
+    expect(screen.queryByTestId("chats-off")).toBeNull();
+    expect(bridge.listChatChannels).not.toHaveBeenCalled();
+    expect(bridge.syncDms).not.toHaveBeenCalled();
+  });
+
+  it("shows the Explorer when a shared view's saved layout selected Chats", async () => {
+    const bridge = makeShareBridge(Promise.resolve(STORED_CHATS_STATE));
+    renderShell(bridge, SHARE_VIEW);
+
+    await settleShareView();
+    await waitFor(() =>
+      expect(screen.getByTestId("activity-explorer").getAttribute("aria-current")).toBe("page"),
+    );
+    expect(await within(screen.getByTestId("side-panel")).findByTestId("file-tree")).toBeTruthy();
+    expect(screen.queryByTestId("chats-off")).toBeNull();
     expect(bridge.listChatChannels).not.toHaveBeenCalled();
     expect(bridge.syncDms).not.toHaveBeenCalled();
   });

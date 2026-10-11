@@ -256,6 +256,7 @@ import {
   setFolderExpanded,
   setOpenEditorsHeight,
   setView,
+  showView,
   toggleAbout,
   toggleFolderExpanded,
   togglePinned,
@@ -1006,6 +1007,12 @@ export function DesktopWorkspaceShell(props: {
   const activeDocumentPath = isVirtualTabPath(focusedTabPath)
     ? null
     : focusedTabPath;
+  // Whether any group holds a file tab, so About can tell "open a file" apart
+  // from "a chat or another non-file tab has focus".
+  const fileTabOpen = useMemo(
+    () => wb.editorGroups.some((group) => group.tabs.some((tab) => !isVirtualTabPath(tab.path))),
+    [wb.editorGroups],
+  );
 
   // A clicked search result: open the file and land at the line. The target
   // is consumed (cleared) by the inspector once a mounted view applied it.
@@ -1146,6 +1153,12 @@ export function DesktopWorkspaceShell(props: {
     () => sidebarViews(sidebarSettings).filter((view) => !(isShareView && view === "chats")),
     [isShareView, sidebarSettings],
   );
+  // A shared view restored with Chats selected shows the Explorer instead.
+  const restoredSharedChats = isShareView && wb.activeView === "chats";
+  useEffect(() => {
+    if (!restoredSharedChats) return;
+    mutateWb((state) => (state.activeView === "chats" ? { ...state, activeView: "explorer" } : state));
+  }, [mutateWb, restoredSharedChats]);
   const pinnedRoots = useMemo(
     () => pinnedAppsFor(props.userSettings?.settings, workspaceId),
     [props.userSettings, workspaceId],
@@ -2387,7 +2400,7 @@ export function DesktopWorkspaceShell(props: {
   ]), [knownTabLabels, chatEditors.titles, dataCollections]);
   // The chat list lives in the left side panel's Chats view.
   const openChatsNavigator = useCallback(() => {
-    mutateWb((state) => ({ ...state, activeView: "chats", sidebarVisible: true }));
+    mutateWb((state) => showView(state, "chats"));
   }, [mutateWb]);
   // The navigator's unread badges come from one fetch at its mount, and the
   // editor is what performs the reads — without this the panel keeps showing
@@ -3817,16 +3830,18 @@ export function DesktopWorkspaceShell(props: {
         label: "Toggle About",
         run: () => mutateWb(toggleAbout),
       },
-      // Every view of dohc's, hidden from the rail or not: a command opens it.
-      ...VIEW_IDS.map((view) => ({
+      // Every view of dohc's, hidden from the rail or not: a command shows it
+      // and never hides it. A shared view has no Chats view to show, so it
+      // offers no command for one, and View > Chats finds nothing to run.
+      ...VIEW_IDS.filter((view) => !(isShareView && view === "chats")).map((view) => ({
         id: `show-${view}`,
         label: `View: ${SIDE_PANEL_VIEWS[view].label}`,
-        run: () => mutateWb((state) => setView(state, view)),
+        run: () => mutateWb((state) => showView(state, view)),
       })),
       ...pinnedApps.map((app) => ({
         id: `show-${appViewId(app.root)}`,
         label: `View: ${app.label}`,
-        run: () => mutateWb((state) => setView(state, appViewId(app.root))),
+        run: () => mutateWb((state) => showView(state, appViewId(app.root))),
       })),
       {
         id: "connect-cloud",
@@ -3905,6 +3920,7 @@ export function DesktopWorkspaceShell(props: {
       reportShellError,
       toggleSource,
       workspaceId,
+      isShareView,
       props.workspace.shareView,
       shareViewWritable,
     ],
@@ -5661,6 +5677,7 @@ export function DesktopWorkspaceShell(props: {
             syncStatus={syncStatus}
             workspaceId={workspaceId}
             activeDocumentPath={activeDocumentPath}
+            fileTabOpen={fileTabOpen}
             shareView={shareView}
             searchChatTarget={searchChatTarget}
             setSearchChatTarget={setSearchChatTarget}

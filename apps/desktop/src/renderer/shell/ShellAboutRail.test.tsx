@@ -11,9 +11,10 @@ vi.hoisted(() => {
   }
   Object.assign(globalThis, { ResizeObserver: ObserverStub, IntersectionObserver: ObserverStub });
 });
-import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import { CHATS_TAB_PATH } from "../workbench/workbenchState";
 import {
   WORKSPACE,
   STORED_STATE,
@@ -138,6 +139,79 @@ describe("About rail (right side)", () => {
     expect(
       (await screen.findByTestId("linked-chats-empty")).textContent,
     ).toBe("Open a file to see its chats, history, and access.");
+  });
+
+  it("says it covers files when a conversation has focus and a file is open", async () => {
+    const bridge = makeBridge(Promise.resolve({
+      ...STORED_STATE,
+      activeView: "chats",
+      editorGroups: [{ id: "primary", tabs: ["b.md", CHATS_TAB_PATH], activeTab: CHATS_TAB_PATH, size: 1 }],
+    }));
+    renderShell(bridge);
+
+    const rail = await screen.findByTestId("about-rail");
+    expect((await within(rail).findByTestId("linked-chats-empty")).textContent).toBe(
+      "About covers files for now. Switch to a file's tab to see its chats, history, and access.",
+    );
+    // Only conversations open: there is no file to switch to.
+    cleanup();
+    renderShell(makeBridge(Promise.resolve({
+      ...STORED_STATE,
+      editorGroups: [{ id: "primary", tabs: [CHATS_TAB_PATH], activeTab: CHATS_TAB_PATH, size: 1 }],
+    })));
+    expect((await within(await screen.findByTestId("about-rail")).findByTestId("linked-chats-empty")).textContent).toBe(
+      "Open a file to see its chats, history, and access.",
+    );
+  });
+
+  it("opens a chat search hit on another file in About once", async () => {
+    const bridge = makeBridge(Promise.resolve({ ...STORED_STATE, aboutVisible: false }));
+    bridge.listFileChats.mockResolvedValue({ fileObjectId: "object-b", threads: [] });
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await screen.findByTestId("tab-b.md");
+    expect(screen.queryByTestId("about-rail")).toBeNull();
+
+    await user.click(screen.getByTestId("activity-search"));
+    await user.type(screen.getByTestId("search-input"), "pricing");
+    await waitFor(() => expect(bridge.searchWorkspace).toHaveBeenCalled());
+    const { searchId } = bridge.searchWorkspace.mock.calls.at(-1)![0];
+    act(() => {
+      bridge.emitSearchResults({
+        searchId,
+        entries: [{
+          path: "other.md", line: 1, column: 1, preview: "pricing questions", matchStart: 0, matchEnd: 7,
+          surface: "chat", threadId: "thread-pricing", title: "Pricing questions",
+        }],
+        done: true,
+        limitHit: false,
+      });
+    });
+    await user.click(await screen.findByTestId("search-result-row"));
+
+    const rail = await screen.findByTestId("about-rail");
+    expect((await within(rail).findByTestId("linked-chat-title")).textContent).toBe("Pricing questions");
+    // The editor stays on b.md: the hit opens in About, not as a tab.
+    expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
+
+    // Consumed once: closing and reopening About shows b.md, not the thread.
+    await user.click(screen.getByTestId("titlebar-about-sidebar"));
+    await user.click(screen.getByTestId("titlebar-about-sidebar"));
+    const reopened = await screen.findByTestId("about-rail");
+    expect((await within(reopened).findByTestId("about-header")).textContent).toBe("b.md");
+    expect(within(reopened).queryByTestId("linked-chat-thread")).toBeNull();
+  });
+
+  it("restores a layout saved with the old right-panel fields with About closed", async () => {
+    const { aboutVisible: _visible, aboutWidth: _width, ...rest } = STORED_STATE;
+    const bridge = makeBridge(Promise.resolve({ ...rest, chatsVisible: true, chatsWidth: 444 } as unknown as typeof STORED_STATE));
+    renderShell(bridge);
+
+    expect((await screen.findByTestId("tab-b.md")).dataset.active).toBe("true");
+    expect((await screen.findByTestId("side-panel")).style.width).toBe("320px");
+    expect(screen.queryByTestId("about-rail")).toBeNull();
+    expect(screen.getByTestId("titlebar-about-sidebar").getAttribute("aria-pressed")).toBe("false");
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
   it("shows the open file's chats and History, and reads access only when opened", async () => {

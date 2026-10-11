@@ -859,6 +859,17 @@ export function setView(
   return { ...state, activeView: view, sidebarVisible: true };
 }
 
+// A command that names a view shows it and never hides it; only the rail's
+// own button toggles.
+export function showView(
+  state: WorkbenchState,
+  view: ActivityViewId,
+): WorkbenchState {
+  return state.activeView === view && state.sidebarVisible
+    ? state
+    : { ...state, activeView: view, sidebarVisible: true };
+}
+
 export function toggleSidebar(state: WorkbenchState): WorkbenchState {
   return { ...state, sidebarVisible: !state.sidebarVisible };
 }
