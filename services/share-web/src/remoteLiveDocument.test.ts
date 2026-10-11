@@ -66,6 +66,7 @@ async function fixture(acknowledge: boolean, maxPendingUpdateBytes = limits.prov
           for (let offset = 0; offset < sync.length; offset += 900) await send({kind: "chunk", transferId: 1, offset, bytes: sync.subarray(offset, offset + 900)});
         }
         if (transfer?.begin.purpose === "submit-update") {
+          expect(transfer.begin.authorContext).toEqual({kind: "link", publicPrincipalId: "public-link-agent"});
           if (result) {
             await send(result === "application-pending"
               ? {kind: "result", result: "retry", deliveryId: transfer.begin.deliveryId, updateDigest: transfer.begin.digest, reason: result}
@@ -89,7 +90,7 @@ async function fixture(acknowledge: boolean, maxPendingUpdateBytes = limits.prov
     async resolveMaterial() {return {ok: true, capabilityToken: "A".repeat(43), profileSecret: "B".repeat(43), setCookie: null, currentCapability: async () => "A".repeat(43)};},
     async fetchRelay() {throw Error("Not used");}});
   return {doc, submitted, ack, run: () => remoteLiveDocument({client, limits: {...limits, provider: {...limits.provider, maxPendingUpdateBytes}}, discriminator: "abcdefghijkl", cookie: "test=cookie", signal: AbortSignal.timeout(20_000),
-    async request(path) {return Response.json(path.endsWith("document") ? {objectId: "document"} : {token: "ab".repeat(32)});}}, "doc.md", {find: "world", replacement: "friend"})};
+    async request(path) {return Response.json(path.endsWith("document") ? {objectId: "document"} : {token: "ab".repeat(32), publicPrincipalId: "public-link-agent", expiresAtMs: Date.now() + 60_000});}}, "doc.md", {find: "world", replacement: "friend"})};
 }
 
 it("waits for host acknowledgement over the real live socket", async () => {

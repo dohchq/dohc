@@ -56,6 +56,7 @@ const COMPARED_TABLES: &[&str] = &[
     "live_audit_settlement_conflicts",
     "live_audit_record_chunks",
     "live_audit_events",
+    "live_audit_projection_authors",
     "live_audit_event_publications",
     "live_audit_event_conflicts",
     "live_accepted_updates",
@@ -70,6 +71,9 @@ const COMPARED_TABLES: &[&str] = &[
     "live_owner_adoptions",
     "live_device_bootstraps",
     "live_device_settlements",
+    "live_settlement_publication_states",
+    "live_settlement_publication_admissions",
+    "live_settlement_attribution_unavailable",
     "ydoc_owner_base_sources",
     "ydoc_owner_activation_sources",
     "live_device_application_bindings",
@@ -536,6 +540,7 @@ mod tests {
             tx.execute("INSERT INTO live_audit_settlement_conflicts VALUES ('workspace','peer',0,?1,'{}',?2)",rusqlite::params![sha,source]).unwrap();
             tx.execute("INSERT INTO live_audit_record_chunks VALUES (?1,0,?1)",[&sha]).unwrap();
             tx.execute("INSERT INTO live_audit_events VALUES ('relay','workspace','main','object',?1,1,?1,?1,1,'delivery',1,NULL,NULL,1)",[&sha]).unwrap();
+            tx.execute(r#"INSERT INTO live_audit_projection_authors VALUES ('workspace','peer',0,'main','object','note.md','lineage','[{"kind":"human","humanId":"recipient","humanName":"Recipient"}]')"#,[]).unwrap();
             tx.execute("INSERT INTO live_audit_event_publications VALUES ('relay','workspace','main','object',?1,1,'peer',0)",[&sha]).unwrap();
             tx.execute("INSERT INTO live_audit_event_conflicts VALUES ('workspace','peer',0,?1)",[&sha]).unwrap();
             Ok::<_, StorageError>(())
@@ -548,6 +553,7 @@ mod tests {
             "live_audit_settlement_conflicts",
             "live_audit_record_chunks",
             "live_audit_events",
+            "live_audit_projection_authors",
             "live_audit_event_publications",
             "live_audit_event_conflicts",
             "live_audit_base_publications",

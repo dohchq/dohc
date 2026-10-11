@@ -8,6 +8,10 @@ type VersionedTextConflictId = string;
 
 export const MAX_VERSIONED_BINARY_FILE_BYTES = 5 * 1024 * 1024;
 
+export function isCaptureRecoveryOrigin(origin: string): boolean {
+  return origin === "capture-recovery" || origin === "capture-recovery-cleared";
+}
+
 /**
  * Opaque key-envelope relay contracts.
  *
@@ -104,7 +108,7 @@ export interface ActorNeutralWriteMetadata {
 // updates, so "ydoc" says how the change arrived, not who made it. Writes
 // take ActorNeutralWriteMetadata, so no write can claim it.
 export interface MomentMetadata extends Omit<ActorNeutralWriteMetadata, "origin"> {
-  origin: ActorNeutralWriteOrigin | "ydoc";
+  origin: ActorNeutralWriteOrigin | "ydoc" | "capture-recovery" | "capture-recovery-cleared";
 }
 
 // Optional authorship carried by a MOMENT (never by snapshot metadata, which
@@ -135,6 +139,9 @@ interface AgentMomentAuthor {
 interface HumanMomentAuthor {
   kind: "human";
   humanId: string;
+  humanName?: string;
+  // Set only when the engine installs the relay's admitted settlement snapshot.
+  relayConfirmed?: true;
   onBehalfOf?: string;
 }
 
@@ -158,6 +165,12 @@ interface LinkMomentAuthor {
   principalId: string;
 }
 
+interface LiveLinkMomentAuthor {
+  kind: "link";
+  publicPrincipalId: string;
+  label: string;
+}
+
 /**
  * An automation writing a file. The depth is its trigger's chain depth plus
  * one, so the claims its write causes carry the chain onward and stop at the
@@ -171,11 +184,13 @@ interface AutomationMomentAuthor {
 }
 
 export type MomentAuthor =
+  | { kind: "unattributed" }
   | AgentMomentAuthor
   | HumanMomentAuthor
   | PublicMomentAuthor
   | NamedMomentAuthor
   | LinkMomentAuthor
+  | LiveLinkMomentAuthor
   | AutomationMomentAuthor;
 
 // A person's own write names them, as desktop main reads them. A local agent
@@ -183,7 +198,7 @@ export type MomentAuthor =
 // person, and none when its run has none.
 export type MomentWriteAuthor =
   | (AgentMomentAuthor & { onBehalfOf: string })
-  | Omit<HumanMomentAuthor, "onBehalfOf">
+  | Omit<HumanMomentAuthor, "onBehalfOf" | "humanName" | "relayConfirmed">
   | AutomationMomentAuthor;
 
 type VersionedFileContentKind = "text" | "binary";
@@ -445,6 +460,7 @@ interface VersionedTextMomentPayload {
 }
 
 interface VersionedTextWriteResult {
+  deduped?: boolean;
   materialized?: boolean;
   materializeOutcome?: "applied" | "skipped" | "conflict" | "superseded" | "error";
   object: FileObjectRecord;
@@ -591,6 +607,7 @@ export interface VersionedTextStore {
     versionId: VersionId;
     path: string;
     expectedObjectId?: WorkspaceObjectId;
+    expectedSha256?: string;
     // Delete only if the path is still missing on disk when the engine applies
     // the delete. A caller that saw the file missing sets it: a replace can
     // empty the name for a moment.
@@ -949,6 +966,7 @@ interface LinkedChatProjection {
 }
 
 export interface LinkedChatStore {
+  getMessage(input: { workspaceId: WorkspaceId; messageId: ChatMessageId }): Promise<ChatMessage>;
   // Creates a FILE-LINKED thread. linkedFile is required (exactly-one-owner
   // at creation): an ownerless thread would be readable and indexed but
   // unreachable by navigation. Channel threads go through startChannelThread.

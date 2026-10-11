@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { RecoveryList } from "./RecoveryList";
+import { DismissDraftControls, RecoveryList } from "./RecoveryList";
+import { ShellErrorReporter } from "./shell/useShellError";
 import { durableMarkdownFromSnapshot } from "./collab/recoverySnapshot";
 import type { OrphanedDraftRow } from "./orphanedDrafts";
 
@@ -15,6 +16,14 @@ import type { OrphanedDraftRow } from "./orphanedDrafts";
 // gate has nothing left to hold. The fixture below is built with plain yjs
 // for the same reason.
 let projectionShouldFail = false;
+
+it("reports failed dismissal through the shell with retry", async () => {
+  const error = new Error("disk full"), report = vi.fn(), dismiss = vi.fn(async () => {throw error;});
+  render(<ShellErrorReporter.Provider value={report}><DismissDraftControls onDismiss={dismiss} /></ShellErrorReporter.Provider>);
+  fireEvent.click(screen.getByTestId("recovery-dismiss"));
+  fireEvent.click(screen.getByTestId("recovery-dismiss-confirm"));
+  await waitFor(() => expect(report).toHaveBeenCalledWith({message: "dohc could not dismiss this draft. Your saved copy remains available.", cause: error, retry: expect.any(Function)}));
+});
 let projectionCalls = 0;
 let failProjectionCall: number | null = null;
 let projectionGate: { promise: Promise<void>; release: () => void } | null =

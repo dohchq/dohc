@@ -13,6 +13,12 @@ import {
   type CliResultByVerb,
 } from "./protocol";
 import { renderCliResult } from "./render";
+import { readStdinText } from "./stdin";
+import {
+  CHAT_MESSAGE_TOO_LONG,
+  MAX_CHAT_MESSAGE_BODY_BYTES,
+  normalizeChatMessageBody,
+} from "@dohc/workspace-contracts/chat-message-body";
 
 const DEFAULT_RESPONSE_TIMEOUT_MS = 30_000;
 
@@ -31,14 +37,6 @@ interface CliExecutionOptions {
   client?: CliClientOptions;
 }
 
-async function processStdin(): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of process.stdin) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
-  }
-  return Buffer.concat(chunks).toString("utf8");
-}
-
 async function bodyForCommand(
   command: ParsedCliCommand,
   readStdin: () => Promise<string>,
@@ -47,6 +45,16 @@ async function bodyForCommand(
     const text = command.stdin ? await readStdin() : command.text;
     if (!documentEditTextSchema.safeParse(text).success) throw new DohcCliError("document text is at most 256 KiB as UTF-8");
     return text;
+  }
+  if (command.verb === "fileChatStart") {
+    const body = command.stdin ? await readStdin() : command.body;
+    // The desktop applies the same check; refusing here saves the request.
+    try {
+      normalizeChatMessageBody(body);
+    } catch (error) {
+      throw new DohcCliError(error instanceof Error ? error.message : String(error));
+    }
+    return body;
   }
   if (command.verb !== "post" && command.verb !== "reply") return undefined;
   if (command.body !== "-") return command.body;
@@ -67,6 +75,10 @@ function buildCliRequest(
     actor: command.actor,
   } as const;
   switch (command.verb) {
+    case "accessObject":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, ref: command.ref, cursor: command.cursor } };
+    case "accessSharing":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, lane: command.lane, cursor: command.cursor } };
     case "documentRead":
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, path: command.path } };
     case "documentEdit":
@@ -83,6 +95,14 @@ function buildCliRequest(
             ...(command.requestId === undefined ? {} : { requestId: command.requestId }),
           } };
     }
+    case "fileChatStart":
+      return { verb: command.verb, protocolVersion: common.protocolVersion, args: {
+        cwd: common.cwd, actor: common.actor, path: command.path, title: command.title,
+        body: stdinBody ?? command.body,
+        ...(command.agent === undefined ? {} : { agent: command.agent }),
+        ...(command.requestId === undefined ? {} : { requestId: command.requestId }),
+        ...((command.runId ?? runId) ? { runId: command.runId ?? runId } : {}),
+      } };
     case "dataset":
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, request: command.request } };
     case "appPublication":
@@ -277,7 +297,7 @@ function refusal(result: CliResultByVerb[keyof CliResultByVerb]): string | null 
     : result.reason;
 }
 
-const REFUSING_VERBS = new Set(["moment", "documentRead", "documentEdit", "documentCreate", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress"]);
+const REFUSING_VERBS = new Set(["moments", "moment", "documentRead", "documentEdit", "documentCreate", "fileChatStart", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress"]);
 
 function jsonOutput(result: CliResultByVerb[keyof CliResultByVerb]): string {
   return JSON.stringify({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...result }, null, 2);
@@ -288,7 +308,7 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
     const env = options.env ?? process.env;
     const command = parseCliArguments(options.argv, env);
     if ("help" in command) return { exitCode: 0, stdout: renderCliHelp(command), stderr: "" };
-    const stdinBody = await bodyForCommand(command, options.readStdin ?? processStdin);
+    const stdinBody = await bodyForCommand(command, options.readStdin ?? (() => readStdinText(process.stdin, command.verb === "fileChatStart" ? { bytes: MAX_CHAT_MESSAGE_BODY_BYTES, message: CHAT_MESSAGE_TOO_LONG } : undefined)));
     const request = buildCliRequest(
       command,
       options.cwd ?? process.cwd(),

@@ -1,7 +1,6 @@
-import { formatChatTime } from "../time";
 import { basenameOf } from "../path";
 import { ipcErrorMessage } from "../ipcError";
-import { ArrowLeft, MessageSquare } from "lucide-react";
+import { ArrowLeft, Info, MessageSquare } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ChatMessageRecord,
@@ -9,23 +8,33 @@ import type {
   ListFileChatsResponse,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import { EmptyState, RetryRow } from "../ui/controls";
+import { SkeletonRows } from "../ui/SkeletonRows";
+import {
+  AboutAccess,
+  AboutChatRow,
+  AboutHeader,
+  AboutHistory,
+  AboutNote,
+  AboutSection,
+  type AboutFile,
+  type AboutNotices,
+  type AboutSectionId,
+  type AccessContext,
+} from "./About";
 import {
   ChatComposer,
   ChatMessageList,
   type ChatMessageListHandle,
-  chatAuthorLabel,
 } from "./chatMessages";
 import { useReactions, type ReactionView } from "./reactionStore";
 
-// Linked Chats surface (PR 0M-5) — the Chats panel's "This file" tab. Per-file Chats
-// stored in the engine and linked to the file's stable object id, so a chat
-// follows its file through renames. Product vocabulary: these are Chats.
+// The Chats panel's About tab: the open file's Chats, History and Access.
+// Per-file Chats (PR 0M-5) are stored in the engine and linked to the file's
+// stable object id, so a chat follows its file through renames, and that id
+// is what History asks about. Product vocabulary: these are Chats.
 // Message rendering + composer are the shared chatMessages pieces
 // so this surface and the workspace Chats view can never drift.
-
-// Re-exported: EngineHistory (and its tests) import the authorship rule from
-// here since PR 0N-1.
-export { chatAuthorLabel };
 
 // The composer's replacement for every received file share.
 // Same words main throws (SharedFileReadOnlyError) and the same shape the
@@ -43,10 +52,14 @@ function ReadOnlyNotice() {
 
 const NO_REACTIONS: ReactionView = { reactions: [], viewerAuthorId: "" };
 
+// `key` names the workspace and file an answer is for: a state for another
+// file reads as loading, so a switch never shows the last file's chats.
 type ThreadsState =
   | { status: "loading" }
-  | { status: "unavailable"; message: string }
-  | { status: "ready"; fileObjectId: string | null; threads: ChatThreadRecord[] };
+  | { status: "unavailable"; key: string }
+  | { status: "ready"; key: string; fileObjectId: string | null; threads: ChatThreadRecord[] };
+
+const SECTIONS_OPEN: Record<AboutSectionId, boolean> = { chats: true, history: true, access: false };
 
 const WORKSPACE_UPDATING_MESSAGE = "Workspace is still updating. Try again.";
 const THREAD_LOAD_RETRY_MS = 1_000;
@@ -94,8 +107,23 @@ export function LinkedChatsPanel(props: {
   // file-linked threads it lists are read here, not in the Chats view.
   onThreadRead?: () => void;
   onError: (message: string, cause?: unknown) => void;
+  // The file's History, where this workspace records it. A shared view
+  // records none, so it passes nothing and About shows no History.
+  history?: {
+    revision: number;
+    onOpenMoment: (momentId: string, filePath: string) => void;
+  };
+  // Where a section read that failed reports, and what can explain an Access
+  // answer that covers nothing. Both stay the same object between renders.
+  notices: AboutNotices;
+  accessContext: AccessContext;
 }) {
   const { workspaceId, filePath } = props;
+  const threadsKey = `${workspaceId}\0${filePath ?? ""}`;
+  // Which sections are open stays while the person moves between files.
+  const [sectionsOpen, setSectionsOpen] = useState(SECTIONS_OPEN);
+  const toggleSection = (id: AboutSectionId) => () =>
+    setSectionsOpen((current) => ({ ...current, [id]: !current[id] }));
   // Every received file share reads the chat about its files and adds nothing
   // to it. Main refuses every chat write with these words before the store.
   const readOnly = props.shareReadOnly === true;
@@ -110,25 +138,33 @@ export function LinkedChatsPanel(props: {
   const reactions = useReactions();
   const listRef = useRef<ChatMessageListHandle | null>(null);
 
+  const currentThreadsKey = useRef(threadsKey);
+  currentThreadsKey.current = threadsKey;
+  const { notices } = props;
   const refreshThreads = useCallback(async () => {
     if (!filePath) return;
     const token = ++liveToken.current;
+    const current = () => token === liveToken.current && currentThreadsKey.current === threadsKey;
+    const identity = `about-chats:${filePath}`;
+    // The words go to the shell's error hook. The row goes when this file
+    // leaves About, so its Try again always reads this file.
+    const fail = (message: string, cause?: unknown) => {
+      setThreadsState({ status: "unavailable", key: threadsKey });
+      notices.report({ identity, message, cause, retry: () => void refreshThreads() });
+    };
     setThreadsState({ status: "loading" });
     let updatingStartedAtMs: number | null = null;
-    while (token === liveToken.current) {
+    while (current()) {
       try {
         const result = await bridge().listFileChats({ workspaceId, path: filePath });
-        if (token !== liveToken.current) return;
+        if (!current()) return;
         if (isWorkspaceUpdatingResponse(result)) {
           const now = performance.now();
           updatingStartedAtMs ??= now;
           const remainingMs =
             updatingStartedAtMs + THREAD_LOAD_RETRY_DEADLINE_MS - now;
           if (remainingMs <= 0) {
-            setThreadsState({
-              status: "unavailable",
-              message: WORKSPACE_UPDATING_MESSAGE,
-            });
+            fail(WORKSPACE_UPDATING_MESSAGE);
             return;
           }
           await new Promise((resolveDelay) =>
@@ -136,24 +172,24 @@ export function LinkedChatsPanel(props: {
           );
           continue;
         }
+        notices.clear(identity);
         setThreadsState({
           status: "ready",
+          key: threadsKey,
           fileObjectId: result.fileObjectId,
           threads: result.threads,
         });
         return;
       } catch (error) {
-        if (token !== liveToken.current) return;
-        setThreadsState({
-          status: "unavailable",
-          message: ipcErrorMessage(error, "Could not load Chats for this file."),
-        });
+        if (!current()) return;
+        fail(ipcErrorMessage(error, "Could not load Chats for this file."), error);
         return;
       }
     }
-  }, [filePath, workspaceId]);
+  }, [filePath, notices, threadsKey, workspaceId]);
 
-  // File (or workspace) switch: drop everything stale and reload.
+  // File (or workspace) switch: drop everything stale and reload. The file
+  // that leaves About takes its Notices row with it.
   useEffect(() => {
     liveToken.current += 1;
     setActiveThread(null);
@@ -161,14 +197,15 @@ export function LinkedChatsPanel(props: {
     setComposer("");
     setCreating(null);
     if (!filePath) {
-      setThreadsState({ status: "ready", fileObjectId: null, threads: [] });
+      setThreadsState({ status: "loading" });
       return;
     }
     void refreshThreads();
     return () => {
       liveToken.current += 1;
+      notices.clear(`about-chats:${filePath}`);
     };
-  }, [filePath, refreshThreads]);
+  }, [filePath, notices, refreshThreads]);
 
   const openThread = useCallback(
     async (thread: ChatThreadRecord, focusMessageId?: string) => {
@@ -389,87 +426,85 @@ export function LinkedChatsPanel(props: {
 
   if (!filePath) {
     return (
-      <div
+      <EmptyState
         data-testid="linked-chats-empty"
-        className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center"
-      >
-        <span className="text-xs text-muted">No file open</span>
-        <span className="text-[11px] text-subtle">
-          Open a file to see its Chats.
-        </span>
-      </div>
+        icon={Info}
+        title={
+          props.history
+            ? "Open a file to see its chats, history, and access."
+            : "Open a file to see its chats and access."
+        }
+      />
     );
   }
 
-  if (threadsState.status === "loading") {
-    return (
-      <div className="flex flex-1 items-center justify-center px-4 text-xs text-subtle">
-        Loading Chats...
-      </div>
-    );
-  }
-
-  if (threadsState.status === "unavailable") {
-    return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
-        <span className="text-xs text-danger">{threadsState.message}</span>
-        <button
-          type="button"
-          onClick={() => void refreshThreads()}
-          className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink"
-        >
-          Try again
-        </button>
-      </div>
-    );
-  }
-
+  const threads = "key" in threadsState && threadsState.key === threadsKey ? threadsState : null;
+  // History asks about the file's object id, which this file's chats read
+  // answers. History keeps its place while that read runs or fails.
+  const file: AboutFile =
+    threads === null ? { status: "loading" }
+    : threads.status === "unavailable" ? { status: "failed", retry: () => void refreshThreads() }
+    : { status: "ready", objectId: threads.fileObjectId };
   return (
-    <div data-testid="linked-chats-panel" className="flex min-h-0 flex-1 flex-col">
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        {threadsState.threads.length === 0 ? (
-          <div
-            data-testid="linked-chats-empty"
-            className="flex h-full flex-col items-center justify-center gap-1 px-4 text-center"
-          >
-            <MessageSquare size={16} aria-hidden className="text-subtle" />
-            <span className="text-xs text-muted">
-              No chats about this file yet.
-            </span>
-            {/* "Start one." is a next step this surface does not offer at
-                `view`, where the New chat control is gone. */}
-            {readOnly ? null : (
-              <span className="text-[11px] text-subtle">Start one.</span>
-            )}
-          </div>
-        ) : (
-          <ul className="m-0 list-none p-0">
-            {threadsState.threads.map((thread) => (
-              <li key={thread.id} className="border-b border-line">
-                <button
-                  type="button"
-                  data-testid="linked-chat-open"
-                  data-thread-id={thread.id}
-                  onClick={() => void openThread(thread)}
-                  className="block w-full cursor-pointer px-3 py-2 text-left transition-colors duration-75 hover:bg-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
-                >
-                  <span className="block truncate text-[12px] font-medium text-ink">
-                    {thread.title}
-                  </span>
-                  <span className="block text-[10px] text-subtle">
-                    {formatChatTime(thread.updatedAtMs).label}
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
+    <div data-testid="about-panel" className="flex min-h-0 flex-1 flex-col">
+      <AboutHeader path={filePath} />
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto pb-2">
+        <AboutSection
+          id="chats"
+          icon={MessageSquare}
+          label="Chats"
+          count={threads?.status === "ready" ? String(threads.threads.length) : undefined}
+          expanded={sectionsOpen.chats}
+          onToggle={toggleSection("chats")}
+        >
+          {threads === null ? (
+            <SkeletonRows rows={2} className="px-2 py-1" label="Loading Chats..." />
+          ) : threads.status === "unavailable" ? (
+            <RetryRow testId="linked-chats-failed" onRetry={() => void refreshThreads()} />
+          ) : (
+            <div data-testid="linked-chats-panel">
+              {threads.threads.length === 0 ? (
+                // The next step is the New chat control below, where this
+                // file offers one.
+                <AboutNote testId="linked-chats-empty">No chats about this file yet.</AboutNote>
+              ) : (
+                <ul className="m-0 list-none p-0">
+                  {threads.threads.map((thread) => (
+                    <li key={thread.id}>
+                      <AboutChatRow thread={thread} onOpen={() => void openThread(thread)} />
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </AboutSection>
+        {props.history ? (
+          <AboutHistory
+            workspaceId={workspaceId}
+            path={filePath}
+            file={file}
+            revision={props.history.revision}
+            expanded={sectionsOpen.history}
+            onToggle={toggleSection("history")}
+            onOpenMoment={props.history.onOpenMoment}
+            notices={notices}
+          />
+        ) : null}
+        <AboutAccess
+          workspaceId={workspaceId}
+          path={filePath}
+          expanded={sectionsOpen.access}
+          onToggle={toggleSection("access")}
+          notices={notices}
+          context={props.accessContext}
+        />
       </div>
-      {readOnly ? (
+      {threads?.status !== "ready" ? null : readOnly ? (
         <ReadOnlyNotice />
       ) : (
         <div className="shrink-0 border-t border-line p-2">
-          {threadsState.fileObjectId === null ? (
+          {threads.fileObjectId === null ? (
             <p className="m-0 px-1 text-[11px] leading-4 text-subtle">
               Chats aren't available for this file yet — only text files dohc
               tracks can have Chats.

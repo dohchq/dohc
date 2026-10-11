@@ -92,6 +92,23 @@ it("reports a failed read and retries the current workspace", async () => {
   expect(bridgeMock.cloudStatus).toHaveBeenNthCalledWith(2, { workspaceId: "ws-1" });
 });
 
+// About tells a status still being read from one that could not be read.
+it("says the status could not be read until a read answers, for this workspace only", async () => {
+  bridgeMock.cloudStatus.mockRejectedValueOnce(new Error("engine unavailable"))
+    .mockResolvedValue({ connected: true, workspaceSynced: true });
+  const { result, rerender } = renderHook(
+    ({ workspaceId }) => useCloudPresence(workspaceId, onStatusUnavailable),
+    { initialProps: { workspaceId: "ws-1" } },
+  );
+  expect(result.current.cloudStatusUnreadable).toBe(false);
+  await waitFor(() => expect(result.current.cloudStatusUnreadable).toBe(true));
+  await act(async () => onStatusUnavailable.mock.calls[0]![0]());
+  await waitFor(() => expect(result.current.cloudStatus).not.toBeNull());
+  expect(result.current.cloudStatusUnreadable).toBe(false);
+  rerender({ workspaceId: "ws-2" });
+  expect(result.current.cloudStatusUnreadable).toBe(false);
+});
+
 it("does not report a confirmed unsynced workspace as unavailable", async () => {
   bridgeMock.cloudStatus.mockResolvedValue({ connected: true, workspaceSynced: false });
   renderHook(() => useCloudPresence("ws-1", onStatusUnavailable));

@@ -1,5 +1,7 @@
 use crate::EngineService;
 use crate::events::emit_automation_claimed;
+use crate::lock;
+use crate::rpc::error::map_runtime;
 use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::deserialize_optional_non_null;
 use crate::rpc::request::now_ms;
@@ -29,10 +31,377 @@ use dohc_engine_protocol::error::WireError;
 use dohc_engine_protocol::transport::RequestContext;
 use dohc_engine_protocol::wire::WorkspaceHandle;
 use dohc_engine_runtime::NoFaults;
+use dohc_engine_runtime::{ActorHandle, CancellationToken};
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use tokio::sync::oneshot;
+
+struct DurabilityRequest {
+    claim_id: Option<String>,
+    token: CancellationToken,
+    reply: oneshot::Sender<Result<(), WireError>>,
+}
+
+#[derive(Default)]
+struct DurabilityState {
+    running: bool,
+    pending: Vec<DurabilityRequest>,
+}
+
+/// One active barrier and one following batch. A caller arriving during the
+/// active sync waits for the following one, which covers its earlier writes.
+#[derive(Clone, Default)]
+pub(super) struct DurabilityQueue(Arc<Mutex<DurabilityState>>);
+
+struct DurabilityDriver(Option<DurabilityQueue>);
+
+impl DurabilityDriver {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for DurabilityDriver {
+    fn drop(&mut self) {
+        if let Some(queue) = self.0.take() {
+            let mut state = lock(&queue.0);
+            state.running = false;
+            for request in std::mem::take(&mut state.pending) {
+                let _ = request.reply.send(Err(WireError::new(
+                    ErrorCode::Internal,
+                    "automation durability worker stopped",
+                )));
+            }
+        }
+    }
+}
+
+impl DurabilityQueue {
+    fn submit(
+        &self,
+        actor: ActorHandle,
+        workspace_id: String,
+        claim_id: Option<String>,
+        token: CancellationToken,
+    ) -> oneshot::Receiver<Result<(), WireError>> {
+        self.submit_with(claim_id, token, move |claims| {
+            let actor = actor.clone();
+            let workspace_id = workspace_id.clone();
+            async move {
+                actor
+                    .automation_make_durable_batch(workspace_id, claims, Arc::new(NoFaults))
+                    .await
+                    .map(|results| {
+                        results
+                            .into_iter()
+                            .map(|result| result.map_err(map_runtime))
+                            .collect()
+                    })
+                    .map_err(map_runtime)
+            }
+        })
+    }
+
+    fn submit_with<F, Fut>(
+        &self,
+        claim_id: Option<String>,
+        token: CancellationToken,
+        mut work: F,
+    ) -> oneshot::Receiver<Result<(), WireError>>
+    where
+        F: FnMut(Vec<(Option<String>, CancellationToken)>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<Vec<Result<(), WireError>>, WireError>> + Send,
+    {
+        let (reply, receiver) = oneshot::channel();
+        let mut state = lock(&self.0);
+        state.pending.push(DurabilityRequest {
+            claim_id,
+            token,
+            reply,
+        });
+        if !state.running {
+            state.running = true;
+            let queue = self.clone();
+            let mut driver = DurabilityDriver(Some(queue.clone()));
+            tokio::spawn(async move {
+                loop {
+                    let requests = std::mem::take(&mut lock(&queue.0).pending);
+                    let claims = requests
+                        .iter()
+                        .map(|request| (request.claim_id.clone(), request.token.clone()))
+                        .collect();
+                    let result = work(claims).await;
+                    match result {
+                        Ok(results) => {
+                            for (request, result) in requests.into_iter().zip(results) {
+                                let _ = request.reply.send(result);
+                            }
+                        }
+                        Err(error) => {
+                            for request in requests {
+                                let _ = request.reply.send(Err(error.clone()));
+                            }
+                        }
+                    }
+                    let mut state = lock(&queue.0);
+                    if state.pending.is_empty() {
+                        state.running = false;
+                        driver.disarm();
+                        break;
+                    }
+                }
+            });
+        }
+        receiver
+    }
+}
+
+#[cfg(test)]
+mod durability_tests {
+    use super::*;
+    type Batch = (
+        Vec<(Option<String>, CancellationToken)>,
+        oneshot::Sender<Result<Vec<Result<(), WireError>>, WireError>>,
+    );
+
+    fn enqueue(
+        queue: &DurabilityQueue,
+        batches: tokio::sync::mpsc::UnboundedSender<Batch>,
+        claim: &str,
+        token: CancellationToken,
+    ) -> oneshot::Receiver<Result<(), WireError>> {
+        queue.submit_with(Some(claim.into()), token, move |claims| {
+            let batches = batches.clone();
+            async move {
+                let (finish, done) = oneshot::channel();
+                batches.send((claims, finish)).unwrap();
+                done.await.unwrap()
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn durability_queue_late_callers_share_the_following_barrier() {
+        let queue = DurabilityQueue::default();
+        let (send, mut batches) = tokio::sync::mpsc::unbounded_channel();
+        let first = enqueue(&queue, send.clone(), "first", CancellationToken::new());
+        let (claims, finish) = batches.recv().await.unwrap();
+        assert_eq!(claims.len(), 1);
+        let mut second = enqueue(&queue, send.clone(), "second", CancellationToken::new());
+        let third = enqueue(&queue, send.clone(), "third", CancellationToken::new());
+        finish.send(Ok(vec![Ok(())])).unwrap();
+        first.await.unwrap().unwrap();
+        let (claims, finish) = batches.recv().await.unwrap();
+        assert_eq!(
+            claims
+                .iter()
+                .map(|(claim, _)| claim.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["second", "third"]
+        );
+        assert!(matches!(
+            second.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        finish.send(Ok(vec![Ok(()), Ok(())])).unwrap();
+        second.await.unwrap().unwrap();
+        third.await.unwrap().unwrap();
+        assert!(!lock(&queue.0).running);
+        assert!(batches.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn durability_queue_failure_and_cancelled_caller_do_not_strand_followers() {
+        let queue = DurabilityQueue::default();
+        let (send, mut batches) = tokio::sync::mpsc::unbounded_channel();
+        let first = enqueue(&queue, send.clone(), "first", CancellationToken::new());
+        let (_, finish) = batches.recv().await.unwrap();
+        let cancelled = CancellationToken::new();
+        let abandoned = enqueue(&queue, send.clone(), "cancelled", cancelled.clone());
+        let follower = enqueue(&queue, send, "follower", CancellationToken::new());
+        cancelled.cancel();
+        drop(abandoned);
+        finish
+            .send(Err(WireError::new(ErrorCode::Internal, "sync failed")))
+            .unwrap();
+        assert_eq!(first.await.unwrap().unwrap_err().message, "sync failed");
+        let (claims, finish) = batches.recv().await.unwrap();
+        assert!(claims[0].1.is_cancelled());
+        assert!(!claims[1].1.is_cancelled());
+        finish
+            .send(Ok(vec![
+                Err(WireError::new(ErrorCode::Cancelled, "cancelled")),
+                Ok(()),
+            ]))
+            .unwrap();
+        follower.await.unwrap().unwrap();
+        assert!(!lock(&queue.0).running);
+    }
+
+    #[tokio::test]
+    async fn durability_queue_panic_releases_followers_and_allows_a_new_driver() {
+        let queue = DurabilityQueue::default();
+        let (started, begin) = oneshot::channel();
+        let (finish, done) = oneshot::channel::<()>();
+        let mut started = Some(started);
+        let mut done = Some(done);
+        let first = queue.submit_with(None, CancellationToken::new(), move |_| {
+            let started = started.take().unwrap();
+            let done = done.take().unwrap();
+            async move {
+                started.send(()).unwrap();
+                done.await.unwrap();
+                panic!("injected driver panic");
+            }
+        });
+        begin.await.unwrap();
+        let (send, mut batches) = tokio::sync::mpsc::unbounded_channel();
+        let follower = enqueue(&queue, send.clone(), "follower", CancellationToken::new());
+        finish.send(()).unwrap();
+        assert!(first.await.is_err());
+        assert_eq!(
+            follower.await.unwrap().unwrap_err().code,
+            ErrorCode::Internal
+        );
+        assert!(!lock(&queue.0).running);
+        let next = enqueue(&queue, send, "next", CancellationToken::new());
+        let (_, finish) = batches.recv().await.unwrap();
+        finish.send(Ok(vec![Ok(())])).unwrap();
+        next.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "machine-local barrier contention measurement"]
+    async fn durability_queue_contention_cost() {
+        use dohc_engine_domain::WriteText;
+        use dohc_engine_storage::FaultPoint;
+        use dohc_engine_testkit::{GateFaults, ScratchDir};
+        use std::future::{Future, poll_fn};
+        use std::pin::Pin;
+        use std::task::Poll;
+        use std::time::Instant;
+
+        let scratch = ScratchDir::new().unwrap();
+        let service = EngineService::new();
+        let ctx = RequestContext::unbounded();
+        let opened = service.workspace_open(&ctx, json!({"rootDir": scratch.path().to_string_lossy(), "workspaceId": "contention", "captureMode": "none"})).await.unwrap();
+        let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        let open = service.open(Some(&handle)).unwrap();
+        for pair in -1..30_i32 {
+            let arms = if pair % 2 == 0 {
+                ["A", "B"]
+            } else {
+                ["B", "A"]
+            };
+            for arm in arms {
+                // Hold a NORMAL write so every request is queued before timing.
+                let gate = GateFaults::at(FaultPoint::StorageBeforePersist);
+                let actor = open.actor.clone();
+                let held_gate = gate.clone();
+                let held = tokio::spawn(async move {
+                    actor
+                        .versioned_text_write(
+                            WriteText {
+                                workspace_id: "contention".into(),
+                                version_id: "main".into(),
+                                object_id: "held".into(),
+                                path: "held.md".into(),
+                                text: format!("{pair}/{arm}"),
+                                moment_id: format!("{pair}/{arm}"),
+                                metadata_origin: "api".into(),
+                                metadata_summary: None,
+                                metadata_correlation_id: None,
+                                author_json: None,
+                                now_ms: 1,
+                                request_id: None,
+                            },
+                            held_gate,
+                            CancellationToken::new(),
+                        )
+                        .await
+                        .unwrap();
+                });
+                let wait = gate.clone();
+                tokio::task::spawn_blocking(move || wait.wait_until_reached())
+                    .await
+                    .unwrap();
+                type Reply = Pin<Box<dyn Future<Output = Result<(), WireError>>>>;
+                let mut replies: Vec<Reply> = Vec::new();
+                if arm == "A" {
+                    for _ in 0..16 {
+                        let actor = open.actor.clone();
+                        let mut reply: Reply = Box::pin(async move {
+                            actor
+                                .automation_make_durable_batch(
+                                    "contention".into(),
+                                    vec![(None, CancellationToken::new())],
+                                    Arc::new(NoFaults),
+                                )
+                                .await
+                                .map_err(map_runtime)?
+                                .pop()
+                                .unwrap()
+                                .map_err(map_runtime)
+                        });
+                        poll_fn(|cx| {
+                            assert!(reply.as_mut().poll(cx).is_pending());
+                            Poll::Ready(())
+                        })
+                        .await;
+                        replies.push(reply);
+                    }
+                } else {
+                    let first = open.durability.submit(
+                        open.actor.clone(),
+                        "contention".into(),
+                        None,
+                        CancellationToken::new(),
+                    );
+                    tokio::task::yield_now().await;
+                    assert!(lock(&open.durability.0).pending.is_empty());
+                    replies.push(Box::pin(async move { first.await.unwrap() }));
+                    for _ in 1..16 {
+                        let reply = open.durability.submit(
+                            open.actor.clone(),
+                            "contention".into(),
+                            None,
+                            CancellationToken::new(),
+                        );
+                        replies.push(Box::pin(async move { reply.await.unwrap() }));
+                    }
+                }
+                let mut read = Box::pin(open.actor.automation_claims(
+                    "contention".into(),
+                    "unrelated".into(),
+                    None,
+                    20,
+                ));
+                poll_fn(|cx| {
+                    assert!(read.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                println!("contention_start={}", json!({"pair":pair,"arm":arm}));
+                let start = Instant::now();
+                gate.release();
+                read.await.unwrap();
+                let read_ms = start.elapsed().as_secs_f64() * 1000.0;
+                for reply in replies {
+                    reply.await.unwrap();
+                }
+                held.await.unwrap();
+                println!(
+                    "contention_sample={}",
+                    json!({"pair":pair,"arm":arm,"readMs":read_ms,"allBarriersMs":start.elapsed().as_secs_f64()*1000.0,"barriers":if arm=="A"{16}else{2}})
+                );
+            }
+        }
+        drop(open);
+        service.workspace_close(Some(handle)).await.unwrap();
+    }
+}
 
 pub(crate) const AUTOMATION_CLAIM_MAX_ATTEMPTS: i64 = 2;
 
@@ -159,6 +528,13 @@ fn automation_group_handover_json(handover: &AutomationGroupHandover) -> Value {
 struct AutomationClaimNextParams {
     now_ms: Option<i64>,
     automation_id_prefix: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutomationMakeDurableParams {
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    claim_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -340,6 +716,12 @@ pub(crate) fn automation_claim_json(claim: &AutomationClaim) -> Value {
         "createdAtMs": claim.created_at_ms,
         "updatedAtMs": claim.updated_at_ms,
     });
+    if let Some(parent) = &claim.parent_claim_id {
+        value
+            .as_object_mut()
+            .expect("claim is an object")
+            .insert("parentClaimId".to_owned(), json!(parent));
+    }
     if let Some(error) = &claim.error {
         let object = value.as_object_mut().expect("claim is an object");
         object.insert("error".to_owned(), json!(error));
@@ -646,6 +1028,30 @@ impl EngineService {
         )
         .await?;
         Ok(json!({ "pruned": pruned.pruned, "more": pruned.more }))
+    }
+
+    pub(super) async fn automations_make_durable(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: AutomationMakeDurableParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let reply = open.durability.submit(
+            open.actor.clone(),
+            open.workspace_id.clone(),
+            params.claim_id,
+            cancellation.token(),
+        );
+        let token = cancellation.token();
+        tokio::select! {
+            biased;
+            () = token.cancelled() => return Err(cancellation.interruption("automations.makeDurable")),
+            result = reply => result.map_err(|_| WireError::new(ErrorCode::WorkspaceUnavailable, "workspace actor is unavailable"))??,
+        }
+        Ok(json!({}))
     }
 
     pub(super) async fn automations_settle(

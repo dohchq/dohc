@@ -539,7 +539,7 @@ describe("collection folders", () => {
     act(() => {
       const sessionId = sessionsByPath.get("tasks/one.md")!;
       for (const listener of [...saveStateListeners]) {
-        listener({ sessionId, state: "saved", seq: 1 });
+        listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "saved-here" }, seq: 1 });
       }
     });
 
@@ -1731,7 +1731,7 @@ describe("workbench render cost", () => {
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
 
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
 
     vi.useFakeTimers();
     try {
@@ -1769,7 +1769,7 @@ describe("workbench render cost", () => {
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
 
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
 
     vi.useFakeTimers();
     try {
@@ -1801,7 +1801,7 @@ describe("workbench render cost", () => {
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
 
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
 
     vi.useFakeTimers();
     try {
@@ -1828,7 +1828,7 @@ describe("workbench render cost", () => {
     await waitFor(() =>
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
 
     vi.useFakeTimers();
     try {
@@ -1864,7 +1864,7 @@ describe("workbench render cost", () => {
     renderShell(bridge);
     await screen.findAllByTestId("tree-row");
 
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
 
     vi.useFakeTimers();
     try {
@@ -1903,7 +1903,7 @@ describe("workbench render cost", () => {
     await waitFor(
       () => {
         expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
-        expect(bridge.workspaceActivitySubscriberCount()).toBe(1);
+        expect(bridge.workspaceActivitySubscriberCount()).toBe(2);
       },
     );
 

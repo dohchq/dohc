@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReadCrashReportResult } from "../ipc/bridgeContract";
@@ -228,6 +228,25 @@ describe("workspace manager", () => {
     expect(screen.getByRole("button", { name: /create workspace/i })).toHaveProperty("disabled", false);
   });
 
+  it.each(["link", "shares", "notices"])("shows the attach refusal for reserved id %s in a toast and Notices", async (workspaceId) => {
+    const body = `Its workspace ID, ${workspaceId}, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again.`;
+    bridge.attachWorkspaceFolder.mockRejectedValueOnce(new Error(
+      `Error invoking remote method 'attachWorkspaceFolder': ReservedWorkspaceIdError: ${body}`,
+    ));
+    const user = userEvent.setup();
+    const onReady = vi.fn();
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={onReady} />);
+    await user.click(await screen.findByRole("button", { name: /open an existing folder/i }));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(within(toast).getByText("dohc can't open this folder")).toBeTruthy();
+    expect(within(toast).getByText(body)).toBeTruthy();
+    expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(onReady).not.toHaveBeenCalled();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = screen.getByTestId("notice-center");
+    expect(within(notices).getByText("dohc can't open this folder")).toBeTruthy();
+    expect(within(notices).getByText(body)).toBeTruthy();
+  });
   it("attaches an existing folder as a workspace", async () => {
     const user = userEvent.setup();
     const onReady = vi.fn();
@@ -474,12 +493,14 @@ describe("workspace manager with registered workspaces", () => {
       top: 570, bottom: 594, left: 280, right: 304, width: 24, height: 24, x: 280, y: 570, toJSON: () => ({}),
     });
     vi.stubGlobal("innerHeight", 600);
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(64);
     await user.click(trigger);
     const menu = screen.getByRole("menu", { name: "More for team" });
     // Viewport-fixed, so the scrolling list's overflow cannot clip it; a
-    // row near the bottom opens its menu upward.
+    // row near the bottom opens its menu upward, 4px over the trigger.
     expect(menu.className).toContain("fixed");
-    expect(Number.parseFloat(menu.style.top)).toBeLessThan(570);
+    expect(menu.style.top).toBe("");
+    expect(menu.style.bottom).toBe(`${600 - 570 + 4}px`);
     expect(Number.parseFloat(menu.style.left)).toBe(304 - 176);
   });
 

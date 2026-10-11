@@ -138,13 +138,13 @@ describe("desktop engine construction", () => {
     const f = fixture();
     const opened = vi.fn();
     f.dependencies.onWorkspaceOpened = opened;
-    const workspace = { workspaceId: "notices", rootPath: await createTestScratch("notice-open-") };
+    const workspace = { workspaceId: "notice-test-workspace", rootPath: await createTestScratch("notice-open-") };
     try {
       await f.engine.start();
       expect(opened).not.toHaveBeenCalled();
       const sessions = f.engine.sessions!;
       await sessions.run(workspace, async () => undefined);
-      expect(opened).toHaveBeenCalledExactlyOnceWith("notices");
+      expect(opened).toHaveBeenCalledExactlyOnceWith("notice-test-workspace");
       await sessions.run(workspace, async () => undefined);
       expect(opened).toHaveBeenCalledTimes(1);
       await sessions.closeWorkspace(workspace);
@@ -487,6 +487,49 @@ describe("desktop engine restart coordination", () => {
     } finally { await f.close(); }
   });
 
+  it("waits for the startup smoke cap after progress stalls before reporting an engine failure", async () => {
+    const f = fixture();
+    const opened = deferred();
+    const cancel = vi.fn(async (_requestId: number) => {});
+    let openId!: number;
+    const client: EngineDaemonClient = {
+      reportsProgress: () => true,
+      async sendRequest(request, _signal, onProgress) {
+        if (request.method === "workspace.open" && String(workspaceIdOf(request)).startsWith("desktop-startup-smoke-")) {
+          openId = request.id;
+          onProgress?.();
+          opened.resolve();
+          return await new Promise<Response>(() => {});
+        }
+        return await f.client.sendRequest(request);
+      },
+      cancelRequest: cancel,
+      onEvent: handler => f.client.onEvent(handler),
+      close: () => f.client.close(),
+      waitForExit: () => f.client.waitForExit(),
+    };
+    const close = vi.spyOn(client, "close");
+    f.setLaunch(async () => client);
+    try {
+      vi.useFakeTimers();
+      await f.engine.start();
+      await opened.promise;
+      await vi.advanceTimersByTimeAsync(11_000);
+      expect(cancel).not.toHaveBeenCalled();
+      expect(close).not.toHaveBeenCalled();
+      expect(f.engine.daemon!.currentClient()).toBe(client);
+      expect(f.dependencies.recordEngineProblem).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(109_010);
+      await vi.waitFor(() => expect(f.dependencies.recordEngineProblem).toHaveBeenCalled(), { timeout: 15_000 });
+      expect(cancel).toHaveBeenCalledWith(openId);
+      expect(close).toHaveBeenCalledOnce();
+      expect(f.dependencies.recordEngineProblem).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ message: "Rust engine workspace.open timed out after 120000ms." }), "restarting",
+      );
+      expect(f.dependencies.dialog.showErrorBox).not.toHaveBeenCalled();
+    } finally { await f.close(); }
+  });
+
   it("records one crash problem per engine crash, then the final verdict", async () => {
     const f = fixture();
     const exit = new Error("exited"); const attempt = new Error("attempt failed"); const verdict = new Error("limit");
@@ -625,7 +668,7 @@ describe("private owner peer lifecycle", () => {
     const config = {nativeConfigPath: "native-config", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2},
       relayUrl: "https://relay.example.test", documents: [document]};
     f.dependencies.process.env.DOHC_DESKTOP_OWNER_DELIVERY_CONFIG = "peer-config";
-    f.dependencies.ownerDeliveryCredentials = () => ({bearer: "actual-token", relayUrl: config.relayUrl, signal: credentials.signal});
+    f.dependencies.ownerDeliveryCredentials = () => ({bearer: "actual-token", accountId: "credential-owner", relayUrl: config.relayUrl, signal: credentials.signal});
     ownerDeliveryMock.read.mockReturnValue(config);
     let active: Promise<unknown> | undefined, lifetime!: AbortController;
     ownerDeliveryMock.start.mockImplementation(options => {
@@ -641,9 +684,10 @@ describe("private owner peer lifecycle", () => {
       active = run(document, lifetime.signal);
       await entered.promise;
       expect(passOptions.bearer).toBe("actual-token");
+      expect(passOptions.accountId).toBe("credential-owner");
       if (mode === "credentials") credentials.abort();
       let closed = false;
-      const closing = Promise.resolve(mode === "daemon" ? f.options().beforePublish!() : f.engine.closeRelayTransportWorkspace("owner")).then(() => {closed = true;});
+      const closing = Promise.resolve(mode === "daemon" ? f.options().beforePublish!(new AbortController().signal) : f.engine.closeRelayTransportWorkspace("owner")).then(() => {closed = true;});
       expect(passOptions.signal.aborted).toBe(true);
       expect(() => passOptions.assertCurrent()).toThrow();
       await Promise.resolve();
@@ -693,7 +737,7 @@ describe("server owner peer lifecycle", () => {
     const changed = vi.fn();
     f.dependencies.notifyOwnerDeliveryChanged = changed;
     f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => credentials.signal.aborted ? [] : ["owner"], hasRefusals: () => undefined,
-      connect: async () => ({bearer: "token", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
+      connect: async () => ({bearer: "token", accountId: "credential-owner", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
         refusals: async () => {},
         documents: async () => ({ok: true, documents: [{path: "a.md", status, document}]})})};
     ownerDeliveryMock.pass.mockResolvedValue("retry");
@@ -726,7 +770,7 @@ describe("server owner peer lifecycle", () => {
       attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
     const documents = vi.fn(async () => ({ok: true, documents: [{path: "a.md", status: "ready", document}]}));
     f.dependencies.serverOwnerDelivery = {prepare: vi.fn(async () => config), workspaceIds: () => ["owner"], hasRefusals: () => undefined,
-      connect: async () => ({bearer: "actual-token", relayUrl: "https://relay.test", signal: credentials.signal,
+      connect: async () => ({bearer: "actual-token", accountId: "credential-owner", relayUrl: "https://relay.test", signal: credentials.signal,
         assertCurrent: () => credentials.signal.throwIfAborted(), documents, refusals: async () => {}})};
     let passOptions!: Parameters<typeof import("./nativeOwnerDelivery")["runNativeOwnerDeliveryPass"]>[0];
     ownerDeliveryMock.pass.mockImplementation(async options => {passOptions = options; entered.resolve(); await settled.promise; options.assertCurrent(); return "empty";});
@@ -736,9 +780,10 @@ describe("server owner peer lifecycle", () => {
       await entered.promise;
       expect(passOptions.document).toEqual(document);
       expect(passOptions.bearer).toBe("actual-token");
+      expect(passOptions.accountId).toBe("credential-owner");
       if (mode === "credentials") credentials.abort();
       let closed = false;
-      const closing = Promise.resolve(mode === "daemon" ? f.options().beforePublish!() : f.engine.closeRelayTransportWorkspace("owner")).then(() => {closed = true;});
+      const closing = Promise.resolve(mode === "daemon" ? f.options().beforePublish!(new AbortController().signal) : f.engine.closeRelayTransportWorkspace("owner")).then(() => {closed = true;});
       expect(passOptions.signal.aborted).toBe(true);
       expect(() => passOptions.assertCurrent()).toThrow();
       await Promise.resolve(); expect(closed).toBe(false);

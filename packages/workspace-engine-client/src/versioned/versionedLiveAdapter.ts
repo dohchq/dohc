@@ -36,6 +36,7 @@ import {
   type AutomationRetryParams,
   type AutomationScheduleMarksResult,
   type AutomationSettleParams,
+  type AutomationMakeDurableParams,
   type AutomationSubscribeParams,
   type AutomationSubscribeResult,
   type AutomationUnsubscribeParams,
@@ -44,6 +45,8 @@ import {
   type AutomationWatchGroupsParams,
   type AutomationWatchGroupsResult,
   type CaptureFlushResult,
+  type CaptureRecoveryImportParams,
+  type CaptureRecoveryImportResult,
   type CaptureMoveFileResult,
   type CollectionGetParams,
   type CollectionGetRecordParams,
@@ -1060,6 +1063,7 @@ export class VersionedLiveAdapter {
     versionId: string;
     path: string;
     expectedObjectId?: string;
+    expectedSha256?: string;
     onlyIfAbsentOnDisk?: boolean;
     requestId?: string;
     metadata: AdapterWriteMetadata;
@@ -1081,6 +1085,7 @@ export class VersionedLiveAdapter {
         versionId: input.versionId,
         path: input.path,
         ...(input.expectedObjectId !== undefined ? { expectedObjectId: input.expectedObjectId } : {}),
+        ...(input.expectedSha256 !== undefined ? { expectedSha256: input.expectedSha256 } : {}),
         ...(input.onlyIfAbsentOnDisk ? { onlyIfAbsentOnDisk: true } : {}),
         origin: input.metadata.origin,
         ...(input.metadata.summary !== undefined
@@ -1138,12 +1143,14 @@ export class VersionedLiveAdapter {
 
   async readHistoryPage(input: {
     workspaceId: string;
+    objectId?: string;
     limit?: number;
     beforeMomentOrder?: number;
   }): Promise<VersionedMethodResultMap["history.page"]> {
     this.assertWorkspace(input.workspaceId);
     return this.request(VERSIONED_METHOD.historyPage, {
       workspaceId: input.workspaceId,
+      ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
       ...(input.limit !== undefined ? { limit: input.limit } : {}),
       ...(input.beforeMomentOrder !== undefined
         ? { beforeMomentOrder: input.beforeMomentOrder }
@@ -1259,6 +1266,11 @@ export class VersionedLiveAdapter {
     input: AutomationClaimNextParams,
   ): Promise<AutomationClaimNextResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsClaimNext, input);
+  }
+
+  /** Syncs earlier engine writes; the claim may belong to an external ledger. */
+  async makeAutomationWritesDurable(input: AutomationMakeDurableParams = {}): Promise<void> {
+    await this.workspaceRequest(WORKSPACE_METHOD.automationsMakeDurable, input);
   }
 
   /** Settles a running claim as done, or failed with its error text. */
@@ -1590,6 +1602,14 @@ export class VersionedLiveAdapter {
 
   async watcherStatus(): Promise<WatcherStatusResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.watcherStatus, {});
+  }
+
+  async importRecovery(input: CaptureRecoveryImportParams): Promise<CaptureRecoveryImportResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.captureImportRecovery, input);
+  }
+
+  async clearCaptureRecovery(momentId: string): Promise<void> {
+    await this.workspaceRequest(WORKSPACE_METHOD.captureClearRecovery, { momentId });
   }
 
   async listKeptCopies(): Promise<KeptCopiesListResult> {

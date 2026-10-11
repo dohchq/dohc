@@ -218,6 +218,8 @@ struct VersionedTextDeleteParams {
     path: String,
     #[serde(default)]
     expected_object_id: Option<String>,
+    #[serde(default)]
+    expected_sha256: Option<String>,
     /// Delete only if the path is still missing on disk when the engine
     /// applies the delete: the caller saw it missing, and a replace can empty
     /// the name for a moment.
@@ -394,12 +396,6 @@ impl EngineService {
         let moment_id = params.moment_id.unwrap_or_else(|| {
             self.generated_rpc_id("moment", request.id, request_id.as_deref(), &path)
         });
-        if params.create_only && params.restore_before_moment_id.is_some() {
-            return Err(WireError::new(
-                ErrorCode::InvalidParams,
-                "create-only cannot restore history",
-            ));
-        }
         let input = WriteText {
             workspace_id: open.workspace_id.clone(),
             version_id: params.version_id,
@@ -865,6 +861,7 @@ impl EngineService {
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                 },
                 params.expected_object_id,
+                params.expected_sha256,
                 params.only_if_absent_on_disk,
                 open.root.clone(),
                 Arc::new(self.self_writes.scoped(&open.root)),
@@ -1154,7 +1151,11 @@ mod tests {
         params: serde_json::Value,
     ) -> Result<serde_json::Value, dohc_engine_protocol::error::WireError> {
         let mut params = params;
-        params["origin"] = json!("api");
+        params
+            .as_object_mut()
+            .unwrap()
+            .entry("origin")
+            .or_insert(json!("api"));
         let request = Request {
             id,
             method: method.into(),
@@ -1185,6 +1186,104 @@ mod tests {
                     request.params.clone(),
                 )
                 .await
+        }
+    }
+
+    #[tokio::test]
+    async fn guarded_history_undo_preserves_identity_and_refuses_occupied_paths() {
+        for occupied in ["absent", "disk", "snapshot"] {
+            let scratch = ScratchDir::new().unwrap();
+            let service = EngineService::new();
+            let handle = open_for_test(&service, scratch.path()).await;
+            let text = "recipient text\n";
+            let created = write_for_test(&service, &handle, 1, "create", "versionedText.write",
+                json!({"versionId": "main", "path": "record.md", "text": text, "publish": true, "createOnly": true}))
+                .await.unwrap();
+            let params = json!({"versionId": "main", "path": "record.md", "origin": "restore",
+                "expectedObjectId": created["snapshot"]["objectId"],
+                "expectedSha256": dohc_engine_storage::hex_sha256(text.as_bytes())});
+            let request = Request {
+                id: 2,
+                method: "versionedText.delete".into(),
+                workspace: Some(handle.clone()),
+                deadline_ms: None,
+                idempotency_key: Some("delete".into()),
+                progress: false,
+                params,
+            };
+            let removed = service
+                .versioned_text_delete(
+                    &RequestContext::unbounded(),
+                    &request,
+                    request.params.clone(),
+                )
+                .await
+                .unwrap();
+            assert!(!scratch.path().join("record.md").exists());
+            if occupied == "disk" {
+                std::fs::write(scratch.path().join("record.md"), "Owner text KEEP").unwrap();
+            } else if occupied == "snapshot" {
+                write_for_test(&service, &handle, 3, "replacement", "versionedText.write",
+                    json!({"versionId": "main", "path": "record.md", "text": "Owner text KEEP", "publish": true}))
+                    .await.unwrap();
+                // The engine must also refuse an occupied canonical path with absent disk bytes.
+                std::fs::remove_file(scratch.path().join("record.md")).unwrap();
+            }
+            let params = json!({"versionId": "main", "path": "record.md", "text": text,
+                "origin": "restore", "publish": true, "createOnly": true,
+                "restoreBeforeMomentId": removed["moment"]["momentId"]});
+            let restored = write_for_test(
+                &service,
+                &handle,
+                4,
+                "undo",
+                "versionedText.write",
+                params.clone(),
+            )
+            .await;
+            if occupied == "absent" {
+                let restored = restored.unwrap();
+                assert_eq!(
+                    restored["snapshot"]["objectId"],
+                    created["snapshot"]["objectId"]
+                );
+                assert_eq!(restored["materializeOutcome"], "applied");
+                assert_eq!(
+                    std::fs::read_to_string(scratch.path().join("record.md")).unwrap(),
+                    text
+                );
+                let replay =
+                    write_for_test(&service, &handle, 5, "undo", "versionedText.write", params)
+                        .await
+                        .unwrap();
+                assert_eq!(replay["deduped"], true);
+                assert_eq!(replay["moment"], restored["moment"]);
+            } else {
+                assert!(restored.is_err());
+                if occupied == "disk" {
+                    assert_eq!(
+                        std::fs::read_to_string(scratch.path().join("record.md")).unwrap(),
+                        "Owner text KEEP"
+                    );
+                } else {
+                    assert!(!scratch.path().join("record.md").exists());
+                }
+            }
+            let rows = service
+                .open(Some(&handle))
+                .unwrap()
+                .actor
+                .list_moments(dohc_engine_domain::ListMomentsQuery {
+                    workspace_id: "rpc-publish".into(),
+                    version_id: None,
+                    object_id: None,
+                    limit: 10,
+                    before_moment_order: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(rows.moments.len(), if occupied == "disk" { 2 } else { 3 });
+            service.workspace_close(Some(handle)).await.unwrap();
         }
     }
 

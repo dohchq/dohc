@@ -224,6 +224,15 @@ fn collection_reconcile_request_take_preserves_a_concurrent_request() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lease_blocked_collection_adoption_retries_after_release_without_a_file_change() {
+    held_collection_idle_ticks(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lease_blocked_collection_with_pending_sibling_does_not_reconcile_on_idle_ticks() {
+    held_collection_idle_ticks(true).await;
+}
+
+async fn held_collection_idle_ticks(pending_sibling: bool) {
     let scratch = ScratchDir::new().expect("scratch");
     let collection_dir = scratch.path().join("tasks");
     std::fs::create_dir_all(&collection_dir).expect("collection directory");
@@ -255,47 +264,152 @@ async fn lease_blocked_collection_adoption_retries_after_release_without_a_file_
     let key = DocKey::new(WORKSPACE_ID, "main", &object_id).expect("record key");
     let lease = leases.acquire(&key).expect("hold record lease");
 
-    let files = FilesActor::spawn_async(scratch.path().to_path_buf(), ScanBounds::default())
+    let seed = manifest_seed(scratch.path(), &actor, WORKSPACE_ID)
         .await
-        .expect("files actor");
+        .unwrap()
+        .into_scan_seed();
+    let files = FilesActor::spawn_async_with_manifest(
+        scratch.path().to_path_buf(),
+        ScanBounds::default(),
+        seed,
+    )
+    .await
+    .expect("files actor");
     let files = FilesActorCloseGuard::new(files);
     let status = Arc::new(DriverStatus::default());
     let self_writes = SelfWriteSuppression::default();
     status.request_collection_reconcile();
-    let first_root = bind_capture_root(scratch.path()).expect("bind first run root");
+    let first_run =
+        reconcile_if_dirty_bound(scratch.path(), &files.handle(), CancellationToken::new())
+            .await
+            .expect("capture recorded files while adoption is held");
+    assert!(
+        matches!(first_run.run, ReconcileRun::Completed(_)),
+        "the first pass must exercise the completed-plan path"
+    );
     let first_clean = apply_bound_run_with_handle(
         collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
         &files.handle(),
-        RootBoundRun {
-            captured_root: first_root,
-            run: ReconcileRun::Converged,
-        },
+        first_run,
         &CancellationToken::new(),
     )
     .await;
-    assert!(!first_clean, "the held lease makes this pass retryable");
     assert!(
-        status.collection_reconcile_pending(),
-        "a held lease must leave another collection pass scheduled"
+        first_clean,
+        "recorded content with a deferred adoption is settled"
     );
+    assert!(
+        !status.degraded(),
+        "waiting on a session is not degraded capture"
+    );
+    if pending_sibling {
+        let sibling = collection_dir.join("beta.md");
+        std::fs::write(&sibling, "Beta task\n").unwrap();
+        seed_collection_capture(&actor, scratch.path(), &["tasks/beta.md"]);
+        seed_plain_richdoc_lineage(&actor, "tasks/beta.md", "Beta task\n").await;
+        // The captured seed and lineage agree, but disk changed before adoption.
+        // This candidate takes its lease, then stays deferred on the stale target.
+        std::fs::write(&sibling, "Uncaptured sibling change\n").unwrap();
+        status.request_collection_reconcile();
+        assert!(
+            apply_bound_run_with_handle(
+                collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
+                &files.handle(),
+                RootBoundRun {
+                    captured_root: bind_capture_root(scratch.path()).unwrap(),
+                    run: ReconcileRun::Converged
+                },
+                &CancellationToken::new(),
+            )
+            .await
+        );
+        let state: String = rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row(
+                "SELECT adoption_state FROM collection_records WHERE file_path='tasks/beta.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            state.starts_with("deferred-conflict"),
+            "the sibling must remain pending: {state}"
+        );
+        assert!(
+            !std::fs::read_to_string(&sibling)
+                .unwrap()
+                .contains("id: rec_")
+        );
+    }
+    let observer = rusqlite::Connection::open(&db).expect("idle reconcile observer");
+    let data_version = || {
+        observer
+            .query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))
+            .unwrap()
+    };
+    let mut reconciles = 0;
+    let mut unsettled = 0;
+    for _ in 0..120 {
+        let before = data_version();
+        let clean = apply_bound_run_with_handle(
+            collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
+            &files.handle(),
+            RootBoundRun {
+                captured_root: bind_capture_root(scratch.path()).unwrap(),
+                run: ReconcileRun::Converged,
+            },
+            &CancellationToken::new(),
+        )
+        .await;
+        unsettled += usize::from(!clean);
+        reconciles += usize::from(data_version() != before);
+    }
+    println!("held lease: {reconciles} reconciles / 120 idle ticks (one minute at 2 Hz)");
     assert_eq!(
-        std::fs::read_to_string(collection_dir.join("alpha.md"))
-            .expect("read lease-blocked record"),
-        "Alpha task\n"
+        reconciles, 0,
+        "a held lease must not repeatedly reconcile without a release or explicit request"
     );
-
+    assert_eq!(unsettled, 0, "idle ticks stay settled");
+    assert!(!status.collection_reconcile_pending());
+    if pending_sibling {
+        drop(lease);
+        files.close().await;
+        supervisor.close(&db).expect("close actor");
+        return;
+    }
+    status.request_collection_reconcile();
+    let before = data_version();
+    assert!(
+        apply_bound_run_with_handle(
+            collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
+            &files.handle(),
+            RootBoundRun {
+                captured_root: bind_capture_root(scratch.path()).unwrap(),
+                run: ReconcileRun::Converged
+            },
+            &CancellationToken::new(),
+        )
+        .await
+    );
+    assert_ne!(
+        data_version(),
+        before,
+        "an explicit request retries even with the same held lease"
+    );
     drop(lease);
-    let second_root = bind_capture_root(scratch.path()).expect("bind second run root");
+    let released_at = std::time::Instant::now();
+    let second_run =
+        reconcile_if_dirty_bound(scratch.path(), &files.handle(), CancellationToken::new())
+            .await
+            .expect("retry capture after release");
     let second_clean = apply_bound_run_with_handle(
         collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
         &files.handle(),
-        RootBoundRun {
-            captured_root: second_root,
-            run: ReconcileRun::Converged,
-        },
+        second_run,
         &CancellationToken::new(),
     )
     .await;
+    println!("release-to-adoption: {:?}", released_at.elapsed());
     assert!(second_clean, "the scheduled retry adopts after release");
     assert!(!status.collection_reconcile_pending());
     assert!(
@@ -356,6 +470,30 @@ async fn lease_blocked_collection_candidate_does_not_starve_other_adoptions() {
     let key = DocKey::new(WORKSPACE_ID, "main", &object_id).expect("first record key");
     let lease = leases.acquire(&key).expect("hold first record lease");
 
+    let bindings: i64 = rusqlite::Connection::open(&db).unwrap().query_row(
+        "SELECT COUNT(*) FROM collection_records WHERE workspace_id=?1 AND file_path='tasks/beta.md'", [WORKSPACE_ID], |row| row.get(0)).unwrap();
+    assert_eq!(
+        bindings, 0,
+        "the sibling must bind and claim in this reconciliation"
+    );
+    {
+        let mut store = dohc_engine_storage::EngineStore::open(&db, 3).unwrap();
+        dohc_engine_domain::subscribe_automation(
+            &mut store,
+            WORKSPACE_ID,
+            &dohc_engine_domain::AutomationSubscription {
+                automation_id: "collection:tasks#watch".to_owned(),
+                prefix: "tasks".to_owned(),
+                kinds: vec![dohc_engine_domain::AutomationChangeKind::Added],
+                fields: None,
+            },
+            1,
+            &NoFaults,
+        )
+        .unwrap();
+    }
+    let events = EngineEvents::default();
+    let mut notices = events.subscribe();
     let files = FilesActor::spawn_async(scratch.path().to_path_buf(), ScanBounds::default())
         .await
         .expect("files actor");
@@ -365,7 +503,10 @@ async fn lease_blocked_collection_candidate_does_not_starve_other_adoptions() {
     status.request_collection_reconcile();
     let first_root = bind_capture_root(scratch.path()).expect("bind first run root");
     let first_clean = apply_bound_run_with_handle(
-        collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
+        ApplyRunContext {
+            events,
+            ..collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes)
+        },
         &files.handle(),
         RootBoundRun {
             captured_root: first_root,
@@ -374,8 +515,12 @@ async fn lease_blocked_collection_candidate_does_not_starve_other_adoptions() {
         &CancellationToken::new(),
     )
     .await;
-    assert!(!first_clean, "the held lease keeps its retry scheduled");
-    assert!(status.collection_reconcile_pending());
+    assert!(
+        first_clean,
+        "a deferred adoption does not fail a converged pass"
+    );
+    assert!(!status.degraded());
+
     assert_eq!(
         std::fs::read_to_string(collection_dir.join("alpha.md"))
             .expect("read lease-blocked record"),
@@ -401,6 +546,33 @@ async fn lease_blocked_collection_candidate_does_not_starve_other_adoptions() {
         .expect("first-pass adoption states");
     assert_eq!(alpha_state, "pending-lossless");
     assert_eq!(beta_state, "adopted");
+
+    let mut emitted = Vec::new();
+    while let Ok(notice) = notices.try_recv() {
+        emitted.push(notice);
+    }
+    let beta_record_id: String = rusqlite::Connection::open(&db).unwrap().query_row(
+        "SELECT record_id FROM collection_records WHERE workspace_id=?1 AND file_path='tasks/beta.md'", [WORKSPACE_ID], |row| row.get(0)).unwrap();
+    let claims: i64 = rusqlite::Connection::open(&db).unwrap().query_row(
+        "SELECT COUNT(*) FROM automation_claims WHERE workspace_id=?1 AND record_id=?2 AND change_kind='added'", rusqlite::params![WORKSPACE_ID, beta_record_id], |row| row.get(0)).unwrap();
+    assert_eq!(
+        claims, 1,
+        "the sibling lifecycle claim must already be committed"
+    );
+    let capture_emitted = emitted.iter().any(|notice| {
+        notice.name == CAPTURE_MOMENT_RECORDED_EVENT
+            && notice.payload["paths"]
+                .as_array()
+                .is_some_and(|paths| paths.iter().any(|path| path == "tasks/beta.md"))
+    });
+    let claim_emitted = emitted.iter().any(|notice| {
+        notice.name == crate::events::AUTOMATION_CLAIMED_EVENT
+            && notice.payload["recordId"] == beta_record_id
+    });
+    assert!(
+        capture_emitted && claim_emitted,
+        "committed sibling events: capture={capture_emitted}, automation={claim_emitted}: {emitted:?}"
+    );
 
     drop(lease);
     let second_root = bind_capture_root(scratch.path()).expect("bind second run root");
@@ -434,6 +606,15 @@ async fn lease_blocked_collection_candidate_does_not_starve_other_adoptions() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn watcher_edit_stripping_adopted_record_id_reasserts_the_binding() {
+    assert_changed_record_reconciles(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watcher_record_change_retries_deferred_adoption_with_matching_id() {
+    assert_changed_record_reconciles(true).await;
+}
+
+async fn assert_changed_record_reconciles(deferred_same_id: bool) {
     let scratch = ScratchDir::new().expect("scratch");
     let collection_dir = scratch.path().join("tasks");
     let record_path = collection_dir.join("alpha.md");
@@ -470,6 +651,7 @@ async fn watcher_edit_stripping_adopted_record_id_reasserts_the_binding() {
         assert!(
             sink.reconcile_collections()
                 .expect("bind pending collection record")
+                .changed_paths
                 .is_empty()
         );
     })
@@ -488,7 +670,8 @@ async fn watcher_edit_stripping_adopted_record_id_reasserts_the_binding() {
                 ..bound_sink_params(adopt_actor, WORKSPACE_ID, "main", adopt_root, 3)
             })
             .reconcile_collections()
-            .expect("adopt shared-imported record"),
+            .expect("adopt shared-imported record")
+            .changed_paths,
             ["tasks/alpha.md"]
         );
     })
@@ -561,7 +744,16 @@ async fn watcher_edit_stripping_adopted_record_id_reasserts_the_binding() {
         .await
         .expect("acknowledge the already-captured adopted-file baseline");
 
-    std::fs::write(&record_path, b"Alpha task").expect("strip adopted record id");
+    let expected = if deferred_same_id {
+        rusqlite::Connection::open(&db).unwrap().execute(
+            "UPDATE collection_records SET adoption_state='deferred-conflict' WHERE file_path='tasks/alpha.md'", []).unwrap();
+        let changed = adopted.replace("Alpha task", "Changed task");
+        std::fs::write(&record_path, &changed).unwrap();
+        changed
+    } else {
+        std::fs::write(&record_path, b"Alpha task").expect("strip adopted record id");
+        adopted
+    };
     wait_for_watcher_dirty(&handle).await;
     let changed_root = bind_capture_root(scratch.path()).expect("bind changed run root");
     let changed = handle
@@ -607,13 +799,25 @@ async fn watcher_edit_stripping_adopted_record_id_reasserts_the_binding() {
         "the changed record capture settles cleanly"
     );
     let restored = std::fs::read_to_string(&record_path).expect("read restored record");
+    let state: String = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row(
+            "SELECT adoption_state FROM collection_records WHERE file_path='tasks/alpha.md'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        state, "adopted",
+        "a Changed record must finish its deferred adoption"
+    );
 
     watcher.stop().expect("stop watcher");
     files.close().await;
     supervisor.close(&db).expect("close actor");
 
     assert_eq!(
-        restored, adopted,
+        restored, expected,
         "the established binding must reassert its id after an ordinary edit strips it"
     );
 }
@@ -677,6 +881,7 @@ async fn watcher_repairing_malformed_collection_record_adopts_and_indexes_it() {
         assert!(
             sink.reconcile_collections()
                 .expect("exclude malformed collection record")
+                .changed_paths
                 .is_empty()
         );
     })

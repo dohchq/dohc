@@ -280,8 +280,10 @@ impl<'de> Visitor<'de> for Snapshot {
             authors.push(author);
         }
         if authors.len() == 2
-            && (matches!(authors[0], LiveAuthorEntry::Agent { .. })
-                || !matches!(authors[1], LiveAuthorEntry::Agent { .. }))
+            && (matches!(
+                authors[0],
+                LiveAuthorEntry::Agent { .. } | LiveAuthorEntry::Automation { .. }
+            ) || !matches!(authors[1], LiveAuthorEntry::Agent { .. }))
         {
             return Err(A::Error::custom("snapshot author order"));
         }

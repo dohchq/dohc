@@ -78,11 +78,19 @@ it.each([
   expect(response.status).toBe(404); expect(await response.text()).toBe('{"ok":false,"error":"not found"}');
 });
 it("returns the single-use ticket only after exact relay response validation", async () => {
-  const ticket = {token: "ab".repeat(32), expiresAtMs: Date.now() + 60_000};
+  const ticket = {token: "ab".repeat(32), publicPrincipalId: "public-link-a", expiresAtMs: Date.now() + 60_000};
   const f = fixture(vi.fn(async () => Response.json(ticket)));
   const response = await f.client.handle(request({discriminator, objectId: "object-a"}, "/api/live/link-ticket"));
   expect(await response.json()).toEqual(ticket);
   expect(f.fetchRelay.mock.calls[0]![0].url).toBe("https://relay.example.test/sync/live/link-tickets");
+});
+it.each([
+  {token: "ab".repeat(32), expiresAtMs: Date.now() + 60_000},
+  {token: "ab".repeat(32), expiresAtMs: Date.now() + 60_000, publicPrincipalId: ""},
+  {token: "ab".repeat(32), expiresAtMs: Date.now() + 60_000, publicPrincipalId: "public-link-a", principalId: "private"},
+])("refuses a link ticket without its exact public identity: %j", async ticket => {
+  const response = await fixture(vi.fn(async () => Response.json(ticket))).client.handle(request({discriminator, objectId: "object-a"}, "/api/live/link-ticket"));
+  expect(response.status).toBe(404);
 });
 it("bounds admission even when an injected relay ignores cancellation", async () => {
   let release!: (value: Response) => void, entered!: () => void;

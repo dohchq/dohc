@@ -21,6 +21,22 @@ impl EngineService {
     /// declared agent run authors capture, never a person.
     pub(super) fn ensure_admissible_author(&self, request: &Request) -> Result<(), WireError> {
         let method = request.method.as_str();
+        if method == "capture.importRecovery" {
+            if self.configured_live_host.get().is_some()
+                && request
+                    .params
+                    .get("updates")
+                    .and_then(Value::as_array)
+                    .is_some_and(|updates| {
+                        updates
+                            .iter()
+                            .any(|update| update.get("attribution").is_some_and(names_person))
+                    })
+            {
+                return Err(refused());
+            }
+            return Ok(());
+        }
         let capture_author = matches!(method, "capture.setAuthor" | "workspace.open");
         let key = match method {
             "capture.setAuthor" => "author",
@@ -63,6 +79,10 @@ mod tests {
 
     fn person_claims() -> Vec<Request> {
         vec![
+            request(
+                "capture.importRecovery",
+                json!({"updates":[{"actorOriginId":"alice", "attribution":{"actorKind":"human", "onBehalfOf":"alice", "depth":0}}]}),
+            ),
             request(
                 "ydoc.recordUpdate",
                 json!({"actorOriginId":"alice", "attribution":{"actorKind":"human", "onBehalfOf":"alice", "depth":0}}),

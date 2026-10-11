@@ -6,6 +6,7 @@ use dohc_engine_collab::live_update_application::{
     validate_checkpoint_coverage,
 };
 use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
+use std::cell::RefCell;
 use std::fmt;
 use std::io::{BufReader, Write};
 
@@ -43,6 +44,13 @@ struct ParsedRecord {
     suffix: Suffix,
     canonical_digest: String,
     canonical_version: u8,
+    authors: dohc_engine_collab::author_coverage::Authors,
+}
+
+struct ParsedMetadata {
+    accepted: RelayAcceptedLiveUpdate,
+    canonical_version: u8,
+    authors: dohc_engine_collab::author_coverage::Authors,
 }
 
 fn accepted_header(head: &[u8]) -> Result<RelayAcceptedLiveUpdate, SyncError> {
@@ -112,6 +120,7 @@ fn end_fields<'de, A: MapAccess<'de>>(map: &mut A) -> Result<(), A::Error> {
 }
 
 struct RecordVisitor<'a> {
+    storage_failure: &'a RefCell<Option<SyncError>>,
     conn: &'a Connection,
     workspace: &'a str,
 }
@@ -147,7 +156,12 @@ impl<'de> Visitor<'de> for RecordVisitor<'_> {
         if map.next_key::<String>()?.as_deref() != Some("metadata") {
             return Err(serde::de::Error::custom("missing live audit metadata"));
         }
-        let (accepted, canonical_version) = map.next_value_seed(MetadataSeed {
+        let ParsedMetadata {
+            accepted,
+            canonical_version,
+            authors,
+        } = map.next_value_seed(MetadataSeed {
+            storage_failure: self.storage_failure,
             conn: self.conn,
             workspace: self.workspace,
             header: &header,
@@ -182,7 +196,7 @@ impl<'de> Visitor<'de> for RecordVisitor<'_> {
                     source.local_ydoc_sequence,
                     &source.host_coordinate.host_id,
                 )
-                .map_err(serde::de::Error::custom)?;
+                .map_err(|error| decode_failure(error, self.storage_failure))?;
         }
         crate::model::bounded(
             &suffix.content_coordinate.origin_id,
@@ -207,24 +221,26 @@ impl<'de> Visitor<'de> for RecordVisitor<'_> {
             suffix,
             canonical_digest: dohc_engine_storage::hex(&canonical.finalize()),
             canonical_version,
+            authors,
         })
     }
 }
 
 struct MetadataSeed<'a> {
+    storage_failure: &'a RefCell<Option<SyncError>>,
     conn: &'a Connection,
     workspace: &'a str,
     header: &'a Header,
     canonical: &'a mut Sha256,
 }
 impl<'de> DeserializeSeed<'de> for MetadataSeed<'_> {
-    type Value = (RelayAcceptedLiveUpdate, u8);
+    type Value = ParsedMetadata;
     fn deserialize<D: serde::Deserializer<'de>>(self, decoder: D) -> Result<Self::Value, D::Error> {
         decoder.deserialize_map(self)
     }
 }
 impl<'de> Visitor<'de> for MetadataSeed<'_> {
-    type Value = (RelayAcceptedLiveUpdate, u8);
+    type Value = ParsedMetadata;
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("accepted metadata and ordered first-seen ranges")
     }
@@ -239,10 +255,10 @@ impl<'de> Visitor<'de> for MetadataSeed<'_> {
             scope(&self.header.relay_database_namespace, &accepted.binding),
             self.header.event_count,
         )
-        .map_err(serde::de::Error::custom)?;
+        .map_err(|error| decode_failure(error, self.storage_failure))?;
         if self.header.event_count > 1 {
             let p = scope(&self.header.relay_database_namespace, &accepted.binding);
-            let cursor:i64=self.conn.query_row(&format!("SELECT journal_cursor FROM live_audit_events WHERE {SCOPE} AND event_count=?6"),params![p[0],p[1],p[2],p[3],p[4],self.header.event_count-1],|r|r.get(0)).map_err(serde::de::Error::custom)?;
+            let cursor:i64=self.conn.query_row(&format!("SELECT journal_cursor FROM live_audit_events WHERE {SCOPE} AND event_count=?6"),params![p[0],p[1],p[2],p[3],p[4],self.header.event_count-1],|r|r.get(0)).map_err(SyncError::corrupt).map_err(|error| decode_failure(error, self.storage_failure))?;
             if accepted.receipt.journal_cursor <= cursor {
                 return Err(serde::de::Error::custom(
                     "live audit cursor did not advance",
@@ -280,6 +296,7 @@ impl<'de> Visitor<'de> for MetadataSeed<'_> {
         chain.update(b"]");
         chain_v2.update(b"]");
         let mut version = 1;
+        let mut covered_authors = dohc_engine_collab::author_coverage::Authors::default();
         if let Some(key) = map.next_key::<String>()? {
             if key != "canonicalVersion" || map.next_value::<u8>()? != 2 {
                 return Err(serde::de::Error::custom("invalid metadata version"));
@@ -298,6 +315,9 @@ impl<'de> Visitor<'de> for MetadataSeed<'_> {
             .map_err(serde::de::Error::custom)?;
             let mut tail = b",\"canonicalVersion\":2,\"authorSnapshot\":".to_vec();
             serde_json::to_writer(&mut tail, &authors).map_err(serde::de::Error::custom)?;
+            covered_authors
+                .union_json(&serde_json::to_string(&authors).map_err(serde::de::Error::custom)?)
+                .map_err(serde::de::Error::custom)?;
             tail.extend_from_slice(b",\"firstSeenDeletes\":[");
             self.canonical.update(&tail);
             chain_v2.update(&tail);
@@ -318,6 +338,14 @@ impl<'de> Visitor<'de> for MetadataSeed<'_> {
                 }
                 let coverage: Vec<LiveCheckpointAuthorCoverage> = map.next_value()?;
                 validate_checkpoint_coverage(&coverage).map_err(serde::de::Error::custom)?;
+                let checkpoint_authors: Vec<_> =
+                    coverage.iter().map(|entry| &entry.author).collect();
+                covered_authors
+                    .union_json(
+                        &serde_json::to_string(&checkpoint_authors)
+                            .map_err(serde::de::Error::custom)?,
+                    )
+                    .map_err(serde::de::Error::custom)?;
                 let mut tail = b",\"checkpointCoverage\":".to_vec();
                 serde_json::to_writer(&mut tail, &coverage).map_err(serde::de::Error::custom)?;
                 self.canonical.update(&tail);
@@ -328,7 +356,7 @@ impl<'de> Visitor<'de> for MetadataSeed<'_> {
         if self.header.event_count > 1 {
             let p = scope(&self.header.relay_database_namespace, &accepted.binding);
             let prior: u8 = self.conn.query_row(&format!("SELECT canonical_version FROM live_audit_events WHERE {SCOPE} AND event_count=?6"),
-                params![p[0],p[1],p[2],p[3],p[4],self.header.event_count-1], |row|row.get(0)).map_err(serde::de::Error::custom)?;
+                params![p[0],p[1],p[2],p[3],p[4],self.header.event_count-1], |row|row.get(0)).map_err(SyncError::corrupt).map_err(|error| decode_failure(error, self.storage_failure))?;
             if prior == 2 && version == 1 {
                 return Err(serde::de::Error::custom(
                     "accepted history version downgrade",
@@ -348,7 +376,11 @@ impl<'de> Visitor<'de> for MetadataSeed<'_> {
                 "live audit evidence chain differs",
             ));
         }
-        Ok((accepted, version))
+        Ok(ParsedMetadata {
+            accepted,
+            canonical_version: version,
+            authors: covered_authors,
+        })
     }
 }
 
@@ -409,18 +441,49 @@ fn parse(
     // Missing source order is retryable even though serde wraps visitor errors.
     // The small routing header is retained separately by the envelope and checked
     // before parsing at the import seam.
+    let storage_failure = RefCell::new(None);
     let mut reader = BufReader::with_capacity(65_536, ChunkReader::new(conn, manifest)?);
     let mut decoder = serde_json::Deserializer::from_reader(&mut reader);
-    let record =
-        serde::Deserializer::deserialize_map(&mut decoder, RecordVisitor { conn, workspace })
-            .map_err(parse_error)?;
-    decoder.end().map_err(parse_error)?;
-    reader.into_inner().finish()?;
+    let decoded = serde::Deserializer::deserialize_map(
+        &mut decoder,
+        RecordVisitor {
+            conn,
+            workspace,
+            storage_failure: &storage_failure,
+        },
+    )
+    .and_then(|record| {
+        decoder.end()?;
+        Ok(record)
+    });
+    drop(decoder);
+    let mut chunks = reader.into_inner();
+    if let Some(error) = storage_failure.into_inner() {
+        return Err(error);
+    }
+    if let Some(error) = chunks.take_storage_failure() {
+        return Err(error.into());
+    }
+    let record = decoded.map_err(parse_error)?;
+    chunks
+        .finish()
+        .map_err(|_| invalid("invalid historical live application"))?;
     if record.canonical_digest != manifest.record_digest {
         return Err(invalid("noncanonical historical live application"));
     }
     require_content(conn, &record)?;
     Ok(record)
+}
+
+fn decode_failure<E: serde::de::Error>(
+    error: SyncError,
+    storage_failure: &RefCell<Option<SyncError>>,
+) -> E {
+    let message = E::custom(&error);
+    if matches!(&error, SyncError::Storage(_)) {
+        *storage_failure.borrow_mut() = Some(error);
+    }
+    message
 }
 
 fn parse_error(error: serde_json::Error) -> SyncError {
@@ -449,22 +512,11 @@ fn require_content(conn: &Connection, record: &ParsedRecord) -> Result<(), SyncE
     {
         return Err(invalid("live audit content coordinate differs"));
     }
-    let lengths: Option<(i64, i64)> = conn
-        .query_row(
-            "SELECT byte_length,length(bytes) FROM binary_blobs WHERE sha256=?1",
-            [&record.accepted.receipt.update_digest],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()
-        .map_err(SyncError::corrupt)?;
-    if lengths
-        != Some((
-            record.header.update_byte_length as i64,
-            record.header.update_byte_length as i64,
-        ))
-    {
-        return Err(SyncError::BlobInvalid);
-    }
+    super::chunks::require_blob_length(
+        conn,
+        &record.accepted.receipt.update_digest,
+        record.header.update_byte_length,
+    )?;
     // The content operation already validated the Y.Doc. Recheck its address
     // without decoding it or materializing the full audit record.
     let mut hash = Sha256::new();
@@ -562,44 +614,371 @@ fn insert_event(
     Ok(true)
 }
 
+fn retain_projection_authors(
+    tx: &Transaction<'_>,
+    record: &ParsedRecord,
+    confirmed: bool,
+) -> Result<(), SyncError> {
+    if record.authors.is_empty() {
+        return Ok(());
+    }
+    let binding = &record.accepted.binding;
+    let coordinate = &record.suffix.content_coordinate;
+    let imported_content: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM replication_log WHERE workspace_id=?1 AND origin_id=?2 \
+         AND origin_seq=?3 AND op_kind='ydoc.update' AND (?4 OR imported=1) AND apply_disposition='applied' \
+         AND COALESCE(json_extract(payload_json,'$.isBaseState'),0)=0)",
+        params![binding.workspace_id,coordinate.origin_id,coordinate.origin_seq,confirmed], |row| row.get(0),
+    ).map_err(SyncError::corrupt)?;
+    if !imported_content {
+        return Ok(());
+    }
+    let existing: Option<String> = tx.query_row(
+        "SELECT author_json FROM live_audit_projection_authors WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+        params![binding.workspace_id,coordinate.origin_id,coordinate.origin_seq], |row| row.get(0),
+    ).optional().map_err(SyncError::corrupt)?;
+    let mut authors = dohc_engine_collab::author_coverage::Authors::default();
+    if let Some(existing) = existing {
+        authors.union_json(&existing).map_err(SyncError::corrupt)?;
+    }
+    authors
+        .union_json(&record.authors.json())
+        .map_err(SyncError::corrupt)?;
+    let json = bounded_projection_authors(&authors)?;
+    tx.execute(
+        "INSERT INTO live_audit_projection_authors(workspace_id,origin_id,origin_seq,version_id,object_id,path,lineage_claim_id,author_json) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(workspace_id,origin_id,origin_seq) DO UPDATE SET author_json=excluded.author_json",
+        params![binding.workspace_id,coordinate.origin_id,coordinate.origin_seq,binding.main_version_id,
+            binding.object_id,binding.current_path,binding.lineage_claim_id,json],
+    ).map_err(SyncError::persist)?;
+    let key = DocKey::new(
+        &binding.workspace_id,
+        &binding.main_version_id,
+        &binding.object_id,
+    )
+    .map_err(|_| invalid("invalid audited projection identity"))?;
+    annotate_projected_moment_in_tx(
+        tx,
+        &key,
+        &binding.current_path,
+        &coordinate.origin_id,
+        coordinate.origin_seq,
+    )
+}
+
+fn bounded_projection_authors(
+    authors: &dohc_engine_collab::author_coverage::Authors,
+) -> Result<String, SyncError> {
+    if authors.len() > dohc_engine_collab::author_coverage::MAX_INTERVAL_AUTHORS
+        || authors.journal_bytes() > dohc_engine_collab::author_coverage::MAX_INTERVAL_AUTHOR_BYTES
+    {
+        return Err(invalid("audited projection authors exceed bound"));
+    }
+    Ok(authors.json())
+}
+
+pub(crate) fn annotate_projected_moment_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    origin_id: &str,
+    origin_seq: i64,
+) -> Result<(), SyncError> {
+    // Retained coordinate coverage also reaches a projection drained after its
+    // audit. The primary-key lookup never scans the document's audit history.
+    let moment_id = crate::ydoc_apply::ydoc_apply_moment_id(key, path, origin_id, origin_seq);
+    let entries: Option<(Option<String>, String)> = tx.query_row(
+        "SELECT m.author_json,a.author_json FROM live_audit_projection_authors a JOIN moments m \
+         ON m.workspace_id=a.workspace_id AND m.version_id=a.version_id AND m.object_id=a.object_id \
+           AND m.path=a.path AND m.moment_id=?6 AND m.metadata_origin='ydoc' AND m.operation='write' \
+           AND COALESCE(m.sync_record_only,0)=0 \
+         JOIN replication_log r ON r.workspace_id=a.workspace_id AND r.origin_id=a.origin_id \
+           AND r.origin_seq=a.origin_seq AND r.op_kind='ydoc.update' AND r.apply_disposition='applied' \
+           AND json_extract(r.payload_json,'$.lineageClaimId')=a.lineage_claim_id \
+         WHERE a.workspace_id=?1 AND a.origin_id=?2 AND a.origin_seq=?3 AND a.version_id=?4 \
+           AND a.object_id=?5 AND a.path=?7",
+        params![key.workspace_id,origin_id,origin_seq,key.version_id,key.object_id,moment_id,path],
+        |row| Ok((row.get(0)?,row.get(1)?)),
+    ).optional().map_err(SyncError::corrupt)?;
+    let Some((existing, verified)) = entries else {
+        return Ok(());
+    };
+    let mut authors = dohc_engine_collab::author_coverage::Authors::default();
+    if let Some(existing) = existing {
+        authors.union_json(&existing).map_err(SyncError::corrupt)?;
+    }
+    authors.union_json(&verified).map_err(SyncError::corrupt)?;
+    tx.execute(
+        "UPDATE moments SET author_json=?3 WHERE workspace_id=?1 AND moment_id=?2",
+        params![
+            key.workspace_id,
+            moment_id,
+            bounded_projection_authors(&authors)?
+        ],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
+}
+
+pub(crate) fn drained_coordinate_authors(
+    conn: &rusqlite::Connection,
+    key: &DocKey,
+    path: &str,
+    origin: &str,
+    seq: i64,
+) -> Result<dohc_engine_collab::author_coverage::Authors, SyncError> {
+    let coverage: Option<(String, Option<String>)> = conn.query_row(
+        "SELECT r.payload_json,a.author_json FROM replication_log r \
+         LEFT JOIN live_audit_projection_authors a \
+         ON r.workspace_id=a.workspace_id AND r.origin_id=a.origin_id AND r.origin_seq=a.origin_seq \
+         AND json_extract(r.payload_json,'$.lineageClaimId')=a.lineage_claim_id \
+         AND a.version_id=?4 AND a.object_id=?5 AND a.path=?6 \
+         WHERE r.workspace_id=?1 AND r.origin_id=?2 AND r.origin_seq=?3 \
+         AND r.op_kind='ydoc.update' AND r.apply_disposition='applied' \
+         AND json_extract(r.payload_json,'$.versionId')=?4 \
+         AND json_extract(r.payload_json,'$.objectId')=?5 \
+         AND json_extract(r.payload_json,'$.path')=?6",
+        params![key.workspace_id, origin, seq, key.version_id, key.object_id, path],
+        |row| Ok((row.get(0)?,row.get(1)?)),
+    ).optional().map_err(SyncError::corrupt)?;
+    let mut authors = dohc_engine_collab::author_coverage::Authors::default();
+    if let Some((payload, verified)) = coverage {
+        if let Some(verified) = verified {
+            authors.union_json(&verified).map_err(SyncError::corrupt)?;
+        } else if !dohc_engine_collab::author_coverage::accepted_only_in(conn, key)
+            .map_err(SyncError::corrupt)?
+        {
+            // Use the single-coordinate projection's conversion and admission
+            // boundary. Payload declarations cannot create verified authors.
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Attribution {
+                actor_origin_id: Option<String>,
+                attribution: Option<dohc_engine_domain::ChangeAttribution>,
+            }
+            let payload: Attribution =
+                serde_json::from_str(&payload).map_err(SyncError::corrupt)?;
+            if let Some(recorded) = dohc_engine_domain::moment_author_json(
+                payload.actor_origin_id.as_deref(),
+                payload.attribution.as_ref(),
+            ) {
+                authors.union_json(&recorded).map_err(SyncError::corrupt)?;
+            }
+        }
+    }
+    if authors.is_empty() {
+        authors
+            .union_json(r#"[{"kind":"unattributed"}]"#)
+            .map_err(SyncError::corrupt)?;
+    }
+    Ok(authors)
+}
+
+pub(crate) fn annotate_drained_projection_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    origin_id: &str,
+    origin_seq: i64,
+    coordinates: &[(String, i64)],
+) -> Result<(), SyncError> {
+    let moment_id = crate::ydoc_apply::ydoc_apply_moment_id(key, path, origin_id, origin_seq);
+    let existing: Option<Option<String>> = tx
+        .query_row(
+            "SELECT author_json FROM moments WHERE workspace_id=?1 AND moment_id=?2 \
+         AND metadata_origin='ydoc' AND operation='write' AND COALESCE(sync_record_only,0)=0",
+            params![key.workspace_id, moment_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let Some(existing) = existing else {
+        return Ok(());
+    };
+    let mut authors = dohc_engine_collab::author_coverage::Authors::default();
+    if let Some(existing) = existing {
+        authors.union_json(&existing).map_err(SyncError::corrupt)?;
+    }
+    for (origin, seq) in coordinates {
+        let coordinate_authors = drained_coordinate_authors(tx, key, path, origin, *seq)?;
+        // A later audit can add authors, but cannot erase this coverage gap.
+        authors
+            .union_json(&coordinate_authors.json())
+            .map_err(SyncError::corrupt)?;
+    }
+    tx.execute(
+        "UPDATE moments SET author_json=?3 WHERE workspace_id=?1 AND moment_id=?2",
+        params![
+            key.workspace_id,
+            moment_id,
+            bounded_projection_authors(&authors)?,
+        ],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
+}
+
+fn parse_event_envelope(
+    tx: &Transaction<'_>,
+    op: &ReplicationEnvelope,
+) -> Result<(EventPayload, ParsedRecord), SyncError> {
+    let payload: EventPayload = serde_json::from_value(op.payload.clone())
+        .map_err(|_| invalid("invalid live audit application payload"))?;
+    if serde_json::to_value(&payload).map_err(SyncError::corrupt)? != op.payload {
+        return Err(invalid("noncanonical live audit application payload"));
+    }
+    let routing = [
+        payload.relay_database_namespace.as_str(),
+        op.workspace_id.as_str(),
+        payload.main_version_id.as_str(),
+        payload.object_id.as_str(),
+        payload.lineage_claim_id.as_str(),
+    ];
+    if !(1..=crate::MAX_WIRE_INTEGER).contains(&payload.event_count) {
+        return Err(invalid("invalid live audit event count"));
+    }
+    previous_evidence(tx, routing, payload.event_count)?;
+    let record = parse(tx, &op.workspace_id, &payload.manifest)?;
+    if scope(
+        &record.header.relay_database_namespace,
+        &record.accepted.binding,
+    ) != routing
+        || record.header.event_count != payload.event_count
+        || record.accepted.receipt.update_digest != payload.update_blob_sha256
+    {
+        return Err(invalid("live audit routing differs"));
+    }
+    Ok((payload, record))
+}
+
+fn confirm_record_authors(
+    record: &mut ParsedRecord,
+    envelope: &ReplicationEnvelope,
+) -> Result<bool, SyncError> {
+    if envelope.relay_seq.is_none_or(|seq| seq <= 0) {
+        return Ok(false);
+    }
+    let Some(snapshot) = &envelope.admitted_author_snapshot else {
+        return Ok(false);
+    };
+    if snapshot.as_array().is_none_or(|authors| {
+        authors.len() > dohc_engine_collab::author_coverage::MAX_INTERVAL_AUTHORS
+    }) || serde_json::to_vec(snapshot)
+        .map_err(SyncError::corrupt)?
+        .len()
+        > dohc_engine_collab::author_coverage::MAX_INTERVAL_AUTHOR_BYTES
+    {
+        return Ok(false);
+    }
+    let Ok(entries) = serde_json::from_value::<Vec<LiveAuthorEntry>>(snapshot.clone()) else {
+        return Ok(false);
+    };
+    if entries.iter().any(|author| author.validate().is_err()) {
+        return Ok(false);
+    }
+    let mut values = serde_json::to_value(entries).map_err(SyncError::corrupt)?;
+    let mut authors = dohc_engine_collab::author_coverage::Authors::default();
+    authors
+        .union_json(&values.to_string())
+        .map_err(SyncError::corrupt)?;
+    if authors.is_empty() || authors.json() != record.authors.json() {
+        return Ok(false);
+    }
+    for author in values.as_array_mut().expect("serialized author list") {
+        if author["kind"] == "human" {
+            author["relayConfirmed"] = serde_json::Value::Bool(true);
+        }
+    }
+    let mut confirmed = dohc_engine_collab::author_coverage::Authors::default();
+    confirmed
+        .union_json(&values.to_string())
+        .map_err(SyncError::corrupt)?;
+    if confirmed.journal_bytes() > dohc_engine_collab::author_coverage::MAX_INTERVAL_AUTHOR_BYTES {
+        return Ok(false);
+    }
+    record.authors = confirmed;
+    Ok(true)
+}
+
+pub(crate) fn refresh_confirmed_application_in_tx(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+) -> Result<(), SyncError> {
+    if envelope.op_kind != EVENT_OP
+        || envelope.admitted_author_snapshot.is_none()
+        || envelope.relay_seq.is_none_or(|seq| seq <= 0)
+    {
+        return Ok(());
+    }
+    let applied: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM replication_log WHERE workspace_id=?1 AND origin_id=?2 \
+         AND origin_seq=?3 AND op_kind='live.audit.application' AND apply_disposition='applied')",
+            params![
+                envelope.workspace_id,
+                envelope.origin_id,
+                envelope.origin_seq
+            ],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if !applied {
+        return Ok(());
+    }
+    let payload = &envelope.payload;
+    let (Some(namespace), Some(version), Some(object), Some(lineage), Some(count), Some(digest)) = (
+        payload["relayDatabaseNamespace"].as_str(),
+        payload["mainVersionId"].as_str(),
+        payload["objectId"].as_str(),
+        payload["lineageClaimId"].as_str(),
+        payload["eventCount"].as_i64(),
+        payload["manifest"]["recordDigest"].as_str(),
+    ) else {
+        return Ok(());
+    };
+    let retained: bool = tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM live_audit_events WHERE {SCOPE} AND event_count=?6 AND record_digest=?7)"),
+        params![namespace,envelope.workspace_id,version,object,lineage,count,digest], |row|row.get(0)).map_err(SyncError::corrupt)?;
+    if !retained {
+        return Ok(());
+    }
+    // Refresh is optional proof enrichment. A damaged or refused audit must
+    // never prevent subsequent content from passing an already-acked row.
+    tx.execute_batch("SAVEPOINT dohc_audit_confirmation")
+        .map_err(SyncError::persist)?;
+    let refresh = (|| {
+        let (_, mut record) = parse_event_envelope(tx, envelope)?;
+        if confirm_record_authors(&mut record, envelope)? {
+            retain_projection_authors(tx, &record, true)?;
+        }
+        Ok::<_, SyncError>(())
+    })();
+    if matches!(&refresh, Err(SyncError::Storage(_))) {
+        return refresh;
+    }
+    if refresh.is_err() {
+        tx.execute_batch("ROLLBACK TO dohc_audit_confirmation")
+            .map_err(SyncError::persist)?;
+    }
+    tx.execute_batch("RELEASE dohc_audit_confirmation")
+        .map_err(SyncError::persist)?;
+    Ok(())
+}
+
 pub(super) fn apply_event_envelope(
     store: &mut EngineStore,
     envelope: &ReplicationEnvelope,
     faults: &dyn FaultInjector,
 ) -> Result<ApplyOutcome<()>, SyncError> {
     apply_envelope_with_mutation_outcome(store, envelope, faults, |tx, op| {
-        let payload: EventPayload = serde_json::from_value(op.payload.clone())
-            .map_err(|_| invalid("invalid live audit application payload"))?;
-        if serde_json::to_value(&payload).map_err(SyncError::corrupt)? != op.payload {
-            return Err(invalid("noncanonical live audit application payload"));
-        }
-        let routing = [
-            payload.relay_database_namespace.as_str(),
-            op.workspace_id.as_str(),
-            payload.main_version_id.as_str(),
-            payload.object_id.as_str(),
-            payload.lineage_claim_id.as_str(),
-        ];
-        if !(1..=crate::MAX_WIRE_INTEGER).contains(&payload.event_count) {
-            return Err(invalid("invalid live audit event count"));
-        }
-        previous_evidence(tx, routing, payload.event_count)?;
-        let record = parse(tx, &op.workspace_id, &payload.manifest)?;
-        if scope(
-            &record.header.relay_database_namespace,
-            &record.accepted.binding,
-        ) != routing
-            || record.header.event_count != payload.event_count
-            || record.accepted.receipt.update_digest != payload.update_blob_sha256
-        {
-            return Err(invalid("live audit routing differs"));
-        }
+        let (payload, mut record) = parse_event_envelope(tx, op)?;
         if !insert_event(tx, &record, &payload.manifest)? {
             tx.execute("INSERT INTO live_audit_event_conflicts(workspace_id,origin_id,origin_seq,record_digest) VALUES (?1,?2,?3,?4)",params![op.workspace_id,op.origin_id,op.origin_seq,payload.manifest.record_digest]).map_err(SyncError::persist)?;
             return Ok(MutationOutcome::RefusedRetainingMutation {
                 reason: "live audit event identity contains different evidence".into(),
             });
         }
+        let confirmed = confirm_record_authors(&mut record, op)?;
+        retain_projection_authors(tx, &record, confirmed)?;
         Ok(MutationOutcome::Applied(()))
     })
 }

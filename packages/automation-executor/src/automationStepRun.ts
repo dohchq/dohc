@@ -30,7 +30,7 @@ import {
 } from "./automationPlan";
 import { chatNeedsOf, AutomationChatSessionWait, type ChatDirectory } from "./automationChat";
 import type { ReachCollection, ReachRoster } from "./automationReach";
-import { RUN_PLAN_BUDGET_BYTES, type RunWrite, type StoredRun, type StoredStep } from "./automationRunStore";
+import { engineWrite, RUN_PLAN_BUDGET_BYTES, type RunWrite, type StoredRun, type StoredStep } from "./automationRunStore";
 import {
   startRun,
   checkPlannedMessages,
@@ -79,6 +79,9 @@ export interface StepReads {
 
 /** How a run's steps read and write one kind of Collection. */
 export interface StepBackend {
+  /** A write may have landed even if applying its effect failed before recording it. */
+  needsDurability?(): boolean;
+  madeDurable?(): void;
   /**
    * Runs one step's reads. Null when the Collection's store is not open;
    * "changed" when a record changed between two of the step's reads of it.
@@ -92,7 +95,7 @@ export interface StepBackend {
   apply(
     run: StoredRun,
     effect: StoredStep["effects"][number],
-    place: { index: number; ordinal: number; part: number; mode: EffectMode },
+    place: { index: number; ordinal: number; part: number; mode: EffectMode; recorded?: boolean },
     chat: ChatDirectory | null,
   ): Promise<RunWrite[] | { outcome: CollectionAutomationRunOutcome }>;
 }
@@ -114,6 +117,7 @@ export interface StepRunInput {
   stopped: AbortSignal;
   /** The claim's run: 1, plus one per Try again. */
   claimRun: number;
+  engineClaimId?: string;
 }
 
 const failed = (error: string, timedOut = false): CollectionAutomationRunOutcome => ({ kind: "failed", error, timedOut });
@@ -156,6 +160,28 @@ type Done =
   | { kind: "add"; ordinal: number; ref: RunRef | null }
   | { kind: "code"; value: JsonValue };
 
+function replayEffect(effect: StoredStep["effects"][number], writes: readonly RunWrite[]): StoredStep["effects"][number] {
+  const fields = new Set(writes.flatMap(write => write.kind === "field" ? [write.field] : []));
+  if (effect.kind === "set") return { ...effect, fields: effect.fields.filter(field => fields.has(field.field)) };
+  if (effect.kind === "add") return { ...effect, fields: effect.fields.filter(field => fields.has(field.field)) };
+  return effect;
+}
+
+type RunProgress = {
+  effects: number;
+  engineEffects: number;
+  syncFailed: boolean;
+  append: Promise<{ error: unknown } | null> | null;
+  checkpoint(): Promise<boolean>;
+};
+
+async function finishEffectAppend(progress: RunProgress): Promise<void> {
+  const append = progress.append;
+  progress.append = null;
+  const result = await append;
+  if (result) throw result.error;
+}
+
 /**
  * Runs the steps of `run`, which is saved when `saved` is true, and ends it:
  * a run that is done or failed is saved with its outcome, and one that waits
@@ -171,11 +197,53 @@ export async function runSteps(
   /** The run's evaluator time, which every step goes on counting. */
   spent: AutomationTimeSpent,
 ): Promise<CollectionAutomationRunOutcome> {
-  const outcome = await walkSteps(dependencies, backend, input, ctx, run, saved, spent);
-  if (outcome.kind === "wait") return outcome;
-  // A step that failed before anything was saved changed nothing: the claim
-  // runs again from the start.
+  const mark = run.durableEffects;
+  let lastDurableAt = dependencies.nowMs();
+  const sync = async () => {
+    const engineWrites = backend.needsDurability?.() || run.applied.slice(run.durableEffects, progress.effects)
+      .some(({ writes }) => writes.some(engineWrite));
+    // The receipt and WAL sync different files. Own both through completion.
+    const [durable, appended] = await Promise.allSettled([
+      (async () => { if (engineWrites) await dependencies.makeDurable(input.engineClaimId); })(),
+      finishEffectAppend(progress),
+    ]);
+    if (appended.status === "rejected") throw appended.reason;
+    if (durable.status === "rejected") { progress.syncFailed = true; return false; }
+    backend.madeDurable?.();
+    return true;
+  };
+  const progress: RunProgress = { effects: mark, engineEffects: 0, syncFailed: false, append: null,
+    async checkpoint() {
+      // Bound crash replay without syncing short runs or every effect.
+      if (progress.engineEffects < 50 || dependencies.nowMs() - lastDurableAt < 2000) return true;
+      if (!await sync()) return false;
+      await dependencies.store.save({ ...run, durableEffects: progress.effects });
+      run.durableEffects = progress.effects;
+      progress.engineEffects = 0;
+      lastDurableAt = dependencies.nowMs();
+      return true;
+    },
+  };
+  let outcome: Awaited<ReturnType<typeof walkSteps>>;
+  try {
+    outcome = await walkSteps(dependencies, backend, input, ctx, run, saved, spent, progress);
+  } catch (error) {
+    await finishEffectAppend(progress).catch(() => {});
+    throw error;
+  }
+  if (progress.syncFailed || !await sync()) return { kind: "wait", reason: "engine" };
+  if (outcome.kind === "done" && input.stopped.aborted) outcome = { kind: "wait", reason: "stopped" };
+  const durableEffects = progress.effects;
+  if (outcome.kind === "wait") {
+    if (durableEffects > mark) {
+      await dependencies.store.save({ ...run, durableEffects });
+      run.durableEffects = durableEffects;
+    }
+    return outcome;
+  }
+  // A step that failed before anything was saved changed nothing.
   if (outcome.kind !== "done" && !outcome.saved) return outcome.outcome;
+  run.durableEffects = durableEffects;
   if (outcome.kind === "done") {
     run.outcome = { state: "done" };
   } else if (outcome.outcome.kind === "failed") {
@@ -187,7 +255,7 @@ export async function runSteps(
 }
 
 /** What running steps needs besides a backend. */
-type StepRunDependencies = Pick<CollectionAutomationRunDependencies, "evaluator" | "store" | "nowMs" | "chat" | "recipientVerdicts" | "readCode">;
+type StepRunDependencies = Pick<CollectionAutomationRunDependencies, "makeDurable" | "evaluator" | "store" | "nowMs" | "chat" | "recipientVerdicts" | "readCode">;
 
 /** The text of the code file a run-file step runs, or why it cannot run. */
 export async function readCodeFile(
@@ -211,6 +279,7 @@ async function walkSteps(
   run: StoredRun,
   wasSaved: boolean,
   spent: AutomationTimeSpent,
+  progress: RunProgress,
 ): Promise<{ kind: "done" } | { kind: "wait"; reason: Extract<CollectionAutomationRunOutcome, { kind: "wait" }>["reason"] } | { kind: "ended"; outcome: CollectionAutomationRunOutcome; saved: boolean; step: number }> {
   const { automation } = input;
   const { store } = dependencies;
@@ -220,6 +289,7 @@ async function walkSteps(
   const savedSteps = new Map(run.steps.map((step) => [step.ordinal, step]));
   // Only the first effect an earlier attempt left unrecorded may have landed.
   const firstUnrecorded = run.applied.length;
+  const durableEffects = run.durableEffects;
   let reused = 0;
   let effectIndex = 0;
   let fieldWrites = run.steps.reduce((count, step) => count + fieldWriteCount(step.effects), 0);
@@ -335,22 +405,33 @@ async function walkSteps(
       delete step.appendMs;
       delete step.appendCount;
     }
-    if (effectIndex <= run.applied.length) return null;
-    // Every message and notice is checked under this roster before it is sent.
-    const messages = await checkPlannedMessages(dependencies, { automationId: ctx.claim.automationId, automation, collection: input.collection, roster: input.roster }, [step], ctx.chat);
+    if (effectIndex <= durableEffects) return null;
+    // Check newly planned steps together before sending any message or notice.
+    const unsent = { ...step, effects: step.effects.filter((_effect, part) => first + part >= firstUnrecorded) };
+    const messages = fresh || !wasSaved ? await checkPlannedMessages(dependencies, { automationId: ctx.claim.automationId, automation, collection: input.collection, roster: input.roster }, [unsent], ctx.chat) : { chat: ctx.chat };
     if ("outcome" in messages) return messages.outcome;
     for (const [part, effect] of step.effects.entries()) {
       const index = first + part;
-      if (index < run.applied.length) continue;
+      if (index < durableEffects) continue;
+      const recorded = index < firstUnrecorded;
+      const receipt = recorded ? run.applied[index]! : null;
+      if (receipt !== null && !receipt.writes.some(engineWrite)) {
+        progress.effects = index + 1;
+        continue;
+      }
       if (input.stopped.aborted) return stopped;
       if (input.signal.aborted) return failed(DEADLINE_ERROR, true);
-      const mode: EffectMode = fresh ? "fresh" : index === firstUnrecorded ? "may-have-landed" : "resumed";
+      // Keep at most one effect without a durable receipt, as resume expects.
+      await finishEffectAppend(progress);
+      if (input.stopped.aborted) return stopped;
+      if (input.signal.aborted) return failed(DEADLINE_ERROR, true);
+      const mode: EffectMode = recorded ? "may-have-landed" : fresh ? "fresh" : index === firstUnrecorded ? "may-have-landed" : "resumed";
       let writes: RunWrite[];
       const writeStarted = dependencies.nowMs();
       try {
-        const applied = await backend.apply(run, effect, { index, ordinal: step.ordinal, part, mode }, messages.chat);
+        const applied = await backend.apply(run, receipt === null ? effect : replayEffect(effect, receipt.writes), { index, ordinal: step.ordinal, part, mode, recorded }, messages.chat);
         if ("outcome" in applied) return applied.outcome;
-        writes = applied;
+        writes = receipt === null ? applied : [...receipt.writes.filter(write => !engineWrite(write)), ...applied];
       } catch (error) {
         if (isEngineStoreBusyRefusal(error)) return { kind: "wait", reason: "busy" };
         if (error instanceof AutomationRunWait) return { kind: "wait", reason: error.reason };
@@ -361,13 +442,25 @@ async function walkSteps(
       }
       const landed = { ordinal: step.ordinal, writes, writeMs: Math.max(0, dependencies.nowMs() - writeStarted), writeCount: 1 };
       const appendStarted = dependencies.nowMs();
-      await store.appendEffect(run, landed);
-      const appendMs = Math.max(0, dependencies.nowMs() - appendStarted);
-      if (step.appendMs !== undefined && step.appendCount !== undefined) {
-        step.appendMs += appendMs;
-        step.appendCount += 1;
+      if (recorded) {
+        progress.effects = index + 1;
+        run.applied[index] = landed;
+        if (writes.some(engineWrite)) progress.engineEffects++;
+        if (!await progress.checkpoint()) return { kind: "wait", reason: "engine" };
+        continue;
       }
+      progress.append = store.appendEffect(run, landed).then(() => {
+        const appendMs = Math.max(0, dependencies.nowMs() - appendStarted);
+        if (step.appendMs !== undefined && step.appendCount !== undefined) {
+          step.appendMs += appendMs;
+          step.appendCount += 1;
+        }
+        return null;
+      }, (error: unknown) => ({ error }));
       run.applied.push(landed);
+      progress.effects = index + 1;
+      if (writes.some(engineWrite)) progress.engineEffects++;
+      if (!await progress.checkpoint()) return { kind: "wait", reason: "engine" };
     }
     return null;
   };
@@ -383,6 +476,7 @@ async function walkSteps(
       if (step !== null) {
         reused += 1;
       } else {
+        await finishEffectAppend(progress);
         // Saved steps run first, in order; one this walk never reached means the run is not this automation's.
         if (reused < run.steps.length) return end(failed(UNREADABLE_RUN_ERROR));
         let prepared: Awaited<ReturnType<typeof prepare>>;
@@ -470,7 +564,7 @@ export async function coordinateSourceRun(
       }
       if (started !== null) return input.stopped.aborted ? stopped : started;
     }
-    return await runSteps(dependencies, backend, { ...input, claimRun: input.claim.run }, ctx, state, resuming, spent);
+    return await runSteps(dependencies, backend, { ...input, claimRun: input.claim.run, engineClaimId: source.engineClaim?.claimId }, ctx, state, resuming, spent);
   } catch (error) {
     if (isEngineStoreBusyRefusal(error)) return { kind: "wait", reason: "busy" };
     if (error instanceof AutomationRunWait) return { kind: "wait", reason: error.reason };

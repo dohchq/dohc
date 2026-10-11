@@ -1,4 +1,5 @@
-import { spawn, execFile, execFileSync } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
+import { readGit } from "../../tools/rust-engine-program/git-read.mjs";
 import { createWriteStream, mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { createRequire } from "node:module";
@@ -38,7 +39,7 @@ export function pnpm(args) {
 }
 
 export function git(args, cwd = repoRoot) {
-  return execFileSync("git", args, { cwd, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 }).trim();
+  return readGit(args, cwd).trim();
 }
 
 export function run(command, args, { cwd = repoRoot, env = process.env, log, onSpawn, quietStdout = false, timeoutMs, signal: abortSignal } = {}) {

@@ -83,6 +83,7 @@ export const DATASET_RESULTS: Record<DatasetAction, DatasetKind[]> = {
 // apps/desktop/src/ipc/ownerAppPublicationIpc.ts and
 // localOwnerAppPublication.ts answer with.
 export const APP_RESULTS: Record<AppAction, AppKind[]> = {
+  createLink: ["linkCreated", "urlUnavailable"],
   listLocal: ["localListed"],
   prepareLocal: ["prepared"],
   launchLocal: ["localLaunched"],
@@ -108,8 +109,20 @@ export const HISTORY_RESULTS: Record<string, CliSocketVerb> = {
   show: "moment",
 };
 
+export const ACCESS_RESULTS: Record<string, CliSocketVerb> = {
+  object: "accessObject",
+  sharing: "accessSharing",
+};
+
+const ACCESS_NOTES = [
+  "Both verbs return only the allowlisted AccessAnswer fields shown below, with at most 100 rows per page. They never return credentials, bearer URLs, invitation URLs, share codes, or link URLs.",
+  "Share answers use the current observation; the CLI never refreshes share inventories. `freshness` is `fresh`, `stale`, or `unknown`; `checkedAtMs` is the observation timestamp in milliseconds, or null when unknown. `coverage` names the observed scope and whether it is complete. Its `observation` is `interval`: pages do not form an atomic snapshot. `nextCursor` continues the answer, or is null at the end.",
+  "Queries use only the CLI's registered workspace, with no workspace enumeration. The granted lane contains that workspace owner's grants; the received lane contains the signed-in account's received shares. A received object's answer shows only the recipient's own grant.",
+  "Collection answers read current Collection authority and return capability facts, not share grants.",
+].join("\n\n");
+
 const DOCUMENT_RESULTS: Record<string, CliSocketVerb> = {
-  read: "documentRead", edit: "documentEdit", create: "documentCreate",
+  read: "documentRead", edit: "documentEdit", create: "documentCreate", comment: "fileChatStart",
 };
 
 // The socket verb whose result each `dohc automation` verb prints.
@@ -148,6 +161,7 @@ export const CHAT_EXAMPLES: Record<string, string[][]> = {
 // verb's result schema; a string is written from the tool in tools.ts.
 export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_dataset: "what that verb returns, listed under [`dohc dataset`](#dohc-dataset).",
+  dohc_publish_app: "the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the owner can end it in dohc. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.",
   dohc_list_workspaces: "`{ workspaces: { workspaceId, rootPath, kind, remote? }[] }`",
   dohc_workspace_status: "`{ synced, scope, cloudConnected, credentialStatus, workspaceId?, serverUrl? }`. `scope` is `\"local\"` or `\"cloud\"`.",
   dohc_list_changes: { cli: "moments" },
@@ -404,7 +418,7 @@ function shellBlock(line: string): string {
   return "```sh\n" + line + "\n```";
 }
 
-// What a verb returns. Chat, history, and automation verbs print their socket verb's
+// What a verb returns. Chat, history, Access, and automation verbs print their socket verb's
 // result; the JSON verbs of `dataset` and `app` return the result kinds
 // listed above.
 function verbReturns(command: string, name: string): string {
@@ -414,7 +428,8 @@ function verbReturns(command: string, name: string): string {
       ? HISTORY_RESULTS[name]
       : command === "document"
         ? DOCUMENT_RESULTS[name]
-        : command === "automation" ? AUTOMATION_RESULTS[name] : undefined;
+        : command === "automation" ? AUTOMATION_RESULTS[name]
+          : command === "access" ? ACCESS_RESULTS[name] : undefined;
   if (socketVerb !== undefined) {
     if (!Object.hasOwn(cliResultSchemas, socketVerb)) throw new Error(`dohc ${command} ${name} has no result schema.`);
     const result = jsonSchema(cliResultSchemas[socketVerb as CliSocketVerb], "output");
@@ -422,7 +437,8 @@ function verbReturns(command: string, name: string): string {
     const printed = (branches(result) ?? [result])
       .filter((branch) => (command !== "history" && command !== "document" && command !== "automation") || branch.properties?.ok?.const !== false);
     const shapes = printed.map((branch) => shapeText(branch).replace(/^\{ /, "{ schemaVersion, "));
-    return `With \`--json\`, prints ${shapes.map((shape) => `\`${shape}\``).join(" or ")}.`;
+    const socketNote = command === "access" ? ` Uses socket verb \`${socketVerb}\`.` : "";
+    return `With \`--json\`, prints ${shapes.map((shape) => `\`${shape}\``).join(" or ")}.${socketNote}`;
   }
   if (command === "dataset") {
     return returnsLine(resultShapes(jsonSchema(DatasetResult, "output"), "kind", DATASET_RESULTS[name as DatasetAction]));
@@ -459,12 +475,14 @@ function commandSection(name: string, command: CliCommandSpec): string {
   if (name === "history") checkCovered(name, Object.keys(command.verbs), Object.keys(HISTORY_RESULTS));
   if (name === "document") checkCovered(name, Object.keys(command.verbs), Object.keys(DOCUMENT_RESULTS));
   if (name === "automation") checkCovered(name, Object.keys(command.verbs), Object.keys(AUTOMATION_RESULTS));
+  if (name === "access") checkCovered(name, Object.keys(command.verbs), Object.keys(ACCESS_RESULTS));
   const jsonOperands = [...new Set(verbs.filter(([, verb]) => verb.fields).map(([, verb]) => verb.operands))];
   return [
     `### \`dohc ${name}\``,
     jsonOperands.length > 0 ? shellBlock(`dohc ${name} <verb> ${jsonOperands.join(" | ")}`) : "",
     command.summary,
     command.notes.join(" "),
+    name === "access" ? ACCESS_NOTES : "",
     ...verbs.map(([verbName, verb]) => verbSection(name, verbName, verb)),
   ].filter(Boolean).join("\n\n");
 }

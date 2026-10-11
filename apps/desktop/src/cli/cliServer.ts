@@ -1,6 +1,9 @@
 import { creationPartialMessage } from "@dohc/cli/creation";
+import { atomicReplaceFileSync } from "../atomicReplaceFile";
+import { cliUsageInvocation, type CliUsageInvocation } from "../usage/cliUsage";
 import { nameSlug } from "@dohc/workspace-contracts/names";
 import { SHARED_AUTOMATION_HISTORY_REASON } from "@dohc/workspace-contracts/automation-controls";
+import type { WorkspacePolicyPath } from "@dohc/security-contract/effective-policy";
 import { readThreadDispatchState } from "../agents/threadDispatchState";
 import {
   CLI_PROTOCOL_VERSION,
@@ -78,7 +81,6 @@ import {
 import {
   mkdirSync,
   readFileSync,
-  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -96,6 +98,7 @@ import { z } from "zod";
 import { DatasetSchemaChangeError } from "../workspaces/datasetSchemaChanges";
 import { isInside } from "../security/pathContainment";
 import type { ChatWrites } from "../workspaces/chatWrites";
+import { normalizeChatMessageBody } from "@dohc/workspace-contracts/chat-message-body";
 import type { AutomationRunRetry } from "../automations/automationNotices";
 import type { LocalDatasetAgent } from "../workspaces/localDatasetHost";
 import {
@@ -257,18 +260,38 @@ export interface CliButtonsPort {
   ): Promise<{ result: NamedPressResult; waiting: PressWaitReason | null }>;
 }
 
+// dohc can't read the workspace's History rules, so every History answer is
+// this one, naming the files and nothing about any change.
+export type HistoryPolicyRefusal = { status: "policy-unreadable"; unreadable: WorkspacePolicyPath[] };
+export type HistoryReadRefusal = { status: "untracked" } | HistoryPolicyRefusal;
+
+function historyPolicyUnreadable(refusal: HistoryPolicyRefusal) {
+  return {
+    ok: false as const,
+    status: "policy-unreadable" as const,
+    unreadable: refusal.unreadable,
+    reason: `History is hidden because dohc can't read ${refusal.unreadable.join(" and ")}`,
+  };
+}
+
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
+  access?: {
+    object(input: import("zod").infer<typeof import("@dohc/workspace-contracts/access").ObjectAccessInput>): Promise<import("@dohc/workspace-contracts/access").AccessAnswer>;
+    sharing(input: import("zod").infer<typeof import("@dohc/workspace-contracts/access").SharingAccessInput>): Promise<import("@dohc/workspace-contracts/access").AccessAnswer>;
+  };
   // `agent` is the agent this socket's write is, or null for the person.
   dataset?(request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null): Promise<import("@dohc/cli/dataset").DatasetResult>;
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
-  appPublication?(request: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
+  appPublication?(request: OwnerAppPublicationRequest, agent?: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null): Promise<OwnerAppPublicationResult>;
   store: LinkedChatStore;
   dispatchStore: AwaitableAgentDispatchStore;
   readOnly: boolean;
   fileObjectIdForPath(path: string): Promise<string | null>;
   filePathForObjectId(objectId: string): Promise<string | null>;
-  listMoments(input: { limit: number; objectId?: string }): Promise<VersionedTextMomentSummary[]>;
-  readMoment(momentId: string): Promise<VersionedTextMoment | null>;
+  listMoments(input: { limit: number; objectId?: string }): Promise<VersionedTextMomentSummary[] | HistoryPolicyRefusal>;
+  // A refusal says why History hides a change, never its path or contents:
+  // its rules no longer track a file it touched, or dohc can't read them.
+  readMoment(momentId: string): Promise<VersionedTextMoment | HistoryReadRefusal | null>;
   daemonReads: {
     queryChatMessagesGranular(input: {
       query: string;
@@ -298,6 +321,7 @@ export interface CliRunMessageLink {
 }
 
 export interface CliServerOptions {
+  recordSuccess?(invocation: CliUsageInvocation): unknown;
   stateDir: string;
   listWorkspaces(): readonly CliRegistryWorkspace[];
   openWorkspace(workspace: CliRegistryWorkspace): Promise<CliWorkspaceContext>;
@@ -1691,12 +1715,10 @@ class RunMessageLinkRecoveryQueue {
           }),
         ),
       ];
-      const temporaryPath = `${path}.${process.pid}.tmp`;
-      writeFileSync(temporaryPath, `${JSON.stringify(stored)}\n`, {
+      atomicReplaceFileSync(path, (temporaryPath) => writeFileSync(temporaryPath, `${JSON.stringify(stored)}\n`, {
         encoding: "utf8",
         mode: 0o600,
-      });
-      renameSync(temporaryPath, path);
+      }));
       return true;
     } catch (error) {
       try {
@@ -1844,7 +1866,9 @@ async function startFileChat(
   options: CliServerOptions,
 ): Promise<{ created: boolean; result: unknown }> {
   let thread: ChatThread;
+  let body: string;
   try {
+    body = normalizeChatMessageBody(input.body);
     thread = await options.chatWrites.createFileThread(context, {
       title: input.title,
       linkedFile: async () => {
@@ -1865,7 +1889,7 @@ async function startFileChat(
     message = await options.chatWrites.sendMessage(context, {
       writer: { via: "cli", actor: "agent", ...(input.agent ? { agentName: input.agent } : {}) },
       threadId: thread.id,
-      body: input.body,
+      body,
       resolveAttachments: async () => [],
     });
   } catch (error) {
@@ -1961,12 +1985,14 @@ async function onceForRequestId(
   requestId: string,
   input: unknown,
   run: () => Promise<{ done: boolean; result: unknown }>,
+  completion: { replayed: boolean },
 ): Promise<unknown> {
   const memory = workspaceRequests(options, context.workspaceId);
   // A digest, so a remembered edit does not keep its text in memory.
   const inputKey = createHash("sha256").update(JSON.stringify(input)).digest("hex");
   const remembered = memory.requests.get(requestId);
   if (remembered) {
+    completion.replayed = true;
     if (remembered.input !== inputKey) {
       return { ok: false as const, reason: `request id ${requestId} was already used for a different request` };
     }
@@ -2110,11 +2136,19 @@ async function dispatch(
   request: CliRequest,
   context: CliWorkspaceContext,
   options: CliServerOptions,
+  completion: { replayed: boolean },
 ): Promise<unknown> {
+  if (request.verb === "accessObject") {
+    const ref = request.args.ref;
+    if (ref.kind !== "path") return dispatchWorkspace(request, context, options, completion);
+    const paths = await callerPaths(context, request.args.cwd);
+    const rebased = { ...request, args: { ...request.args, ref: { ...ref, path: paths.rebase(ref.path, "read") } } };
+    return dispatchWorkspace(rebased, context, options, completion);
+  }
   const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "fileWrite", "fileMove", "fileDelete", "appPublication"]);
   if (!pathVerbs.has(request.verb)) {
     validateRequestPathSpellings(request);
-    return dispatchWorkspace(request, context, options);
+    return dispatchWorkspace(request, context, options, completion);
   }
   let paths: Awaited<ReturnType<typeof callerPaths>>;
   try { paths = await callerPaths(context, request.args.cwd); } catch (error) {
@@ -2141,7 +2175,7 @@ async function dispatch(
       case "appPublication": {
         const input = request.args.request;
         rebased = { ...request, args: { ...request.args, request: "appRoot" in input
-          ? { ...input, appRoot: paths.rebase(input.appRoot, "read") } : input } };
+          ? { ...input, appRoot: paths.rebase(input.appRoot, "read"), ...(input.action === "createLink" && input.paths ? {paths:input.paths.map(path=>paths.rebase(path,"read"))} : {}) } : input } };
         break;
       }
       case "fileChats":
@@ -2213,7 +2247,7 @@ async function dispatch(
     return request.verb === "dataset" ? { kind: "refused", code: "path_rejected", message: reason } : { ok: false, reason };
   }
   try {
-    return paths.result(parseCliResult(request.verb, await dispatchWorkspace(rebased, context, options)), request.verb === "moment");
+    return paths.result(parseCliResult(request.verb, await dispatchWorkspace(rebased, context, options, completion)), request.verb === "moment");
   } catch (error) {
     const workspacePaths = error instanceof DatasetSchemaChangeError
       ? error.workspacePaths
@@ -2228,18 +2262,33 @@ async function dispatchWorkspace(
   request: CliRequest,
   context: CliWorkspaceContext,
   options: CliServerOptions,
+  completion: { replayed: boolean },
 ): Promise<unknown> {
   if (request.verb === "reply" && request.args.choose !== undefined && request.args.resolve === undefined) {
     throw new CliCommandError("--choose needs --resolve <message>");
   }
   switch (request.verb) {
+    case "accessObject":
+      if (!context.access) throw new CliCommandError("Access observations are unavailable.");
+      return context.access.object(request.args);
+    case "accessSharing":
+      if (!context.access) throw new CliCommandError("Access observations are unavailable.");
+      return context.access.sharing(request.args);
     case "appPublication": {
       if (request.args.request.workspaceId !== context.workspaceId || context.readOnly || !context.appPublication) throw new CliCommandError("App publication requires the owning workspace.");
-      return context.appPublication(request.args.request);
+      if (options.agentRunDepth(context.workspaceId) > 0) throw new CliCommandError("Automations cannot use app publication.");
+      const agent = writeActor(request.args.actor, context, options) === "agent"
+        ? {kind:"agent" as const,label:"agentLabel" in request.args.request ? request.args.request.agentLabel ?? null : null,labelSource:"agent-declared" as const} : null;
+      return context.appPublication(request.args.request, agent);
     }
     case "dataset": {
       if (request.args.request.action === "export" && !request.args.request.savePath) throw new CliCommandError("Collection export requires an explicit savePath.");
       if (request.args.request.workspaceId !== context.workspaceId || context.readOnly || !context.dataset) throw new CliCommandError("Collections require the owning workspace.");
+      if (request.args.request.action === "approve" || request.args.request.action === "approveMigration") {
+        const invocationAgent = datasetAgent(request.args.actor, context, options);
+        return context.dataset(request.args.request, invocationAgent
+          ? {...invocationAgent,approvalAgent:{kind:"agent",label:request.args.request.agentLabel ?? null,labelSource:"agent-declared"}} : null);
+      }
       return context.dataset(request.args.request, datasetAgent(request.args.actor, context, options));
     }
     case "ownerAppResponses": {
@@ -2264,6 +2313,8 @@ async function dispatchWorkspace(
         limit: LIST_MOMENTS_HARD_LIMIT,
         ...(objectId ? { objectId } : {}),
       });
+      // An empty list would say this workspace has no History.
+      if (!Array.isArray(moments)) return historyPolicyUnreadable(moments);
       const selectedMoments = sinceMs === undefined
         ? moments
         : moments.filter((moment) => moment.recordedAtMs > sinceMs);
@@ -2288,6 +2339,15 @@ async function dispatchWorkspace(
 
     case "moment": {
       const moment = await context.readMoment(request.args.id);
+      if (moment && "status" in moment) {
+        return moment.status === "untracked"
+          ? {
+              ok: false as const,
+              status: "untracked" as const,
+              reason: `change ${request.args.id} is hidden because History no longer tracks its file`,
+            }
+          : historyPolicyUnreadable(moment);
+      }
       if (!moment) {
         return {
           ok: false as const,
@@ -2743,7 +2803,7 @@ async function dispatchWorkspace(
         // The request id is the press's key, so a resend after a restart names the same press.
         const result = await pressWith(requestId);
         return { done: result.ok, result };
-      });
+      }, completion);
     }
 
     case "documentRead": {
@@ -2809,7 +2869,7 @@ async function dispatchWorkspace(
       };
       const requestId = request.args.requestId;
       if (requestId === undefined) return (await edit()).result;
-      return await onceForRequestId(context, options, requestId, [path, find ?? null, replacement, agent ?? null], edit);
+      return await onceForRequestId(context, options, requestId, [path, find ?? null, replacement, agent ?? null], edit, completion);
     }
 
     case "documentCreate": {
@@ -2867,6 +2927,7 @@ async function dispatchWorkspace(
           const started = await startFileChat(context, input, options);
           return { done: started.created, result: started.result };
         },
+        completion,
       );
     }
   }
@@ -3414,14 +3475,21 @@ export async function handleCliRequestLine(
   }
 
   try {
-    const context = await workspaceContextForRequest(parsed.data, options);
-    const unvalidated = await dispatch(parsed.data, context, options);
+    // The caller's door labels counting only; authority never receives it.
+    const { door: _door, ...request } = parsed.data;
+    const completion = { replayed: false };
+    const context = await workspaceContextForRequest(request, options);
+    const unvalidated = await dispatch(request, context, options, completion);
     const result = parseCliResult(parsed.data.verb, unvalidated);
     const response = cliTransportResponseSchema.parse({
       protocolVersion: CLI_PROTOCOL_VERSION,
       ok: true,
       result,
     });
+    const invocation = completion.replayed ? null : cliUsageInvocation(parsed.data, result);
+    if (invocation) {
+      try { options.recordSuccess?.(invocation); } catch { /* Measurement cannot fail the command. */ }
+    }
     return `${JSON.stringify(response)}\n`;
   } catch (error) {
     const response = cliTransportResponseSchema.parse({

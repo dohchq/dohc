@@ -17,6 +17,9 @@ The product sections below are decision boundaries, not a feature checklist. Use
 
 The workspace is the primary product object. It can contain files, live documents, structured data, chats, and apps.
 
+Keep routine work useful without programming knowledge or an agent.
+Expose source and advanced controls when people need to change an app.
+
 Files are the portable foundation, not the required runtime representation for every feature. Use the state model that fits the subsystem. A live document can be a Y.Doc and structured data can live in SQLite. Keep work owned, inspectable, and exportable instead of forcing all state into flat text.
 
 Start with a job people need to finish. Design capabilities around how they use, change, and share its result.
@@ -172,7 +175,7 @@ Use one name for one thing. [`CONTEXT.md`](CONTEXT.md) is the canonical term lis
 
 ## Local development
 
-Use Node 24.14 or newer and pnpm 11.20.0, as pinned in `package.json`.
+Use Node 24.16 or newer and pnpm 11.20.0, as pinned in `package.json`.
 
 - `pnpm dev:desktop` starts the desktop app. `pnpm dev` is an alias.
 - `pnpm dev:site` starts the marketing site.
@@ -183,7 +186,7 @@ Use Node 24.14 or newer and pnpm 11.20.0, as pinned in `package.json`.
 ## Verification
 
 Use [the agent verification procedure](docs/engineering/verify-agent-work.md) for worktree setup, desktop QA, debug access, and PR evidence.
-For desktop QA, start with `pnpm doctor`. Use `pnpm qa:smoke` for boot, editing, persistence, and restart.
+For desktop QA, start with `pnpm run doctor`. Use `pnpm qa:smoke` for boot, editing, persistence, and restart.
 
 Run the smallest check that proves the change.
 

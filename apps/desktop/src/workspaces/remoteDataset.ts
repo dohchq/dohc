@@ -183,7 +183,7 @@ export function createRemoteDatasetData(input: {
     async approveMigrationCandidate(value) {
       if (input.shareId !== undefined || value.workspaceId !== input.workspaceId) throw new Error("Only the Collection owner can change its rules.");
       const signal = value.signal ? AbortSignal.any([input.signal, value.signal]) : input.signal;
-      const raw = await request(`${path(value.datasetId)}/approve-migration`, { candidateId: value.candidateId, checkpointSha256: value.checkpointSha256 }, signal);
+      const raw = await request(`${path(value.datasetId)}/approve-migration`, { candidateId: value.candidateId, checkpointSha256: value.checkpointSha256, approvalAgent:value.approvalAgent }, signal);
       const result = DatasetResult.parse({ ...(raw as object), kind: "migrated" });
       if (result.kind !== "migrated" || result.revision.datasetId !== value.datasetId || result.cursor.workspaceId !== input.workspaceId || result.cursor.datasetId !== value.datasetId || result.cursor.approvedRevisionHash !== result.revision.revisionSha256) {
         throw new Error("The server did not confirm this Collection change. Refresh the Collection before reviewing it again.");
@@ -367,7 +367,7 @@ export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<impo
     file: async value => (await target(value.datasetId)).file(value),
     permissions: async value => {
       const authority = await target(value.datasetId);
-      if (!("permissions" in authority) || !authority.permissions) throw new Error("Publish this Collection before managing shared access.");
+      if (!("permissions" in authority) || !authority.permissions) throw new Error("Collection permissions are unavailable.");
       return authority.permissions(value);
     },
     setGrant: async value => {

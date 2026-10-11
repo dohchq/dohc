@@ -22,13 +22,14 @@ import { FileInspector } from "./FileInspector";
 // Keep Vite transforms out of Testing Library's one-second assertion window.
 // Read mode also preloads MarkdownEditor, while a truncated read lazy-loads
 // SourceCodeEditor, so await all three imports before render.
+// Cold transforms can exceed 10 s under suite load; match the 30 s test budget.
 beforeAll(async () => {
   await Promise.all([
     import("./markdown/IncrementalMarkdownDocument"),
     import("./editor/MarkdownEditor"),
     import("./SourceCodeEditor"),
   ]);
-});
+}, 30_000);
 
 // The file reader renders through the shared markdown component map, so a
 // document reads the same wherever dohc shows it. The map itself is pinned
@@ -46,7 +47,7 @@ const engineDocState: UseEngineDoc = {
   doc: null,
   objectId: null,
   versionId: null,
-  saveState: "saved",
+  saveState: { kind: "saved-here" },
   saveError: null,
     authorCapacity: false,
   notInVersion: false,
@@ -60,6 +61,7 @@ const engineDocState: UseEngineDoc = {
   recoveryAssets: null,
   permanentFailureWhileEditing: false,
   readOnlyWhileEditing: false,
+  readOnlyCause: null,
   removalInProgress: null,
   artifactAssets: [],
   readArtifactAsset: async () => {
@@ -91,6 +93,7 @@ describe("FileInspector renders markdown through the shared component map", () =
   const bridgeMock = {
     // A document over the WYSIWYG threshold opens in read mode, which is where
     // the rendered document — rather than the editor — is what this test reads.
+    onWorkspaceActivity: vi.fn(() => () => undefined),
     readWorkspaceText: vi.fn(async () => ({
       text: TABLE_DOCUMENT,
       truncated: false,

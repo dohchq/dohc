@@ -1,3 +1,4 @@
+import { desktopPins } from "../src/testPins";
 import { expect, test, type Page } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -183,7 +184,7 @@ test("owner + participant chat and co-presence converge in the real app", async 
     const baseUrl = relay.baseUrl;
 
     // --- (a) OWNER creates a channel, starts a thread, sends a message ------
-    await page.getByTestId("titlebar-chats-sidebar").click();
+    await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
     await expect(page.getByTestId("chats-view")).toBeVisible();
 
     await page.getByTestId("chats-new-channel").click();

@@ -8,6 +8,7 @@ import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifac
 import type { DatasetSchemaChange } from "@dohc/cli/dataset";
 import { generateDatasetSources } from "./datasetGenerator";
 import { generateDatasetHistoryRestore } from "./datasetHistoryRestore";
+import { invalidateDatasetAddresses } from "./datasetAddress";
 import { createLocalDatasetHost, type LocalDatasetHost } from "./localDatasetHost";
 import { createDatasetHandler } from "../ipc/datasetIpc";
 import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
@@ -49,6 +50,7 @@ async function fixture(initial: DatasetDefinition = definition, remote = false, 
       prepareMigrationCandidate: host.prepareMigrationCandidate, approveMigrationCandidate: host.approveMigrationCandidate, discardMigrationCandidate: host.discardMigrationCandidate,
       migrationPreviewPage: host.migrationPreviewPage }) as unknown as import("./remoteDataset").OwnerDatasetData } : {}), withAdapter: async (_workspace, work) => work(adapter), createSources: async (_workspace, sources) => {
       for (const [path, source] of Object.entries(sources)) { if (files.has(path)) throw new Error("Existing source"); files.set(path, source); }
+      invalidateDatasetAddresses({ workspaceId: "w" });
       alterSources?.(Object.keys(sources));
     } });
   async function prepare(change: DatasetSchemaChange, current = host.approvedArtifacts(id(1)).revision) {
@@ -80,6 +82,7 @@ it("prepares a forward reversal from History, keeps newer records, and saves the
   const second = await approve(f, changed);
   const registration = await f.host.action(call(second.revision, id(6), { values: { [id(4)]: "Tuesday registration" } }, "tuesday"));
   const review = await restore(f);
+  await expect(f.handler("owner", { action: "describe", workspaceId: "w", datasetPath: f.datasetPath })).resolves.toMatchObject({ kind: "description", dataset: { revision: 2 } });
   expect(review.previousRevision.revision).toBe(2); expect(review.revision.revision).toBe(3);
   expect(review.revision.definition.tables[0]!.fields[1]!.name).toBe("Name");
   expect(review.migrationSql).toBe("SELECT 1;");
@@ -99,6 +102,7 @@ it("reverses an added button without SQL, then puts it back, keeping later edits
   const button = added.revision.definition.tables[0]!.fields.at(-1)!;
   await f.host.action(call(added.revision, id(7), { id: recordId, expectedVersion: 1, values: { [id(4)]: "Ada Lovelace" } }, "after-button"));
   const review = await restore(f);
+  await expect(f.handler("owner", { action: "describe", workspaceId: "w", datasetPath: f.datasetPath })).resolves.toMatchObject({ kind: "description", dataset: { revision: 2 } });
   expect(review.migrationSql).toBe("SELECT 1;");
   expect(review.revision.definition.tables).toEqual(f.revision.definition.tables);
   expect(review.revision.definition.operations).toEqual(added.revision.definition.operations);
@@ -149,6 +153,7 @@ it("refuses to put a button back over a later field with its name", () => {
 it("refuses a reviewed reversal after a new registration and preserves every registration", async () => {
   const f = await fixture(); const second = await approve(f, await f.prepare({ kind: "renameField", tableId: id(2), fieldId: id(4), name: "Full name" }));
   const review = await restore(f);
+  await expect(f.handler("owner", { action: "describe", workspaceId: "w", datasetPath: f.datasetPath })).resolves.toMatchObject({ kind: "description", dataset: { revision: 2 } });
   await f.host.action(call(second.revision, id(6), { values: { [id(4)]: "New submission" } }, "newer"));
   await expect(approve(f, review)).rejects.toThrow("changed after review");
   expect(f.host.describe(id(1)).revision).toBe(2);
@@ -226,6 +231,7 @@ it.each([false, true])("compiles TypeScript when reversing a saved change (sourc
   const candidate = await f.host.prepareMigrationCandidate({ workspaceId: "w", revision, schemaSql: first.schemaSql, operationSource, migrationSql: "SELECT 1;", expected: first.cursor });
   await f.host.approveMigrationCandidate({ workspaceId: "w", datasetId: id(1), candidateId: candidate.candidateId, checkpointSha256: candidate.checkpointSha256 });
   const review = await restore(f);
+  await expect(f.handler("owner", { action: "describe", workspaceId: "w", datasetPath: f.datasetPath })).resolves.toMatchObject({ kind: "description", dataset: { revision: 2 } });
   expect(review.revision.definition.operationsPath).toMatch(/operations\.ts$/);
   expect(review.operationSource).toBe(first.operationSource);
   const result = await approve(f, review);

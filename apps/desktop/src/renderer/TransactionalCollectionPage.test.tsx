@@ -387,6 +387,72 @@ describe("transactional Collection page", () => {
     expect(screen.queryByText("Change not confirmed")).toBeNull();
   });
 
+  it("shows a reopen wait in the page, says when it ends, and loads the records from its Try again", async () => {
+    const waiting = new Error("Error invoking remote method 'desktop:dataset': DatasetReopenWaitError [dataset_reopen_wait] [retryAfterMs=5000]: This Collection is waiting to reopen. Try again in 5 seconds.");
+    const loaded = deferred<{ result: AppBackendJson }>();
+    const invoke = vi.fn<(request: TransactionalInvoke) => Promise<{ result: AppBackendJson }>>()
+      .mockRejectedValueOnce(waiting).mockReturnValueOnce(loaded.promise).mockResolvedValue({ result: page() });
+    const onSettled = vi.fn();
+    const identity = `collection-load:${id(1)}:${id(2)}`;
+    // Only the page's timers are fake; Testing Library's async helpers need real ones, so this test uses act alone.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let retryFromToast: () => void;
+    try {
+      const { onError } = setup({ invoke, onSettled });
+      await act(async () => {});
+      const region = screen.getByRole("region", { name: "People" });
+      expect(within(region).getByText("This Collection is waiting to reopen. Try again in 5 seconds.")).toBeTruthy();
+      expect(onError).toHaveBeenCalledWith("dohc could not load People.", waiting, expect.any(Function), identity);
+      // Records that could not load take no changes.
+      expect(screen.getByRole<HTMLButtonElement>("button", { name: "New record" }).disabled).toBe(true);
+      retryFromToast = onError.mock.calls[0]![2]!;
+      await act(() => vi.advanceTimersByTimeAsync(4999));
+      expect(within(region).getByText("This Collection is waiting to reopen. Try again in 5 seconds.")).toBeTruthy();
+      await act(() => vi.advanceTimersByTimeAsync(1));
+      expect(within(region).getByText("The wait has ended.")).toBeTruthy();
+      fireEvent.click(within(region).getByRole("button", { name: "Try again" }));
+      expect(within(region).queryByText("The wait has ended.")).toBeNull();
+      expect(within(region).getByText("Loading records…")).toBeTruthy();
+      expect(onSettled).not.toHaveBeenCalled();
+      await act(async () => loaded.resolve({ result: page() }));
+      expect(within(region).getByText("Alice")).toBeTruthy();
+      expect(within(region).queryByRole("button", { name: "Try again" })).toBeNull();
+      expect(onSettled).toHaveBeenCalledWith(identity);
+      expect(screen.getByRole<HTMLButtonElement>("button", { name: "New record" }).disabled).toBe(false);
+    } finally { vi.useRealTimers(); }
+    // The toast's Try again is the same load.
+    expect(invoke).toHaveBeenCalledTimes(2);
+    act(() => retryFromToast());
+    await waitFor(() => expect(invoke).toHaveBeenCalledTimes(3));
+  });
+
+  it("shows any failed load in the page with the toast's Try again", async () => {
+    const stopped = new Error("Error invoking remote method 'desktop:dataset': PersistentRuntimeError [worker_stopped] [retryAfterMs=5000]: The worker stopped.");
+    const invoke = vi.fn<(request: TransactionalInvoke) => Promise<{ result: AppBackendJson }>>().mockRejectedValueOnce(stopped).mockResolvedValue({ result: page() });
+    const { onError } = setup({ invoke });
+    const region = screen.getByRole("region", { name: "People" });
+    expect(await within(region).findByText("dohc could not load People.")).toBeTruthy();
+    expect(onError).toHaveBeenCalledWith("dohc could not load People.", stopped, expect.any(Function), `collection-load:${id(1)}:${id(2)}`);
+    expect(within(region).queryByText(/waiting to reopen/)).toBeNull();
+    fireEvent.click(within(region).getByRole("button", { name: "Try again" }));
+    expect(await within(region).findByText("Alice")).toBeTruthy();
+    expect(within(region).queryByText("dohc could not load People.")).toBeNull();
+  });
+
+  it("drops the wait and its Notices row when a read in place finds the records", async () => {
+    const invoke = vi.fn<(request: TransactionalInvoke) => Promise<{ result: AppBackendJson }>>()
+      .mockRejectedValueOnce(new Error("Error invoking remote method 'desktop:dataset': DatasetReopenWaitError [dataset_reopen_wait] [retryAfterMs=5000]: This Collection is waiting to reopen. Try again in 5 seconds.")).mockResolvedValue({ result: page() });
+    const onSettled = vi.fn();
+    const { props, rerender } = setup({ invoke, onSettled });
+    const region = screen.getByRole("region", { name: "People" });
+    await within(region).findByText("This Collection is waiting to reopen. Try again in 5 seconds.");
+    // An automation run changed records, so the page reads them again in place.
+    rerender(<TransactionalCollectionPage {...props} onSettled={onSettled} recordsChanged={1} />);
+    expect(await within(region).findByText("Alice")).toBeTruthy();
+    expect(within(region).queryByText(/waiting to reopen/)).toBeNull();
+    expect(onSettled).toHaveBeenCalledWith(`collection-load:${id(1)}:${id(2)}`);
+  });
+
   it("reports malformed pages through Notices without rendering unapproved data", async () => {
     const { onError } = setup({ invoke: async () => ({ result: { rows: [{ id: 1, version: "bad", values: { [secret]: "Hidden" } }], nextCursor: null } }) });
     await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
@@ -494,6 +560,23 @@ it("finishes a read and a read in place asked for in one render, and leaves noth
   expect(screen.queryByText("Loading records…")).toBeNull();
   expect((screen.getByRole("button", { name: "New record" }) as HTMLButtonElement).disabled).toBe(false);
   expect((screen.getByRole("button", { name: "Refresh" }) as HTMLButtonElement).disabled).toBe(false);
+});
+
+it("stands lines in for records not yet shown, and keeps the words while a shown page reloads", async () => {
+  const first = deferred<{ result: AppBackendJson }>();
+  const invoke = vi.fn(async (): Promise<{ result: AppBackendJson }> => ({ result: page() }));
+  invoke.mockReturnValueOnce(first.promise);
+  const { props, rerender } = setup({ invoke });
+  const opening = (await screen.findByText("Loading records…")).closest("[role=status]");
+  expect(opening?.classList.contains("dohc-reveal-if-slow"), "a first open prints its loading words at once, over nothing").toBe(true);
+  await act(async () => first.resolve({ result: page() }));
+  await screen.findByText("Alice");
+  const again = deferred<{ result: AppBackendJson }>();
+  invoke.mockReturnValueOnce(again.promise);
+  rerender(<TransactionalCollectionPage {...props} recordsVersion={1} />);
+  expect((await screen.findByText("Loading records…")).tagName).toBe("P");
+  expect(screen.getByText("Alice")).toBeTruthy();
+  await act(async () => again.resolve({ result: page() }));
 });
 
 it("shows the ⚡ button beside New record, and a ⚡ that names the automations on each field they set", async () => {

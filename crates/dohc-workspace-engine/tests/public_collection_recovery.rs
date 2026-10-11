@@ -94,6 +94,8 @@ fn paired_public_collection_backup_preserves_acceptance_and_refuses_stale_relay(
             })
             .expect("hydrate relay text blob");
         let envelope = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "w".to_owned(),
             origin_id: row["originId"].as_str().expect("origin").to_owned(),
             origin_seq: row["originSeq"].as_i64().expect("origin sequence"),
@@ -312,6 +314,8 @@ async fn accepted_response_native_owner_undo_syncs_and_history_restores() {
             &mut store,
             &mut dohc_engine_collab::WriterDocCache::new(),
             &ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: "w".into(),
                 origin_id: row["originId"].as_str().unwrap().into(),
                 origin_seq: row["originSeq"].as_i64().unwrap(),

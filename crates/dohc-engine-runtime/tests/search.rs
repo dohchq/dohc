@@ -209,6 +209,8 @@ fn replicated_envelope(
     payload: serde_json::Value,
 ) -> ReplicationEnvelope {
     ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: WS.to_owned(),
         origin_id: origin_id.to_owned(),
         origin_seq,

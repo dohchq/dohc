@@ -1,6 +1,7 @@
 import { CopyButton } from "./ui/CopyButton";
 import { DangerButton, SecondaryButton } from "./ui/controls";
-import { useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
+import { ShellErrorReporter } from "./shell/useShellError";
 import { restoreRecoveryDraftText } from "./collab/recoverySnapshot";
 import {
   dismissOrphanedDraft,
@@ -24,8 +25,27 @@ import {
 // it exists — so the destructive step requires an explicit confirmation.
 // Shared by this list and the in-document notice: one
 // contract for one destructive action.
-export function DismissDraftControls(props: { onDismiss: () => void }) {
+export function DismissDraftControls(props: { onDismiss: () => void | Promise<void> }) {
   const [confirming, setConfirming] = useState(false);
+  const [dismissing, setDismissing] = useState(false);
+  const report = useContext(ShellErrorReporter);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  const dismiss = () => {
+    setDismissing(true);
+    void Promise.resolve().then(props.onDismiss).catch(cause => {
+      if (mounted.current) report?.({
+        message: "dohc could not dismiss this draft. Your saved copy remains available.",
+        cause,
+        retry: dismiss,
+      });
+    }).finally(() => {
+      if (mounted.current) setDismissing(false);
+    });
+  };
   if (!confirming) {
     return (
       <button
@@ -41,7 +61,7 @@ export function DismissDraftControls(props: { onDismiss: () => void }) {
   return (
     <span className="flex items-center gap-2">
       <span className="text-[11px] text-danger">Deletes the only copy.</span>
-      <DangerButton size="compact" data-testid="recovery-dismiss-confirm" onClick={props.onDismiss}>
+      <DangerButton size="compact" data-testid="recovery-dismiss-confirm" disabled={dismissing} onClick={dismiss}>
         Dismiss edit
       </DangerButton>
       <SecondaryButton size="compact" data-testid="recovery-dismiss-cancel" onClick={() => setConfirming(false)}>

@@ -20,6 +20,7 @@ import {
   type CliRegistryWorkspace,
   type CliRunMessageLink,
   type CliServerHandle,
+  type CliServerOptions,
   type CliWorkspaceContext,
   type startCliServer as startCliServerImplementation,
 } from "./cliServer";
@@ -40,7 +41,7 @@ import type { ChatRelayIdentityTarget } from "../workspaces/chatRelayIdentity";
 import type { ChatWrites } from "../workspaces/chatWrites";
 import type { LiveDocumentEditOrigin, LiveDocumentSessions } from "../workspaces/engineYDocSessionIpc";
 import { readWorkspaceText } from "../workspaces/workspaceAssets";
-import { historyPathAdmission, readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
+import { historyPathAdmission, historyMomentPathsAdmitted, readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
 import type { DocumentProjection } from "../workspaces/documentProjection";
 import { FRONTMATTER_REFUSAL, startsWithFrontmatter } from "@dohc/ydoc-projection";
 import { VersionedTextStoreError, type MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
@@ -59,9 +60,11 @@ async function settledMarkdown(rootPath: string, path: string): Promise<string> 
 }
 
 interface DesktopCliServerDependencies<State> {
+  access?(workspaceId: string): NonNullable<CliWorkspaceContext["access"]>;
+  recordSuccess?: CliServerOptions["recordSuccess"];
   dataset?(request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null): Promise<import("@dohc/cli/dataset").DatasetResult>;
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
-  ownerAppPublication?(request: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
+  ownerAppPublication?(request: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null): Promise<OwnerAppPublicationResult>;
   /** The executor calls the Automations panel makes, for one workspace. */
   automations(workspace: RegistryEntry): CliAutomationsPort;
   /** A window's press path, for one workspace. */
@@ -211,6 +214,7 @@ export function createDesktopCliServer<State>(
     };
     return {
       workspaceId: workspace.workspaceId,
+      ...(dependencies.access ? { access: dependencies.access(workspace.workspaceId) } : {}),
       ...(dependencies.dataset ? { dataset: (request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null) =>
         withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
           if (request.workspaceId !== workspace.workspaceId || operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The Collection workspace attachment changed.");
@@ -222,10 +226,10 @@ export function createDesktopCliServer<State>(
           if(request.workspaceId!==workspace.workspaceId || operation.signal!==publicationAttachment || publicationAttachment.aborted)throw new Error("The response workspace attachment changed.");
           return dependencies.ownerAppResponses!(request);
         })}:{}),
-      ...(dependencies.ownerAppPublication ? { appPublication: (request: OwnerAppPublicationRequest) =>
+      ...(dependencies.ownerAppPublication ? { appPublication: (request: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null = null) =>
         withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
           if (request.workspaceId !== workspace.workspaceId || operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The app publication workspace attachment changed.");
-          return dependencies.ownerAppPublication!(request);
+          return dependencies.ownerAppPublication!(request, agent);
         }) } : {}),
       rootPath: workspace.rootPath,
       automations: dependencies.automations(workspace),
@@ -385,8 +389,11 @@ export function createDesktopCliServer<State>(
           }),
       filePathForObjectId: (objectId) => capture.filePathForObjectId(objectId),
       listMoments: async ({ limit, objectId }) => {
+        // Unreadable rules hide every change, as the desktop's History does.
+        const policy = await readWorkspaceEnginePolicy(workspace.rootPath);
+        if (policy.errors.length) return { status: "policy-unreadable", unreadable: policy.unreadable };
         const page = await capture.listMoments({ limit, ...(objectId ? { objectId } : {}) });
-        const admitted = historyPathAdmission(await readWorkspaceEnginePolicy(workspace.rootPath));
+        const admitted = historyPathAdmission(policy);
         return page.moments
           .filter(
             (moment): moment is typeof moment & { objectId: string; protected: false } =>
@@ -410,20 +417,23 @@ export function createDesktopCliServer<State>(
           }));
       },
       readMoment: async (momentId) => {
+        // Unreadable rules hide every change, as the desktop's History does,
+        // so the answer says nothing about this change.
+        const policy = await readWorkspaceEnginePolicy(workspace.rootPath);
+        if (policy.errors.length) return { status: "policy-unreadable", unreadable: policy.unreadable };
         const detail = await capture.readMoment(momentId);
         if (!detail || detail.protected) return null;
         const { moment } = detail;
         // History reads come from the active version, as the list does.
         if (moment.versionId !== (await capture.listVersions()).activeVersionId) return null;
-        const admitted = historyPathAdmission(await readWorkspaceEnginePolicy(workspace.rootPath));
-        const paths = [moment.path, moment.payload.after.path, ...(moment.payload.before ? [moment.payload.before.path] : [])];
-        return paths.every(admitted) ? moment : null;
+        return historyMomentPathsAdmitted(historyPathAdmission(policy), moment) ? moment : { status: "untracked" };
       },
     };
   }
 
   async function startDesktopCliServer(): Promise<CliServerHandle> {
     return startCliServer({
+      recordSuccess: dependencies.recordSuccess,
       stateDir: stateDir(),
       listWorkspaces: () =>
         listWorkspaces()

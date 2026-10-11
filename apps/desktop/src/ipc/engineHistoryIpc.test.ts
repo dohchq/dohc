@@ -10,6 +10,7 @@ import {
   EngineMomentDetailRecord,
   ENGINE_TEXT_MAX_CHARS,
   ListWorkspaceVersionConflictsResult,
+  ReadEngineMomentResult,
   WorkspaceVersionConflict,
 } from "./bridgeContract";
 import { compareVersionFilesPage } from "@dohc/workspace-core/versionCompare";
@@ -32,6 +33,23 @@ const TEXT_SHA = "a".repeat(64);
 const BINARY_SHA = "b".repeat(64);
 
 describe("listEngineMomentsForIpc", () => {
+  it.each(["list", "detail"])("preserves relay confirmation through History %s validation", async (surface) => {
+    const detail = detailWith({before: null, after: textSide("new")});
+    if (detail.protected) throw new Error("Expected a plaintext moment");
+    const authors = [{kind: "human" as const, humanId: "recipient", humanName: "Recipient", relayConfirmed: true as const}];
+    detail.moment.authors = authors;
+    if (surface === "detail") {
+      const result = ReadEngineMomentResult.parse({moment: engineMomentDetailForIpc(detail, names)});
+      expect(result.moment?.authors).toEqual(authors);
+      return;
+    }
+    const response = await listEngineMomentsForIpc(async () => ({
+      moments: [{...detail.moment, momentOrder: 1, protected: false}],
+      nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+    }), names);
+    if (!("moments" in response)) throw new Error("Expected ready history");
+    expect(response.moments[0]?.authors).toEqual(authors);
+  });
   it.each([
     "History is still updating. Try again.",
     "Workspace is still updating. Try again.",
@@ -61,6 +79,7 @@ describe("listEngineMomentsForIpc", () => {
       {kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1},
       {kind: "link", grantId: "grant", grantGeneration: 1, principalId: "holder"},
       {kind: "public", principalId: "public", grantId: "grant"},
+      {kind: "unattributed"},
     ];
     const response = await listEngineMomentsForIpc(async () => ({
       moments: [{...detail.moment, authors, momentOrder: 1, protected: false}],
@@ -189,6 +208,17 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
     expect(record.publicAuthor).toBeUndefined();
     expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
   });
+  it("preserves a live link author without inventing the grant for Stop and restore", () => {
+    const detail = detailWith({before: textSide("old"), after: textSide("new")});
+    if (detail.protected) throw new Error("Expected a plaintext moment");
+    const author = {kind: "link", publicPrincipalId: "public-holder", label: "Ana"} as const;
+    detail.moment.authors = [author];
+    const record = engineMomentDetailForIpc(detail, names);
+    expect(record.authors).toEqual([author]);
+    expect(record.linkAuthor).toBeUndefined();
+    expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
+  });
+
   it("carries an Edit link's grant and principal, and names no person for it", () => {
     const detail = detailWith({before: textSide("old"), after: textSide("new")});
     if (detail.protected) throw new Error("Expected a plaintext moment");
@@ -497,4 +527,23 @@ describe("version texts the engine accepted cross the bridge", () => {
     expect(message).toContain("characters");
     expect(message).toContain("version text");
   });
+});
+
+
+it("omits only rename summaries from timeline rows and details", async () => {
+  for (const operation of ["write", "delete", "rename"] as const) {
+    const detail = detailWith({ before: textSide("old"), after: textSide("new") });
+    if (detail.protected) throw new Error("Expected ordinary history");
+    detail.moment.operation = operation;
+    detail.moment.metadata.summary = operation === "rename" ? "Renamed private/a.md to notes/a.md" : "Saved latest edits";
+    const listed = await listEngineMomentsForIpc(async () => ({
+      moments: [{ ...detail.moment, momentOrder: 1, protected: false }],
+      nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+    }), names);
+    if (!("moments" in listed)) throw new Error("Expected ready history");
+    for (const row of [listed.moments[0], engineMomentDetailForIpc(detail, names)]) {
+      if (operation === "rename") expect(row).not.toHaveProperty("summary");
+      else expect(row).toHaveProperty("summary", "Saved latest edits");
+    }
+  }
 });

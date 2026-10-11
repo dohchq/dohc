@@ -12,6 +12,7 @@ use dohc_engine_protocol::{
     wire::WorkspaceHandle,
 };
 use dohc_engine_storage::{EngineStore, NoFaults};
+use dohc_engine_sync::list_replication_ops;
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{
     CAPTURE_INITIAL_SETTLED_EVENT, CAPTURE_MOMENT_RECORDED_EVENT, CaptureApplyProbe,
@@ -748,6 +749,45 @@ async fn a_sink_policy_hold_recovers_when_the_original_policy_bytes_return() {
         )
         .await
         .expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn narrowing_path_policy_journals_the_retirement_delete() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    write_file(scratch.path(), "notes/a.md", b"tracked history");
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_for_text(&transport, &handle, "notes/a.md", Some("tracked history")).await;
+    let db_path = scratch.path().join(".dohc/engine/engine.db");
+    {
+        let conn = rusqlite::Connection::open(&db_path).expect("open sync setup");
+        conn.execute("INSERT INTO sync_identity (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms) VALUES (?1, 'owner-device', 'epoch', 'stream', 1)", [WORKSPACE_ID]).expect("owner identity");
+        conn.execute("INSERT INTO sync_relay_push_state (workspace_id, origin_id, pushed_seq) VALUES (?1, 'owner-device', 0)", [WORKSPACE_ID]).expect("enable outgoing journal");
+    }
+    write_file(
+        scratch.path(),
+        ".dohc/files.toml",
+        b"[[rule]]\npath = \"notes/**\"\ntracked = false\n",
+    );
+    wait_for_text(&transport, &handle, "notes/a.md", None).await;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9_290, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+    let store = EngineStore::open_read_only(&db_path).expect("read journal");
+    let ops =
+        list_replication_ops(&store, WORKSPACE_ID, "owner-device", -1, 100).expect("outgoing ops");
+    assert!(
+        ops.iter().any(|op| op.op_kind == "moment.append"
+            && op.payload["path"] == "notes/a.md"
+            && op.payload["operation"] == "delete"),
+        "the actual policy narrow must journal its delete: {ops:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

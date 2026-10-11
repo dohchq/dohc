@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { readFile } from "node:fs/promises";
-import { spawnSync } from "node:child_process";
+import { readGit } from "./git-read.mjs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -220,15 +220,9 @@ export function requireCiPassVerdict(log, resolveHead) {
 }
 
 // The checkout this verdict is being accepted for. A git that cannot answer
-// returns null, which refuses the verdict rather than skipping the check.
+// throws with stderr, which refuses the verdict rather than skipping the check.
 function resolveCheckoutHead() {
-  const res = spawnSync("git rev-parse HEAD", {
-    cwd: resolve(dirname(fileURLToPath(import.meta.url)), "../.."),
-    shell: true,
-    encoding: "utf8",
-  });
-  if (res.error || res.status !== 0) return null;
-  const head = res.stdout.trim();
+  const head = readGit(["rev-parse", "HEAD"], resolve(dirname(fileURLToPath(import.meta.url)), "../..")).trim();
   return /^[0-9a-f]{40}$/.test(head) ? head : null;
 }
 
@@ -243,7 +237,7 @@ async function main() {
   );
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((error) => {
     console.error(`::error::${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;

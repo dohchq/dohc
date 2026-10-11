@@ -1,13 +1,14 @@
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { deferred } from "../testing/deferred";
 import { createRegistryStore, type RegistryEntry } from "../workspaces/registryStore";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { checkAutomationReach, type ReachStep } from "@dohc/automation-executor/automation-reach";
 import { readSyncHistory, recordNeverSynced, recordSynced } from "../workspaces/syncHistory";
 import { createTestScratch } from "../workspaces/testTemp";
 import {
   listRosterGrants,
+  lookupHistoryAccounts,
   readStoredRoster,
   type ListedGrant,
   type ListedLink,
@@ -16,6 +17,7 @@ import {
 } from "@dohc/automation-executor/roster-listing";
 import {
   createShareRosters,
+  createHistoryLabels,
   reachRosterFor,
   rosterAuthorLabel,
   rosterPersonLabel,
@@ -27,9 +29,13 @@ import { listEngineMomentsForIpc } from "../ipc/engineHistoryIpc";
 const WORKSPACE = "ws-trip";
 const remote = { serverUrl: "https://server.dohc.test", ownerUserId: "u-owner" };
 
+const facts = { shareId: "s-1", generation: 1, status: "active" as const, granterUserId: "u-owner",
+  granterEmail: null, subjectName: null, sharerName: null };
+const { granterUserId, granterEmail, ...linkFacts } = facts;
+
 function row(overrides: Record<string, unknown> = {}) {
   return {
-    shareId: "s-1", workspaceId: WORKSPACE, grantId: "g-1", principalKind: "user", generation: 1,
+    ...facts, status: overrides.revokedAtMs ? "revoked" : "active", shareId: "s-1", workspaceId: WORKSPACE, grantId: "g-1", principalKind: "user", generation: 1,
     recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", createdAtMs: 1, revokedAtMs: null,
     selector: { paths: ["Trip"], versionId: null }, access: "edit", automationsGeneration: null, ...overrides,
   };
@@ -37,7 +43,7 @@ function row(overrides: Record<string, unknown> = {}) {
 
 function link(overrides: Record<string, unknown> = {}) {
   return {
-    grantId: "g-link", status: "active", selector: { paths: ["Trip"], versionId: null }, access: "edit", automationsGeneration: null,
+    ...linkFacts, grantId: "g-link", status: "active", selector: { paths: ["Trip"], versionId: null }, access: "edit", automationsGeneration: null,
     dependents: [{ grantId: "g-dep", recipientUserId: "u-ben", recipientEmail: "ben@dohc.test", access: "edit", generation: 1, createdAtMs: 1 }],
     ...overrides,
   };
@@ -46,12 +52,13 @@ function link(overrides: Record<string, unknown> = {}) {
 // A link's own grant, as the listing keeps it.
 function linkGrant(grantId: string, overrides: Record<string, unknown> = {}) {
   return {
-    grant: { grantId, recipientUserId: null, recipientEmail: null, selector: { paths: ["Trip"], versionId: null }, access: "edit" },
+    grant: { ...facts, status: overrides.ended ? "revoked" : "active", grantId, recipientUserId: null, recipientEmail: null, selector: { paths: ["Trip"], versionId: null }, access: "edit" },
     ended: false, automationsGeneration: null, ...overrides,
   } as ListedLink;
 }
 
 const ana: ListedGrant = {
+  ...facts,
   grantId: "g-1", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test",
   selector: { paths: ["Trip"], versionId: null }, access: "edit",
 };
@@ -67,14 +74,15 @@ function relay(pages: Record<string, Page>) {
     const page = pages[path];
     if (page === undefined) throw new Error(`unexpected ${path}`);
     if (page instanceof Error) throw page;
-    return page;
+    return page.body !== null && typeof page.body === "object" && "granted" in page.body
+      ? { ...page, body: { granterUserId, granterEmail, ...page.body } } : page;
   });
 }
 
 // The listing for one /sync/shares body and one page of links.
 async function listed(shares: unknown, links: unknown[] = []): Promise<RosterListing> {
   const answer = await listRosterGrants(WORKSPACE, relay({
-    "/sync/shares": { status: 200, body: shares },
+    "/sync/shares?workspaceId=ws-trip": { status: 200, body: shares },
     "/sync/ws-trip/shares/links": { status: 200, body: { ok: true, links } },
   }));
   if (answer.kind !== "answered") throw new Error("the relay answered every request");
@@ -82,18 +90,114 @@ async function listed(shares: unknown, links: unknown[] = []): Promise<RosterLis
 }
 
 describe("roster from the relay's listings", () => {
+  it("loads missing History names once per inventory without fetching known names or changing the roster", async () => {
+    const roster = await listed({ granted: [row()] });
+    const before = JSON.stringify(roster);
+    let inventory = 1;
+    const hold = deferred<Awaited<ReturnType<typeof lookupHistoryAccounts>>>();
+    const lookupAccounts = vi.fn(() => hold.promise);
+    const names = createHistoryLabels({ snapshot: () => ({ roster, owner: true, context: "window", inventory }), lookupAccounts });
+    await names.prepare(WORKSPACE, [{ userId: "u-ana", grantId: "g-1" }]);
+    expect(lookupAccounts).not.toHaveBeenCalled();
+    const author = { userId: "u-ben", grantId: "g-dep" };
+    const first = names.prepare(WORKSPACE, [author]);
+    const second = names.prepare(WORKSPACE, [author]);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(lookupAccounts).toHaveBeenCalledTimes(1);
+    hold.resolve([{ ...author, recipientUserId: author.userId, recipientEmail: "Ben", parentGrantId: "g-link" }]);
+    await Promise.all([first, second]);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(names.author(WORKSPACE, author)).toBe("Ben (via share link)");
+    await names.prepare(WORKSPACE, [author]);
+    expect(lookupAccounts).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(roster)).toBe(before);
+    inventory++;
+    await names.prepare(WORKSPACE, [author]);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(lookupAccounts).toHaveBeenCalledTimes(2);
+    names.invalidate(WORKSPACE);
+    await names.prepare(WORKSPACE, [author]);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(lookupAccounts).toHaveBeenCalledTimes(3);
+  });
+
+  it("isolates History caches and discards responses after account or attachment changes", async () => {
+    const roster = await listed({ granted: [] });
+    const hold = deferred<Awaited<ReturnType<typeof lookupHistoryAccounts>>>();
+    let context = "first-account";
+    const lookupAccounts = vi.fn(() => hold.promise);
+    const names = createHistoryLabels({ snapshot: () => ({ roster, owner: true, context, inventory: 1 }), lookupAccounts });
+    const author = { userId: "u-ben", grantId: "g-dep" };
+    const pending = names.prepare(WORKSPACE, [author]);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    context = "next-account";
+    hold.resolve([{ ...author, recipientUserId: author.userId, recipientEmail: "Ben", parentGrantId: "g-link" }]);
+    await pending;
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(names.author(WORKSPACE, author)).toBe("Someone you shared with");
+    await names.prepare("another-workspace", [author]);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(names.author("another-workspace", author)).toBe("Ben (via share link)");
+    expect(names.author(WORKSPACE, author)).toBe("Someone you shared with");
+  });
+
+  it("keeps holder data owner-only and retries unavailable History lookups", async () => {
+    const roster = await listed({ granted: [] });
+    let owner = false;
+    const lookupAccounts = vi.fn(async () => null);
+    const names = createHistoryLabels({ snapshot: () => ({ roster, owner, context: "window", inventory: 1 }), lookupAccounts });
+    const author = { userId: "u-ben", grantId: "g-dep" };
+    await names.prepare(WORKSPACE, [author]);
+    expect(lookupAccounts).not.toHaveBeenCalled();
+    owner = true;
+    names.prepare(WORKSPACE, [author]);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    names.prepare(WORKSPACE, [author]);
+    expect(lookupAccounts).toHaveBeenCalledTimes(1);
+    expect(names.author(WORKSPACE, author)).toBe("Someone you shared with");
+  });
+  it("marks an active link holder's History label as their own choice", async () => {
+    const listing = await listed({ granted: [] }, [link()]);
+    expect(rosterAuthorLabel(listing, { userId: "u-ben", grantId: "g-dep" })).toBe("ben@dohc.test (Edit)");
+    expect(rosterPersonLabel(listing, "u-ben")).toBe("ben@dohc.test");
+  });
+  it.each([null, 3])("names an ended link holder in History without current access (automations generation %s)", async (automationsGeneration) => {
+    const listing = await listed({ granted: [] });
+    const get = relay({ "/sync/ws-trip/shares/links?historyGrantId=g-dep": { status: 200, body: { holders: [{ grantId: "g-dep", recipientUserId: "u-ben", recipientEmail: "Ben", parentGrantId: "g-link" }] } } });
+    const names = createHistoryLabels({ snapshot: () => ({ roster: listing, owner: true, context: "window", inventory: 1 }),
+      lookupAccounts: (_workspaceId, ids) => lookupHistoryAccounts(WORKSPACE, get, ids) });
+    expect(get).not.toHaveBeenCalled();
+    expect(listing.grants).toEqual([]);
+    expect(reachRosterFor({ entry: { workspaceId: WORKSPACE, rootPath: "/trip", kind: "personal", mode: "local-first", remote },
+      localUserId: null, localPersonId: null, history: null, latest: listing, next: "" }))
+      .toMatchObject({ kind: "owner", grants: [], formerEditors: [] });
+    const readHistory = () => listEngineMomentsForIpc(async () => ({
+      moments: [{ id: "m-ended", workspaceId: WORKSPACE, versionId: "main", objectId: "o-1", path: "Trip/a.md", recordedAtMs: 1,
+        operation: "write", metadata: { origin: "sync" }, momentOrder: 0, protected: false,
+        authors: [{ kind: "named", userId: "u-ben", grantId: "g-dep", grantGeneration: 1 }] }],
+      nextBeforeMomentOrder: null, latestMomentOrder: 0, activeVersionId: "main", protectedTruncated: false,
+    }), { agent: () => undefined, person: () => undefined, automation: () => null,
+      prepare: authors => names.prepare(WORKSPACE, authors.filter(author => author.kind === "named")), named: author => names.author(WORKSPACE, author) });
+    const immediate = await readHistory();
+    expect(immediate).toMatchObject({ moments: [{ namedAuthor: { label: "Someone you shared with" } }] });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    const history = await readHistory();
+    expect(history).toMatchObject({ moments: [{ namedAuthor: { label: "Ben (via share link)" } }] });
+    expect(names.person(WORKSPACE, "u-ben")).toBe("Ben (via share link)");
+    expect(listing.grants !== null && listing.endedGrants).toEqual([]);
+    expect(get).toHaveBeenCalledTimes(1);
+  });
   it("keeps the owner's active grants on this workspace, and only the person of a revoked one", async () => {
     const group = { kind: "group", channelWireId: "wire-trip", paths: ["Trip"], versionId: null };
     const listing = await listed({
       ok: true,
       granted: [
         row({ grantId: "g-5" }),
-        row({ grantId: "g-other", workspaceId: "ws-other" }),
         row({ grantId: "g-revoked", revokedAtMs: 9 }),
         row({ grantId: "g-link", principalKind: "link", recipientUserId: null, recipientEmail: null }),
         row({ grantId: "g-4", principalKind: "email", recipientUserId: null, recipientEmail: "cai@dohc.test", access: "view" }),
-        row({ grantId: "g-3", selector: group, access: "read-write" }),
-        row({ grantId: "g-2", selector: group, access: "read-only" }),
+        row({ grantId: "g-3", selector: group, access: "read-write", fileScope: "served" }),
+        row({ grantId: "g-2", selector: group, access: "read-only", fileScope: "served" }),
         row({ grantId: "g-1", selector: { kind: "chat", channelWireId: "wire-family" }, access: "read-write" }),
         row({ grantId: "g-6", selector: { paths: [], versionId: "v-1" }, access: "edit" }),
       ],
@@ -102,7 +206,7 @@ describe("roster from the relay's listings", () => {
     expect(listing.grants?.map((grant) => grant.grantId)).toEqual(["g-1", "g-2", "g-3", "g-4", "g-5", "g-6"]);
     // The revoked grant stays only as its person, which reach below never reads.
     expect(listing.grants !== null && listing.endedGrants)
-      .toEqual([{ grantId: "g-revoked", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test" }]);
+      .toEqual([{ ...facts, status: "revoked", grantId: "g-revoked", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test" }]);
     const entry: RegistryEntry = { workspaceId: WORKSPACE, rootPath: "/trip", kind: "personal", mode: "local-first", remote };
     expect(reachRosterFor({ entry, localUserId: null, localPersonId: null, history: null, latest: listing, next: "" })).toEqual({
       kind: "owner", ownerUserId: "u-owner", grants: [
@@ -117,7 +221,7 @@ describe("roster from the relay's listings", () => {
     });
   });
 
-  it("lists each active Edit link as its own grant, and every active link's dependents like named grants", async () => {
+  it("lists each active link as its own grant, and every active link's dependents like named grants", async () => {
     expect(await listed({ granted: [] }, [
       link(),
       link({ grantId: "g-view", access: "view", dependents: [] }),
@@ -126,10 +230,11 @@ describe("roster from the relay's listings", () => {
       link({ grantId: "g-revoked-damaged", status: "revoked", selector: null, access: "unknown" }),
     ])).toEqual({
       grants: [{
-        grantId: "g-dep", recipientUserId: "u-ben", recipientEmail: "ben@dohc.test",
+        ...facts, grantId: "g-dep", recipientUserId: "u-ben", recipientEmail: "ben@dohc.test",
         selector: { paths: ["Trip"], versionId: null }, access: "edit",
       }],
-      links: [linkGrant("g-link")],
+      links: [linkGrant("g-comment", { grant: { ...linkGrant("g-comment").grant, access: "comment" } }),
+        linkGrant("g-link"), linkGrant("g-view", { grant: { ...linkGrant("g-view").grant, access: "view" } })],
       formerGrants: [], endedGrants: [],
     });
   });
@@ -162,15 +267,14 @@ describe("roster from the relay's listings", () => {
       .toEqual({ grants: null, problem: { kind: "damaged-share", recipientEmail: damaged.recipientEmail } });
   });
 
-  it("ignores another workspace's damaged row, and calls a row with no workspace unusable", async () => {
+  it("refuses a row with another workspace or no workspace", async () => {
     expect(await listed({
       granted: [
         row({ grantId: "g-2", selector: null, damaged: true, revokedAtMs: 5 }),
         row({ grantId: "g-3", workspaceId: "ws-other", selector: null, damaged: true, access: 7, principalKind: 3, revokedAtMs: "no" }),
         row(),
       ],
-      // A revoked row past its use for reach still names its person for History.
-    })).toEqual({ grants: [ana], links: [], formerGrants: [], endedGrants: [{ grantId: "g-2", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test" }] });
+    })).toEqual({ grants: null, problem: { kind: "unusable-listing" } });
     expect(await listed({ granted: [row({ workspaceId: undefined })] }))
       .toEqual({ grants: null, problem: { kind: "unusable-listing" } });
   });
@@ -196,7 +300,7 @@ describe("roster from the relay's listings", () => {
     const { automationsGeneration: _left, ...older } = link();
     expect(await listed({ granted: [] }, [older])).toEqual({ grants: null, problem: { kind: "outdated-server" } });
     const entry: RegistryEntry = { workspaceId: WORKSPACE, rootPath: "/trip", kind: "personal", mode: "local-first", remote };
-    const stored = { version: 1, grants: null, problem: { kind: "outdated-server" } } as const;
+    const stored = { version: 1, listedAtMs: 0, grants: null, problem: { kind: "outdated-server" } } as const;
     expect(reachRosterFor({ entry: { ...entry, shareRoster: stored }, localUserId: null, localPersonId: null, history: null, latest: null, next: "" }))
       .toEqual({ kind: "unknown", problem: { kind: "outdated-server" } });
   });
@@ -218,10 +322,10 @@ describe("roster from the relay's listings", () => {
       links: [],
       formerGrants: [
         { grant: { ...ana, grantId: "g-narrowed", access: "view" }, automationsGeneration: 1 },
-        { grant: { ...ana, grantId: "g-revoked" }, automationsGeneration: 2 },
+        { grant: { ...ana, status: "revoked", grantId: "g-revoked" }, automationsGeneration: 2 },
       ],
       // A revoked grant that never wrote automations names its person for History only.
-      endedGrants: [{ grantId: "g-revoked-idle", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test" }],
+      endedGrants: [{ ...facts, status: "revoked", grantId: "g-revoked-idle", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test" }],
     });
     // A revoked grant that wrote automations but cannot be read, or says it
     // did and covers no files, fails closed.
@@ -238,7 +342,7 @@ describe("roster from the relay's listings", () => {
     const entry: RegistryEntry = { workspaceId: WORKSPACE, rootPath: "/trip", kind: "personal", mode: "local-first", remote };
     const chat = { ...ana, selector: { kind: "chat" as const, channelWireId: "wire" }, access: "read-write" as const };
     expect(reachRosterFor({
-      entry: { ...entry, shareRoster: { version: 1, grants: [], links: [], formerGrants: [{ grant: chat, automationsGeneration: 1 }], endedGrants: [] } },
+      entry: { ...entry, shareRoster: { version: 1, listedAtMs: 0, grants: [], links: [], formerGrants: [{ grant: chat, automationsGeneration: 1 }], endedGrants: [] } },
       localUserId: null, localPersonId: null, history: null, latest: null, next: "",
     })).toEqual({ kind: "unknown", problem: { kind: "unchecked", next: "" } });
   });
@@ -247,7 +351,7 @@ describe("roster from the relay's listings", () => {
     const { automationsGeneration: _left, ...older } = row();
     expect(await listed({ granted: [older] })).toEqual({ grants: null, problem: { kind: "outdated-server" } });
     const { automationsGeneration: _other, ...elsewhere } = row({ workspaceId: "ws-other" });
-    expect(await listed({ granted: [elsewhere, row()] })).toEqual({ grants: [ana], links: [], formerGrants: [], endedGrants: [] });
+    expect(await listed({ granted: [elsewhere, row()] })).toEqual({ grants: null, problem: { kind: "unusable-listing" } });
   });
 
   it("finds the evidence to hold a step after the owner revoked, from another computer, a recipient who wrote it", async () => {
@@ -297,7 +401,7 @@ describe("the roster the reach check reads", () => {
     expect(reachRosterFor({ entry, localUserId: null, localPersonId: "install-here", history: "never-synced", latest: null, next: "" }))
       .toEqual({ kind: "owner", ownerUserId: null, localPersonId: "install-here", grants: [] });
     expect(reachRosterFor({
-      entry: { ...entry, remote, shareRoster: { version: 1, grants: [], links: [], formerGrants: [], endedGrants: [] } }, localUserId: null, localPersonId: "install-here", history: null, latest: null, next: "",
+      entry: { ...entry, remote, shareRoster: { version: 1, listedAtMs: 0, grants: [], links: [], formerGrants: [], endedGrants: [] } }, localUserId: null, localPersonId: "install-here", history: null, latest: null, next: "",
     })).toEqual({ kind: "owner", ownerUserId: "u-owner", grants: [], formerEditors: [] });
   });
 
@@ -326,8 +430,8 @@ describe("the roster the reach check reads", () => {
     const read = (shareRoster: unknown) =>
       reachRosterFor({ entry: { ...entry, remote, shareRoster: shareRoster as RegistryEntry["shareRoster"] }, localUserId: null, localPersonId: null, history: null, latest: null, next });
     expect(reachRosterFor({ entry: { ...entry, remote }, localUserId: null, localPersonId: null, history: null, latest: null, next })).toEqual(unchecked);
-    expect(read({ version: 2, grants: [ana], links: [], formerGrants: [], endedGrants: [] })).toEqual({ kind: "owner", ownerUserId: "u-owner", grants: [anaOnRoster], formerEditors: [] });
-    expect(read({ version: 2, grants: null, problem: { kind: "damaged-link" } }))
+    expect(read({ version: 2, listedAtMs: 0, grants: [ana], links: [], formerGrants: [], endedGrants: [] })).toEqual({ kind: "owner", ownerUserId: "u-owner", grants: [anaOnRoster], formerEditors: [] });
+    expect(read({ version: 2, listedAtMs: 0, grants: null, problem: { kind: "damaged-link" } }))
       .toEqual({ kind: "unknown", problem: { kind: "damaged-link" } });
     for (const damaged of [
       { ...ana, selector: { paths: [], versionId: null } },
@@ -336,14 +440,14 @@ describe("the roster the reach check reads", () => {
       { ...ana, selector: { kind: "group", channelWireId: "wire", paths: [], versionId: null }, access: "read-write" },
       { ...ana, recipientUserId: null, recipientEmail: null },
     ]) {
-      expect(read({ version: 2, grants: [damaged], links: [], formerGrants: [], endedGrants: [] }), JSON.stringify(damaged)).toEqual(unchecked);
+      expect(read({ version: 2, listedAtMs: 0, grants: [damaged], links: [], formerGrants: [], endedGrants: [] }), JSON.stringify(damaged)).toEqual(unchecked);
     }
-    expect(read({ version: 2, grants: null })).toEqual(unchecked);
+    expect(read({ version: 2, listedAtMs: 0, grants: null })).toEqual(unchecked);
   });
 
   it("makes each active link an editor of its own, and keeps a link that wrote automations directly and stopped editing", () => {
     const read = (links: unknown[]) => reachRosterFor({
-      entry: { ...entry, remote, shareRoster: { version: 2, grants: [ana], links, formerGrants: [], endedGrants: [] } as RegistryEntry["shareRoster"] },
+      entry: { ...entry, remote, shareRoster: { version: 2, listedAtMs: 0, grants: [ana], links, formerGrants: [], endedGrants: [] } as RegistryEntry["shareRoster"] },
       localUserId: null, localPersonId: null, history: null, latest: null, next: "",
     });
     const onRoster = (grantId: string, access = "edit") =>
@@ -368,15 +472,15 @@ describe("the roster the reach check reads", () => {
     const unchecked = { kind: "unknown", problem: { kind: "unchecked", next: "" } };
     const read = (shareRoster: unknown) =>
       reachRosterFor({ entry: { ...entry, remote, shareRoster: shareRoster as RegistryEntry["shareRoster"] }, localUserId: null, localPersonId: null, history: null, latest: null, next: "" });
-    expect(read({ version: 2, grants: [ana] })).toEqual(unchecked);
-    expect(read({ version: 2, grants: [], formerGrants: [], endedGrants: [], links: [linkGrant("g-a", { grant: { ...linkGrant("g-a").grant, recipientUserId: "u-ana" } })] }))
+    expect(read({ version: 2, listedAtMs: 0, grants: [ana] })).toEqual(unchecked);
+    expect(read({ version: 2, listedAtMs: 0, grants: [], formerGrants: [], endedGrants: [], links: [linkGrant("g-a", { grant: { ...linkGrant("g-a").grant, recipientUserId: "u-ana" } })] }))
       .toEqual(unchecked);
-    expect(read({ version: 2, grants: [], formerGrants: [], endedGrants: [], links: [{ ...linkGrant("g-a"), ended: undefined }] })).toEqual(unchecked);
+    expect(read({ version: 2, listedAtMs: 0, grants: [], formerGrants: [], endedGrants: [], links: [{ ...linkGrant("g-a"), ended: undefined }] })).toEqual(unchecked);
   });
 
   it("prefers a listing it learned but could not save", () => {
     expect(reachRosterFor({
-      entry: { ...entry, remote, shareRoster: { version: 1, grants: [ana], links: [], formerGrants: [], endedGrants: [] } }, localUserId: null, localPersonId: null, history: null, next: "",
+      entry: { ...entry, remote, shareRoster: { version: 1, listedAtMs: 0, grants: [ana], links: [], formerGrants: [], endedGrants: [] } }, localUserId: null, localPersonId: null, history: null, next: "",
       latest: { grants: null, problem: { kind: "unusable-listing" } },
     })).toEqual({ kind: "unknown", problem: { kind: "unusable-listing" } });
   });
@@ -438,6 +542,7 @@ describe("keeping the roster current", () => {
     await r.forRun(WORKSPACE);
     expect(store.find(WORKSPACE)?.shareRoster).toMatchObject({ version: 1, grants: [ana], links: [], formerGrants: [], endedGrants: [] });
 
+    now += SHARE_ROSTER_REFRESH_MS;
     vi.advanceTimersByTime(SHARE_ROSTER_REFRESH_MS);
     expect(list).toHaveBeenCalledTimes(2);
     r.close(WORKSPACE);
@@ -493,6 +598,20 @@ describe("keeping the roster current", () => {
     now += SHARE_ROSTER_FRESH_MS * 5;
     expect(await r.forRun(WORKSPACE)).toEqual(cached);
     expect(list, "a run waited on a relay that already failed").toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the roster version and file bytes when the owner-email acquisition fails", async () => {
+    seed();
+    const before = store.find(WORKSPACE)?.shareRoster;
+    const directory = join(dirname(store.registryFile), "share-rosters");
+    const files = await readdir(directory);
+    const bytes = await Promise.all(files.map(file => readFile(join(directory, file), "utf8")));
+    const get = relay({ "/sync/shares?workspaceId=ws-trip": { status: 500, body: { ok: false } } });
+    const { rosters: r, saveRoster } = rosters(() => listRosterGrants(WORKSPACE, get));
+    expect(await r.forRun(WORKSPACE)).toEqual(cached);
+    expect(saveRoster).not.toHaveBeenCalled();
+    expect(store.find(WORKSPACE)?.shareRoster).toEqual(before);
+    expect(await Promise.all(files.map(file => readFile(join(directory, file), "utf8")))).toEqual(bytes);
   });
 
   it("keeps the cache while this computer sends no pull", async () => {
@@ -825,15 +944,15 @@ describe("a direct write's author in History", () => {
     rosterAuthorLabel(readStoredRoster(saved), author);
 
   const grant = (grantId: string, recipientUserId: string | null, recipientEmail: string | null, access: "view" | "edit") =>
-    ({ grantId, recipientUserId, recipientEmail, selector: { paths: ["trip"], versionId: null }, access }) as ListedGrant;
-  const roster = { version: 1, grants: [grant("g-1", "ana", "ana@example.com", "edit"), grant("g-2", "ben", "ben@example.com", "view")], links: [], formerGrants: [], endedGrants: [] };
+    ({ ...facts, grantId, recipientUserId, recipientEmail, selector: { paths: ["trip"], versionId: null }, access }) as ListedGrant;
+  const roster = { version: 1, listedAtMs: 0, grants: [grant("g-1", "ana", "ana@example.com", "edit"), grant("g-2", "ben", "ben@example.com", "view")], links: [], formerGrants: [], endedGrants: [] };
 
   it("names a Button presser by active, former, then ended grants, with no opaque-id fallback", () => {
     const listing = { ...roster,
       formerGrants: [{ grant: grant("old", "ana", "old@example.com", "edit"), automationsGeneration: 1 },
         { grant: grant("former", "cy", "cy@example.com", "edit"), automationsGeneration: 1 }],
-      endedGrants: [{ grantId: "ended", recipientUserId: "cy", recipientEmail: "older@example.com" },
-        { grantId: "last", recipientUserId: "dee", recipientEmail: "dee@example.com" }],
+      endedGrants: [{ ...facts, status: "revoked" as const, grantId: "ended", recipientUserId: "cy", recipientEmail: "older@example.com" },
+        { ...facts, status: "revoked" as const, grantId: "last", recipientUserId: "dee", recipientEmail: "dee@example.com" }],
     };
     expect(rosterPersonLabel(listing, "ana")).toBe("ana@example.com");
     expect(rosterPersonLabel(listing, "cy")).toBe("cy@example.com");
@@ -862,10 +981,10 @@ describe("a direct write's author in History", () => {
     // Ana wrote records, never automations.yaml, and the owner stopped her.
     const listing = await listed({ granted: [row({ revokedAtMs: 9 })] });
     expect(listing.grants).toEqual([]);
-    expect(labelFrom({ ...listing, version: 1 }, { userId: "u-ana", grantId: "g-1" })).toBe("ana@dohc.test");
+    expect(labelFrom({ ...listing, version: 1, listedAtMs: 0 }, { userId: "u-ana", grantId: "g-1" })).toBe("ana@dohc.test");
     // An invite nobody claimed names no person, so it cannot name a writer.
     const unclaimed = await listed({ granted: [row({ revokedAtMs: 9, principalKind: "email", recipientUserId: null })] });
-    expect(labelFrom({ ...unclaimed, version: 1 }, { userId: "u-ana", grantId: "g-1" })).toBe("Someone you shared with");
+    expect(labelFrom({ ...unclaimed, version: 1, listedAtMs: 0 }, { userId: "u-ana", grantId: "g-1" })).toBe("Someone you shared with");
   });
 
   it("keeps History loading on a saved roster this build cannot read, and names nobody from it", async () => {
@@ -888,7 +1007,7 @@ describe("a direct write's author in History", () => {
     expect(labelFrom(roster, { userId: "cy", grantId: "revoked" })).toBe("Someone you shared with");
     expect(labelFrom(roster, { userId: "cy", grantId: "g-1" })).toBe("Someone you shared with");
     expect(labelFrom(undefined, { userId: "ana", grantId: "g-1" })).toBe("Someone you shared with");
-    expect(labelFrom({ version: 1, grants: null, problem: { kind: "unusable-listing" } }, { userId: "ana", grantId: "g-1" }))
+    expect(labelFrom({ version: 1, listedAtMs: 0, grants: null, problem: { kind: "unusable-listing" } }, { userId: "ana", grantId: "g-1" }))
       .toBe("Someone you shared with");
   });
 });

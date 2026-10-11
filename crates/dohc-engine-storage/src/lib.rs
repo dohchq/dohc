@@ -29,6 +29,7 @@
 pub mod backup;
 pub mod blob;
 pub mod diagnostics;
+mod durability;
 pub mod error;
 pub mod faults;
 pub mod limits;

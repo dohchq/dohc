@@ -1,5 +1,6 @@
 import {
   checkManifest,
+  ReservedWorkspaceIdError,
   createWorkspaceManifest,
   defaultWorkspaceMode,
   validateAttachedFolder,
@@ -22,10 +23,21 @@ export interface CreatedWorkspace {
 // that addresses a mount spells the container the same way.
 export const SHARED_WITH_ME_FOLDER = "shared-with-me";
 
+// A .dohc/manifest.json dohc will not adopt or overwrite. ERROR_WORDS reads
+// `code` into words; the message, with the parser's reason, is for Copy.
+export class WorkspaceManifestError extends Error {
+  override name = "WorkspaceManifestError";
+  readonly code: "unreadable" | "newer-version";
+
+  constructor(code: WorkspaceManifestError["code"], message: string) {
+    super(message);
+    this.code = code;
+  }
+}
+
 type ManifestState =
   | { kind: "absent" }
-  | { kind: "valid"; workspaceId: string; workspaceKind: WorkspaceKind; mode: CreatedWorkspace["mode"] }
-  | { kind: "blocked"; reason: string };
+  | { kind: "valid"; workspaceId: string; workspaceKind: WorkspaceKind; mode: CreatedWorkspace["mode"] };
 
 async function inspectManifest(metadataDir: string): Promise<ManifestState> {
   let raw: string;
@@ -39,7 +51,7 @@ async function inspectManifest(metadataDir: string): Promise<ManifestState> {
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return { kind: "blocked", reason: "this folder has a corrupt .dohc/manifest.json" };
+    throw new WorkspaceManifestError("unreadable", "this folder has a corrupt .dohc/manifest.json");
   }
   const check = checkManifest(parsed);
   if (check.status === "valid") {
@@ -50,17 +62,20 @@ async function inspectManifest(metadataDir: string): Promise<ManifestState> {
       mode: check.manifest.mode,
     };
   }
+  if (check.status === "reserved-id") {
+    throw new ReservedWorkspaceIdError(check.workspaceId);
+  }
   if (check.status === "newer-version") {
-    return {
-      kind: "blocked",
-      reason: `this workspace was created by a newer version of dohc (manifest v${check.version})`,
-    };
+    throw new WorkspaceManifestError(
+      "newer-version",
+      `this workspace was created by a newer version of dohc (manifest v${check.version})`,
+    );
   }
   // A present-but-broken manifest must never be silently overwritten (it may
   // be the user's data). checkManifest never returns "absent" for a file that
   // exists, but narrow defensively.
   const reason = check.status === "invalid" ? check.reason : "unrecognized manifest";
-  return { kind: "blocked", reason: `this folder has an invalid .dohc/manifest.json: ${reason}` };
+  throw new WorkspaceManifestError("unreadable", `this folder has an invalid .dohc/manifest.json: ${reason}`);
 }
 
 export async function createWorkspaceFolder(input: {
@@ -81,9 +96,6 @@ export async function createWorkspaceFolder(input: {
   await mkdir(input.rootPath, { recursive: true });
   const metadataDir = await resolveWorkspaceMetadataDir(input.rootPath);
   const state = await inspectManifest(metadataDir);
-  if (state.kind === "blocked") {
-    throw new Error(state.reason);
-  }
   // A folder that is already a dohc workspace keeps its identity — sync and
   // history hang off workspaceId, so overwriting the manifest severs them.
   if (state.kind === "valid") {

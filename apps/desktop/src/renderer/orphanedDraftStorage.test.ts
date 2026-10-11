@@ -36,6 +36,33 @@ it("writes version 1 on capture and replacement and restores both", () => {
   expect(loadStoredDrafts(now)).toEqual([expect.objectContaining(replacement)]);
 });
 
+it("preserves a superseded key another window changed before cleanup", () => {
+  const original = JSON.stringify({...draft, version: 1});
+  localStorage.setItem(key, original);
+  loadStoredDrafts(now);
+  const changed = JSON.stringify({...draft, text: "another window typing", version: 1});
+  const setItem = Storage.prototype.setItem;
+  const intercepted = vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, nextKey, raw) {
+    setItem.call(this, nextKey, raw);
+    if (nextKey !== key) setItem.call(this, key, changed);
+  });
+  try {expect(replaceStoredDraft({...draft, text: "newer typing"})).toBe(true);}
+  finally {intercepted.mockRestore();}
+  expect(localStorage.getItem(key)).toBe(changed);
+  expect(loadStoredDrafts(now).map(row => row.text).sort()).toEqual(["another window typing", "newer typing"]);
+});
+
+it("keeps the superseded key when the new copy cannot be written", () => {
+  const original = JSON.stringify({...draft, version: 1});
+  localStorage.setItem(key, original);
+  loadStoredDrafts(now);
+  const refused = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {throw new Error("quota exceeded");});
+  try {expect(replaceStoredDraft({...draft, text: "newer typing"})).toBe(false);}
+  finally {refused.mockRestore();}
+  expect(localStorage.getItem(key)).toBe(original);
+  expect(loadStoredDrafts(now).map(row => row.text)).toEqual([draft.text]);
+});
+
 describe.each([{}, { version: 1 }])("supported format %j", (version) => {
   it("restores the draft without rewriting it", () => {
     const raw = JSON.stringify({ ...draft, ...version });

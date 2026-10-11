@@ -162,6 +162,16 @@ it.each([['operation','delete'],['path','other.md'],['payloadAfterPath','other.m
     expect(f.raw.prepare('SELECT * FROM sync_relay_live_documents').all()).toEqual([])
   }finally{f.close()}
 })
+it('ignores refused moments while verifying an ordinary activation cut',()=>{
+  const f=fixture();try{
+    f.raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,settlement_admission_json) VALUES ('workspace','origin',3,'moment.append',?,3,?)")
+      .run(JSON.stringify({versionId:'main',objectId:'object',momentId:'refused',path:'other.md',operation:'delete'}),
+        JSON.stringify({status:'refused',settlementId:'refused',reason:'authorship-mismatch'}))
+    f.capture.source.committedCursor=4
+    expect(f.prepare()).toEqual({document:f.document,replayed:false,completed:false})
+    expect(f.store.read('workspace','docs/a.md',1_000_000)!.source).toEqual(f.capture.source)
+  }finally{f.close()}
+})
 it('refuses an ordinary baseline as stale after a real workspace identity rotation',()=>{
   const f=fixture();try{
     f.prepare();const access=f.store.pending(f.document,host)

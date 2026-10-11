@@ -2058,10 +2058,10 @@ describe("ui-state merge-on-load", () => {
     );
   });
 
-  // A refresh can record a refusal on an early page and then die on a later
+  // A manual refresh can record a refusal on an early page and die on a later
   // one. The evidence is already durable at that point — reading it only on
   // the success path would keep it invisible until a lucky refresh.
-  it("shows a refusal recorded by a refresh that then failed", async () => {
+  it("shows a refusal recorded by a failed manual refresh", async () => {
     const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs([])),
     );
@@ -2102,6 +2102,10 @@ describe("ui-state merge-on-load", () => {
       },
     });
 
+    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1));
+    await act(async () => undefined);
+    expect(bridge.getWorkspaceRegistry).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId("shared-view-refresh"));
     const refused = await screen.findByTestId("shared-view-refused");
     expect(
       refused.textContent,
@@ -2334,7 +2338,7 @@ describe("ui-state merge-on-load", () => {
 
     await waitFor(() => {
       expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
-      expect(bridge.workspaceActivitySubscriberCount()).toBe(1);
+      expect(bridge.workspaceActivitySubscriberCount()).toBe(3);
       expect(screen.getByTestId("tab-pulled.md")).toBeTruthy();
     });
     act(() => {
@@ -2412,7 +2416,7 @@ describe("ui-state merge-on-load", () => {
       folders: string[];
     }>();
     let issued = 0;
-    // Keep Chats closed so the subscribers are notifications and listing refresh.
+    // Keep Chats closed; the listing and both live editors subscribe to activity.
     const bridge = makeBridge(
       Promise.resolve({
         ...storedStateWithTabs(["b.md", "gone.md"], "b.md"),
@@ -2427,7 +2431,7 @@ describe("ui-state merge-on-load", () => {
 
     await waitFor(() => {
       expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
-      expect(bridge.workspaceActivitySubscriberCount()).toBe(1);
+      expect(bridge.workspaceActivitySubscriberCount()).toBe(3);
       expect(screen.getByTestId("tab-gone.md")).toBeTruthy();
     });
     act(() => {
@@ -2509,7 +2513,7 @@ describe("ui-state merge-on-load", () => {
     await waitFor(
       () => {
         expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
-        expect(bridge.workspaceActivitySubscriberCount()).toBe(1);
+        expect(bridge.workspaceActivitySubscriberCount()).toBe(3);
         expect(screen.getByTestId("tab-pulled.md")).toBeTruthy();
       },
     );
@@ -3552,9 +3556,8 @@ describe("ui-state merge-on-load", () => {
     renderShell(bridge);
 
     await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1));
-    // Notifications subscribes immediately; the listing refresh listener is
-    // the second live subscription and waits for workspace readiness.
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
+    // Both the listing refresh and typing recovery subscribe after readiness.
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
     vi.useFakeTimers();
     try {
       act(() => {
@@ -3617,7 +3620,7 @@ describe("ui-state merge-on-load", () => {
     // A second listing is issued while the first is still in flight.
     await waitFor(() => {
       expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
-      expect(bridge.workspaceActivitySubscriberCount()).toBe(1);
+      expect(bridge.workspaceActivitySubscriberCount()).toBe(3);
       expect(screen.getByTestId("tab-live.md")).toBeTruthy();
     });
     act(() => {

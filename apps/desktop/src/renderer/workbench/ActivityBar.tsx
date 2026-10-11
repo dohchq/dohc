@@ -1,3 +1,4 @@
+import { desktopPins, activityPin } from "../../testPins";
 import {
   Cloud,
   Files,
@@ -9,7 +10,7 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { pinnedAppInitial, type PinnedApp } from "./pinnedApps";
-import { appViewId, type ActivityViewId, type ViewId } from "./workbenchState";
+import { appViewId, SHARING_VIEW_ID, type ActivityViewId, type ViewId } from "./workbenchState";
 
 // VS Code-style activity bar: 48px icon rail, leftmost column of the
 // workbench. Ported a11y/active patterns from the retired web ActivityBar
@@ -139,7 +140,6 @@ export function ActivityBar(props: {
   pinnedApps?: readonly PinnedApp[];
   onPinnedAppMenu?: (appRoot: string) => void;
   onSelectView: (view: ActivityViewId) => void;
-  onOpenCloud?: () => void;
   onOpenSettings?: () => void;
   notices?: ReactNode;
   viewsDisabled?: boolean;
@@ -147,18 +147,18 @@ export function ActivityBar(props: {
   return (
     <nav
       aria-label="Activity bar"
-      data-testid="activity-bar"
+      data-testid={desktopPins.activityBar}
       className="flex w-12 shrink-0 flex-col items-center gap-1 border-r border-line bg-panel pb-2 pt-1"
     >
       {/* The view list scrolls, so enough pinned apps never push the
-          Cloud and Settings buttons off the rail. It spans the rail and pads
+          Sharing and Settings buttons off the rail. It spans the rail and pads
           its ends, so the clip keeps the active bar, a tile's count, and the
           focus ring, and never scrolls sideways. */}
       <div inert={props.viewsDisabled || undefined} className="flex min-h-0 w-full flex-col items-center gap-1 overflow-y-auto overflow-x-hidden py-1">
         {props.views.map((view) => (
           <RailButton
             key={view}
-            testId={`activity-${view}`}
+            testId={activityPin(view)}
             label={LABELS[view]}
             // The rail reflects a collapsed panel: no active mark while hidden.
             active={props.sidebarVisible && props.activeView === view}
@@ -195,16 +195,20 @@ export function ActivityBar(props: {
         })}
       </div>
       <div className="mt-auto flex flex-col items-center gap-1 border-t border-line pt-2">
-        <RailButton
-          testId="activity-cloud"
-          label="Sync and sharing"
-          badge={props.hasConflict ? "danger" : undefined}
-          onClick={props.onOpenCloud}
-          icon={<RailGlyph Icon={Cloud} />}
-        />
+        {/* Sharing opens a view like the ones above, so it goes inert with them. */}
+        <div inert={props.viewsDisabled || undefined} className="flex w-full justify-center">
+          <RailButton
+            testId={activityPin(SHARING_VIEW_ID)}
+            label="Sharing"
+            active={props.sidebarVisible && props.activeView === SHARING_VIEW_ID}
+            badge={props.hasConflict ? "danger" : undefined}
+            onClick={() => props.onSelectView(SHARING_VIEW_ID)}
+            icon={<RailGlyph Icon={Cloud} />}
+          />
+        </div>
         {props.notices}
         <RailButton
-          testId="activity-settings"
+          testId={activityPin("settings")}
           label="Open settings"
           onClick={props.onOpenSettings}
           icon={<RailGlyph Icon={Settings} />}

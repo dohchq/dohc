@@ -52,11 +52,21 @@ describe("sendCliRequest", () => {
       JSON.stringify({
         token: TOKEN,
         protocolVersion: CLI_PROTOCOL_VERSION,
+        door: "cli",
         verb: "groups",
         args: { cwd: "/workspace", actor: "human" },
       }),
       undefined,
     );
+  });
+
+  it.each(["cli", "mcp"] as const)("preserves the %s label on the wire without changing the result", async door => {
+    const stateDir = await tempStateDir();
+    const result = { groups: [] };
+    const transport = vi.fn(async (_socketPath: string, _line: string) => ({ protocolVersion: CLI_PROTOCOL_VERSION, ok: true, result }));
+    expect(await sendCliRequest({ protocolVersion: CLI_PROTOCOL_VERSION, door, verb: "groups", args: { cwd: "/workspace", actor: "agent" } },
+      { stateDir, transport, platform: "linux" })).toEqual(result);
+    expect(JSON.parse(transport.mock.calls[0]![1])).toMatchObject({ door, token: TOKEN, args: { actor: "agent" } });
   });
 
   it("reports a protocol mismatch before validating a future response shape", async () => {

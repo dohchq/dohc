@@ -25,7 +25,7 @@ fn corrupt(reason: impl Into<String>) -> CollabError {
     }
 }
 
-/// One snapshot per scoped identity. Later admissions replace the summary snapshot.
+/// One snapshot per scoped identity. Confirmation requires every merged entry.
 #[derive(Default)]
 pub struct Authors(BTreeMap<String, Value>);
 
@@ -42,6 +42,13 @@ impl Authors {
             .get("kind")
             .and_then(Value::as_str)
             .ok_or_else(|| corrupt("author has no kind"))?;
+        if kind == "unattributed" {
+            if author.as_object().is_none_or(|object| object.len() != 1) {
+                return Err(corrupt("invalid unattributed coverage marker"));
+            }
+            self.0.insert("unattributed".into(), author);
+            return Ok(());
+        }
         let field = match kind {
             "agent" => "agentId",
             "automation" => "automationId",
@@ -55,9 +62,17 @@ impl Authors {
             .ok_or_else(|| corrupt("author has no identity"))?;
         let scope = author.get("onBehalfOf").and_then(Value::as_str);
         let identity = serde_json::json!([kind, scope, id]).to_string();
-        let prior_depth = self
-            .0
-            .get(&identity)
+        let previous = self.0.get(&identity);
+        if previous.is_some_and(|previous| {
+            previous.get("relayConfirmed") != Some(&Value::Bool(true))
+                || author.get("relayConfirmed") != Some(&Value::Bool(true))
+        }) {
+            author
+                .as_object_mut()
+                .expect("author object")
+                .remove("relayConfirmed");
+        }
+        let prior_depth = previous
             .and_then(|previous| previous.get("depth"))
             .and_then(Value::as_u64)
             .unwrap_or(0);
@@ -226,9 +241,55 @@ pub fn reserved_in(conn: &Connection, key: &DocKey) -> Result<Authors, CollabErr
         .flatten();
     if let Some(json) = reserved {
         authors.union_json(&json)?;
+        // Confirmation belongs to that settlement, not the next local interval.
+        for author in authors.0.values_mut() {
+            if let Some(fields) = author.as_object_mut() {
+                fields.remove("relayConfirmed");
+            }
+        }
     }
     for author in interval_in(conn, key, i64::MAX)?.0.into_values() {
         authors.insert(author)?;
+    }
+    Ok(authors)
+}
+
+/// History recovery keeps native authors too. Accepted settlement deliberately
+/// excludes the owner's private tail; its outbox retains compacted provenance.
+pub fn recovery_in(conn: &Connection, key: &DocKey) -> Result<Authors, CollabError> {
+    let mut authors = reserved_in(conn, key)?;
+    let mut statement = conn
+        .prepare(
+            "SELECT e.native_source_json FROM owner_ydoc_outbox_entries e
+         JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id
+         JOIN ydoc_docs d ON d.workspace_id=o.workspace_id AND d.version_id=o.main_version_id
+           AND d.object_id=o.object_id AND d.lineage_claim_id=o.lineage_claim_id
+         WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3
+           AND e.pending=1 AND e.native_source_json IS NOT NULL",
+        )
+        .map_err(sql)?;
+    let sources = statement
+        .query_map(
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(sql)?;
+    for source in sources {
+        let source: crate::owner_outbox::OwnerOutboxSource =
+            serde_json::from_str(&source.map_err(sql)?)
+                .map_err(|_| corrupt("recovery native source is invalid"))?;
+        if let Some(native) = source.native() {
+            if let Some((actor, attribution)) = native
+                .native_author()
+                .map_err(|_| corrupt("recovery native author is invalid"))?
+            {
+                if let Some(json) =
+                    dohc_engine_domain::moment_author_json(actor.as_deref(), attribution.as_ref())
+                {
+                    authors.union_json(&json)?;
+                }
+            }
+        }
     }
     Ok(authors)
 }
@@ -300,9 +361,13 @@ pub fn admit_accepted_in(
     key: &DocKey,
     authors: &[String],
 ) -> Result<(), CollabError> {
-    if authors.is_empty() {
-        return Ok(());
-    }
+    // Missing recording context is coverage too, never proof of recipient-only edits.
+    let unattributed = [r#"[{"kind":"unattributed"}]"#.to_owned()];
+    let authors = if authors.is_empty() {
+        &unattributed
+    } else {
+        authors
+    };
     let mut covered = reserved_in(conn, key)?;
     for json in authors {
         admit(&mut covered, json)?;
@@ -583,4 +648,26 @@ pub fn reconcile_workspace_in(
         reconcile_in(conn, &key, now_ms)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod confirmation_tests {
+    use super::Authors;
+    use serde_json::json;
+
+    #[test]
+    fn confirmation_requires_every_entry_for_an_identity_in_either_order() {
+        let plain = json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"}]);
+        let confirmed = json!([{"kind":"human","humanId":"recipient","humanName":"Recipient","relayConfirmed":true}]);
+        for (first, second) in [(&plain, &confirmed), (&confirmed, &plain)] {
+            let mut authors = Authors::default();
+            authors.union_json(&first.to_string()).unwrap();
+            authors.union_json(&second.to_string()).unwrap();
+            assert_eq!(authors.json(), plain.to_string());
+        }
+        let mut authors = Authors::default();
+        authors.union_json(&confirmed.to_string()).unwrap();
+        authors.union_json(&confirmed.to_string()).unwrap();
+        assert_eq!(authors.json(), confirmed.to_string());
+    }
 }

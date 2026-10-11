@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { mkdir, open, readFile, rename } from "node:fs/promises";
+import { mkdir, open, readFile } from "node:fs/promises";
+import { atomicReplaceFile } from "../atomicReplaceFile";
 import { dirname } from "node:path";
 import { isAutomationWake } from "@dohc/workspace-contracts/relay";
 import { automationMessageId, automationWakeThreadId, type AutomationChatMessage } from "@dohc/automation-executor/automation-chat";
@@ -38,10 +39,11 @@ export function createAutomationWakeIntents(file: string) {
     a.account === b.account && a.noticeId === b.noticeId;
   const write = async (rows: AutomationWakeIntent[]) => {
     await mkdir(dirname(file), { recursive: true });
-    const handle = await open(file + ".tmp", "w", 0o600);
-    try { await handle.writeFile(JSON.stringify(rows) + "\n"); await handle.sync(); }
-    finally { await handle.close(); }
-    await rename(file + ".tmp", file);
+    await atomicReplaceFile(file, async (temporary) => {
+      const handle = await open(temporary, "w", 0o600);
+      try { await handle.writeFile(JSON.stringify(rows) + "\n"); await handle.sync(); }
+      finally { await handle.close(); }
+    });
   };
   return {
     list: () => serial(read),

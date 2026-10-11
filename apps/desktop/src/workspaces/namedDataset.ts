@@ -15,6 +15,7 @@ export function createNamedDatasetData(input: {
   offline?: { cache: NamedDatasetPageCache; relayResponse(credentials: CloudCredentials, path: string, init: RequestInit): Promise<Response> };
 }): Pick<OwnerDatasetData, "list" | "describe" | "inspect" | "invoke" | "upload" | "file"> {
   const marker = input.shareView as { shareId?: unknown; relayUrl?: unknown; grantedSelector?: unknown; ended?: unknown } | null;
+  if (marker?.ended === true) throw new Error("Your access to this share ended. Ask the owner to share it again.");
   if (!marker || typeof marker !== "object" || Array.isArray(marker) || typeof marker.shareId !== "string" || !marker.shareId || marker.shareId.length > 200 ||
     marker.ended !== undefined && marker.ended !== false || !recordedShareSelector(marker.grantedSelector) || typeof marker.relayUrl !== "string" || !input.credentials.relayUrl) {
     throw new Error("This shared workspace is unavailable. Open its current share again.");

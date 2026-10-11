@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { posix } from "node:path";
-import { DATASET_METADATA_MAX_BYTES, datasetDefinitionDigestContent, parseDatasetDefinition, parseDatasetRevision } from "@dohc/security-contract/dataset";
+import { parseLiveAuthorSnapshot, parseLiveUpdateIdentifier } from "@dohc/live-session-contract";
+import { datasetBaseFolder, DATASET_METADATA_MAX_BYTES, parseDatasetDefinition, parseDatasetRevision } from "@dohc/security-contract/dataset";
 import {
   MAX_AUTOMATIONS_FILE_BYTES,
   parseAutomationsFile,
@@ -8,7 +8,7 @@ import {
   type AutomationsFileParseResult,
 } from "@dohc/workspace-contracts/automations";
 import { pathCollisionKey } from "../pathCollisionKey";
-import { parseCollectionRecordFields, parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
+import { parseCollectionRecordIdentity, parseCollectionRecordFields, parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
 import { collectionVersionError } from "@dohc/workspace-contracts/collection";
 import { stableJsonStringify } from "../canonicalJson";
 import { notFound, relayError, RelayError } from "../errors";
@@ -142,7 +142,7 @@ export class CollectionWriteStaleError extends RelayError {
  * write from its capability and profile, never from anything it claims.
  */
 export type CollectionWriter =
-  | { kind: "named"; userId: string }
+  | { kind: "named"; userId: string; humanName: string }
   | {
       kind: "link";
       capabilityHash: string;
@@ -217,9 +217,14 @@ export function commitCollectionWrite(
       throw new CollectionWriteStaleError(path, currentFile(storage, workspaceId, path)?.blobSha256 ?? null);
     }
     checkBases(storage, workspaceId, decision.write);
+    if (decision.write.kind === "new-record") {
+      checkRecordCreation(storage, workspaceId, decision.write, writer.kind === "link"
+        ? suppliedBytes(writer.content) : storedBytes(storage, workspaceId, decision.write));
+    }
 
     let addedBytes = 0;
     let principalId: string | null = null;
+    let linkAuthor: {kind: "link"; publicPrincipalId: string; label: string} | undefined;
     if (current.kind === "link") {
       if (linkPrincipalLimitReached(storage, current.enrollment)) {
         throw relayError("quota_exceeded", "This link has as many browsers as it can hold.");
@@ -230,7 +235,7 @@ export function commitCollectionWrite(
       }
       addedBytes += newBlobBytes(storage, workspaceId, current.content);
       assertWorkspaceQuota(storage, workspaceId, addedBytes);
-      commitLinkEnrollment(storage, {
+      const principal = commitLinkEnrollment(storage, {
         capabilityHash: current.capabilityHash,
         profileTokenHash: current.profileTokenHash,
         enrollment: current.enrollment,
@@ -240,10 +245,16 @@ export function commitCollectionWrite(
         discussionRevision: Number(current.enrollment.authority.discussion_revision),
       });
       insertNewBlobs(storage, workspaceId, current.content, input.nowMs);
+      linkAuthor = {kind: "link", publicPrincipalId: collectionLinkPublicPrincipal(storage,
+        current.authorized.share.workspaceId, input.grantId, principal.principalId),
+        label: principal.displayName ?? "Anonymous"};
     }
     const author: DirectWriteMomentAuthor = current.kind === "named"
       ? { kind: "named", userId: current.userId, grantId: input.grantId, grantGeneration: input.grantGeneration }
       : { kind: "link", grantId: input.grantId, grantGeneration: input.grantGeneration, principalId: principalId! };
+    const admittedAuthorSnapshot = parseLiveAuthorSnapshot(writer.kind === "named"
+      ? [{kind: "human", humanId: writer.userId, humanName: writer.humanName}]
+      : [linkAuthor!]);
     const originId = `${COLLECTION_FILE_ORIGIN_PREFIX}${input.grantId}`;
     const firstOriginSeq = maxOriginSeq(storage, workspaceId, originId) + 1;
     const ops = changesOf(decision.write).map((change, index) => ({
@@ -251,6 +262,7 @@ export function commitCollectionWrite(
       opKind: "moment.append",
       payloadJson: stableJsonStringify(momentFor(storage, workspaceId, change, index, author, input)),
       recordedAtMs: input.nowMs,
+      admittedAuthorSnapshot,
     }));
     const paths = changesOf(decision.write).map((change) => change.afterPath!);
     const receipt: CollectionWriteReceipt = { submitId: input.submitId, paths, committedAtMs: input.nowMs };
@@ -258,7 +270,8 @@ export function commitCollectionWrite(
     const receiptJson = JSON.stringify(receipt);
     const authorId = author.kind === "named" ? author.userId : author.principalId;
     const storageBytes = Buffer.byteLength(pathsJson) + Buffer.byteLength(receiptJson) +
-      Buffer.byteLength(input.grantId) + Buffer.byteLength(authorId) + Buffer.byteLength(originId) + 256;
+      Buffer.byteLength(input.grantId) + Buffer.byteLength(authorId) + Buffer.byteLength(originId) +
+      256;
     // The ledger row goes first, so the append's quota check counts it.
     storage.db.prepare(
       `INSERT INTO sync_relay_collection_writes (
@@ -277,8 +290,53 @@ export function commitCollectionWrite(
   });
 }
 
+const publicPrincipalStatements = new WeakMap<SqliteDb, {
+  find: ReturnType<SqliteDb["prepare"]>;
+  insert: ReturnType<SqliteDb["prepare"]>;
+}>();
+
+/** The write transaction has already authenticated and enrolled this principal. */
+function collectionLinkPublicPrincipal(storage: StorageContext, workspaceId: string, grantId: string, principalId: string): string {
+  let statements = publicPrincipalStatements.get(storage.db);
+  if (!statements) {
+    statements = {
+      find: storage.db.prepare("SELECT workspace_id,public_principal_id FROM sync_relay_app_public_principals WHERE grant_id=? AND principal_id=?"),
+      insert: storage.db.prepare("INSERT INTO sync_relay_app_public_principals(workspace_id,grant_id,principal_id,public_principal_id,storage_bytes) VALUES(?,?,?,?,?)"),
+    };
+    publicPrincipalStatements.set(storage.db, statements);
+  }
+  const mapping = statements.find.get(grantId, principalId);
+  if (mapping) {
+    if (mapping.workspace_id !== workspaceId) throw new Error("The public link principal mapping is damaged.");
+    return parseLiveUpdateIdentifier(mapping.public_principal_id);
+  }
+  const publicId = `public_${randomUUID()}`;
+  const storageBytes = Buffer.byteLength(JSON.stringify([workspaceId, grantId, principalId, publicId])) + 128;
+  assertWorkspaceQuota(storage, workspaceId, storageBytes);
+  statements.insert.run(workspaceId, grantId, principalId, publicId, storageBytes);
+  return publicId;
+}
+
 function changesOf(write: CollectionWrite): ProposedChange[] {
   return write.kind === "new-collection" ? write.changes : [write.change];
+}
+
+function checkRecordCreation(
+  storage: StorageContext, workspaceId: string,
+  write: Extract<CollectionWrite, { kind: "new-record" }>, bytesOf: ContentBytes,
+): void {
+  const schema = currentFile(storage, workspaceId, `${write.collectionPath}/${COLLECTION_SCHEMA_FILE}`);
+  const schemaText = schema && priorText(storage, workspaceId, schema.blobSha256);
+  if (!schemaText || schemaText === "unreadable" || parseCollectionSchema(schemaText).status !== "valid") {
+    throw refusal("This Collection does not have a current document schema.");
+  }
+  const bytes = bytesOf(write.change.afterBlobSha256!, write.change.afterByteLength!);
+  const id = bytes && parseCollectionRecordIdentity(utf8(bytes) ?? "");
+  if (!id) throw refusal("This record needs a valid record ID.");
+  if (storage.db.prepare(`SELECT 1 FROM sync_relay_current_record_ids
+    WHERE workspace_id = ? AND version_id = ? AND record_id = ? LIMIT 1`).get(workspaceId, MAIN_VERSION_ID, id)) {
+    throw refusal("The sync relay could not create this record. Choose a new name and record ID, then try again.");
+  }
 }
 
 // What a submit id stands for. The client's own clock is left out: the
@@ -448,7 +506,6 @@ type CachedDatasetDescriptor = {
   blobSha256: string;
   expiresAtMs: number;
   datasetId: string;
-  definitionSha256: string;
   approval?: { revisionSha256: string; canSwitch: boolean };
 };
 const datasetDescriptors = new WeakMap<StorageContext, Map<string, CachedDatasetDescriptor>>();
@@ -476,7 +533,6 @@ function datasetDescriptor(storage: StorageContext, workspaceId: string, folder:
     blobSha256: descriptor.blobSha256,
     expiresAtMs: now + DATASET_PREFLIGHT_CACHE_MS,
     datasetId: definition.datasetId,
-    definitionSha256: createHash("sha256").update(datasetDefinitionDigestContent(definition)).digest("hex"),
   };
   cache.delete(key);
   if (cache.size >= DATASET_PREFLIGHT_CACHE_ENTRIES) {
@@ -497,8 +553,7 @@ function approvedDatasetFolder(storage: StorageContext, workspaceId: string, fol
     const revisionSha256 = createHash("sha256").update(revisionJson).digest("hex");
     if (descriptor.approval?.revisionSha256 === revisionSha256) return descriptor.approval.canSwitch;
     const approved = parseDatasetRevision(JSON.parse(revisionJson));
-    const canSwitch = approved.datasetId === descriptor.datasetId && posix.dirname(approved.definition.schemaPath) === folder
-      && descriptor.definitionSha256 === approved.definitionSha256;
+    const canSwitch = approved.datasetId === descriptor.datasetId && datasetBaseFolder(approved.definition) === folder;
     descriptor.approval = { revisionSha256, canSwitch };
     return canSwitch;
   } catch { return false; }

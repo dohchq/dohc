@@ -1,11 +1,13 @@
+import { SAVED_HERE, SAVING, saveProblem, saveStateEqual, type SaveState } from "@dohc/workspace-contracts/save-state";
 import { registerPendingEditorDraft } from "./pendingEditorDrafts";
 import { RecordButtonsRow } from "./collections/RecordButtonsRow";
 import type { RecordHistoryTarget } from "./collections/useRecordHistory";
 import type { ReportButtonError } from "./collections/useAutomationButtons";
 import {
+  DocumentControls,
   EngineMayHoldDocumentNotice,
+  OPENING_TITLE,
   ViewHeader,
-  type FileSaveState,
   OrphanedDraftNotices,
   EngineRemovalInProgressNotice,
 } from "./fileInspectorUi";
@@ -20,23 +22,24 @@ import {
   AUTOSAVE_DEBOUNCE_MS,
   publishOwnedUnmountDraft,
   type DraftFlush,
-  type SaveState,
 } from "./useAutosavedTextDraft";
 import { resolveWikilinkNavigation, resolveWorkspaceLinkNavigation } from "./wikilinkNavigation";
+import { reportTextSave } from "./shell/useDocumentSaveNotices";
 import { CopyButton } from "./ui/CopyButton";
-import { FileText } from "lucide-react";
+import { SkeletonRows } from "./ui/SkeletonRows";
 import {
   Suspense,
   lazy,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   useSyncExternalStore,
   type LazyExoticComponent,
 } from "react";
-import type * as Y from "yjs";
+import * as Y from "yjs";
 import type { ChatFileMentionRecord } from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
@@ -61,11 +64,10 @@ import { blockTargetForLine } from "./editor/intraBlock";
 import type { HeadingNavigationTarget } from "./editor/OutlinePanel";
 import type { PropertiesPanelProps } from "./PropertiesPanel";
 import { PageIdentity } from "./PageIdentity";
-import { FrontmatterAsWritten } from "./FrontmatterAsWritten";
+import { FrontmatterAsWritten, LiveFrontmatterAsWritten } from "./FrontmatterAsWritten";
 import { captureOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
 import { BacklinksPanel } from "./BacklinksPanel";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
-import { DocumentMenu } from "./DocumentMenu";
 import { EditorErrorBoundary } from "./editor/EditorErrorBoundary";
 import { extractWorkspaceHeadings, resolveWorkspaceHeadingAnchorTarget } from "../workspaces/workspaceHeadings";
 import type { SharedLocalDocument } from "./sharedLocalDocument";
@@ -84,7 +86,7 @@ const ENGINE_FRONTMATTER_FIELD = "frontmatter";
 
 // The filename without its directory or extension — the Notion-style empty
 // title placeholder ("2026-plan.md" -> "2026-plan").
-function filenameStem(path: string): string {
+export function filenameStem(path: string): string {
   const slash = path.lastIndexOf("/");
   const leaf = slash >= 0 ? path.slice(slash + 1) : path;
   const dot = leaf.lastIndexOf(".");
@@ -170,11 +172,13 @@ function DeletedWhileEditingNotice(props: {
   );
 }
 
+// One line in the 28px the empty properties row takes, so the body below
+// does not move when the panel arrives.
 function PropertiesFallback() {
   return (
     <div className="dohc-page-properties">
-      <div className="dohc-page-properties__inner text-[11px] text-subtle">
-        Loading properties...
+      <div className="dohc-page-properties__inner">
+        <SkeletonRows rows={1} label="Loading properties..." className="h-7 justify-center" />
       </div>
     </div>
   );
@@ -205,7 +209,7 @@ export function MarkdownView(props: {
   onOpenChatMention?: (mention: ChatFileMentionRecord) => void;
   chatMentionsAvailable?: boolean;
   onSharePath?: (path: string) => void;
-  onSaveStateChange?: (state: FileSaveState) => void;
+  onSaveStateChange?: (state: SaveState) => void;
   registerDraftFlush?: (flush: DraftFlush | null) => void;
   knownFiles?: ReadonlyArray<WikilinkFile>;
   pendingUndo?: PendingTextUndo;
@@ -273,7 +277,10 @@ export function MarkdownView(props: {
   const [savedBody, setSavedBody] = useState(props.body);
   const [wysiwygResyncEpoch, setWysiwygResyncEpoch] = useState(0);
   const knownFiles = props.knownFiles ?? EMPTY_WIKILINK_FILES;
-  const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved");
+  const [saveState, setSaveStateValue] = useState<SaveState>(SAVED_HERE);
+  const setSaveState = (state: SaveState) => {
+    setSaveStateValue((current) => saveStateEqual(current, state) ? current : state);
+  };
   const [writerSettledEpoch, setWriterSettledEpoch] = useState(0);
   const localSource = useRef<object>({});
   const activeLocalBuffer = useRef(props.localBuffer);
@@ -296,7 +303,7 @@ export function MarkdownView(props: {
   const engine = props.engine;
   useEffect(() => {
     if (!engine.available && pendingMarkdownOwner !== null) {
-      setSaveState("saving");
+      setSaveState(SAVING);
     }
   }, [engine.available, pendingMarkdownOwner]);
   // The engine open runs ON the capture chain, so a document opened
@@ -446,7 +453,7 @@ export function MarkdownView(props: {
     const newerInitialization =
       sharedSnapshot.source === null && baselineChanged;
     if (
-      sharedSnapshot.saveState === "saved" &&
+      sharedSnapshot.saveState.kind === "saved-here" &&
       !sharedSnapshot.dirty &&
       !bodyChanged
     ) {
@@ -501,7 +508,7 @@ export function MarkdownView(props: {
       draftRevision.current,
     );
     captureLatestConflictDraft();
-    if (!unmounted.current) setSaveState("error");
+    if (!unmounted.current) setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
   }
 
   function acceptSnapshot(
@@ -518,7 +525,7 @@ export function MarkdownView(props: {
         snapshot.body,
         snapshot.contentHash,
         localSource.current,
-        state === "error",
+        state.kind === "error",
         snapshot.readTicket,
       )
     ) {
@@ -575,7 +582,7 @@ export function MarkdownView(props: {
     ) {
       return false;
     }
-    return acceptSnapshot(snapshot, "error");
+    return acceptSnapshot(snapshot, saveProblem("error", "dohc could not confirm the file was saved."));
   }
 
   function reconcileConflictSnapshot() {
@@ -612,6 +619,32 @@ export function MarkdownView(props: {
   // writeDraftNow documents). The transition guard keeps it idempotent under
   // replayed renders (`readOnlyRef` precedent below).
   const orphanedDrafts = useOrphanedDrafts(props.workspaceId, props.path);
+  const lastLiveDoc = useRef<{ key: string; doc: Y.Doc } | null>(null);
+  const [endedCopy, setEndedCopy] = useState<{ key: string; doc: Y.Doc } | null>(null);
+  if (engine.doc) lastLiveDoc.current = { key: props.documentKey, doc: engine.doc };
+  const showEndedCopy = !engine.doc && !opening &&
+    engine.readOnlyCause === "access-ended" && orphanedDrafts.length === 0;
+  const endedSnapshot = useMemo(() => {
+    const live = lastLiveDoc.current;
+    return showEndedCopy && live?.key === props.documentKey
+      ? { key: live.key, update: Y.encodeStateAsUpdate(live.doc) }
+      : null;
+  }, [showEndedCopy, props.documentKey, engine.doc]);
+  useLayoutEffect(() => {
+    if (!endedSnapshot) {
+      setEndedCopy(null);
+      return;
+    }
+    // Commit owns the display copy. Discarded renders keep only bytes.
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, endedSnapshot.update);
+    lastLiveDoc.current = null;
+    setEndedCopy({ key: endedSnapshot.key, doc });
+    return () => doc.destroy();
+  }, [endedSnapshot]);
+  const readOnlyCopy = showEndedCopy && endedCopy?.key === props.documentKey ? endedCopy.doc : null;
+  const displayDoc = engine.doc ?? readOnlyCopy;
+
   const openingRef = useRef(opening);
   if (opening && !openingRef.current) {
     if (saveTimer.current) {
@@ -630,7 +663,7 @@ export function MarkdownView(props: {
       // set-aside edit's own signal is derived from the store below — that
       // way Dismiss retires it instead of stranding an
       // error chip on a draft that no longer exists.
-      setSaveState("saved");
+      setSaveState(SAVED_HERE);
       // The surface goes back to the document. Clearing the flag lets the
       // props.body sync effect take over when a dependency fires — but in
       // read mode `editing` never flips and the reopened body can be
@@ -658,7 +691,7 @@ export function MarkdownView(props: {
     conflictDraftId.current = null;
     capturedConflictDraft.current = null;
     flushConflict.current = false;
-    setSaveState("saved");
+    setSaveState(SAVED_HERE);
   }, [orphanedDrafts, saveState, props.contentRequestId]);
   // What the header chip shows: a real pending/failed save wins; otherwise an
   // unresolved set-aside draft gets its own state. The
@@ -667,18 +700,19 @@ export function MarkdownView(props: {
   // save-first prompt never promises to save a draft the pipeline cannot
   // write. The shell reads the store itself for the tab dot.
   const chipState =
-    saveState !== "saved"
+    saveState.kind !== "saved-here"
       ? saveState
       : orphanedDrafts.length > 0
         ? ("recovery" as const)
-        : "saved";
+        : engine.readOnlyCause === "access-ended" ? "read-only"
+          : engine.readOnlyCause ? "read-only-unavailable" : "saved";
   // The engine branch has its own authoritative save state; the set-aside
   // draft still is not in the document it shows, so a settled engine must
   // not read "Saved" over an unresolved notice.
   const engineChipState =
-    engine.saveState === "saved" && orphanedDrafts.length > 0
+    engine.saveState.kind === "saved-here" && orphanedDrafts.length > 0
       ? ("recovery" as const)
-      : engine.saveState;
+      : engine.goneCause ?? engine.saveState;
 
   serializeDraftRef.current = () => {
     // WYSIWYG mode: the Tiptap editor owns the body while inline PageIdentity /
@@ -714,17 +748,17 @@ export function MarkdownView(props: {
     // whose retry bound the document), it is empty. Refuse instead of
     // exporting stale text; the menu says the document is not ready.
     const editorBody = wysiwygRef.current?.getMarkdown();
-    if (editorBody === undefined && engine.doc !== null) return null;
+    if (editorBody === undefined && displayDoc !== null) return null;
     const body = editorBody ?? markdownEditorBody(props.body);
-    if (!engine.doc) {
+    if (!displayDoc) {
       return mergeMarkdownEditorBody(latestDraft.current, body);
     }
     const liveMeta = Object.fromEntries(
-      engine.doc.getMap(ENGINE_FRONTMATTER_FIELD).entries(),
+      displayDoc.getMap(ENGINE_FRONTMATTER_FIELD).entries(),
     ) as Record<string, unknown>;
     // The frontmatter text the settle keeps, so a copy matches the file.
-    const meta = engine.doc.getMap("meta");
-    const written = writtenFrontmatterKeys(engine.doc.getMap(ENGINE_FRONTMATTER_FIELD), meta);
+    const meta = displayDoc.getMap("meta");
+    const written = writtenFrontmatterKeys(displayDoc.getMap(ENGINE_FRONTMATTER_FIELD), meta);
     const block = frontmatterBlockFor(
       orderFrontmatter(liveMeta),
       meta.get("dohcFrontmatterSource"),
@@ -834,6 +868,7 @@ export function MarkdownView(props: {
     onPendingDraftChange?.(unsavedDraft.current);
   });
   const readOnly =
+    readOnlyCopy !== null ||
     !!props.forceReadOnly ||
     engine.notInVersion ||
     engine.documentUnavailable ||
@@ -871,7 +906,24 @@ export function MarkdownView(props: {
   const { writesRefusedRef } = props;
   const writesBlocked = () =>
     readOnlyRef.current || writesRefusedRef.current || staleBaseline.current;
-  const engineMode = engine.available && engine.doc !== null;
+  // What a plain write did to the file it wrote, for the shell's save
+  // notices. Their Try again saves the newest draft only while this view
+  // still shows that file and can write it.
+  const saveNowRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  const reportSave = (failure: { cause?: unknown } | null) => {
+    const written = props.localBuffer;
+    reportTextSave(props.workspaceId, props.path, failure && {
+      ...failure,
+      retry: () => {
+        if (unmounted.current || activeLocalBuffer.current !== written || writesBlocked() || openingRef.current) {
+          return false;
+        }
+        void saveNowRef.current();
+        return true;
+      },
+    });
+  };
+  const engineMode = displayDoc !== null;
   const engineModeRef = useRef(engineMode);
   engineModeRef.current = engineMode;
   const flushEngineUpdatesRef = useRef(engine.flushPendingLocalUpdates);
@@ -894,7 +946,7 @@ export function MarkdownView(props: {
   // doc identity also covers a same-version engine retry.
   const sourceMarkdown =
     sourceProjection?.documentKey === props.documentKey &&
-    sourceProjection.doc === engine.doc
+    sourceProjection.doc === displayDoc
       ? sourceProjection.markdown
       : null;
   const readDocumentRef = useRef<HTMLDivElement | null>(null);
@@ -994,14 +1046,14 @@ export function MarkdownView(props: {
             acceptedRequestFloor.current,
             snapshot.requestId,
           );
-          setSaveState("saved");
+          setSaveState(SAVED_HERE);
           return;
         }
         flushConflict.current = true;
         conflictContentHash.current = snapshot.contentHash;
         conflictRequestId.current = snapshot.requestId;
         captureLatestConflictDraft();
-        acceptSnapshot(snapshot, "error");
+        acceptSnapshot(snapshot, saveProblem("error", "dohc could not confirm the file was saved."));
         return;
       }
     }
@@ -1011,7 +1063,7 @@ export function MarkdownView(props: {
       writersLive.current === 0 &&
       props.contentRequestId > acceptedRequestFloor.current
     ) {
-      acceptSnapshot(latestSnapshot.current, "saved");
+      acceptSnapshot(latestSnapshot.current, SAVED_HERE);
     }
     // The helpers read mutable writer state and the atomic snapshot above.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1071,7 +1123,7 @@ export function MarkdownView(props: {
           props.path,
           serializeDraftRef.current(),
         );
-        setSaveState("saved");
+        setSaveState(SAVED_HERE);
       }
       const sharedBeforeResync = props.localBuffer.getSnapshot();
       const peerDraftPending =
@@ -1194,11 +1246,11 @@ export function MarkdownView(props: {
     setJump(null);
   }, [jump, showSource]);
   useEffect(() => {
-    if (!showSource || !engine.doc) {
+    if (!showSource || !displayDoc) {
       setSourceProjection(null);
       return;
     }
-    const doc = engine.doc;
+    const doc = displayDoc;
     const documentKey = props.documentKey;
     let cancelled = false;
     let serialize: ((doc: Y.Doc) => string) | null = null;
@@ -1246,7 +1298,7 @@ export function MarkdownView(props: {
       if (updateTimer !== null) clearTimeout(updateTimer);
       doc.off("update", scheduleRecompute);
     };
-  }, [showSource, engine.doc, props.documentKey]);
+  }, [showSource, displayDoc, props.documentKey]);
 
   // One toggle for both branches (the shell's palette command and Ctrl/Cmd+/
   // route through it): engine mode flips the read-only source projection; the
@@ -1301,15 +1353,7 @@ export function MarkdownView(props: {
     }
     // Deletion is terminal: recovery owns any text worth keeping, and the
     // shell must not promise a flush to a path that no longer exists.
-    onSaveStateChange?.(
-      engine.saveState === "saved" ||
-        engine.saveState === "saving" ||
-        engine.saveState === "deleted"
-        ? engine.saveState
-        : engine.saveState === "object-changed"
-          ? "deleted"
-          : "error",
-    );
+    onSaveStateChange?.(engine.saveState);
   }, [saveState, engine.available, engine.saveState, onSaveStateChange]);
 
   useEffect(() => {
@@ -1376,7 +1420,7 @@ export function MarkdownView(props: {
           captureLatestConflictDraft(options.textSnapshot);
           if (options.releaseUnusedDraft) props.localBuffer.releaseUnusedDraft();
         }
-        if (!unmounted.current) setSaveState("error");
+        if (!unmounted.current) setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
         return;
       }
       // Mounted edits publish when they happen. Re-reading this pane's editor
@@ -1396,8 +1440,9 @@ export function MarkdownView(props: {
       // newest text, so an older queued write can never land over a newer one.
       const issuedRevision = draftRevision.current;
       unsavedDraft.current = false;
-      if (!unmounted.current) setSaveState("saving");
+      if (!unmounted.current) setSaveState(SAVING);
       let issuedText: string | null = null;
+      let answered = false;
       try {
         const writing = props.localBuffer.write(
           localSource.current,
@@ -1413,6 +1458,8 @@ export function MarkdownView(props: {
         );
         if (options.releaseUnusedDraft) props.localBuffer.releaseUnusedDraft();
         const result = await writing;
+        answered = true;
+        reportSave(result.status === "no-baseline" ? {} : null);
         if (activeLocalBuffer.current !== props.localBuffer) {
           if (result.status === "conflict" || result.status === "no-baseline") {
             captureOrphanedDraft(props.workspaceId, props.path, result.body);
@@ -1423,7 +1470,7 @@ export function MarkdownView(props: {
         latestDraft.current = props.localBuffer.getSnapshot().body;
         if (result.status === "skipped") {
           baseContentHash.current = result.contentHash;
-          if (!unmounted.current) setSaveState("saved");
+          if (!unmounted.current) setSaveState(SAVED_HERE);
           return;
         }
         if (result.status === "no-baseline") {
@@ -1431,7 +1478,7 @@ export function MarkdownView(props: {
           if (options.captureOnFailure && options.textSnapshot !== undefined) {
             captureLatestConflictDraft(options.textSnapshot);
           }
-          if (!unmounted.current) setSaveState("error");
+          if (!unmounted.current) setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
           if (options.rejectOnError) {
             throw new Error("dohc cannot save this draft without a content hash.");
           }
@@ -1453,7 +1500,7 @@ export function MarkdownView(props: {
           unsavedDraft.current = false;
           captureLatestConflictDraft();
           if (!unmounted.current) {
-            setSaveState("error");
+            setSaveState(saveProblem("error", "The file changed on disk."));
             reconcileConflictSnapshot();
           }
           if (options.rejectOnError) {
@@ -1469,7 +1516,7 @@ export function MarkdownView(props: {
         if (latestContentRequestId.current > issuedBaseRequestId) {
           verifyAfterRequestId.current = latestContentRequestId.current;
           if (!unmounted.current) {
-            setSaveState("saving");
+            setSaveState(SAVING);
             props.refreshAfterConflict();
           }
           return;
@@ -1477,13 +1524,16 @@ export function MarkdownView(props: {
         if (!unmounted.current && draftRevision.current === issuedRevision) {
           setDraft(text);
           setSavedBody(text);
-          setSaveState("saved");
+          setSaveState(SAVED_HERE);
         } else if (!unmounted.current && !unsavedDraft.current) {
           // The write queue cannot start a newer writer until this run returns.
           // A queued or pending local edit therefore keeps this flag set.
-          setSaveState("saved");
+          setSaveState(SAVED_HERE);
         }
       } catch (error) {
+        // A write that rejected is a failed save. A throw after the write
+        // answered comes from handling that answer, which is reported above.
+        if (!answered) reportSave({ cause: error });
         if (activeLocalBuffer.current !== props.localBuffer) {
           if (issuedText !== null) {
             captureOrphanedDraft(props.workspaceId, props.path, issuedText);
@@ -1497,7 +1547,7 @@ export function MarkdownView(props: {
         if (options.captureOnFailure && options.textSnapshot !== undefined) {
           captureLatestConflictDraft(options.textSnapshot);
         }
-        if (!unmounted.current) setSaveState("error");
+        if (!unmounted.current) setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
         if (options.rejectOnError) throw error;
       }
     };
@@ -1524,6 +1574,7 @@ export function MarkdownView(props: {
   async function saveNow(): Promise<void> {
     await writeDraftNow();
   }
+  saveNowRef.current = saveNow;
 
   function onDraft(next: string) {
     if (readOnly) return;
@@ -1570,7 +1621,7 @@ export function MarkdownView(props: {
     }
     draftRevision.current += 1;
     unsavedDraft.current = true;
-    setSaveState("saving");
+    setSaveState(SAVING);
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => void saveNow(), AUTOSAVE_DEBOUNCE_MS);
   }
@@ -1900,50 +1951,52 @@ export function MarkdownView(props: {
   // Yjs UndoManager.
   // "Source" flips to a read-only projection of the Y.Doc's markdown — a VIEW,
   // never a second editing surface (see the showSource comment above).
-  if (engine.available && engine.doc) {
+  if (displayDoc) {
     return (
       <div className="flex min-h-0 flex-1 flex-col">
         <ViewHeader
-          icon={<FileText size={13} aria-hidden />}
           path={props.path}
-          label={showSource ? "markdown source" : "document"}
           onShare={onShareCurrentPath}
+          status={
+            <StateMark
+              testId="markdown-save-state"
+              truncate
+              state={engine.readOnlyWhileEditing || readOnlyCopy ? "read-only" : engineChipState}
+              shown={engine.readOnlyWhileEditing || readOnlyCopy
+                ? orphanedDrafts.length > 0 ? "read-only-transition" : engine.readOnlyCause === "access-ended" ? "read-only" : "read-only-unavailable"
+                : engineChipState}
+              title={
+                engine.readOnlyCause === "access-ended" && orphanedDrafts.length === 0
+                  ? "Your access to this document ended."
+                  : (engineChipState === "deleted" ||
+                  engineChipState === "object-changed") &&
+                hasSetAsideEdit
+                  ? goneNotice(engine.goneCause, true)
+                  : typeof engineChipState !== "string" && engineChipState.kind === "error" && engine.saveError
+                    ? engine.saveError
+                    : undefined
+              }
+            />
+          }
           actions={
-            <>
-              <StateMark
-                testId="markdown-save-state"
-                state={engineChipState}
-                shown={engine.readOnlyWhileEditing ? "read-only-transition" : engineChipState}
-                title={
-                  (engineChipState === "deleted" ||
-                    engineChipState === "object-changed") &&
-                  hasSetAsideEdit
-                    ? goneNotice(engine.goneCause, true)
-                    : engineChipState === "error" && engine.saveError
-                      ? engine.saveError
-                      : undefined
-                }
-              />
-              <button
-                type="button"
-                data-testid="markdown-source-toggle"
-                aria-pressed={showSource}
-                title="Toggle markdown source (Ctrl+/)"
-                onClick={toggleSourceView}
-                className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
-              >
-                {showSource ? "Editor" : "Source"}
-              </button>
-              <DocumentMenu
-                workspaceId={props.workspaceId}
-                reportError={props.onButtonError}
-                suggestedName={filenameStem(props.path)}
+            <DocumentControls
+              toggle={{
+                label: showSource ? "Editor" : "Source",
+                testId: "markdown-source-toggle",
+                pressed: showSource,
+                title: "Toggle markdown source (Ctrl+/)",
+                onClick: toggleSourceView,
+              }}
+              menu={{
+                workspaceId: props.workspaceId,
+                reportError: props.onButtonError,
+                suggestedName: filenameStem(props.path),
                 // Always live, even in source view: the WYSIWYG editor stays
                 // MOUNTED (hidden) while source is shown, so its ref keeps
                 // serializing the current Y.Doc state at click time.
-                getMarkdown={() => serializeEngineDraft()}
-              />
-            </>
+                getMarkdown: () => serializeEngineDraft(),
+              }}
+            />
           }
         />
         {props.truncatedNotice}
@@ -1954,21 +2007,13 @@ export function MarkdownView(props: {
           // steps aside, like the legacy editor's source mode.
           <div data-testid="view-markdown-source" className="flex min-h-0 flex-1 flex-col">
             <div className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px] text-subtle">
-              <span>Read-only markdown source — switch back to Editor to make changes.</span>
+              <span>{readOnly ? "Read-only markdown source" : "Read-only markdown source — switch back to Editor to make changes."}</span>
               <CopyButton testId="markdown-source-copy" getText={() => sourceMarkdown} />
             </div>
             {sourceMarkdown === null ? (
-              <div className="flex flex-1 items-center justify-center text-xs text-subtle">
-                Loading source...
-              </div>
+              <SkeletonRows layout="panel" label="Loading source..." />
             ) : (
-              <Suspense
-                fallback={
-                  <div className="flex flex-1 items-center justify-center text-xs text-subtle">
-                    Loading source...
-                  </div>
-                }
-              >
+              <Suspense fallback={<SkeletonRows layout="panel" label="Loading source..." />}>
                 <LazySourceCodeEditor
                   testId="markdown-source-view"
                   value={sourceMarkdown}
@@ -1983,7 +2028,11 @@ export function MarkdownView(props: {
             )}
           </div>
         ) : null}
-        {/* data-dohc-doc-pane: the whole pane is the editor's image drop zone,
+        {/* Every document pane keeps its scrollbar's room, so a short and a
+            long document share one column, and the loading lines line up
+            with both (FileInspector).
+
+            data-dohc-doc-pane: the whole pane is the editor's image drop zone,
             top-matter included — MarkdownEditor finds it with closest(). See
             the drop-zone comment in imagePaste.ts.
 
@@ -1997,13 +2046,13 @@ export function MarkdownView(props: {
           data-testid="view-markdown"
           data-dohc-doc-pane=""
           hidden={showSource}
-          className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)]"
+          className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
         >
           {/* Title + inline properties are one top-matter zone (hovering it
               reveals the quiet "Add a property" affordance on empty docs). */}
           <div className="dohc-page-topmatter">
             <PageIdentity
-              ydoc={engine.doc}
+              ydoc={displayDoc}
               filenameStem={filenameStem(props.path)}
               readOnly={readOnly}
               onEnterBody={() => wysiwygRef.current?.focus("start")}
@@ -2011,10 +2060,18 @@ export function MarkdownView(props: {
             {recordButtons}
             {readOnly ? null : (
               <Suspense fallback={<PropertiesFallback />}>
-                <LazyPropertiesPanel ydoc={engine.doc} fieldMarks={fieldMarks} />
+                <LazyPropertiesPanel ydoc={displayDoc} fieldMarks={fieldMarks} />
               </Suspense>
             )}
-            <FrontmatterAsWritten ydoc={engine.doc} saved={engine.saveState === "saved"} propertiesShown={!readOnly} />
+            <LiveFrontmatterAsWritten
+              workspaceId={props.workspaceId}
+              path={props.path}
+              // Null until the inspector has read the file.
+              body={props.contentRequestId > 0 ? props.body : null}
+              ydoc={displayDoc}
+              saveState={engine.saveState}
+              propertiesShown={!readOnly}
+            />
           </div>
           <EditorErrorBoundary
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:engine`}
@@ -2035,7 +2092,7 @@ export function MarkdownView(props: {
               onPendingUndoConsumed={props.onPendingUndoConsumed}
               readOnly={readOnly}
               collab={{
-                ydoc: engine.doc,
+                ydoc: displayDoc,
                 // Solo engine editing shows the settle indicator, not presence
                 // chrome — "disabled" hides the in-editor presence bar while the
                 // ydoc still drives Tiptap (collabActive keys off ydoc, not this).
@@ -2056,17 +2113,15 @@ export function MarkdownView(props: {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <ViewHeader
-        icon={<FileText size={13} aria-hidden />}
         path={props.path}
-        label="document"
         onShare={onShareCurrentPath}
-        actions={
+        status={
           <>
             {/* The wait has its own word: an opening document is not a
                 saved one, and dohc has not decided about it yet. Read mode
                 hides the "Saved" idle chip, but PageIdentity stays editable
                 there and autosaves title/icon edits — so a pending or failed
-                save (saveState !== "saved") must surface even when not
+                save (saveState.kind !== "saved-here") must surface even when not
                 `editing`, or a failed title/icon save is invisible while the
                 optimistic value keeps showing. */}
             {opening ? (
@@ -2077,8 +2132,9 @@ export function MarkdownView(props: {
                 // browser does not reliably draw a tooltip over a disabled
                 // control. This span is not disabled, so hovering the state
                 // always explains it.
-                title="You can edit this document when it finishes opening."
-                className="font-mono text-[11px] text-subtle"
+                title={OPENING_TITLE}
+                // Shown only if opening is slow, like the loading lines.
+                className="dohc-reveal-if-slow min-w-0 truncate font-mono text-[11px] text-subtle"
               >
                 Opening…
               </span>
@@ -2088,60 +2144,58 @@ export function MarkdownView(props: {
                 opening, `editing` is always false, so the chip appears there
                 only when the state is not "saved". */}
             {editing || chipState !== "saved" ? (
-              <StateMark testId="markdown-save-state" state={chipState} shown={chipState} />
+              <StateMark testId="markdown-save-state" truncate state={chipState} shown={chipState} title={chipState === "read-only" ? "Your access to this document ended." : undefined} />
             ) : null}
-            <button
-              type="button"
-              data-testid="markdown-edit-toggle"
-              disabled={readOnly || opening}
-              title={
-                opening
-                  ? "You can edit this document when it finishes opening."
-                  : undefined
-              }
-              onClick={() => {
+          </>
+        }
+        actions={
+          <DocumentControls
+            toggle={{
+              label: surfaceMode === "read" ? "Edit" : surfaceMode === "wysiwyg" ? "Source" : "WYSIWYG",
+              testId: "markdown-edit-toggle",
+              disabled: readOnly || opening,
+              title: opening ? OPENING_TITLE : undefined,
+              onClick: () => {
                 if (readOnly || opening) return;
                 if (mode === "source" && saveTimer.current) {
                   clearTimeout(saveTimer.current);
                   void saveNow();
                 }
                 toggleEditorMode();
-              }}
-              className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {surfaceMode === "read" ? "Edit" : surfaceMode === "wysiwyg" ? "Source" : "WYSIWYG"}
-            </button>
-            {/* A truncated doc only loaded a bounded prefix into
-                serializeDraftRef — copying/exporting it would silently emit a
-                partial document. Hide the menu until the full file is loaded
-                (same gate as the inline properties below). */}
-            {!props.truncated ? (
-              <DocumentMenu
-                workspaceId={props.workspaceId}
-                reportError={props.onButtonError}
-                suggestedName={filenameStem(props.path)}
-                // The same rule the engine branch answers to: emit the
-                // document, or refuse. This branch shows the disk, and until
-                // the engine open answers there is no telling whether the
-                // disk is the document — a session that binds a moment later
-                // may hold replicated updates the file has never seen (#564,
-                // codex r19/r21). Refuse for the whole unresolved window,
-                // which the editor beside this menu already spends read-only
-                // or opening. The refusal reads "Document not open", and the
-                // notice below offers the retry that resolves it.
-                //
-                // `opening` is the wait and `engineMayHoldDocument` is the
-                // wait giving up; both mean the same thing to an export. Once
-                // the open answers "not engine-backed", the file IS the
-                // document and this lifts.
-                getMarkdown={() =>
-                  engine.opening || engine.engineMayHoldDocument
-                    ? null
-                    : serializeDraftRef.current()
-                }
-              />
-            ) : null}
-          </>
+              },
+            }}
+            // A truncated doc only loaded a bounded prefix into
+            // serializeDraftRef — copying/exporting it would silently emit a
+            // partial document. No menu until the full file is loaded (same
+            // gate as the inline properties below).
+            menu={
+              props.truncated
+                ? null
+                : {
+                    workspaceId: props.workspaceId,
+                    reportError: props.onButtonError,
+                    suggestedName: filenameStem(props.path),
+                    // The same rule the engine branch answers to: emit the
+                    // document, or refuse. This branch shows the disk, and until
+                    // the engine open answers there is no telling whether the
+                    // disk is the document — a session that binds a moment later
+                    // may hold replicated updates the file has never seen (#564,
+                    // codex r19/r21). Refuse for the whole unresolved window,
+                    // which the editor beside this menu already spends read-only
+                    // or opening. The refusal reads "Document not open", and the
+                    // notice below offers the retry that resolves it.
+                    //
+                    // `opening` is the wait and `engineMayHoldDocument` is the
+                    // wait giving up; both mean the same thing to an export. Once
+                    // the open answers "not engine-backed", the file IS the
+                    // document and this lifts.
+                    getMarkdown: () =>
+                      engine.opening || engine.engineMayHoldDocument
+                        ? null
+                        : serializeDraftRef.current(),
+                  }
+            }
+          />
         }
       />
       {props.truncatedNotice}
@@ -2151,7 +2205,7 @@ export function MarkdownView(props: {
           timeout aside — where the user can copy it — instead of letting it
           reach disk over the artifact the engine is binding. */}
       {engine.engineMayHoldDocument || engine.liveHostUnavailable ? (
-        <EngineMayHoldDocumentNotice onRetry={props.onRetryEngineOpen} contentShown />
+        <EngineMayHoldDocumentNotice onRetry={props.onRetryEngineOpen} contentShown message={engine.sharedWaiting?.message} />
       ) : null}
       {engine.removalInProgress ? (
         <EngineRemovalInProgressNotice
@@ -2161,13 +2215,7 @@ export function MarkdownView(props: {
       ) : null}
       {documentNotices}
       {surfaceMode === "source" ? (
-        <Suspense
-          fallback={
-            <div className="flex min-h-0 flex-1 items-center justify-center text-xs text-subtle">
-              Loading editor...
-            </div>
-          }
-        >
+        <Suspense fallback={<SkeletonRows layout="panel" label="Loading editor..." />}>
           <LazySourceCodeEditor
             testId="markdown-editor"
             value={draft}
@@ -2195,7 +2243,7 @@ export function MarkdownView(props: {
           ref={localDocPaneRef}
           data-testid="view-markdown"
           data-dohc-doc-pane=""
-          className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)]"
+          className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
         >
           <div className="dohc-page-topmatter">
             <PageIdentity
@@ -2250,13 +2298,7 @@ export function MarkdownView(props: {
         // rich document. Keep view-markdown: callers use it as the mounted
         // document surface regardless of which read representation owns it.
         <div data-testid="view-markdown" className="flex min-h-0 flex-1 flex-col">
-          <Suspense
-            fallback={
-              <div className="flex flex-1 items-center justify-center text-xs text-subtle">
-                Loading source...
-              </div>
-            }
-          >
+          <Suspense fallback={<SkeletonRows layout="panel" label="Loading source..." />}>
             <LazySourceCodeEditor
               testId="markdown-source-view"
               value={props.body}
@@ -2275,7 +2317,7 @@ export function MarkdownView(props: {
         <div
           ref={localDocPaneRef}
           data-testid="view-markdown"
-          className="min-h-0 flex-1 overflow-auto"
+          className="min-h-0 flex-1 overflow-auto [scrollbar-gutter:stable]"
         >
           <div className="dohc-page-topmatter">
             {/* Title, icon and properties autosave through the same disk write

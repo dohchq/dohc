@@ -1,3 +1,5 @@
+import type { SharedDocumentOpenState } from "../../ipc/sharedDocumentOpenState";
+import { SAVED_HERE, SAVING, UNKNOWN_SAVE_STATE, saveProblem, saveStateEqual, type SaveState } from "@dohc/workspace-contracts/save-state";
 import * as Y from "yjs";
 import { authorCapacityMessage } from "./authorCapacityMessage";
 import type { LiveDocumentKind } from "@dohc/workspace-contracts/live-documents";
@@ -8,7 +10,7 @@ import {
 } from "@dohc/excalidraw-scene";
 import type { BinaryFileData } from "@excalidraw/excalidraw/types";
 import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
-import type { EngineYDocSaveStateEvent } from "../../ipc/bridgeContract";
+import type { EngineYDocSaveStateEvent, ReadOnlyTransitionCause } from "../../ipc/bridgeContract";
 import { readError, withErrorWords } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 import { documentKey, documentVersionKey } from "../documentVersionKey";
@@ -20,6 +22,7 @@ import {
   captureOrphanedDraft,
   replaceOrphanedDraft,
 } from "../orphanedDrafts";
+import { bytesToBase64 } from "../base64";
 import {
   bindEngineYDoc,
   EngineYDocDeliveryRefusedError,
@@ -110,30 +113,6 @@ function snapshotsEqual(a: Uint8Array, b: Uint8Array): boolean {
   return true;
 }
 
-// "error" = a settle failed, so the file on disk is behind what the editor
-// shows. "file-locked" = the same stale disk, but transient by contract:
-// another program holds the file's handle and the engine retries until it
-// releases, so the copy names the blocker instead of advising an edit.
-// "read-only" = the workspace is a read-only shared view and the edit
-// was discarded outright; retrying cannot help, so it gets its own copy.
-// "changed-on-disk" = the file was edited outside dohc while this document was
-// open, and dohc kept that edit instead of overwriting it.
-// "deleted" and "object-changed" = this document is gone from its path: the
-// file was deleted, or another file now holds the path. Both set the text
-// aside and refuse further writes.
-// None is ever inferred — main pushes all of them from real outcomes.
-export type EngineDocSaveState =
-  | "saved-to-host"
-  | "saved"
-  | "saving"
-  | "error"
-  | "file-locked"
-  | "pending-share"
-  | "read-only"
-  | "changed-on-disk"
-  | "deleted"
-  | "object-changed";
-
 // Why a document left its path while it was open.
 export type DocumentGoneCause = "deleted" | "object-changed";
 
@@ -177,6 +156,7 @@ type EngineDocOpenOutcome =
   | { kind: "not-in-version" }
   | { kind: "document-unavailable" }
   | { kind: "live-host-unavailable" }
+  | { kind: "shared-waiting"; waiting: SharedDocumentOpenState }
   | { kind: "engine-may-hold-document" }
   | { kind: "artifact-assets-invalid" }
   | { kind: "removal-in-progress"; removal: EngineRemovalInProgress };
@@ -224,6 +204,7 @@ function makeTransport(
           : {}),
         ...(result.notInVersion ? { notInVersion: true } : {}),
         ...(result.liveHostUnavailable ? { liveHostUnavailable: true } : {}),
+        ...(result.sharedWaiting ? { sharedWaiting: result.sharedWaiting } : {}),
         ...(result.documentUnavailable ? { documentUnavailable: true } : {}),
         ...(result.engineMayHoldDocument ? { engineMayHoldDocument: true } : {}),
         ...(result.artifactAssetsInvalid ? { artifactAssetsInvalid: true } : {}),
@@ -303,6 +284,7 @@ function makeTransport(
 }
 
 export type EngineDocInput = {
+  accessEnded?: boolean;
   workspaceId: string;
   path: string;
   // The caller gates which supported live files open an engine session.
@@ -324,7 +306,7 @@ export type EngineDocInput = {
 export type EngineDocLeaseSnapshot = {
   key: string;
   outcome: EngineDocOpenOutcome | null;
-  saveState: EngineDocSaveState;
+  saveState: SaveState;
   saveError: string | null;
   authorCapacity: boolean;
   deletion: {
@@ -332,7 +314,7 @@ export type EngineDocLeaseSnapshot = {
     draftId: number | null;
     cause: DocumentGoneCause;
   } | null;
-  readOnlyTransition: { token: number } | null;
+  readOnlyTransition: { token: number; cause: ReadOnlyTransitionCause } | null;
   permanentFailure: { token: number } | null;
   sceneRecoveryAssets: {
     token: number;
@@ -366,7 +348,7 @@ function emptyLeaseSnapshot(requestKey: string): EngineDocLeaseSnapshot {
   return {
     key: requestKey,
     outcome: null,
-    saveState: "saved",
+    saveState: UNKNOWN_SAVE_STATE,
     saveError: null,
     authorCapacity: false,
     deletion: null,
@@ -415,7 +397,7 @@ function createEngineDocSession(
   const token = ++engineDocLeaseCounter;
   const sessionId = nextSessionId();
   const listeners = new Set<() => void>();
-  const saveStateRef = { current: "saved" as EngineDocSaveState };
+  const saveStateRef = { current: UNKNOWN_SAVE_STATE as SaveState };
   const writesRefused = { current: false };
   const localSeq = { current: 0 };
   const transport = makeTransport(
@@ -431,6 +413,8 @@ function createEngineDocSession(
   let started = false;
   let disposed = false;
   let binding: EngineYDocBinding | null = null;
+  const recoveryIdentity = (bytes: Uint8Array, objectId: string | null = binding?.objectId ?? null) =>
+    objectId ? {objectId, updateBase64: bytesToBase64(bytes)} : undefined;
   let retiredBinding: EngineYDocBinding | null = null;
   let bindingDestroyed = false;
   let detachSaveObserver: (() => void) | null = null;
@@ -438,8 +422,12 @@ function createEngineDocSession(
   let deletionPending = false;
   let deletionCause: DocumentGoneCause = "deleted";
   let deliveryPending = false;
+  let typingUnresolved = false;
+  let confirmedLocalSeq = 0;
   let pendingSavedSeq: number | null = null;
-  let pendingSavedState: "saved" | "saved-to-host" = "saved";
+  let replacementPending = false;
+  let replacementSaveState: EngineYDocSaveStateEvent | null = null;
+  let pendingSavedState: SaveState = SAVED_HERE;
   const retiredDraftObservers = new Map<Y.Doc, () => void>();
   let lifecycle: Promise<void> = Promise.resolve();
   let disposePromise: Promise<void> | null = null;
@@ -501,10 +489,12 @@ function createEngineDocSession(
   });
 
   const reportSaveState = (
-    state: EngineDocSaveState,
+    state: SaveState,
     error: string | null = null,
     authorCapacity = false,
   ): void => {
+    if (state.kind === "error" && error) state = saveProblem("error", error, "issueId" in state ? state.issueId : null);
+    if (saveStateEqual(snapshot.saveState, state) && snapshot.saveError === error && snapshot.authorCapacity === authorCapacity) return;
     saveStateRef.current = state;
     publish((current) => ({ ...current, saveState: state, saveError: error, authorCapacity }));
   };
@@ -521,6 +511,7 @@ function createEngineDocSession(
       !writesRefused.current &&
       pendingSavedSeq >= localSeq.current
     ) {
+      confirmedLocalSeq = pendingSavedSeq;
       reportSaveState(pendingSavedState);
     }
     pendingSavedSeq = null;
@@ -637,6 +628,7 @@ function createEngineDocSession(
     sceneRecovery: SceneRecoveryWork | null = null,
   ): void => {
     const slot = recovery;
+    const snapshotObjectId = binding?.objectId ?? null;
     const revision = ++slot.revision;
     const statusRevision = transition && sceneRecovery
       ? ++recoveryStatusRevision
@@ -670,9 +662,9 @@ function createEngineDocSession(
         }
         if (slot.draftId === null) {
           if (!forceCreate) return;
-          slot.draftId = captureOrphanedDraft(workspaceId, path, text);
+          slot.draftId = captureOrphanedDraft(workspaceId, path, text, recoveryIdentity(newest, snapshotObjectId));
         } else {
-          replaceOrphanedDraft(workspaceId, path, slot.draftId, text);
+          replaceOrphanedDraft(workspaceId, path, slot.draftId, text, recoveryIdentity(newest, snapshotObjectId));
         }
         // Only the published render state dies with the session — the draft
         // itself is already durable in the module-level store, unmount or not.
@@ -725,6 +717,7 @@ function createEngineDocSession(
   const captureDeletion = (
     doc: Y.Doc,
     cause: DocumentGoneCause = "deleted",
+    edited = false,
   ): void => {
     writesRefused.current = true;
     // The PATH is gone whichever lineage wins: deletion outlives any later
@@ -737,7 +730,7 @@ function createEngineDocSession(
     // serializer would otherwise get to read it.
     const bytes = Y.encodeStateAsUpdate(doc);
     recovery.snapshotBytes = bytes;
-    const forceCreate = saveStateRef.current !== "saved";
+    const forceCreate = edited || (saveStateRef.current.kind !== "saved-here" && saveStateRef.current.kind !== "unknown");
     const sceneRecovery =
       forceCreate && documentKind === "scene" && binding
         ? prepareSceneRecovery(bytes, binding)
@@ -753,13 +746,14 @@ function createEngineDocSession(
         workspaceId,
         path,
         sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc, bytes),
+        recoveryIdentity(bytes),
       );
     }
     publish((current) => ({
       ...current,
       deletion: { token, draftId: recovery.draftId, cause },
     }));
-    reportSaveState(cause);
+    reportSaveState(UNKNOWN_SAVE_STATE);
     enqueueRecoverySnapshot(
       bytes,
       forceCreate,
@@ -768,28 +762,32 @@ function createEngineDocSession(
     );
   };
 
-  const captureReadOnlyTransition = (doc: Y.Doc): void => {
+  const captureReadOnlyTransition = (doc: Y.Doc, recoverEdits = true, cause: ReadOnlyTransitionCause = "access-ended"): void => {
     writesRefused.current = true;
     recovery.transition = "read-only";
     const bytes = Y.encodeStateAsUpdate(doc);
     recovery.snapshotBytes = bytes;
     const sceneRecovery =
-      documentKind === "scene" && binding
+      recoverEdits && documentKind === "scene" && binding
         ? prepareSceneRecovery(bytes, binding)
         : null;
-    // Main sends this state only after it has discarded a local update.
-    // Persist the rejected document synchronously before the session closes.
-    recovery.draftId = captureOrphanedDraft(
-      workspaceId,
-      path,
-      sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc, bytes),
-    );
+    if (recoverEdits) {
+      // Persist the rejected document synchronously before the session closes.
+      recovery.draftId = captureOrphanedDraft(
+        workspaceId,
+        path,
+        sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc, bytes),
+        recoveryIdentity(bytes),
+      );
+    }
     publish((current) => ({
       ...current,
-      readOnlyTransition: { token },
+      readOnlyTransition: { token, cause },
     }));
-    reportSaveState("read-only");
-    enqueueRecoverySnapshot(bytes, true, recovery.transition, sceneRecovery);
+    reportSaveState(UNKNOWN_SAVE_STATE);
+    if (recoverEdits) {
+      enqueueRecoverySnapshot(bytes, true, recovery.transition, sceneRecovery);
+    }
   };
 
   const refreshRecoveryDraft = (doc: Y.Doc): void => {
@@ -810,6 +808,13 @@ function createEngineDocSession(
         recovery.draftId,
         sceneRecovery?.immediateText ??
           crudeRecoveryText(documentKind, doc, bytes),
+        recoveryIdentity(bytes),
+      );
+    } else {
+      recovery.draftId = captureOrphanedDraft(
+        workspaceId,
+        path,
+        sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc, bytes),
       );
     }
     enqueueRecoverySnapshot(
@@ -833,13 +838,14 @@ function createEngineDocSession(
       workspaceId,
       path,
       sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc, bytes),
+      recoveryIdentity(bytes),
     );
     if (!disposed) {
       publish((current) => ({
         ...current,
         permanentFailure: { token },
       }));
-      reportSaveState("error", readError(error).words);
+      reportSaveState(saveProblem("error", "dohc could not confirm the file was saved."), readError(error).words);
     }
     enqueueRecoverySnapshot(bytes, true, recovery.transition, sceneRecovery);
   };
@@ -901,23 +907,24 @@ function createEngineDocSession(
     if (disposed) return;
     publish((current) => ({
       ...current,
-      readOnlyTransition: { token },
+      readOnlyTransition: { token, cause: "lineage-failure" },
     }));
     const bound = retiredBinding ?? binding;
     if (bound) {
       setOutcome(boundOutcome(retired, bound, [...bound.artifactAssets]));
     }
     reportSaveState(
-      "error",
+      saveProblem("error", "dohc could not finish replacing this document."),
       withErrorWords("dohc could not finish replacing this document.", error),
     );
   };
 
   const onSaveState = (event: EngineYDocSaveStateEvent): void => {
     if (disposed || event.sessionId !== sessionId) return;
-    if (event.state === "deleted" || event.state === "object-changed") {
+    if(event.typingUnresolved !== undefined) typingUnresolved=event.typingUnresolved;
+    if (event.access === "deleted" || event.access === "object-changed") {
       pendingSavedSeq = null;
-      const cause = event.state;
+      const cause = event.access;
       const doc = binding?.doc;
       if (!doc) {
         deletionPending = true;
@@ -933,7 +940,7 @@ function createEngineDocSession(
           ...current,
           deletion: { token, draftId: recovery.draftId, cause },
         }));
-        reportSaveState(cause);
+        reportSaveState(UNKNOWN_SAVE_STATE);
         refreshRecoveryDraft(doc);
         return;
       }
@@ -943,18 +950,25 @@ function createEngineDocSession(
     // Deletion is terminal for this session. A settle/update already in
     // flight can report after main's deletion notice, but it no longer
     // describes a path that exists and must not repaint this state.
+    if (replacementPending && !event.access) {
+      replacementSaveState = event;
+      return;
+    }
     if (writesRefused.current) return;
-    if (event.state === "read-only") {
+    if (event.access === "read-only") {
       pendingSavedSeq = null;
       const doc = binding?.doc;
-      // Unlike deletion, this report answers a local update, so it cannot
-      // precede the binding that allowed that update.
       if (!doc) return;
-      captureReadOnlyTransition(doc);
+      // Hosted status has seq 0. A refused apply names its staged edit.
+      // Remote updates can change saveState without staging a local edit.
+      captureReadOnlyTransition(doc,
+        event.seq > 0 || deliveryPending || localSeq.current > confirmedLocalSeq,
+        event.readOnlyCause ?? "access-ended",
+      );
       releaseBinding();
       return;
     }
-    if (event.state === "saved" || event.state === "saved-to-host") {
+    if (event.state.kind === "saved-here" || event.state.kind === "saved-to-host") {
       if (deliveryPending) {
         // Batches or unacknowledged deliveries are still outstanding — a
         // settle that raced ahead of them must not vouch for the mirror.
@@ -964,20 +978,23 @@ function createEngineDocSession(
         }
         return;
       }
-      if (event.seq >= localSeq.current) reportSaveState(event.state);
+      if (event.seq >= localSeq.current) {
+        confirmedLocalSeq = event.seq;
+        reportSaveState(event.state);
+      }
       return;
     }
     pendingSavedSeq = null;
-    if (event.state === "file-locked" || event.state === "pending-share") {
+    if (event.state.kind === "file-locked" || event.state.kind === "pending-share") {
       if (event.seq >= localSeq.current) reportSaveState(event.state);
       return;
     }
-    if (event.state === "error" || event.state === "changed-on-disk") {
+    if (event.state.kind === "error" || event.state.kind === "changed-on-disk") {
       reportSaveState(event.state, event.editRefusal?.message ?? (event.authorCapacity ? authorCapacityMessage(input.path) : null), event.authorCapacity);
       return;
     }
-    if (event.state === "settling") {
-      reportSaveState("saving");
+    if (event.state.kind === "saving") {
+      reportSaveState(SAVING);
       return;
     }
   };
@@ -991,13 +1008,13 @@ function createEngineDocSession(
           // A replacement installed a fresh recovery slot while the path
           // stayed deleted. The first edit on the winner starts its own
           // draft instead of vanishing.
-          captureDeletion(doc, deletionCause);
+          captureDeletion(doc, deletionCause, true);
           return;
         }
         refreshRecoveryDraft(doc);
         return;
       }
-      reportSaveState("saving");
+      reportSaveState(SAVING);
     };
     doc.on("update", onUpdate);
     detachSaveObserver = () => doc.off("update", onUpdate);
@@ -1060,6 +1077,7 @@ function createEngineDocSession(
             workspaceId,
             path,
             sceneRecovery.immediateText,
+            recoveryIdentity(bytes, retiredAuthority?.objectId ?? null),
           );
         } else {
           replaceOrphanedDraft(
@@ -1067,6 +1085,7 @@ function createEngineDocSession(
             path,
             draftId,
             sceneRecovery.immediateText,
+            recoveryIdentity(bytes, retiredAuthority?.objectId ?? null),
           );
         }
         if (publishesRecoveryStatus) {
@@ -1122,9 +1141,9 @@ function createEngineDocSession(
       }
       const crude = durableMarkdownFromSnapshot(retired, bytes);
       if (draftId === null) {
-        draftId = captureOrphanedDraft(workspaceId, path, crude);
+        draftId = captureOrphanedDraft(workspaceId, path, crude, recoveryIdentity(bytes, retiredAuthority?.objectId ?? null));
       } else {
-        replaceOrphanedDraft(workspaceId, path, draftId, crude);
+        replaceOrphanedDraft(workspaceId, path, draftId, crude, recoveryIdentity(bytes, retiredAuthority?.objectId ?? null));
       }
       if (retiredRecoverySlot === recovery) {
         // The slot must know about this draft and snapshot: a deletion or
@@ -1155,7 +1174,7 @@ function createEngineDocSession(
     // began. Persist it synchronously before acknowledging. If a transaction
     // already in the editor lands before React unmounts the retired doc, the
     // observer refreshes that same durable draft.
-    if (saveStateRef.current !== "saved" || deliveryPending) persist();
+    if ((saveStateRef.current.kind !== "saved-here" && saveStateRef.current.kind !== "unknown") || deliveryPending) persist();
     const onRetiredUpdate = () => persist();
     retired.on("update", onRetiredUpdate);
     retiredDraftObservers.set(retired, () => retired.off("update", onRetiredUpdate));
@@ -1189,6 +1208,12 @@ function createEngineDocSession(
           const bound = await bindEngineYDoc(transport, undefined, {
             onDeliveryFailure: captureDeliveryFailure,
             onDeliveryPendingChange,
+            hasUnresolvedCheckpoint: ()=>typingUnresolved,
+            checkpointForExit: async () => {await bridge().typingRecovery({workspaceId, action: "flush"});},
+            onDocumentReplacementStarted: () => {
+              replacementPending = true;
+              replacementSaveState = null;
+            },
             onDocumentReplacing: preserveRetiredDocument,
             onLineageReplacementFailure: captureLineageReplacementFailure,
           });
@@ -1213,6 +1238,8 @@ function createEngineDocSession(
             // autosave would race the session it still binds.
             if (bound.notInVersion) {
               setOutcome({ kind: "not-in-version" });
+            } else if (bound.sharedWaiting) {
+              setOutcome({ kind: "shared-waiting", waiting: bound.sharedWaiting });
             } else if (bound.liveHostUnavailable) {
               setOutcome({ kind: "live-host-unavailable" });
             } else if (bound.documentUnavailable) {
@@ -1239,6 +1266,8 @@ function createEngineDocSession(
             // reads. The winner starts a fresh slot so later delete/unmount
             // work cannot rewrite that draft with an independent lineage.
             recovery = newRecoverySlot();
+            // The replacement owns new work; retired edits have their own draft.
+            confirmedLocalSeq = localSeq.current;
             retiredBinding = null;
             // Deletion of the PATH outlives any lineage: the file is gone
             // whichever lineage wins, so only non-deletion refusals reset.
@@ -1252,8 +1281,12 @@ function createEngineDocSession(
               ...(deletionPending ? {} : { deletion: null }),
             }));
             if (!writesRefused.current && !deliveryPending) {
-              reportSaveState("saved");
+              reportSaveState(UNKNOWN_SAVE_STATE);
             }
+            replacementPending = false;
+            const checkedState = replacementSaveState;
+            replacementSaveState = null;
+            if (checkedState) onSaveState(checkedState);
             observeSaveState(replacement);
             setOutcome(boundOutcome(replacement, bound, bound.artifactAssets));
           });

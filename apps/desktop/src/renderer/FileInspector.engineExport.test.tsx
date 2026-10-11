@@ -24,7 +24,7 @@ const engineDocState: UseEngineDoc = {
   doc: null,
   objectId: null,
   versionId: null,
-  saveState: "saved",
+  saveState: { kind: "saved-here" },
   saveError: null,
     authorCapacity: false,
   notInVersion: false,
@@ -38,6 +38,7 @@ const engineDocState: UseEngineDoc = {
   recoveryAssets: null,
   permanentFailureWhileEditing: false,
   readOnlyWhileEditing: false,
+  readOnlyCause: null,
   removalInProgress: null,
   artifactAssets: [],
   readArtifactAsset: async () => {
@@ -77,6 +78,7 @@ const writeText = vi.fn(async () => {});
 
 describe("engine-mode DocumentMenu exports the live editor body, not stale props.body", () => {
   const bridgeMock = {
+    onWorkspaceActivity: vi.fn(() => () => undefined),
     readWorkspaceText: vi.fn(async () => ({
       text: "# Stale disk body\n",
       truncated: false,
@@ -92,7 +94,7 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
   beforeEach(() => {
     engineDocState.available = true;
     engineDocState.doc = new Y.Doc();
-    engineDocState.saveState = "saved";
+    engineDocState.saveState = { kind: "saved-here" };
     vi.stubGlobal(
       "ResizeObserver",
       class {

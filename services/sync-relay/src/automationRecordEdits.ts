@@ -1,3 +1,6 @@
+import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
+import type {AutomationDeclaration} from "@dohc/live-session-contract/live-authorship";
+import {AutomationCreationCommitted} from "@dohc/automation-executor/collection-record-edits";
 import {createHash} from "node:crypto";
 import {posix} from "node:path";
 import type {
@@ -8,6 +11,7 @@ import {
   openEngineYdocProviderSession,
   isIdempotencyKeyReuseRefusal,
   VersionedLiveAdapter,
+  YdocOwnerDraftPendingError,
   type EngineTransport,
   type EngineYdocProviderSession,
 } from "@dohc/workspace-engine-client";
@@ -17,6 +21,10 @@ import type {AutomationReplica} from "./automationReplicas";
 export interface ReplicaRecordEngine {
   readonly adapter: Pick<VersionedLiveAdapter, "getActiveVersion" | "readTextFile" | "writeTextFile" | "getCollectionRecord" | "sharedFileUpdateStates">;
   openSession(input: {versionId: string; path: string; expectedObjectId?: string}): Promise<EngineYdocProviderSession>;
+  checkWriteAuthority?(path: string, declaration: AutomationDeclaration, signal: AbortSignal): Promise<void>;
+  prepareSharedRecord?(path: string, signal: AbortSignal): Promise<void>;
+  deliverSharedRecord?(path: string, signal: AbortSignal): Promise<void>;
+  onDeliveryError?(path: string, error: unknown): void;
 }
 
 /** The engine of one open replica. */
@@ -31,6 +39,7 @@ export function replicaRecordEngine(replica: Pick<AutomationReplica, "client" | 
       ...(expectedObjectId === undefined ? {} : {expectedObjectId}),
       // A record file is a live Markdown document.
       contentKind: "richdoc",
+      trustedAutomationDraft: true,
       // The session reads its own doc when a write's turn comes.
       onRemoteUpdate: () => undefined,
     }),
@@ -72,18 +81,26 @@ export function replicaRecordEditContext(
   return {
     async openRecord(path) {
       const versionId = await activeVersion();
+      await engine.prepareSharedRecord?.(path, signal);
       const provider = await engine.openSession({versionId, path});
       const expectedObjectId = provider.objectId;
       return await recordSession(provider, path, signal, ownerUndo, () => engine.openSession({
         versionId, path, ...(expectedObjectId === undefined ? {} : {expectedObjectId}),
-      }));
+      }), engine.deliverSharedRecord ? () => engine.deliverSharedRecord!(path, signal) : undefined, error => engine.onDeliveryError?.(path, error), engine.checkWriteAuthority ? async options => {
+        if (!ownerUndo && options.attribution?.actorKind === "automation" && options.actorOriginId !== undefined) {
+          await engine.checkWriteAuthority!(path, {automationId: options.actorOriginId, attribution: {...options.attribution, actorKind: "automation", depth: options.attribution.depth ?? 0}}, signal);
+        }
+      } : undefined);
     },
     async createFile(path, text, author) {
       // Undo adds nothing.
       if (ownerUndo || author.kind !== "automation") throw new Error(AUTOMATIONS_ONLY);
+      await engine.checkWriteAuthority?.(path, {automationId: author.automationId, attribution: {actorKind: "automation",
+        ...(author.onBehalfOf === undefined ? {} : {onBehalfOf: author.onBehalfOf}), depth: author.depth, run: author.run}}, signal);
       const versionId = await activeVersion();
       signal.throwIfAborted();
-      await adapter.writeTextFile({
+      let result;
+      try { result = await adapter.writeTextFile({
         workspaceId,
         versionId,
         path,
@@ -92,19 +109,25 @@ export function replicaRecordEditContext(
         createOnly: true,
         // The same file again is the same request, so a retry after the
         // engine committed it replays the answer instead of refusing.
-        requestId: `automation-create:${createHash("sha256").update(`${path}\0${text}`).digest("hex")}`,
+        requestId: `automation-create:${createHash("sha256").update(text).digest("hex")}`,
         metadata: {origin: "api", summary: `Added ${posix.basename(path)}`},
         author: {kind: "automation", automationId: author.automationId, onBehalfOf: author.onBehalfOf, depth: author.depth},
-      });
+      }); }
+      catch (error) {
+        if (isIdempotencyKeyReuseRefusal(error)) throw new AutomationCreationCommitted();
+        throw error;
+      }
+      if (result.deduped) throw new AutomationCreationCommitted();
       return path;
     },
     async readText(path) {
       const read = await adapter.readTextFile({workspaceId, versionId: await activeVersion(), path});
-      if (typeof read?.text !== "string") throw new Error(`${path} is not a text file in this server's copy of the workspace.`);
+      if (typeof read?.text !== "string") throw new VersionedTextStoreError("file-not-found", `${path} is not a text file in this server's copy of the workspace.`);
       return {text: read.text, truncated: false};
     },
     withAdapter: async (work) => replica.signal.aborted ? null : await work(adapter),
-    // The engine adopted each record before its create returned.
+    // No change notices here. A new record is adopted before its create returns;
+    // a deduped one adopted later makes the run wait out its adoption deadline and resume on retry.
     onRecordsChanged: () => () => undefined,
     signal,
   };
@@ -121,13 +144,16 @@ const AUTOMATIONS_ONLY = "This server writes records only for automations, and f
  * canonical state for the caller to inspect. Other failures or an aborted
  * signal stop further writes and settlement.
  */
-async function recordSession(provider: EngineYdocProviderSession, path: string, signal: AbortSignal, ownerUndo: boolean, reopen: () => Promise<EngineYdocProviderSession>): Promise<RecordEditSession> {
+async function recordSession(provider: EngineYdocProviderSession, path: string, signal: AbortSignal, ownerUndo: boolean, reopen: () => Promise<EngineYdocProviderSession>, deliver?: () => Promise<void>, onDeliveryError?: (error: unknown) => void, checkWriteAuthority?: (options: Parameters<RecordEditSession["applyDecidedLocalUpdate"]>[2]) => Promise<void>): Promise<RecordEditSession> {
   try {
     if (provider.head === "absent") {
       throw new Error(`${path} is not a record in this server's copy of the workspace.`);
     }
     signal.throwIfAborted();
-    if (provider.unsettled) await provider.settleNow({summary: `Updated ${posix.basename(path)}`});
+    if (provider.unsettled) {
+      try {await provider.settleNow({summary: `Updated ${posix.basename(path)}`});}
+      catch (error) {if (!(error instanceof YdocOwnerDraftPendingError)) throw error;}
+    }
   } catch (error) {
     await provider.evict();
     throw error;
@@ -144,6 +170,7 @@ async function recordSession(provider: EngineYdocProviderSession, path: string, 
           ? options.attribution?.actorKind === "human"
           : options.attribution?.actorKind === "automation" && options.actorOriginId !== undefined;
         if (!allowed) throw new Error(AUTOMATIONS_ONLY);
+        await checkWriteAuthority?.(options);
         const update = decide(provider.doc);
         if (update === null) return false;
         try {
@@ -161,7 +188,10 @@ async function recordSession(provider: EngineYdocProviderSession, path: string, 
             provider = await reopen();
             if (provider.head === "absent") throw new Error(`${path} is not a record in this server's copy of the workspace.`);
             signal.throwIfAborted();
-            if (provider.unsettled) await provider.settleNow({summary: `Updated ${posix.basename(path)}`});
+            if (provider.unsettled) {
+              try {await provider.settleNow({summary: `Updated ${posix.basename(path)}`});}
+              catch (error) {if (!(error instanceof YdocOwnerDraftPendingError)) throw error;}
+            }
             failed = false;
             throw error;
           }
@@ -179,7 +209,14 @@ async function recordSession(provider: EngineYdocProviderSession, path: string, 
       await chain;
       if (failed) throw new Error(`An earlier write to ${path} failed, so its session does not settle.`);
       signal.throwIfAborted();
-      return await provider.settleNow(options);
+      try {return await provider.settleNow(options);}
+      catch (error) {
+        if (!(error instanceof YdocOwnerDraftPendingError) || !deliver) throw error;
+        // Keep the draft reference even if delivery is uncertain. Its durable
+        // native status distinguishes pending, accepted and not accepted.
+        try {await deliver();} catch (deliveryError) {signal.throwIfAborted(); onDeliveryError?.(deliveryError);}
+        throw error;
+      }
     },
     async close(options) {
       await chain;

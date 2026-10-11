@@ -87,13 +87,22 @@ pub(crate) struct YdocSession {
 }
 
 impl YdocSession {
+    pub(super) fn set_lineage_claim(&mut self, claim: Option<String>) -> Result<(), CollabError> {
+        if self.lineage_claim_id != claim {
+            self._lease.bind_claim(claim.as_deref())?;
+            self.lineage_claim_id = claim;
+        }
+        Ok(())
+    }
+
     pub(super) fn imported_owner(
         workspace: WorkspaceHandle,
         key: DocKey,
         captured: &dohc_engine_collab::live_update_application::ImportedOwnerActivation,
         lease: Lease,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, CollabError> {
+        lease.bind_claim(Some(&captured.source.lineage_claim_id))?;
+        Ok(Self {
             owner_draft: None,
             workspace,
             key,
@@ -109,7 +118,7 @@ impl YdocSession {
             open_head_sha: Some(captured.source.source_digest.clone()),
             owner_seed_source: None,
             _lease: lease,
-        }
+        })
     }
 }
 
@@ -290,6 +299,9 @@ struct YdocRecordUpdateParams {
     /// the update row and every history row the apply derives.
     #[serde(default)]
     attribution: Option<dohc_engine_domain::ChangeAttribution>,
+    /// Only the server delivery path supplies the automation declaration at admission.
+    #[serde(default)]
+    trusted_automation_draft: bool,
     /// The client declares this update as the SEED: a faithful import of the
     /// `seedContent` the open returned, built before any user input could
     /// reach the session. Only the adapter's seed path sends it; a
@@ -298,6 +310,19 @@ struct YdocRecordUpdateParams {
     /// head as the lineage's seed source.
     #[serde(default)]
     seed: bool,
+}
+
+impl YdocRecordUpdateParams {
+    fn automation_declaration(&self) -> Option<dohc_engine_domain::AutomationDeclaration> {
+        self.trusted_automation_draft
+            .then(|| {
+                dohc_engine_domain::AutomationDeclaration::from_change(
+                    self.actor_origin_id.as_deref(),
+                    self.attribution.as_ref(),
+                )
+            })
+            .flatten()
+    }
 }
 
 #[derive(Serialize)]
@@ -751,6 +776,7 @@ impl EngineService {
                     reason: params.reason,
                     observed_binding: params.observed_binding,
                 },
+                now_ms()?,
                 cancellation.token(),
             )
             .await
@@ -1014,6 +1040,9 @@ impl EngineService {
                     .collect()
             }),
         };
+        lease
+            .bind_claim(state.lineage_claim_id.as_deref())
+            .map_err(|error| map_runtime(RuntimeError::Collab(error)))?;
         lock(&self.sessions).insert(
             session_id,
             YdocSession {
@@ -1074,7 +1103,7 @@ impl EngineService {
         };
         let (open, session) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
         let update = base64::engine::general_purpose::STANDARD
-            .decode(params.update_base64)
+            .decode(&params.update_base64)
             .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid update encoding"))?;
         if let Some(attribution) = &params.attribution
             && let Err(reason) = attribution.validate()
@@ -1129,6 +1158,7 @@ impl EngineService {
                     params.actor_origin_id.as_deref(),
                     params.attribution.as_ref(),
                 ),
+                automation_declaration: params.automation_declaration(),
             };
             let actor = open.actor.clone();
             let workspace = open.workspace_id.clone();
@@ -1197,7 +1227,9 @@ impl EngineService {
                     && let Some(session) = lock(&sessions).get_mut(&session_id)
                 {
                     session.first_update_pending = false;
-                    session.lineage_claim_id = append.lineage_claim_id.clone();
+                    session
+                        .set_lineage_claim(append.lineage_claim_id.clone())
+                        .map_err(RuntimeError::Collab)?;
                 }
                 let settlement_requested = match &outcome {
                     Ok(append) => append.settlement_requested,
@@ -1730,7 +1762,9 @@ impl EngineService {
             ),
         };
         if let Some(session) = lock(&self.sessions).get_mut(&params.session_id) {
-            session.lineage_claim_id = state.lineage_claim_id.clone();
+            session
+                .set_lineage_claim(state.lineage_claim_id.clone())
+                .map_err(|error| map_runtime(RuntimeError::Collab(error)))?;
             session.owner_draft = owner_draft.clone();
         }
         let initial_update = state.initial_update;
@@ -1844,7 +1878,55 @@ mod owner_draft_editor_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn desktop_automation_drafts_do_not_require_server_declarations() {
+        let value = serde_json::json!({"sessionId":"session","updateBase64":"AAA=","actorOriginId":"collection:Tasks#mark","attribution":{"actorKind":"automation","depth":1,"onBehalfOf":"presser"}});
+        let desktop: super::YdocRecordUpdateParams = serde_json::from_value(value.clone()).unwrap();
+        assert!(desktop.automation_declaration().is_none());
+        let mut server_value = value;
+        server_value["trustedAutomationDraft"] = serde_json::json!(true);
+        let server: super::YdocRecordUpdateParams = serde_json::from_value(server_value).unwrap();
+        let declaration = server.automation_declaration().unwrap();
+        assert_eq!(declaration.automation_id, "collection:Tasks#mark");
+        assert_eq!(
+            declaration.attribution.on_behalf_of.as_deref(),
+            Some("presser")
+        );
+    }
+
     use super::*;
+    #[test]
+    fn imported_owner_binds_session_claim() {
+        use dohc_engine_collab::live_update_application::{
+            ImportedOwnerActivation, ImportedOwnerSource,
+        };
+        let claim = "a".repeat(64);
+        let source: ImportedOwnerSource = serde_json::from_value(json!({
+            "version":1,"relayDatabaseNamespace":"relay","workspaceId":"ws","mainVersionId":"main",
+            "objectId":"object","lineageClaimId":claim,"currentPath":"head.md","replicationEpoch":"epoch",
+            "streamIdentity":"stream","committedCursor":1,"baseOriginId":"peer","baseOriginSeq":0,
+            "baseRelaySeq":1,"sourceMomentId":"source","sourceDigest":claim,"sourceByteLength":0,
+            "nativeHeadSequence":0,"fullStateDigest":claim,"fullStateByteLength":0
+        })).unwrap();
+        let captured = ImportedOwnerActivation {
+            activation_id: "activation".into(),
+            source,
+            baseline_bytes: Vec::new(),
+            full_state: Vec::new(),
+            restore_generation: None,
+        };
+        let leases = dohc_engine_collab::LeaseRegistry::new();
+        let key = DocKey::new("ws", "main", "object").unwrap();
+        let session = YdocSession::imported_owner(
+            WorkspaceHandle("handle".into()),
+            key.clone(),
+            &captured,
+            leases.acquire(&key).unwrap(),
+        );
+        assert_eq!(leases.bound_claim(&key).as_deref(), Some(claim.as_str()));
+        drop(session);
+        assert_eq!(leases.bound_claim(&key), None);
+    }
     use crate::EngineService;
     use crate::rpc::error::map_owner_outbox;
     use crate::rpc::request::OperationCancellation;
@@ -2550,6 +2632,28 @@ mod tests {
             before,
             "native rename must roll back every mutation"
         );
+
+        let bytes = std::fs::read(root.join("notes/owner.md")).unwrap();
+        let request = serde_json::from_value(json!({"id":92,"method":"versionedText.delete","workspace":handle,
+            "params":{"versionId":"main","path":"notes/owner.md","origin":"restore","expectedSha256":dohc_engine_storage::hex_sha256(&bytes)}})).unwrap();
+        assert_eq!(
+            service
+                .versioned_text_delete(
+                    &RequestContext::unbounded(),
+                    &request,
+                    request.params.clone()
+                )
+                .await
+                .unwrap_err()
+                .message,
+            "live-document-binding-active"
+        );
+        assert_eq!(
+            std::fs::read(root.join("notes/owner.md")).unwrap(),
+            bytes,
+            "closing the owner's session must not let checked deletion unlink its adopted object"
+        );
+        assert_eq!(snapshot(), before);
 
         std::fs::rename(root.join("notes/owner.md"), root.join("moved.md")).unwrap();
         let actor = service.open(Some(handle)).unwrap().actor.clone();

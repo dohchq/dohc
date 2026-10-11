@@ -28,7 +28,7 @@ it("keeps repeated stored snapshots independent and validates changed bytes on t
   } finally {f.close();}
 });
 
-it("refuses corrupted stored snapshots, nonempty seed coverage, deletion ranges and checkpoint coverage", () => {
+it("refuses corrupted stored snapshots, nonempty seed coverage and deletion ranges", () => {
   const f = registered({deployment: true});
   try {
     for (let index = 0; index < 2; index++) {
@@ -39,13 +39,12 @@ it("refuses corrupted stored snapshots, nonempty seed coverage, deletion ranges 
     const original = f.raw.prepare("SELECT * FROM sync_relay_live_update_journal WHERE delivery_id='corrupt-1'").get()!;
     const document = f.input.evidence.document;
     for (const [column, damaged] of [
-      ["author_snapshot_json", JSON.stringify([{kind: "human", humanId: "owner", humanName: "Owner"},
-        {kind: "agent", agentId: '"'.repeat(512), agentName: '"'.repeat(512), onBehalfOf: '"'.repeat(512)}])],
+      ["author_snapshot_json", JSON.stringify([{kind: "automation", automationId: '"'.repeat(512),
+        attribution: {actorKind: "automation", depth: 1, onBehalfOf: '"'.repeat(512),
+          run: {claimId: '"'.repeat(512), automationName: '"'.repeat(1024)}}}])],
       ["author_snapshot_json", JSON.stringify([{kind: "agent", agentId: "agent"}, {kind: "human", humanId: "owner", humanName: "Owner"}])],
       ["seed_first_seen_json", JSON.stringify([{clientId: 999, startClock: 0, endClock: 1}])],
       ["first_seen_deletes_json", JSON.stringify([{clientId: 999, startClock: -1, endClock: 1}])],
-      ["checkpoint_coverage_json", JSON.stringify([{author: {kind: "human", humanId: "owner", humanName: "Owner"},
-        structRanges: [{clientId: 999, startClock: 5, endClock: 6}, {clientId: 999, startClock: 0, endClock: 1}], deletionRanges: []}])],
     ] as const) {
       f.write(db => db.prepare(`UPDATE sync_relay_live_update_journal SET ${column}=? WHERE delivery_id='corrupt-1'`).run(damaged));
       expect(() => f.storage.readLiveUpdateJournalCut({document})).toThrow();
@@ -54,3 +53,47 @@ it("refuses corrupted stored snapshots, nonempty seed coverage, deletion ranges 
     }
   } finally {f.close();}
 });
+
+it("refuses non-canonical coverage on a stored checkpoint", () => {
+  const f = registered({deployment: true});
+  try {
+    const large = f.update("payload", "x".repeat(1_048_576));
+    for (let index = 0; index < 20; index++) {
+      expect(f.storage.commitLiveUpdateJournal(f.capture(large, `checkpoint-${index}`)).result.kind).toBe("accepted");
+    }
+    const document = f.input.evidence.document;
+    const original = f.storage.readLiveUpdateJournalCut({document});
+    if (original.kind !== "cut") throw new Error("Expected checkpoint cut");
+    expect(original.cut.checkpoint.cursor).not.toBeNull();
+    expect(original.cut.checkpoint.metadata?.checkpointCoverage).toEqual([]);
+    expect(original.cut.suffix).toEqual([]);
+    const coverage = JSON.stringify([{author: {kind: "human", humanId: "owner", humanName: "Owner"},
+      structRanges: [{clientId: 999, startClock: 5, endClock: 6}, {clientId: 999, startClock: 0, endClock: 1}], deletionRanges: []}]);
+    f.write(db => db.prepare("UPDATE sync_relay_live_update_journal SET checkpoint_coverage_json=? WHERE journal_cursor=?")
+      .run(coverage, original.cut.checkpoint.cursor));
+    expect(() => f.storage.readLiveUpdateJournalCut({document})).toThrow("Invalid live application range.");
+    f.write(db => db.prepare("UPDATE sync_relay_live_update_journal SET checkpoint_coverage_json=? WHERE journal_cursor=?")
+      .run(JSON.stringify(original.cut.checkpoint.metadata!.checkpointCoverage), original.cut.checkpoint.cursor));
+    expect(f.storage.readLiveUpdateJournalCut({document})).toEqual(original);
+  } finally {f.close();}
+}, 120_000);
+
+it.each([{coverage: []}, {coverage: [{author: {kind: "human", humanId: "owner", humanName: "Owner"},
+  structRanges: [{clientId: 999, startClock: 0, endClock: 1}], deletionRanges: []}]}])(
+  "refuses canonical checkpoint coverage without a checkpoint: $coverage", ({coverage}) => {
+    const f = registered({deployment: true});
+    try {
+      expect(f.storage.commitLiveUpdateJournal(f.capture(f.update(), "suffix")).result.kind).toBe("accepted");
+      const document = f.input.evidence.document;
+      const original = f.storage.readLiveUpdateJournalCut({document});
+      if (original.kind !== "cut") throw new Error("Expected suffix cut");
+      expect(original.cut.checkpoint.cursor).toBeNull();
+      expect(original.cut.suffix).toHaveLength(1);
+      expect(original.cut.suffix[0]!.metadata.checkpointCoverage).toBeUndefined();
+      f.write(db => db.prepare("UPDATE sync_relay_live_update_journal SET checkpoint_coverage_json=? WHERE delivery_id='suffix'")
+        .run(JSON.stringify(coverage)));
+      expect(() => f.storage.readLiveUpdateJournalCut({document})).toThrow("live update journal is damaged");
+      f.write(db => db.prepare("UPDATE sync_relay_live_update_journal SET checkpoint_coverage_json=NULL WHERE delivery_id='suffix'").run());
+      expect(f.storage.readLiveUpdateJournalCut({document})).toEqual(original);
+    } finally {f.close();}
+  });

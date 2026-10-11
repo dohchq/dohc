@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { CHATS_TAB_PATH } from "./workbench/workbenchState";
 import { deferred } from "../testing/deferred";
+import { createAutomationButtons } from "./collections/useAutomationButtons";
 import { DesktopWorkspaceShell, WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, makeBridge, renderShell, shellBootstrapProps, SHARE_STATUS, SHARE_VIEW, makeShareBridge, settleShareView } from "./DesktopWorkspaceShell.testHarness";
 
 describe("share background work readiness", () => {
@@ -14,6 +15,32 @@ describe("share background work readiness", () => {
     ...SHARE_VIEW,
     shareView: { ...SHARE_VIEW.shareView!, access: "edit" },
   };
+
+  it("preserves an overdue burst's Notices intent after the opening refresh", async () => {
+    const bridge = makeShareBridge();
+    Object.assign(bridge, {
+      pressAutomationButton: async () => ({ busy: false, relayed: true }),
+      onAutomationRunSettled: () => () => undefined,
+      onAutomationRunWaiting: () => () => undefined,
+      onCollectionAutomationsChanged: () => () => undefined,
+    });
+    const opening = deferred<Awaited<ReturnType<typeof bridge.refreshSharedView>>>();
+    bridge.refreshSharedView.mockImplementationOnce(() => opening.promise);
+    renderShell(bridge, EDIT_SHARE);
+    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledOnce());
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const buttons = createAutomationButtons({ workspaceId: EDIT_SHARE.workspaceId, of: { collectionPath: "tasks" } });
+    try {
+      await act(async () => buttons.press("Finish", { id: "task", label: "task" }));
+      await act(async () => vi.advanceTimersByTimeAsync(2_000));
+      expect(bridge.refreshSharedView).toHaveBeenCalledOnce();
+      await act(async () => opening.resolve({ ok: true, status: "unchanged", probed: true, changedPaths: 0,
+        excludedPaths: [], unjournalablePaths: [], refusedOps: 0, refusedDetail: null }));
+      await act(async () => vi.advanceTimersByTimeAsync(0));
+      expect(bridge.refreshSharedView).toHaveBeenCalledTimes(2);
+      expect(bridge.refreshSharedView).toHaveBeenLastCalledWith({ workspaceId: EDIT_SHARE.workspaceId, trigger: "press-burst" });
+    } finally { buttons.close(); vi.useRealTimers(); }
+  });
 
   it("waits for readiness before pushing, then reports one real failure with Try again", async () => {
     const admission = deferred<typeof SHARE_STATUS>();
@@ -30,7 +57,7 @@ describe("share background work readiness", () => {
     expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
     expect(bridge.pushShareDirectWrites).not.toHaveBeenCalled();
-    expect(bridge.onShareDirectWritesPushed).toHaveBeenCalledOnce();
+    expect(bridge.onShareDirectWritesPushed).not.toHaveBeenCalled();
     expect((screen.getByRole("button", { name: "Refresh" }) as HTMLButtonElement).disabled).toBe(true);
 
     await act(async () => {
@@ -49,7 +76,7 @@ describe("share background work readiness", () => {
     await user.click(screen.getByTestId("notice-center-toggle"));
     const notices = await screen.findByTestId("notice-center");
     expect(within(notices).getAllByText(message)).toHaveLength(1);
-    bridge.pushShareDirectWrites.mockResolvedValue({ status: "pushed", writes: [] });
+    bridge.pushShareDirectWrites.mockResolvedValue(undefined);
     await user.click(within(notices).getByRole("button", { name: "Try again" }));
     expect(bridge.pushShareDirectWrites).toHaveBeenCalledTimes(2);
   });
@@ -69,14 +96,14 @@ describe("share background work readiness", () => {
         status: "pushed",
         writes: [result === "refused"
           ? { result, paths: ["trip/packing/automations.yaml"], reason: "" }
-          : { result, paths: ["trip/packing/collection.yaml"], stalePath: "trip/packing/collection.yaml" }],
+          : { result, paths: ["trip/packing/collection.yaml"], stalePath: "trip/packing/collection.yaml", recoveredDraftPath: null }],
       },
     }));
     await act(async () => { readiness.resolve(SHARE_STATUS); });
     await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
 
     const message = result === "refused"
-      ? "granter@dohc.test's server didn't take your change to packing/automations.yaml. Send it as a proposal."
+      ? "The sync relay did not accept your change to packing/automations.yaml. Send it as a proposal."
       : "packing/collection.yaml changed before your change reached granter@dohc.test. Check the new version, or send yours as a proposal.";
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain(message);
@@ -687,7 +714,7 @@ describe("shared view send changes", () => {
     }));
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain(
-      "sam@dohc.test's server didn't take your change to packing/automations.yaml. Send it as a proposal.",
+      "The sync relay did not accept your change to packing/automations.yaml. Send it as a proposal.",
     );
     await user.click(screen.getByTestId("workspace-shell-error-action"));
     await waitFor(() => expect(bridge.submitShareChanges).toHaveBeenCalledWith({ workspaceId: SHARE_VIEW.workspaceId }));
@@ -698,7 +725,7 @@ describe("shared view send changes", () => {
     renderShell(bridge, { ...SHARE_VIEW, shareView: { shareId: "share-1", granterEmail: "sam@dohc.test", access: "comment" } });
     await screen.findByTestId("shared-view-banner");
     // A write started before access ended can still report its outcome.
-    expect(bridge.onShareDirectWritesPushed).toHaveBeenCalledOnce();
+    await waitFor(() => expect(bridge.onShareDirectWritesPushed).toHaveBeenCalledOnce());
     expect(bridge.pushShareDirectWrites).not.toHaveBeenCalled();
   });
 
@@ -1110,6 +1137,7 @@ describe("shared view with an unreadable grant", () => {
     ...SHARE_VIEW,
     shareView: {
       shareId: "share-1",
+      recipientUserId: "recipient",
       granterEmail: "sam@dohc.test",
       damaged: true as const,
     },
@@ -1125,6 +1153,8 @@ describe("shared view with an unreadable grant", () => {
     );
     // No level is stated, because none could be read.
     expect(banner.textContent).not.toContain("read-only. Ask");
+    expect(banner.textContent).not.toContain("This share must be reopened");
+    expect(banner.textContent).toContain("sam@dohc.test dohc can't read");
   });
 
   // The chat half of the same stance. A grant that names no
@@ -1177,9 +1207,9 @@ describe("shared view chats surface", () => {
     expect(await screen.findByTestId("chats-panel")).toBeTruthy();
     expect(screen.getByTestId("titlebar-chats-sidebar")).toBeTruthy();
 
-    // The file tab is the only tab. A workspace-wide listing would be a
+    // About is the only tab. A workspace-wide listing would be a
     // superset to filter, which is the shape #627 came from.
-    expect(screen.getByTestId("chats-panel-tab-file")).toBeTruthy();
+    expect(screen.getByTestId("chats-panel-tab-about")).toBeTruthy();
     expect(screen.queryByTestId("chats-panel-tab-all")).toBeNull();
     expect(screen.queryByTestId("chats-panel-off")).toBeNull();
 
@@ -1194,6 +1224,8 @@ describe("shared view chats surface", () => {
     expect((await screen.findByTestId("linked-chat-readonly-note")).textContent).toBe(
       "Chats are read-only in this shared view.",
     );
+    // A shared view records no History, so About has no History section.
+    expect(screen.queryByTestId("about-history")).toBeNull();
 
     expect(bridge.listChatChannels).not.toHaveBeenCalled();
     expect(bridge.syncDms).not.toHaveBeenCalled();
@@ -1253,10 +1285,10 @@ describe("shared view chats surface", () => {
 
     expect(await screen.findByTestId("chats-panel")).toBeTruthy();
     expect(screen.getByTestId("titlebar-chats-sidebar")).toBeTruthy();
-    // Both tabs. Collapsing every workspace to the share's file-only strip
+    // Both tabs. Collapsing every workspace to the share's About-only strip
     // would keep the share pin above green.
     expect(screen.getByTestId("chats-panel-tab-all")).toBeTruthy();
-    expect(screen.getByTestId("chats-panel-tab-file")).toBeTruthy();
+    expect(screen.getByTestId("chats-panel-tab-about")).toBeTruthy();
     await waitFor(() => expect(bridge.listChatChannels).toHaveBeenCalled());
     expect(screen.queryByTestId("chats-panel-off")).toBeNull();
   });

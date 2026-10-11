@@ -10,7 +10,12 @@ it("routes source-view recipients through share identity without claiming owner 
   expect(deps.relayJson).toHaveBeenCalledWith(deps.credentials, "/sync/shares/share/datasets", expect.anything());
   expect(data).not.toHaveProperty("approvedArtifacts");
 });
-it.each([null, {}, { ...marker, ended: true }, { ...marker, grantedSelector: null }, { ...marker, relayUrl: "https://different" }])("refuses damaged, revoked or wrong-origin share markers before transport", shareView => {
+it("refuses ended-share requests with the access reason before transport", () => {
+  const deps = input();
+  expect(() => createNamedDatasetData({ ...deps, shareView: { ...marker, ended: true } })).toThrow("Your access to this share ended. Ask the owner to share it again.");
+  expect(deps.relayJson).not.toHaveBeenCalled();
+});
+it.each([null, {}, { ...marker, grantedSelector: null }, { ...marker, relayUrl: "https://different" }])("refuses damaged or wrong-origin share markers before transport", shareView => {
   const deps = input();
   expect(() => createNamedDatasetData({ ...deps, shareView })).toThrow();
   expect(deps.relayJson).not.toHaveBeenCalled();

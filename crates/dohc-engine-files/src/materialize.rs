@@ -773,6 +773,9 @@ pub fn run_pending_jobs(
     let jobs = store.list_pending_materialization_jobs()?;
     let mut results = Vec::with_capacity(jobs.len());
     for job in jobs {
+        if job.job_id.starts_with("restore-delete-mat_") {
+            continue;
+        }
         let outcome = materialize_one(store, root, &job, options)?;
         let crashed = matches!(outcome, JobOutcome::Crashed(_));
         results.push(JobResult {
@@ -802,7 +805,10 @@ pub fn materialize_one(
     }
 }
 
-fn materialize_one_ordinary(
+/// Execute an ordinary job, retaining the error that explains a blocked path.
+/// Callers that manage a staged publication need that reason before deciding
+/// whether to retain or discard it.
+pub fn materialize_one_ordinary(
     store: &EngineStore,
     root: &Path,
     job: &MaterializationJob,
@@ -1433,6 +1439,12 @@ fn materialize_delete(
     // empty name is what a delete leaves anyway.
     let spec = match stage_target(staging, target, job, expected, &mut reads, options)? {
         Stage::Moved(spec) => spec,
+        Stage::CrossVolume if job.job_id.starts_with("restore-delete-mat_") => {
+            return Err(MaterializeError::io(
+                target,
+                &std::io::Error::from(ErrorKind::CrossesDevices),
+            ));
+        }
         Stage::CrossVolume => return materialize_cross_volume(store, target, None, job, options),
         Stage::Conflict => {
             store.mark_materialization_conflict(&job.job_id, now_ms)?;
@@ -1444,6 +1456,65 @@ fn materialize_delete(
         }
     };
     let staged = staging.dir.join(&spec.displaced_name);
+    if job.job_id.starts_with("restore-delete-mat_") {
+        // Keep the preimage until the durable publication receipt exists. A
+        // filesystem or receipt failure returns it without replacing new work.
+        let published = (|| {
+            if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
+                return Ok(JobOutcome::Crashed(
+                    FaultPoint::MaterializeAfterRenameBeforeComplete,
+                ));
+            }
+            let inspected = inspect_displaced(store, &staged, expected, None)?;
+            if should_crash(faults, FaultPoint::MaterializeAfterDisplacedHash) {
+                return Ok(JobOutcome::Crashed(
+                    FaultPoint::MaterializeAfterDisplacedHash,
+                ));
+            }
+            if matches!(inspected, Inspected::Unreadable) {
+                return Err(MaterializeError::io(
+                    &staged,
+                    &std::io::Error::from(ErrorKind::PermissionDenied),
+                ));
+            }
+            if !matches!(inspected, Inspected::Known { .. } | Inspected::Missing) {
+                if !return_displaced(target, &staged, options)? {
+                    let moved = Moved::open(store, spec.clone(), &staging.dir)?;
+                    store.resolve_displacement(
+                        moved.displacement_id,
+                        keep_resolution(&inspected),
+                        None,
+                        now_ms,
+                    )?;
+                }
+                store.mark_materialization_conflict(&job.job_id, now_ms)?;
+                return Ok(JobOutcome::Conflict);
+            }
+            sync_parent_dir(target.parent(), policy)?;
+            store.mark_materialization_complete(&job.job_id, now_ms)?;
+            // Cleanup cannot turn an applied publication into a refusal.
+            let _ = std::fs::remove_file(&staged);
+            if should_crash(faults, FaultPoint::MaterializeAfterKnownCopyDeletion) {
+                return Ok(JobOutcome::Crashed(
+                    FaultPoint::MaterializeAfterKnownCopyDeletion,
+                ));
+            }
+            Ok(JobOutcome::Completed)
+        })();
+        if published.is_err()
+            && entry_exists(&staged)?
+            && !return_displaced(target, &staged, options)?
+        {
+            let moved = Moved::open(store, spec, &staging.dir)?;
+            store.resolve_displacement(
+                moved.displacement_id,
+                keep_resolution(&Inspected::Missing),
+                None,
+                now_ms,
+            )?;
+        }
+        return published;
+    }
     if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
         return Ok(JobOutcome::Crashed(
             FaultPoint::MaterializeAfterRenameBeforeComplete,

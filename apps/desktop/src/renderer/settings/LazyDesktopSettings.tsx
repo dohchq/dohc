@@ -8,6 +8,7 @@ import {
   type ComponentType,
 } from "react";
 import { ErrorBoundary } from "../ErrorBoundary";
+import { SkeletonRows } from "../ui/SkeletonRows";
 import type { SettingsDialog } from "./SettingsDialog";
 
 export type DesktopSettingsProps = ComponentProps<typeof SettingsDialog>;
@@ -27,9 +28,9 @@ function SettingsLoading() {
       aria-modal="true"
       aria-label="Settings"
       data-testid="settings-loading"
-      className="dohc-elevated flex h-[min(760px,calc(100vh-48px))] w-[min(1040px,calc(100vw-32px))] items-center justify-center overflow-hidden rounded-xl border border-line bg-bg px-4 text-xs text-subtle"
+      className="dohc-elevated flex h-[min(760px,calc(100vh-48px))] w-[min(1040px,calc(100vw-32px))] flex-col overflow-hidden rounded-xl border border-line bg-bg p-2"
     >
-      Loading settings...
+      <SkeletonRows layout="panel" label="Loading settings..." />
     </div>
   );
 }

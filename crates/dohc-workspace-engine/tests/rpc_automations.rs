@@ -57,13 +57,14 @@ async fn received_share_handles_refuse_local_automation_claims_and_execution() {
         "automations.press",
         "automations.claimSchedule",
         "automations.runNow",
+        "automations.makeDurable",
         "automations.settle",
     ] {
+        let error = call_error(&transport, &handle, &mut id, method, json!({})).await;
+        assert_eq!(error.code, ErrorCode::Forbidden, "{method}");
         assert_eq!(
-            call_error(&transport, &handle, &mut id, method, json!({}))
-                .await
-                .code,
-            ErrorCode::Forbidden
+            error.message, "received shares do not execute automations",
+            "{method}"
         );
     }
     call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
@@ -1869,5 +1870,233 @@ async fn presses_and_schedule_steps_claim_through_rpc() {
     assert!(
         claimed_events(&mut notices).is_empty(),
         "and announces nothing"
+    );
+}
+
+#[tokio::test]
+async fn make_durable_requires_a_running_local_claim_and_preserves_recovery_age() {
+    let scratch = ScratchDir::new().unwrap();
+    write_root_binding(scratch.path(), TOKEN).unwrap();
+    seed_claims(&scratch);
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({"rootDir": scratch.path().to_string_lossy(), "workspaceId": WORKSPACE_ID}),
+            ),
+        )
+        .await
+        .unwrap();
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).unwrap();
+    let mut id = 1;
+    let claim = call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.claimNext",
+        json!({"automationIdPrefix": AUTOMATION}),
+    )
+    .await;
+    let claim_id = &claim["claimId"];
+    for use_wire_key in [false, true] {
+        id += 1;
+        let marker = format!("\0automation-durability:{WORKSPACE_ID}");
+        let mut collision = request(
+            id,
+            "versionedText.write",
+            Some(handle.clone()),
+            json!({
+                "versionId": "main", "path": "collision.md", "text": "collision", "origin": "api"
+            }),
+        );
+        if use_wire_key {
+            collision.idempotency_key = Some(marker);
+        } else {
+            collision.params["requestId"] = json!(marker);
+        }
+        let error = transport
+            .call(RequestContext::unbounded(), collision)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert_eq!(error.message, "invalid-request-id");
+    }
+    for _ in 0..2 {
+        assert_eq!(
+            call(
+                &transport,
+                &handle,
+                &mut id,
+                "automations.makeDurable",
+                json!({"claimId": claim_id})
+            )
+            .await,
+            json!({})
+        );
+    }
+    let after = call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.getClaim",
+        json!({"claimId": claim_id}),
+    )
+    .await;
+    assert_eq!(after["claim"]["updatedAtMs"], claim["updatedAtMs"]);
+    assert_eq!(after["claim"]["attempts"], claim["attempts"]);
+    id += 2;
+    let (valid, unknown) = tokio::join!(
+        transport.call(
+            RequestContext::unbounded(),
+            request(
+                id - 1,
+                "automations.makeDurable",
+                Some(handle.clone()),
+                json!({"claimId":claim_id})
+            )
+        ),
+        transport.call(
+            RequestContext::unbounded(),
+            request(
+                id,
+                "automations.makeDurable",
+                Some(handle.clone()),
+                json!({"claimId":"unknown"})
+            )
+        ),
+    );
+    valid.unwrap();
+    assert_eq!(unknown.unwrap_err().code, ErrorCode::InvalidParams);
+    assert_eq!(
+        call_error(
+            &transport,
+            &handle,
+            &mut id,
+            "automations.makeDurable",
+            json!({"claimId": "unknown"})
+        )
+        .await
+        .code,
+        ErrorCode::InvalidParams
+    );
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.settle",
+        json!({"claimId": claim_id, "state": "done"}),
+    )
+    .await;
+    assert_eq!(
+        call_error(
+            &transport,
+            &handle,
+            &mut id,
+            "automations.makeDurable",
+            json!({"claimId": claim_id})
+        )
+        .await
+        .code,
+        ErrorCode::InvalidParams
+    );
+    // External claims still sync this copy's writes.
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.makeDurable",
+        json!({}),
+    )
+    .await;
+    call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+    let store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 2).unwrap();
+    store
+        .read_with(|conn| {
+            let seq: i64 = conn.query_row(
+                "SELECT result_seq FROM engine_requests WHERE kind = 'automation-durability'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert!([-1, -2].contains(&seq));
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+}
+
+#[tokio::test]
+async fn make_durable_record_creation_replay_does_not_resurrect_a_deleted_record() {
+    let scratch = ScratchDir::new().unwrap();
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport.call(RequestContext::unbounded(), request(1, "workspace.open", None,
+        json!({"rootDir": scratch.path().to_string_lossy(), "workspaceId": WORKSPACE_ID, "captureMode": "none"}))).await.unwrap();
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).unwrap();
+    let mut id = 1;
+    let create = json!({"versionId": "main", "path": "record.md", "text": "---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n",
+        "origin": "api", "publish": true, "createOnly": true, "requestId": "automation-create:stable"});
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "versionedText.write",
+        create.clone(),
+    )
+    .await;
+    assert!(scratch.path().join("record.md").exists());
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "versionedText.delete",
+        json!({"versionId": "main", "path": "record.md", "origin": "api"}),
+    )
+    .await;
+    // The desktop removes the file after committing its canonical deletion.
+    std::fs::remove_file(scratch.path().join("record.md")).unwrap();
+    assert!(!scratch.path().join("record.md").exists());
+    let replay = call(&transport, &handle, &mut id, "versionedText.write", create).await;
+    assert_eq!(replay["deduped"], true);
+    assert!(!scratch.path().join("record.md").exists());
+    call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+}
+
+#[test]
+#[ignore = "machine-local durability measurement"]
+fn make_durable_barrier_cost() {
+    let scratch = ScratchDir::new().unwrap();
+    let path = engine_db_path(&scratch).unwrap();
+    let mut store = EngineStore::open(&path, 1).unwrap();
+    // Disable auto-checkpoints to measure the FULL commit itself.
+    store
+        .read_with(|conn| conn.pragma_update(None, "wal_autocheckpoint", 0))
+        .unwrap();
+    let wal = path.with_file_name("engine.db-wal");
+    let before = std::fs::metadata(&wal).unwrap().len();
+    let mut samples = Vec::new();
+    for index in 0..260 {
+        let start = std::time::Instant::now();
+        dohc_engine_domain::make_automation_writes_durable(&mut store, WORKSPACE_ID, &NoFaults)
+            .unwrap();
+        if index >= 10 {
+            samples.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        assert_eq!(store.synchronous_setting().unwrap(), 1);
+    }
+    assert!(
+        std::fs::metadata(&wal).unwrap().len() > before + 250 * 4096,
+        "every barrier must produce WAL frames, including repeated calls"
+    );
+    println!("barrier_raw_ms={samples:?}");
+    samples.sort_by(f64::total_cmp);
+    println!(
+        "barrier n={} median_ms={} p95_ms={}",
+        samples.len(),
+        (samples[124] + samples[125]) / 2.0,
+        samples[237]
     );
 }

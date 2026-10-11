@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   EngineMomentRecord,
+  HistoryPolicyUnreadableResult,
   ListEngineMomentsResponse,
   ListEngineMomentsResult,
 } from "../../ipc/bridgeContract";
@@ -83,9 +84,11 @@ export function useHistoryPage(
   page: HistoryPage | null;
   loadingMore: boolean;
   readState: HistoryReadState;
+  policyError: HistoryPolicyUnreadableResult | null;
 } & HistoryPageOwner {
   const [page, setPageState] = useState<HistoryPage | null>(null);
   const [loadingMore, setLoadingMoreState] = useState(false);
+  const [policyError, setPolicyError] = useState<HistoryPolicyUnreadableResult | null>(null);
   const [readState, setReadState] = useState<HistoryReadState>("loading");
   // Mirrors of the two values a pagination reads synchronously: the cursor it
   // fetches from, and whether one is already out. Written only beside their
@@ -121,6 +124,15 @@ export function useHistoryPage(
       latestPage.current = next;
       setPageState(next);
     };
+    const hideForPolicy = (token: number, result: HistoryPolicyUnreadableResult) => {
+      committed.current = token;
+      committedVersionId.current = null;
+      heldRefresh.current = null;
+      setPage(null);
+      setLoadingMore(false);
+      setPolicyError(result);
+      setReadState("failed");
+    };
     const setLoadingMore = (next: boolean) => {
       loadingMoreNow.current = next;
       setLoadingMoreState(next);
@@ -145,7 +157,7 @@ export function useHistoryPage(
           workspaceId,
           limit: HISTORY_PAGE_LIMIT,
         });
-        if (!("status" in response)) return response;
+        if (!("status" in response) || response.status === "policy-unreadable") return response;
         if (
           attempt === HISTORY_UPDATING_RETRY_DELAYS_MS.length ||
           token !== newestRefresh.current
@@ -172,7 +184,12 @@ export function useHistoryPage(
         throw error;
       }
       if ("status" in response) {
-        if (token === newestRefresh.current) setReadState("updating");
+        if (token === newestRefresh.current) {
+          if (response.status === "policy-unreadable") {
+            if (token > committed.current) hideForPolicy(token, response);
+          }
+          else setReadState("updating");
+        }
         return;
       }
       const answer: ListEngineMomentsResult = response;
@@ -184,6 +201,7 @@ export function useHistoryPage(
       const commit = () => {
         committed.current = token;
         committedVersionId.current = answer.activeVersionId;
+        setPolicyError(null);
         // A refresh returns to the newest page; older pages reload on demand,
         // so any load-more it supersedes is over.
         setLoadingMore(false);
@@ -230,7 +248,13 @@ export function useHistoryPage(
         // The displayed page remains the honest last answer while capture is
         // settling. Releasing the button below gives the user a bounded
         // retry; this expected progress result is never a global error.
-        if ("status" in answer) return;
+        if ("status" in answer) {
+          if (answer.status === "policy-unreadable" && token > committed.current &&
+            token >= newestRefresh.current && (pageVersionId === null || !isStale(token, pageVersionId))) {
+            hideForPolicy(token, answer);
+          }
+          return;
+        }
         // The committed-answer rule, applied to this page as well, plus the
         // one question an append owes: the page must describe the same
         // version as the timeline it extends.
@@ -327,5 +351,49 @@ export function useHistoryPage(
     [issue],
   );
 
-  return { page, loadingMore, readState, ...owner };
+  const [namesRevision, setNamesRevision] = useState<{ workspaceId: string } | null>(null);
+  const namedRevision = useRef<typeof namesRevision>(null);
+  useEffect(() => bridge().onHistoryNamesChanged?.(event => {
+    if (event.workspaceId === workspaceId) setNamesRevision({ workspaceId });
+  }), [workspaceId]);
+  useEffect(() => {
+    const shown = latestPage.current;
+    if (
+      namesRevision?.workspaceId !== workspaceId || namedRevision.current === namesRevision ||
+      loadingMore || shown === null || shown.moments.length === 0
+    ) return;
+    let liveRequest = true;
+    const watermark = committed.current;
+    const version = committedVersionId.current;
+    const live = () => liveRequest && !loadingMoreNow.current && latestPage.current === shown && committed.current === watermark && committedVersionId.current === version;
+    const scan = async () => {
+      const named = new Map<string, EngineMomentRecord>();
+      let before = Math.max(...shown.moments.map(moment => moment.momentOrder)) + 1;
+      const last = Math.min(...shown.moments.map(moment => moment.momentOrder));
+      do {
+        const response = await bridge().listEngineMoments({ workspaceId, beforeMomentOrder: before, limit: HISTORY_PAGE_LIMIT });
+        if (!live() || "status" in response || response.activeVersionId !== version) return false;
+        for (const moment of response.moments) named.set(moment.id, moment);
+        if (response.nextBeforeMomentOrder === null || response.nextBeforeMomentOrder <= last) break;
+        if (response.nextBeforeMomentOrder >= before) return false;
+        before = response.nextBeforeMomentOrder;
+      } while (live());
+      if (!live()) return false;
+      const next = { ...shown, moments: shown.moments.map(moment => named.get(moment.id) ?? moment) };
+      latestPage.current = next;
+      // An append keeps earlier rows. Consume the event only once their
+      // names reach the page; an interrupted scan runs on the new page.
+      namedRevision.current = namesRevision;
+      setPageState(next);
+      return true;
+    };
+    void (async () => {
+      for (let attempt = 0; attempt < 2 && live(); attempt++) {
+        try { if (await scan()) return; } catch { /* Retry once while this page is still current. */ }
+      }
+    })();
+    return () => { liveRequest = false; };
+  }, [workspaceId, owner, page, loadingMore, namesRevision]);
+
+  return { page, loadingMore, readState, policyError, ...owner };
 }

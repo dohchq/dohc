@@ -270,6 +270,8 @@ export interface ApplyLocalUpdateOptions {
   actorOriginId?: string;
   /** Declared write provenance the engine records beside the actor origin. */
   attribution?: ChangeAttributionWire;
+  /** Server delivery retains this declaration for canonical automation admission. */
+  trustedAutomationDraft?: boolean;
   /**
    * The wire idempotency key for this update's recordUpdate request, in
    * place of the session-generated one. An automation run's write carries
@@ -582,6 +584,7 @@ interface LocalUpdateRecord {
   readonly idempotencyKey: string;
   readonly actorOriginId?: string;
   readonly attribution?: ChangeAttributionWire;
+  readonly trustedAutomationDraft?: boolean;
   readonly seed: boolean;
   refusal?: unknown;
 }
@@ -811,6 +814,7 @@ export class YdocAdapterSession {
       idempotencyKey: options?.idempotencyKey ?? `${this.sessionId}:${this.nextLocalUpdateSeq++}`,
       ...(options?.actorOriginId ? { actorOriginId: options.actorOriginId } : {}),
       ...(options?.attribution ? { attribution: structuredClone(options.attribution) } : {}),
+      ...(options?.trustedAutomationDraft ? {trustedAutomationDraft: true} : {}),
       seed: seedUpdate,
     };
     const retainedBytes = record.updateBase64.length * 2 +
@@ -949,6 +953,7 @@ export class YdocAdapterSession {
       updateBase64: record.updateBase64,
       ...(record.actorOriginId ? { actorOriginId: record.actorOriginId } : {}),
       ...(record.attribution ? { attribution: structuredClone(record.attribution) } : {}),
+      ...(record.trustedAutomationDraft ? {trustedAutomationDraft: true} : {}),
       ...(record.seed ? { seed: true } : {}),
     };
     let result: YdocRecordUpdateResult;

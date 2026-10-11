@@ -209,7 +209,7 @@ impl ApplicationOwner {
             let audit = LiveSettlementAudit {
                 namespace: held.namespace.clone(), binding: application.admitted.accepted.binding.clone(), coordinate: held.coordinate.clone(),
                 previous_cursor, terminal_cursor: application.admitted.accepted.receipt.journal_cursor,
-                previous_sequence, sequence: application.local_head_sequence, observed_head: application.local_head_sequence, accepted: None, receipts, interval_digest,
+                previous_sequence, sequence: application.local_head_sequence, observed_head: application.local_head_sequence, accepted: None, terminal_source: false, receipts, interval_digest,
                 bootstrap_moment: expected_moment, bootstrap_digest: expected_digest,
                 first: owner.is_none() && prior.is_none() && last_settled.is_none(),
                 restore: Some(Box::new(RestoreAudit { input: input.clone(), expected_vector: hex_sha256(&proposal.receipt().after_state_vector), application, prior, max_bytes, max_events })),
@@ -469,6 +469,8 @@ mod tests {
             stopped <= empty + 32,
             "a stopped operation must use the unique operation lookup: {empty} -> {stopped}"
         );
-        eprintln!("restore lookup VM steps: empty={empty}, ordinary10000={ordinary}, stopped10000={stopped}");
+        eprintln!(
+            "restore lookup VM steps: empty={empty}, ordinary10000={ordinary}, stopped10000={stopped}"
+        );
     }
 }

@@ -38,7 +38,7 @@ use dohc_engine_files::{
     IngestReason, ManifestEntry, PoolGauge, ReconcilePlan, ReconcileRun, ScanBounds,
     ScanGeneration, ScanManifest, apply_reconcile_plan_cancellable,
 };
-use dohc_engine_runtime::{ActorHandle, NoFaults, RuntimeError};
+use dohc_engine_runtime::{ActorHandle, CollectionReconciliation, NoFaults, RuntimeError};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -712,6 +712,8 @@ impl ScanGauge {
 #[derive(Default)]
 pub(crate) struct DriverStatus {
     bits: std::sync::atomic::AtomicU8,
+    collection_lease_held: std::sync::atomic::AtomicBool,
+    collection_release_generation: std::sync::atomic::AtomicU64,
 }
 
 /// The files layer (actor + watcher + loop) is up and driving.
@@ -904,6 +906,21 @@ impl DriverStatus {
     }
     pub(crate) fn request_collection_reconcile(&self) {
         self.update(|bits| bits | STATUS_COLLECTION_RECONCILE_PENDING);
+    }
+    fn record_collection_reconciliation(&self, lease_held: bool, release_generation: u64) {
+        self.collection_release_generation
+            .store(release_generation, Ordering::Relaxed);
+        self.collection_lease_held
+            .store(lease_held, Ordering::Release);
+    }
+    fn offer_collection_reconcile_after_release(&self, leases: &LeaseRegistry, workspace_id: &str) {
+        if self.collection_lease_held.load(Ordering::Acquire)
+            && leases.release_generation(workspace_id)
+                != self.collection_release_generation.load(Ordering::Relaxed)
+        {
+            self.collection_lease_held.store(false, Ordering::Release);
+            self.request_collection_reconcile();
+        }
     }
     #[cfg(test)]
     fn collection_reconcile_pending(&self) -> bool {
@@ -2472,7 +2489,8 @@ struct CaptureThreadOutcome {
     plan: ReconcilePlan,
     result: CaptureApplyResult,
     policy_held: bool,
-    collections: Option<Result<Vec<String>, RuntimeError>>,
+    collections: Option<Result<CollectionReconciliation, RuntimeError>>,
+    collection_release_generation: u64,
     /// Automation claims the captures and the reconciliation committed.
     automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
 }
@@ -2559,6 +2577,7 @@ async fn apply_bound_run_with_handle(
     } = context;
     let now_ms = wall_now_ms();
     let RootBoundRun { captured_root, run } = run;
+    status.offer_collection_reconcile_after_release(leases, workspace_id);
     let (plan, collection_reconcile_requested) = match run {
         ReconcileRun::Completed(plan) => {
             let requested = status.take_collection_reconcile_request()
@@ -2567,6 +2586,8 @@ async fn apply_bound_run_with_handle(
         }
         ReconcileRun::Converged => {
             let adopted_paths = if status.take_collection_reconcile_request() {
+                // Read before the attempt so a release racing it still wakes a retry.
+                let release_generation = leases.release_generation(workspace_id);
                 let result = match actor.active_version_id(workspace_id.to_owned()).await {
                     Ok(version_id) => {
                         let collection_actor = actor.clone();
@@ -2609,13 +2630,17 @@ async fn apply_bound_run_with_handle(
                     }
                     Err(RuntimeError::Domain(
                         dohc_engine_domain::DomainError::WorkspaceNotFound,
-                    )) => Ok((Vec::new(), Vec::new())),
+                    )) => Ok((CollectionReconciliation::default(), Vec::new())),
                     Err(error) => Err(error),
                 };
                 match result {
-                    Ok((paths, claims)) => {
+                    Ok((reconciliation, claims)) => {
+                        status.record_collection_reconciliation(
+                            reconciliation.lease_held,
+                            release_generation,
+                        );
                         crate::events::emit_automation_claimed(&events, workspace_id, &claims);
-                        paths
+                        reconciliation.changed_paths
                     }
                     Err(_) => {
                         status.request_collection_reconcile();
@@ -2726,18 +2751,19 @@ async fn apply_bound_run_with_handle(
             // one-policy-snapshot-per-task rule.
             let mut sink = StoreCaptureSink::new(StoreCaptureSinkParams {
                 actor: apply_actor,
-                workspace_id: apply_workspace,
+                workspace_id: apply_workspace.clone(),
                 version_id,
                 shadow_root: apply_root,
                 captured_root: Ok(apply_captured_root),
                 now_ms,
                 author_json: apply_author_json,
-                leases: apply_leases,
+                leases: apply_leases.clone(),
                 self_writes: apply_self_writes,
                 provenance: apply_provenance,
             });
             let result =
                 apply_reconcile_plan_cancellable(&apply_plan, &mut sink, &NoFaults, &apply_cancel);
+            let mut collection_release_generation = 0;
             let collections =
                 if result.failed_applies.is_empty() && !result.degraded && result.completed() {
                     let reconcile = if collection_reconcile_requested {
@@ -2748,7 +2774,11 @@ async fn apply_bound_run_with_handle(
                         sink.collection_record_id_mismatch(changed_collection_paths)
                     };
                     match reconcile {
-                        Ok(true) => Some(sink.reconcile_collections()),
+                        Ok(true) => {
+                            collection_release_generation =
+                                apply_leases.release_generation(&apply_workspace);
+                            Some(sink.reconcile_collections())
+                        }
                         Ok(false) => None,
                         Err(error) => Some(Err(error)),
                     }
@@ -2760,6 +2790,7 @@ async fn apply_bound_run_with_handle(
                 result,
                 policy_held: sink.policy_held(),
                 collections,
+                collection_release_generation,
                 automation_claims: sink.take_automation_claims(),
             });
         });
@@ -2776,6 +2807,7 @@ async fn apply_bound_run_with_handle(
         mut result,
         policy_held: sink_policy_held,
         collections: collection_result,
+        collection_release_generation,
         automation_claims,
     }) = applied
     else {
@@ -2791,7 +2823,13 @@ async fn apply_bound_run_with_handle(
     // executors now.
     crate::events::emit_automation_claimed(&events, workspace_id, &automation_claims);
     let collection_paths = match collection_result {
-        Some(Ok(paths)) => paths,
+        Some(Ok(reconciliation)) => {
+            status.record_collection_reconciliation(
+                reconciliation.lease_held,
+                collection_release_generation,
+            );
+            reconciliation.changed_paths
+        }
         Some(Err(_)) => {
             status.request_collection_reconcile();
             result.degraded = true;

@@ -52,8 +52,10 @@ describe("markdown document opening state", () => {
   function makeHeldOpenBridge() {
     const serverDoc = markdownToYDoc(DOC_MARKDOWN);
     let settle: ((available: boolean) => void) | null = null;
+    const saveListeners = new Set<Parameters<DohcDesktopBridge["onEngineYDocSaveState"]>[0]>();
     const bridgeMock = {
       platform: "linux" as const,
+      onWorkspaceActivity: vi.fn(() => () => undefined),
       readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(
         async () => ({
           text: DOC_MARKDOWN,
@@ -74,11 +76,12 @@ describe("markdown document opening state", () => {
         source: "default" as const,
       })),
       openEngineYDocSession: vi.fn(
-        () =>
+        (_payload: { sessionId: string }) =>
           new Promise<{
             available: boolean;
             initialUpdate?: Uint8Array;
             lineageGeneration?: number;
+            documentUnavailable?: boolean;
           }>(
             (resolve) => {
               settle = (available) =>
@@ -100,11 +103,18 @@ describe("markdown document opening state", () => {
       onEngineYDocOwnerHandoff: () => () => undefined,
       prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
-      onEngineYDocSaveState: vi.fn(() => () => undefined),
+      onEngineYDocSaveState: vi.fn((listener: Parameters<DohcDesktopBridge["onEngineYDocSaveState"]>[0]) => {
+        saveListeners.add(listener);
+        return () => saveListeners.delete(listener);
+      }),
     };
     return {
       bridgeMock,
       bind: () => act(() => settle?.(true)),
+      reportSavedOutcome: () => act(() => {
+        const sessionId = bridgeMock.openEngineYDocSession.mock.calls.at(-1)![0].sessionId;
+        for (const listener of saveListeners) listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "saved-here" }, seq: 0 });
+      }),
       answerNotEngineBacked: () => act(() => settle?.(false)),
     };
   }
@@ -170,6 +180,80 @@ describe("markdown document opening state", () => {
     // Past the 800ms autosave debounce, so a scheduled write has fired.
     await advanceAutosaveDebounce();
   }
+
+  // The header after its icon and path, read left to right: the status
+  // slot (a save state, "Opening…"), then Share and the document's controls.
+  function headerGroup() {
+    const header = screen.getByTestId("file-inspector").querySelector("header");
+    const [, , status, ...controls] = [...(header?.children ?? [])];
+    const control = (el: Element) => el.querySelector("button") ?? el;
+    return {
+      // A truncating save state sits in a wrapper beside its tooltip.
+      status: [...(status?.children ?? [])].map(
+        (el) => el.getAttribute("data-testid") ?? el.querySelector("[data-testid]")?.getAttribute("data-testid"),
+      ),
+      controls: controls.map((el) =>
+        el.tagName === "BUTTON" && !el.getAttribute("aria-label")
+          ? "toggle"
+          : el.getAttribute("aria-label") ?? el.querySelector("[aria-label]")?.getAttribute("aria-label") ?? el.textContent,
+      ),
+      disabled: controls.map((el) => (control(el) as HTMLButtonElement).disabled),
+    };
+  }
+  const CONTROLS = ["Share file", "toggle", "Document actions"];
+
+  it("draws the document's header controls in their places from the click frame to ready", async () => {
+    const read = Promise.withResolvers<Awaited<ReturnType<DohcDesktopBridge["readWorkspaceText"]>>>();
+    const { bridgeMock, bind, reportSavedOutcome } = makeHeldOpenBridge();
+    bridgeMock.readWorkspaceText.mockReturnValueOnce(read.promise);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" onSharePath={() => undefined} />);
+
+    // The text has not arrived: the loading view.
+    expect(screen.queryByTestId("view-markdown")).toBeNull();
+    expect(headerGroup(), "a loading header without the toggle and the menu puts the menu where Share was once the text arrives").toEqual({
+      status: [], controls: CONTROLS, disabled: [false, true, false],
+    });
+    // The header names the file, never its kind in words: the icon says it.
+    expect(screen.getByTestId("file-inspector").querySelector("header")?.textContent).toBe("a.mdEdit");
+
+    // The text arrived and the engine open is held: the opening view.
+    await act(async () => read.resolve({ text: DOC_MARKDOWN, truncated: false, contentHash: TEST_CONTENT_HASH }));
+    await screen.findByTestId("view-markdown");
+    expect(headerGroup()).toEqual({ status: ["markdown-open-state"], controls: CONTROLS, disabled: [false, true, false] });
+
+    // The session bound: the ready view.
+    bind();
+    reportSavedOutcome();
+    await waitFor(() => expect(screen.getByTestId("markdown-source-toggle")).toBeTruthy());
+    expect(headerGroup(), "a save state among the controls moves Share whenever its words change").toEqual({
+      status: ["markdown-save-state"], controls: CONTROLS, disabled: [false, false, false],
+    });
+  });
+
+  it("keeps the document's header controls in their places, disabled, when the read fails", async () => {
+    const { bridgeMock } = makeHeldOpenBridge();
+    bridgeMock.readWorkspaceText.mockRejectedValue(new Error("EACCES"));
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" onSharePath={() => undefined} />);
+    await screen.findByText("Couldn't read this file.");
+    expect(headerGroup(), "a failed read drops the toggle and the menu, and Share moves right").toEqual({
+      status: [], controls: CONTROLS, disabled: [false, true, true],
+    });
+    // A failed read never opens, so the toggle does not promise that it will.
+    expect(screen.getByTestId("file-inspector").querySelector("header button:not([aria-label])")?.getAttribute("title")).toBeNull();
+  });
+
+  it("keeps the document's header controls in their places, disabled, when the file is gone from its path", async () => {
+    const { bridgeMock } = makeHeldOpenBridge();
+    bridgeMock.openEngineYDocSession.mockResolvedValueOnce({ available: false, documentUnavailable: true });
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" onSharePath={() => undefined} />);
+    await screen.findByTestId("file-unavailable");
+    expect(headerGroup(), "the unavailable view drops the toggle and the menu, and Share moves right").toEqual({
+      status: [], controls: CONTROLS, disabled: [false, true, true],
+    });
+  });
 
   it("refuses every disk write while the open is held, then takes the keystroke into the bound session", async () => {
     useAutoAdvancingFakeTimers();
@@ -558,13 +642,13 @@ describe("markdown document opening state", () => {
     vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
     const states: string[] = [];
     await armDraftThenReopen(user, bridge, {
-      onSaveStateChange: (state) => states.push(state),
+      onSaveStateChange: (state) => states.push(state.kind),
     });
     await screen.findByTestId("orphaned-draft-notice");
     expect(
       screen.getByTestId("markdown-save-state").getAttribute("data-state"),
     ).toBe("recovery");
-    await waitFor(() => expect(states.at(-1), "lift: report the recovery-derived state through onSaveStateChange (the round-1 behavior). The shell then marks the tab savable-dirty and the version switch prompts to save a draft that no longer exists in the pipeline.").toBe("saved"));
+    await waitFor(() => expect(states.at(-1), "lift: report the recovery-derived state through onSaveStateChange (the round-1 behavior). The shell then marks the tab savable-dirty and the version switch prompts to save a draft that no longer exists in the pipeline.").toBe("saved-here"));
     expect(states).not.toContain("error");
 
     await user.click(screen.getByTestId("recovery-dismiss"));
@@ -573,7 +657,7 @@ describe("markdown document opening state", () => {
       expect(screen.queryByTestId("orphaned-draft-notice"), "chip: collapse chipState to the plain saveState. The chip then reads nothing while the notice says an edit is not saved.").toBeNull(),
     );
     expect(screen.queryByTestId("markdown-save-state")).toBeNull();
-    expect(states.at(-1)).toBe("saved");
+    expect(states.at(-1)).toBe("saved-here");
   });
 
   it("shares concurrent legacy Markdown flushes until their held write lands", async () => {
@@ -2188,7 +2272,7 @@ describe("markdown document opening state", () => {
       body: newBody,
       contentHash: newHash,
       dirty: false,
-      saveState: "saved",
+      saveState: { kind: "saved-here" },
     });
 
     const title = screen.getByTestId("page-title");
@@ -2308,6 +2392,7 @@ describe("markdown document opening state", () => {
 
     // The reopen resolves BOUND: the engine branch renders with the notice.
     bridge.bind();
+    bridge.reportSavedOutcome();
     await screen.findByTestId("markdown-source-toggle");
     await screen.findByTestId("orphaned-draft-notice");
 

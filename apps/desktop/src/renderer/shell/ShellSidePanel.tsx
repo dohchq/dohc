@@ -1,19 +1,19 @@
 import { Maximize2, RefreshCw } from "lucide-react";
-import { Suspense, lazy, type ComponentProps, type ReactNode } from "react";
+import { Suspense, lazy, useState, type ComponentProps, type ReactNode } from "react";
 import type { WorkspaceSummary } from "../../ipc/bridgeContract";
 import { ErrorBoundary } from "../ErrorBoundary";
 import type { CustomizePart } from "../settings/customize";
 import { MoreMenu } from "../ui/MoreMenu";
 import type { RelayShareTarget } from "../RelayShareDialog";
-import { PanelLoading } from "../workbench/PanelLoading";
+import { SkeletonRows, SkeletonSlot } from "../ui/SkeletonRows";
 // Eager on purpose. Behind lazy(), the search input did not exist until the
 // chunk resolved, and every character typed in that gap went to whatever the
 // user clicked to open the panel — queries arrived with their first letters
 // missing. The view carries no dependency the shell does not already load.
 import { SearchView } from "../workbench/SearchView";
 import { SidePanel } from "../workbench/SidePanel";
-import { setView, setSidebarWidth, type WorkbenchState } from "../workbench/workbenchState";
-import { LazyGraphView, LazySitePreviewPage } from "./lazyViews";
+import { setView, setSidebarWidth, SHARING_VIEW_ID, type WorkbenchState } from "../workbench/workbenchState";
+import { LazyGraphView, LazySharingView, LazySitePreviewPage } from "./lazyViews";
 
 const LazyAppsView = lazy(() =>
   import("../workbench/AppsView").then((mod) => ({ default: mod.AppsView })),
@@ -38,6 +38,8 @@ export function ShellSidePanel(props: {
   openSearchResult: ComponentProps<typeof SearchView>["onOpenResult"];
   workspaceId: string;
   activeDocumentPath: string | null;
+  focusedTabPath: AppsViewProps["activePath"];
+  appsNotices: AppsViewProps["notices"];
   graphKey: GraphViewProps["refreshKey"];
   openPathWithHeading: GraphViewProps["onOpenPath"] & AppsViewProps["onOpenPath"];
   openGraphChatThread: GraphViewProps["onOpenChatThread"];
@@ -48,6 +50,7 @@ export function ShellSidePanel(props: {
   createFirstApp: AppsViewProps["onCreateFirstApp"];
   shareView: NonNullable<WorkspaceSummary["shareView"]> | null;
   historyTimeline: ReactNode;
+  sharing: ComponentProps<typeof LazySharingView>;
   selectedAppRoot: string | null;
   openAppTab: SitePreviewPageProps["onOpenApp"];
   reportShellError: SitePreviewPageProps["reportError"];
@@ -67,6 +70,8 @@ export function ShellSidePanel(props: {
     openSearchResult,
     workspaceId,
     activeDocumentPath,
+    focusedTabPath,
+    appsNotices,
     graphKey,
     openPathWithHeading,
     openGraphChatThread,
@@ -77,11 +82,14 @@ export function ShellSidePanel(props: {
     createFirstApp,
     shareView,
     historyTimeline,
+    sharing,
     selectedAppRoot,
     openAppTab,
     reportShellError,
     setShareTarget,
   } = props;
+  // Where the Apps view puts its count and create button, ahead of Refresh.
+  const [appsHead, setAppsHead] = useState<HTMLSpanElement | null>(null);
   return (
     <SidePanel
       title={sidePanelTitle}
@@ -112,16 +120,19 @@ export function ShellSidePanel(props: {
               <Maximize2 size={13} aria-hidden />
             </button>
           ) : wb.activeView === "sites" ? (
-            <button
-              type="button"
-              data-testid="sites-refresh"
-              aria-label="Refresh apps"
-              title="Refresh apps"
-              onClick={refreshSites}
-              className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
-            >
-              <RefreshCw size={13} aria-hidden />
-            </button>
+            <>
+              <span ref={setAppsHead} className="contents" />
+              <button
+                type="button"
+                data-testid="sites-refresh"
+                aria-label="Refresh apps"
+                title="Refresh apps"
+                onClick={refreshSites}
+                className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
+              >
+                <RefreshCw size={13} aria-hidden />
+              </button>
+            </>
           ) : null}
           <MoreMenu
             label="Sidebar actions"
@@ -147,7 +158,7 @@ export function ShellSidePanel(props: {
       ) : wb.activeView === "search" ? (
         <SearchView search={search} onOpenResult={openSearchResult} />
       ) : wb.activeView === "graph" ? (
-        <Suspense fallback={<PanelLoading label="graph" />}>
+        <Suspense fallback={<SkeletonRows layout="panel" label="Loading graph..." />}>
           <LazyGraphView
             workspaceId={workspaceId}
             activePath={activeDocumentPath}
@@ -159,9 +170,13 @@ export function ShellSidePanel(props: {
           />
         </Suspense>
       ) : wb.activeView === "sites" ? (
-        <Suspense fallback={<PanelLoading label="apps" />}>
+        <SkeletonSlot>
+        <Suspense fallback={<SkeletonRows inSlot layout="panel" label="Loading apps…" />}>
           <LazyAppsView
             workspaceId={workspaceId}
+            head={appsHead}
+            activePath={focusedTabPath}
+            notices={appsNotices}
             pinnedApps={pinnedRoots}
             onSetPinned={(appRoot, pinned) => void setAppPinned(appRoot, pinned)}
             filesSettledRevision={listingsSettled}
@@ -171,12 +186,17 @@ export function ShellSidePanel(props: {
             {...(askAgent ? { askAgent } : {})}
           />
         </Suspense>
+        </SkeletonSlot>
       ) : wb.activeView === "history" ? (
         historyTimeline
+      ) : wb.activeView === SHARING_VIEW_ID ? (
+        <Suspense fallback={<SkeletonRows layout="panel" label="Loading sharing..." />}>
+          <LazySharingView {...sharing} />
+        </Suspense>
       ) : selectedAppRoot !== null ? (
         // The same sealed preview an app's tab runs: a sandboxed frame
         // on a dohc loopback server, with no dohc bridge.
-        <Suspense fallback={<PanelLoading label="app" />}>
+        <Suspense fallback={<SkeletonRows layout="panel" label="Loading app..." />}>
           <LazySitePreviewPage
             key={selectedAppRoot}
             variant="panel"

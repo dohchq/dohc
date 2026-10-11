@@ -330,10 +330,33 @@ impl EngineStore {
         E: From<StorageError>,
     {
         self.prepare_write().map_err(E::from)?;
+        Self::write_on_connection(&self.conn, faults, f)
+    }
 
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+    /// One FULL commit syncs this transaction and every earlier WAL commit.
+    pub fn write_durable_with<T, E>(
+        &mut self,
+        faults: &dyn FaultInjector,
+        f: impl FnOnce(&Transaction<'_>) -> Result<T, E>,
+    ) -> Result<TxnOutcome<T>, E>
+    where
+        E: From<StorageError>,
+    {
+        self.prepare_write().map_err(E::from)?;
+        crate::durability::with_full_synchronous(&self.conn, |conn| {
+            Self::write_on_connection(conn, faults, f)
+        })
+    }
+
+    fn write_on_connection<T, E>(
+        conn: &Connection,
+        faults: &dyn FaultInjector,
+        f: impl FnOnce(&Transaction<'_>) -> Result<T, E>,
+    ) -> Result<TxnOutcome<T>, E>
+    where
+        E: From<StorageError>,
+    {
+        let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
             .map_err(StorageError::persist)?;
 
         let value = match f(&tx) {
@@ -442,8 +465,8 @@ impl EngineStore {
 
     // ---- R04: materialization jobs --------------------------------------
 
-    /// Every pending materialization job, oldest first — the set the filesystem
-    /// pipeline replays at startup and executes on enqueue.
+    /// Generic pending jobs, oldest first. Checked deletes are owned by the
+    /// runtime publication state machine and must never enter generic replay.
     pub fn list_pending_materialization_jobs(
         &self,
     ) -> Result<Vec<MaterializationJob>, StorageError> {

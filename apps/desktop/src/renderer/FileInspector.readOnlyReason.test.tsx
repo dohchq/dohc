@@ -16,6 +16,7 @@ setupFileInspectorTests();
 describe("read-only reason on the text and CSV chips", () => {
   const bridgeMock = {
     platform: "linux" as const,
+    onWorkspaceActivity: vi.fn(() => () => undefined),
     readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(),
     writeWorkspaceText: vi.fn<DohcDesktopBridge["writeWorkspaceText"]>(
       async () => ({ status: "written", contentHash: TEST_CONTENT_HASH }),
@@ -40,14 +41,20 @@ describe("read-only reason on the text and CSV chips", () => {
   const SHARE = "This document is shared with you to read.";
   const TOO_LARGE = "This file is too large to edit in dohc.";
 
+  // The header says the file and nothing about its state: the chip says that.
   for (const [path, testId] of [
     ["notes.txt", "view-text-save-state"],
+    ["main.ts", "view-text-save-state"],
+    ["index.html", "view-text-save-state"],
+    ["config.yaml", "view-text-save-state"],
+    ["config.json", "view-json-save-state"],
     ["rows.csv", "csv-save-state"],
   ] as const) {
     it(`${path}: a read-only share says so`, async () => {
       bridgeMock.readWorkspaceText.mockResolvedValue({ text: "a,b\n", truncated: false, contentHash: TEST_CONTENT_HASH });
       render(<FileInspector workspaceId="ws-1" path={path} readOnly />);
       const chip = await screen.findByTestId(testId);
+      expect(screen.getByTestId("file-inspector").querySelector("header")?.textContent).toBe(path);
       expect(chip.textContent).toBe("Read-only");
       expect(chip.getAttribute("title")).toBe(SHARE);
       expect(chip.dataset.state).toBe("saved");
@@ -57,6 +64,7 @@ describe("read-only reason on the text and CSV chips", () => {
       bridgeMock.readWorkspaceText.mockResolvedValue({ text: "a,b\n", truncated: true, contentHash: null });
       render(<FileInspector workspaceId="ws-1" path={path} />);
       const chip = await screen.findByTestId(testId);
+      expect(screen.getByTestId("file-inspector").querySelector("header")?.textContent).toBe(path);
       expect(chip.textContent).toBe("Read-only");
       expect(chip.getAttribute("title")).toBe(TOO_LARGE);
       expect(chip.dataset.state).toBe("saved");

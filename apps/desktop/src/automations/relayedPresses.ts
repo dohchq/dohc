@@ -92,7 +92,10 @@ export function automationPressRelay(relay: SyncRelayConnection) {
       await call(`${ws(workspaceId)}/automation-presses/settle`, { method: "POST", headers: json, body: JSON.stringify(input) });
     },
     /** A recipient's press on a shared Collection's button. */
-    async press(shareId: string, input: { pressId: string; automationId: string; collectionPath: string; definitionHash: string; recordId: string; confirmed: readonly string[] }): Promise<RelayAutomationPressReceipt> {
+    async press(shareId: string, input: { pressId: string; automationId: string; collectionPath: string; definitionHash: string; recordId: string; confirmed: readonly string[] }, notices?: {
+      isCurrent(): boolean;
+      sync(isCurrent: () => boolean): Promise<void>;
+    }): Promise<RelayAutomationPressReceipt> {
       const { ok: _ok, ...receipt } = await call(`/sync/shares/${encodeURIComponent(shareId)}/automation-presses`, {
         method: "POST", headers: json, body: JSON.stringify(input),
       }, "Button press", {
@@ -101,6 +104,7 @@ export function automationPressRelay(relay: SyncRelayConnection) {
         409: () => new Error("This press already went to another button. Press it again."),
         429: () => new Error("Too many button presses. Wait a moment, then press again."),
       });
+      if (receipt.state === "settled" && notices?.isCurrent()) void notices.sync(notices.isCurrent);
       return receipt as unknown as RelayAutomationPressReceipt;
     },
   };

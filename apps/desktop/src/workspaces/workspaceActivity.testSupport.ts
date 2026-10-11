@@ -11,7 +11,7 @@ import {
 
 type TestActivityWorkspace = CreatedWorkspace & { attachmentId?: symbol };
 export const idleObservation: WorkspaceActivityOptions["observationFor"] = () => ({
-  ready: Promise.resolve(), stop: async () => {}, pulledPaths: async () => {}, pullStarting: () => {}, pullFinished: () => {},
+  ready: Promise.resolve(), stop: async () => {}, pulledPaths: async () => {}, pullStarting: () => {}, pullFinished: () => {}, retry: async () => {},
 });
 
 /** Test-only registry adapter for the single-attachment activity service. */

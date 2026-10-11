@@ -1,3 +1,4 @@
+import { desktopPins, chatsPanelTabPin } from "../src/testPins";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { join } from "node:path";
 import { seedThroughDaemon } from "./helpers/daemonSeed";
@@ -9,7 +10,7 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   explorerRow,
-  openFileChatsPanel,
+  openAboutPanel,
   openWorkspaceFromFirstRun,
   seedCloudCredentials,
   seedWorkspaceManifest,
@@ -23,9 +24,9 @@ const messageCount = 300;
 const author = { kind: "human" as const, displayName: "Reader" };
 
 async function openChats(page: Page): Promise<Locator> {
-  const panel = page.getByTestId("chats-panel");
-  if (!(await panel.isVisible())) await page.getByTestId("titlebar-chats-sidebar").click();
-  await panel.getByTestId("chats-panel-tab-all").click();
+  const panel = page.getByTestId(desktopPins.chatsPanel);
+  if (!(await panel.isVisible())) await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
+  await panel.getByTestId(chatsPanelTabPin("all")).click();
   return panel;
 }
 
@@ -179,7 +180,7 @@ test("a file linked mention reveals an unmounted historical message", async () =
     const page = desktop.page;
     await waitForWorkspaceFile(page, workspaceId, "topic.md");
     await explorerRow(page, "topic.md").click();
-    await openFileChatsPanel(page);
+    await openAboutPanel(page);
     await page.getByTestId("linked-chat-open").click();
     const rail = page.getByTestId("linked-chat-thread");
     await expectWindowed(rail, "linked-chat", `File message ${messageCount - 1}`);

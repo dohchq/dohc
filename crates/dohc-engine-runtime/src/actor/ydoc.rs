@@ -183,6 +183,7 @@ impl ActorHandle {
         &self,
         binding: dohc_engine_collab::LiveObjectBinding,
         namespace: String,
+        recovery: bool,
         token: CancellationToken,
         reservation: Arc<dyn Send + Sync>,
     ) -> Result<
@@ -198,7 +199,9 @@ impl ActorHandle {
                 return Err(RuntimeError::Cancelled);
             }
             Ok(store.read_with(|conn| {
-                dohc_engine_collab::owner_outbox::enrollment::prepare_in(conn, &binding, &namespace)
+                dohc_engine_collab::owner_outbox::enrollment::prepare_in(
+                    conn, &binding, &namespace, recovery,
+                )
             }))
         })
         .await
@@ -297,6 +300,7 @@ impl ActorHandle {
         workspace_id: String,
         after: Option<dohc_engine_collab::owner_outbox::draft::OwnerDraftCursor>,
         limit: usize,
+        pending_only: bool,
         token: CancellationToken,
         reservation: Arc<dyn Send + Sync>,
     ) -> Result<
@@ -317,8 +321,40 @@ impl ActorHandle {
                     &workspace_id,
                     after.as_ref(),
                     limit,
+                    pending_only,
                 )
             }))
+        })
+        .await
+    }
+
+    pub async fn owner_ydoc_refuse_entry(
+        &self,
+        workspace_id: String,
+        input: dohc_engine_collab::owner_outbox::OwnerOutboxRefuseInput,
+        now_ms: i64,
+        token: CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<Result<dohc_engine_collab::LiveObjectBinding, OwnerOutboxError>, RuntimeError> {
+        self.run(move |store, _cache| {
+            let _reservation = reservation;
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(
+                match store.write_with(&NoFaults, |tx| {
+                    dohc_engine_collab::owner_outbox::refuse_entry_in_tx(
+                        tx,
+                        &workspace_id,
+                        &input,
+                        now_ms,
+                    )
+                }) {
+                    Ok(TxnOutcome::Committed(binding)) => Ok(binding),
+                    Ok(TxnOutcome::Crashed { .. }) => Err(OwnerOutboxError::Corrupt),
+                    Err(error) => Err(error),
+                },
+            )
         })
         .await
     }
@@ -575,13 +611,14 @@ impl ActorHandle {
         &self,
         workspace_id: String,
         input: OwnerOutboxQuarantineInput,
+        now_ms: i64,
         token: CancellationToken,
     ) -> Result<Result<(), OwnerOutboxError>, RuntimeError> {
         self.run(move |store, _cache| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                Ok(quarantine_owner_outbox(store, &workspace_id, input))
+                Ok(quarantine_owner_outbox(store, &workspace_id, input, now_ms))
             }
         })
         .await
@@ -916,6 +953,7 @@ impl ActorHandle {
                 return Ok((None, None));
             };
             if marker.lineage_claim_status.has_claimed_base()
+                || marker.file_export_lane.is_enabled()
                 || (marker.head_update_seq == 0 && marker.head_snapshot_seq == 0)
                 || !store.read_with(|conn| {
                     dohc_engine_sync::workspace_replicates_with_relay(conn, &key.workspace_id)
@@ -1949,104 +1987,21 @@ pub(super) fn ydoc_record_update_on_store(
         },
         faults,
         now_ms,
-        |tx, outcome, update_sha| {
-            dohc_engine_collab::owner_outbox::append_adopted_local_update_in_tx(
+        |tx, outcome, _update_sha| {
+            if !journal_local_append_in_tx(
                 tx,
                 &journal_key,
                 &journal_path,
-                outcome.seq,
+                journal_kind,
                 update,
-                now_ms,
-            )?;
-            if dohc_engine_collab::owner_outbox::has_adopted_owner_in(tx, &journal_key)? {
-                outcome.emit_outbound = false;
-                return Ok(());
-            }
-            // Origination is asked first and owns the base-once decision: it
-            // originates only a lineage that has no base yet. The base is a
-            // full state, so it already carries this append and every row the
-            // lineage held before it — a delta beside it would be redundant.
-            // Everything else journals its delta.
-            let base_originated = match dohc_engine_sync::originate_ydoc_base_in_tx(
-                tx,
-                &journal_key,
-                &journal_path,
                 actor_origin_id.as_deref(),
                 attribution.as_ref(),
+                seed_source.as_ref(),
+                &mut sharing_declined,
+                outcome,
                 now_ms,
-            )
-            .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
-                reason: format!("outbound ydoc.update base origination failed: {error}"),
-            })? {
-                dohc_engine_sync::BaseOrigination::Originated { base_snapshot_sha } => {
-                    if let Some(source) = &seed_source {
-                        dohc_engine_collab::owner_base_source::retain_owner_base_source_in_tx(
-                            tx,
-                            &journal_key,
-                            &journal_path,
-                            &base_snapshot_sha,
-                            source,
-                        )?;
-                    }
-                    true
-                }
-                dohc_engine_sync::BaseOrigination::Declined(reason) => {
-                    sharing_declined = Some(reason);
-                    false
-                }
-                dohc_engine_sync::BaseOrigination::NothingToDo => false,
-            };
-            if !base_originated && outcome.emit_outbound {
-                let lineage_claim_id = dohc_engine_collab::read_marker_in(tx, &journal_key)?
-                    .and_then(|marker| marker.lineage_claim_id)
-                    .ok_or_else(|| dohc_engine_collab::CollabError::Corrupt {
-                        reason: "exact Y.Doc lineage has no claim id".to_owned(),
-                    })?;
-                let origin_seq = dohc_engine_sync::journal_local_op_in_tx(
-                    tx,
-                    &journal_key.workspace_id,
-                    "ydoc.update",
-                    &ydoc_update_payload(
-                        &journal_key,
-                        &journal_path,
-                        journal_kind,
-                        update_sha,
-                        &lineage_claim_id,
-                        actor_origin_id.as_deref(),
-                        attribution.as_ref(),
-                        false,
-                    ),
-                    now_ms,
-                )
-                .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
-                    // Named explicitly: an exact replicated lineage
-                    // with NO sync identity is a half-initialized state
-                    // (every real replicated flow runs sync init first —
-                    // pulls require the identity and the TS driver creates
-                    // it when journaling the base). Fail closed with a
-                    // diagnosable reason rather than a generic failure; an
-                    // identity cannot be seeded down here (origin identity
-                    // is minted by sync init, not the collab layer).
-                    reason: format!("outbound ydoc.update journal append failed: {error}"),
-                })?;
-                // The op's replication coordinate exists only now, after the
-                // journal assigned it. Thread it into the facts so record
-                // events and the automation trigger key see the same
-                // coordinate every peer derives from the envelope. A
-                // base-originated or never-synced apply keeps `None`; its
-                // per-change key is the history row id.
-                if let Some(facts) = outcome.record_facts.as_mut() {
-                    let origin_id: String = tx
-                        .query_row(
-                            "SELECT origin_id FROM sync_identity WHERE workspace_id=?1",
-                            [&journal_key.workspace_id],
-                            |row| row.get(0),
-                        )
-                        .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
-                            reason: format!("journaled ydoc.update has no sync identity: {error}"),
-                        })?;
-                    facts.source = Some((origin_id, origin_seq));
-                }
+            )? {
+                return Ok(());
             }
             // The origin-device automation trigger (ADR 0008). This hook runs
             // only for ops this device journals — the sync apply path never
@@ -2172,6 +2127,7 @@ fn record_file_holds_head(
     live_audit: Option<&dohc_engine_collab::live_update_application::LiveSettlementAudit>,
     current: &dohc_engine_domain::TextSnapshot,
     source_state_vector_sha256: &str,
+    publication_state_bytes: Option<&[u8]>,
     now_ms: i64,
 ) -> Result<bool, RuntimeError> {
     let (head, settled, pending_empty, last_sha): (i64, Option<i64>, bool, Option<String>) = store.read_with(|conn| {
@@ -2224,6 +2180,14 @@ fn record_file_holds_head(
             .map_err(StorageError::persist_public)?;
         }
         if let Some(audit) = live_audit {
+            let capture = audit.prepare_publication_state_in_tx(tx)?;
+            let state = match &capture {
+                dohc_engine_collab::live_update_application::LiveSettlementPublicationState::New => Some(
+                    publication_state_bytes.ok_or(StorageError::StateCorrupt { source: None })?,
+                ),
+                dohc_engine_collab::live_update_application::LiveSettlementPublicationState::Retained(bytes) => Some(bytes.as_slice()),
+                dohc_engine_collab::live_update_application::LiveSettlementPublicationState::Unavailable => None,
+            };
             let id = audit.record_in_tx(
                 tx,
                 &current.latest_moment_id,
@@ -2231,6 +2195,9 @@ fn record_file_holds_head(
                 source_state_vector_sha256,
                 now_ms,
             )?;
+            if let Some(state) = state {
+            audit.record_publication_state_in_tx(tx, &id, state)?;
+            }
             dohc_engine_sync::journal_live_settlement_in_tx(
                 tx,
                 &audit.binding().workspace_id,
@@ -2360,7 +2327,7 @@ fn restore_live_settlement_marker(
     }
     let outcome=store.write_with(faults,|tx| -> Result<(),RuntimeError> {
         if !audit.covers_projection_in(tx,moment,markdown)? {return Err(DomainError::ConflictStaleTarget.into());}
-        let matches:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM snapshots s JOIN moments m ON m.workspace_id=s.workspace_id AND m.version_id=s.version_id AND m.object_id=s.object_id AND m.moment_id=s.latest_moment_id WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.path=?4 AND s.latest_moment_id=?5 AND s.blob_sha256=?6 AND m.moment_order=?7) AND NOT EXISTS(SELECT 1 FROM materialization_jobs WHERE (workspace_id=?1 OR workspace_id='') AND target_path=?4 AND status='complete' AND job_id NOT LIKE 'version-switch-%' AND target_generation>?7)",params![b.workspace_id,b.main_version_id,b.object_id,b.current_path,moment,markdown,job.target_generation],|row|row.get(0)).map_err(StorageError::persist_public)?;
+        let matches:bool=tx.query_row(concat!("SELECT EXISTS(SELECT 1 FROM snapshots s JOIN moments m ON ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=s.workspace_id AND m.version_id=s.version_id AND m.object_id=s.object_id AND m.moment_id=s.latest_moment_id WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.path=?4 AND s.latest_moment_id=?5 AND s.blob_sha256=?6 AND m.moment_order=?7) AND NOT EXISTS(SELECT 1 FROM materialization_jobs WHERE (workspace_id=?1 OR workspace_id='') AND target_path=?4 AND status='complete' AND job_id NOT LIKE 'version-switch-%' AND target_generation>?7)"),params![b.workspace_id,b.main_version_id,b.object_id,b.current_path,moment,markdown,job.target_generation],|row|row.get(0)).map_err(StorageError::persist_public)?;
         if !matches || !permitted_disk() {return Err(DomainError::ConflictStaleTarget.into());}
         let changed=tx.execute("UPDATE materialization_jobs SET status='pending',completed_at_ms=NULL WHERE job_id=?1 AND workspace_id=?2 AND target_path=?3 AND content_sha256=?4 AND target_generation=?5 AND status IN ('conflict','complete')",params![job.job_id,b.workspace_id,b.current_path,markdown,job.target_generation]).map_err(StorageError::persist_public)?;
         if changed!=1 {return Err(DomainError::ConflictStaleTarget.into());}
@@ -2564,6 +2531,7 @@ pub(super) fn ydoc_settle_on_store(
     if doc.has_pending_dependencies() {
         return Err(dohc_engine_collab::CollabError::MissingDependencies.into());
     }
+    let publication_state_bytes = live_audit.map(|_| doc.encode_full_state());
     let projection = project_ydoc_on_store(store, key, doc, content_kind)?;
     // The in-band cap bounds only what the RESPONSE can carry as one wire
     // string — it must never gate the settle itself. Materialization writes
@@ -2780,6 +2748,7 @@ pub(super) fn ydoc_settle_on_store(
             live_audit,
             &current,
             &projection.source_state_vector_sha256,
+            publication_state_bytes.as_deref(),
             now_ms,
         )?;
         return Ok(YdocSettleOutcome::Settled(Box::new(YdocSettlement {
@@ -2825,6 +2794,7 @@ pub(super) fn ydoc_settle_on_store(
             None,
             &current,
             &projection.source_state_vector_sha256,
+            publication_state_bytes.as_deref(),
             now_ms,
         )?;
         return Ok(YdocSettleOutcome::Settled(Box::new(YdocSettlement {
@@ -2970,6 +2940,14 @@ pub(super) fn ydoc_settle_on_store(
             dohc_engine_domain::DomainError::Storage(StorageError::persist_public(error))
         })?;
         if let Some(audit) = live_audit {
+            let capture = audit.prepare_publication_state_in_tx(tx)?;
+            let state = match &capture {
+                dohc_engine_collab::live_update_application::LiveSettlementPublicationState::New => Some(
+                    publication_state_bytes.as_deref().ok_or(StorageError::StateCorrupt { source: None })?,
+                ),
+                dohc_engine_collab::live_update_application::LiveSettlementPublicationState::Retained(bytes) => Some(bytes.as_slice()),
+                dohc_engine_collab::live_update_application::LiveSettlementPublicationState::Unavailable => None,
+            };
             let id = audit.record_in_tx(
                 tx,
                 &result.moment.moment_id,
@@ -2977,6 +2955,9 @@ pub(super) fn ydoc_settle_on_store(
                 &source_state_vector_sha256,
                 now_ms,
             )?;
+            if let Some(state) = state {
+            audit.record_publication_state_in_tx(tx, &id, state)?;
+            }
             dohc_engine_sync::journal_live_settlement_in_tx(
                 tx,
                 &audit.binding().workspace_id,
@@ -4204,4 +4185,152 @@ mod collection_adoption_settlement_tests {
             .expect("other binding");
         assert_eq!(other, "pending");
     }
+}
+
+/// Returns false for an adopted owner, whose appends must not claim local automations.
+#[allow(clippy::too_many_arguments)]
+fn journal_local_append_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    content_kind: ContentKind,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+    seed_source: Option<&dohc_engine_collab::owner_base_source::OwnerSeedSource>,
+    sharing_declined: &mut Option<SharingDeclined>,
+    outcome: &mut AppendOutcome,
+    now_ms: i64,
+) -> Result<bool, CollabError> {
+    let update_sha = &hex_sha256(update);
+    dohc_engine_collab::owner_outbox::append_adopted_local_update_in_tx(
+        tx,
+        key,
+        path,
+        outcome.seq,
+        update,
+        now_ms,
+    )?;
+    if dohc_engine_collab::owner_outbox::has_adopted_owner_in(tx, key)? {
+        outcome.emit_outbound = false;
+        return Ok(false);
+    }
+    // Origination is asked first and owns the base-once decision: it
+    // originates only a lineage that has no base yet. The base is a
+    // full state, so it already carries this append and every row the
+    // lineage held before it — a delta beside it would be redundant.
+    // Everything else journals its delta.
+    let base_originated = match dohc_engine_sync::originate_appended_ydoc_base_in_tx(
+        tx,
+        key,
+        path,
+        actor_origin_id,
+        attribution,
+        seed_source.is_some(),
+        now_ms,
+    )
+    .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
+        reason: format!("outbound ydoc.update base origination failed: {error}"),
+    })? {
+        dohc_engine_sync::BaseOrigination::Originated { base_snapshot_sha } => {
+            if let Some(source) = seed_source {
+                dohc_engine_collab::owner_base_source::retain_owner_base_source_in_tx(
+                    tx,
+                    key,
+                    path,
+                    &base_snapshot_sha,
+                    source,
+                )?;
+            }
+            true
+        }
+        dohc_engine_sync::BaseOrigination::Declined(reason) => {
+            *sharing_declined = Some(reason);
+            false
+        }
+        dohc_engine_sync::BaseOrigination::NothingToDo => false,
+    };
+    if !base_originated && outcome.emit_outbound {
+        let lineage_claim_id = dohc_engine_collab::read_marker_in(tx, key)?
+            .and_then(|marker| marker.lineage_claim_id)
+            .ok_or_else(|| dohc_engine_collab::CollabError::Corrupt {
+                reason: "exact Y.Doc lineage has no claim id".to_owned(),
+            })?;
+        let origin_seq = dohc_engine_sync::journal_local_op_in_tx(
+            tx,
+            &key.workspace_id,
+            "ydoc.update",
+            &ydoc_update_payload(
+                key,
+                path,
+                content_kind,
+                update_sha,
+                &lineage_claim_id,
+                actor_origin_id,
+                attribution,
+                false,
+            ),
+            now_ms,
+        )
+        .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
+            // Named explicitly: an exact replicated lineage
+            // with NO sync identity is a half-initialized state
+            // (every real replicated flow runs sync init first —
+            // pulls require the identity and the TS driver creates
+            // it when journaling the base). Fail closed with a
+            // diagnosable reason rather than a generic failure; an
+            // identity cannot be seeded down here (origin identity
+            // is minted by sync init, not the collab layer).
+            reason: format!("outbound ydoc.update journal append failed: {error}"),
+        })?;
+        // The op's replication coordinate exists only now, after the
+        // journal assigned it. Thread it into the facts so record
+        // events and the automation trigger key see the same
+        // coordinate every peer derives from the envelope. A
+        // base-originated or never-synced apply keeps `None`; its
+        // per-change key is the history row id.
+        if let Some(facts) = outcome.record_facts.as_mut() {
+            let origin_id: String = tx
+                .query_row(
+                    "SELECT origin_id FROM sync_identity WHERE workspace_id=?1",
+                    [&key.workspace_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
+                    reason: format!("journaled ydoc.update has no sync identity: {error}"),
+                })?;
+            facts.source = Some((origin_id, origin_seq));
+        }
+    }
+    Ok(true)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn journal_recovery_append_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    content_kind: ContentKind,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+    outcome: &mut AppendOutcome,
+    now_ms: i64,
+) -> Result<bool, CollabError> {
+    if outcome.deduped {
+        return Ok(false);
+    }
+    journal_local_append_in_tx(
+        tx,
+        key,
+        path,
+        content_kind,
+        update,
+        actor_origin_id,
+        attribution,
+        None,
+        &mut None,
+        outcome,
+        now_ms,
+    )
 }

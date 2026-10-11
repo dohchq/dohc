@@ -44,7 +44,23 @@ const THEMES = ["light", "dark"] as const;
 const PARTS = [
   "surfaces", "buttons", "copy", "segmented", "switch", "state-mark", "chips", "avatars", "badges", "text-inputs",
   "steps", "folder-chip", "hue-control", "color-control", "list-rows", "menu", "document-menu",
-  "empty", "loading", "toasts", "notices", "dialog",
+  "empty", "loading", "toasts", "notices", "dialog", "menu-radio", "menu-field", "menu-overflow", "menu-danger",
+  "editor-groups", "editor-groups-empty",
+  "kind-glyph",
+  "block-menu", "table-menu",
+  "history",
+  "file-header",
+  "slash-menu",
+  "editor-group-focus",
+  "frontmatter-as-written",
+  "title-bar-status",
+  "capture-recovery",
+  "about",
+  "sharing",
+  "usage-record",
+  "word-diff",
+  "apps-shelf",
+  "chat-rows",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an
 // hour past it, so the real time that passes between installing and
@@ -171,11 +187,14 @@ async function forceMarkedStates(cdp: Cdp, scope: string): Promise<void> {
 // on a row, and no pointer press reaches the listeners that close a menu.
 // Focus then leaves the menu for the page: a menu closes when focus moves to
 // another element, not when it goes to the page, and the row the part marks
-// is drawn by a forced :focus rather than by the keyboard's focus ring.
+// is drawn by a forced :focus rather than by the keyboard's focus ring. A
+// menu paints hover only once a pointer has moved over it, so the list is
+// told one has, without a pointer that would land on a row.
 async function openMenu(page: Page, trigger: Locator, menu: Locator): Promise<void> {
   await trigger.focus();
   await page.keyboard.press("Enter");
   await expect(menu).toBeVisible();
+  await menu.dispatchEvent("mousemove", { movementX: 1, movementY: 0 });
   await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
 }
 
@@ -257,18 +276,17 @@ test("@states-page @states-baselines every shared part matches its baseline in b
 
     for (const theme of THEMES) {
       const pane = page.getByTestId(`states-${theme}`);
-      const copied = pane.getByTestId(`states-copy-copied-${theme}`);
-      await press(page, copied);
-      await expect(copied).toHaveText("Copied");
-      const refused = pane.getByTestId(`states-copy-refused-${theme}`);
-      await press(page, refused);
-      await expect(refused).toHaveText("Couldn't copy");
-      const details = pane.getByTestId(`states-copy-details-copied-${theme}`);
-      await press(page, details);
-      await expect(details).toHaveText("Copied");
-      const detailsIcon = pane.getByTestId(`states-copy-details-icon-copied-${theme}`);
-      await press(page, detailsIcon);
-      await expect(detailsIcon).toHaveAttribute("title", "Copied");
+      for (const [answer, words] of [["copied", "Copied"], ["failed", "Couldn't copy"]] as const) {
+        const withWords = pane.getByTestId(`states-copy-words-${answer}-${theme}`);
+        await press(page, withWords);
+        await expect(withWords).toHaveText(words);
+        const icon = pane.getByTestId(`states-copy-icon-${answer}-${theme}`);
+        await press(page, icon);
+        await expect(icon).toHaveAttribute("title", words);
+      }
+      const field = pane.getByTestId(`states-copy-field-copied-${theme}`);
+      await press(page, field);
+      await expect(field).toHaveAttribute("title", "Copied");
     }
     await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
 
@@ -276,8 +294,9 @@ test("@states-page @states-baselines every shared part matches its baseline in b
     await cdp.send("DOM.enable");
     await cdp.send("CSS.enable");
     // A menu's rows exist only while it is open, so a part with a menu is
-    // marked after it opens its menu.
-    await forceMarkedStates(cdp, `[data-testid="states-page"] [data-part]:not(:has([aria-haspopup="menu"]))`);
+    // marked after it opens its menu. A part marked data-menus="rest" holds
+    // menus without being about them, and is captured with them closed.
+    await forceMarkedStates(cdp, `[data-testid="states-page"] [data-part]:is([data-menus="rest"], :not(:has([aria-haspopup="menu"])))`);
     await waitForStillPage(page);
 
     const seen = new Set<string>();
@@ -304,7 +323,7 @@ test("@states-page @states-baselines every shared part matches its baseline in b
         }
         if (seen.has(`${name}-${theme}`)) throw new Error(`two parts are named ${name}`);
         seen.add(`${name}-${theme}`);
-        const menus = await part.locator("[aria-haspopup='menu']").count();
+        const menus = (await part.getAttribute("data-menus")) === "rest" ? 0 : await part.locator("[aria-haspopup='menu']").count();
         if (menus > 1) throw new Error(`${name} (${theme}) has ${menus} menus; a part opens one`);
         if (menus === 1) menuParts.push({ name, theme, part, box });
         else await capture(name, theme, box);
@@ -321,6 +340,31 @@ test("@states-page @states-baselines every shared part matches its baseline in b
       await waitForStillPage(page);
       await capture(name, theme, box);
       await closeMenu(page, trigger, menu);
+    }
+    // A file header keeps Share and the document's controls inside itself at
+    // any width, and its save state gives way before its file name: the path
+    // is cut only once the save state shows no more than one character and an
+    // ellipsis (13px of 11px mono). The narrow specimen must really have cut
+    // its save state short, or the check proves nothing.
+    for (const theme of THEMES) {
+      const part = page.getByTestId(`states-${theme}`).locator('[data-part="file-header"]');
+      for (const header of await part.locator("header").all()) {
+        const edge = await header.evaluate((el) => el.getBoundingClientRect().right - parseFloat(getComputedStyle(el).paddingRight));
+        const rights = await header.locator("button").evaluateAll((buttons) => buttons.map((button) => button.getBoundingClientRect().right));
+        if (rights.some((right) => right > edge + 0.5)) failures.push(`a file header control (${theme}) runs past its header`);
+        const order = await header.evaluate((el) => {
+          const path = el.querySelector(":scope > span");
+          const label = el.querySelector(":scope > div .truncate");
+          return { pathCut: !!path && path.scrollWidth > path.clientWidth, statusWidth: label?.clientWidth ?? 0 };
+        });
+        if (order.pathCut && order.statusWidth >= 13) {
+          failures.push(`a file header (${theme}) cut its file name while its save state still had ${order.statusWidth}px of words`);
+        }
+      }
+      const label = page.getByTestId(`states-file-header-pending-${theme}`).locator(".truncate");
+      if (!(await label.evaluate((el) => el.scrollWidth > el.clientWidth))) {
+        failures.push(`the narrow file header's save state (${theme}) is not cut short`);
+      }
     }
     expect(failures, "every part must equal its baseline").toEqual([]);
     expect([...seen].sort()).toEqual(PARTS.flatMap((part) => THEMES.map((theme) => `${part}-${theme}`)).sort());

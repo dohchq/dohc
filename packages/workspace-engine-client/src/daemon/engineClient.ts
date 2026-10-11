@@ -726,10 +726,10 @@ interface PendingBlob {
 type HelloAckEnvelope = Extract<Envelope, { type: "helloAck" }>;
 
 export class EngineClient implements EngineTransport {
-  async ownerYDocListDrafts(request:OwnerYDocDeliveryRequest, input:{after:OwnerYDocDraftCursor|null;limit:number}, signal?:AbortSignal):Promise<{drafts:readonly OwnerYDocDraftDescriptor[];next:OwnerYDocDraftCursor|null}> {
+  async ownerYDocListDrafts(request:OwnerYDocDeliveryRequest, input:{after:OwnerYDocDraftCursor|null;limit:number;pendingOnly?:boolean}, signal?:AbortSignal):Promise<{drafts:readonly OwnerYDocDraftDescriptor[];next:OwnerYDocDraftCursor|null}> {
     if (!Number.isSafeInteger(input.limit) || input.limit<1 || input.limit>64) throw new TypeError("Invalid draft page size.");
     const after=input.after===null?null:ownerDraftCursor(input.after),limit=input.limit;
-    const response=await this.sendLiveUpload(request,"ydoc.ownerDelivery.listDrafts",16*1024*1024,()=>({params:{after:after&&{...after},limit},streams:[]}),signal);
+    const response=await this.sendLiveUpload(request,"ydoc.ownerDelivery.listDrafts",16*1024*1024,()=>({params:{after:after&&{...after},limit,...(input.pendingOnly ? {pendingOnly:true} : {})},streams:[]}),signal);
     const row=response.result as {drafts?:unknown;next?:OwnerYDocDraftCursor|null};
     if (!row || Object.keys(row).sort().join()!=="drafts,next" || !Array.isArray(row.drafts) || row.drafts.length>limit) throw new TypeError("Invalid draft page.");
     const drafts=row.drafts.map(decodeOwnerYDocDraftDescriptor),next=row.next===null?null:ownerDraftCursor(row.next!);
@@ -764,11 +764,11 @@ export class EngineClient implements EngineTransport {
     return row;
   }
 
-  async ownerYDocPrepareEnrollment(request: OwnerYDocDeliveryRequest, target: OwnerYDocDeliveryTarget, signal?: AbortSignal): Promise<
+  async ownerYDocPrepareEnrollment(request: OwnerYDocDeliveryRequest, target: OwnerYDocDeliveryTarget & {recovery?:boolean}, signal?: AbortSignal): Promise<
     {status:"capture";captured:{nativeHeadSequence:number;localStateDigest:string}} | {status:"observed";draft:OwnerYDocDraftDescriptor}
   > {
     const params=ownerDeliveryTarget(target);
-    const response=await this.sendLiveUpload(request,"ydoc.ownerDelivery.prepareEnrollment",3*1024*1024,()=>({params,streams:[]}),signal);
+    const response=await this.sendLiveUpload(request,"ydoc.ownerDelivery.prepareEnrollment",3*1024*1024,()=>({params:{...params,...(target.recovery ? {recovery:true} : {})},streams:[]}),signal);
     const row=response.result as Record<string,unknown>;
     if (row.status==="observed" && Object.keys(row).sort().join()==="draft,status") {
       const draft=decodeOwnerYDocDraftDescriptor(row.draft);
@@ -782,7 +782,7 @@ export class EngineClient implements EngineTransport {
   }
 
   async ownerYDocEnroll(request:OwnerYDocDeliveryRequest, input:OwnerYDocDeliveryTarget & {
-    captured:{nativeHeadSequence:number;localStateDigest:string};journalCursor:number;hostVector:Uint8Array;checkpoint:Uint8Array
+    captured:{nativeHeadSequence:number;localStateDigest:string};journalCursor:number;hostVector:Uint8Array;checkpoint:Uint8Array;recovery?:boolean
   }, signal?:AbortSignal):Promise<OwnerYDocDraftDescriptor> {
     const target=ownerDeliveryTarget(input), captured={nativeHeadSequence:input.captured.nativeHeadSequence,localStateDigest:parseLiveUpdateDigest(input.captured.localStateDigest)};
     if (!Number.isSafeInteger(captured.nativeHeadSequence) || captured.nativeHeadSequence<0 || !Number.isSafeInteger(input.journalCursor) || input.journalCursor<0 || input.hostVector.byteLength<1 || input.hostVector.byteLength>MAX_LIVE_UPDATE_BYTES || input.checkpoint.byteLength<2 || input.checkpoint.byteLength>MAX_LIVE_UPDATE_BYTES) throw new TypeError("Invalid owner enrollment cut.");
@@ -790,12 +790,18 @@ export class EngineClient implements EngineTransport {
     const response=await this.sendLiveUpload(request,"ydoc.ownerDelivery.enroll",byteLength+3*1024*1024,()=>{
       const bytes=Buffer.concat([input.hostVector,input.checkpoint],byteLength), digest=createHash("sha256").update(bytes).digest("hex"), streamId=this.nextLiveStreamId++;
       if (!Number.isSafeInteger(streamId)) throw new TypeError("Owner stream identifiers exhausted.");
-      return {params:{...target,captured,journalCursor:input.journalCursor,hostVectorByteLength:input.hostVector.byteLength,streamId,byteLength,digest},streams:[{streamId,bytes,digest}]};
+      return {params:{...target,...(input.recovery ? {recovery:true} : {}),captured,journalCursor:input.journalCursor,hostVectorByteLength:input.hostVector.byteLength,streamId,byteLength,digest},streams:[{streamId,bytes,digest}]};
     },signal);
     if (Object.keys(response.result as object).join()!=="draft") throw new TypeError("Invalid owner enrollment response.");
     const draft=decodeOwnerYDocDraftDescriptor((response.result as Record<string,unknown>).draft);
-    if (JSON.stringify(draft.binding)!==JSON.stringify(target.binding) || draft.relayDatabaseNamespace!==target.relayDatabaseNamespace || draft.acceptedCursor!==input.journalCursor || draft.revision!==1) throw new TypeError("Owner enrollment differs from request.");
+    if (JSON.stringify(draft.binding)!==JSON.stringify(target.binding) || draft.relayDatabaseNamespace!==target.relayDatabaseNamespace || draft.acceptedCursor!==input.journalCursor) throw new TypeError("Owner enrollment differs from request.");
     return draft;
+  }
+
+  async ownerYDocRefuseEntry(request:OwnerYDocDeliveryRequest, input:{outboxId:string;deliveryId:string;updateDigest:string;reason:string}, signal?:AbortSignal):Promise<void> {
+    const params={outboxId:parseLiveUpdateIdentifier(input.outboxId,"outbox ID"),deliveryId:parseLiveUpdateIdentifier(input.deliveryId,"delivery ID"),updateDigest:parseLiveUpdateDigest(input.updateDigest),reason:parseLiveUpdateIdentifier(input.reason,"refusal reason")};
+    const response=await this.sendLiveUpload(request,"ydoc.ownerDelivery.refuseEntry",3*1024*1024,()=>({params,streams:[]}),signal);
+    if (!response.result || Object.keys(response.result).join()!=="refused" || (response.result as {refused?:unknown}).refused!==true) throw new TypeError("Invalid owner refusal response.");
   }
 
   async ownerYDocReadState(request: OwnerYDocDeliveryRequest, target: OwnerYDocDeliveryTarget, signal?: AbortSignal): Promise<OwnerYDocDeliveryPosition & {stateVector: Buffer}> {
@@ -1246,8 +1252,8 @@ export class EngineClient implements EngineTransport {
     } catch (error: unknown) {
       // Failed or expired input cannot leave a half-written stream on this connection.
       if (writeInput) {
-        if (!inputComplete) this.close();
         await writeTask.catch(() => undefined);
+        if (!inputComplete) this.close();
       }
       throw error;
     } finally {
@@ -1502,7 +1508,7 @@ export class EngineClient implements EngineTransport {
       throw new TypeError("Private live application uploads require a positive blob chunk limit.");
     }
     if (
-      (!restoreOutput && !["ydoc.ownerDelivery.applyAcceptedFrame","ydoc.ownerDelivery.applyInitialSync","ydoc.ownerDelivery.isReceiptApplied","ydoc.ownerDelivery.listDrafts","ydoc.ownerDelivery.appendDraft","ydoc.ownerDelivery.prepareEnrollment","ydoc.ownerDelivery.enroll"].includes(method) && (!Number.isSafeInteger(request.registrationId) ||
+      (!restoreOutput && !["ydoc.ownerDelivery.applyAcceptedFrame","ydoc.ownerDelivery.applyInitialSync","ydoc.ownerDelivery.isReceiptApplied","ydoc.ownerDelivery.listDrafts","ydoc.ownerDelivery.appendDraft","ydoc.ownerDelivery.prepareEnrollment","ydoc.ownerDelivery.enroll","ydoc.ownerDelivery.refuseEntry"].includes(method) && (!Number.isSafeInteger(request.registrationId) ||
       request.registrationId! < 1)) ||
       !Number.isSafeInteger(request.deadlineMs) ||
       request.deadlineMs < 1 ||

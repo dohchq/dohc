@@ -18,6 +18,26 @@ import { AutomationRunWait, SHARED_BUTTON_DENIED, SHARED_BUTTON_FAILED, SHARED_B
 
 const WORKSPACE = "ws-1";
 const HASH = "0123456789abcdef";
+it.each(["pending", "accepted", "settled"])("starts Notices only for a settled relayed press receipt (%s)", async state => {
+  const routes = automationPressRelay({ baseUrl: "https://relay.test", token: "recipient-session",
+    fetch: async () => Response.json({ ok: true, pressId: "press", state, outcome: state === "settled" ? "failed" : null, createdAtMs: 1 }) });
+  const sync = vi.fn(async (_current: () => boolean) => {}); const isCurrent = () => true;
+  await routes.press("share", { pressId: "press", automationId: "finish", collectionPath: "Tasks", definitionHash: HASH, recordId: "task", confirmed: [] }, { sync, isCurrent });
+  expect(sync).toHaveBeenCalledTimes(state === "settled" ? 1 : 0);
+  if (state === "settled") expect(sync).toHaveBeenCalledWith(isCurrent);
+});
+it("drops a late relayed press receipt after switching away", async () => {
+  let finish!: (response: Response) => void; let started!: () => void;
+  const ready = new Promise<void>(resolve => { started = resolve; });
+  const response = new Promise<Response>(resolve => { finish = resolve; });
+  const routes = automationPressRelay({ baseUrl: "https://relay.test", token: "recipient-session",
+    fetch: () => { started(); return response; } });
+  let current = true; const sync = vi.fn(async (_current: () => boolean) => {});
+  const pressing = routes.press("share", { pressId: "press", automationId: "finish", collectionPath: "Tasks", definitionHash: HASH, recordId: "task", confirmed: [] }, { sync, isCurrent: () => current });
+  await ready; current = false;
+  finish(Response.json({ ok: true, pressId: "press", state: "settled", outcome: "failed", createdAtMs: 1 }));
+  await pressing; expect(sync).not.toHaveBeenCalled();
+});
 it.each([404, 409, 503])("keeps host authority status %s truthful", async status => {
   const routes = automationPressRelay({ baseUrl: "https://relay.test", token: "owner-session",
     fetch: async () => Response.json({ code: status === 404 ? "not_found" : "conflict" }, { status }) });

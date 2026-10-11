@@ -1,6 +1,7 @@
 import {
   forwardRef,
   useCallback,
+  useContext,
   useEffect,
   useImperativeHandle,
   useMemo,
@@ -10,6 +11,7 @@ import {
   type ReactNode,
   type SetStateAction,
 } from "react";
+import { ShellErrorReporter } from "../shell/useShellError";
 import { Extension, resolveFocusPosition, type Editor } from "@tiptap/core";
 import { DohcMarkdownTable, serializeRichdocBody } from "@dohc/ydoc-projection";
 import { EditorContent, useEditor, useEditorState } from "@tiptap/react";
@@ -51,6 +53,7 @@ import {
   pickAndInsertImages,
   type ImagePasteContext,
 } from "./imagePaste";
+import { handleUrlPaste, type UrlPasteOffer } from "./urlPaste";
 import { bridge } from "../bridge";
 import { FindReplaceBar } from "./FindReplaceBar";
 import { findReplaceExtension } from "./findReplace";
@@ -122,6 +125,7 @@ import { intraBlockRange, type IntraBlockMatch } from "./intraBlock";
 import { SafeTrailingNode } from "./safeTrailingNode";
 import { hasFormattableSelection, selectionFormat } from "./selectionFormat";
 import { createCollaborationHistoryHandle } from "./sharedCollaborationHistory";
+import { SkeletonRows } from "../ui/SkeletonRows";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
 
 export type MarkdownEditorHandle = {
@@ -169,6 +173,7 @@ export type MarkdownEditorProps = {
   value: string;
   onDirty: (materialize?: () => string) => void;
   onFocus?: () => void;
+  onUrlPasteOffer?: (offer: UrlPasteOffer) => void;
   workspaceId: string;
   path: string;
   knownFiles: ReadonlyArray<WikilinkFile>;
@@ -463,6 +468,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       value,
       onDirty,
       onFocus,
+      onUrlPasteOffer,
       knownFiles,
       onOpenWikilink,
       onOpenWorkspaceLink,
@@ -504,7 +510,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     const blockMenuStateRef = useRef<BlockMenuState>(blockMenuState);
     const slashCommandRunnerRef = useRef<(id: SlashCommandId) => void>(() => {});
     const blockInsertRef = useRef<(pos: number) => void>(() => {});
-    const blockMenuOpenRef = useRef<(pos: number, rect: DOMRect) => void>(() => {});
+    const blockMenuOpenRef = useRef<(pos: number, handle: HTMLElement) => void>(() => {});
     const knownFilesRef = useRef<ReadonlyMap<string, WikilinkFile>>(new Map());
     const applyingPendingUndoRef = useRef(false);
     const appliedPendingUndoToken = useRef<number | null>(null);
@@ -517,8 +523,14 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     const onOpenWorkspaceLinkRef = useRef<
       ((target: WorkspaceLinkTarget) => void) | null
     >(onOpenWorkspaceLink ?? null);
+    const urlPasteOfferRef = useRef(onUrlPasteOffer);
+    urlPasteOfferRef.current = onUrlPasteOffer;
     const onFocusRef = useRef(onFocus);
     onFocusRef.current = onFocus;
+    // The shell's error hook, for a code block's copy the clipboard refused.
+    const reportError = useContext(ShellErrorReporter);
+    const reportErrorRef = useRef(reportError);
+    reportErrorRef.current = reportError;
 
     // ProseMirror invokes menu handlers outside React's render cycle. Keep the
     // imperative ref current in the same tick as the visual state so rapid
@@ -648,6 +660,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
                 stateRef: slashStateRef,
                 setState: publishSlashState,
                 runCommandRef: slashCommandRunnerRef,
+                yTiptap: collaborationExtensions?.yTiptap ?? null,
               }),
               makeBlockControlsPlugin({
                 onInsertRef: blockInsertRef,
@@ -667,7 +680,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
                 openWorkspaceLink: (target) =>
                   onOpenWorkspaceLinkRef.current?.(target),
               }),
-              makeCodeBlockChromePlugin(),
+              makeCodeBlockChromePlugin(() => reportErrorRef.current),
               // After the slash-command plugin (menu keeps ArrowDown while
               // open), before code-block continuation (nested code escapes
               // past its callout) and StarterKit keymaps (Mod-Enter beats
@@ -685,7 +698,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             ];
           },
         }),
-      [collab?.ydoc, publishSlashState],
+      [collab?.ydoc, collaborationExtensions, publishSlashState],
     );
 
     // Cmd/Ctrl+K registered via addKeyboardShortcuts on its own extension —
@@ -807,8 +820,10 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             class: "dohc-notion-editor",
             "data-testid": "markdown-editor",
           },
-          handlePaste: (view, event) =>
-            handleImagePaste(view, event, pasteContextRef.current),
+          handlePaste: (view, event) => {
+            if (handleImagePaste(view, event, pasteContextRef.current)) return true;
+            return handleUrlPaste(view, event, urlPasteOfferRef.current);
+          },
           handleDrop: (view, event) =>
             handleImageDrop(view, event as DragEvent, pasteContextRef.current),
           handleKeyDown: readCaretBeforeKey,
@@ -930,8 +945,14 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       [editor, openSlashMenuAtPosition],
     );
 
-    const openBlockMenu = useCallback((pos: number, rect: DOMRect) => {
-      setBlockMenuState(resolveBlockMenuState(pos, rect));
+    // The handle of the block whose menu is open closes it, like any trigger.
+    const openBlockMenu = useCallback((pos: number, handle: HTMLElement) => {
+      const current = blockMenuStateRef.current;
+      setBlockMenuState(
+        current.open && current.pos === pos
+          ? CLOSED_BLOCK_MENU_STATE
+          : resolveBlockMenuState(pos, handle),
+      );
     }, []);
 
     const closeBlockMenu = useCallback(() => {
@@ -1235,11 +1256,8 @@ const MarkdownEditorCollabLoader = forwardRef<
 
   if (load.status === "loading") {
     return (
-      <div
-        className="dohc-tiptap-editor flex h-full items-center justify-center text-xs text-subtle"
-        data-collab-state={props.collab?.status ?? "connecting"}
-      >
-        Loading editor...
+      <div className="dohc-tiptap-editor h-full" data-collab-state={props.collab?.status ?? "connecting"}>
+        <SkeletonRows layout="document" label="Loading editor..." className="pt-1.5" />
       </div>
     );
   }

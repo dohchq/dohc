@@ -2720,9 +2720,9 @@ pub fn is_collection_record_bound_in_tx(
     Ok(bound_record(conn, workspace_id, version_id, object_id)?.is_some())
 }
 
-/// Whether any changed collection record's canonical `id` key differs from
-/// the record id already bound to that path. Capture calls this after the
-/// changed bytes are durable and before deciding whether reconciliation is
+/// Whether a changed record needs adoption again, or its canonical `id` key
+/// differs from the record id already bound to that path. Capture calls this
+/// after the changed bytes are durable and before deciding whether reconciliation is
 /// necessary, so ordinary field/body edits stay on the indexing fast path.
 pub fn collection_record_id_mismatch_in_tx(
     conn: &Connection,
@@ -2732,7 +2732,7 @@ pub fn collection_record_id_mismatch_in_tx(
 ) -> Result<bool, crate::DomainError> {
     let mut statement = conn
         .prepare(
-            "SELECT r.record_id,b.text FROM collection_records r \
+            "SELECT r.record_id,b.text,r.adoption_state FROM collection_records r \
              LEFT JOIN snapshots s ON s.workspace_id=r.workspace_id \
                AND s.version_id=r.version_id AND s.path=r.file_path \
                AND s.object_id=r.object_id \
@@ -2744,13 +2744,23 @@ pub fn collection_record_id_mismatch_in_tx(
     for path in paths {
         let binding = statement
             .query_row(params![workspace_id, version_id, path], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
             })
             .optional()
             .map_err(crate::DomainError::sql_corrupt)?;
-        let Some((record_id, text)) = binding else {
+        let Some((record_id, text, adoption_state)) = binding else {
             return Ok(true);
         };
+        if matches!(
+            adoption_state.as_str(),
+            "deferred-conflict" | "deferred-conflict-lossless"
+        ) {
+            return Ok(true);
+        }
         let canonical_id = text.as_deref().and_then(markdown_record_id);
         if canonical_id.as_deref() != Some(record_id.as_str()) {
             return Ok(true);
@@ -2879,6 +2889,17 @@ impl SharedChangeAuthor {
         ids.iter().all(|id| !id.is_empty() && id.len() <= 512)
             && (1..=9_007_199_254_740_991).contains(&generation)
     }
+}
+
+/// The sole relay-derived author of a direct Collection write.
+pub fn moment_shared_author(author_json: Option<&str>) -> Option<SharedChangeAuthor> {
+    let authors = moment_author_entries(author_json);
+    let [author] = authors.as_slice() else {
+        return None;
+    };
+    serde_json::from_value::<SharedChangeAuthor>(author.clone())
+        .ok()
+        .filter(SharedChangeAuthor::is_valid)
 }
 
 /// The automation run a write came from: the claim it ran for, and the
@@ -3087,6 +3108,45 @@ pub struct AgentDeclaration {
     #[serde(deserialize_with = "Option::deserialize")]
     pub on_behalf_of: Option<String>,
     pub depth: u32,
+}
+
+/// Automation provenance carried by a durable shared record draft. Never authority.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AutomationDeclaration {
+    pub automation_id: String,
+    pub attribution: ChangeAttribution,
+}
+
+impl AutomationDeclaration {
+    pub fn deserialize_present<'de, D: serde::Deserializer<'de>>(
+        decoder: D,
+    ) -> Result<Option<Self>, D::Error> {
+        let declaration = Self::deserialize(decoder)?;
+        declaration.validate().map_err(serde::de::Error::custom)?;
+        Ok(Some(declaration))
+    }
+    pub fn from_change(
+        actor_origin_id: Option<&str>,
+        attribution: Option<&ChangeAttribution>,
+    ) -> Option<Self> {
+        let attribution = attribution.filter(|a| a.actor_kind == ChangeActorKind::Automation)?;
+        Some(Self {
+            automation_id: actor_origin_id?.to_owned(),
+            attribution: attribution.clone(),
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.automation_id.is_empty()
+            || self.automation_id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES
+            || self.automation_id.chars().any(char::is_control)
+            || self.attribution.actor_kind != ChangeActorKind::Automation
+        {
+            return Err("invalid automation declaration");
+        }
+        self.attribution.validate()
+    }
 }
 
 impl AgentDeclaration {
@@ -3791,10 +3851,15 @@ pub fn index_historical_record_owner_moment_in_tx(
 ) -> Result<(), StorageError> {
     let moment = tx
         .query_row(
-            "SELECT m.version_id,m.object_id,m.path,b.text FROM moments m \
+            concat!(
+                "SELECT m.version_id,m.object_id,m.path,b.text FROM moments m \
              JOIN blobs b ON b.sha256=m.after_blob_sha256 \
              WHERE m.workspace_id=?1 AND m.moment_order=?2 \
-               AND m.after_content_kind='text'",
+               AND m.after_content_kind='text' \
+               AND ",
+                crate::exclude_capture_recovery_sql!("m"),
+                ""
+            ),
             params![workspace_id, moment_order],
             |row| {
                 Ok((
@@ -3864,13 +3929,16 @@ fn ensure_historical_record_owners_backfilled(
     }
 
     let mut statement = tx
-        .prepare(
+        .prepare(concat!(
             "SELECT m.moment_order,m.object_id,m.path,b.text FROM moments m \
              JOIN blobs b ON b.sha256=m.after_blob_sha256 \
              WHERE m.workspace_id=?1 AND m.version_id=?2 \
                AND m.after_content_kind='text' AND lower(substr(m.path,-3))='.md' \
-             ORDER BY m.moment_order",
-        )
+               AND ",
+            crate::exclude_capture_recovery_sql!("m"),
+            " \
+             ORDER BY m.moment_order"
+        ))
         .map_err(crate::DomainError::sql_corrupt)?;
     let moments = statement
         .query_map(params![workspace_id, version_id], |row| {
@@ -5030,7 +5098,7 @@ fn indexed_validation(
 type CollectionRecordRow = (
     String,
     String,
-    String,
+    bool,
     Option<String>,
     Option<String>,
     Option<String>,
@@ -5111,7 +5179,11 @@ fn load_collection_records_selected(
     });
     let mut statement = conn
         .prepare(&format!(
-            "SELECT r.record_id,r.file_path,r.adoption_state,f.field_name,f.value_json,\
+            "SELECT r.record_id,r.file_path,\
+                    EXISTS(SELECT 1 FROM conflicts c WHERE c.workspace_id=r.workspace_id \
+                      AND c.target_version_id=r.version_id AND c.status='open' \
+                      AND (c.current_object_id=r.object_id OR c.incoming_object_id=r.object_id \
+                           OR c.path=r.file_path)),f.field_name,f.value_json,\
                     f.validation_status,f.validation_reason_json \
              FROM collection_records r \
              LEFT JOIN collection_record_fields f \
@@ -5132,7 +5204,7 @@ fn load_collection_records_selected(
         .map_err(crate::DomainError::sql_corrupt)?;
     let mut records = Vec::<CollectionRecord>::new();
     let mut record_indexes = HashMap::<String, usize>::new();
-    for (record_id, file_path, adoption_state, field, value, validation, reason) in rows {
+    for (record_id, file_path, conflicted, field, value, validation, reason) in rows {
         let index = match record_indexes.get(&record_id).copied() {
             Some(index) => index,
             None => {
@@ -5140,10 +5212,7 @@ fn load_collection_records_selected(
                 records.push(CollectionRecord {
                     id: record_id.clone(),
                     path: file_path,
-                    conflicted: matches!(
-                        adoption_state.as_str(),
-                        "deferred-conflict" | "deferred-conflict-lossless"
-                    ),
+                    conflicted,
                     values: Vec::new(),
                 });
                 record_indexes.insert(record_id, index);
@@ -6820,6 +6889,7 @@ mod tests {
                  CREATE TABLE moments(\
                    workspace_id TEXT NOT NULL,version_id TEXT NOT NULL,object_id TEXT NOT NULL,\
                    path TEXT NOT NULL,after_blob_sha256 TEXT,after_content_kind TEXT NOT NULL,\
+                   metadata_origin TEXT NOT NULL DEFAULT 'user',\
                    moment_order INTEGER NOT NULL,PRIMARY KEY(workspace_id,moment_order)\
                  );\
                  CREATE TABLE collection_historical_record_owners(\
@@ -6843,11 +6913,28 @@ mod tests {
             )
             .expect("create and seed owner index database");
 
+        for (order, origin) in [(4, "capture-recovery"), (5, "capture-recovery-cleared")] {
+            connection.execute(
+                "INSERT INTO moments(workspace_id,version_id,object_id,path,after_blob_sha256,after_content_kind,moment_order,metadata_origin)
+                 VALUES ('workspace','version','recovery-object','tasks/recovery.md','first','text',?1,?2)",
+                rusqlite::params![order, origin],
+            ).expect("seed an inert recovery moment");
+        }
+
         ensure_historical_record_owners_backfilled(&connection, "workspace", "version")
             .expect("backfill historical owners");
         let first = load_historical_record_owners(&connection, "workspace", "version")
             .expect("read first backfill");
         assert!(first[FIRST_ID].contains("first-object"));
+        assert!(!first[FIRST_ID].contains("recovery-object"));
+        for order in [4, 5] {
+            index_historical_record_owner_moment_in_tx(&connection, "workspace", order)
+                .expect("skip incremental recovery indexing");
+        }
+        assert!(
+            !load_historical_record_owners(&connection, "workspace", "version").unwrap()[FIRST_ID]
+                .contains("recovery-object")
+        );
 
         connection
             .execute(
@@ -7179,8 +7266,12 @@ mod tests {
                  CREATE TABLE blobs(sha256 TEXT PRIMARY KEY, text TEXT NOT NULL);\
                  CREATE TABLE collection_records(\
                    workspace_id TEXT, version_id TEXT, record_id TEXT,\
-                   collection_path TEXT, file_path TEXT, adoption_state TEXT NOT NULL,\
+                   collection_path TEXT, file_path TEXT, object_id TEXT NOT NULL,\
+                   adoption_state TEXT NOT NULL,\
                    PRIMARY KEY (workspace_id, version_id, file_path));\
+                 CREATE TABLE conflicts(\
+                   workspace_id TEXT, target_version_id TEXT, status TEXT,\
+                   current_object_id TEXT, incoming_object_id TEXT, path TEXT);\
                  CREATE TABLE collection_record_fields(\
                    workspace_id TEXT, version_id TEXT, record_id TEXT,\
                    field_name TEXT, value_json TEXT NOT NULL,\
@@ -7228,17 +7319,33 @@ mod tests {
             connection
                 .execute("DELETE FROM collection_record_fields", [])
                 .expect("clear fields");
+            connection
+                .execute("DELETE FROM conflicts", [])
+                .expect("clear conflicts");
             let record_count = rng.pick(12);
             let mut records = Vec::new();
             for index in 0..record_count {
                 let record_id = format!("rec_{seed}_{index}");
                 let file_path = format!("{COLLECTION}/r{index}.md");
+                let object_id = format!("object_{seed}_{index}");
+                let conflicted = index % 2 == 0;
                 connection
                     .execute(
-                        "INSERT INTO collection_records VALUES (?1,'main',?2,?3,?4,'adopted')",
-                        rusqlite::params![WORKSPACE, record_id, COLLECTION, file_path],
+                        "INSERT INTO collection_records VALUES (?1,'main',?2,?3,?4,?5,'adopted')",
+                        rusqlite::params![WORKSPACE, record_id, COLLECTION, file_path, object_id],
                     )
                     .expect("record row");
+                connection
+                    .execute(
+                        "INSERT INTO conflicts VALUES (?1,'main',?2,?3,NULL,?4)",
+                        rusqlite::params![
+                            WORKSPACE,
+                            if conflicted { "open" } else { "resolved" },
+                            object_id,
+                            file_path,
+                        ],
+                    )
+                    .expect("conflict row");
                 let mut values = Vec::new();
                 for field in FIELDS {
                     // A quarter of fields are missing entirely.
@@ -7294,7 +7401,7 @@ mod tests {
                 records.push(CollectionRecord {
                     id: record_id,
                     path: file_path,
-                    conflicted: false,
+                    conflicted,
                     values,
                 });
             }
@@ -7341,6 +7448,17 @@ mod tests {
                 )
                 .expect("differential query")
                 .expect("differential collection");
+                for record in &page.records {
+                    let expected = records
+                        .iter()
+                        .find(|expected| expected.id == record.id)
+                        .unwrap();
+                    assert_eq!(
+                        record.conflicted, expected.conflicted,
+                        "seed {seed}: conflict flag for {}",
+                        record.id
+                    );
+                }
                 actual_pages.push(
                     page.records
                         .iter()

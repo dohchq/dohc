@@ -113,6 +113,11 @@ export class ServerClaimEngine extends VersionedLiveAdapter {
     }
   }
 
+  override async makeAutomationWritesDurable(input: Parameters<VersionedLiveAdapter["makeAutomationWritesDurable"]>[0] = {}) {
+    // Effects write the server's copy, even when the live host served the claim.
+    await super.makeAutomationWritesDurable(this.fromLive.has(input.claimId ?? "") ? {} : input);
+  }
+
   override async settleAutomationClaim(input: Parameters<VersionedLiveAdapter["settleAutomationClaim"]>[0]) {
     if (!this.fromLive.has(input.claimId)) return await super.settleAutomationClaim(input);
     const settled = await this.ledgerFor("settle").settleAutomationClaim(input);

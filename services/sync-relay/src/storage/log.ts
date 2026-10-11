@@ -1,3 +1,4 @@
+import {commitHostedSettlement,settlementResponseIdentifier} from "./hostedSettlement";
 import { type StorageContext } from "./context";
 import { enforceWorkspaceIdentityInTransaction, assertWorkspaceQuota } from "./workspaces";
 import {
@@ -6,6 +7,7 @@ import {
   type AppendLogBatchResult,
   type FetchLogPageResult,
   type SyncRelayLogRow,
+  type SqliteDb,
 } from "./types";
 import { SyncRelayConflictError, SyncRelayBlobMissingError } from "./errors";
 import { referencedBlobShas, versionIdFromVersionCreatePayload } from "./blobReferences";
@@ -19,6 +21,10 @@ import {
   applyCurrentFileOp,
 } from "./currentFiles";
 import { rowToLogRow } from "./rows";
+import { notifyDesktopReadiness } from "../desktopReadinessChanges";
+import {confirmLiveApplication} from "./liveApplicationAuthorship";
+
+const logPageStatements = new WeakMap<SqliteDb, ReturnType<SqliteDb["prepare"]>>();
 
 export function appendLogBatch(storage: StorageContext, input: {
     workspaceId: string;
@@ -57,7 +63,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
          WHERE workspace_id = ? AND origin_id = ?`,
       );
       const existingStmt = storage.db.prepare(
-        `SELECT op_kind, payload_json, recorded_at_ms
+        `SELECT op_kind, payload_json, recorded_at_ms, settlement_admission_json
          FROM sync_relay_log
          WHERE workspace_id = ? AND origin_id = ? AND origin_seq = ?`,
       );
@@ -78,6 +84,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
             existing &&
             existing.op_kind === op.opKind &&
             existing.payload_json === op.payloadJson &&
+            existing.settlement_admission_json === (op.settlementAdmission === undefined ? null : JSON.stringify(op.settlementAdmission)) &&
             Number(existing.recorded_at_ms) === op.recordedAtMs
           ) {
             skipped += 1;
@@ -100,6 +107,17 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
         }
       }
 
+      let batchCoordinates: Map<number, SyncRelayLogInput> | undefined;
+      for (const op of newOps) {
+        commitHostedSettlement(storage, op, input.workspaceId, input.originId);
+        if (op.opKind === "live.audit.application") {
+          batchCoordinates ??= new Map(newOps.map(entry => [entry.originSeq, entry]));
+          confirmLiveApplication(storage, op, input.workspaceId, input.originId, batchCoordinates);
+        }
+      }
+      addedLogBytes=newOps.reduce((bytes,op)=>bytes+Buffer.byteLength(op.payloadJson)+
+        (op.admittedAuthorSnapshot===undefined?0:Buffer.byteLength(JSON.stringify(op.admittedAuthorSnapshot)))+
+        (op.settlementAdmission===undefined?0:Buffer.byteLength(JSON.stringify(op.settlementAdmission))),0);
       assertWorkspaceQuota(storage, input.workspaceId, addedLogBytes);
 
       // Data-integrity gate (0P sync-hardening): a log op must never be made
@@ -116,6 +134,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
       // client resolves by re-uploading and re-posting.
       const referencedShas = new Set<string>();
       for (const op of newOps) {
+        if(op.settlementAdmission?.status === "refused")continue;
         for (const sha of referencedBlobShas(op.opKind, op.payloadJson, {
           workspaceId: input.workspaceId,
           recordedAtMs: op.recordedAtMs,
@@ -135,8 +154,8 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
 
       const insertStmt = storage.db.prepare(
         `INSERT INTO sync_relay_log (
-          workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, admitted_author_snapshot_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, admitted_author_snapshot_json, settlement_admission_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       const objectPathStmt = storage.db.prepare(OBJECT_PATH_UPSERT_SQL);
       const objectMomentStmt = storage.db.prepare(OBJECT_MOMENT_INSERT_SQL);
@@ -151,8 +170,10 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
           op.payloadJson,
           op.recordedAtMs,
           op.admittedAuthorSnapshot === undefined ? null : JSON.stringify(op.admittedAuthorSnapshot),
+          op.settlementAdmission === undefined ? null : JSON.stringify(op.settlementAdmission),
         );
         inserted += 1;
+        if(op.settlementAdmission?.status === "refused")continue;
         // Keep "where is this object now?" answerable by primary
         // key. The relay_seq this row just took IS the order the guard in the
         // upsert compares, so a later moment always wins and an out-of-order
@@ -173,6 +194,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
           // proposal's base resolves to at accept.
           const moment = objectMomentFromMomentPayload(op.payloadJson);
           if (moment) {
+            if (moment.versionId === "main" && moment.path !== null) notifyDesktopReadiness(storage, {workspaceId: input.workspaceId, path: moment.path});
             objectMomentStmt.run(
               input.workspaceId,
               moment.objectId,
@@ -212,7 +234,9 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
           Number(result.lastInsertRowid),
         );
       }
-      return { inserted, skipped, currentMaxOriginSeq: currentMax };
+      const settlementRefusals=input.ops.filter(op=>op.settlementAdmission?.status === "refused").map(op=>({originId:input.originId,originSeq:op.originSeq,
+        momentId:settlementResponseIdentifier((JSON.parse(op.payloadJson) as Record<string,unknown>).momentId),settlementId:op.settlementAdmission!.settlementId,reason:"authorship-mismatch"}));
+      return { inserted, skipped, currentMaxOriginSeq: currentMax,...(settlementRefusals.length?{settlementRefusals}:{}) };
   }
 
 export function maxOriginSeq(storage: StorageContext, workspaceId: string, originId: string): number {
@@ -230,15 +254,18 @@ export function fetchLogPage(storage: StorageContext, input: {
     sinceRelaySeq: number;
     limit: number;
   }): FetchLogPageResult {
-    const rows = storage.db
-      .prepare(
-        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json
+    let statement = logPageStatements.get(storage.db);
+    if (!statement) {
+      statement = storage.db.prepare(
+        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json
          FROM sync_relay_log
          WHERE workspace_id = ? AND relay_seq > ?
          ORDER BY relay_seq
          LIMIT ?`,
-      )
-      .all(input.workspaceId, input.sinceRelaySeq, input.limit + 1);
+      );
+      logPageStatements.set(storage.db, statement);
+    }
+    const rows = statement.all(input.workspaceId, input.sinceRelaySeq, input.limit + 1);
     const pageRows = rows.slice(0, input.limit).map(rowToLogRow);
     const last = pageRows[pageRows.length - 1];
     return {
@@ -257,7 +284,7 @@ export function fetchLogPageDescending(storage: StorageContext, input: {
       input.beforeRelaySeq === null
         ? storage.db
             .prepare(
-              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json
+              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json
                FROM sync_relay_log
                WHERE workspace_id = ?
                ORDER BY relay_seq DESC
@@ -266,7 +293,7 @@ export function fetchLogPageDescending(storage: StorageContext, input: {
             .all(input.workspaceId, input.limit)
         : storage.db
             .prepare(
-              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json
+              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json
                FROM sync_relay_log
                WHERE workspace_id = ? AND relay_seq < ?
                ORDER BY relay_seq DESC
@@ -283,10 +310,23 @@ export function fetchLogCoordinate(storage: StorageContext, input: {
   }): SyncRelayLogRow | null {
     const row = storage.db
       .prepare(
-        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json
+        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json
          FROM sync_relay_log
          WHERE workspace_id = ? AND origin_id = ? AND origin_seq = ?`,
       )
       .get(input.workspaceId, input.originId, input.originSeq);
     return row ? rowToLogRow(row) : null;
   }
+
+export function hasRefusedSettlement(storage: StorageContext, input: {
+  workspaceId: string; originId: string; originSeq: number;
+  settlementId: string; momentId: string; reason: string;
+}): boolean {
+  return storage.db.prepare(`SELECT 1 FROM sync_relay_log
+    WHERE workspace_id=? AND origin_id=? AND origin_seq<? AND op_kind='moment.append'
+      AND json_extract(settlement_admission_json,'$.status')='refused'
+      AND json_extract(settlement_admission_json,'$.settlementId')=?
+      AND json_extract(settlement_admission_json,'$.reason')=?
+      AND json_extract(payload_json,'$.momentId')=? LIMIT 1`)
+    .get(input.workspaceId,input.originId,input.originSeq,input.settlementId,input.reason,input.momentId) !== undefined;
+}

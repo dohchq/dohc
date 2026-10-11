@@ -1,3 +1,4 @@
+import { desktopPins } from "../testPins";
 import { DohcMark } from "@dohc/brand";
 import { Check, ChevronsUpDown, PanelLeft, PanelRight, Search } from "lucide-react";
 import { type ReactNode, useId, useRef, useState } from "react";
@@ -6,7 +7,7 @@ import { TITLEBAR_HEIGHT_PX } from "./tokens";
 import { useDismiss } from "./ui/useDismiss";
 
 // Workspace labels use the final folder name on either platform.
-export function workspaceName(workspace: WorkspaceSummary): string {
+export function workspaceName(workspace: Pick<WorkspaceSummary, "rootPath">): string {
   // Separator-agnostic: rootPath is backslash-separated on native Windows.
   return workspace.rootPath.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "workspace";
 }
@@ -97,7 +98,7 @@ export function Titlebar(props: {
 
   return (
     <header
-      data-testid="titlebar"
+      data-testid={desktopPins.titlebar}
       className="titlebar-drag relative flex shrink-0 items-center gap-2 border-b border-line bg-panel"
       style={{ height: TITLEBAR_HEIGHT_PX, paddingLeft: leftInset }}
     >
@@ -245,7 +246,7 @@ export function Titlebar(props: {
           ) : null}
           {props.chatsSidebar ? (
             <LayoutToggle
-              testId="titlebar-chats-sidebar"
+              testId={desktopPins.titlebarChatsSidebar}
               label="Toggle chats sidebar"
               pressed={props.chatsSidebar.visible}
               onClick={props.chatsSidebar.onToggle}

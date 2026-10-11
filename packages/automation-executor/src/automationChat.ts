@@ -3,6 +3,14 @@ import type { ChatChannelKind, ChatChannelType, ChatThreadLane, LinkedChatStore 
 import type { Automation } from "@dohc/workspace-contracts/automations";
 import type { ReachRoster } from "./automationReach";
 
+export async function hasChatMessage(store: Pick<LinkedChatStore, "getMessage">, workspaceId: string, messageId: string): Promise<boolean> {
+  try { return (await store.getMessage({ workspaceId, messageId })) !== null; }
+  catch (error) {
+    if (error instanceof Error && error.message === "message-not-found") return false;
+    throw error;
+  }
+}
+
 // Where an automation's messages go (item 6, section 2). A post goes to a
 // Group this workspace has, found by its name. A direct message goes only to
 // a direct message this workspace's owner already started with exactly that

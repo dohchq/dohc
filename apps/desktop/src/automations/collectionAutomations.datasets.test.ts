@@ -8,15 +8,16 @@ import {
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
 import type { JsonValue } from "@dohc/app-backend-runtime";
 import { AUTOMATION_NEVER_STARTED_REFUSAL } from "@dohc/app-backend-runtime/dataset-automation-claims";
-import type { DatasetDefinition } from "@dohc/security-contract/dataset";
+import { datasetBaseFolder, type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { parseAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
 import { VersionedLiveAdapter, type AutomationClaim } from "@dohc/workspace-engine-client";
+import { generateDatasetSchemaChange } from "../workspaces/datasetSchemaChanges";
 import { generateDatasetSources } from "../workspaces/datasetGenerator";
 import { createLocalDatasetHost, type LocalDatasetAgent, type LocalDatasetHost } from "../workspaces/localDatasetHost";
 import { generateDatasetFormSources } from "../workspaces/datasetFormGenerator";
@@ -38,6 +39,7 @@ import {
   CollectionAutomations,
   type AutomationFailureReport,
   type CollectionAutomationEngine,
+  type CollectionAutomationsOptions,
   type PressSettled,
   type PressWaitReason,
 } from "@dohc/automation-executor/collection-automations";
@@ -454,6 +456,7 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
     releaseAutomationGroups: async () => ({ watchedGeneration: 0, handover: { floorMs: 0, automations: [] } }),
     watchAutomationGroups: async (input: { subscriptions: unknown[] }) => { watched.splice(0, watched.length, ...input.subscriptions); return { needsHandover: false }; },
     // Serves the oldest pending claim, as the engine drains its queue.
+    makeAutomationWritesDurable: async () => {},
     claimNextAutomation: async () => {
       const next = engineClaims.filter((claim) => claim.state === "pending").sort((left, right) => left.createdAtMs - right.createdAtMs)[0];
       if (next === undefined) return null;
@@ -568,7 +571,7 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
       return { text, truncated: false as const, contentHash: sha256(text) };
     } catch { return null; }
   });
-  const makeExecutor = () => executor = new CollectionAutomations({
+  const makeExecutor = (extra: Partial<CollectionAutomationsOptions> = {}) => executor = new CollectionAutomations({
     resolveRelayedPress: resolveAuthority,
     resolveButtonInspection: async (id) => {
       const authority = await resolveAuthority(id);
@@ -587,7 +590,7 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
     requestHost: async () => undefined,
     readMessageBody: async () => { throw new Error("These test messages carry their whole body."); },
     postNotice: async (notice) => { notices.push(notice); wake(); },
-    chat: {
+    chat: { hasMessage: async () => false,
       directory: async (current) => chatDirectoryOf([TEAM], current),
       write: async (_signal, message) => { await options.onMessage?.(message); messages.push(message); wake(); },
     },
@@ -654,6 +657,7 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
       wake();
       return result;
     },
+    ...extra,
   });
   makeExecutor();
   return {
@@ -701,6 +705,72 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
 }
 
 describe("Collection automations on a dataset", () => {
+  it.each(["failed reload", "dataset move"] as const)("retries a dataset press after a %s index read", async change => {
+    const f = await world();
+    await f.writeAutomations(closePaid().replace("field-changed: Paid", "button: Mark paid"));
+    const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+    const indexReached = Promise.withResolvers<void>(), indexResume = Promise.withResolvers<void>();
+    let paused = false, indexing = false, releases = 0;
+    const auxiliary = { ...definition, datasetId: id(300), schemaPath: "Aux/schema.sql", operationsPath: "Aux/operations.js" };
+    const relocated = { ...definition, schemaPath: "Shared/Budget/schema.sql", operationsPath: "Shared/Budget/operations.js" };
+    let definitions = [definition];
+    await mkdir(join(f.root, "Aux"));
+    await writeFile(join(f.root, "Aux/dataset.json"), JSON.stringify({ datasetId: auxiliary.datasetId }));
+    const base = createAutomationRunStore(f.root, resolveWorkspaceMetadataDir);
+    const executor = f.makeExecutor({
+      store: { ...base, runsOf: async (...args) => {
+        if (!paused && f.claims().some(c => c.state === "running")) { paused = true; reached.resolve(); await resume.promise; }
+        return base.runsOf(...args);
+      } },
+      withDatasetHost: async work => work({ ...f.host.automations,
+        release: claim => { f.host.automations.release(claim); releases += 1; },
+        datasets: () => ({ definitions, failures: [] }),
+        revision: datasetId => ({ ...f.approved, definition: definitions.find(d => d.datasetId === datasetId)! }),
+        generated: () => true,
+        dataGrants: datasetId => datasetId === auxiliary.datasetId ? { workspaceId: "workspace", grants: [] } : f.host.automations.dataGrants(datasetId),
+      }),
+      readText: async path => {
+        if (indexing && path === "Aux/automations.yaml") { indexReached.resolve(); await indexResume.promise; }
+        if (indexing && change === "failed reload" && path === "Budget/collection.yaml") {
+          indexing = false;
+          throw new Error("Schema read failed.");
+        }
+        return f.readText(path);
+      },
+    });
+    onTestFinished(async () => { resume.resolve(); indexResume.resolve(); await executor.dispose(); });
+    await executor.open();
+    await executor.idle();
+    const { id: invoice } = await f.create({ [PAID]: false, [STATUS]: "Open" });
+    const pressed = await executor.pressDataset({ datasetId: BUDGET, table: "Invoices", field: "Mark paid", recordId: JSON.stringify(invoice),
+      pressId: id(301), pressedBy: "user-owner", by: { kind: "human" }, confirmed: [] }, async datasetId => f.host.describe(datasetId), () => undefined);
+    expect(pressed.busy).toBe(false);
+    await reached.promise;
+    if (change === "dataset move") {
+      await mkdir(join(f.root, "Shared"));
+      await rename(join(f.root, "Budget"), join(f.root, "Shared/Budget"));
+    }
+    definitions = [auxiliary, change === "dataset move" ? relocated : definition];
+    indexing = true;
+    const reload = change === "failed reload"
+      ? executor.resyncFileObservation().then(() => null, error => error)
+      : (executor.datasetsChanged(), executor.automationsIn("Shared/Budget"));
+    await indexReached.promise;
+    expect(executor.locate(AUTOMATION)).toBeNull();
+    resume.resolve();
+    await expect.poll(() => f.claims()[0]?.state).toBe("pending");
+    // Another claim notification must not settle the temporarily missing source.
+    executor.notifyClaimed();
+    await expect.poll(() => releases).toBeGreaterThanOrEqual(2);
+    expect(f.claims()[0]?.state).toBe("pending");
+    expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
+    indexResume.resolve();
+    await reload;
+    if (change === "failed reload") expect(f.errors).toContainEqual({ context: "reload Collection automations", error: new Error("Schema read failed.") });
+    await expect.poll(() => f.claims()[0]?.state).toBe("done");
+    expect((await f.record(invoice))?.values[STATUS]).toBe("Closed");
+  });
+
   it("reports a missing trigger field instead of showing an automation that cannot subscribe as runnable", async () => {
     const f = await world();
     await f.writeAutomations(closePaid().replace("field-changed: Paid", "field-changed: Missing"));
@@ -2261,7 +2331,7 @@ describe("dataset automation claims in both ledgers", () => {
     const store = createAutomationRunStore(f.root, resolveWorkspaceMetadataDir);
     const old = Date.now() - 31 * 24 * 60 * 60 * 1000;
     const saved = (claimId: string, outcome: StoredRun["outcome"], rest: Partial<StoredRun> = {}): StoredRun => ({
-      version: 9, claimId, automationId: AUTOMATION, definitionHash: "h", keySeed: "h-1", startedAtMs: old, finishedAtMs: old, steps: [],
+      durableEffects: 0, version: 13, claimId, automationId: AUTOMATION, definitionHash: "h", keySeed: "h-1", startedAtMs: old, finishedAtMs: old, steps: [],
       applied: [], created: [], replans: [], undoRequests: [], undoCalls: [], undoCovers: [], readableFields: null, collections: [], rules: null,
       superseded: false, undo: null, undoKept: [], settled: outcome?.state === "done", outcome, ...rest,
     });
@@ -2459,9 +2529,10 @@ ${steps}`;
     f.engineClaims.push(engineClaim("atc_budget", "pending", due, SWEEP));
     f.executor.notifyClaimed();
     await f.until(() => f.engineClaims[0]!.attempts === 0 && f.served() >= 1);
-    // The index it asked for has run, and nothing wakes the claim again.
+    // Wait for the requested index read without inspecting the missing folder, which starts another read.
     const settle = async () => {
-      await f.executor.automationsIn("Budget");
+      await f.executor.idle();
+      await (f.executor as unknown as { chain: Promise<void> }).chain;
       await f.executor.idle();
     };
     await settle();
@@ -3753,5 +3824,76 @@ automations:
     editStopped: "dohc cannot read Broken/dataset.json. Fix that file, then try again.",
     actionsStopped: "dohc cannot read Broken/dataset.json. Fix that file, then try again.",
   });
+  await f.executor.dispose();
+});
+
+it.each([1, 2])("keeps timed and message automations at the base after %s field changes", async changes => {
+  const f = await world({ groups: true });
+  try {
+    for (let change = 1; change <= changes; change++) {
+      const approved = f.host.approvedArtifacts(BUDGET);
+      const next = generateDatasetSchemaChange({ ...approved, change: { kind: "renameField", tableId: TABLE, fieldId: FINISHED, name: `Finished ${change}` } });
+      expect(next.descriptorPath).toMatch(/\/revisions\/\d+-[^/]+\/revision\.json$/);
+      expect(datasetBaseFolder(JSON.parse(next.files[next.descriptorPath]!))).toBe("Budget");
+      for (const [path, text] of Object.entries(next.files)) {
+        await mkdir(join(f.root, dirname(path)), { recursive: true });
+        await writeFile(join(f.root, path), text);
+      }
+      const prepared = await f.host.prepareMigration({ datasetId: BUDGET, descriptorPath: next.descriptorPath, migrationPath: next.migrationPath, adapter: f.adapter });
+      const result = await f.host.approveMigration({ preparationId: prepared.preparationId, revisionSha256: prepared.revision.revisionSha256, approvalDigest: prepared.approvalDigest });
+      Object.assign(f.rules, { revision: result.revision.revision, revisionSha256: result.revision.revisionSha256 });
+    }
+    expect(JSON.parse(await readFile(join(f.root, "Budget/dataset.json"), "utf8")).schemaPath).toBe("Budget/schema.sql");
+    await f.writeAutomations(`  - id: scheduled
+    name: Scheduled
+    when: {schedule: day, timezone: UTC}
+    do:
+      - add-record: {Status: Scheduled}
+        collection: Budget
+        operation: invoices.create
+  - id: messaged
+    name: Messaged
+    when: {group-message: Team}
+    do:
+      - add-record: {Status: '=message.body'}
+        collection: Budget
+        operation: invoices.create
+`);
+    await f.executor.open();
+    expect(await f.executor.automationsIn("Budget")).toMatchObject({ automations: [
+      { valid: true, cannotRun: null }, { valid: true, cannotRun: null },
+    ] });
+    const scheduled = engineClaim("base-schedule", "pending", Date.UTC(2026, 8, 27), `collection:${BUDGET}#scheduled`);
+    const messaged = engineClaim("base-message", "pending", Date.UTC(2026, 8, 28), `collection:${BUDGET}#messaged`);
+    messaged.trigger = { key: "message:base-message" };
+    messaged.change = { kind: "message", authorOriginId: null, actorKind: "human", onBehalfOf: null, sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0,
+      message: { id: "base-message", threadId: "thread", groupId: "team", lane: "posts", authorKind: "human", authorDisplayName: "Bob", authorUserId: "u-bob", createdAtMs: Date.UTC(2026, 8, 28), body: "Messaged" } };
+    f.engineClaims.push(scheduled, messaged);
+    f.executor.notifyClaimed();
+    await f.until(() => f.engineClaims.every(claim => claim.state === "done" || claim.state === "failed"));
+    expect(f.engineClaims).toMatchObject([{ state: "done" }, { state: "done" }]);
+    expect((await f.records()).map(row => row.values[STATUS]).sort()).toEqual(["Messaged", "Scheduled"]);
+    expect(f.errors).toEqual([]);
+  } finally { await f.executor.dispose(); }
+});
+
+it("reports dataset-only kept fields on every Stop and restore retry", async () => {
+  const f = await world();
+  await f.writeAutomations(closePaid(`      - set: {Status: Closed, Notes: Closed by automation}
+        operation: invoices.edit
+`));
+  await f.executor.open();
+  const invoice = await f.create({[STATUS]: "Open", [NOTES]: "draft"});
+  await f.edit(invoice.id, {[PAID]: true});
+  await f.until(() => f.claims()[0]?.state === "done");
+  await f.edit(invoice.id, {[NOTES]: "mine"});
+  const listed = await f.executor.automationsIn("Budget");
+  if(listed.status !== "read" || !listed.automations[0]?.valid) throw Error("No definition");
+  const definitions = [{collectionPath: "Budget", id: "close-paid", definitionHash: listed.automations[0].definitionHash}];
+  definitions[0]!.id = listed.automations[0].automation.id;
+  const first = await f.executor.undoRunsOf(definitions, async () => undefined);
+  expect(first.keptFields).toHaveLength(1);
+  const retry = await f.executor.undoRunsOf(definitions, async () => undefined, true);
+  expect(retry.keptFields).toEqual(first.keptFields);
   await f.executor.dispose();
 });

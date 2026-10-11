@@ -1,3 +1,4 @@
+import { desktopPins, activityPin } from "../src/testPins";
 import { expect, test } from "@playwright/test";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -34,7 +35,7 @@ import {
 // Spec 1 (grant side): the app user shares a file by email from the
 //   explorer context menu, gets a copyable share code, manages it under
 //   Settings → Sync and sharing, and ends it — after which the recipient's relay
-//   access is a byte-identical 404.
+//   access returns 404 with the removed-recipient explanation (#1438).
 // Spec 2 (receive side, the full loop): grant → open the share in the app
 //   → browse/search the read-only view → granter edits → refresh sees it →
 //   revoke → refresh surfaces "this share was ended" honestly.
@@ -158,7 +159,7 @@ async function openOnlyProposal(
   return { summary, proposal };
 }
 
-test("grant side: share a file by email from the explorer, copy the code, and end it from Settings", async () => {
+test("grant side: share a file by email from the explorer, copy the code, and end it from Sharing", async () => {
   test.setTimeout(240_000);
   const temp = await createTempWorkspace();
   const workspaceId = "share-grant-e2e";
@@ -242,28 +243,41 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     expect(strangerFetch.status).toBe(404);
     expect(strangerFetch.body).toBe(missingFetch.body);
 
-    // Settings → Sync and sharing → "Shared by me": the grant is listed and endable.
-    await page.getByTestId("activity-settings").click();
-    await page.getByTestId("settings-nav-cloud").click();
-    const row = page.getByTestId("shared-by-me-row");
+    // Sharing → "Shared by me": the grant is listed and endable.
+    await page.getByTestId(activityPin("sharing")).click();
+    const row = page.locator(`[data-testid="sharing-granted-row"][data-share-id="${shareId}"]`);
     await expect(row).toBeVisible();
-    await expect(row).toContainText("docs/plan.md");
-    await expect(row).toContainText(RECIPIENT_EMAIL);
-    // Ending asks before it ends: the first click opens the confirm.
-    await row.getByTestId("shared-by-me-revoke-start").click();
-    await expect(row.getByTestId("shared-by-me-revoke-confirm")).toBeVisible();
-    await row.getByTestId("shared-by-me-revoke").click();
-    await expect(row).toContainText("Ended — was shared with");
+    await expect(row).toContainText("plan.md");
+    await expect(row).toContainText("docs/");
+    // Ending asks before it ends: the menu opens the confirm.
+    await row.hover();
+    await row.getByRole("button", { name: "Share actions" }).click();
+    await page.getByRole("menuitem", { name: "End share…" }).click();
+    const confirm = page.getByTestId("sharing-end-confirm");
+    await expect(confirm).toContainText(RECIPIENT_EMAIL);
+    await confirm.getByTestId("sharing-end").click();
+    await expect(row.getByTestId("sharing-row-status")).toHaveText("ended");
 
-    // Revocation is live: the recipient's next fetch is the byte-identical
-    // generic 404.
+    // Revocation is live: the recipient's next fetch returns 404 with the
+    // owner-removed explanation (#1438).
     const revokedFetch = await relayJson(
       relay.baseUrl,
       RECIPIENT_TOKEN,
       `/sync/shares/${shareId}/log?since=0`,
     );
     expect(revokedFetch.status).toBe(404);
-    expect(revokedFetch.body).toBe(missingFetch.body);
+    expect(JSON.parse(revokedFetch.body)).toEqual({
+      ok: false,
+      error: "The owner removed your access.",
+      code: "share_access_removed",
+    });
+    const strangerAfterRemoval = await relayJson(
+      relay.baseUrl,
+      "test:e2e-stranger",
+      `/sync/shares/${shareId}/log?since=0`,
+    );
+    expect(strangerAfterRemoval.status).toBe(404);
+    expect(strangerAfterRemoval.body).toBe(missingFetch.body);
   } finally {
     // Stop the relay child before removing the temp tree it holds open, or
     // Windows leaks the dir with EBUSY (POSIX tolerates the reverse order).
@@ -591,7 +605,12 @@ confidentialTest.describe("View link lifecycle", () => {
         neverValidCredential,
         "/sync/link/share",
       );
-      expect(neverValidRead.status).toBe(401);
+      // #1422 normalizes unverified link refusals to the same opaque 404.
+      expect(neverValidRead.status).toBe(404);
+      expect(JSON.parse(neverValidRead.body)).toEqual({
+        ok: false,
+        error: "not found",
+      });
       const oldCapabilityAfterReset = await readViewLink(
         relay.baseUrl,
         oldCapability,
@@ -669,7 +688,30 @@ confidentialTest.describe("View link lifecycle", () => {
         "/sync/shares/never-valid/log?since=0&limit=500",
       );
       expect(missingNamedShare.status).toBe(404);
-      expect(namedAfterEnd).toEqual(missingNamedShare);
+      expect(JSON.parse(missingNamedShare.body)).toEqual({
+        ok: false,
+        error: "not found",
+        code: "not_found",
+      });
+      // #1438 explains removal to former recipients while strangers stay opaque.
+      expect(namedAfterEnd.status).toBe(404);
+      expect(JSON.parse(namedAfterEnd.body)).toEqual({
+        ok: false,
+        error: "The owner removed your access.",
+        code: "share_access_removed",
+      });
+      const strangerAfterRemoval = await relayJson(
+        relay.baseUrl,
+        "test:e2e-stranger",
+        `/sync/shares/${shareId}/log?since=0&limit=500`,
+      );
+      const missingFetch = await relayJson(
+        relay.baseUrl,
+        "test:e2e-stranger",
+        "/sync/shares/never-valid/log?since=0&limit=500",
+      );
+      expect(strangerAfterRemoval.status).toBe(404);
+      expect(strangerAfterRemoval.body).toBe(missingFetch.body);
     } finally {
       await relay?.stop();
       if (desktop) await cleanupDesktopWorkspace(desktop, temp);
@@ -749,7 +791,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     await expect(page.getByText("The comet-tail draft.")).toBeVisible();
 
     // Search: the shared view is locally searchable.
-    await page.getByTestId("activity-search").click();
+    await page.getByTestId(activityPin("search")).click();
     await page.getByTestId("search-input").fill("comet-tail");
     await expect(
       page.locator('[data-testid="search-result-group"][data-path="docs/shared.md"]'),
@@ -1267,8 +1309,8 @@ test("Comment handoff opens files without creating a second generic chat", async
     );
     await revealExplorerPath(page, "docs/shared.md");
     await explorerRow(page, "docs/shared.md").click();
-    if ((await page.getByTestId("chats-panel").count()) === 0) {
-      await page.getByTestId("titlebar-chats-sidebar").click();
+    if ((await page.getByTestId(desktopPins.chatsPanel).count()) === 0) {
+      await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
     }
     await expect(page.getByTestId("linked-chat-readonly-note")).toBeVisible();
     await expect(page.getByTestId("linked-chat-composer")).toHaveCount(0);
@@ -1395,8 +1437,8 @@ test("direct named Comment keeps desktop generic chat read-only", async () => {
 
     await revealExplorerPath(page, "docs/shared.md");
     await explorerRow(page, "docs/shared.md").click();
-    if ((await page.getByTestId("chats-panel").count()) === 0) {
-      await page.getByTestId("titlebar-chats-sidebar").click();
+    if ((await page.getByTestId(desktopPins.chatsPanel).count()) === 0) {
+      await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
     }
     await expect(page.getByTestId("linked-chat-readonly-note")).toBeVisible();
     await expect(page.getByTestId("linked-chat-composer")).toHaveCount(0);

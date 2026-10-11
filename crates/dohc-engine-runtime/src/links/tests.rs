@@ -49,48 +49,28 @@ fn open(path: &Path) -> EngineStore {
     EngineStore::open_for_actor(path, 1, None, None).unwrap()
 }
 fn write(s: &mut EngineStore, object: &str, path: &str, text: &str, n: i64) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    let mut refusals = 0;
-    loop {
-        let result = (|| {
-            let mut v = VersionedTextStore::new(s);
-            v.ensure_main_version("ws", "main", 1, &NoFaults)?;
-            v.write_text(
-                &WriteText {
-                    workspace_id: "ws".into(),
-                    version_id: "main".into(),
-                    object_id: object.into(),
-                    path: path.into(),
-                    text: text.into(),
-                    moment_id: format!("m-{object}-{n}"),
-                    metadata_origin: "test".into(),
-                    metadata_summary: None,
-                    metadata_correlation_id: None,
-                    author_json: None,
-                    now_ms: n,
-                    request_id: None,
-                },
-                &NoFaults,
-            )
-            .map(|_| ())
-        })();
-        match result {
-            Ok(()) => {
-                assert_eq!(refusals, 0, "unpinned links fixture refused a write");
-                return;
-            }
-            Err(error) if error.code() == "file-locked" => {
-                refusals += 1;
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "fixture write never admitted"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            Err(error) => panic!("fixture write failed: {error}"),
-        }
-    }
+    let mut v = VersionedTextStore::new(s);
+    v.ensure_main_version("ws", "main", 1, &NoFaults).unwrap();
+    v.write_text(
+        &WriteText {
+            workspace_id: "ws".into(),
+            version_id: "main".into(),
+            object_id: object.into(),
+            path: path.into(),
+            text: text.into(),
+            moment_id: format!("m-{object}-{n}"),
+            metadata_origin: "test".into(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            author_json: None,
+            now_ms: n,
+            request_id: None,
+        },
+        &NoFaults,
+    )
+    .unwrap();
 }
+
 fn count(s: &EngineStore, table: &str) -> i64 {
     s.read_with(|c| c.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0)))
         .unwrap()

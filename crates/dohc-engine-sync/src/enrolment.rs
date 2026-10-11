@@ -17,8 +17,9 @@
 //! moments whose object has retained or claimed CRDT state, except its current
 //! head when durable coverage proves it is the lineage's file artifact. Deferred
 //! CRDT input still reserves the path. A pruned local marker has no such state:
-//! its saved artifact history, including settled Y.Doc projections, remains
-//! the source for enrollment.
+//! its saved artifact history remains the source for enrollment. A declined
+//! lineage instead exports one current saved version; its intermediate settles
+//! stay local after prune, claim, and later enrollment.
 //!
 //! A live append stores its path on `ydoc_docs`, so enrollment can originate
 //! the lineage before any settle creates a snapshot. Once a snapshot exists,
@@ -96,7 +97,7 @@ pub(crate) fn originate_unclaimed_ydoc_bases_in_tx(
          FROM ydoc_docs d LEFT JOIN snapshots s \
            ON s.workspace_id=d.workspace_id AND s.version_id=d.version_id \
           AND s.object_id=d.object_id \
-         WHERE d.workspace_id=?1 AND d.lineage_claim_status = 'unclaimed' \
+         WHERE d.workspace_id=?1 AND d.lineage_claim_status = 'unclaimed' AND d.file_export_lane!=1 \
          ORDER BY d.version_id, d.object_id",
         workspace_id,
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -119,6 +120,16 @@ pub(crate) fn originate_unclaimed_ydoc_bases_in_tx(
         if let BaseOrigination::Declined(declined) =
             originate_ydoc_base_in_tx(tx, &key, &path, None, None, now_ms)?
         {
+            sharing_declined.push(declined);
+        }
+    }
+    // Stored facts include leased and pruned lineages; reading them never claims a base.
+    for declined in crate::ydoc_origination::current_sharing_declines_in_tx(tx, workspace_id)? {
+        if let Some(existing) = sharing_declined.iter_mut().find(|item| {
+            item.version_id == declined.version_id && item.object_id == declined.object_id
+        }) {
+            *existing = declined;
+        } else {
             sharing_declined.push(declined);
         }
     }
@@ -145,7 +156,7 @@ pub fn originate_live_ydoc_base_in_tx(
                ON s.workspace_id=d.workspace_id AND s.version_id=d.version_id \
               AND s.object_id=d.object_id \
              WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3 \
-               AND d.lineage_claim_status = 'unclaimed'",
+               AND d.lineage_claim_status = 'unclaimed' AND d.file_export_lane IN (0,3)",
             params![key.workspace_id, key.version_id, key.object_id],
             |row| row.get(0),
         )
@@ -174,7 +185,7 @@ pub fn originate_closing_ydoc_base_in_tx(
              ON s.workspace_id=d.workspace_id AND s.version_id=d.version_id \
              AND s.object_id=d.object_id \
              WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3 \
-             AND d.lineage_claim_status = 'unclaimed'",
+             AND d.lineage_claim_status = 'unclaimed' AND d.file_export_lane IN (0,3)",
             params![key.workspace_id, key.version_id, key.object_id],
             |row| row.get(0),
         )
@@ -209,23 +220,71 @@ fn backfill_moments_and_conflict_bundles(
     backfill_moments_between(tx, workspace_id, after_moment_order, None)
 }
 
+macro_rules! head_export_exclusions_sql {
+    () => {
+        "                     AND NOT EXISTS (SELECT 1 FROM live_device_application_bindings b \
+                       WHERE b.workspace_id=s.workspace_id AND b.main_version_id=s.version_id \
+                         AND b.object_id=s.object_id) \
+                     AND NOT EXISTS (SELECT 1 FROM ydoc_owner_bindings b \
+                       WHERE b.workspace_id=s.workspace_id AND b.main_version_id=s.version_id \
+                         AND b.object_id=s.object_id) \
+                     AND NOT EXISTS (SELECT 1 FROM conflicts c \
+                       WHERE c.workspace_id=s.workspace_id AND c.status='open' \
+                         AND (c.target_version_id=s.version_id OR c.source_version_id=s.version_id) \
+                         AND (c.path=s.path OR s.object_id IN \
+                           (c.base_object_id,c.current_object_id,c.incoming_object_id))) \
+                     AND COALESCE((SELECT j.status='conflict' AND j.content_sha256=s.blob_sha256 \
+                       FROM materialization_jobs j \
+                       WHERE j.workspace_id IN (?1,'') AND j.target_path=s.path \
+                       ORDER BY j.created_at_ms DESC,j.rowid DESC LIMIT 1),0)=0 \
+                     AND NOT EXISTS (SELECT 1 FROM replication_pending_conflict_moments p \
+                       WHERE p.workspace_id=?1 AND p.moment_id=s.latest_moment_id) \
+                     AND NOT EXISTS (SELECT 1 FROM ydoc_deferred_updates u \
+                       WHERE u.workspace_id=s.workspace_id AND u.version_id=s.version_id \
+                         AND u.object_id=s.object_id) \
+"
+    };
+}
+
 // Unary + removes the correlated keys' TEXT affinity, allowing SQLite to
 // use all columns of the JSON expression indexes.
-const COVERED_HEADS_SQL: &str = "SELECT s.latest_moment_id,s.version_id,s.object_id,s.blob_sha256,d.content_kind, \
-                     d.head_update_seq,d.head_snapshot_seq FROM snapshots s JOIN ydoc_docs d \
+const COVERED_HEADS_SQL: &str = concat!(
+    "SELECT s.latest_moment_id,s.version_id,s.object_id,s.blob_sha256,d.content_kind, \
+                     d.head_update_seq,d.head_snapshot_seq,d.lineage_claim_id FROM snapshots s JOIN ydoc_docs d \
                      ON d.workspace_id=s.workspace_id AND d.version_id=s.version_id \
                        AND d.object_id=s.object_id \
                    JOIN moments h ON h.workspace_id=s.workspace_id \
                      AND h.version_id=s.version_id AND h.object_id=s.object_id \
                      AND h.moment_id=s.latest_moment_id \
                      AND h.payload_after_blob_sha256=s.blob_sha256 AND h.payload_after_path=s.path \
-                   WHERE s.workspace_id=?1 AND s.content_kind='text' \
+                   WHERE s.workspace_id=?1 AND s.content_kind='text' AND ",
+    dohc_engine_domain::exclude_capture_recovery_sql!("h"),
+    " \
                      AND d.lineage_claim_status != 'unclaimed' \
                      AND d.lineage_parent_claim_id IS NULL AND d.base_origin_id = ( \
                        SELECT origin_id FROM sync_identity WHERE workspace_id=?1) \
-                     AND (d.export_attempt_moment_id IS NOT s.latest_moment_id \
+                     AND CASE WHEN d.export_attempt_moment_id IS NOT s.latest_moment_id \
                        OR d.export_attempt_update_seq IS NOT d.head_update_seq \
-                       OR d.export_attempt_snapshot_seq IS NOT d.head_snapshot_seq) \
+                       OR d.export_attempt_snapshot_seq IS NOT d.head_snapshot_seq \
+                       OR d.export_attempt_lineage_claim_id IS NOT d.lineage_claim_id \
+                       THEN 1 WHEN d.export_wait_asset_sha256 IS NULL THEN 0 \
+                         WHEN NOT EXISTS (SELECT 1 FROM binary_blobs waiting_blob \
+                           WHERE waiting_blob.sha256=d.export_wait_asset_sha256) THEN 0 \
+                         WHEN d.export_wait_asset_path IS NULL THEN 1 \
+                         ELSE EXISTS (SELECT 1 FROM path_aliases a JOIN snapshots asset \
+                           ON asset.workspace_id=a.workspace_id AND asset.version_id=a.version_id \
+                             AND asset.object_id=a.object_id \
+                           WHERE a.workspace_id=d.workspace_id AND a.version_id=d.version_id \
+                             AND a.path=d.export_wait_asset_path AND asset.content_kind='binary' \
+                             AND asset.binary_sha256=d.export_wait_asset_sha256 \
+                           UNION ALL ",
+    crate::ydoc_apply::retired_scene_asset_sql!(
+        "d.workspace_id",
+        "d.version_id",
+        "d.export_wait_asset_path",
+        "d.export_wait_asset_sha256"
+    ),
+    ") END \
                      AND ((d.settled_update_seq=d.head_update_seq \
                        AND d.last_settled_sha=s.blob_sha256) OR ( \
                        d.last_settled_sha IS NULL AND d.seed_source_sha256=s.blob_sha256 \
@@ -239,27 +298,12 @@ const COVERED_HEADS_SQL: &str = "SELECT s.latest_moment_id,s.version_id,s.object
                        AND NOT EXISTS (SELECT 1 FROM ydoc_snapshots b \
                          WHERE b.workspace_id=d.workspace_id AND b.version_id=d.version_id \
                            AND b.object_id=d.object_id AND b.up_to_seq NOT IN (0,1)))) \
-                     AND NOT EXISTS (SELECT 1 FROM live_device_application_bindings b \
-                       WHERE b.workspace_id=d.workspace_id AND b.main_version_id=d.version_id \
-                         AND b.object_id=d.object_id) \
-                     AND NOT EXISTS (SELECT 1 FROM ydoc_owner_bindings b \
-                       WHERE b.workspace_id=d.workspace_id AND b.main_version_id=d.version_id \
-                         AND b.object_id=d.object_id) \
-                     AND NOT EXISTS (SELECT 1 FROM conflicts c \
-                       WHERE c.workspace_id=d.workspace_id AND c.status='open' \
-                         AND (c.target_version_id=d.version_id OR c.source_version_id=d.version_id) \
-                         AND (c.path=s.path OR d.object_id IN \
-                           (c.base_object_id,c.current_object_id,c.incoming_object_id))) \
-                     AND COALESCE((SELECT j.status='conflict' AND j.content_sha256=s.blob_sha256 \
-                       FROM materialization_jobs j \
-                       WHERE j.workspace_id IN (?1,'') AND j.target_path=s.path \
-                       ORDER BY j.created_at_ms DESC,j.rowid DESC LIMIT 1),0)=0 \
-                     AND NOT EXISTS (SELECT 1 FROM replication_log r \
+",
+    head_export_exclusions_sql!(),
+    "                     AND NOT EXISTS (SELECT 1 FROM replication_log r \
                        WHERE r.workspace_id=?1 AND r.op_kind='moment.append' \
                          AND json_extract(r.payload_json,'$.versionId')=+s.version_id \
                          AND json_extract(r.payload_json,'$.objectId')=+s.object_id) \
-                     AND NOT EXISTS (SELECT 1 FROM replication_pending_conflict_moments p \
-                       WHERE p.workspace_id=?1 AND p.moment_id=s.latest_moment_id) \
                      AND NOT EXISTS (SELECT 1 FROM replication_log r \
                        WHERE r.workspace_id=?1 AND r.op_kind='moment.append' \
                          AND json_extract(r.payload_json,'$.momentId')=+s.latest_moment_id \
@@ -267,10 +311,8 @@ const COVERED_HEADS_SQL: &str = "SELECT s.latest_moment_id,s.version_id,s.object
                            SELECT 1 FROM replication_pending_refusals p \
                            WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id \
                              AND p.origin_seq=r.origin_seq))) \
-                     AND NOT EXISTS (SELECT 1 FROM ydoc_deferred_updates u \
-                       WHERE u.workspace_id=d.workspace_id AND u.version_id=d.version_id \
-                         AND u.object_id=d.object_id) \
-                     ORDER BY h.moment_order";
+                     ORDER BY h.moment_order"
+);
 
 /// Export an object's first file artifact only after this origin has journaled
 /// its base. Durable coverage and the strict peer projection must both agree
@@ -281,7 +323,9 @@ pub(crate) fn export_covered_heads_in_tx(
     leases: &dyn LeaseProbe,
 ) -> Result<(), SyncError> {
     let candidates = {
-        let mut statement = tx.prepare(COVERED_HEADS_SQL).map_err(SyncError::corrupt)?;
+        let mut statement = tx
+            .prepare_cached(COVERED_HEADS_SQL)
+            .map_err(SyncError::corrupt)?;
         statement
             .query_map([workspace_id], |row| {
                 Ok((
@@ -292,13 +336,16 @@ pub(crate) fn export_covered_heads_in_tx(
                     row.get::<_, String>(4)?,
                     row.get::<_, i64>(5)?,
                     row.get::<_, i64>(6)?,
+                    row.get::<_, String>(7)?,
                 ))
             })
             .map_err(SyncError::corrupt)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(SyncError::corrupt)?
     };
-    for (moment_id, version_id, object_id, sha, kind, update_seq, snapshot_seq) in candidates {
+    for (moment_id, version_id, object_id, sha, kind, update_seq, snapshot_seq, lineage_claim_id) in
+        candidates
+    {
         let key = DocKey {
             workspace_id: workspace_id.to_owned(),
             version_id,
@@ -307,12 +354,13 @@ pub(crate) fn export_covered_heads_in_tx(
         if leases.is_live(&key) {
             continue;
         }
-        // Retry only when the artifact or durable document head changes. Keep
-        // the attempt in this transaction so rollback cannot suppress a retry.
+        // Keep attempts and asset waits in this transaction so rollback
+        // cannot suppress a retry.
         tx.execute(
             "UPDATE ydoc_docs SET export_attempt_moment_id=?4,export_attempt_update_seq=?5, \
-             export_attempt_snapshot_seq=?6 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-            params![workspace_id, key.version_id, key.object_id, moment_id, update_seq, snapshot_seq],
+             export_attempt_snapshot_seq=?6,export_attempt_lineage_claim_id=?7, \
+             export_wait_asset_sha256=NULL,export_wait_asset_path=NULL WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![workspace_id, key.version_id, key.object_id, moment_id, update_seq, snapshot_seq, lineage_claim_id],
         ).map_err(SyncError::persist)?;
         let doc = match dohc_engine_collab::load_doc_in(tx, &key) {
             Ok(doc) => doc,
@@ -323,19 +371,38 @@ pub(crate) fn export_covered_heads_in_tx(
             continue;
         };
         let projection = if kind == dohc_engine_collab::ContentKind::Scene {
-            crate::project_ydoc_with_store(tx, &key, &doc, kind)
+            crate::ydoc_apply::project_scene_with_store(tx, &key, &doc)
         } else {
-            doc.project(kind).map_err(|error| match error {
-                dohc_engine_collab::CollabError::Storage(error) => SyncError::Storage(error),
-                _ => SyncError::InvalidInput {
-                    reason: "export projection is unavailable",
-                },
-            })
+            doc.project(kind)
+                .map_err(|error| match error {
+                    dohc_engine_collab::CollabError::Storage(error) => SyncError::Storage(error),
+                    _ => SyncError::InvalidInput {
+                        reason: "export projection is unavailable",
+                    },
+                })
+                .map_err(crate::ydoc_apply::SceneProjectionError::from)
         };
         let projection = match projection {
             Ok(projection) => projection,
-            Err(error @ SyncError::Storage(_)) => return Err(error),
-            Err(_) => continue,
+            Err(failure) => {
+                if let SyncError::Storage(_) = failure.error {
+                    return Err(failure.error);
+                }
+                if let Some(wait) = failure.waiting_asset {
+                    let (path, sha256) = match wait {
+                        crate::ydoc_apply::SceneAssetWait::Head { path, sha256 } => {
+                            (Some(path), sha256)
+                        }
+                        crate::ydoc_apply::SceneAssetWait::Blob { sha256 } => (None, sha256),
+                    };
+                    tx.execute(
+                        "UPDATE ydoc_docs SET export_wait_asset_path=?4,export_wait_asset_sha256=?5 \
+                         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                        params![workspace_id, key.version_id, key.object_id, path, sha256],
+                    ).map_err(SyncError::persist)?;
+                }
+                continue;
+            }
         };
         let mut projection = projection.content;
         if kind == dohc_engine_collab::ContentKind::Richdoc
@@ -375,19 +442,22 @@ fn backfill_moments_between(
     // so covered heads have their own strict projection proof.
     let moment_ids: Vec<String> = {
         let mut statement = tx
-            .prepare(
+            .prepare(concat!(
                 "SELECT m.moment_id FROM moments m \
-                 WHERE m.workspace_id=?1 \
+                 WHERE m.workspace_id=?1 AND ",
+                dohc_engine_domain::exclude_capture_recovery_sql!("m"),
+                " \
                    AND ((m.metadata_origin != 'ydoc' OR EXISTS ( \
                      SELECT 1 FROM ydoc_docs p \
                      WHERE p.workspace_id=m.workspace_id AND p.version_id=m.version_id \
                        AND p.object_id=m.object_id AND p.lineage_claim_status='unclaimed' \
-                       AND p.head_update_seq=0 AND p.head_snapshot_seq=0)) \
+                       AND p.head_update_seq=0 AND p.head_snapshot_seq=0 AND p.file_export_lane=0 \
+                       AND EXISTS(SELECT 1 FROM snapshots s WHERE s.workspace_id=p.workspace_id AND s.version_id=p.version_id AND s.object_id=p.object_id))) \
                      AND NOT EXISTS (SELECT 1 FROM ydoc_docs d \
                        WHERE d.workspace_id=m.workspace_id AND d.version_id=m.version_id \
                          AND d.object_id=m.object_id \
                          AND (d.head_update_seq>0 OR d.head_snapshot_seq>0 \
-                           OR d.lineage_claim_status != 'unclaimed'))) \
+                           OR d.lineage_claim_status != 'unclaimed' OR d.file_export_lane IN (1,2)))) \
                    AND m.moment_order > ?2 \
                    AND (?3 IS NULL OR m.moment_order <= ?3) \
                    AND NOT EXISTS (SELECT 1 FROM replication_pending_conflict_moments p \
@@ -402,8 +472,8 @@ fn backfill_moments_between(
                    AND NOT EXISTS (SELECT 1 FROM ydoc_deferred_updates d \
                      WHERE d.workspace_id=m.workspace_id AND d.version_id=m.version_id \
                        AND d.object_id=m.object_id) \
-                 ORDER BY m.moment_order",
-            )
+                 ORDER BY m.moment_order"
+            ))
             .map_err(SyncError::corrupt)?;
         statement
             .query_map(
@@ -418,6 +488,229 @@ fn backfill_moments_between(
         journal_moment_append_in_tx(tx, workspace_id, &moment_id)?;
     }
     Ok(())
+}
+
+pub(crate) fn file_version_is_publishable_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    moment_id: &str,
+) -> Result<bool, SyncError> {
+    tx.query_row(
+        concat!("SELECT EXISTS(SELECT 1 FROM moments h JOIN snapshots s USING(workspace_id,version_id,object_id)
+           WHERE h.workspace_id=?1 AND h.version_id=?2 AND h.object_id=?3 AND h.moment_id=?4
+             AND s.latest_moment_id=h.moment_id AND s.content_kind='text'
+             AND h.payload_after_blob_sha256=s.blob_sha256 AND h.payload_after_path=s.path ",
+             head_export_exclusions_sql!(), " AND ", dohc_engine_domain::exclude_capture_recovery_sql!("h"), ")"),
+        params![key.workspace_id,key.version_id,key.object_id,moment_id],|r|r.get(0)
+    ).map_err(SyncError::corrupt)
+}
+
+/// The cut and all candidate admissions share the actor's writer transaction.
+pub(crate) fn backfill_file_versions_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+) -> Result<(), SyncError> {
+    if !crate::ydoc_origination::can_originate_local_bases_in_tx(tx, workspace_id)? {
+        return Ok(());
+    }
+    let cut: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(moment_order),-1) FROM moments WHERE workspace_id=?1",
+            [workspace_id],
+            |r| r.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    let mut file_budget = FileExportBudget::default();
+    let candidates: Vec<(String, String, String)> = {
+        let mut statement = tx.prepare(concat!(
+            "SELECT m.moment_id,m.version_id,m.object_id
+             FROM moments m JOIN snapshots s USING(workspace_id,version_id,object_id)
+             JOIN ydoc_docs d USING(workspace_id,version_id,object_id)
+             WHERE m.workspace_id=?1 AND d.file_export_lane IN (1,2) AND d.lineage_claim_status='unclaimed'
+               AND s.latest_moment_id=m.moment_id AND s.content_kind='text'
+               AND m.payload_after_blob_sha256=s.blob_sha256 AND m.payload_after_path=s.path
+               AND m.moment_order<=?2
+               AND NOT EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=m.workspace_id AND r.op_kind='moment.append' AND json_extract(r.payload_json,'$.momentId')=+m.moment_id AND (r.imported=0 OR NOT EXISTS(SELECT 1 FROM replication_pending_refusals p WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id AND p.origin_seq=r.origin_seq)))
+             AND ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " ORDER BY m.moment_order"
+        )).map_err(SyncError::corrupt)?;
+        statement
+            .query_map(params![workspace_id, cut], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .map_err(SyncError::corrupt)?
+            .collect::<Result<_, _>>()
+            .map_err(SyncError::corrupt)?
+    };
+    for (moment_id, version_id, object_id) in candidates {
+        let key = DocKey {
+            workspace_id: workspace_id.to_owned(),
+            version_id,
+            object_id,
+        };
+        if file_version_is_publishable_in_tx(tx, &key, &moment_id)? {
+            journal_file_version_in_tx(tx, &key, &moment_id, &mut file_budget)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) const LAST_FILE_EXPORT_SQL: &str = concat!("SELECT r.payload_json,m.moment_order,r.rowid FROM replication_log r
+         JOIN moments m ON m.workspace_id=r.workspace_id
+           AND m.moment_id=json_extract(r.payload_json,'$.momentId')
+         WHERE r.workspace_id=?1 AND r.op_kind='moment.append'
+           AND json_extract(r.payload_json,'$.versionId')=+?2
+           AND json_extract(r.payload_json,'$.objectId')=+?3
+           AND (r.imported=0 OR (COALESCE(m.sync_record_only,0)=0 AND NOT EXISTS(SELECT 1 FROM replication_pending_refusals p
+             WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id AND p.origin_seq=r.origin_seq)))
+         AND ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " ORDER BY m.moment_order DESC,r.rowid DESC LIMIT 1");
+
+pub(crate) enum LastFileExport {
+    Known(Option<serde_json::Value>),
+    UnexplainedGap,
+}
+
+pub(crate) fn last_file_export_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+) -> Result<LastFileExport, SyncError> {
+    let mut last: Option<(String, (i64, bool, i64))> = tx
+        .query_row(
+            LAST_FILE_EXPORT_SQL,
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| Ok((row.get(0)?, (row.get(1)?, true, row.get(2)?))),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    // Rollback replaces its target moment but leaves the published operation.
+    // Its compensating moment orders that export immediately before the replacement.
+    let mut missing = tx.prepare(
+        "SELECT r.payload_json,r.rowid,json_extract(r.payload_json,'$.momentId')
+         FROM replication_log r LEFT JOIN moments m ON m.workspace_id=r.workspace_id
+           AND m.moment_id=json_extract(r.payload_json,'$.momentId')
+         WHERE r.workspace_id=?1 AND r.op_kind='moment.append'
+           AND json_extract(r.payload_json,'$.versionId')=+?2 AND json_extract(r.payload_json,'$.objectId')=+?3
+           AND m.moment_id IS NULL AND (r.imported=0 OR NOT EXISTS(SELECT 1 FROM replication_pending_refusals p
+             WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id AND p.origin_seq=r.origin_seq))"
+    ).map_err(SyncError::corrupt)?;
+    let rows = missing
+        .query_map(
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .map_err(SyncError::corrupt)?;
+    for row in rows {
+        let (json, rowid, id) = row.map_err(SyncError::corrupt)?;
+        let replacement = dohc_engine_domain::rollback_compensating_moment_id(
+            &key.workspace_id,
+            &key.version_id,
+            &id,
+        );
+        let order: Option<i64> = tx
+            .query_row(
+                "SELECT moment_order FROM moments WHERE workspace_id=?1 AND moment_id=?2",
+                params![key.workspace_id, replacement],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(SyncError::corrupt)?;
+        let Some(order) = order else {
+            eprintln!(
+                "engine: published moment {id} is missing without its rollback compensator in {}/{}/{}; publishing the real preimage",
+                key.workspace_id, key.version_id, key.object_id
+            );
+            return Ok(LastFileExport::UnexplainedGap);
+        };
+        let rank = (order, false, rowid);
+        if last.as_ref().is_none_or(|(_, previous)| rank > *previous) {
+            last = Some((json, rank));
+        }
+    }
+    last.map(|(json, _)| serde_json::from_str(&json).map_err(SyncError::corrupt))
+        .transpose()
+        .map(LastFileExport::Known)
+}
+
+pub(crate) fn file_version_before_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    last: Option<&serde_json::Value>,
+) -> Result<crate::outbound::PortableBefore, SyncError> {
+    if let Some(last) = last {
+        return Ok(crate::outbound::PortableBefore::published(last));
+    }
+    let first: String = tx.query_row(concat!("SELECT m.moment_id FROM moments m WHERE ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND NOT EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=m.workspace_id AND r.op_kind='moment.append' AND r.imported=1 AND json_extract(r.payload_json,'$.momentId')=+m.moment_id AND NOT EXISTS(SELECT 1 FROM replication_pending_refusals p WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id AND p.origin_seq=r.origin_seq)) ORDER BY m.moment_order LIMIT 1"), params![key.workspace_id,key.version_id,key.object_id], |r|r.get(0)).map_err(SyncError::corrupt)?;
+    let (bootstrap, _) =
+        crate::outbound::moment_append_payload_in_tx(tx, &key.workspace_id, &first)?;
+    Ok(crate::outbound::PortableBefore::bootstrap(&bootstrap))
+}
+
+#[derive(Default)]
+pub(crate) struct FileExportBudget {
+    blobs: std::collections::BTreeMap<String, i64>,
+}
+
+pub(crate) fn journal_file_version_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    moment_id: &str,
+    budget: &mut FileExportBudget,
+) -> Result<bool, SyncError> {
+    let last = last_file_export_in_tx(tx, key)?;
+    let (current, _) =
+        crate::outbound::moment_append_payload_in_tx(tx, &key.workspace_id, moment_id)?;
+    if let LastFileExport::Known(Some(last)) = &last
+        && last["operation"] != "delete"
+        && [
+            "payloadAfterBlobSha256",
+            "payloadAfterPath",
+            "payloadAfterContentKind",
+        ]
+        .iter()
+        .all(|field| last[*field] == current[*field])
+    {
+        return Ok(true);
+    }
+    let before = match &last {
+        LastFileExport::Known(last) => file_version_before_in_tx(tx, key, last.as_ref())?,
+        LastFileExport::UnexplainedGap => crate::outbound::PortableBefore::bootstrap(&current),
+    };
+    let payload = crate::outbound::moment_append_payload_from_in_tx(
+        tx,
+        &key.workspace_id,
+        moment_id,
+        &before,
+    )?;
+    let mut blobs = budget.blobs.clone();
+    for (field, kind) in [
+        ("payloadBeforeBlobSha256", "payloadBeforeContentKind"),
+        ("payloadAfterBlobSha256", "payloadAfterContentKind"),
+        ("beforeBlobSha256", "beforeContentKind"),
+    ] {
+        if payload[kind] == "text"
+            && let Some(sha) = payload[field].as_str()
+        {
+            let length: i64 = tx
+                .query_row(
+                    "SELECT byte_length FROM blobs WHERE sha256=?1",
+                    [sha],
+                    |r| r.get(0),
+                )
+                .map_err(SyncError::corrupt)?;
+            blobs.insert(sha.to_owned(), length);
+        }
+    }
+    if blobs.values().sum::<i64>() > 20 * 1024 * 1024 {
+        return Ok(false);
+    }
+    crate::outbound::journal_moment_append_from_in_tx(tx, &key.workspace_id, moment_id, &before)?;
+    budget.blobs = blobs;
+    Ok(true)
 }
 
 fn backfill_versions(tx: &Transaction<'_>, workspace_id: &str) -> Result<(), SyncError> {
@@ -923,6 +1216,8 @@ mod tests {
             10,
         );
         let refused = crate::ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "ws".to_owned(),
             origin_id: "peer".to_owned(),
             origin_seq: 0,
@@ -968,6 +1263,8 @@ mod tests {
             10,
         );
         let refused = crate::ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "ws".to_owned(),
             origin_id: "peer".to_owned(),
             origin_seq: 0,
@@ -1291,6 +1588,8 @@ mod tests {
             )
             .expect("named version");
         let refused = crate::ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "ws".to_owned(),
             origin_id: "peer".to_owned(),
             origin_seq: 0,
@@ -1394,6 +1693,8 @@ mod tests {
             &mut peer,
             &mut dohc_engine_collab::WriterDocCache::new(),
             &crate::ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: "ws".to_owned(),
                 origin_id: "peer".to_owned(),
                 origin_seq: 0,
@@ -1531,6 +1832,8 @@ mod tests {
             &mut local,
             &mut dohc_engine_collab::WriterDocCache::new(),
             &crate::ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: "ws".to_owned(),
                 origin_id: "peer".to_owned(),
                 origin_seq: 0,
@@ -2084,6 +2387,66 @@ mod tests {
     }
 
     #[test]
+    fn saved_file_and_covered_head_exports_mark_unproven_hosted_authors_across_epochs() {
+        for retained in [false, true] {
+            let (_scratch, _, mut store) = open_store();
+            seed_main(&mut store);
+            if retained {
+                seed_retained_artifact(&mut store);
+            } else {
+                write_text(
+                    &mut store,
+                    "main",
+                    "seed-object",
+                    "seed-moment",
+                    "saved text",
+                    "capture",
+                    10,
+                );
+            }
+            let authors=serde_json::json!([{"kind":"human","humanId":"hosted-reader","humanName":"Reader"},{"kind":"agent","agentId":"agent","onBehalfOf":"hosted-reader"}]).to_string();
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "UPDATE moments SET author_json=?1 WHERE moment_id='seed-moment'",
+                        [&authors],
+                    )
+                    .map_err(SyncError::persist)?;
+                    Ok::<_, SyncError>(())
+                })
+                .unwrap();
+            enroll(&mut store).unwrap();
+            let assert_marked = |store: &EngineStore| {
+                let moments: Vec<_> = local_ops(store)
+                    .into_iter()
+                    .filter(|(kind, _)| kind == "moment.append")
+                    .collect();
+                assert!(!moments.is_empty());
+                for (_, payload) in moments {
+                    assert!(payload.get("authors").is_none());
+                    assert!(payload.get("settlementReference").is_none());
+                    assert_eq!(payload["metadata"]["summary"], "Attribution unavailable");
+                    assert_eq!(
+                        payload["attributionUnavailable"]["settlementId"],
+                        "unavailable"
+                    );
+                }
+                assert!(!crate::list_refusal_notices(store, "ws").unwrap().is_empty());
+            };
+            assert_marked(&store);
+            store.write_with(&NoFaults,|tx| {
+                tx.execute("DELETE FROM sync_relay_cursors WHERE workspace_id='ws'",[]).map_err(SyncError::persist)?;
+                tx.execute("DELETE FROM sync_relay_push_state WHERE workspace_id='ws'",[]).map_err(SyncError::persist)?;
+                tx.execute("UPDATE sync_identity SET replication_epoch='next-epoch',stream_identity='next-stream' WHERE workspace_id='ws'",[]).map_err(SyncError::persist)?;
+                tx.execute("UPDATE moments SET author_json=?1 WHERE moment_id='seed-moment'",[&authors]).map_err(SyncError::persist)?;
+                Ok::<_,SyncError>(())
+            }).unwrap();
+            enroll(&mut store).unwrap();
+            assert_marked(&store);
+        }
+    }
+
+    #[test]
     fn enrollment_exports_a_preserved_seed_head_once_without_changing_history() {
         let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
@@ -2435,30 +2798,18 @@ mod tests {
         seed_retained_artifact_as(&mut store, "- parent\n  - nested\n", ContentKind::Richdoc);
         mark_head_settled(&mut store);
         enroll(&mut store).expect("enroll unprojectable seed");
-        store.write_with(&NoFaults, |tx| {
-            tx.execute_batch("CREATE TABLE export_attempt_test(count INTEGER NOT NULL); \
-                INSERT INTO export_attempt_test VALUES(0); \
-                CREATE TRIGGER count_export_attempts AFTER UPDATE OF export_attempt_moment_id ON ydoc_docs \
-                BEGIN UPDATE export_attempt_test SET count=count+1; END;")
-                .map_err(SyncError::persist)?;
-            Ok::<_, SyncError>(())
-        }).expect("observe attempts");
+        observe_export_attempts(&mut store);
         sweep(&mut store, 101);
-        let count = |store: &EngineStore| {
-            store
-                .read_with(|conn| {
-                    conn.query_row("SELECT count FROM export_attempt_test", [], |r| {
-                        r.get::<_, i64>(0)
-                    })
-                })
-                .expect("attempt count")
-        };
-        assert_eq!(count(&store), 0, "unchanged failed projection is skipped");
+        assert_eq!(
+            export_attempt_count(&store),
+            0,
+            "unchanged failed projection is skipped"
+        );
         drop(store);
         let mut store = EngineStore::open(&path, 102).expect("reopen failed projection cache");
         sweep(&mut store, 102);
         assert_eq!(
-            count(&store),
+            export_attempt_count(&store),
             0,
             "restart keeps the failed projection skipped"
         );
@@ -2472,7 +2823,7 @@ mod tests {
             102,
         );
         sweep(&mut store, 103);
-        assert_eq!(count(&store), 1, "new moment is retried");
+        assert_eq!(export_attempt_count(&store), 1, "new moment is retried");
         store
             .write_with(&NoFaults, |tx| {
                 tx.execute(
@@ -2484,42 +2835,399 @@ mod tests {
             })
             .expect("advance document head");
         sweep(&mut store, 104);
-        assert_eq!(count(&store), 2, "new document sequence is retried");
+        assert_eq!(
+            export_attempt_count(&store),
+            2,
+            "new document sequence is retried"
+        );
         sweep(&mut store, 105);
-        assert_eq!(count(&store), 2, "unchanged failed head is skipped");
+        assert_eq!(
+            export_attempt_count(&store),
+            2,
+            "unchanged failed head is skipped"
+        );
+    }
+
+    fn export_pass(store: &mut EngineStore) {
+        store
+            .write_with(&NoFaults, |tx| {
+                export_covered_heads_in_tx(tx, "ws", &crate::NoLiveLeases)
+            })
+            .expect("export pass");
+    }
+
+    fn observe_export_attempts(store: &mut EngineStore) {
+        store.write_with(&NoFaults, |tx| {
+            tx.execute_batch("CREATE TABLE export_attempt_test(count INTEGER NOT NULL); \
+                INSERT INTO export_attempt_test VALUES(0); \
+                CREATE TRIGGER count_export_attempts AFTER UPDATE OF export_attempt_moment_id ON ydoc_docs \
+                WHEN NEW.export_attempt_moment_id IS NOT NULL \
+                BEGIN UPDATE export_attempt_test SET count=count+1; END;")
+                .map_err(SyncError::persist)
+        }).expect("observe attempts");
+    }
+
+    fn export_attempt_count(store: &EngineStore) -> i64 {
+        store
+            .read_with(|conn| {
+                conn.query_row("SELECT count FROM export_attempt_test", [], |row| {
+                    row.get(0)
+                })
+            })
+            .expect("attempt count")
     }
 
     #[test]
-    fn retained_scene_with_image_exports_the_hydrated_artifact_after_its_base() {
-        use dohc_engine_domain::WriteBinary;
-        use serde_json::json;
-        use std::collections::BTreeMap;
+    fn retained_export_retries_reseeded_lineage_on_the_same_head() {
         let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
-        let key = DocKey::new("ws", "main", "scene").expect("scene key");
-        let asset_sha = dohc_engine_storage::hex_sha256(&[1, 2, 3]);
-        let asset_ref =
-            dohc_engine_collab::scene_asset_ref("ws", "main", "scene", &asset_sha, "image/png")
-                .expect("asset ref");
+        seed_retained_artifact(&mut store);
+        let author: Option<String> = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT author_json FROM moments WHERE moment_id='seed-moment'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .expect("original author");
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO sync_relay_push_state(workspace_id,origin_id,pushed_seq) VALUES ('ws','local',-1)", [])
+                .map_err(SyncError::persist)?;
+            originate_unclaimed_ydoc_bases_in_tx(tx, "ws", &crate::NoLiveLeases, 100)?;
+            tx.execute("UPDATE moments SET author_json='invalid' WHERE moment_id='seed-moment'", [])
+                .map_err(SyncError::persist)?;
+            export_covered_heads_in_tx(tx, "ws", &crate::NoLiveLeases)
+        }).expect("attempt cannot journal malformed author");
+        observe_export_attempts(&mut store);
+        let coordinates = |store: &EngineStore| {
+            store
+                .read_with(|conn| {
+                    conn.query_row(
+            "SELECT export_attempt_moment_id,head_update_seq,head_snapshot_seq FROM ydoc_docs", [],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)),
+        )
+                })
+                .expect("head coordinates")
+        };
+        let before = coordinates(&store);
+        store
+            .write_with(&NoFaults, |tx| {
+                let lineage = dohc_engine_storage::put_binary_blob(tx, b"reseeded lineage")?;
+                tx.execute("UPDATE ydoc_docs SET lineage_claim_id=?1", [lineage])
+                    .map_err(SyncError::persist)?;
+                tx.execute(
+                    "UPDATE moments SET author_json=?1 WHERE moment_id='seed-moment'",
+                    [author],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("reseed lineage and restore journalable artifact");
+        export_pass(&mut store);
+        assert_eq!(
+            coordinates(&store),
+            before,
+            "moment and head sequences did not change"
+        );
+        assert_eq!(
+            export_attempt_count(&store),
+            1,
+            "new lineage retries unchanged head"
+        );
+        assert!(
+            local_ops(&store)
+                .iter()
+                .any(|(kind, p)| kind == "moment.append" && p["momentId"] == "seed-moment")
+        );
+        export_pass(&mut store);
+        assert_eq!(export_attempt_count(&store), 1);
+    }
+
+    #[test]
+    fn retained_export_retries_scene_after_missing_asset_arrives() {
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        seed_retained_scene(&mut store, "scene", false);
+        observe_export_attempts(&mut store);
+        enroll(&mut store).expect("enroll pending scene");
+        assert_eq!(export_attempt_count(&store), 1);
+        assert!(
+            !local_ops(&store)
+                .iter()
+                .any(|(kind, p)| kind == "moment.append" && p["objectId"] == "scene")
+        );
+        // Store and authorize the asset without changing the scene's document or moment.
+        let sha = dohc_engine_storage::hex_sha256(&[1, 2, 3]);
         VersionedTextStore::new(&mut store)
             .write_binary(
-                &WriteBinary {
+                &dohc_engine_domain::WriteBinary {
                     workspace_id: "ws".to_owned(),
                     version_id: "main".to_owned(),
                     object_id: "asset".to_owned(),
-                    path: asset_ref.clone(),
+                    path: dohc_engine_collab::scene_asset_ref(
+                        "ws",
+                        "main",
+                        "scene",
+                        &sha,
+                        "image/png",
+                    )
+                    .expect("ref"),
                     bytes: vec![1, 2, 3],
                     moment_id: "asset-moment".to_owned(),
                     metadata_origin: "api".to_owned(),
                     metadata_summary: None,
                     metadata_correlation_id: None,
                     author_json: None,
-                    now_ms: 10,
+                    now_ms: 101,
                     request_id: None,
                 },
                 &NoFaults,
             )
-            .expect("save image");
+            .expect("asset arrives");
+        sweep(&mut store, 102);
+        assert_eq!(
+            export_attempt_count(&store),
+            2,
+            "asset arrival retries the scene"
+        );
+        assert!(
+            local_ops(&store)
+                .iter()
+                .any(|(kind, p)| kind == "moment.append" && p["objectId"] == "scene")
+        );
+        sweep(&mut store, 103);
+        assert_eq!(
+            export_attempt_count(&store),
+            2,
+            "successful scene is skipped"
+        );
+        let wait: (Option<String>, Option<String>) = store.read_with(|conn| conn.query_row(
+            "SELECT export_wait_asset_path,export_wait_asset_sha256 FROM ydoc_docs WHERE object_id='scene'",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        )).expect("cleared asset wait");
+        assert_eq!(wait, (None, None));
+    }
+
+    #[test]
+    fn retained_export_waits_for_its_asset_before_retrying() {
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        seed_retained_scene(&mut store, "scene", false);
+        observe_export_attempts(&mut store);
+        enroll(&mut store).expect("enroll waiting scene");
+        store_scene_asset(&mut store, "unrelated");
+        for pass in 101..104 {
+            sweep(&mut store, pass);
+        }
+        assert_eq!(
+            export_attempt_count(&store),
+            1,
+            "unchanged missing asset must not re-project"
+        );
+        store_scene_asset(&mut store, "scene");
+        sweep(&mut store, 104);
+        sweep(&mut store, 105);
+        assert_eq!(
+            export_attempt_count(&store),
+            2,
+            "arrival wakes exactly one attempt"
+        );
+        assert_eq!(
+            local_ops(&store)
+                .iter()
+                .filter(|(kind, p)| kind == "moment.append" && p["objectId"] == "scene")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn retained_export_wakes_when_the_arriving_asset_head_was_retired() {
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        seed_retained_scene(&mut store, "scene", false);
+        observe_export_attempts(&mut store);
+        enroll(&mut store).expect("enroll waiting scene");
+        store_scene_asset(&mut store, "scene");
+        let sha = dohc_engine_storage::hex_sha256(&[1, 2, 3]);
+        let path = dohc_engine_collab::scene_asset_ref("ws", "main", "scene", &sha, "image/png")
+            .expect("ref");
+        VersionedTextStore::new(&mut store)
+            .delete_text_file(
+                &dohc_engine_domain::DeleteTextFile {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    path,
+                    moment_id: "asset-retired".to_owned(),
+                    request_id: None,
+                    metadata_origin: "ydoc".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 102,
+                },
+                &NoFaults,
+            )
+            .expect("retire arriving asset head");
+        let key = DocKey::new("ws", "main", "scene").expect("key");
+        store
+            .read_with(|conn| {
+                let doc = dohc_engine_collab::load_doc_in(conn, &key).expect("scene");
+                crate::project_ydoc_with_store(conn, &key, &doc, ContentKind::Scene)
+            })
+            .expect("retired history already authorizes the scene asset");
+        sweep(&mut store, 103);
+        assert_eq!(
+            export_attempt_count(&store),
+            2,
+            "retired asset arrival wakes the scene"
+        );
+        assert!(
+            local_ops(&store)
+                .iter()
+                .any(|(kind, p)| kind == "moment.append" && p["objectId"] == "scene")
+        );
+        sweep(&mut store, 104);
+        assert_eq!(export_attempt_count(&store), 2);
+    }
+
+    fn store_scene_asset(store: &mut EngineStore, object_id: &str) {
+        let sha = dohc_engine_storage::hex_sha256(&[1, 2, 3]);
+        VersionedTextStore::new(store)
+            .write_binary(
+                &dohc_engine_domain::WriteBinary {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: format!("{object_id}-asset"),
+                    path: dohc_engine_collab::scene_asset_ref(
+                        "ws",
+                        "main",
+                        object_id,
+                        &sha,
+                        "image/png",
+                    )
+                    .expect("ref"),
+                    bytes: vec![1, 2, 3],
+                    moment_id: format!("{object_id}-asset-moment"),
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 101,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("asset arrives");
+    }
+
+    #[test]
+    fn retained_export_wait_selection_uses_asset_indexes() {
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        seed_retained_scene(&mut store, "scene", false);
+        enroll(&mut store).expect("enroll waiting scene");
+        let plan = store
+            .read_with(|conn| {
+                conn.prepare(&format!("EXPLAIN QUERY PLAN {COVERED_HEADS_SQL}"))?
+                    .query_map(["ws"], |row| row.get::<_, String>(3))?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .expect("selection plan");
+        for index in [
+            "sqlite_autoindex_binary_blobs_1",
+            "sqlite_autoindex_path_aliases_1",
+            "sqlite_autoindex_snapshots_1",
+            "idx_moments_version_path_order",
+        ] {
+            assert!(
+                plan.iter().any(|line| line.contains(index)),
+                "{index}: {plan:?}"
+            );
+        }
+        assert!(
+            !plan.iter().any(|line| line.starts_with("SCAN ")),
+            "unexpected scan in retained export selection: {plan:?}"
+        );
+        for alias in ["deleted", "newer"] {
+            let search = format!("SEARCH {alias} USING INDEX idx_moments_version_path_order ");
+            assert!(
+                plan.iter().any(|line| line.starts_with(&search)),
+                "{alias} must search the partial index: {plan:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn retained_export_keeps_non_asset_permanent_projection_failure() {
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        seed_retained_artifact(&mut store);
+        let oversized = Ydoc::wire().plaintext_insert(
+            0,
+            &"x".repeat(dohc_engine_collab::limits::MAX_PROJECTION_BYTES + 1),
+        );
+        store
+            .write_with(&NoFaults, |tx| {
+                let sha = dohc_engine_storage::put_binary_blob(tx, &oversized)?;
+                tx.execute("UPDATE ydoc_updates SET update_blob_sha256=?1", [sha])
+                    .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("oversized projection");
+        observe_export_attempts(&mut store);
+        enroll(&mut store).expect("enroll oversized projection");
+        assert_eq!(export_attempt_count(&store), 1);
+        for pass in 101..104 {
+            sweep(&mut store, pass);
+        }
+        assert_eq!(
+            export_attempt_count(&store),
+            1,
+            "permanent projection failure stays cached"
+        );
+        assert!(
+            !local_ops(&store)
+                .iter()
+                .any(|(kind, p)| kind == "moment.append" && p["objectId"] == "seed-object")
+        );
+    }
+
+    fn seed_retained_scene(
+        store: &mut EngineStore,
+        object_id: &str,
+        asset_present: bool,
+    ) -> String {
+        use dohc_engine_domain::WriteBinary;
+        use serde_json::json;
+        use std::collections::BTreeMap;
+        let key = DocKey::new("ws", "main", object_id).expect("scene key");
+        let asset_sha = dohc_engine_storage::hex_sha256(&[1, 2, 3]);
+        let asset_ref =
+            dohc_engine_collab::scene_asset_ref("ws", "main", object_id, &asset_sha, "image/png")
+                .expect("asset ref");
+        if asset_present {
+            VersionedTextStore::new(store)
+                .write_binary(
+                    &WriteBinary {
+                        workspace_id: "ws".to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: format!("{object_id}-asset"),
+                        path: asset_ref.clone(),
+                        bytes: vec![1, 2, 3],
+                        moment_id: format!("{object_id}-asset-moment"),
+                        metadata_origin: "api".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 10,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .expect("save image");
+        }
         let imported = dohc_engine_collab::import_portable_scene(
             &json!({
                 "type":"excalidraw", "version":2, "source":"https://excalidraw.com",
@@ -2543,33 +3251,31 @@ mod tests {
             .expect("scene state");
         let doc = Ydoc::wire();
         doc.apply(&update).expect("apply scene");
-        let projection = store
-            .read_with(|conn| crate::project_ydoc_with_store(conn, &key, &doc, ContentKind::Scene))
-            .expect("hydrate scene");
-        assert_ne!(
-            projection.content,
-            doc.project(ContentKind::Scene)
-                .expect("unhydrated projection")
-                .content
-        );
+        let content = doc
+            .fold_scene()
+            .portable_json_with_asset_bytes(&BTreeMap::from([(
+                "image-file".to_owned(),
+                vec![1, 2, 3],
+            )]))
+            .expect("hydrated artifact");
         write_text(
-            &mut store,
+            store,
             "main",
-            "scene",
-            "scene-moment",
-            &projection.content,
+            object_id,
+            &format!("{object_id}-moment"),
+            &content,
             "capture",
             11,
         );
-        let sha = dohc_engine_storage::hex_sha256(projection.content.as_bytes());
+        let sha = dohc_engine_storage::hex_sha256(content.as_bytes());
         dohc_engine_collab::record_local_update(
-            &mut store,
+            store,
             &mut dohc_engine_collab::WriterDocCache::new(),
             &key,
             &update,
             dohc_engine_collab::LocalAppend {
                 marker: Some(dohc_engine_collab::MarkerCreation {
-                    path: Some("scene.md"),
+                    path: Some(&format!("{object_id}.md")),
                     content_kind: ContentKind::Scene,
                     regime: Regime::LocalOnly,
                 }),
@@ -2582,6 +3288,14 @@ mod tests {
             |_, _, _| Ok(()),
         )
         .expect("retain scene");
+        sha
+    }
+
+    #[test]
+    fn retained_scene_with_image_exports_the_hydrated_artifact_after_its_base() {
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        let sha = seed_retained_scene(&mut store, "scene", true);
         enroll(&mut store).expect("enroll scene");
         let ops = local_ops(&store);
         let base = ops
@@ -3060,6 +3774,8 @@ mod tests {
                 peer,
                 &mut dohc_engine_collab::WriterDocCache::new(),
                 &crate::ReplicationEnvelope {
+                    settlement_admission: None,
+                    admitted_author_snapshot: None,
                     workspace_id: "ws".to_owned(),
                     origin_id: "source".to_owned(),
                     origin_seq: origin_seq as i64,
@@ -3348,6 +4064,8 @@ mod tests {
         crate::apply_version_envelope(
             &mut peer,
             &crate::ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: "ws".to_owned(),
                 origin_id: "peer".to_owned(),
                 origin_seq: 0,
@@ -3363,6 +4081,8 @@ mod tests {
             &mut peer,
             &mut dohc_engine_collab::WriterDocCache::new(),
             &crate::ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: "ws".to_owned(),
                 origin_id: "peer".to_owned(),
                 origin_seq: 1,
@@ -3650,6 +4370,8 @@ mod tests {
         let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         let imported = crate::ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "ws".to_owned(),
             origin_id: "peer".to_owned(),
             origin_seq: 0,
@@ -3833,11 +4555,14 @@ mod tests {
             dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
         };
 
+        store
+            .write_with(&NoFaults, |tx| backfill_file_versions_in_tx(tx, "ws"))
+            .unwrap();
         assert!(
             local_ops(&store)
                 .iter()
-                .all(|(kind, _)| kind != "moment.append"),
-            "a declined lineage must not export its file"
+                .any(|(kind, _)| kind == "moment.append"),
+            "a declined lineage exports its saved file version at the next push cut"
         );
         assert_eq!(declines.len(), 1, "the caller receives the declined base");
         assert_eq!(declines[0].constraint, "MAX_YDOC_UPDATE_BYTES");

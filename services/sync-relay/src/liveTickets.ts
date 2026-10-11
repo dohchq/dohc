@@ -36,7 +36,7 @@ export function createLiveTickets(options: LiveTicketOptions) {
   }
 
   return {
-    async mint(input: unknown, context: LiveBrowserContext, signal?: AbortSignal): Promise<{ token: string; expiresAtMs: number } | null> {
+    async mint(input: unknown, context: LiveBrowserContext, signal?: AbortSignal): Promise<{ token: string; expiresAtMs: number; publicPrincipalId?: string } | null> {
       let scope: LiveBrowserContext;
       let objectId: string;
       try {
@@ -49,7 +49,7 @@ export function createLiveTickets(options: LiveTicketOptions) {
         const token = mintLiveTicketToken(entropy);
         const tokenHash = hashLiveTicketToken(token, key);
         const minted = storage.mintLiveTicket({ objectId, scope, report, audience, ticketId: newTicketId(), tokenHash });
-        return minted === null ? null : { token, expiresAtMs: minted.expiresAtMs };
+        return minted === null ? null : { token, ...minted };
       } catch { throw new Error("Live-ticket operation failed."); }
     },
     async redeem(token: unknown, context: LiveBrowserContext, signal?: AbortSignal): Promise<RedeemedLiveTicket | null> {

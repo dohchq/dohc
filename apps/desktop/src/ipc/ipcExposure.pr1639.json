@@ -1,0 +1,4 @@
+{
+  "sourceCommit": "5b66137930c222de2f1f40ea0975a7090344244e",
+  "nameRemovals": ["desktop:write-clipboard-text"]
+}

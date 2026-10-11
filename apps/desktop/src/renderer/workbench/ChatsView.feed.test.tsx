@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ChatsView as ProductionChatsView, type ChatsNav } from "./ChatsView";
 import { LinkedChatsPanel } from "./LinkedChats";
 import { ReactionStoreProvider } from "./reactionStore";
+import type { AboutNotices, AccessContext } from "./About";
 import {
   ChatsView,
   NOW,
@@ -22,6 +23,9 @@ import {
   shareListing,
 } from "./ChatsView.testHarness";
 import { deferred } from "../../testing/deferred";
+
+const ABOUT_NOTICES: AboutNotices = { report: vi.fn(), clear: vi.fn() };
+const ACCESS_CONTEXT: AccessContext = { facts: { cloud: "checking", shareView: false }, openSyncSettings: vi.fn(), connect: vi.fn() };
 
 // Like opens the emoji picker; the reaction is written when a choice is
 // picked. jsdom measures every box as empty and the picker dismisses itself
@@ -862,12 +866,13 @@ describe("ChatsView hybrid feed", () => {
     const cards = await screen.findAllByTestId("chats-post-card");
     expect(cards).toHaveLength(2);
     expect(screen.getByText("Should we ship on Friday? The launch checklist is ready.")).toBeTruthy();
-    expect(screen.getAllByTestId("chats-post-comment-count")[0]?.textContent).toBe(
-      "2 comments",
-    );
-    expect(screen.getByTestId("chats-post-decision-open").textContent).toBe(
-      "Poll open",
-    );
+    const commentCount = screen.getAllByTestId("chats-post-comment-count")[0];
+    expect(commentCount?.textContent).toBe("2");
+    expect(commentCount?.getAttribute("aria-label")).toBe("2 comments");
+    const poll = screen.getByTestId("chats-post-decision-open");
+    expect(poll.textContent).toBe("");
+    expect(poll.getAttribute("aria-label")).toBe("Poll open");
+    expect(poll.getAttribute("title")).toBe("Poll open");
     expect(screen.getByTestId("chats-post-reaction-pill").textContent).toContain("1");
     expect(screen.getByTestId("chats-post-agent-badge").textContent).toBe("agent");
     expect(cards[1]?.getAttribute("data-author-kind")).toBe("agent");
@@ -1098,6 +1103,8 @@ describe("Home and a file's chat share one reaction store", () => {
             filePath="notes/topic.md"
             initialThread={{ id: "thread-1", title: "Thread", createdAtMs: NOW, updatedAtMs: NOW }}
             onError={onError}
+            notices={ABOUT_NOTICES}
+            accessContext={ACCESS_CONTEXT}
           />
         </div>
       </ReactionStoreProvider>,

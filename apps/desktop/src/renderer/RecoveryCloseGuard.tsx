@@ -1,3 +1,4 @@
+import { hasPendingYDocDeliveries, settleYDocDeliveries } from "./pendingYDocDeliveries";
 import { hasPendingEditorDrafts, settlePendingEditorDrafts } from "./pendingEditorDrafts";
 import {
   useEffect,
@@ -205,10 +206,11 @@ function resumeRoundIntent(
 }
 
 function hasUnsettledWrites(): boolean {
-  return hasPendingEditorDrafts() || hasPendingCollectionFieldWrites() || collectionWriteFailures().length > 0;
+  return hasPendingYDocDeliveries() || hasPendingEditorDrafts() || hasPendingCollectionFieldWrites() || collectionWriteFailures().length > 0;
 }
 
 async function settleWritesForExit(): Promise<boolean> {
+  if (!(await settleYDocDeliveries())) return false;
   if (!(await settlePendingEditorDrafts())) return false;
   const settled = await settleCollectionFieldWrites(undefined, {
     stallMs: COLLECTION_WRITE_STALL_MS,

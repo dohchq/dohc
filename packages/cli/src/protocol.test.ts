@@ -1,3 +1,4 @@
+import { renderCliResult } from "./render";
 import { describe, expect, it } from "vitest";
 import {
   CLI_PROTOCOL_VERSION,
@@ -8,6 +9,30 @@ import {
 
 const token = "a".repeat(64);
 const argsBase = { cwd: "C:/ws", actor: "agent" as const };
+
+it("parses Access answers through the field allowlist and refuses caller workspace selectors", () => {
+  const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessSharing", args: { ...argsBase, lane: "received" } };
+  expect(cliRequestSchema.safeParse(request).success).toBe(true);
+  expect(cliRequestSchema.safeParse({ ...request, args: { ...request.args, workspaceId: "other" } }).success).toBe(false);
+  expect(cliRequestSchema.safeParse({ ...request, args: { ...request.args, accountId: "other" } }).success).toBe(false);
+  const answer = parseCliResult("accessSharing", { ref: null, rows: [{ kind: "share", shareId: "share", grantId: "grant", via: "received", status: "removed",
+      granterUserId: null, granterEmail: null, recipientUserId: "recipient", recipientEmail: null, subjectName: null, sharerName: null,
+      selector: null, access: null, generation: null, removalMessage: "The owner removed your access." }],
+    visibility: "visible", freshness: "stale", checkedAtMs: 7,
+    nextCursor: null, coverage: { kind: "received-account", complete: true, observation: "interval" }, bearerUrl: "secret" });
+  expect(answer).not.toHaveProperty("bearerUrl");
+  expect(JSON.parse(renderCliResult("accessSharing", answer)).rows[0].removalMessage).toBe("The owner removed your access.");
+});
+
+it("accepts only CLI and MCP counting labels, with an optional label on the strict envelope", () => {
+  const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "groups", args: argsBase };
+  expect(cliRequestSchema.parse(request)).not.toHaveProperty("door");
+  for (const door of ["cli", "mcp"]) expect(cliRequestSchema.parse({ ...request, door })).toMatchObject({ door });
+  for (const door of ["automation", "renderer", "unknown", null, 1]) {
+    expect(cliRequestSchema.safeParse({ ...request, door }).success).toBe(false);
+  }
+  expect(cliRequestSchema.safeParse({ ...request, usage: true }).success).toBe(false);
+});
 
 it("rejects unused agent attribution on automation switches", () => {
   const args = { ...argsBase, collectionPath: "tasks", automation: "stamp", enabled: false,
@@ -33,6 +58,10 @@ it.each(["collectionSetFields", "collectionCreateRecord"])("validates the agent 
 });
 
 describe("moment author results", () => {
+  it("preserves a relay-confirmed person's public name", () => {
+    const result = momentsResult([{kind: "human", humanId: "recipient", humanName: "Recipient", relayConfirmed: true}]);
+    expect(parseCliResult("moments", result)).toEqual(result);
+  });
   it.each([
     { kind: "agent", agentId: "agent" },
     { kind: "automation", automationId: "collection:tasks#stamp", depth: 4 },

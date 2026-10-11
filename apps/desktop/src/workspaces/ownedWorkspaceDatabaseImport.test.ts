@@ -57,6 +57,7 @@ function ownerFiles(input: {
     | "pull"
     | "recordRefusals"
     | "markEnded"
+    | "updateUnsavedPaths"
     | "retireTarget"
     | "assertProjectionRoot"
     | "createMount"
@@ -67,6 +68,7 @@ function ownerFiles(input: {
       throw new Error("Unexpected pull");
     },
     recordRefusals: async () => undefined,
+    updateUnsavedPaths: async () => undefined,
     markEnded: async () => undefined,
     retireTarget: async () => undefined,
     assertProjectionRoot: async () => undefined,

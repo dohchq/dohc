@@ -1,4 +1,6 @@
+import { desktopPins, activityPin } from "../src/testPins";
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
@@ -44,8 +46,11 @@ function ownBubble(message: Locator): Locator {
   return message.locator('> [data-testid="chats-comment-bubble"]');
 }
 
-async function addReaction(message: Locator, emoji: string): Promise<void> {
-  await message.hover();
+// A message's actions show, and take the pointer, while its own row is
+// hovered. A comment's item also holds its replies, so hover its bubble;
+// the opening post is its own row.
+async function addReaction(message: Locator, emoji: string, row: Locator = ownBubble(message)): Promise<void> {
+  await row.hover();
   const actions = ownActions(message);
   await actions.getByTestId("chats-add-reaction").click();
   await message.page()
@@ -82,8 +87,8 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     let page = desktop.page;
     let view = editorArea(page);
 
-    await page.getByTestId("titlebar-chats-sidebar").click();
-    await expect(page.getByTestId("chats-panel")).toBeVisible();
+    await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
+    await expect(page.getByTestId(desktopPins.chatsPanel)).toBeVisible();
 
     // Channels remain a human/UI action. Creating one opens its feed
     // immediately, where the post composer accepts a multiline body and the
@@ -96,8 +101,8 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     // Creating a channel opens it in the Chats tab. Collapse the navigator
     // so this spec asserts on one surface.
     await expect(view.getByTestId("chats-channel-view")).toBeVisible();
-    await page.getByTestId("chats-panel-collapse").click();
-    await expect(page.getByTestId("chats-panel")).toHaveCount(0);
+    await page.getByTestId(desktopPins.chatsPanelCollapse).click();
+    await expect(page.getByTestId(desktopPins.chatsPanel)).toHaveCount(0);
     await expect(view.getByTestId("chats-channel-title")).toHaveText(channelName);
 
     await view.getByTestId("chats-new-thread-composer").fill(postBody);
@@ -134,6 +139,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await composer.press("Enter");
     await expect(commentWithBody(view, interveningCommentBody)).toBeVisible();
 
+    await ownBubble(firstComment).hover();
     await ownActions(firstComment).getByTestId("chats-comment-reply").click();
     await expect(view.getByTestId("chats-replying-mode")).toContainText(
       "Replying to You",
@@ -154,7 +160,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     // A post reaction is a reaction on the opening message. The same quiet
     // pills work on comments.
     const openingMessage = view.locator('article[data-testid="chats-message"]');
-    await addReaction(openingMessage, "👍");
+    await addReaction(openingMessage, "👍", openingMessage);
     await expect(reactionPill(openingMessage, "👍")).toHaveAttribute(
       "data-mine",
       "true",
@@ -196,9 +202,6 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await expect(ownBubble(agentComment).getByTestId("chats-comment-agent-badge")).toHaveText(
       "agent",
     );
-    const agentBubble = ownBubble(agentComment);
-    await expect(agentBubble).toHaveClass(/border-l-2/);
-    await expect(agentBubble).toHaveAttribute("style", /--dohc-agent/);
     await expect(ownBubble(agentComment).getByTestId("chats-comment-decision-open")).toHaveText(
       "Poll open",
     );
@@ -207,7 +210,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     // the full agent treatment and resolve gesture intact.
     await view.getByTestId("chats-thread-back").click();
     const decisionCard = postCard(view, postTitle);
-    await expect(decisionCard.getByTestId("chats-post-decision-open")).toHaveText(
+    await expect(decisionCard.getByTestId("chats-post-decision-open")).toHaveAccessibleName(
       "Poll open",
     );
     await decisionCard.click();
@@ -239,7 +242,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     expect(matchingLine).toContain(cliMessageId);
 
     // Park outside Chats so the relaunch reveal is deterministic.
-    await page.getByTestId("activity-explorer").click();
+    await page.getByTestId(activityPin("explorer")).click();
     await desktop.close();
     desktop = null;
 
@@ -248,10 +251,10 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     page = desktop.page;
     view = editorArea(page);
     if (!(await page.getByTestId("chats-view").isVisible())) {
-      await page.getByTestId("titlebar-chats-sidebar").click();
+      await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
     }
 
-    const persistedChannel = page.getByTestId("chats-panel")
+    const persistedChannel = page.getByTestId(desktopPins.chatsPanel)
       .getByTestId("chats-channel")
       .filter({ hasText: channelName });
     await expect(persistedChannel).toBeVisible();
@@ -261,9 +264,9 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await expect(persistedCard).toBeVisible();
     await expect(persistedCard.getByTestId("chats-post-title")).toHaveText(postTitle);
     await expect(persistedCard.getByTestId("chats-post-excerpt")).toHaveText(postExcerpt);
-    await expect(persistedCard.getByTestId("chats-post-comment-count")).toHaveText(
-      "5 comments",
-    );
+    const commentCount = persistedCard.getByTestId("chats-post-comment-count");
+    await expect(commentCount).toHaveText("5");
+    await expect(commentCount).toHaveAccessibleName("5 comments");
     await expect(
       persistedCard.locator(
         '[data-testid="chats-post-reaction-pill"][data-emoji="👍"]',
@@ -291,13 +294,59 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     const persistedAgentComment = commentWithBody(view, decisionBody);
     await expect(ownBubble(persistedAgentComment).getByTestId("chats-comment-agent-badge"))
       .toHaveText("agent");
-    await expect(ownBubble(persistedAgentComment))
-      .toHaveClass(/border-l-2/);
     await expect(
       ownBubble(persistedAgentComment).getByTestId("chats-comment-decision-resolved"),
     ).toHaveText("Answered");
     await expect(view.getByTestId("chats-comment-decision-open")).toHaveCount(0);
     await expect(commentWithBody(view, resolutionBody)).toBeVisible();
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+// A comment's toolbar floats 4px over the comment above it. Hidden, it
+// takes no pointer, so a click on the bottom edge of the comment above,
+// right where the hidden Reply sits, starts no reply to the comment below.
+test("a comment's hidden toolbar takes no click meant for the comment above", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const workspaceId = "chats-run-toolbar-e2e";
+  const aboveBody = "First line of the run";
+  const belowBody = "Second line of the run";
+  try {
+    await seedWorkspaceManifest(temp, workspaceId);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+    await openWorkspaceFromFirstRun(page, temp);
+    await page.evaluate(async ({ workspaceId, bodies }) => {
+      const bridge = (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop;
+      const { channel } = await bridge.createChatChannel({ workspaceId, name: "Run check", type: "posts" });
+      const { thread } = await bridge.startChannelThread({ workspaceId, channelId: channel.id, body: "Launch checklist" });
+      for (const body of bodies) await bridge.sendChatMessage({ workspaceId, threadId: thread.id, body });
+    }, { workspaceId, bodies: [aboveBody, belowBody] });
+    await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
+    await page.getByTestId("chats-channel").filter({ hasText: "Run check" }).click();
+    await page.getByTestId(desktopPins.chatsPanelCollapse).click();
+    const view = editorArea(page);
+    await view.getByTestId("chats-post-card").first().click();
+
+    const above = commentWithBody(view, aboveBody);
+    const below = commentWithBody(view, belowBody);
+    await expect(below).toHaveAttribute("data-continues", "true");
+    const aboveBox = await ownBubble(above).boundingBox();
+    const replyBox = await ownBubble(below).getByTestId("chats-comment-reply").boundingBox();
+    if (!aboveBox || !replyBox) throw new Error("both comments need a box");
+    // Half a pixel inside the hidden Reply, where it overlaps the comment above.
+    const point = { x: replyBox.x + replyBox.width / 2, y: replyBox.y + 0.5 };
+    expect(point.y).toBeGreaterThan(aboveBox.y);
+    expect(point.y).toBeLessThan(aboveBox.y + aboveBox.height);
+    await page.mouse.click(point.x, point.y);
+    await expect(view.getByTestId("chats-replying-mode")).toHaveCount(0);
+
+    // The same Reply, shown on hover, still starts a reply.
+    await ownBubble(below).hover();
+    await ownBubble(below).getByTestId("chats-comment-reply").click();
+    await expect(view.getByTestId("chats-replying-mode")).toContainText("Replying to You");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
@@ -328,14 +377,14 @@ test("an agent chat written by the CLI while the app runs arrives unread live", 
     // Open #general in the editor and stay there. The panel stays a navigator,
     // so both surfaces render chats markup from here on; scope every locator
     // to the one being asserted.
-    const panel = page.getByTestId("chats-panel");
+    const panel = page.getByTestId(desktopPins.chatsPanel);
     const channelView = page.locator(
       '[data-testid="chats-channel-view"][data-variant="page"]',
     );
     const threadView = page.locator(
       '[data-testid="chats-thread-view"][data-variant="page"]',
     );
-    await page.getByTestId("titlebar-chats-sidebar").click();
+    await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
     await expect(panel).toBeVisible();
     await expect(panel.getByTestId("chats-channel-name")).toHaveText("general");
     await panel.getByTestId("chats-channel").click();
