@@ -2812,6 +2812,45 @@ mod tests {
     }
 
     #[test]
+    fn live_application_ended_without_settle_preserves_local_tail() {
+        let (dir, mut store, mut cache, owner, handle) = fixture();
+        let producer = Ydoc::wire();
+        let initial = ack(apply(
+            &mut store,
+            &mut cache,
+            &handle,
+            event("unsettled", 1, producer.plaintext_insert(0, "local draft")),
+        ));
+        drop(owner);
+        store = reopen(store, &dir);
+        let (tail, settled): (i64, i64) =
+            store
+                .read_with(|conn| {
+                    conn.query_row(
+            "SELECT last_local_update_seq,COALESCE(settled_update_seq,0) FROM ydoc_docs", [],
+            |row| Ok((row.get(0)?,row.get(1)?)))
+                })
+                .unwrap();
+        assert_eq!(tail, initial.local_ydoc_sequence);
+        assert!(
+            tail > settled,
+            "recovery must wait for this device's open-time settle"
+        );
+        assert_eq!(
+            count(&store, "moments"),
+            0,
+            "the application did not publish a file"
+        );
+        assert_eq!(
+            document(&store)
+                .project(ContentKind::Plaintext)
+                .unwrap()
+                .content,
+            "local draft"
+        );
+    }
+
+    #[test]
     fn integrated_apply_reopen_exact_replay_and_content_dedupe_have_distinct_audits() {
         let (dir, mut store, mut cache, _owner, handle) = fixture();
         let producer = Ydoc::wire();

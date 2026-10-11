@@ -1,8 +1,8 @@
 use dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD;
 use dohc_engine_collab::{
     CollabError, CompactOutcome, ContentKind, DocKey, RemoteAppendProbe, RemoteUpdate,
-    ReplicationApplyOutcome, WriterDocCache, apply_remote_update,
-    apply_remote_update_in_transaction_with_projection, maybe_compact,
+    ReplicationApplyOutcome, WriterDocCache, apply_remote_update_in_transaction_with_projection,
+    apply_remote_update_with_guard, maybe_compact,
 };
 use dohc_engine_domain::{
     ConflictFileState, DomainError, WriteText, enqueue_write, select_snapshot_by_path_in_tx,
@@ -181,6 +181,11 @@ pub struct YdocLineageReplacement {
 /// an interactive daemon session owns it.
 pub trait LeaseProbe: Send + Sync {
     fn is_live(&self, key: &DocKey) -> bool;
+
+    /// A live session's consumed claim. Unknown bindings hold changed artifacts.
+    fn bound_claim(&self, _key: &DocKey) -> Option<String> {
+        None
+    }
 }
 
 /// Default probe for callers that do not own an interactive session registry.
@@ -207,6 +212,10 @@ impl LeaseProbe for AlwaysLive {
 impl LeaseProbe for dohc_engine_collab::LeaseRegistry {
     fn is_live(&self, key: &DocKey) -> bool {
         self.is_held(key)
+    }
+
+    fn bound_claim(&self, key: &DocKey) -> Option<String> {
+        dohc_engine_collab::LeaseRegistry::bound_claim(self, key)
     }
 }
 
@@ -410,6 +419,7 @@ fn apply_deferred_base(
     recorded_at_ms: i64,
     faults: &dyn FaultInjector,
     search_policy: Option<&SearchPolicySnapshot>,
+    recovery_leases: Option<&dyn crate::LeaseProbe>,
 ) -> Result<Option<YdocLineageReplacement>, SyncError> {
     let incoming_doc = dohc_engine_collab::Ydoc::wire();
     incoming_doc
@@ -421,6 +431,7 @@ fn apply_deferred_base(
     let bytes = bytes.to_vec();
     let origin_id = origin_id.to_owned();
     let outcome = store.write_with(faults, move |tx| {
+        if let Some(leases)=recovery_leases { require_recovery_closed(tx,&key,leases)?; }
         let already_preserved: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id=?1 AND kind='sync-ydoc-conflict')",
             [ydoc_conflict_coordinate_id(&key.workspace_id, &origin_id, origin_seq)],
@@ -648,7 +659,7 @@ pub fn drain_deferred_ydoc_for_key(
     faults: &dyn FaultInjector,
 ) -> Result<YdocDrainResult, SyncError> {
     let (drained, cleanup) =
-        drain_deferred_ydoc(store, cache, key, DeferredDrainMode::All, faults)?;
+        drain_deferred_ydoc(store, cache, key, DeferredDrainMode::All, faults, None)?;
     complete_drain(store, drained, cleanup, faults)
 }
 
@@ -664,7 +675,7 @@ fn drain_deferred_ydoc_in_batch(
     } else {
         DeferredDrainMode::All
     };
-    let (drained, cleanup) = drain_deferred_ydoc(store, cache, key, mode, faults)?;
+    let (drained, cleanup) = drain_deferred_ydoc(store, cache, key, mode, faults, None)?;
     complete_drain(store, drained, cleanup, faults)
 }
 
@@ -695,7 +706,7 @@ pub fn drain_deferred_ydoc_for_key_holding_cleanup(
     key: &DocKey,
     faults: &dyn FaultInjector,
 ) -> Result<(YdocDrainResult, YdocDrainCleanup), SyncError> {
-    drain_deferred_ydoc(store, cache, key, DeferredDrainMode::All, faults)
+    drain_deferred_ydoc(store, cache, key, DeferredDrainMode::All, faults, None)
 }
 
 /// Run the cleanup an immediate drain owes and surface its projection refusal
@@ -719,10 +730,23 @@ pub fn complete_deferred_ydoc_drain_cleanup(
     cleanup: YdocDrainCleanup,
     faults: &dyn FaultInjector,
 ) -> Result<Option<crate::ReplicationRefusal>, SyncError> {
-    if cleanup.coordinates.is_empty() && cleanup.projection_refusal.is_none() {
+    complete_drain_cleanup(store, cleanup, faults, None)
+}
+
+fn complete_drain_cleanup(
+    store: &mut EngineStore,
+    cleanup: YdocDrainCleanup,
+    faults: &dyn FaultInjector,
+    recovery: Option<(&DocKey, &dyn crate::LeaseProbe)>,
+) -> Result<Option<crate::ReplicationRefusal>, SyncError> {
+    if cleanup.coordinates.is_empty() && cleanup.projection_refusal.is_none() && recovery.is_none()
+    {
         return Ok(None);
     }
     let cleared = store.write_with(faults, |tx| {
+        if let Some((key, leases)) = recovery {
+            require_recovery_closed(tx, key, leases)?;
+        }
         if let Some(refusal) = cleanup.projection_refusal.as_ref() {
             crate::apply::persist_refusal(tx, refusal)?;
         }
@@ -733,6 +757,13 @@ pub fn complete_deferred_ydoc_drain_cleanup(
                 params![cleanup.workspace_id, origin_id, origin_seq],
             )
             .map_err(SyncError::persist)?;
+        }
+        if let Some((key, _)) = recovery {
+            let waiting: bool = tx.query_row("SELECT settle_prior_update_seq IS NOT NULL FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![key.workspace_id,key.version_id,key.object_id],|row|row.get(0)).map_err(SyncError::corrupt)?;
+            if !waiting {
+                crate::moment_apply::open_artifacts::clear_settled_mark_in_tx(tx,key)?;
+                crate::moment_apply::open_artifacts::remember_attempt_in_tx(tx,key)?;
+            }
         }
         Ok::<_, SyncError>(())
     })?;
@@ -769,8 +800,57 @@ pub fn drain_deferred_ydoc_for_live_session(
         key,
         DeferredDrainMode::Live(expected_lineage_claim_id),
         faults,
+        None,
     )?;
     complete_drain(store, drained, cleanup, faults)
+}
+
+pub(crate) fn drain_deferred_ydoc_for_ended_session(
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    key: &DocKey,
+    leases: &dyn crate::LeaseProbe,
+    faults: &dyn FaultInjector,
+) -> Result<YdocDrainResult, SyncError> {
+    let checked = store.write_with(faults, |tx| {
+        require_recovery_closed(tx, key, leases)?;
+        let now_ms: i64 = tx.query_row("SELECT updated_at_ms FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![key.workspace_id,key.version_id,key.object_id],|row|row.get(0)).map_err(SyncError::corrupt)?;
+        dohc_engine_collab::author_coverage::reconcile_in(tx,key,now_ms).map_err(map_collab_hard_error)?;
+        Ok::<_,SyncError>(())
+    })?;
+    if matches!(checked, TxnOutcome::Crashed { .. }) {
+        return Err(SyncError::FaultCrash);
+    }
+    let (mut drained, cleanup) = drain_deferred_ydoc(
+        store,
+        cache,
+        key,
+        DeferredDrainMode::All,
+        faults,
+        Some(leases),
+    )?;
+    let refusal = complete_drain_cleanup(store, cleanup, faults, Some((key, leases)))?;
+    drained.refusals.extend(refusal);
+    Ok(drained)
+}
+
+fn require_recovery_closed(
+    conn: &Connection,
+    key: &DocKey,
+    leases: &dyn crate::LeaseProbe,
+) -> Result<(), SyncError> {
+    if leases.is_live(key) {
+        return Err(SyncError::LiveDocumentBindingActive);
+    }
+    let draft: bool=conn.query_row("SELECT last_local_update_seq>COALESCE(settled_update_seq,0) FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![key.workspace_id,key.version_id,key.object_id],|row|row.get(0)).map_err(SyncError::corrupt)?;
+    if draft {
+        return Err(SyncError::RetryableState {
+            reason: "local-document-unsettled",
+        });
+    }
+    dohc_engine_collab::live_update_application::require_restore_open(conn, key)
+        .map_err(map_collab_hard_error)
 }
 
 /// Whether [`drain_deferred_ydoc_for_live_session`] would drain anything into
@@ -833,6 +913,7 @@ fn drain_deferred_ydoc(
     key: &DocKey,
     mode: DeferredDrainMode<'_>,
     faults: &dyn FaultInjector,
+    recovery_leases: Option<&dyn crate::LeaseProbe>,
 ) -> Result<(YdocDrainResult, YdocDrainCleanup), SyncError> {
     let inactive_refusals = if matches!(mode, DeferredDrainMode::All) {
         drain_inactive_ydoc_updates(store, &key.workspace_id, faults)?
@@ -926,6 +1007,9 @@ fn drain_deferred_ydoc(
     })?;
     let materialization_pending = if unresolved {
         let reconciled = store.write_with(faults, |tx| {
+            if let Some(leases) = recovery_leases {
+                require_recovery_closed(tx, key, leases)?;
+            }
             dohc_engine_collab::author_coverage::reconcile_in(tx, key, pending[0].3)
                 .map_err(map_collab_hard_error)
         })?;
@@ -966,6 +1050,9 @@ fn drain_deferred_ydoc(
     let mut record_facts = Vec::new();
     let mut projection_refusal = None;
     for (origin_id, origin_seq, relay_seq, recorded_at_ms, lineage_claim_id, payload) in pending {
+        if let Some(leases) = recovery_leases {
+            store.read_with(|conn| require_recovery_closed(conn, key, leases))?;
+        }
         if !payload.is_base_state
             && !matches!(mode, DeferredDrainMode::Live(_))
             && store.read_with(|conn| inactive_lineage_exists(conn, key, &lineage_claim_id))?
@@ -1030,6 +1117,7 @@ fn drain_deferred_ydoc(
                 recorded_at_ms,
                 faults,
                 search_policy.as_ref(),
+                recovery_leases,
             )? {
                 lineage_replacements.push(replacement);
             }
@@ -1052,6 +1140,9 @@ fn drain_deferred_ydoc(
         })?;
         if lineage_claim_id != winner_claim_id {
             let retained = store.write_with(faults, |tx| {
+                if let Some(leases) = recovery_leases {
+                    require_recovery_closed(tx, key, leases)?;
+                }
                 apply_inactive_delta_in_tx(
                     tx,
                     key,
@@ -1161,7 +1252,7 @@ fn drain_deferred_ydoc(
             origin_seq,
             bytes,
         };
-        let apply_result = apply_remote_update(
+        let apply_result = apply_remote_update_with_guard(
             store,
             cache,
             key,
@@ -1170,9 +1261,19 @@ fn drain_deferred_ydoc(
             payload.attribution.as_ref(),
             faults,
             recorded_at_ms,
+            |_| {
+                if recovery_leases.is_some_and(|leases| leases.is_live(key)) {
+                    Err(CollabError::LeaseHeld)
+                } else {
+                    Ok(())
+                }
+            },
         );
         let (outcome, applied_facts) = match apply_result {
             Ok(applied) => (applied.outcome, applied.record_facts),
+            Err(CollabError::LeaseHeld) if recovery_leases.is_some() => {
+                return Err(SyncError::LiveDocumentBindingActive);
+            }
             Err(error) => {
                 match map_collab_payload_error(error, "parked ydoc.update could not be applied") {
                     SyncError::InvalidInput { reason } => {
@@ -1254,6 +1355,7 @@ fn drain_deferred_ydoc(
             payload_recorded_at,
             search_policy.as_ref(),
             faults,
+            recovery_leases,
         )?
     {
         match projected {
@@ -1267,11 +1369,14 @@ fn drain_deferred_ydoc(
             // retaining the marker would wedge every later drain. The CRDT
             // content is durable above; the visible path legitimately remains
             // governed by its current owner, so consume the marker.
-            Err(SyncError::InvalidInput { .. }) => {}
+            Err(SyncError::InvalidInput { .. }) if recovery_leases.is_none() => {}
             // A measured size rejection is also terminal, but unlike an
             // identity pin it must stay visible to the peer. Persist it against
             // the last coordinate whose accepted bytes made this projection
             // too large before the queue cleanup below consumes the marker.
+            Err(error @ SyncError::ProjectionTooLarge { .. }) if recovery_leases.is_some() => {
+                return Err(error);
+            }
             Err(SyncError::ProjectionTooLarge {
                 constraint,
                 actual_bytes,
@@ -1366,6 +1471,7 @@ fn project_final_drained_doc(
     payload_recorded_at: i64,
     search_policy: Option<&SearchPolicySnapshot>,
     faults: &dyn FaultInjector,
+    recovery_leases: Option<&dyn crate::LeaseProbe>,
 ) -> Result<Option<(FinalDrainProjection, ContentKind)>, SyncError> {
     if let Some(doc) = store
         .read_with(|conn| cache.doc_for_consumer(conn, key))
@@ -1389,6 +1495,7 @@ fn project_final_drained_doc(
             payload_recorded_at,
             search_policy,
             faults,
+            recovery_leases,
         );
         return Ok(Some((projected, marker.content_kind)));
     }
@@ -1414,6 +1521,7 @@ fn project_final_drained_doc(
         payload_recorded_at,
         search_policy,
         faults,
+        recovery_leases,
     );
     Ok(Some((projected, kind)))
 }
@@ -1431,8 +1539,12 @@ fn write_final_drained_projection(
     payload_recorded_at: i64,
     search_policy: Option<&SearchPolicySnapshot>,
     faults: &dyn FaultInjector,
+    recovery_leases: Option<&dyn crate::LeaseProbe>,
 ) -> Result<TxnOutcome<crate::BaseOrigination>, SyncError> {
     store.write_with(faults, |tx| {
+        if let Some(leases) = recovery_leases {
+            require_recovery_closed(tx, key, leases)?;
+        }
         project_and_write_in_tx(
             tx,
             key,
@@ -1485,8 +1597,6 @@ fn refuse_deferred_ydoc(
         crate::apply::persist_refusal(tx, &refusal)?;
         if refusal.reason.message() == LIVE_UNADMITTED_UPDATE {
             retain_refused_ydoc_blob(tx, &key.workspace_id, origin_id, origin_seq)?;
-            tx.execute("UPDATE replication_log SET apply_disposition='refused' WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
-                params![key.workspace_id,origin_id,origin_seq]).map_err(SyncError::persist)?;
         }
         tx.execute(
             "DELETE FROM ydoc_deferred_updates \
@@ -5326,7 +5436,7 @@ fn validate_retryable_ydoc_identity(
     })
 }
 
-fn map_collab_hard_error(error: CollabError) -> SyncError {
+pub(crate) fn map_collab_hard_error(error: CollabError) -> SyncError {
     match error {
         CollabError::OwnerOutboxFrozen => SyncError::LiveDocumentBindingActive,
         CollabError::RestoreFenced => SyncError::RetryableState {

@@ -1078,7 +1078,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
         : { incarnation: kept.incarnation, unwantedSinceMs: kept.unwantedSinceMs, leftAtMs: kept.leftAtMs },
     });
     try {
-      replicas.reconcile();
+      replicas.reconcile(workspaceId);
       await copyOpened(workspaceId);
       return await work(ownedCopy(scope));
     } finally {

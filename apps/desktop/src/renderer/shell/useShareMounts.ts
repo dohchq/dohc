@@ -187,6 +187,7 @@ export function useShareMounts(
   };
 
   return {
+    shareMounts,
     mountCount,
     mountContentEpoch,
     reloadShareMounts,

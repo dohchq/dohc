@@ -1,3 +1,5 @@
+import { createTypingCheckpointWriter } from "./typingCheckpointWriter";
+import { DrawingCheckpointUnavailable, registerTypingCheckpoint, typingRecoveryStateVectorSha256, type OutageTypingCheckpoint } from "./outageTypingRecovery";
 import type { RecordEditSession } from "@dohc/automation-executor/collection-record-edits";
 import { isCaptureRecoveryOrigin } from "@dohc/workspace-contracts/engine";
 import { errorMessage } from "./workspaceError";
@@ -73,6 +75,7 @@ import {
 } from "@dohc/workspace-engine-client";
 import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "@dohc/workspace-engine-client/limits";
 import * as Y from "yjs";
+import { yDocToMarkdown } from "@dohc/ydoc-projection";
 import {
   isTextMediaType,
   mediaTypeForPath,
@@ -765,6 +768,12 @@ export interface WorkspaceEngineCaptureOptions {
   onError?: (context: string, error: unknown) => void;
   preserveUnsentState?: (input: { path: string; objectId: string; contentKind: YdocContentKind; doc: Y.Doc }) => Promise<void>;
   hasRetainedLiveDraft?: (path: string, objectId: string) => Promise<boolean>;
+  waitForTypingRecovery?: () => Promise<void>;
+  writeTypingCheckpoint?: (checkpoint: OutageTypingCheckpoint) => Promise<void>;
+  writeTypingCheckpointSync?: (checkpoint: OutageTypingCheckpoint) => void;
+  onTypingCheckpointFailure?: (path:string,error:unknown)=>void;
+  onTypingCheckpointRecovered?: (path:string)=>void;
+  retireTypingCheckpoint?: (checkpoint: OutageTypingCheckpoint) => Promise<void>;
   // Outcome of each background HISTORY-CAPTURE task (batch capture and
   // reconciliation passes). With the engine as the workspace's sole
   // recorder, a persistently failing store means history capture fails
@@ -2155,6 +2164,7 @@ export function createWorkspaceEngineCapture(
     contentKind?: YdocContentKind;
     onDead: () => void;
     onAlive: () => void;
+    onTypingUnresolved?: () => void;
     onObjectChanged: () => void;
     onRemoteUpdate: (update: Uint8Array, localAcknowledgement?: boolean) => void;
     onLineageReplaced: (update: Uint8Array, recoveredPaths: string[]) => void;
@@ -2228,10 +2238,83 @@ export function createWorkspaceEngineCapture(
       removePendingRecord(record);
       Y.applyUpdate(doc, record.update);
       Y.applyUpdate(recordedDoc, record.update);
+      retireCheckpointIfDurable();
       if (!record.editorVisible) {
         try { input.onRemoteUpdate(record.update, true); }
         catch (error) { onError(`Y.Doc record update observer of ${input.path}`, error); }
       }
+    };
+    const queuedOriginals = new Set<{update: Uint8Array; options: PendingRecord["options"]}>();
+    let checkpointBase: {claim: string | null; vector: Uint8Array; base: Uint8Array; disk: string | null} | null = null;
+    let diskHeadSha256: string | null = null;
+    let checkpointContentKind: YdocContentKind = input.contentKind ?? "richdoc";
+    let checkpointTimer: ReturnType<typeof setTimeout> | null = null;
+    const checkpointId = randomUUID();
+    let lastCheckpoint: OutageTypingCheckpoint | null = null;
+    const checkpointSnapshot = (): OutageTypingCheckpoint | null => {
+      if (!checkpointBase || !canonicalDoc || !sessionObjectId || !options.writeTypingCheckpoint) return null;
+      if (checkpointContentKind === "scene") return null;
+      const snapshot = new Y.Doc();
+      try {
+        Y.applyUpdate(snapshot, Y.encodeStateAsUpdate(canonicalDoc));
+        for (const original of queuedOriginals) Y.applyUpdate(snapshot, original.update);
+        const text = checkpointContentKind === "plaintext"
+          ? snapshot.getText("plainText").toString() : yDocToMarkdown(snapshot);
+        return {version: 2, checkpointId, workspaceId, versionId: input.versionId, objectId: sessionObjectId, path: input.path,
+          expectedClaimId: checkpointBase.claim, expectedStateVectorSha256: typingRecoveryStateVectorSha256(checkpointBase.vector),
+          expectedDiskSha256: checkpointBase.disk, text, admittedBaseBase64: Buffer.from(checkpointBase.base).toString("base64"), updateBase64: Buffer.from(Y.encodeStateAsUpdate(snapshot)).toString("base64"),
+          updates: [...pendingRecords, ...queuedOriginals].map(r => ({requestId: r.options.idempotencyKey!, updateBase64: Buffer.from(r.update).toString("base64"),
+            ...(r.options.actorOriginId !== undefined ? {actorOriginId: r.options.actorOriginId} : {}),
+            ...(r.options.attribution !== undefined ? {attribution: structuredClone(r.options.attribution)} : {})}))};
+      } finally { snapshot.destroy(); }
+    };
+    const checkpointTypingIsDurable = (): boolean => canonicalDoc !== null &&
+      pendingRecords.size === 0 && queuedOriginals.size === 0 &&
+      Buffer.from(Y.encodeStateAsUpdate(canonicalDoc)).equals(Buffer.from(Y.encodeStateAsUpdate(recordedDoc)));
+    const retireLastCheckpoint = async (): Promise<void> => {
+      const retired = lastCheckpoint;
+      if (retired) await options.retireTypingCheckpoint?.(retired);
+      if (lastCheckpoint === retired) lastCheckpoint = null;
+    };
+    const checkpointWriter = createTypingCheckpointWriter<OutageTypingCheckpoint>({
+      write: snapshot => options.writeTypingCheckpoint!(snapshot),
+      writeSync: options.writeTypingCheckpointSync,
+      retire: retireLastCheckpoint,
+      stored: snapshot => {lastCheckpoint = snapshot;},
+    });
+    const flushCheckpoint = (): Promise<void> => {
+      if (checkpointTimer !== null) { clearTimeout(checkpointTimer); checkpointTimer = null; }
+      if(checkpointBase && checkpointContentKind === "scene" && !checkpointTypingIsDurable()) {const error=new DrawingCheckpointUnavailable(); options.onTypingCheckpointFailure?.(input.path,error); return Promise.reject(error);}
+      const snapshot = checkpointSnapshot();
+      if (!snapshot) return checkpointWriter.wait();
+      return checkpointWriter.flush(checkpointTypingIsDurable() ? null : snapshot);
+    };
+    const checkpointUnresolved = (): void => {
+      if (!options.writeTypingCheckpoint) return;
+      if (!checkpointBase && recordedStateVector) {
+        checkpointBase = {claim: canonicalLineageClaimId, vector: new Uint8Array(recordedStateVector), base: Y.encodeStateAsUpdate(recordedDoc), disk: diskHeadSha256};
+        input.onTypingUnresolved?.();
+      }
+      void flushCheckpoint().catch(error => onError("Typing checkpoint", error));
+    };
+    const checkpointEdited = (): void => {
+      if (!checkpointBase || checkpointTimer !== null) return;
+      checkpointTimer = setTimeout(() => { checkpointTimer = null; void flushCheckpoint().catch(error => onError("Typing checkpoint", error)); }, 100);
+      checkpointTimer.unref();
+    };
+    const flushCheckpointSync=():void=>{
+      if(checkpointTimer !== null){clearTimeout(checkpointTimer);checkpointTimer=null;}
+      if(checkpointBase && checkpointContentKind === "scene" && !checkpointTypingIsDurable()) throw new DrawingCheckpointUnavailable();
+      if(checkpointTypingIsDurable()) return;
+      const snapshot=checkpointSnapshot(); if(snapshot) checkpointWriter.flushSync(snapshot);
+    };
+    const unregisterCheckpoint = registerTypingCheckpoint(workspaceId,flushCheckpoint,()=>checkpointBase !== null && !checkpointTypingIsDurable(),{checkpointId,path:input.path},flushCheckpointSync,()=>checkpointBase !== null);
+    const retireCheckpointIfDurable = (): void => {
+      if (!checkpointBase || !checkpointTypingIsDurable()) return;
+      options.onTypingCheckpointRecovered?.(input.path);
+      if (!dead && current !== null) checkpointBase = null;
+      if (checkpointTimer !== null) {clearTimeout(checkpointTimer); checkpointTimer = null;}
+      void checkpointWriter.flush(null).catch(error => onError("Typing checkpoint retirement", error));
     };
     let queuedUpdateBytes = 0;
     let queuedUpdateCount = 0;
@@ -2332,6 +2415,7 @@ export function createWorkspaceEngineCapture(
     ): void => {
       releaseObligation ??= unreleased;
       current = null;
+      checkpointUnresolved();
       input.onDead();
       if (dead) return;
       dead = true;
@@ -2346,10 +2430,13 @@ export function createWorkspaceEngineCapture(
     // release obligation it left behind is discharged too.
     const markAlive = (): void => {
       releaseObligation = null;
-      if (!dead) return;
-      dead = false;
-      clearDeadYDocSession(deadSessionToken);
-      input.onAlive();
+      if (dead) {
+        dead = false;
+        clearDeadYDocSession(deadSessionToken);
+        retireCheckpointIfDurable();
+        input.onAlive();
+      }
+      retireCheckpointIfDurable();
     };
 
     // `generation` is always the `openEngineYdocProviderSession` ladder
@@ -2426,6 +2513,7 @@ export function createWorkspaceEngineCapture(
             ) {
               return;
             }
+            checkpointUnresolved();
             const failed = opened;
             void append(async () => {
               if (current === failed) await rebind(failed);
@@ -2543,6 +2631,7 @@ export function createWorkspaceEngineCapture(
                 updatesSettled = Math.max(updatesSettled, covered);
               }
               settleForgiven = false;
+              if (result.materialized) diskHeadSha256 = result.sha256;
               return input.onSettled(result, token, generation);
             },
           });
@@ -2755,6 +2844,7 @@ export function createWorkspaceEngineCapture(
     ): Promise<void> => {
       if (current !== failed || canonicalDoc === null || closed) return;
       const doc = canonicalDoc;
+      checkpointUnresolved();
       if (options?.releaseBeforeOpen) {
         try {
           // Recovery must retain acknowledged originals in the durable lineage.
@@ -2975,12 +3065,15 @@ export function createWorkspaceEngineCapture(
     // inside — no per-run deadline here, or the task would carry two.
     // Rebinds after a daemon death run on the session's own operation chain,
     // outside that budget, and keep the full ladder.
+    await options.waitForTypingRecovery?.();
     current = await openGeneration(true);
+    checkpointContentKind = current.contentKind;
     canonicalDoc = current.doc;
     Y.applyUpdate(recordedDoc, Y.encodeStateAsUpdate(canonicalDoc));
     canonicalLineageClaimId = current.lineageClaimId ?? null;
     sessionObjectId = current.objectId;
     recordedStateVector = Y.encodeStateVector(canonicalDoc);
+    if (options.writeTypingCheckpoint) diskHeadSha256 = await readFile(join(rootPath, input.path)).then(sha256Bytes).catch((error: NodeJS.ErrnoException) => {if (error.code === "ENOENT") return null; throw error;});
     const initialOpening = openingRemoteUpdates.get(current);
     if (initialOpening) {
       initialOpening.installed = true;
@@ -3220,17 +3313,22 @@ export function createWorkspaceEngineCapture(
         queuedUpdateCount += 1;
         const submittedGeneration = localGeneration;
         const capturedUpdate = new Uint8Array(update);
+        const capturedOptions = {...structuredClone(applyOptions ?? {}), idempotencyKey: applyOptions?.idempotencyKey ?? createId()};
+        const original = {update: capturedUpdate, options: capturedOptions};
+        queuedOriginals.add(original);
+        checkpointEdited();
         let queued = true;
         const releaseQueued = (): void => {
           if (!queued) return;
           queued = false;
           queuedUpdateBytes -= capturedUpdate.byteLength;
           queuedUpdateCount -= 1;
+          queuedOriginals.delete(original);
         };
         void journalLocalUpdate(() => {
           releaseQueued();
           return submittedGeneration === localGeneration ? capturedUpdate : null;
-        }, onArmed, applyOptions, false).catch((error: unknown) => {
+        }, onArmed, capturedOptions, false).catch((error: unknown) => {
           onError(`Y.Doc local update of ${input.path}`, error);
         }).finally(releaseQueued);
       },
@@ -3277,13 +3375,16 @@ export function createWorkspaceEngineCapture(
             releaseObligation = null;
           }
           closed = true;
+          unregisterCheckpoint();
           recordedDoc.destroy();
           current = null;
           clearDeadYDocSession(deadSessionToken);
         });
       },
       close(closeOptions) {
-        return append(async () => {
+        const closeCheckpoint = () => flushCheckpoint().then(() => {closed = true; unregisterCheckpoint(); clearDeadYDocSession(deadSessionToken);});
+        if (closeOptions?.shuttingDown && checkpointBase && !sessions.hasAvailableClient()) return closeCheckpoint();
+        const closing = append(async () => {
           if (closed) return;
           // The quit path closes with a settle and nobody types again, so this
           // is the last chance to persist text the canonical doc has been
@@ -3305,6 +3406,7 @@ export function createWorkspaceEngineCapture(
               releaseObligation = null;
             }
             closed = true;
+          unregisterCheckpoint();
             recordedDoc.destroy();
             clearDeadYDocSession(deadSessionToken);
             return;
@@ -3330,6 +3432,7 @@ export function createWorkspaceEngineCapture(
             // layer above would treat the path as still-reserved forever.
             if (error instanceof YdocReleasedWithSettleFailureError) {
               closed = true;
+          unregisterCheckpoint();
               recordedDoc.destroy();
               current = null;
               clearDeadYDocSession(deadSessionToken);
@@ -3337,10 +3440,36 @@ export function createWorkspaceEngineCapture(
             throw error;
           }
           closed = true;
+          unregisterCheckpoint();
+          await checkpointWriter.idle();
           recordedDoc.destroy();
           current = null;
           clearDeadYDocSession(deadSessionToken);
         });
+        if (!options.writeTypingCheckpoint) return closing;
+        // Renderer retirement can start this close before main begins shutdown.
+        // The checkpoint closes it without joining the blocked reconnect chain.
+        let shutdownCheckpointStarted = false;
+        let onShutdown!: () => void;
+        const checkpointShutdown = new Promise<void>((resolve, reject) => {
+          onShutdown = () => {
+            if (!checkpointBase || sessions.hasAvailableClient()) return;
+            shutdownCheckpointStarted = true;
+            void closeCheckpoint().then(resolve, reject);
+          };
+          captureWaitAbort.signal.addEventListener("abort", onShutdown, {once: true});
+          if (captureWaitAbort.signal.aborted) onShutdown();
+        });
+        const ordinaryClose = closing.then(
+          () => shutdownCheckpointStarted ? checkpointShutdown : undefined,
+          (error) => {
+            if (shutdownCheckpointStarted) return checkpointShutdown;
+            throw error;
+          },
+        );
+        return Promise.race([ordinaryClose, checkpointShutdown]).finally(() =>
+          captureWaitAbort.signal.removeEventListener("abort", onShutdown),
+        );
       },
     };
     return {
@@ -3778,7 +3907,6 @@ export function createWorkspaceEngineCapture(
     const workspace = { workspaceId, rootPath, attachmentId };
     let cursor: CollectionPendingAdoptionCursor | null = null;
     let found = false;
-    let deferred = false;
     let reconcileReady = false;
     const pendingAdoptionKeys = new Set<string>();
     do {
@@ -3802,17 +3930,14 @@ export function createWorkspaceEngineCapture(
               live.publicSession?.objectId !== adoption.objectId ||
               live.publicSession.contentKind !== "richdoc"
             ) {
-              deferred = true;
               continue;
             }
             if (live.closing || live.status === "failing-close" || live.publicSession === null) {
-              deferred = true;
               continue;
             }
             const borrowed = borrowRecordSession(live);
             try {
-              const status = await live.session.adoptCollectionRecord?.();
-              if (status !== "settled") deferred = true;
+              await live.session.adoptCollectionRecord?.();
             } finally {
               await borrowed.close();
             }
@@ -3865,16 +3990,14 @@ export function createWorkspaceEngineCapture(
           reconcileReady = true;
         } catch (error) {
           if (error instanceof YdocOwnerDraftPendingError) {
-            deferred = true;
             continue;
           }
           // Every unconfirmed eviction — busy, cancelled while queued, or any
           // other failure — leaves the daemon session live and its lease
           // held. Deleting the only handle here would leak that lease:
-          // reconciliation then fails with collection-reconciliation-lease-
-          // held, and later drains can only open another provider into the
-          // same lease. Retain until eviction is confirmed; a daemon restart
-          // is the one case the handle goes stale, and the binding check
+          // adoption then keeps waiting, and later drains can only open
+          // another provider into the same lease. Retain until eviction is
+          // confirmed. A daemon restart makes the handle stale; the binding check
           // above replaces it then. The not-pending sweep below releases it
           // once the adoption clears.
           if (retained !== undefined) {
@@ -3883,7 +4006,6 @@ export function createWorkspaceEngineCapture(
             pendingCollectionAdoptionProviders.delete(adoptionKey);
           }
           if (isTransientEngineRefusal(error)) {
-            deferred = true;
             continue;
           }
           onError(`collection adoption of ${adoption.filePath}`, error);
@@ -3893,13 +4015,7 @@ export function createWorkspaceEngineCapture(
     } while (cursor !== null);
     await releaseRetainedCollectionAdoptionProviders(pendingAdoptionKeys);
     if (!found || !reconcileReady) return;
-    try {
-      await engine.reconcileCapture?.();
-    } catch (error) {
-      if ((deferred || pendingCollectionAdoptionProviders.size > 0) &&
-          error instanceof DaemonRefusalError && error.wireCode === "COLLECTION_RECONCILIATION_LEASE_HELD") return;
-      throw error;
-    }
+    await engine.reconcileCapture?.();
   }
 
   async function releaseRetainedCollectionAdoptionProviders(
@@ -4318,6 +4434,7 @@ export function createWorkspaceEngineCapture(
           versionId,
           path: input.path,
           ...(input.contentKind ? { contentKind: input.contentKind } : {}),
+          onTypingUnresolved: () => reportSaveState("settling", 0, "status"),
           onDead: () => {
             if (
               entry !== null &&
@@ -4326,6 +4443,7 @@ export function createWorkspaceEngineCapture(
             ) {
               entry.status = "dead-generation";
             }
+            reportSaveState("settling",0,"status");
           },
           onAlive: () => {
             if (
@@ -4335,6 +4453,7 @@ export function createWorkspaceEngineCapture(
             ) {
               entry.status = "live";
             }
+            reportSaveState("settling",0,"status");
           },
           onObjectChanged: () => {
             try {

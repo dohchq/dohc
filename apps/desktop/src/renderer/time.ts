@@ -16,6 +16,17 @@ export function formatClock(createdAtMs: number): string {
   return clockFormat.format(new Date(createdAtMs));
 }
 
+// The time of day without its AM or PM, for a slot too narrow for them:
+// "2:45", or "14:45" where the clock runs to 24 hours.
+export function formatClockDigits(createdAtMs: number): string {
+  return clockFormat
+    .formatToParts(new Date(createdAtMs))
+    .filter((part) => part.type !== "dayPeriod")
+    .map((part) => part.value)
+    .join("")
+    .trim();
+}
+
 // The day a chat lane divider names: Today, Yesterday, else the date.
 export function formatChatDay(createdAtMs: number, now = Date.now()): string {
   const day = new Date(createdAtMs);

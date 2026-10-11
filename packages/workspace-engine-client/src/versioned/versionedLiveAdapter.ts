@@ -45,6 +45,8 @@ import {
   type AutomationWatchGroupsParams,
   type AutomationWatchGroupsResult,
   type CaptureFlushResult,
+  type CaptureRecoveryImportParams,
+  type CaptureRecoveryImportResult,
   type CaptureMoveFileResult,
   type CollectionGetParams,
   type CollectionGetRecordParams,
@@ -1600,6 +1602,10 @@ export class VersionedLiveAdapter {
 
   async watcherStatus(): Promise<WatcherStatusResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.watcherStatus, {});
+  }
+
+  async importRecovery(input: CaptureRecoveryImportParams): Promise<CaptureRecoveryImportResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.captureImportRecovery, input);
   }
 
   async clearCaptureRecovery(momentId: string): Promise<void> {

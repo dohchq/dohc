@@ -431,6 +431,16 @@ export class EngineWorkspaceSessions {
     this.workspaceOpenDeadlineMs = deadline ?? WORKSPACE_OPEN_DEADLINE_MS;
   }
 
+  /** Checks publication without opening a workspace or calling the daemon. */
+  hasAvailableClient(): boolean {
+    try {
+      this.source.currentClient();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /** Uses an existing binding without opening or reconnecting a workspace. */
   async runIfOpen<T>(
     workspace: EngineWorkspace,

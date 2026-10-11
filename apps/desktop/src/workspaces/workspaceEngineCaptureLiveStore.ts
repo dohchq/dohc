@@ -277,6 +277,7 @@ function authorFromWire(author: NonNullable<MomentRecord["authors"]>[number]): M
       kind: "human",
       humanId: author.humanId,
       ...(author.humanName !== undefined ? { humanName: author.humanName } : {}),
+      ...(author.relayConfirmed === true ? { relayConfirmed: true } : {}),
       ...(author.onBehalfOf !== undefined ? { onBehalfOf: author.onBehalfOf } : {}),
     };
   }

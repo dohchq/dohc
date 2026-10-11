@@ -2207,7 +2207,11 @@ describe("connection dialog retries", () => {
     const user = userEvent.setup();
     renderShell(bridge);
 
-    await user.click(await screen.findByTestId("activity-cloud"));
+    const openConnect = async () => {
+      await user.keyboard("{Control>}k{/Control}");
+      await user.click(await screen.findByText("Connect server"));
+    };
+    await openConnect();
     await user.type(
       await screen.findByTestId("cloud-server-url"),
       "https://dohc.example.test",
@@ -2217,7 +2221,7 @@ describe("connection dialog retries", () => {
 
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByTestId("cloud-sync-panel")).toBeNull());
-    await user.click(screen.getByTestId("activity-cloud"));
+    await openConnect();
     expect(
       ((await screen.findByTestId("cloud-server-url")) as HTMLInputElement).value,
     ).toBe("");

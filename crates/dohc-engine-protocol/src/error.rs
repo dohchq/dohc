@@ -34,8 +34,6 @@ pub enum ErrorCode {
     Cancelled,
     /// Bounded queues are full; explicit backpressure.
     Overloaded,
-    /// Collection reconciliation waits for an open document's session lease.
-    CollectionReconciliationLeaseHeld,
     /// The session generation is no longer valid (engine restarted).
     SessionExpired,
     /// The workspace handle does not refer to an open workspace.
@@ -108,7 +106,6 @@ impl ErrorCode {
             ErrorCode::DeadlineExceeded => "DEADLINE_EXCEEDED",
             ErrorCode::Cancelled => "CANCELLED",
             ErrorCode::Overloaded => "OVERLOADED",
-            ErrorCode::CollectionReconciliationLeaseHeld => "COLLECTION_RECONCILIATION_LEASE_HELD",
             ErrorCode::SessionExpired => "SESSION_EXPIRED",
             ErrorCode::WorkspaceUnavailable => "WORKSPACE_UNAVAILABLE",
             ErrorCode::Conflict => "CONFLICT",
@@ -182,7 +179,6 @@ impl ErrorCode {
             // idempotency keys; the engine deduplicates on replay.
             ErrorCode::DeadlineExceeded => Retryability::AfterBackoff,
             ErrorCode::Overloaded => Retryability::AfterBackoff,
-            ErrorCode::CollectionReconciliationLeaseHeld => Retryability::AfterBackoff,
             ErrorCode::SessionExpired | ErrorCode::WorkspaceUnavailable => {
                 Retryability::AfterReconnect
             }

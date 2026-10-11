@@ -68,8 +68,9 @@ pub use replay_parity::{
     ReplayBatch,
 };
 pub use replication::{
-    apply_remote_update, apply_remote_update_in_transaction_with_projection, RemoteApplyProjection,
-    RemoteUpdate, ReplicationApplyOutcome, UpdateOrigin,
+    apply_remote_update, apply_remote_update_in_transaction_with_projection,
+    apply_remote_update_with_guard, RemoteApplyProjection, RemoteUpdate, ReplicationApplyOutcome,
+    UpdateOrigin,
 };
 pub use scene::{
     encode_scene_asset_record, encode_scene_asset_records, fold_scene, import_portable_scene,
@@ -142,7 +143,7 @@ fn check_identifier(value: &str, reason: &'static str) -> Result<(), CollabError
     Ok(())
 }
 
-pub(crate) fn validate_actor_origin_id(value: &str) -> Result<(), CollabError> {
+pub fn validate_actor_origin_id(value: &str) -> Result<(), CollabError> {
     // Locally admitted authors appear in History and must contain no controls.
     if value.is_empty()
         || value.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES

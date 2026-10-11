@@ -1,3 +1,4 @@
+import { registerTypingCheckpoint } from "./workspaces/outageTypingRecovery";
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
@@ -377,6 +378,16 @@ describe("desktop bootstrap", () => {
     f.app.emit("will-quit", event());
     expect(f.dependencies.launch.finished).toHaveBeenCalledOnce();
     // A quit vetoed at before-quit never reaches will-quit, so it counts nothing.
+  });
+
+  it("flushes outage typing at OS session end without cancelling the end", async () => {
+    const f = fixture(); await boot(f); const window = new EventEmitter();
+    const flush = vi.fn(() => undefined); const unregister = registerTypingCheckpoint("workspace", async()=>{},()=>true,undefined,flush);
+    try {
+      f.app.emit("browser-window-created", {}, window); const preventDefault = vi.fn();
+      window.emit("session-end", {preventDefault});
+      expect(flush).toHaveBeenCalledOnce(); expect(preventDefault).not.toHaveBeenCalled();
+    } finally {unregister();}
   });
 
   it("finishes the launch when Windows ends the session, which emits no quit event", async () => {
@@ -946,6 +957,13 @@ describe("desktop shutdown", () => {
     f.app.emit("before-quit", quit);
     expect(f.dependencies.beforeQuit).toHaveBeenCalledWith(quit);
     expect(f.dependencies.shutdown.beginEngineShutdown).not.toHaveBeenCalled();
+  });
+
+  it("runs the checkpoint boundary when ordinary quit has no workspace window", async () => {
+    const checkpoint = vi.fn((quit: {preventDefault(): void}) => quit.preventDefault());
+    const f = fixture(d => {d.windows.hasWorkspace = () => false; d.beforeQuitWithoutWindows = checkpoint;});
+    await boot(f); const quit = event(); f.app.emit("before-quit", quit);
+    expect(checkpoint).toHaveBeenCalledWith(quit); expect(f.dependencies.beforeQuit).not.toHaveBeenCalled();
   });
 
   it.each([false, true])("keeps the process after the last window only when dispatch is enabled: %s", async (enabled) => {

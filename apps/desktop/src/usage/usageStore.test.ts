@@ -295,6 +295,23 @@ describe("local usage store", () => {
     expect(saved().counts).toEqual([]);
     expect(disk.has(path + ".tmp")).toBe(false);
   });
+  it.each(["clear", "off", "on"] as const)("keeps memory and the file in agreement after a failed %s", async action => {
+    const initial = seed(action !== "on");
+    initial.counts.push({ ...pair, day: today(), count: 3 });
+    const { store, io, saved } = memoryStore(initial);
+    await store.load();
+    io.rename.mockRejectedValueOnce(new Error("disk unavailable"));
+    const control = action === "clear" ? store.clear() : store.setEnabled(action === "on");
+    await expect(control).rejects.toThrow("disk unavailable");
+    const read = await store.read();
+    expect(read.enabled).toBe(action !== "on");
+    expect(read.counts).toEqual(initial.counts);
+    expect(saved()).toMatchObject({ enabled: action !== "on", counts: initial.counts });
+    // The retried write keeps the old state, and nothing it lost comes back.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(saved()).toMatchObject({ enabled: action !== "on", counts: initial.counts });
+    expect(store.recordSuccess(pair)).toBe(action !== "on");
+  });
   it("reuses fixed version coverage on each new complete day without per-day rows", async () => {
     const { store } = memoryStore(); await store.load();
     vi.setSystemTime(new Date(2026, 9, 8, 0, 1));

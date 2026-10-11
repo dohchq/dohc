@@ -1,3 +1,4 @@
+import {prepareLiveApplications} from "./storage/liveApplicationAuthorship";
 import {prepareHostedSettlements} from "./storage/hostedSettlement";
 import * as shareLabelsStorage from "./storage/shareLabels";
 import * as buttonInspections from "./automationButtonInspections";
@@ -837,7 +838,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return keyEnvelopesStorage.getKeyEnvelope(this, workspaceId);
   }
 
-  prepareHostedSettlements(input:{workspaceId:string;originId:string;ops:SyncRelayLogInput[]},signal?:AbortSignal):Promise<void>{return prepareHostedSettlements(this,input,undefined,signal);}
+  async prepareLogAppend(input:{workspaceId:string;originId:string;ops:SyncRelayLogInput[]},signal?:AbortSignal):Promise<void>{
+    await prepareHostedSettlements(this,input,undefined,signal);
+    await prepareLiveApplications(this,input,signal);
+  }
 
   appendLogBatch(input: {
     workspaceId: string;

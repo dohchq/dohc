@@ -293,7 +293,7 @@ export async function restoreDirectWrites(
       const liveSettlement = moment.metadata.origin === "ydoc" || (moment.metadata.origin === "local-file"
         && /^moment-ydoc-(?:apply-)?[a-fA-F0-9]{64}$/u.test(moment.id));
       return moment.authors.every(author => original.kind === "named"
-        ? (author.kind === "named" && author.userId === original.userId) || (liveSettlement && author.kind === "human" && author.humanId === original.userId)
+        ? (author.kind === "named" && author.userId === original.userId) || (liveSettlement && author.kind === "human" && author.relayConfirmed === true && author.humanId === original.userId)
         : original.kind === "link" && "principalId" in original && author.kind === "link" && (
           "publicPrincipalId" in author
             ? entry.first.publicPrincipalId !== undefined && author.publicPrincipalId === entry.first.publicPrincipalId

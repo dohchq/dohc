@@ -6,7 +6,7 @@ import { DiscardLiveDraftRecoveryPayload, liveDraftRecoveryOperations } from "./
 describe("live draft recovery replies", () => {
   const record = {recordId: "a".repeat(64), path: "notes/a.md", objectId: "object", text: "Unseen copy", updateBase64: "AAA="};
   it("declares all remaining recovery records on both list and dismiss", () => {
-    for (const operation of Object.values(liveDraftRecoveryOperations)) {
+    for (const operation of [liveDraftRecoveryOperations.listLiveDraftRecovery, liveDraftRecoveryOperations.discardLiveDraftRecovery]) {
       expect(operation.result.parse([record])).toEqual([record]);
       expect(operation.result.safeParse([{...record, recordId: "../draft"}]).success).toBe(false);
       expect(operation.result.safeParse([{...record, path: "../outside.md"}]).success).toBe(false);
