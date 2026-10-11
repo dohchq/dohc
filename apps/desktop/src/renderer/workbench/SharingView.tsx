@@ -1,7 +1,7 @@
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import { File, FileDiff, FolderInput, Layers, Link, MessageSquare, TriangleAlert } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import type { ShareProposalRow, WorkspaceSummary } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
@@ -228,10 +228,12 @@ function ShareRow(props: {
 }) {
   const { subject } = props;
   const acts = props.copies !== undefined || props.menu.length > 0;
-  const name = [subject.name, props.sub, props.note, props.state].filter(Boolean).join(", ");
+  const name = [subject.name, props.sub, props.state].filter(Boolean).join(", ");
+  // The note is sentences: it describes the row rather than joining its name.
+  const noteId = `${useId()}-note`;
   return (
     <li data-testid={`sharing-${props.lane}-row`} data-share-id={props.shareId} data-status={props.status}>
-      <div role="group" aria-label={name} data-sharing-row-focus
+      <div role="group" aria-label={name} aria-describedby={props.note ? noteId : undefined} data-sharing-row-focus
         className={`group ${ABOUT_ROW} min-h-10 ${props.note ? "flex-wrap gap-y-0.5 py-1.5" : ""} hover:bg-hover focus:bg-selected focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent`}>
         {subject.glyph}
         <span className="flex min-w-0 flex-1 flex-col">
@@ -258,7 +260,7 @@ function ShareRow(props: {
           ) : null}
         </span>
         {/* The whole width under the name, past the glyph (15px and its 8px gap). */}
-        {props.note ? <span data-testid="sharing-row-note" className="basis-full pl-[23px] text-[11px] leading-4 text-subtle">{props.note}</span> : null}
+        {props.note ? <span id={noteId} data-testid="sharing-row-note" className="basis-full pl-[23px] text-[11px] leading-4 text-subtle">{props.note}</span> : null}
       </div>
       {props.children}
     </li>
@@ -395,8 +397,9 @@ function SkippedChanges(props: { mount: ShareMount; actions: SharingActions }) {
   const skipped = props.mount.skippedOps;
   if (!skipped) return null;
   return (
-    <div className="mx-2 mb-1 flex items-start gap-1.5 rounded-md bg-panel-2 py-1 pl-2 pr-1 text-[12px] text-warning">
-      <ul className="m-0 flex min-w-0 flex-1 list-none flex-col gap-0.5 p-0">
+    <div className="mx-2 mb-1 flex flex-col gap-1 rounded-md bg-panel-2 py-1.5 pl-2 pr-1.5 text-[12px] text-warning">
+      {/* The lines take the block's width; Dismiss sits under them at its end. */}
+      <ul className="m-0 flex min-w-0 list-none flex-col gap-0.5 p-0">
         {shareSkipNoticeLines(skipped, props.mount.granterEmail).map((line) => (
           <li key={line.kind} data-testid="sharing-skipped" data-kind={line.kind} className="flex items-start gap-1.5">
             <TriangleAlert size={13} aria-hidden className="mt-0.5 shrink-0" />
@@ -404,7 +407,7 @@ function SkippedChanges(props: { mount: ShareMount; actions: SharingActions }) {
           </li>
         ))}
       </ul>
-      <SecondaryButton size="compact" data-testid="sharing-skipped-dismiss" aria-label="Dismiss skipped changes"
+      <SecondaryButton size="compact" className="self-end" data-testid="sharing-skipped-dismiss" aria-label="Dismiss skipped changes"
         onClick={(event) => {
           // The lines go; the menu that shows them again takes focus.
           event.currentTarget.closest("li")?.querySelector<HTMLElement>('[data-testid="sharing-received-menu"]')?.focus();
@@ -726,22 +729,22 @@ export function SharingView(props: {
   // yes or no is kept, never the link.
   const [invitations, setInvitations] = useState(false);
   const probed = useRef(false);
+  // Mount-only, so StrictMode's replay sets it again before the probe answers.
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   const grantedView = granted.view;
   useEffect(() => {
     if (probed.current || grantedView.status !== "ready") return;
     const grant = groupShares(grantedView.answer.rows).map((group) => copiesOf(group).invitation).find((row) => row !== null);
     if (!grant) return;
+    // A started probe stands for the view's life; a lane reload does not ask again.
     probed.current = true;
-    let live = true, answered = false;
     bridge().getShareCopyDetails({ shareId: grant.shareId, grantId: grant.grantId }).then((details) => {
-      answered = true;
-      if (live) setInvitations(details.status === "active" && !!details.browserInvitationUrl);
-    }, () => { answered = true; });
-    return () => {
-      live = false;
-      // A probe that never answered may ask again, as StrictMode's replay does.
-      if (!answered) probed.current = false;
-    };
+      if (mounted.current) setInvitations(details.status === "active" && !!details.browserInvitationUrl);
+    }, () => undefined);
   }, [grantedView]);
 
   // As About's Access: ask main to check again when the view opens, and when

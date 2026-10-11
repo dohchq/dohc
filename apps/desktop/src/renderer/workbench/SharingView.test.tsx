@@ -490,7 +490,7 @@ describe("copying a share's code or invitation", () => {
     reportFailure.mockReset();
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
   });
-  function CopyView(props: { focus?: SharingFocus; open?: boolean }) {
+  function CopyView(props: { focus?: SharingFocus; open?: boolean; facts?: AccessFacts }) {
     return <ShellErrorReporter.Provider value={reportFailure}><View {...props} /></ShellErrorReporter.Provider>;
   }
   const INVITING = {
@@ -545,6 +545,24 @@ describe("copying a share's code or invitation", () => {
     expect(within(named).queryByRole("button", { name: "Copy invitation" })).toBeNull();
     expect(within(named).getByRole("button", { name: "Copy code" })).toBeTruthy();
     expect(reportFailure).not.toHaveBeenCalled();
+  });
+
+  it("asks once per view open, even when the list reads again while it waits", async () => {
+    answerWith({ granted: answer("granted", { rows: ROWS }) });
+    const pending = deferred<ShareCopyResult>();
+    bridgeMock.getShareCopyDetails.mockReturnValue(pending.promise);
+    const { rerender } = render(<CopyView />);
+    await rowOf("share-1");
+    await waitFor(() => expect(bridgeMock.getShareCopyDetails).toHaveBeenCalledOnce());
+    // A new connection reads both lists again while the probe is pending.
+    const reads = bridgeMock.listSharingAccess.mock.calls.length;
+    rerender(<CopyView facts={SIGNED_OUT} />);
+    await waitFor(() => expect(bridgeMock.listSharingAccess.mock.calls.length).toBeGreaterThan(reads));
+    await act(async () => undefined);
+    expect(bridgeMock.getShareCopyDetails).toHaveBeenCalledOnce();
+    await act(async () => pending.resolve(INVITING));
+    expect(await within(await rowOf("share-1")).findByRole("button", { name: "Copy invitation" })).toBeTruthy();
+    expect(bridgeMock.getShareCopyDetails).toHaveBeenCalledOnce();
   });
 
   it("asks nothing when no row could have an invitation", async () => {
@@ -672,7 +690,9 @@ describe("mounts and their skipped changes", () => {
     // The relay's words, whole, then what the copy here still does.
     expect(within(row).getByTestId("sharing-row-note").textContent)
       .toBe("Sam removed your access. Your copy stays readable but won't update.");
-    expect(screen.getByRole("group", { name: /^notes, from .+, Sam removed your access\. Your copy stays readable but won't update\., removed$/ })).toBeTruthy();
+    // Named by what it is; the note's sentences describe it.
+    const group = screen.getByRole("group", { name: /^notes, from .+, removed$/ });
+    expect(group.getAttribute("aria-describedby")).toBe(within(row).getByTestId("sharing-row-note").id);
     expect(within(row).getByTestId("sharing-row-status").textContent).toBe("removed");
     expect(within(await openMenu(row)).getByRole("menuitem", { name: "Remove from workspace" })).toBeTruthy();
   });
