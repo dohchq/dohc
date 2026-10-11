@@ -544,7 +544,36 @@ pub struct CollectionFieldHistoryEntry {
     /// author and for an automation's write recorded without its run.
     pub automation_run: Option<AutomationRunAttribution>,
     /// Owner-only relay-derived provenance for a live Edit link change.
-    pub link_author: Option<SharedChangeAuthor>,
+    pub link_author: Option<CollectionLiveLinkAuthor>,
+}
+
+/// A live link's public snapshot identity, distinct from a direct write's private principal.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum CollectionLiveLinkAuthor {
+    #[serde(rename = "link")]
+    Link {
+        #[serde(rename = "grantId")]
+        grant_id: String,
+        #[serde(rename = "grantGeneration")]
+        grant_generation: i64,
+        #[serde(rename = "publicPrincipalId")]
+        public_principal_id: String,
+    },
+}
+
+impl CollectionLiveLinkAuthor {
+    pub fn is_valid(&self) -> bool {
+        let Self::Link {
+            grant_id,
+            grant_generation,
+            public_principal_id,
+        } = self;
+        [grant_id, public_principal_id]
+            .iter()
+            .all(|id| !id.is_empty() && id.len() <= 512)
+            && (1..=9_007_199_254_740_991).contains(grant_generation)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -6390,15 +6419,11 @@ pub fn get_collection_record(
                     ),
                     link_author: link_author_json
                         .map(|json| {
-                            let author: SharedChangeAuthor =
-                                serde_json::from_str(&json).map_err(|_| {
-                                    crate::DomainError::StateCorrupt {
-                                        reason: "collection history link author is invalid",
-                                    }
+                            let author: CollectionLiveLinkAuthor = serde_json::from_str(&json)
+                                .map_err(|_| crate::DomainError::StateCorrupt {
+                                    reason: "collection history link author is invalid",
                                 })?;
-                            if !matches!(author, SharedChangeAuthor::Link { .. })
-                                || !author.is_valid()
-                            {
+                            if !author.is_valid() {
                                 return Err(crate::DomainError::StateCorrupt {
                                     reason: "collection history link author is invalid",
                                 });

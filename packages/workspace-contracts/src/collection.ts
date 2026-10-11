@@ -1,5 +1,3 @@
-import type { MomentAuthor } from "./engine";
-
 export const COLLECTION_SCHEMA_FILENAME = "collection.yaml";
 export const RECORD_ID_FRONTMATTER_KEY = "id";
 
@@ -284,6 +282,14 @@ export type AutomationRunAttribution = {
   automationName: string;
 };
 
+/** Owner-only live provenance. The public principal is distinct from a direct write's private principal. */
+export interface CollectionLiveLinkAuthor {
+  kind: "link";
+  grantId: string;
+  grantGeneration: number;
+  publicPrincipalId: string;
+}
+
 interface CollectionFieldHistoryEntry {
   historyId: number;
   field: string;
@@ -300,7 +306,7 @@ interface CollectionFieldHistoryEntry {
   /** The run an automation's write came from, `null` for any other write and for one recorded without its run. */
   automationRun: AutomationRunAttribution | null;
   /** Owner-only attribution from an accepted live Edit link frame. */
-  linkAuthor: Extract<MomentAuthor, { kind: "link"; grantId: string }> | null;
+  linkAuthor: CollectionLiveLinkAuthor | null;
 }
 
 export interface CollectionGetRecordResult {

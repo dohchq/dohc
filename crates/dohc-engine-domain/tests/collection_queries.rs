@@ -3289,8 +3289,7 @@ fn get_record_history_is_bounded_and_newest_first() {
 #[test]
 fn get_record_history_reads_link_author_without_an_account_actor() {
     let (_scratch, mut store) = seeded_store();
-    let author =
-        json!({"kind":"link","grantId":"grant","grantGeneration":2,"principalId":"public-holder"});
+    let author = json!({"kind":"link","grantId":"grant","grantGeneration":2,"publicPrincipalId":"public-holder"});
     store.write_with(&NoFaults, |tx| -> Result<(), StorageError> {
         tx.execute("INSERT INTO collection_field_history(workspace_id,version_id,record_id,field_name,recorded_at_ms,link_author_json) VALUES (?1,?2,?3,'Status',100,?4)",
             params![WORKSPACE_ID, VERSION_ID, FIRST_TASK_ID, author.to_string()]).map_err(StorageError::persist_public)?;

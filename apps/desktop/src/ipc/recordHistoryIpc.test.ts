@@ -16,7 +16,7 @@ const names = (): RecordHistoryAuthors => ({
 describe("Record History live authors", () => {
   it.skipIf(process.env.DOHC_FIELD_HISTORY_COST !== "1")("measures preparation of a 50-link page", async () => {
     const history = Array.from({ length: 50 }, (_, historyId) => ({ ...change("human"), historyId, actorKind: null, authorOriginId: null, onBehalfOf: null,
-      linkAuthor: { kind: "link" as const, grantId: "link", grantGeneration: 2, principalId: `public-holder-${historyId}` } }));
+      linkAuthor: { kind: "link" as const, grantId: "link", grantGeneration: 2, publicPrincipalId: `public-holder-${historyId}` } }));
     const page = { history, nextBeforeHistoryId: null };
     const authors = names();
     const samples: number[] = [];
@@ -29,13 +29,26 @@ describe("Record History live authors", () => {
     process.stdout.write(`record_history_page_cost: rows=50 n=${samples.length} median_ns=${(samples[14]! + samples[15]!) / 2}\n`);
   });
   it("keeps the link grant and public principal without account lookups", async () => {
-    const linkAuthor = { kind: "link" as const, grantId: "ended-link", grantGeneration: 2, principalId: "public-holder" };
+    const linkAuthor = { kind: "link" as const, grantId: "ended-link", grantGeneration: 2, publicPrincipalId: "public-holder" };
     const person = vi.fn();
     const prepare = vi.fn();
     const page = await recordHistoryForIpc({ history: [{ ...change("human"), actorKind: null, authorOriginId: null, onBehalfOf: null, linkAuthor }], nextBeforeHistoryId: null }, { ...names(), person, prepare });
     expect(page.entries[0]?.author).toEqual(linkAuthor);
     expect(person).not.toHaveBeenCalled();
     expect(prepare).toHaveBeenCalledExactlyOnceWith([]);
+  });
+  it("keeps the relay-bound link agent without looking up the public principal as an account", async () => {
+    const linkAuthor = { kind: "link" as const, grantId: "link", grantGeneration: 2, publicPrincipalId: "public-holder" };
+    const person = vi.fn();
+    const prepare = vi.fn();
+    const agent = vi.fn(() => "Agent");
+    const page = await recordHistoryForIpc({ history: [{ ...change("agent"), onBehalfOf: "public-holder", linkAuthor }], nextBeforeHistoryId: null }, { ...names(), person, prepare, agent });
+    expect(page.entries[0]?.author).toEqual({ ...linkAuthor, agentName: "Agent" });
+    expect(GetCollectionRecordHistoryResult.parse(page)).toEqual(page);
+    expect(() => GetCollectionRecordHistoryResult.parse({ ...page, entries: [{ ...page.entries[0], author: { ...linkAuthor, principalId: "private-holder" } }] })).toThrow();
+    expect(person).not.toHaveBeenCalled();
+    expect(prepare).toHaveBeenCalledExactlyOnceWith([]);
+    expect(agent).toHaveBeenCalledExactlyOnceWith("public-holder");
   });
   it.each(["human", "agent"] as const)("keeps a %s row's local person unnamed and off account lookups", async actorKind => {
     const localId = "local:installation-1";

@@ -70,6 +70,7 @@ export async function recordHistoryForIpc(
   authors: RecordHistoryAuthors,
 ): Promise<GetCollectionRecordHistoryResult> {
   authors.prepare([...new Set(page.history.flatMap(entry => {
+    if (entry.linkAuthor !== null) return [];
     if (entry.authorOriginId === null) return [];
     const userId = entry.actorKind === "human" ? entry.authorOriginId : entry.onBehalfOf;
     return userId !== null && recordHistoryPersonIsNamed(userId) ? [userId] : [];
@@ -88,7 +89,12 @@ export async function recordHistoryForIpc(
     return known;
   };
   const authorOf = async (entry: HistoryEntry): Promise<Author> => {
-    if (entry.linkAuthor !== null) return entry.linkAuthor;
+    if (entry.linkAuthor !== null) {
+      const link = entry.linkAuthor;
+      return entry.actorKind === "agent" && entry.authorOriginId !== null && entry.onBehalfOf === link.publicPrincipalId
+        ? { ...link, agentName: authors.agent(entry.onBehalfOf) }
+        : link;
+    }
     const actor = entry.authorOriginId;
     if (actor === null) return null;
     if (entry.actorKind === "human") {

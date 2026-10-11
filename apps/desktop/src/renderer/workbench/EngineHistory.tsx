@@ -6,7 +6,6 @@ import { useId, useMemo, useState } from "react";
 import { LegendList } from "@legendapp/list/react";
 import type { EngineMomentRecord } from "../../ipc/bridgeContract";
 import { chatAuthorLabel } from "./chatMessages";
-import { historyLinkLabel } from "./historyLinkLabel";
 
 // Engine history timeline. Renders engine moments with their summaries
 // ("Saved latest edits", "Merged version X into Main", "Reconciled offline
@@ -79,7 +78,7 @@ export function engineMomentSourceLabel(
 ): string {
   if (moment.origin === "restore" && moment.personAuthorName !== undefined) return moment.personAuthorName;
   if (moment.publicAuthor) return `Link holder ${moment.publicAuthor.principalId}`;
-  if (moment.linkAuthor) return historyLinkLabel(moment.linkAuthor);
+  if (moment.linkAuthor) return `Edit link · holder ${moment.linkAuthor.principalId.slice(0, 8)}`;
   if (moment.automationAuthor) {
     const { name, collection } = moment.automationAuthor;
     return collection === undefined ? name : `${name} in ${collection}`;

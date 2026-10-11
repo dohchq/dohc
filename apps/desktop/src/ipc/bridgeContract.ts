@@ -716,7 +716,13 @@ const HistoryLinkAuthor = z.object({
   principalId: z.string().min(1).max(500),
 }).strict();
 const RecordHistoryAuthor = z.discriminatedUnion("kind", [
-  HistoryLinkAuthor,
+  z.object({
+    kind: z.literal("link"),
+    grantId: z.string().min(1).max(512),
+    grantGeneration: z.number().int().positive(),
+    publicPrincipalId: z.string().min(1).max(512),
+    agentName: z.string().min(1).max(4096).optional(),
+  }).strict(),
   z.object({ kind: z.literal("human"), name: z.string().min(1).max(4096) }),
   z.object({ kind: z.literal("agent"), name: z.string().min(1).max(4096), person: z.string().min(1).max(4096).optional() }),
   z.object({

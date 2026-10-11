@@ -34,15 +34,20 @@ const snapshot = {
 };
 
 it("preserves the owner-only link author through the collection history wire contract", () => {
-  const linkAuthor = { kind: "link", grantId: "ended-link", grantGeneration: 2, principalId: "public-holder" };
-  const fetched = decodeWorkspaceResult(WORKSPACE_METHOD.collectionsGetRecord, {
+  const linkAuthor = { kind: "link", grantId: "ended-link", grantGeneration: 2, publicPrincipalId: "public-holder" };
+  const raw = {
     collection: { path: "tasks", objectId: "schema", status: "valid", reasons: [] },
     record: { id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa", path: "tasks/a.md", conflicted: false, values: [] },
     history: [{ historyId: 1, field: "Status", previous: { present: false, value: null }, next: { present: true, value: "Done" },
       authorOriginId: null, actorKind: null, onBehalfOf: null, depth: null, recordedAtMs: 1, automationRun: null, linkAuthor }],
     nextBeforeHistoryId: null,
-  });
+  };
+  const fetched = decodeWorkspaceResult(WORKSPACE_METHOD.collectionsGetRecord, raw);
   expect(fetched.history[0]?.linkAuthor).toEqual(linkAuthor);
+  expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.collectionsGetRecord, {
+    ...raw,
+    history: [{ ...raw.history[0], linkAuthor: { kind: "link", grantId: "ended-link", grantGeneration: 2, principalId: "private-holder" } }],
+  })).toThrow(ProtocolShapeError);
 });
 
 const state = {

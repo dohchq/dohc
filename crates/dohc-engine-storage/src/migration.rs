@@ -3557,13 +3557,10 @@ mod tests {
     use crate::faults::FaultAction;
     use crate::faults::NoFaults;
 
-    fn field_history_link_upgrade(rows: i64, on_disk: bool) {
+    fn field_history_link_upgrade(rows: i64) {
         let dir = tempdir();
-        let mut conn = if on_disk {
-            open_bare(&dir.join("engine.db"))
-        } else {
-            Connection::open_in_memory().unwrap()
-        };
+        let path = dir.join("engine.db");
+        let mut conn = open_bare(&path);
         let ctx = MigrationContext::current(1000);
         let target = BASELINE_MIGRATIONS
             .iter()
@@ -3591,7 +3588,7 @@ mod tests {
         let start = std::time::Instant::now();
         run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
         println!(
-            "field_history_link_migration: rows={rows} on_disk={on_disk} elapsed_ns={}",
+            "field_history_link_migration: rows={rows} on_disk=true elapsed_ns={}",
             start.elapsed().as_nanos()
         );
         assert_eq!(root(&conn), before_root, "the table was not rebuilt");
@@ -3604,9 +3601,19 @@ mod tests {
             .unwrap(),
             rows
         );
-        conn.execute("INSERT INTO collection_field_history(workspace_id,version_id,record_id,field_name,recorded_at_ms,link_author_json) VALUES ('ws','main','record','status',?1,?2)", rusqlite::params![rows+1, r#"{"kind":"link","grantId":"grant","grantGeneration":1,"principalId":"public"}"#]).unwrap();
+        conn.execute("INSERT INTO collection_field_history(workspace_id,version_id,record_id,field_name,recorded_at_ms,link_author_json) VALUES ('ws','main','record','status',?1,?2)", rusqlite::params![rows+1, r#"{"kind":"link","grantId":"grant","grantGeneration":1,"publicPrincipalId":"public"}"#]).unwrap();
         assert_eq!(conn.last_insert_rowid(), rows + 1);
         assert_eq!(conn.query_row("SELECT count(*) FROM sqlite_schema WHERE name IN ('collection_field_history_by_record','collection_field_history_by_source')", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
+        drop(conn);
+        let mut conn = open_bare(&path);
+        assert_eq!(root(&conn), before_root);
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM collection_field_history", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            rows + 1
+        );
         assert_eq!(
             run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
             MigrationOutcome::Applied { newly_applied: 0 }
@@ -3615,13 +3622,13 @@ mod tests {
 
     #[test]
     fn field_history_link_migration_preserves_populated_rows() {
-        field_history_link_upgrade(3, false);
+        field_history_link_upgrade(3);
     }
 
     #[test]
     #[ignore = "manual migration timing on one million persisted rows"]
     fn field_history_link_migration_million_rows() {
-        field_history_link_upgrade(1_000_000, true);
+        field_history_link_upgrade(1_000_000);
     }
     #[cfg(feature = "fault-injection")]
     use std::sync::atomic::{AtomicBool, Ordering};
