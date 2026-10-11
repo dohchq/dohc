@@ -30,6 +30,7 @@ pub use owner_publication::{
     OwnerAdmissionPending, OwnerPublicationPrefix, owner_publication_prefix,
 };
 mod path_policy;
+mod references;
 mod refusal_notices;
 mod relay;
 pub use refusal_notices::{

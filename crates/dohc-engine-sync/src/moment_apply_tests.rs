@@ -2009,6 +2009,8 @@ enum PendingFieldSettlement {
     StorageFailure,
     Oversize,
     ReplayFailure,
+    NonFiniteFields,
+    RequotedNonFinite,
 }
 
 #[test]
@@ -2036,6 +2038,16 @@ fn observed_owner_indexing_replay_failure_does_not_stop_frames_or_settlement() {
     pending_field_settlement_case(PendingFieldSettlement::ReplayFailure);
 }
 
+#[test]
+fn observed_owner_settlement_flags_restored_source_beside_draft_values() {
+    pending_field_settlement_case(PendingFieldSettlement::NonFiniteFields);
+}
+
+#[test]
+fn observed_owner_settlement_keeps_draft_quoted_value_over_equal_checkpoint_value() {
+    pending_field_settlement_case(PendingFieldSettlement::RequotedNonFinite);
+}
+
 fn pending_field_settlement(replay: bool) {
     pending_field_settlement_case(if replay {
         PendingFieldSettlement::Replay
@@ -2058,13 +2070,22 @@ fn pending_field_settlement_case(case: PendingFieldSettlement) {
     doc.frontmatter_set("id", "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa")
         .unwrap();
     doc.frontmatter_set("status", "open").unwrap();
+    let requoted = case == PendingFieldSettlement::RequotedNonFinite;
+    let non_finite = requoted || case == PendingFieldSettlement::NonFiniteFields;
+    // The accepted `.nan` that the draft leaves alone.
+    let untouched = if requoted { "effort" } else { "estimate" };
     let text = doc.project(YdocContentKind::Richdoc).unwrap().content;
     let mut owner = restore_owner_from(&doc.encode_full_state(), &text, "tasks/owner.md");
     seed_text_moment(
         &mut owner.store,
         "schema",
         "tasks/collection.yaml",
-        "fields:\n  status:\n    type: text\n",
+        if non_finite {
+            "fields:\n  status:\n    type: text\n  estimate:\n    type: number\n  \
+             effort:\n    type: number\n"
+        } else {
+            "fields:\n  status:\n    type: text\n"
+        },
         "schema",
         None,
         true,
@@ -2082,10 +2103,36 @@ fn pending_field_settlement_case(case: PendingFieldSettlement) {
         host.richdoc_append_paragraph("accepted body"),
         1,
     );
+    if non_finite {
+        // A restore keeps source text that the generated emitter would quote.
+        let current = host.project(YdocContentKind::Richdoc).unwrap().content;
+        let restored = current.replacen("---\n", "---\nestimate: .nan\neffort: .nan\n", 1);
+        apply_test_owner_frame(
+            &mut owner,
+            host.rewrite_content_to_markdown(YdocContentKind::Richdoc, &restored)
+                .unwrap(),
+            2,
+        );
+    }
     let draft = Ydoc::wire();
     draft.apply(&host.encode_full_state()).unwrap();
     let vector = draft.encode_state_vector();
     draft.frontmatter_set("status", "done").unwrap();
+    if requoted {
+        // The draft quotes the accepted value. Its JSON value stays the same.
+        let shown = draft.project(YdocContentKind::Richdoc).unwrap().content;
+        let quoted = shown.replacen("\nestimate: .nan\n", "\nestimate: \".nan\"\n", 1);
+        assert_ne!(quoted, shown);
+        draft
+            .frontmatter_set_preserving_markdown_source("estimate", ".nan", &quoted)
+            .unwrap();
+        assert_eq!(
+            draft.frontmatter_json()["estimate"],
+            host.frontmatter_json()["estimate"]
+        );
+    } else if non_finite {
+        draft.frontmatter_set("effort", "7").unwrap();
+    }
     if case == PendingFieldSettlement::Oversize {
         draft.richdoc_append_paragraph(&"pending body ".repeat(170_000));
         owner.observed.limits.max_pending_bytes = 3_000_000;
@@ -2115,6 +2162,30 @@ fn pending_field_settlement_case(case: PendingFieldSettlement) {
         })
         .unwrap();
     assert_pending_status(&owner);
+    let draft_fields = non_finite.then(|| record_fields(&owner));
+    if let Some(fields) = &draft_fields {
+        // The draft indexed the restored value from JSON, without its source.
+        let accepted = fields.iter().find(|field| field.0 == untouched).unwrap();
+        assert!(
+            !accepted
+                .3
+                .as_deref()
+                .unwrap_or_default()
+                .contains("number-not-finite")
+        );
+    }
+    if requoted {
+        let fields = draft_fields.as_ref().unwrap();
+        let estimate = fields.iter().find(|field| field.0 == "estimate").unwrap();
+        assert!(
+            estimate
+                .3
+                .as_deref()
+                .is_some_and(|code| code.contains("expected-number"))
+        );
+        let shown = visible_draft_text(&owner);
+        assert!(shown.contains("\nestimate: \".nan\"\n"));
+    }
     if matches!(
         case,
         PendingFieldSettlement::Quarantined | PendingFieldSettlement::QuarantinedRefusal
@@ -2217,6 +2288,7 @@ fn pending_field_settlement_case(case: PendingFieldSettlement) {
     }
     let later_frame = replay.then(|| host.richdoc_append_paragraph("settled before its frame"));
     let settled = host.project(YdocContentKind::Richdoc).unwrap().content;
+    assert!(!non_finite || settled.contains("\nestimate: .nan\neffort: .nan\n"));
     let cursor = if replay {
         2
     } else {
@@ -2302,6 +2374,25 @@ fn pending_field_settlement_case(case: PendingFieldSettlement) {
     )
     .unwrap();
     assert!(matches!(result.primary, ApplyDisposition::Applied(ref r) if r.record_facts.is_none()));
+    if let Some(mut fields) = draft_fields {
+        // Accepted `.nan` takes its parse flag. Draft values keep their index.
+        let (accepted, others): (Vec<_>, Vec<_>) = record_fields(&owner)
+            .into_iter()
+            .partition(|field| field.0 == untouched);
+        assert!(
+            accepted[0]
+                .3
+                .as_deref()
+                .is_some_and(|code| code.contains("number-not-finite"))
+        );
+        fields.retain(|field| field.0 != untouched);
+        assert_eq!(others, fields);
+    }
+    if requoted {
+        // The draft's quoted value still shows over the checkpoint's `.nan`.
+        let shown = visible_draft_text(&owner);
+        assert!(shown.contains("\nestimate: \".nan\"\n"));
+    }
     if let Some(update) = later_frame {
         assert_eq!(
             owner
@@ -2388,6 +2479,45 @@ fn assert_retained_status(owner: &RestoreOwner) {
             Ok::<_, rusqlite::Error>(())
         })
         .unwrap();
+}
+
+fn record_fields(owner: &RestoreOwner) -> Vec<(String, String, String, Option<String>)> {
+    owner
+        .store
+        .read_with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT field_name,value_json,validation_status,validation_reason_json \
+                 FROM collection_record_fields ORDER BY field_name",
+            )?;
+            let fields = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, rusqlite::Error>(fields)
+        })
+        .unwrap()
+}
+
+fn visible_draft_text(owner: &RestoreOwner) -> String {
+    owner
+        .store
+        .read_with(|conn| {
+            let draft = dohc_engine_collab::owner_outbox::draft::open_draft_in(
+                conn,
+                &owner.observed.binding,
+                owner.observed.revision,
+            )
+            .unwrap();
+            let projection = draft.doc.project(YdocContentKind::Richdoc).unwrap();
+            Ok::<_, rusqlite::Error>(projection.content)
+        })
+        .unwrap()
 }
 
 /// The host's state once a restore that appends `paragraph` is accepted.

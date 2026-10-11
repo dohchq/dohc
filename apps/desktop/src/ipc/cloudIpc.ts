@@ -74,7 +74,7 @@ export function registerCloudIpcHandlers<
   }): EngineRelayWorkspaceClient;
   enrollWorkspaceKeyEnvelope: typeof enrollWorkspaceKeyEnvelope;
   installWorkspaceDataKey: typeof installWorkspaceDataKey;
-  setWorkspaceRemote(workspaceId: string, remote: NonNullable<RegistryEntry["remote"]>): unknown;
+  setWorkspaceRemote(workspaceId: string, remote: NonNullable<RegistryEntry["remote"]>): Promise<void>;
   usableRoot(rootPath: string): string;
   readdir(rootPath: string): Promise<string[]>;
   mkdir(rootPath: string, options: { recursive: true }): Promise<unknown>;
@@ -253,10 +253,11 @@ export function registerCloudIpcHandlers<
             await installWorkspaceDataKey(workspace.rootPath, unwrapped),
         });
         operation.assertCurrent();
-        setWorkspaceRemote(workspace.workspaceId, {
+        await setWorkspaceRemote(workspace.workspaceId, {
           serverUrl: credentials.serverUrl,
           ownerUserId: credentials.userId,
         });
+        operation.assertCurrent();
         await activity.enableCloud(workspace);
         operation.assertCurrent();
         return SyncStatusResult.parse(activity.getStatus(workspace.workspaceId));
@@ -377,7 +378,7 @@ export function registerCloudIpcHandlers<
         // never seed boilerplate into the remote or conflict against it.
         await openWorkspaceActivity(created, {
           afterActivityOpen: async () => {
-            setWorkspaceRemote(created.workspaceId, {
+            await setWorkspaceRemote(created.workspaceId, {
               serverUrl: credentials.serverUrl,
               ownerUserId: credentials.userId,
             });

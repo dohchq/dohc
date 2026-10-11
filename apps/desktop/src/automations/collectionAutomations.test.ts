@@ -5078,7 +5078,7 @@ describe("Collection automations that a Group message starts", () => {
     await neverSynced.dispose();
 
     // Sync was on once and is off now: another computer may be the host.
-    recordSynced(w.root);
+    await recordSynced(w.root);
     const syncedBefore = w.makeExecutor({ groupHost: host, hostCanRun: async () => false });
     await syncedBefore.open();
     await w.until(() => !w.subscriptions.has("collection:Tasks#task"));
@@ -5524,7 +5524,7 @@ describe("Collection automations that a Group message starts", () => {
     w.engine.releaseAutomationGroups = async () => { removals += 1; return await release(); };
 
     // Sync turns on, and the relay records no host yet.
-    recordSynced(w.root);
+    await recordSynced(w.root);
     workspace.remote = {};
     here.executor.hostChanged();
     await here.executor.automationsIn("Tasks");
@@ -5552,7 +5552,7 @@ describe("Collection automations that a Group message starts", () => {
     // the host, and nothing else asks the executor.
     relay.row = start.row;
     relay.down = "down" in start;
-    recordSynced(w.root);
+    await recordSynced(w.root);
     workspace.remote = {};
     here.hosts.relayAnswered("ws");
     await w.until(() => !subscribed(w));

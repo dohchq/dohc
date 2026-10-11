@@ -975,6 +975,35 @@ impl Ydoc {
         Value::Object(entries.into_iter().collect())
     }
 
+    /// Parse provenance for the frontmatter this document shows, read without
+    /// projecting the body. Only kept source text can hold YAML that the
+    /// values cannot show, such as an unquoted `.nan` or a tag.
+    pub fn frontmatter_provenance(
+        &self,
+    ) -> Result<dohc_engine_domain::collections::FrontmatterProvenance, CollabError> {
+        let current = self.frontmatter_json();
+        let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
+        let meta = self.doc.get_or_insert_map(ROOT_META);
+        let txn = self.doc.transact();
+        let source = match meta.get(&txn, FRONTMATTER_SOURCE_META_KEY) {
+            Some(Out::Any(Any::String(source))) => source,
+            _ => return Ok(Default::default()),
+        };
+        let rendered = current
+            .as_object()
+            .ok_or(CollabError::FrontmatterEditRefused)?
+            .iter()
+            .map(|(key, value)| Ok((key.clone(), project_frontmatter(key, value)?)))
+            .collect::<ProjectionResult<BTreeMap<_, _>>>()?;
+        let written = written_frontmatter_keys(&map, &meta, &txn);
+        let kept = frontmatter_yaml::kept(&source, &rendered, &written)
+            .ok_or(CollabError::FrontmatterEditRefused)?;
+        let provenance =
+            dohc_engine_domain::collections::markdown_frontmatter_json_with_provenance(&kept)
+                .map_or_else(Default::default, |(_, provenance)| provenance);
+        Ok(provenance)
+    }
+
     /// Per body paragraph, its formatted runs `(text, bold, italic)` — the
     /// structural surface the cross-engine tests compare against the yjs
     /// paragraph deltas (marks / formatting fidelity).

@@ -382,6 +382,37 @@ describe('live property renames', () => {
     } finally { renamedOnto.destroy(); recreated.destroy() }
   })
 
+  // A person deletes a property and adds it back as text. The new key no
+  // longer holds its kept text, so it settles quoted; the others keep theirs.
+  it('quotes a property deleted and added back as the same text', () => {
+    const doc = markdownToYDoc('---\nestimate: .nan\neffort: .nan\n---\n\nBody')
+    const reopened = new Y.Doc()
+    try {
+      const frontmatter = doc.getMap<unknown>('frontmatter')
+      const meta = doc.getMap<unknown>('meta')
+      const before = frontmatterMapValues(frontmatter)
+      expect(before).toEqual({ estimate: '.nan', effort: '.nan' })
+      expect(writtenFrontmatterKeys(frontmatter, meta)).toEqual(new Set(['estimate', 'effort']))
+      Y.applyUpdate(reopened, Y.encodeStateAsUpdate(doc))
+      const updates: Uint8Array[] = []
+      doc.on('update', update => updates.push(update))
+
+      patchFrontmatter(doc, new Map(), ['estimate'])
+      setFrontmatterValue(doc, 'estimate', '.nan')
+      expect(frontmatterMapValues(frontmatter)).toEqual(before)
+      expect(writtenFrontmatterKeys(frontmatter, meta)).toEqual(new Set(['effort']))
+      const settled = yDocToMarkdown(doc)
+      expect(settled).toMatch(/^estimate: (['"])\.nan\1$/m)
+      expect(settled).toMatch(/^effort: \.nan$/m)
+      expect(loadMarkdownFrontmatter(settled)!.meta).toEqual(before)
+
+      // The checkpoint replays the edits as a replica receives them.
+      for (const update of updates) Y.applyUpdate(reopened, update)
+      expect(frontmatterMapValues(reopened.getMap('frontmatter'))).toEqual(before)
+      expect(yDocToMarkdown(reopened)).toBe(settled)
+    } finally { doc.destroy(); reopened.destroy() }
+  })
+
   it('keeps edits another device makes to other properties at the same time', () => {
     const base = markdownToYDoc(budget)
     const [a, b] = [new Y.Doc(), new Y.Doc()]

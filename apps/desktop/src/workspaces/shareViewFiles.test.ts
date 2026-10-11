@@ -339,7 +339,7 @@ describe("ShareViewFiles", () => {
     const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
     await withStaleSensitiveWorkspaceOperation(rootPath, async lease => {
       if (restriction === "end") await files.end(lease, requested, () => undefined);
-      else await files.narrow(lease, requested, () => undefined, (paths, snapshot) => {
+      else await files.narrow(lease, requested, () => undefined, async (paths, snapshot) => {
         registered.grantedSelector.access = "view"; registered.unsavedPaths = paths; registered.unconfirmedChanges = snapshot;
       });
     });
@@ -397,7 +397,7 @@ describe("ShareViewFiles", () => {
     await withStaleSensitiveWorkspaceOperation(rootPath, async lease => {
       const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
       if (restriction === "end") await files.end(lease, requested, () => undefined);
-      else await files.narrow(lease, requested, () => undefined, (paths, snapshot) => {
+      else await files.narrow(lease, requested, () => undefined, async (paths, snapshot) => {
         registered.unsavedPaths = paths; registered.unconfirmedChanges = snapshot;
       });
     });
@@ -430,7 +430,7 @@ describe("ShareViewFiles", () => {
     try {
       await withStaleSensitiveWorkspaceOperation(rootPath, async lease => {
         if (restriction === "end") await files.end(lease, requested, () => undefined);
-        else await files.narrow(lease, requested, () => undefined, unsavedPaths => {
+        else await files.narrow(lease, requested, () => undefined, async unsavedPaths => {
           registered.grantedSelector.access = "view"; registered.unsavedPaths = unsavedPaths;
         });
       });
@@ -458,7 +458,7 @@ describe("ShareViewFiles", () => {
     const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
     await withStaleSensitiveWorkspaceOperation(rootPath, async lease => {
       if (restriction === "end") await files.end(lease, requested, () => undefined);
-      else await files.narrow(lease, requested, () => undefined, () => { registered.grantedSelector.access = "view"; });
+      else await files.narrow(lease, requested, () => undefined, async () => { registered.grantedSelector.access = "view"; });
     });
     expect(store.writeTextFile).toHaveBeenCalledWith(expect.objectContaining({ path, text: "recipient agent edit\n", metadata: { origin: "local-file" } }));
     await withStaleSensitiveWorkspaceOperation(rootPath, lease => files.reconcile(lease, requested, "settle"));
@@ -496,7 +496,7 @@ describe("ShareViewFiles", () => {
     try {
       await withStaleSensitiveWorkspaceOperation(rootPath, async lease => {
         if (restriction === "end") await files.end(lease, requested, () => undefined);
-        else await files.narrow(lease, requested, () => undefined, unsavedPaths => {
+        else await files.narrow(lease, requested, () => undefined, async unsavedPaths => {
           registered.grantedSelector.access = "view"; registered.unsavedPaths = unsavedPaths;
         });
       });
