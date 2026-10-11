@@ -66,6 +66,7 @@ export interface ServerRuns {
     scope: OwnerScope,
     definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>,
     again: boolean,
+    retentionId: string,
   ): Promise<{ undone: number; left: number; reverted: number; missing: number; keptFields: KeptAutomationField[]; otherKept: number; errorMessage: string | null }>;
   holds(scope: OwnerScope): CollectionAutomationHold[];
   allow(scope: OwnerScope, input: { automationId: string; definitionHash: string; step: string; seq: number; recipient?: string }): Promise<"confirmed" | "changed">;
@@ -111,7 +112,7 @@ export function createAutomationServerRoutes(
       }
       case "restore":
         if (typeof body.again !== "boolean") throw badRequest("again must be true or false");
-        return jsonResponse({ ok: true, ...(await server.restore(scope, definitionsOf(body.definitions), body.again)) }, 200);
+        return jsonResponse({ ok: true, ...(await server.restore(scope, definitionsOf(body.definitions), body.again, line(body.retentionId, 256, "retentionId"))) }, 200);
       case "allow": {
         const recipient = body.recipient === undefined ? undefined : line(body.recipient, 1_024, "recipient");
         const status = await server.allow(scope, {

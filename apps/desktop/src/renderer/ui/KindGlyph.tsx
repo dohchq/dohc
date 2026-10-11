@@ -1,4 +1,4 @@
-import { Database, File, FileCode, FileSpreadsheet, FileText, Image, PenTool, type LucideIcon } from "lucide-react";
+import { AppWindow, Database, File, FileCode, FileSpreadsheet, FileText, Image, PenTool, type LucideIcon } from "lucide-react";
 import type { FileKindRecord } from "@dohc/workspace-contracts/kinds";
 
 // One kind, one glyph, one name: every surface draws a file's kind through
@@ -34,4 +34,10 @@ export function KindGlyph(props: {
     ? { role: "img", "aria-label": props.kind.name }
     : { "aria-hidden": true };
   return <Glyph {...label} size={props.size} className={`shrink-0 ${props.className ?? ""}`} />;
+}
+
+// An app is a folder, not a file kind, so the registry has no record for it.
+// A surface that lists an app as an object draws this glyph beside its name.
+export function AppGlyph(props: { size: number; className?: string }) {
+  return <AppWindow aria-hidden size={props.size} className={`shrink-0 ${props.className ?? ""}`} />;
 }

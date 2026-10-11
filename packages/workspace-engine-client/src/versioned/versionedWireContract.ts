@@ -668,6 +668,7 @@ const HumanAuthorSchema = mutableStruct({
   kind: Schema.Literal("human"),
   humanId: Schema.String,
   humanName: Schema.optionalKey(Schema.String),
+  relayConfirmed: Schema.optionalKey(Schema.Literal(true)),
   onBehalfOf: Schema.optionalKey(Schema.String),
 });
 const CorruptAuthorSchema = mutableStruct({ corrupt: Schema.Literal(true) });

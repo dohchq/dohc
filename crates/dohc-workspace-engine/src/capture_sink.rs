@@ -14,8 +14,8 @@ use dohc_engine_runtime::search::{
 };
 use dohc_engine_runtime::{
     ActorHandle, CaptureIngest, CaptureIngestBinary, CaptureRetire, CaptureSecret,
-    CaptureSecretRetire, MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS, NoFaults,
-    RuntimeError, WorkspaceRootGuard,
+    CaptureSecretRetire, CollectionReconciliation, MAX_CAPTURE_INGEST_BATCH_BYTES,
+    MAX_CAPTURE_INGEST_BATCH_OPS, NoFaults, RuntimeError, WorkspaceRootGuard,
 };
 use dohc_engine_storage::hex_sha256;
 use std::collections::HashMap;
@@ -493,12 +493,12 @@ impl StoreCaptureSink {
     /// Refresh collection detection and record bindings after a clean capture
     /// pass. Adoption uses the runtime's ordinary Y.Doc update + settle path,
     /// including durable replication journaling and self-write suppression.
-    pub(crate) fn reconcile_collections(&self) -> Result<Vec<String>, RuntimeError> {
+    pub(crate) fn reconcile_collections(&self) -> Result<CollectionReconciliation, RuntimeError> {
         let root_guard = self.root_guard().map_err(|_| RuntimeError::Identity {
             reason: "workspace root changed during capture",
             source: None,
         })?;
-        let reconciliation = self.actor.reconcile_collections_blocking_guarded(
+        let mut reconciliation = self.actor.reconcile_collections_blocking_guarded(
             self.workspace_id.clone(),
             self.version_id.clone(),
             self.shadow_root.clone(),
@@ -510,8 +510,8 @@ impl StoreCaptureSink {
         )?;
         self.automation_claims
             .borrow_mut()
-            .extend(reconciliation.automation_claims);
-        Ok(reconciliation.changed_paths)
+            .extend(std::mem::take(&mut reconciliation.automation_claims));
+        Ok(reconciliation)
     }
 
     /// Check only the changed collection records offered by this capture

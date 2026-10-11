@@ -1,5 +1,5 @@
-import { Globe2, Maximize2, RefreshCw } from "lucide-react";
-import { Suspense, lazy, type ComponentProps, type ReactNode } from "react";
+import { Maximize2, RefreshCw } from "lucide-react";
+import { Suspense, lazy, useState, type ComponentProps, type ReactNode } from "react";
 import type { WorkspaceSummary } from "../../ipc/bridgeContract";
 import { ErrorBoundary } from "../ErrorBoundary";
 import type { CustomizePart } from "../settings/customize";
@@ -12,25 +12,12 @@ import { SkeletonRows, SkeletonSlot } from "../ui/SkeletonRows";
 // missing. The view carries no dependency the shell does not already load.
 import { SearchView } from "../workbench/SearchView";
 import { SidePanel } from "../workbench/SidePanel";
-import { setView, setSidebarWidth, type WorkbenchState } from "../workbench/workbenchState";
-import { LazyGraphView, LazySitePreviewPage } from "./lazyViews";
+import { setView, setSidebarWidth, SHARING_VIEW_ID, type WorkbenchState } from "../workbench/workbenchState";
+import { LazyGraphView, LazySharingView, LazySitePreviewPage } from "./lazyViews";
 
 const LazyAppsView = lazy(() =>
   import("../workbench/AppsView").then((mod) => ({ default: mod.AppsView })),
 );
-
-// AppsView's own toolbar row above its loading lines, so when the view
-// arrives still loading, its lines take over in the same place.
-function AppsViewLoading() {
-  return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line px-3">
-        <Globe2 size={13} aria-hidden className="text-subtle" />
-      </div>
-      <SkeletonRows inSlot layout="panel" label="Loading apps..." />
-    </div>
-  );
-}
 
 type GraphViewProps = ComponentProps<typeof LazyGraphView>;
 type AppsViewProps = ComponentProps<typeof LazyAppsView>;
@@ -51,6 +38,8 @@ export function ShellSidePanel(props: {
   openSearchResult: ComponentProps<typeof SearchView>["onOpenResult"];
   workspaceId: string;
   activeDocumentPath: string | null;
+  focusedTabPath: AppsViewProps["activePath"];
+  appsNotices: AppsViewProps["notices"];
   graphKey: GraphViewProps["refreshKey"];
   openPathWithHeading: GraphViewProps["onOpenPath"] & AppsViewProps["onOpenPath"];
   openGraphChatThread: GraphViewProps["onOpenChatThread"];
@@ -61,6 +50,7 @@ export function ShellSidePanel(props: {
   createFirstApp: AppsViewProps["onCreateFirstApp"];
   shareView: NonNullable<WorkspaceSummary["shareView"]> | null;
   historyTimeline: ReactNode;
+  sharing: ComponentProps<typeof LazySharingView>;
   selectedAppRoot: string | null;
   openAppTab: SitePreviewPageProps["onOpenApp"];
   reportShellError: SitePreviewPageProps["reportError"];
@@ -80,6 +70,8 @@ export function ShellSidePanel(props: {
     openSearchResult,
     workspaceId,
     activeDocumentPath,
+    focusedTabPath,
+    appsNotices,
     graphKey,
     openPathWithHeading,
     openGraphChatThread,
@@ -90,11 +82,14 @@ export function ShellSidePanel(props: {
     createFirstApp,
     shareView,
     historyTimeline,
+    sharing,
     selectedAppRoot,
     openAppTab,
     reportShellError,
     setShareTarget,
   } = props;
+  // Where the Apps view puts its count and create button, ahead of Refresh.
+  const [appsHead, setAppsHead] = useState<HTMLSpanElement | null>(null);
   return (
     <SidePanel
       title={sidePanelTitle}
@@ -125,16 +120,19 @@ export function ShellSidePanel(props: {
               <Maximize2 size={13} aria-hidden />
             </button>
           ) : wb.activeView === "sites" ? (
-            <button
-              type="button"
-              data-testid="sites-refresh"
-              aria-label="Refresh apps"
-              title="Refresh apps"
-              onClick={refreshSites}
-              className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
-            >
-              <RefreshCw size={13} aria-hidden />
-            </button>
+            <>
+              <span ref={setAppsHead} className="contents" />
+              <button
+                type="button"
+                data-testid="sites-refresh"
+                aria-label="Refresh apps"
+                title="Refresh apps"
+                onClick={refreshSites}
+                className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
+              >
+                <RefreshCw size={13} aria-hidden />
+              </button>
+            </>
           ) : null}
           <MoreMenu
             label="Sidebar actions"
@@ -173,9 +171,12 @@ export function ShellSidePanel(props: {
         </Suspense>
       ) : wb.activeView === "sites" ? (
         <SkeletonSlot>
-        <Suspense fallback={<AppsViewLoading />}>
+        <Suspense fallback={<SkeletonRows inSlot layout="panel" label="Loading apps…" />}>
           <LazyAppsView
             workspaceId={workspaceId}
+            head={appsHead}
+            activePath={focusedTabPath}
+            notices={appsNotices}
             pinnedApps={pinnedRoots}
             onSetPinned={(appRoot, pinned) => void setAppPinned(appRoot, pinned)}
             filesSettledRevision={listingsSettled}
@@ -188,6 +189,10 @@ export function ShellSidePanel(props: {
         </SkeletonSlot>
       ) : wb.activeView === "history" ? (
         historyTimeline
+      ) : wb.activeView === SHARING_VIEW_ID ? (
+        <Suspense fallback={<SkeletonRows layout="panel" label="Loading sharing..." />}>
+          <LazySharingView {...sharing} />
+        </Suspense>
       ) : selectedAppRoot !== null ? (
         // The same sealed preview an app's tab runs: a sandboxed frame
         // on a dohc loopback server, with no dohc bridge.

@@ -134,11 +134,17 @@ async function computer(input: {
     await client.waitForExit();
   };
   cleanup.push(closeEngine);
+  // Like automationReplicas, queue complete passes from every caller.
+  let syncChain: Promise<void> = Promise.resolve();
   return {
     root: input.root, nextRequestId, client, workspace, lifetime: lifetime.signal, request,
     async sync() {
-      for (let more = true; more;) more = (await replication.push()).hasMore;
-      for (let more = true; more;) more = (await replication.pull()).hasMore;
+      const run = syncChain.then(async () => {
+        for (let more = true; more;) more = (await replication.push()).hasMore;
+        for (let more = true; more;) more = (await replication.pull()).hasMore;
+      });
+      syncChain = run.catch(() => undefined);
+      await run;
     },
     record: async (recordId: string) =>
       await request("collections.getRecord", { collectionPath: "Tasks", recordId, historyLimit: 10 }, workspace) as unknown as CollectionGetRecordResult,
@@ -537,7 +543,7 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
   for (const side of [owner, recipient]) expect(await readFile(join(side.root, "Tasks/one.md"), "utf8")).toContain("Status: Doing");
   expect(await sharedValue(firstGrant)).toBe("Doing");
   const restoredClaim = await press(firstGrant.shareId, "button-native-before-stop");
-  expect(await running.runs.restore(scope, [{collectionPath: "Tasks", id: "mark", definitionHash: hash}], false)).toMatchObject({undone: 1, left: 0, errorMessage: null});
+  expect(await running.runs.restore(scope, [{collectionPath: "Tasks", id: "mark", definitionHash: hash}], false, "restore-test")).toMatchObject({undone: 1, left: 0, errorMessage: null});
   await vi.waitFor(async () => expect((await running.runs.get(scope, markId, restoredClaim))?.undone).toBe(true), {timeout: DEADLINE_MS});
   await consumer.settle(document); await owner.sync(); await recipient.sync();
   for (const side of [owner, recipient]) expect(await readFile(join(side.root, "Tasks/one.md"), "utf8")).toContain("Status: Doing");
@@ -573,6 +579,7 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
   };
   const handlers = new Map<string, (event: {sender: string}, payload: unknown) => unknown>();
   registerStopAndRestoreIpc({
+    currentAutomations: () => executor!, canReleaseRuns: () => true,
     registerHandler: (channel, handler) => handlers.set(channel, handler), assertTrustedSender: () => undefined,
     withRendererWorkspaceOperation: async (_sender: string, _workspaceId, _message, work) => work({
       workspace: {workspaceId: WORKSPACE, rootPath: owner.root}, state: {collectionAutomations: executor!}, assertCurrent: () => undefined,
@@ -587,7 +594,10 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
     localPerson: async () => ({kind: "human", humanId: "owner"}), queuePull: () => undefined,
     syncNow: async () => {await owner.sync(); await copy.sync();}, deletePath: async () => undefined,
     notifyRenderer: () => undefined, assertOriginalWorkspace: () => undefined,
-    serverRuns: {restore: (_workspaceId, definitions, again) => running.runs.restore(scope, definitions, again)},
+    serverRuns: {
+      restore: (_workspaceId, definitions, again, retentionId) => running.runs.restore(scope, definitions, again, retentionId),
+      releaseRestore: async (_workspaceId, retentionId) => {await running.runs.restore(scope, [], false, retentionId); return true;},
+    },
     requireEngineCapture: async () => ({capture: {
       readMoment,
       listObjectMomentsAfter: async (objectId, momentId) => {
@@ -921,12 +931,15 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
     identity: {kind: "join", replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity}});
   await peer.sync();
   const imported = (await peer.request("moments.list", {limit: 100}, peer.workspace)).moments as unknown as Array<{momentId: string; authors?: unknown}>;
-  expect(imported.find(moment => moment.momentId === recipientMoment.momentId)?.authors).toEqual(expect.arrayContaining(expectedAuthors));
+  // The peer stores the relay's admitted snapshot, so its people carry the relay's confirmation.
+  const confirmedAuthors = expectedAuthors.map(author => ({...author, relayConfirmed: true}));
+  expect(imported.find(moment => moment.momentId === recipientMoment.momentId)?.authors).toEqual(expect.arrayContaining(confirmedAuthors));
   const peerHistory = new VersionedLiveAdapter(peer.client, peer.workspace, {workspaceId: WORKSPACE});
   expect(await peerHistory.getMoment({workspaceId: WORKSPACE, momentId: recipientMoment.momentId}))
-    .toMatchObject({syncRecordOnly: true, authors: expect.arrayContaining(expectedAuthors)});
+    .toMatchObject({syncRecordOnly: true, authors: expect.arrayContaining(confirmedAuthors)});
+  // The owner's copy gains the same confirmation once the relay accepts the settlement.
   expect((await moments()).find(moment => moment.momentId === recipientMoment.momentId)?.authors)
-    .toEqual(recipientMoment.authors);
+    .toEqual((recipientMoment.authors as Array<Record<string, unknown>>).map(author => ({...author, relayConfirmed: true})));
   expect(await readFile(join(peer.root, "Tasks/one.md"), "utf8")).toContain("RecipientNote: Keep this text");
   await session.close({settle: false});
   const restore = async (side: typeof owner) => {
@@ -965,8 +978,8 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
       undoRuns: async () => ({undone: 0, left: 0, keptFields: [], missing: 0, otherKept: 0, errorMessage: null}),
     }, [{path: "Tasks/one.md", objectId: document.objectId, momentId: creationMoment.momentId, created: true}]);
   };
-  // The relay-admitted settlement and live audit both retain the recipient.
-  expect(imported).toContainEqual(expect.objectContaining({authors: [{kind: "human", humanId: "reader", humanName: "Reader"}]}));
+  // The relay-admitted settlement and the relay-checked live audit both retain the confirmed recipient.
+  expect(imported).toContainEqual(expect.objectContaining({authors: [{kind: "human", humanId: "reader", humanName: "Reader", relayConfirmed: true}]}));
   if (authors === "owner-and-recipient") {
     expect(await restore(peer)).toMatchObject({status: "restored", restored: [],
       review: [{path: "Tasks/one.md", reason: "changed-since"}], unfinished: null});

@@ -302,6 +302,70 @@ fn actorless_admission_counts_the_marker_and_refuses_before_appending() {
 }
 
 #[test]
+fn compensated_settlement_does_not_inherit_relay_confirmation() {
+    let mut ts = fresh_store("compensated-confirmation");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1);
+    let doc = Ydoc::wire();
+    record_human(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &doc.plaintext_insert(0, "edit"),
+        "recipient",
+    )
+    .unwrap();
+    let moment_id = "moment-ydoc-reserved";
+    let confirmed = serde_json::json!([{"kind":"human","humanId":"recipient","humanName":"Recipient","relayConfirmed":true}]);
+    ts.store.write_with(&NoFaults, |tx| {
+        tx.execute("INSERT OR IGNORE INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES (?1,?2,'main','main',1)", rusqlite::params![key.workspace_id, key.version_id])
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+        let sha = dohc_engine_storage::put_binary_blob(tx, b"edit")?;
+        tx.execute("INSERT INTO moments(workspace_id,moment_order,moment_id,version_id,object_id,path,recorded_at_ms,operation,after_content_kind,after_binary_sha256,before_present,metadata_origin,author_json) VALUES (?1,1,?2,?3,?4,'authors.txt',3,'write','binary',?5,0,'ydoc',?6)", rusqlite::params![key.workspace_id, moment_id, key.version_id, key.object_id, sha, confirmed.to_string()])
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+        author_coverage::advance_in(tx, &key, true)?;
+        tx.execute("UPDATE ydoc_docs SET settle_seq=1 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3", rusqlite::params![key.workspace_id, key.version_id, key.object_id])
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+        Ok::<_, CollabError>(())
+    }).unwrap();
+    ts.store
+        .write_with(&NoFaults, |tx| {
+            author_coverage::compensate_in(tx, &key, Some(moment_id), 4)
+        })
+        .unwrap();
+    let pending: String = ts
+        .store
+        .read_with(|conn| conn.query_row("SELECT pending_authors_json FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3", rusqlite::params![key.workspace_id, key.version_id, key.object_id], |row| row.get(0)))
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&pending).unwrap(),
+        serde_json::json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"}])
+    );
+    let interval = ts
+        .store
+        .read_with(|conn| author_coverage::interval_in(conn, &key, i64::MAX))
+        .unwrap();
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&interval.json()).unwrap();
+    assert!(entries
+        .iter()
+        .all(|author| author.get("relayConfirmed").is_none()));
+    let retained: String = ts
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT author_json FROM moments WHERE moment_id=?1",
+                [moment_id],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&retained).unwrap(),
+        confirmed
+    );
+}
+
+#[test]
 fn declared_seed_is_not_an_author_and_coverage_tracks_fold_reset_and_consumption() {
     let mut ts = fresh_store("seed-author-index");
     let key = test_key();

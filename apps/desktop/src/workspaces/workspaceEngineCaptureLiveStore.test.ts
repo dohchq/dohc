@@ -22,6 +22,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { describe, expect, it, vi } from "vitest";
 import { createCaptureLiveStores as createAttachedCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 import { createTestScratch } from "./testTemp";
+import { restoreDirectWrites, type StopAndRestoreDependencies } from "./stopAndRestore";
 
 vi.mock("node:timers/promises", { spy: true });
 
@@ -240,6 +241,45 @@ const moment = {
   beforeByteLength: 5,
   beforeInbandLimitBytes: null,
 } as const;
+
+describe("Stop and restore relay confirmation through the moment reader", () => {
+  it.each(["confirmed", "local", "mixed", "unattributed"] as const)(
+    "checks %s live settlement authors from the daemon",
+    async kind => {
+      const human = { kind: "human", humanId: "ana", ...(kind === "local" ? {} : { humanName: "Ana", relayConfirmed: true }) };
+      const created = { ...moment, momentId: "created", beforePresent: false,
+        authors: [{ kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1 }] };
+      const later = { ...moment, momentId: `moment-ydoc-${"b".repeat(64)}`, metadataOrigin: "local-file",
+        beforeBlobSha256: moment.afterBlobSha256, afterBlobSha256: "b".repeat(64), afterText: "Changed",
+        authors: kind === "mixed" ? [human, { kind: "human", humanId: "owner", humanName: "Owner", relayConfirmed: true }]
+          : kind === "unattributed" ? [human, { kind: "unattributed" }] : [human] };
+      const client = clientFor(async request => {
+        expect(request.method).toBe(VERSIONED_METHOD.momentsGet);
+        return { id: request.id, result: (request.params as { momentId: string }).momentId === "created" ? created : later };
+      });
+      const { store } = createCaptureLiveStores(
+        { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
+      );
+      const restore = vi.fn<StopAndRestoreDependencies["restore"]>(async () => ({
+        kind: "restored", receipt: { path: moment.path, restoredMomentId: "back", removed: true },
+      }));
+      const outcome = await restoreDirectWrites({
+        moment: id => store.getMoment({ workspaceId: WORKSPACE_ID, momentId: id }),
+        momentsAfter: async () => [later.momentId], assertCurrent() {}, restore,
+        folderEntries: async () => [], removeEmptyFolder: async () => {},
+        undoRuns: async () => { throw new Error("no automations"); },
+      }, [{ momentId: created.momentId, objectId: moment.objectId, path: moment.path, created: true }]);
+      if (kind === "confirmed") {
+        expect(outcome).toMatchObject({ restored: [{ path: moment.path, removed: true }], review: [] });
+        expect(restore).toHaveBeenCalledWith(created.momentId, later.momentId, false);
+      } else {
+        expect(outcome).toMatchObject({ restored: [], review: [{ path: moment.path, reason: "changed-since",
+          changedBy: kind === "local" ? "Person ana" : kind === "unattributed" ? "An unrecorded author" : "Another author" }] });
+        expect(restore).not.toHaveBeenCalled();
+      }
+    },
+  );
+});
 
 function conflict(status: "open" | "resolved" = "open"): ConflictRecord {
   const state = {

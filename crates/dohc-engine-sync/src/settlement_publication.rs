@@ -95,6 +95,18 @@ pub(crate) fn admitted_moment_authors(
                     serde_json::from_str(&native).map_err(SyncError::corrupt)?;
                 converted.extend(entries);
             }
+            human @ LiveAuthorEntry::Human { .. } => {
+                let mut native = serde_json::to_value(human).map_err(SyncError::corrupt)?;
+                if envelope.relay_seq.is_some()
+                    && matches!(
+                        envelope.settlement_admission,
+                        Some(SettlementAdmission::Accepted { .. })
+                    )
+                {
+                    native["relayConfirmed"] = Value::Bool(true);
+                }
+                converted.push(native);
+            }
             other => converted.push(serde_json::to_value(other).map_err(SyncError::corrupt)?),
         }
     }
@@ -371,6 +383,10 @@ mod tests {
             {"kind":"human","humanId":"reader","humanName":"Reader"},
             {"kind":"unattributed"}
         ]);
+        let native_snapshot = json!([
+            {"kind":"human","humanId":"reader","humanName":"Reader","relayConfirmed":true},
+            {"kind":"unattributed"}
+        ]);
         envelope.admitted_author_snapshot = Some(snapshot.clone());
         owner.write_with(&NoFaults, |tx| {
             tx.execute("UPDATE replication_log SET payload_json=?1 WHERE workspace_id='ws' AND origin_id=?2 AND origin_seq=?3",
@@ -408,12 +424,36 @@ mod tests {
                 let (native, admitted): (String, String) = store.read_with(|conn| {
                     conn.query_row("SELECT m.author_json,a.authors_json FROM moments m JOIN live_settlement_publication_admissions a USING(workspace_id,moment_id) WHERE m.moment_id='moment'", [], |row| Ok((row.get(0)?, row.get(1)?)))
                 }).unwrap();
-                assert_eq!(serde_json::from_str::<Value>(&native).unwrap(), snapshot);
+                assert_eq!(
+                    serde_json::from_str::<Value>(&native).unwrap(),
+                    native_snapshot
+                );
                 assert_eq!(serde_json::from_str::<Value>(&admitted).unwrap(), snapshot);
             }
         }
     }
 
+    #[test]
+    fn only_admitted_humans_carry_relay_confirmation() {
+        let (_scratch, _path, mut store) = open_store();
+        let accepted = proved(source(&mut store));
+        for missing_receipt in [false, true] {
+            let mut unadmitted = accepted.clone();
+            if missing_receipt {
+                unadmitted.relay_seq = None;
+            } else {
+                unadmitted.settlement_admission = None;
+            }
+            assert_eq!(
+                admitted_moment_authors(&unadmitted).unwrap().unwrap()[0],
+                json!({"kind":"human","humanId":"reader","humanName":"Reader"})
+            );
+        }
+        assert_eq!(
+            admitted_moment_authors(&accepted).unwrap().unwrap()[0],
+            json!({"kind":"human","humanId":"reader","humanName":"Reader","relayConfirmed":true})
+        );
+    }
     #[test]
     fn accepted_echo_stamps_named_contributors_and_keeps_the_immutable_payload() {
         let (_scratch, _path, mut store) = open_store();
@@ -430,7 +470,10 @@ mod tests {
         );
         assert_eq!(
             serde_json::from_str::<Value>(&authors).unwrap(),
-            envelope.admitted_author_snapshot.clone().unwrap()
+            json!([
+                {"kind":"human","humanId":"reader","humanName":"Reader","relayConfirmed":true},
+                {"kind":"agent","agentId":"assistant","agentName":"Assistant","onBehalfOf":"reader","depth":2}
+            ])
         );
         let mut forged = envelope.clone();
         forged.admitted_author_snapshot = Some(json!([{"kind":"human","humanId":"other"}]));

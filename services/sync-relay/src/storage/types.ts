@@ -411,6 +411,12 @@ export interface SyncRelayLinkInventoryPage {
   nextCursor: SyncRelayLinkInventoryCursor | null;
 }
 
+export interface SyncRelayHistoryAccount {
+  grantId: string;
+  recipientUserId: string;
+  parentGrantId: string;
+}
+
 export interface SyncRelayIndependentGrantInventoryCursor {
   shareId: string;
   grantCreatedAtMs: number;
@@ -786,7 +792,7 @@ export interface SyncRelayStorage {
     expectedSha256: string | null;
   }): { sha256: string };
   getKeyEnvelope(workspaceId: string): KeyEnvelopeRow | null;
-  prepareHostedSettlements(input:{workspaceId:string;originId:string;ops:SyncRelayLogInput[]},signal?:AbortSignal):Promise<void>;
+  prepareLogAppend(input:{workspaceId:string;originId:string;ops:SyncRelayLogInput[]},signal?:AbortSignal):Promise<void>;
   appendLogBatch(input: {
     workspaceId: string;
     originId: string;
@@ -1009,6 +1015,7 @@ export interface SyncRelayStorage {
     workspaceId: string,
     cursor?: SyncRelayLinkInventoryCursor,
   ): SyncRelayLinkInventoryPage;
+  lookupHistoryAccounts(workspaceId: string, grantIds: readonly string[], userIds: readonly string[]): SyncRelayHistoryAccount[];
   listActiveIndependentShareGrants(input: {
     workspaceId: string;
     shareIds: readonly string[];

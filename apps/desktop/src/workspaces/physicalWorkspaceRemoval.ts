@@ -5,12 +5,14 @@ export function createPhysicalWorkspaceRemoval<Workspace extends {workspaceId: s
   findWorkspace(workspaceId: string): Workspace | null;
   removeWorkspace(workspaceId: string): void;
   removeDrafts(workspaceId: string): Promise<void>;
+  confirmDraftRemoval?(workspaceId: string): Promise<boolean>;
   onError(workspaceId: string, error: unknown): void;
 }) {
   return async function removePhysicalWorkspace(
     binding: WorkspaceAuthorityBinding<Workspace>,
     beforeRegistryRemoval: () => void | Promise<void> = () => undefined,
-  ): Promise<void> {
+  ): Promise<boolean> {
+    if (dependencies.confirmDraftRemoval && !(await dependencies.confirmDraftRemoval(binding.workspaceId))) return false;
     await dependencies.retireBinding(binding, {
       finalize: beforeRegistryRemoval,
       removeBinding: () => {
@@ -26,16 +28,17 @@ export function createPhysicalWorkspaceRemoval<Workspace extends {workspaceId: s
     } catch (error) {
       dependencies.onError(binding.workspaceId, error);
     }
+    return true;
   };
 }
 
 export function createWorkspaceForget(dependencies: {
-  remove(workspaceId: string): Promise<void>;
+  remove(workspaceId: string): Promise<void | boolean>;
   clearNotices(workspaceId: string): void;
   notifyRenderer(): void;
 }) {
   return async function forgetWorkspace(workspaceId: string): Promise<void> {
-    await dependencies.remove(workspaceId);
+    if(await dependencies.remove(workspaceId) === false) return;
     dependencies.clearNotices(workspaceId);
     dependencies.notifyRenderer();
   };

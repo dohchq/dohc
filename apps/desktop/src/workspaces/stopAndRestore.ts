@@ -50,6 +50,8 @@ export interface RestoreReceipt {
 }
 
 export interface StopAndRestoreDependencies {
+  recordDefinitions?(definitions: ReadonlyArray<{collectionPath: string; id: string; definitionHash: string}>): Promise<void>;
+  recordRestore?(receipt: RestoreReceipt): Promise<void>;
   /** A moment, `protected` when its contents are protected here, or null while it has not arrived. */
   moment(momentId: string): Promise<VersionedTextMoment | "protected" | null>;
   /** Throws when the window that asked has left the workspace. */
@@ -261,7 +263,7 @@ export async function restoreDirectWrites(
       const liveSettlement = moment.metadata.origin === "ydoc" || (moment.metadata.origin === "local-file"
         && /^moment-ydoc-(?:apply-)?[a-fA-F0-9]{64}$/u.test(moment.id));
       return moment.authors.every(author => original.kind === "named"
-        ? (author.kind === "named" && author.userId === original.userId) || (liveSettlement && author.kind === "human" && author.humanId === original.userId)
+        ? (author.kind === "named" && author.userId === original.userId) || (liveSettlement && author.kind === "human" && author.relayConfirmed === true && author.humanId === original.userId)
         : original.kind === "link" && "principalId" in original && author.kind === "link" && (
           "publicPrincipalId" in author
             ? entry.first.publicPrincipalId !== undefined && author.publicPrincipalId === entry.first.publicPrincipalId
@@ -343,6 +345,7 @@ export async function restoreDirectWrites(
     unfinished: message === null ? null : { step, message },
   });
   try {
+    await dependencies.recordDefinitions?.(definitions);
     for (const { entry, head } of restorable) {
       const folder = posix.dirname(entry.first.path);
       if (isCreatedSchema(entry)) {
@@ -373,6 +376,7 @@ export async function restoreDirectWrites(
         continue;
       }
       restored.push({ ...result.receipt, ...(entry.first.created ? { removed: true } : {}) });
+      await dependencies.recordRestore?.(restored.at(-1)!);
       if (isCreatedSchema(entry)) await dependencies.removeEmptyFolder(folder);
     }
     if (definitions.length > 0) {

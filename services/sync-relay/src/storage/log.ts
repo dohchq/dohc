@@ -7,6 +7,7 @@ import {
   type AppendLogBatchResult,
   type FetchLogPageResult,
   type SyncRelayLogRow,
+  type SqliteDb,
 } from "./types";
 import { SyncRelayConflictError, SyncRelayBlobMissingError } from "./errors";
 import { referencedBlobShas, versionIdFromVersionCreatePayload } from "./blobReferences";
@@ -21,6 +22,9 @@ import {
 } from "./currentFiles";
 import { rowToLogRow } from "./rows";
 import { notifyDesktopReadiness } from "../desktopReadinessChanges";
+import {confirmLiveApplication} from "./liveApplicationAuthorship";
+
+const logPageStatements = new WeakMap<SqliteDb, ReturnType<SqliteDb["prepare"]>>();
 
 export function appendLogBatch(storage: StorageContext, input: {
     workspaceId: string;
@@ -103,7 +107,14 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
         }
       }
 
-      for(const op of newOps)commitHostedSettlement(storage,op,input.workspaceId,input.originId);
+      let batchCoordinates: Map<number, SyncRelayLogInput> | undefined;
+      for (const op of newOps) {
+        commitHostedSettlement(storage, op, input.workspaceId, input.originId);
+        if (op.opKind === "live.audit.application") {
+          batchCoordinates ??= new Map(newOps.map(entry => [entry.originSeq, entry]));
+          confirmLiveApplication(storage, op, input.workspaceId, input.originId, batchCoordinates);
+        }
+      }
       addedLogBytes=newOps.reduce((bytes,op)=>bytes+Buffer.byteLength(op.payloadJson)+
         (op.admittedAuthorSnapshot===undefined?0:Buffer.byteLength(JSON.stringify(op.admittedAuthorSnapshot)))+
         (op.settlementAdmission===undefined?0:Buffer.byteLength(JSON.stringify(op.settlementAdmission))),0);
@@ -243,15 +254,18 @@ export function fetchLogPage(storage: StorageContext, input: {
     sinceRelaySeq: number;
     limit: number;
   }): FetchLogPageResult {
-    const rows = storage.db
-      .prepare(
+    let statement = logPageStatements.get(storage.db);
+    if (!statement) {
+      statement = storage.db.prepare(
         `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json
          FROM sync_relay_log
          WHERE workspace_id = ? AND relay_seq > ?
          ORDER BY relay_seq
          LIMIT ?`,
-      )
-      .all(input.workspaceId, input.sinceRelaySeq, input.limit + 1);
+      );
+      logPageStatements.set(storage.db, statement);
+    }
+    const rows = statement.all(input.workspaceId, input.sinceRelaySeq, input.limit + 1);
     const pageRows = rows.slice(0, input.limit).map(rowToLogRow);
     const last = pageRows[pageRows.length - 1];
     return {

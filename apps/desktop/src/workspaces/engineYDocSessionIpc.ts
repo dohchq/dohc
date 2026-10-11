@@ -1,3 +1,4 @@
+import { isTypingSessionUnresolved } from "./outageTypingRecovery";
 import { SharedDocumentWaitingError } from "../ipc/sharedDocumentOpenState";
 import { engineSaveState } from "./engineYDocSaveState";
 import { createHash } from "node:crypto";
@@ -1323,6 +1324,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
             workspaceId: outbound.workspaceId,
             path: outbound.path,
             ...message.event,
+            typingUnresolved: isTypingSessionUnresolved(outbound.workspaceId,outbound.path),
             ...(message.closing ? { closing: true } : {}),
             ...engineSaveState(message.event.state, message.event.editRefusal),
           }),

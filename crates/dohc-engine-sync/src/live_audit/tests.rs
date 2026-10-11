@@ -770,6 +770,8 @@ enum FirstDrainCoordinate {
     Verified,
     RefusedPath,
     Declared,
+    DeclaredHuman,
+    UnconfirmedHumanAudit,
 }
 
 fn import_authored_projection(
@@ -778,14 +780,88 @@ fn import_authored_projection(
     first_coordinate: Option<FirstDrainCoordinate>,
     late: bool,
 ) {
-    import_authored_projection_with_local_gap(
+    import_projection(
         deferred,
         mixed,
         first_coordinate,
         late,
         false,
         false,
+        Confirmation::None,
     );
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Confirmation {
+    None,
+    Admitted,
+    Mismatch,
+    NoReceipt,
+    ForgedMarker,
+    RetentionBound,
+    StorageFailure,
+    ReaderStorageFailure,
+}
+
+#[test]
+fn relay_confirmed_audit_keeps_an_independent_local_marker() {
+    import_projection(
+        true,
+        false,
+        None,
+        false,
+        true,
+        false,
+        Confirmation::Admitted,
+    );
+}
+
+#[test]
+fn confirmed_audited_drain_at_capacity_cannot_attest_prior_credit() {
+    import_projection(
+        true,
+        false,
+        None,
+        false,
+        false,
+        true,
+        Confirmation::Admitted,
+    );
+}
+
+#[test]
+fn relay_confirmed_audit_authors_reach_import_and_origin_echo() {
+    import_confirmed_projection(false, false, None, false, Confirmation::Admitted);
+}
+
+#[test]
+fn relay_confirmed_audit_authors_survive_deferred_projection_and_reopen() {
+    import_confirmed_projection(true, false, None, false, Confirmation::Admitted);
+}
+
+#[test]
+fn relay_confirmed_audit_preserves_other_checkpoint_authors() {
+    import_confirmed_projection(false, true, None, false, Confirmation::Admitted);
+}
+
+#[test]
+fn forged_audit_snapshot_or_missing_relay_receipt_cannot_confirm_a_person() {
+    import_confirmed_projection(false, false, None, false, Confirmation::Mismatch);
+    import_confirmed_projection(false, false, None, false, Confirmation::NoReceipt);
+    import_confirmed_projection(false, false, None, false, Confirmation::ForgedMarker);
+}
+
+#[test]
+fn confirmed_audit_cannot_attest_a_declared_same_person_in_a_drain() {
+    for late in [false, true] {
+        import_confirmed_projection(
+            true,
+            false,
+            Some(FirstDrainCoordinate::DeclaredHuman),
+            late,
+            Confirmation::Admitted,
+        );
+    }
 }
 
 fn import_authored_projection_with_local_gap(
@@ -795,6 +871,44 @@ fn import_authored_projection_with_local_gap(
     late: bool,
     local_gap: bool,
     at_capacity: bool,
+) {
+    import_projection(
+        deferred,
+        mixed,
+        first_coordinate,
+        late,
+        local_gap,
+        at_capacity,
+        Confirmation::None,
+    );
+}
+
+fn import_confirmed_projection(
+    deferred: bool,
+    mixed: bool,
+    first_coordinate: Option<FirstDrainCoordinate>,
+    late: bool,
+    confirmation: Confirmation,
+) {
+    import_projection(
+        deferred,
+        mixed,
+        first_coordinate,
+        late,
+        false,
+        false,
+        confirmation,
+    );
+}
+
+fn import_projection(
+    deferred: bool,
+    mixed: bool,
+    first_coordinate: Option<FirstDrainCoordinate>,
+    late: bool,
+    local_gap: bool,
+    at_capacity: bool,
+    confirmation: Confirmation,
 ) {
     use dohc_engine_collab::live_update_application::{
         AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, LiveUpdateReceipt, RelayAcceptedLiveUpdate,
@@ -806,7 +920,7 @@ fn import_authored_projection_with_local_gap(
     doc.apply(&f.bytes).unwrap();
     let first_update = first_coordinate.map(|_| doc.richdoc_append_paragraph("First coordinate."));
     let update = doc.richdoc_append_paragraph("Recipient changed this paragraph.");
-    let authors = json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"}]);
+    let mut authors = json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"}]);
     let other = json!({"kind":"link","publicPrincipalId":"other-link","label":"Link editor"});
     let prior = json!([{"kind":"human","humanId":"owner","humanName":"Owner"}]);
     let event = AdmittedLiveUpdate {
@@ -846,8 +960,11 @@ fn import_authored_projection_with_local_gap(
         first.metadata.accepted.receipt.delivery_id = "first-delivery".into();
         first.metadata.accepted.receipt.update_digest = hex_sha256(&first.update_bytes);
         first.metadata.accepted.receipt.journal_cursor = 1;
-        first.metadata.author_snapshot = (first_coordinate == Some(FirstDrainCoordinate::Verified))
-            .then(|| serde_json::from_value(authors.clone()).unwrap());
+        first.metadata.author_snapshot = matches!(
+            first_coordinate,
+            Some(FirstDrainCoordinate::Verified | FirstDrainCoordinate::UnconfirmedHumanAudit)
+        )
+        .then(|| serde_json::from_value(authors.clone()).unwrap());
         if first.metadata.author_snapshot.is_none() {
             first.metadata.canonical_version = None;
             first.metadata.first_seen_deletes = None;
@@ -929,13 +1046,165 @@ fn import_authored_projection_with_local_gap(
             )
             .unwrap();
         }
-        if first_coordinate == Some(FirstDrainCoordinate::Declared)
-            && op.op_kind == "ydoc.update"
+        if op.op_kind == application_record::EVENT_OP
+            && confirmation != Confirmation::None
+            && (!matches!(
+                first_coordinate,
+                Some(
+                    FirstDrainCoordinate::DeclaredHuman
+                        | FirstDrainCoordinate::UnconfirmedHumanAudit
+                )
+            ) || op.origin_seq == last_audit_seq)
+        {
+            let mut snapshot = authors.clone();
+            if mixed {
+                snapshot.as_array_mut().unwrap().push(other.clone());
+            }
+            if confirmation == Confirmation::Mismatch {
+                snapshot[0]["humanId"] = json!("forged");
+            }
+            if confirmation == Confirmation::ForgedMarker {
+                snapshot[0]["relayConfirmed"] = json!(true);
+            }
+            op.admitted_author_snapshot = Some(snapshot);
+            if confirmation == Confirmation::NoReceipt {
+                op.relay_seq = None;
+            }
+        }
+        if matches!(
+            confirmation,
+            Confirmation::Admitted
+                | Confirmation::RetentionBound
+                | Confirmation::StorageFailure
+                | Confirmation::ReaderStorageFailure
+        ) {
+            let bounded = confirmation == Confirmation::RetentionBound
+                && op.op_kind == application_record::EVENT_OP;
+            let full_coverage = if bounded {
+                json!(
+                    (0..dohc_engine_collab::author_coverage::MAX_INTERVAL_AUTHORS)
+                        .map(|i| json!({"kind":"link","publicPrincipalId":format!("link-{i}")}))
+                        .collect::<Vec<_>>()
+                )
+                .to_string()
+            } else {
+                String::new()
+            };
+            if bounded {
+                f.store.read_with(|conn| conn.execute(
+                    "INSERT INTO live_audit_projection_authors(workspace_id,origin_id,origin_seq,version_id,object_id,path,lineage_claim_id,author_json) VALUES ('ws','owner-origin',?1,'main','object','note.md',?2,?3)",
+                    params![op.origin_seq-1,f.binding.lineage_claim_id,full_coverage],
+                )).unwrap();
+            }
+            if confirmation == Confirmation::StorageFailure
+                && op.op_kind == application_record::EVENT_OP
+            {
+                f.store.read_with(|conn| conn.execute_batch(
+                    "CREATE TEMP TRIGGER fail_audit_confirmation BEFORE INSERT ON live_audit_projection_authors BEGIN SELECT RAISE(ABORT,'injected storage failure'); END;",
+                )).unwrap();
+                let failed = crate::apply_replication_envelope(
+                    &mut f.store,
+                    &mut WriterDocCache::new(),
+                    &op,
+                    &NoFaults,
+                    &NoLiveLeases,
+                );
+                assert!(matches!(failed, Err(SyncError::Storage(_))), "{failed:?}");
+                f.store
+                    .read_with(|conn| conn.execute_batch("DROP TRIGGER fail_audit_confirmation"))
+                    .unwrap();
+            }
+            if confirmation == Confirmation::ReaderStorageFailure
+                && op.op_kind == application_record::EVENT_OP
+            {
+                f.store
+                    .read_with(|conn| {
+                        conn.execute_batch("ALTER TABLE binary_blobs RENAME TO unavailable_blobs")
+                    })
+                    .unwrap();
+                let failed = crate::apply_replication_envelope(
+                    &mut f.store,
+                    &mut WriterDocCache::new(),
+                    &op,
+                    &NoFaults,
+                    &NoLiveLeases,
+                );
+                assert!(matches!(failed, Err(SyncError::Storage(_))), "{failed:?}");
+                f.store
+                    .read_with(|conn| {
+                        conn.execute_batch("ALTER TABLE unavailable_blobs RENAME TO binary_blobs")
+                    })
+                    .unwrap();
+            }
+            let echoed = crate::apply_replication_envelope(
+                &mut f.store,
+                &mut WriterDocCache::new(),
+                &op,
+                &NoFaults,
+                &NoLiveLeases,
+            )
+            .unwrap();
+            assert!(matches!(echoed.primary, ApplyDisposition::Skipped));
+            if bounded {
+                let retained: String = f
+                    .store
+                    .read_with(|conn| {
+                        conn.query_row(
+                    "SELECT author_json FROM live_audit_projection_authors WHERE origin_seq=?1",
+                    [op.origin_seq-1], |row| row.get(0),
+                )
+                    })
+                    .unwrap();
+                assert_eq!(
+                    retained, full_coverage,
+                    "optional proof must roll back on a bound failure"
+                );
+                f.store
+                    .read_with(|conn| {
+                        conn.execute(
+                            "DELETE FROM live_audit_projection_authors WHERE origin_seq=?1",
+                            [op.origin_seq - 1],
+                        )
+                    })
+                    .unwrap();
+            }
+            if !bounded
+                && op.op_kind == application_record::EVENT_OP
+                && op.admitted_author_snapshot.is_some()
+            {
+                let saved: Option<String> = f
+                    .store
+                    .read_with(|conn| {
+                        conn.query_row(
+                            "SELECT author_json FROM live_audit_projection_authors LIMIT 1",
+                            [],
+                            |r| r.get(0),
+                        )
+                        .optional()
+                    })
+                    .unwrap();
+                assert!(
+                    saved
+                        .as_deref()
+                        .unwrap_or("")
+                        .contains("\"relayConfirmed\":true")
+                );
+            }
+        }
+        if matches!(
+            first_coordinate,
+            Some(FirstDrainCoordinate::Declared | FirstDrainCoordinate::DeclaredHuman)
+        ) && op.op_kind == "ydoc.update"
             && op.payload["isBaseState"] != true
             && (op.origin_seq == first_delta_seq || late)
         {
-            op.payload["actorOriginId"] = json!("agent-x");
-            op.payload["attribution"] = json!({"actorKind":"agent","depth":0});
+            if first_coordinate == Some(FirstDrainCoordinate::DeclaredHuman) {
+                op.payload["actorOriginId"] = json!("recipient");
+                op.payload["attribution"] = json!({"actorKind":"human","depth":0});
+            } else {
+                op.payload["actorOriginId"] = json!("agent-x");
+                op.payload["attribution"] = json!({"actorKind":"agent","depth":0});
+            }
         }
         if late && op.op_kind == application_record::EVENT_OP && op.origin_seq == last_audit_seq {
             late_ops.push(op);
@@ -1045,7 +1314,10 @@ fn import_authored_projection_with_local_gap(
         }
         assert_eq!(
             count(&receiver, "live_audit_projection_authors"),
-            i64::from(first_coordinate == Some(FirstDrainCoordinate::Verified)) + i64::from(!late)
+            i64::from(matches!(
+                first_coordinate,
+                Some(FirstDrainCoordinate::Verified | FirstDrainCoordinate::UnconfirmedHumanAudit)
+            )) + i64::from(!late)
         );
         if at_capacity {
             let entries = std::iter::once(authors[0].clone())
@@ -1096,6 +1368,16 @@ fn import_authored_projection_with_local_gap(
             .expect("verified public authors"),
     )
     .unwrap();
+    if matches!(
+        confirmation,
+        Confirmation::Admitted
+            | Confirmation::RetentionBound
+            | Confirmation::StorageFailure
+            | Confirmation::ReaderStorageFailure
+    ) && !at_capacity
+    {
+        authors[0]["relayConfirmed"] = json!(true);
+    }
     if local_gap {
         let text: String = receiver
             .read_with(|conn| {
@@ -1110,6 +1392,8 @@ fn import_authored_projection_with_local_gap(
         assert!(text.contains("Recipient changed this paragraph."));
     }
     if at_capacity {
+        // Prior interval credit for this same person was not relay-confirmed.
+        // The checked audit cannot attest that earlier credit through a union.
         assert_eq!(
             stored.as_array().unwrap().len(),
             dohc_engine_collab::author_coverage::MAX_INTERVAL_AUTHORS
@@ -1120,6 +1404,14 @@ fn import_authored_projection_with_local_gap(
                 .as_array()
                 .unwrap()
                 .contains(&json!({"kind":"unattributed"}))
+        );
+    } else if matches!(
+        first_coordinate,
+        Some(FirstDrainCoordinate::DeclaredHuman | FirstDrainCoordinate::UnconfirmedHumanAudit)
+    ) {
+        assert_eq!(
+            stored,
+            json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"}])
         );
     } else if mixed {
         assert_eq!(stored.as_array().unwrap().len(), 3);
@@ -2542,4 +2834,466 @@ fn imported_activation_publication(foreign_baseline: bool, preserve_baseline: bo
         second.payload["payloadAfterBlobSha256"],
         hex_sha256(b"Next accepted edit.")
     );
+}
+
+#[test]
+fn refused_audit_replayed_below_ack_does_not_block_later_operations() {
+    let mut f = fixture(true);
+    let op = ReplicationEnvelope {
+        workspace_id: "ws".into(),
+        origin_id: "remote".into(),
+        origin_seq: 0,
+        op_kind: application_record::EVENT_OP.into(),
+        recorded_at_ms: 200,
+        payload: json!({"extra":"refused"}),
+        relay_seq: Some(100),
+        admitted_author_snapshot: Some(
+            json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"}]),
+        ),
+        settlement_admission: None,
+    };
+    let first = crate::apply_replication_envelope(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    assert!(matches!(first.primary, ApplyDisposition::Refused(_)));
+    let replay = crate::apply_replication_envelope(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    assert!(matches!(replay.primary, ApplyDisposition::Skipped));
+    let mut next = op;
+    next.origin_seq = 1;
+    next.relay_seq = Some(101);
+    next.op_kind = "workspace.init".into();
+    next.payload = json!({});
+    next.admitted_author_snapshot = None;
+    let later = crate::apply_replication_envelope(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &next,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    assert!(matches!(later.primary, ApplyDisposition::Applied(_)));
+}
+
+#[test]
+fn ordinary_human_drain_keeps_exact_authors_without_an_unknown_contributor() {
+    import_confirmed_projection(
+        true,
+        false,
+        Some(FirstDrainCoordinate::DeclaredHuman),
+        false,
+        Confirmation::None,
+    );
+}
+
+#[test]
+fn confirmed_and_unconfirmed_audits_of_one_person_merge_without_confirmation() {
+    import_confirmed_projection(
+        true,
+        false,
+        Some(FirstDrainCoordinate::UnconfirmedHumanAudit),
+        false,
+        Confirmation::Admitted,
+    );
+}
+
+#[test]
+fn confirmation_refresh_bound_failure_is_skipped_without_partial_annotation() {
+    import_confirmed_projection(false, false, None, false, Confirmation::RetentionBound);
+}
+
+#[test]
+fn confirmation_refresh_propagates_storage_failure_and_can_retry() {
+    import_confirmed_projection(false, false, None, false, Confirmation::StorageFailure);
+}
+
+#[test]
+fn confirmation_refresh_propagates_streaming_storage_failure_and_can_retry() {
+    import_confirmed_projection(
+        false,
+        false,
+        None,
+        false,
+        Confirmation::ReaderStorageFailure,
+    );
+}
+
+fn copy_audit_blobs(source: &EngineStore, target: &mut EngineStore) {
+    let blobs: Vec<Vec<u8>> = source
+        .read_with(|conn| {
+            conn.prepare("SELECT bytes FROM binary_blobs")?
+                .query_map([], |row| row.get(0))?
+                .collect()
+        })
+        .unwrap();
+    target
+        .write_with(&NoFaults, |tx| {
+            for bytes in blobs {
+                put_binary_blob(tx, &bytes)?;
+            }
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+}
+
+fn malformed_restore_receipt_pull(field: &str, value: serde_json::Value) {
+    use dohc_engine_collab::live_update_application::AdmittedLiveUpdateMetadata;
+    let mut f = fixture(true);
+    bootstrap(&mut f, false).unwrap();
+    let (_scratch, _path, mut receiver) = open_store();
+    crate::adopt_join_identity(
+        &mut receiver,
+        "ws",
+        "receiver",
+        "epoch",
+        "stream",
+        200,
+        &NoFaults,
+    )
+    .unwrap();
+    copy_audit_blobs(&f.store, &mut receiver);
+    for mut op in operations(&f.store) {
+        op.relay_seq = Some(op.origin_seq + 1);
+        crate::apply_replication_envelope(
+            &mut receiver,
+            &mut WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+    }
+    accept_enrollment_event(&mut f, 1);
+    let mut audit = operations(&f.store)
+        .into_iter()
+        .find(|op| op.op_kind == application_record::EVENT_OP)
+        .unwrap();
+    let manifest: chunks::Manifest =
+        serde_json::from_value(audit.payload["manifest"].clone()).unwrap();
+    let record: serde_json::Value = f
+        .store
+        .read_with(|conn| {
+            serde_json::from_reader(chunks::ChunkReader::new(conn, &manifest).unwrap())
+        })
+        .unwrap();
+    let mut metadata: AdmittedLiveUpdateMetadata =
+        serde_json::from_value(record["metadata"].clone()).unwrap();
+    metadata.accepted.binding.restore_fence_generation = 1;
+    metadata.accepted.receipt.journal_cursor = 2;
+    let base: BasePayload = serde_json::from_value(published(&f).payload).unwrap();
+    let previous = &base.record.checkpoint.evidence_digest;
+    let evidence =
+        hex_sha256(&serde_json::to_vec(&("accepted-event-v1", previous, 1, &metadata)).unwrap());
+    let mut terminal = json!({"deliveryId":"earlier", "updateDigest": f.binding.lineage_claim_id,
+        "journalCursor":1, "acceptingHostEpoch":1});
+    terminal[field] = value;
+    let restore: restore_record::RestoreSource = serde_json::from_value(json!({
+        "operationId":"restore", "oldGeneration":0, "origin":{"kind":"bootstrap","id":"bootstrap"},
+        "hostId":"host", "appliedSequence":1, "fenceHeadSequence":1, "fencedAtMs":100,
+        "point":{"journalCursor":0,"receiptDigest":f.binding.lineage_claim_id,
+            "markdownDigest":f.input.projected_markdown_digest,"projectionDigest":f.input.projected_markdown_digest},
+        "selected":{"eventCount":0,"terminal":null,"evidenceDigest":previous},
+        "accepted":{"eventCount":0,"terminal":terminal,"evidenceDigest":previous},
+        "originEvidenceDigest":hex_sha256(&serde_json::to_vec(&f.input).unwrap()),
+        "nativeSourceManifestDigest":f.binding.lineage_claim_id,"frozenStateDigest":f.binding.lineage_claim_id,
+        "pointStateDigest":f.binding.lineage_claim_id,"finalContentDigest":f.input.projected_markdown_digest
+    })).unwrap();
+    // Serialize through the native metadata and restore types, in native record order.
+    let bytes = format!(
+        "{{\"kind\":\"application\",\"relayDatabaseNamespace\":\"relay\",\"eventCount\":1,\"evidenceDigest\":\"{evidence}\",\"updateByteLength\":{},\"metadata\":{},\"sourceApplication\":{{\"localYDocSequence\":2,\"hostCoordinate\":{{\"hostId\":\"host\",\"hostEpoch\":1,\"instanceId\":\"instance\",\"connectionId\":\"connection\"}}}},\"sourceRestore\":{},\"contentCoordinate\":{}}}",
+        f.bytes.len(),
+        serde_json::to_string(&metadata).unwrap(),
+        serde_json::to_string(&restore).unwrap(),
+        record["contentCoordinate"]
+    );
+    let dohc_engine_storage::TxnOutcome::Committed(manifest) = receiver
+        .write_with(&NoFaults, |tx| {
+            use std::io::Write;
+            let mut writer = chunks::ChunkWriter::new(tx);
+            writer.write_all(bytes.as_bytes()).unwrap();
+            writer.finish()
+        })
+        .unwrap()
+    else {
+        panic!("record write rolled back")
+    };
+    audit.payload["manifest"] = serde_json::to_value(manifest).unwrap();
+    pull_refused_audit(&mut receiver, audit);
+}
+
+fn pull_refused_audit(receiver: &mut EngineStore, mut audit: ReplicationEnvelope) {
+    audit.origin_id = "malformed".into();
+    audit.origin_seq = 0;
+    audit.relay_seq = Some(100);
+    audit.admitted_author_snapshot = None;
+    let mut later = audit.clone();
+    later.origin_seq = 1;
+    later.relay_seq = Some(101);
+    later.op_kind = "workspace.init".into();
+    later.payload = json!({});
+    contact(receiver);
+    let relay = crate::tests::FakeRelay::default();
+    *relay.pull.lock().unwrap() = Some(crate::PullResponse {
+        ops: vec![audit, later],
+        next_cursor: 101,
+        has_more: false,
+    });
+    let client = crate::RelaySyncClient::new(relay);
+    let result = client
+        .pull_chat_workspace(
+            receiver,
+            &mut WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            300,
+        )
+        .unwrap();
+    assert!(
+        matches!(
+            result,
+            crate::SyncPassOutcome::Complete {
+                refused: 1,
+                applied: 1,
+                ..
+            }
+        ),
+        "{result:?}"
+    );
+    assert_eq!(
+        crate::read_replication_acked_seq(receiver, "ws", "malformed").unwrap(),
+        1
+    );
+    assert_eq!(count(receiver, "live_audit_events"), 0);
+}
+
+#[test]
+fn record_digest_mismatch_does_not_stall_pull() {
+    let mut f = fixture(true);
+    bootstrap(&mut f, false).unwrap();
+    accept_enrollment_event(&mut f, 1);
+    let (_scratch, _path, mut receiver) = open_store();
+    crate::adopt_join_identity(
+        &mut receiver,
+        "ws",
+        "receiver",
+        "epoch",
+        "stream",
+        200,
+        &NoFaults,
+    )
+    .unwrap();
+    copy_audit_blobs(&f.store, &mut receiver);
+    let mut ops = operations(&f.store);
+    let mut audit = ops.pop().unwrap();
+    assert_eq!(audit.op_kind, application_record::EVENT_OP);
+    for mut op in ops {
+        op.relay_seq = Some(op.origin_seq + 1);
+        crate::apply_replication_envelope(
+            &mut receiver,
+            &mut WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+    }
+    audit.payload["manifest"]["recordDigest"] = json!("f".repeat(64));
+    pull_refused_audit(&mut receiver, audit);
+}
+
+#[test]
+fn malformed_restore_receipt_epoch_does_not_stall_pull() {
+    malformed_restore_receipt_pull("acceptingHostEpoch", json!(0));
+}
+
+#[test]
+fn malformed_restore_receipt_delivery_does_not_stall_pull() {
+    malformed_restore_receipt_pull("deliveryId", json!(""));
+}
+
+#[test]
+fn malformed_restore_receipt_digest_does_not_stall_pull() {
+    malformed_restore_receipt_pull("updateDigest", json!("x"));
+}
+
+fn canonical_version_read_failure(refresh: bool) {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let mut f = fixture(true);
+    bootstrap(&mut f, false).unwrap();
+    accept_enrollment_event(&mut f, 1);
+    accept_enrollment_event(&mut f, 2);
+    let (_scratch, _path, mut receiver) = open_store();
+    copy_audit_blobs(&f.store, &mut receiver);
+    let mut ops = operations(&f.store);
+    let mut audit = ops.pop().unwrap();
+    assert_eq!(audit.op_kind, application_record::EVENT_OP);
+    for mut op in ops {
+        op.relay_seq = Some(op.origin_seq + 1);
+        crate::apply_replication_envelope(
+            &mut receiver,
+            &mut WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+    }
+    audit.relay_seq = Some(audit.origin_seq + 1);
+    audit.admitted_author_snapshot = Some(json!([]));
+    if refresh {
+        crate::apply_replication_envelope(
+            &mut receiver,
+            &mut WriterDocCache::new(),
+            &audit,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+    }
+    let target = &mut receiver;
+    let before_ack = crate::read_replication_acked_seq(target, "ws", &audit.origin_id).unwrap();
+    let denied = Arc::new(AtomicBool::new(false));
+    let captured = denied.clone();
+    target
+        .read_with(|conn| {
+            conn.authorizer(Some(move |ctx: AuthContext<'_>| {
+                if matches!(
+                    ctx.action,
+                    AuthAction::Read {
+                        table_name: "live_audit_events",
+                        column_name: "canonical_version"
+                    }
+                ) {
+                    captured.store(true, Ordering::SeqCst);
+                    Authorization::Deny
+                } else {
+                    Authorization::Allow
+                }
+            }))
+        })
+        .unwrap();
+    let failed = crate::apply_replication_envelope(
+        target,
+        &mut WriterDocCache::new(),
+        &audit,
+        &NoFaults,
+        &NoLiveLeases,
+    );
+    target
+        .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+        .unwrap();
+    assert!(denied.load(Ordering::SeqCst));
+    assert!(matches!(failed, Err(SyncError::Storage(_))), "{failed:?}");
+    assert_eq!(
+        crate::read_replication_acked_seq(target, "ws", &audit.origin_id).unwrap(),
+        before_ack
+    );
+    assert_eq!(count(target, "replication_pending_refusals"), 0);
+    let retried = crate::apply_replication_envelope(
+        target,
+        &mut WriterDocCache::new(),
+        &audit,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    assert!(!matches!(retried.primary, ApplyDisposition::Refused(_)));
+}
+
+#[test]
+fn canonical_version_read_failure_on_import_can_retry() {
+    canonical_version_read_failure(false);
+}
+
+#[test]
+fn canonical_version_read_failure_on_refresh_can_retry() {
+    canonical_version_read_failure(true);
+}
+
+#[test]
+fn damaged_local_audit_chunk_propagates_storage_failure_and_can_retry() {
+    let mut f = fixture(true);
+    bootstrap(&mut f, false).unwrap();
+    accept_enrollment_event(&mut f, 1);
+    let mut audit = operations(&f.store).pop().unwrap();
+    audit.relay_seq = Some(audit.origin_seq + 1);
+    audit.admitted_author_snapshot = Some(json!([]));
+    let manifest: chunks::Manifest =
+        serde_json::from_value(audit.payload["manifest"].clone()).unwrap();
+    let sha = &manifest.chunks[0].sha256;
+    let (_scratch, _path, mut receiver) = open_store();
+    copy_audit_blobs(&f.store, &mut receiver);
+    for mut op in operations(&f.store) {
+        op.relay_seq = Some(op.origin_seq + 1);
+        crate::apply_replication_envelope(
+            &mut receiver,
+            &mut WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+    }
+    let original = f.store.get_binary_blob(sha).unwrap().unwrap();
+    let mut damaged = original.clone();
+    damaged[0] ^= 1;
+    receiver
+        .read_with(|conn| {
+            conn.execute(
+                "UPDATE binary_blobs SET bytes=?1 WHERE sha256=?2",
+                params![damaged, sha],
+            )
+        })
+        .unwrap();
+    let result = crate::apply_replication_envelope(
+        &mut receiver,
+        &mut WriterDocCache::new(),
+        &audit,
+        &NoFaults,
+        &NoLiveLeases,
+    );
+    assert!(
+        matches!(
+            result,
+            Err(SyncError::Storage(
+                dohc_engine_storage::StorageError::BlobIntegrity { .. }
+            ))
+        ),
+        "{result:?}"
+    );
+    assert_eq!(count(&receiver, "replication_pending_refusals"), 0);
+    receiver
+        .read_with(|conn| {
+            conn.execute(
+                "UPDATE binary_blobs SET bytes=?1 WHERE sha256=?2",
+                params![original, sha],
+            )
+        })
+        .unwrap();
+    let result = crate::apply_replication_envelope(
+        &mut receiver,
+        &mut WriterDocCache::new(),
+        &audit,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    assert!(matches!(result.primary, ApplyDisposition::Skipped));
 }

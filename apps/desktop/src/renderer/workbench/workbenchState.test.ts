@@ -832,6 +832,12 @@ describe("ui-state persistence round-trip", () => {
     ).toBe("explorer");
   });
 
+  it("keeps Sharing open across a restart, through the stored file's schema", () => {
+    const stored = serializeUiState(setView(defaultWorkbenchState(), "sharing"));
+    expect(SetWorkspaceUiStatePayload.parse({ workspaceId: "workspace", state: stored }).state.activeView).toBe("sharing");
+    expect(parseUiState(stored).activeView).toBe("sharing");
+  });
+
   it("does not migrate or alias the version-1 flat-tab contract", () => {
     expect(
       parseUiState({ version: 1, tabs: ["a.md"], activeTab: "a.md" }),
