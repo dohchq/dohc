@@ -147,17 +147,18 @@ async function typeAfter(page: Page, anchor: string, text: string): Promise<void
 
 /**
  * A recipient's ended share: the banner says so without a Refresh, and the
- * document stays readable with Edit disabled and nothing editable. `text`
- * must show, so a missing or empty document cannot pass.
+ * document stays readable in its live editor, which is read-only, and
+ * nothing is editable. `text` must show, so a missing or empty document
+ * cannot pass.
  */
 async function expectEndedShare(page: Page, text: string[]) {
   const banner = page.getByTestId("shared-view-banner");
   await expect(banner).toHaveAttribute("data-ended", "true", { timeout: 60_000 });
   await expect(banner).toContainText(/This share was ended/);
   await expect(page.getByTestId("shared-view-refresh")).toHaveCount(0);
-  await expect(page.getByTestId("markdown-edit-toggle")).toBeDisabled();
   const document = page.getByTestId("view-markdown");
   await expect(document).toBeVisible();
+  await expect(document.getByTestId("markdown-editor")).toHaveAttribute("contenteditable", "false");
   for (const line of text) await expect(document).toContainText(line);
   await expect(page.getByTestId("file-inspector").locator('[contenteditable="true"]')).toHaveCount(0);
   return document;
