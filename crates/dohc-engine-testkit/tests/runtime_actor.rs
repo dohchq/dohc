@@ -209,7 +209,9 @@ async fn restart_bumps_generation_and_preserves_state() {
 }
 
 // Close joins the writer and checkpoint worker. Retained WAL bytes are durable
-// data, not an open connection; Windows exclusive opens prove handle release.
+// data, not an open connection. The Windows gate proves handle release with
+// exclusive opens; on POSIX this test proves only that a fresh writer can
+// reopen and read every committed row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn close_releases_the_connection() {
     let scratch = ScratchDir::new().expect("scratch");

@@ -1141,7 +1141,7 @@ async function expectBusyBudgetFailure(operation: () => Promise<unknown>, messag
   vi.useFakeTimers();
   try {
     const assertion = expect(operation()).rejects.toThrow(message);
-    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(10_000);
     await assertion;
   } finally { vi.useRealTimers(); }
 }

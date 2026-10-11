@@ -3864,7 +3864,7 @@ it.each(["failure", "success"] as const)(
 
       vi.useFakeTimers();
       newResponse.resolve();
-      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.advanceTimersByTimeAsync(10_000);
       vi.useRealTimers();
       expect(reported).toHaveLength(4);
       expect(reported.at(-1)).toEqual({ state: "settling", seq: rendererSeq });

@@ -48,6 +48,16 @@ pub(super) fn report_slow_tick(duration: Duration, phase: &str) {
 fn open(path: &Path) -> EngineStore {
     EngineStore::open_for_actor(path, 1, None, None).unwrap()
 }
+fn client_busy_budget() -> Duration {
+    static BUDGET: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        let policy: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../packages/workspace-engine-client/src/daemon/storeBusyRetry.json"
+        ))
+        .unwrap();
+        Duration::from_millis(policy["engineStoreBusyRetryMs"].as_u64().unwrap())
+    })
+}
 fn write(s: &mut EngineStore, object: &str, path: &str, text: &str, n: i64) {
     let input = WriteText {
         workspace_id: "ws".into(),
@@ -63,7 +73,7 @@ fn write(s: &mut EngineStore, object: &str, path: &str, text: &str, n: i64) {
         now_ms: n,
         request_id: None,
     };
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + client_busy_budget();
     let mut backoff = Duration::from_millis(5);
     loop {
         let mut versions = VersionedTextStore::new(s);
@@ -1096,18 +1106,17 @@ fn drain_resumes_after_abrupt_process_exit() {
 
 #[test]
 fn maximal_writes_checkpoint_within_the_client_busy_budget() {
-    let policy: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../packages/workspace-engine-client/src/daemon/storeBusyRetry.json"
-    ))
-    .unwrap();
-    let budget = Duration::from_millis(policy["engineStoreBusyRetryMs"].as_u64().unwrap());
+    let budget = client_busy_budget();
     fn handoff(store: &mut EngineStore, label: &str, budget: Duration) -> Duration {
         let began = Instant::now();
         let mut refusals = 0;
         loop {
             match store.write_with(&NoFaults, |_| Ok::<_, StorageError>(())) {
                 Ok(TxnOutcome::Committed(())) => break,
-                Err(StorageError::FileLocked) => refusals += 1,
+                Err(StorageError::FileLocked) => {
+                    refusals += 1;
+                    std::thread::sleep(Duration::from_millis(1));
+                }
                 result => panic!("unexpected admission result: {result:?}"),
             }
             assert!(

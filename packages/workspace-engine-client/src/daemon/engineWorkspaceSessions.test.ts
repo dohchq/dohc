@@ -3428,8 +3428,8 @@ describe("store busy total budget", () => {
     const refusal = daemonRefusal("OVERLOADED", "engine-store-busy", "afterBackoff");
     const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { now: () => now, sleep: async ms => { now += ms; } });
     await expect(sessions.run(workspace, async () => { attemptedAt.push(now); throw refusal; })).rejects.toBe(refusal);
-    expect(now).toBe(30_000);
-    expect(attemptedAt.every(at => at < 30_000)).toBe(true);
+    expect(now).toBe(10_000);
+    expect(attemptedAt.every(at => at < 10_000)).toBe(true);
   });
   it.each(["clears", "pinned after open", "pinned during open"] as const)(
     "shares one busy budget across workspace binding and the action: %s", async (scenario) => {
@@ -3446,13 +3446,13 @@ describe("store busy total budget", () => {
         now: () => now, sleep: async ms => { now += ms; },
       });
       const operation = vi.fn(async () => {
-        if (now < 10_000 || scenario !== "clears") throw refusal;
+        if (now < 8_000 || scenario !== "clears") throw refusal;
         return "saved";
       });
       if (scenario === "clears") expect(await sessions.run(workspace, operation)).toBe("saved");
       else {
         await expect(sessions.run(workspace, operation)).rejects.toBe(refusal);
-        expect(now).toBe(30_000);
+        expect(now).toBe(10_000);
         if (scenario === "pinned during open") expect(operation).not.toHaveBeenCalled();
       }
     },
