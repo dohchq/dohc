@@ -478,11 +478,21 @@ export async function createCollectionRecord(
   let path = prepared.path;
   let recordId = requestedId;
   let durable = false;
+  let checkingExistingFile = false;
   let failedStage: CreationStage = "index";
   try {
     const existingPath = input.recordId === undefined
       ? null : await recordPathFor(context, input.collectionPath, requestedId);
     if (existingPath !== null) {
+      if (input.author.kind === "automation") {
+        checkingExistingFile = true;
+        const existingId = await fileRecordId(context, existingPath).catch((error: unknown) => {
+          if (isFileNotFound(error)) throw new AutomationCreationSkipped();
+          throw error;
+        });
+        if (existingId !== requestedId) throw new AutomationCreationSkipped();
+        checkingExistingFile = false;
+      }
       if (input.author.kind !== "automation" && existingPath !== prepared.path) {
         throw new Error("This record ID belongs to another path. Open that record to edit its fields.");
       }
@@ -514,7 +524,7 @@ export async function createCollectionRecord(
     return { path, recordId, ...(Object.keys(kept).length > 0 ? { kept } : {}) };
   } catch (error) {
     // A transport or lease can fail after the write landed.
-    if (error instanceof AutomationCreationSkipped) throw error;
+    if (error instanceof AutomationCreationSkipped || checkingExistingFile) throw error;
     const diskId = await fileRecordId(context, path).catch(() => null);
     if (!durable && diskId !== requestedId) throw error;
     if (diskId !== null && ["write", "capture", "index"].includes(failedStage)) recordId = diskId;
@@ -636,8 +646,7 @@ async function createRecordFile(
       : (error as NodeJS.ErrnoException | null)?.code === "EEXIST";
     if (!collision && !committed) throw error;
     const existing = await fileRecordId(context, requestedPath).catch((readError: unknown) => {
-      if (!committed || (readError as NodeJS.ErrnoException | null)?.code === "ENOENT"
-        || (readError instanceof VersionedTextStoreError && readError.code === "file-not-found")) return undefined;
+      if (!committed || isFileNotFound(readError)) return undefined;
       throw readError;
     });
     if (committed && existing !== recordId) throw new AutomationCreationSkipped();
@@ -646,6 +655,11 @@ async function createRecordFile(
     if (existing === recordId) return requestedPath;
   }
   throw new Error(`${requestedPath} already exists. Choose another record name.`);
+}
+
+function isFileNotFound(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | null)?.code === "ENOENT"
+    || (error instanceof VersionedTextStoreError && error.code === "file-not-found");
 }
 
 /** The valid record id in a file's frontmatter, or null. */
