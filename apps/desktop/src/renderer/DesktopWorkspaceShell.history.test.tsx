@@ -2532,7 +2532,6 @@ describe("history page", () => {
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     let activeRunId: string | null = null;
     bridge.getAgentRunStatus = vi.fn(async () => ({
-      mcpEnabled: true,
       activeRun: activeRunId
         ? {
             id: activeRunId,
@@ -2581,10 +2580,16 @@ describe("history page", () => {
     );
     await screen.findByTestId("mcp-enable-toggle");
 
-    // Wait for the panel's initial read before starting the run.
+    // Wait for the panel's initial read to commit before starting the run.
+    // "Stopped" cannot show it: the panel renders that before any read lands.
+    // The config snippet commits in the same render as the status it read.
     await waitFor(() =>
-      expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"),
+      expect(screen.getByTestId("mcp-config-snippet").textContent).toContain(
+        '"command": "dohc-mcp"',
+      ),
     );
+    expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("stopped");
+    expect(bridge.getMcpConfig).toHaveBeenCalledTimes(1);
 
     // A run starts, and the toggle's reread catches it alive — but the reread
     // is still in flight.
@@ -2605,6 +2610,10 @@ describe("history page", () => {
       for (const answerRead of heldPanelReads) answerRead();
       await Promise.resolve();
     });
+    // The panel committed the run it saw, so the shell was handed an observation.
+    await waitFor(() =>
+      expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"),
+    );
     expect(bridge.startAgentRun).not.toHaveBeenCalled();
     expect(bridge.endAgentRun).not.toHaveBeenCalled();
 
@@ -2877,7 +2886,6 @@ describe("history page", () => {
         });
       }
       return Promise.resolve({
-        mcpEnabled: true,
         activeRun: runIsAlive
           ? {
               id: "run-1",
@@ -2981,7 +2989,6 @@ describe("history page", () => {
       movedOn ? { ...SYNC_STATUS, state: "syncing" as const } : SYNC_STATUS,
     );
     bridge.getAgentRunStatus = vi.fn(async () => ({
-      mcpEnabled: false,
       activeRun: movedOn
         ? {
             id: "run-1",
@@ -3037,12 +3044,10 @@ describe("history page", () => {
   // believed nothing had answered.
   it("keeps an older no-history refresh from undoing a newer agent answer", async () => {
     const idle: AgentRunStatusResult = {
-      mcpEnabled: false,
       activeRun: null,
       lastRun: null,
     };
     const running: AgentRunStatusResult = {
-      mcpEnabled: false,
       activeRun: {
         id: "run-1",
         startedAt: 1,
@@ -3106,7 +3111,6 @@ describe("history page", () => {
         throw new Error("agent status failed");
       }
       return {
-        mcpEnabled: false,
         activeRun: null,
         lastRun: null,
       };

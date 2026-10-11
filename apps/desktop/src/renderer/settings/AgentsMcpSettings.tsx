@@ -1,6 +1,6 @@
 import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
 import { useRequestSequence } from "../useRequestSequence";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Bot } from "lucide-react";
 import type {
   AgentRunStatusResult,
@@ -8,6 +8,7 @@ import type {
 } from "../../ipc/bridgeContract";
 import type { RunnerSettings } from "../../settings/userSettings";
 import { bridge } from "../bridge";
+import { ipcErrorMessage } from "../ipcError";
 import { CopyButton } from "../ui/CopyButton";
 import { PreferredNameControl } from "./PreferredNameControl";
 import { RunnerSettingsCard } from "./RunnerSettingsCard";
@@ -65,6 +66,7 @@ export function AgentsMcpSettings(props: {
     sessionRecorderOn,
     onRunnerChange,
     onAgentActiveChange,
+    onError,
   } = props;
   const [status, setStatus] = useState<AgentRunStatusResult | null>(null);
   const [config, setConfig] = useState<McpConfigResult | null>(null);
@@ -95,12 +97,19 @@ export function AgentsMcpSettings(props: {
   const retryRefresh = useCallback(() => {
     const version = requestVersionRef.current();
     setLoadError(null);
-    void refresh(version).catch(() => {
-      if (isCurrentRequest(version)) {
-        setLoadError("Could not load MCP settings.");
-      }
-    });
-  }, [isCurrentRequest, refresh]);
+    // Busy keeps a toggle from starting while this older read can still paint.
+    setBusy(true);
+    void refresh(version)
+      .catch((cause: unknown) => {
+        if (isCurrentRequest(version)) {
+          setLoadError("Could not load agent settings.");
+          onError?.(ipcErrorMessage(cause, "dohc could not load agent settings."), cause);
+        }
+      })
+      .finally(() => {
+        if (isCurrentRequest(version)) setBusy(false);
+      });
+  }, [isCurrentRequest, onError, refresh]);
 
   useEffect(() => {
     const version = requestVersionRef.next();
@@ -108,22 +117,24 @@ export function AgentsMcpSettings(props: {
     setConfig(null);
     setLoadError(null);
     setBusy(false);
-    void refresh(version).catch(() => {
+    void refresh(version).catch((cause: unknown) => {
       if (isCurrentRequest(version)) {
-        setLoadError("Could not load MCP settings.");
+        setLoadError("Could not load agent settings.");
+        onError?.(ipcErrorMessage(cause, "dohc could not load agent settings."), cause);
       }
     });
     return () => {
       requestVersionRef.next();
     };
-  }, [isCurrentRequest, refresh, workspaceId]);
+  }, [isCurrentRequest, onError, refresh, workspaceId]);
 
-  const enabled = status?.mcpEnabled ?? false;
+  const runActive = Boolean(status?.activeRun);
   const runnerConfigured = configuredRunnerCommand(runner).length > 0;
   // Each way of connecting reports its own state; neither one is required. The
-  // runner dispatches only with an agent name to post as. An enabled MCP server
-  // is only available to connect to: no trusted signal proves that an external
-  // client copied the configuration, so this never claims one is connected.
+  // runner dispatches only with an agent name to post as. An active agent run
+  // only marks changes as the agent's: no trusted signal proves that an
+  // external client copied the configuration, so this never claims one is
+  // connected.
   const runnerState = runner.enabled
     ? props.agentName
       ? { state: "ready", label: "Dispatch ready" }
@@ -135,6 +146,9 @@ export function AgentsMcpSettings(props: {
   const toggle = useCallback(async () => {
     const version = requestVersionRef.current();
     const renderedRunId = status?.activeRun?.id ?? null;
+    const starting = renderedRunId === null;
+    let attempted = false;
+    let changed = false;
     setBusy(true);
     try {
       const latestStatus = await refresh(version);
@@ -146,34 +160,50 @@ export function AgentsMcpSettings(props: {
         onAgentActiveChange?.({ active: latestRun !== null, mutated: false });
         return;
       }
+      attempted = true;
       if (latestRun) {
         await bridge().endAgentRun({ workspaceId, runId: latestRun.id });
       } else {
         await bridge().startAgentRun({ workspaceId });
       }
+      changed = true;
       const finalStatus = await refresh(version);
       if (isCurrentRequest(version)) {
         onAgentActiveChange?.({ active: finalStatus.activeRun !== null, mutated: true });
       }
-    } catch {
-      if (isCurrentRequest(version)) {
-        setLoadError("Could not update MCP server.");
+    } catch (cause) {
+      if (!isCurrentRequest(version)) return;
+      if (changed || !attempted) {
+        // Only a read failed: the one before the start or end, or the one after it.
+        setLoadError("Could not load agent settings.");
+        onError?.(ipcErrorMessage(cause, "dohc could not load agent settings."), cause);
+      } else if (starting) {
+        setLoadError("Could not start the agent run.");
+        onError?.(ipcErrorMessage(cause, "dohc could not start an agent run in this workspace. Try again."), cause);
+      } else {
+        setLoadError("Could not stop the agent run.");
+        onError?.(ipcErrorMessage(cause, "dohc could not stop this workspace's agent run. Try again."), cause);
+      }
+      if (!attempted) return;
+      // Reread live status alone: the config did not change. After a refusal
+      // it is only an observation, since a refusal does not say whether the
+      // run changed.
+      try {
+        const observed = await bridge().getAgentRunStatus({ workspaceId });
+        if (!isCurrentRequest(version)) return;
+        setStatus(observed);
+        onAgentActiveChange?.({ active: observed.activeRun !== null, mutated: changed });
+      } catch {
+        // The failure above is already this click's notice. A run that did
+        // change still needs the shell to reread it, so report an observation.
+        if (changed && isCurrentRequest(version)) {
+          onAgentActiveChange?.({ active: starting, mutated: false });
+        }
       }
     } finally {
       if (isCurrentRequest(version)) setBusy(false);
     }
-  }, [workspaceId, refresh, isCurrentRequest, status?.activeRun?.id, onAgentActiveChange]);
-
-  // The guide's Enable MCP hands focus to the config's Copy once the server
-  // runs. The guide button disables for the toggle, which drops focus in
-  // Chromium, and is gone once the server runs, so focus moves explicitly.
-  const configCopyRef = useRef<HTMLButtonElement>(null);
-  const focusCopyWhenRunning = useRef(false);
-  useEffect(() => {
-    if (busy || !focusCopyWhenRunning.current) return;
-    focusCopyWhenRunning.current = false;
-    if (enabled) configCopyRef.current?.focus();
-  }, [busy, enabled]);
+  }, [workspaceId, refresh, isCurrentRequest, status?.activeRun?.id, onAgentActiveChange, onError]);
 
   return (
     <div className="flex flex-col">
@@ -224,33 +254,9 @@ export function AgentsMcpSettings(props: {
           <div className="px-4 py-3">
             <p className="m-0 text-[11px] font-medium text-ink">Connect an existing agent</p>
             <p className="m-0 mt-1 text-[10px] leading-relaxed text-subtle">
-              Enable the workspace-scoped MCP server. Then copy the MCP config below into your
-              existing agent. Sign-in status stays with that provider.
+              Copy the MCP config below into your existing agent. Sign-in status stays with
+              that provider.
             </p>
-            {status ? (
-              <span
-                data-testid="agent-setup-mcp-state"
-                data-state={enabled ? "running" : "stopped"}
-                className="mt-2 block text-[10px] font-medium text-muted"
-              >
-                {enabled ? "Server running" : "Server stopped"}
-              </span>
-            ) : null}
-            {/* Disable stays on the server row below, and Copy stays beside the MCP config. */}
-            {enabled ? null : (
-              <button
-                type="button"
-                data-testid="agent-setup-mcp-action"
-                disabled={busy}
-                onClick={() => {
-                  focusCopyWhenRunning.current = true;
-                  void toggle();
-                }}
-                className="mt-2 rounded-md border border-line bg-bg px-2.5 py-1 text-[10px] font-medium text-muted hover:text-ink disabled:opacity-50"
-              >
-                Enable MCP
-              </button>
-            )}
           </div>
         </div>
       </section>
@@ -278,30 +284,29 @@ export function AgentsMcpSettings(props: {
       </SettingRow>
 
       <SettingRow
-        title="dohc MCP server"
-        description="Enable this only when you want local agents to use dohc tools for this workspace."
+        title="Agent run"
+        description="While a run is active, history marks changes in this workspace as your agent's."
         testId="settings-row-mcp-server"
       >
         <span
           data-testid="mcp-status"
-          data-state={enabled ? "running" : "stopped"}
+          data-state={runActive ? "running" : "stopped"}
           className="text-[11px] text-muted"
         >
-          {enabled ? "Running" : "Stopped"}
+          {runActive ? "Running" : "Stopped"}
         </span>
         <button
           type="button"
           data-testid="mcp-enable-toggle"
-          aria-pressed={enabled}
           disabled={busy}
           onClick={() => void toggle()}
           className={`rounded-md px-3 py-1.5 text-[11px] font-medium transition-colors ${
-            enabled
+            runActive
               ? "border border-line bg-transparent text-muted hover:bg-hover hover:text-ink"
               : "bg-accent text-bg hover:opacity-90"
           } disabled:opacity-50`}
         >
-          {enabled ? "Disable" : "Enable"}
+          {runActive ? "Stop run" : "Start run"}
         </button>
       </SettingRow>
 
@@ -313,8 +318,9 @@ export function AgentsMcpSettings(props: {
           <span>{loadError}</span>
           <button
             type="button"
+            disabled={busy}
             onClick={retryRefresh}
-            className="rounded-md border border-line px-2 py-1 text-muted transition-colors hover:bg-hover hover:text-ink"
+            className="rounded-md border border-line px-2 py-1 text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
           >
             Retry
           </button>
@@ -326,7 +332,6 @@ export function AgentsMcpSettings(props: {
           <h3 className="m-0 text-[13px] font-medium text-ink">MCP config</h3>
           <CopyButton
             key={workspaceId}
-            ref={configCopyRef}
             disabled={!config || "unavailable" in config}
             getText={() => (config && !("unavailable" in config) ? configSnippet(config) : null)}
           />

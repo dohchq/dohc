@@ -2634,12 +2634,11 @@ const activity = {
       ),
     ),
 };
-// Local agent integration: owns the per-workspace MCP child + active-run slot
-// and persists agent-run records. The run slot is wired into the watcher
+// Local agent integration: owns the per-workspace active-run slot and
+// persists agent-run records. The run slot is wired into the watcher
 // (workspaceActivity.setAgentRun) so a run's writes are attributed to the
-// agent. The MCP child is spawned only in a packaged/dev runtime where a server
-// entry resolves; otherwise the toggle still flips and the user's AI tool
-// launches its own copy via the Settings config snippet.
+// agent. The user's AI tool launches its own MCP server from the Settings
+// config snippet.
 const agentIntegration = createAgentIntegration({
   workspaceIds: () => workspaceAuthorities.workspaceIds(),
   localPersonId: localUserId,
@@ -2690,7 +2689,6 @@ const agentIntegration = createAgentIntegration({
       release: () => lease.release(),
     };
   },
-  home: stateDir(),
   // Every terminal run path funnels through endAgentRun (a Settings stop or
   // the endAgentRun IPC) — the try-in-version review card listens on that
   // single seam.
@@ -6385,7 +6383,8 @@ function registerIpcHandlers(): void {
   });
 
   const agentRunsIpc = createAgentRunsIpc<WebContents, IpcMainInvokeEvent, RegistryEntry, DesktopRendererWorkspaceOperation>({
-    detectAgentTools,
+    detectAgentTools: (workspaceRoot: string, signal: AbortSignal) =>
+      detectAgentTools(workspaceRoot, signal, resourcesBasePath()),
     registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, requireEngineCapture,
     linkedChatStoreFor, agentDispatchStoreHandleFor, requireWorkspace, assertAgentRunnableWorkspace,

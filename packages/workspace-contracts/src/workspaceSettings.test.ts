@@ -4,6 +4,7 @@ import {
   DEFAULT_WORKSPACE_SETTINGS,
   decodeWorkspaceSettings,
 } from "./workspaceSettings";
+import { WORKSPACE_SETTINGS_DEFAULTS } from "./workspaceSettingsValues";
 
 function expectFailureMessage(input: unknown, message: string): void {
   expect(() => decodeWorkspaceSettings(input)).toThrow(message);
@@ -13,7 +14,6 @@ describe("WorkspaceSettings", () => {
   it("decodes the current settings and defaults old optional groups", () => {
     const oldShape = {
       version: 1,
-      agents: { mcpAutoStart: false },
       sites: { defaultPreviewMode: "auto" },
       privacy: { confirmExternalLinks: true },
     };
@@ -23,25 +23,45 @@ describe("WorkspaceSettings", () => {
   it("rejects excess properties at every strict object level", () => {
     expectFailureMessage(
       { ...DEFAULT_WORKSPACE_SETTINGS, token: "secret" },
-      "Expected no excess property",
+      "unrecognized_keys",
     );
-    for (const section of ["agents", "sites", "privacy", "files"] as const) {
+    for (const section of ["sites", "privacy", "files"] as const) {
       expectFailureMessage(
         {
           ...DEFAULT_WORKSPACE_SETTINGS,
           [section]: { ...DEFAULT_WORKSPACE_SETTINGS[section], token: "secret" },
         },
-        "Expected no excess property",
+        "unrecognized_keys",
       );
     }
   });
 
+  it("rejects the retired agents group", () => {
+    expectFailureMessage(
+      { ...DEFAULT_WORKSPACE_SETTINGS, agents: { mcpAutoStart: false } },
+      "unrecognized_keys",
+    );
+  });
+
   it("keeps decoded settings mutable", () => {
     const decoded = decodeWorkspaceSettings(DEFAULT_WORKSPACE_SETTINGS);
-    decoded.agents.mcpAutoStart = true;
+    decoded.privacy.confirmExternalLinks = false;
     decoded.files.attachmentFolderName = "attachments";
-    expect(decoded.agents.mcpAutoStart).toBe(true);
+    expect(decoded.privacy.confirmExternalLinks).toBe(false);
     expect(decoded.files.attachmentFolderName).toBe("attachments");
+  });
+
+  it("gives each decode its own defaulted files group", () => {
+    const oldShape = {
+      version: 1,
+      sites: { defaultPreviewMode: "auto" },
+      privacy: { confirmExternalLinks: true },
+    };
+    const first = decodeWorkspaceSettings(oldShape);
+    const second = decodeWorkspaceSettings(oldShape);
+    first.files.attachmentFolderName = "attachments";
+    expect(second.files.attachmentFolderName).toBe("assets");
+    expect(WORKSPACE_SETTINGS_DEFAULTS.files.attachmentFolderName).toBe("assets");
   });
 
   it("reports the attachment folder bound with its limit and unit", () => {

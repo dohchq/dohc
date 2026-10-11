@@ -239,12 +239,13 @@ export function directoryFingerprint(path) {
   return hash.digest("hex");
 }
 
-function artifactFingerprint(kind) {
+// The Windows x64 probe owner and relay run on the compiler's pinned Node, so both trees are desktop artifacts.
+export function artifactFingerprint(kind, root = repoRoot, platform = process.platform, arch = process.arch) {
   if (kind === "engine") return hashFile(enginePath);
   return createHash("sha256").update(JSON.stringify([
     "apps/desktop/dist", "apps/desktop/resources/cli-bin", "apps/desktop/resources/app-backend-runtime", "services/share-web/viewer/dist",
-    ...(process.platform === "win32" && process.arch === "x64" ? ["apps/desktop/resources/app-compiler"] : []),
-  ].map((path) => [path, directoryFingerprint(join(repoRoot, path))]))).digest("hex");
+    ...(platform === "win32" && arch === "x64" ? ["apps/desktop/resources/app-compiler", "apps/desktop/resources/agent-probe"] : []),
+  ].map((path) => [path, directoryFingerprint(join(root, path))]))).digest("hex");
 }
 
 // A receipt is reusable while the inputs its build consumed are unchanged.

@@ -970,7 +970,7 @@ export function DesktopWorkspaceShell(props: {
   // the same fallback main uses for local authorship.
   const LOCAL_USER_LABEL = "You";
   const localAgentName = props.userSettings?.settings.profile.agentName ?? "Your agent";
-  const localAgentEnabled = Boolean(agentSetup?.runnerEnabled || agentSetup?.mcpEnabled);
+  const localAgentEnabled = Boolean(agentSetup?.runnerEnabled || agentSetup?.agentRunActive);
   const mentionCandidates = useMemo<MentionCandidate[]>(
     () => [
       ...(localAgentEnabled

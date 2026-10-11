@@ -137,7 +137,7 @@ describe("ChatsView My agent", () => {
         agentName: "Nova",
         runnerConfigured: true,
         runnerEnabled: true,
-        mcpEnabled: false,
+        agentRunActive: false,
       },
       onSetupAgent,
       userSettings: DEFAULT_USER_SETTINGS,
@@ -234,12 +234,12 @@ describe("ChatsView My agent", () => {
     const onSaveUserSettings = vi.fn(async () => undefined);
     const runnerSelfTest = vi.fn(async () => ({ ok: true, detail: "The runner answered." }));
     vi.stubGlobal("dohcDesktop", { ...(globalThis as { dohcDesktop?: object }).dohcDesktop, runnerSelfTest });
-    // An enabled MCP server is not a set-up agent.
+    // An active agent run is not a set-up agent.
     renderView(vi.fn(), vi.fn(), {
       agentSetup: {
         runnerConfigured: false,
         runnerEnabled: false,
-        mcpEnabled: true,
+        agentRunActive: true,
       },
       onSetupAgent: vi.fn(),
       userSettings: DEFAULT_USER_SETTINGS,

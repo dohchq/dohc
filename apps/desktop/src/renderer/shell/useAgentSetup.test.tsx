@@ -5,9 +5,8 @@ import type { AgentRunStatusResult } from "../../ipc/bridgeContract";
 import type { SettingsSectionId } from "../settings/settingsRegistry";
 import { useAgentSetup } from "./useAgentSetup";
 
-const inactive: AgentRunStatusResult = { mcpEnabled: false, activeRun: null, lastRun: null };
+const inactive: AgentRunStatusResult = { activeRun: null, lastRun: null };
 const active: AgentRunStatusResult = {
-  mcpEnabled: true,
   activeRun: { id: "run-1", startedAt: 1, agentId: "agent", onBehalfOf: "owner", status: "running" },
   lastRun: null,
 };

@@ -21,8 +21,7 @@ import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 export const WORKSPACE_SETTINGS_FILE = "settings.local.json";
 export const MAX_WORKSPACE_SETTINGS_FILE_BYTES = 256 * 1024;
 
-// The contract decides what is valid; the IPC mirror, bound to the contract
-// by type, lists the keys.
+// The contract schema decides both what is valid and which keys exist.
 const workspaceSettingKinds = settingKinds(WorkspaceSettings, DEFAULT_WORKSPACE_SETTINGS);
 
 function decodedOrNull(candidate: unknown): WorkspaceSettings | null {
