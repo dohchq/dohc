@@ -632,6 +632,7 @@ pub enum SyncPassOutcome {
         owner_admission_pending: Vec<crate::OwnerAdmissionPending>,
         pushed: usize,
         next_settled_head_publish_at_ms: Option<i64>,
+        settled_head_readers: bool,
         fetched: usize,
         has_more: bool,
         applied: usize,
@@ -707,22 +708,23 @@ fn record_settled_head_readers(
     }
 }
 
-fn settled_head_activation_deadline(
+fn settled_head_publication_status(
     store: &EngineStore,
     workspace: &str,
     now_ms: i64,
-) -> Result<Option<i64>, RelayError> {
+) -> Result<(bool, Option<i64>), RelayError> {
     store
         .read_with(|conn| {
-            let pending: bool = conn
+            let status: Option<(bool, bool)> = conn
                 .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM sync_identity
-          WHERE workspace_id=?1 AND settled_head_readers=1 AND settled_head_activation_pending=1)",
+                    "SELECT settled_head_readers,settled_head_activation_pending FROM sync_identity WHERE workspace_id=?1",
                     [workspace],
-                    |r| r.get(0),
+                    |r| Ok((r.get(0)?, r.get(1)?)),
                 )
+                .optional()
                 .map_err(SyncError::corrupt)?;
-            Ok::<_, SyncError>(pending.then_some(now_ms))
+            let (readers, pending) = status.unwrap_or((false, false));
+            Ok::<_, SyncError>((readers, (readers && pending).then_some(now_ms)))
         })
         .map_err(local)
 }
@@ -1684,14 +1686,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
         }
 
+        let (settled_head_readers, activation) =
+            settled_head_publication_status(store, workspace_id, now_ms)?;
         Ok(SyncPassOutcome::Complete {
             owner_admission_pending,
-            next_settled_head_publish_at_ms: settled_head_activation_deadline(
-                store,
-                workspace_id,
-                now_ms,
-            )?
-            .or(progress.next_settled_head_publish_at_ms),
+            settled_head_readers,
+            next_settled_head_publish_at_ms: activation
+                .or(progress.next_settled_head_publish_at_ms),
             pushed,
             fetched: 0,
             has_more: resume_needed
@@ -2024,13 +2025,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 record_facts,
             });
         }
+        let (settled_head_readers, next_settled_head_publish_at_ms) =
+            settled_head_publication_status(store, workspace_id, now_ms)?;
         Ok(SyncPassOutcome::Complete {
             owner_admission_pending: Vec::new(),
-            next_settled_head_publish_at_ms: settled_head_activation_deadline(
-                store,
-                workspace_id,
-                now_ms,
-            )?,
+            settled_head_readers,
+            next_settled_head_publish_at_ms,
             pushed: 0,
             fetched,
             has_more,

@@ -155,6 +155,43 @@ afterEach(() => {
 });
 
 describe("relaySyncEngine", () => {
+  it("recovers a reader activation wake dropped while a pass is still running", async () => {
+    const reads: Array<{ answer: () => void }> = [];
+    const fetch = vi.fn(async (resource: string | URL | Request, init?: RequestInit) => {
+      if (String(resource).endsWith("/bootstrap")) return Response.json({ ok: true, hasContent: true, replicationEpoch: "e", streamIdentity: "s" });
+      return new Promise<Response>((resolve, reject) => {
+        reads.push({ answer: () => resolve(Response.json({ ok: true, hasMore: false, settledHeadReaders: true })) });
+        init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason), { once: true });
+      });
+    });
+    let finish!: () => void;
+    const held = new Promise<void>((resolve) => { finish = resolve; });
+    let completedPulls = 0;
+    pullMock.mockResolvedValueOnce(pullResult({ settledHeadReaders: false }));
+    pullMock.mockResolvedValueOnce(pullResult({ settledHeadReaders: false }));
+    pullMock.mockResolvedValueOnce(pullResult({ settledHeadReaders: true }));
+    const sync = engine({ capture: capture(),
+      waitForChange: createRelayLogWait({ workspaceId: "w", relay: { baseUrl: "http://relay.test", token: "token", fetch } }),
+      afterSuccessfulPull: async () => { if (++completedPulls === 2) await held; },
+    });
+    try {
+      await sync.start();
+      await vi.advanceTimersByTimeAsync(0);
+      const running = sync.retryNow({ countsAsAttempt: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(completedPulls).toBe(2);
+      reads[0]!.answer();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(pullMock).toHaveBeenCalledTimes(2);
+      finish();
+      await running;
+      await vi.advanceTimersByTimeAsync(0);
+      reads[1]!.answer();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(pullMock).toHaveBeenCalledTimes(3);
+      expect(pushMock).toHaveBeenCalledTimes(3);
+    } finally { finish(); await sync.stop(); }
+  });
   it("starts one serialized push when an empty pull activates publication", async () => {
     pullMock.mockResolvedValueOnce(pullResult({ nextSettledHeadPublishAtMs: 12345 } as Partial<PullWorkspaceFromRelayResult>));
     const sync = engine({ capture: capture() });

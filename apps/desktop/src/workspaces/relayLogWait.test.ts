@@ -21,6 +21,17 @@ function fakeRelay(answers: Array<{ status: number; body: unknown; afterMs?: num
 }
 
 describe("held relay log reads", () => {
+  it("keeps waking until the engine records the reader flag after a dropped wake", async () => {
+    const relay = fakeRelay(Array.from({ length: 3 }, () => ({ status: 200, body: { ok: true, hasMore: false, settledHeadReaders: true }, afterMs: 25_000 })));
+    let recorded = false;
+    const wait = createRelayLogWait({ workspaceId: "workspace", ...relay });
+    const signal = new AbortController().signal;
+    await expect(wait(0, signal, () => recorded)).resolves.toBe(true);
+    // A running pass dropped this wake and recorded the earlier false hint.
+    await expect(wait(0, signal, () => recorded)).resolves.toBe(true);
+    recorded = true;
+    await expect(wait(0, signal, () => recorded)).resolves.toBe(false);
+  });
   it("requests a pull once when reader demand changes without a log operation", async () => {
     const relay = fakeRelay([
       { status: 200, body: { ok: true, hasMore: false, settledHeadReaders: true }, afterMs: 25_000 },
@@ -30,8 +41,8 @@ describe("held relay log reads", () => {
     const wait = createRelayLogWait({ workspaceId: "workspace", ...relay });
     const signal = new AbortController().signal;
     await expect(wait(0, signal)).resolves.toBe(true);
-    await expect(wait(0, signal)).resolves.toBe(false);
-    await expect(wait(0, signal)).resolves.toBe(true);
+    await expect(wait(0, signal, () => true)).resolves.toBe(false);
+    await expect(wait(0, signal, () => true)).resolves.toBe(true);
   });
   it("names the relay's coordinate once and reports whether the log moved past the cursor", async () => {
     const relay = fakeRelay([

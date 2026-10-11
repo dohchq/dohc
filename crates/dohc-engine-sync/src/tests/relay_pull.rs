@@ -1505,6 +1505,7 @@ fn page_base_repair(repeat_coordinate: bool) {
     let mut relay = PagedRelay::new([(
         0,
         PullResponse {
+            settled_head_readers: None,
             ops,
             next_cursor: if repeat_coordinate { 20 } else { 10 },
             has_more: false,

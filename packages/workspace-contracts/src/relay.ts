@@ -33,6 +33,7 @@ export interface SharingDeclined {
 }
 
 export interface PullWorkspaceFromRelayResult {
+  settledHeadReaders?: boolean;
   nextSettledHeadPublishAtMs?: number | null;
   fetched: number;
   applied: number;
@@ -55,6 +56,7 @@ export interface OwnerAdmissionPending {
 }
 
 export interface PushWorkspaceToRelayResult {
+  settledHeadReaders?: boolean;
   nextSettledHeadPublishAtMs?: number | null;
   hasMore: boolean;
   ownerAdmissionPending: OwnerAdmissionPending[];

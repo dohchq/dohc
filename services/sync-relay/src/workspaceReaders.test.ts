@@ -1,5 +1,6 @@
 import { afterEach, expect, it } from "vitest";
 import { claimWorkspace, closeTestStorages, json, jsonBody, request, seedLinkGrant, testHandler, testStorage } from "./testing";
+import { workspaceHasSettledHeadReaders } from "./storage/shares";
 import type { StorageContext } from "./storage/context";
 
 afterEach(closeTestStorages);
@@ -28,6 +29,17 @@ it("reports current external file readers on append, ordinary and held reads", a
   add("chat", { kind: "chat", channelWireId: "channel" });
   add("invalid", { broken: true });
   await readers(false);
+  const db = (storage as StorageContext).db;
+  db.prepare("UPDATE sync_relay_shares SET selector_json='invalid JSON' WHERE share_id='invalid'").run();
+  await readers(false);
+  // JSON.parse uses the last duplicate key. Keep ambiguous rows for that parser.
+  db.prepare("UPDATE sync_relay_share_grants SET access='read-only' WHERE grant_id='invalid'").run();
+  db.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id='invalid'")
+    .run('{"kind":"chat","kind":"group","channelWireId":"channel","paths":["docs"],"versionId":null}');
+  await readers(true);
+  db.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id='invalid'")
+    .run('{"kind":"group","kind":"chat","paths":["docs"],"channelWireId":"channel"}');
+  await readers(false);
   add("files", files);
   await readers(true);
   storage.revokeShareGrant({ shareId: "files", grantId: "files", revokedAtMs: 2 });
@@ -49,4 +61,15 @@ it("reports current external file readers on append, ordinary and held reads", a
   await readers(true);
   raw.prepare("UPDATE sync_relay_workspaces SET owner_user_id='another' WHERE workspace_id='w'").run();
   expect(storage.workspaceIsOwnedBy("w", "owner")).toBe(false);
+});
+
+it("stops consuming grant rows at the first current file reader", () => {
+  let consumed = 0;
+  const row = { selector_json: JSON.stringify({ paths: ["docs"], versionId: null }), access: "view" };
+  const context = { db: { prepare: () => ({
+    all: () => Array.from({ length: 2_000 }, () => { consumed += 1; return row; }),
+    iterate: function* () { for (let i = 0; i < 2_000; i += 1) { consumed += 1; yield row; } },
+  }) } } as unknown as StorageContext;
+  expect(workspaceHasSettledHeadReaders(context, "w")).toBe(true);
+  expect(consumed).toBe(1);
 });

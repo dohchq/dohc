@@ -56,6 +56,7 @@ impl Relay {
             RelayIoRequest::Pull(_) => {
                 self.pulls += 1;
                 RelayIoResponse::Pull(PullResponse {
+                    settled_head_readers: None,
                     ops: Vec::new(),
                     next_cursor: 0,
                     has_more: false,
@@ -345,6 +346,7 @@ fn base_repair_batch_reuses_answers_when_pending_groups_shift_boundaries() {
                     assert!(push.ops.is_empty());
                     probes += 1;
                     RelayIoResponse::Push(PushResponse {
+                        settled_head_readers: None,
                         accepted: 0,
                         inserted: 0,
                         skipped: 0,

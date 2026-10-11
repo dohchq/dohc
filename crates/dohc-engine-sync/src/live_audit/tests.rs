@@ -898,7 +898,7 @@ fn fix2_push_drains_audit_backlog_before_publishing_the_held_head() {
         }
         ops
     };
-    let mut f = fixture(true);
+    let mut f = fixture(false);
     bootstrap(&mut f, false).unwrap();
     accept_enrollment_event(&mut f, 1);
     settle_bootstrap_publication(&mut f, 1, "moment-ydoc-audited").unwrap();
@@ -939,6 +939,7 @@ fn fix2_push_drains_audit_backlog_before_publishing_the_held_head() {
             Ok::<_, SyncError>(())
         })
         .unwrap();
+    assert_eq!(count(&f.store, "live_audit_pending_exports"), 1);
     let checked = f
         .store
         .read_with(|c| {
@@ -950,6 +951,18 @@ fn fix2_push_drains_audit_backlog_before_publishing_the_held_head() {
         })
         .unwrap();
     let client = crate::RelaySyncClient::new(crate::tests::FakeRelay::default());
+    client
+        .claim_workspace(
+            &mut f.store,
+            crate::ClaimRequest {
+                workspace_id: "ws".into(),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+            },
+            None,
+            &NoFaults,
+        )
+        .unwrap();
     client
         .push_workspace(
             &mut f.store,
@@ -976,7 +989,7 @@ fn fix2_push_drains_audit_backlog_before_publishing_the_held_head() {
             .unwrap(),
         checked
     );
-    client
+    let drained = client
         .push_workspace(
             &mut f.store,
             "ws",
@@ -987,6 +1000,25 @@ fn fix2_push_drains_audit_backlog_before_publishing_the_held_head() {
         )
         .unwrap();
     assert_eq!(count(&f.store, "live_audit_pending_exports"), 0);
+    assert!(matches!(
+        drained,
+        crate::SyncPassOutcome::Complete {
+            next_settled_head_publish_at_ms: Some(120_000),
+            ..
+        }
+    ));
+    // Draining publishes the audited companion now, so its publication clock
+    // holds the newer head until the wake. No further edit is needed.
+    client
+        .push_workspace(
+            &mut f.store,
+            "ws",
+            &NoFaults,
+            &crate::NoLiveLeases,
+            120_000,
+            100_000_000,
+        )
+        .unwrap();
     let ops = all_ops(&f.store);
     let held = ops
         .iter()
@@ -3108,7 +3140,9 @@ fn settle_bootstrap_publication_at(
                     300 + cursor,
                 )?;
                 if proof_ready { audit.record_publication_state_in_tx(tx, &id, &doc.encode_full_state())?; }
-                assert!(journal_live_settlement_in_tx(tx, "ws", &id, published_at_ms)?.is_some());
+                let ready = crate::workspace_replicates_with_relay_in_tx(tx, "ws")?
+                    && !enrollment::pending_in_tx(tx, "ws")?;
+                assert_eq!(journal_live_settlement_in_tx(tx, "ws", &id, published_at_ms)?.is_some(), ready);
                 Ok(())
             })?;
             Ok(())

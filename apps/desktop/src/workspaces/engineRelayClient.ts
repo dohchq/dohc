@@ -771,6 +771,7 @@ export class EngineRelayClient {
         return {
           pushed: result.pushed,
           nextSettledHeadPublishAtMs: result.nextSettledHeadPublishAtMs,
+          settledHeadReaders: result.settledHeadReaders,
           hasMore: result.hasMore,
           // The daemon owns all origin selection; desktop callers only consume
           // the count, so no origin identifiers cross the process boundary.
@@ -786,6 +787,7 @@ export class EngineRelayClient {
         let conflictsOpened = 0;
         let nextCursor = 0;
         let nextSettledHeadPublishAtMs: number | null = null;
+        let settledHeadReaders = false;
         let previousCursor: number | null = null;
         const declines: SharingDeclined[] = [];
         const changed = new Map<
@@ -811,6 +813,7 @@ export class EngineRelayClient {
           previousCursor = pageCursor;
           nextCursor = pageCursor;
           nextSettledHeadPublishAtMs = result.nextSettledHeadPublishAtMs ?? nextSettledHeadPublishAtMs;
+          settledHeadReaders = result.settledHeadReaders;
           fetched += result.fetched;
           applied += result.applied;
           skipped += result.skipped;
@@ -831,6 +834,7 @@ export class EngineRelayClient {
         return {
           fetched,
           nextSettledHeadPublishAtMs,
+          settledHeadReaders,
           applied,
           skipped,
           conflictsOpened,

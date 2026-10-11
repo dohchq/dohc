@@ -75,7 +75,7 @@ export interface CloudSyncEngineOptions {
   // without polling. A rejection backs the next wait off. The engine aborts
   // `signal` when it no longer needs the answer, and waits for the promise to
   // settle before it waits again or stops.
-  waitForChange?: (since: number, signal: AbortSignal) => Promise<boolean>;
+  waitForChange?: (since: number, signal: AbortSignal, recordedReaders: () => boolean) => Promise<boolean>;
   // How long the engine waits after a pass before it pulls again on its own:
   // the fallback for a change `waitForChange` missed. Omitted, the engine
   // pulls only when asked.
@@ -165,6 +165,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   let idlePullTimer: ReturnType<typeof setTimeout> | undefined;
   // The cursor a reported change was past, until a pass starts to pull it.
   let changeReported: number | undefined;
+  let settledHeadReaders = false;
   // What the pass that just pulled reached. The wait restarts from it once
   // that pass ends: a change reported while the pass still runs would
   // otherwise yield to a pass that has already pulled.
@@ -178,7 +179,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   let chain: Promise<void> = Promise.resolve();
   // The wait on the relay for a change past the last pull.
   const watch = options.waitForChange && startRelayWatch({
-    wait: options.waitForChange,
+    wait: (since, signal) => options.waitForChange!(since, signal, () => settledHeadReaders),
     initialDelayMs: initialBackoffMs,
     maxDelayMs: maxBackoffMs,
     changed: (since) => {
@@ -380,6 +381,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       const result = await pushWithIdentity({ push: () => operations.push(), claim });
       passSharingDeclined.push(...result.sharingDeclined);
       passOwnerPending = result.ownerAdmissionPending;
+      settledHeadReaders = result.settledHeadReaders ?? settledHeadReaders;
       pushHasMore = result.hasMore;
       nextSettledHeadPublishAtMs = result.nextSettledHeadPublishAtMs ?? null;
     };
@@ -427,6 +429,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     // Only a fully successful pull (materialized + cursor committed inside
     // runRelaySync) completes the bootstrap; a throw above leaves the next
     // retry pull-only.
+    settledHeadReaders = pullResult.settledHeadReaders ?? settledHeadReaders;
     const pullPublishAtMs = pullResult.nextSettledHeadPublishAtMs;
     if (pullPublishAtMs != null) {
       nextSettledHeadPublishAtMs = nextSettledHeadPublishAtMs === null

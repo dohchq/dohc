@@ -808,9 +808,9 @@ for (const delivery of ["typing", "late-share", "upgrade", "declined"] as const)
             database.prepare("UPDATE ydoc_docs SET file_export_lane=1,regime='local-only',lineage_claim_status='unclaimed',lineage_claim_id=NULL WHERE object_id=?").run(head.object_id);
           } else {
             if (database.prepare("PRAGMA table_info(ydoc_docs)").all().some(column => column.name === "last_published_moment_id")) {
-              database.exec("BEGIN; DROP INDEX idx_live_device_settlements_moment; DROP INDEX IF EXISTS idx_ydoc_unchecked_publication; ALTER TABLE ydoc_docs DROP COLUMN last_published_moment_id; ALTER TABLE ydoc_docs DROP COLUMN last_published_at_ms; ALTER TABLE ydoc_docs DROP COLUMN published_checked_settle_seq; ALTER TABLE sync_identity DROP COLUMN settled_head_readers; ALTER TABLE sync_identity DROP COLUMN settled_head_activation_pending; DELETE FROM engine_migrations WHERE ordinal=42; COMMIT;");
+              database.exec("BEGIN; DROP INDEX idx_live_device_settlements_moment; DROP INDEX IF EXISTS idx_ydoc_unchecked_publication; ALTER TABLE ydoc_docs DROP COLUMN last_published_moment_id; ALTER TABLE ydoc_docs DROP COLUMN last_published_at_ms; ALTER TABLE ydoc_docs DROP COLUMN published_checked_settle_seq; ALTER TABLE sync_identity DROP COLUMN settled_head_readers; ALTER TABLE sync_identity DROP COLUMN settled_head_activation_pending; DELETE FROM engine_migrations WHERE ordinal=43; COMMIT;");
             }
-            expect(database.prepare("SELECT max(ordinal) AS ordinal FROM engine_migrations").get()?.ordinal).toBe(41);
+            expect(database.prepare("SELECT max(ordinal) AS ordinal FROM engine_migrations").get()?.ordinal).toBe(42);
           }
         } finally { database.close(); }
         owner = await launchDesktopApp({ workspace: ownerTemp, env: stack.trustEnv });

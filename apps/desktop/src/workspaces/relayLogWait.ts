@@ -21,14 +21,13 @@ export function createRelayLogWait(input: {
   relay: SyncRelayConnection;
   holdMs?: number;
   nowMs?: () => number;
-}): (since: number, signal: AbortSignal) => Promise<boolean> {
+}): (since: number, signal: AbortSignal, recordedReaders?: () => boolean) => Promise<boolean> {
   const holdMs = input.holdMs ?? RELAY_LOG_HOLD_MS;
   const nowMs = input.nowMs ?? (() => Date.now());
   // The relay's current coordinate. A held read names it the way a pull does;
   // the relay refuses a stale one, and the next read asks for it again.
-  let settledHeadReaders = false;
   let identity: RelayWorkspaceIdentity | null | undefined;
-  return async (since, abort) => {
+  return async (since, abort, recordedReaders = () => false) => {
     // One deadline bounds the coordinate read and the held read together.
     const signal = AbortSignal.any([abort, AbortSignal.timeout(holdMs + 15_000)]);
     if (identity === undefined) {
@@ -58,8 +57,7 @@ export function createRelayLogWait(input: {
       label: "Held relay log read",
     });
     const hint = HeldLogRead.parse(await response.json());
-    const readersChanged = hint.settledHeadReaders !== settledHeadReaders;
-    settledHeadReaders = hint.settledHeadReaders;
+    const readersChanged = hint.settledHeadReaders !== recordedReaders();
     const hasMore = hint.hasMore || readersChanged;
     if (!hasMore && nowMs() - startedAtMs < holdMs / 2) {
       throw new Error("The relay answered a held read early without a change.");

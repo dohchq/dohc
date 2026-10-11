@@ -274,8 +274,27 @@ pub(crate) fn publish_ordinary_settled_heads_in_tx(
         [workspace_id],
     )
     .map_err(SyncError::persist)?;
+    let unchecked: bool = tx
+        .prepare_cached("SELECT EXISTS(SELECT 1 FROM ydoc_docs INDEXED BY idx_ydoc_unchecked_publication WHERE workspace_id=?1 AND file_export_lane=0 AND settle_seq>published_checked_settle_seq)")
+        .map_err(SyncError::corrupt)?
+        .query_row([workspace_id], |row| row.get(0))
+        .map_err(SyncError::corrupt)?;
+    if !unchecked {
+        return Ok(None);
+    }
+    tx.prepare_cached(
+        "UPDATE ydoc_docs AS d INDEXED BY idx_ydoc_unchecked_publication
+         SET published_checked_settle_seq=settle_seq
+         WHERE workspace_id=?1 AND file_export_lane=0 AND settle_seq>published_checked_settle_seq
+           AND (EXISTS(SELECT 1 FROM snapshots s LEFT JOIN moments h
+             ON h.workspace_id=s.workspace_id AND h.moment_id=s.latest_moment_id
+             WHERE s.workspace_id=d.workspace_id AND s.version_id=d.version_id AND s.object_id=d.object_id
+               AND (s.content_kind<>'text' OR d.settle_seq<h.moment_order))
+           OR (d.last_settled_sha IS NOT NULL AND NOT EXISTS(SELECT 1 FROM snapshots s
+             WHERE s.workspace_id=d.workspace_id AND s.version_id=d.version_id AND s.object_id=d.object_id)))",
+    ).map_err(SyncError::corrupt)?.execute([workspace_id]).map_err(SyncError::persist)?;
     let candidates: Vec<OrdinarySettledHead> = {
-        let mut statement = tx.prepare(concat!(
+        let mut statement = tx.prepare_cached(concat!(
             "SELECT h.moment_id,b.byte_length+COALESCE((SELECT byte_length FROM blobs WHERE sha256=h.payload_before_blob_sha256),0),d.last_published_at_ms,
                EXISTS(SELECT 1 FROM moments m WHERE m.workspace_id=h.workspace_id
                  AND m.version_id=h.version_id AND m.object_id=h.object_id
@@ -288,7 +307,7 @@ pub(crate) fn publish_ordinary_settled_heads_in_tx(
                    AND m.version_id=h.version_id AND m.object_id=h.object_id
                    AND m.metadata_origin='ydoc' AND m.moment_id GLOB 'moment-ydoc-*'
                    AND m.moment_id NOT GLOB 'moment-ydoc-apply-*' AND COALESCE(m.sync_record_only,0)=0
-                   AND m.moment_order>COALESCE(p.moment_order,-1) AND m.moment_order<=h.moment_order
+                   AND m.moment_order>MAX(COALESCE(p.moment_order,-1),d.published_checked_settle_seq) AND m.moment_order<=h.moment_order
                    AND NOT EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=m.workspace_id
                      AND r.imported=1 AND r.op_kind='moment.append'
                      AND json_extract(r.payload_json,'$.momentId')=+m.moment_id
@@ -388,7 +407,9 @@ pub(crate) fn publish_ordinary_settled_heads_in_tx(
                 check_settled_head_in_tx(tx, workspace_id, &version, &object, settle_seq)?;
             }
             crate::outbound::OrdinaryHeadPublication::PassFull => next = Some(now_ms),
-            crate::outbound::OrdinaryHeadPublication::Oversized => {}
+            crate::outbound::OrdinaryHeadPublication::Oversized => {
+                check_settled_head_in_tx(tx, workspace_id, &version, &object, settle_seq)?;
+            }
         }
     }
     Ok(next)

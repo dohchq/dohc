@@ -5157,8 +5157,8 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         let ctx = MigrationContext::current(1_000);
         let target = migration_index("v2-ydoc-published-moment");
-        assert_eq!(BASELINE_MIGRATIONS[target].ordinal, 42);
-        assert_eq!(BASELINE_MIGRATIONS[target - 1].ordinal, 41);
+        assert_eq!(BASELINE_MIGRATIONS[target].ordinal, 43);
+        assert_eq!(BASELINE_MIGRATIONS[target - 1].ordinal, 42);
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..target], &ctx, &NoFaults).unwrap();
         conn.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main');
             INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','main',0);

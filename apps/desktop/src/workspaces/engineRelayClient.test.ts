@@ -87,7 +87,7 @@ class MockDaemon implements EngineDaemonClient {
         case "sync.push":
           return {
             status: "complete", refused: 0,
-            pushed: 3, nextSettledHeadPublishAtMs: null, ownerAdmissionPending: [],
+            pushed: 3, settledHeadReaders: false, nextSettledHeadPublishAtMs: null, ownerAdmissionPending: [],
             fetched: 0,
             applied: 0,
             skipped: 0,
@@ -101,7 +101,7 @@ class MockDaemon implements EngineDaemonClient {
         case "sync.pull":
           return {
             status: "complete", refused: 0,
-            pushed: 0, nextSettledHeadPublishAtMs: null, ownerAdmissionPending: [],
+            pushed: 0, settledHeadReaders: false, nextSettledHeadPublishAtMs: null, ownerAdmissionPending: [],
             fetched: 4,
             applied: 2,
             skipped: 2,
@@ -252,18 +252,18 @@ function expectStatefulRequestsScoped(requests: Request[]): void {
 describe("EngineRelayClient", () => {
   it("carries an empty pull's durable publication wake through cursor commit", async () => {
     const daemon = new MockDaemon(request => request.method === "sync.pull" ? {
-      status: "complete", nextSettledHeadPublishAtMs: 12345, refused: 0, fetched: 0, applied: 0, skipped: 0,
+      status: "complete", settledHeadReaders: true, nextSettledHeadPublishAtMs: 12345, refused: 0, fetched: 0, applied: 0, skipped: 0,
       conflictsOpened: 0, hasMore: false, nextCursor: 0, pendingCursor: { kind: "relay", token: "cursor-0" },
       changedPaths: [], sharingDeclined: [], refusals: [],
     } : undefined);
     const { client } = await harness(daemon);
-    await expect(client.pull(async () => undefined)).resolves.toMatchObject({ nextSettledHeadPublishAtMs: 12345, fetched: 0 });
+    await expect(client.pull(async () => undefined)).resolves.toMatchObject({ settledHeadReaders: true, nextSettledHeadPublishAtMs: 12345, fetched: 0 });
     expect(daemon.requests.some(request => request.method === "sync.commitCursor")).toBe(true);
   });
   it("commits engine-owned refusals before notifying Notices", async () => {
     const refusal = { workspaceId: "workspace-a", originId: "peer", originSeq: 1, opKind: "conflict.resolve", code: "invalid-input", reason: "Review this conflict." };
     const daemon = new MockDaemon(request => request.method === "sync.pull" ? {
-      status: "complete", nextSettledHeadPublishAtMs: null, refused: 1, fetched: 1, applied: 0, skipped: 0, conflictsOpened: 0, hasMore: false,
+      status: "complete", settledHeadReaders: false, nextSettledHeadPublishAtMs: null, refused: 1, fetched: 1, applied: 0, skipped: 0, conflictsOpened: 0, hasMore: false,
       nextCursor: 9, pendingCursor: {kind: "relay", token: "cursor-9"}, changedPaths: [], sharingDeclined: [], refusals: [refusal],
     } : undefined);
     const changed = vi.fn(() => expect(daemon.requests.some(request => request.method === "sync.commitCursor")).toBe(true));
@@ -356,12 +356,12 @@ describe("EngineRelayClient", () => {
 
   it("preserves push continuation for the sync coordinator", async () => {
     const daemon = new MockDaemon((request) => request.method === "sync.push" ? {
-      status: "complete", pushed: 64, nextSettledHeadPublishAtMs: null, fetched: 0, applied: 0, refused: 0, skipped: 0,
+      status: "complete", pushed: 64, settledHeadReaders: false, nextSettledHeadPublishAtMs: null, fetched: 0, applied: 0, refused: 0, skipped: 0,
       conflictsOpened: 0, hasMore: true, pendingCursor: null, changedPaths: [],
       sharingDeclined: [], ownerAdmissionPending: [], refusals: [], recordFacts: [],
     } : undefined);
     const { client, sessions } = await harness(daemon);
-    await expect(client.push()).resolves.toMatchObject({ pushed: 64, nextSettledHeadPublishAtMs: null, hasMore: true });
+    await expect(client.push()).resolves.toMatchObject({ pushed: 64, settledHeadReaders: false, nextSettledHeadPublishAtMs: null, hasMore: true });
     await sessions.closeAll();
   });
 
@@ -369,7 +369,7 @@ describe("EngineRelayClient", () => {
     const { daemon, sessions, client } = await harness();
 
     await expect(client.push()).resolves.toEqual({
-      pushed: 3, nextSettledHeadPublishAtMs: null, ownerAdmissionPending: [],
+      pushed: 3, settledHeadReaders: false, nextSettledHeadPublishAtMs: null, ownerAdmissionPending: [],
       hasMore: false, originsPushed: [],
       sharingDeclined: [],
     });
@@ -458,7 +458,7 @@ describe("EngineRelayClient", () => {
       pulls += 1;
       return {
         status: "complete", refused: 0,
-        pushed: 0, nextSettledHeadPublishAtMs: null, ownerAdmissionPending: [],
+        pushed: 0, settledHeadReaders: false, nextSettledHeadPublishAtMs: null, ownerAdmissionPending: [],
         fetched: 1,
         applied: 1,
         skipped: 0,
@@ -518,7 +518,7 @@ describe("EngineRelayClient", () => {
       pulls += 1;
       return {
         status: "complete", refused: 0,
-        pushed: 0, nextSettledHeadPublishAtMs: null, ownerAdmissionPending: [],
+        pushed: 0, settledHeadReaders: false, nextSettledHeadPublishAtMs: null, ownerAdmissionPending: [],
         fetched: 1,
         applied: 1,
         skipped: 0,
@@ -579,7 +579,7 @@ describe("EngineRelayClient", () => {
         const page = committedPages + 1;
         return {
           status: "complete", refused: 0,
-          pushed: 0, nextSettledHeadPublishAtMs: null, ownerAdmissionPending: [],
+          pushed: 0, settledHeadReaders: false, nextSettledHeadPublishAtMs: null, ownerAdmissionPending: [],
           fetched: 1,
           applied: 1,
           skipped: 0,
@@ -654,7 +654,7 @@ describe("EngineRelayClient", () => {
       if (request.method !== "sync.pull") return undefined;
       return {
         status: "complete", refused: 0,
-        pushed: 0, nextSettledHeadPublishAtMs: null, ownerAdmissionPending: [],
+        pushed: 0, settledHeadReaders: false, nextSettledHeadPublishAtMs: null, ownerAdmissionPending: [],
         fetched: 1,
         applied: 1,
         skipped: 0,
@@ -688,7 +688,7 @@ describe("EngineRelayClient", () => {
       if (request.method !== "sync.push") return undefined;
       return {
         status: "complete", refused: 0,
-        pushed: 0, nextSettledHeadPublishAtMs: null, ownerAdmissionPending: [], hasMore: false,
+        pushed: 0, settledHeadReaders: false, nextSettledHeadPublishAtMs: null, ownerAdmissionPending: [], hasMore: false,
         sharingDeclined: [
           {
             path: "notes/oversized.md",
@@ -705,7 +705,7 @@ describe("EngineRelayClient", () => {
     const { sessions, client } = await harness(daemon);
 
     await expect(client.push()).resolves.toEqual({
-      pushed: 0, nextSettledHeadPublishAtMs: null, ownerAdmissionPending: [],
+      pushed: 0, settledHeadReaders: false, nextSettledHeadPublishAtMs: null, ownerAdmissionPending: [],
       hasMore: false, originsPushed: [],
       sharingDeclined: [
         {
@@ -727,7 +727,7 @@ describe("EngineRelayClient", () => {
       if (request.method !== "sync.push") return undefined;
       return {
         status: "complete", refused: 0,
-        pushed: 0, nextSettledHeadPublishAtMs: null, ownerAdmissionPending: [], hasMore: false,
+        pushed: 0, settledHeadReaders: false, nextSettledHeadPublishAtMs: null, ownerAdmissionPending: [], hasMore: false,
         sharingDeclined: [
           {
             objectId: "missing-path",
@@ -754,7 +754,7 @@ describe("EngineRelayClient", () => {
       if (request.method === "sync.pull") {
         return {
           status: "complete", refused: 0,
-          pushed: 0, nextSettledHeadPublishAtMs: null, ownerAdmissionPending: [],
+          pushed: 0, settledHeadReaders: false, nextSettledHeadPublishAtMs: null, ownerAdmissionPending: [],
           fetched: 0,
           applied: 0,
           skipped: 0,
@@ -2218,7 +2218,7 @@ describe("EngineRelayClient", () => {
         const first = workspacePulls === 1;
         return {
           status: "complete", refused: 0,
-          pushed: 0, nextSettledHeadPublishAtMs: null, ownerAdmissionPending: [],
+          pushed: 0, settledHeadReaders: false, nextSettledHeadPublishAtMs: null, ownerAdmissionPending: [],
           fetched: first ? 2 : 3,
           hasMore: first,
           applied: first ? 1 : 2,

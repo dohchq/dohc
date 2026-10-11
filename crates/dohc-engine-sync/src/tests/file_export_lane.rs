@@ -392,17 +392,15 @@ fn fix1b_checked_heads_preserve_throttled_and_temporarily_excluded_work() {
     );
 }
 
-#[test]
-fn fix1a_oversized_head_does_not_schedule_an_endless_push() {
-    let (_scratch, _, mut store) = ordinary_publisher_fixture();
+fn oversized_ordinary_head(store: &mut EngineStore) {
     ordinary_saved_head(
-        &mut store,
+        store,
         "moment-ydoc-before",
         &"a".repeat(7 * 1024 * 1024),
         10,
     );
     ordinary_saved_head(
-        &mut store,
+        store,
         "moment-ydoc-too-big",
         &"b".repeat(7 * 1024 * 1024),
         20,
@@ -442,6 +440,159 @@ fn fix1a_oversized_head_does_not_schedule_an_endless_push() {
             Ok::<_, SyncError>(())
         })
         .unwrap();
+}
+
+#[test]
+fn fix3_deduped_local_settle_does_not_trigger_a_projection_export() {
+    let (_scratch, _, mut store) = ordinary_publisher_fixture();
+    let client = RelaySyncClient::new(FakeRelay::default());
+    ordinary_saved_head(&mut store, "moment-ydoc-published", "published", 10);
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_000, 0)
+        .unwrap();
+    ordinary_saved_head(&mut store, "moment-ydoc-deduped", "published", 20);
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_001, 0)
+        .unwrap();
+    assert_eq!(publication_checked(&store).0, publication_checked(&store).1);
+    ordinary_saved_head(&mut store, "moment-ydoc-apply-peer-only", "peer text", 30);
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 90_000, 0)
+        .unwrap();
+    assert_eq!(
+        exports(&store).len(),
+        2,
+        "a permanently excluded local settle is not unpublished local work"
+    );
+    assert_eq!(publication_checked(&store).0, publication_checked(&store).1);
+}
+
+#[test]
+fn fix3_oversized_head_is_checked_and_a_new_settle_reopens_it() {
+    let (_scratch, _, mut store) = ordinary_publisher_fixture();
+    oversized_ordinary_head(&mut store);
+    let client = RelaySyncClient::new(FakeRelay::default());
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 10_000_000, 0)
+        .unwrap();
+    assert_eq!(publication_checked(&store).0, publication_checked(&store).1);
+    ordinary_saved_head(&mut store, "moment-ydoc-shrunk", "small", 30);
+    assert!(publication_checked(&store).0 < publication_checked(&store).1);
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 20_000_000, 0)
+        .unwrap();
+    assert_eq!(
+        exports(&store).last().unwrap().payload["momentId"],
+        "moment-ydoc-shrunk"
+    );
+}
+
+#[test]
+fn fix3_idle_push_clears_two_thousand_filesystem_rewrites_and_an_oversized_head() {
+    let (_scratch, _, mut store) = ordinary_publisher_fixture();
+    oversized_ordinary_head(&mut store);
+    store.write_with(&NoFaults, |tx| {
+        for i in 0..2_000 {
+            let object = format!("rewritten-{i}");
+            let settled = format!("moment-ydoc-{i}");
+            let mut input = WriteText {
+                workspace_id: "ws".into(), version_id: "main".into(), object_id: object.clone(),
+                moment_id: settled.clone(), path: format!("{object}.md"), text: "settled".into(),
+                metadata_origin: "ydoc".into(), metadata_summary: None, metadata_correlation_id: None,
+                author_json: None, now_ms: 1, request_id: None,
+            };
+            dohc_engine_domain::write_projected_text_in_tx(tx, &input).map_err(SyncError::corrupt)?;
+            tx.execute("INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,regime,lineage_claim_status,updated_at_ms,file_export_lane,path,last_settled_sha,settle_seq)
+                SELECT 'ws','main',?1,'plaintext','local-only','unclaimed',1,0,?2,s.blob_sha256,m.moment_order FROM snapshots s JOIN moments m ON m.workspace_id=s.workspace_id AND m.moment_id=s.latest_moment_id WHERE s.workspace_id='ws' AND s.object_id=?1", params![object,input.path]).map_err(SyncError::persist)?;
+            input.moment_id = format!("filesystem-{i}");
+            input.text = "rewritten through the filesystem".into();
+            input.metadata_origin = "local-file".into();
+            dohc_engine_domain::write_projected_text_in_tx(tx, &input).map_err(SyncError::corrupt)?;
+        }
+        Ok::<_, SyncError>(())
+    }).unwrap();
+    let unchecked = |store: &EngineStore| {
+        store.read_with(|c| c.query_row("SELECT COUNT(*) FROM ydoc_docs INDEXED BY idx_ydoc_unchecked_publication WHERE workspace_id='ws' AND file_export_lane=0 AND settle_seq>published_checked_settle_seq", [], |r| r.get::<_,i64>(0))).unwrap()
+    };
+    assert_eq!(unchecked(&store), 2_001);
+    let client = RelaySyncClient::new(FakeRelay::default());
+    for now in [10_000_000, 10_000_001] {
+        client
+            .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, now, 0)
+            .unwrap();
+        assert_eq!(
+            unchecked(&store),
+            0,
+            "idle selection must read an empty partial index"
+        );
+    }
+}
+
+#[test]
+fn fix3_deleted_renamed_and_non_text_heads_are_checked() {
+    for change in ["delete", "rename", "binary"] {
+        let (_scratch, _, mut store) = ordinary_publisher_fixture();
+        ordinary_saved_head(&mut store, "moment-ydoc-saved", "saved", 10);
+        if change == "delete" {
+            VersionedTextStore::new(&mut store)
+                .delete_text_file(
+                    &DeleteTextFile {
+                        workspace_id: "ws".into(),
+                        version_id: "main".into(),
+                        path: "doc.md".into(),
+                        moment_id: "deleted".into(),
+                        request_id: None,
+                        metadata_origin: "local-file".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 20,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        } else if change == "rename" {
+            VersionedTextStore::new(&mut store)
+                .rename_text_file(
+                    &RenameTextFile {
+                        workspace_id: "ws".into(),
+                        version_id: "main".into(),
+                        from_path: "doc.md".into(),
+                        to_path: "renamed.md".into(),
+                        moment_id: "renamed".into(),
+                        request_id: None,
+                        metadata_origin: "local-file".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 20,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        } else {
+            let sha = store.put_binary_blob(b"binary").unwrap();
+            store.write_with(&NoFaults, |tx| {
+                tx.execute("UPDATE snapshots SET content_kind='binary',blob_sha256=NULL,binary_sha256=?1 WHERE object_id='doc'", [sha]).map_err(SyncError::persist)?;
+                Ok::<_,SyncError>(())
+            }).unwrap();
+        }
+        RelaySyncClient::new(FakeRelay::default())
+            .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_000, 0)
+            .unwrap();
+        assert_eq!(
+            publication_checked(&store).0,
+            publication_checked(&store).1,
+            "{change}"
+        );
+        assert_eq!(exports(&store).len(), 1);
+    }
+}
+
+#[test]
+fn fix1a_oversized_head_does_not_schedule_an_endless_push() {
+    let (_scratch, _, mut store) = ordinary_publisher_fixture();
+    oversized_ordinary_head(&mut store);
     let client = RelaySyncClient::new(FakeRelay::default());
     for now in [10_000_000, 10_000_001, 60_000] {
         let outcome = client

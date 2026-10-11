@@ -53,13 +53,18 @@ export function workspaceHasSettledHeadReaders(storage: StorageContext, workspac
   const shares = storage.db.prepare(`SELECT DISTINCT s.selector_json,g.access FROM sync_relay_shares s
     JOIN sync_relay_share_grants g ON g.share_id=s.share_id
     WHERE s.workspace_id=? AND ${currentShareGrantSql("g", "s")}
-      AND (g.principal_kind='link' OR (g.principal_kind='user' AND g.principal_user_id<>s.granter_user_id))`)
-    .all(workspaceId) as Array<{ selector_json: string; access: string }>;
-  return shares.some((share) => {
+      AND (g.principal_kind='link' OR (g.principal_kind='user' AND g.principal_user_id<>s.granter_user_id))
+      AND CASE WHEN json_valid(s.selector_json) THEN NOT (
+        json_extract(s.selector_json,'$.kind') IS 'chat'
+        AND (SELECT COUNT(*) FROM json_each(s.selector_json) WHERE key='kind')=1)
+        ELSE 0 END`)
+    .iterate(workspaceId) as Iterable<{ selector_json: string; access: string }>;
+  for (const share of shares) {
     const stored = parseStoredAnyShareSelectorJson(share.selector_json);
     const selector = stored && effectiveShareSelector(stored, share.access);
-    return selector !== null && fileSideOf(selector) !== null;
-  });
+    if (selector !== null && fileSideOf(selector) !== null) return true;
+  }
+  return false;
 }
 
 export function createShare(storage: StorageContext, input: {

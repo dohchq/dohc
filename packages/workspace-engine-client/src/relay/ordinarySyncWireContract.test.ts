@@ -6,20 +6,20 @@ const decline = { path: "work.md", objectId: "work.md", versionId: "main", linea
 const admission = { workspaceId: "workspace", originId: "owner", originSeq: 2, versionId: "main", objectId: "object", path: "work.md" };
 const change = { versionId: "main", path: "work.md", operation: "write", contentKind: "text" };
 const refusal = { workspaceId: "workspace", originId: "peer", originSeq: 1, opKind: "text.write", code: "invalid-input", reason: "Cannot apply this operation." };
-const push = { status: "complete", pushed: 0, nextSettledHeadPublishAtMs: null, fetched: 0, applied: 0, refused: 0, skipped: 0, conflictsOpened: 0,
+const push = { status: "complete", pushed: 0, settledHeadReaders: false, nextSettledHeadPublishAtMs: null, fetched: 0, applied: 0, refused: 0, skipped: 0, conflictsOpened: 0,
   hasMore: false, nextCursor: null, pendingCursor: null, changedPaths: [], refusals: [], ownerAdmissionPending: [admission], sharingDeclined: [decline] };
 const pull = { ...push, fetched: 2, applied: 1, refused: 1, nextCursor: 9, pendingCursor: { kind: "relay", token: "opaque-issued-token" },
   ownerAdmissionPending: [], changedPaths: [change], refusals: [refusal] };
 
 describe("ordinary native sync contract", () => {
   it("projects native push without requiring its null pull cursor fields", () => {
-    expect(decodeOrdinarySyncResult("sync.push", push)).toEqual({ status: "complete", pushed: 0, nextSettledHeadPublishAtMs: null, hasMore: false,
+    expect(decodeOrdinarySyncResult("sync.push", push)).toEqual({ status: "complete", pushed: 0, settledHeadReaders: false, nextSettledHeadPublishAtMs: null, hasMore: false,
       ownerAdmissionPending: [admission], sharingDeclined: [decline] });
   });
 
   it("preserves producing versions, full refusal evidence and the issued token", () => {
     expect(decodeOrdinarySyncResult("sync.pull", { ...pull, ignored: true,
-      pendingCursor: { ...pull.pendingCursor, ignored: true } })).toEqual({ status: "complete", nextSettledHeadPublishAtMs: null, fetched: 2, applied: 1,
+      pendingCursor: { ...pull.pendingCursor, ignored: true } })).toEqual({ status: "complete", settledHeadReaders: false, nextSettledHeadPublishAtMs: null, fetched: 2, applied: 1,
       refused: 1, skipped: 0, conflictsOpened: 0, hasMore: false, nextCursor: 9, pendingCursor: pull.pendingCursor,
       changedPaths: [change], refusals: [refusal], sharingDeclined: [decline] });
   });
@@ -39,7 +39,8 @@ describe("ordinary native sync contract", () => {
   );
 
   it.each([
-    { nextSettledHeadPublishAtMs: undefined }, { nextSettledHeadPublishAtMs: 1.5 },
+    { settledHeadReaders: undefined }, { settledHeadReaders: "true" },
+    { nextSettledHeadPublishAtMs: undefined }, { settledHeadReaders: false, nextSettledHeadPublishAtMs: 1.5 },
     { fetched: undefined }, { applied: "1" }, { refused: null }, { nextCursor: -1 },
     { skipped: Number.MAX_SAFE_INTEGER + 1 }, { conflictsOpened: 0.5 }, { hasMore: null },
     { status: "crashedAfterApply" }, { status: "crashedAfterRemoteCommit" },
@@ -57,7 +58,8 @@ describe("ordinary native sync contract", () => {
   });
 
   it.each([
-    { nextSettledHeadPublishAtMs: undefined }, { nextSettledHeadPublishAtMs: 1.5 }, { status: "crashedAfterRemoteCommit" }, { pushed: null }, { hasMore: undefined },
+    { settledHeadReaders: undefined }, { settledHeadReaders: "true" },
+    { nextSettledHeadPublishAtMs: undefined }, { settledHeadReaders: false, nextSettledHeadPublishAtMs: 1.5 }, { status: "crashedAfterRemoteCommit" }, { pushed: null }, { hasMore: undefined },
     { ownerAdmissionPending: null }, { ownerAdmissionPending: [{}] },
     { ownerAdmissionPending: [{ ...admission, originSeq: -1 }] },
     { ownerAdmissionPending: [{ ...admission, objectId: null }] },
