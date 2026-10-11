@@ -73,6 +73,175 @@ fn ordinary_saved_head_at_path(
     }).unwrap();
 }
 
+fn assert_share_publications(
+    source: &EngineStore,
+    publications: &[ReplicationEnvelope],
+    path: &str,
+    expected: &str,
+) {
+    let blobs: Vec<(String, Vec<u8>)> = source
+        .read_with(|c| {
+            c.prepare("SELECT sha256,text FROM blobs")?
+                .query_map([], |r| Ok((r.get(0)?, r.get::<_, String>(1)?.into_bytes())))?
+                .collect::<Result<_, _>>()
+        })
+        .unwrap();
+    let ops = publications
+        .iter()
+        .map(|op| ShareReplicationEnvelope {
+            origin_id: op.origin_id.clone(),
+            origin_seq: op.origin_seq,
+            op_kind: op.op_kind.clone(),
+            payload: op.payload.clone(),
+            recorded_at_ms: op.recorded_at_ms,
+        })
+        .collect();
+    let relay = PagedShareRelay::new(
+        [],
+        [(
+            0,
+            ShareViewResponse {
+                ops,
+                next_cursor: i64::try_from(publications.len()).unwrap(),
+                has_more: false,
+            },
+        )],
+    )
+    .with_view_blobs(blobs);
+    let (_scratch, _, mut recipient) = open_store();
+    let grant = ShareGrant {
+        paths: vec!["doc.md".into(), "renamed.md".into()],
+        version_id: Some("main".into()),
+        access: ShareAccess::View,
+    };
+    let result = RelaySyncClient::new(relay)
+        .pull_share_view(&mut recipient, "ws", "share", &grant, &NoFaults)
+        .unwrap();
+    assert!(result.refusals.is_empty(), "{result:?}");
+    assert_eq!(
+        VersionedTextStore::new(&mut recipient)
+            .read_text("ws", "main", path)
+            .unwrap()
+            .unwrap()
+            .text,
+        expected
+    );
+}
+
+fn peer_publication(store: &mut EngineStore, moment: &str) -> ReplicationEnvelope {
+    let TxnOutcome::Committed(payload) = store
+        .write_with(&NoFaults, |tx| {
+            crate::outbound::moment_append_payload_in_tx(tx, "ws", moment)
+                .map(|(payload, _)| payload)
+        })
+        .unwrap()
+    else {
+        panic!("peer publication fixture crashed")
+    };
+    envelope("peer", 0, "moment.append", payload)
+}
+
+#[test]
+fn fix6_peer_publication_then_undo_survives_a_projection() {
+    let (_scratch, _, mut store) = ordinary_publisher_fixture();
+    let client = RelaySyncClient::new(FakeRelay::default());
+    ordinary_saved_head(&mut store, "moment-ydoc-published", "A", 10);
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_000, 0)
+        .unwrap();
+    ordinary_saved_head(&mut store, "moment-ydoc-held", "B", 20);
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_001, 0)
+        .unwrap();
+    ordinary_saved_head(&mut store, "moment-ydoc-apply-C", "C", 30);
+    ordinary_saved_head(&mut store, "moment-ydoc-peer-C", "C", 31);
+    let peer = peer_publication(&mut store, "moment-ydoc-peer-C");
+    store.write_with(&NoFaults, |tx| {
+        tx.execute("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES ('ws','peer',0,'moment.append',?1,31,1)", [peer.payload.to_string()]).map_err(SyncError::persist)?;
+        Ok::<_, SyncError>(())
+    }).unwrap();
+    ordinary_saved_head(&mut store, "moment-ydoc-undo", "A", 40);
+    let held = client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_002, 0)
+        .unwrap();
+    assert!(matches!(
+        held,
+        SyncPassOutcome::Complete {
+            next_settled_head_publish_at_ms: Some(90_000),
+            ..
+        }
+    ));
+    ordinary_saved_head(&mut store, "moment-ydoc-apply-C2", "A + C2", 50);
+    let projected = client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_003, 0)
+        .unwrap();
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 90_000, 0)
+        .unwrap();
+    let published = exports(&store);
+    assert_eq!(
+        published.len(),
+        3,
+        "the undo after peer C must publish the converged projection"
+    );
+    assert!(matches!(
+        projected,
+        SyncPassOutcome::Complete {
+            next_settled_head_publish_at_ms: Some(90_000),
+            ..
+        }
+    ));
+    let mut served = published[..2].to_vec();
+    served.push(peer);
+    served.push(published[2].clone());
+    assert_share_publications(&store, &served, "doc.md", "A + C2");
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 120_000, 0)
+        .unwrap();
+    assert_eq!(exports(&store).len(), 3);
+}
+
+#[test]
+fn fix6_only_successful_peer_publications_cover_earlier_local_work() {
+    for refused in [false, true] {
+        let (_scratch, _, mut store) = ordinary_publisher_fixture();
+        let client = RelaySyncClient::new(FakeRelay::default());
+        ordinary_saved_head(&mut store, "moment-ydoc-published", "A", 10);
+        client
+            .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_000, 0)
+            .unwrap();
+        ordinary_saved_head(&mut store, "moment-ydoc-held", "B", 20);
+        client
+            .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_001, 0)
+            .unwrap();
+        ordinary_saved_head(&mut store, "moment-ydoc-peer-C", "B + C", 30);
+        let peer = peer_publication(&mut store, "moment-ydoc-peer-C");
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES ('ws','peer',0,'moment.append',?1,30,1)", [peer.payload.to_string()]).map_err(SyncError::persist)?;
+            if refused {
+                tx.execute("INSERT INTO replication_pending_refusals(workspace_id,origin_id,origin_seq,op_kind,reason_code,reason_message) VALUES ('ws','peer',0,'moment.append','invalid-input','test refusal')", []).map_err(SyncError::persist)?;
+            }
+            Ok::<_, SyncError>(())
+        }).unwrap();
+        ordinary_saved_head(&mut store, "moment-ydoc-apply-C2", "B + C2", 40);
+        client
+            .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 90_000, 0)
+            .unwrap();
+        assert_eq!(
+            exports(&store).len(),
+            if refused { 3 } else { 2 },
+            "refused={refused}"
+        );
+        assert_eq!(publication_checked(&store).0, publication_checked(&store).1);
+        let mut served = exports(&store);
+        if !refused {
+            // With no new local work, C2 is delivered by the peer's publication.
+            served.push(peer_publication(&mut store, "moment-ydoc-apply-C2"));
+        }
+        assert_share_publications(&store, &served, "doc.md", "B + C2");
+    }
+}
+
 #[test]
 fn fix4_throttled_local_save_survives_rename_then_projection() {
     let (_scratch, _, mut store) = ordinary_publisher_fixture();
@@ -152,6 +321,8 @@ fn fix4_throttled_local_save_survives_rename_then_projection() {
         .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 120_000, 0)
         .unwrap();
     assert_eq!(exports(&store).len(), published.len());
+    assert_eq!(published.len(), 3);
+    assert_share_publications(&store, &published, "renamed.md", "local save + peer edit");
 }
 
 #[test]
@@ -234,6 +405,14 @@ fn fix4_oversized_local_save_survives_a_shrinking_projection() {
         .unwrap();
     assert!(after.starts_with("local edit\n"));
     assert_eq!(publication_checked(&store).0, publication_checked(&store).1);
+    // The upgraded 10.5 MiB publication exceeds share replay's text ceiling.
+    // The fitting companion must still deliver the converged head.
+    assert_share_publications(
+        &store,
+        &published[2..],
+        "doc.md",
+        &local[..15 * 1024 * 1024 / 2],
+    );
 }
 
 #[test]
@@ -358,6 +537,10 @@ fn fix2_throttled_local_save_survives_a_peer_projection() {
         .unwrap();
     assert_eq!(exports(&store).len(), 3);
     assert_eq!(publication_checked(&store).0, publication_checked(&store).1);
+    assert_share_publications(&store, &published, "doc.md", "local save + peer edit");
+    let mut served = exports(&store);
+    served.push(peer_publication(&mut store, "moment-ydoc-apply-next"));
+    assert_share_publications(&store, &served, "doc.md", "next peer edit");
 }
 
 #[test]
@@ -379,6 +562,9 @@ fn fix2_imported_settle_does_not_make_a_projection_local() {
         .unwrap();
     assert_eq!(exports(&store).len(), 1);
     assert_eq!(publication_checked(&store).0, publication_checked(&store).1);
+    let mut served = exports(&store);
+    served.push(peer_publication(&mut store, "moment-ydoc-apply-imported"));
+    assert_share_publications(&store, &served, "doc.md", "imported + peer");
 }
 
 #[test]
@@ -721,6 +907,9 @@ fn fix5_edit_then_revert_does_not_trigger_a_projection_export() {
         ));
         assert_eq!(publication_checked(&store).0, publication_checked(&store).1);
     }
+    let mut served = exports(&store);
+    served.push(peer_publication(&mut store, "moment-ydoc-apply-peer-only"));
+    assert_share_publications(&store, &served, "doc.md", "peer text");
 }
 
 #[test]
@@ -746,6 +935,9 @@ fn fix3_deduped_local_settle_does_not_trigger_a_projection_export() {
         "a permanently excluded local settle is not unpublished local work"
     );
     assert_eq!(publication_checked(&store).0, publication_checked(&store).1);
+    let mut served = exports(&store);
+    served.push(peer_publication(&mut store, "moment-ydoc-apply-peer-only"));
+    assert_share_publications(&store, &served, "doc.md", "peer text");
 }
 
 #[test]
@@ -1112,6 +1304,8 @@ fn ordinary_publication_after_a_peer_projection_covers_both_settle_intervals() {
         exports(&store)[1].payload["authors"],
         json!([{"kind":"unattributed"}])
     );
+    assert_eq!(exports(&store).len(), 2);
+    assert_share_publications(&store, &exports(&store), "doc.md", "local text");
 }
 
 #[test]
@@ -1122,6 +1316,9 @@ fn ordinary_publisher_never_echoes_peer_projection_heads() {
         .push_workspace(&mut store, "ws", &NoFaults, &NoLiveLeases, 60_000, 0)
         .unwrap();
     assert_eq!(exports(&store).len(), 1);
+    let mut served = exports(&store);
+    served.push(peer_publication(&mut store, "moment-ydoc-apply-peer"));
+    assert_share_publications(&store, &served, "doc.md", "peer");
 }
 
 #[test]

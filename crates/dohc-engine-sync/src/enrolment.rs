@@ -9,7 +9,7 @@
 //! Moment backfill cannot use `metadata_origin` to tell local from imported:
 //! `moment_apply.rs` stores the sending peer's wire value verbatim (S2's
 //! boundary stamp covers `snapshots`/`fork_base_snapshots`, not `moments`).
-//! It excludes an imported moment by exact provenance instead — a matching
+//! It excludes an imported moment by exact provenance instead â€” a matching
 //! successfully applied `imported=1` row in `replication_log`, correlated on
 //! `momentId` (which the receiver preserves verbatim, unlike secrets). An
 //! imported coordinate with a pending refusal did not create the matching
@@ -304,13 +304,13 @@ pub(crate) fn publish_ordinary_settled_heads_in_tx(
                  AND m.moment_order>COALESCE(p.moment_order,-1)
                  AND m.moment_order<=h.moment_order LIMIT 1 OFFSET 1),
                d.version_id,d.object_id,d.settle_seq,(h.metadata_origin<>'ydoc' OR h.moment_id NOT GLOB 'moment-ydoc-*' OR (h.moment_id GLOB 'moment-ydoc-apply-*' AND NOT COALESCE((
-                 SELECT (m.payload_after_blob_sha256 IS NOT p.payload_after_blob_sha256
-                   OR m.payload_after_path IS NOT p.payload_after_path)
+                 SELECT (m.payload_after_blob_sha256 IS NOT l.payload_after_blob_sha256
+                   OR m.payload_after_path IS NOT l.payload_after_path)
                  FROM moments m WHERE m.workspace_id=h.workspace_id
                    AND m.version_id=h.version_id AND m.object_id=h.object_id
                    AND m.metadata_origin='ydoc' AND m.moment_id GLOB 'moment-ydoc-*'
                    AND m.moment_id NOT GLOB 'moment-ydoc-apply-*' AND COALESCE(m.sync_record_only,0)=0
-                   AND m.moment_order>COALESCE(p.moment_order,-1) AND m.moment_order<=h.moment_order
+                   AND m.moment_order>COALESCE(l.moment_order,-1) AND m.moment_order<=h.moment_order
                    AND NOT EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=m.workspace_id
                      AND r.imported=1 AND r.op_kind='moment.append'
                      AND json_extract(r.payload_json,'$.momentId')=+m.moment_id
@@ -345,6 +345,18 @@ pub(crate) fn publish_ordinary_settled_heads_in_tx(
                AND h.version_id=s.version_id AND h.object_id=s.object_id
              JOIN blobs b ON b.sha256=s.blob_sha256
              LEFT JOIN moments p ON p.workspace_id=d.workspace_id AND p.moment_id=d.last_published_moment_id
+             LEFT JOIN moments l ON l.workspace_id=d.workspace_id AND l.moment_id=COALESCE((
+               SELECT m.moment_id FROM moments m
+               WHERE m.workspace_id=d.workspace_id AND m.version_id=d.version_id AND m.object_id=d.object_id
+                 AND m.moment_order>COALESCE(p.moment_order,-1)
+                 AND EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=m.workspace_id
+                   AND r.imported=1 AND r.op_kind='moment.append'
+                   AND json_extract(r.payload_json,'$.momentId')=+m.moment_id
+                   AND json_extract(r.payload_json,'$.versionId')=+m.version_id
+                   AND json_extract(r.payload_json,'$.objectId')=+m.object_id
+                   AND NOT EXISTS(SELECT 1 FROM replication_pending_refusals f
+                     WHERE f.workspace_id=r.workspace_id AND f.origin_id=r.origin_id AND f.origin_seq=r.origin_seq))
+               ORDER BY m.moment_order DESC LIMIT 1),p.moment_id)
              WHERE d.workspace_id=?1 AND d.file_export_lane=0 AND d.settle_seq>d.published_checked_settle_seq AND s.content_kind='text'
                AND d.last_settled_sha=s.blob_sha256 AND d.settle_seq=h.moment_order
                AND h.payload_after_blob_sha256=s.blob_sha256 AND h.payload_after_path=s.path
@@ -616,7 +628,7 @@ fn backfill_moments_between(
     // `metadata_origin` alone cannot tell a locally-authored moment from an
     // imported one: `moment_apply.rs`'s `INSERT INTO moments` stores the
     // WIRE payload's `metadata.origin` verbatim (the sending peer's own
-    // value — "api", "capture", "local-file", whatever that peer used), not
+    // value â€” "api", "capture", "local-file", whatever that peer used), not
     // a boundary stamp. Only `snapshots`/`fork_base_snapshots` get S2's
     // "sync" stamp. The reliable discriminator is real import provenance:
     // `moment_apply.rs` preserves the sender's `moment_id` verbatim (unlike
@@ -1385,7 +1397,7 @@ mod tests {
             10,
         );
         // The exclusion reads real import provenance (`replication_log`), not
-        // `metadata_origin` — `moment_apply.rs` stores the sender's wire value
+        // `metadata_origin` â€” `moment_apply.rs` stores the sender's wire value
         // verbatim, so a domain write alone does not simulate an import. Seed
         // the matching imported row a real pull would have landed.
         store
