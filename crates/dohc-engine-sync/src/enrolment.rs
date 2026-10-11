@@ -303,14 +303,14 @@ pub(crate) fn publish_ordinary_settled_heads_in_tx(
                  AND COALESCE(m.sync_record_only,0)=0
                  AND m.moment_order>COALESCE(p.moment_order,-1)
                  AND m.moment_order<=h.moment_order LIMIT 1 OFFSET 1),
-               d.version_id,d.object_id,d.settle_seq,(h.metadata_origin<>'ydoc' OR h.moment_id NOT GLOB 'moment-ydoc-*' OR (h.moment_id GLOB 'moment-ydoc-apply-*' AND NOT EXISTS(
-                 SELECT 1 FROM moments m WHERE m.workspace_id=h.workspace_id
+               d.version_id,d.object_id,d.settle_seq,(h.metadata_origin<>'ydoc' OR h.moment_id NOT GLOB 'moment-ydoc-*' OR (h.moment_id GLOB 'moment-ydoc-apply-*' AND NOT COALESCE((
+                 SELECT (m.payload_after_blob_sha256 IS NOT p.payload_after_blob_sha256
+                   OR m.payload_after_path IS NOT p.payload_after_path)
+                 FROM moments m WHERE m.workspace_id=h.workspace_id
                    AND m.version_id=h.version_id AND m.object_id=h.object_id
                    AND m.metadata_origin='ydoc' AND m.moment_id GLOB 'moment-ydoc-*'
                    AND m.moment_id NOT GLOB 'moment-ydoc-apply-*' AND COALESCE(m.sync_record_only,0)=0
                    AND m.moment_order>COALESCE(p.moment_order,-1) AND m.moment_order<=h.moment_order
-                   AND (m.payload_after_blob_sha256 IS NOT p.payload_after_blob_sha256
-                     OR m.payload_after_path IS NOT p.payload_after_path)
                    AND NOT EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=m.workspace_id
                      AND r.imported=1 AND r.op_kind='moment.append'
                      AND json_extract(r.payload_json,'$.momentId')=+m.moment_id
@@ -318,7 +318,8 @@ pub(crate) fn publish_ordinary_settled_heads_in_tx(
                      AND json_extract(r.payload_json,'$.objectId')=+m.object_id
                      AND NOT EXISTS(SELECT 1 FROM replication_pending_refusals f
                        WHERE f.workspace_id=r.workspace_id AND f.origin_id=r.origin_id
-                         AND f.origin_seq=r.origin_seq)))) OR NOT (p.moment_id IS NULL OR p.operation='delete'
+                         AND f.origin_seq=r.origin_seq))
+                 ORDER BY m.moment_order DESC LIMIT 1),0)) OR NOT (p.moment_id IS NULL OR p.operation='delete'
                  OR p.payload_after_blob_sha256 IS NOT h.payload_after_blob_sha256
                  OR p.payload_after_path IS NOT h.payload_after_path
                  OR EXISTS(SELECT 1 FROM moments m WHERE m.workspace_id=h.workspace_id

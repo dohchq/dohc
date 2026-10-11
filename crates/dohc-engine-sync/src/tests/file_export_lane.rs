@@ -674,6 +674,56 @@ fn oversized_ordinary_head(store: &mut EngineStore) {
 }
 
 #[test]
+fn fix5_edit_then_revert_does_not_trigger_a_projection_export() {
+    let (_scratch, _, mut store) = ordinary_publisher_fixture();
+    let client = RelaySyncClient::new(FakeRelay::default());
+    ordinary_saved_head(&mut store, "moment-ydoc-published", "A", 10);
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_000, 0)
+        .unwrap();
+    ordinary_saved_head(&mut store, "moment-ydoc-edit", "B", 20);
+    let held = client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_001, 0)
+        .unwrap();
+    assert!(matches!(
+        held,
+        SyncPassOutcome::Complete {
+            next_settled_head_publish_at_ms: Some(90_000),
+            ..
+        }
+    ));
+    ordinary_saved_head(&mut store, "moment-ydoc-revert", "A", 30);
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_002, 0)
+        .unwrap();
+    assert_eq!(
+        exports(&store).len(),
+        2,
+        "the reverted save is deduplicated"
+    );
+    assert_eq!(publication_checked(&store).0, publication_checked(&store).1);
+    ordinary_saved_head(&mut store, "moment-ydoc-apply-peer-only", "peer text", 40);
+    for now in [90_000, 120_000] {
+        let outcome = client
+            .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, now, 0)
+            .unwrap();
+        assert_eq!(
+            exports(&store).len(),
+            2,
+            "a reverted local edit must not republish the peer's text"
+        );
+        assert!(matches!(
+            outcome,
+            SyncPassOutcome::Complete {
+                next_settled_head_publish_at_ms: None,
+                ..
+            }
+        ));
+        assert_eq!(publication_checked(&store).0, publication_checked(&store).1);
+    }
+}
+
+#[test]
 fn fix3_deduped_local_settle_does_not_trigger_a_projection_export() {
     let (_scratch, _, mut store) = ordinary_publisher_fixture();
     let client = RelaySyncClient::new(FakeRelay::default());
