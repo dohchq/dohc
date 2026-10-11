@@ -430,6 +430,7 @@ async fn scene_open_seeds_large_embedded_assets_in_the_engine_and_rehydrates_on_
         image_bytes,
     );
 
+    let mut settlement_events = service.events().subscribe();
     let settled = call(
         &transport,
         &handle,
@@ -440,6 +441,18 @@ async fn scene_open_seeds_large_embedded_assets_in_the_engine_and_rehydrates_on_
     .await;
     assert_eq!(settled["materialized"], json!(true));
     assert_eq!(settled["content"], Value::Null);
+    let wake = std::iter::from_fn(|| settlement_events.try_recv().ok())
+        .find(|event| event.name == "ydoc.settled")
+        .expect("a successful settlement must wake publication before replying");
+    assert_eq!(
+        wake.payload,
+        json!({
+            "workspaceId": "ws-rpc-scene-seed",
+            "paths": ["drawings/large.excalidraw"],
+            "appliedCount": 1,
+            "notOwnedCount": 0,
+        })
+    );
     let portable: Value = serde_json::from_slice(
         &std::fs::read(scratch.path().join("drawings/large.excalidraw"))
             .expect("materialized scene"),

@@ -3157,7 +3157,30 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_FIELD_HISTORY_LINK_AUTHOR_DDL,
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 43,
+        id: "v2-ydoc-published-moment",
+        sql: V2_YDOC_PUBLISHED_MOMENT_DDL,
+        sets_user_version: None,
+    },
 ];
+
+const V2_YDOC_PUBLISHED_MOMENT_DDL: &str = "\
+ALTER TABLE ydoc_docs ADD COLUMN last_published_moment_id TEXT;
+ALTER TABLE ydoc_docs ADD COLUMN last_published_at_ms INTEGER;
+CREATE INDEX idx_live_device_settlements_moment ON live_device_settlements(workspace_id,moment_id);
+UPDATE ydoc_docs SET last_published_moment_id=(
+    SELECT m.moment_id FROM moments m
+    WHERE m.workspace_id=ydoc_docs.workspace_id AND m.version_id=ydoc_docs.version_id
+      AND m.object_id=ydoc_docs.object_id AND EXISTS (
+        SELECT 1 FROM replication_log r WHERE r.workspace_id=m.workspace_id
+          AND r.op_kind='moment.append' AND r.imported=0
+          AND json_extract(r.payload_json,'$.momentId')=+m.moment_id)
+    ORDER BY m.moment_order DESC LIMIT 1) WHERE file_export_lane=0;
+UPDATE ydoc_docs SET last_published_at_ms=(
+    SELECT m.recorded_at_ms FROM moments m WHERE m.workspace_id=ydoc_docs.workspace_id
+      AND m.moment_id=ydoc_docs.last_published_moment_id);
+";
 
 const V2_OPEN_DOCUMENT_ARTIFACTS_DDL: &str = "\
 CREATE TABLE replication_pending_refusals_next (
@@ -3803,6 +3826,10 @@ mod tests {
             (
                 "v2-field-history-link-author",
                 "459b1b741b2a2ae0ee53c7c4696a6935ad651ae5905c1e3da42642f88ee413f0",
+            ),
+            (
+                "v2-ydoc-published-moment",
+                "767db867370bcf7008a35177aaa3b6c837e0d2485f7ac13740528c365a1c9e03",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -5118,6 +5145,58 @@ mod tests {
         assert!(
             conn.execute("UPDATE ydoc_docs SET file_export_lane=4", [])
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn published_moment_migration_backfills_only_local_ordinary_exports_in_order() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let ctx = MigrationContext::current(1_000);
+        let target = migration_index("v2-ydoc-published-moment");
+        assert_eq!(BASELINE_MIGRATIONS[target].ordinal, 42);
+        assert_eq!(BASELINE_MIGRATIONS[target - 1].ordinal, 41);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..target], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main');
+            INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','main',0);
+            INSERT INTO file_objects VALUES ('ws','doc',0);
+            INSERT INTO blobs VALUES ('sha',1,'a');
+            INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,regime,lineage_claim_status,updated_at_ms)
+              VALUES ('ws','main','doc','plaintext','local-only','unclaimed',0);").unwrap();
+        for (order, id, imported) in [(1, "first", 0), (2, "last", 0), (3, "imported", 1)] {
+            conn.execute("INSERT INTO moments(workspace_id,moment_order,moment_id,version_id,object_id,path,recorded_at_ms,operation,after_blob_sha256,before_present,metadata_origin)
+                VALUES ('ws',?1,?2,'main','doc','doc.md',?1,'write','sha',0,'ydoc')",rusqlite::params![order,id]).unwrap();
+            conn.execute("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported)
+                VALUES ('ws','local',?1,'moment.append',?2,?1,?3)",rusqlite::params![order,format!(r#"{{"momentId":"{id}","versionId":"main","objectId":"doc"}}"#),imported]).unwrap();
+        }
+        conn.execute_batch("INSERT INTO moments(workspace_id,moment_order,moment_id,version_id,object_id,path,recorded_at_ms,operation,after_blob_sha256,before_present,metadata_origin)
+            VALUES ('ws',4,'moment-ydoc-stale','main','doc','doc.md',4,'write','sha',0,'ydoc');
+            INSERT INTO file_objects VALUES ('ws','declined',0);
+            INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,regime,lineage_claim_status,updated_at_ms,file_export_lane)
+              VALUES ('ws','main','declined','plaintext','local-only','unclaimed',0,1);
+            INSERT INTO moments(workspace_id,moment_order,moment_id,version_id,object_id,path,recorded_at_ms,operation,after_blob_sha256,before_present,metadata_origin)
+              VALUES ('ws',5,'declined-export','main','declined','declined.md',5,'write','sha',0,'ydoc');
+            INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported)
+              VALUES ('ws','local',5,'moment.append','{\"momentId\":\"declined-export\"}',5,0);").unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let marker: (String, i64) = conn
+            .query_row(
+                "SELECT last_published_moment_id,last_published_at_ms FROM ydoc_docs WHERE object_id='doc'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(marker, ("last".to_owned(), 2));
+        let declined: Option<String> = conn
+            .query_row(
+                "SELECT last_published_moment_id FROM ydoc_docs WHERE object_id='declined'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(declined.is_none());
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 0 }
         );
     }
 

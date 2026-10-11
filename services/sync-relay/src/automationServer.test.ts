@@ -1229,7 +1229,7 @@ describe("the owner's routes to the server's runs", () => {
           case "sync.adoptJoinIdentity": return { result: { adopted: true } };
           case "sync.push":
             if (failing) throw new Error("replica cannot push");
-            return { result: { status: "complete", pushed: 0, hasMore: false, sharingDeclined: [], ownerAdmissionPending: [] } };
+            return { result: { status: "complete", pushed: 0, nextSettledHeadPublishAtMs: null, hasMore: false, sharingDeclined: [], ownerAdmissionPending: [] } };
           case "sync.pull": return { result: { status: "complete", nextCursor: 1, pendingCursor: { kind: "relay", token: "t" }, hasMore: false,
             fetched: 0, applied: 0, refused: 0, skipped: 0, conflictsOpened: 0, refusals: [], sharingDeclined: [], changedPaths: [] } };
           case "sync.materializePendingCursor": return { result: { materialized: true } };

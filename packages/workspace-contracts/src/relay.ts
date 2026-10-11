@@ -54,6 +54,7 @@ export interface OwnerAdmissionPending {
 }
 
 export interface PushWorkspaceToRelayResult {
+  nextSettledHeadPublishAtMs?: number | null;
   hasMore: boolean;
   ownerAdmissionPending: OwnerAdmissionPending[];
   pushed: number;

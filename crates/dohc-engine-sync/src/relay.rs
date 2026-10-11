@@ -629,6 +629,7 @@ pub enum SyncPassOutcome {
     Complete {
         owner_admission_pending: Vec<crate::OwnerAdmissionPending>,
         pushed: usize,
+        next_settled_head_publish_at_ms: Option<i64>,
         fetched: usize,
         has_more: bool,
         applied: usize,
@@ -683,6 +684,7 @@ pub struct PushWorkspaceProgress {
     page: Option<PreparedPushPage>,
     batch_size: usize,
     file_versions_selected: bool,
+    next_settled_head_publish_at_ms: Option<i64>,
 }
 
 impl Default for PushWorkspaceProgress {
@@ -693,15 +695,18 @@ impl Default for PushWorkspaceProgress {
             page: None,
             batch_size: crate::MAX_PUSH_OPS_PER_BATCH,
             file_versions_selected: false,
+            next_settled_head_publish_at_ms: None,
         }
     }
 }
 
 fn select_file_versions(
     selection: &mut bool,
+    next_publish_at_ms: &mut Option<i64>,
     store: &mut EngineStore,
     workspace_id: &str,
     faults: &dyn FaultInjector,
+    now_ms: i64,
 ) -> Result<(), RelayError> {
     if *selection {
         return Ok(());
@@ -709,15 +714,18 @@ fn select_file_versions(
     match store
         .write_with(faults, |tx| {
             if !crate::ydoc_origination::can_originate_local_bases_in_tx(tx, workspace_id)? {
-                return Ok::<_, SyncError>(false);
+                return Ok::<_, SyncError>((false, None));
             }
             crate::enrolment::backfill_file_versions_in_tx(tx, workspace_id)?;
-            Ok(true)
+            let next =
+                crate::enrolment::publish_ordinary_settled_heads_in_tx(tx, workspace_id, now_ms)?;
+            Ok((true, next))
         })
         .map_err(local)?
     {
-        TxnOutcome::Committed(selected) => {
+        TxnOutcome::Committed((selected, next)) => {
             *selection = selected;
+            *next_publish_at_ms = next;
             Ok(())
         }
         TxnOutcome::Crashed { .. } => Err(local(SyncError::FaultCrash)),
@@ -1303,9 +1311,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         .map_err(local)?;
         select_file_versions(
             &mut progress.file_versions_selected,
+            &mut progress.next_settled_head_publish_at_ms,
             store,
             workspace_id,
             faults,
+            now_ms,
         )?;
         let mut origins = list_workspace_origins(store, workspace_id).map_err(local)?;
         let mut pushed = 0_usize;
@@ -1357,9 +1367,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             enrollment_prepared = true;
             select_file_versions(
                 &mut progress.file_versions_selected,
+                &mut progress.next_settled_head_publish_at_ms,
                 store,
                 workspace_id,
                 faults,
+                now_ms,
             )?;
             // Re-read so the probe's backfill enters the push loop.
             origins = list_workspace_origins(store, workspace_id).map_err(local)?;
@@ -1534,9 +1546,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         enrollment_prepared = true;
                         select_file_versions(
                             &mut progress.file_versions_selected,
+                            &mut progress.next_settled_head_publish_at_ms,
                             store,
                             workspace_id,
                             faults,
+                            now_ms,
                         )?;
                         for added in list_workspace_origins(store, workspace_id).map_err(local)? {
                             if seen_origins.insert(added.clone()) {
@@ -1596,6 +1610,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
 
         Ok(SyncPassOutcome::Complete {
             owner_admission_pending,
+            next_settled_head_publish_at_ms: progress.next_settled_head_publish_at_ms,
             pushed,
             fetched: 0,
             has_more: resume_needed
@@ -1924,6 +1939,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         Ok(SyncPassOutcome::Complete {
             owner_admission_pending: Vec::new(),
+            next_settled_head_publish_at_ms: None,
             pushed: 0,
             fetched,
             has_more,

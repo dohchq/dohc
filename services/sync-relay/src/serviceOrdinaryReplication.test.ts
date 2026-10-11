@@ -20,7 +20,7 @@ function fixture(config = attachment()) {
   const sendRequest = vi.fn(async (request: Parameters<EngineClient["sendRequest"]>[0]) => {
     const result = request.method === "sync.adoptJoinIdentity" ? {adopted: true} : request.method === "sync.claim" ? {claimed: true} :
       request.method === "sync.materializePendingCursor" ? {materialized: true} : request.method === "sync.commitCursor" ? {committed: true, sharingDeclined: []} : request.method === "sync.push" ?
-        {status: "complete", pushed: 1, hasMore: false, sharingDeclined: [], ownerAdmissionPending: []} : page();
+        {status: "complete", pushed: 1, nextSettledHeadPublishAtMs: null, hasMore: false, sharingDeclined: [], ownerAdmissionPending: []} : page();
     return {result};
   });
   let requestId = 0;
@@ -57,7 +57,7 @@ it("reports pending owner admission and retries publication without changing ret
   const f = fixture(), original = f.sendRequest.getMockImplementation()!;
   const pending = [{workspaceId: "workspace", originId: "owner", originSeq: 2, versionId: "main", objectId: "object", path: "private.md"}];
   f.sendRequest.mockImplementation(async request => request.method === "sync.push" ?
-    {result: {status: "complete", pushed: 0, hasMore: false, sharingDeclined: [], ownerAdmissionPending: pending}} as never : original(request));
+    {result: {status: "complete", pushed: 0, nextSettledHeadPublishAtMs: null, hasMore: false, sharingDeclined: [], ownerAdmissionPending: pending}} as never : original(request));
   await expect(f.driver.push()).rejects.toThrow("Ordinary publication is waiting for owner admission.");
   expect(pending).toEqual([{workspaceId: "workspace", originId: "owner", originSeq: 2, versionId: "main", objectId: "object", path: "private.md"}]);
   f.sendRequest.mockImplementation(original);
@@ -155,7 +155,7 @@ it("retains complete sharing-decline identity from cursor commit", async () => {
 it("retains complete sharing-decline identity from publication", async () => {
   const f = fixture(), original = f.sendRequest.getMockImplementation()!;
   f.sendRequest.mockImplementation(async request => request.method === "sync.push" ?
-    {result: {status: "complete", pushed: 0, hasMore: false, sharingDeclined: [decline], ownerAdmissionPending: []}} as never : original(request));
+    {result: {status: "complete", pushed: 0, nextSettledHeadPublishAtMs: null, hasMore: false, sharingDeclined: [decline], ownerAdmissionPending: []}} as never : original(request));
   expect(await f.driver.push()).toEqual({pushed: 0, hasMore: false, sharingDeclined: [decline]});
 });
 
@@ -197,7 +197,7 @@ it("pages publication within the pull bound while each page makes progress", asy
   const f = fixture(), original = f.sendRequest.getMockImplementation()!;
   const pages = [{pushed: 3, hasMore: true}, {pushed: 2, hasMore: true}, {pushed: 1, hasMore: false}];
   f.sendRequest.mockImplementation(async request => request.method === "sync.push" ?
-    {result: {status: "complete", ...pages.shift()!, sharingDeclined: [], ownerAdmissionPending: []}} as never : original(request));
+    {result: {status: "complete", nextSettledHeadPublishAtMs: null, ...pages.shift()!, sharingDeclined: [], ownerAdmissionPending: []}} as never : original(request));
   expect(await f.driver.publish()).toEqual({pushed: 5, hasMore: true});
   expect(f.methods().filter(method => method === "sync.push")).toHaveLength(2);
 });
@@ -210,7 +210,7 @@ it("stops publication at a page without progress or one waiting for owner admiss
   ] as const) {
     const f = fixture(), original = f.sendRequest.getMockImplementation()!;
     f.sendRequest.mockImplementation(async request => request.method === "sync.push" ?
-      {result: {status: "complete", sharingDeclined: [], ...answer}} as never : original(request));
+      {result: {status: "complete", nextSettledHeadPublishAtMs: null, sharingDeclined: [], ...answer}} as never : original(request));
     expect(await f.driver.publish()).toEqual(expected);
     expect(f.methods().filter(method => method === "sync.push")).toHaveLength(1);
   }

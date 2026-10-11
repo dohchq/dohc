@@ -194,7 +194,7 @@ export function startWorkspaceFileObservation(
           try {
             if (decodeFileObservationWake(event.payload).workspaceId === workspace.workspaceId) wake();
           } catch { wake(); }
-        } else if (event.name === "capture.momentRecorded") {
+        } else if (event.name === "capture.momentRecorded" || event.name === "ydoc.settled") {
           const scope = scopeOf(event.payload);
           if (!scope || scope.workspaceId === workspace.workspaceId) captured(scope?.paths ?? undefined);
         }

@@ -1,6 +1,9 @@
 import { activityPin, editorTabTestId, settingsNavPin } from "../src/testPins";
 import type { LiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
 import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
+import * as Y from "yjs";
+import { openEngineYdocProviderSession, type EngineTransport } from "@dohc/workspace-engine-client";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -9,6 +12,7 @@ import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 import type { DohcDesktopBridge, EngineMomentRecord } from "../src/ipc/bridgeContract";
 import { assertDesktopEngineHealthy, launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
 import { DohcCliFailure, runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
+import { openLiveDaemonWorkspace } from "./helpers/daemonSeed";
 import { liveDocumentFold, ownerAuditRecord, ownerEnrollment, ownerOutboxDeclarations, ownerSettlementState, ydocUpdateAuthors, type LiveAuditRecord } from "./helpers/engineDb";
 import { approveDesktop, createVerifiedAccount, openDesktopApproval, startSelfHostOnboardingStack, trustFixtureCa } from "./helpers/selfHostOnboarding";
 import {
@@ -169,7 +173,7 @@ async function shareForEdit(page: Page, workspaceId: string, recipientEmail: str
 
 /** A recipient opens the share on their own desktop, connecting their account first, and opens the document. */
 async function openShare(recipient: LaunchedDesktopApp, temp: TempWorkspace, approvalPage: Page, origin: string,
-  account: { email: string; password: string }, shareCode: string): Promise<string> {
+  account: { email: string; password: string }, shareCode: string, readOnly = false): Promise<string> {
   const page = recipient.page;
   await page.getByTestId("first-run-open-share").click();
   await page.getByTestId("open-share-code").fill(shareCode);
@@ -193,7 +197,10 @@ async function openShare(recipient: LaunchedDesktopApp, temp: TempWorkspace, app
     (window as unknown as { dohcDesktop: Api }).dohcDesktop.listWorkspaceFiles({ workspaceId }), shared.workspaceId);
   expect(listed.files.map(file => file.path).filter(path => path.startsWith("private/"))).toEqual([]);
   expect(existsSync(join(temp.rootPath, HIDDEN))).toBe(false);
-  await openDocument(page);
+  if (readOnly) {
+    await revealExplorerPath(page, PATH);
+    await explorerRow(page, PATH).click();
+  } else await openDocument(page);
   await expect(explorerRow(page, "private")).toHaveCount(0);
   return shared.workspaceId;
 }
@@ -718,3 +725,113 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
     }
   }
 });
+
+
+for (const delivery of ["typing", "upgrade", "declined"] as const) {
+  test(`@settled-heads a View share receives settled ${delivery} while the owner's editor stays open`, async ({ browser }, testInfo) => {
+    test.setTimeout(300_000);
+    const ownerTemp = await createTempWorkspace();
+    const recipientTemp = await createTempWorkspace();
+    const apps: LaunchedDesktopApp[] = [];
+    const contexts: BrowserContext[] = [];
+    let stack: Awaited<ReturnType<typeof startSelfHostOnboardingStack>> | undefined;
+    const ownerAccount = { email: `owner-${randomUUID()}@example.test`, password: `Owner-${randomUUID()}`, name: "Owner" };
+    const recipientAccount = { email: `recipient-${randomUUID()}@example.test`, password: `Recipient-${randomUUID()}`, name: "Recipient" };
+    const settledText = "The recipient sees this saved edit with the owner still typing.";
+    try {
+      stack = await startSelfHostOnboardingStack(ownerTemp.baseDir);
+      const ownerBrowser = await browser.newContext();
+      const recipientBrowser = await browser.newContext();
+      contexts.push(ownerBrowser, recipientBrowser);
+      const recipientApproval = await recipientBrowser.newPage();
+      await createVerifiedAccount(recipientApproval, stack.account, recipientAccount);
+      await writeWorkspaceFiles(ownerTemp, [{ path: PATH, contents: SEED }, { path: HIDDEN, contents: HIDDEN_TEXT }]);
+      let owner = await launchDesktopApp({ workspace: ownerTemp, env: stack.trustEnv });
+      apps.push(owner);
+      const workspace = await openWorkspaceFromFirstRun(owner.page, ownerTemp);
+      await owner.page.getByTestId(activityPin("settings")).click();
+      await owner.page.getByTestId(settingsNavPin("cloud")).click();
+      await owner.page.getByRole("button", { name: "Open sync and sharing" }).click();
+      const ownerApproval = await ownerBrowser.newPage();
+      const approval = await openDesktopApproval(owner, ownerApproval, stack.relayUrl);
+      await createVerifiedAccount(ownerApproval, stack.account, ownerAccount, approval);
+      await approveDesktop(ownerApproval, ownerAccount);
+      await expect(owner.page.getByTestId("cloud-connected-email")).toHaveText(ownerAccount.email);
+      await owner.page.getByTestId("cloud-enable-sync").click();
+      await expect(owner.page.getByTestId("cloud-workspace-synced")).toBeVisible();
+      await owner.page.keyboard.press("Escape");
+      await waitForWorkspaceFile(owner.page, workspace.workspaceId, PATH);
+      const share = await owner.page.evaluate(({ workspaceId, recipientEmail, path }) =>
+        (window as unknown as { dohcDesktop: Api }).dohcDesktop.createRelayShare({ workspaceId, recipientEmail, paths: [path], access: "view" }),
+      { workspaceId: workspace.workspaceId, recipientEmail: recipientAccount.email, path: PATH });
+      const recipient = await launchDesktopApp({ workspace: recipientTemp, env: stack.trustEnv });
+      apps.push(recipient);
+      const recipientWorkspaceId = await openShare(recipient, recipientTemp, recipientApproval, stack.relayUrl, recipientAccount, share.shareCode, true);
+      await expect(recipient.page.getByText("The person writes here.", { exact: false })).toBeVisible();
+      const before = await momentIds(recipient.page, recipientWorkspaceId, PATH);
+      if (delivery !== "typing") {
+        await owner.close();
+        apps.splice(apps.indexOf(owner), 1);
+        const offline = await openLiveDaemonWorkspace(workspace);
+        try {
+          const session = await offline.sessions.run(offline.workspace, ({ client, workspace: handle }) =>
+            openEngineYdocProviderSession({ transport: client as EngineTransport, workspace: handle,
+              versionId: "main", path: PATH, contentKind: "richdoc", onRemoteUpdate: () => undefined }));
+          try {
+            const vector = Y.encodeStateVector(session.doc);
+            session.doc.transact(() => {
+              const paragraph = new Y.XmlElement("paragraph");
+              const text = new Y.XmlText();
+              text.insert(0, settledText);
+              paragraph.insert(0, [text]);
+              const body = session.doc.getXmlFragment("body");
+              body.insert(body.length, [paragraph]);
+            });
+            await session.applyLocalUpdate(Y.encodeStateAsUpdate(session.doc, vector), { armSettle: false });
+            expect((await session.settleNow()).materialized).toBe(true);
+          } finally { await session.close(); }
+        } finally { await offline.close(); }
+        // The desktop and offline daemon are closed before the persisted-state fixture changes.
+        const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
+        const database = new DatabaseSync(join(ownerTemp.rootPath, ".dohc/engine/engine.db"));
+        try {
+          const head = database.prepare("SELECT latest_moment_id,object_id FROM snapshots WHERE path=?").get(PATH)!;
+          expect(database.prepare("SELECT count(*) AS n FROM replication_log WHERE op_kind='moment.append' AND json_extract(payload_json,'$.momentId')=?").get(head.latest_moment_id)?.n).toBe(0);
+          if (delivery === "declined") {
+            // Exercise #1711's persisted lane; Rust tests separately prove real size refusals.
+            database.prepare("UPDATE ydoc_docs SET file_export_lane=1,regime='local-only',lineage_claim_status='unclaimed',lineage_claim_id=NULL WHERE object_id=?").run(head.object_id);
+          } else {
+            if (database.prepare("PRAGMA table_info(ydoc_docs)").all().some(column => column.name === "last_published_moment_id")) {
+              database.exec("BEGIN; DROP INDEX idx_live_device_settlements_moment; ALTER TABLE ydoc_docs DROP COLUMN last_published_moment_id; ALTER TABLE ydoc_docs DROP COLUMN last_published_at_ms; DELETE FROM engine_migrations WHERE ordinal=42; COMMIT;");
+            }
+            expect(database.prepare("SELECT max(ordinal) AS ordinal FROM engine_migrations").get()?.ordinal).toBe(41);
+          }
+        } finally { database.close(); }
+        owner = await launchDesktopApp({ workspace: ownerTemp, env: stack.trustEnv });
+        apps.push(owner);
+        expect((await activeWorkspace(owner.page, ownerTemp.rootPath)).workspaceId).toBe(workspace.workspaceId);
+        await openDocument(owner.page);
+      } else {
+        await openDocument(owner.page);
+        await typeAfter(owner.page, "The person writes here.", ` ${settledText}`);
+      }
+      await expect(saveState(owner.page)).toHaveAttribute("data-state", "saved");
+      await expect.poll(() => readFile(join(ownerTemp.rootPath, PATH), "utf8"), { timeout: 30_000 }).toContain(settledText);
+      await expect.poll(() => readFile(join(recipientTemp.rootPath, PATH), "utf8"), { timeout: 90_000 }).toContain(settledText);
+      await expect(recipient.page.getByText(settledText, { exact: false })).toBeVisible({ timeout: 30_000 });
+      await expect.poll(() => momentIds(recipient.page, recipientWorkspaceId, PATH), { timeout: 30_000 }).not.toEqual(before);
+      await expect(editor(owner.page)).toBeVisible();
+      await expect(editor(owner.page)).toContainText(settledText);
+      for (const app of apps) assertDesktopEngineHealthy(app.logs);
+    } catch (error) {
+      if (stack) await testInfo.attach("relay output", { contentType: "text/plain", body: stack.relayOutput() });
+      throw error;
+    } finally {
+      const closed = await Promise.allSettled([...contexts.map(context => context.close()), ...apps.map(app => app.close())]);
+      closed.push(...await Promise.allSettled([stack?.close()]));
+      closed.push(...await Promise.allSettled([ownerTemp.cleanup(), recipientTemp.cleanup()]));
+      const failures = closed.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (failures.length) throw new AggregateError(failures.map(result => result.reason), "Settled-head fixture cleanup failed.");
+    }
+  });
+}

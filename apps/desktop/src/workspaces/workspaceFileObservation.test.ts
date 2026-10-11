@@ -246,7 +246,7 @@ describe("workspace file observation", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("subscribes to workspace events, forwards truncated capture broadly, and unsubscribes", async () => {
+  it("subscribes to settled-head and capture events in the current workspace and unsubscribes", async () => {
     const eventHandlers = new Set<(event: Event) => void>();
     const clientHandlers = new Set<() => void>();
     const daemon: Pick<EngineDaemonLifecycle, "onEvent" | "onClientChanged"> = {
@@ -273,6 +273,11 @@ describe("workspace file observation", () => {
     expect(callbacks.captured).toHaveBeenCalledOnce();
     emit("capture.momentRecorded", { workspaceId: "a", paths: ["note.md"], appliedCount: 2, notOwnedCount: 0 });
     expect(callbacks.captured).toHaveBeenLastCalledWith(undefined);
+    emit("ydoc.settled", { workspaceId: "a", paths: ["final.md"], appliedCount: 1, notOwnedCount: 0 });
+    expect(callbacks.captured).toHaveBeenLastCalledWith(["final.md"]);
+    const settledCalls = vi.mocked(callbacks.captured).mock.calls.length;
+    emit("ydoc.settled", { workspaceId: "b", paths: ["other.md"], appliedCount: 1, notOwnedCount: 0 });
+    expect(callbacks.captured).toHaveBeenCalledTimes(settledCalls);
     emit("workspace.filesChanged", { workspaceId: "b", cursor: answer(1).cursor });
     expect(sendRequest).toHaveBeenCalledOnce();
     emit("workspace.filesChanged", { workspaceId: "a", cursor: answer(1).cursor });

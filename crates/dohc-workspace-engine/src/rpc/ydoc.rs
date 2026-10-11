@@ -1287,6 +1287,10 @@ impl EngineService {
                             .await
                         {
                             Ok(dohc_engine_runtime::YdocSettleOutcome::Settled(settled)) => {
+                                settle_events.emit("ydoc.settled", serde_json::json!({
+                                    "workspaceId": settle_open.workspace_id,
+                                    "paths": [settled.path], "appliedCount": 1, "notOwnedCount": 0,
+                                }));
                                 if settled.collection_reconcile_required {
                                     settle_open.request_collection_reconcile();
                                 }
@@ -1502,6 +1506,13 @@ impl EngineService {
         if settled.collection_reconcile_required {
             open.request_collection_reconcile();
         }
+        self.events.emit(
+            "ydoc.settled",
+            serde_json::json!({
+                "workspaceId": open.workspace_id,
+                "paths": [settled.path], "appliedCount": 1, "notOwnedCount": 0,
+            }),
+        );
         if let Some(session) = lock(&self.sessions).get_mut(session_id) {
             session.last_settled_sha = Some(settled.sha256.clone());
         }

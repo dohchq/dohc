@@ -43,6 +43,7 @@ const OrdinarySyncResultSchemas = {
   "sync.push": mutableStruct({
     status: Schema.Literal("complete"),
     pushed: Count,
+    nextSettledHeadPublishAtMs: Schema.NullOr(Schema.Number.check(Schema.isInt())),
     hasMore: Schema.Boolean,
     ownerAdmissionPending: Schema.mutable(Schema.Array(OwnerAdmissionPending)),
     sharingDeclined: Schema.mutable(Schema.Array(SharingDeclined)),

@@ -192,7 +192,7 @@ describe("the automation replicas", () => {
             case "workspace.close": return { result: {} };
             case "sync.adoptJoinIdentity": return { result: { adopted: true } };
             case "versions.ensureMain": return { result: { id: "main" } };
-            case "sync.push": return { result: { status: "complete", pushed: 0, hasMore: false, sharingDeclined: [], ownerAdmissionPending: [] } };
+            case "sync.push": return { result: { status: "complete", pushed: 0, nextSettledHeadPublishAtMs: null, hasMore: false, sharingDeclined: [], ownerAdmissionPending: [] } };
             case "sync.materializePendingCursor": return { result: { materialized: true } };
             case "sync.commitCursor": return { result: { committed: true, sharingDeclined: [] } };
             case "sync.pull": return { result: { status: "complete", nextCursor: 1, pendingCursor: { kind: "relay", token: "t" }, hasMore: false,

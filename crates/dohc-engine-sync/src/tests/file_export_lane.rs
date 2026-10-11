@@ -24,6 +24,539 @@ fn owner() -> (ScratchDir, std::path::PathBuf, EngineStore) {
     (scratch, path, store)
 }
 
+fn ordinary_publisher_fixture() -> (ScratchDir, std::path::PathBuf, EngineStore) {
+    let (scratch, path, mut store) = owner();
+    write(&mut store, "doc", "seed", "doc.md", "seed", "local-file", 1);
+    lane(&mut store, "doc");
+    let doc = fresh_seed(
+        &mut store,
+        &DocKey::new("ws", "main", "doc").unwrap(),
+        "seed",
+    );
+    let claim = store.put_binary_blob(&doc.encode_full_state()).unwrap();
+    store.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE ydoc_docs SET file_export_lane=0,regime='replicated',lineage_claim_status='exact',lineage_claim_id=?1,base_origin_id='local',settled_update_seq=head_update_seq", [claim]).map_err(SyncError::persist)?;
+        journal_moment_append_in_tx(tx, "ws", "seed")
+    }).unwrap();
+    (scratch, path, store)
+}
+
+fn ordinary_saved_head(store: &mut EngineStore, id: &str, text: &str, now: i64) {
+    store.write_with(&NoFaults, |tx| {
+        dohc_engine_domain::write_projected_text_in_tx(tx, &WriteText {
+            workspace_id:"ws".into(),version_id:"main".into(),object_id:"doc".into(),
+            moment_id:id.into(),path:"doc.md".into(),text:text.into(),metadata_origin:"ydoc".into(),
+            metadata_summary:None,metadata_correlation_id:None,author_json:None,now_ms:now,request_id:None,
+        }).map_err(SyncError::corrupt)?;
+        tx.execute("UPDATE ydoc_docs SET last_settled_sha=(SELECT blob_sha256 FROM snapshots WHERE workspace_id='ws' AND object_id='doc'),settle_seq=(SELECT moment_order FROM moments WHERE workspace_id='ws' AND moment_id=?1)", [id]).map_err(SyncError::persist)?;
+        Ok::<_,SyncError>(())
+    }).unwrap();
+}
+
+#[test]
+fn ordinary_settled_heads_coalesce_at_push_while_the_editor_is_open() {
+    let (_scratch, _, mut store) = ordinary_publisher_fixture();
+    ordinary_saved_head(&mut store, "moment-ydoc-first", "first", 10);
+    ordinary_saved_head(&mut store, "moment-ydoc-last", "last", 20);
+    let client = RelaySyncClient::new(FakeRelay::default());
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_000, 0)
+        .unwrap();
+    let selected = exports(&store);
+    assert_eq!(selected.len(), 2);
+    assert_eq!(selected[1].payload["momentId"], "moment-ydoc-last");
+    assert_eq!(
+        selected[1].payload["authors"],
+        json!([{"kind":"unattributed"}])
+    );
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 90_000, 0)
+        .unwrap();
+    assert_eq!(exports(&store).len(), 2);
+}
+
+#[test]
+fn ordinary_publication_after_a_peer_projection_covers_both_settle_intervals() {
+    let (_scratch, _, mut store) = ordinary_publisher_fixture();
+    ordinary_saved_head(&mut store, "moment-ydoc-apply-peer", "peer text", 10);
+    ordinary_saved_head(&mut store, "moment-ydoc-local", "local text", 20);
+    store.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE moments SET author_json='[{\"kind\":\"agent\",\"agentId\":\"local-agent\"}]' WHERE moment_id='moment-ydoc-local'", []).map_err(SyncError::persist)?;
+        Ok::<_,SyncError>(())
+    }).unwrap();
+    RelaySyncClient::new(FakeRelay::default())
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_000, 0)
+        .unwrap();
+    assert_eq!(
+        exports(&store)[1].payload["authors"],
+        json!([{"kind":"unattributed"}])
+    );
+}
+
+#[test]
+fn ordinary_publisher_never_echoes_peer_projection_heads() {
+    let (_scratch, _, mut store) = ordinary_publisher_fixture();
+    ordinary_saved_head(&mut store, "moment-ydoc-apply-peer", "peer", 10);
+    RelaySyncClient::new(FakeRelay::default())
+        .push_workspace(&mut store, "ws", &NoFaults, &NoLiveLeases, 60_000, 0)
+        .unwrap();
+    assert_eq!(exports(&store).len(), 1);
+}
+
+#[test]
+fn ordinary_publication_survives_crash_and_backfills_a_stale_head_once() {
+    for point in [
+        FaultPoint::StorageBeforePersist,
+        FaultPoint::StorageAfterCommitBeforeAck,
+    ] {
+        let (_scratch, path, mut store) = ordinary_publisher_fixture();
+        let client = RelaySyncClient::new(RecordingRelay::default());
+        client
+            .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_000, 0)
+            .unwrap();
+        ordinary_saved_head(
+            &mut store,
+            "moment-ydoc-stale",
+            "saved before upgrade",
+            70_000,
+        );
+        let crash = ScriptedFaults::crash_at(point);
+        assert!(
+            client
+                .push_workspace(&mut store, "ws", crash.as_ref(), &AlwaysLive, 90_000, 0)
+                .is_err()
+        );
+        drop(store);
+        let mut store = EngineStore::open(&path, 100_000).unwrap();
+        client
+            .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 100_000, 0)
+            .unwrap();
+        assert_eq!(exports(&store).len(), 2);
+        let marker: String = store
+            .read_with(|c| {
+                c.query_row("SELECT last_published_moment_id FROM ydoc_docs", [], |r| {
+                    r.get(0)
+                })
+            })
+            .unwrap();
+        assert_eq!(marker, "moment-ydoc-stale");
+        drop(store);
+        let mut store = EngineStore::open(&path, 120_000).unwrap();
+        client
+            .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 120_000, 0)
+            .unwrap();
+        assert_eq!(
+            exports(&store).len(),
+            2,
+            "restart cannot publish the backfill twice"
+        );
+    }
+}
+
+#[test]
+fn ordinary_coalescing_uploads_the_saved_head_and_its_local_preimage() {
+    let (_scratch, _, mut store) = ordinary_publisher_fixture();
+    let client = RelaySyncClient::new(RecordingRelay::default());
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_000, 0)
+        .unwrap();
+    let uploads_before = client.transport().uploads.lock().unwrap().len();
+    for (id, text) in [("one", "first"), ("two", "second"), ("three", "third")] {
+        ordinary_saved_head(&mut store, &format!("moment-ydoc-{id}"), text, 70_000);
+    }
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 90_000, 0)
+        .unwrap();
+    let uploads = client.transport().uploads.lock().unwrap();
+    let mut bodies: Vec<_> = uploads[uploads_before..]
+        .iter()
+        .map(|upload| upload.bytes.as_slice())
+        .collect();
+    bodies.sort_unstable();
+    assert_eq!(bodies, [b"second".as_slice(), b"third".as_slice()]);
+    assert_eq!(exports(&store).len(), 2);
+    assert_eq!(
+        exports(&store)[1].payload["beforeLatestMomentId"],
+        "moment-ydoc-two"
+    );
+}
+
+#[test]
+fn ordinary_publisher_keeps_the_saved_head_when_newer_edits_are_unsettled() {
+    let (_scratch, _, mut store) = ordinary_publisher_fixture();
+    ordinary_saved_head(&mut store, "moment-ydoc-saved", "saved text", 10);
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE ydoc_docs SET head_update_seq=head_update_seq+1", [])
+                .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    RelaySyncClient::new(RecordingRelay::default())
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_000, 0)
+        .unwrap();
+    let published = exports(&store);
+    assert_eq!(published.len(), 2);
+    assert_eq!(published[1].payload["momentId"], "moment-ydoc-saved");
+}
+
+#[test]
+fn ordinary_publisher_throttles_by_size_and_accepts_a_backward_clock() {
+    for (bytes, interval) in [(50_000, 30_000), (1_000_000, 360_000)] {
+        let first_push_ms = 1_000_000;
+        let (_scratch, _, mut store) = ordinary_publisher_fixture();
+        let first = "a".repeat(bytes);
+        ordinary_saved_head(&mut store, "moment-ydoc-one", &first, 10);
+        let client = RelaySyncClient::new(FakeRelay::default());
+        client
+            .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, first_push_ms, 0)
+            .unwrap();
+        ordinary_saved_head(&mut store, "moment-ydoc-two", &"b".repeat(bytes), 20);
+        let result = client
+            .push_workspace(
+                &mut store,
+                "ws",
+                &NoFaults,
+                &AlwaysLive,
+                first_push_ms + 1,
+                0,
+            )
+            .unwrap();
+        assert_eq!(exports(&store).len(), 2, "the second head waits");
+        assert!(format!("{result:?}").contains(&format!(
+            "next_settled_head_publish_at_ms: Some({})",
+            first_push_ms + interval
+        )));
+        client
+            .push_workspace(
+                &mut store,
+                "ws",
+                &NoFaults,
+                &AlwaysLive,
+                first_push_ms + interval,
+                0,
+            )
+            .unwrap();
+        assert_eq!(exports(&store).len(), 3);
+        ordinary_saved_head(&mut store, "moment-ydoc-three", &"c".repeat(bytes), 30);
+        client
+            .push_workspace(
+                &mut store,
+                "ws",
+                &NoFaults,
+                &AlwaysLive,
+                first_push_ms - 1,
+                0,
+            )
+            .unwrap();
+        assert_eq!(
+            exports(&store).len(),
+            4,
+            "a backward clock cannot strand text"
+        );
+    }
+}
+
+#[test]
+fn ordinary_publisher_defers_whole_heads_at_the_blob_budget_and_wakes_the_remainder() {
+    let (_scratch, _, mut store) = ordinary_publisher_fixture();
+    for index in 0..11 {
+        let object = format!("budget-{index}");
+        let path = format!("{object}.md");
+        let seed = format!("budget-seed-{index}");
+        let head = format!("moment-ydoc-budget-{index}");
+        let before = format!("{index:02}{}", "a".repeat(999_998));
+        let after = format!("{index:02}{}", "b".repeat(999_998));
+        write(&mut store, &object, &seed, &path, &before, "local-file", 1);
+        lane(&mut store, &object);
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE ydoc_docs SET file_export_lane=0,regime='replicated',lineage_claim_status='exact',lineage_claim_id=(SELECT lineage_claim_id FROM ydoc_docs WHERE object_id='doc'),base_origin_id='local' WHERE object_id=?1", [&object]).map_err(SyncError::persist)?;
+            journal_moment_append_in_tx(tx,"ws",&seed)
+        }).unwrap();
+        write(&mut store, &object, &head, &path, &after, "ydoc", 10);
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE ydoc_docs SET last_settled_sha=(SELECT blob_sha256 FROM snapshots WHERE object_id=?1),settle_seq=(SELECT moment_order FROM moments WHERE moment_id=?2) WHERE object_id=?1", params![object,head]).map_err(SyncError::persist)?;
+            Ok::<_,SyncError>(())
+        }).unwrap();
+    }
+    let published = |store: &EngineStore| {
+        exports(store)
+            .iter()
+            .filter(|op| {
+                op.payload["momentId"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("moment-ydoc-budget-")
+            })
+            .count()
+    };
+    let client = RelaySyncClient::new(RecordingRelay::default());
+    let first = client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 1_000_000, 0)
+        .unwrap();
+    assert_eq!(published(&store), 10);
+    assert!(format!("{first:?}").contains("next_settled_head_publish_at_ms: Some(1000000)"));
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 1_000_000, 0)
+        .unwrap();
+    assert_eq!(published(&store), 11);
+}
+
+#[test]
+fn ordinary_publisher_preserves_single_settle_authors_and_local_history() {
+    for authors in [
+        json!([{"kind":"agent","agentId":"agent"}]),
+        json!([{"kind":"human","humanId":"relay-person","humanName":"Person"},
+            {"kind":"agent","agentId":"agent","onBehalfOf":"relay-person"}]),
+    ] {
+        let (_scratch, _, mut store) = ordinary_publisher_fixture();
+        ordinary_saved_head(&mut store, "moment-ydoc-one", "one", 10);
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE moments SET author_json=?1,metadata_summary='Saved text' WHERE moment_id='moment-ydoc-one'",[authors.to_string()]).map_err(SyncError::persist)?;
+            Ok::<_,SyncError>(())
+        }).unwrap();
+        RelaySyncClient::new(FakeRelay::default())
+            .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_000, 0)
+            .unwrap();
+        let all = exports(&store);
+        assert_eq!(all.len(), 2);
+        let wire = &all[1].payload;
+        assert_eq!(wire["metadata"]["summary"], "Saved text");
+        assert!(wire.get("attributionUnavailable").is_none());
+        assert!(
+            wire["authors"]
+                .as_array()
+                .unwrap()
+                .contains(&json!({"kind":"agent","agentId":"agent"}))
+        );
+        assert!(!wire.to_string().contains("relay-person"));
+        let local: String = store
+            .read_with(|c| {
+                c.query_row(
+                    "SELECT author_json FROM moments WHERE moment_id='moment-ydoc-one'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&local).unwrap(),
+            authors
+        );
+        assert_eq!(count(&store, "replication_pending_refusals"), 0);
+        assert_eq!(count(&store, "live_settlement_attribution_unavailable"), 0);
+    }
+}
+
+#[test]
+fn ordinary_publisher_dedupes_content_without_advancing_the_marker() {
+    let (_scratch, _, mut store) = ordinary_publisher_fixture();
+    ordinary_saved_head(&mut store, "moment-ydoc-first", "first", 10);
+    let client = RelaySyncClient::new(FakeRelay::default());
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_000, 0)
+        .unwrap();
+    ordinary_saved_head(&mut store, "moment-ydoc-away", "away", 20);
+    ordinary_saved_head(&mut store, "moment-ydoc-return", "first", 30);
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 90_000, 0)
+        .unwrap();
+    assert_eq!(exports(&store).len(), 2);
+    let marker: String = store
+        .read_with(|c| {
+            c.query_row("SELECT last_published_moment_id FROM ydoc_docs", [], |r| {
+                r.get(0)
+            })
+        })
+        .unwrap();
+    assert_eq!(marker, "moment-ydoc-first");
+    ordinary_saved_head(&mut store, "moment-ydoc-new", "new", 40);
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 90_001, 0)
+        .unwrap();
+    assert_eq!(exports(&store).len(), 3);
+    store
+        .write_with(&NoFaults, |tx| {
+            journal_moment_append_in_tx(tx, "ws", "seed")
+        })
+        .unwrap();
+    let marker: String = store
+        .read_with(|c| {
+            c.query_row("SELECT last_published_moment_id FROM ydoc_docs", [], |r| {
+                r.get(0)
+            })
+        })
+        .unwrap();
+    assert_eq!(
+        marker, "moment-ydoc-new",
+        "late history cannot move the marker backward"
+    );
+}
+
+#[test]
+fn ordinary_publisher_leaves_unbound_audited_heads_to_the_audit_publisher() {
+    let (_scratch, _, mut store) = ordinary_publisher_fixture();
+    ordinary_saved_head(&mut store, "moment-ydoc-audited", "audited", 10);
+    store.write_with(&NoFaults, |tx| {
+        tx.execute("INSERT INTO live_device_settlements(settlement_id,relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,previous_cursor,terminal_cursor,previous_ydoc_sequence,local_ydoc_sequence,application_count,interval_digest,moment_id,markdown_digest,source_state_vector_digest,binding_json,host_coordinate_json,recorded_at_ms) VALUES ('audit','relay','ws','main','doc','claim',0,0,0,0,0,?1,'moment-ydoc-audited',?1,?1,'{}','{}',10)",["a".repeat(64)]).map_err(SyncError::persist)?;
+        Ok::<_,SyncError>(())
+    }).unwrap();
+    assert_eq!(count(&store, "live_device_application_bindings"), 0);
+    RelaySyncClient::new(FakeRelay::default())
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_000, 0)
+        .unwrap();
+    assert_eq!(exports(&store).len(), 1);
+}
+
+#[test]
+fn ordinary_companion_keeps_a_peer_n_updates_ahead_including_richdoc_source() {
+    for kind in [ContentKind::Plaintext, ContentKind::Richdoc] {
+        for open in [false, true] {
+            let (_scratch, _, mut source) = owner();
+            let key = DocKey::new("ws", "main", "doc").unwrap();
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown(kind, "seed").unwrap();
+            let base = doc.encode_full_state();
+            let claim = source.put_binary_blob(&base).unwrap();
+            source
+                .write_with(&NoFaults, |tx| {
+                    journal_local_op_in_tx(
+                        tx,
+                        "ws",
+                        "ydoc.update",
+                        &crate::ydoc_update_payload(
+                            &key, "doc.md", kind, &claim, &claim, None, None, true,
+                        ),
+                        1,
+                    )
+                })
+                .unwrap();
+            // Both the owner and the peer receive the actual base and updates.
+            let (_peer_scratch, _, mut peer) = open_store();
+            seed_replication_version(&mut peer, "main", "main");
+            adopt_join_identity(
+                &mut peer, "ws", "device-b", "epoch-1", "stream-1", 1, &NoFaults,
+            )
+            .unwrap();
+            peer.write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO sync_relay_push_state VALUES ('ws','device-b',-1)",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+            let mut cache = WriterDocCache::new();
+            for (origin, destination) in [("base", &mut source), ("local", &mut peer)] {
+                destination.put_binary_blob(&base).unwrap();
+                let op = envelope(
+                    origin,
+                    0,
+                    "ydoc.update",
+                    crate::ydoc_update_payload(
+                        &key, "doc.md", kind, &claim, &claim, None, None, true,
+                    ),
+                );
+                apply_ydoc_envelope(destination, &mut cache, &op, &NoFaults, &NoLiveLeases)
+                    .unwrap();
+            }
+            let text = if kind == ContentKind::Richdoc {
+                "---\nid: record\n---\n\n| Key | Value |\n| --- | --- |\n| generated |  |\n\n\n\n**bold** _italic_ `code`"
+            } else {
+                "saved text"
+            };
+            let delta = doc
+                .rewrite_content_to_markdown_preserving_source(kind, text)
+                .unwrap();
+            let sha = source.put_binary_blob(&delta).unwrap();
+            source
+                .write_with(&NoFaults, |tx| {
+                    journal_local_op_in_tx(
+                        tx,
+                        "ws",
+                        "ydoc.update",
+                        &crate::ydoc_update_payload(
+                            &key, "doc.md", kind, &sha, &claim, None, None, false,
+                        ),
+                        2,
+                    )
+                })
+                .unwrap();
+            peer.put_binary_blob(&delta).unwrap();
+            let update = envelope(
+                "local",
+                1,
+                "ydoc.update",
+                crate::ydoc_update_payload(&key, "doc.md", kind, &sha, &claim, None, None, false),
+            );
+            apply_ydoc_envelope(&mut peer, &mut cache, &update, &NoFaults, &NoLiveLeases).unwrap();
+            let id = format!(
+                "moment-ydoc-{}",
+                dohc_engine_storage::hex_sha256(text.as_bytes())
+            );
+            RelaySyncClient::new(RecordingRelay::default())
+                .push_workspace(&mut peer, "ws", &NoFaults, &NoLiveLeases, 60_000, 0)
+                .unwrap();
+            assert!(
+                exports(&peer).is_empty(),
+                "device B must not republish device A's projection"
+            );
+            ordinary_saved_head(&mut source, &id, text, 3);
+            if kind == ContentKind::Richdoc {
+                assert_ne!(
+                    doc.project(kind).unwrap().content,
+                    text,
+                    "exercise the lexical settle override"
+                );
+            }
+            RelaySyncClient::new(FakeRelay::default())
+                .push_workspace(&mut source, "ws", &NoFaults, &AlwaysLive, 60_000, 0)
+                .unwrap();
+            let selected = exports(&source);
+            assert_eq!(selected.len(), 1);
+            for n in 0..10 {
+                let delta = doc
+                    .rewrite_content_to_markdown(kind, &format!("peer ahead {n}"))
+                    .unwrap();
+                let sha = peer.put_binary_blob(&delta).unwrap();
+                let op = envelope(
+                    "ahead",
+                    n,
+                    "ydoc.update",
+                    crate::ydoc_update_payload(
+                        &key, "doc.md", kind, &sha, &claim, None, None, false,
+                    ),
+                );
+                apply_ydoc_envelope(&mut peer, &mut cache, &op, &NoFaults, &NoLiveLeases).unwrap();
+            }
+            let before = VersionedTextStore::new(&mut peer)
+                .read_text("ws", "main", "doc.md")
+                .unwrap()
+                .unwrap();
+            let jobs = count(&peer, "materialization_jobs");
+            hydrate(&source, &mut peer);
+            if open {
+                let leases = dohc_engine_collab::LeaseRegistry::new();
+                let held = leases.acquire(&key).unwrap();
+                held.bind_claim(Some(&claim)).unwrap();
+                let result =
+                    apply_moment_envelope(&mut peer, &selected[0], &NoFaults, &leases).unwrap();
+                assert!(matches!(result.primary, ApplyDisposition::Applied(0)));
+            } else {
+                apply(&mut peer, &selected[0]);
+            }
+            let after = VersionedTextStore::new(&mut peer)
+                .read_text("ws", "main", "doc.md")
+                .unwrap()
+                .unwrap();
+            assert_eq!(before, after, "the companion is History, not a rewind");
+            assert_eq!(jobs, count(&peer, "materialization_jobs"));
+            assert_eq!(count(&peer, "conflicts"), 0);
+        }
+    }
+}
+
 fn write(
     store: &mut EngineStore,
     object: &str,

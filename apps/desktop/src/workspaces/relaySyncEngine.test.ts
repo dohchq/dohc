@@ -155,6 +155,77 @@ afterEach(() => {
 });
 
 describe("relaySyncEngine", () => {
+  it("pushes a throttled settled head at its deadline without another local change", async () => {
+    vi.setSystemTime(0);
+    pushMock.mockImplementationOnce(async () => ({
+      pushed: 0, hasMore: false, originsPushed: [], ownerAdmissionPending: [],
+      sharingDeclined: [], nextSettledHeadPublishAtMs: 30_000,
+    }));
+    const sync = createRelaySyncEngine({
+      rootDir: "/tmp/workspace", relay: { baseUrl: "http://relay.test", token: "token" },
+      operations: mockOperations(), capture: capture(), onChange: vi.fn(),
+      idlePullMs: 300_000, nowMs: () => Date.now(),
+    });
+    await sync.start();
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(pushMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(pushMock).toHaveBeenCalledTimes(2);
+    await sync.stop();
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(pushMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the settled-head deadline through local debounces and cancels it on stop", async () => {
+    vi.setSystemTime(0);
+    pushMock.mockImplementation(async () => ({
+      pushed: 0, hasMore: false, originsPushed: [], ownerAdmissionPending: [],
+      sharingDeclined: [], nextSettledHeadPublishAtMs: 30_000,
+    }));
+    const sync = createRelaySyncEngine({
+      rootDir: "/tmp/workspace", relay: { baseUrl: "http://relay.test", token: "token" },
+      operations: mockOperations(), capture: capture(), onChange: vi.fn(),
+      idlePullMs: 300_000, debounceMs: 100, nowMs: () => Date.now(),
+    });
+    await sync.start();
+    await vi.advanceTimersByTimeAsync(10_000);
+    sync.queueSync();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(pushMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(19_899);
+    expect(pushMock).toHaveBeenCalledTimes(2);
+    pushMock.mockImplementationOnce(async () => ({
+      pushed: 1, hasMore: false, originsPushed: [], ownerAdmissionPending: [],
+      sharingDeclined: [], nextSettledHeadPublishAtMs: 60_000,
+    }));
+    await vi.advanceTimersByTimeAsync(1);
+    expect(pushMock).toHaveBeenCalledTimes(3);
+    await sync.stop();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(pushMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("backs off a failed settled-head wake without retaining a second deadline timer", async () => {
+    vi.setSystemTime(0);
+    pushMock.mockImplementationOnce(async () => ({
+      pushed: 0, hasMore: false, originsPushed: [], ownerAdmissionPending: [],
+      sharingDeclined: [], nextSettledHeadPublishAtMs: 30_000,
+    })).mockRejectedValueOnce(new Error("offline"));
+    const sync = createRelaySyncEngine({
+      rootDir: "/tmp/workspace", relay: { baseUrl: "http://relay.test", token: "token" },
+      operations: mockOperations(), capture: capture(), onChange: vi.fn(),
+      idlePullMs: 300_000, initialBackoffMs: 500, nowMs: () => Date.now(),
+    });
+    await sync.start();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(pushMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(499);
+    expect(pushMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(pushMock).toHaveBeenCalledTimes(3);
+    await sync.stop();
+  });
+
   it("releases document opens and authored writes and pulls between drain passes", async () => {
     const events: string[] = [];
     let captureChain: Promise<unknown> = Promise.resolve();

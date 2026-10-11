@@ -154,6 +154,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   let nextBackoffMs = initialBackoffMs;
   let debounceTimer: ReturnType<typeof setTimeout> | undefined;
   let continuationTimer: ReturnType<typeof setTimeout> | undefined;
+  let settledHeadTimer: ReturnType<typeof setTimeout> | undefined;
   let backoffTimer: ReturnType<typeof setTimeout> | undefined;
   // A pull the Chats polls asked for while local writes held the debounce.
   let pullTimer: ReturnType<typeof setTimeout> | undefined;
@@ -215,6 +216,10 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   // The timers that would start another pass. A pass leaves the wait on the
   // relay running.
   function clearPassTimers(): void {
+    if (settledHeadTimer !== undefined) {
+      clearTimeout(settledHeadTimer);
+      settledHeadTimer = undefined;
+    }
     if (continuationTimer !== undefined) {
       clearTimeout(continuationTimer);
       continuationTimer = undefined;
@@ -352,6 +357,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     changeReported = undefined;
     let passOwnerPending = ownerAdmissionPending;
     let pushHasMore = false;
+    let nextSettledHeadPublishAtMs: number | null = null;
     const claim = async () => {
       claimingIdentity = true;
       emitChange();
@@ -375,6 +381,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       passSharingDeclined.push(...result.sharingDeclined);
       passOwnerPending = result.ownerAdmissionPending;
       pushHasMore = result.hasMore;
+      nextSettledHeadPublishAtMs = result.nextSettledHeadPublishAtMs ?? null;
     };
     const passSharingDeclined: PushWorkspaceToRelayResult["sharingDeclined"] = [];
     const pullResult = await options.capture.runRelaySync(
@@ -461,6 +468,12 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     nextBackoffMs = initialBackoffMs;
     setSyncFailure(null);
     if (ownerAdmissionPending.length > 0 && !pushHasMore) scheduleBackoff();
+    if (nextSettledHeadPublishAtMs !== null && !pushHasMore && !stopped && !authExpired && backoffTimer === undefined) {
+      settledHeadTimer = setTimeout(() => {
+        settledHeadTimer = undefined;
+        void runPass(false, true);
+      }, Math.max(0, nextSettledHeadPublishAtMs - nowMs()));
+    }
     // Release the capture chain between bounded pushes. Each pass pulls before
     // the next timer admits more work, so document opens and writes can proceed.
     // Bootstrap also needs a normal pass after its initial pull.

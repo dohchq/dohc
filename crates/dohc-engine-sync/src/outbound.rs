@@ -420,6 +420,7 @@ fn mark_export_in_tx(
     payload: serde_json::Value,
     recorded: i64,
 ) -> Result<(), SyncError> {
+    record_published_moment_in_tx(tx, workspace, &payload, recorded)?;
     if payload.get("attributionUnavailable").is_none() {
         return Ok(());
     }
@@ -445,11 +446,66 @@ fn mark_export_in_tx(
     Ok(())
 }
 
+fn record_published_moment_in_tx(
+    tx: &Transaction<'_>,
+    workspace: &str,
+    payload: &serde_json::Value,
+    published_at_ms: i64,
+) -> Result<(), SyncError> {
+    tx.execute(
+        "UPDATE ydoc_docs SET last_published_moment_id=?4,last_published_at_ms=?5
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND file_export_lane=0
+           AND COALESCE((SELECT moment_order FROM moments WHERE workspace_id=?1
+             AND moment_id=last_published_moment_id),-1)<
+             (SELECT moment_order FROM moments WHERE workspace_id=?1 AND moment_id=?4)",
+        params![
+            workspace,
+            payload["versionId"].as_str(),
+            payload["objectId"].as_str(),
+            payload["momentId"].as_str(),
+            published_at_ms
+        ],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
+}
+
+pub(crate) fn journal_ordinary_settled_head_in_tx(
+    tx: &Transaction<'_>,
+    workspace: &str,
+    moment: &str,
+    coalesced: bool,
+    now_ms: i64,
+    budget: &mut crate::enrolment::FileExportBudget,
+) -> Result<bool, SyncError> {
+    let (payload, recorded) = moment_payload_with_authors_in_tx(tx, workspace, moment, None, true)?;
+    let mut payload = payload;
+    if coalesced {
+        payload["authors"] = serde_json::json!([{"kind":"unattributed"}]);
+    }
+    if !budget.include_payload(tx, &payload)? {
+        return Ok(false);
+    }
+    journal_local_op_in_tx(tx, workspace, "moment.append", &payload, recorded)?;
+    record_published_moment_in_tx(tx, workspace, &payload, now_ms)?;
+    Ok(true)
+}
+
 fn moment_payload_in_tx(
     tx: &Transaction<'_>,
     workspace_id: &str,
     moment_id: &str,
     portable_before: Option<&PortableBefore>,
+) -> Result<(serde_json::Value, i64), SyncError> {
+    moment_payload_with_authors_in_tx(tx, workspace_id, moment_id, portable_before, false)
+}
+
+fn moment_payload_with_authors_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    moment_id: &str,
+    portable_before: Option<&PortableBefore>,
+    wire_only_authors: bool,
 ) -> Result<(serde_json::Value, i64), SyncError> {
     let row = tx
         .query_row(
@@ -582,7 +638,9 @@ fn moment_payload_in_tx(
             serde_json::Value::String("Attribution unavailable".into());
     }
     let proof_ready: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM live_device_settlements s JOIN live_settlement_publication_states p USING(settlement_id) WHERE s.workspace_id=?1 AND s.moment_id=?2)",params![workspace_id,row.moment_id],|r|r.get(0)).map_err(SyncError::corrupt)?;
-    if !proof_ready {
+    if wire_only_authors {
+        omit_client_identity_authors(&mut payload);
+    } else if !proof_ready {
         mark_unproven_hosted_authors(&mut payload);
     }
     omit_local_person_authors(&mut payload);
@@ -597,7 +655,7 @@ fn moment_payload_in_tx(
             ) && author
                 .get("onBehalfOf")
                 .and_then(serde_json::Value::as_str)
-                .is_some_and(|id| relay_person_id(id).is_none())
+                .is_some_and(|id| wire_only_authors || relay_person_id(id).is_none())
             {
                 author
                     .as_object_mut()

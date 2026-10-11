@@ -533,7 +533,7 @@ async function completedServiceOwner() {
         }
         case "sync.adoptJoinIdentity": return reply({adopted: true});
         case "sync.push": pushed.resolve();
-          return reply({status: "complete", hasMore: false, pushed: 0, sharingDeclined: [], ownerAdmissionPending: []});
+          return reply({status: "complete", hasMore: false, pushed: 0, nextSettledHeadPublishAtMs: null, sharingDeclined: [], ownerAdmissionPending: []});
         case "sync.pull": return reply({status: "complete", nextCursor: 3, pendingCursor: {kind: "relay", token: "pending"}, hasMore: false,
           fetched: 0, applied: 0, refused: 0, skipped: 0, conflictsOpened: 0, refusals: [], sharingDeclined: [], changedPaths: []});
         case "sync.materializePendingCursor": return reply({materialized: true});

@@ -770,6 +770,7 @@ export class EngineRelayClient {
         );
         return {
           pushed: result.pushed,
+          nextSettledHeadPublishAtMs: result.nextSettledHeadPublishAtMs,
           hasMore: result.hasMore,
           // The daemon owns all origin selection; desktop callers only consume
           // the count, so no origin identifiers cross the process boundary.

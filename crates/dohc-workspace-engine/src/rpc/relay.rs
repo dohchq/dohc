@@ -250,6 +250,7 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
     match outcome {
         SyncPassOutcome::Complete {
             owner_admission_pending,
+            next_settled_head_publish_at_ms,
             pushed,
             fetched,
             has_more,
@@ -267,6 +268,7 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             "status": "complete",
             "ownerAdmissionPending":owner_admission_pending,
             "pushed": pushed,
+            "nextSettledHeadPublishAtMs": next_settled_head_publish_at_ms,
             "fetched": fetched,
             "hasMore": has_more,
             "applied": applied,
@@ -1797,6 +1799,7 @@ mod tests {
     fn sync_outcome_json_surfaces_an_undrained_complete_pass() {
         let value = sync_outcome_json(SyncPassOutcome::Complete {
             owner_admission_pending: Vec::new(),
+            next_settled_head_publish_at_ms: Some(30_000),
             pushed: 0,
             fetched: 500,
             has_more: true,
@@ -1821,6 +1824,7 @@ mod tests {
         });
 
         assert_eq!(value["status"], "complete");
+        assert_eq!(value["nextSettledHeadPublishAtMs"], 30_000);
         assert_eq!(
             value["hasMore"], true,
             "omitting hasMore makes a bounded prefix indistinguishable from a drained relay"
