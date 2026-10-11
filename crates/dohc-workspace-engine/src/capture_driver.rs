@@ -711,6 +711,8 @@ impl ScanGauge {
 /// every read a consistent snapshot and every transition one store.
 #[derive(Default)]
 pub(crate) struct DriverStatus {
+    #[cfg(test)]
+    busy_reconcile_refusals: std::sync::atomic::AtomicU64,
     bits: std::sync::atomic::AtomicU8,
     collection_lease_held: std::sync::atomic::AtomicBool,
     collection_release_generation: std::sync::atomic::AtomicU64,
@@ -2597,6 +2599,8 @@ async fn apply_bound_run_with_handle(
                         let collection_self_writes = self_writes.clone();
                         let collection_author_json = author_json.clone();
                         let collection_provenance = provenance.clone();
+                        let collection_cancel = cancel.clone();
+                        let collection_status = Arc::clone(status);
                         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
                         let thread = std::thread::Builder::new()
                             .name("dohc-capture-collection-reconcile".to_owned())
@@ -2613,7 +2617,11 @@ async fn apply_bound_run_with_handle(
                                     self_writes: collection_self_writes,
                                     provenance: collection_provenance,
                                 });
-                                let reconciled = sink.reconcile_collections();
+                                let reconciled = reconcile_collections_after_backfill(
+                                    &sink,
+                                    &collection_cancel,
+                                    &collection_status,
+                                );
                                 let _ = done_tx.send(
                                     reconciled.map(|paths| (paths, sink.take_automation_claims())),
                                 );
@@ -2734,6 +2742,7 @@ async fn apply_bound_run_with_handle(
     let apply_plan = plan.clone();
     let apply_author_json = author_json.clone();
     let apply_cancel = cancel.clone();
+    let apply_status = Arc::clone(status);
     let apply_captured_root = Arc::clone(&captured_root);
     // The retained-over-cap loop below retires through its own sink; it must
     // carry the same pass provenance or its deletes split the reconcile/fence
@@ -2777,7 +2786,11 @@ async fn apply_bound_run_with_handle(
                         Ok(true) => {
                             collection_release_generation =
                                 apply_leases.release_generation(&apply_workspace);
-                            Some(sink.reconcile_collections())
+                            Some(reconcile_collections_after_backfill(
+                                &sink,
+                                &apply_cancel,
+                                &apply_status,
+                            ))
                         }
                         Ok(false) => None,
                         Err(error) => Some(Err(error)),
@@ -2988,6 +3001,48 @@ async fn apply_bound_run_with_handle(
         return false;
     }
     clean
+}
+
+fn reconcile_collections_after_backfill(
+    sink: &StoreCaptureSink,
+    cancel: &CancellationToken,
+    status: &DriverStatus,
+) -> Result<CollectionReconciliation, RuntimeError> {
+    let mut delay = std::time::Duration::from_millis(20);
+    loop {
+        if cancel.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
+        match sink.reconcile_collections() {
+            Err(error) if capture_store_busy(&error) => {
+                #[cfg(test)]
+                status
+                    .busy_reconcile_refusals
+                    .fetch_add(1, Ordering::Release);
+                #[cfg(not(test))]
+                let _ = status;
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(std::time::Duration::from_millis(200));
+            }
+            result => return result,
+        }
+    }
+}
+
+fn capture_store_busy(error: &RuntimeError) -> bool {
+    let mut cause: &dyn std::error::Error = error;
+    loop {
+        if matches!(
+            cause.downcast_ref::<dohc_engine_storage::StorageError>(),
+            Some(dohc_engine_storage::StorageError::FileLocked)
+        ) {
+            return true;
+        }
+        match cause.source() {
+            Some(source) => cause = source,
+            None => return false,
+        }
+    }
 }
 
 async fn repair_and_materialize_ydoc_recoveries(

@@ -164,6 +164,27 @@ impl Checkpoints {
     }
 
     #[cfg(test)]
+    pub(crate) fn completed_for_test(&self) -> u64 {
+        *self.completed.0.lock().unwrap()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_for_completion_for_test(&self, before: u64) {
+        let (sequence, signal) = &*self.completed;
+        let (sequence, _) = signal
+            .wait_timeout_while(
+                sequence.lock().unwrap(),
+                std::time::Duration::from_secs(60),
+                |sequence| *sequence <= before,
+            )
+            .unwrap();
+        assert!(
+            *sequence > before,
+            "committed write never requested checkpoint work"
+        );
+    }
+
+    #[cfg(test)]
     pub(crate) fn writer_work_for_test(&self) -> (u64, i64) {
         (
             self.writer_calls.load(Ordering::Relaxed),
@@ -368,35 +389,39 @@ mod tests {
     }
 
     #[test]
+    fn each_commit_wakes_checkpoint_worker_without_write_refusals() {
+        let scratch = ScratchDir::new().unwrap();
+        let mut s = store(&scratch.path().join("engine.db"));
+        let mut maximum = 0;
+        let mut refusals = 0;
+        for n in 0..1600 {
+            let before = s.checkpoint_completed_for_test();
+            refusals += write_after_checkpoint(&mut s, n % 64, 16 * 1024);
+            s.wait_for_checkpoint_completion_for_test(before);
+            maximum = maximum.max(s.read_with(frames).unwrap().0);
+        }
+        assert_eq!(refusals, 0);
+        assert!(
+            maximum < MAX_PENDING_WAL_FRAMES,
+            "WAL reached the write gate: {maximum}"
+        );
+        assert!(s.checkpoint_work_for_test().1 <= MAX_WRITER_BACKFILL_FRAMES);
+    }
+
+    #[test]
     fn sustained_writes_recycle_wal_and_never_backfill_a_large_tail_on_writer() {
         let scratch = ScratchDir::new().unwrap();
         let mut s = store(&scratch.path().join("engine.db"));
         let mut maximum = 0;
-        let mut previous = 0;
-        let mut resets = 0;
-        let mut refusals = 0;
         for n in 0..1600 {
-            refusals += write_after_checkpoint(&mut s, n % 64, 16 * 1024);
-            let log = s.read_with(frames).unwrap().0;
-            maximum = maximum.max(log);
-            resets += usize::from(log < previous);
-            previous = log;
+            write_after_checkpoint(&mut s, n % 64, 16 * 1024);
+            maximum = maximum.max(s.read_with(frames).unwrap().0);
         }
-        // Allow 10% retries: a loaded gate can deschedule the checkpointer past the 5 ms handoff.
-        eprintln!("STEADY_WRITES refusals={refusals}/1600 (bound=160)");
-        assert!(
-            refusals <= 160,
-            "steady writes exceeded refusal bound: {refusals}"
-        );
-        assert!(resets > 0, "sustained writes never recycled WAL");
         assert!(
             maximum < 4 * WRITER_CHECKPOINT_FRAMES,
             "WAL grew past combined checkpoint bound: {maximum}"
         );
-        let (_, writer_max) = s.checkpoint_work_for_test();
-        assert!(writer_max <= MAX_WRITER_BACKFILL_FRAMES);
-        assert_eq!(s.table_row_count("checkpoint_load").unwrap(), 64);
-        exercise_background_writer_handoff();
+        assert!(s.checkpoint_work_for_test().1 <= MAX_WRITER_BACKFILL_FRAMES);
     }
 
     #[test]

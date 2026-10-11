@@ -220,6 +220,19 @@ impl EngineStore {
             .map_or((0, 0), |c| c.writer_work_for_test())
     }
 
+    #[cfg(test)]
+    pub(crate) fn checkpoint_completed_for_test(&self) -> u64 {
+        self.checkpoints.as_ref().unwrap().completed_for_test()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_for_checkpoint_completion_for_test(&self, before: u64) {
+        self.checkpoints
+            .as_ref()
+            .unwrap()
+            .wait_for_completion_for_test(before);
+    }
+
     fn prepare_write(&mut self) -> Result<(), StorageError> {
         if self.checkpoints.as_ref().is_some_and(|c| c.has_stopped()) {
             let replacement = crate::checkpoint::Checkpoints::start(&self.database_path)?;

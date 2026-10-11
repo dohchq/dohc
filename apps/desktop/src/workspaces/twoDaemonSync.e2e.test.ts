@@ -1456,7 +1456,12 @@ it.skipIf(engine.missing)(
       expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
       await daemonA.close();
       daemonA = null;
-      await copyFile(engineDb, backupDb);
+      const snapshot = new DatabaseSync(engineDb);
+      try {
+        snapshot.prepare("VACUUM INTO ?").run(backupDb);
+      } finally {
+        snapshot.close();
+      }
 
       daemonA = await openLiveDaemonCapture({
         workspaceId,

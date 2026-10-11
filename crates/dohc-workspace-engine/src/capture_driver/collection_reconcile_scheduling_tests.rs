@@ -1302,3 +1302,93 @@ async fn a_failed_recovery_repair_still_announces_committed_adoptions() {
     files.close().await;
     supervisor.close(&db).expect("close actor");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn write_gate_refused_collection_reconcile_waits_for_backfill_and_flushes_cleanly() {
+    let scratch = ScratchDir::new().unwrap();
+    let root = scratch.path();
+    let db = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).unwrap().actor;
+    // Bind an ordinary captured file so startup has a workspace and version.
+    std::fs::write(root.join("note.md"), "note\n").unwrap();
+    seed_collection_capture(&actor, root, &["note.md"]);
+    let events = EngineEvents::default();
+    let observation =
+        crate::file_observation::FileObservation::new(events.clone(), WORKSPACE_ID.into());
+    observation.start(root.to_path_buf()).unwrap();
+    let driver = CaptureDriver::spawn(CaptureDriverSpawnParams {
+        observation: Arc::clone(&observation),
+        root: root.to_path_buf(),
+        actor: actor.clone(),
+        workspace_id: WORKSPACE_ID.into(),
+        leases: LeaseRegistry::new(),
+        self_writes: SelfWriteSuppression::default(),
+        apply_gate: Arc::new(tokio::sync::Mutex::new(())),
+        store_freshly_created: false,
+        initial_author_json: None,
+        events,
+        apply_probe: None,
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        driver.wait_for_open_ready(),
+    )
+    .await
+    .unwrap();
+    assert!(!driver.status().degraded());
+    let writer = rusqlite::Connection::open(&db).unwrap();
+    writer
+        .execute_batch("PRAGMA wal_autocheckpoint=0; CREATE TABLE refused_capture_load(body BLOB)")
+        .unwrap();
+    let reader = rusqlite::Connection::open(&db).unwrap();
+    reader
+        .execute_batch("BEGIN; SELECT * FROM refused_capture_load")
+        .unwrap();
+    writer
+        .execute(
+            "INSERT INTO refused_capture_load VALUES (?1)",
+            [vec![42_u8; 28 * 1024 * 1024]],
+        )
+        .unwrap();
+    let frames: i64 = writer
+        .query_row("PRAGMA wal_checkpoint(NOOP)", [], |r| r.get(1))
+        .unwrap();
+    assert!(frames > 6000);
+    driver.status().request_collection_reconcile();
+    let (reply, outcome) = tokio::sync::oneshot::channel();
+    driver.flush_sender().send(reply).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        while driver
+            .status()
+            .busy_reconcile_refusals
+            .load(Ordering::Acquire)
+            == 0
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("driver must encounter the write gate");
+    assert!(
+        !driver.status().degraded(),
+        "busy capture must not fail an import"
+    );
+    reader.execute_batch("ROLLBACK").unwrap();
+    drop(reader);
+    drop(writer);
+    let flushed = tokio::time::timeout(std::time::Duration::from_secs(60), outcome)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        flushed.settled && flushed.running && !flushed.degraded,
+        "{flushed:?}"
+    );
+    driver.begin_shutdown().unwrap().await.unwrap();
+    if let Some(shutdown) = observation.begin_shutdown() {
+        shutdown.await.unwrap();
+    }
+    drop(actor);
+    supervisor.close(&db).unwrap();
+}
