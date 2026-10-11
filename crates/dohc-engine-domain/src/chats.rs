@@ -135,10 +135,8 @@ const FEED_LIMIT_DEFAULT: i64 = 20;
 /// asking for more is clamped to this; the returned `next_after_message_order`
 /// cursor pages the rest. Keeps every read bounded (plan §Rust policy).
 pub const MAX_MESSAGE_PAGE: i64 = 500;
-/// Hard cap on the low-cardinality workspace lists (channels/threads/follows/
-/// bookmarks). These are per-workspace enumerations with no natural paging in the
-/// TS oracle; the cap bounds the returned `Vec` so a corrupt/huge store cannot
-/// materialize an unbounded allocation. Chosen well above realistic cardinality.
+/// Maximum rows in one convenience list read. Channel and follow RPC lists
+/// use bounded keyset pages to continue beyond it.
 const MAX_LIST_ROWS: i64 = 10_000;
 /// base32 lowercase (RFC 4648, no padding) alphabet (`linkedChatStore.ts:557`).
 const BASE32_LOWERCASE_ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
@@ -2223,6 +2221,22 @@ impl<'a> LinkedChatStore<'a> {
         &self,
         workspace_id: &str,
     ) -> Result<Vec<ChatChannelSummary>, DomainError> {
+        self.list_channels_page(workspace_id, None, MAX_LIST_ROWS)
+    }
+
+    /// Read one bounded channel page after an exclusive creation coordinate.
+    pub fn list_channels_page(
+        &self,
+        workspace_id: &str,
+        after: Option<(i64, &str)>,
+        limit: i64,
+    ) -> Result<Vec<ChatChannelSummary>, DomainError> {
+        if !(1..=MAX_LIST_ROWS).contains(&limit) {
+            return Err(DomainError::chat(
+                "invalid-parameters",
+                "Page limit is invalid.",
+            ));
+        }
         self.store.read_with(|conn| {
             let corrupt_read_state = conn
                 .query_row(
@@ -2244,13 +2258,22 @@ impl<'a> LinkedChatStore<'a> {
                     "Linked chat store is corrupt.",
                 ));
             }
+            // CROSS JOIN keeps the bounded page before the thread lookups.
             let mut stmt = conn
                 .prepare_cached(
-                    "SELECT ch.workspace_id, ch.channel_id, ch.name, ch.slug, ch.kind, \
+                    "WITH page AS ( \
+                       SELECT ch.* FROM chat_channels ch \
+                       WHERE ch.workspace_id = ?1 \
+                         AND (ch.created_at_ms, ch.channel_id) > (?2, ?3) \
+                         AND NOT EXISTS (SELECT 1 FROM chat_channel_placeholders p \
+                           WHERE p.workspace_id = ch.workspace_id AND p.channel_id = ch.channel_id) \
+                       ORDER BY ch.created_at_ms, ch.channel_id LIMIT ?4 \
+                     ) \
+                     SELECT ch.workspace_id, ch.channel_id, ch.name, ch.slug, ch.kind, \
                             ch.created_at_ms, ch.updated_at_ms, \
                             ch.type, ch.purpose, ch.folder_path, \
                             COALESCE(agg.thread_count, 0), COALESCE(agg.unread_count, 0) \
-                     FROM chat_channels ch \
+                     FROM page ch \
                      LEFT JOIN ( \
                        SELECT t.workspace_id, t.channel_id, COUNT(*) AS thread_count, \
                               SUM(MAX( \
@@ -2261,18 +2284,16 @@ impl<'a> LinkedChatStore<'a> {
                                             WHERE rs.workspace_id = t.workspace_id \
                                               AND rs.thread_id = t.thread_id), 0), \
                                 0)) AS unread_count \
-                       FROM chat_threads t \
-                       WHERE t.channel_id IS NOT NULL \
+                       FROM page selected CROSS JOIN chat_threads t \
+                       WHERE t.workspace_id = selected.workspace_id \
+                         AND t.channel_id = selected.channel_id \
                        GROUP BY t.workspace_id, t.channel_id \
                      ) agg ON agg.workspace_id = ch.workspace_id AND agg.channel_id = ch.channel_id \
-                     WHERE ch.workspace_id = ?1 \
-                       AND NOT EXISTS (SELECT 1 FROM chat_channel_placeholders p \
-                         WHERE p.workspace_id = ch.workspace_id AND p.channel_id = ch.channel_id) \
-                     ORDER BY ch.created_at_ms, ch.channel_id LIMIT ?2",
+                     ORDER BY ch.created_at_ms, ch.channel_id",
                 )
                 .map_err(DomainError::sql_corrupt)?;
             let rows = stmt
-                .query_map(params![workspace_id, MAX_LIST_ROWS], |row| {
+                .query_map(params![workspace_id, after.map_or(i64::MIN, |value| value.0), after.map_or("", |value| value.1), limit], |row| {
                     let channel = map_channel_row(row)?;
                     let thread_count = row.get(10)?;
                     let unread_count = row.get(11)?;
@@ -4145,6 +4166,24 @@ impl<'a> LinkedChatStore<'a> {
         owner_user_id: &str,
         state: Option<&str>,
     ) -> Result<Vec<ChatFollow>, DomainError> {
+        self.list_follows_page(workspace_id, owner_user_id, state, None, MAX_LIST_ROWS)
+    }
+
+    /// Read one bounded follow page after an exclusive target coordinate.
+    pub fn list_follows_page(
+        &self,
+        workspace_id: &str,
+        owner_user_id: &str,
+        state: Option<&str>,
+        after: Option<(FollowTargetKind, &str)>,
+        limit: i64,
+    ) -> Result<Vec<ChatFollow>, DomainError> {
+        if !(1..=MAX_LIST_ROWS).contains(&limit) {
+            return Err(DomainError::chat(
+                "invalid-parameters",
+                "Page limit is invalid.",
+            ));
+        }
         // The write path stores trimmed owners: a padded lookup must resolve
         // the same identity or the caller sees a silently empty list.
         let owner_user_id = normalize_feed_identity(owner_user_id, "follow owner")?;
@@ -4167,12 +4206,20 @@ impl<'a> LinkedChatStore<'a> {
                      origin_id, origin_seq FROM chat_follows \
                      WHERE workspace_id = ?1 AND owner_user_id = ?2 \
                        AND (?3 IS NULL OR state = ?3) \
-                     ORDER BY target_kind, target_id LIMIT ?4",
+                       AND (target_kind, target_id) > (?4, ?5) \
+                     ORDER BY target_kind, target_id LIMIT ?6",
                 )
                 .map_err(DomainError::sql_corrupt)?;
             let rows = stmt
                 .query_map(
-                    params![workspace_id, owner_user_id, state, MAX_LIST_ROWS],
+                    params![
+                        workspace_id,
+                        owner_user_id,
+                        state,
+                        after.map_or("", |value| value.0.as_str()),
+                        after.map_or("", |value| value.1),
+                        limit
+                    ],
                     map_follow_row,
                 )
                 .map_err(DomainError::sql_corrupt)?;

@@ -236,7 +236,10 @@ impl EngineService {
             &[&params.owner_user_id, &logical_limit_binding],
         );
         let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
-        let consumed = cursor.as_ref().map_or(0, |cursor| cursor.consumed);
+        let consumed = cursor
+            .as_ref()
+            .and_then(|cursor| cursor.consumed)
+            .unwrap_or(0);
         if consumed > logical_limit {
             return Err(WireError::new(ErrorCode::InvalidParams, "invalid-cursor"));
         }
@@ -275,7 +278,7 @@ impl EngineService {
             Some(encode_chat_cursor(&ChatKeysetCursor {
                 version: 1,
                 binding,
-                consumed: next_consumed,
+                consumed: Some(next_consumed),
                 first: last.outbox_updated_at_ms,
                 second: last.bookmark.bookmark_id.clone(),
                 third: None,
@@ -334,13 +337,9 @@ impl EngineService {
             .map(|bookmark| bookmark_json(&workspace_id, bookmark))
             .collect();
         let included = bounded_chat_page_len(&row_values)?.min(page_limit);
-        let next_cursor = chat_page_cursor(
-            &bookmarks,
-            included,
-            cursor.as_ref().map_or(0, |cursor| cursor.consumed),
-            binding,
-            |bookmark| (bookmark.updated_at_ms, bookmark.bookmark_id.clone()),
-        )?;
+        let next_cursor = chat_page_cursor(&bookmarks, included, binding, |bookmark| {
+            (bookmark.updated_at_ms, bookmark.bookmark_id.clone())
+        })?;
         Ok(json!({
             "bookmarks": row_values[..included].to_vec(),
             "nextCursor": next_cursor,
