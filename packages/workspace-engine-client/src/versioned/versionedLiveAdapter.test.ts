@@ -2017,3 +2017,32 @@ describe("shared file update states", () => {
     expect(requests).toEqual(Array(2).fill("ydoc.ownerDelivery.listDrafts"));
   });
 });
+
+
+describe("outage typing recovery import", () => {
+  const checkpoint = {
+    versionId: "main", objectId: "object", path: "note.md", expectedClaimId: "claim",
+    expectedStateVectorSha256: "a".repeat(64), expectedDiskSha256: "b".repeat(64), admittedBaseBase64: "AAA=", text: "kept typing",
+    updates: [{requestId: "original", updateBase64: "AAA=", actorOriginId: "person",
+      attribution: {actorKind: "human" as const, onBehalfOf: "person", depth: 0}}],
+  };
+  it.each(["replayed", "covered", "imported"])("preserves original requests and authors for a committed %s reply", async outcome => {
+    const reply = {committed: true, outcome, momentId: outcome === "imported" ? "recovery-moment" : null};
+    const adapter = new VersionedLiveAdapter({close() {}, async sendRequest(request: Request): Promise<Response> {
+      expect(request.method).toBe("capture.importRecovery");
+      expect(request.workspace).toBe(WORKSPACE);
+      expect(request.params).toEqual(checkpoint);
+      return {id: request.id, result: reply};
+    }}, WORKSPACE, {workspaceId: WORKSPACE});
+    expect(await adapter.importRecovery(checkpoint)).toEqual(reply);
+  });
+  it.each([
+    {committed: false, outcome: "covered", momentId: null},
+    {committed: true, outcome: "unknown", momentId: null},
+  ])("refuses malformed retirement acknowledgements %#", async reply => {
+    const adapter = new VersionedLiveAdapter({close() {}, async sendRequest(request: Request): Promise<Response> {
+      return {id: request.id, result: reply};
+    }}, WORKSPACE, {workspaceId: WORKSPACE});
+    await expect(adapter.importRecovery(checkpoint)).rejects.toThrow();
+  });
+});

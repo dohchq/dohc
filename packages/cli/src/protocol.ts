@@ -741,6 +741,8 @@ const rawMomentAuthorSchema = z.union([
   z.object({
     kind: z.literal("human"),
     humanId: z.string().min(1),
+    humanName: z.string().min(1).max(500).optional(),
+    relayConfirmed: z.literal(true).optional(),
     onBehalfOf: z.string().min(1).optional(),
   }).strict(),
   // A live author snapshot's account holder or link holder, as the relay admitted them.

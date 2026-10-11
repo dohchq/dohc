@@ -1,3 +1,4 @@
+import { waitForEnginePublicationGate } from "./testEnginePublicationGate";
 import type { App, Dialog } from "electron";
 import {
   EngineWorkspaceSessions,
@@ -395,6 +396,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       if (hostIngress && peerIngress && (hostIngress.configPath !== peerIngress.configPath ||
         hostIngress.client.aggregateBytes !== peerIngress.client.aggregateBytes || hostIngress.client.maxUploads !== peerIngress.client.maxUploads)) throw new Error("Private owner modes require the same native ingress configuration and client budget.");
       const ingress = hostIngress ?? peerIngress ?? (serverOwnerConfig && {configPath: serverOwnerConfig.nativeConfigPath, client: serverOwnerConfig.nativeClient});
+      let publications = 0;
       rustEngineDaemon = createRustEngineDaemon({
         ...(ingress ? {privateOwnerHost: ingress} : {}),
         ...testEngineRestartOverrides(),
@@ -431,7 +433,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
             );
           }
         },
-        beforePublish: async () => {
+        beforePublish: async signal => {
+          const gate = process.env.DOHC_TEST_ENGINE_PUBLICATION_GATE;
+          if (publications++ > 0 && process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged && gate) await waitForEnginePublicationGate(gate, signal);
           stopOwnerHost();
           await stopOwnerDelivery();
           await Promise.all(workspaceAuthorities.workspaceIds().map((workspaceId) =>

@@ -220,7 +220,12 @@ fn parsed_moment_author(value: Value) -> Value {
         _ => None,
     };
     if let Some(fields) = snapshot_fields {
-        let valid = object.len() == 3 && fields.into_iter().all(&snapshot_text);
+        // The relay confirms an admitted person, never a link holder.
+        let marker = object.get("kind").and_then(Value::as_str) == Some("human")
+            && object.contains_key("relayConfirmed");
+        let valid = object.len() == 3 + usize::from(marker)
+            && fields.into_iter().all(&snapshot_text)
+            && (!marker || object.get("relayConfirmed") == Some(&Value::Bool(true)));
         return if valid { value } else { corrupt() };
     }
     if object.get("kind").and_then(Value::as_str) == Some("public") {
@@ -262,8 +267,13 @@ fn parsed_moment_author(value: Value) -> Value {
         return if valid { value } else { corrupt() };
     }
     if object.get("kind").and_then(Value::as_str) == Some("human") {
-        let valid = object.len() == 2 + usize::from(object.contains_key("onBehalfOf"))
+        let valid = object.len()
+            == 2 + usize::from(object.contains_key("onBehalfOf"))
+                + usize::from(object.contains_key("relayConfirmed"))
             && bounded_ids(&["humanId"])
+            && object
+                .get("relayConfirmed")
+                .is_none_or(|value| value == &Value::Bool(true))
             && principal_ok;
         return if valid { value } else { corrupt() };
     }
@@ -499,6 +509,20 @@ mod relay_author_tests {
             panic!("one author in, one author out: {authors}");
         };
         author.clone()
+    }
+
+    #[test]
+    fn keeps_only_a_true_relay_confirmation_marker() {
+        let confirmed = json!({"kind":"human","humanId":"reader","relayConfirmed":true});
+        assert_eq!(parsed_moment_author(&confirmed.to_string()), confirmed);
+        for marker in [json!(false), json!(null), json!("true"), json!(1)] {
+            assert_eq!(
+                parsed_moment_author(
+                    &json!({"kind":"human","humanId":"reader","relayConfirmed":marker}).to_string()
+                ),
+                json!({"corrupt":true})
+            );
+        }
     }
 
     #[test]
@@ -766,6 +790,36 @@ mod relay_author_tests {
                 json!({"corrupt":true}),
                 "{malformed}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod snapshot_confirmation_tests {
+    use super::parsed_moment_author;
+    use serde_json::json;
+
+    /// The relay confirms an admitted person in either shape. Any other
+    /// marker value, extra field, or marker on a link holder reads as corrupt.
+    #[test]
+    fn reads_confirmed_people_and_refuses_malformed_markers() {
+        for author in [
+            json!({"kind":"human","humanId":"reader","humanName":"Reader","relayConfirmed":true}),
+            json!({"kind":"human","humanId":"reader","humanName":"Reader"}),
+            json!({"kind":"human","humanId":"reader","relayConfirmed":true}),
+        ] {
+            assert_eq!(parsed_moment_author(author.clone()), author);
+        }
+        for author in [
+            json!({"kind":"human","humanId":"reader","humanName":"Reader","relayConfirmed":false}),
+            json!({"kind":"human","humanId":"reader","humanName":"Reader","relayConfirmed":"true"}),
+            json!({"kind":"human","humanId":"reader","humanName":"Reader","relayConfirmed":null}),
+            json!({"kind":"human","humanId":"reader","relayConfirmed":false}),
+            json!({"kind":"human","humanId":"reader","humanName":"Re\nader","relayConfirmed":true}),
+            json!({"kind":"human","humanId":"reader","humanName":"Reader","relayConfirmed":true,"extra":1}),
+            json!({"kind":"link","publicPrincipalId":"public_1","label":"Anonymous","relayConfirmed":true}),
+        ] {
+            assert_eq!(parsed_moment_author(author), json!({"corrupt": true}));
         }
     }
 }

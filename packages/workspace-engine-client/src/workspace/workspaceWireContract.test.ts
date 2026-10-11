@@ -936,3 +936,18 @@ describe("automations wire schemas", () => {
     }
   });
 });
+
+it("recovery replies only authorize retirement after a committed decision", () => {
+  for (const outcome of ["replayed", "imported", "covered"] as const) {
+    expect(decodeWorkspaceResult(WORKSPACE_METHOD.captureImportRecovery,
+      {committed:true,outcome,momentId:outcome === "imported" ? "moment" : null})).toMatchObject({committed:true,outcome});
+  }
+  for (const reply of [{committed:false,outcome:"replayed",momentId:null},{committed:true,outcome:"unknown",momentId:null}]) {
+    expect(()=>decodeWorkspaceResult(WORKSPACE_METHOD.captureImportRecovery,reply)).toThrow(ProtocolShapeError);
+  }
+});
+
+it("decodes whether a recovery keeps typing for a deleted file",()=>{
+ const record={momentId:"recovery",versionId:"main",objectId:"object",path:"note.md",captureMomentId:"deleted",deleted:true};
+ expect(decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus,{running:true,degraded:false,terminal:false,phase:"ready",noAtomicPlacement:false,recoveryUnavailable:false,keptFiles:[],captureRecoveries:[record]})).toMatchObject({captureRecoveries:[record]});
+});

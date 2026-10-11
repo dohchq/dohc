@@ -3864,3 +3864,95 @@ async fn resumed_binding_publication(refused: bool, unchanged_tail: bool) {
         assert_ne!(settled.settlement_id,first.settlement_id);
     });
 }
+
+#[tokio::test]
+async fn recovery_request_ledger_uses_the_resumed_restore_generation() {
+    let f = Fixture::new().await;
+    f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
+    let input = applied_restore(&f, None, 0).await;
+    let restored = settle_restore(&f, input.clone(), Arc::new(NoFaults))
+        .await
+        .unwrap();
+    f.owner
+        .resume_restore(
+            NativeRestoreResume {
+                application: input,
+                settlement_id: restored.settlement_id,
+            },
+            restore_coordinate(),
+            2_000_000,
+            100,
+            f.root.path().to_owned(),
+            31,
+            Arc::new(NoFaults),
+            tokio_util::sync::CancellationToken::new(),
+            Arc::new(()),
+        )
+        .await
+        .unwrap();
+    let key = dohc_engine_collab::DocKey::new("workspace", "main", "object").unwrap();
+    let doc = f.read(|db| dohc_engine_collab::load_doc_in(db, &key).unwrap());
+    let update = doc
+        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "# After restore\n")
+        .unwrap();
+    let mut store = EngineStore::open(&f.db, 32).unwrap();
+    let mut cache = dohc_engine_collab::WriterDocCache::new();
+    let outcome = dohc_engine_collab::durable::record_local_update(
+        &mut store,
+        &mut cache,
+        &key,
+        &update,
+        dohc_engine_collab::durable::LocalAppend {
+            marker: Some(dohc_engine_collab::durable::MarkerCreation {
+                path: Some(&f.binding.current_path),
+                content_kind: ContentKind::Richdoc,
+                regime: dohc_engine_collab::Regime::Replicated,
+            }),
+            restore_generation: Some(1),
+            request_id: Some("generation-one-original"),
+            ..Default::default()
+        },
+        &NoFaults,
+        33,
+        |_, _, _| Ok(()),
+    )
+    .unwrap();
+    assert!(matches!(
+        outcome,
+        dohc_engine_storage::TxnOutcome::Committed(_)
+    ));
+    store
+        .write_with(
+            &NoFaults,
+            |tx| -> Result<(), dohc_engine_collab::CollabError> {
+                assert_eq!(
+                    dohc_engine_collab::live_update_application::restore_generation(tx, &key)?,
+                    Some(1)
+                );
+                assert!(dohc_engine_collab::durable::recovery_update_is_recorded_in(
+                    tx,
+                    &key,
+                    &f.binding.current_path,
+                    "generation-one-original",
+                    &update,
+                    None,
+                    None
+                )?);
+                assert!(
+                    dohc_engine_collab::durable::record_recovery_update_in_tx(
+                        tx,
+                        &key,
+                        &f.binding.current_path,
+                        "generation-one-original",
+                        &update,
+                        None,
+                        None,
+                        34
+                    )?
+                    .deduped
+                );
+                Ok(())
+            },
+        )
+        .unwrap();
+}

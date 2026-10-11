@@ -12,6 +12,7 @@ import {
   EngineMomentRecord,
   ENGINE_TEXT_MAX_CHARS,
   ListWorkspaceVersionConflictsResult,
+  ReadEngineMomentResult,
   WorkspaceVersionConflict,
 } from "./bridgeContract";
 import { compareVersionFilesPage } from "@dohc/workspace-core/versionCompare";
@@ -35,6 +36,23 @@ const TEXT_SHA = "a".repeat(64);
 const BINARY_SHA = "b".repeat(64);
 
 describe("listEngineMomentsForIpc", () => {
+  it.each(["list", "detail"])("preserves relay confirmation through History %s validation", async (surface) => {
+    const detail = detailWith({before: null, after: textSide("new")});
+    if (detail.protected) throw new Error("Expected a plaintext moment");
+    const authors = [{kind: "human" as const, humanId: "recipient", humanName: "Recipient", relayConfirmed: true as const}];
+    detail.moment.authors = authors;
+    if (surface === "detail") {
+      const result = ReadEngineMomentResult.parse({moment: engineMomentDetailForIpc(detail, names)});
+      expect(result.moment?.authors).toEqual(authors);
+      return;
+    }
+    const response = await listEngineMomentsForIpc(async () => ({
+      moments: [{...detail.moment, momentOrder: 1, protected: false}],
+      nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+    }), names);
+    if (!("moments" in response)) throw new Error("Expected ready history");
+    expect(response.moments[0]?.authors).toEqual(authors);
+  });
   it.each([
     "History is still updating. Try again.",
     "Workspace is still updating. Try again.",

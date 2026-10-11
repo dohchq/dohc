@@ -132,6 +132,7 @@ pub(super) struct ChunkReader<'a> {
     token_length: usize,
     depth: usize,
     bounded_container: Option<(usize, u64)>,
+    storage_failure: Option<dohc_engine_storage::StorageError>,
 }
 
 impl<'a> ChunkReader<'a> {
@@ -150,7 +151,17 @@ impl<'a> ChunkReader<'a> {
             token_length: 0,
             depth: 0,
             bounded_container: None,
+            storage_failure: None,
         })
+    }
+
+    pub fn take_storage_failure(&mut self) -> Option<dohc_engine_storage::StorageError> {
+        self.storage_failure.take()
+    }
+
+    fn record_storage_failure(&mut self, error: dohc_engine_storage::StorageError) -> io::Error {
+        self.storage_failure = Some(error);
+        io::Error::other("live audit storage read failed")
     }
 
     fn token(&mut self, byte: u8, position: u64) -> io::Result<()> {
@@ -254,14 +265,18 @@ impl Read for ChunkReader<'_> {
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .optional()
-                .map_err(io::Error::other)?;
+                .map_err(|error| {
+                    self.record_storage_failure(dohc_engine_storage::StorageError::corrupt_public(
+                        error,
+                    ))
+                })?;
             if lengths != Some((chunk.byte_length as i64, chunk.byte_length as i64)) {
                 return Err(io::Error::other("live audit chunk unavailable"));
             }
             // Drop the previous allocation before the bounded blob read.
             self.buffer = Vec::new();
             self.buffer = dohc_engine_storage::get_binary_blob(self.conn, &chunk.sha256)
-                .map_err(io::Error::other)?
+                .map_err(|error| self.record_storage_failure(error))?
                 .ok_or_else(|| io::Error::other("live audit chunk unavailable"))?;
             self.offset = 0;
             self.next += 1;

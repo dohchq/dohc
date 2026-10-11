@@ -273,12 +273,18 @@ function authorFromWire(author: NonNullable<MomentRecord["authors"]>[number]): M
   }
   if (author.kind === "unattributed") return { kind: "unattributed" };
   if (author.kind === "human" && "humanName" in author) {
-    return { kind: "human", humanId: author.humanId, humanName: author.humanName };
+    return {
+      kind: "human",
+      humanId: author.humanId,
+      humanName: author.humanName,
+      ...(author.relayConfirmed === true ? { relayConfirmed: true } : {}),
+    };
   }
   if (author.kind === "human") {
     return {
       kind: "human",
       humanId: author.humanId,
+      ...(author.relayConfirmed === true ? { relayConfirmed: true } : {}),
       ...(author.onBehalfOf !== undefined ? { onBehalfOf: author.onBehalfOf } : {}),
     };
   }

@@ -1,3 +1,4 @@
+import { renderCliResult } from "./render";
 import { describe, expect, it } from "vitest";
 import {
   CLI_PROTOCOL_VERSION,
@@ -14,9 +15,13 @@ it("parses Access answers through the field allowlist and refuses caller workspa
   expect(cliRequestSchema.safeParse(request).success).toBe(true);
   expect(cliRequestSchema.safeParse({ ...request, args: { ...request.args, workspaceId: "other" } }).success).toBe(false);
   expect(cliRequestSchema.safeParse({ ...request, args: { ...request.args, accountId: "other" } }).success).toBe(false);
-  const answer = parseCliResult("accessSharing", { ref: null, rows: [], visibility: "visible", freshness: "stale", checkedAtMs: 7,
+  const answer = parseCliResult("accessSharing", { ref: null, rows: [{ kind: "share", shareId: "share", grantId: "grant", via: "received", status: "removed",
+      granterUserId: null, granterEmail: null, recipientUserId: "recipient", recipientEmail: null, subjectName: null, sharerName: null,
+      selector: null, access: null, generation: null, removalMessage: "The owner removed your access." }],
+    visibility: "visible", freshness: "stale", checkedAtMs: 7,
     nextCursor: null, coverage: { kind: "received-account", complete: true, observation: "interval" }, bearerUrl: "secret" });
   expect(answer).not.toHaveProperty("bearerUrl");
+  expect(JSON.parse(renderCliResult("accessSharing", answer)).rows[0].removalMessage).toBe("The owner removed your access.");
 });
 
 it("accepts only CLI and MCP counting labels, with an optional label on the strict envelope", () => {
@@ -53,6 +58,10 @@ it.each(["collectionSetFields", "collectionCreateRecord"])("validates the agent 
 });
 
 describe("moment author results", () => {
+  it("preserves a relay-confirmed person's public name", () => {
+    const result = momentsResult([{kind: "human", humanId: "recipient", humanName: "Recipient", relayConfirmed: true}]);
+    expect(parseCliResult("moments", result)).toEqual(result);
+  });
   it.each([
     { kind: "agent", agentId: "agent" },
     { kind: "automation", automationId: "collection:tasks#stamp", depth: 4 },

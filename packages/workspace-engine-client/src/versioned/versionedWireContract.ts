@@ -669,6 +669,7 @@ const AutomationAuthorSchema = mutableStruct({
 const HumanAuthorSchema = mutableStruct({
   kind: Schema.Literal("human"),
   humanId: Schema.String,
+  relayConfirmed: Schema.optionalKey(Schema.Literal(true)),
   onBehalfOf: Schema.optionalKey(Schema.String),
 });
 // A relay-admitted live author snapshot names the account holder with the
@@ -677,6 +678,7 @@ const SnapshotHumanAuthorSchema = mutableStruct({
   kind: Schema.Literal("human"),
   humanId: Schema.String,
   humanName: Schema.String,
+  relayConfirmed: Schema.optionalKey(Schema.Literal(true)),
 });
 const CorruptAuthorSchema = mutableStruct({ corrupt: Schema.Literal(true) });
 const MomentAuthorsSchema = Schema.NullOr(

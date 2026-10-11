@@ -288,6 +288,7 @@ it("adds four probes per relayed press at 2, 5, 10 and 20 seconds without access
     elapsed = at;
   }
   expect(pull).toHaveBeenCalledTimes(4); expect(check).not.toHaveBeenCalled();
+  expect(pull.mock.calls).toEqual([[true], [true], [true], [true]]);
   expect(vi.getTimerCount()).toBe(1);
   console.info("relayed Button: 4 added unchanged probes, 0 access requests, 1 timer");
 });
@@ -300,13 +301,14 @@ it("measures 123 requests in an idle visible hour with one unchanged relayed pre
   console.info("one relayed Button in an idle hour: 123 requests vs 120 without a press; 4 burst probes, net +3");
 });
 
-it.each([1, 2, 3, 4])("stops the relayed Button burst when probe %s brings changes", async changedAt => {
+it.each([1, 2, 3, 4])("keeps all relayed Button probes when probe %s brings changes", async changedAt => {
   setup(); await flush(); pull.mockClear(); check.mockClear();
   for (let count = 1; count < changedAt; count++) pull.mockResolvedValueOnce(false);
   pull.mockResolvedValueOnce(true);
   await relayPress();
   await act(() => vi.advanceTimersByTimeAsync(20_000));
-  expect(pull).toHaveBeenCalledTimes(changedAt); expect(check).not.toHaveBeenCalled();
+  expect(pull).toHaveBeenCalledTimes(4); expect(check).not.toHaveBeenCalled();
+  expect(pull.mock.calls).toEqual([[true], [true], [true], [true]]);
 });
 
 it("coalesces overdue Button probes behind a slow pull without overlap", async () => {
@@ -320,6 +322,7 @@ it("coalesces overdue Button probes behind a slow pull without overlap", async (
   expect(pull).toHaveBeenCalledTimes(2);
   await act(() => vi.advanceTimersByTimeAsync(10_000));
   expect(pull).toHaveBeenCalledTimes(3);
+  expect(pull.mock.calls).toEqual([[true], [true], [true]]);
 });
 
 it.each(["hidden", "credentials", "workspace", "failure"])("cancels a Button burst on %s", async reason => {

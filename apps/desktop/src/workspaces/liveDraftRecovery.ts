@@ -53,16 +53,18 @@ async function recoveryRecords(directory: string): Promise<RecoveryRow[]> {
 }
 
 export async function hasRetainedLiveDraft(directory: string, workspaceId: string, path: string, objectId: string): Promise<boolean> {
-  return (await listLiveDraftRecovery(directory, workspaceId, {objectId, path})).length > 0;
+  // Pending typing also protects History Restore, but is not a set-aside draft.
+  return (await readableRecoveryRecords(await recoveryRecords(directory), workspaceId, {objectId, path}, true)).length > 0;
 }
 
 export async function listLiveDraftRecovery(directory: string, workspaceId: string, target?: {objectId: string; path: string}): Promise<LiveDraftRecoveryRecord[]> {
   return readableRecoveryRecords(await recoveryRecords(directory), workspaceId, target);
 }
 
-async function readableRecoveryRecords(rows: readonly RecoveryRow[], workspaceId: string, target?: {objectId: string; path: string}): Promise<LiveDraftRecoveryRecord[]> {
+async function readableRecoveryRecords(rows: readonly RecoveryRow[], workspaceId: string, target?: {objectId: string; path: string}, includeTypingCheckpoints = false): Promise<LiveDraftRecoveryRecord[]> {
   const result: LiveDraftRecoveryRecord[] = [];
   for (const {file, record} of rows) {
+    if (record.version !== 1 && !(includeTypingCheckpoints && record.version === 2)) continue;
     if (record.workspaceId !== workspaceId) continue;
     if (target && record.objectId !== target.objectId && record.path !== target.path) continue;
     const parsed = LiveDraftRecoveryRecord.safeParse({recordId: basename(file).slice(0, 64), path: record.path, objectId: record.objectId, updateBase64: record.updateBase64, text: record.text === undefined ? "" : record.text});
@@ -88,6 +90,7 @@ export async function removeLiveDraftCopies(directory: string, workspaceId: stri
   const before = await readableRecoveryRecords(rows, workspaceId, {objectId, path});
   const removed = new Set<string>();
   for (const row of rows) {
+    if (row.record.version !== 1) continue;
     if (row.record.workspaceId !== workspaceId || row.record.objectId !== objectId || typeof row.record.updateBase64 !== "string" || activeTemporaryDrafts.has(row.file)) continue;
     if (recordId !== undefined && basename(row.file).slice(0, 64) !== recordId) continue;
     if (createHash("sha256").update(Buffer.from(row.record.updateBase64, "base64")).digest("hex") !== snapshotSha256) continue;
@@ -137,6 +140,10 @@ export async function preserveUnsentLiveDraft(directory: string, workspaceId: st
     else throw new Error("This document format cannot enter text draft recovery.");
     await preserveLiveDraft(directory, workspaceId, { path: input.path, objectId: input.objectId, contentKind: input.contentKind, text, update });
   } finally { snapshot.destroy(); }
+}
+
+export async function hasWorkspaceLiveDrafts(directory: string, workspaceId: string): Promise<boolean> {
+  return (await recoveryRecords(directory)).some(row => row.record.workspaceId === workspaceId);
 }
 
 export async function removeWorkspaceLiveDrafts(directory: string, workspaceId: string): Promise<void> {

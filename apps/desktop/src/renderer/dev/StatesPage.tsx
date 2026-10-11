@@ -3,7 +3,18 @@ import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contrac
 import { AlertTriangle, Bot, CheckCircle2, Globe2, MessageSquare, MoreHorizontal, SearchX } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import type { ChatThreadRecord, EngineMomentRecord, HistoryPolicyUnreadableResult, SyncStatusResult } from "../../ipc/bridgeContract";
+import type {
+  ChannelThreadRecord,
+  ChatChannelRecord,
+  ChatMessageRecord,
+  ChatThreadRecord,
+  EngineMomentRecord,
+  HistoryPolicyUnreadableResult,
+  SitePackageInfo,
+  SyncStatusResult,
+  UsageRecordResult,
+  UsageRecordRow,
+} from "../../ipc/bridgeContract";
 import { readError, withErrorWords } from "../../ipc/errorWords";
 import { DocumentMenu } from "../DocumentMenu";
 import { FrontmatterAsWritten } from "../FrontmatterAsWritten";
@@ -14,9 +25,10 @@ import { buildTableMenu, type TableMenuRow } from "../editor/tableControls";
 import { OverlayFrame } from "../Overlay";
 import { CollectionUnavailable } from "../TransactionalCollectionPage";
 import { ColorControl, HueControl, SwitchControl, TextControl } from "../settings/SettingRow";
+import { UsageRecordCard, UsageRecordClearConfirm, type UsageRecordView } from "../settings/UsageRecordSettings";
 import { ConfirmDialogCard } from "../ui/ConfirmDialog";
 import { CopyButton, CopyField } from "../ui/CopyButton";
-import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
+import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, RetryRow, SecondaryButton, SectionLabel } from "../ui/controls";
 import { MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
 import { MoreMenu } from "../ui/MoreMenu";
 import { SegmentedControl } from "../ui/SegmentedControl";
@@ -24,14 +36,20 @@ import { SkeletonRows } from "../ui/SkeletonRows";
 import { SAVE_STATE, StateMark, type SaveStateKey } from "../ui/StateMark";
 import { FolderChip, Step } from "../ui/Step";
 import { AgentBadge } from "../workbench/AgentBadge";
+import { AppRows } from "../workbench/AppsView";
+import { siteTabPath } from "../workbench/workbenchState";
 import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
+import { ThreadMessages } from "../workbench/ChatPosts";
+import type { ChatReactionControls } from "../workbench/chatMessages";
+import { PostCard, type PostData } from "../workbench/PostCard";
 import { EditorGroupLayout } from "../workbench/EditorGroupLayout";
 import { EditorTabs } from "../workbench/EditorTabs";
 import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords } from "../workbench/HistoryPolicyStates";
 import { TreeRow, type VisibleRow } from "../workbench/Explorer";
 import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
 import { MomentRow } from "../workbench/EngineHistory";
+import { DiffCounts, UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "../workbench/unifiedDiff";
 import {
   AboutAccessView,
   AboutChatRow,
@@ -405,6 +423,83 @@ const ABOUT_ACCESS_UNKNOWN: AccessAnswer = {
   freshness: "unknown",
 };
 
+// A group's feed and a thread, from the drawing's #general.
+const CHAT_AT = new Date(2026, 6, 8, 14, 43).getTime();
+const CHAT_REACTIONS: ChatReactionControls = { reactions: [], viewerAuthorId: "you", onToggle: noop };
+const CHAT_CHANNEL: ChatChannelRecord = {
+  id: "general", name: "general", slug: "general", kind: "channel", type: "posts",
+  createdAtMs: CHAT_AT, updatedAtMs: CHAT_AT, threadCount: 3, unreadCount: 0,
+};
+const chatPost = (
+  id: string,
+  author: { authorKind: "human" | "agent"; authorDisplayName: string },
+  title: string,
+  bodySnippet: string,
+  counts: Partial<Pick<ChannelThreadRecord, "messageCount" | "unreadCount" | "openDecisionCount">> = {},
+): { thread: ChannelThreadRecord; data: PostData } => ({
+  thread: {
+    id, title, createdAtMs: CHAT_AT, updatedAtMs: CHAT_AT, channelId: CHAT_CHANNEL.id,
+    messageCount: 1, lastReadSequence: 0, unreadCount: 0, ...counts,
+  },
+  data: { openingMessage: { id: `${id}-opening`, createdAtMs: CHAT_AT, bodySnippet, ...author }, reactions: [], viewerAuthorId: "you" },
+});
+const SAM = { authorKind: "human", authorDisplayName: "Sam" } as const;
+const CHAT_POSTS = [
+  chatPost("post-plain", SAM, "Pricing page copy", "Pricing page copy\nDraft is in research/competitors.md for now. Comments welcome."),
+  chatPost("post-hover", { authorKind: "agent", authorDisplayName: "Agent" }, "The funnel numbers changed since last week.",
+    "The funnel numbers changed since last week.", { unreadCount: 1 }),
+  chatPost("post-poll", SAM, "Can we get the launch checklist into shape before Friday?",
+    "Can we get the launch checklist into shape before Friday?", { messageCount: 5, unreadCount: 2, openDecisionCount: 1 }),
+];
+// The feed's rows, then two kept rows with keyboard focus: on the row, and
+// on Comment inside its toolbar.
+const CHAT_FEED_SPECIMENS: { key: string; post: (typeof CHAT_POSTS)[number]; force?: { row?: string; button?: string }; last?: boolean }[] = [
+  { key: "titled", post: CHAT_POSTS[0]! },
+  { key: "hovered", post: CHAT_POSTS[1]!, force: { row: "hover" } },
+  { key: "poll", post: CHAT_POSTS[2]! },
+  { key: "row-focus", post: CHAT_POSTS[0]!, force: { row: "focus focus-visible" } },
+  { key: "toolbar-focus", post: CHAT_POSTS[0]!, force: { row: "focus-within", button: "focus focus-visible" }, last: true },
+];
+const chatMessage = (id: string, body: string, minutes: number, parentMessageId?: string): ChatMessageRecord => ({
+  id, threadId: "post-plain", ...SAM, body, createdAtMs: CHAT_AT + minutes * 60_000,
+  ...(parentMessageId ? { parentMessageId } : {}),
+});
+const CHAT_THREAD_MESSAGES = [
+  chatMessage("opening", "Draft is in research/competitors.md for now. Comments welcome.", 0),
+  chatMessage("comment-1", "The second section reads well.", 1, "opening"),
+  chatMessage("comment-2", "Can we cut the last paragraph?", 2, "opening"),
+];
+const CHAT_THREAD_NAV = { level: "thread", channel: CHAT_CHANNEL, thread: CHAT_POSTS[0]!.thread } as const;
+const NO_BOOKMARKS = new Set<string>();
+
+// A thread at the drawing's column, its second comment hovered.
+function ChatThreadSpecimen() {
+  return (
+    <div className="w-[560px]" data-force-state="hover" data-force-target='[data-message-id="comment-2"] > [data-testid="chats-comment-bubble"]'>
+      <ThreadMessages
+        nav={CHAT_THREAD_NAV}
+        messages={CHAT_THREAD_MESSAGES}
+        messagesLoading={false}
+        threadLocked={false}
+        flashMessageId={null}
+        runRecords={{}}
+        reactionsByMessage={new Map()}
+        decisionsByMessage={new Map()}
+        attachmentsByMessage={new Map()}
+        reactionControls={CHAT_REACTIONS}
+        mentionCandidates={[]}
+        bookmarkFor={() => undefined}
+        bookmarkBusy={NO_BOOKMARKS}
+        toggleBookmark={async () => undefined}
+        beginReply={noop}
+        beginResolve={noop}
+        scrollToMessage={noop}
+        setMessageNode={noop}
+      />
+    </div>
+  );
+}
+
 // The About tab at the drawing's 290px, on the chrome.
 function AboutPanelSpecimen(props: { children: ReactNode }) {
   return <div className="flex w-[290px] flex-col rounded-lg border border-line bg-panel pb-2">{props.children}</div>;
@@ -546,7 +641,7 @@ const menuItems = [
   { label: "Delete", onSelect: noop, disabled: true },
 ];
 
-const avatarSizes = ["post", "comment", "strip"] as const;
+const avatarSizes = ["post", "row", "comment", "strip"] as const;
 
 const SYNC_CODE = "dohc-sync:ws_7f3a:wss://relay.dohc.dev";
 
@@ -853,17 +948,17 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="avatars" title="Avatars">
-        <Specimen label="human: post, comment, strip">
+        <Specimen label="human: post, row, comment, strip">
           {avatarSizes.map((size) => (
             <ChatAvatar key={size} name="Ice de Vera" kind="human" size={size} />
           ))}
         </Specimen>
-        <Specimen label="agent: post, comment, strip">
+        <Specimen label="agent: post, row, comment, strip">
           {avatarSizes.map((size) => (
             <ChatAvatar key={size} name="Agent" kind="agent" size={size} />
           ))}
         </Specimen>
-        <Specimen label="automation: post, comment, strip">
+        <Specimen label="automation: post, row, comment, strip">
           {avatarSizes.map((size) => (
             <ChatAvatar key={size} name="Nightly digest" kind="automation" size={size} />
           ))}
@@ -1419,9 +1514,193 @@ function Pane(props: { theme: "light" | "dark" }) {
           </div>
         </Specimen>
       </Section>
+
+      {/* After Sharing, so the parts above keep their places. */}
+      <Section part="usage-record" title="Usage record">
+        <Specimen label="counts, with a row and a door this version does not count">
+          <UsageRecordSpecimen view={USAGE_RECORD} />
+        </Specimen>
+        <Specimen label="off, with saved counts">
+          <UsageRecordSpecimen view={{ ...USAGE_RECORD, enabled: false }} />
+        </Specimen>
+        <Specimen label="nothing counted yet">
+          <UsageRecordSpecimen view={{ ...USAGE_RECORD, since: USAGE_TODAY, rows: [] }} />
+        </Specimen>
+        <Specimen label="a record dohc cannot read">
+          <UsageRecordSpecimen view={{ status: "unreadable", file: USAGE_RECORD.file, code: "EACCES" }} />
+        </Specimen>
+        <Specimen label="loading, then a failed read: words in Notices">
+          <div className="flex flex-col gap-3">
+            <UsageRecordSpecimen view={{ status: "loading" }} />
+            <UsageRecordSpecimen view={{ status: "failed" }} />
+          </div>
+        </Specimen>
+        <Specimen label="Clear's confirm, with Copy first">
+          <div className={SHADOW_ROOM}>
+            <UsageRecordClearConfirm card record={USAGE_RECORD} onCancel={noop} onConfirm={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="keyboard focus on the switch">
+          <div data-force-state="focus focus-visible" data-force-target='[role="switch"]'>
+            <UsageRecordSpecimen view={{ ...USAGE_RECORD, rows: USAGE_RECORD.rows.slice(0, 2) }} />
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* After Usage record, so the parts above keep their places. */}
+      <Section part="word-diff" title="Word diff">
+        {WORD_DIFFS.map((specimen) => (
+          <Specimen key={specimen.label} label={specimen.label}>
+            <div className="w-[520px] rounded-lg border border-line bg-bg">
+              <div className="flex h-9 items-center gap-2 border-b border-line px-4 text-[12px]">
+                <span className="min-w-0 flex-1 truncate font-mono text-ink">{specimen.path}</span>
+                {specimen.diff.counts ? <DiffCounts counts={specimen.diff.counts} /> : null}
+              </div>
+              <UnifiedDiffLines lines={buildUnifiedDiffLines(specimen.diff)} />
+            </div>
+          </Specimen>
+        ))}
+      </Section>
+
+      {/* After Word diff, so the parts above keep their places. Its empty and loading
+          states are the shared ones above, in Empty ("create") and Loading. */}
+      <Section part="apps-shelf" title="Apps shelf">
+        <Specimen label="pinned; selected, with a warning; shared, hovered; low confidence">
+          <div className="w-60 rounded-lg border border-line bg-panel" data-force-state="hover" data-force-target="li:nth-child(3)">
+            <AppRows apps={SHELF_APPS} pinnedApps={["trip-planner"]} activePath={siteTabPath("apps/funnel-dashboard")}
+              onOpenPath={noop} onSetPinned={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="keyboard focus: a row, then a pin">
+          <div className="w-60 rounded-lg border border-line bg-panel" data-force-state="focus focus-visible"
+            data-force-target='li:nth-child(1) [data-testid="sites-row"]'>
+            <div data-force-state="focus focus-visible" data-force-target='li:nth-child(3) [data-testid="sites-pin"]'>
+              <AppRows apps={SHELF_APPS} pinnedApps={[]} activePath={null} onOpenPath={noop} onSetPinned={noop} />
+            </div>
+          </div>
+        </Specimen>
+        <Specimen label="failed read: words in Notices">
+          <div className="w-60 rounded-lg border border-line bg-panel p-1">
+            <RetryRow testId={`states-apps-failed-${theme}`} onRetry={noop} />
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="chat-rows" title="Chat rows">
+        <Specimen label="feed: titled; hovered, unread; untitled, unread, poll, comments; focus on a row; focus in its toolbar">
+          <div className="w-[560px]">
+            {CHAT_FEED_SPECIMENS.map(({ key, post, force, last }) => (
+              // Each row is painted in its own box, as the feed list's items are.
+              <div key={key} data-feed-last={last ? "" : undefined} className="[contain:paint_layout_style]">
+                <div data-force-state={force?.row} data-force-target='[data-testid="chats-post-card"]'>
+                  <div data-force-state={force?.button} data-force-target='[data-testid="chats-post-comment"]'>
+                    <PostCard thread={post.thread} data={post.data} reactionControls={CHAT_REACTIONS} onOpen={noop} onToggleBookmark={noop} />
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Specimen>
+        <Specimen label="thread: opening post, divider, a run of two comments, the second hovered">
+          <ChatThreadSpecimen />
+        </Specimen>
+      </Section>
     </section>
   );
 }
+
+// A fixed day, so "today" and "since" never move the capture.
+const USAGE_TODAY = "2026-10-07";
+const usageCell = (count: number, counted = true) => ({ count, counted });
+const usageRow = (capabilityId: string, label: string, doors: Partial<UsageRecordRow["doors"]>, lastUsed: string | null = null): UsageRecordRow => ({
+  capabilityId, label, lastUsed,
+  doors: { renderer: usageCell(0, false), cli: usageCell(0, false), mcp: usageCell(0, false), automation: usageCell(0, false), ...doors },
+});
+const USAGE_RECORD: Extract<UsageRecordResult, { status: "readable" }> = {
+  status: "readable", enabled: true, file: "C:\\Users\\ada\\AppData\\Roaming\\dohc\\dohc-usage.json",
+  since: "2026-09-12", incompleteDays: 1,
+  rows: [
+    usageRow("version.create", "Create a workspace version", { renderer: usageCell(41), cli: usageCell(2, false) }, "2026-10-07"),
+    usageRow("file.kept.save", "Save a kept copy beside its file", { renderer: usageCell(3), cli: usageCell(1), mcp: usageCell(0) }, "2026-10-06"),
+    usageRow("version.try", "Try changes in a workspace version", { renderer: usageCell(1) }, "2026-09-03"),
+    usageRow("chat.post", "Post a chat message", { cli: usageCell(0), mcp: usageCell(0) }),
+    usageRow("chat.export", "Export a chat", {}),
+  ],
+};
+
+// Privacy's width for the card.
+function UsageRecordSpecimen(props: { view: UsageRecordView }) {
+  return (
+    <div className="w-[560px] [&>section]:mt-0">
+      <UsageRecordCard view={props.view} today={USAGE_TODAY} onSwitch={noop} onClear={noop} onRetry={noop} />
+    </div>
+  );
+}
+
+// The drawing's prose edit, a code edit, and a rewrite that keeps its lines
+// whole, through the same diff the History page runs.
+const WORD_DIFFS = [
+  {
+    label: "prose: a word replaced, words added",
+    path: "notes/product-plan.md",
+    before: "## Goals\n\n- Ship the chats feed to the first beta group\n- Get a new person to their first document in under 30 seconds\n- Make agent activity readable at a glance\n\n## Workstreams\n",
+    after: "## Goals\n\n- Ship the chats feed to the first beta group\n- Get a new person to their first document in under 20 seconds\n- Make agent activity readable at a glance, with who changed what\n\n## Workstreams\n",
+  },
+  {
+    label: "code: changed tokens",
+    path: "src/limits.ts",
+    before: "export function limitFor(kind: string) {\n  const limit = 800;\n  return kind === \"history\" ? limit : limit / 2;\n}\n",
+    after: "export function limitFor(kind: string, displayLimit?: number) {\n  const limit = displayLimit ?? 800;\n  return kind === \"history\" ? limit : Math.floor(limit / 2);\n}\n",
+  },
+  {
+    label: "a rewritten line stays whole; a new line has no pair",
+    path: "notes/trip.md",
+    before: "# Trip\n\nThe meeting moved to Tuesday.\n",
+    after: "# Trip\n\nBring snacks for everyone!\nTickets are in the shared folder.\n",
+  },
+].map((specimen) => ({ ...specimen, diff: computeTextDiff(specimen.before, specimen.after, 800) }));
+
+const SHELF_APP: SitePackageInfo = {
+  root: "trip-planner",
+  title: "Trip planner",
+  kind: "static",
+  confidence: "high",
+  entryPath: "trip-planner/index.html",
+  configPath: null,
+  packagePath: null,
+  packageManager: null,
+  scripts: {},
+  configuredScripts: {},
+  configuredPreviewMode: null,
+  configuredBuildOutput: null,
+  buildOutputs: [],
+  sourceFiles: ["trip-planner/index.html"],
+  shareManifest: { ok: false, reason: "no-runnable-artifact" },
+  diagnostics: [],
+  authority: { kind: "workspace" },
+};
+
+const SHELF_APPS: SitePackageInfo[] = [
+  SHELF_APP,
+  {
+    ...SHELF_APP,
+    root: "apps/funnel-dashboard",
+    title: "Funnel dashboard",
+    diagnostics: [{
+      path: "apps/funnel-dashboard/dohc.json",
+      severity: "warning",
+      code: "invalid-config",
+      message: "Configured preview commands run only in dev mode.",
+    }],
+  },
+  {
+    ...SHELF_APP,
+    root: "shared-with-me/sam/signup-form",
+    title: "Signup form",
+    authority: { kind: "share", mountRoot: "shared-with-me/sam" },
+  },
+  { ...SHELF_APP, root: "notes/reading-list", title: "Reading list", confidence: "low" },
+];
 
 const SYNCED_STATUS: SyncStatusResult = {
   state: "synced",

@@ -58,6 +58,7 @@ import {
   TextControl,
 } from "./SettingRow";
 import { ReportsSettings } from "./ReportsSettings";
+import { UsageRecordSettings } from "./UsageRecordSettings";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { SecondaryButton } from "../ui/controls";
 import { SharedByMeList } from "./SharedByMeList";
@@ -1038,6 +1039,7 @@ export function SettingsDialog(props: {
               onChange={(privacy) => void saveUserSettings({ ...userSettings, privacy })}
               onError={props.onError}
             />
+            <UsageRecordSettings onError={props.onError} />
           </div>
         );
       case "keyboard":

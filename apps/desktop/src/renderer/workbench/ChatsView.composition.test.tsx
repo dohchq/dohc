@@ -18,6 +18,7 @@ import {
   mentionRoster,
 } from "./ChatsView.testHarness";
 import { runnerProgram } from "./ChatsView";
+import { formatChatTime, formatClockDigits } from "../time";
 
 describe("ChatsView My agent", () => {
   it("discovers an opted-in agent after creation while navigator polling is suspended", async () => {
@@ -449,12 +450,80 @@ describe("ChatsView document thread", () => {
     expect(contexts).toHaveLength(1);
     expect(contexts[0]?.textContent).toBe("↳ replying to Ana");
     expect(screen.getByTestId("chats-comment-agent-badge").textContent).toBe("agent");
-    expect(screen.getAllByTestId("chats-comment-bubble")[2]?.className).toContain(
-      "border-l-2",
-    );
 
     await user.click(contexts[0]!);
     expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ block: "center" });
+  });
+
+  it("draws one author's comments within five minutes as one run with hover actions", async () => {
+    const user = userEvent.setup();
+    const opening = message({ body: "The full opening post body." });
+    const first = message({ id: "comment-1", parentMessageId: opening.id, authorDisplayName: "Ana", body: "First" });
+    const second = message({
+      id: "comment-2", parentMessageId: opening.id, authorDisplayName: "Ana", body: "Second", createdAtMs: NOW + 60_000,
+    });
+    const later = message({
+      id: "comment-3", parentMessageId: opening.id, authorDisplayName: "Ana", body: "Later", createdAtMs: NOW + 10 * 60_000,
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ messageCount: 4 })] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [opening, first, second, later] });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    const divider = await screen.findByTestId("chats-comments-divider");
+    expect(divider.getAttribute("role")).toBeNull();
+    expect(divider.querySelector(".sr-only")?.textContent).toBe("3 comments");
+    const items = screen.getAllByTestId("chats-message").filter((element) => element.tagName === "LI");
+    expect(items.map((item) => item.dataset.continues)).toEqual(["false", "true", "false"]);
+    // The continued comment keeps its author and time for screen readers.
+    const author = items[1]!.querySelector('[data-testid="chats-message-author"]');
+    expect(author?.textContent).toBe("Ana");
+    expect(author?.parentElement?.className).toBe("sr-only");
+    // Its hover time is the clock without AM or PM, right-aligned in a slot
+    // that ends at the avatar's edge; the full time is its tooltip.
+    const slot = items[1]!.querySelector('[data-testid="chats-comment-run-time"]')!;
+    expect(slot.className.split(/\s+/)).toEqual(expect.arrayContaining(["left-0", "w-9", "justify-end"]));
+    const runTime = slot.querySelector("time")!;
+    expect(runTime.textContent).toBe(formatClockDigits(second.createdAtMs));
+    expect(runTime.textContent).not.toMatch(/AM|PM/i);
+    expect(runTime.getAttribute("title")).toBe(formatChatTime(second.createdAtMs).label);
+    expect(items[0]!.querySelector('[data-testid="chats-comment-run-time"]')).toBeNull();
+    // Every action sits in the row's toolbar, inside the row.
+    const bubble = items[0]!.querySelector('[data-testid="chats-comment-bubble"]')!;
+    const toolbar = bubble.querySelector('[data-testid="chats-message-toolbar"]')!;
+    expect(toolbar.querySelector('[data-testid="chats-comment-reply"]')?.getAttribute("aria-label")).toBe("Reply");
+    expect(toolbar.querySelector('[data-testid="chats-add-reaction"]')).not.toBeNull();
+    expect(toolbar.querySelector('[data-testid="chats-message-bookmark"]')).not.toBeNull();
+  });
+
+  it("breaks a run at an agent's run failure but not at a person's words that read like one", async () => {
+    const user = userEvent.setup();
+    const opening = message({ body: "The full opening post body." });
+    const failure = "⚠ Agent run failed: exit 1";
+    const comments = [
+      message({ id: "agent-1", parentMessageId: opening.id, authorKind: "agent", authorDisplayName: "Agent", body: "Starting" }),
+      message({ id: "agent-failed", parentMessageId: opening.id, authorKind: "agent", authorDisplayName: "Agent", body: failure, createdAtMs: NOW + 1 }),
+      message({ id: "agent-2", parentMessageId: opening.id, authorKind: "agent", authorDisplayName: "Agent", body: "Retrying", createdAtMs: NOW + 2 }),
+      message({ id: "ana-1", parentMessageId: opening.id, authorDisplayName: "Ana", body: failure, createdAtMs: NOW + 3 }),
+      message({ id: "ana-2", parentMessageId: opening.id, authorDisplayName: "Ana", body: "That was me quoting it", createdAtMs: NOW + 4 }),
+    ];
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ messageCount: 6 })] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [opening, ...comments] });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await screen.findByTestId("chats-comments-divider");
+    const items = screen.getAllByTestId("chats-message").filter((element) => element.tagName === "LI");
+    expect(items.map((item) => [item.dataset.messageId, item.dataset.continues])).toEqual([
+      ["agent-1", "false"],
+      ["agent-failed", "false"],
+      ["agent-2", "false"],
+      ["ana-1", "false"],
+      ["ana-2", "true"],
+    ]);
+    expect(items[3]!.querySelector('[data-testid="chats-comment-bubble"]')?.getAttribute("data-system")).toBeNull();
   });
 
   it("enters reply mode and sends the true parent message id", async () => {

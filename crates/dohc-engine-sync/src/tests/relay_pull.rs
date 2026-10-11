@@ -6720,6 +6720,81 @@ fn deferred_relay_suffixes_and_new_origins_keep_their_place_in_the_cycle() {
 }
 
 #[test]
+fn refused_live_audit_below_ack_does_not_stall_an_uncommitted_pull_replay() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    let mut audit = envelope(
+        "audit-peer",
+        0,
+        "live.audit.application",
+        json!({"extra":"refused"}),
+    );
+    audit.relay_seq = Some(1);
+    audit.admitted_author_snapshot =
+        Some(json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"}]));
+    let client = RelaySyncClient::new(FakeRelay {
+        pull: Mutex::new(Some(PullResponse {
+            ops: vec![audit.clone()],
+            next_cursor: 1,
+            has_more: false,
+        })),
+        ..Default::default()
+    });
+    let first = client
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1000,
+        )
+        .unwrap();
+    assert!(matches!(
+        first,
+        SyncPassOutcome::Complete {
+            refused: 1,
+            pending_cursor: Some(_),
+            ..
+        }
+    ));
+    // The pass's row/ack committed, but its workspace pull cursor did not.
+    let mut later = envelope("audit-peer", 1, "workspace.init", json!({}));
+    later.relay_seq = Some(2);
+    let replay = RelaySyncClient::new(FakeRelay {
+        pull: Mutex::new(Some(PullResponse {
+            ops: vec![audit, later],
+            next_cursor: 2,
+            has_more: false,
+        })),
+        ..Default::default()
+    });
+    let result = replay
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1001,
+        )
+        .unwrap();
+    assert!(matches!(
+        result,
+        SyncPassOutcome::Complete {
+            applied: 1,
+            skipped: 1,
+            pending_cursor: Some(_),
+            ..
+        }
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "audit-peer").unwrap(),
+        1
+    );
+}
+
+#[test]
 #[ignore = "manual partial-index insert measurement"]
 fn ydoc_update_index_insert_measurement() {
     for local in [true, false] {

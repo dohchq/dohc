@@ -1,3 +1,4 @@
+import { useTypingRecoveryNotices } from "./shell/useTypingRecoveryNotices";
 import { CreationPartialError } from "@dohc/cli/creation";
 import {shareSenderLabel} from "@dohc/security-contract/share-labels";
 import { AgentSettingsProvider } from "./workbench/AgentBadge";
@@ -807,6 +808,7 @@ export function DesktopWorkspaceShell(props: {
     clearEditorGroupRefusalError,
     showSettingsFileNotice,
     showSuccessNotice,
+    showWarningNotice,
     showReportsNotice,
     showKeptCopies,
     showKeptCopySaved,
@@ -930,8 +932,8 @@ export function DesktopWorkspaceShell(props: {
   const { chatCollaboration, refreshCloudStatus, workspaceSynced, cloudStatus, cloudStatusUnreadable } =
     useCloudPresence(workspaceId, reportCloudStatusUnavailable);
   // About's section reads report through this shell's notices, one row per
-  // section and file. Each may fail again, so each is a repeat: it keeps a
-  // row's toast while the row is there, and toasts again once it is gone.
+  // section and file. A repeat keeps an existing row's toast state only for
+  // an unchanged message. A changed message, or a missing row, toasts again.
   const aboutNotices = useMemo<AboutNotices>(
     () => ({ report: (failure) => reportShellFailure({ ...failure, repeat: true }), clear: clearIdentity }),
     [clearIdentity, reportShellFailure],
@@ -1550,14 +1552,14 @@ export function DesktopWorkspaceShell(props: {
     engineHistoryToken,
     null,
   );
-  const refreshShareViewRef = useRef<(trigger?: "manual" | "background") => Promise<ShareViewRefresh>>(async () => "current");
-  const shareRefreshFlight = useRef<{ admission: typeof workspaceAdmission; promise: Promise<ShareViewRefresh>; trigger: "manual" | "background"; followUp?: Promise<ShareViewRefresh> } | null>(null);
+  const refreshShareViewRef = useRef<(trigger?: "manual" | "background" | "press-burst") => Promise<ShareViewRefresh>>(async () => "current");
+  const shareRefreshFlight = useRef<{ admission: typeof workspaceAdmission; promise: Promise<ShareViewRefresh>; trigger: "manual" | "background" | "press-burst"; followUp?: Promise<ShareViewRefresh> } | null>(null);
   const checkShareAccess = useSharedViewAccess({
     workspaceId,
     enabled: workspaceIsReady && !!shareView && !shareViewDamaged && !shareViewEnded,
     admission: workspaceAdmission,
     relayFailed: captureDecidedFor !== workspaceId || syncStatus === null ? undefined : !!syncStatus.syncFailure,
-    pull: async () => await refreshShareViewRef.current("background") === "changed",
+    pull: async pressBurst => await refreshShareViewRef.current(pressBurst ? "press-burst" : "background") === "changed",
     onPersistentFailure: error => reportShellError("Couldn't refresh the shared view.", error,
       () => { if (!workspaceAdmission.superseded) void refreshShareViewRef.current(); }),
     onVerified: result => {
@@ -2571,9 +2573,10 @@ export function DesktopWorkspaceShell(props: {
     reportShellError,
     openRecovery: openCaptureRecovery,
   });
-  // A History Restore of kept typing clears it in the engine, so the next
-  // read drops its row.
-  const onHistoryRestored = useCallback(() => {
+  // Restore resolves this change's notice, including a Copy fallback that
+  // the engine no longer lists.
+  const onHistoryRestored = useCallback((momentId?: string) => {
+    if (momentId) captureRecoveries.restored(momentId);
     refreshAfterHistoryRestore();
     void captureRecoveries.refresh();
   }, [captureRecoveries, refreshAfterHistoryRestore]);
@@ -3995,7 +3998,7 @@ export function DesktopWorkspaceShell(props: {
     show: (reports) => showReportsNotice(reports, () => openSettings("privacy")),
   });
 
-  const refreshShareView = useCallback((trigger: "manual" | "background" = "manual"): Promise<ShareViewRefresh> => {
+  const refreshShareView = useCallback((trigger: "manual" | "background" | "press-burst" = "manual"): Promise<ShareViewRefresh> => {
     const active = shareRefreshFlight.current;
     if (active?.admission === workspaceAdmission) {
       if (trigger !== active.trigger) {
@@ -4006,7 +4009,7 @@ export function DesktopWorkspaceShell(props: {
       return active.promise;
     }
     const refresh = async (): Promise<ShareViewRefresh> => {
-      const background = trigger === "background";
+      const background = trigger !== "manual";
       if (!shareView) return "current";
       if (!workspaceIsReady || workspaceAdmission.superseded || shareViewDamaged) return "stale";
       if (shareViewEnded) return "ended";
@@ -4643,6 +4646,7 @@ export function DesktopWorkspaceShell(props: {
         atMs: error.atMs,
         canRetry: error.retry !== null,
         ...(error.action ? { actionLabel: error.action.label } : {}),
+        ...(error.action?.additional ? { additionalActionLabels: error.action.additional.map(action => action.label) } : {}),
         seen: error.seen,
       })),
     [shellErrors, reportFacts],
@@ -4817,6 +4821,7 @@ export function DesktopWorkspaceShell(props: {
     if (syncStatus?.recoveryUnavailable === undefined) return;
     reportRecoveryUnavailable(syncStatus.recoveryUnavailable, retryFileRecovery, revealRecoveryWorkspace);
   }, [syncStatus?.recoveryUnavailable, reportRecoveryUnavailable, retryFileRecovery, revealRecoveryWorkspace]);
+  const typingRecoveryConfirmation = useTypingRecoveryNotices({workspaceId, ready: workspaceIsReady, openHistory: openHistoryView, importedRecovery: captureRecoveries.imported, reportShellFailure, showSuccessNotice, showWarningNotice, clearKind, clearIdentity});
   const keptFilesNotice = useKeptFilesNotice({
     workspaceId,
     paths: syncStatus?.keptFiles?.filter(([path]) => !path),
@@ -5157,6 +5162,8 @@ export function DesktopWorkspaceShell(props: {
             openSearchResult={openSearchResult}
             workspaceId={workspaceId}
             activeDocumentPath={activeDocumentPath}
+            focusedTabPath={focusedTabPath}
+            appsNotices={aboutNotices}
             graphKey={graphKey}
             openPathWithHeading={openPathWithHeading}
             openGraphChatThread={openGraphChatThread}
@@ -5832,6 +5839,7 @@ export function DesktopWorkspaceShell(props: {
         </div>
       ) : null}
 
+      {typingRecoveryConfirmation}
       {restartPrompt !== "closed" ? (
         <Overlay
           onClose={() => {

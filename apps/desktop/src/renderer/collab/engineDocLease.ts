@@ -423,6 +423,7 @@ function createEngineDocSession(
   let deletionPending = false;
   let deletionCause: DocumentGoneCause = "deleted";
   let deliveryPending = false;
+  let typingUnresolved = false;
   let confirmedLocalSeq = 0;
   let pendingSavedSeq: number | null = null;
   let replacementPending = false;
@@ -951,6 +952,7 @@ function createEngineDocSession(
 
   const onSaveState = (event: EngineYDocSaveStateEvent): void => {
     if (disposed || event.sessionId !== sessionId) return;
+    if(event.typingUnresolved !== undefined) typingUnresolved=event.typingUnresolved;
     if (event.access === "deleted" || event.access === "object-changed") {
       pendingSavedSeq = null;
       const cause = event.access;
@@ -1241,6 +1243,8 @@ function createEngineDocSession(
           const bound = await bindEngineYDoc(transport, undefined, {
             onDeliveryFailure: captureDeliveryFailure,
             onDeliveryPendingChange,
+            hasUnresolvedCheckpoint: ()=>typingUnresolved,
+            checkpointForExit: async () => {await bridge().typingRecovery({workspaceId, action: "flush"});},
             onDocumentReplacementStarted: () => {
               replacementPending = true;
               replacementSaveState = null;

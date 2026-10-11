@@ -88,6 +88,20 @@ impl LeaseRegistry {
     /// Acquire an exclusive lease for `key`. Fails with [`CollabError::LeaseHeld`]
     /// if another live lease for the same lineage is outstanding.
     pub fn acquire(&self, key: &DocKey) -> Result<Lease, CollabError> {
+        self.acquire_with_notification(key, true)
+    }
+
+    /// Acquire exclusion for an engine-internal attempt. Its release does not
+    /// wake deferred work: the attempt must finish before its caller returns.
+    pub fn acquire_internal(&self, key: &DocKey) -> Result<Lease, CollabError> {
+        self.acquire_with_notification(key, false)
+    }
+
+    fn acquire_with_notification(
+        &self,
+        key: &DocKey,
+        notify_release: bool,
+    ) -> Result<Lease, CollabError> {
         let mut held = self.held.lock().map_err(|_| CollabError::Corrupt {
             reason: "lease registry mutex poisoned".to_string(),
         })?;
@@ -106,6 +120,7 @@ impl LeaseRegistry {
             releases: self.released.clone(),
             key: self.object_scope(key),
             released: false,
+            notify_release,
         })
     }
 
@@ -129,8 +144,8 @@ impl LeaseRegistry {
             .clone()
     }
 
-    /// A count that moves every time a lease on `workspace_id` under this
-    /// view's root is released.
+    /// A count that moves when a session lease on `workspace_id` under this
+    /// view's root is released. Internal attempts do not move it.
     pub fn release_generation(&self, workspace_id: &str) -> u64 {
         self.released
             .lock()
@@ -146,6 +161,7 @@ pub struct Lease {
     releases: Arc<Mutex<HashMap<String, u64>>>,
     key: (String, String),
     released: bool,
+    notify_release: bool,
 }
 
 impl Lease {
@@ -181,6 +197,9 @@ impl Lease {
         if let Ok(mut held) = self.held.lock() {
             held.remove(&self.key);
         }
+        if !self.notify_release {
+            return;
+        }
         if let Ok(mut releases) = self.releases.lock() {
             let count = releases.entry(self.key.0.clone()).or_default();
             *count = count.wrapping_add(1);
@@ -203,6 +222,65 @@ impl std::fmt::Debug for Lease {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn internal_attempts_preserve_a_sessions_bound_claim_and_release_generation() {
+        let registry = LeaseRegistry::new();
+        let key = DocKey::new("ws", "main", "object").unwrap();
+        let fork = DocKey::new("ws", "fork", "object").unwrap();
+        let lease = registry.acquire(&key).unwrap();
+        lease.bind_claim(Some("predecessor")).unwrap();
+        for attempt in [&key, &fork] {
+            assert!(matches!(
+                registry.acquire_internal(attempt),
+                Err(CollabError::LeaseHeld)
+            ));
+            assert_eq!(registry.bound_claim(&key).as_deref(), Some("predecessor"));
+        }
+        lease.bind_claim(Some("successor")).unwrap();
+        assert_eq!(registry.bound_claim(&key).as_deref(), Some("successor"));
+        assert_eq!(registry.release_generation("ws"), 0);
+        drop(lease);
+        assert_eq!(registry.bound_claim(&key), None);
+        assert_eq!(registry.release_generation("ws"), 1);
+        drop(registry.acquire_internal(&key).unwrap());
+        assert_eq!(registry.bound_claim(&key), None);
+        assert_eq!(registry.release_generation("ws"), 1);
+    }
+
+    #[test]
+    fn binding_updates_do_not_bypass_or_notify_an_internal_guard() {
+        let registry = LeaseRegistry::new();
+        let key = DocKey::new("ws", "main", "object").unwrap();
+        let fork = DocKey::new("ws", "fork", "object").unwrap();
+        let sibling = DocKey::new("ws", "main", "sibling").unwrap();
+        let internal = registry.acquire_internal(&key).unwrap();
+        let session = registry.acquire(&sibling).unwrap();
+        for claim in [Some("predecessor"), Some("successor"), None] {
+            session.bind_claim(claim).unwrap();
+            assert_eq!(registry.bound_claim(&sibling).as_deref(), claim);
+            assert_eq!(registry.bound_claim(&key), None);
+            assert!(registry.is_held(&key));
+            for attempt in [&key, &fork] {
+                assert!(matches!(
+                    registry.acquire(attempt),
+                    Err(CollabError::LeaseHeld)
+                ));
+            }
+            assert_eq!(registry.release_generation("ws"), 0);
+        }
+        session.bind_claim(Some("sibling-session")).unwrap();
+        drop(internal);
+        assert!(!registry.is_held(&key));
+        assert_eq!(
+            registry.bound_claim(&sibling).as_deref(),
+            Some("sibling-session")
+        );
+        assert_eq!(registry.release_generation("ws"), 0);
+        let reopened = registry.acquire(&key).unwrap();
+        reopened.bind_claim(Some("new-session")).unwrap();
+        assert_eq!(registry.bound_claim(&key).as_deref(), Some("new-session"));
+    }
 
     #[test]
     fn bound_claim_follows_the_session_and_is_scoped_to_root_and_version() {

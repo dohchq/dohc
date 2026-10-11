@@ -8,7 +8,7 @@ import type {
   ListFileChatsResponse,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
-import { EmptyState } from "../ui/controls";
+import { EmptyState, RetryRow } from "../ui/controls";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import {
   AboutAccess,
@@ -16,7 +16,6 @@ import {
   AboutHeader,
   AboutHistory,
   AboutNote,
-  AboutRetry,
   AboutSection,
   type AboutFile,
   type AboutNotices,
@@ -466,7 +465,7 @@ export function LinkedChatsPanel(props: {
           {threads === null ? (
             <SkeletonRows rows={2} className="px-2 py-1" label="Loading Chats..." />
           ) : threads.status === "unavailable" ? (
-            <AboutRetry testId="linked-chats-failed" onRetry={() => void refreshThreads()} />
+            <RetryRow testId="linked-chats-failed" onRetry={() => void refreshThreads()} />
           ) : (
             <div data-testid="linked-chats-panel">
               {threads.threads.length === 0 ? (

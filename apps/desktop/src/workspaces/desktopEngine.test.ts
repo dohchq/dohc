@@ -687,7 +687,7 @@ describe("private owner peer lifecycle", () => {
       expect(passOptions.accountId).toBe("owner-account");
       if (mode === "credentials") credentials.abort();
       let closed = false;
-      const closing = Promise.resolve(mode === "daemon" ? f.options().beforePublish!() : f.engine.closeRelayTransportWorkspace("owner")).then(() => {closed = true;});
+      const closing = Promise.resolve(mode === "daemon" ? f.options().beforePublish!(new AbortController().signal) : f.engine.closeRelayTransportWorkspace("owner")).then(() => {closed = true;});
       expect(passOptions.signal.aborted).toBe(true);
       expect(() => passOptions.assertCurrent()).toThrow();
       await Promise.resolve();
@@ -783,7 +783,7 @@ describe("server owner peer lifecycle", () => {
       expect(passOptions.accountId).toBe("owner-account");
       if (mode === "credentials") credentials.abort();
       let closed = false;
-      const closing = Promise.resolve(mode === "daemon" ? f.options().beforePublish!() : f.engine.closeRelayTransportWorkspace("owner")).then(() => {closed = true;});
+      const closing = Promise.resolve(mode === "daemon" ? f.options().beforePublish!(new AbortController().signal) : f.engine.closeRelayTransportWorkspace("owner")).then(() => {closed = true;});
       expect(passOptions.signal.aborted).toBe(true);
       expect(() => passOptions.assertCurrent()).toThrow();
       await Promise.resolve(); expect(closed).toBe(false);

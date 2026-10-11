@@ -52,7 +52,7 @@ fn text_sha(text: &str) -> String {
 
 #[test]
 fn imported_live_moment_preserves_public_author_snapshots() {
-    for author in [
+    for mut author in [
         json!({"kind":"unattributed"}),
         json!({"kind":"human", "humanId":"recipient", "humanName":"Recipient"}),
         json!({"kind":"link", "publicPrincipalId":"public-recipient", "label":"Edit link participant"}),
@@ -84,11 +84,37 @@ fn imported_live_moment_preserves_public_author_snapshots() {
         ));
         let actual: String = store.read_with(|conn| conn.query_row(
             "SELECT author_json FROM moments WHERE workspace_id='ws' AND moment_id='live-settlement'", [], |row| row.get(0))).unwrap();
+        if author["kind"] == "human" {
+            author["relayConfirmed"] = json!(true);
+        }
         assert_eq!(
             serde_json::from_str::<Value>(&actual).unwrap(),
             json!([author])
         );
     }
+}
+
+#[test]
+fn client_declared_human_cannot_preserve_relay_confirmation() {
+    let (_scratch, mut store) = test_store();
+    hydrate_texts(&mut store, &["local fields"]);
+    let payload = with_author(
+        absent_text_payload("local-settlement", "record", "record.md", "local fields"),
+        json!({"kind":"human","humanId":"recipient","relayConfirmed":true}),
+    );
+    let op = envelope("local-device", 0, "ws", payload);
+    assert!(matches!(
+        apply_moment_envelope(&mut store, &op, &NoFaults)
+            .unwrap()
+            .primary,
+        ApplyDisposition::Applied(_)
+    ));
+    let actual: String = store.read_with(|conn| conn.query_row(
+        "SELECT author_json FROM moments WHERE workspace_id='ws' AND moment_id='local-settlement'", [], |row| row.get(0))).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&actual).unwrap(),
+        json!([{"kind":"human","humanId":"recipient"}])
+    );
 }
 
 #[test]

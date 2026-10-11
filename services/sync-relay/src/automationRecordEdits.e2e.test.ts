@@ -935,19 +935,22 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
     identity: {kind: "join", replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity}});
   await peer.sync();
   const imported = (await peer.request("moments.list", {limit: 100}, peer.workspace)).moments as unknown as Array<{momentId: string; authors?: unknown}>;
-  // The peer imports the relay's verified authors and its retained audit
-  // evidence adds no credit to the moment.
+  // The peer imports the relay's admitted authors and its retained audit
+  // evidence adds no credit to the moment. The relay confirms each person.
+  const confirmedAuthors = (admittedAuthors as Array<Record<string, unknown>>)
+    .map(author => author.kind === "human" ? {...author, relayConfirmed: true} : author);
   const importedAuthors = imported.find(moment => moment.momentId === recipientMoment.momentId)?.authors;
-  expect(importedAuthors).toEqual(expect.arrayContaining(admittedAuthors));
-  expect(importedAuthors).toHaveLength(admittedAuthors.length);
+  expect(importedAuthors).toEqual(expect.arrayContaining(confirmedAuthors));
+  expect(importedAuthors).toHaveLength(confirmedAuthors.length);
   const peerHistory = new VersionedLiveAdapter(peer.client, peer.workspace, {workspaceId: WORKSPACE});
   const peerMoment = await peerHistory.getMoment({workspaceId: WORKSPACE, momentId: recipientMoment.momentId});
-  expect(peerMoment).toMatchObject({syncRecordOnly: true, authors: expect.arrayContaining(admittedAuthors)});
-  expect(peerMoment?.authors).toHaveLength(admittedAuthors.length);
-  // Publication refreshed the hosting computer's moment to the admitted authors.
+  expect(peerMoment).toMatchObject({syncRecordOnly: true, authors: expect.arrayContaining(confirmedAuthors)});
+  expect(peerMoment?.authors).toHaveLength(confirmedAuthors.length);
+  // Publication refreshed the hosting computer's moment to the admitted
+  // authors, and the relay's acceptance confirms each person there too.
   const refreshedAuthors = (await moments()).find(moment => moment.momentId === recipientMoment.momentId)?.authors;
-  expect(refreshedAuthors).toEqual(expect.arrayContaining(admittedAuthors));
-  expect(refreshedAuthors).toHaveLength(admittedAuthors.length);
+  expect(refreshedAuthors).toEqual(expect.arrayContaining(confirmedAuthors));
+  expect(refreshedAuthors).toHaveLength(confirmedAuthors.length);
   expect(await readFile(join(peer.root, "Tasks/one.md"), "utf8")).toContain("RecipientNote: Keep this text");
   await session.close({settle: false});
   const restore = async (side: typeof owner) => {
@@ -986,8 +989,8 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
       undoRuns: async () => ({undone: 0, left: 0, keptFields: [], missing: 0, otherKept: 0, errorMessage: null}),
     }, [{path: "Tasks/one.md", objectId: document.objectId, momentId: creationMoment.momentId, created: true}]);
   };
-  // The relay-admitted settlement and live audit both retain the recipient.
-  expect(imported).toContainEqual(expect.objectContaining({authors: [{kind: "human", humanId: "reader", humanName: "Reader"}]}));
+  // The relay-admitted settlement and the relay-checked live audit both retain the confirmed recipient.
+  expect(imported).toContainEqual(expect.objectContaining({authors: [{kind: "human", humanId: "reader", humanName: "Reader", relayConfirmed: true}]}));
   if (authors === "owner-and-recipient") {
     expect(await restore(peer)).toMatchObject({status: "restored", restored: [],
       review: [{path: "Tasks/one.md", reason: "changed-since"}], unfinished: null});

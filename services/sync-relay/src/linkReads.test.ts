@@ -2804,14 +2804,25 @@ describe("relay capability reads", () => {
     const linkLog = await json(
       await h(linkRequest(capability, "/sync/link/log?since=0&limit=100")),
     );
-    const linkOps = (recipientLog.ops as Array<Record<string, unknown>>).map(
-      ({ originId: _originId, ...op }) => op,
-    );
+    const recipientOps = recipientLog.ops as Array<Record<string, unknown>>;
+    const stored = storage.fetchLogCoordinate({ workspaceId: WORKSPACE, originId: "origin-a", originSeq: 1 })!;
+    expect(stored.admittedAuthorSnapshot).toBeUndefined();
+    expect(JSON.parse(stored.payloadJson)).not.toHaveProperty("authors");
+    expect(stored.settlementAdmission).toBeUndefined();
+    expect(recipientOps.find(op => op.opKind === "moment.append")?.payload).toMatchObject({
+      authors: [{ kind: "unattributed" }],
+    });
+    // This named-reader fallback is not a relay-journal snapshot; accountless replay omits authors.
+    const linkOps = recipientOps.map(({ originId: _originId, payload, ...op }) => {
+      const { authors: _authors, ...artifact } = payload as Record<string, unknown>;
+      return { ...op, payload: artifact };
+    });
     const { ownOriginId, ...recipientPage } = recipientLog;
     expect(ownOriginId).toMatch(/^relay:share-member:[a-f0-9]{64}$/);
     expect(linkLog).toEqual({ ...recipientPage, ops: linkOps, epochLogFloor: 0 });
     expect(linkLog).not.toHaveProperty("ownOriginId");
     expect(linkOps.every((op) => !Object.hasOwn(op, "originId"))).toBe(true);
+    expect(JSON.stringify(linkLog)).not.toContain('"authors"');
     expect(JSON.stringify(linkLog)).not.toContain("private/hidden.md");
 
     const recipientBlob = await h(
@@ -3395,7 +3406,10 @@ describe("relay capability reads", () => {
       .filter((op) =>
         ["workspace.init", "moment.append", "version.create"].includes(op.opKind),
       )
-      .map(({ originId: _originId, ...op }) => op);
+      .map(({ originId: _originId, payload, ...op }) => {
+        const { authors: _authors, ...artifact } = payload;
+        return { ...op, payload: artifact };
+      });
     expect(linkLog).toEqual({
       ok: true,
       ops: expectedLinkOps,
@@ -3408,6 +3422,7 @@ describe("relay capability reads", () => {
         (op) => !Object.hasOwn(op, "originId"),
       ),
     ).toBe(true);
+    expect(JSON.stringify(linkLog)).not.toContain('"authors"');
     // The excluded kinds by name: a widened accountless boundary must fail
     // here even if the expected-list above is ever derived from the server.
     const chatKinds = [

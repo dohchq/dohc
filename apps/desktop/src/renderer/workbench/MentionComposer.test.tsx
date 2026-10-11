@@ -18,6 +18,7 @@ const candidates: MentionCandidate[] = [
 function Harness(props: {
   fileCandidates?: { path: string; label: string }[];
   onSend?: () => void;
+  onRosterPick?: (pick: import("../offers/agentAddressed").AgentRosterPick | null) => void;
   onEscape?: () => void;
   loadFileHeadings?: (path: string) => Promise<readonly WorkspaceHeadingRecord[]>;
   surface?: "post";
@@ -37,6 +38,7 @@ function Harness(props: {
       {...(props.loadFileHeadings
         ? { loadFileHeadings: props.loadFileHeadings }
         : {})}
+      onRosterPick={props.onRosterPick}
       onChange={setValue}
       onSend={props.onSend ?? (() => {})}
       {...(props.onEscape ? { onEscape: props.onEscape } : {})}
@@ -323,5 +325,52 @@ describe("MentionComposer menu on the Menu part's recipe", () => {
     expect(second.hasAttribute("data-active")).toBe(false);
     fireEvent.mouseMove(second, { movementX: 0, movementY: 2 });
     expect(second.hasAttribute("data-active")).toBe(true);
+  });
+});
+
+
+describe("offer roster picks", () => {
+  it("emits an agent pick only on roster completion and clears it when removed", async () => {
+    const onRosterPick = vi.fn();
+    const user = userEvent.setup();
+    render(<Harness onRosterPick={onRosterPick} />);
+    const composer = screen.getByTestId("chats-composer") as HTMLTextAreaElement;
+    await user.type(composer, "@agent");
+    expect(onRosterPick).not.toHaveBeenCalled();
+    await user.click(screen.getAllByTestId("chats-mention-option")[0]!);
+    expect(onRosterPick).toHaveBeenLastCalledWith({ candidate: candidates[0], from: 0, to: 6 });
+    composer.focus();
+    composer.setSelectionRange(0, 6);
+    await user.keyboard("{Backspace}");
+    expect(onRosterPick).toHaveBeenLastCalledWith(null);
+  });
+  it("moves the picked span when text is inserted before it", async () => {
+    const onRosterPick = vi.fn();
+    const user = userEvent.setup();
+    render(<Harness onRosterPick={onRosterPick} />);
+    const composer = screen.getByTestId("chats-composer") as HTMLTextAreaElement;
+    await user.type(composer, "@ag");
+    await user.click(screen.getAllByTestId("chats-mention-option")[0]!);
+    composer.focus(); composer.setSelectionRange(0, 0);
+    await user.paste("Hi ");
+    expect(onRosterPick).toHaveBeenLastCalledWith({ candidate: candidates[0], from: 3, to: 9 });
+  });
+});
+
+describe("agent pick continuity", () => {
+  it("keeps the picked agent when a person is picked, and clears it when the agent mention is removed", async () => {
+    const onRosterPick = vi.fn();
+    const user = userEvent.setup();
+    render(<Harness onRosterPick={onRosterPick} />);
+    const composer = screen.getByTestId("chats-composer") as HTMLTextAreaElement;
+    await user.type(composer, "@ag");
+    await user.click(screen.getAllByTestId("chats-mention-option")[0]!);
+    await user.type(composer, "and @yo");
+    await user.click(screen.getAllByTestId("chats-mention-option").find(option => option.getAttribute("data-candidate-id") === "user:you")!);
+    expect(composer.value).toBe("@agent and @you ");
+    expect(onRosterPick).toHaveBeenLastCalledWith({ candidate: candidates[0], from: 0, to: 6 });
+    composer.focus(); composer.setSelectionRange(0, 7);
+    await user.keyboard("{Backspace}");
+    expect(onRosterPick).toHaveBeenLastCalledWith(null);
   });
 });

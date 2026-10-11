@@ -26,6 +26,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
         || matches!(
             method,
             "capture.reconcile"
+                | "capture.importRecovery"
                 | "versionedText.list"
                 | "versionedText.captureSources"
                 | "versionedText.read"
@@ -503,6 +504,9 @@ impl EngineService {
                     .await?
             }
             "watcher.status" => self.watcher_status(request.workspace).await?,
+            "capture.importRecovery" => {
+                Box::pin(self.capture_import_recovery(request.workspace, request.params)).await?
+            }
             "capture.clearRecovery" => {
                 self.capture_clear_recovery(request.workspace, request.params)
                     .await?
@@ -995,7 +999,7 @@ impl EngineService {
         Ok(ServiceResponse::response(Response { id, result }))
     }
 
-    fn ensure_handle_allows_method(
+    pub(super) fn ensure_handle_allows_method(
         &self,
         handle: Option<&WorkspaceHandle>,
         method: &str,
@@ -1003,19 +1007,44 @@ impl EngineService {
         let Some(handle) = handle else {
             return Ok(());
         };
-        if method.starts_with("automations.")
-            && lock(&self.handles)
-                .get(handle)
-                .is_some_and(|open| open.projects_collections())
-        {
-            return Err(WireError::new(
-                ErrorCode::Forbidden,
-                "received shares do not execute automations",
-            ));
-        }
-        let read_only = lock(&self.handles)
+        let (projects_collections, read_only) = lock(&self.handles)
             .get(handle)
-            .is_some_and(|open| open.mode == WorkspaceOpenMode::ReadOnly);
+            .map(|open| {
+                (
+                    open.projects_collections(),
+                    open.mode == WorkspaceOpenMode::ReadOnly,
+                )
+            })
+            .unwrap_or_default();
+        if projects_collections {
+            if method.starts_with("automations.") {
+                return Err(WireError::new(
+                    ErrorCode::Forbidden,
+                    "received shares do not execute automations",
+                ));
+            }
+            if matches!(
+                method,
+                "ydoc.open"
+                    | "ydoc.recordUpdate"
+                    | "ydoc.resync"
+                    | "ydoc.adoptCollectionRecord"
+                    | "ydoc.settle"
+                    | "ydoc.close"
+                    | "ydoc.evict"
+            ) {
+                return Err(WireError::new(
+                    ErrorCode::Forbidden,
+                    "received shares do not open live document sessions",
+                ));
+            }
+            if method == "liveApplication.provisionOwner" {
+                return Err(WireError::new(
+                    ErrorCode::Forbidden,
+                    "received shares do not host live applications",
+                ));
+            }
+        }
         if read_only
             && !matches!(
                 method,
@@ -1167,6 +1196,7 @@ mod tests {
         request.workspace = Some(attached_handle.clone());
         for method in [
             "workspace.open",
+            "capture.importRecovery",
             "ydoc.open",
             "sync.recoverOrigin",
             "sync.probe",
@@ -1313,6 +1343,7 @@ mod tests {
             "automations.subscribe",
             "automations.unsubscribe",
             "automations.watchGroups",
+            "capture.importRecovery",
             "capture.flush",
             "capture.hold",
             "capture.moveFile",

@@ -1,4 +1,5 @@
 {
+  "desktop:get-share-copy-details": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "shareCopyHandler.withRendererWorkspaceOperation" } },
   "desktop:get-object-access": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:list-sharing-access": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:request-access-refresh": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
@@ -27,6 +28,9 @@
   "desktop:read-reports-notice": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:acknowledge-reports-notice": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:report-renderer-error": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:read-usage-record": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:clear-usage-record": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:set-usage-record-enabled": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:register-chat-dispatch-notices": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:dismiss-chat-dispatch-notice": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:read-schedule-host": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "main.scheduleHostState" } },
@@ -47,5 +51,7 @@
   "desktop:dismiss-stop-and-restore": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:dismiss-share-capture-notice": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:engine-ydoc-retry-save": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "engineYDocSessionIpc.retrySave" } },
-  "desktop:update-share-direct-write-delivery": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "shareDirectWriteDelivery.sessionWorkspaceAndDocumentMatch" } }
+  "desktop:update-share-direct-write-delivery": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "shareDirectWriteDelivery.sessionWorkspaceAndDocumentMatch" } },
+  "desktop:typing-recovery": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:get-folder-app": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null }
 }
