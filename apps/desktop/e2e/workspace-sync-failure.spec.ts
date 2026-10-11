@@ -95,7 +95,12 @@ test("a sync the server cannot take names the server, offers Try again, and clea
 
     // Try again from the row, while the server is still down: the title bar
     // shows the pass, and its failure interrupts with Try again and copy.
-    await notices.getByRole("button", { name: "Try again" }).click();
+    // Live editing files its own retrying row with a Try again of its own.
+    await notices
+      .getByRole("listitem")
+      .filter({ hasText: "dohc could not reach the server." })
+      .getByRole("button", { name: "Try again" })
+      .click();
     await expect(toast).toContainText("dohc could not reach the server.", { timeout: 60_000 });
     await expect(page.getByTestId("workspace-shell-error-retry")).toBeVisible();
     await expect(page.getByTestId("workspace-shell-error-copy")).toBeVisible();
