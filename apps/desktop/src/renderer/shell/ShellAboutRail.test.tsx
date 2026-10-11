@@ -151,7 +151,7 @@ describe("About rail (right side)", () => {
 
     const rail = await screen.findByTestId("about-rail");
     expect((await within(rail).findByTestId("linked-chats-empty")).textContent).toBe(
-      "About covers files. Switch to a file's tab to see its chats, history, and access.",
+      "About covers files and chats. Switch to a file's tab to see its chats, history, and access.",
     );
     // Only conversations open: there is no file to switch to.
     cleanup();

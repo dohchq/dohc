@@ -96,9 +96,23 @@ function Access(props: { workspaceId?: string; path?: string; open?: boolean; fa
   return (
     <AboutAccess
       workspaceId={props.workspaceId ?? "workspace-a"}
-      path={props.path ?? "docs/plan.md"}
+      subject={{ kind: "path", path: props.path ?? "docs/plan.md" }}
       expanded={open}
       onToggle={() => setOpen((current) => !current)}
+      notices={notices}
+      context={contextFor(props.facts ?? SYNCED)}
+    />
+  );
+}
+
+function ChatAccess(props: { channelWireId: string; received: boolean | null; facts?: AccessFacts }) {
+  return (
+    <AboutAccess
+      workspaceId="workspace-a"
+      subject={{ kind: "chat", channelWireId: props.channelWireId }}
+      received={props.received}
+      expanded
+      onToggle={() => undefined}
       notices={notices}
       context={contextFor(props.facts ?? SYNCED)}
     />
@@ -424,6 +438,53 @@ describe("About Access", () => {
       }),
     );
     expect(bridgeMock.requestAccessRefresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks about a chat by its wire identity, in a chat's words", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValueOnce(answer({ ref: { kind: "chat", channelWireId: "wire-general" } }))
+      .mockRejectedValueOnce(new Error("disk is busy"));
+    const { rerender } = render(<ChatAccess channelWireId="wire-general" received={false} />);
+    expect((await screen.findByTestId("about-access-empty")).textContent).toBe(
+      "No share from this workspace includes this chat.",
+    );
+    expect(bridgeMock.getObjectAccess).toHaveBeenCalledWith({
+      workspaceId: "workspace-a",
+      ref: { kind: "chat", channelWireId: "wire-general" },
+    });
+    rerender(<ChatAccess channelWireId="wire-launch" received={false} />);
+    await screen.findByTestId("about-access-failed");
+    expect(notices.report).toHaveBeenCalledWith(expect.objectContaining({ identity: "about-access:chat:wire-launch" }));
+    expect(notices.clear).toHaveBeenCalledWith("about-access:chat:wire-general");
+  });
+
+  it.each([
+    [false, NOT_SYNCED, "not-synced"],
+    [true, NOT_SYNCED, "unexplained"],
+    [true, SIGNED_OUT, "signed-out"],
+    [null, SIGNED_OUT, "unexplained"],
+  ] as const)("explains an unknown chat answer by its share lane (received %s)", async (received, facts, reason) => {
+    bridgeMock.getObjectAccess.mockResolvedValue({ ...UNKNOWN, ref: { kind: "chat", channelWireId: "wire-general" } });
+    render(<ChatAccess channelWireId="wire-general" received={received} facts={facts} />);
+    const unknown = await screen.findByTestId("about-access-unknown");
+    expect(unknown.dataset.reason).toBe(reason);
+    if (reason === "unexplained") {
+      expect(unknown.textContent).toContain("Access information is unavailable for this chat.");
+    }
+  });
+
+  it("says a chat main cannot find is gone", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValue({ ...UNKNOWN, visibility: "missing" });
+    render(<ChatAccess channelWireId="wire-general" received={false} />);
+    expect((await screen.findByTestId("about-access-unknown")).textContent).toBe("This chat is no longer in this workspace.");
+  });
+
+  it("does not read again when only the chat's share lane becomes known", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValue(answer());
+    const { rerender } = render(<ChatAccess channelWireId="wire-general" received={null} />);
+    await screen.findByTestId("about-access-empty");
+    rerender(<ChatAccess channelWireId="wire-general" received={false} />);
+    await act(async () => undefined);
+    expect(bridgeMock.getObjectAccess).toHaveBeenCalledTimes(1);
   });
 
   it("reads the next page from the answer's cursor", async () => {

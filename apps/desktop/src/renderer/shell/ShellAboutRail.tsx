@@ -1,4 +1,4 @@
-import { Suspense, lazy, memo, type ComponentProps } from "react";
+import { Suspense, lazy, memo, useEffect, useState, type ComponentProps } from "react";
 import type {
   ChatThreadRecord,
   SyncStatusResult,
@@ -7,7 +7,8 @@ import type {
 import { ErrorBoundary } from "../ErrorBoundary";
 import { AboutRail } from "../workbench/AboutRail";
 import { SkeletonRows, SkeletonSlot } from "../ui/SkeletonRows";
-import { setAboutWidth, type WorkbenchState } from "../workbench/workbenchState";
+import { parseChatTabPath, setAboutWidth, type WorkbenchState } from "../workbench/workbenchState";
+import { useAboutConversation } from "../workbench/aboutConversation";
 import { chatsOffCopy } from "./capabilityOffCopy";
 
 const LazyLinkedChatsPanel = lazy(() =>
@@ -16,10 +17,17 @@ const LazyLinkedChatsPanel = lazy(() =>
   })),
 );
 
+const LazyAboutConversationPanel = lazy(() =>
+  import("../workbench/AboutConversationPanel").then((mod) => ({
+    default: mod.AboutConversationPanel,
+  })),
+);
+
 type LinkedChatsPanelProps = ComponentProps<typeof LazyLinkedChatsPanel>;
 
-// The right side panel: About the active file. Every input is state or a
-// stable callback, so a shell render that changes none of them skips it.
+// The right side panel: About the active file or conversation. Every input is
+// state or a stable callback, so a shell render that changes none of them
+// skips it.
 export const ShellAboutRail = memo(function ShellAboutRail(props: {
   wb: WorkbenchState;
   mutateWb: (updater: (state: WorkbenchState) => WorkbenchState) => void;
@@ -62,6 +70,21 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
     aboutNotices,
     accessContext,
   } = props;
+  // A conversation tab's page says what About shows for it. A shared view
+  // has no conversations, so its About stays on files. A chat search hit
+  // opens its file's chat here and keeps it until another tab takes focus.
+  const [searchHitTab, setSearchHitTab] = useState<string | null>(null);
+  if (searchChatTarget !== null && searchHitTab !== focusedTabPath) setSearchHitTab(focusedTabPath);
+  useEffect(() => {
+    setSearchHitTab((tab) => (tab === focusedTabPath ? tab : null));
+  }, [focusedTabPath]);
+  const chatTab = parseChatTabPath(focusedTabPath);
+  const conversationTab = !shareView && searchHitTab !== focusedTabPath &&
+    (chatTab?.kind === "channel" || chatTab?.kind === "dm");
+  // Null for a tab that is not a conversation's.
+  const published = useAboutConversation(workspaceId, conversationTab ? focusedTabPath : null);
+  const conversation = conversationTab ? published : null;
+  const loading = <SkeletonRows inSlot layout="panel" label="Loading About..." />;
   return (
     <AboutRail
       width={wb.aboutWidth}
@@ -83,7 +106,7 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
           // A shared view needs no capture and waits for no decision: main
           // answers its per-file chat from the share scope.
           !captureDecided ? (
-            <SkeletonRows inSlot layout="panel" label="Loading About..." />
+            loading
           ) : (
             <div
               data-testid="about-rail-off"
@@ -92,8 +115,19 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
               {chatsOffCopy(syncStatus)}
             </div>
           )
+        ) : conversation === undefined ? (
+          loading
+        ) : conversation !== null && conversation !== "none" ? (
+          <Suspense fallback={loading}>
+            <LazyAboutConversationPanel
+              workspaceId={workspaceId}
+              conversation={conversation}
+              notices={aboutNotices}
+              accessContext={accessContext}
+            />
+          </Suspense>
         ) : (
-          <Suspense fallback={<SkeletonRows inSlot layout="panel" label="Loading About..." />}>
+          <Suspense fallback={loading}>
             <LazyLinkedChatsPanel
               workspaceId={workspaceId}
               filePath={activeDocumentPath}

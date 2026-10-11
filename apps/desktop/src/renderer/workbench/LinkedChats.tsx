@@ -29,7 +29,8 @@ import {
 } from "./chatMessages";
 import { useReactions, type ReactionView } from "./reactionStore";
 
-// The About rail: the open file's Chats, History and Access.
+// The About rail for a file: its Chats, History and Access. A focused chat
+// tab gets AboutConversationPanel instead.
 // Per-file Chats (PR 0M-5) are stored in the engine and linked to the file's
 // stable object id, so a chat follows its file through renames, and that id
 // is what History asks about. Product vocabulary: these are Chats.
@@ -88,9 +89,9 @@ function isWorkspaceUpdatingResponse(
 export function LinkedChatsPanel(props: {
   workspaceId: string;
   filePath: string | null;
-  // With no file focused: whether some tab still holds a file. About covers
-  // files only, so the empty state then points at that tab instead of asking
-  // for a file to be opened.
+  // With no file or chat focused: whether some tab still holds a file. The
+  // empty state then points at that tab instead of asking for a file to be
+  // opened.
   fileTabOpen?: boolean;
   // A shared view always passes true. Absent means a workspace this machine
   // owns, which is writable by definition.
@@ -436,7 +437,7 @@ export function LinkedChatsPanel(props: {
         icon={Info}
         title={
           props.fileTabOpen
-            ? `About covers files. Switch to a file's tab to see its ${sections}.`
+            ? `About covers files and chats. Switch to a file's tab to see its ${sections}.`
             : `Open a file to see its ${sections}.`
         }
       />
@@ -452,7 +453,7 @@ export function LinkedChatsPanel(props: {
     : { status: "ready", objectId: threads.fileObjectId };
   return (
     <div data-testid="about-panel" className="flex min-h-0 flex-1 flex-col">
-      <AboutHeader path={filePath} />
+      <AboutHeader subject={{ path: filePath }} />
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto pb-2">
         <AboutSection
           id="chats"
@@ -498,7 +499,7 @@ export function LinkedChatsPanel(props: {
         ) : null}
         <AboutAccess
           workspaceId={workspaceId}
-          path={filePath}
+          subject={{ kind: "path", path: filePath }}
           expanded={sectionsOpen.access}
           onToggle={toggleSection("access")}
           notices={notices}

@@ -94,8 +94,8 @@ afterEach(() => {
 
 describe("LinkedChatsPanel with no file focused", () => {
   it.each([
-    [true, false, "About covers files. Switch to a file's tab to see its chats, history, and access."],
-    [true, true, "About covers files. Switch to a file's tab to see its chats and access."],
+    [true, false, "About covers files and chats. Switch to a file's tab to see its chats, history, and access."],
+    [true, true, "About covers files and chats. Switch to a file's tab to see its chats and access."],
     [false, false, "Open a file to see its chats, history, and access."],
     [false, true, "Open a file to see its chats and access."],
   ] as const)("fileTabOpen %s, shared %s", (fileTabOpen, shared, copy) => {
