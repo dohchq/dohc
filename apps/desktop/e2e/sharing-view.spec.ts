@@ -17,7 +17,8 @@ import {
 } from "./helpers/workspace";
 
 // The Sharing view on a real relay: the owner shares a file, finds the share
-// under Shared by me from the rail and from Settings, and ends it there.
+// under Shared by me from Settings search and from the rail, copies its code,
+// and ends it there.
 
 const GRANTER_TOKEN = "test:e2e-granter";
 const RECIPIENT_TOKEN = "test:e2e-recipient";
@@ -66,19 +67,30 @@ test("sharing view: lists a share this workspace granted and ends it", async () 
     const shareId = shareCode.split(":")[1]!;
     await dialog.getByTestId("share-done").click();
 
-    // Settings points its list at the Sharing view.
+    // Settings keeps values only; its search still finds the share and opens
+    // the Sharing view on its row.
     await page.getByTestId(activityPin("settings")).click();
     await page.getByTestId(settingsNavPin("cloud")).click();
-    await page.getByTestId("settings-manage-sharing-granted").click();
+    await expect(page.getByTestId("settings-section-cloud")).not.toContainText("Shared by me");
+    await page.getByTestId("settings-search").fill("plan.md");
+    await page.getByTestId("settings-sharing-result").filter({ hasText: "plan.md" }).click();
     const view = page.getByTestId("sharing-view");
     await expect(view).toBeVisible();
     await expect(page.getByTestId(activityPin("sharing"))).toHaveAttribute("aria-current", "page");
 
-    // Shared by me lists the grant with what it covers and who has it.
+    // Shared by me lists the grant with what it covers and who has it, focused.
     const row = view.getByTestId("sharing-granted-row").filter({ hasText: "plan.md" });
     await expect(row).toBeVisible();
     await expect(row).toContainText("docs/");
     await expect(row).toHaveAttribute("data-status", "active");
+    await expect(row.locator("[data-sharing-row-focus]")).toBeFocused();
+
+    // The row hands out the share's code from its actions, by keyboard.
+    await page.keyboard.press("Tab");
+    await expect(row.getByTestId("sharing-granted-actions").locator(":focus")).toHaveCount(1);
+    await row.getByRole("button", { name: "Copy code" }).focus();
+    await page.keyboard.press("Enter");
+    await expect.poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText())).toBe(shareCode);
 
     // The rail button closes and reopens the same view.
     await page.getByTestId(activityPin("sharing")).click();
@@ -103,6 +115,76 @@ test("sharing view: lists a share this workspace granted and ends it", async () 
       .toBe(404);
   } finally {
     // Stop the relay before removing the temp tree it holds open (Windows EBUSY).
+    await relay?.stop();
+    if (desktop) await cleanupDesktopWorkspace(desktop, temp);
+    else await temp.cleanup();
+  }
+});
+
+// A share still on this computer that the relay no longer lists: it reads as
+// removed and keeps Remove. Its skipped changes take Dismiss, and the row's
+// menu shows them again.
+test("sharing view: a removed share on this computer, its skipped changes, and Remove", async () => {
+  test.setTimeout(240_000);
+  const temp = await createTempWorkspace();
+  const workspaceId = "sharing-view-mounts-e2e";
+  const shareId = "share-gone";
+  let relay: SyncRelayHandle | null = null;
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+  try {
+    await seedWorkspaceManifest(temp, workspaceId);
+    await writeWorkspaceFiles(temp, [
+      { path: "docs/plan.md", contents: "# Plan\n" },
+      { path: "shared-with-me/notes/notes.md", contents: "# Notes\n" },
+    ]);
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+    await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
+    await seedWorkspaceRegistry(temp, [{
+      workspaceId, rootPath: temp.rootPath, remote: { serverUrl: relay.baseUrl, ownerUserId: "e2e-granter" },
+      shareMounts: [{
+        shareId, label: "notes", granterEmail: "sam@dohc.test", relayUrl: relay.baseUrl, recipientEmail: "e2e-granter@dohc.test",
+        grantedSelector: { paths: ["notes.md"], versionId: null, access: "view" },
+        skippedOps: {
+          ops: [{ originId: "origin-sam", originSeq: 4, opKind: "write", code: "share-boundary-violation", detail: "notes/draft.md", atMs: 1 }],
+          more: 0, generation: 2,
+        },
+      }],
+    }]);
+    await seedCloudCredentials(temp, {
+      serverUrl: relay.baseUrl,
+      relayUrl: relay.baseUrl,
+      email: "e2e-granter@dohc.test",
+      userId: "e2e-granter",
+      token: GRANTER_TOKEN,
+    });
+
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+    await openWorkspaceFromFirstRun(page, temp);
+
+    await page.getByTestId(activityPin("sharing")).click();
+    const row = page.locator(`[data-testid="sharing-received-row"][data-share-id="${shareId}"]`);
+    await expect(row).toHaveAttribute("data-status", "removed");
+    await expect(row).toContainText("notes");
+    await expect(row.getByTestId("sharing-row-status")).toHaveText("removed");
+
+    // Dismiss hides the skipped changes; the record stays, so the menu shows them again.
+    const skipped = page.getByTestId("sharing-skipped");
+    await expect(skipped).toHaveCount(1);
+    await page.getByTestId("sharing-skipped-dismiss").click();
+    await expect(skipped).toHaveCount(0);
+    await row.hover();
+    await row.getByRole("button", { name: "Share actions" }).click();
+    await page.getByRole("menuitem", { name: "Show skipped changes" }).click();
+    await expect(skipped).toHaveCount(1);
+
+    // Remove takes the share off this computer.
+    await row.hover();
+    await row.getByRole("button", { name: "Share actions" }).click();
+    await page.getByRole("menuitem", { name: "Remove from workspace" }).click();
+    await expect(row).toHaveCount(0);
+  } finally {
     await relay?.stop();
     if (desktop) await cleanupDesktopWorkspace(desktop, temp);
     else await temp.cleanup();

@@ -16,6 +16,7 @@ import {
 import { pushOverlay, removeOverlay } from "../overlayStack";
 import { Overlay } from "../Overlay";
 import type { ScheduleHostResult } from "../../ipc/bridgeContract";
+import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { SettingsDialog } from "./SettingsDialog";
 import { applyLookSettings } from "../theme";
 import { CUSTOMIZE_TARGETS } from "./customize";
@@ -76,11 +77,28 @@ async function resetWorkspaceSettings(): Promise<WorkspaceSettingsResult> {
   return { settings: workspaceSettingsOnDisk, source: "stored" };
 }
 
+// The Sharing view's lists, as Settings search reads them.
+function sharingAnswer(lane: "granted" | "received"): AccessAnswer {
+  const row: AccessShareRow = lane === "granted"
+    ? { kind: "share", shareId: "share-plan", grantId: "grant-1", via: "named", granterUserId: "me", granterEmail: null,
+        recipientUserId: "sam", recipientEmail: "sam@example.com", subjectName: null, sharerName: null,
+        selector: { paths: ["notes/product-plan.md"], versionId: null }, access: "edit", status: "active", generation: 1 }
+    : { kind: "share", shareId: "share-funnel", grantId: "grant-2", via: "received", granterUserId: "sam", granterEmail: "sam@example.com",
+        recipientUserId: "me", recipientEmail: null, subjectName: "funnel.csv", sharerName: "Sam",
+        selector: { paths: ["data/funnel.csv"], versionId: null }, access: "view", status: "active", generation: 1 };
+  return {
+    ref: null, rows: [row], visibility: "visible",
+    coverage: { kind: lane === "granted" ? "granted" : "received-account", complete: true, observation: "interval" },
+    checkedAtMs: 1, freshness: "fresh", nextCursor: null,
+  };
+}
+
 const bridge = {
   onWorkspaceActivity: vi.fn(() => () => {}),
   readDiagnostics: vi.fn(async () => ({ text: "dohc diagnostics", available: { usage: false, errors: false } })),
   readUsageRecord: vi.fn(async () => ({ status: "readable", enabled: true, file: "/state/dohc-usage.json", since: null, incompleteDays: 0, rows: [] })),
-  listRelayShares: vi.fn(async () => ({ owned: [], received: [], removed: [] })),
+  requestAccessRefresh: vi.fn(async () => undefined),
+  listSharingAccess: vi.fn(async ({ lane }: { workspaceId: string; lane: "granted" | "received" }) => sharingAnswer(lane)),
   getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
   detectAgentTools: vi.fn(async () => ({ workingDirectory: "/workspace", tools: [] })),
   getMcpConfig: vi.fn(getDefaultMcpConfig),
@@ -969,23 +987,76 @@ describe("SettingsDialog", () => {
     expect(onOpenLiveDocuments).toHaveBeenCalledOnce();
   });
 
-  it("opens the Sharing view from each share list", async () => {
+  // Settings holds values. The share lists live in the Sharing view.
+  it("keeps share lists out of sync and sharing", async () => {
+    render(
+      <SettingsDialog
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="cloud"
+        onOpenSharing={() => {}}
+        onClose={() => {}}
+      />,
+    );
+
+    const section = await screen.findByTestId("settings-section-cloud");
+    expect(within(section).getByRole("button", { name: "Open sync and sharing" })).toBeTruthy();
+    expect(section.textContent).not.toContain("Shared by me");
+    expect(section.textContent).not.toContain("Shared with me");
+    expect(within(section).queryByRole("list")).toBeNull();
+    // Nothing reads the lists until a search asks.
+    expect(bridge.listSharingAccess).not.toHaveBeenCalled();
+  });
+
+  it("finds a share by name, and a list by its old section name, and opens Sharing on it", async () => {
     const onOpenSharing = vi.fn();
     const user = userEvent.setup();
     render(
       <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
-        initialSection="cloud"
         onOpenSharing={onOpenSharing}
         onClose={() => {}}
       />,
     );
 
-    await user.click(await screen.findByTestId("settings-manage-sharing-granted"));
-    await user.click(screen.getByTestId("settings-manage-sharing-received"));
-    expect(onOpenSharing).toHaveBeenCalledTimes(2);
-    expect(screen.getAllByRole("button", { name: "Manage in Sharing" })).toHaveLength(2);
+    const search = await screen.findByTestId(desktopPins.settingsSearch);
+    await user.type(search, "product-plan");
+    const share = await screen.findByRole("button", { name: /product-plan\.md/ });
+    // No section matches, so the result stands alone.
+    expect(screen.queryByTestId(desktopPins.settingsEmptySearch)).toBeNull();
+    expect(bridge.listSharingAccess).toHaveBeenCalledWith({ workspaceId: "ws-1", lane: "granted" });
+    expect(bridge.listSharingAccess).toHaveBeenCalledWith({ workspaceId: "ws-1", lane: "received" });
+    await user.click(share);
+    expect(onOpenSharing).toHaveBeenLastCalledWith({ lane: "granted", shareId: "share-plan" });
+
+    await user.clear(search);
+    await user.type(search, "shared with me");
+    const results = await screen.findByTestId("settings-sharing-results");
+    const lane = within(results).getAllByTestId("settings-sharing-result");
+    expect(lane.map((result) => result.textContent)).toEqual(["Shared with me"]);
+    await user.click(lane[0]!);
+    expect(onOpenSharing).toHaveBeenLastCalledWith({ lane: "received", shareId: null });
+    // The lists were read once for the dialog.
+    expect(bridge.listSharingAccess).toHaveBeenCalledTimes(2);
+  });
+
+  it("offers no Shared by me result in a shared view", async () => {
+    const user = userEvent.setup();
+    render(
+      <SettingsDialog
+        workspaceId="ws-1"
+        workspacePath="/x"
+        sharedView
+        onOpenSharing={() => {}}
+        onClose={() => {}}
+      />,
+    );
+
+    await user.type(await screen.findByTestId(desktopPins.settingsSearch), "shared");
+    const results = await screen.findByTestId("settings-sharing-results");
+    expect(within(results).getAllByTestId("settings-sharing-result").map((result) => result.dataset.lane)).toEqual(["received"]);
+    expect(bridge.listSharingAccess).not.toHaveBeenCalledWith(expect.objectContaining({ lane: "granted" }));
   });
 
   it("hides live documents in a shared view", async () => {
