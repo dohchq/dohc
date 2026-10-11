@@ -504,8 +504,10 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     // History's flat form: the snapshot person and the declared agent, never
     // the grant authority. The service keeps the same credit that owner
     // devices import.
+    // Import marks the relay-admitted person confirmed; the admitted snapshot carries no marker.
+    const importedHuman = {...human, relayConfirmed: true};
     const declaredCredit = [
-      {momentId: agentSettlement.record.momentId, imported: [agent, human]},
+      {momentId: agentSettlement.record.momentId, imported: [agent, importedHuman]},
       {momentId: automationSettlement.record.momentId, imported: [automation]},
     ] as const;
     const expectAuthors = (actual: unknown, expected: readonly unknown[]) => {
@@ -561,7 +563,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     expect(await momentAuthors(peerRpc, settledMomentId)).toBeNull();
     peer.close(); await peer.waitForExit(); peer = undefined;
     results.declaredAuthors = {
-      agent: {receipt: agentAck, settlement: agentSettlement, admitted: [human, agent], imported: [agent, human]},
+      agent: {receipt: agentAck, settlement: agentSettlement, admitted: [human, agent], imported: [agent, importedHuman]},
       automation: {receipt: automationAck, settlement: automationSettlement, admitted: [automationAdmitted], imported: [automation]},
     };
     // The service imports the admitted credit through its own background pull.
