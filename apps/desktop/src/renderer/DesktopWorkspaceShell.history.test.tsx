@@ -296,7 +296,7 @@ describe("history page", () => {
     ]));
     const user = userEvent.setup();
     renderShell(bridge);
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     await user.click(screen.getByTestId("activity-history"));
     expect(await screen.findByText("Wrote the outline")).toBeTruthy();
     expect(screen.getByText("You, trip-agent, ana@example.com and 1 more")).toBeTruthy();
