@@ -216,7 +216,7 @@ Shared configuration and unknown code inputs retain full verification.
 
 - One agent owns verification and the PR's evidence. Other agents run focused checks for their changes.
 - Run focused checks while implementing and during review rounds.
-- After the required reviews finish with no open blocking findings, the verification owner runs `pnpm verify:pr` once. If it fails, fix the cause, get the affected delta reviewed, and run it again.
+- After the required reviews finish with no open blocking findings, the verification owner runs `pnpm verify:pr` once, unless passing cloud evidence already covers the reviewed head. If it fails, fix the cause, get the affected delta reviewed, and run it again.
 - Before merging, require passing canonical gate evidence that covers the PR's changes.
 - After a rebase or merge, inspect the delta and reuse passing evidence when it still covers the change.
 - When reusing passing evidence, rerun only checks affected by source, dependency, configuration, or conflict-resolution changes. Advancing main alone does not require another gate run.
