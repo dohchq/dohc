@@ -206,15 +206,15 @@ describe("usage record in Privacy", () => {
     expect(screen.getAllByRole("row")).toHaveLength(ROWS.length + 1);
   });
 
-  it("says an unreadable record stays as it is, reports it once, and offers nothing that would write it", async () => {
+  it.each(["EACCES", "INVALID_USAGE_RECORD"])("reports %s once and offers nothing that would write the unreadable record", async code => {
     const onError = vi.fn();
-    bridge.readUsageRecord.mockResolvedValueOnce({ status: "unreadable", file: RECORD.file, code: "EACCES" });
+    bridge.readUsageRecord.mockResolvedValueOnce({ status: "unreadable", file: RECORD.file, code });
     render(<UsageRecordSettings onError={onError} />);
     const unreadable = await screen.findByTestId("usage-record-unreadable");
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onError).toHaveBeenCalledWith(
-      "dohc could not read the usage record (EACCES). dohc leaves the file as it is and counts nothing. Restart dohc to try again.");
-    expect(unreadable.textContent).toContain("dohc could not read the usage record (EACCES).");
+      `dohc could not read the usage record (${code}). dohc leaves the file as it is and counts nothing. Restart dohc to try again.`);
+    expect(unreadable.textContent).toContain(`dohc could not read the usage record (${code}).`);
     expect(unreadable.textContent).toContain("dohc leaves the file as it is and counts nothing.");
     expect(screen.queryByRole("switch")).toBeNull();
     expect(screen.queryByTestId("usage-record-clear")).toBeNull();

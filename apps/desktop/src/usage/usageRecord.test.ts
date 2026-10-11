@@ -117,6 +117,28 @@ describe("usage record bridge", () => {
     expect(io.rm).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["bad JSON", "not JSON"],
+    ["schema mismatch", '{"version":1,"enabled":false}'],
+    ["newer schema", '{"version":2,"enabled":false,"cleanExit":true,"days":[],"counts":[],"coverage":[]}'],
+  ])("exposes %s to Privacy as unreadable without replacing it", async (_reason, raw) => {
+    const { store, io, disk, call } = setup();
+    disk.set(FILE, raw);
+    await store.load();
+    await expect(call("readUsageRecord", {})).resolves.toEqual({
+      status: "unreadable", file: FILE, code: "INVALID_USAGE_RECORD",
+    });
+    await expect(call("clearUsageRecord", {})).rejects.toMatchObject({ code: "INVALID_USAGE_RECORD" });
+    await expect(call("setUsageRecordEnabled", { enabled: true })).rejects.toMatchObject({ code: "INVALID_USAGE_RECORD" });
+    expect(store.recordSuccess({ capabilityId: "version.try", door: "renderer" })).toBe(false);
+    await vi.advanceTimersByTimeAsync(86_400_000);
+    await store.close();
+    expect(disk.get(FILE)).toBe(raw);
+    expect(io.writeFile).not.toHaveBeenCalled();
+    expect(io.rename).not.toHaveBeenCalled();
+    expect(io.rm).not.toHaveBeenCalled();
+  });
+
   it("fails a read before the store exists instead of calling it unreadable", async () => {
     const handlers = usageRecordHandlers({ store: () => undefined, file: () => FILE, coverage: DESKTOP_USAGE_COVERAGE });
     await expect(handlers.readUsageRecord({}, { event: undefined })).rejects.toThrow("has not opened the usage record");

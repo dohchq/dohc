@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { localUsageDay, UsageSnapshot, type UsageBuildPair, type UsageSnapshot as Snapshot } from "@dohc/workspace-contracts/usage";
 import { deferred } from "../testing/deferred";
 import { createTestScratch } from "../workspaces/testTemp";
-import { createUsageStore, USAGE_PENDING_LIMIT, USAGE_SNAPSHOT_NAME, type UsageFileSystem } from "./usageStore";
+import { createUsageStore, USAGE_PENDING_LIMIT, USAGE_SNAPSHOT_NAME, USAGE_WRITE_INTERVAL_MS, type UsageFileSystem } from "./usageStore";
 
 const pair = { capabilityId: "version.try", door: "renderer" } as const;
 const mapping: UsageBuildPair[] = [{ ...pair, status: "covered" }];
@@ -202,14 +202,6 @@ describe("local usage store", () => {
     await vi.advanceTimersByTimeAsync(30_000);
     expect(saved().counts[0]!.count).toBe(2);
   });
-  it.each(["clear", "off"] as const)("allows %s on a corrupt record without successful decoding", async action => {
-    const { store, disk, path, saved } = memoryStore();
-    disk.set(path, '{"enabled":false,"content":"corrupt"}');
-    disk.set(path + ".tmp", "interrupted");
-    if (action === "clear") await store.clear(); else await store.setEnabled(false);
-    expect(saved()).toMatchObject({ enabled: false, counts: [], days: [{ complete: false }] });
-    if (action === "clear") expect(disk.has(path + ".tmp")).toBe(false);
-  });
   it.each(["clear", "off"] as const)("drops retired ids and permits %s while keeping known data where appropriate", async action => {
     const initial = { ...seed(), counts: [{ ...pair, day: today(), count: 3 },
       { capabilityId: "retired.action", door: "renderer", day: today(), count: 9 }],
@@ -267,22 +259,48 @@ describe("local usage store", () => {
     expect(disk.has(path + ".tmp")).toBe(false);
     expect(store.recordSuccess(pair)).toBe(action === "on");
   });
-  it("keeps collection Off when a saved Off record becomes torn", async () => {
-    const { store, restart, disk, path, saved } = memoryStore();
-    await store.load(); store.recordSuccess(pair); await store.setEnabled(false); await store.close();
-    expect(saved().enabled).toBe(false);
-    disk.set(path, '{"version":1,"enabled":false,"counts":[');
-    const next = restart(); await next.load();
-    expect(saved()).toMatchObject({ enabled: false, counts: [], days: [{ complete: false }] });
-    expect(next.recordSuccess(pair)).toBe(false);
-    await next.clear();
-    expect(saved().enabled).toBe(false);
-  });
-  it.each(['{"enabled":true,"content":"corrupt"}', "not JSON"])("defaults a read but unrecoverable record to Off", async raw => {
-    const { store, disk, path, saved } = memoryStore();
-    disk.set(path, raw); await store.load();
-    expect(saved()).toMatchObject({ enabled: false, counts: [], days: [{ complete: false }] });
+  it.each([
+    ["bad JSON", '{"version":1,"enabled":false,"counts":['],
+    ["schema mismatch", JSON.stringify({ version: 1, enabled: false, cleanExit: true, days: [], counts: "invalid", coverage: [] })],
+    ["newer schema", JSON.stringify({ version: 2, enabled: false, cleanExit: true, days: [], counts: [], coverage: [] })],
+  ])("preserves %s across launch, controls, midnight, close and restart", async (_reason, raw) => {
+    const { store, io, disk, path, restart } = memoryStore();
+    disk.set(path, raw);
+    disk.set(path + ".tmp", "interrupted snapshot");
+    expect(store.recordSuccess(pair)).toBe(true);
+    await store.load();
+    expect(disk.get(path)).toBe(raw);
     expect(store.recordSuccess(pair)).toBe(false);
+    await expect(store.read()).rejects.toMatchObject({ code: "INVALID_USAGE_RECORD" });
+    await expect(store.query(query())).rejects.toMatchObject({ code: "INVALID_USAGE_RECORD" });
+    await expect(store.setEnabled(false)).rejects.toMatchObject({ code: "INVALID_USAGE_RECORD" });
+    await expect(store.setEnabled(true)).rejects.toMatchObject({ code: "INVALID_USAGE_RECORD" });
+    await expect(store.clear()).rejects.toMatchObject({ code: "INVALID_USAGE_RECORD" });
+    await expect(store.flush()).rejects.toMatchObject({ code: "INVALID_USAGE_RECORD" });
+    await vi.advanceTimersByTimeAsync(86_400_000 + USAGE_WRITE_INTERVAL_MS);
+    await store.close();
+    expect(disk.get(path)).toBe(raw);
+    expect(disk.get(path + ".tmp")).toBe("interrupted snapshot");
+    const next = restart();
+    await next.load();
+    expect(next.recordSuccess(pair)).toBe(false);
+    await expect(next.read()).rejects.toMatchObject({ code: "INVALID_USAGE_RECORD" });
+    await next.close();
+    expect(io.writeFile).not.toHaveBeenCalled();
+    expect(io.rename).not.toHaveBeenCalled();
+    expect(io.rm).not.toHaveBeenCalled();
+    expect(disk.get(path)).toBe(raw);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("loads an externally repaired record on a control without restoring queued successes", async () => {
+    const { store, disk, path, saved } = memoryStore();
+    disk.set(path, "not JSON");
+    store.recordSuccess(pair);
+    await store.load();
+    disk.set(path, JSON.stringify(seed(false)));
+    await store.setEnabled(true);
+    expect(saved()).toMatchObject({ enabled: true, counts: [] });
+    expect(store.recordSuccess(pair)).toBe(true);
   });
   it("ignores interrupted temporary snapshots and can retry a failed Clear", async () => {
     const { store, io, saved, disk, path } = memoryStore();
