@@ -50,6 +50,23 @@ afterEach(() => {
 });
 
 describe("RecordHistoryDialog", () => {
+  it("shows a confirmed person without an automation label", async () => {
+    stub(async () => ({ entries: [entry(1, { kind: "human", name: "Ana" })], nextBeforeHistoryId: null }));
+    render(dialog());
+    const row = await screen.findByTestId("record-history-entry");
+    expect(row.textContent).toContain("Ana");
+    expect(within(row).queryByTestId("record-history-automation")).toBeNull();
+    expect(within(row).queryByRole("button", { name: "View run" })).toBeNull();
+  });
+
+  it("shows the agent and the confirmed person it acted for", async () => {
+    stub(async () => ({ entries: [entry(1, { kind: "agent", name: "Agent", person: "Ana" })], nextBeforeHistoryId: null }));
+    render(dialog());
+    expect((await screen.findByTestId("record-history-entry")).textContent).toContain("Agent for Ana");
+    expect(screen.getByText("Agent").classList.contains("text-agent")).toBe(true);
+    expect(screen.getByText("for Ana").classList.contains("text-muted")).toBe(true);
+  });
+
   it("names an automation for its changes, one row per run, and opens the run this computer keeps", async () => {
     const bridge = stub(async () => ({
       entries: [
