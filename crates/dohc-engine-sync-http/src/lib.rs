@@ -523,92 +523,120 @@ impl HttpRelayTransport {
         overflow: RelayError,
         cancelled: Option<&dyn Fn() -> bool>,
     ) -> Result<(Vec<u8>, Option<String>), RelayError> {
-        let mut response = response.map_err(map_transport_error)?;
+        let response = response.map_err(map_transport_error)?;
         if cancelled.is_some_and(|cancelled| cancelled()) {
             return Err(cancelled_relay_request());
         }
         if !response.status().is_success() {
-            let error = map_http_error(&mut response, context);
-            return if cancelled.is_some_and(|cancelled| cancelled()) {
-                Err(cancelled_relay_request())
-            } else {
-                Err(error)
+            let status = response.status().as_u16();
+            if status == 401 {
+                return Err(RelayError::Unauthorized);
+            }
+            let body = read_response_body(
+                response,
+                MAX_ERROR_RESPONSE_BYTES,
+                RelayError::InvalidResponse,
+                cancelled,
+            );
+            if cancelled.is_some_and(|cancelled| cancelled()) {
+                return Err(cancelled_relay_request());
+            }
+            let code = match body {
+                Ok(bytes) => serde_json::from_slice::<ErrorBody>(&bytes)
+                    .ok()
+                    .and_then(|body| body.code),
+                Err(error) if error == cancelled_relay_request() => return Err(error),
+                Err(_) => None,
             };
+            return Err(classify_http_error(status, code.as_deref(), context));
         }
         let etag = response
             .headers()
             .get("etag")
             .and_then(|value| value.to_str().ok())
             .and_then(parse_etag);
-        let mut reader = response
-            .into_body()
-            .into_with_config()
-            .limit(read_limit_bytes as u64)
-            .reader();
-        let Some(cancelled) = cancelled else {
+        read_response_body(response, read_limit_bytes as u64, overflow, cancelled)
+            .map(|bytes| (bytes, etag))
+    }
+}
+
+fn read_response_body(
+    response: Response<Body>,
+    read_limit_bytes: u64,
+    overflow: RelayError,
+    cancelled: Option<&dyn Fn() -> bool>,
+) -> Result<Vec<u8>, RelayError> {
+    let mut reader = response
+        .into_body()
+        .into_with_config()
+        .limit(read_limit_bytes)
+        .reader();
+    let Some(cancelled) = cancelled else {
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 64 * 1024];
+        loop {
+            let read = std::io::Read::read(&mut reader, &mut chunk)
+                .map_err(|error| map_body_read_error(error, &overflow))?;
+            if read == 0 {
+                return Ok(bytes);
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+        }
+    };
+
+    let permit = acquire_body_read_worker(cancelled)?;
+    let (message_tx, message_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::Builder::new()
+        .name("dohc-relay-body-read".to_owned())
+        .spawn(move || {
+            let _permit = permit;
             let mut bytes = Vec::new();
             let mut chunk = [0_u8; 64 * 1024];
             loop {
                 let read = std::io::Read::read(&mut reader, &mut chunk)
-                    .map_err(|error| map_body_read_error(error, &overflow))?;
-                if read == 0 {
-                    return Ok((bytes, etag));
-                }
-                bytes.extend_from_slice(&chunk[..read]);
-            }
-        };
-
-        let permit = acquire_body_read_worker(cancelled)?;
-        let (message_tx, message_rx) = std::sync::mpsc::channel();
-        let worker = std::thread::Builder::new()
-            .name("dohc-relay-body-read".to_owned())
-            .spawn(move || {
-                let _permit = permit;
-                let mut bytes = Vec::new();
-                let mut chunk = [0_u8; 64 * 1024];
-                loop {
-                    let read = std::io::Read::read(&mut reader, &mut chunk)
-                        .map_err(|error| map_body_read_error(error, &overflow));
-                    match read {
-                        Ok(0) => {
-                            let _ = message_tx.send(BodyReadWorkerMessage::Finished(Ok(bytes)));
-                            return;
-                        }
-                        Ok(read) => {
-                            bytes.extend_from_slice(&chunk[..read]);
-                            if message_tx.send(BodyReadWorkerMessage::Progress).is_err() {
-                                return;
-                            }
-                        }
-                        Err(error) => {
-                            let _ = message_tx.send(BodyReadWorkerMessage::Finished(Err(error)));
+                    .map_err(|error| map_body_read_error(error, &overflow));
+                match read {
+                    Ok(0) => {
+                        let _ = message_tx.send(BodyReadWorkerMessage::Finished(Ok(bytes)));
+                        return;
+                    }
+                    Ok(read) => {
+                        bytes.extend_from_slice(&chunk[..read]);
+                        if message_tx.send(BodyReadWorkerMessage::Progress).is_err() {
                             return;
                         }
                     }
+                    Err(error) => {
+                        let _ = message_tx.send(BodyReadWorkerMessage::Finished(Err(error)));
+                        return;
+                    }
                 }
-            })
-            .map_err(|_| RelayError::InvalidResponse)?;
+            }
+        })
+        .map_err(|_| RelayError::InvalidResponse)?;
 
-        loop {
-            match message_rx.recv_timeout(CANCELLABLE_BODY_READ_POLL_INTERVAL) {
-                Ok(BodyReadWorkerMessage::Progress) => {}
-                Ok(BodyReadWorkerMessage::Finished(result)) => {
-                    worker.join().map_err(|_| RelayError::InvalidResponse)?;
-                    return if cancelled() {
-                        Err(cancelled_relay_request())
-                    } else {
-                        result.map(|bytes| (bytes, etag))
-                    };
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    worker.join().map_err(|_| RelayError::InvalidResponse)?;
-                    return Err(RelayError::InvalidResponse);
-                }
+    loop {
+        match message_rx.recv_timeout(CANCELLABLE_BODY_READ_POLL_INTERVAL) {
+            Ok(BodyReadWorkerMessage::Progress) => {
+                #[cfg(test)]
+                tests::signal_body_read_progress();
             }
-            if cancelled() {
-                return Err(cancelled_relay_request());
+            Ok(BodyReadWorkerMessage::Finished(result)) => {
+                worker.join().map_err(|_| RelayError::InvalidResponse)?;
+                return if cancelled() {
+                    Err(cancelled_relay_request())
+                } else {
+                    result
+                };
             }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                worker.join().map_err(|_| RelayError::InvalidResponse)?;
+                return Err(RelayError::InvalidResponse);
+            }
+        }
+        if cancelled() {
+            return Err(cancelled_relay_request());
         }
     }
 }
@@ -1232,8 +1260,12 @@ fn map_http_error(response: &mut Response<Body>, context: RequestContext) -> Rel
         .read_json::<ErrorBody>()
         .ok()
         .and_then(|body| body.code);
+    classify_http_error(status, code.as_deref(), context)
+}
+
+fn classify_http_error(status: u16, code: Option<&str>, context: RequestContext) -> RelayError {
     if let Some(code) = code {
-        return map_server_code(&code, context);
+        return map_server_code(code, context);
     }
     match status {
         300..=399 => RelayError::BadRequest,
@@ -1583,6 +1615,19 @@ mod tests {
 
     use super::*;
 
+    thread_local! {
+        static BODY_READ_PROGRESS: std::cell::RefCell<Option<std::sync::mpsc::Sender<()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn signal_body_read_progress() {
+        BODY_READ_PROGRESS.with_borrow_mut(|signal| {
+            if let Some(signal) = signal.take() {
+                let _ = signal.send(());
+            }
+        });
+    }
+
     #[derive(Deserialize)]
     struct RelayErrorFixture {
         code: String,
@@ -1748,6 +1793,59 @@ mod tests {
             String::from_utf8_lossy(&request).into_owned()
         });
         (base, handle)
+    }
+
+    #[test]
+    fn cancellable_error_reads_preserve_codes_statuses_and_the_error_body_bound() {
+        let cases = [
+            (
+                401,
+                r#"{"code":"blob_not_found"}"#.to_owned(),
+                RelayError::Unauthorized,
+            ),
+            (403, "not JSON".to_owned(), RelayError::Forbidden),
+            (404, "{}".to_owned(), RelayError::WorkspaceUnavailable),
+            (500, "{}".to_owned(), RelayError::ServerInternal),
+            (
+                500,
+                r#"{"code":"blob_not_found"}"#.to_owned(),
+                RelayError::BlobMissing,
+            ),
+            (
+                500,
+                r#"{"code":"future_code"}"#.to_owned(),
+                RelayError::UnknownServerCode("future_code".to_owned()),
+            ),
+            (
+                500,
+                format!(
+                    r#"{{"code":"blob_not_found","padding":"{}"}}"#,
+                    "x".repeat(MAX_ERROR_RESPONSE_BYTES as usize)
+                ),
+                RelayError::ServerInternal,
+            ),
+        ];
+        for (status, body, expected) in cases {
+            let (base, server) = answer_once(status, body);
+            let transport = HttpRelayTransport::new_insecure_loopback_for_tests(base, "token")
+                .expect("loopback transport");
+            let outcome = transport
+                .download_blobs_cancellable(
+                    BlobDownloadBatchRequest {
+                        workspace_id: "workspace".to_owned(),
+                        replication_epoch: "epoch".to_owned(),
+                        stream_identity: "stream".to_owned(),
+                        blobs: vec![dohc_engine_sync::BlobDownloadSpec {
+                            sha256: "blob".to_owned(),
+                            limit_bytes: 8,
+                        }],
+                    },
+                    || false,
+                )
+                .expect("download batch");
+            server.join().expect("server");
+            assert_eq!(outcome.results, vec![Err(expected)], "status {status}");
+        }
     }
 
     #[test]
@@ -2190,7 +2288,18 @@ mod tests {
 
     #[test]
     fn cancelling_a_stalled_tls_blob_body_settles_before_body_release() {
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        assert_stalled_blob_body_cancels(200, "partdone");
+    }
+
+    #[test]
+    fn cancelling_stalled_tls_blob_error_bodies_settles_before_body_release() {
+        for status in [404, 500] {
+            assert_stalled_blob_body_cancels(status, r#"{"code":"blob_not_found"}"#);
+        }
+    }
+
+    fn assert_stalled_blob_body_cancels(status: u16, body: &'static str) {
+        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::mpsc;
         use std::time::Duration;
 
@@ -2217,12 +2326,17 @@ mod tests {
             let mut stream = StreamOwned::new(connection, stream);
             let mut request = [0_u8; 4096];
             let _ = stream.read(&mut request).expect("TLS request");
+            let partial_response = format!(
+                "HTTP/1.1 {status} Answer\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                &body[..4],
+            );
             stream
-                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 8\r\nconnection: close\r\n\r\npart")
+                .write_all(partial_response.as_bytes())
                 .expect("partial TLS blob response");
             stream.flush().expect("partial TLS blob flush");
             release_body_rx.recv().expect("release stalled body");
-            let _ = stream.write_all(b"done");
+            let _ = stream.write_all(&body.as_bytes()[4..]);
             let _ = stream.flush();
         });
         let tls_config = ureq::tls::TlsConfig::builder()
@@ -2238,10 +2352,8 @@ mod tests {
         let (outcome_tx, outcome_rx) = mpsc::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
         let request_cancelled = Arc::clone(&cancelled);
-        let checks = Arc::new(AtomicUsize::new(0));
-        let request_checks = Arc::clone(&checks);
-        const MID_BODY_CHECK_THRESHOLD: usize = 7;
         let request_thread = thread::spawn(move || {
+            BODY_READ_PROGRESS.with_borrow_mut(|signal| *signal = Some(mid_body_tx));
             let outcome = transport.download_blobs_cancellable(
                 BlobDownloadBatchRequest {
                     workspace_id: "workspace".to_owned(),
@@ -2252,35 +2364,26 @@ mod tests {
                         limit_bytes: 8,
                     }],
                 },
-                || {
-                    let cancelled = request_cancelled.load(Ordering::SeqCst);
-                    let check_count = request_checks.fetch_add(1, Ordering::SeqCst) + 1;
-                    if check_count >= MID_BODY_CHECK_THRESHOLD {
-                        mid_body_tx.send(()).expect("mid-body signal");
-                    }
-                    cancelled
-                },
+                || request_cancelled.load(Ordering::SeqCst),
             );
             outcome_tx.send(outcome).expect("blob request outcome");
         });
 
-        mid_body_rx
-            .recv_timeout(Duration::from_secs(10))
-            .expect("client checks cancellation after reading partial body");
+        let partial_body_read = mid_body_rx.recv_timeout(Duration::from_secs(10));
         cancelled.store(true, Ordering::SeqCst);
         let outcome_before_release = outcome_rx.recv_timeout(Duration::from_secs(1));
 
-        release_body_tx.send(()).expect("release TLS server");
+        let _ = release_body_tx.send(());
         request_thread.join().expect("blob request thread");
         server_thread.join().expect("TLS server thread");
 
+        partial_body_read.expect("client reads partial body before cancellation");
         let outcome = outcome_before_release
             .expect("cancellation must settle while the next body chunk is still stalled");
         assert!(
             matches!(&outcome, Err(RelayError::Local(reason)) if reason == "relay-io-cancelled"),
             "a cancelled body must not expose the bytes read before cancellation: {outcome:?}"
         );
-        assert!(checks.load(Ordering::SeqCst) >= 7);
     }
 
     #[test]

@@ -138,8 +138,8 @@ impl ErrorCode {
     }
 
     /// Default retryability classification for this code. A response may
-    /// override it (e.g. `INTERNAL` after a definitely-not-committed write
-    /// can be `afterBackoff`), but the default is what generated clients use.
+    /// override it. An `INTERNAL` response with `afterBackoff` may follow a
+    /// committed write, so mutation retries must keep the original idempotency key.
     pub const fn default_retryability(self) -> Retryability {
         match self {
             ErrorCode::AuthFailed
