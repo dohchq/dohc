@@ -2192,7 +2192,7 @@ describe("unavailable MCP launcher settings", () => {
     await user.keyboard("{Control>}k{/Control}");
     await user.click(
       await within(await screen.findByTestId("command-palette")).findByText(
-        "Settings: Open Agents & MCP",
+        "Settings: Open Agents (MCP)",
       ),
     );
 

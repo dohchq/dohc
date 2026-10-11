@@ -24,7 +24,10 @@ import { SlashCommandMenu, type SlashCommandState } from "../editor/slashCommand
 import { buildTableMenu, type TableMenuRow } from "../editor/tableControls";
 import { OverlayFrame } from "../Overlay";
 import { CollectionUnavailable } from "../TransactionalCollectionPage";
-import { ColorControl, HueControl, SwitchControl, TextControl } from "../settings/SettingRow";
+import { ColorControl, HueControl, SettingRow, StepperControl, SwitchControl, TextControl, ThemeControl } from "../settings/SettingRow";
+import { PreferredNameControl } from "../settings/PreferredNameControl";
+import { SettingsNav } from "../settings/SettingsNav";
+import { SETTINGS_SECTIONS } from "../settings/settingsRegistry";
 import { UsageRecordCard, UsageRecordClearConfirm, type UsageRecordView } from "../settings/UsageRecordSettings";
 import { ConfirmDialogCard } from "../ui/ConfirmDialog";
 import { CopyButton, CopyField } from "../ui/CopyButton";
@@ -1639,7 +1642,103 @@ function Pane(props: { theme: "light" | "dark" }) {
           <ChatThreadSpecimen />
         </Specimen>
       </Section>
+
+      {/* After Chat rows, so the parts above keep their places. */}
+      <Section part="settings-frame" title="Settings frame">
+        <Specimen label="General chosen, Appearance hovered, keyboard focus on Files; a changed row">
+          <div
+            className="flex h-[420px] w-[688px] overflow-hidden rounded-xl border border-line bg-bg"
+            data-force-state="hover"
+            data-force-target='[data-testid="settings-nav-appearance"]'
+          >
+            <div className="flex" data-force-state="focus focus-visible" data-force-target='[data-testid="settings-nav-files"]'>
+              <SettingsNav workspacePath={SETTINGS_WORKSPACE} sections={SETTINGS_SECTIONS} activeSection="general"
+                onSelect={noop} query="" onQuery={noop} />
+            </div>
+            {/* No close button here, so no room is kept for one. */}
+            <div className="min-w-0 flex-1 px-8 py-7">
+              <div className="max-w-[640px]">
+                <SettingRow title="Your name">
+                  <PreferredNameControl value="Ada" onChange={async () => undefined} testIdPrefix={`states-name-${theme}`} />
+                </SettingRow>
+                <SettingRow title="Editor font" modified onReset={noop}>
+                  <SegmentedControl label="Editor font" value="serif" options={EDITOR_FONT_OPTIONS} onChange={noop} />
+                </SettingRow>
+              </div>
+            </div>
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="theme-picker" title="Theme picker">
+        <Specimen label="System chosen">
+          <ThemeControl value="system" onChange={noop} />
+        </Specimen>
+        <Specimen label="Dark chosen, Light hovered">
+          <div data-force-state="hover" data-force-target='[role="radio"]:nth-child(2)'>
+            <ThemeControl value="dark" onChange={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="keyboard focus on the chosen">
+          <div data-force-state="focus focus-visible" data-force-target='[aria-checked="true"]'>
+            <ThemeControl value="light" onChange={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="changed, in its row: the dot and the reset">
+          <div className="w-[560px]">
+            <SettingRow title="Theme" modified onReset={noop}>
+              <ThemeControl value="dark" onChange={noop} />
+            </SettingRow>
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="zoom-stepper" title="Zoom stepper">
+        <Specimen label="100%">
+          <ZoomSpecimen percent={100} />
+        </Specimen>
+        <Specimen label="+ hovered">
+          <div data-force-state="hover" data-force-target='[aria-label="Zoom in"]'>
+            <ZoomSpecimen percent={100} />
+          </div>
+        </Specimen>
+        <Specimen label="keyboard focus on the value">
+          <div data-force-state="focus focus-visible" data-force-target='[aria-label^="Reset zoom"]'>
+            <ZoomSpecimen percent={110} />
+          </div>
+        </Specimen>
+        <Specimen label="at the largest: + disabled">
+          <ZoomSpecimen percent={300} atMost />
+        </Specimen>
+        <Specimen label="changed, in its row: the dot and the reset">
+          <div className="w-[560px]">
+            <SettingRow title="Zoom" modified onReset={noop}>
+              <ZoomSpecimen percent={110} />
+            </SettingRow>
+          </div>
+        </Specimen>
+      </Section>
     </section>
+  );
+}
+
+const SETTINGS_WORKSPACE = "C:\\Users\\ada\\Documents\\trip";
+const EDITOR_FONT_OPTIONS = [
+  { value: "sans", label: "Sans" },
+  { value: "serif", label: "Serif" },
+  { value: "mono", label: "Mono" },
+];
+
+// Appearance's zoom stepper, with the keys this platform shows.
+function ZoomSpecimen(props: { percent: number; atMost?: boolean }) {
+  return (
+    <StepperControl
+      setting="zoom"
+      value={`${props.percent}%`}
+      decrease={{ label: "Zoom out", keys: ["Ctrl", "-"], onClick: noop }}
+      reset={{ label: "Reset to 100%", to: "100%", keys: ["Ctrl", "0"], onClick: noop }}
+      increase={{ label: "Zoom in", keys: ["Ctrl", "="], disabled: props.atMost, onClick: noop }}
+    />
   );
 }
 

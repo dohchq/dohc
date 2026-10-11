@@ -91,9 +91,9 @@ export function Overlay(props: {
       if (!isTopOverlay(idRef.current)) return;
       if (switchModalRegion(event, panelRef.current)) return;
       if (event.key === "Escape") {
-        // One Escape closes one surface: a menu open inside the dialog takes
-        // this one, and the next reaches the dialog.
-        if (event.target instanceof Element && event.target.closest("[role='menu']")) return;
+        // One Escape closes one surface: a menu or a control's tooltip open
+        // inside the dialog takes this one, and the next reaches the dialog.
+        if (event.target instanceof Element && event.target.closest("[role='menu'], [data-tooltip-open]")) return;
         event.stopPropagation();
         onCloseRef.current?.();
         return;

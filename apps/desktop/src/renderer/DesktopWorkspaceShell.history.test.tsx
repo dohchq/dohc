@@ -2576,7 +2576,7 @@ describe("history page", () => {
     await user.keyboard("{Control>}k{/Control}");
     await user.click(
       await within(await screen.findByTestId("command-palette")).findByText(
-        "Settings: Open Agents & MCP",
+        "Settings: Open Agents (MCP)",
       ),
     );
     await screen.findByTestId("mcp-enable-toggle");
@@ -2918,7 +2918,7 @@ describe("history page", () => {
     await user.keyboard("{Control>}k{/Control}");
     await user.click(
       await within(await screen.findByTestId("command-palette")).findByText(
-        "Settings: Open Agents & MCP",
+        "Settings: Open Agents (MCP)",
       ),
     );
     await screen.findByTestId("mcp-enable-toggle");

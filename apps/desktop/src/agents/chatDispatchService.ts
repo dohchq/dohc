@@ -885,7 +885,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         try {
           options.onDispatchNotice?.(workspace, {
             reason: "no-runner", threadId,
-            message: `No agent could take this request. ${command ? "Agent dispatch is off." : "No agent runner is configured."} Set up agent dispatch in Settings → Agents & MCP.`,
+            message: `No agent could take this request. ${command ? "Agent dispatch is off." : "No agent runner is configured."} Set up agent dispatch in Settings → Agents.`,
           });
         } catch (error) {
           reportError(error);
