@@ -328,6 +328,7 @@ const VERSIONED_PARAM_SHAPES = {
     optionalI64: ["limit", "beforeMomentOrder"],
   },
   [VERSIONED_METHOD.momentsGet]: { requiredStrings: ["momentId"] },
+  [VERSIONED_METHOD.publicationApplied]: { requiredStrings: ["requestId", "momentId"] },
   [VERSIONED_METHOD.historyPage]: {
     requiredStrings: ["workspaceId"],
     optionalStrings: ["objectId"],
@@ -385,7 +386,7 @@ interface WorkspaceState {
   moments: Map<string, InternalMoment>;
   secretMoments: Map<string, InternalSecretMoment>;
   blobs: Map<string, number[]>;
-  replays: Map<string, { fingerprint: string; result: JsonObject }>;
+  replays: Map<string, { fingerprint: string; result: JsonObject; published: boolean }>;
 }
 
 interface ParsedWriteFields {
@@ -615,6 +616,11 @@ function validatePreWorkspaceSemantics(method: string, params: JsonObject): void
     case VERSIONED_METHOD.momentsGet:
       if (serdeRequiredParamString(params, "momentId") === "") {
         throw new Error("momentId must not be empty");
+      }
+      break;
+    case VERSIONED_METHOD.publicationApplied:
+      if (serdeRequiredParamString(params, "requestId") === "" || serdeRequiredParamString(params, "momentId") === "") {
+        throw new Error("requestId and momentId must not be empty");
       }
       break;
     case VERSIONED_METHOD.secretsApply:
@@ -1256,6 +1262,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
         return this.momentsList(state, params);
       case VERSIONED_METHOD.momentsGet:
         return this.momentsGet(state, params);
+      case VERSIONED_METHOD.publicationApplied:
+        return this.publicationApplied(state, params);
       case VERSIONED_METHOD.historyPage:
         return this.historyPage(state, params);
       case VERSIONED_METHOD.searchEnsureIndex:
@@ -2630,6 +2638,16 @@ export class VersionedLoopbackEngine implements EngineTransport {
     return moment ? this.capMoment(moment.wire) : null;
   }
 
+  // As in the daemon's request ledger, a request binds to the one moment its
+  // recorded result names.
+  private publicationApplied(state: WorkspaceState, params: JsonObject): boolean {
+    const momentId = requiredString(params, "momentId", "publication applied");
+    const recorded = state.replays.get(requiredString(params, "requestId", "publication applied"));
+    const moment = recorded?.result.moment;
+    return recorded?.published === true && state.moments.has(momentId) &&
+      typeof moment === "object" && moment !== null && !Array.isArray(moment) && moment.momentId === momentId;
+  }
+
   private historyPage(state: WorkspaceState, params: JsonObject): JsonValue {
     const activeVersionId = state.activeVersionId;
     if (!state.versioned || activeVersionId === undefined) {
@@ -2826,6 +2844,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
       state.replays.set(requestId, {
         fingerprint,
         result,
+        // The daemon records a write's publication outcome, and confirms a
+        // checked delete once it reaches disk. This engine publishes as it records.
+        published: result.materializeOutcome === undefined
+          ? typeof params.expectedSha256 === "string"
+          : result.materializeOutcome === "applied",
       });
     }
   }

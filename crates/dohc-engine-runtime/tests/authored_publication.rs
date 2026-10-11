@@ -85,6 +85,346 @@ fn create() -> WriteConditions {
         expected_sha256: None,
     }
 }
+async fn publish_binary(
+    actor: &ActorHandle,
+    root: &Path,
+    input: WriteBinary,
+    conditions: WriteConditions,
+    faults: Arc<dyn FaultInjector>,
+) -> Outcome {
+    actor
+        .versioned_binary_write_with_conditions(
+            input,
+            root.into(),
+            conditions,
+            Arc::new(()),
+            faults,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .materialize_outcome
+}
+async fn applied(actor: &ActorHandle, request: &str, moment: &str) -> bool {
+    actor
+        .publication_applied("publish".into(), request.into(), moment.into())
+        .await
+        .unwrap()
+}
+async fn publish_older(
+    actor: &ActorHandle,
+    root: &Path,
+    binary_write: bool,
+    faults: Arc<dyn FaultInjector>,
+) -> Outcome {
+    if binary_write {
+        publish_binary(actor, root, binary("older"), create(), faults).await
+    } else {
+        publish(
+            actor,
+            root,
+            text("older", "note.txt", "older"),
+            create(),
+            faults,
+        )
+        .await
+        .unwrap()
+        .materialize_outcome
+    }
+}
+/// Another person's later edit, already on disk when it is recorded.
+async fn publish_newer(actor: &ActorHandle, root: &Path, binary_write: bool) -> Vec<u8> {
+    if binary_write {
+        let input = WriteBinary {
+            bytes: vec![1, 0, 254],
+            ..binary("newer")
+        };
+        std::fs::write(root.join(&input.path), &input.bytes).unwrap();
+        let bytes = input.bytes.clone();
+        let outcome = publish_binary(
+            actor,
+            root,
+            input,
+            WriteConditions::default(),
+            Arc::new(NoFaults),
+        )
+        .await;
+        assert_eq!(outcome, Outcome::Applied);
+        bytes
+    } else {
+        std::fs::write(root.join("note.txt"), "newer").unwrap();
+        let result = publish(
+            actor,
+            root,
+            text("newer", "note.txt", "newer"),
+            WriteConditions::default(),
+            Arc::new(NoFaults),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.materialize_outcome, Outcome::Applied);
+        b"newer".to_vec()
+    }
+}
+
+#[tokio::test]
+async fn replay_confirms_only_a_publication_that_reached_disk() {
+    for binary_write in [false, true] {
+        for superseded in [false, true] {
+            let scratch = ScratchDir::new().unwrap();
+            let db = engine_db_path(&scratch).unwrap();
+            let supervisor = WorkspaceSupervisor::new();
+            let actor = supervisor.open(&db, 1).unwrap().actor;
+            let path = if binary_write {
+                "asset.bin"
+            } else {
+                "note.txt"
+            };
+            let crash = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit);
+            assert_eq!(
+                publish_older(&actor, scratch.path(), binary_write, crash).await,
+                Outcome::Error
+            );
+            assert!(!applied(&actor, "older", "moment-older").await);
+            let newer = if superseded {
+                Some(publish_newer(&actor, scratch.path(), binary_write).await)
+            } else {
+                None
+            };
+            supervisor.close(&db).unwrap();
+            let actor = supervisor.open(&db, 2).unwrap().actor;
+            actor
+                .materialize_replay_pending(scratch.path().into(), "publish".into(), 20)
+                .await
+                .unwrap();
+            // A superseded job reads complete, yet its bytes never landed.
+            assert_eq!(applied(&actor, "older", "moment-older").await, !superseded);
+            let newer = match newer {
+                Some(newer) => newer,
+                None => publish_newer(&actor, scratch.path(), binary_write).await,
+            };
+            assert_eq!(
+                publish_older(&actor, scratch.path(), binary_write, Arc::new(NoFaults)).await,
+                if superseded {
+                    Outcome::Superseded
+                } else {
+                    Outcome::Applied
+                }
+            );
+            // A confirmed publication stays confirmed and never rewrites the later edit.
+            assert_eq!(applied(&actor, "older", "moment-older").await, !superseded);
+            assert_eq!(std::fs::read(scratch.path().join(path)).unwrap(), newer);
+            // The request binds only to the moment it recorded, in its workspace.
+            assert!(!applied(&actor, "older", "moment-newer").await);
+            assert!(!applied(&actor, "newer", "moment-older").await);
+            assert!(applied(&actor, "newer", "moment-newer").await);
+            assert!(
+                !actor
+                    .publication_applied("other".into(), "older".into(), "moment-older".into())
+                    .await
+                    .unwrap()
+            );
+            supervisor.close(&db).unwrap();
+        }
+    }
+}
+
+/// A binary moment id can look like a text job id. Superseding its job still
+/// marks its own request.
+#[tokio::test]
+async fn prefixed_binary_supersession_is_not_a_publication_receipt() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).unwrap().actor;
+    let older = WriteBinary {
+        moment_id: "authored-mat_receipt".into(),
+        ..binary("older")
+    };
+    let crash = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit);
+    assert_eq!(
+        publish_binary(&actor, scratch.path(), older, create(), crash).await,
+        Outcome::Error
+    );
+    let newer = publish_newer(&actor, scratch.path(), true).await;
+    supervisor.close(&db).unwrap();
+    let actor = supervisor.open(&db, 2).unwrap().actor;
+    actor
+        .materialize_replay_pending(scratch.path().into(), "publish".into(), 20)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read(scratch.path().join("asset.bin")).unwrap(),
+        newer
+    );
+    assert!(!applied(&actor, "older", "authored-mat_receipt").await);
+    assert!(applied(&actor, "newer", "moment-newer").await);
+    supervisor.close(&db).unwrap();
+}
+
+/// Another moment's complete job never confirms a pending publication, even
+/// when its id is the pending moment's text job id.
+#[tokio::test]
+async fn unrelated_prefixed_binary_job_cannot_confirm_a_pending_publication() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).unwrap().actor;
+    let pending = WriteBinary {
+        moment_id: "receipt".into(),
+        ..binary("pending")
+    };
+    let crash = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit);
+    assert_eq!(
+        publish_binary(&actor, scratch.path(), pending, create(), crash).await,
+        Outcome::Error
+    );
+    let unrelated = WriteBinary {
+        moment_id: "authored-mat_receipt".into(),
+        path: "other.bin".into(),
+        ..binary("unrelated")
+    };
+    assert_eq!(
+        publish_binary(
+            &actor,
+            scratch.path(),
+            unrelated,
+            create(),
+            Arc::new(NoFaults)
+        )
+        .await,
+        Outcome::Applied
+    );
+    assert!(!scratch.path().join("asset.bin").exists());
+    assert!(!applied(&actor, "pending", "receipt").await);
+    assert!(applied(&actor, "unrelated", "authored-mat_receipt").await);
+    supervisor.close(&db).unwrap();
+}
+
+/// A binary moment id can read like an internal job id. Publication and replay
+/// still treat it as authored: confirmed only once its bytes are on disk, and
+/// superseded without a conflict copy when later work landed first.
+#[tokio::test]
+async fn internal_job_prefixed_binary_ids_replay_as_authored_publications() {
+    for prefix in [
+        "secret-mat_",
+        "version-switch-secret-mat_",
+        "version-switch-mat_",
+        "restore-delete-mat_",
+        "binary-rename-1-delete-mat_",
+        "ydoc-mat_",
+    ] {
+        for (crash, superseded) in [(false, false), (true, false), (true, true)] {
+            let scratch = ScratchDir::new().unwrap();
+            let db = engine_db_path(&scratch).unwrap();
+            let supervisor = WorkspaceSupervisor::new();
+            let actor = supervisor.open(&db, 1).unwrap().actor;
+            let moment = format!("{prefix}receipt");
+            let older = WriteBinary {
+                moment_id: moment.clone(),
+                ..binary("older")
+            };
+            let bytes = older.bytes.clone();
+            let faults: Arc<dyn FaultInjector> = if crash {
+                ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit)
+            } else {
+                Arc::new(NoFaults)
+            };
+            assert_eq!(
+                publish_binary(&actor, scratch.path(), older, create(), faults).await,
+                if crash {
+                    Outcome::Error
+                } else {
+                    Outcome::Applied
+                },
+                "{moment}"
+            );
+            assert_eq!(
+                scratch.path().join("asset.bin").exists(),
+                !crash,
+                "{moment}"
+            );
+            assert_eq!(applied(&actor, "older", &moment).await, !crash, "{moment}");
+            // Another person's later edit, whose id also reads as internal.
+            let newer_moment = format!("{prefix}newer");
+            let newer = if superseded {
+                let input = WriteBinary {
+                    moment_id: newer_moment.clone(),
+                    bytes: vec![1, 0, 254],
+                    ..binary("newer")
+                };
+                std::fs::write(scratch.path().join("asset.bin"), &input.bytes).unwrap();
+                let bytes = input.bytes.clone();
+                assert_eq!(
+                    publish_binary(
+                        &actor,
+                        scratch.path(),
+                        input,
+                        WriteConditions::default(),
+                        Arc::new(NoFaults)
+                    )
+                    .await,
+                    Outcome::Applied,
+                    "{moment}"
+                );
+                Some(bytes)
+            } else {
+                None
+            };
+            supervisor.close(&db).unwrap();
+            let actor = supervisor.open(&db, 2).unwrap().actor;
+            actor
+                .materialize_replay_pending(scratch.path().into(), "publish".into(), 20)
+                .await
+                .unwrap();
+            // Confirmed exactly when its own bytes landed. A later person's
+            // edit is never overwritten.
+            assert_eq!(
+                std::fs::read(scratch.path().join("asset.bin")).unwrap(),
+                newer.unwrap_or(bytes),
+                "{moment}"
+            );
+            assert_eq!(
+                applied(&actor, "older", &moment).await,
+                !superseded,
+                "{moment}"
+            );
+            if superseded {
+                assert!(applied(&actor, "newer", &newer_moment).await, "{moment}");
+            }
+            supervisor.close(&db).unwrap();
+            // The request records the supersession; nothing was set aside.
+            let (outcome, status): (Option<String>, String) = rusqlite::Connection::open(&db)
+                .unwrap()
+                .query_row(
+                    "SELECT r.publication_outcome, j.status FROM engine_requests r \
+                     JOIN materialization_jobs j ON j.job_id = ?1 \
+                     WHERE r.request_id = 'older' AND r.kind = 'versioned'",
+                    [dohc_engine_domain::binary_write_job_id(&moment)],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(status, "complete", "{moment}");
+            assert_eq!(
+                outcome.as_deref() == Some("superseded"),
+                superseded,
+                "{moment}"
+            );
+            let conflicts = std::fs::read_dir(scratch.path())
+                .unwrap()
+                .filter(|entry| {
+                    entry
+                        .as_ref()
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .ends_with(".conflict")
+                })
+                .count();
+            assert_eq!(conflicts, 0, "{moment}");
+        }
+    }
+}
 
 #[tokio::test]
 async fn publication_replay_after_version_switch_preserves_settled_outcomes_and_fingerprints() {
@@ -722,6 +1062,7 @@ async fn text_crash_recovery_publishes_or_preserves_foreign_bytes_once() {
                     Outcome::Applied
                 }
             );
+            assert_eq!(applied(&actor, "crash", "moment-crash").await, !outside);
             assert_eq!(
                 std::fs::read_to_string(scratch.path().join("large.txt")).unwrap(),
                 if outside { "outside" } else { &input.text }
@@ -783,6 +1124,7 @@ async fn binary_create_race_preserves_competitor_and_replays_conflict_after_rest
         .unwrap();
     assert_eq!(replay.materialize_outcome, Outcome::Conflict);
     assert!(replay.write.deduped);
+    assert!(!applied(&actor, "binary-race", "moment-binary-race").await);
     assert_eq!(
         std::fs::read(scratch.path().join("asset.bin")).unwrap(),
         b"competitor"
@@ -1102,5 +1444,136 @@ async fn rollback_published_text_restores_previous_bytes_and_removes_a_created_f
             assert!(!scratch.path().join("rollback.txt").exists());
         }
         supervisor.close(&db).unwrap();
+    }
+}
+
+async fn capture_env(
+    actor: &ActorHandle,
+    root: &Path,
+    key: &dohc_engine_crypto::SecretDataKey,
+    body: &str,
+    now_ms: i64,
+) -> i64 {
+    std::fs::write(root.join(".env"), body).unwrap();
+    actor
+        .capture_secret(
+            dohc_engine_domain::CaptureSecret {
+                workspace_id: "publish".into(),
+                version_id: "main".into(),
+                path: ".env".into(),
+                text: body.into(),
+                metadata_origin: "local-file".into(),
+                metadata_correlation_id: None,
+                now_ms,
+                claim_foreign_head: true,
+            },
+            key.clone(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .moment
+        .unwrap()
+        .moment_order
+}
+
+/// Secret capture names its job after a secret moment id a caller can
+/// predict. A binary publication whose moment id spells that job id keeps its
+/// own job, whether the capture came before or after it: capture neither
+/// confirms the publication nor takes its place, and replay publishes it.
+#[tokio::test]
+async fn secret_capture_never_takes_a_binary_publication_job() {
+    use dohc_engine_domain::secrets::derive_capture_secret_moment_id;
+    for secret_order in [0, 1] {
+        let scratch = ScratchDir::new().unwrap();
+        let root = scratch.path();
+        let db = engine_db_path(&scratch).unwrap();
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).unwrap().actor;
+        let key = dohc_engine_crypto::create_key_file(root).unwrap();
+        assert_eq!(capture_env(&actor, root, &key, "MODE=first", 20).await, 0);
+        let moment = format!(
+            "secret-mat_{}",
+            derive_capture_secret_moment_id("publish", "main", ".env", secret_order)
+        );
+        let input = WriteBinary {
+            moment_id: moment.clone(),
+            ..binary("collision")
+        };
+        let bytes = input.bytes.clone();
+        let crash = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit);
+        assert_eq!(
+            publish_binary(&actor, root, input, create(), crash).await,
+            Outcome::Error,
+            "{moment}"
+        );
+        assert_eq!(capture_env(&actor, root, &key, "MODE=second", 21).await, 1);
+        assert!(!root.join("asset.bin").exists(), "{moment}");
+        assert!(!applied(&actor, "collision", &moment).await, "{moment}");
+
+        supervisor.close(&db).unwrap();
+        let actor = supervisor.open(&db, 2).unwrap().actor;
+        actor
+            .materialize_replay_pending(root.into(), "publish".into(), 30)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(root.join("asset.bin")).unwrap(), bytes);
+        assert!(applied(&actor, "collision", &moment).await, "{moment}");
+        assert_eq!(
+            std::fs::read_to_string(root.join(".env")).unwrap(),
+            "MODE=second"
+        );
+
+        // Later work on both paths keeps the publication confirmed.
+        let later = WriteBinary {
+            bytes: vec![7, 7],
+            ..binary("later")
+        };
+        let later_bytes = later.bytes.clone();
+        assert_eq!(
+            publish_binary(
+                &actor,
+                root,
+                later,
+                WriteConditions::default(),
+                Arc::new(NoFaults)
+            )
+            .await,
+            Outcome::Applied,
+            "{moment}"
+        );
+        assert_eq!(capture_env(&actor, root, &key, "MODE=third", 40).await, 2);
+        supervisor.close(&db).unwrap();
+        let actor = supervisor.open(&db, 3).unwrap().actor;
+        actor
+            .materialize_replay_pending(root.into(), "publish".into(), 50)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(root.join("asset.bin")).unwrap(), later_bytes);
+        assert_eq!(
+            std::fs::read_to_string(root.join(".env")).unwrap(),
+            "MODE=third"
+        );
+        assert!(applied(&actor, "collision", &moment).await, "{moment}");
+        assert!(applied(&actor, "later", "moment-later").await, "{moment}");
+        supervisor.close(&db).unwrap();
+
+        // The secret's plaintext lives only in the workspace file.
+        for suffix in ["", "-wal"] {
+            let mut path = db.clone().into_os_string();
+            path.push(suffix);
+            let Ok(stored) = std::fs::read(&path) else {
+                continue;
+            };
+            for body in ["MODE=first", "MODE=second", "MODE=third"] {
+                assert!(
+                    !stored
+                        .windows(body.len())
+                        .any(|window| window == body.as_bytes()),
+                    "{moment}: {body}"
+                );
+            }
+        }
     }
 }

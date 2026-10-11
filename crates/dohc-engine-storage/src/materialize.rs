@@ -352,7 +352,8 @@ const JOB_COLUMNS: &str = "job_id, workspace_id, target_path, content_sha256, pr
      preimage_sha256, target_generation, status, created_at_ms, operation";
 
 /// Every pending job, oldest first (then by id for determinism). The set the
-/// filesystem pipeline replays at startup and executes on enqueue.
+/// filesystem pipeline replays at startup and executes on enqueue. Checked
+/// deletes are left to their own recovery.
 pub(crate) fn list_pending_jobs(
     conn: &Connection,
 ) -> Result<Vec<MaterializationJob>, StorageError> {
@@ -369,7 +370,7 @@ pub(crate) fn list_jobs(
         ""
     };
     let sql = format!(
-        "SELECT {JOB_COLUMNS} FROM materialization_jobs \
+        "SELECT {JOB_COLUMNS} FROM materialization_jobs j \
          {filter} ORDER BY created_at_ms ASC, job_id ASC"
     );
     let mut stmt = conn.prepare_cached(&sql).map_err(StorageError::corrupt)?;
@@ -441,6 +442,31 @@ pub(crate) fn mark_cancelled(
     now_ms: i64,
 ) -> Result<(), StorageError> {
     set_status(conn, job_id, JobStatus::Cancelled, now_ms)
+}
+
+/// The publication job id of moment `m`, from its recorded kind: binary
+/// writes prefix the moment id with `binary-mat_` (the domain's
+/// `binary_write_job_id`), text writes with `authored-mat_`. A job is that
+/// moment's only when its workspace and generation also match the moment.
+pub const MOMENT_PUBLICATION_JOB_SQL: &str = "CASE m.after_content_kind WHEN 'binary' \
+     THEN 'binary-mat_' || m.moment_id ELSE 'authored-mat_' || m.moment_id END";
+
+/// Record that the keyed write this job publishes never reached disk.
+pub(crate) fn record_superseded_publication(
+    conn: &Connection,
+    job: &MaterializationJob,
+) -> Result<(), StorageError> {
+    conn.execute(
+        &format!(
+            "UPDATE engine_requests SET publication_outcome = 'superseded' \
+             WHERE kind = 'versioned' AND publication_outcome IS NULL AND result_seq = \
+             (SELECT m.moment_order FROM moments m WHERE m.workspace_id = ?1 \
+              AND m.moment_order = ?2 AND {MOMENT_PUBLICATION_JOB_SQL} = ?3)"
+        ),
+        rusqlite::params![job.workspace_id, job.target_generation, job.job_id],
+    )
+    .map_err(StorageError::persist)?;
+    Ok(())
 }
 
 /// Mark a job in conflict (newer external content was preserved; not clobbered).
@@ -812,9 +838,9 @@ pub(crate) fn pending_job_count(conn: &Connection) -> Result<i64, StorageError> 
 /// for `path` in `workspace_id`, including legacy rows whose workspace
 /// coordinate predates the column, or `None` if nothing has been materialized
 /// there yet. An empty caller coordinate is itself a legacy global job, so its
-/// fence spans every workspace. Active
-/// version projections use snapshot timestamps, which are a different
-/// namespace and therefore cannot participate in this ordering fence. The
+/// fence spans every workspace. Active version projections (`version-switch-`
+/// jobs) use snapshot timestamps, which are a different namespace and
+/// therefore cannot participate in this ordering fence. The
 /// materialization pipeline uses this to skip a pending ordinary job whose
 /// generation is superseded by an already-materialized newer generation for
 /// the same path (concurrent/out-of-order jobs must never regress a path).

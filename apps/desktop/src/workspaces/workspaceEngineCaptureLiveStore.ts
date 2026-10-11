@@ -1231,6 +1231,10 @@ export function createCaptureLiveStores(
         : momentFromWire(input.workspaceId, await hydratedMoment(moment));
     },
 
+    async publicationApplied(input: { workspaceId: string; requestId: string; momentId: string }) {
+      return await runRead(async (adapter) => await adapter.publicationApplied(input));
+    },
+
     async compareTextFileVersions(input: {
       workspaceId: string;
       targetVersionId: string;

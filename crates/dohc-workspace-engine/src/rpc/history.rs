@@ -80,6 +80,13 @@ struct MomentsGetParams {
     moment_id: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PublicationAppliedParams {
+    request_id: String,
+    moment_id: String,
+}
+
 pub(super) fn moment_json(moment: &dohc_engine_domain::MomentRecord) -> Value {
     let after_inband_limit = (moment.after_content_kind == "text"
         && moment.after_text.is_none()
@@ -492,6 +499,34 @@ impl EngineService {
             None => Value::Null,
             Some(moment) => moment_json(&moment),
         })
+    }
+
+    pub(super) async fn publication_applied(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: PublicationAppliedParams = parse(params)?;
+        if params.request_id.is_empty() || params.moment_id.is_empty() {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "requestId and momentId must not be empty",
+            ));
+        }
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let applied = Self::read_under_ctx(
+            &cancellation,
+            "versionedText.publicationApplied",
+            open.actor.publication_applied(
+                open.workspace_id.clone(),
+                params.request_id,
+                params.moment_id,
+            ),
+        )
+        .await?;
+        Ok(json!(applied))
     }
 }
 

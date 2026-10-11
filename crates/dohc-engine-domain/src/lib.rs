@@ -128,10 +128,10 @@ pub use conflicts::{
     ConflictRowUpdate, ConflictStatus, ResolveConflictKind, ResolveTextConflict,
     ResolveTextConflictResult, TEXT_CONFLICT_QUERY_LIMIT, TextConflict, WriteBinaryFile,
     binary_delete_job_id, binary_rename_delete_job_id, binary_rename_write_job_id,
-    conflict_state_preimage, enqueue_binary_delete, enqueue_binary_rename, enqueue_delete,
-    enqueue_write, insert_text_conflict_if_absent, live_state_matches_conflict_current,
-    load_text_conflict_in_tx, select_snapshot_by_path_in_tx, update_text_conflict_row,
-    write_binary_file_in_tx,
+    binary_write_job_id, conflict_state_preimage, enqueue_binary_delete, enqueue_binary_rename,
+    enqueue_delete, enqueue_write, insert_text_conflict_if_absent,
+    live_state_matches_conflict_current, load_text_conflict_in_tx, select_snapshot_by_path_in_tx,
+    update_text_conflict_row, write_binary_file_in_tx,
 };
 pub use error::DomainError;
 pub use merge::{

@@ -490,6 +490,23 @@ impl ActorHandle {
         })
         .await
     }
+
+    /// Whether this store already records a workspace other than `workspace_id`.
+    pub async fn holds_other_workspace(&self, workspace_id: String) -> Result<bool, RuntimeError> {
+        self.run(move |store, _| {
+            store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM versioned_workspaces WHERE workspace_id <> ?1)",
+                        rusqlite::params![workspace_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(dohc_engine_storage::StorageError::corrupt_public)
+                })
+                .map_err(RuntimeError::Storage)
+        })
+        .await
+    }
 }
 
 /// Debug-only guard: the synchronous `*_blocking` API uses

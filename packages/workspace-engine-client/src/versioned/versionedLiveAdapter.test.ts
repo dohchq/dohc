@@ -166,6 +166,10 @@ const VERSIONED_REQUEST_CASES: VersionedRequestCase[] = [
   { method: VERSIONED_METHOD.momentsList, params: {} },
   { method: VERSIONED_METHOD.momentsGet, params: { momentId: "moment" } },
   {
+    method: VERSIONED_METHOD.publicationApplied,
+    params: { requestId: "request", momentId: "moment" },
+  },
+  {
     method: VERSIONED_METHOD.historyPage,
     params: { workspaceId: WORKSPACE },
   },
@@ -446,6 +450,29 @@ describe("VersionedLiveAdapter", () => {
     const ordinary = { ...input, createOnly: false, path: "ordinary.md", requestId: "ordinary-request" };
     await adapter.writeTextFile(ordinary);
     await expect(adapter.writeTextFile({ ...ordinary, createOnly: true })).rejects.toThrow();
+  });
+
+  it("confirms a keyed publication only for the moment its request recorded", async () => {
+    const loopback = new VersionedLoopbackEngine();
+    const adapter = new VersionedLiveAdapter({ sendRequest: (request) => loopback.sendRequest(request), close: () => undefined }, WORKSPACE, { workspaceId: WORKSPACE });
+    await adapter.ensureMainVersion({ workspaceId: WORKSPACE });
+    const base = { workspaceId: WORKSPACE, versionId: "main", metadata: { origin: "api" as const } };
+    const published = await adapter.writeTextFile({ ...base, path: "published.md", text: "a", publish: true, requestId: "published" });
+    const recorded = await adapter.writeTextFile({ ...base, path: "recorded.md", text: "b", requestId: "recorded" });
+    const expectedSha256 = createHash("sha256").update("a").digest("hex");
+    const checked = await adapter.deleteTextFile({ ...base, path: "published.md", expectedSha256, requestId: "checked" });
+    const unchecked = await adapter.deleteTextFile({ ...base, path: "recorded.md", requestId: "unchecked" });
+    const applied = (requestId: string, momentId: string) => adapter.publicationApplied({ workspaceId: WORKSPACE, requestId, momentId });
+    // A published write and a checked delete reach disk inside the engine.
+    expect(await applied("published", published.moment.momentId)).toBe(true);
+    expect(await applied("checked", checked.moment.momentId)).toBe(true);
+    // A recorded-only write and an unchecked delete never confirm publication.
+    expect(await applied("recorded", recorded.moment.momentId)).toBe(false);
+    expect(await applied("unchecked", unchecked.moment.momentId)).toBe(false);
+    // A request binds only to the moment it recorded.
+    expect(await applied("published", checked.moment.momentId)).toBe(false);
+    expect(await applied("missing", published.moment.momentId)).toBe(false);
+    await expect(applied("", published.moment.momentId)).rejects.toThrow();
   });
 
   it("requires a workspace binding before the adapter can issue requests", () => {
@@ -1458,7 +1485,7 @@ describe("VersionedLiveAdapter", () => {
   });
 
   it("encodes every one of the 33 versioned methods with exact params", async () => {
-    expect(VERSIONED_REQUEST_CASES).toHaveLength(35);
+    expect(VERSIONED_REQUEST_CASES).toHaveLength(36);
     const requests: Request[] = [];
     const adapter = new VersionedLiveAdapter(
       captureClient(requests),

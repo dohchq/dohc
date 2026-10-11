@@ -402,7 +402,7 @@ async fn rollback_restore_uses_current_generation_over_newer_completed_lineage()
         .query_row(
             "SELECT higher.target_generation, restore.target_generation \
              FROM materialization_jobs higher, materialization_jobs restore \
-             WHERE higher.job_id = 'higher-generation' \
+             WHERE higher.job_id = 'binary-mat_higher-generation' \
                AND restore.job_id = ?1",
             [restore_job_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
@@ -522,7 +522,7 @@ async fn rollback_restore_generation_fence_is_scoped_to_its_workspace() {
             "SELECT restore.target_generation, other.target_generation, \
                     restore.workspace_id, other.workspace_id \
              FROM materialization_jobs restore, materialization_jobs other \
-             WHERE restore.job_id = ?1 AND other.job_id = 'b-higher-generation'",
+             WHERE restore.job_id = ?1 AND other.job_id = 'binary-mat_b-higher-generation'",
             [&restore_job_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
@@ -649,7 +649,7 @@ async fn write_after_tip_rollback_is_newer_than_the_completed_restore() {
                     restore.status, newer.status \
              FROM materialization_jobs restore, materialization_jobs newer \
              WHERE restore.job_id = ?1 \
-               AND newer.job_id = 'post-rollback-write'",
+               AND newer.job_id = 'binary-mat_post-rollback-write'",
             [restore_job_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
@@ -2091,7 +2091,7 @@ async fn ordinary_rollback_prefixed_write_is_superseded_normally() {
     let status: String = connection
         .query_row(
             "SELECT status FROM materialization_jobs WHERE job_id = ?1",
-            [spoofed_moment_id],
+            [dohc_engine_domain::binary_write_job_id(spoofed_moment_id)],
             |row| row.get(0),
         )
         .expect("spoof-prefixed ordinary job");

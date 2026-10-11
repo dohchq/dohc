@@ -653,6 +653,14 @@ export interface VersionedTextStore {
     workspaceId: WorkspaceId;
     momentId: VersionedTextMomentId;
   }): Promise<VersionedTextMoment | null>;
+  // Whether keyed write `requestId`, whose recorded result is `momentId`,
+  // reached disk. A committed moment alone never says so: its publication
+  // can fail, conflict, or be superseded.
+  publicationApplied(input: {
+    workspaceId: WorkspaceId;
+    requestId: string;
+    momentId: VersionedTextMomentId;
+  }): Promise<boolean>;
   // Releases the underlying database handle after in-flight writes drain.
   // Callers that own a store (workspace teardown, app quit) must close it so
   // SQLite handles/WAL locks never outlive the workspace session.

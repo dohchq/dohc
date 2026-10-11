@@ -40,6 +40,7 @@ export const VERSIONED_METHOD = {
   secretsMomentsGet: "secrets.moments.get",
   momentsList: "moments.list",
   momentsGet: "moments.get",
+  publicationApplied: "versionedText.publicationApplied",
   historyPage: "history.page",
   searchEnsureIndex: "search.ensureIndex",
 } as const;
@@ -300,6 +301,7 @@ type MomentsListParams = JsonObject & {
 };
 
 type MomentsGetParams = JsonObject & { momentId: string };
+type PublicationAppliedParams = JsonObject & { requestId: string; momentId: string };
 
 type HistoryPageParams = JsonObject & {
   workspaceId: string;
@@ -503,6 +505,7 @@ export type VersionedMethodParamsMap = {
   [VERSIONED_METHOD.secretsMomentsGet]: SecretsMomentsGetParams;
   [VERSIONED_METHOD.momentsList]: MomentsListParams;
   [VERSIONED_METHOD.momentsGet]: MomentsGetParams;
+  [VERSIONED_METHOD.publicationApplied]: PublicationAppliedParams;
   [VERSIONED_METHOD.historyPage]: HistoryPageParams;
   [VERSIONED_METHOD.searchEnsureIndex]: SearchEnsureIndexParams;
 };
@@ -543,6 +546,7 @@ export type VersionedMethodResultMap = {
   [VERSIONED_METHOD.secretsMomentsGet]: SecretsMomentsGetResult;
   [VERSIONED_METHOD.momentsList]: MomentsListResult;
   [VERSIONED_METHOD.momentsGet]: MomentsGetResult;
+  [VERSIONED_METHOD.publicationApplied]: boolean;
   [VERSIONED_METHOD.historyPage]: HistoryPageResult;
   [VERSIONED_METHOD.searchEnsureIndex]: SearchEnsureIndexResult;
 };
@@ -1073,6 +1077,7 @@ const VersionedResultSchemas = {
   [VERSIONED_METHOD.secretsMomentsGet]: Schema.NullOr(SecretMomentRecordSchema),
   [VERSIONED_METHOD.momentsList]: MomentsListResultSchema,
   [VERSIONED_METHOD.momentsGet]: Schema.NullOr(MomentRecordSchema),
+  [VERSIONED_METHOD.publicationApplied]: Schema.Boolean,
   [VERSIONED_METHOD.historyPage]: HistoryPageResultSchema,
   [VERSIONED_METHOD.searchEnsureIndex]: EmptyObjectSchema,
 } as const;

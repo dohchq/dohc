@@ -111,6 +111,49 @@ it.each(["text", "delete"])("replays a keyed %s restore without reversing a late
   await engine.stop();
 });
 
+it.each([["text", "error"], ["text", "conflict"], ["binary", "conflict"], ["binary", "superseded"]] as const)(
+  "never adopts an unconfirmed keyed %s restore (%s) on retry", async (kind, outcome) => {
+    const root = await createTestScratch("dohc-keyed-restore-unpublished-");
+    const loopback = new VersionedLoopbackEngine();
+    const send = loopback.sendRequest.bind(loopback);
+    const unpublished = new Set<string>();
+    vi.spyOn(loopback, "sendRequest").mockImplementation(async request => {
+      const response = await send(request);
+      const params = request.params as Record<string, JsonValue>;
+      // The daemon's request ledger answers as the injected publication ended.
+      if (request.method === VERSIONED_METHOD.publicationApplied) {
+        return {...response, result: response.result === true && !unpublished.has(params.momentId as string)};
+      }
+      if ((request.method !== VERSIONED_METHOD.textWrite && request.method !== VERSIONED_METHOD.binaryWrite) || params.origin !== "restore") return response;
+      const result = response.result as Record<string, JsonValue>;
+      unpublished.add((result.moment as Record<string, JsonValue>).momentId as string);
+      return {...response, result: {...result, materialized: false, materializeOutcome: outcome}};
+    });
+    const sessions = mockLiveSessions(loopback);
+    const store = createCaptureLiveStores({workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID}, sessions).store;
+    const target = {workspaceId: WORKSPACE_ID, versionId: "main", path: kind === "text" ? "note.txt" : "image.bin", metadata: {origin: "api" as const}};
+    const current = kind === "text" ? "current" : Buffer.from([0, 255, 2]);
+    await store.ensureMainVersion({workspaceId: WORKSPACE_ID});
+    if (kind === "text") await store.writeTextFile({...target, text: "original"});
+    else await store.writeBinaryFile({...target, bytes: Buffer.from([0, 255, 1])});
+    const changed = kind === "text"
+      ? await store.writeTextFile({...target, text: "current"})
+      : await store.writeBinaryFile({...target, bytes: Buffer.from([0, 255, 2])});
+    await write(root, target.path, current);
+    const engine = capture(root, {store, rustEngineSessions: sessions});
+    const options = {expectedHeadMomentId: changed.moment.id, requestId: "restore/unpublished-session-file"};
+    try {
+      await expect(engine.restoreFileToBeforeMoment(changed.moment.id, RESTORER, options)).rejects.toThrow();
+      expect(unpublished.size).toBe(1);
+      await expect(engine.restoreFileToBeforeMoment(changed.moment.id, RESTORER, options)).rejects.toMatchObject({name: "RestoreHeadChangedError"});
+      expect(await engine.findRestoreReceipt(changed.moment.id, options.requestId)).toBeNull();
+      expect(await engine.publicationApplied([...unpublished][0]!, options.requestId)).toBe(false);
+      expect(await readFile(join(root, target.path))).toEqual(Buffer.from(current));
+    } finally {
+      await engine.stop();
+    }
+  });
+
 // chmod/ACL-based fixtures cannot make a path unreadable for root (root
 // ignores file modes), so every test that needs an unreadable path skips
 // under uid 0.
