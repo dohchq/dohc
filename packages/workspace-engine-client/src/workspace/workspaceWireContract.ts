@@ -956,13 +956,6 @@ const CollectionQueryResultSchema = mutableStruct({
   nextCursor: Schema.NullOr(CollectionQueryCursorSchema),
 });
 
-const LinkMomentAuthorSchema = mutableStruct({
-  kind: Schema.Literal("link"),
-  grantId: Schema.String,
-  grantGeneration: Schema.Int,
-  principalId: Schema.String,
-});
-
 const CollectionGetRecordResultSchema = mutableStruct({
   collection: CollectionSummarySchema,
   record: CollectionRecordSchema,
@@ -1098,7 +1091,12 @@ const SharedChangeAuthorSchema = Schema.Union([
     grantId: Schema.String,
     grantGeneration: Schema.Int,
   }),
-  LinkMomentAuthorSchema,
+  mutableStruct({
+    kind: Schema.Literal("link"),
+    grantId: Schema.String,
+    grantGeneration: Schema.Int,
+    principalId: Schema.String,
+  }),
 ]);
 export type SharedChangeAuthor = typeof SharedChangeAuthorSchema.Type;
 

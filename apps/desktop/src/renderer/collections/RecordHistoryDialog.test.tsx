@@ -50,24 +50,21 @@ afterEach(() => {
 });
 
 describe("RecordHistoryDialog", () => {
-  it("names a link holder without an id, even after the grant ends", async () => {
-    stub(async () => ({ entries: [entry(1, { kind: "link", grantId: "ended-link", grantGeneration: 2, publicPrincipalId: "public-holder-1" })], nextBeforeHistoryId: null }));
+  it("names a link holder", async () => {
+    stub(async () => ({ entries: [entry(1, { kind: "link" })], nextBeforeHistoryId: null }));
     render(dialog());
     const row = await screen.findByTestId("record-history-entry");
     expect(row.textContent).toContain("Link holder");
-    expect(row.textContent).not.toContain("public-holder");
-    expect(row.textContent).not.toContain("ended-link");
     expect(within(row).queryByTestId("record-history-automation")).toBeNull();
     expect(within(row).queryByRole("button", { name: "View run" })).toBeNull();
   });
   it("shows a declared agent acting for a link holder", async () => {
-    stub(async () => ({ entries: [entry(1, { kind: "link", grantId: "link", grantGeneration: 2, publicPrincipalId: "public-holder-1", agentName: "Agent" })], nextBeforeHistoryId: null }));
+    stub(async () => ({ entries: [entry(1, { kind: "link", agentName: "Agent" })], nextBeforeHistoryId: null }));
     render(dialog());
     const row = await screen.findByTestId("record-history-entry");
     expect(row.textContent).toContain("Agent for a link holder");
     expect(within(row).getByText("Agent").className).toContain("text-agent");
     expect(within(row).getByText("for a link holder").className).toContain("text-muted");
-    expect(row.textContent).not.toContain("public-holder");
     expect(within(row).queryByRole("button", { name: "View run" })).toBeNull();
   });
   it("shows a confirmed person without an automation label", async () => {

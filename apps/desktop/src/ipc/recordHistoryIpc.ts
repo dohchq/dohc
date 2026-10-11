@@ -90,10 +90,10 @@ export async function recordHistoryForIpc(
   };
   const authorOf = async (entry: HistoryEntry): Promise<Author> => {
     if (entry.linkAuthor !== null) {
-      const link = entry.linkAuthor;
-      return entry.actorKind === "agent" && entry.authorOriginId !== null && entry.onBehalfOf === link.publicPrincipalId
-        ? { ...link, agentName: authors.agent(entry.onBehalfOf) }
-        : link;
+      // The renderer names the role, so the link's ids stay in main.
+      return entry.actorKind === "agent" && entry.authorOriginId !== null && entry.onBehalfOf === entry.linkAuthor.publicPrincipalId
+        ? { kind: "link", agentName: authors.agent(entry.onBehalfOf) }
+        : { kind: "link" };
     }
     const actor = entry.authorOriginId;
     if (actor === null) return null;

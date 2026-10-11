@@ -28,12 +28,12 @@ describe("Record History live authors", () => {
     samples.sort((a, b) => a - b);
     process.stdout.write(`record_history_page_cost: rows=50 n=${samples.length} median_ns=${(samples[14]! + samples[15]!) / 2}\n`);
   });
-  it("keeps the link grant and public principal without account lookups", async () => {
+  it("names a link without its ids or account lookups", async () => {
     const linkAuthor = { kind: "link" as const, grantId: "ended-link", grantGeneration: 2, publicPrincipalId: "public-holder" };
     const person = vi.fn();
     const prepare = vi.fn();
     const page = await recordHistoryForIpc({ history: [{ ...change("human"), actorKind: null, authorOriginId: null, onBehalfOf: null, linkAuthor }], nextBeforeHistoryId: null }, { ...names(), person, prepare });
-    expect(page.entries[0]?.author).toEqual(linkAuthor);
+    expect(page.entries[0]?.author).toEqual({ kind: "link" });
     expect(person).not.toHaveBeenCalled();
     expect(prepare).toHaveBeenCalledExactlyOnceWith([]);
   });
@@ -43,9 +43,10 @@ describe("Record History live authors", () => {
     const prepare = vi.fn();
     const agent = vi.fn(() => "Agent");
     const page = await recordHistoryForIpc({ history: [{ ...change("agent"), onBehalfOf: "public-holder", linkAuthor }], nextBeforeHistoryId: null }, { ...names(), person, prepare, agent });
-    expect(page.entries[0]?.author).toEqual({ ...linkAuthor, agentName: "Agent" });
+    expect(page.entries[0]?.author).toEqual({ kind: "link", agentName: "Agent" });
     expect(GetCollectionRecordHistoryResult.parse(page)).toEqual(page);
-    expect(() => GetCollectionRecordHistoryResult.parse({ ...page, entries: [{ ...page.entries[0], author: { ...linkAuthor, principalId: "private-holder" } }] })).toThrow();
+    expect(() => GetCollectionRecordHistoryResult.parse({ ...page, entries: [{ ...page.entries[0], author: { kind: "link", principalId: "private-holder" } }] })).toThrow();
+    expect(() => GetCollectionRecordHistoryResult.parse({ ...page, entries: [{ ...page.entries[0], author: { ...linkAuthor } }] })).toThrow();
     expect(person).not.toHaveBeenCalled();
     expect(prepare).toHaveBeenCalledExactlyOnceWith([]);
     expect(agent).toHaveBeenCalledExactlyOnceWith("public-holder");

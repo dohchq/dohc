@@ -727,12 +727,6 @@ const exportResultSchema = z
   })
   .strict();
 
-const rawLinkAuthorSchema = z.object({
-  kind: z.literal("link"),
-  grantId: z.string().min(1),
-  grantGeneration: z.number().int().positive(),
-  principalId: z.string().min(1),
-}).strict();
 const rawMomentAuthorSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("unattributed") }).strict(),
   z.object({
@@ -761,7 +755,12 @@ const rawMomentAuthorSchema = z.discriminatedUnion("kind", [
     grantId: z.string().min(1),
     grantGeneration: z.number().int().positive(),
   }).strict(),
-  rawLinkAuthorSchema,
+  z.object({
+    kind: z.literal("link"),
+    grantId: z.string().min(1),
+    grantGeneration: z.number().int().positive(),
+    principalId: z.string().min(1),
+  }).strict(),
   z.object({
     kind: z.literal("automation"),
     automationId: z.string().min(1),

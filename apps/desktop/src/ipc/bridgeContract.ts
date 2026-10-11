@@ -709,20 +709,8 @@ const RecordHistoryValue = z.object({ present: z.boolean(), value: CollectionVal
 // computer keeps it or the owner's server showed it to them this session,
 // "unchecked" when History must ask with locateRecordHistoryRun.
 const RecordHistoryRunLocation = z.enum(["available", "unchecked"]);
-const HistoryLinkAuthor = z.object({
-  kind: z.literal("link"),
-  grantId: z.string().min(1).max(500),
-  grantGeneration: z.number().int().positive(),
-  principalId: z.string().min(1).max(500),
-}).strict();
 const RecordHistoryAuthor = z.discriminatedUnion("kind", [
-  z.object({
-    kind: z.literal("link"),
-    grantId: z.string().min(1).max(512),
-    grantGeneration: z.number().int().positive(),
-    publicPrincipalId: z.string().min(1).max(512),
-    agentName: z.string().min(1).max(4096).optional(),
-  }).strict(),
+  z.object({ kind: z.literal("link"), agentName: z.string().min(1).max(4096).optional() }).strict(),
   z.object({ kind: z.literal("human"), name: z.string().min(1).max(4096) }),
   z.object({ kind: z.literal("agent"), name: z.string().min(1).max(4096), person: z.string().min(1).max(4096).optional() }),
   z.object({
@@ -1618,7 +1606,12 @@ export const EngineMomentRecord = z.object({
   // Present when an Edit share link wrote the moment directly (ADR 0013).
   // The grant names the link, and the principal the browser session that
   // used it; neither names a person.
-  linkAuthor: HistoryLinkAuthor.optional(),
+  linkAuthor: z.object({
+    kind: z.literal("link"),
+    grantId: z.string().min(1).max(500),
+    grantGeneration: z.number().int().positive(),
+    principalId: z.string().min(1).max(500),
+  }).strict().optional(),
   summary: z.string().max(500).optional(),
   correlationId: z.string().max(200).optional(),
   // Workspace-global recording order: the pagination cursor and a monotonic
