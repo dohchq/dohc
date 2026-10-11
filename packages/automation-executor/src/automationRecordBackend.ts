@@ -1,4 +1,5 @@
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
+import { changedSincePressed } from "./automationButtons";
 import type { StoredRun } from "./automationRunStore";
 import { datasetUndoDeletes, datasetCodeTable, datasetCodeOperation, datasetTableNamed, datasetStepsOf } from "./datasetAutomationPlan";
 import { isDeepStrictEqual } from "node:util";
@@ -72,7 +73,7 @@ import type { AutomationTarget } from "./automationTargets";
 export type RecordRunDependencies = Pick<CollectionAutomationRunDependencies,
   "makeDurable" | "targets" | "evaluator" | "store" | "nowMs" | "personName" | "chat" | "postNotice" | "recipientVerdicts" | "readMessageBody" | "readCode"
 > & Partial<Pick<CollectionAutomationRunDependencies,
-  "withReads" | "withRecordWrites" | "collectionIdOf" | "collectionPathOf" | "isIndexReading" | "checkReach" | "localPersonId" | "checkPresser" | "authorizeDataset"
+  "withReads" | "withRecordWrites" | "collectionIdOf" | "collectionPathOf" | "isIndexReading" | "checkReach" | "localPersonId" | "checkPresser" | "authorizeDataset" | "isButtonField"
 >> & Partial<Pick<DatasetAutomationRunDependencies, "withHost" | "cachedRoster">>;
 export type RecordRunInput = Omit<CollectionAutomationRunInput, "claim"> & {
   claim: Pick<AutomationClaim, "automationId" | "claimId" | "run" | "depth" | "createdAtMs">;
@@ -114,6 +115,10 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
   const saved = await savedRunOf(deps.store, claim, automation);
   if ("outcome" in saved) return { outcome: saved.outcome };
   const current = saved.current;
+  if (source.kind === "document" && automation.when.kind === "button" && current === null
+    && !await deps.isButtonField!(collection.path, automation.when.field)) {
+    return { outcome: failed(changedSincePressed(automation.when.field)) };
+  }
   const chat = readsChats(automation) ? await deps.chat.directory(roster, chatNeedsOf([automation])) : null;
   if (readsChats(automation) && chat === null) return { outcome: { kind: "wait", reason: "engine" } };
   if (source.engineClaim !== null) {

@@ -171,6 +171,7 @@ async function fixture(sourceDataset = false, targetDataset = true) {
   };
   const dependencies: CollectionAutomationRunDependencies & DatasetAutomationRunDependencies = {
     makeDurable: async () => {},
+    isButtonField: async () => true,
     collectionIdOf: (path) => collectionIds.get(path) ?? null,
     collectionPathOf: (id) => hooks.hideDatasetLocations && id.endsWith("-dataset") ? null : [...collectionIds].find(([, known]) => known === id)?.[0] ?? null,
     targets: { resolve: async (path) => hooks.hostDown && targets.get(path)?.kind === "dataset" ? { kind: "problem", code: "host-unavailable", problem: "Unavailable" } : targets.get(path) ?? { kind: "problem", code: "missing", problem: "Missing" } },

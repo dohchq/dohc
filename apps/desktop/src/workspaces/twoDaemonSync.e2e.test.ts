@@ -625,6 +625,7 @@ it.skipIf(engine.missing).each([
           onCaptureSettled: () => () => undefined,
         }));
         const dependencies = {
+          isButtonField: async () => true,
           withReads: async <T,>(work: (engine: VersionedLiveAdapter) => Promise<T>) => work(adapter),
           withRecordWrites: async <T,>(signal: AbortSignal, work: (writes: ReturnType<typeof edits>) => Promise<T>) => work(edits(signal)),
           collectionIdOf: () => collectionId, collectionPathOf: () => "tasks",
