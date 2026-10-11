@@ -268,6 +268,7 @@ import {
 } from "./workbench/workbenchState";
 import type { ChatsPanelTab } from "./workbench/ChatsPanel";
 import type { AboutNotices, AccessContext } from "./workbench/About";
+import type { SharingFocus } from "./workbench/SharingView";
 import { usePinnedApps } from "./workbench/pinnedApps";
 import { pinnedAppsFor } from "../settings/pinnedApps";
 import { ipcErrorMessage } from "./ipcError";
@@ -823,7 +824,10 @@ export function DesktopWorkspaceShell(props: {
     onError: (fallback, error, retry, identity) => reportShellError(fallback, error, retry, undefined, identity)});
   useChatDispatchNotices(workspaceId, workspaceIsReady, reportShellFailure, clearKind);
   useWorkspacePathOpenFailures(workspaceId, reportShellFailure);
-  // Share removals from Chats, Settings, Sharing and the share dialog: one
+  // The row or lane Settings search opened the Sharing view on.
+  const [sharingFocus, setSharingFocus] = useState<SharingFocus | null>(null);
+  const clearSharingFocus = useCallback(() => setSharingFocus(null), []);
+  // Share removals from Chats, Sharing and the share dialog: one
   // notice with Undo, held here so it outlives the surface that removed the
   // access. Each removal and Undo counts, so an open Sharing view reads again.
   const [sharesRevision, sharesChanged] = useReducer((revision: number) => revision + 1, 0);
@@ -2975,7 +2979,7 @@ export function DesktopWorkspaceShell(props: {
     reloadShareMounts,
     refreshShareMounts,
     unmountShare,
-    onSettingsFilesChanged,
+    onMountsChanged,
   } = useShareMounts(
     workspaceId,
     workspaceShareMounts,
@@ -5175,11 +5179,13 @@ export function DesktopWorkspaceShell(props: {
               proposals: shareProposals,
               onReviewChanges: setReviewProposalId,
               mounts: shareMounts,
-              onMounted: () => onSettingsFilesChanged(),
+              onMountsChanged,
               onUnmount: unmountShare,
               shareRemovals,
               sharesRevision,
               reportError: reportShellError,
+              focus: sharingFocus,
+              onFocused: clearSharingFocus,
             }}
             selectedAppRoot={selectedAppRoot}
             openAppTab={openAppTab}
@@ -6172,14 +6178,13 @@ export function DesktopWorkspaceShell(props: {
             {...(askAgent ? { askAgent } : {})}
             onClose={closeSettings}
             onAgentActiveChange={onSettingsAgentActiveChange}
-            onWorkspaceFilesChanged={onSettingsFilesChanged}
-            shareRemovals={shareRemovals}
             onOpenCloud={() => {
               closeSettings();
               setCloudOpen(true);
             }}
-            onOpenSharing={() => {
+            onOpenSharing={(target) => {
               closeSettings();
+              setSharingFocus(target);
               mutateWb((state) => ({ ...state, activeView: SHARING_VIEW_ID, sidebarVisible: true }));
             }}
             {...(liveDocumentsAvailable

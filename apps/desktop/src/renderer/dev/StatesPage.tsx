@@ -60,7 +60,7 @@ import {
   type AccessSetup,
   type AccessView,
 } from "../workbench/About";
-import { SharingPanel, type SharingActions } from "../workbench/SharingView";
+import { SharingPanel, type ShareMount, type SharingActions, type SkipView } from "../workbench/SharingView";
 import { CAPTURE_RECOVERY_TITLE, captureRecoveryMessage } from "../shell/useCaptureRecoveryNotices";
 import { WorkspaceSyncStatus } from "../workbench/WorkspaceSyncStatus";
 import { closeStatesPage } from "./statesRoute";
@@ -549,10 +549,28 @@ const SHARING_UNKNOWN: Partial<AccessAnswer> = {
   checkedAtMs: null,
   freshness: "unknown",
 };
-const SHARING_MOUNTS = [{ shareId: "in-funnel", label: "funnel", granterEmail: "sam@hollis.studio", access: "view" as const }];
+const SHARING_MOUNTS: ShareMount[] = [{ shareId: "in-funnel", label: "funnel", granterEmail: "sam@hollis.studio", access: "view" }];
+// A mount the relay no longer lists, and one whose pulls skipped changes.
+const SHARING_SKIPPED = {
+  ops: [{ originId: "origin-sam", originSeq: 4, opKind: "write", code: "share-boundary-violation", detail: "notes/draft.md", atMs: SHARING_CHECKED_AT }],
+  more: 0, generation: 3,
+};
+const SHARING_REMOVED_MOUNTS: ShareMount[] = [
+  { ...SHARING_MOUNTS[0]!, skippedOps: SHARING_SKIPPED },
+  { shareId: "in-notes", label: "notes", granterEmail: "kim@example.com", access: "view" },
+];
+const SHARING_REMOVED: AccessAnswer = {
+  ...SHARING_RECEIVED,
+  rows: [
+    SHARING_RECEIVED.rows[0]!,
+    aboutGrant({ shareId: "in-budget", grantId: "in-3", via: "received", sharerName: null, granterEmail: null, recipientUserId: "me",
+      recipientEmail: null, selector: null, access: null, status: "removed", removalMessage: "Sam removed your access." }),
+  ],
+};
 const SHARING_WAITING = new Map([["share-plan", { count: 2, senders: ["sam@hollis.studio"], oldestProposalId: "proposal-1" }]]);
 const SHARING_ACTIONS: SharingActions = {
-  retry: noop, more: noop, reviewChanges: noop, startEnd: noop, cancelEnd: noop, end: noop, mount: noop, unmount: noop, reviewConflicts: noop,
+  retry: noop, more: noop, reviewChanges: noop, startEnd: noop, cancelEnd: noop, end: noop, mount: noop, unmount: noop,
+  copy: async () => null, dismissSkips: noop, showSkips: noop, reviewConflicts: noop,
 };
 const ready = (answer: AccessAnswer): AccessView => ({ status: "ready", answer });
 
@@ -564,6 +582,8 @@ function SharingSpecimen(props: {
   receivedReason?: AccessReason;
   conflictCount?: number;
   confirmShareId?: string;
+  mounts?: ShareMount[];
+  skipView?: SkipView;
 }) {
   return (
     <div className="flex w-[280px] flex-col rounded-lg border border-line bg-panel">
@@ -574,7 +594,8 @@ function SharingSpecimen(props: {
         receivedSetup={props.receivedReason ? accessSetup(props.receivedReason) : ACCESS_UNEXPLAINED}
         conflictCount={props.conflictCount ?? null}
         waiting={SHARING_WAITING}
-        mounts={SHARING_MOUNTS}
+        mounts={props.mounts ?? SHARING_MOUNTS}
+        skipView={props.skipView ?? new Map()}
         confirmShareId={props.confirmShareId ?? null}
         busyShareId={null}
         actions={SHARING_ACTIONS}
@@ -1512,6 +1533,18 @@ function Pane(props: { theme: "light" | "dark" }) {
                 received={ready({ ...SHARING_RECEIVED, rows: [] })} />
             </div>
           </div>
+        </Specimen>
+        <Specimen label="keyboard focus on a row's code copy">
+          <div data-force-state="focus-within" data-force-target='[data-testid="sharing-granted-actions"]'>
+            <div data-force-state="focus focus-visible" data-force-target='[data-testid="sharing-copy-code"]'>
+              <SharingSpecimen granted={ready({ ...SHARING_GRANTED, rows: SHARING_GRANTED.rows.slice(0, 1) })}
+                received={ready({ ...SHARING_RECEIVED, rows: [] })} />
+            </div>
+          </div>
+        </Specimen>
+        <Specimen label="removed shares still on this computer, and skipped changes">
+          <SharingSpecimen granted={ready({ ...SHARING_GRANTED, rows: [] })} received={ready(SHARING_REMOVED)}
+            mounts={SHARING_REMOVED_MOUNTS} />
         </Specimen>
       </Section>
 
