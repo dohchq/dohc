@@ -29,7 +29,7 @@ export function SettingRow(props: {
         {/* The dot hangs left of the title, so marking a row moves nothing in it. */}
         <div className="relative flex items-center">
           {props.modified ? (
-            <span title="Modified" className="absolute right-full top-1/2 mr-2 size-1.5 -translate-y-1/2 rounded-full bg-accent">
+            <span title="Modified" className="absolute right-full top-1/2 mr-1 size-1.5 -translate-y-1/2 rounded-full bg-accent">
               <span className="sr-only">Modified</span>
             </span>
           ) : null}
@@ -42,23 +42,21 @@ export function SettingRow(props: {
       </div>
       <div className="flex min-w-0 items-center justify-end gap-2 max-[720px]:justify-start">
         {props.children}
-        {/* A resettable row keeps the reset's place while unchanged, so its
-            control stays under the pointer when the reset appears. */}
-        {props.onReset ? (
-          props.modified ? (
-            <button
-              type="button"
-              aria-label="Reset"
-              title="Reset"
-              onClick={props.onReset}
-              className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
-            >
-              <RotateCcw size={14} strokeWidth={1.9} aria-hidden />
-            </button>
-          ) : (
-            <span aria-hidden className="size-6 shrink-0" />
-          )
-        ) : null}
+        {/* Every row keeps the reset's place, so controls share a right edge
+            and stay under the pointer when a reset appears. */}
+        {props.modified && props.onReset ? (
+          <button
+            type="button"
+            aria-label="Reset"
+            title="Reset"
+            onClick={props.onReset}
+            className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
+          >
+            <RotateCcw size={14} strokeWidth={1.9} aria-hidden />
+          </button>
+        ) : (
+          <span aria-hidden className="size-6 shrink-0" />
+        )}
       </div>
     </div>
   );
@@ -183,6 +181,9 @@ export function StepperControl(props: {
           data-tooltip-open={open ? "" : undefined}
           disabled={spec.disabled}
           onClick={spec.onClick}
+          // A click is the pointer's, even on a part the keyboard focused
+          // before, so it leaves no keyboard tooltip behind.
+          onPointerDown={() => setFocused((current) => (current === name ? null : current))}
           onFocus={(event) => {
             if (!event.currentTarget.matches(":focus-visible")) return;
             setFocused(name);

@@ -1647,7 +1647,7 @@ function Pane(props: { theme: "light" | "dark" }) {
       <Section part="settings-frame" title="Settings frame">
         <Specimen label="General chosen, Appearance hovered, keyboard focus on Files; a changed row">
           <div
-            className="flex h-[420px] w-[680px] overflow-hidden rounded-xl border border-line bg-bg"
+            className="flex h-[420px] w-[688px] overflow-hidden rounded-xl border border-line bg-bg"
             data-force-state="hover"
             data-force-target='[data-testid="settings-nav-appearance"]'
           >
@@ -1655,7 +1655,8 @@ function Pane(props: { theme: "light" | "dark" }) {
               <SettingsNav workspacePath={SETTINGS_WORKSPACE} sections={SETTINGS_SECTIONS} activeSection="general"
                 onSelect={noop} query="" onQuery={noop} />
             </div>
-            <div className="min-w-0 flex-1 py-7 pl-8 pr-12">
+            {/* No close button here, so no room is kept for one. */}
+            <div className="min-w-0 flex-1 px-8 py-7">
               <div className="max-w-[640px]">
                 <SettingRow title="Your name">
                   <PreferredNameControl value="Ada" onChange={async () => undefined} testIdPrefix={`states-name-${theme}`} />

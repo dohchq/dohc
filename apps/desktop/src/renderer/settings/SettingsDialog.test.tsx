@@ -503,6 +503,22 @@ describe("SettingsDialog", () => {
     const tip = within(row).getByRole("tooltip");
     expect(tip.textContent).toContain("Zoom in");
     expect(zoomIn.getAttribute("aria-describedby")).toBe(tip.id);
+
+    // A click on the part the keyboard focused leaves no tooltip once the pointer leaves.
+    await user.click(zoomIn);
+    await user.unhover(zoomIn);
+    expect(within(row).queryByRole("tooltip")).toBeNull();
+    expect(zoomIn.getAttribute("aria-describedby")).toBeNull();
+  });
+
+  it("keeps the reset's place on a row that cannot reset, so controls share a right edge", async () => {
+    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+
+    const updates = await screen.findByTestId("settings-row-desktop-updates");
+    const last = within(updates).getByTestId("install-update-button").parentElement!.lastElementChild!;
+    expect(last.tagName).toBe("SPAN");
+    expect(last.getAttribute("aria-hidden")).toBe("true");
+    expect(last.className).toContain("size-6");
   });
 
   it("closes a stepper's tooltip with the first Escape and Settings with the next", async () => {
