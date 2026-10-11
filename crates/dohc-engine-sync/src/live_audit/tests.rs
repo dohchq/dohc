@@ -400,10 +400,6 @@ fn relay_pull_live_audit_missing_chunk_retries_without_ack() {
         .unwrap();
     for _ in 0..2 {
         assert!(matches!(
-            apply_audit_envelope(&mut receiver, &audit, &NoFaults),
-            Err(SyncError::BlobInvalid)
-        ));
-        assert!(matches!(
             client.pull_chat_workspace(
                 &mut receiver,
                 &mut WriterDocCache::new(),
@@ -473,7 +469,10 @@ fn assert_corrupt_length_is_storage(update: bool) {
         })
         .unwrap();
     let error = apply_audit_envelope(&mut receiver, &audit, &NoFaults).unwrap_err();
-    assert!(matches!(error, SyncError::Storage(_)), "{error:?}");
+    assert!(
+        matches!(&error, SyncError::Storage(dohc_engine_storage::StorageError::BlobIntegrity { sha256 }) if sha256 == sha),
+        "{error:?}"
+    );
     assert_eq!(
         crate::read_replication_acked_seq(&receiver, "ws", "owner-origin").unwrap(),
         audit.origin_seq - 1
@@ -482,13 +481,57 @@ fn assert_corrupt_length_is_storage(update: bool) {
 }
 
 #[test]
-fn relay_pull_live_audit_corrupt_chunk_length_is_storage() {
+fn audit_apply_live_audit_corrupt_chunk_length_is_storage() {
     assert_corrupt_length_is_storage(false);
 }
 
 #[test]
-fn relay_pull_live_audit_corrupt_update_length_is_storage() {
+fn audit_apply_live_audit_corrupt_update_length_is_storage() {
     assert_corrupt_length_is_storage(true);
+}
+
+#[test]
+fn audit_apply_live_audit_missing_chunk_retries_without_ack() {
+    let (_scratch, mut receiver, client, _) = length_claim_pull(LengthClaim::Valid);
+    let audit = client
+        .transport()
+        .pull
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .ops[0]
+        .clone();
+    let sha = audit.payload["manifest"]["chunks"][0]["sha256"]
+        .as_str()
+        .unwrap();
+    let bytes = receiver.get_binary_blob(sha).unwrap().unwrap();
+    receiver
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM binary_blobs WHERE sha256=?1", [sha])
+                .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            apply_audit_envelope(&mut receiver, &audit, &NoFaults),
+            Err(SyncError::BlobInvalid)
+        ));
+        assert_eq!(
+            crate::read_replication_acked_seq(&receiver, "ws", "owner-origin").unwrap(),
+            audit.origin_seq - 1
+        );
+        assert_eq!(count(&receiver, "live_audit_events"), 0);
+        assert_eq!(count(&receiver, "replication_pending_refusals"), 0);
+    }
+    receiver.put_binary_blob(&bytes).unwrap();
+    let result = apply_audit_envelope(&mut receiver, &audit, &NoFaults).unwrap();
+    assert!(matches!(result.primary, ApplyDisposition::Applied(_)));
+    assert_eq!(
+        crate::read_replication_acked_seq(&receiver, "ws", "owner-origin").unwrap(),
+        audit.origin_seq
+    );
 }
 
 fn assert_checksum_precedes_length_refusal(claim: LengthClaim) {
