@@ -111,7 +111,7 @@ test("the plan retains every package test and preserves stricter worker caps", (
   assert.equal(tasks.length, 8);
   assert.equal(tasks[0].name, "@dohc/ydoc-projection");
   assert.equal(tasks[1].name, "@dohc/desktop");
-  assert.equal(tasks.find(task => task.name === "@dohc/app-backend-runtime").args.at(-1), "--maxWorkers=2");
+  assert.equal(tasks.find(task => task.name === "@dohc/app-backend-runtime").args.at(-1), "--maxWorkers=1");
   assert.equal(tasks.find(task => task.name === "@dohc/future-package").script, "test");
   assert.equal(tasks.filter(task => task.resource === "postgres").length, 4);
   assert.throws(() => testPlan([pkg("desktop")]), /Missing test:unit/);
