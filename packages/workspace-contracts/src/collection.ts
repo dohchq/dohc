@@ -283,7 +283,7 @@ export type AutomationRunAttribution = {
 };
 
 /** Owner-only live provenance. The public principal is distinct from a direct write's private principal. */
-export interface CollectionLiveLinkAuthor {
+interface CollectionLiveLinkAuthor {
   kind: "link";
   grantId: string;
   grantGeneration: number;
