@@ -20,6 +20,8 @@ thiserror = "2"
 base64 = "0.23"
 
 [dev-dependencies]
+quote = "1"
+syn = { version = "2", features = ["full"] }
 dohc-engine-collab = { path = "../dohc-engine-collab", features = ["test-support"] }
 dohc-engine-crypto = { path = "../dohc-engine-crypto" }
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }

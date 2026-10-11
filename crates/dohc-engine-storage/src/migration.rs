@@ -2846,6 +2846,36 @@ CREATE TABLE live_settlement_attribution_unavailable (
 ) STRICT;
 ";
 
+const V2_YDOC_FILE_EXPORT_LANE_DDL: &str = "
+ALTER TABLE ydoc_docs ADD COLUMN file_export_lane INTEGER NOT NULL DEFAULT 0 CHECK (file_export_lane IN (0,1,2,3));
+UPDATE ydoc_docs SET file_export_lane=1 WHERE lineage_claim_status='unclaimed' AND sharing_declined_json IS NOT NULL;
+DROP TRIGGER ydoc_sharing_declined_head;
+CREATE TRIGGER ydoc_sharing_declined_head AFTER UPDATE ON snapshots
+WHEN NEW.blob_sha256 IS NOT OLD.blob_sha256
+    OR (NEW.latest_moment_id IS NOT OLD.latest_moment_id AND NEW.metadata_origin='restore')
+BEGIN
+    UPDATE ydoc_docs SET sharing_declined_json=NULL
+    WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id
+        AND file_export_lane NOT IN (1,2) AND sharing_declined_json IS NOT NULL;
+END;
+DROP TRIGGER ydoc_sharing_declined_restore;
+CREATE TRIGGER ydoc_sharing_declined_restore AFTER INSERT ON live_restore_fences
+BEGIN
+    UPDATE ydoc_docs SET sharing_declined_json=NULL
+    WHERE workspace_id=NEW.workspace_id AND version_id=NEW.main_version_id AND object_id=NEW.object_id
+        AND file_export_lane NOT IN (1,2) AND sharing_declined_json IS NOT NULL;
+END;
+CREATE TRIGGER ydoc_file_export_claimed AFTER UPDATE OF lineage_claim_status ON ydoc_docs
+WHEN NEW.lineage_claim_status != 'unclaimed' AND NEW.file_export_lane != 0
+BEGIN
+    UPDATE ydoc_docs SET file_export_lane=0 WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id;
+END;
+CREATE TRIGGER ydoc_file_export_deleted AFTER DELETE ON snapshots
+BEGIN
+    UPDATE ydoc_docs SET file_export_lane=3 WHERE workspace_id=OLD.workspace_id AND version_id=OLD.version_id AND object_id=OLD.object_id AND file_export_lane IN (1,2);
+END;
+";
+
 /// The frozen, ordered list of migrations this build knows. No build may
 /// delete or rename the `v2-baseline` ledger row, because an older build
 /// recognizes a newer store only by that row and would otherwise offer
@@ -3109,6 +3139,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 40,
         id: "v2-open-document-artifacts",
         sql: V2_OPEN_DOCUMENT_ARTIFACTS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 41,
+        id: "v2-ydoc-file-export-lane",
+        sql: V2_YDOC_FILE_EXPORT_LANE_DDL,
         sets_user_version: None,
     },
 ];
@@ -3675,6 +3711,10 @@ mod tests {
             (
                 "v2-open-document-artifacts",
                 "2a4525cbf68a02045589052295e240bc621fc2de73f96f3a549d505bc06394d7",
+            ),
+            (
+                "v2-ydoc-file-export-lane",
+                "7caa4d6ee7db128cdb9b6b87e2c05b487ce39cb4b5f93ac96b2da5d4bbec7175",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -4923,6 +4963,77 @@ mod tests {
     }
 
     #[test]
+    fn file_export_lane_migration_preserves_prune_and_head_changes_clears_claim_and_retires_delete()
+    {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let ctx = MigrationContext::current(1000);
+        let target = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.ordinal == 41)
+            .unwrap();
+        assert_eq!(BASELINE_MIGRATIONS[target - 1].ordinal, 40);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..target], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main'); INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','main',0); INSERT INTO file_objects VALUES ('ws','doc',0);").unwrap();
+        let sha = "a".repeat(64);
+        conn.execute("INSERT INTO blobs VALUES (?1,1,'a')", [&sha])
+            .unwrap();
+        conn.execute("INSERT INTO snapshots(workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES ('ws','main','doc','doc.md',?1,0,'a','ydoc')",[&sha]).unwrap();
+        conn.execute("INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,regime,lineage_claim_status,updated_at_ms,sharing_declined_json) VALUES ('ws','main','doc','plaintext','local-only','unclaimed',0,?1)",[format!(r#"{{"head_sha256":"{sha}","constraint":"MAX_YDOC_UPDATE_BYTES","limit_bytes":20,"observed_bytes":21}}"#)]).unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=target], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let flag = |conn: &Connection| {
+            conn.query_row("SELECT file_export_lane FROM ydoc_docs", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(flag(&conn), 1);
+        conn.execute(
+            "UPDATE ydoc_docs SET head_update_seq=0,head_snapshot_seq=0",
+            [],
+        )
+        .unwrap();
+        conn.execute("UPDATE snapshots SET latest_moment_id='b'", [])
+            .unwrap();
+        assert_eq!(flag(&conn), 1);
+        let next_sha = "b".repeat(64);
+        conn.execute("INSERT INTO blobs VALUES (?1,1,'b')", [&next_sha])
+            .unwrap();
+        conn.execute(
+            "UPDATE snapshots SET blob_sha256=?1,metadata_origin='restore'",
+            [&next_sha],
+        )
+        .unwrap();
+        assert_eq!(flag(&conn), 1);
+        assert!(
+            conn.query_row(
+                "SELECT sharing_declined_json IS NOT NULL FROM ydoc_docs",
+                [],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap()
+        );
+        let claim = crate::hex_sha256(b"");
+        conn.execute("INSERT INTO binary_blobs VALUES (?1,0,X'')", [&claim])
+            .unwrap();
+        conn.execute("UPDATE ydoc_docs SET regime='replicated',lineage_claim_status='exact',lineage_claim_id=?1",[&claim]).unwrap();
+        assert_eq!(flag(&conn), 0);
+        conn.execute(
+            "UPDATE ydoc_docs SET regime='local-only',lineage_claim_status='unclaimed',lineage_claim_id=NULL,file_export_lane=1",
+            [],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM snapshots", []).unwrap();
+        assert_eq!(flag(&conn), 3);
+        assert!(
+            conn.execute("UPDATE ydoc_docs SET file_export_lane=4", [])
+                .is_err()
+        );
+    }
+
+    #[test]
     fn retained_export_lineage_migration_upgrades_ordinal_38_without_backfill() {
         let mut conn = Connection::open_in_memory().unwrap();
         let ctx = MigrationContext::current(1_000);
@@ -4990,10 +5101,12 @@ mod tests {
         let before = migration_index("v2-open-document-artifacts");
         assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 39);
         assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 40);
-        assert_eq!(before + 1, BASELINE_MIGRATIONS.len());
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         conn.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main'); INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','main',0); INSERT INTO file_objects VALUES ('ws','doc',0),('ws','settled',0); INSERT INTO blobs(sha256,byte_length,text) VALUES ('old',3,'old'),('new',3,'new'); INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,regime,lineage_claim_status,head_update_seq,head_snapshot_seq,settled_update_seq,updated_at_ms) VALUES ('ws','main','doc','plaintext','local-only','unclaimed',2,0,1,0),('ws','main','settled','plaintext','local-only','unclaimed',2,0,2,0); INSERT INTO snapshots(workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES ('ws','main','doc','doc.md','old',0,'m0','sync'); INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES ('ws','peer',0,'moment.append','{}',0,1); INSERT INTO replication_pending_refusals VALUES ('ws','peer',0,'moment.append','invalid-input','Existing refusal','report');").unwrap();
-        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
         assert_eq!(
             conn.query_row(
                 "SELECT last_local_update_seq FROM ydoc_docs WHERE object_id='doc'",

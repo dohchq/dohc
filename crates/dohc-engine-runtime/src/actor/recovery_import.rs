@@ -163,12 +163,14 @@ impl ActorHandle {
                         if before.encode_full_state() == after.encode_full_state() { continue; }
                         let mut append = dohc_engine_collab::durable::record_recovery_update_in_tx(tx, key, &input.path, &update.request_id, &update.update,
                             update.actor_origin_id.as_deref(), update.attribution.as_ref(), now_ms)?;
-                        super::ydoc::journal_recovery_append_in_tx(tx, key, &snapshot.path,
+                        let local_append = super::ydoc::journal_recovery_append_in_tx(tx, key, &snapshot.path,
                             marker.content_kind, &update.update, update.actor_origin_id.as_deref(),
                             update.attribution.as_ref(), &mut append, now_ms)?;
                         if !append.deduped && let Some(facts) = append.record_facts.take() {
-                            automation_claims.extend(dohc_engine_domain::claim_automation_triggers_in_tx(tx, &key.workspace_id, &facts, now_ms)
-                                .map_err(|_| refused("automation-claim-failed"))?);
+                            if local_append {
+                                automation_claims.extend(dohc_engine_domain::claim_automation_triggers_in_tx(tx, &key.workspace_id, &facts, now_ms)
+                                    .map_err(|_| refused("automation-claim-failed"))?);
+                            }
                             record_facts.push(facts);
                         }
                     }

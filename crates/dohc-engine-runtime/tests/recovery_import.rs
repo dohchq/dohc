@@ -691,3 +691,58 @@ async fn deleted_recovery_requires_the_latest_ordinary_moment_to_be_a_delete() {
             .unwrap();
     });
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn laned_outage_replay_does_not_attempt_origination_or_read_sync_control() {
+    for lane in [1, 2] {
+        let (scratch, db, supervisor, _actor, state, doc, bytes) = setup().await;
+        supervisor.close(&db).unwrap();
+        inspect(&db, |store| {
+            store.write_with(&NoFaults, |tx| -> Result<(), StorageError> {
+                tx.execute(
+                    "UPDATE ydoc_docs SET file_export_lane=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    rusqlite::params![WS, state.key.version_id, state.key.object_id, lane],
+                ).unwrap();
+                Ok(())
+            }).unwrap();
+        });
+        let actor = supervisor.open(&db, 15).unwrap().actor;
+        let control = rusqlite::Connection::open(&db).unwrap();
+        // Open validates the schema first; any subsequent origination probe fails.
+        control
+            .execute_batch("ALTER TABLE sync_relay_push_state RENAME TO unavailable_sync_control")
+            .unwrap();
+        let replay = import(&actor, scratch.path(), checkpoint(&state, &doc, bytes)).await;
+        control
+            .execute_batch("ALTER TABLE unavailable_sync_control RENAME TO sync_relay_push_state")
+            .unwrap();
+        drop(control);
+        assert_eq!(replay.unwrap(), RecoveryImportOutcome::Replayed,);
+        supervisor.close(&db).unwrap();
+        inspect(&db, |store| {
+            store
+                .read_with(|conn| {
+                    let actual = dohc_engine_collab::load_doc_in(conn, &state.key).unwrap();
+                    assert_eq!(actual.plaintext_string(), "outage\nbase\n");
+                    let marker = dohc_engine_collab::read_marker_in(conn, &state.key)
+                        .unwrap()
+                        .unwrap();
+                    assert!(marker.lineage_claim_id.is_none());
+                    assert_eq!(
+                        conn.query_row("SELECT file_export_lane FROM ydoc_docs", [], |row| row
+                            .get::<_, i64>(0))
+                            .unwrap(),
+                        lane
+                    );
+                    assert_eq!(
+                        conn.query_row("SELECT COUNT(*) FROM replication_log", [], |row| row
+                            .get::<_, i64>(0))
+                            .unwrap(),
+                        0
+                    );
+                    Ok::<_, StorageError>(())
+                })
+                .unwrap();
+        });
+    }
+}

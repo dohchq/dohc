@@ -953,6 +953,7 @@ impl ActorHandle {
                 return Ok((None, None));
             };
             if marker.lineage_claim_status.has_claimed_base()
+                || marker.file_export_lane.is_enabled()
                 || (marker.head_update_seq == 0 && marker.head_snapshot_seq == 0)
                 || !store.read_with(|conn| {
                     dohc_engine_sync::workspace_replicates_with_relay(conn, &key.workspace_id)
@@ -1987,7 +1988,7 @@ pub(super) fn ydoc_record_update_on_store(
         faults,
         now_ms,
         |tx, outcome, _update_sha| {
-            journal_local_append_in_tx(
+            if !journal_local_append_in_tx(
                 tx,
                 &journal_key,
                 &journal_path,
@@ -1999,7 +2000,9 @@ pub(super) fn ydoc_record_update_on_store(
                 &mut sharing_declined,
                 outcome,
                 now_ms,
-            )?;
+            )? {
+                return Ok(());
+            }
             // The origin-device automation trigger (ADR 0008). This hook runs
             // only for ops this device journals — the sync apply path never
             // reaches it — so claiming here is origin-device execution by
@@ -4184,6 +4187,7 @@ mod collection_adoption_settlement_tests {
     }
 }
 
+/// Returns false for an adopted owner, whose appends must not claim local automations.
 #[allow(clippy::too_many_arguments)]
 fn journal_local_append_in_tx(
     tx: &rusqlite::Transaction<'_>,
@@ -4197,7 +4201,7 @@ fn journal_local_append_in_tx(
     sharing_declined: &mut Option<SharingDeclined>,
     outcome: &mut AppendOutcome,
     now_ms: i64,
-) -> Result<(), CollabError> {
+) -> Result<bool, CollabError> {
     let update_sha = &hex_sha256(update);
     dohc_engine_collab::owner_outbox::append_adopted_local_update_in_tx(
         tx,
@@ -4209,19 +4213,20 @@ fn journal_local_append_in_tx(
     )?;
     if dohc_engine_collab::owner_outbox::has_adopted_owner_in(tx, key)? {
         outcome.emit_outbound = false;
-        return Ok(());
+        return Ok(false);
     }
     // Origination is asked first and owns the base-once decision: it
     // originates only a lineage that has no base yet. The base is a
     // full state, so it already carries this append and every row the
     // lineage held before it — a delta beside it would be redundant.
     // Everything else journals its delta.
-    let base_originated = match dohc_engine_sync::originate_ydoc_base_in_tx(
+    let base_originated = match dohc_engine_sync::originate_appended_ydoc_base_in_tx(
         tx,
         key,
         path,
         actor_origin_id,
         attribution,
+        seed_source.is_some(),
         now_ms,
     )
     .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
@@ -4297,7 +4302,7 @@ fn journal_local_append_in_tx(
             facts.source = Some((origin_id, origin_seq));
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4311,9 +4316,9 @@ pub(super) fn journal_recovery_append_in_tx(
     attribution: Option<&ChangeAttribution>,
     outcome: &mut AppendOutcome,
     now_ms: i64,
-) -> Result<(), CollabError> {
+) -> Result<bool, CollabError> {
     if outcome.deduped {
-        return Ok(());
+        return Ok(false);
     }
     journal_local_append_in_tx(
         tx,

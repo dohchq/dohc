@@ -102,6 +102,7 @@ interface ParsedResolve {
   effectContext: EffectContext;
   effects: Effect[];
   lineageTransition: LineageTransition | null;
+  exportedBefore: Side | undefined;
 }
 
 export class SyncRelayInvalidConflictResolveError extends RelayError {
@@ -271,8 +272,8 @@ function author(value: unknown): AgentAuthor | null {
 }
 
 function paths(value: unknown): string[] {
-  if (!Array.isArray(value) || value.length < 1 || value.length > 2) {
-    invalid("paths must contain one or two strings");
+  if (!Array.isArray(value) || value.length < 1 || value.length > 3) {
+    invalid("paths must contain one to three strings");
   }
   const parsed = value.map((raw, index) => {
     if (typeof raw !== "string" || raw.length === 0) {
@@ -591,6 +592,40 @@ function sha256Canonical(value: unknown): string {
   return createHash("sha256").update(stableJsonStringify(value), "utf8").digest("hex");
 }
 
+function effectShadow(
+  payload: ParsedResolve,
+  effect: Effect,
+  effectIndex: number,
+): Record<string, unknown> {
+  const shadow = effect.kind === "delete"
+    ? deleteShadow(payload, effect, effectIndex)
+    : writeShadow(payload, effect, effectIndex);
+  const exported = payload.exportedBefore;
+  if (exported && payload.current.present && shadow.objectId === payload.current.objectId) {
+    const before = exported.present && !(effect.kind === "write" &&
+      payload.effects.slice(0, effectIndex).some((previous) => previous.kind === "delete"))
+      ? exported : null;
+    const path = before === null ? null : payload.paths[before.pathRef];
+    Object.assign(shadow, {
+      payloadBeforeBlobSha256: before?.blobSha256 ?? null,
+      payloadBeforePath: path,
+      payloadBeforeContentKind: before?.contentKind ?? null,
+      payloadBeforeByteLength: before?.byteLength ?? null,
+      beforePresent: before === null ? "null" : "present",
+      beforeObjectId: before?.objectId ?? null,
+      beforeVersionId: before === null ? null : payload.targetVersionId,
+      beforePath: path,
+      beforeBlobSha256: before?.blobSha256 ?? null,
+      beforeContentKind: before?.contentKind ?? null,
+      beforeByteLength: before?.byteLength ?? null,
+      beforeUpdatedAtMs: before?.updatedAtMs ?? null,
+      beforeLatestMomentId: before?.latestMomentId ?? null,
+      beforeMetadata: null,
+    });
+  }
+  return shadow;
+}
+
 function validateBindings(payload: ParsedResolve): void {
   const choicePairs = new Map([
     ["current", "kept-current"],
@@ -605,8 +640,14 @@ function validateBindings(payload: ParsedResolve): void {
     payload.current.pathRef,
     payload.incoming.pathRef,
     payload.result.pathRef,
+    ...(payload.exportedBefore ? [payload.exportedBefore.pathRef] : []),
   ]);
   if (usedPaths.size !== payload.paths.length) invalid("paths contains an unused entry");
+  const exported = payload.exportedBefore;
+  if (exported && (payload.lineageTransition !== null || !payload.current.present ||
+    (exported.present && exported.objectId !== payload.current.objectId))) {
+    invalid("exported preimage must name its unclaimed object");
+  }
 
   const currentCreated = payload.effectContext.currentObjectCreatedAtMs;
   const resultCreated = payload.effectContext.resultObjectCreatedAtMs;
@@ -718,10 +759,7 @@ function validateBindings(payload: ParsedResolve): void {
   }
 
   for (const [effectIndex, effect] of payload.effects.entries()) {
-    const shadow =
-      effect.kind === "delete"
-        ? deleteShadow(payload, effect, effectIndex)
-        : writeShadow(payload, effect, effectIndex);
+    const shadow = effectShadow(payload, effect, effectIndex);
     const shadowJson = stableJsonStringify(shadow);
     const observedBytes = utf8Bytes(shadowJson);
     if (observedBytes > MAX_PAYLOAD_JSON_BYTES) {
@@ -751,8 +789,9 @@ export function conflictResolveBlobShas(
   } catch {
     invalid("payload is not JSON");
   }
+  const input = requireRecord(parsed, "payload");
   const record = exactKeys(
-    parsed,
+    input,
     [
       "formatVersion",
       "workspaceId",
@@ -767,6 +806,7 @@ export function conflictResolveBlobShas(
       "effectContext",
       "effects",
       "lineageTransition",
+      ...(Object.hasOwn(input, "exportedBefore") ? ["exportedBefore"] : []),
     ],
     "payload",
   );
@@ -812,6 +852,8 @@ export function conflictResolveBlobShas(
     effectContext: context,
     effects: effects(record.effects),
     lineageTransition: lineageTransition(record.lineageTransition),
+    exportedBefore: Object.hasOwn(record, "exportedBefore")
+      ? side(record.exportedBefore, parsedPaths.length, "exportedBefore") : undefined,
   };
   validateBindings(payload);
 
@@ -819,6 +861,7 @@ export function conflictResolveBlobShas(
   for (const candidate of [payload.current, payload.incoming, payload.result]) {
     if (candidate.present) roots.push(candidate.blobSha256);
   }
+  if (payload.exportedBefore?.present) roots.push(payload.exportedBefore.blobSha256);
   const next = payload.lineageTransition?.successor;
   if (next) {
     roots.push(

@@ -610,6 +610,25 @@ pub fn finish_checked_delete_in_tx(
             result.moment.recorded_at_ms,
         )?;
     } else {
+        let referenced: bool = tx
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM replication_log
+                   WHERE workspace_id=?1 AND op_kind='moment.append'
+                     AND json_extract(payload_json,'$.momentId')=?2
+                 ) OR EXISTS(
+                   SELECT 1 FROM replication_pending_conflict_moments
+                   WHERE workspace_id=?1 AND moment_id=?2
+                 )",
+                params![workspace_id, moment_id],
+                |row| row.get(0),
+            )
+            .map_err(DomainError::sql_corrupt)?;
+        if referenced {
+            return Err(DomainError::InvalidInput {
+                reason: "checked delete moment has replication dependents",
+            });
+        }
         tx.execute(
             "DELETE FROM engine_requests WHERE result_seq=?1 AND kind='versioned'",
             [result.moment.moment_order],

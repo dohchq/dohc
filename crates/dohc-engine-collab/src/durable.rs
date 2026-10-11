@@ -89,9 +89,26 @@ impl Regime {
     }
 }
 
+/// File delivery survives prune. Only a fresh seed permits another base attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileExportLane {
+    Off,
+    Declined,
+    Reseeded,
+    /// Delivery ended at deletion; old settles still belong only to the owner.
+    Retired,
+}
+
+impl FileExportLane {
+    pub fn is_enabled(self) -> bool {
+        matches!(self, Self::Declined | Self::Reseeded)
+    }
+}
+
 /// A document marker with content, regime, head pointers, and lineage identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Marker {
+    pub file_export_lane: FileExportLane,
     pub content_kind: ContentKind,
     pub regime: Regime,
     pub head_update_seq: i64,
@@ -637,6 +654,7 @@ where
                     )
                     .map_err(map_sql)?;
                     Marker {
+                        file_export_lane: FileExportLane::Off,
                         content_kind,
                         regime,
                         head_update_seq: 0,
@@ -702,6 +720,12 @@ where
                         ],
                     )
                     .map_err(map_sql)?;
+                }
+                if is_seed && outcome.seq == 1 {
+                    tx.execute(
+                        "UPDATE ydoc_docs SET file_export_lane=2 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND file_export_lane=1",
+                        rusqlite::params![key.workspace_id,key.version_id,key.object_id],
+                    ).map_err(map_sql)?;
                 }
                 if is_seed {
                     tx.execute(
@@ -2669,6 +2693,7 @@ pub(crate) fn binary_blob_for_gate(conn: &Connection, sha: &str) -> Result<Vec<u
 }
 
 struct MarkerRow {
+    file_export_lane: i64,
     content_kind: String,
     regime: String,
     head_update_seq: i64,
@@ -2692,7 +2717,7 @@ pub fn read_marker_in(conn: &Connection, key: &DocKey) -> Result<Option<Marker>,
             "SELECT content_kind, regime, head_update_seq, head_snapshot_seq, \
              lineage_claim_status, lineage_claim_id, lineage_parent_claim_id, \
              lineage_epoch_tag, path, base_origin_id, base_origin_seq, base_relay_seq, \
-             base_relay_confirmed_absent FROM ydoc_docs \
+             base_relay_confirmed_absent, file_export_lane FROM ydoc_docs \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             rusqlite::params![key.workspace_id, key.version_id, key.object_id],
             |row| {
@@ -2710,6 +2735,7 @@ pub fn read_marker_in(conn: &Connection, key: &DocKey) -> Result<Option<Marker>,
                     base_origin_seq: row.get(10)?,
                     base_relay_seq: row.get(11)?,
                     base_relay_confirmed_absent: row.get(12)?,
+                    file_export_lane: row.get(13)?,
                 })
             },
         )
@@ -2717,6 +2743,17 @@ pub fn read_marker_in(conn: &Connection, key: &DocKey) -> Result<Option<Marker>,
         .map_err(map_sql)?;
     row.map(|row| {
         Ok(Marker {
+            file_export_lane: match row.file_export_lane {
+                0 => FileExportLane::Off,
+                1 => FileExportLane::Declined,
+                2 => FileExportLane::Reseeded,
+                3 => FileExportLane::Retired,
+                _ => {
+                    return Err(CollabError::Corrupt {
+                        reason: "invalid file export lane".to_owned(),
+                    })
+                }
+            },
             content_kind: ContentKind::parse(&row.content_kind)?,
             regime: Regime::parse(&row.regime),
             head_update_seq: row.head_update_seq,
