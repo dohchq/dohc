@@ -56,7 +56,7 @@ fn destructive_statements(source: &str) -> Vec<String> {
         ) {
             continue;
         }
-        if index > 0 && words[index - 1] == "=" && tokens[index].starts_with('\'') {
+        if tokens[index].starts_with('\'') {
             continue;
         }
         if let Some(target) = rest.get(2) {
@@ -235,6 +235,9 @@ fn retention_audit_recognizes_other_deleters_and_cascading_parents() {
         "UPDATE moments SET path=moment_id WHERE moment_id=?1",
         "UPDATE moments SET path=?1; SELECT moment_id=?2",
         "SELECT EXISTS(SELECT 1 FROM moments c WHERE c.operation='delete')\n FROM moments m",
+        "SELECT EXISTS(SELECT 1 FROM moments c WHERE c.operation IN ('delete'))\n FROM moments m",
+        "SELECT EXISTS(SELECT 1 FROM moments c WHERE c.operation<>'delete')\n FROM moments m",
+        "SELECT EXISTS(SELECT 1 FROM moments c WHERE c.operation IS 'delete')\n FROM moments m",
     ] {
         assert!(
             destructive_statements(sql).is_empty(),

@@ -703,18 +703,21 @@ async fn laned_outage_replay_does_not_attempt_origination_or_read_sync_control()
                     "UPDATE ydoc_docs SET file_export_lane=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
                     rusqlite::params![WS, state.key.version_id, state.key.object_id, lane],
                 ).unwrap();
-                // Any origination probe now fails; the durable draft remains readable.
-                tx.execute_batch("DROP TABLE sync_relay_push_state").unwrap();
                 Ok(())
             }).unwrap();
         });
         let actor = supervisor.open(&db, 15).unwrap().actor;
-        assert_eq!(
-            import(&actor, scratch.path(), checkpoint(&state, &doc, bytes))
-                .await
-                .unwrap(),
-            RecoveryImportOutcome::Replayed,
-        );
+        let control = rusqlite::Connection::open(&db).unwrap();
+        // Open validates the schema first; any subsequent origination probe fails.
+        control
+            .execute_batch("ALTER TABLE sync_relay_push_state RENAME TO unavailable_sync_control")
+            .unwrap();
+        let replay = import(&actor, scratch.path(), checkpoint(&state, &doc, bytes)).await;
+        control
+            .execute_batch("ALTER TABLE unavailable_sync_control RENAME TO sync_relay_push_state")
+            .unwrap();
+        drop(control);
+        assert_eq!(replay.unwrap(), RecoveryImportOutcome::Replayed,);
         supervisor.close(&db).unwrap();
         inspect(&db, |store| {
             store
