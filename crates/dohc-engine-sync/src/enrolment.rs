@@ -3030,13 +3030,16 @@ mod tests {
                 .map_err(SyncError::corrupt)?;
                 dohc_engine_collab::author_coverage::advance_in(tx, &key, false)
                     .map_err(SyncError::corrupt)?;
-                tx.execute(
-                    "UPDATE ydoc_docs SET last_settled_sha=(SELECT blob_sha256 FROM snapshots s \
-                   WHERE s.workspace_id=ydoc_docs.workspace_id \
-                     AND s.version_id=ydoc_docs.version_id AND s.object_id=ydoc_docs.object_id)",
-                    [],
-                )
-                .map_err(SyncError::persist)?;
+                // The close case still has to materialize its first saved artifact.
+                if !close_before_enrollment {
+                    tx.execute(
+                        "UPDATE ydoc_docs SET last_settled_sha=(SELECT blob_sha256 FROM snapshots s \
+                       WHERE s.workspace_id=ydoc_docs.workspace_id \
+                         AND s.version_id=ydoc_docs.version_id AND s.object_id=ydoc_docs.object_id)",
+                        [],
+                    )
+                    .map_err(SyncError::persist)?;
+                }
                 Ok::<_, SyncError>(())
             })
             .expect("record settlement coverage");
@@ -3063,6 +3066,11 @@ mod tests {
                 .load_materialization_job(&settled.job_id)
                 .expect("load settlement job")
                 .expect("settlement queues materialization");
+            assert_eq!(
+                job.preimage,
+                dohc_engine_storage::Preimage::Absent,
+                "the first saved artifact has not been materialized yet",
+            );
             assert_eq!(
                 dohc_engine_files::materialize_one(
                     &store,
