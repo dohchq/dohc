@@ -5916,9 +5916,12 @@ function registerIpcHandlers(): void {
     automationPersonName: (workspaceId, userId, sender) => {
       const workspace = findWorkspace(workspaceId);
       if (userId === (workspace?.remote?.ownerUserId ?? localUserId())) return null;
-      const historyLabels = historyLabelsFor(sender);
-      historyLabels.prepare(workspaceId, [{ userId }]);
-      return historyLabels.person(workspaceId, userId);
+      return historyLabelsFor(sender).person(workspaceId, userId);
+    },
+    prepareRecordHistoryPeople: (workspaceId, userIds, sender) => {
+      const workspace = findWorkspace(workspaceId);
+      const ownerId = workspace?.remote?.ownerUserId ?? localUserId();
+      historyLabelsFor(sender).prepare(workspaceId, userIds.filter(userId => userId !== ownerId).map(userId => ({ userId })));
     },
     namedAuthorLabels: (workspaceId, sender) => {
       const historyLabels = historyLabelsFor(sender);

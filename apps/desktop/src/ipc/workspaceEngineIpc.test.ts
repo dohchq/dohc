@@ -190,6 +190,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
   const readPolicy = vi.fn<(rootPath: string) => Promise<WorkspaceEnginePolicySnapshot>>(async () => ({ filesPolicy: null, visibilityPolicy: null, errors: [], unreadable: [] }));
   if (policyRoot) readPolicy.mockImplementation(readWorkspaceEnginePolicy);
   const automationPersonName = vi.fn((_workspaceId: string, userId: string, _sender: Sender): string | null => userId === "person-local" ? null : userId);
+  const prepareRecordHistoryPeople = vi.fn<(_workspaceId: string, userIds: readonly string[], _sender: Sender) => void>();
   const registrations = createWorkspaceEngineIpc({
     readWorkspaceEnginePolicy: readPolicy,
     localPersonId: () => "person-local",
@@ -209,6 +210,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     notifyRenderer: notify,
     namedAuthorLabels: () => ({ named: () => "Someone you shared with" }),
     automationPersonName,
+    prepareRecordHistoryPeople,
     retryOwnerLiveDelivery, retryCloudSync,
     retryFileObservation: retry ? id => { void retryFileObservation(id); return retry.read(); } : retryFileObservation,
     requireWorkspace, assertWritableWorkspace: writable, syncStatusWithOwnedProjection: syncProjection,
@@ -232,7 +234,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     notify, writable, requireWorkspace, displayName, syncProjection, canonicalWorkspaceFor, requireSessions,
     events, handlers, invoke, routed, retryOwnerLiveDelivery, retryCloudSync, retryFileObservation, automationRunOnThisComputer, relay, setMissingAdapter: () => { missingAdapter = true; },
     storeWorkspaces, readPolicy,
-    sent, automationPersonName,
+    sent, automationPersonName, prepareRecordHistoryPeople,
     signIn: (account: string | null) => { session.account = account; session.generation += 1; },
     /** A credential load begins: no account is known until it reads the store. Resolves the load with its account. */
     loading: () => {
@@ -292,9 +294,9 @@ describe("workspace engine IPC registrations", () => {
     const lookupAccounts = vi.fn(() => held.promise);
     const labels = createHistoryLabels({ snapshot: () => ({ roster: { grants: [], links: [], endedGrants: [], formerGrants: [] }, owner: true, context: 1, inventory: 1 }), lookupAccounts });
     h.automationPersonName.mockImplementation((workspaceId, userId) => {
-      labels.prepare(workspaceId, [{ userId }]);
       return labels.person(workspaceId, userId);
     });
+    h.prepareRecordHistoryPeople.mockImplementation((workspaceId, userIds) => labels.prepare(workspaceId, userIds.map(userId => ({ userId }))));
     h.adapter.getCollectionRecord.mockResolvedValue({
       collection: { path: "tasks", objectId: "tasks", status: "valid", reasons: [] },
       record: { id: "a", path: "tasks/a.md", conflicted: false, values: [] }, nextBeforeHistoryId: null,
@@ -506,7 +508,7 @@ describe("workspace engine IPC registrations", () => {
         entry(6, automation),
         entry(5, { authorOriginId: "codex", actorKind: "agent", onBehalfOf: "person-local", depth: 0 }),
         entry(4, { authorOriginId: "codex", actorKind: "agent", onBehalfOf: "user-ana", depth: 0 }),
-        entry(3, { actorKind: "human" }),
+        entry(3, { actorKind: "human", authorOriginId: "user-ana", onBehalfOf: "user-ana" }),
         entry(2, { ...automation, onBehalfOf: "user-ana" }),
       ],
       nextBeforeHistoryId: 3,
@@ -524,12 +526,13 @@ describe("workspace engine IPC registrations", () => {
         { historyId: 6, author: { kind: "automation", name: stamp, run: null } },
         { historyId: 5, author: { kind: "agent", name: "You" } },
         // Another person's agent, as the file timeline names it.
-        { historyId: 4, author: { kind: "agent", name: "Agent" } },
-        { historyId: 3, author: null },
+        { historyId: 4, author: { kind: "agent", name: "Agent", person: "user-ana" } },
+        { historyId: 3, author: { kind: "human", name: "user-ana" } },
         { historyId: 2, author: { kind: "automation", name: stamp, person: "user-ana", run: null } },
       ],
     });
     expect(GetCollectionRecordHistoryResult.parse(page).entries[0]?.author).not.toHaveProperty("person");
+    expect(h.prepareRecordHistoryPeople).toHaveBeenCalledExactlyOnceWith("workspace", ["person-local", "user-ana"], expect.any(Sender));
     expect(h.automationRunOnThisComputer.mock.calls).toEqual([
       ["workspace", stamp, "claim-here"],
       ["workspace", stamp, "claim-gone"],

@@ -7,6 +7,8 @@ type Author = GetCollectionRecordHistoryResult["entries"][number]["author"];
 
 /** How main names a record history's authors, in one workspace. */
 export interface RecordHistoryAuthors {
+  /** Prepare account labels together, without waiting on network I/O. */
+  prepare?(userIds: readonly string[]): void;
   /** An agent, by the person it acted for: this computer's agent by name, any other as "Agent". */
   agent(onBehalfOf: string | null): string;
   /** Null for the workspace owner, whose ordinary automation rows need no extra label. */
@@ -62,6 +64,15 @@ export async function recordHistoryForIpc(
   page: Pick<CollectionGetRecordResult, "history" | "nextBeforeHistoryId">,
   authors: RecordHistoryAuthors,
 ): Promise<GetCollectionRecordHistoryResult> {
+  authors.prepare?.([...new Set(page.history.flatMap(entry => {
+    if (entry.authorOriginId === null) return [];
+    return entry.actorKind === "human" ? [entry.authorOriginId] : entry.onBehalfOf === null ? [] : [entry.onBehalfOf];
+  }))]);
+  const people = new Map<string, string | null>();
+  const personOf = (userId: string): string | null => {
+    if (!people.has(userId)) people.set(userId, authors.person(userId));
+    return people.get(userId)!;
+  };
   const runs = new Map<string, Promise<boolean>>();
   const available = (automationId: string, claimId: string): Promise<boolean> => {
     const key = JSON.stringify([automationId, claimId]);
@@ -72,10 +83,17 @@ export async function recordHistoryForIpc(
   const authorOf = async (entry: HistoryEntry): Promise<Author> => {
     const actor = entry.authorOriginId;
     if (actor === null) return null;
-    if (entry.actorKind === "agent") return { kind: "agent", name: authors.agent(entry.onBehalfOf) };
+    if (entry.actorKind === "human") {
+      const name = personOf(actor);
+      return name === null ? null : { kind: "human", name };
+    }
+    if (entry.actorKind === "agent") {
+      const person = entry.onBehalfOf === null ? null : personOf(entry.onBehalfOf);
+      return { kind: "agent", name: authors.agent(entry.onBehalfOf), ...(person === null ? {} : { person }) };
+    }
     if (entry.actorKind !== "automation") return null;
     const run = entry.automationRun;
-    const person = entry.onBehalfOf === null ? null : authors.person(entry.onBehalfOf);
+    const person = entry.onBehalfOf === null ? null : personOf(entry.onBehalfOf);
     return {
       kind: "automation",
       automationId: actor,

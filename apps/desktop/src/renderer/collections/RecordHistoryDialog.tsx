@@ -69,7 +69,10 @@ export function recordHistoryGroups(entries: readonly RecordHistoryEntry[]): Gro
 function AuthorName(props: { author: Author; id: string }) {
   const { author } = props;
   if (author.kind === "agent") {
-    return <span id={props.id} className="min-w-0 truncate text-[12px] text-agent">{author.name}</span>;
+    return <span id={props.id} className="min-w-0 truncate text-[12px] text-agent">{author.name}{author.person ? ` for ${author.person}` : ""}</span>;
+  }
+  if (author.kind === "human") {
+    return <span id={props.id} className="min-w-0 truncate text-[12px] text-muted">{author.name}</span>;
   }
   return (
     <span id={props.id} data-testid="record-history-automation" className="inline-flex min-w-0 items-center gap-1 text-[12px] text-muted">
