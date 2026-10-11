@@ -350,6 +350,7 @@ describe("two-client presence over a real relay child", () => {
     const shareId = await createChatShare(baseUrl, "owner", ownerWs, "member", wireId);
 
     // OWNER publishes presence via the WORKSPACE route on the wireId topic.
+    // Send displayName on both peers to prove the relay strips caller-supplied names.
     const ownerView = await publish(baseUrl, "owner", ownerWs, wireId, {
       clientId: "owner-1",
       state: { displayName: "Owner", typing: false },
@@ -372,17 +373,16 @@ describe("two-client presence over a real relay child", () => {
     );
     expect(memberPoll.status).toBe(200);
     const memberPolled = ((await memberPoll.json()) as { peers: Peer[] }).peers;
+    expect(memberPolled.map((p) => p.sessionToken)).toEqual(memberView.map((p) => p.sessionToken));
     for (const peers of [memberView, memberPolled]) {
       expect(peers.find((p) => !p.isSelf)?.displayName).toBe("owner");
       expect(peers.find((p) => p.isSelf)?.displayName).toBe("member");
-      expect(peers.map((p) => p.sessionToken)).toEqual(memberView.map((p) => p.sessionToken));
       for (const peer of peers) {
         expect(peer).not.toHaveProperty("userId");
         expect(peer).not.toHaveProperty("clientId");
         expect(peer.state).not.toHaveProperty("displayName");
       }
     }
-    expect(memberView.every(p => !Object.hasOwn(p, "userId") && !Object.hasOwn(p, "clientId"))).toBe(true);
 
     // …and the OWNER, reading its workspace scope, now sees the PARTICIPANT —
     // proving workspace-scope and share-scope resolved to the one relay scope.
