@@ -1305,6 +1305,15 @@ async fn a_failed_recovery_repair_still_announces_committed_adoptions() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn write_gate_refused_collection_reconcile_waits_for_backfill_and_flushes_cleanly() {
+    refused_collection_flush(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn persistent_collection_refusal_answers_degraded_and_releases_apply_gate() {
+    refused_collection_flush(true).await;
+}
+
+async fn refused_collection_flush(persistent: bool) {
     let scratch = ScratchDir::new().unwrap();
     let root = scratch.path();
     let db = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
@@ -1317,6 +1326,8 @@ async fn write_gate_refused_collection_reconcile_waits_for_backfill_and_flushes_
     let observation =
         crate::file_observation::FileObservation::new(events.clone(), WORKSPACE_ID.into());
     observation.start(root.to_path_buf()).unwrap();
+    let probe = CaptureApplyProbe::default();
+    let apply_gate: ApplyGate = Arc::new(tokio::sync::Mutex::new(()));
     let driver = CaptureDriver::spawn(CaptureDriverSpawnParams {
         observation: Arc::clone(&observation),
         root: root.to_path_buf(),
@@ -1324,11 +1335,11 @@ async fn write_gate_refused_collection_reconcile_waits_for_backfill_and_flushes_
         workspace_id: WORKSPACE_ID.into(),
         leases: LeaseRegistry::new(),
         self_writes: SelfWriteSuppression::default(),
-        apply_gate: Arc::new(tokio::sync::Mutex::new(())),
+        apply_gate: Arc::clone(&apply_gate),
         store_freshly_created: false,
         initial_author_json: None,
         events,
-        apply_probe: None,
+        apply_probe: Some(probe.clone()),
     });
     tokio::time::timeout(
         std::time::Duration::from_secs(60),
@@ -1358,22 +1369,40 @@ async fn write_gate_refused_collection_reconcile_waits_for_backfill_and_flushes_
     driver.status().request_collection_reconcile();
     let (reply, outcome) = tokio::sync::oneshot::channel();
     driver.flush_sender().send(reply).await.unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(60), async {
-        while driver
-            .status()
-            .busy_reconcile_refusals
-            .load(Ordering::Acquire)
-            == 0
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        probe.reconcile_refused.notified(),
+    )
     .await
     .expect("driver must encounter the write gate");
     assert!(
         !driver.status().degraded(),
-        "busy capture must not fail an import"
+        "brief busy capture must not fail an import"
     );
+    if persistent {
+        // Queue behind the refused tick, before its retry budget expires.
+        let gate = tokio::time::timeout(std::time::Duration::from_secs(60), apply_gate.lock())
+            .await
+            .expect("the bounded retry must release the apply gate");
+        drop(gate);
+        let flushed = tokio::time::timeout(std::time::Duration::from_secs(60), outcome)
+            .await
+            .expect("persistent failure must answer the flush")
+            .unwrap();
+        assert!(!flushed.settled && flushed.degraded, "{flushed:?}");
+        assert!(driver.status().collection_reconcile_pending());
+        // Keep the reader pinned through shutdown: it never clears the refusal.
+        let stopped = driver.begin_shutdown().unwrap();
+        stopped.await.unwrap();
+        if let Some(shutdown) = observation.begin_shutdown() {
+            shutdown.await.unwrap();
+        }
+        drop(reader);
+        drop(writer);
+        drop(actor);
+        supervisor.close(&db).unwrap();
+        return;
+    }
     reader.execute_batch("ROLLBACK").unwrap();
     drop(reader);
     drop(writer);
@@ -1384,6 +1413,177 @@ async fn write_gate_refused_collection_reconcile_waits_for_backfill_and_flushes_
     assert!(
         flushed.settled && flushed.running && !flushed.degraded,
         "{flushed:?}"
+    );
+    driver.begin_shutdown().unwrap().await.unwrap();
+    if let Some(shutdown) = observation.begin_shutdown() {
+        shutdown.await.unwrap();
+    }
+    drop(actor);
+    supervisor.close(&db).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn committed_adoption_and_claims_are_announced_before_a_sibling_busy_retry() {
+    let scratch = ScratchDir::new().unwrap();
+    let root = scratch.path();
+    std::fs::create_dir(root.join("tasks")).unwrap();
+    std::fs::write(root.join("tasks/collection.yaml"), "name: Tasks\n").unwrap();
+    std::fs::write(root.join("tasks/alpha.md"), "Alpha\n").unwrap();
+    std::fs::write(root.join("tasks/beta.md"), "Beta\n").unwrap();
+    let db = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).unwrap().actor;
+    seed_collection_capture(
+        &actor,
+        root,
+        &["tasks/collection.yaml", "tasks/alpha.md", "tasks/beta.md"],
+    );
+    seed_plain_richdoc_lineage(&actor, "tasks/alpha.md", "Alpha\n").await;
+    seed_plain_richdoc_lineage(&actor, "tasks/beta.md", "Beta\n").await;
+    actor
+        .automation_subscribe(
+            WORKSPACE_ID.into(),
+            dohc_engine_domain::AutomationSubscription {
+                automation_id: "collection:tasks#watch".into(),
+                prefix: "tasks".into(),
+                kinds: vec![dohc_engine_domain::AutomationChangeKind::Added],
+                fields: None,
+            },
+            1,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let pinned = Arc::new(Mutex::new(
+        None::<(rusqlite::Connection, rusqlite::Connection)>,
+    ));
+    let once = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let listener_db = db.clone();
+    let listener_pin = Arc::clone(&pinned);
+    let probe = CaptureApplyProbe {
+        collection_committed: Some(Arc::new(move |step| {
+            if step.changed_paths.is_empty() || once.swap(true, Ordering::AcqRel) {
+                return;
+            }
+            assert_eq!(step.changed_paths, ["tasks/alpha.md"]);
+            let writer = rusqlite::Connection::open(&listener_db).unwrap();
+            writer
+                .execute_batch(
+                    "PRAGMA wal_autocheckpoint=0; CREATE TABLE partial_reconcile_load(body BLOB)",
+                )
+                .unwrap();
+            let reader = rusqlite::Connection::open(&listener_db).unwrap();
+            reader
+                .execute_batch("BEGIN; SELECT * FROM partial_reconcile_load")
+                .unwrap();
+            writer
+                .execute(
+                    "INSERT INTO partial_reconcile_load VALUES (?1)",
+                    [vec![42_u8; 28 * 1024 * 1024]],
+                )
+                .unwrap();
+            let frames: i64 = writer
+                .query_row("PRAGMA wal_checkpoint(NOOP)", [], |r| r.get(1))
+                .unwrap();
+            assert!(frames > 6000);
+            *listener_pin.lock().unwrap() = Some((reader, writer));
+        })),
+        ..Default::default()
+    };
+    let events = EngineEvents::default();
+    let mut notices = events.subscribe();
+    let observation =
+        crate::file_observation::FileObservation::new(events.clone(), WORKSPACE_ID.into());
+    observation.start(root.to_path_buf()).unwrap();
+    let driver = CaptureDriver::spawn(CaptureDriverSpawnParams {
+        observation: Arc::clone(&observation),
+        root: root.to_path_buf(),
+        actor: actor.clone(),
+        workspace_id: WORKSPACE_ID.into(),
+        leases: LeaseRegistry::new(),
+        self_writes: SelfWriteSuppression::default(),
+        apply_gate: Arc::new(tokio::sync::Mutex::new(())),
+        store_freshly_created: false,
+        initial_author_json: None,
+        events,
+        apply_probe: Some(probe.clone()),
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        probe.reconcile_refused.notified(),
+    )
+    .await
+    .expect("B must be refused after A commits");
+    assert!(
+        std::fs::read_to_string(root.join("tasks/alpha.md"))
+            .unwrap()
+            .contains("id: rec_")
+    );
+    assert!(
+        !std::fs::read_to_string(root.join("tasks/beta.md"))
+            .unwrap()
+            .contains("id: rec_")
+    );
+    let mut recorded = Vec::new();
+    let mut claims = Vec::new();
+    let drain_notices =
+        |notices: &mut tokio::sync::mpsc::Receiver<crate::events::EngineEventNotice>,
+         recorded: &mut Vec<String>,
+         claims: &mut Vec<serde_json::Value>| {
+            while let Ok(notice) = notices.try_recv() {
+                if notice.name == CAPTURE_MOMENT_RECORDED_EVENT {
+                    recorded.extend(
+                        notice.payload["paths"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|p| p.as_str().unwrap().to_owned()),
+                    );
+                } else if notice.name == crate::AUTOMATION_CLAIMED_EVENT {
+                    claims.push(notice.payload);
+                }
+            }
+        };
+    drain_notices(&mut notices, &mut recorded, &mut claims);
+    assert_eq!(
+        recorded,
+        ["tasks/alpha.md"],
+        "A reaches the renderer before B can complete"
+    );
+    assert_eq!(
+        claims.len(),
+        2,
+        "both committed lifecycle claims must already be announced"
+    );
+    let (reader, writer) = pinned.lock().unwrap().take().unwrap();
+    reader.execute_batch("ROLLBACK").unwrap();
+    drop(reader);
+    drop(writer);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        driver.wait_for_open_ready(),
+    )
+    .await
+    .unwrap();
+    let (reply, outcome) = tokio::sync::oneshot::channel();
+    driver.flush_sender().send(reply).await.unwrap();
+    let flushed = tokio::time::timeout(std::time::Duration::from_secs(60), outcome)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(flushed.settled && !flushed.degraded, "{flushed:?}");
+    drain_notices(&mut notices, &mut recorded, &mut claims);
+    assert_eq!(
+        recorded,
+        ["tasks/alpha.md", "tasks/beta.md"],
+        "each committed adoption is announced once"
+    );
+    assert_eq!(claims.len(), 2, "retry must not announce claims twice");
+    assert!(
+        std::fs::read_to_string(root.join("tasks/beta.md"))
+            .unwrap()
+            .contains("id: rec_")
     );
     driver.begin_shutdown().unwrap().await.unwrap();
     if let Some(shutdown) = observation.begin_shutdown() {

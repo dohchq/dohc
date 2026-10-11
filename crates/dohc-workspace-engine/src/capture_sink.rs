@@ -493,7 +493,16 @@ impl StoreCaptureSink {
     /// Refresh collection detection and record bindings after a clean capture
     /// pass. Adoption uses the runtime's ordinary Y.Doc update + settle path,
     /// including durable replication journaling and self-write suppression.
+    #[cfg(test)]
     pub(crate) fn reconcile_collections(&self) -> Result<CollectionReconciliation, RuntimeError> {
+        self.reconcile_collections_announcing(None)
+    }
+
+    pub(crate) fn reconcile_collections_announcing(
+        &self,
+        committed: Option<dohc_engine_runtime::actor::CollectionCommitListener>,
+    ) -> Result<CollectionReconciliation, RuntimeError> {
+        let announced = committed.is_some();
         let root_guard = self.root_guard().map_err(|_| RuntimeError::Identity {
             reason: "workspace root changed during capture",
             source: None,
@@ -507,7 +516,14 @@ impl StoreCaptureSink {
             self.now_ms,
             Arc::new(NoFaults),
             root_guard,
+            committed,
         )?;
+        if announced {
+            // The observer already announced every committed step, including
+            // steps before a refusal. Do not announce them again on success.
+            reconciliation.changed_paths.clear();
+            reconciliation.automation_claims.clear();
+        }
         self.automation_claims
             .borrow_mut()
             .extend(std::mem::take(&mut reconciliation.automation_claims));

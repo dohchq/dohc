@@ -452,6 +452,7 @@ fn queued_collection_reconcile_refuses_replacement_root_before_db_changes() {
             10,
             Arc::new(NoFaults),
             actor_guard,
+            None,
         )
     });
 
@@ -533,6 +534,7 @@ fn post_commit_root_refusal_leaves_no_self_write_suppression() {
             10,
             Arc::new(NoFaults),
             actor_guard,
+            None,
         )
     });
 

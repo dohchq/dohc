@@ -61,6 +61,10 @@ pub const EARLY_IMPORT_MIN_ADDED_FILES: usize = 1_000;
 #[cfg_attr(any(test, feature = "harness"), derive(Default))]
 pub struct CaptureApplyProbe {
     #[cfg(test)]
+    reconcile_refused: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    collection_committed: Option<dohc_engine_runtime::actor::CollectionCommitListener>,
+    #[cfg(test)]
     pub(crate) observation_root: Option<PathBuf>,
     #[cfg(feature = "harness")]
     inner: Arc<CaptureApplyProbeInner>,
@@ -76,6 +80,20 @@ pub struct CaptureApplyProbe {
     open_budget_reached: Arc<tokio::sync::Notify>,
     #[cfg(any(test, feature = "harness"))]
     open_budget_release: Arc<tokio::sync::Notify>,
+}
+
+impl CaptureApplyProbe {
+    fn reconcile_refused(&self) {
+        #[cfg(test)]
+        self.reconcile_refused.notify_one();
+    }
+
+    fn collection_committed(&self, _step: &CollectionReconciliation) {
+        #[cfg(test)]
+        if let Some(listener) = &self.collection_committed {
+            listener(_step);
+        }
+    }
 }
 
 #[cfg(any(test, feature = "harness"))]
@@ -711,8 +729,6 @@ impl ScanGauge {
 /// every read a consistent snapshot and every transition one store.
 #[derive(Default)]
 pub(crate) struct DriverStatus {
-    #[cfg(test)]
-    busy_reconcile_refusals: std::sync::atomic::AtomicU64,
     bits: std::sync::atomic::AtomicU8,
     collection_lease_held: std::sync::atomic::AtomicBool,
     collection_release_generation: std::sync::atomic::AtomicU64,
@@ -924,7 +940,6 @@ impl DriverStatus {
             self.request_collection_reconcile();
         }
     }
-    #[cfg(test)]
     fn collection_reconcile_pending(&self) -> bool {
         self.bits.load(Ordering::Acquire) & STATUS_COLLECTION_RECONCILE_PENDING != 0
     }
@@ -1852,6 +1867,11 @@ async fn drive_loop<E: DriverEnv>(
                         outcome = Some(TickObservation::Healthy {
                             clean: all_clean && !fresh_disruption,
                         });
+                        // Answer this flush after the bounded collection retry.
+                        // The next tick retries its still-pending reconciliation.
+                        if !clean && status.collection_reconcile_pending() {
+                            break;
+                        }
                     }
                     TickIo::ActorLost => {
                         outcome = Some(TickObservation::ActorLost);
@@ -2600,14 +2620,15 @@ async fn apply_bound_run_with_handle(
                         let collection_author_json = author_json.clone();
                         let collection_provenance = provenance.clone();
                         let collection_cancel = cancel.clone();
-                        let collection_status = Arc::clone(status);
+                        let collection_events = events.clone();
+                        let collection_probe = apply_probe.clone();
                         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
                         let thread = std::thread::Builder::new()
                             .name("dohc-capture-collection-reconcile".to_owned())
                             .spawn(move || {
                                 let sink = StoreCaptureSink::new(StoreCaptureSinkParams {
                                     actor: collection_actor,
-                                    workspace_id: collection_workspace,
+                                    workspace_id: collection_workspace.clone(),
                                     version_id,
                                     shadow_root: collection_root,
                                     captured_root: Ok(captured_root),
@@ -2620,7 +2641,9 @@ async fn apply_bound_run_with_handle(
                                 let reconciled = reconcile_collections_after_backfill(
                                     &sink,
                                     &collection_cancel,
-                                    &collection_status,
+                                    &collection_events,
+                                    &collection_workspace,
+                                    collection_probe.as_ref(),
                                 );
                                 let _ = done_tx.send(
                                     reconciled.map(|paths| (paths, sink.take_automation_claims())),
@@ -2742,7 +2765,7 @@ async fn apply_bound_run_with_handle(
     let apply_plan = plan.clone();
     let apply_author_json = author_json.clone();
     let apply_cancel = cancel.clone();
-    let apply_status = Arc::clone(status);
+    let apply_events = events.clone();
     let apply_captured_root = Arc::clone(&captured_root);
     // The retained-over-cap loop below retires through its own sink; it must
     // carry the same pass provenance or its deletes split the reconcile/fence
@@ -2789,7 +2812,9 @@ async fn apply_bound_run_with_handle(
                             Some(reconcile_collections_after_backfill(
                                 &sink,
                                 &apply_cancel,
-                                &apply_status,
+                                &apply_events,
+                                &apply_workspace,
+                                apply_probe.as_ref(),
                             ))
                         }
                         Ok(false) => None,
@@ -3003,44 +3028,52 @@ async fn apply_bound_run_with_handle(
     clean
 }
 
+const COLLECTION_BUSY_RETRY_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 fn reconcile_collections_after_backfill(
     sink: &StoreCaptureSink,
     cancel: &CancellationToken,
-    status: &DriverStatus,
+    events: &EngineEvents,
+    workspace_id: &str,
+    probe: Option<&CaptureApplyProbe>,
 ) -> Result<CollectionReconciliation, RuntimeError> {
+    let deadline = std::time::Instant::now() + COLLECTION_BUSY_RETRY_LIMIT;
     let mut delay = std::time::Duration::from_millis(20);
+    let events = events.clone();
+    let workspace_id = workspace_id.to_owned();
+    let commit_probe = probe.cloned();
+    let committed: dohc_engine_runtime::actor::CollectionCommitListener = Arc::new(move |step| {
+        crate::events::emit_automation_claimed(&events, &workspace_id, &step.automation_claims);
+        if !step.changed_paths.is_empty() {
+            events.emit(
+                CAPTURE_MOMENT_RECORDED_EVENT,
+                moment_recorded_payload(&workspace_id, &step.changed_paths, &[]),
+            );
+        }
+        if let Some(probe) = &commit_probe {
+            probe.collection_committed(step);
+        }
+    });
     loop {
         if cancel.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
-        match sink.reconcile_collections() {
-            Err(error) if capture_store_busy(&error) => {
-                #[cfg(test)]
-                status
-                    .busy_reconcile_refusals
-                    .fetch_add(1, Ordering::Release);
-                #[cfg(not(test))]
-                let _ = status;
-                std::thread::sleep(delay);
+        match sink.reconcile_collections_announcing(Some(Arc::clone(&committed))) {
+            Err(error) if crate::rpc::error::store_busy(&error) => {
+                if let Some(probe) = probe {
+                    probe.reconcile_refused();
+                }
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(error);
+                }
+                std::thread::sleep(delay.min(remaining));
+                if std::time::Instant::now() >= deadline {
+                    return Err(error);
+                }
                 delay = (delay * 2).min(std::time::Duration::from_millis(200));
             }
             result => return result,
-        }
-    }
-}
-
-fn capture_store_busy(error: &RuntimeError) -> bool {
-    let mut cause: &dyn std::error::Error = error;
-    loop {
-        if matches!(
-            cause.downcast_ref::<dohc_engine_storage::StorageError>(),
-            Some(dohc_engine_storage::StorageError::FileLocked)
-        ) {
-            return true;
-        }
-        match cause.source() {
-            Some(source) => cause = source,
-            None => return false,
         }
     }
 }

@@ -69,7 +69,7 @@ pub(super) fn map_owner_outbox(error: OwnerOutboxError) -> WireError {
 /// Matched on the variant for the reason the artifact lock above is: `code()`
 /// delegates through each wrapper, so "file-locked" alone cannot tell a busy
 /// database apart from a busy file.
-fn store_busy(error: &RuntimeError) -> bool {
+pub(crate) fn store_busy(error: &RuntimeError) -> bool {
     use dohc_engine_storage::StorageError;
     // The search index keeps the raw rusqlite failure instead of wrapping it
     // in the storage taxonomy, so it carries no `FileLocked` to match on and

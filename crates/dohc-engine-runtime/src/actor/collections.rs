@@ -173,6 +173,7 @@ impl ActorHandle {
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         root_guard: Arc<dyn WorkspaceRootGuard>,
+        committed: Option<CollectionCommitListener>,
     ) -> Result<CollectionReconciliation, RuntimeError> {
         let root_guard: Option<Arc<dyn WorkspaceRootGuard>> = Some(root_guard);
         let token: CancellationToken = CancellationToken::new();
@@ -189,6 +190,7 @@ impl ActorHandle {
                 now_ms,
                 faults.as_ref(),
                 &token,
+                committed.as_deref(),
             )
         })
     }
@@ -219,6 +221,7 @@ impl ActorHandle {
                 now_ms,
                 faults.as_ref(),
                 &token,
+                None,
             )
         })
         .await
@@ -526,6 +529,7 @@ mod collection_adoption_update_tests {
             10,
             &dohc_engine_storage::NoFaults,
             &CancellationToken::new(),
+            None,
         )
     }
 
@@ -1880,6 +1884,9 @@ fn cleanup_collection_relation_on_store(
     Ok(CollectionRelationCleanupExecution::Applied(settlement.path))
 }
 
+/// Receives durable reconcile steps on the actor; must not re-enter it.
+pub type CollectionCommitListener = Arc<dyn Fn(&CollectionReconciliation) + Send + Sync>;
+
 /// What one collection reconciliation changed.
 #[derive(Debug, Default)]
 pub struct CollectionReconciliation {
@@ -1906,6 +1913,7 @@ fn reconcile_collections_on_store(
     now_ms: i64,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
+    committed: Option<&(dyn Fn(&CollectionReconciliation) + Send + Sync)>,
 ) -> Result<CollectionReconciliation, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
@@ -1928,6 +1936,12 @@ fn reconcile_collections_on_store(
         TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
     };
 
+    if let Some(committed) = committed {
+        committed(&CollectionReconciliation {
+            automation_claims: automation_claims.clone(),
+            ..Default::default()
+        });
+    }
     let mut changed_paths = Vec::new();
     let mut pending_seed_objects = HashSet::new();
     let mut lease_held = false;
@@ -1954,6 +1968,12 @@ fn reconcile_collections_on_store(
                 if let Some(path) = changed_path
                     && !changed_paths.contains(&path)
                 {
+                    if let Some(committed) = committed {
+                        committed(&CollectionReconciliation {
+                            changed_paths: vec![path.clone()],
+                            ..Default::default()
+                        });
+                    }
                     changed_paths.push(path);
                 }
             }
@@ -2022,6 +2042,12 @@ fn reconcile_collections_on_store(
         ) {
             Ok(CollectionRelationCleanupExecution::Applied(path)) => {
                 if !changed_paths.contains(&path) {
+                    if let Some(committed) = committed {
+                        committed(&CollectionReconciliation {
+                            changed_paths: vec![path.clone()],
+                            ..Default::default()
+                        });
+                    }
                     changed_paths.push(path);
                 }
             }
