@@ -46,7 +46,8 @@ import { siteTabPath, VIEW_IDS } from "../workbench/workbenchState";
 import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { ThreadMessages } from "../workbench/ChatPosts";
-import type { ChatReactionControls } from "../workbench/chatMessages";
+import { ChatComposer, type ChatReactionControls } from "../workbench/chatMessages";
+import { MentionComposer } from "../workbench/MentionComposer";
 import { PostCard, type PostData } from "../workbench/PostCard";
 import { EditorGroupLayout } from "../workbench/EditorGroupLayout";
 import { EditorTabs } from "../workbench/EditorTabs";
@@ -504,6 +505,8 @@ function ChatThreadSpecimen() {
     </div>
   );
 }
+
+const COMPOSER_DRAFT = "Can we cut the last paragraph?";
 
 // The About rail at the drawing's 290px, on the chrome.
 function AboutPanelSpecimen(props: { children: ReactNode }) {
@@ -1718,6 +1721,39 @@ function Pane(props: { theme: "light" | "dark" }) {
               <ZoomSpecimen percent={110} />
             </SettingRow>
           </div>
+        </Specimen>
+      </Section>
+
+      {/* After Zoom stepper, so the parts above keep their places. A send shows
+          only once it has taken a second, so the capture waits for the ring. */}
+      <Section part="composer-sending" title="Composer sending">
+        <Specimen label="at rest">
+          <div className="w-[400px] rounded-lg border border-line bg-panel">
+            <MentionComposer testIdPrefix={`states-composer-rest-${theme}`} composerId={`states-composer-rest-${theme}`}
+              value={COMPOSER_DRAFT} sending={false} placeholder="Message #general" sendLabel="Send message"
+              candidates={[]} onChange={noop} onSend={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="sending, after a second: a group, a message or a post's comments">
+          <div className="w-[400px] rounded-lg border border-line bg-panel">
+            <MentionComposer testIdPrefix={`states-composer-stream-${theme}`} composerId={`states-composer-stream-${theme}`}
+              value={COMPOSER_DRAFT} sending placeholder="Message #general" sendLabel="Send message"
+              candidates={[]} onChange={noop} onSend={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="sending, after a second: a new post">
+          <div className="w-[560px]">
+            <MentionComposer testIdPrefix={`states-composer-post-${theme}`} composerId={`states-composer-post-${theme}`}
+              value={COMPOSER_DRAFT} sending surface="post" authorName="Ada" placeholder="What's happening in #general?"
+              sendLabel="Start post" candidates={[]} onChange={noop} onSend={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="sending, after a second: a file's chats in About">
+          <AboutPanelSpecimen>
+            <ChatComposer testIdPrefix={`states-composer-about-${theme}`} composerId={`states-composer-about-${theme}`}
+              value={COMPOSER_DRAFT} sending placeholder="Write a message…" sendLabel="Send message"
+              onChange={noop} onSend={noop} />
+          </AboutPanelSpecimen>
         </Specimen>
       </Section>
 

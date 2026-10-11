@@ -3965,7 +3965,8 @@ export function ChatsView(props: {
               testIdPrefix="chats-dm"
               composerId="chats-dm-composer"
               value={composer}
-              sending={sending || !dm.threadId}
+              sending={sending}
+              disabled={!dm.threadId}
               placeholder={`Message ${dm.peerLabel}…`}
               sendLabel="Send message"
               candidates={mentionCandidates}
