@@ -53,6 +53,12 @@ extraResources:
     to: app-compiler/node_modules
     filter:
       - "**/*"
+  # The probe owner and relay run outside app.asar. The relay uses
+  # app-compiler/node.exe; stage-agent-probe.mjs checks that closure.
+  - from: resources/agent-probe
+    to: agent-probe
+    filter:
+      - "**/*"
   - from: build/icon.png
     to: tray-icon.png
   - from: build/icon.png

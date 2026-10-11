@@ -5493,8 +5493,7 @@ export const UnmountShareResult = z.object({
 export type UnmountShareResult = z.infer<typeof UnmountShareResult>;
 
 // Local agent integration. An agent run is a LOCAL concept: a small
-// record persisted to .dohc/agent-runs.json. Enabling a run (optionally) spawns
-// the managed MCP stdio child for the workspace and sets the watcher's
+// record persisted to .dohc/agent-runs.json. Starting a run sets the watcher's
 // active-run slot, so the run's writes are attributed to the agent.
 export const AgentRunPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -5521,7 +5520,6 @@ export const StartAgentRunResult = AgentRunRecordSchema;
 export type StartAgentRunResult = z.infer<typeof StartAgentRunResult>;
 
 export const AgentRunStatusResult = z.object({
-  mcpEnabled: z.boolean(),
   activeRun: AgentRunRecordSchema.nullable(),
   lastRun: AgentRunRecordSchema.nullable(),
 });

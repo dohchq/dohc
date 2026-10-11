@@ -28,7 +28,7 @@ function SettingsLoading() {
       aria-modal="true"
       aria-label="Settings"
       data-testid="settings-loading"
-      className="dohc-elevated flex h-[min(760px,calc(100vh-48px))] w-[min(1040px,calc(100vw-32px))] flex-col overflow-hidden rounded-xl border border-line bg-bg p-2"
+      className="dohc-elevated flex h-[min(760px,calc(100vh-112px))] w-[min(1040px,calc(100vw-32px))] flex-col overflow-hidden rounded-xl border border-line bg-bg p-2"
     >
       <SkeletonRows layout="panel" label="Loading settings..." />
     </div>
@@ -48,7 +48,7 @@ export function LazyDesktopSettings(
       scope="settings"
       resetKeys={[settingsProps.workspaceId, attempt]}
       onRetry={retry}
-      fallbackClassName="dohc-elevated h-[min(760px,calc(100vh-48px))] w-[min(1040px,calc(100vw-32px))] rounded-xl border border-line"
+      fallbackClassName="dohc-elevated h-[min(760px,calc(100vh-112px))] w-[min(1040px,calc(100vw-32px))] rounded-xl border border-line"
       recoveryMessage="The workspace is still available. Try again."
     >
       <Suspense fallback={<SettingsLoading />}>

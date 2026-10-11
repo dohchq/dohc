@@ -1,5 +1,5 @@
-// The dohc MCP server. The DESKTOP runs this; the user's AI tool (Claude Code,
-// Codex) is the client, launching it as a stdio child via its own config:
+// The dohc MCP server. The user's AI tool (Claude Code, Codex) is the client,
+// launching it as a stdio child via its own config:
 //   { mcpServers: { dohc: { command, args: ["--workspace", root, "--home", home] } } }
 // Stdio is scoped by construction — only the configured tool talks to it — so
 // there is no shared-secret auth to manage (a persistent HTTP server would
