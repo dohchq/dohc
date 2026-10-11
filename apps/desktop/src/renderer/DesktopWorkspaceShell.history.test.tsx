@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "./DesktopWorkspaceShell.testSupport";
-import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { SetWorkspaceUiStatePayload } from "../ipc/bridgeContract";
@@ -9,8 +9,9 @@ import { DEFAULT_WORKSPACE_SETTINGS, type WorkspaceSettingsResult } from "../wor
 import { rendererMarks } from "../performance/rendererMarks";
 import { momentDiffTabPath, versionCompareTabPath } from "./workbench/workbenchState";
 import { deferred } from "../testing/deferred";
+import type { Workspace } from "./DesktopWorkspaceShell";
 import { textEditorContent } from "./FileInspector.editor-fixture";
-import { WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, storedTabs, makeBridge, renderShell, SHARE_STATUS, SHARE_VIEW, makeShareBridge, settleShareView } from "./DesktopWorkspaceShell.testHarness";
+import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, storedTabs, makeBridge, renderShell, shellBootstrapProps, SHARE_STATUS, SHARE_VIEW, makeShareBridge, settleShareView } from "./DesktopWorkspaceShell.testHarness";
 
 describe("history page", () => {
   it("shows a failed file read in a toast and Notices while history stays available", async () => {
@@ -271,6 +272,80 @@ describe("history page", () => {
       protectedTruncated: false,
     };
   }
+
+  // DesktopRoot keys the shell by workspace, so a switch remounts it. A history
+  // answer A asked for before the switch can land after B is on screen, and it
+  // must never paint there. The E2E switch spec covers this only as a smoke
+  // test against the real app; here A's answer is held until B has painted.
+  it("keeps a history answer workspace A asked for out of workspace B", async () => {
+    const A_CONTROL = "A_CONTROL wrote the A plan";
+    const A_STALE = "A_STALE answered after the switch";
+    const B_ONLY = "B_ONLY wrote the B note";
+    const heldA = deferred<ListEngineMomentsResult>();
+    let selected = WORKSPACE.workspaceId;
+    let holdA = false;
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(async () => {
+      if (selected === OTHER_WORKSPACE.workspaceId) {
+        return historyPage([historyMoment("m-b", B_ONLY)]);
+      }
+      return holdA ? heldA.promise : historyPage([historyMoment("m-a", A_CONTROL)]);
+    });
+    const shell = (workspace: Workspace) => (
+      <DesktopWorkspaceShell
+        key={workspace.workspaceId}
+        workspace={workspace}
+        workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
+        onSwitchWorkspace={() => {}}
+      />
+    );
+    vi.stubGlobal("dohcDesktop", bridge);
+    const user = userEvent.setup();
+    const view = render(shell(WORKSPACE));
+
+    // A's answers paint in A: the control that makes the absence below mean
+    // something.
+    await user.click(screen.getByTestId("activity-history"));
+    expect(await screen.findByText(A_CONTROL)).toBeTruthy();
+
+    // A asks again, and that answer is held.
+    holdA = true;
+    const readsBeforeHold = bridge.listEngineMoments.mock.calls.length;
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() =>
+      expect(bridge.listEngineMoments.mock.calls.length).toBeGreaterThan(readsBeforeHold),
+    );
+    const heldRead = bridge.listEngineMoments.mock.calls.length;
+    expect(bridge.listEngineMoments).toHaveBeenNthCalledWith(
+      heldRead,
+      expect.objectContaining({ workspaceId: WORKSPACE.workspaceId }),
+    );
+
+    // Switch to B the way DesktopRoot does, and wait for B's own history.
+    selected = OTHER_WORKSPACE.workspaceId;
+    view.rerender(shell(OTHER_WORKSPACE));
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    await user.click(screen.getByTestId("activity-history"));
+    expect(await screen.findByText(B_ONLY)).toBeTruthy();
+    expect(screen.queryByText(A_CONTROL)).toBeNull();
+
+    // Only now does A's held answer land, and the renderer consumes it.
+    await act(async () => {
+      heldA.resolve(historyPage([historyMoment("m-a-stale", A_STALE)]));
+      await heldA.promise;
+    });
+    await act(async () => {});
+
+    expect(screen.queryByText(A_STALE)).toBeNull();
+    expect(screen.queryByText(A_CONTROL)).toBeNull();
+    expect(screen.getByText(B_ONLY)).toBeTruthy();
+    expect(screen.getAllByTestId("engine-moment-open")).toHaveLength(1);
+  });
 
   it("uses the admitted rename label in the row, search and diff header", async () => {
     const bridge = makeBridge(Promise.resolve(null));
