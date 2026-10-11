@@ -4144,3 +4144,130 @@ it("does not install an Edit renewal when the viewer release is absent", async (
   expect((await handle(request("/api/view/meta", {headers}))).status).toBe(503);
   expect(readCapabilities).toEqual([`LinkCapability ${CAP_ALPHA_1}`]);
 });
+
+describe("link relay JSON lifecycle", () => {
+  async function stateFor(phase: "exchange" | "refresh" | "handoff", relay: (request: Request) => Promise<Response>) {
+    let now = 1_000;
+    let initialExchange = phase !== "exchange";
+    const capabilities: string[] = [];
+    const sessionValue = {ok: true, grantId: "grant-json-bounds", capabilityToken: CAP_ALPHA_1, capabilityExpiresAtMs: 901_000};
+    const target = `/sync/link-${phase}`;
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test", publicHosts: new Set([HOST]), relayTimeoutMs: 250, nowMs: () => now,
+      fetchRelay: async relayRequest => {
+        const path = new URL(relayRequest.url).pathname;
+        if (path === "/sync/link-exchange" && initialExchange) {
+          initialExchange = false;
+          return Response.json(sessionValue);
+        }
+        if (path === target) return relay(relayRequest);
+        expect(path).toBe("/sync/link/share");
+        capabilities.push(relayRequest.headers.get("authorization")!);
+        return Response.json({ok: true, access: "view"});
+      },
+    });
+    let headers: Record<string, string> = {};
+    if (phase !== "exchange") {
+      const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+      const {session} = await exchanged.json() as {session: string};
+      headers = {cookie: cookiePair(exchanged), "x-dohc-link-session": session};
+    }
+    if (phase === "refresh") now = 601_001;
+    return {
+      call: (signal?: AbortSignal) => handler(phase === "exchange"
+        ? request("/api/exchange", {...exchange(SECRET_ALPHA), signal})
+        : request(phase === "refresh" ? "/api/view/meta" : "/api/handoff", {method: phase === "refresh" ? "GET" : "POST", headers, signal})),
+      value: phase === "handoff" ? {ok: true, code: HANDOFF_CODE, expiresAtMs: 901_000}
+        : {...sessionValue, capabilityToken: CAP_ALPHA_2, capabilityExpiresAtMs: 1_501_001},
+      capabilities,
+    };
+  }
+
+  it.each(["exchange", "refresh", "handoff"] as const)("bounds %s JSON before accepting a valid oversized body", async phase => {
+    let cancelled = 0, pulls = 0;
+    const state = await stateFor(phase, async () => new Response(new ReadableStream({
+      pull(controller) {
+        pulls++;
+        if (pulls === 1) controller.enqueue(new TextEncoder().encode(JSON.stringify(state.value)));
+        else if (pulls === 2) controller.enqueue(new Uint8Array(2 * 1024 * 1024).fill(32));
+        else controller.close();
+      },
+      cancel() {cancelled++;},
+    }, {highWaterMark: 0}), {headers: {"content-type": "application/json"}}));
+    const answer = await state.call();
+    expect(cancelled).toBe(1);
+    expect(pulls).toBe(2);
+    expect(answer.headers.has("set-cookie")).toBe(false);
+    expect(answer.status).toBe(phase === "refresh" ? 200 : 404);
+    if (phase === "refresh") expect(state.capabilities).toEqual([`LinkCapability ${CAP_ALPHA_1}`]);
+  });
+
+  it.each([
+    {phase: "exchange", stop: "timeout"}, {phase: "exchange", stop: "abort"},
+    {phase: "refresh", stop: "timeout"}, {phase: "handoff", stop: "timeout"}, {phase: "handoff", stop: "abort"},
+  ] as const)("cancels a stalled $phase body on $stop", async ({phase, stop}) => {
+    vi.useFakeTimers();
+    const browser = new AbortController();
+    let markProgress!: () => void;
+    const progress = new Promise<void>(resolve => {markProgress = resolve;});
+    let bodyController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    let cancelled = 0;
+    let attempts = 0;
+    try {
+      const state = await stateFor(phase, async () => {
+        if (++attempts > 1) return Response.json(state.value);
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {bodyController = controller; controller.enqueue(new TextEncoder().encode("{"));},
+          pull() {markProgress();},
+          cancel() {cancelled++;},
+        }, {highWaterMark: 0}), {headers: {"content-type": "application/json"}});
+      });
+      const pending = state.call(browser.signal);
+      await progress;
+      if (stop === "timeout") await vi.advanceTimersByTimeAsync(250);
+      else browser.abort();
+      expect(cancelled).toBe(1);
+      const answer = await pending;
+      expect(answer.status).toBe(phase === "refresh" ? 200 : 404);
+      expect(answer.headers.has("set-cookie")).toBe(false);
+      expect((await state.call()).status).toBe(200);
+      expect(attempts).toBe(2);
+    } finally {
+      bodyController?.error(new Error("fixture cleanup"));
+      browser.abort();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["exchange", "handoff"] as const)("closes %s headers received after browser cancellation", async phase => {
+    const browser = new AbortController();
+    let bodyController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    let cancelled = 0;
+    const state = await stateFor(phase, async () => {
+      browser.abort();
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {bodyController = controller;},
+        cancel() {cancelled++;},
+      }), {headers: {"content-type": "application/json"}});
+    });
+    const pending = state.call(browser.signal);
+    try {
+      await expect.poll(() => cancelled, {timeout: 1000}).toBe(1);
+      const answer = await pending;
+      expect(answer.status).toBe(404);
+      expect(answer.headers.has("set-cookie")).toBe(false);
+    } finally {
+      bodyController?.error(new Error("fixture cleanup"));
+      await pending;
+    }
+  });
+  it.each([404, 429, 503])("closes a rejected %s refresh body and preserves its refusal", async status => {
+    let cancelled = 0;
+    const state = await stateFor("refresh", async () => new Response(new ReadableStream({cancel() {cancelled++;}}), {status}));
+    const answer = await state.call();
+    expect(cancelled).toBe(1);
+    expect(answer.status).toBe(status === 404 ? 404 : 200);
+    expect(answer.headers.has("set-cookie")).toBe(false);
+    expect(state.capabilities).toEqual(status === 404 ? [] : [`LinkCapability ${CAP_ALPHA_1}`]);
+  });
+});

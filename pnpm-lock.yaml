@@ -1109,6 +1109,9 @@ importers:
 
   services/workspace-api:
     dependencies:
+      '@dohc/service-http':
+        specifier: workspace:*
+        version: link:../../packages/service-http
       '@dohc/workspace-auth':
         specifier: workspace:*
         version: link:../../packages/workspace-auth

@@ -158,6 +158,19 @@ describe("share-web configuration", () => {
     expect(config.port).toBe(0);
   });
 
+  it("canonicalizes exact trusted IPv4 and IPv6 addresses once at startup", () => {
+    const config = loadShareWebConfig({...accountEnvironment,
+      DOHC_SHARE_WEB_TRUSTED_PROXIES: "127.0.0.1,::FFFF:7F00:1,2001:0DB8:0:0:0:0:0:1,0:0:0:0:0:0:0:1",
+    });
+    expect(config.trustedProxies).toEqual(new Set(["127.0.0.1", "2001:db8::1", "::1"]));
+  });
+
+  it.each(["proxy.test", "127.0.0.0/8", "127.0.0.1:80", "[::1]", "fe80::1%eth0", "127.1", "2130706433", "127.000.0.1", "*"])(
+    "rejects a trusted proxy that is not an exact IP: %s", proxy => {
+      expect(() => loadShareWebConfig({...accountEnvironment, DOHC_SHARE_WEB_TRUSTED_PROXIES: proxy}))
+        .toThrow(/exact comma-separated peer addresses/u);
+    },
+  );
   it("uses no trusted proxies when the list is unset", () => {
     const config = loadShareWebConfig({
       NODE_ENV: "test",
