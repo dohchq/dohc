@@ -2,7 +2,7 @@ import { request as httpRequest } from "node:http";
 import { once } from "node:events";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, resolve, toNamespacedPath } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { WebSocket } from "ws";
 import { getCookies, parseSetCookieHeader } from "better-auth/cookies";
@@ -578,7 +578,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
       }, {timeout: 30000});
     } finally {serviceEngine.close();}
     await supervisor!.close(); supervisor = undefined; active = undefined;
-    const engine = new DatabaseSync(join(workspace, ".dohc/engine/engine.db"), {readOnly: true});
+    const engine = new DatabaseSync(toNamespacedPath(join(workspace, ".dohc/engine/engine.db")), {readOnly: true});
     try {results.persistedApplications = engine.prepare("SELECT delivery_id,update_digest FROM live_device_update_applications ORDER BY journal_cursor").all();
       expect(results.persistedApplications).toEqual(expect.arrayContaining([{delivery_id: ack.deliveryId, update_digest: ack.updateDigest}]));
       // Publication replaced the service's private credit with the

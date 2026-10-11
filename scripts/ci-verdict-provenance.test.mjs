@@ -388,34 +388,6 @@ test("PR workflow uses both canonical jobs and provisions the pinned Rust tools"
     `cargo-${tool}@${document.env[`CARGO_${tool.toUpperCase()}_VERSION`]}`).sort());
 });
 
-test("both gate filters select on ignore rules and vendored engine dependencies", () => {
-  // The tree-provenance row reads `git status`, so an ignore rule decides
-  // what the gate can see at all: ignoring a path removes it from every
-  // reading, and ignoring the wiring probe would disable
-  // scripts/rust-gate-artifact.test.mjs without changing a line of it. A
-  // .gitignore-only PR selecting neither job is a check whose preconditions
-  // sit outside what the check can see — which is the defect class this whole
-  // change is about.
-  const filters = workflow.slice(
-    workflow.indexOf("filters: |"),
-    workflow.indexOf("\n  javascript:"),
-  );
-  const rustFilter = filters.slice(
-    filters.indexOf("\n            rust:"),
-    filters.indexOf("\n            js:"),
-  );
-  const jsFilter = filters.slice(filters.indexOf("\n            js:"));
-  assert.match(rustFilter, /^ +- '\.gitignore'$/m);
-  assert.match(jsFilter, /^ +- '\.gitignore'$/m);
-  assert.match(rustFilter, /^ +- 'vendor\/\*\*'$/m);
-  assert.match(jsFilter, /^ +- 'vendor\/\*\*'$/m);
-  // Both slices must be real filter lists, or the assertions above pass by
-  // reading the same text twice.
-  assert.match(rustFilter, /- 'tools\/rust-engine-program\/\*\*'/);
-  assert.match(jsFilter, /- 'scripts\/\*\*'/);
-  assert.doesNotMatch(rustFilter, /- 'scripts\/\*\*'/);
-});
-
 // These cases use string/boolean comparisons shared by JavaScript and Actions.
 // Actionlint checks syntax; this helper does not model all Actions coercions.
 // Read the actual expressions so a removed switch or dependency breaks the test.

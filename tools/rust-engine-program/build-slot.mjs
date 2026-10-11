@@ -627,14 +627,17 @@ export function verificationLanes(env = process.env) {
   return Number(requested);
 }
 
-export function acquireVerificationSlot(env = process.env, { lightweight = false, metadata, waitMs = 6 * 60 * 60_000 } = {}) {
+export function acquireVerificationSlot(env = process.env, { lightweight = false, metadata, waitMs = 6 * 60 * 60_000, observeTicket } = {}) {
   const fullLanes = verificationLanes(env);
   const budget = resolveBuildBudget(env);
   if (!budget) return null;
   return acquireSlot({ root: env.DOHC_VERIFICATION_SLOT_ROOT ?? budget.root, slots: lightweight ? 1 : fullLanes,
     kind: lightweight ? "verification-light-slot" : "verification-slot", lanes: "verification runs", metadata,
-    waitMs, pollMs: 60_000, cooperativeCancellation: true });
+    waitMs, pollMs: 60_000, cooperativeCancellation: true, observeTicket });
 }
+
+/** A ticket observer failed, so acquisition stopped before admission instead of retrying. */
+export class TicketEvidenceError extends Error {}
 
 /**
  * Take a slot of `kind`, waiting (and reclaiming dead owners) until one frees.
@@ -643,6 +646,11 @@ export function acquireVerificationSlot(env = process.env, { lightweight = false
  * With cooperativeCancellation, the caller handles child termination and
  * releases the slot in finally; signals set a nonzero exit code without exiting.
  * Signals received while waiting reject acquisition so caller cleanup can run.
+ * `observeTicket({ root, kind, name, path })` runs synchronously for each
+ * newly published ticket before that ticket attempts admission. An uncontended
+ * admission removes its ticket within milliseconds, so no later reader can
+ * rely on seeing it. A throwing or Promise-returning observer rejects
+ * acquisition with TicketEvidenceError.
  */
 async function acquireSlot({
   root,
@@ -655,6 +663,7 @@ async function acquireSlot({
   heartbeatMs = defaultHeartbeatMs,
   cooperativeCancellation = false,
   metadata,
+  observeTicket,
 }) {
   mkdirSync(root, { recursive: true });
   const label = kind.replace("-", " ");
@@ -673,6 +682,15 @@ async function acquireSlot({
   };
   const onSigint = () => cancel("SIGINT", 130);
   const onSigterm = () => cancel("SIGTERM", 143);
+  const observe = ({ name, path }) => {
+    // Inspecting a returned thenable runs observer code too, so its failures must not reach the transient retry.
+    try {
+      const result = observeTicket({ root, kind, name, path });
+      if (typeof result?.then !== "function") return;
+      result.then(undefined, () => {});
+    } catch (error) { throw new TicketEvidenceError(`Ticket evidence capture failed for ${name}: ${error?.message}`, { cause: error }); }
+    throw new TicketEvidenceError(`Ticket evidence capture for ${name} must finish synchronously.`);
+  };
   process.on("exit", removeTicket);
   process.on("SIGINT", onSigint);
   process.on("SIGTERM", onSigterm);
@@ -692,7 +710,10 @@ async function acquireSlot({
         ticket.remove();
         ticket = undefined;
       }
-      ticket ??= createTicket(root, kind, heartbeatMs, metadata);
+      if (!ticket) {
+        ticket = createTicket(root, kind, heartbeatMs, metadata);
+        if (observeTicket) observe(ticket);
+      }
       refreshQueue();
       const reserved = ahead > 0 && free.length > 0 && ahead >= free.length;
       const sweepMs = reserved ? Math.min(pollMs, 1000) : pollMs;
@@ -720,7 +741,7 @@ async function acquireSlot({
         if (created) return claimSlot(dir, `${kind}-${i}`, heartbeatMs, cooperativeCancellation, removeTicket, root, kind, metadata);
       }
     } catch (error) {
-      if (!transientFilesystemError(error, root, kind)) throw error;
+      if (error instanceof TicketEvidenceError || !transientFilesystemError(error, root, kind)) throw error;
       ahead = -1; // This snapshot cannot grant admission; retry after the sleep.
     }
     if (!denied) {

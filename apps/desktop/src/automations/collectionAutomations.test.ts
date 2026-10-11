@@ -6806,6 +6806,9 @@ describe("Collection automations that a Group message starts", () => {
       const relayed = await w.relayPress(w.executor,
         { automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: paid, recordId: invoice.id, pressId: "relay-1", pressedBy: "user-ana", confirmed: [] }, () => undefined);
       if (relayed.pressed.busy) throw new Error("Expected a claim");
+      const { claimId } = relayed.pressed;
+      await w.until(() => w.events.includes(`released ${claimId}`));
+      expect(w.pressEvents).toContainEqual({ waiting: { claimId, reason: "roster" } });
       await w.renameCollection("Tasks", "Shared/Tasks");
       await w.executor.automationsIn("Shared/Tasks");
       w.setRoster(OWNER);

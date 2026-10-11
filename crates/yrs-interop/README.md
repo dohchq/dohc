@@ -29,10 +29,15 @@ One engine-side observation: `yDocToMarkdown` is not read-only. y-prosemirror's 
 
 ## Run the harness
 
-The scripts always `cargo build` before spawning the Rust peer, so a stale binary can never certify.
+Prepare the Rust peer once through the repository's build budget. Preparation uses locked dependencies and owns this checkout's `target/` directory.
+It records the exact executable and source and binary hashes. Fidelity and fuzz reject a missing or stale receipt.
+The drivers never run Cargo. `CARGO_TARGET_DIR`, including relative values, does not redirect preparation or peer launches.
+Use the same Cargo environment for preparation and the drivers. Changing it invalidates the source fingerprint and requires preparation again.
+Run these commands from the repository root.
 
 ```
-pnpm install --filter @dohc/yrs-interop-scripts...
+pnpm setup:worktree
+node scripts/verification/yrs-interop.mjs
 pnpm --filter @dohc/yrs-interop-scripts fidelity
 pnpm --filter @dohc/yrs-interop-scripts fuzz -- --seeds 500 --strict
 ```
@@ -44,7 +49,7 @@ The fidelity run accepts an optional corpus harvested from a copied `engine.db` 
 ## Harness inventory
 
 - `src/main.rs`: yrs stdio JSON harness (apply, diff, state, content, merge, plus yrs-driven text and XML edits returning the exact encoded delta). Bytes-mode doc construction exists only for the pinned divergence probe.
-- `scripts/rustPeer.ts`: protocol client. Rebuilds the harness before first spawn; a dead harness fails runs instead of hanging them.
+- `scripts/rustPeer.ts`: protocol client. Uses the prepared executable; a dead harness fails runs instead of hanging them.
 - `scripts/canonical.ts`: the canonical content JSON both sides compute independently, normalization, undeclared-root detection, and diff reporting.
 - `scripts/corpus.ts` and `scripts/fidelity.ts`: the fidelity corpus and the three pinned probes (surrogate, bytes-mode, truncation-atomicity).
 - `scripts/fuzz.ts`: the seeded alternating-driver fuzz. One PRNG drives every choice, so any seed replays deterministically.
