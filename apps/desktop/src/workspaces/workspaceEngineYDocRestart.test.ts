@@ -3862,8 +3862,11 @@ it.each(["failure", "success"] as const)(
       });
       expect([...saveSeq.inFlight.values()]).toEqual([2]);
 
+      vi.useFakeTimers();
       newResponse.resolve();
-      await expect.poll(() => reported.length).toBe(4);
+      await vi.advanceTimersByTimeAsync(30_000);
+      vi.useRealTimers();
+      expect(reported).toHaveLength(4);
       expect(reported.at(-1)).toEqual({ state: "settling", seq: rendererSeq });
       expect(saveSeq.inFlight.size).toBe(0);
       expect(await readFile(join(rootPath, "note.md"), "utf8")).toBe("old edit");
@@ -3875,6 +3878,7 @@ it.each(["failure", "success"] as const)(
       expect(await readFile(join(rootPath, "note.md"), "utf8")).toBe("old edit plus new edit");
       expect(saveSeq.inFlight.size).toBe(0);
     } finally {
+      vi.useRealTimers();
       oldResponse.resolve();
       newResponse.resolve();
       readSpy.mockImplementation(createReadStream);

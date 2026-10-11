@@ -1137,6 +1137,15 @@ it.each([
   await session.close({settle: false});
 });
 
+async function expectBusyBudgetFailure(operation: () => Promise<unknown>, message: string | RegExp = "engine-store-busy") {
+  vi.useFakeTimers();
+  try {
+    const assertion = expect(operation()).rejects.toThrow(message);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await assertion;
+  } finally { vi.useRealTimers(); }
+}
+
 // The other busy thing needs the other answer. A busy engine database
 // is dohc's own writers meeting inside SQLite: nothing of the user's is held,
 // nobody can act, and the provider retries by itself. So the surface stays
@@ -1157,7 +1166,7 @@ it("stays on settling for a busy engine store, because the retry is coming", asy
   captureErrors = [];
 
   settleRefusal = wireRefusal("engine-store-busy", "OVERLOADED");
-  await expect(session.settleNow()).rejects.toThrow("engine-store-busy");
+  await expectBusyBudgetFailure(() => session.settleNow());
 
   expect(states.at(-1)).toBe("settling");
   expect(states).not.toContain("error");
@@ -1193,7 +1202,7 @@ it("retires capture settle bookkeeping after repeated busy-store failures", asyn
   try {
     settleRefusal = wireRefusal("engine-store-busy", "OVERLOADED");
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      await expect(session.settleNow()).rejects.toThrow("engine-store-busy");
+      await expectBusyBudgetFailure(() => session.settleNow());
       expect.soft([...saveSeq.inFlight.keys()]).toEqual([]);
     }
     expect(reports).toEqual([
@@ -1235,12 +1244,10 @@ it("keeps saying settling when a busy store fails a close's settle", async () =>
   captureErrors = [];
 
   settleRefusal = wireRefusal("engine-store-busy", "OVERLOADED");
-  await expect(session.settleNow()).rejects.toThrow("engine-store-busy");
+  await expectBusyBudgetFailure(() => session.settleNow());
   states.length = 0;
   captureErrors = [];
-  await expect(session.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
+  await expectBusyBudgetFailure(() => session.close(), /released, but its pre-close settle failed/);
 
   // A retry is coming, so no word but `settling` is honest — and `error`
   // would send the user to try another edit for a database that is merely

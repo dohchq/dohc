@@ -3404,3 +3404,58 @@ it("checks client publication during shutdown without sending a daemon request",
   expect(sessions.hasAvailableClient()).toBe(true);
   expect(client.requests).toEqual([]);
 });
+
+
+describe("store busy total budget", () => {
+  it("waits through catch-up beyond the old two attempts without surfacing failure", async () => {
+    const workspace = await tempWorkspace("busy-catch-up");
+    const client = new MockClient("busy-catch-up");
+    let now = 0, attempts = 0;
+    const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { now: () => now, sleep: async ms => { now += ms; } });
+    const result = await sessions.run(workspace, async () => {
+      attempts++;
+      if (now < 5000) throw daemonRefusal("OVERLOADED", "engine-store-busy", "afterBackoff");
+      return "saved";
+    });
+    expect(result).toBe("saved");
+    expect(attempts).toBeGreaterThan(2);
+  });
+  it("surfaces the original typed refusal when the total budget expires", async () => {
+    const workspace = await tempWorkspace("busy-pinned-reader");
+    const client = new MockClient("busy-pinned-reader");
+    let now = 0;
+    const attemptedAt: number[] = [];
+    const refusal = daemonRefusal("OVERLOADED", "engine-store-busy", "afterBackoff");
+    const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { now: () => now, sleep: async ms => { now += ms; } });
+    await expect(sessions.run(workspace, async () => { attemptedAt.push(now); throw refusal; })).rejects.toBe(refusal);
+    expect(now).toBe(30_000);
+    expect(attemptedAt.every(at => at < 30_000)).toBe(true);
+  });
+  it.each(["clears", "pinned after open", "pinned during open"] as const)(
+    "shares one busy budget across workspace binding and the action: %s", async (scenario) => {
+      const workspace = await tempWorkspace("busy-binding");
+      const client = new MockClient("busy-binding");
+      let now = 0;
+      const refusal = daemonRefusal("OVERLOADED", "engine-store-busy", "afterBackoff");
+      const request = client.sendRequest.bind(client);
+      vi.spyOn(client, "sendRequest").mockImplementation(async input => {
+        if (input.method === "workspace.open" && (now < 5000 || scenario === "pinned during open")) throw refusal;
+        return request(input);
+      });
+      const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
+        now: () => now, sleep: async ms => { now += ms; },
+      });
+      const operation = vi.fn(async () => {
+        if (now < 10_000 || scenario !== "clears") throw refusal;
+        return "saved";
+      });
+      if (scenario === "clears") expect(await sessions.run(workspace, operation)).toBe("saved");
+      else {
+        await expect(sessions.run(workspace, operation)).rejects.toBe(refusal);
+        expect(now).toBe(30_000);
+        if (scenario === "pinned during open") expect(operation).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+});

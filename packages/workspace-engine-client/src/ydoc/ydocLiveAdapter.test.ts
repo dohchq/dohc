@@ -2337,68 +2337,42 @@ describe("YdocLiveAdapter", () => {
     await provider.close({ settle: false });
   });
 
-  it("retries an engine-store-busy settle until the store frees, then saves", async () => {
-    // A busy SQLite handle is dohc's own writers meeting, and the store
-    // reports itself intact and the operation retryable. It used to reach the
-    // caller as INTERNAL / retry "no", so the settle stood down on a condition
-    // that clears by waiting and the user's edits reached the file only on
-    // some unrelated later settle. The ladder now re-arms on it beside the
-    // file lock.
-    const { provider, blocked, refusal, settleErrors, settled, delays, scheduler } =
-      await openAgainstABlockedSettle("typed while the store was busy", {
-        settleDebounceMs: 100,
-        blocker: "engine-store-busy",
-      });
-
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      expect(scheduler.armed).toHaveLength(1);
+  it("waits out store catch-up without surfacing a settle error", async () => {
+    vi.useFakeTimers();
+    try {
+      const { provider, blocked, settleErrors, settled, scheduler } =
+        await openAgainstABlockedSettle("typed while the store was busy", {
+          settleDebounceMs: 100, blocker: "engine-store-busy",
+        });
       scheduler.fire();
-      await drain();
-    }
-    // Every failure re-armed the next attempt and none went quiet.
-    expect(settleErrors).toEqual([refusal, refusal, refusal]);
-    expect(settled).toEqual([]);
-
-    // The contention clears; the pending retry lands the write by itself.
-    blocked.held = false;
-    scheduler.fire();
-    await drain();
-    expect(settled).toHaveLength(1);
-    expect(scheduler.armed).toHaveLength(0);
-    // The rungs are the busy store's, capped at 1s rather than the lock's 10s.
-    expect(delays).toEqual([100, 100, 200, 400]);
-
-    await provider.close({ settle: false });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(settleErrors).toEqual([]);
+      expect(settled).toEqual([]);
+      blocked.held = false;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(settled).toHaveLength(1);
+      expect(settleErrors).toEqual([]);
+      expect(scheduler.armed).toHaveLength(0);
+      await provider.close({ settle: false });
+    } finally { vi.useRealTimers(); }
   });
 
-  it("caps the busy-store ladder far below the file lock's", async () => {
-    // The two waits are for different things. A file lock is held by a
-    // program outside dohc and can last as long as that program does; SQLite
-    // contention is dohc's own and clears in milliseconds. One shared cap
-    // would either hold a document unsettled for ten seconds over a
-    // millisecond of contention, or retry a locked file too eagerly to be
-    // worth bounding.
-    const busy = await openAgainstABlockedSettle("typed while the store was busy", {
-      settleDebounceMs: 4000,
-      blocker: "engine-store-busy",
-    });
-    const lockedFile = await openAgainstABlockedSettle("typed against a lock", {
-      settleDebounceMs: 4000,
-    });
-
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+  it("surfaces a persistent store refusal when its total budget expires", async () => {
+    vi.useFakeTimers();
+    try {
+      const busy = await openAgainstABlockedSettle("typed while the store was busy", {
+        settleDebounceMs: 4000, blocker: "engine-store-busy",
+      });
       busy.scheduler.fire();
-      await drain();
-      lockedFile.scheduler.fire();
-      await drain();
-    }
-    // Both ladders start at the debounce the caller asked for and are then
-    // held down to their own ceiling.
-    expect(busy.delays).toEqual([4000, 1000, 1000, 1000]);
-    expect(lockedFile.delays).toEqual([4000, 4000, 8000, 10_000]);
-
-    await busy.provider.close({ settle: false });
-    await lockedFile.provider.close({ settle: false });
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(busy.settleErrors).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(busy.settleErrors).toEqual([busy.refusal]);
+      expect(busy.settled).toEqual([]);
+      expect(busy.delays).toEqual([4000, 1000]);
+      expect(busy.scheduler.armed).toHaveLength(1);
+      await busy.provider.close({ settle: false });
+    } finally { vi.useRealTimers(); }
   });
 
   // A provider whose JOURNAL write is refused busy `refusals` times before the
