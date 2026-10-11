@@ -9,7 +9,7 @@
 //! Moment backfill cannot use `metadata_origin` to tell local from imported:
 //! `moment_apply.rs` stores the sending peer's wire value verbatim (S2's
 //! boundary stamp covers `snapshots`/`fork_base_snapshots`, not `moments`).
-//! It excludes an imported moment by exact provenance instead â€” a matching
+//! It excludes an imported moment by exact provenance instead — a matching
 //! successfully applied `imported=1` row in `replication_log`, correlated on
 //! `momentId` (which the receiver preserves verbatim, unlike secrets). An
 //! imported coordinate with a pending refusal did not create the matching
@@ -628,7 +628,7 @@ fn backfill_moments_between(
     // `metadata_origin` alone cannot tell a locally-authored moment from an
     // imported one: `moment_apply.rs`'s `INSERT INTO moments` stores the
     // WIRE payload's `metadata.origin` verbatim (the sending peer's own
-    // value â€” "api", "capture", "local-file", whatever that peer used), not
+    // value — "api", "capture", "local-file", whatever that peer used), not
     // a boundary stamp. Only `snapshots`/`fork_base_snapshots` get S2's
     // "sync" stamp. The reliable discriminator is real import provenance:
     // `moment_apply.rs` preserves the sender's `moment_id` verbatim (unlike
@@ -1397,7 +1397,7 @@ mod tests {
             10,
         );
         // The exclusion reads real import provenance (`replication_log`), not
-        // `metadata_origin` â€” `moment_apply.rs` stores the sender's wire value
+        // `metadata_origin` — `moment_apply.rs` stores the sender's wire value
         // verbatim, so a domain write alone does not simulate an import. Seed
         // the matching imported row a real pull would have landed.
         store
