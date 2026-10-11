@@ -1,4 +1,4 @@
-import policy from "./storeBusyRetry.json";
+import policy from "./storeBusyRetry.json" with { type: "json" };
 import { isEngineStoreBusyRefusal } from "../live/daemonLiveAdapter";
 
 // Maximal-write checkpoint measurements must retain at least fourfold headroom.
