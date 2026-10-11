@@ -22,6 +22,25 @@ const MAX_SHARES = 6;
 type Found = { lane: SharingLane; row: AccessShareRow };
 export type SharingResult = SharingFocus & { label: string; row: AccessShareRow | null };
 
+// A lane's every page, or null when its first read failed. A later page main
+// refuses, because the listing changed, keeps what was read.
+async function readLane(workspaceId: string, lane: SharingLane, current: () => boolean): Promise<Found[] | null> {
+  const found: Found[] = [];
+  let cursor: string | null = null;
+  do {
+    let answer;
+    try {
+      answer = await bridge().listSharingAccess({ workspaceId, lane, ...(cursor ? { cursor } : {}) });
+    } catch {
+      return cursor === null ? null : found;
+    }
+    if (cursor !== null && answer.coverage.kind === "unavailable") break;
+    for (const row of answer.rows) if (row.kind === "share") found.push({ lane, row });
+    cursor = answer.nextCursor;
+  } while (cursor !== null && current());
+  return found;
+}
+
 // Both lists, read once per workspace on the first search.
 export function useSharingSearch(workspaceId: string, sharedView: boolean, query: string): SharingResult[] {
   const [found, setFound] = useState<{ workspaceId: string; rows: Found[] } | null>(null);
@@ -36,11 +55,11 @@ export function useSharingSearch(workspaceId: string, sharedView: boolean, query
     const lanes: SharingLane[] = sharedView ? ["received"] : ["granted", "received"];
     void (async () => {
       await bridge().requestAccessRefresh({ workspaceId, reason: "sharing-open" }).catch(() => undefined);
-      const answers = await Promise.all(lanes.map((lane) =>
-        bridge().listSharingAccess({ workspaceId, lane })
-          .then((answer) => answer.rows.flatMap((row) => row.kind === "share" ? [{ lane, row }] : []))
-          .catch(() => [] as Found[])));
-      if (request.isCurrent(token)) setFound({ workspaceId, rows: answers.flat() });
+      const answers = await Promise.all(lanes.map((lane) => readLane(workspaceId, lane, () => request.isCurrent(token))));
+      if (!request.isCurrent(token)) return;
+      // Every read failed: the next query change asks again.
+      if (answers.every((answer) => answer === null)) asked.current = null;
+      setFound({ workspaceId, rows: answers.flatMap((answer) => answer ?? []) });
     })();
   }, [q, request, sharedView, workspaceId]);
 

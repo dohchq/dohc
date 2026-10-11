@@ -181,7 +181,9 @@ function endConfirmWords(group: ShareGroup, waiting: WaitingChanges | undefined)
     : `End this share and decline ${waiting.count} changes ${who} sent? Undo restores the share, not the declined changes.`;
 }
 
-function StatusWord(props: { word: "damaged" | "ended" | "removed" }) {
+type Word = "damaged" | "ended" | "removed";
+
+function StatusWord(props: { word: Word }) {
   return (
     <span data-testid="sharing-row-status" className="shrink-0 font-mono text-[11px] text-subtle">
       {props.word}
@@ -199,16 +201,25 @@ function LevelMark(props: { access: AccessShareRow["access"] | undefined }) {
   );
 }
 
+// Wide enough for the rows' longest item, "Remove from workspace".
+const ROW_MENU_WIDTH = 200;
+
 // A row: the glyph, the name over its folder or sender, a control that stays
-// put, then the trail. On hover and keyboard focus the row's actions take the
-// trail's place, so the name keeps the room of the wider of the two, not
-// both. The row itself takes focus when the view opens on it.
+// put, the status word, then the trail. On hover and keyboard focus the row's
+// actions take the trail's place, so the name keeps the room of the wider of
+// the two, not both; the status word stays. The view focuses a row when it
+// opens on it, and the row is named for a screen reader by what it shows.
 function ShareRow(props: {
   lane: SharingLane;
   shareId: string;
   status: string;
   subject: Subject;
   sub: string | null;
+  // Words a row must show whole, wrapped under the second line.
+  note?: string | null;
+  // The level, or the status word, for the row's name.
+  state: string | null;
+  word?: Word | null;
   lead?: ReactNode;
   trail: ReactNode;
   copies?: ReactNode;
@@ -217,16 +228,18 @@ function ShareRow(props: {
 }) {
   const { subject } = props;
   const acts = props.copies !== undefined || props.menu.length > 0;
+  const name = [subject.name, props.sub, props.note, props.state].filter(Boolean).join(", ");
   return (
     <li data-testid={`sharing-${props.lane}-row`} data-share-id={props.shareId} data-status={props.status}>
-      <div tabIndex={-1} data-sharing-row-focus
-        className={`group ${ABOUT_ROW} h-10 hover:bg-hover focus:bg-selected focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent`}>
+      <div role="group" aria-label={name} data-sharing-row-focus
+        className={`group ${ABOUT_ROW} min-h-10 ${props.note ? "flex-wrap gap-y-0.5 py-1.5" : ""} hover:bg-hover focus:bg-selected focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent`}>
         {subject.glyph}
-        <span className="flex min-w-0 flex-1 flex-col" title={subject.title}>
-          <span className="truncate">{subject.name}</span>
-          {props.sub ? <span className="truncate text-[11px] text-subtle">{props.sub}</span> : null}
+        <span className="flex min-w-0 flex-1 flex-col">
+          <span className="truncate" title={subject.title}>{subject.name}</span>
+          {props.sub ? <span className="truncate text-[11px] text-subtle" title={props.sub}>{props.sub}</span> : null}
         </span>
         {props.lead}
+        {props.word ? <StatusWord word={props.word} /> : null}
         {/* The trail and the actions share one cell, right-aligned, so the
             trails line up at the row's end. The actions are positioned: the
             faded trail is a layer of its own and would take their clicks. */}
@@ -239,11 +252,13 @@ function ShareRow(props: {
               className="relative col-start-1 row-start-1 flex items-center gap-0.5 opacity-0 transition-opacity duration-75 group-hover:opacity-100 group-focus-within:opacity-100">
               {props.copies}
               {props.menu.length > 0 ? (
-                <MoreMenu label="Share actions" testId={`sharing-${props.lane}-menu`} items={props.menu} />
+                <MoreMenu label="Share actions" testId={`sharing-${props.lane}-menu`} items={props.menu} width={ROW_MENU_WIDTH} />
               ) : null}
             </span>
           ) : null}
         </span>
+        {/* The whole width under the name, past the glyph (15px and its 8px gap). */}
+        {props.note ? <span data-testid="sharing-row-note" className="basis-full pl-[23px] text-[11px] leading-4 text-subtle">{props.note}</span> : null}
       </div>
       {props.children}
     </li>
@@ -286,6 +301,8 @@ function GrantedRow(props: {
   waiting: WaitingChanges | undefined;
   confirming: boolean;
   busy: boolean;
+  // Whether this server has shown that it makes browser invitations.
+  invitations: boolean;
   actions: SharingActions;
 }) {
   const { group, waiting, actions } = props;
@@ -293,7 +310,11 @@ function GrantedRow(props: {
   const active = group.rows.find((row) => row.status === "active");
   const subject = subjectOf(first);
   const canEnd = endable(group);
-  const { code, invitation } = copiesOf(group);
+  const copies = copiesOf(group);
+  const code = copies.code;
+  const invitation = props.invitations ? copies.invitation : null;
+  const word: Word | null = active ? null : first.status === "damaged" ? "damaged" : "ended";
+  const level = active?.access ? LEVELS[active.access].label : null;
   const cancelRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (props.confirming) cancelRef.current?.focus();
@@ -309,6 +330,8 @@ function GrantedRow(props: {
       status={active ? "active" : first.status}
       subject={subject}
       sub={subject.folder}
+      state={word ?? level}
+      word={word}
       menu={menu}
       copies={code || invitation ? (
         <>
@@ -338,7 +361,7 @@ function GrantedRow(props: {
       trail={
         <>
           <Faces rows={group.rows} />
-          {active ? <LevelMark access={active.access} /> : <StatusWord word={first.status === "damaged" ? "damaged" : "ended"} />}
+          {active ? <LevelMark access={active.access} /> : null}
         </>
       }
     >
@@ -365,24 +388,31 @@ function GrantedRow(props: {
   );
 }
 
-// A mount's skipped changes, under its row: what the pulls skipped, with
-// Dismiss. The record stays, so the row's menu can show them again.
+// A mount's skipped changes, under its row: what the pulls skipped, then one
+// Dismiss for all of them. The record stays, so the row's menu can show them
+// again, and focus moves there.
 function SkippedChanges(props: { mount: ShareMount; actions: SharingActions }) {
   const skipped = props.mount.skippedOps;
   if (!skipped) return null;
   return (
-    <ul className="m-0 mx-2 mb-1 flex list-none flex-col gap-0.5 p-0">
-      {shareSkipNoticeLines(skipped, props.mount.granterEmail).map((line) => (
-        <li key={line.kind} data-testid="sharing-skipped" data-kind={line.kind}
-          className="flex items-start gap-1.5 rounded-md bg-panel-2 py-1 pl-2 pr-1 text-[12px] text-warning">
-          <TriangleAlert size={13} aria-hidden className="mt-0.5 shrink-0" />
-          <span className="min-w-0 flex-1 leading-4" title={line.detail ?? line.text}>{line.text}</span>
-          <SecondaryButton size="compact" data-testid="sharing-skipped-dismiss" onClick={() => props.actions.dismissSkips(props.mount)}>
-            Dismiss
-          </SecondaryButton>
-        </li>
-      ))}
-    </ul>
+    <div className="mx-2 mb-1 flex items-start gap-1.5 rounded-md bg-panel-2 py-1 pl-2 pr-1 text-[12px] text-warning">
+      <ul className="m-0 flex min-w-0 flex-1 list-none flex-col gap-0.5 p-0">
+        {shareSkipNoticeLines(skipped, props.mount.granterEmail).map((line) => (
+          <li key={line.kind} data-testid="sharing-skipped" data-kind={line.kind} className="flex items-start gap-1.5">
+            <TriangleAlert size={13} aria-hidden className="mt-0.5 shrink-0" />
+            <span className="min-w-0 flex-1 leading-4" title={line.detail ?? line.text}>{line.text}</span>
+          </li>
+        ))}
+      </ul>
+      <SecondaryButton size="compact" data-testid="sharing-skipped-dismiss" aria-label="Dismiss skipped changes"
+        onClick={(event) => {
+          // The lines go; the menu that shows them again takes focus.
+          event.currentTarget.closest("li")?.querySelector<HTMLElement>('[data-testid="sharing-received-menu"]')?.focus();
+          props.actions.dismissSkips(props.mount);
+        }}>
+        Dismiss
+      </SecondaryButton>
+    </div>
   );
 }
 
@@ -423,14 +453,22 @@ function ReceivedRow(props: {
     : files && active
       ? [{ label: "Add to workspace", onSelect: () => actions.mount(shareId), disabled: props.busy }]
       : [];
-  const word = damaged ? "damaged" : removed ? "removed" : active || !row ? null : "ended";
+  const word: Word | null = damaged ? "damaged" : removed ? "removed" : active || !row ? null : "ended";
+  const level = access ? LEVELS[access].label : null;
+  // A removal says it whole, in the relay's words, and what a copy still here does.
+  const note = removed
+    ? [row?.removalMessage, mount ? "Your copy stays readable but won't update." : null].filter(Boolean).join(" ") || null
+    : null;
   return (
     <ShareRow
       lane="received"
       shareId={shareId}
       status={row?.status ?? (damaged ? "damaged" : removed ? "removed" : "unlisted")}
       subject={subject}
-      sub={(removed ? row?.removalMessage : undefined) ?? `from ${sender}`}
+      sub={`from ${sender}`}
+      note={note}
+      state={word ?? level}
+      word={word}
       menu={menu}
       trail={
         <>
@@ -441,7 +479,7 @@ function ReceivedRow(props: {
             </span>
           ) : null}
           <span title={parts.full} className="inline-flex"><ChatAvatar name={sender} kind="human" size="strip" /></span>
-          {word ? <StatusWord word={word} /> : <LevelMark access={access ?? null} />}
+          {word ? null : <LevelMark access={access ?? null} />}
         </>
       }
     >
@@ -547,6 +585,7 @@ export function SharingPanel(props: {
   waiting: ReadonlyMap<string, WaitingChanges>;
   mounts: readonly ShareMount[];
   skipView: SkipView;
+  invitations: boolean;
   confirmShareId: string | null;
   busyShareId: string | null;
   actions: SharingActions;
@@ -582,7 +621,7 @@ export function SharingPanel(props: {
       {props.granted ? (
         <Section lane="granted" view={props.granted} setup={props.grantedSetup} actions={actions}>
           {(answer) => groupShares(answer.rows).map((group) => (
-            <GrantedRow key={group.shareId} group={group} waiting={props.waiting.get(group.shareId)}
+            <GrantedRow key={group.shareId} group={group} waiting={props.waiting.get(group.shareId)} invitations={props.invitations}
               confirming={props.confirmShareId === group.shareId} busy={props.busyShareId === group.shareId} actions={actions} />
           ))}
         </Section>
@@ -669,11 +708,41 @@ export function SharingView(props: {
     const lane = panel.current?.querySelector<HTMLElement>(`[data-testid="sharing-${focus.lane}"]`);
     const row = focus.shareId === null ? null : [...lane?.querySelectorAll<HTMLElement>(`[data-testid="sharing-${focus.lane}-row"]`) ?? []]
       .find((element) => element.dataset.shareId === focus.shareId);
-    const target = row?.querySelector<HTMLElement>("[data-sharing-row-focus]") ?? lane?.querySelector<HTMLElement>("[data-sharing-lane-focus]");
+    const rowTarget = row?.querySelector<HTMLElement>("[data-sharing-row-focus]");
+    const target = rowTarget ?? lane?.querySelector<HTMLElement>("[data-sharing-lane-focus]");
+    // A row takes focus only for this jump, so a click never leaves it selected.
+    if (rowTarget) {
+      rowTarget.tabIndex = -1;
+      rowTarget.addEventListener("blur", () => rowTarget.removeAttribute("tabindex"), { once: true });
+    }
     target?.focus({ preventScroll: true });
     target?.scrollIntoView?.({ block: "nearest" });
     onFocused();
   }, [focus, focusView, onFocused]);
+
+  // Copy invitation shows only once this server has made one: the relay
+  // makes them only when its browser deployment is set up. One probe per
+  // view open, for the first row that could have one; only the answer's
+  // yes or no is kept, never the link.
+  const [invitations, setInvitations] = useState(false);
+  const probed = useRef(false);
+  const grantedView = granted.view;
+  useEffect(() => {
+    if (probed.current || grantedView.status !== "ready") return;
+    const grant = groupShares(grantedView.answer.rows).map((group) => copiesOf(group).invitation).find((row) => row !== null);
+    if (!grant) return;
+    probed.current = true;
+    let live = true, answered = false;
+    bridge().getShareCopyDetails({ shareId: grant.shareId, grantId: grant.grantId }).then((details) => {
+      answered = true;
+      if (live) setInvitations(details.status === "active" && !!details.browserInvitationUrl);
+    }, () => { answered = true; });
+    return () => {
+      live = false;
+      // A probe that never answered may ask again, as StrictMode's replay does.
+      if (!answered) probed.current = false;
+    };
+  }, [grantedView]);
 
   // As About's Access: ask main to check again when the view opens, and when
   // the server connection it was asked under changes.
@@ -761,7 +830,10 @@ export function SharingView(props: {
   // A share that ended since the list was read has nothing to copy. The row
   // is stale, not the person's to fix: read the list again, copy nothing.
   async function copy(grant: AccessShareRow, what: CopyWhat): Promise<string | null> {
+    const token = epoch.current();
     const details = await bridge().getShareCopyDetails({ shareId: grant.shareId, grantId: grant.grantId });
+    // The view closed while main answered: hand out nothing, read nothing.
+    if (!epoch.isCurrent(token)) return null;
     if (details.status === "ended") {
       void loadGranted({ refreshed: refresh() });
       return null;
@@ -819,6 +891,7 @@ export function SharingView(props: {
       waiting={waiting}
       mounts={props.mounts}
       skipView={skipView}
+      invitations={invitations}
       confirmShareId={confirmShareId}
       busyShareId={busyShareId}
       actions={actions}
