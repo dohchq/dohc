@@ -1,3 +1,5 @@
+import type { MomentAuthor } from "./engine";
+
 export const COLLECTION_SCHEMA_FILENAME = "collection.yaml";
 export const RECORD_ID_FRONTMATTER_KEY = "id";
 
@@ -297,6 +299,8 @@ interface CollectionFieldHistoryEntry {
   recordedAtMs: number;
   /** The run an automation's write came from, `null` for any other write and for one recorded without its run. */
   automationRun: AutomationRunAttribution | null;
+  /** Owner-only attribution from an accepted live Edit link frame. */
+  linkAuthor: Extract<MomentAuthor, { kind: "link"; grantId: string }> | null;
 }
 
 export interface CollectionGetRecordResult {

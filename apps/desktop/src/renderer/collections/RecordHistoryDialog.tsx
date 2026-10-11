@@ -8,6 +8,7 @@ import { SecondaryButton } from "../ui/controls";
 import { SkeletonLines } from "../ui/SkeletonRows";
 import { useRequestSequence } from "../useRequestSequence";
 import { HISTORY_READ_FAILED } from "./useRecordHistory";
+import { historyLinkLabel } from "../workbench/historyLinkLabel";
 
 // A record's History: its field changes, newest first, a page at a time,
 // read only while the dialog is open. An automation's changes name it as it
@@ -74,8 +75,8 @@ function AuthorName(props: { author: Author; id: string }) {
       {author.person ? <span className="truncate text-muted">{` for ${author.person}`}</span> : null}
     </span>;
   }
-  if (author.kind === "human") {
-    return <span id={props.id} className="min-w-0 truncate text-[12px] text-muted">{author.name}</span>;
+  if (author.kind === "human" || author.kind === "link") {
+    return <span id={props.id} className="min-w-0 truncate text-[12px] text-muted">{author.kind === "link" ? historyLinkLabel(author) : author.name}</span>;
   }
   return (
     <span id={props.id} data-testid="record-history-automation" className="inline-flex min-w-0 items-center gap-1 text-[12px] text-muted">

@@ -727,6 +727,12 @@ const exportResultSchema = z
   })
   .strict();
 
+const rawLinkAuthorSchema = z.object({
+  kind: z.literal("link"),
+  grantId: z.string().min(1),
+  grantGeneration: z.number().int().positive(),
+  principalId: z.string().min(1),
+}).strict();
 const rawMomentAuthorSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("unattributed") }).strict(),
   z.object({
@@ -755,12 +761,7 @@ const rawMomentAuthorSchema = z.discriminatedUnion("kind", [
     grantId: z.string().min(1),
     grantGeneration: z.number().int().positive(),
   }).strict(),
-  z.object({
-    kind: z.literal("link"),
-    grantId: z.string().min(1),
-    grantGeneration: z.number().int().positive(),
-    principalId: z.string().min(1),
-  }).strict(),
+  rawLinkAuthorSchema,
   z.object({
     kind: z.literal("automation"),
     automationId: z.string().min(1),
@@ -1018,6 +1019,7 @@ const collectionRecordResultSchema = z.discriminatedUnion("ok", [
             onBehalfOf: z.string().min(1).nullable(),
             depth: z.number().int().nonnegative().nullable(),
             recordedAtMs: z.number().int().nonnegative(),
+            linkAuthor: rawLinkAuthorSchema.nullable(),
             // The automation run that made the change: its claim, and the automation's name when it ran.
             automationRun: z
               .object({ claimId: z.string().min(1), automationName: z.string().min(1) })

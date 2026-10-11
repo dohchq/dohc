@@ -67,6 +67,7 @@ const results = {
         depth: 0,
         recordedAtMs: 20,
         automationRun: null,
+        linkAuthor: null,
       },
     ],
   },

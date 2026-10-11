@@ -3287,6 +3287,51 @@ fn get_record_history_is_bounded_and_newest_first() {
 }
 
 #[test]
+fn get_record_history_reads_link_author_without_an_account_actor() {
+    let (_scratch, mut store) = seeded_store();
+    let author =
+        json!({"kind":"link","grantId":"grant","grantGeneration":2,"principalId":"public-holder"});
+    store.write_with(&NoFaults, |tx| -> Result<(), StorageError> {
+        tx.execute("INSERT INTO collection_field_history(workspace_id,version_id,record_id,field_name,recorded_at_ms,link_author_json) VALUES (?1,?2,?3,'Status',100,?4)",
+            params![WORKSPACE_ID, VERSION_ID, FIRST_TASK_ID, author.to_string()]).map_err(StorageError::persist_public)?;
+        Ok(())
+    }).unwrap();
+    let details = store
+        .read_with(|conn| {
+            get_collection_record(conn, WORKSPACE_ID, "tasks", FIRST_TASK_ID, 10, None)
+        })
+        .unwrap()
+        .unwrap();
+    let row = serde_json::to_value(&details.history[0]).unwrap();
+    assert_eq!(row["linkAuthor"], author);
+    assert_eq!(row["actorKind"], serde_json::Value::Null);
+    assert_eq!(row["authorOriginId"], serde_json::Value::Null);
+    for share_id in ["recipient-share", "link-holder-share"] {
+        store.write_with(&NoFaults, |tx| -> Result<(), StorageError> {
+            tx.execute("INSERT INTO share_view_cursors(workspace_id,share_id,cursor) VALUES (?1,?2,'0')", params![WORKSPACE_ID, share_id]).map_err(StorageError::persist_public)?;
+            // A received binding must not read even residual owner history.
+            tx.execute("UPDATE collection_field_history SET link_author_json='invalid'", []).map_err(StorageError::persist_public)?;
+            Ok(())
+        }).unwrap();
+        let received = store
+            .read_with(|conn| {
+                get_collection_record(conn, WORKSPACE_ID, "tasks", FIRST_TASK_ID, 10, Some(-1))
+            })
+            .unwrap()
+            .unwrap();
+        assert!(received.history.is_empty(), "{share_id}");
+        assert_eq!(received.next_before_history_id, None);
+        store
+            .write_with(&NoFaults, |tx| -> Result<(), StorageError> {
+                tx.execute("DELETE FROM share_view_cursors", [])
+                    .map_err(StorageError::persist_public)?;
+                Ok(())
+            })
+            .unwrap();
+    }
+}
+
+#[test]
 fn before_history_id_cursor_pages_equal_timestamps_without_gaps_or_duplicates() {
     let (_scratch, mut store) = seeded_store();
     let seeded = store

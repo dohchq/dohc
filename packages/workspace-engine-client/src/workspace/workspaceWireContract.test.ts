@@ -33,6 +33,18 @@ const snapshot = {
   metadataCorrelationId: null,
 };
 
+it("preserves the owner-only link author through the collection history wire contract", () => {
+  const linkAuthor = { kind: "link", grantId: "ended-link", grantGeneration: 2, principalId: "public-holder" };
+  const fetched = decodeWorkspaceResult(WORKSPACE_METHOD.collectionsGetRecord, {
+    collection: { path: "tasks", objectId: "schema", status: "valid", reasons: [] },
+    record: { id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa", path: "tasks/a.md", conflicted: false, values: [] },
+    history: [{ historyId: 1, field: "Status", previous: { present: false, value: null }, next: { present: true, value: "Done" },
+      authorOriginId: null, actorKind: null, onBehalfOf: null, depth: null, recordedAtMs: 1, automationRun: null, linkAuthor }],
+    nextBeforeHistoryId: null,
+  });
+  expect(fetched.history[0]?.linkAuthor).toEqual(linkAuthor);
+});
+
 const state = {
   path: "note.md",
   contentKind: "text",
@@ -346,6 +358,7 @@ describe("workspace wire schemas", () => {
             depth: 0,
             recordedAtMs: 1,
             automationRun: { claimId: "atc_1", automationName: "Stamp the finish date" },
+            linkAuthor: null,
           },
         ],
         nextBeforeHistoryId: null,

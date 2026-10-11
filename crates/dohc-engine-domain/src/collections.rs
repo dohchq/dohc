@@ -543,6 +543,8 @@ pub struct CollectionFieldHistoryEntry {
     /// The automation run that wrote the change, `None` for any other
     /// author and for an automation's write recorded without its run.
     pub automation_run: Option<AutomationRunAttribution>,
+    /// Owner-only relay-derived provenance for a live Edit link change.
+    pub link_author: Option<SharedChangeAuthor>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -6264,6 +6266,21 @@ pub fn get_collection_record(
     let Some(record) = record else {
         return Ok(None);
     };
+    let received: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM share_view_cursors WHERE workspace_id=?1)",
+            [workspace_id],
+            |row| row.get(0),
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    if received {
+        return Ok(Some(CollectionRecordDetails {
+            collection,
+            record,
+            history: Vec::new(),
+            next_before_history_id: None,
+        }));
+    }
     let before = before_history_id
         .map(|history_id| {
             conn.query_row(
@@ -6282,7 +6299,7 @@ pub fn get_collection_record(
     let mut sql = String::from(
         "SELECT history_id,field_name,previous_value_json,next_value_json,author_origin_id,\
                 actor_kind,on_behalf_of,chain_depth,recorded_at_ms,\
-                automation_claim_id,automation_name \
+                automation_claim_id,automation_name,link_author_json \
          FROM collection_field_history \
          WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3",
     );
@@ -6325,6 +6342,7 @@ pub fn get_collection_record(
                 row.get::<_, i64>(8)?,
                 row.get::<_, Option<String>>(9)?,
                 row.get::<_, Option<String>>(10)?,
+                row.get::<_, Option<String>>(11)?,
             ))
         })
         .map_err(crate::DomainError::sql_corrupt)?
@@ -6345,6 +6363,7 @@ pub fn get_collection_record(
                 recorded_at_ms,
                 automation_claim_id,
                 automation_name,
+                link_author_json,
             )| {
                 Ok(CollectionFieldHistoryEntry {
                     history_id,
@@ -6369,6 +6388,24 @@ pub fn get_collection_record(
                             automation_name,
                         },
                     ),
+                    link_author: link_author_json
+                        .map(|json| {
+                            let author: SharedChangeAuthor =
+                                serde_json::from_str(&json).map_err(|_| {
+                                    crate::DomainError::StateCorrupt {
+                                        reason: "collection history link author is invalid",
+                                    }
+                                })?;
+                            if !matches!(author, SharedChangeAuthor::Link { .. })
+                                || !author.is_valid()
+                            {
+                                return Err(crate::DomainError::StateCorrupt {
+                                    reason: "collection history link author is invalid",
+                                });
+                            }
+                            Ok(author)
+                        })
+                        .transpose()?,
                 })
             },
         )

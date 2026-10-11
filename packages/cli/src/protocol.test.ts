@@ -286,6 +286,7 @@ describe("collection result schemas", () => {
             depth: 0,
             recordedAtMs: 12,
             automationRun: null,
+            linkAuthor: null,
           },
         ],
       }),

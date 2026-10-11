@@ -88,6 +88,7 @@ export async function recordHistoryForIpc(
     return known;
   };
   const authorOf = async (entry: HistoryEntry): Promise<Author> => {
+    if (entry.linkAuthor !== null) return entry.linkAuthor;
     const actor = entry.authorOriginId;
     if (actor === null) return null;
     if (entry.actorKind === "human") {
