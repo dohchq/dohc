@@ -940,6 +940,7 @@ impl DriverStatus {
             self.request_collection_reconcile();
         }
     }
+    #[cfg(test)]
     fn collection_reconcile_pending(&self) -> bool {
         self.bits.load(Ordering::Acquire) & STATUS_COLLECTION_RECONCILE_PENDING != 0
     }
@@ -1588,6 +1589,8 @@ enum TickIo {
     /// Reconciled and applied one plan; `clean` is false when the apply
     /// reported failures or the scan itself was degraded.
     Applied { clean: bool },
+    /// The collection reconcile used its total busy-retry budget.
+    CollectionBusyExhausted,
     /// The files actor died under us.
     ActorLost,
     /// The reconcile failed while the layer stayed up.
@@ -1867,11 +1870,10 @@ async fn drive_loop<E: DriverEnv>(
                         outcome = Some(TickObservation::Healthy {
                             clean: all_clean && !fresh_disruption,
                         });
-                        // Answer this flush after the bounded collection retry.
-                        // The next tick retries its still-pending reconciliation.
-                        if !clean && status.collection_reconcile_pending() {
-                            break;
-                        }
+                    }
+                    TickIo::CollectionBusyExhausted => {
+                        outcome = Some(TickObservation::Healthy { clean: false });
+                        break;
                     }
                     TickIo::ActorLost => {
                         outcome = Some(TickObservation::ActorLost);
@@ -2153,7 +2155,8 @@ impl DriverEnv for RealEnv {
                     initial,
                     &initial_cancel,
                 )
-                .await;
+                .await
+                .clean;
                 // The open barrier must not release on a failed baseline: a
                 // caller whose first write lands before the retry could have
                 // it overwritten by the retry's capture of stale closed-period
@@ -2183,6 +2186,7 @@ impl DriverEnv for RealEnv {
                                 &initial_cancel,
                             )
                             .await
+                            .clean
                         }
                         Err(_) => false,
                     };
@@ -2299,7 +2303,11 @@ impl DriverEnv for RealEnv {
                     ..
                 },
             ) => {
-                if !apply_run(self.apply_context(), layer, run, cancel).await {
+                let applied = apply_run(self.apply_context(), layer, run, cancel).await;
+                if applied.collection_busy_exhausted {
+                    return TickIo::CollectionBusyExhausted;
+                }
+                if !applied.clean {
                     return TickIo::Applied { clean: false };
                 }
                 if self.status.degraded() {
@@ -2316,7 +2324,11 @@ impl DriverEnv for RealEnv {
                 }
             }
             Ok(run) => {
-                let clean = apply_run(self.apply_context(), layer, run, cancel).await;
+                let applied = apply_run(self.apply_context(), layer, run, cancel).await;
+                if applied.collection_busy_exhausted {
+                    return TickIo::CollectionBusyExhausted;
+                }
+                let clean = applied.clean;
                 // A clean-looking tick with a NON-EMPTY quarantine is not
                 // health: the controller parks persistently failing paths on
                 // its own degraded-rescan backoff and stops self-forcing
@@ -2428,7 +2440,8 @@ pub(crate) async fn reconcile_full_for_switch(
                 RootBoundRun { captured_root, run },
                 &token,
             )
-            .await;
+            .await
+            .clean;
             // A new file an editor still holds is not recorded yet, so the
             // switch would leave it behind.
             let deferred = match handle.stats().await {
@@ -2511,9 +2524,9 @@ struct CaptureThreadOutcome {
     plan: ReconcilePlan,
     result: CaptureApplyResult,
     policy_held: bool,
-    collections: Option<Result<CollectionReconciliation, RuntimeError>>,
+    collections: Option<Result<bool, CollectionReconcileFailure>>,
     collection_release_generation: u64,
-    /// Automation claims the captures and the reconciliation committed.
+    /// Automation claims the ordinary file captures committed.
     automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
 }
 
@@ -2561,6 +2574,38 @@ fn moment_recorded_payload(
     })
 }
 
+#[derive(Clone, Copy)]
+struct ApplyOutcome {
+    clean: bool,
+    collection_busy_exhausted: bool,
+}
+
+impl ApplyOutcome {
+    const CLEAN: Self = Self {
+        clean: true,
+        collection_busy_exhausted: false,
+    };
+    const FAILED: Self = Self {
+        clean: false,
+        collection_busy_exhausted: false,
+    };
+}
+
+#[derive(Clone, Copy)]
+enum CollectionReconcileFailure {
+    Failed,
+    BusyBudgetExhausted,
+}
+
+impl CollectionReconcileFailure {
+    fn apply_outcome(self) -> ApplyOutcome {
+        ApplyOutcome {
+            clean: false,
+            collection_busy_exhausted: matches!(self, Self::BusyBudgetExhausted),
+        }
+    }
+}
+
 /// Apply one reconcile run through the capture sink and acknowledge it.
 ///
 /// INVARIANT: a prepared plan is always acknowledged — the controller's
@@ -2574,7 +2619,7 @@ async fn apply_run(
     layer: &FilesLayer,
     run: RootBoundRun,
     cancel: &CancellationToken,
-) -> bool {
+) -> ApplyOutcome {
     apply_bound_run_with_handle(context, &layer.files.handle(), run, cancel).await
 }
 
@@ -2583,7 +2628,7 @@ async fn apply_bound_run_with_handle(
     files: &FilesHandle,
     run: RootBoundRun,
     cancel: &CancellationToken,
-) -> bool {
+) -> ApplyOutcome {
     let _links_hold = context.actor.defer_link_drain_for_capture();
     let ApplyRunContext {
         root,
@@ -2607,7 +2652,7 @@ async fn apply_bound_run_with_handle(
             (plan, requested)
         }
         ReconcileRun::Converged => {
-            let adopted_paths = if status.take_collection_reconcile_request() {
+            if status.take_collection_reconcile_request() {
                 // Read before the attempt so a release racing it still wakes a retry.
                 let release_generation = leases.release_generation(workspace_id);
                 let result = match actor.active_version_id(workspace_id.to_owned()).await {
@@ -2645,43 +2690,35 @@ async fn apply_bound_run_with_handle(
                                     &collection_workspace,
                                     collection_probe.as_ref(),
                                 );
-                                let _ = done_tx.send(
-                                    reconciled.map(|paths| (paths, sink.take_automation_claims())),
-                                );
+                                let _ = done_tx.send(reconciled);
                             });
                         match thread {
                             Ok(joiner) => {
-                                let outcome =
-                                    done_rx.await.unwrap_or(Err(RuntimeError::ActorUnavailable));
+                                let outcome = done_rx
+                                    .await
+                                    .unwrap_or(Err(CollectionReconcileFailure::Failed));
                                 let _ = tokio::task::spawn_blocking(move || joiner.join()).await;
                                 outcome
                             }
-                            Err(_) => Err(RuntimeError::ActorUnavailable),
+                            Err(_) => Err(CollectionReconcileFailure::Failed),
                         }
                     }
                     Err(RuntimeError::Domain(
                         dohc_engine_domain::DomainError::WorkspaceNotFound,
-                    )) => Ok((CollectionReconciliation::default(), Vec::new())),
-                    Err(error) => Err(error),
+                    )) => Ok(false),
+                    Err(_) => Err(CollectionReconcileFailure::Failed),
                 };
                 match result {
-                    Ok((reconciliation, claims)) => {
-                        status.record_collection_reconciliation(
-                            reconciliation.lease_held,
-                            release_generation,
-                        );
-                        crate::events::emit_automation_claimed(&events, workspace_id, &claims);
-                        reconciliation.changed_paths
+                    Ok(lease_held) => {
+                        status.record_collection_reconciliation(lease_held, release_generation);
                     }
-                    Err(_) => {
+                    Err(failure) => {
                         status.request_collection_reconcile();
                         status.mark_degraded();
-                        return false;
+                        return failure.apply_outcome();
                     }
                 }
-            } else {
-                Vec::new()
-            };
+            }
             return match repair_and_materialize_ydoc_recoveries(
                 root,
                 actor,
@@ -2691,32 +2728,22 @@ async fn apply_bound_run_with_handle(
             )
             .await
             {
-                Ok(mut recovered_paths) => {
-                    recovered_paths.extend(adopted_paths);
+                Ok(recovered_paths) => {
                     if !recovered_paths.is_empty() {
                         events.emit(
                             CAPTURE_MOMENT_RECORDED_EVENT,
                             moment_recorded_payload(workspace_id, &recovered_paths, &[]),
                         );
                     }
-                    true
+                    ApplyOutcome::CLEAN
                 }
                 Err(_) => {
-                    // The reconcile above already committed these adoptions.
-                    // An unrelated repair failure must not drop their event —
-                    // the renderer would stay stale on committed state.
-                    if !adopted_paths.is_empty() {
-                        events.emit(
-                            CAPTURE_MOMENT_RECORDED_EVENT,
-                            moment_recorded_payload(workspace_id, &adopted_paths, &[]),
-                        );
-                    }
                     status.mark_degraded();
-                    false
+                    ApplyOutcome::FAILED
                 }
             };
         }
-        ReconcileRun::Cancelled => return true,
+        ReconcileRun::Cancelled => return ApplyOutcome::CLEAN,
     };
     if apply_probe
         .as_ref()
@@ -2727,7 +2754,7 @@ async fn apply_bound_run_with_handle(
         }
         status.mark_degraded();
         ack_all_failed(files, plan, status).await;
-        return false;
+        return ApplyOutcome::FAILED;
     }
     // The active version, precisely: only a genuinely uninitialized
     // workspace falls back to "main" (bootstrapped by ensure_main_version).
@@ -2745,7 +2772,7 @@ async fn apply_bound_run_with_handle(
             }
             status.mark_degraded();
             ack_all_failed(files, plan, status).await;
-            return false;
+            return ApplyOutcome::FAILED;
         }
     };
     let apply_actor = actor.clone();
@@ -2818,7 +2845,7 @@ async fn apply_bound_run_with_handle(
                             ))
                         }
                         Ok(false) => None,
-                        Err(error) => Some(Err(error)),
+                        Err(_) => Some(Err(CollectionReconcileFailure::Failed)),
                     }
                 } else {
                     None
@@ -2855,24 +2882,23 @@ async fn apply_bound_run_with_handle(
         }
         status.mark_degraded();
         ack_all_failed(files, plan, status).await;
-        return false;
+        return ApplyOutcome::FAILED;
     };
     // Claims are committed whatever else this pass decides: wake the
     // executors now.
     crate::events::emit_automation_claimed(&events, workspace_id, &automation_claims);
-    let collection_paths = match collection_result {
-        Some(Ok(reconciliation)) => {
-            status.record_collection_reconciliation(
-                reconciliation.lease_held,
-                collection_release_generation,
-            );
-            reconciliation.changed_paths
+    let collection_busy_exhausted = matches!(
+        collection_result,
+        Some(Err(CollectionReconcileFailure::BusyBudgetExhausted))
+    );
+    match collection_result {
+        Some(Ok(lease_held)) => {
+            status.record_collection_reconciliation(lease_held, collection_release_generation);
         }
         Some(Err(_)) => {
             status.request_collection_reconcile();
             result.degraded = true;
             status.mark_degraded();
-            Vec::new()
         }
         None => {
             if collection_reconcile_requested {
@@ -2880,9 +2906,8 @@ async fn apply_bound_run_with_handle(
                 // has not reached collection reconciliation yet.
                 status.request_collection_reconcile();
             }
-            Vec::new()
         }
-    };
+    }
     // OVER-CAP + narrowed: a path in the scanner's retained-over-cap set
     // never appears in the diff (CAL-3 keeps it last-known-good, never
     // Retire), so a policy narrow could never reach it through an op. Retire
@@ -3010,22 +3035,23 @@ async fn apply_bound_run_with_handle(
     // retained loop above (which reports its retires via not_owned_paths).
     // Gating on applied_paths alone left the renderer permanently stale for
     // exactly those moments.
-    if !result.applied_paths.is_empty()
-        || !result.not_owned_paths.is_empty()
-        || !collection_paths.is_empty()
-    {
-        let mut recorded_paths = result.applied_paths.clone();
-        recorded_paths.extend(collection_paths);
+    if !result.applied_paths.is_empty() || !result.not_owned_paths.is_empty() {
         events.emit(
             CAPTURE_MOMENT_RECORDED_EVENT,
-            moment_recorded_payload(workspace_id, &recorded_paths, &result.not_owned_paths),
+            moment_recorded_payload(workspace_id, &result.applied_paths, &result.not_owned_paths),
         );
     }
     if result.completed() && files.acknowledge_capture(plan, result).await.is_err() {
         status.mark_degraded();
-        return false;
+        return ApplyOutcome {
+            clean: false,
+            collection_busy_exhausted,
+        };
     }
-    clean
+    ApplyOutcome {
+        clean,
+        collection_busy_exhausted,
+    }
 }
 
 const COLLECTION_BUSY_RETRY_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -3036,44 +3062,59 @@ fn reconcile_collections_after_backfill(
     events: &EngineEvents,
     workspace_id: &str,
     probe: Option<&CaptureApplyProbe>,
-) -> Result<CollectionReconciliation, RuntimeError> {
+) -> Result<bool, CollectionReconcileFailure> {
     let deadline = std::time::Instant::now() + COLLECTION_BUSY_RETRY_LIMIT;
     let mut delay = std::time::Duration::from_millis(20);
-    let events = events.clone();
-    let workspace_id = workspace_id.to_owned();
-    let commit_probe = probe.cloned();
-    let committed: dohc_engine_runtime::actor::CollectionCommitListener = Arc::new(move |step| {
-        crate::events::emit_automation_claimed(&events, &workspace_id, &step.automation_claims);
-        if !step.changed_paths.is_empty() {
-            events.emit(
-                CAPTURE_MOMENT_RECORDED_EVENT,
-                moment_recorded_payload(&workspace_id, &step.changed_paths, &[]),
-            );
-        }
-        if let Some(probe) = &commit_probe {
-            probe.collection_committed(step);
-        }
-    });
     loop {
         if cancel.is_cancelled() {
-            return Err(RuntimeError::Cancelled);
+            return Err(CollectionReconcileFailure::Failed);
         }
-        match sink.reconcile_collections_announcing(Some(Arc::clone(&committed))) {
+        let committed = Arc::new(std::sync::Mutex::new(CollectionReconciliation::default()));
+        let collected = Arc::clone(&committed);
+        let commit_probe = probe.cloned();
+        let listener: dohc_engine_runtime::actor::CollectionCommitListener =
+            Arc::new(move |step| {
+                let mut collected = collected.lock().expect("collection commit buffer");
+                collected
+                    .changed_paths
+                    .extend(step.changed_paths.iter().cloned());
+                collected
+                    .automation_claims
+                    .extend(step.automation_claims.iter().cloned());
+                drop(collected);
+                if let Some(probe) = &commit_probe {
+                    probe.collection_committed(step);
+                }
+            });
+        let result = sink.reconcile_collections_observed(Some(listener));
+        // A refusal rolls back only its own step. Announce the committed prefix
+        // once per pass before retrying, even when the retry budget has expired.
+        let committed = committed.lock().expect("collection commit buffer");
+        crate::events::emit_automation_claimed(events, workspace_id, &committed.automation_claims);
+        if !committed.changed_paths.is_empty() {
+            events.emit(
+                CAPTURE_MOMENT_RECORDED_EVENT,
+                moment_recorded_payload(workspace_id, &committed.changed_paths, &[]),
+            );
+        }
+        drop(committed);
+        match result {
             Err(error) if crate::rpc::error::store_busy(&error) => {
                 if let Some(probe) = probe {
                     probe.reconcile_refused();
                 }
                 let remaining = deadline.saturating_duration_since(std::time::Instant::now());
                 if remaining.is_zero() {
-                    return Err(error);
+                    return Err(CollectionReconcileFailure::BusyBudgetExhausted);
                 }
                 std::thread::sleep(delay.min(remaining));
                 if std::time::Instant::now() >= deadline {
-                    return Err(error);
+                    return Err(CollectionReconcileFailure::BusyBudgetExhausted);
                 }
                 delay = (delay * 2).min(std::time::Duration::from_millis(200));
             }
-            result => return result,
+            Ok(reconciliation) => return Ok(reconciliation.lease_held),
+            Err(_) => return Err(CollectionReconcileFailure::Failed),
         }
     }
 }

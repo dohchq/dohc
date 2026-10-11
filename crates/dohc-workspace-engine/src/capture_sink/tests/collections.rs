@@ -6,7 +6,7 @@ fn reconcile_after_backfill(
 ) -> Result<CollectionReconciliation, RuntimeError> {
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
     loop {
-        match sink.reconcile_collections() {
+        match sink.reconcile_collections_observed(None) {
             Err(RuntimeError::Storage(dohc_engine_storage::StorageError::FileLocked)) => {
                 assert!(
                     std::time::Instant::now() < deadline,
@@ -34,7 +34,7 @@ fn replicated_empty_record_refusal_is_a_failed_ingest_in_both_capture_routes() {
         write_file(scratch.path(), path, b"");
         ingest(&mut sink, "tasks/collection.yaml").unwrap();
         ingest(&mut sink, path).unwrap();
-        sink.reconcile_collections().unwrap();
+        sink.reconcile_collections_observed(None).unwrap();
         seed_captured_richdoc_lineage(&sink, path);
         let conn = Connection::open(&db).unwrap();
         conn.execute(
@@ -90,7 +90,8 @@ fn unsupported_collection_keeps_record_bytes_and_ids_untouched() {
     ingest(&mut sink, "tasks/new.md").expect("capture record");
     let moments = moment_count(&db, "tasks/new.md");
     let updates = ydoc_update_count(&db, "tasks/new.md");
-    sink.reconcile_collections().expect("unsupported schema");
+    sink.reconcile_collections_observed(None)
+        .expect("unsupported schema");
     assert!(collection_record(&db, "tasks/new.md").is_none());
     assert_eq!(
         std::fs::read(scratch.path().join("tasks/new.md")).expect("disk bytes"),
@@ -615,9 +616,11 @@ fn copied_collection_adoption_stores_are_isolated_and_survive_reopen() {
         write_file(scratch.path(), "tasks/record.md", title.as_bytes());
         ingest(sink, "tasks/collection.yaml").expect("capture schema");
         ingest(sink, "tasks/record.md").expect("capture record");
-        sink.reconcile_collections().expect("first adoption pass");
+        sink.reconcile_collections_observed(None)
+            .expect("first adoption pass");
         seed_captured_richdoc_lineage(sink, "tasks/record.md");
-        sink.reconcile_collections().expect("seeded adoption pass");
+        sink.reconcile_collections_observed(None)
+            .expect("seeded adoption pass");
         expected.push(
             std::fs::read_to_string(scratch.path().join("tasks/record.md")).expect("adopted bytes"),
         );
@@ -672,13 +675,13 @@ proptest! {
             )
         };
 
-        sink.reconcile_collections().expect("first adoption pass");
+        sink.reconcile_collections_observed(None).expect("first adoption pass");
         if case.expected_adoption("placeholder").is_some() {
             if case.replicated {
                 enable_sync_for_collection_test(&db);
             }
             seed_captured_richdoc_lineage(&sink, "tasks/generated.md");
-            sink.reconcile_collections().expect("seeded adoption pass");
+            sink.reconcile_collections_observed(None).expect("seeded adoption pass");
         }
 
         let original_binding = {
@@ -700,7 +703,7 @@ proptest! {
             .expect("copy adopted generated record");
             ingest(&mut sink, "tasks/generated-copy.md").expect("capture generated copy");
             seed_captured_richdoc_lineage(&sink, "tasks/generated-copy.md");
-            sink.reconcile_collections().expect("adopt generated copy");
+            sink.reconcile_collections_observed(None).expect("adopt generated copy");
 
             let (copy_id, copy_stored) = {
                 let mut store = EngineStore::open_read_only(&db).expect("read adopted copy");
@@ -780,9 +783,11 @@ fn frontmatterless_collection_adoption_preserves_leading_blank_lines_and_markdow
     ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
     ingest(&mut sink, "tasks/generated.md").expect("capture generated record");
 
-    sink.reconcile_collections().expect("first adoption pass");
+    sink.reconcile_collections_observed(None)
+        .expect("first adoption pass");
     seed_captured_richdoc_lineage(&sink, "tasks/generated.md");
-    sink.reconcile_collections().expect("seeded adoption pass");
+    sink.reconcile_collections_observed(None)
+        .expect("seeded adoption pass");
 
     let (record_id, state) = collection_record(&db, "tasks/generated.md")
         .and_then(|(record_id, state)| record_id.map(|record_id| (record_id, state)))
@@ -973,7 +978,7 @@ fn collection_adoption_writes_one_engine_id_and_self_write_does_not_loop() {
     seed_captured_richdoc_lineage(&sink, "tasks/alpha.md");
 
     assert_eq!(
-        sink.reconcile_collections()
+        sink.reconcile_collections_observed(None)
             .expect("adopt record")
             .changed_paths,
         ["tasks/alpha.md"]
@@ -1017,7 +1022,7 @@ fn collection_adoption_writes_one_engine_id_and_self_write_does_not_loop() {
     assert_eq!(ydoc_update_count(&db, "tasks/alpha.md"), 2);
     assert_eq!(engine_ydoc_update_count(&db, "tasks/alpha.md"), 1);
     assert!(
-        sink.reconcile_collections()
+        sink.reconcile_collections_observed(None)
             .expect("idempotent reconciliation")
             .changed_paths
             .is_empty()
@@ -1100,7 +1105,8 @@ fn collection_adoption_seeds_typed_frontmatter_and_multi_relation_edges() {
         seed_captured_richdoc_lineage(&sink, path);
     }
 
-    sink.reconcile_collections().expect("adopt typed record");
+    sink.reconcile_collections_observed(None)
+        .expect("adopt typed record");
     assert_eq!(
         indexed_collection_field(&db, "tasks/alpha.md", "estimate"),
         Some(("3".to_owned(), "valid".to_owned(), None))
@@ -1148,7 +1154,8 @@ fn imported_collection_record_with_an_existing_id_tracks_later_capture_edits() {
     ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
     ingest(&mut sink, "tasks/imported.md").expect("capture imported record");
     seed_captured_richdoc_lineage(&sink, "tasks/imported.md");
-    sink.reconcile_collections().expect("adopt imported record");
+    sink.reconcile_collections_observed(None)
+        .expect("adopt imported record");
     assert_eq!(adopted_record_id(&db, "tasks/imported.md"), RECORD_ID);
 
     let adopted = std::fs::read_to_string(scratch.path().join("tasks/imported.md"))
@@ -1157,7 +1164,7 @@ fn imported_collection_record_with_an_existing_id_tracks_later_capture_edits() {
     assert_ne!(edited, adopted, "the fixture must edit the status field");
     write_file(scratch.path(), "tasks/imported.md", edited.as_bytes());
     ingest(&mut sink, "tasks/imported.md").expect("capture imported record edit");
-    sink.reconcile_collections()
+    sink.reconcile_collections_observed(None)
         .expect("reconcile imported record edit");
 
     let queried = query_collection(&db, "tasks", false);
@@ -1194,7 +1201,7 @@ fn invalid_collection_value_roundtrips_and_schema_edit_only_revalidates() {
     ingest(&mut sink, "tasks/alpha.md").expect("capture invalid record");
 
     assert!(
-        sink.reconcile_collections()
+        sink.reconcile_collections_observed(None)
             .expect("index invalid value")
             .changed_paths
             .is_empty()
@@ -1223,7 +1230,7 @@ fn invalid_collection_value_roundtrips_and_schema_edit_only_revalidates() {
     );
     ingest(&mut sink, "tasks/collection.yaml").expect("capture text schema");
     assert!(
-        sink.reconcile_collections()
+        sink.reconcile_collections_observed(None)
             .expect("revalidate existing index")
             .changed_paths
             .is_empty()
@@ -1272,7 +1279,7 @@ fn deleting_relation_target_writes_back_and_histories_the_engine_drop() {
         seed_captured_richdoc_lineage(&sink, path);
     }
     assert_eq!(
-        sink.reconcile_collections()
+        sink.reconcile_collections_observed(None)
             .expect("adopt indexed relation")
             .changed_paths,
         ["tasks/source.md", "tasks/target.md"]
@@ -1285,7 +1292,7 @@ fn deleting_relation_target_writes_back_and_histories_the_engine_drop() {
     std::fs::remove_file(scratch.path().join("tasks/target.md")).expect("delete target");
     sink.retire("tasks/target.md").expect("retire target");
     assert_eq!(
-        sink.reconcile_collections()
+        sink.reconcile_collections_observed(None)
             .expect("drop inbound relation")
             .changed_paths,
         ["tasks/source.md"]
@@ -1368,7 +1375,8 @@ fn relation_cleanup_preserves_source_backed_body_bytes() {
         seed_captured_richdoc_lineage(&sink, path);
     }
 
-    sink.reconcile_collections().expect("adopt records");
+    sink.reconcile_collections_observed(None)
+        .expect("adopt records");
     let adopted = std::fs::read(scratch.path().join("tasks/source.md"))
         .expect("read source-preserved record");
     assert!(
@@ -1383,7 +1391,7 @@ fn relation_cleanup_preserves_source_backed_body_bytes() {
     std::fs::remove_file(scratch.path().join("tasks/target.md")).expect("delete target");
     sink.retire("tasks/target.md").expect("retire target");
     assert_eq!(
-        sink.reconcile_collections()
+        sink.reconcile_collections_observed(None)
             .expect("drop inbound relation")
             .changed_paths,
         ["tasks/source.md"]
@@ -1436,7 +1444,7 @@ fn changing_relation_target_id_reasserts_the_engine_id_and_keeps_the_edge() {
     for path in ["tasks/source.md", "tasks/target.md"] {
         seed_captured_richdoc_lineage(&sink, path);
     }
-    sink.reconcile_collections()
+    sink.reconcile_collections_observed(None)
         .expect("adopt indexed relation");
     assert_eq!(
         relation_edge_count(&db, "tasks/source.md", "related", TARGET_ID),
@@ -1450,7 +1458,7 @@ fn changing_relation_target_id_reasserts_the_engine_id_and_keeps_the_edge() {
         NEW_TARGET_ID,
     );
     let changed = sink
-        .reconcile_collections()
+        .reconcile_collections_observed(None)
         .expect("re-assert the engine-owned target id")
         .changed_paths;
 
@@ -1500,7 +1508,7 @@ fn changing_relation_target_id_reasserts_the_engine_id_and_keeps_the_edge() {
         "the id write-back lands exactly one engine Y.Doc update"
     );
     assert!(
-        sink.reconcile_collections()
+        sink.reconcile_collections_observed(None)
             .expect("idempotent reconciliation after the id write-back")
             .changed_paths
             .is_empty(),
@@ -1556,7 +1564,7 @@ fn moving_relation_target_out_of_declared_collection_drops_it_once_with_engine_h
     for path in ["tasks/source.md", "people/target.md"] {
         seed_captured_richdoc_lineage(&sink, path);
     }
-    sink.reconcile_collections()
+    sink.reconcile_collections_observed(None)
         .expect("adopt cross-collection relation");
     assert_eq!(adopted_record_id(&db, "tasks/source.md"), SOURCE_ID);
     assert_eq!(adopted_record_id(&db, "people/target.md"), TARGET_ID);
@@ -1575,7 +1583,7 @@ fn moving_relation_target_out_of_declared_collection_drops_it_once_with_engine_h
     ingest(&mut sink, "archive/target.md").expect("capture moved target");
     seed_captured_richdoc_lineage(&sink, "archive/target.md");
     let changed = sink
-        .reconcile_collections()
+        .reconcile_collections_observed(None)
         .expect("drop relation to moved target")
         .changed_paths;
     assert!(
@@ -1625,7 +1633,7 @@ fn moving_relation_target_out_of_declared_collection_drops_it_once_with_engine_h
         .expect("retire target's archive path");
     ingest(&mut sink, "people/target.md").expect("capture restored target");
     seed_captured_richdoc_lineage(&sink, "people/target.md");
-    sink.reconcile_collections()
+    sink.reconcile_collections_observed(None)
         .expect("reconcile restored target");
     assert_eq!(adopted_record_id(&db, "people/target.md"), TARGET_ID);
     assert_eq!(
@@ -1673,7 +1681,8 @@ fn copied_source_preserved_collection_record_keeps_bytes_modulo_fresh_id() {
     ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
     ingest(&mut sink, "tasks/original.md").expect("capture original");
     seed_captured_richdoc_lineage(&sink, "tasks/original.md");
-    sink.reconcile_collections().expect("adopt original");
+    sink.reconcile_collections_observed(None)
+        .expect("adopt original");
     let original_id = adopted_record_id(&db, "tasks/original.md");
     let original = std::fs::read_to_string(scratch.path().join("tasks/original.md"))
         .expect("read adopted original");
@@ -1688,7 +1697,7 @@ fn copied_source_preserved_collection_record_keeps_bytes_modulo_fresh_id() {
     ingest(&mut sink, "tasks/copy.md").expect("capture copy");
     seed_captured_richdoc_lineage(&sink, "tasks/copy.md");
     assert_eq!(
-        sink.reconcile_collections()
+        sink.reconcile_collections_observed(None)
             .expect("adopt copy")
             .changed_paths,
         ["tasks/copy.md"]
@@ -1743,7 +1752,8 @@ fn re_adopting_the_same_file_without_an_id_preserves_identity_history_and_relati
     for path in ["tasks/source.md", "tasks/target.md"] {
         seed_captured_richdoc_lineage(&sink, path);
     }
-    sink.reconcile_collections().expect("adopt records");
+    sink.reconcile_collections_observed(None)
+        .expect("adopt records");
     let source_id = adopted_record_id(&db, "tasks/source.md");
     let target_id = adopted_record_id(&db, "tasks/target.md");
 
@@ -1805,7 +1815,7 @@ fn re_adopting_the_same_file_without_an_id_preserves_identity_history_and_relati
         stripped_target.as_bytes(),
     );
     ingest(&mut sink, "tasks/target.md").expect("capture stripped record id");
-    sink.reconcile_collections()
+    sink.reconcile_collections_observed(None)
         .expect("re-adopt record after id removal");
 
     assert_eq!(
@@ -1865,7 +1875,7 @@ fn broken_collection_schema_degrades_and_recovers_without_data_loss() {
     seed_captured_richdoc_lineage(&sink, "tasks/alpha.md");
 
     assert_eq!(
-        sink.reconcile_collections()
+        sink.reconcile_collections_observed(None)
             .expect("adopt record under valid schema")
             .changed_paths,
         ["tasks/alpha.md"]
@@ -1897,7 +1907,7 @@ fn broken_collection_schema_degrades_and_recovers_without_data_loss() {
     );
     ingest(&mut sink, "tasks/collection.yaml").expect("capture broken schema");
     assert!(
-        sink.reconcile_collections()
+        sink.reconcile_collections_observed(None)
             .expect("fail-soft collection reconciliation")
             .changed_paths
             .is_empty()
@@ -1923,7 +1933,7 @@ fn broken_collection_schema_degrades_and_recovers_without_data_loss() {
     );
     ingest(&mut sink, "tasks/collection.yaml").expect("capture repaired schema");
     assert!(
-        sink.reconcile_collections()
+        sink.reconcile_collections_observed(None)
             .expect("recover collection schema")
             .changed_paths
             .is_empty()
@@ -1953,7 +1963,7 @@ fn broken_collection_schema_degrades_and_recovers_without_data_loss() {
     std::fs::remove_file(scratch.path().join("tasks/collection.yaml")).expect("remove schema");
     sink.retire("tasks/collection.yaml").expect("retire schema");
     assert!(
-        sink.reconcile_collections()
+        sink.reconcile_collections_observed(None)
             .expect("remove disappeared collection")
             .changed_paths
             .is_empty()
@@ -1975,7 +1985,8 @@ fn collection_record_binding_follows_frontmatter_id_across_rename() {
     ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
     ingest(&mut sink, "tasks/before.md").expect("capture record");
     seed_captured_richdoc_lineage(&sink, "tasks/before.md");
-    sink.reconcile_collections().expect("adopt record");
+    sink.reconcile_collections_observed(None)
+        .expect("adopt record");
     let record_id = adopted_record_id(&db, "tasks/before.md");
 
     std::fs::rename(
@@ -1989,7 +2000,7 @@ fn collection_record_binding_follows_frontmatter_id_across_rename() {
     let renamed_record = std::fs::read_to_string(scratch.path().join("tasks/after.md"))
         .expect("read renamed record before adoption");
     assert_eq!(
-        sink.reconcile_collections()
+        sink.reconcile_collections_observed(None)
             .expect("reconcile rename")
             .changed_paths,
         ["tasks/after.md"],
@@ -2012,7 +2023,8 @@ fn collection_record_binding_follows_frontmatter_id_across_rename() {
     sink.retire("tasks/after.md")
         .expect("retire collection path");
     ingest(&mut sink, "outside.md").expect("capture outside file");
-    sink.reconcile_collections().expect("reconcile move out");
+    sink.reconcile_collections_observed(None)
+        .expect("reconcile move out");
     assert!(collection_record(&db, "tasks/after.md").is_none());
     assert!(collection_record(&db, "outside.md").is_none());
 
@@ -2049,7 +2061,7 @@ fn collection_adoption_waits_for_an_open_file_conflict_to_resolve() {
     drop(connection);
 
     assert!(
-        sink.reconcile_collections()
+        sink.reconcile_collections_observed(None)
             .expect("defer conflicted record")
             .changed_paths
             .is_empty()
@@ -2075,7 +2087,7 @@ fn collection_adoption_waits_for_an_open_file_conflict_to_resolve() {
         .expect("resolve conflict");
     drop(connection);
     assert!(
-        sink.reconcile_collections()
+        sink.reconcile_collections_observed(None)
             .expect("bind record after conflict resolution")
             .changed_paths
             .is_empty(),
@@ -2087,7 +2099,7 @@ fn collection_adoption_waits_for_an_open_file_conflict_to_resolve() {
     );
     seed_captured_richdoc_lineage(&sink, "tasks/blocked.md");
     assert_eq!(
-        sink.reconcile_collections()
+        sink.reconcile_collections_observed(None)
             .expect("adopt shared-imported record after conflict resolution")
             .changed_paths,
         ["tasks/blocked.md"]
@@ -2155,10 +2167,24 @@ fn disk_writes_to_a_record_claim_once_each_and_body_edits_claim_nothing() {
     );
     ingest(&mut sink, "tasks/alpha.md").expect("capture new record");
     assert!(kinds(&sink).is_empty(), "an unbound file claims nothing");
-    sink.reconcile_collections().expect("bind the record");
-    assert_eq!(kinds(&sink), vec![AutomationChangeKind::Added]);
-    sink.reconcile_collections().expect("reconcile again");
-    assert!(kinds(&sink).is_empty(), "a second pass adds nothing");
+    let claims = sink
+        .reconcile_collections_observed(None)
+        .expect("bind the record")
+        .automation_claims;
+    assert_eq!(
+        claims
+            .iter()
+            .map(|claim| claim.change.kind)
+            .collect::<Vec<_>>(),
+        vec![AutomationChangeKind::Added]
+    );
+    assert!(
+        sink.reconcile_collections_observed(None)
+            .expect("reconcile again")
+            .automation_claims
+            .is_empty(),
+        "a second pass adds nothing"
+    );
 
     write_file(
         scratch.path(),
@@ -2189,8 +2215,15 @@ fn disk_writes_to_a_record_claim_once_each_and_body_edits_claim_nothing() {
 
     std::fs::remove_file(scratch.path().join("tasks/alpha.md")).expect("delete record");
     sink.retire("tasks/alpha.md").expect("retire record");
-    sink.reconcile_collections().expect("unbind the record");
-    assert_eq!(kinds(&sink), vec![AutomationChangeKind::Removed]);
+    let mut removed = kinds(&sink);
+    removed.extend(
+        sink.reconcile_collections_observed(None)
+            .expect("unbind the record")
+            .automation_claims
+            .iter()
+            .map(|claim| claim.change.kind),
+    );
+    assert_eq!(removed, vec![AutomationChangeKind::Removed]);
 
     drop(sink);
     supervisor.close(&db).expect("close actor");
@@ -2215,7 +2248,7 @@ fn a_frontmatter_only_capture_keeps_a_nested_list_in_history_and_the_index() {
     ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
     ingest(&mut sink, path).expect("capture record");
     seed_captured_richdoc_lineage(&sink, path);
-    sink.reconcile_collections()
+    sink.reconcile_collections_observed(None)
         .expect("adopt nested-list record");
     assert_eq!(adopted_record_id(&db, path), RECORD_ID);
     let connection = rusqlite::Connection::open(&db).unwrap();
@@ -2299,7 +2332,8 @@ fn a_disk_edit_folded_into_a_record_lineage_claims_once() {
     ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
     ingest(&mut sink, "tasks/imported.md").expect("capture record");
     seed_captured_richdoc_lineage(&sink, "tasks/imported.md");
-    sink.reconcile_collections().expect("adopt record");
+    sink.reconcile_collections_observed(None)
+        .expect("adopt record");
     assert_eq!(adopted_record_id(&db, "tasks/imported.md"), RECORD_ID);
     {
         let mut store = EngineStore::open(&db, 1).expect("open store");

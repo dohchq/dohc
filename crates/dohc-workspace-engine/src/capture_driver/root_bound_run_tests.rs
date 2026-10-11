@@ -138,7 +138,8 @@ async fn seeded_deletes_survive_an_over_cap_policy_hold_and_recovery() {
             RootBoundRun { captured_root, run },
             &CancellationToken::new(),
         )
-        .await;
+        .await
+        .clean;
         assert_eq!(clean, recovery);
         assert!(
             actor
@@ -276,7 +277,8 @@ async fn prepared_and_converged_runs_refuse_a_replacement_workspace_root() {
         RootBoundRun { captured_root, run },
         &CancellationToken::new(),
     )
-    .await;
+    .await
+    .clean;
 
     assert!(!clean, "a plan cannot adopt a replacement directory");
     assert!(
@@ -305,7 +307,8 @@ async fn prepared_and_converged_runs_refuse_a_replacement_workspace_root() {
         },
         &CancellationToken::new(),
     )
-    .await;
+    .await
+    .clean;
     assert!(
         !converged_clean,
         "pending collection work must carry the same root identity"

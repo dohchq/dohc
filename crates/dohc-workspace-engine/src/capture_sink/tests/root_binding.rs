@@ -388,7 +388,7 @@ fn collection_reconcile_refuses_replacement_root_before_dispatch() {
     write_file(&root, "tasks/alpha.md", b"replacement task\n");
     let replacement_before =
         std::fs::read(root.join("tasks/alpha.md")).expect("read replacement record");
-    let result = sink.reconcile_collections();
+    let result = sink.reconcile_collections_observed(None);
     let replacement_after =
         std::fs::read(root.join("tasks/alpha.md")).expect("reread replacement record");
     let binding_after = collection_record(&db, "tasks/alpha.md");

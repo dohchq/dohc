@@ -293,7 +293,8 @@ async fn held_collection_idle_ticks(pending_sibling: bool) {
         first_run,
         &CancellationToken::new(),
     )
-    .await;
+    .await
+    .clean;
     assert!(
         first_clean,
         "recorded content with a deferred adoption is settled"
@@ -322,6 +323,7 @@ async fn held_collection_idle_ticks(pending_sibling: bool) {
                 &CancellationToken::new(),
             )
             .await
+            .clean
         );
         let state: String = rusqlite::Connection::open(&db)
             .unwrap()
@@ -360,7 +362,8 @@ async fn held_collection_idle_ticks(pending_sibling: bool) {
             },
             &CancellationToken::new(),
         )
-        .await;
+        .await
+        .clean;
         unsettled += usize::from(!clean);
         reconciles += usize::from(data_version() != before);
     }
@@ -390,6 +393,7 @@ async fn held_collection_idle_ticks(pending_sibling: bool) {
             &CancellationToken::new(),
         )
         .await
+        .clean
     );
     assert_ne!(
         data_version(),
@@ -408,7 +412,8 @@ async fn held_collection_idle_ticks(pending_sibling: bool) {
         second_run,
         &CancellationToken::new(),
     )
-    .await;
+    .await
+    .clean;
     println!("release-to-adoption: {:?}", released_at.elapsed());
     assert!(second_clean, "the scheduled retry adopts after release");
     assert!(!status.collection_reconcile_pending());
@@ -514,7 +519,8 @@ async fn lease_blocked_collection_candidate_does_not_starve_other_adoptions() {
         },
         &CancellationToken::new(),
     )
-    .await;
+    .await
+    .clean;
     assert!(
         first_clean,
         "a deferred adoption does not fail a converged pass"
@@ -585,7 +591,8 @@ async fn lease_blocked_collection_candidate_does_not_starve_other_adoptions() {
         },
         &CancellationToken::new(),
     )
-    .await;
+    .await
+    .clean;
     assert!(second_clean, "the scheduled retry adopts after release");
     assert!(!status.collection_reconcile_pending());
     assert!(
@@ -649,7 +656,7 @@ async fn assert_changed_record_reconciles(deferred_same_id: bool) {
             .unwrap_or_else(|_| panic!("capture {path}"));
         }
         assert!(
-            sink.reconcile_collections()
+            sink.reconcile_collections_observed(None)
                 .expect("bind pending collection record")
                 .changed_paths
                 .is_empty()
@@ -669,7 +676,7 @@ async fn assert_changed_record_reconciles(deferred_same_id: bool) {
                 self_writes: adopt_self_writes,
                 ..bound_sink_params(adopt_actor, WORKSPACE_ID, "main", adopt_root, 3)
             })
-            .reconcile_collections()
+            .reconcile_collections_observed(None)
             .expect("adopt shared-imported record")
             .changed_paths,
             ["tasks/alpha.md"]
@@ -795,7 +802,8 @@ async fn assert_changed_record_reconciles(deferred_same_id: bool) {
             },
             &CancellationToken::new(),
         )
-        .await,
+        .await
+        .clean,
         "the changed record capture settles cleanly"
     );
     let restored = std::fs::read_to_string(&record_path).expect("read restored record");
@@ -879,7 +887,7 @@ async fn watcher_repairing_malformed_collection_record_adopts_and_indexes_it() {
             .unwrap_or_else(|_| panic!("capture {path}"));
         }
         assert!(
-            sink.reconcile_collections()
+            sink.reconcile_collections_observed(None)
                 .expect("exclude malformed collection record")
                 .changed_paths
                 .is_empty()
@@ -995,7 +1003,8 @@ async fn watcher_repairing_malformed_collection_record_adopts_and_indexes_it() {
             },
             &CancellationToken::new(),
         )
-        .await,
+        .await
+        .clean,
         "the repaired collection record capture settles cleanly"
     );
     let pending = rusqlite::Connection::open(&db)
@@ -1046,7 +1055,8 @@ async fn watcher_repairing_malformed_collection_record_adopts_and_indexes_it() {
             },
             &CancellationToken::new(),
         )
-        .await,
+        .await
+        .clean,
         "the imported repaired record adopts cleanly"
     );
     let indexed = rusqlite::Connection::open(&db)
@@ -1117,7 +1127,8 @@ async fn a_converged_watcher_scan_does_not_rewrite_collection_state() {
             )
             .unwrap_or_else(|_| panic!("capture {path}"));
         }
-        sink.reconcile_collections().expect("bind pending record");
+        sink.reconcile_collections_observed(None)
+            .expect("bind pending record");
     })
     .join()
     .expect("collection seed thread");
@@ -1132,7 +1143,7 @@ async fn a_converged_watcher_scan_does_not_rewrite_collection_state() {
             adopt_root,
             3,
         ))
-        .reconcile_collections()
+        .reconcile_collections_observed(None)
         .expect("adopt seeded record");
     })
     .join()
@@ -1184,7 +1195,8 @@ async fn a_converged_watcher_scan_does_not_rewrite_collection_state() {
         },
         &CancellationToken::new(),
     )
-    .await;
+    .await
+    .clean;
     assert!(clean, "an idle converged pass stays healthy");
     assert_eq!(
         data_version(&observer),
@@ -1278,7 +1290,8 @@ async fn a_failed_recovery_repair_still_announces_committed_adoptions() {
         },
         &CancellationToken::new(),
     )
-    .await;
+    .await
+    .clean;
     assert!(!clean, "the failed repair keeps the tick degraded");
     assert!(
         std::fs::read_to_string(collection_dir.join("alpha.md"))
@@ -1526,10 +1539,12 @@ async fn committed_adoption_and_claims_are_announced_before_a_sibling_busy_retry
             .contains("id: rec_")
     );
     let mut recorded = Vec::new();
+    let mut moments = Vec::new();
     let mut claims = Vec::new();
     let drain_notices =
         |notices: &mut tokio::sync::mpsc::Receiver<crate::events::EngineEventNotice>,
          recorded: &mut Vec<String>,
+         moments: &mut Vec<serde_json::Value>,
          claims: &mut Vec<serde_json::Value>| {
             while let Ok(notice) = notices.try_recv() {
                 if notice.name == CAPTURE_MOMENT_RECORDED_EVENT {
@@ -1540,17 +1555,20 @@ async fn committed_adoption_and_claims_are_announced_before_a_sibling_busy_retry
                             .iter()
                             .map(|p| p.as_str().unwrap().to_owned()),
                     );
+                    moments.push(notice.payload);
                 } else if notice.name == crate::AUTOMATION_CLAIMED_EVENT {
                     claims.push(notice.payload);
                 }
             }
         };
-    drain_notices(&mut notices, &mut recorded, &mut claims);
+    drain_notices(&mut notices, &mut recorded, &mut moments, &mut claims);
     assert_eq!(
         recorded,
         ["tasks/alpha.md"],
         "A reaches the renderer before B can complete"
     );
+    assert_eq!(moments.len(), 1, "the refused pass emits one event");
+    assert_eq!(moments[0]["appliedCount"], 1);
     assert_eq!(
         claims.len(),
         2,
@@ -1573,12 +1591,13 @@ async fn committed_adoption_and_claims_are_announced_before_a_sibling_busy_retry
         .unwrap()
         .unwrap();
     assert!(flushed.settled && !flushed.degraded, "{flushed:?}");
-    drain_notices(&mut notices, &mut recorded, &mut claims);
+    drain_notices(&mut notices, &mut recorded, &mut moments, &mut claims);
     assert_eq!(
         recorded,
         ["tasks/alpha.md", "tasks/beta.md"],
         "each committed adoption is announced once"
     );
+    assert_eq!(moments.len(), 2, "one event per pass, without duplicate A");
     assert_eq!(claims.len(), 2, "retry must not announce claims twice");
     assert!(
         std::fs::read_to_string(root.join("tasks/beta.md"))
@@ -1589,6 +1608,81 @@ async fn committed_adoption_and_claims_are_announced_before_a_sibling_busy_retry
     if let Some(shutdown) = observation.begin_shutdown() {
         shutdown.await.unwrap();
     }
+    drop(actor);
+    supervisor.close(&db).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_collection_pass_announces_many_adoptions_in_one_event() {
+    let scratch = ScratchDir::new().unwrap();
+    let root = scratch.path();
+    std::fs::create_dir(root.join("tasks")).unwrap();
+    std::fs::write(root.join("tasks/collection.yaml"), "name: Tasks\n").unwrap();
+    // Below the wire excerpt limit: check every adopted path, not just the count.
+    let paths = (0..20)
+        .map(|i| format!("tasks/record-{i:02}.md"))
+        .collect::<Vec<_>>();
+    for path in &paths {
+        std::fs::write(root.join(path), "Task\n").unwrap();
+    }
+    let db = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).unwrap().actor;
+    let mut captured = vec!["tasks/collection.yaml"];
+    captured.extend(paths.iter().map(String::as_str));
+    seed_collection_capture(&actor, root, &captured);
+    for path in &paths {
+        seed_plain_richdoc_lineage(&actor, path, "Task\n").await;
+    }
+    let events = EngineEvents::default();
+    let mut notices = events.subscribe();
+    let files = FilesActor::spawn_async(root.to_path_buf(), ScanBounds::default())
+        .await
+        .unwrap();
+    let files = FilesActorCloseGuard::new(files);
+    let status = Arc::new(DriverStatus::default());
+    let leases = LeaseRegistry::new();
+    let self_writes = SelfWriteSuppression::default();
+    status.request_collection_reconcile();
+    let outcome = apply_bound_run_with_handle(
+        ApplyRunContext {
+            events,
+            ..collection_apply_context(root, &actor, &leases, &status, &self_writes)
+        },
+        &files.handle(),
+        RootBoundRun {
+            captured_root: bind_capture_root(root).unwrap(),
+            run: ReconcileRun::Converged,
+        },
+        &CancellationToken::new(),
+    )
+    .await;
+    assert!(outcome.clean);
+    let notice = notices
+        .try_recv()
+        .expect("one batched adoption announcement");
+    assert_eq!(notice.name, CAPTURE_MOMENT_RECORDED_EVENT);
+    assert_eq!(notice.payload["appliedCount"], paths.len());
+    let mut announced = notice.payload["paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|path| path.as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    announced.sort();
+    assert_eq!(announced, paths);
+    assert!(
+        notices.try_recv().is_err(),
+        "a pass emits only one moment event"
+    );
+    for path in &paths {
+        assert!(
+            std::fs::read_to_string(root.join(path))
+                .unwrap()
+                .contains("id: rec_")
+        );
+    }
+    files.close().await;
     drop(actor);
     supervisor.close(&db).unwrap();
 }

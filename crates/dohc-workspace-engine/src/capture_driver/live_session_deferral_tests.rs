@@ -87,7 +87,8 @@ async fn capture_with_a_live_session_on_a_new_file(files_on_disk: &[&str]) {
         run,
         &CancellationToken::new(),
     )
-    .await;
+    .await
+    .clean;
     assert!(
         clean,
         "a path the live session holds is not a failed capture"
@@ -141,7 +142,8 @@ async fn capture_with_a_live_session_on_a_new_file(files_on_disk: &[&str]) {
         run,
         &CancellationToken::new(),
     )
-    .await;
+    .await
+    .clean;
     assert!(clean);
     assert_eq!(files.handle().stats().await.expect("stats").deferred, 0);
     assert_eq!(
@@ -228,7 +230,9 @@ impl Harness {
             &self.self_writes,
         );
         context.author_json = self.author_json.clone();
-        apply_bound_run_with_handle(context, files, run, &CancellationToken::new()).await
+        apply_bound_run_with_handle(context, files, run, &CancellationToken::new())
+            .await
+            .clean
     }
 
     fn close(self) {
