@@ -3,11 +3,91 @@ import { expect, it, vi } from "vitest";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { createAutomationFormulaEvaluator } from "./automationEvaluatorHost";
 import { createAutomationRunStore } from "./automationRunStore";
-import { CollectionAutomations, type CollectionAutomationEngine } from "./collectionAutomations";
+import { CollectionAutomations, type CollectionAutomationEngine, type CollectionAutomationsOptions } from "./collectionAutomations";
 import { definitionHash } from "./automationPlan";
 import { SHARED_BUTTON_DENIED } from "./buttonPresser";
 import type { RelayButtonAuthority } from "@dohc/workspace-contracts/relay";
 import { createTestScratch, testMetadataDir } from "./testScratch";
+
+function emptyExecutor(store: CollectionAutomationsOptions["store"], overrides: Partial<CollectionAutomationsOptions> = {}) {
+  const engine = {
+    listCollections: async () => ({ collections: [] }),
+    releaseAutomationGroups: async () => ({ watchedGeneration: 0, handover: { floorMs: 0, automations: [] } }),
+    claimNextAutomation: async () => null,
+    listAutomationClaims: async () => ({ claims: [], next: null }),
+    listAutomationFailures: async () => ({ failures: [] }),
+    pruneAutomationHistory: async () => ({ pruned: 0, more: false }),
+  } as unknown as CollectionAutomationEngine;
+  const roster = { kind: "owner" as const, ownerUserId: "owner", grants: [] };
+  const evaluator = createAutomationFormulaEvaluator();
+  const executor = new CollectionAutomations({
+    withEngine: async work => work(engine),
+    withRecordWrites: async () => { throw Error("Unexpected record write"); },
+    withUndoWrites: async () => { throw Error("Unexpected Undo"); },
+    readText: async () => null, writeText: async () => ({ status: "conflict" }), pathExists: async () => false,
+    roster: async () => roster, cachedRoster: async () => roster,
+    evaluator: evaluator.forWorkspace("workspace"), store, personName: userId => userId,
+    withDatasetHost: async () => null, groupHost: async () => null,
+    groupRelayRecord: async () => ({ generation: 0, handover: null }),
+    reachRelayRecord: async () => ({ generation: 0, reach: null, everShared: false }),
+    groupMessagesSkipped: async () => undefined, requestHost: async () => undefined, readMessageBody: async () => "",
+    chat: { directory: async () => null, write: async () => { throw Error("Unexpected chat"); } }, postNotice: async () => undefined,
+    mayRetryPress: async () => false, onPressSettled: () => undefined, onPressWaiting: () => undefined,
+    onRunsChanged: () => undefined, reportFailure: async () => undefined, withdrawFailure: async () => undefined,
+    onSwitchedOff: () => undefined, onHoldsChanged: () => undefined, onAutomationsChanged: () => undefined,
+    onError: vi.fn(), ...overrides,
+  });
+  return { executor, evaluator };
+}
+
+it.each(["close", "dispose"] as const)("waits for the current run history prune batch on %s without starting another", async (operation) => {
+  const store = createAutomationRunStore(await createTestScratch(`dohc-${operation}-pruning-`), testMetadataDir);
+  const entered = Promise.withResolvers<void>();
+  const batch = Promise.withResolvers<string | null>();
+  const expire = vi.spyOn(store, "expire").mockImplementation(() => {
+    entered.resolve();
+    return batch.promise;
+  });
+  const { executor, evaluator } = emptyExecutor(store);
+  let closing: Promise<void> | undefined;
+  try {
+    await executor.open();
+    await entered.promise;
+    await executor.idle();
+    closing = executor[operation]();
+    const state = await Promise.race([
+      closing.then(() => "closed"),
+      new Promise<"pending">((resolve) => setImmediate(() => resolve("pending"))),
+    ]);
+    expect(state).toBe("pending");
+    batch.resolve("next-batch");
+    await closing;
+    expect(expire).toHaveBeenCalledOnce();
+  } finally {
+    batch.resolve(null);
+    await closing;
+    await executor.dispose();
+    await evaluator.close();
+  }
+});
+
+it("closes when run history pruning has never started", async () => {
+  const store = createAutomationRunStore(await createTestScratch("dohc-close-no-pruning-"), testMetadataDir);
+  const expire = vi.spyOn(store, "expire");
+  let closing: Promise<void> | undefined;
+  const { executor, evaluator } = emptyExecutor(store, {
+    onAutomationsChanged: () => { closing = executor.close(); },
+  });
+  try {
+    await executor.open();
+    expect(closing).toBeDefined();
+    await closing;
+    expect(expire).not.toHaveBeenCalled();
+  } finally {
+    await executor.dispose();
+    await evaluator.close();
+  }
+});
 
 it("persists unchanged reach verdicts after the first save fails", async () => {
   const store = createAutomationRunStore(await createTestScratch("dohc-reach-save-"), testMetadataDir);
