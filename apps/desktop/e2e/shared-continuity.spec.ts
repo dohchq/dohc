@@ -660,7 +660,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       // name the server admitted for their desktop's edit.
       const page = owner!.page;
       const recipientUserId = await accountId(recipientAccount.email);
-      const admitted = { kind: "human", humanId: recipientUserId, humanName: recipientAccount.name };
+      const admitted = { kind: "human", humanId: recipientUserId, humanName: recipientAccount.name, relayConfirmed: true };
       let credit: Awaited<ReturnType<typeof recipientCredit>> | undefined;
       try {
         await expect.poll(async () => (credit = await recipientCredit(page, workspace.workspaceId, R1, recipientUserId))?.authors ?? [],
