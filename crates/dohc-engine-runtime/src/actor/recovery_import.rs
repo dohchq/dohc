@@ -86,12 +86,12 @@ impl ActorHandle {
                         }
                     }
                     dohc_engine_collab::Ydoc::validate_update(&update.update)?;
-                    if marker.is_some() {
-                        dohc_engine_collab::author_coverage::check_admission_in(tx, key,
-                            update.actor_origin_id.as_deref(), update.attribution.as_ref())?;
-                    }
                     if let Some(json) = dohc_engine_domain::moment_author_json(
                         update.actor_origin_id.as_deref(), update.attribution.as_ref()) {
+                        if marker.is_some() {
+                            dohc_engine_collab::author_coverage::check_admission_in(tx, key,
+                                update.actor_origin_id.as_deref(), update.attribution.as_ref())?;
+                        }
                         authors.union_json(&json)?;
                     }
                 }
