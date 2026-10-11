@@ -215,7 +215,7 @@ async fn concurrent_cancel_leaves_a_consistent_actor_state() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn deadline_trips_to_typed_error_committing_nothing() {
+async fn expired_deadline_leaves_work_resumable() {
     let ws = Scratch::new();
     ws.write("a.md", b"alpha\n");
     let actor = FilesActor::spawn_async(ws.path().to_path_buf(), ScanBounds::default())
@@ -231,9 +231,9 @@ async fn deadline_trips_to_typed_error_committing_nothing() {
     assert_eq!(err.code(), "deadline-exceeded");
     assert!(token.is_cancelled());
 
-    // An expired deadline must not enqueue work, even if the queue is ready.
+    // An expired deadline leaves the work unchanged and dirty; the retry completes.
     let stats = handle.stats().await.expect("stats");
-    assert_eq!(stats.generation.0, 0, "no commit on a deadline trip");
+    assert_eq!(stats.generation.0, 0, "no commit on an expired deadline");
     assert!(stats.dirty);
     assert_eq!(stats.tracked, 0);
     assert_eq!(stats.hashed, 0, "no scan on an expired deadline");
