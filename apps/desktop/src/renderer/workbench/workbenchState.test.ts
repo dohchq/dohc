@@ -5,7 +5,7 @@ import {
   activeGroup,
   activeTabPath,
   allTabs,
-  clampChatsWidth,
+  clampAboutWidth,
   clampOpenEditorsHeight,
   clampSidebarWidth,
   closeTab,
@@ -18,9 +18,9 @@ import {
   createEditorGroupRight,
   defaultWorkbenchState,
   DEFAULT_EDITOR_GROUP_ID,
-  CHATS_DEFAULT_WIDTH,
-  CHATS_MAX_WIDTH,
-  CHATS_MIN_WIDTH,
+  ABOUT_DEFAULT_WIDTH,
+  ABOUT_MAX_WIDTH,
+  ABOUT_MIN_WIDTH,
   HISTORY_TAB_PATH,
   CHATS_TAB_PATH,
   chatTabPath,
@@ -46,7 +46,7 @@ import {
   pruneMissingRestoredTabs,
   serializeUiState,
   setSidebarWidth,
-  setChatsWidth,
+  setAboutWidth,
   setOpenEditorsHeight,
   setView,
   OPEN_EDITORS_DEFAULT_HEIGHT,
@@ -55,7 +55,7 @@ import {
   SIDEBAR_DEFAULT_WIDTH,
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
-  toggleChats,
+  toggleAbout,
   toggleSidebar,
   MAX_EDITOR_GROUPS,
   MAX_OPEN_TABS,
@@ -716,14 +716,25 @@ describe("views and panels", () => {
     expect(setView(collapsed, "explorer").sidebarVisible).toBe(true);
   });
 
-  it("toggleSidebar and toggleChats flip independently", () => {
+  it("toggleSidebar and toggleAbout flip independently", () => {
     const state = toggleSidebar(defaultWorkbenchState());
     expect(state.sidebarVisible).toBe(false);
-    // The Chats panel is hidden by default (VS Code secondary-sidebar
+    // The About rail is hidden by default (VS Code secondary-sidebar
     // grammar) — unlike the old always-on history rail.
-    expect(state.chatsVisible).toBe(false);
-    expect(toggleChats(state).chatsVisible).toBe(true);
-    expect(toggleChats(state).sidebarVisible).toBe(false);
+    expect(state.aboutVisible).toBe(false);
+    expect(toggleAbout(state).aboutVisible).toBe(true);
+    expect(toggleAbout(state).sidebarVisible).toBe(false);
+  });
+
+  it("selects Chats like any other left view and leaves the About rail alone", () => {
+    const state = toggleAbout(defaultWorkbenchState());
+    const chats = setView(state, "chats");
+    expect(chats.activeView).toBe("chats");
+    expect(chats.sidebarVisible).toBe(true);
+    expect(chats.aboutVisible).toBe(true);
+    // Choosing Chats again hides the left panel, as every rail view does.
+    expect(setView(chats, "chats").sidebarVisible).toBe(false);
+    expect(setView(setView(chats, "chats"), "chats")).toEqual(chats);
   });
 });
 
@@ -737,13 +748,13 @@ describe("rail widths", () => {
     expect(clampSidebarWidth(Number.POSITIVE_INFINITY)).toBe(SIDEBAR_DEFAULT_WIDTH);
   });
 
-  it("clamps the chats panel into the same generous resize range", () => {
-    expect(clampChatsWidth(10)).toBe(CHATS_MIN_WIDTH);
-    expect(clampChatsWidth(9999)).toBe(CHATS_MAX_WIDTH);
-    expect(clampChatsWidth(1200)).toBe(1200);
-    expect(clampChatsWidth(300.6)).toBe(301);
-    expect(clampChatsWidth(Number.NaN)).toBe(CHATS_DEFAULT_WIDTH);
-    expect(clampChatsWidth(Number.POSITIVE_INFINITY)).toBe(CHATS_DEFAULT_WIDTH);
+  it("clamps the About rail into the same generous resize range", () => {
+    expect(clampAboutWidth(10)).toBe(ABOUT_MIN_WIDTH);
+    expect(clampAboutWidth(9999)).toBe(ABOUT_MAX_WIDTH);
+    expect(clampAboutWidth(1200)).toBe(1200);
+    expect(clampAboutWidth(300.6)).toBe(301);
+    expect(clampAboutWidth(Number.NaN)).toBe(ABOUT_DEFAULT_WIDTH);
+    expect(clampAboutWidth(Number.POSITIVE_INFINITY)).toBe(ABOUT_DEFAULT_WIDTH);
   });
 
   it("setSidebarWidth stores the clamped width and no-ops on no change", () => {
@@ -752,10 +763,10 @@ describe("rail widths", () => {
     expect(setSidebarWidth(state, SIDEBAR_DEFAULT_WIDTH)).toBe(state);
   });
 
-  it("setChatsWidth stores the clamped width and no-ops on no change", () => {
+  it("setAboutWidth stores the clamped width and no-ops on no change", () => {
     const state = defaultWorkbenchState();
-    expect(setChatsWidth(state, 360).chatsWidth).toBe(360);
-    expect(setChatsWidth(state, CHATS_DEFAULT_WIDTH)).toBe(state);
+    expect(setAboutWidth(state, 360).aboutWidth).toBe(360);
+    expect(setAboutWidth(state, ABOUT_DEFAULT_WIDTH)).toBe(state);
   });
 
   it("clamps the open-editors height into bounds and rounds; non-finite resets to the default", () => {
@@ -820,10 +831,16 @@ describe("ui-state persistence round-trip", () => {
     state = resizeEditorGroups(state, DEFAULT_EDITOR_GROUP_ID, "right", 0.35);
     state = setView(state, "history");
     state = setSidebarWidth(state, 333);
-    state = setChatsWidth(state, 444);
+    state = setAboutWidth(state, 444);
     state = setOpenEditorsHeight(state, 210);
-    state = toggleChats(state);
+    state = toggleAbout(state);
     expect(parseUiState(serializeUiState(state))).toEqual(state);
+  });
+
+  it("keeps Chats open across a restart, through the stored file's schema", () => {
+    const stored = serializeUiState(setView(defaultWorkbenchState(), "chats"));
+    expect(SetWorkspaceUiStatePayload.parse({ workspaceId: "workspace", state: stored }).state.activeView).toBe("chats");
+    expect(parseUiState(stored).activeView).toBe("chats");
   });
 
   it("falls back to the explorer for a stored view this build does not know", () => {
@@ -873,7 +890,7 @@ describe("ui-state persistence round-trip", () => {
     const state = parseUiState({
       version: 3,
       sidebarWidth: 5,
-      chatsWidth: 9999,
+      aboutWidth: 9999,
       editorGroups: [
         {
           id: "left",
@@ -892,7 +909,7 @@ describe("ui-state persistence round-trip", () => {
       activeEditorGroup: "missing",
     });
     expect(state.sidebarWidth).toBe(SIDEBAR_MIN_WIDTH);
-    expect(state.chatsWidth).toBe(CHATS_MAX_WIDTH);
+    expect(state.aboutWidth).toBe(ABOUT_MAX_WIDTH);
     expect(state.editorGroups.map((group) => group.id)).toEqual(["left", "right"]);
     expect(state.editorGroups[0].tabs.map((tab) => tab.path)).toEqual(["a.md", "b.md"]);
     expect(state.editorGroups[0].activeTab).toBe("a.md");
@@ -1010,7 +1027,7 @@ describe("ui-state persistence round-trip", () => {
           { id: "evil", tabs: ["evil.md"], activeTab: "evil.md", size: 1 },
         ],
         activeEditorGroup: "evil",
-        chatsVisible: true,
+        aboutVisible: true,
       }),
     );
     expect(inherited).toEqual(defaultWorkbenchState());

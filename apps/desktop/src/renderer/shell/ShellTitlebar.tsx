@@ -1,7 +1,7 @@
 import type { SyncStatusResult, WorkspaceSummary } from "../../ipc/bridgeContract";
 import { Titlebar } from "../Titlebar";
 import { WorkspaceSyncStatus } from "../workbench/WorkspaceSyncStatus";
-import { toggleChats, type WorkbenchState } from "../workbench/workbenchState";
+import { toggleAbout, type WorkbenchState } from "../workbench/workbenchState";
 
 // The shell's titlebar: the workspace switcher, the status label, and the
 // two side panel toggles.
@@ -48,9 +48,9 @@ export function ShellTitlebar(props: {
         visible: wb.sidebarVisible,
         onToggle: toggleSidePanel,
       }}
-      chatsSidebar={{
-        visible: wb.chatsVisible,
-        onToggle: () => mutateWb(toggleChats),
+      aboutSidebar={{
+        visible: wb.aboutVisible,
+        onToggle: () => mutateWb(toggleAbout),
       }}
     />
   );

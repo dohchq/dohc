@@ -668,7 +668,7 @@ function thumbWidth(strip: HTMLElement): number {
 // Ctrl+W and the menu use, reorder through the pure moveTab. `dirty` is
 // runtime-only and known for the active tab (the one mounted inspector
 // reports its save state). h-9: one header band height with the side panel
-// and Chats panel, so the three hairlines meet at the vertical seams.
+// and the About rail, so the three hairlines meet at the vertical seams.
 export const EditorTabs = memo(function EditorTabs(props: {
   groupId: string;
   groupNumber: number;

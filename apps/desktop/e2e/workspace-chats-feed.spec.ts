@@ -6,13 +6,14 @@ import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
+  openChatsView,
   openWorkspaceFromFirstRun,
   seedWorkspaceManifest,
 } from "./helpers/workspace";
 
-// The Chats panel mirrors the editor tab's conversation, so an unscoped
+// The Chats view mirrors the editor tab's conversation, so an unscoped
 // conversation locator matches both surfaces. Everything about the open
-// conversation is read from the editor area; the panel stays the navigator.
+// conversation is read from the editor area; the view stays the navigator.
 function editorArea(page: Page): Locator {
   return page.locator("main");
 }
@@ -87,8 +88,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     let page = desktop.page;
     let view = editorArea(page);
 
-    await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
-    await expect(page.getByTestId(desktopPins.chatsPanel)).toBeVisible();
+    await openChatsView(page);
 
     // Channels remain a human/UI action. Creating one opens its feed
     // immediately, where the post composer accepts a multiline body and the
@@ -98,11 +98,11 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await page.getByTestId("chats-new-channel-name").press("Enter");
     await expect(page.getByTestId("chats-channel-title")).toHaveText(channelName);
 
-    // Creating a channel opens it in the Chats tab. Collapse the navigator
-    // so this spec asserts on one surface.
+    // Creating a channel opens it in the Chats tab. Hide the navigator so
+    // this spec asserts on one surface.
     await expect(view.getByTestId("chats-channel-view")).toBeVisible();
-    await page.getByTestId(desktopPins.chatsPanelCollapse).click();
-    await expect(page.getByTestId(desktopPins.chatsPanel)).toHaveCount(0);
+    await page.getByTestId(activityPin("chats")).click();
+    await expect(page.getByTestId(desktopPins.sidePanel)).toHaveCount(0);
     await expect(view.getByTestId("chats-channel-title")).toHaveText(channelName);
 
     await view.getByTestId("chats-new-thread-composer").fill(postBody);
@@ -250,11 +250,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await openWorkspaceFromFirstRun(desktop.page, temp);
     page = desktop.page;
     view = editorArea(page);
-    if (!(await page.getByTestId("chats-view").isVisible())) {
-      await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
-    }
-
-    const persistedChannel = page.getByTestId(desktopPins.chatsPanel)
+    const persistedChannel = (await openChatsView(page))
       .getByTestId("chats-channel")
       .filter({ hasText: channelName });
     await expect(persistedChannel).toBeVisible();
@@ -324,9 +320,8 @@ test("a comment's hidden toolbar takes no click meant for the comment above", as
       const { thread } = await bridge.startChannelThread({ workspaceId, channelId: channel.id, body: "Launch checklist" });
       for (const body of bodies) await bridge.sendChatMessage({ workspaceId, threadId: thread.id, body });
     }, { workspaceId, bodies: [aboveBody, belowBody] });
-    await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
-    await page.getByTestId("chats-channel").filter({ hasText: "Run check" }).click();
-    await page.getByTestId(desktopPins.chatsPanelCollapse).click();
+    await (await openChatsView(page)).getByTestId("chats-channel").filter({ hasText: "Run check" }).click();
+    await page.getByTestId(activityPin("chats")).click();
     const view = editorArea(page);
     await view.getByTestId("chats-post-card").first().click();
 
@@ -377,15 +372,13 @@ test("an agent chat written by the CLI while the app runs arrives unread live", 
     // Open #general in the editor and stay there. The panel stays a navigator,
     // so both surfaces render chats markup from here on; scope every locator
     // to the one being asserted.
-    const panel = page.getByTestId(desktopPins.chatsPanel);
     const channelView = page.locator(
       '[data-testid="chats-channel-view"][data-variant="page"]',
     );
     const threadView = page.locator(
       '[data-testid="chats-thread-view"][data-variant="page"]',
     );
-    await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
-    await expect(panel).toBeVisible();
+    const panel = await openChatsView(page);
     await expect(panel.getByTestId("chats-channel-name")).toHaveText("general");
     await panel.getByTestId("chats-channel").click();
     await expect(channelView).toBeVisible();

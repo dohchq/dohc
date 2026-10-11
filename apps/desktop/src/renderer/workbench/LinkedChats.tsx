@@ -29,7 +29,7 @@ import {
 } from "./chatMessages";
 import { useReactions, type ReactionView } from "./reactionStore";
 
-// The Chats panel's About tab: the open file's Chats, History and Access.
+// The About rail: the open file's Chats, History and Access.
 // Per-file Chats (PR 0M-5) are stored in the engine and linked to the file's
 // stable object id, so a chat follows its file through renames, and that id
 // is what History asks about. Product vocabulary: these are Chats.

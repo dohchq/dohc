@@ -60,7 +60,8 @@ import {
 } from "./shareSkipNotice";
 import { useChatEditorTabs } from "./shell/useChatEditorTabs";
 import { LazyChatsView, LazyGraphView, LazySitePreviewPage } from "./shell/lazyViews";
-import { ShellChatsPanel } from "./shell/ShellChatsPanel";
+import { ShellAboutRail } from "./shell/ShellAboutRail";
+import { SIDE_PANEL_VIEWS } from "./shell/sidePanelViews";
 import { ShellSidePanel } from "./shell/ShellSidePanel";
 import { ShellTitlebar } from "./shell/ShellTitlebar";
 import {
@@ -160,7 +161,7 @@ import {
   PrimaryButton,
   SecondaryButton,
 } from "./ui/controls";
-import { ActivityBar, activityViewLabel } from "./workbench/ActivityBar";
+import { ActivityBar } from "./workbench/ActivityBar";
 import { EditorTabs } from "./workbench/EditorTabs";
 import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
 import { Explorer } from "./workbench/Explorer";
@@ -255,7 +256,7 @@ import {
   setFolderExpanded,
   setOpenEditorsHeight,
   setView,
-  toggleChats,
+  toggleAbout,
   toggleFolderExpanded,
   togglePinned,
   toggleSidebarOnRail,
@@ -266,7 +267,6 @@ import {
   type WorkbenchState,
   type WorkbenchTab,
 } from "./workbench/workbenchState";
-import type { ChatsPanelTab } from "./workbench/ChatsPanel";
 import type { AboutNotices, AccessContext } from "./workbench/About";
 import type { SharingFocus } from "./workbench/SharingView";
 import { usePinnedApps } from "./workbench/pinnedApps";
@@ -1140,7 +1140,12 @@ export function DesktopWorkspaceShell(props: {
   );
 
   const sidebarSettings = props.userSettings?.settings.sidebar ?? DEFAULT_SIDEBAR_SETTINGS;
-  const railViews = useMemo(() => sidebarViews(sidebarSettings), [sidebarSettings]);
+  // A shared view has chat per file, in About, and no workspace-wide listing,
+  // so its rail offers no Chats.
+  const railViews = useMemo(
+    () => sidebarViews(sidebarSettings).filter((view) => !(isShareView && view === "chats")),
+    [isShareView, sidebarSettings],
+  );
   const pinnedRoots = useMemo(
     () => pinnedAppsFor(props.userSettings?.settings, workspaceId),
     [props.userSettings, workspaceId],
@@ -1150,7 +1155,7 @@ export function DesktopWorkspaceShell(props: {
   const selectedApp = pinnedApps.find((app) => app.root === selectedAppRoot) ?? null;
   // The panel's header names dohc's own view or the pinned app.
   const sidePanelTitle = isViewId(wb.activeView)
-    ? activityViewLabel(wb.activeView)
+    ? SIDE_PANEL_VIEWS[wb.activeView].label
     : wb.activeView === SHARING_VIEW_ID ? "Sharing" : selectedApp?.label ?? "App";
 
   // Every view on the rail, in its order: dohc's own, pinned apps, then
@@ -1613,12 +1618,6 @@ export function DesktopWorkspaceShell(props: {
     engineHistoryToken,
     null,
   );
-  // Which surface the right-hand Chats panel shows (all chats vs About the
-  // active file). Runtime-only — not persisted.
-  const [chatsPanelTab, setChatsPanelTab] = useState<ChatsPanelTab>("all");
-  // A shared view offers the About tab only, so the panel opens there
-  // whatever the runtime state carried in from another workspace.
-  const chatsPanelActiveTab: ChatsPanelTab = shareView ? "about" : chatsPanelTab;
   const [searchChatTarget, setSearchChatTarget] = useState<{
     thread: ChatThreadRecord;
     focusMessageId?: string;
@@ -1788,10 +1787,10 @@ export function DesktopWorkspaceShell(props: {
   //
   // Chats is the exception. A share view still installs no capture, so
   // history and versions stay gone, but main answers chat from the SHARE
-  // scope instead of a capture, so the Chats panel opens everywhere. Only
-  // its About tab there: the per-file surface answers for a file the
-  // share already served, and a workspace-wide listing would be a superset
-  // to filter (decision 5, and the shape that produced #627).
+  // scope instead of a capture, so About opens everywhere. The Chats view
+  // does not: the per-file surface answers for a file the share already
+  // served, and a workspace-wide listing would be a superset to filter
+  // (decision 5, and the shape that produced #627).
   // Whether main's capture will SERVE those surfaces. Main's status is the
   // single answer to "does anything record here": after a failed capture
   // build every version, chat and moment call is refused. It can only
@@ -1803,7 +1802,7 @@ export function DesktopWorkspaceShell(props: {
   // The capture capability. Everything that calls through
   // `requireEngineCapture` reads this one value — the version selector, the
   // Try-in-version banner and review card, the shell's version fetch, the
-  // persisted compare and moment-diff tabs, the Chats panel and tab, the
+  // persisted compare and moment-diff tabs, the Chats view, About and tab, the
   // graph's chat mentions and the linked-mentions panel — so the fact is
   // decided once. A surface that re-derives it drifts, which is exactly how
   // the compare tab kept mounting after #614 gated the selector.
@@ -2386,9 +2385,9 @@ export function DesktopWorkspaceShell(props: {
   const tabLabels = useMemo(() => new Map([...knownTabLabels, ...chatEditors.titles,
     ...dataCollections.flatMap(table => table.datasetPath === null ? [] : [[transactionalCollectionTabPath(table.datasetPath, table.tableId), table.name] as const]),
   ]), [knownTabLabels, chatEditors.titles, dataCollections]);
+  // The chat list lives in the left side panel's Chats view.
   const openChatsNavigator = useCallback(() => {
-    mutateWb((state) => ({ ...state, chatsVisible: true }));
-    setChatsPanelTab("all");
+    mutateWb((state) => ({ ...state, activeView: "chats", sidebarVisible: true }));
   }, [mutateWb]);
   // The navigator's unread badges come from one fetch at its mount, and the
   // editor is what performs the reads — without this the panel keeps showing
@@ -2443,10 +2442,10 @@ export function DesktopWorkspaceShell(props: {
     },
     [openChatsNavInTab, reportShellError, workspaceId],
   );
-  // The one way a chat thread lands in the Chats panel (search hits, file
+  // The one way a file's chat thread lands in About (search hits, file
   // mentions without channel metadata, and the Chats view "Files" grouping
-  // all route here): hand the known thread to the panel's consume-once seam,
-  // switch to About, and force the panel visible.
+  // all route here): hand the known thread to About's consume-once seam and
+  // force the rail visible.
   const openChatThreadInPanel = useCallback(
     (
       thread: { id: string; title: string; createdAtMs: number; updatedAtMs: number },
@@ -2466,8 +2465,7 @@ export function DesktopWorkspaceShell(props: {
         },
         ...(focusMessageId ? { focusMessageId } : {}),
       });
-      setChatsPanelTab("about");
-      mutateWb((state) => ({ ...state, chatsVisible: true }));
+      mutateWb((state) => ({ ...state, aboutVisible: true }));
     },
     [mutateWb],
   );
@@ -2664,7 +2662,7 @@ export function DesktopWorkspaceShell(props: {
   );
 
   // Search-result click: open + land at the line (source mode this phase);
-  // chat results open in the Chats panel instead.
+  // chat results open in About instead.
   const openSearchResult = useCallback(
     (path: string, line: number, _column: number, entry?: SearchResultsEventEntry) => {
       if (entry?.surface === "chat" && entry.threadId) {
@@ -3691,9 +3689,10 @@ export function DesktopWorkspaceShell(props: {
         event.preventDefault();
         setQuickOpenOpen((open) => !open);
       } else if (secondarySidebarKey) {
-        // CommandOrControl+Alt+B mirrors VS Code's secondary-sidebar toggle.
+        // CommandOrControl+Alt+B mirrors VS Code's secondary-sidebar toggle,
+        // which is the About rail.
         event.preventDefault();
-        mutateWb(toggleChats);
+        mutateWb(toggleAbout);
       } else if (key === "b") {
         event.preventDefault();
         toggleSidePanel();
@@ -3810,18 +3809,18 @@ export function DesktopWorkspaceShell(props: {
             },
           ]
         : []),
-      // Every workspace has the Chats panel, shared views included. A
-      // workspace whose capture cannot serve chats keeps the command: the
-      // panel is still there, stating what dohc cannot do.
+      // Every workspace has the About rail, shared views included. A
+      // workspace whose capture cannot serve it keeps the command: the rail
+      // is still there, stating what dohc cannot do.
       {
-        id: "toggle-chats",
-        label: "Toggle chats panel",
-        run: () => mutateWb(toggleChats),
+        id: "toggle-about",
+        label: "Toggle About",
+        run: () => mutateWb(toggleAbout),
       },
       // Every view of dohc's, hidden from the rail or not: a command opens it.
       ...VIEW_IDS.map((view) => ({
         id: `show-${view}`,
-        label: `View: ${activityViewLabel(view)}`,
+        label: `View: ${SIDE_PANEL_VIEWS[view].label}`,
         run: () => mutateWb((state) => setView(state, view)),
       })),
       ...pinnedApps.map((app) => ({
@@ -4532,7 +4531,7 @@ export function DesktopWorkspaceShell(props: {
     onSaveUserSettings: saveUserSettingsFromChats,
     workspacePath: props.workspace.rootPath,
   } as const;
-  // The panel intentionally stays on the overview and only selects editor
+  // The Chats view intentionally stays on the overview and only selects editor
   // destinations. Active chat pages own the live conversations: disable the
   // navigator's collaboration transport so it cannot
   // create a duplicate presence lease, and suspend its polls so one open
@@ -4542,7 +4541,7 @@ export function DesktopWorkspaceShell(props: {
   const chatsTabIsLive = wb.editorGroups.some((group) =>
     isChatsTabPath(group.activeTab),
   );
-  // The panel is a navigator, like the Explorer: it lists Home, the groups,
+  // The Chats view is a navigator, like the Explorer: it lists Home, the groups,
   // people and agents, and every click opens that conversation's editor tab.
   // It never shows a conversation itself, so it holds no presence lease
   // and never seeds or reports a destination.
@@ -5151,6 +5150,7 @@ export function DesktopWorkspaceShell(props: {
             sidePanelTitle={sidePanelTitle}
             openHistoryTab={openHistoryTab}
             openGraphTab={openGraphTab}
+            openChatsTab={openChatsTab}
             refreshSites={refreshSites}
             explorerView={explorerView}
             search={search}
@@ -5163,6 +5163,9 @@ export function DesktopWorkspaceShell(props: {
             openPathWithHeading={openPathWithHeading}
             openGraphChatThread={openGraphChatThread}
             captureAvailable={captureAvailable}
+            captureDecided={captureDecided}
+            syncStatus={syncStatus}
+            chatsNavigatorProps={chatsNavigatorProps}
             pinnedRoots={pinnedRoots}
             setAppPinned={setAppPinned}
             listingsSettled={listingsSettled}
@@ -5644,23 +5647,17 @@ export function DesktopWorkspaceShell(props: {
           />
         </main>
 
-        {/* Chats panel — the right-hand secondary sidebar (every
-            workspace; shared views with their About tab only). Hidden
-            entirely while collapsed; the titlebar Chats button, Ctrl+Alt+B,
-            or the toggle-chats command bring it back. History lives in the
-            left History view and the history tab — never here. */}
-        {wb.chatsVisible ? (
-          <ShellChatsPanel
-            customize={customize}
+        {/* About rail — the right-hand secondary sidebar (every workspace,
+            shared views included). Hidden entirely while collapsed; the
+            titlebar About button, Ctrl+Alt+B, or the toggle-about command
+            bring it back. The chat list lives in the left Chats view. */}
+        {wb.aboutVisible ? (
+          <ShellAboutRail
             wb={wb}
             mutateWb={mutateWb}
-            isShareView={!!shareView}
-            chatsPanelActiveTab={chatsPanelActiveTab}
-            setChatsPanelTab={setChatsPanelTab}
             captureAvailable={captureAvailable}
             captureDecided={captureDecided}
             focusedTabPath={focusedTabPath}
-            openChatsTab={openChatsTab}
             syncStatus={syncStatus}
             workspaceId={workspaceId}
             activeDocumentPath={activeDocumentPath}
@@ -5674,7 +5671,6 @@ export function DesktopWorkspaceShell(props: {
             openMoment={openMomentDiffTab}
             aboutNotices={aboutNotices}
             accessContext={accessContext}
-            chatsNavigatorProps={chatsNavigatorProps}
           />
         ) : null}
         </div>

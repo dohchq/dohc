@@ -84,8 +84,8 @@ import {
   MAX_OPEN_TABS,
   MAX_PINNED_PATHS,
   MAX_RECENT_FILES,
-  CHATS_MAX_WIDTH,
-  CHATS_MIN_WIDTH,
+  ABOUT_MAX_WIDTH,
+  ABOUT_MIN_WIDTH,
   OPEN_EDITORS_MAX_HEIGHT,
   OPEN_EDITORS_MIN_HEIGHT,
   SIDEBAR_MAX_WIDTH,
@@ -5732,10 +5732,10 @@ export const WorkspaceUiState = z.object({
   sidebarWidth: z.number().int().min(SIDEBAR_MIN_WIDTH).max(SIDEBAR_MAX_WIDTH),
   editorGroups: WorkspaceEditorGroups,
   activeEditorGroup: z.string().min(1).max(MAX_EDITOR_GROUP_ID_CHARS),
-  // The right-hand Chats panel. Optional fields degrade independently when a
+  // The right-hand About rail. Optional fields degrade independently when a
   // version-3 file is hand-edited or lacks a newer cosmetic setting.
-  chatsVisible: z.boolean().optional(),
-  chatsWidth: z.number().int().min(CHATS_MIN_WIDTH).max(CHATS_MAX_WIDTH).optional(),
+  aboutVisible: z.boolean().optional(),
+  aboutWidth: z.number().int().min(ABOUT_MIN_WIDTH).max(ABOUT_MAX_WIDTH).optional(),
   // The catch keeps a foreign height from nulling an otherwise valid file.
   openEditorsHeight: z
     .number()
