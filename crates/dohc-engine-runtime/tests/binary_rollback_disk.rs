@@ -120,6 +120,7 @@ async fn superseded_rollback_job_replays_as_complete() {
             Arc::new(()),
             ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
             CancellationToken::new(),
+            325,
         )
         .await
         .unwrap();
@@ -146,6 +147,7 @@ async fn superseded_rollback_job_replays_as_complete() {
             Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
+            325,
         )
         .await
         .unwrap();
@@ -383,6 +385,7 @@ async fn rollback_restore_uses_current_generation_over_newer_completed_lineage()
             Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("active rollback");
@@ -490,6 +493,7 @@ async fn rollback_restore_generation_fence_is_scoped_to_its_workspace() {
             Arc::new(()),
             faults.clone(),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("committed workspace A rollback");
@@ -597,6 +601,7 @@ async fn write_after_tip_rollback_is_newer_than_the_completed_restore() {
             Arc::new(()),
             faults.clone(),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("committed tip rollback");
@@ -697,6 +702,7 @@ async fn completed_binary_delete_rollback_restores_file_bytes() {
             Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("delete rollback");
@@ -761,6 +767,7 @@ async fn completed_binary_rename_rollback_restores_old_path_and_removes_new_path
             Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("rename rollback");
@@ -826,6 +833,7 @@ async fn deduped_rename_rollback_reports_a_cancelled_paired_delete_as_conflict()
             Arc::new(()),
             faults.clone(),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("committed rollback");
@@ -865,6 +873,7 @@ async fn deduped_rename_rollback_reports_a_cancelled_paired_delete_as_conflict()
             Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("deduped rollback replay");
@@ -946,6 +955,7 @@ async fn capture_ignores_a_pending_rename_rollback_delete_until_retry() {
             Arc::new(()),
             faults,
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("rollback with pending delete");
@@ -1079,6 +1089,7 @@ async fn conflicted_rename_rollback_terminates_delete_and_capture_sees_survivor(
             Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("rollback commits despite disk conflict");
@@ -1282,6 +1293,7 @@ async fn capture_ingests_an_inactive_versions_pending_rename_destination() {
             Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("inactive rename rollback");
@@ -1463,6 +1475,7 @@ async fn rollback_rename_namespaces_around_retained_normal_rename_jobs() {
             Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("rollback despite retained job-id collision");
@@ -1563,6 +1576,7 @@ async fn pending_delete_rollback_restore_is_not_seeded_for_capture_retire_on_reo
             Arc::new(()),
             faults.clone(),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("committed rollback with pending restore");
@@ -1690,6 +1704,7 @@ async fn inactive_delete_rollback_drains_when_version_becomes_active() {
             Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("inactive rollback");
@@ -1825,6 +1840,7 @@ async fn superseded_inactive_restore_is_drained_after_switch_projection() {
             Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("inactive rollback");
@@ -1901,6 +1917,7 @@ async fn post_commit_active_version_lookup_failure_returns_committed_rollback() 
             Arc::new(()),
             faults.clone(),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("committed rollback must still be acknowledged");
@@ -2000,6 +2017,7 @@ async fn rollback_replay_cannot_delete_another_workspaces_file() {
             Arc::new(()),
             faults.clone(),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("committed workspace A rollback");
@@ -2203,6 +2221,7 @@ async fn inactive_rollback_write_does_not_hide_active_capture_retire() {
             Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("rollback inactive delete");
@@ -2418,6 +2437,7 @@ async fn inactive_delete_rollback_reprojects_the_still_active_version() {
             rollback_recorder.clone(),
             Arc::new(NoFaults),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("inactive rollback");
@@ -2583,6 +2603,7 @@ async fn inactive_rename_rollback_removes_destination_from_the_active_projection
             Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("inactive rename rollback");
@@ -2693,6 +2714,7 @@ async fn inactive_create_rollback_removes_created_path_from_the_active_projectio
             Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("inactive create rollback");
@@ -2814,6 +2836,7 @@ async fn long_rollback_identity_uses_a_bounded_temp_sibling() {
             Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("rollback with long identity");
@@ -2857,6 +2880,7 @@ async fn long_rollback_identity_uses_a_bounded_temp_sibling() {
             Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("conflicting rollback with long identity");

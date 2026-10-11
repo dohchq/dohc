@@ -153,6 +153,7 @@ async fn rollback_pending_settlement_compensates_before_removing_its_moment() {
                 Arc::new(()),
                 faults,
                 CancellationToken::new(),
+                325,
             )
             .await;
         if crash.is_some() {
@@ -182,6 +183,7 @@ async fn rollback_pending_settlement_compensates_before_removing_its_moment() {
                 Arc::new(()),
                 Arc::new(NoFaults),
                 CancellationToken::new(),
+                325,
             )
             .await
             .expect("retry rollback");

@@ -957,6 +957,7 @@ async fn rolled_back_pending_text_cannot_publish_after_restart() {
             Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
+            325,
         )
         .await
         .unwrap();
@@ -1084,6 +1085,7 @@ async fn rollback_published_text_restores_previous_bytes_and_removes_a_created_f
                 Arc::new(()),
                 Arc::new(NoFaults),
                 CancellationToken::new(),
+                325,
             )
             .await
             .unwrap();

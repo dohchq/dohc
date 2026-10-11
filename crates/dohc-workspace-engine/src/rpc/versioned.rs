@@ -944,6 +944,7 @@ impl EngineService {
                 Arc::new(self.self_writes.scoped(&open.root)),
                 Arc::new(NoFaults),
                 cancellation.token(),
+                now_ms()?,
             )
             .await;
         drop(session_serial);

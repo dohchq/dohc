@@ -1874,6 +1874,7 @@ async fn rollback_compensation_replays_to_the_restored_text_on_a_clean_peer() {
             Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("rollback latest write");
@@ -1885,6 +1886,7 @@ async fn rollback_compensation_replays_to_the_restored_text_on_a_clean_peer() {
             Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("replay rollback");
@@ -2314,6 +2316,7 @@ async fn scene_rollback_waits_for_asset_delete_then_converges_on_a_third_peer() 
             Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect_err("rollback must wait for the replicated asset delete");
@@ -2365,6 +2368,7 @@ async fn scene_rollback_waits_for_asset_delete_then_converges_on_a_third_peer() 
             Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("retry rollback after the asset delete arrives");
@@ -2781,6 +2785,7 @@ async fn assert_peer_local_scene_delete_retires_a_synced_asset(tombstoned: bool)
             Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("rollback peer-local drawing delete");
@@ -3108,6 +3113,7 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
             Arc::new(()),
             ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("commit drawing delete rollback");
@@ -3200,6 +3206,7 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
             Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("retry committed drawing delete rollback");

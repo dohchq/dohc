@@ -253,7 +253,6 @@ struct OrdinarySettledHead {
     bytes: i64,
     last_ms: Option<i64>,
     coalesced: bool,
-    same_blob: bool,
     version: String,
     object: String,
     settle_seq: i64,
@@ -284,8 +283,20 @@ pub(crate) fn publish_ordinary_settled_heads_in_tx(
                  AND COALESCE(m.sync_record_only,0)=0
                  AND m.moment_order>COALESCE(p.moment_order,-1)
                  AND m.moment_order<=h.moment_order LIMIT 1 OFFSET 1),
-               h.payload_before_blob_sha256 IS h.payload_after_blob_sha256,
-               d.version_id,d.object_id,d.settle_seq,(h.metadata_origin<>'ydoc' OR h.moment_id NOT GLOB 'moment-ydoc-*' OR h.moment_id GLOB 'moment-ydoc-apply-*' OR NOT (p.moment_id IS NULL OR p.operation='delete'
+               d.version_id,d.object_id,d.settle_seq,(h.metadata_origin<>'ydoc' OR h.moment_id NOT GLOB 'moment-ydoc-*' OR (h.moment_id GLOB 'moment-ydoc-apply-*' AND NOT EXISTS(
+                 SELECT 1 FROM moments m WHERE m.workspace_id=h.workspace_id
+                   AND m.version_id=h.version_id AND m.object_id=h.object_id
+                   AND m.metadata_origin='ydoc' AND m.moment_id GLOB 'moment-ydoc-*'
+                   AND m.moment_id NOT GLOB 'moment-ydoc-apply-*' AND COALESCE(m.sync_record_only,0)=0
+                   AND m.moment_order>COALESCE(p.moment_order,-1) AND m.moment_order<=h.moment_order
+                   AND NOT EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=m.workspace_id
+                     AND r.imported=1 AND r.op_kind='moment.append'
+                     AND json_extract(r.payload_json,'$.momentId')=+m.moment_id
+                     AND json_extract(r.payload_json,'$.versionId')=+m.version_id
+                     AND json_extract(r.payload_json,'$.objectId')=+m.object_id
+                     AND NOT EXISTS(SELECT 1 FROM replication_pending_refusals f
+                       WHERE f.workspace_id=r.workspace_id AND f.origin_id=r.origin_id
+                         AND f.origin_seq=r.origin_seq)))) OR NOT (p.moment_id IS NULL OR p.operation='delete'
                  OR p.payload_after_blob_sha256 IS NOT h.payload_after_blob_sha256
                  OR p.payload_after_path IS NOT h.payload_after_path
                  OR EXISTS(SELECT 1 FROM moments m WHERE m.workspace_id=h.workspace_id
@@ -328,11 +339,10 @@ pub(crate) fn publish_ordinary_settled_heads_in_tx(
                     bytes: row.get(1)?,
                     last_ms: row.get(2)?,
                     coalesced: row.get(3)?,
-                    same_blob: row.get(4)?,
-                    version: row.get(5)?,
-                    object: row.get(6)?,
-                    settle_seq: row.get(7)?,
-                    permanent: row.get(8)?,
+                    version: row.get(4)?,
+                    object: row.get(5)?,
+                    settle_seq: row.get(6)?,
+                    permanent: row.get(7)?,
                 })
             })
             .map_err(SyncError::corrupt)?
@@ -346,7 +356,6 @@ pub(crate) fn publish_ordinary_settled_heads_in_tx(
         bytes,
         last_ms,
         coalesced,
-        same_blob,
         version,
         object,
         settle_seq,
@@ -355,11 +364,6 @@ pub(crate) fn publish_ordinary_settled_heads_in_tx(
     {
         if permanent {
             check_settled_head_in_tx(tx, workspace_id, &version, &object, settle_seq)?;
-            continue;
-        }
-        // The pass budget counts each blob once; the throttle charges before plus after.
-        let budget_bytes = if same_blob { bytes / 2 } else { bytes };
-        if budget_bytes > FILE_EXPORT_BUDGET_BYTES {
             continue;
         }
         let interval =

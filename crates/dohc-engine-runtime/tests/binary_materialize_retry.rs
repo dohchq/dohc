@@ -110,6 +110,7 @@ async fn deduped_binary_rollback_retries_its_pending_compensation() {
             Arc::new(()),
             faults.clone(),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("committed rollback");
@@ -128,6 +129,7 @@ async fn deduped_binary_rollback_retries_its_pending_compensation() {
             Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("deduped rollback retry");
@@ -219,6 +221,7 @@ async fn inactive_binary_rollback_cancels_the_original_pending_job_before_reopen
             Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("rollback inactive main");

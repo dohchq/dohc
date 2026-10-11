@@ -371,15 +371,9 @@ impl ActorHandle {
         self_writes: Arc<dyn SelfWriteRecorder>,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
+        published_at_ms: i64,
     ) -> Result<RollbackExecutionResult, RuntimeError> {
         self.run(move |store, cache| {
-            let published_at_ms = i64::try_from(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis(),
-            )
-            .unwrap_or(i64::MAX);
             with_local_file_mutation_cache_reset(cache, || {
                 versioned_text_rollback_on_store(
                     store,

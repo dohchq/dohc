@@ -64,6 +64,93 @@ fn ordinary_saved_head(store: &mut EngineStore, id: &str, text: &str, now: i64) 
 }
 
 #[test]
+fn fix2_throttled_local_save_survives_a_peer_projection() {
+    let (_scratch, path, mut store) = ordinary_publisher_fixture();
+    let client = RelaySyncClient::new(FakeRelay::default());
+    ordinary_saved_head(&mut store, "moment-ydoc-published", "published", 10);
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_000, 0)
+        .unwrap();
+    let checked = publication_checked(&store).0;
+    ordinary_saved_head(&mut store, "moment-ydoc-local-save", "local save", 20);
+    let held = client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_001, 0)
+        .unwrap();
+    assert!(matches!(
+        held,
+        SyncPassOutcome::Complete {
+            next_settled_head_publish_at_ms: Some(90_000),
+            ..
+        }
+    ));
+    ordinary_saved_head(
+        &mut store,
+        "moment-ydoc-apply-concurrent",
+        "local save + peer edit",
+        30,
+    );
+    let held = client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_002, 0)
+        .unwrap();
+    assert_eq!(
+        publication_checked(&store).0,
+        checked,
+        "unpublished local work must stay unchecked"
+    );
+    assert!(matches!(
+        held,
+        SyncPassOutcome::Complete {
+            next_settled_head_publish_at_ms: Some(90_000),
+            ..
+        }
+    ));
+    drop(store);
+    let mut store = EngineStore::open(&path, 60_003).unwrap();
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 90_000, 0)
+        .unwrap();
+    let published = exports(&store);
+    assert_eq!(published.len(), 3);
+    assert_eq!(
+        published[2].payload["momentId"],
+        "moment-ydoc-apply-concurrent"
+    );
+    assert_eq!(
+        published[2].payload["authors"],
+        json!([{"kind":"unattributed"}])
+    );
+    assert_eq!(publication_checked(&store).0, publication_checked(&store).1);
+    // A later projection alone has no new local contribution to publish.
+    ordinary_saved_head(&mut store, "moment-ydoc-apply-next", "next peer edit", 40);
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 120_000, 0)
+        .unwrap();
+    assert_eq!(exports(&store).len(), 3);
+    assert_eq!(publication_checked(&store).0, publication_checked(&store).1);
+}
+
+#[test]
+fn fix2_imported_settle_does_not_make_a_projection_local() {
+    let (_scratch, _, mut store) = ordinary_publisher_fixture();
+    ordinary_saved_head(&mut store, "moment-ydoc-imported", "imported", 10);
+    store.write_with(&NoFaults, |tx| {
+        tx.execute("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES ('ws','peer',0,'moment.append',?1,10,1)", [json!({"momentId":"moment-ydoc-imported","versionId":"main","objectId":"doc"}).to_string()]).map_err(SyncError::persist)?;
+        Ok::<_,SyncError>(())
+    }).unwrap();
+    ordinary_saved_head(
+        &mut store,
+        "moment-ydoc-apply-imported",
+        "imported + peer",
+        20,
+    );
+    RelaySyncClient::new(FakeRelay::default())
+        .push_workspace(&mut store, "ws", &NoFaults, &AlwaysLive, 60_000, 0)
+        .unwrap();
+    assert_eq!(exports(&store).len(), 1);
+    assert_eq!(publication_checked(&store).0, publication_checked(&store).1);
+}
+
+#[test]
 fn fix1b_gate_off_holds_the_settled_head() {
     let (_scratch, _, mut store) = ordinary_publisher_fixture();
     ordinary_saved_head(&mut store, "moment-ydoc-held", "held", 10);

@@ -877,6 +877,153 @@ fn accept_named_event(f: &mut Fixture, cursor: i64, delivery: String) {
 }
 
 #[test]
+fn fix2_push_drains_audit_backlog_before_publishing_the_held_head() {
+    let all_ops = |store: &EngineStore| {
+        let mut ops = Vec::new();
+        let mut after = -1;
+        loop {
+            let page = crate::list_replication_ops(
+                store,
+                "ws",
+                "owner-origin",
+                after,
+                crate::MAX_PULL_OPS,
+            )
+            .unwrap();
+            let Some(last) = page.last() else {
+                break;
+            };
+            after = last.origin_seq;
+            ops.extend(page);
+        }
+        ops
+    };
+    let mut f = fixture(true);
+    bootstrap(&mut f, false).unwrap();
+    accept_enrollment_event(&mut f, 1);
+    settle_bootstrap_publication(&mut f, 1, "moment-ydoc-audited").unwrap();
+    contact(&mut f.store);
+    // Exactly one preparation batch leaves the pending stream for the next push.
+    for cursor in 2..=crate::MAX_PUSH_OPS_PER_BATCH as i64 + 1 {
+        accept_enrollment_event(&mut f, cursor);
+    }
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM live_device_application_bindings", [])
+                .map_err(SyncError::persist)?;
+            tx.execute("UPDATE sync_identity SET settled_head_readers=1", [])
+                .map_err(SyncError::persist)?;
+            let written = dohc_engine_domain::write_projected_text_in_tx(
+                tx,
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "ws".into(),
+                    version_id: "main".into(),
+                    object_id: "object".into(),
+                    moment_id: "moment-ydoc-held-save".into(),
+                    path: "note.md".into(),
+                    text: "newer saved work".into(),
+                    metadata_origin: "ydoc".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 400,
+                    request_id: None,
+                },
+            )
+            .map_err(SyncError::corrupt)?;
+            tx.execute(
+                "UPDATE ydoc_docs SET file_export_lane=0,last_settled_sha=?1,settle_seq=?2",
+                params![written.snapshot.blob_sha256, written.moment.moment_order],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let checked = f
+        .store
+        .read_with(|c| {
+            c.query_row(
+                "SELECT published_checked_settle_seq FROM ydoc_docs",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+        })
+        .unwrap();
+    let client = crate::RelaySyncClient::new(crate::tests::FakeRelay::default());
+    client
+        .push_workspace(
+            &mut f.store,
+            "ws",
+            &NoFaults,
+            &crate::NoLiveLeases,
+            60_000,
+            100_000_000,
+        )
+        .unwrap();
+    assert_eq!(count(&f.store, "live_audit_pending_exports"), 1);
+    let ops = all_ops(&f.store);
+    assert!(
+        !ops.iter()
+            .any(|op| op.payload["momentId"] == "moment-ydoc-held-save")
+    );
+    assert_eq!(
+        f.store
+            .read_with(|c| c.query_row(
+                "SELECT published_checked_settle_seq FROM ydoc_docs",
+                [],
+                |r| r.get::<_, i64>(0)
+            ))
+            .unwrap(),
+        checked
+    );
+    client
+        .push_workspace(
+            &mut f.store,
+            "ws",
+            &NoFaults,
+            &crate::NoLiveLeases,
+            90_000,
+            100_000_000,
+        )
+        .unwrap();
+    assert_eq!(count(&f.store, "live_audit_pending_exports"), 0);
+    let ops = all_ops(&f.store);
+    let held = ops
+        .iter()
+        .find(|op| op.payload["momentId"] == "moment-ydoc-held-save")
+        .unwrap();
+    assert!(
+        ops.iter()
+            .filter(|op| op.op_kind == application_record::EVENT_OP
+                || op.payload["momentId"] == "moment-ydoc-audited")
+            .all(|op| op.origin_seq < held.origin_seq)
+    );
+    assert!(client.transport().pushed_requests().iter().any(|request| {
+        request
+            .ops
+            .iter()
+            .any(|op| op.payload["momentId"] == "moment-ydoc-held-save")
+    }));
+    client
+        .push_workspace(
+            &mut f.store,
+            "ws",
+            &NoFaults,
+            &crate::NoLiveLeases,
+            120_000,
+            100_000_000,
+        )
+        .unwrap();
+    assert_eq!(
+        all_ops(&f.store)
+            .iter()
+            .filter(|op| op.payload["momentId"] == "moment-ydoc-held-save")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn first_push_exports_native_history_after_actual_contact() {
     let mut f = fixture(false);
     bootstrap(&mut f, false).unwrap();

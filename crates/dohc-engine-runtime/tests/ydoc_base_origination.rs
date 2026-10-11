@@ -2869,7 +2869,7 @@ async fn closing_an_open_lineage_after_enrolment_claims_it_once_the_file_holds_i
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() {
+async fn fix2_rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() {
     const WS: &str = "ws-rollback-closed-lineage";
     const PATH: &str = "notes/rollback.md";
     const BEFORE: &str = "seed\n";
@@ -2974,6 +2974,7 @@ async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() 
             Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
+            325,
         )
         .await
         .expect("roll back the settled edit");
@@ -2983,6 +2984,21 @@ async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() 
         2,
         "rollback must journal one canonical rewrite after the original base"
     );
+    let store = EngineStore::open(&db, 326).unwrap();
+    let published_at: i64 = store
+        .read_with(|c| {
+            c.query_row(
+                "SELECT last_published_at_ms FROM ydoc_docs WHERE workspace_id=?1 AND object_id=?2",
+                rusqlite::params![WS, object_id],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        published_at, 325,
+        "rollback uses the injected publication time"
+    );
+    drop(store);
     // Plaintext rollback is DB-only; model its external disk projection so
     // the follow-up settle isolates the retained CRDT lineage.
     std::fs::write(scratch.path().join(PATH), BEFORE).expect("project rollback to disk");
