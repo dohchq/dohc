@@ -24,13 +24,14 @@ export function runOwnerCancellationFixture(root, sourceRoot, kind, signal, clea
   put("scripts/verification/doctor.mjs", "export const doctor=()=>({checks:[]});");
   put("scripts/verification/admission.mjs", "export const admissionPreflight=()=>{};export const installedDependenciesMatch=()=>false;export const verificationAdmission=()=>({lightweight:false,reason:'fixture full lane'});");
   put("tools/rust-engine-program/tree-provenance.mjs", "export const readTreeState=()=>({head:'fixture'});export const classifyTreeProvenance=()=>({status:'PASS'});");
-  put("tools/rust-engine-program/git-read.mjs", readFileSync(join(sourceRoot, "tools/rust-engine-program/git-read.mjs")));
+  for (const file of ["git-read.mjs", "gate-commands.mjs"]) copy(`tools/rust-engine-program/${file}`);
   if (kind === "verify") put("scripts/verification/build.mjs", `
     import {existsSync} from 'node:fs';
     import {interruptDuringSync} from './process.mjs';
     export const prepare=async()=>{};
     export const assertPrepared=()=>({});
     export const buildEnvironment=()=>process.env;
+    export const withBuildBudget=action=>action(process.env);
     export const enginePath='fixture-engine';
     export const stagedEnginePath='fixture-staged-engine';
     export const assertIndependentStagedEngine=()=>{};

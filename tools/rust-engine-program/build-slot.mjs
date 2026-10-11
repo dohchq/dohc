@@ -581,6 +581,21 @@ export function acquireBuildSlot(options) {
   return acquireSlot({ ...options, kind: "build-slot", lanes: "cargo lanes" });
 }
 
+/**
+ * Take up to `count` cargo lanes. Only the first waits; each further lane is
+ * taken only when it is free now, so no claimant holds a lane while it waits
+ * for another. Resolves to the held slots; the caller sizes its caps by them.
+ */
+export async function acquireBuildSlots(options, count) {
+  const held = [await acquireBuildSlot(options)];
+  try {
+    while (held.length < count) held.push(await acquireBuildSlot({ ...options, waitMs: 0 }));
+  } catch (error) {
+    if (error.code !== "ETIMEDOUT") { for (const slot of held) slot.release(); throw error; }
+  }
+  return held;
+}
+
 /** Fail-fast ownership for mutable local resources; this creates no waiter queue. */
 export function acquireExclusiveSlot({ root, kind, metadata, cooperativeCancellation = true }) {
   mkdirSync(root, { recursive: true });
@@ -604,18 +619,21 @@ export function acquireExclusiveSlot({ root, kind, metadata, cooperativeCancella
   }
 }
 
+const canonical = path => {
+  try { return realpathSync(path).toLowerCase(); }
+  catch { return resolve(path).toLowerCase(); }
+};
+const verifierEntry = fileURLToPath(new URL("../../scripts/verification/verify.mjs", import.meta.url));
+
 /**
  * Hold the host's single verification lane for a whole PR gate, so two gates
  * never compete for the same cores and disk. Null on a single-tenant host.
  * A gate can wait behind several others, so this waits up to six hours.
+ * Only this checkout's PR verifier may hold it; `entry` is the caller's script.
  */
 export function verificationLanes(env = process.env) {
   const requested = env.DOHC_VERIFICATION_LANES ?? "1";
   if (!["1", "2"].includes(requested)) throw new Error("DOHC_VERIFICATION_LANES must be 1 or 2.");
-  const canonical = path => {
-    try { return realpathSync(path).toLowerCase(); }
-    catch { return resolve(path).toLowerCase(); }
-  };
   const trialRoot = env.DOHC_VERIFICATION_SLOT_ROOT;
   const cargoRoot = resolveBuildBudget(env)?.root;
   if (trialRoot && (env.DOHC_VERIFICATION_TRIAL !== "1" || cargoRoot && canonical(trialRoot) === canonical(cargoRoot))) {
@@ -627,7 +645,10 @@ export function verificationLanes(env = process.env) {
   return Number(requested);
 }
 
-export function acquireVerificationSlot(env = process.env, { lightweight = false, metadata, waitMs = 6 * 60 * 60_000, observeTicket } = {}) {
+export function acquireVerificationSlot(env = process.env, { lightweight = false, metadata, waitMs = 6 * 60 * 60_000, observeTicket, entry = process.argv[1] } = {}) {
+  if (!entry || canonical(entry) !== canonical(verifierEntry)) {
+    throw new Error(`Only the PR verifier (${verifierEntry}) may hold a verification lane. Run pnpm verify:pr, or take a build slot for other Cargo work.`);
+  }
   const fullLanes = verificationLanes(env);
   const budget = resolveBuildBudget(env);
   if (!budget) return null;
@@ -751,7 +772,7 @@ async function acquireSlot({
         : `denied: pid ${process.pid} waiting at queue position ${ahead + 1}`);
     }
     if (Date.now() >= deadline) {
-      throw new Error(
+      throw Object.assign(new Error(
         `no ${label} freed within ${Math.round(waitMs / 60_000)} minutes: ` +
           `the concurrency budget is ${slots} concurrent ${lanes} ` +
           `at ${root} ${free.length === 0
@@ -759,7 +780,7 @@ async function acquireSlot({
             : `with ${ahead < 0 ? "queue position unavailable" : `queue position ${ahead + 1} behind older waiters`}; ${holders(root, slots, kind) || "no current holder"}`}. Wait for a lane to finish and ` +
           `rerun; a dead lane's slot is reclaimed automatically once its ` +
           `heartbeat is 30 minutes stale.`,
-      );
+      ), { code: "ETIMEDOUT" });
     }
     if (Date.now() >= nextMessageAt) {
       const position = ahead < 0 ? "unavailable" : ahead + 1;

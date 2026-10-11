@@ -228,6 +228,7 @@ function runGate(stubDir, extraEnv = {}, args = []) {
     const out = `${res.stdout ?? ""}${res.stderr ?? ""}`;
     return {
       code: res.status,
+      output: out,
       summary: out.slice(out.indexOf("== summary ==")),
       evidence: (out.match(/^- .*\| run-rust-checks \|.*$/m) ?? [""])[0],
     };
@@ -347,6 +348,37 @@ test("oversized inherited caps are clamped in every cargo child and the evidence
     for (const name of ["CARGO_BUILD_JOBS", "RUST_TEST_THREADS", "NEXTEST_TEST_THREADS"]) assert.match(child, new RegExp(`${name}=${jobs}`));
     assert.match(run.evidence, new RegExp(`, jobs ${jobs}, test-threads ${jobs}, head `));
   } finally { rmSync(stub, {recursive: true, force: true}); }
+});
+
+test("the verification lane holder takes a second cargo lane when one is free and reports its caps", () => {
+  const stub = stubToolchain();
+  const slotRoot = mkdtempSync(join(tmpdir(), "dohc-gate-slots-"));
+  try {
+    const jobs = Math.max(1, Math.floor(availableParallelism() / 4));
+    const oversized = { CARGO_BUILD_JOBS: "999", RUST_TEST_THREADS: "999", NEXTEST_TEST_THREADS: "999" };
+    const pair = runGate(stub, oversized, ["--verification-lane"]);
+    assert.equal(pair.code, 0, pair.summary);
+    assert.match(pair.output, /budget: build-slot-1 and build-slot-2 of 4, /);
+    const child = readFileSync(join(stub, "envdump.txt"), "utf8");
+    for (const name of ["CARGO_BUILD_JOBS", "RUST_TEST_THREADS", "NEXTEST_TEST_THREADS"]) assert.match(child, new RegExp(`^${name}=${2 * jobs}\\r?$`, "mu"));
+    assert.match(pair.evidence, new RegExp(`, jobs ${2 * jobs}, test-threads ${2 * jobs}, head `));
+
+    // Three lanes held elsewhere: the holder runs on one share instead of waiting.
+    for (const i of [1, 2, 3]) {
+      mkdirSync(join(slotRoot, `build-slot-${i}`));
+      writeFileSync(join(slotRoot, `build-slot-${i}`, "owner.json"), JSON.stringify({ pid: process.pid, start: new Date().toISOString() }));
+    }
+    const single = runGate(stub, { ...oversized, DOHC_BUILD_SLOT_ROOT: slotRoot }, ["--verification-lane"]);
+    assert.equal(single.code, 0, single.summary);
+    assert.match(single.output, /budget: build-slot-4 of 4, /);
+    assert.match(single.evidence, new RegExp(`, jobs ${jobs}, test-threads ${jobs}, head `));
+
+    // A standalone gate keeps its single share.
+    assert.match(runGate(stub, oversized).output, /budget: build-slot-1 of 4, /);
+  } finally {
+    rmSync(stub, { recursive: true, force: true });
+    rmSync(slotRoot, { recursive: true, force: true });
+  }
 });
 
 test("the gate refuses to start under the disk floor, naming it", () => {

@@ -44,7 +44,7 @@ import { arch, platform, release, tmpdir } from "node:os";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { verifyNativeTarget } from "./native-target.mjs";
 import {
-  acquireBuildSlot,
+  acquireBuildSlots,
   capBuildParallelism,
   freeDiskGb,
   resolveBuildBudget,
@@ -55,16 +55,20 @@ import {
   readTreeState,
 } from "./tree-provenance.mjs";
 import { SCRATCH_SENTINEL, inspectScratchRun } from "./scratch-leak-report.mjs";
+import { clippy, fmtCheck, nextest } from "./gate-commands.mjs";
 import { readGit } from "./git-read.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "../..");
 const preparedRuntime = process.argv.includes("--prepared-runtime");
+// verify.mjs passes this while it holds the host's one full verification lane.
+const verificationLane = process.argv.includes("--verification-lane");
 
 // The machine's build budget. On the shared dev box the gate refuses to
 // start under the free-space floor, takes one of the four build slots before
 // any cargo runs, and caps its compiler and test parallelism to its share of
-// the cores. A single-tenant host (CI)
+// the cores. The verification lane holder also takes a second slot when one
+// is free, and doubles its caps. A single-tenant host (CI)
 // has no slot root and runs uncapped. Incremental compilation is off on both:
 // a full-workspace gate never reuses incremental caches, it only pays their
 // disk — the dev loop keeps its own setting.
@@ -90,7 +94,7 @@ if (budget) {
     process.exit(1);
   }
 }
-const slot = budget ? await acquireBuildSlot(budget) : null;
+const slots = budget ? await acquireBuildSlots(budget, verificationLane ? 2 : 1) : [];
 // The caps ride process.env so every child sees them — including the
 // native-target probe, which spawns its own cargo. A snapshot handed to
 // spawnSync would REPLACE the child environment and silently drop whatever
@@ -100,7 +104,7 @@ const slot = budget ? await acquireBuildSlot(budget) : null;
 // never reuses incremental caches, it only pays their disk.
 process.env.CARGO_INCREMENTAL = "0";
 if (budget) {
-  const capped = capBuildParallelism(process.env, budget.jobs);
+  const capped = capBuildParallelism(process.env, budget.jobs * slots.length);
   for (const name of ["CARGO_BUILD_JOBS", "RUST_TEST_THREADS", "NEXTEST_TEST_THREADS"]) process.env[name] = capped[name];
 }
 // A caller's libtest cap carries to nextest unless the caller split them
@@ -169,20 +173,17 @@ const required = [
     skipCode: 2,
     skipReason: "yjs/tsx unavailable; fixture drift not checked",
   },
-  { name: "fmt --check", cmd: "cargo fmt --all --check" },
+  { name: "fmt --check", cmd: `cargo ${fmtCheck.join(" ")}` },
   // `--locked` on every step that resolves dependencies: a CI substitute must
   // not rewrite Cargo.lock mid-run. Without it, `cargo build` over a stale
   // lock rewrites the file and the tree-provenance row fails — correctly, but
   // the reader gets a provenance refusal where a lockfile error was the fact.
-  {
-    name: "clippy -D warnings",
-    cmd: "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
-  },
+  { name: "clippy -D warnings", cmd: `cargo ${clippy.join(" ")}` },
   // nextest schedules the workspace's ~73 test binaries in parallel where
   // `cargo test` runs them one at a time — measured, that was ~90% of the
   // gate's wall clock. It runs no doctests by design; the `doctests` row
   // below keeps them.
-  { name: "test --workspace", cmd: "cargo nextest run --locked --workspace --no-fail-fast" },
+  { name: "test --workspace", cmd: `cargo ${nextest.join(" ")} --no-fail-fast` },
   { name: "doctests", cmd: "cargo test --locked --workspace --doc" },
   // Test builds enable fault hooks through testkit. Finish with the shipping
   // daemon so desktop preparation sees the default production features.
@@ -237,7 +238,7 @@ console.log(`\n== dohc Rust engine local checks ==`);
 console.log(`host: ${platform()} ${arch()} (${release()})`);
 console.log(`repo: ${repoRoot}`);
 console.log(
-  `budget: ${slot ? `${slot.name} of ${budget.slots}` : "uncapped (no slot root; single-tenant host)"}, ` +
+  `budget: ${slots.length ? `${slots.map(slot => slot.name).join(" and ")} of ${budget.slots}` : "uncapped (no slot root; single-tenant host)"}, ` +
     `${capsField}, incremental off`,
 );
 console.log(`tree at start: ${formatTreeState(readings[0].state)}\n`);

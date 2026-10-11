@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, matchesGlob, resolve } from "node:path";
-import { prepare, assertPrepared, assertIndependentStagedEngine, sourceFingerprint, buildEnvironment, stagedEnginePath, hashFile } from "./build.mjs";
+import { prepare, assertPrepared, assertIndependentStagedEngine, sourceFingerprint, buildEnvironment, stagedEnginePath, hashFile, withBuildBudget } from "./build.mjs";
 import { doctor } from "./doctor.mjs";
 import { git, pnpm, repoRoot, run } from "./process.mjs";
 import { cancellationScope } from "./cancellation.mjs";
@@ -15,6 +15,7 @@ import { acquireExclusiveSlot, acquireVerificationSlot, resolveBuildBudget } fro
 import { processIdentity, ticketEvidence } from "./ticket-evidence.mjs";
 import { admissionPreflight, installedDependenciesMatch, verificationAdmission } from "./admission.mjs";
 import { readGit } from "../../tools/rust-engine-program/git-read.mjs";
+import { clippy, fmtCheck, nextest } from "../../tools/rust-engine-program/gate-commands.mjs";
 import { finishRustEvidence, refreshRustReuse, rustIdentity } from "./rust-reuse.mjs";
 
 const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
@@ -223,6 +224,7 @@ export async function verify(args) {
     const row = { name, command, args: commandArgs, log: join(output, `${name}.log`) };
     return checkedStep(row, () => run(command, commandArgs, { env, log: row.log }), checkpoint);
   }
+  const typecheck = () => pnpm(report.admission?.lightweight ? ["-r", "--workspace-concurrency=1", "--if-present", "typecheck"] : ["run", "typecheck"]);
   save();
   const cancellation = cancellationScope("Verification");
   try {
@@ -254,7 +256,15 @@ export async function verify(args) {
     if (mode === "pr") {
       const preflight = () => admissionPreflight({rust: gates.rust, native, root: repoRoot, pins: require("js-yaml").load(workflow).env});
       await measure("preflight", preflight);
-      report.admission = verificationAdmission({gates, javascript}, readWorkspacePackages(repoRoot), installedDependenciesMatch(repoRoot));
+      const dependenciesReady = installedDependenciesMatch(repoRoot);
+      report.admission = verificationAdmission({gates, javascript}, readWorkspacePackages(repoRoot), dependenciesReady);
+      // Checks that need no lane fail here, fastest first, instead of after the wait. The lane repeats them as evidence.
+      if (gates.rust && !reuseRust) await step("pre-queue-fmt", "cargo", fmtCheck);
+      if (gates.js && dependenciesReady) await step("pre-queue-typecheck", ...typecheck());
+      if (gates.rust && !reuseRust) await withBuildBudget(async env => {
+        await step("pre-queue-clippy", "cargo", clippy, env);
+        await step("pre-queue-test-build", "cargo", [...nextest, "--no-run"], env);
+      });
       // Identify this process before publishing a ticket; no lookup may delay admission.
       const tickets = resolveBuildBudget() ? ticketEvidence({output, checkout: repoRoot, commit: report.commit,
         producer: await measure("producer-identity", () => processIdentity()), persist: save}) : null;
@@ -313,7 +323,7 @@ export async function verify(args) {
           save();
           return;
         }
-        await step("rust", process.execPath, ["tools/rust-engine-program/run-rust-checks.mjs", "--prepared-runtime"], buildEnvironment());
+        await step("rust", process.execPath, ["tools/rust-engine-program/run-rust-checks.mjs", "--prepared-runtime", ...(lane ? ["--verification-lane"] : [])], buildEnvironment());
         await step("rust-verdict", process.execPath, ["tools/rust-engine-program/require-ci-pass-verdict.mjs", join(output, "rust.log")]);
       } catch (error) {
         report.rustError = error.message; save();
@@ -369,7 +379,7 @@ export async function verify(args) {
           report.postgres = { id: database.id }; save();
         }
         const env = { ...process.env, POSTGRES_URL: database?.url ?? "", DOHC_REQUIRE_POSTGRES: "1", DOHC_REQUIRE_ENGINE_E2E: "1", DOHC_TEST_ENGINE_BINARY: stagedEnginePath };
-        await step("typecheck", ...pnpm(report.admission?.lightweight ? ["-r", "--workspace-concurrency=1", "--if-present", "typecheck"] : ["run", "typecheck"]), env);
+        await step("typecheck", ...typecheck(), env);
         report.jsTests = join(output, "js-tests", "result.json");
         // Keep package groups under this owner so cancellation finishes their
         // escalation before database cleanup, without a competing parent timer.
