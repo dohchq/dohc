@@ -924,6 +924,7 @@ fn import_confirmed_projection(
     let mut cache = WriterDocCache::new();
     let mut projection = None;
     let mut late_ops = Vec::new();
+    let mut last_audit = None;
     let ops = operations(&f.store);
     let last_audit_seq = ops
         .iter()
@@ -963,6 +964,9 @@ fn import_confirmed_projection(
                 op.relay_seq = None;
             }
         }
+        if op.op_kind == application_record::EVENT_OP && op.origin_seq == last_audit_seq {
+            last_audit = Some(op.clone());
+        }
         if matches!(
             confirmation,
             Confirmation::Admitted
@@ -986,6 +990,10 @@ fn import_confirmed_projection(
                 f.store.read_with(|conn| conn.execute(
                     "INSERT INTO live_audit_projection_authors(workspace_id,origin_id,origin_seq,version_id,object_id,path,lineage_claim_id,author_json) VALUES ('ws','owner-origin',?1,'main','object','note.md',?2,?3)",
                     params![op.origin_seq-1,f.binding.lineage_claim_id,full_coverage],
+                )).unwrap();
+                f.store.read_with(|conn| conn.execute(
+                    "INSERT INTO live_audit_projection_contributions(workspace_id,origin_id,origin_seq,record_digest,author_json) VALUES ('ws','owner-origin',?1,'retention-bound',?2)",
+                    params![op.origin_seq-1,full_coverage],
                 )).unwrap();
             }
             if confirmation == Confirmation::StorageFailure
@@ -1055,6 +1063,14 @@ fn import_confirmed_projection(
                     .read_with(|conn| {
                         conn.execute(
                             "DELETE FROM live_audit_projection_authors WHERE origin_seq=?1",
+                            [op.origin_seq - 1],
+                        )
+                    })
+                    .unwrap();
+                f.store
+                    .read_with(|conn| {
+                        conn.execute(
+                            "DELETE FROM live_audit_projection_contributions WHERE origin_seq=?1",
                             [op.origin_seq - 1],
                         )
                     })
@@ -1226,6 +1242,22 @@ fn import_confirmed_projection(
         )
         .unwrap();
         assert!(matches!(result.primary, ApplyDisposition::Applied(_)));
+    }
+    if matches!(
+        first_coordinate,
+        Some(FirstDrainCoordinate::DeclaredHuman | FirstDrainCoordinate::UnconfirmedHumanAudit)
+    ) {
+        // A later confirmation of the same record recomputes the moment, but
+        // cannot erase the drain's coverage gap.
+        let echoed = crate::apply_replication_envelope(
+            &mut receiver,
+            &mut cache,
+            &last_audit.expect("last audit record"),
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        assert!(matches!(echoed.primary, ApplyDisposition::Skipped));
     }
     let moment = VersionedTextStore::new(&mut receiver)
         .get_moment("ws", &id)
@@ -3099,6 +3131,234 @@ fn confirmation_refresh_propagates_streaming_storage_failure_and_can_retry() {
         false,
         Confirmation::ReaderStorageFailure,
     );
+}
+
+#[test]
+fn one_audit_record_at_two_coordinates_keeps_its_relay_confirmation() {
+    for confirmed_first in [true, false] {
+        let mut f = fixture(true);
+        bootstrap(&mut f, false).unwrap();
+        let mut authors = commit_recipient_deliveries(&mut f, 1);
+        let copies = [
+            AuditCopy {
+                event_count: 1,
+                republished: false,
+                confirmed: confirmed_first,
+            },
+            AuditCopy {
+                event_count: 1,
+                republished: true,
+                confirmed: !confirmed_first,
+            },
+        ];
+        let (row, moment) = import_audit_copies(&f, &authors, &copies);
+        authors[0]["relayConfirmed"] = json!(true);
+        assert_eq!(
+            row, authors,
+            "projection, confirmed first: {confirmed_first}"
+        );
+        assert_eq!(
+            moment, authors,
+            "History, confirmed first: {confirmed_first}"
+        );
+    }
+}
+
+#[test]
+fn distinct_audit_records_at_one_coordinate_keep_the_conservative_union() {
+    for confirmed_first in [true, false] {
+        let mut f = fixture(true);
+        bootstrap(&mut f, false).unwrap();
+        let authors = commit_recipient_deliveries(&mut f, 2);
+        let copies = [
+            AuditCopy {
+                event_count: 1,
+                republished: false,
+                confirmed: confirmed_first,
+            },
+            AuditCopy {
+                event_count: 2,
+                republished: false,
+                confirmed: !confirmed_first,
+            },
+        ];
+        let (row, moment) = import_audit_copies(&f, &authors, &copies);
+        assert_eq!(
+            row, authors,
+            "projection, confirmed first: {confirmed_first}"
+        );
+        assert_eq!(
+            moment, authors,
+            "History, confirmed first: {confirmed_first}"
+        );
+    }
+}
+
+/// One relay delivery of an audit record: the event it records, whether a
+/// second owner store published it at its own coordinate, and whether the
+/// relay confirmed its authors.
+struct AuditCopy {
+    event_count: i64,
+    republished: bool,
+    confirmed: bool,
+}
+
+/// Commits accepted frames from one collaborator. Later deliveries reuse the
+/// first frame's bytes, so each audit record names the same content coordinate.
+fn commit_recipient_deliveries(f: &mut Fixture, deliveries: i64) -> serde_json::Value {
+    use dohc_engine_collab::live_update_application::{
+        AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, ApplicationError, LiveUpdateReceipt,
+        RelayAcceptedLiveUpdate, ServerDerivedLiveUpdateAuthority, apply_committed,
+    };
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(&f.bytes).unwrap();
+    let update = doc.richdoc_append_paragraph("Recipient changed this paragraph.");
+    let authors = json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"}]);
+    for cursor in 1..=deliveries {
+        let event = AdmittedLiveUpdate {
+            metadata: AdmittedLiveUpdateMetadata {
+                accepted: RelayAcceptedLiveUpdate {
+                    receipt: LiveUpdateReceipt {
+                        delivery_id: format!("recipient-delivery-{cursor}"),
+                        update_digest: hex_sha256(&update),
+                        journal_cursor: cursor,
+                        accepting_host_epoch: 1,
+                    },
+                    binding: f.binding.clone(),
+                    authority: ServerDerivedLiveUpdateAuthority::Named {
+                        principal_id: "recipient".into(),
+                        grant_id: "edit-grant".into(),
+                        grant_generation: 1,
+                    },
+                    received_at_ms: 200,
+                },
+                first_seen: Vec::new(),
+                canonical_version: Some(2),
+                author_snapshot: Some(serde_json::from_value(authors.clone()).unwrap()),
+                first_seen_deletes: Some(Vec::new()),
+                checkpoint_coverage: None,
+            },
+            update_bytes: update.clone(),
+        };
+        apply_committed(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            &f.handle,
+            event,
+            &NoFaults,
+            100_000_000,
+            |tx, namespace, binding, count| {
+                journal_live_event_in_tx(tx, namespace, binding, count, 200)
+                    .map(|_| ())
+                    .map_err(|error| {
+                        ApplicationError::Storage(
+                            dohc_engine_storage::StorageError::persist_public(error),
+                        )
+                    })
+            },
+        )
+        .unwrap();
+    }
+    authors
+}
+
+/// Imports the host's content, then each audit copy in order. Returns the
+/// retained projection authors and, after a reopen, the History moment's.
+fn import_audit_copies(
+    f: &Fixture,
+    authors: &serde_json::Value,
+    copies: &[AuditCopy],
+) -> (serde_json::Value, serde_json::Value) {
+    let (_scratch, path, mut receiver) = open_store();
+    copy_audit_blobs(&f.store, &mut receiver);
+    let ops = operations(&f.store);
+    let delta = ops
+        .iter()
+        .find(|op| op.op_kind == "ydoc.update" && op.payload["isBaseState"] != true)
+        .expect("changed content");
+    let moment_id = crate::ydoc_apply::ydoc_apply_moment_id(
+        &DocKey::new("ws", "main", "object").unwrap(),
+        "note.md",
+        &delta.origin_id,
+        delta.origin_seq,
+    );
+    let mut cache = WriterDocCache::new();
+    let mut audits = Vec::new();
+    for mut op in ops {
+        op.relay_seq = Some(op.origin_seq + 1);
+        if op.op_kind == application_record::EVENT_OP {
+            audits.push(op);
+            continue;
+        }
+        let result = crate::apply_replication_envelope(
+            &mut receiver,
+            &mut cache,
+            &op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        assert!(
+            matches!(result.primary, ApplyDisposition::Applied(_)),
+            "{}: {:?}",
+            op.op_kind,
+            result.primary
+        );
+    }
+    let mut republished_seq = 0;
+    for copy in copies {
+        let mut op = audits
+            .iter()
+            .find(|op| op.payload["eventCount"] == copy.event_count)
+            .expect("journaled audit record")
+            .clone();
+        if copy.republished {
+            // The record names no adopter, so a second owner store that adopts
+            // this lineage publishes the same payload at its own coordinate.
+            op.origin_id = "second-owner-origin".into();
+            op.origin_seq = republished_seq;
+            op.relay_seq = Some(1_000 + republished_seq);
+            republished_seq += 1;
+        }
+        op.admitted_author_snapshot = copy.confirmed.then(|| authors.clone());
+        let result = crate::apply_replication_envelope(
+            &mut receiver,
+            &mut cache,
+            &op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        assert!(
+            matches!(result.primary, ApplyDisposition::Applied(_)),
+            "audit copy: {:?}",
+            result.primary
+        );
+    }
+    assert_eq!(
+        count(&receiver, "live_audit_projection_authors"),
+        1,
+        "every copy names one content coordinate"
+    );
+    let row: String = receiver
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT author_json FROM live_audit_projection_authors",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    drop(receiver);
+    let mut receiver = EngineStore::open(&path, 300).unwrap();
+    let moment = VersionedTextStore::new(&mut receiver)
+        .get_moment("ws", &moment_id)
+        .unwrap()
+        .expect("projection moment");
+    (
+        serde_json::from_str(&row).unwrap(),
+        serde_json::from_str(moment.author_json.as_deref().expect("audited authors")).unwrap(),
+    )
 }
 
 fn copy_audit_blobs(source: &EngineStore, target: &mut EngineStore) {

@@ -3111,6 +3111,21 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_OPEN_DOCUMENT_ARTIFACTS_DDL,
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 41,
+        id: "v2-audited-projection-contributions",
+        sql: "CREATE TABLE live_audit_projection_contributions ( \
+                workspace_id TEXT NOT NULL, origin_id TEXT NOT NULL, origin_seq INTEGER NOT NULL, \
+                record_digest TEXT NOT NULL, author_json TEXT NOT NULL \
+                  CHECK (json_valid(author_json) AND json_type(author_json)='array' \
+                    AND json_array_length(author_json) BETWEEN 1 AND 1024 \
+                    AND length(CAST(author_json AS BLOB))<=131072), \
+                PRIMARY KEY(workspace_id,origin_id,origin_seq,record_digest), \
+                FOREIGN KEY(workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE \
+              ) STRICT; \
+              ALTER TABLE live_audit_projection_authors ADD COLUMN moment_base_json TEXT;",
+        sets_user_version: None,
+    },
 ];
 
 const V2_OPEN_DOCUMENT_ARTIFACTS_DDL: &str = "\
@@ -3675,6 +3690,10 @@ mod tests {
             (
                 "v2-open-document-artifacts",
                 "2a4525cbf68a02045589052295e240bc621fc2de73f96f3a549d505bc06394d7",
+            ),
+            (
+                "v2-audited-projection-contributions",
+                "ffe123de3b71b3874993b68c764c0f939d081ec784a982d8dc8b359152955d55",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -4990,10 +5009,9 @@ mod tests {
         let before = migration_index("v2-open-document-artifacts");
         assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 39);
         assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 40);
-        assert_eq!(before + 1, BASELINE_MIGRATIONS.len());
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         conn.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main'); INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','main',0); INSERT INTO file_objects VALUES ('ws','doc',0),('ws','settled',0); INSERT INTO blobs(sha256,byte_length,text) VALUES ('old',3,'old'),('new',3,'new'); INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,regime,lineage_claim_status,head_update_seq,head_snapshot_seq,settled_update_seq,updated_at_ms) VALUES ('ws','main','doc','plaintext','local-only','unclaimed',2,0,1,0),('ws','main','settled','plaintext','local-only','unclaimed',2,0,2,0); INSERT INTO snapshots(workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES ('ws','main','doc','doc.md','old',0,'m0','sync'); INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES ('ws','peer',0,'moment.append','{}',0,1); INSERT INTO replication_pending_refusals VALUES ('ws','peer',0,'moment.append','invalid-input','Existing refusal','report');").unwrap();
-        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap();
         assert_eq!(
             conn.query_row(
                 "SELECT last_local_update_seq FROM ydoc_docs WHERE object_id='doc'",
