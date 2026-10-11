@@ -23,6 +23,7 @@ import type {
 import type { WorkspaceEngineMomentDetail } from "../workspaces/workspaceEngineCapture";
 import { DaemonRefusalError } from "@dohc/workspace-engine-client";
 import { LIVE_UPDATE_IDENTIFIER_MAX_BYTES } from "@dohc/live-session-contract/live-update-admission";
+import { engineMomentSourceLabel } from "../renderer/workbench/EngineHistory";
 
 const names: EngineMomentAuthorNames = {
   agent: (author) => author.onBehalfOf === "local" ? "You" : author.onBehalfOf,
@@ -283,10 +284,12 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
     const detail = detailWith({before: textSide("old"), after: textSide("new")});
     if (detail.protected) throw new Error("Expected a plaintext moment");
     const author = {kind: "link", publicPrincipalId: "public-holder", label: "Ana"} as const;
+    detail.moment.metadata.origin = "ydoc";
     detail.moment.authors = [author];
     const record = engineMomentDetailForIpc(detail, names);
     expect(record.authors).toEqual([author]);
     expect(record.linkAuthor).toBeUndefined();
+    expect(engineMomentSourceLabel(record)).toBe("Link holder Ana");
     expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
   });
 

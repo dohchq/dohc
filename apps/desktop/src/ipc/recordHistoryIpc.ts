@@ -70,6 +70,7 @@ export async function recordHistoryForIpc(
   authors: RecordHistoryAuthors,
 ): Promise<GetCollectionRecordHistoryResult> {
   authors.prepare([...new Set(page.history.flatMap(entry => {
+    if (entry.linkAuthor !== null) return [];
     if (entry.authorOriginId === null) return [];
     const userId = entry.actorKind === "human" ? entry.authorOriginId : entry.onBehalfOf;
     return userId !== null && recordHistoryPersonIsNamed(userId) ? [userId] : [];
@@ -88,6 +89,12 @@ export async function recordHistoryForIpc(
     return known;
   };
   const authorOf = async (entry: HistoryEntry): Promise<Author> => {
+    if (entry.linkAuthor !== null) {
+      // The renderer names the role, so the link's ids stay in main.
+      return entry.actorKind === "agent" && entry.authorOriginId !== null && entry.onBehalfOf === entry.linkAuthor.publicPrincipalId
+        ? { kind: "link", agentName: authors.agent(entry.onBehalfOf) }
+        : { kind: "link" };
+    }
     const actor = entry.authorOriginId;
     if (actor === null) return null;
     if (entry.actorKind === "human") {

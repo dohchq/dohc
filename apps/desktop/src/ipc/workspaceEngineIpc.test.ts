@@ -303,7 +303,7 @@ describe("workspace engine IPC registrations", () => {
       collection: { path: "tasks", objectId: "tasks", status: "valid", reasons: [] },
       record: { id: "a", path: "tasks/a.md", conflicted: false, values: [] }, nextBeforeHistoryId: null,
       history: [{ historyId: 1, field: "Status", previous: { present: false, value: null }, next: { present: true, value: "Done" },
-        authorOriginId: "automation", actorKind: "automation", onBehalfOf: "ben", depth: 1, recordedAtMs: 1, automationRun: null }],
+        authorOriginId: "automation", actorKind: "automation", onBehalfOf: "ben", depth: 1, recordedAtMs: 1, automationRun: null, linkAuthor: null }],
     });
     await h.invoke(CHANNELS.getCollectionRecordHistory, { workspaceId: "workspace", collectionPath: "tasks", recordId: "a" });
     await new Promise<void>(resolve => setImmediate(resolve));
@@ -324,7 +324,7 @@ describe("workspace engine IPC registrations", () => {
       collection: { path: "tasks", objectId: "tasks", status: "valid", reasons: [] },
       record: { id: "a", path: "tasks/a.md", conflicted: false, values: [] }, nextBeforeHistoryId: null,
       history: [{ historyId: 1, field: "Status", previous: { present: false, value: null }, next: { present: true, value: "Done" },
-        authorOriginId: actorKind === "human" ? "local:installation-1" : "helper", actorKind, onBehalfOf: "local:installation-1", depth: 0, recordedAtMs: 1, automationRun: null }],
+        authorOriginId: actorKind === "human" ? "local:installation-1" : "helper", actorKind, onBehalfOf: "local:installation-1", depth: 0, recordedAtMs: 1, automationRun: null, linkAuthor: null }],
     });
     const page = await h.invoke(CHANNELS.getCollectionRecordHistory, { workspaceId: "workspace", collectionPath: "tasks", recordId: "a" });
     await new Promise<void>(resolve => setImmediate(resolve));
@@ -518,7 +518,7 @@ describe("workspace engine IPC registrations", () => {
     const side = (value: string | null) => ({ present: value !== null, value });
     const entry = (historyId: number, overrides: Partial<CollectionGetRecordResult["history"][number]>) => ({
       historyId, field: "Status", previous: side("Open"), next: side("Done"), authorOriginId: null, actorKind: null,
-      onBehalfOf: null, depth: null, recordedAtMs: 1_000 - historyId, automationRun: null, ...overrides,
+      onBehalfOf: null, depth: null, recordedAtMs: 1_000 - historyId, automationRun: null, linkAuthor: null, ...overrides,
     });
     const automation = { authorOriginId: stamp, actorKind: "automation" as const, onBehalfOf: "person-local", depth: 1 };
     h.adapter.getCollectionRecord.mockResolvedValue({
@@ -598,7 +598,7 @@ describe("workspace engine IPC registrations", () => {
     const change = (historyId: number, claimId: string) => ({
       historyId, field: "Status", previous: { present: true, value: "Open" }, next: { present: true, value: "Done" },
       authorOriginId: stamp, actorKind: "automation" as const, onBehalfOf: "person-local", depth: 1,
-      recordedAtMs: 1_000 - historyId, automationRun: { claimId, automationName: "Stamp" },
+      recordedAtMs: 1_000 - historyId, automationRun: { claimId, automationName: "Stamp" }, linkAuthor: null,
     });
     h.adapter.getCollectionRecord.mockResolvedValue({
       collection: { path: "tasks", objectId: "tasks-id", status: "valid", reasons: [] },

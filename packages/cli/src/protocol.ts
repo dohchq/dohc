@@ -1030,6 +1030,12 @@ const collectionRecordResultSchema = z.discriminatedUnion("ok", [
             onBehalfOf: z.string().min(1).nullable(),
             depth: z.number().int().nonnegative().nullable(),
             recordedAtMs: z.number().int().nonnegative(),
+            linkAuthor: z.object({
+              kind: z.literal("link"),
+              grantId: z.string().min(1),
+              grantGeneration: z.number().int().positive(),
+              publicPrincipalId: z.string().min(1),
+            }).strict().nullable(),
             // The automation run that made the change: its claim, and the automation's name when it ran.
             automationRun: z
               .object({ claimId: z.string().min(1), automationName: z.string().min(1) })

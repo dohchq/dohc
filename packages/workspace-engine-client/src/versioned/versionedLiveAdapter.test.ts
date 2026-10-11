@@ -358,6 +358,7 @@ const WORKSPACE_DECODER_CASES: Array<{
           depth: null,
           recordedAtMs: 1,
           automationRun: null,
+          linkAuthor: null,
         },
       ],
       nextBeforeHistoryId: null,

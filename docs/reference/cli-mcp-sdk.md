@@ -368,7 +368,7 @@ Read one collection record by id: current field values plus per-field history wi
 - `historyLimit`: `integer`
 - `beforeHistoryId`: `integer`
 
-Returns `{ ok: true, collection: { path, status, reasons }, record: { id, path, conflicted, values }, history: { historyId, field, previous, next, authorOriginId, actorKind, onBehalfOf, depth, recordedAtMs, automationRun }[] } | { ok: false, reason }`.
+Returns `{ ok: true, collection: { path, status, reasons }, record: { id, path, conflicted, values }, history: { historyId, field, previous, next, authorOriginId, actorKind, onBehalfOf, depth, recordedAtMs, linkAuthor, automationRun }[] } | { ok: false, reason }`.
 
 ### `dohc_set_record_fields`
 

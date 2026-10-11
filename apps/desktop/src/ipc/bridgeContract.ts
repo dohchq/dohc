@@ -711,6 +711,7 @@ const RecordHistoryValue = z.object({ present: z.boolean(), value: CollectionVal
 // "unchecked" when History must ask with locateRecordHistoryRun.
 const RecordHistoryRunLocation = z.enum(["available", "unchecked"]);
 const RecordHistoryAuthor = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("link"), agentName: z.string().min(1).max(4096).optional() }).strict(),
   z.object({ kind: z.literal("human"), name: z.string().min(1).max(4096) }),
   z.object({ kind: z.literal("agent"), name: z.string().min(1).max(4096), person: z.string().min(1).max(4096).optional() }),
   z.object({
