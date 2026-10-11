@@ -21,8 +21,8 @@ import * as Queue from "effect/Queue";
 import {
   FRONTMATTER_EDIT_REFUSED_MESSAGE,
   frontmatterEditsRefused,
-  patchFrontmatter,
 } from "@dohc/ydoc-projection/frontmatter";
+import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
 import type { CollectionRecordWrites } from "./collectionAutomationRun";
 import { recordIdFromBytes } from "./recordIds";
 

@@ -2850,7 +2850,7 @@ pub fn read_last_settled_sha(
 /// and nothing a prune could lose. Every doubt (a second update, a snapshot,
 /// a prior settle, a replicated regime, no recorded seed source) answers
 /// `None`, and the caller falls back to writing exactly as before.
-pub(crate) fn seed_only_lineage_source(
+pub fn seed_only_lineage_source(
     conn: &Connection,
     key: &DocKey,
 ) -> Result<Option<String>, CollabError> {

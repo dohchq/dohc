@@ -11,11 +11,17 @@ import {
   getDohcYDocFrontmatter,
   getDohcYDocMeta,
   getDohcYDocPlainText,
-  getDohcYDocSelectionSeed,
-  yDocToMarkdown,
   markdownToYDoc,
   plainTextToYDoc,
-} from './import-export'
+  yDocToMarkdown as projectYDocToMarkdown,
+} from '@dohc/ydoc-projection'
+import {
+  EDGE_FRONTMATTER,
+  EDGE_MARKDOWN,
+  receivedYDoc,
+  recordedYDoc,
+} from '../markdown/frontmatter.edge-fixture'
+import { getDohcYDocSelectionSeed, yDocToMarkdown } from './import-export'
 
 type ExpectedMarkdownFragment = string | RegExp
 
@@ -46,9 +52,10 @@ function expectStableMarkdownRoundTrip(
   return once
 }
 
-// These tests cover the desktop editor's markdown round-trip: idempotency,
-// frontmatter ordering, and custom-node preservation. Inline fixtures keep the
-// suite self-contained.
+// These tests cover the desktop editor's markdown round-trip: the canonical
+// writer builds the Y.Doc and the desktop export writes it back. They hold
+// idempotency, frontmatter ordering, and custom-node preservation. Inline
+// fixtures keep the suite self-contained.
 describe('desktop editor markdown round-trip', () => {
   it('widens a code fence when the block content contains a fence', () => {
     const content = 'before\n```\nafter'
@@ -179,19 +186,21 @@ describe('desktop editor markdown round-trip', () => {
   })
 
   it('orders frontmatter id/title/icon first, then the rest alphabetically', () => {
-    const input = [
-      '---',
-      'zeta: 1',
-      'icon: star',
-      'title: T',
-      'alpha: 2',
-      'id: the-id',
-      '---',
-      '',
-      'body',
-    ].join('\n')
+    // The canonical writer keeps a block's text as written, so only values
+    // with no kept text show the order, as after a property edit.
+    const doc = markdownToYDoc('body')
+    const frontmatter = doc.getMap('frontmatter')
+    for (const [key, value] of [
+      ['zeta', 1],
+      ['icon', 'star'],
+      ['title', 'T'],
+      ['alpha', 2],
+      ['id', 'the-id'],
+    ] as const) {
+      frontmatter.set(key, value)
+    }
 
-    const output = yDocToMarkdown(markdownToYDoc(input))
+    const output = yDocToMarkdown(doc)
     const keyOrder = output
       .split('\n')
       .filter((line) => /^[a-zA-Z]+:/.test(line))
@@ -857,6 +866,59 @@ describe('desktop editor markdown round-trip', () => {
     expect(once).not.toContain('> outside')
     const twice = yDocToMarkdown(markdownToYDoc(once))
     expect(twice).toBe(once)
+  })
+})
+
+// The source view projects the live document, so frontmatter the canonical
+// TypeScript writer keeps in shared Y types or as Yjs Any bigints must read as
+// the values it wrote.
+describe('source view of canonically written frontmatter', () => {
+  it('writes shared-type values as the projection does', () => {
+    const doc = receivedYDoc(EDGE_MARKDOWN)
+    try {
+      const frontmatter = doc.getMap<unknown>('frontmatter')
+      expect(frontmatter.get('hostile')).toBeInstanceOf(Y.Map)
+      expect(frontmatter.get('literal')).toBeInstanceOf(Y.Array)
+      expect(frontmatter.get('mixed')).toBeInstanceOf(Y.Array)
+      for (const key of ['exact', 'nested', 'settings', 'status']) {
+        expect(frontmatter.get(key), key).not.toBeInstanceOf(Y.AbstractType)
+      }
+      // A canonical block keeps no text, so the values alone write it.
+      expect(doc.getMap('meta').get('dohcFrontmatterSource')).toBeUndefined()
+
+      expect(yDocToMarkdown(doc)).toBe(`${EDGE_FRONTMATTER}Body`)
+      expect(yDocToMarkdown(doc)).toBe(projectYDocToMarkdown(doc))
+    } finally {
+      doc.destroy()
+    }
+  })
+
+  // A bigint set directly on the frontmatter map is a native Yjs Any value.
+  it.each([
+    ['numbers', 'c'],
+    ['public-frontmatter-unsafe-integer-is-exact', 'exact'],
+  ])('reads the direct Any bigint in the recorded bytes of %s', (name, key) => {
+    const { doc, markdown } = recordedYDoc(name)
+    try {
+      expect(doc.getMap('frontmatter').get(key)).toBe(9007199254740993n)
+      expect(yDocToMarkdown(doc)).toBe(markdown)
+    } finally {
+      doc.destroy()
+    }
+  })
+
+  it.each([
+    'nested-hostile-keys',
+    'public-frontmatter-unsafe-integer-nesting-is-exact',
+    'public-frontmatter-constructor-map-and-unsafe-integer-share-array',
+    'public-frontmatter-literal-shared-bigint-key-map-survives-the-shared-branch',
+  ])('keeps the projected text of the recorded bytes of %s', (name) => {
+    const { doc, markdown } = recordedYDoc(name)
+    try {
+      expect(yDocToMarkdown(doc)).toBe(markdown)
+    } finally {
+      doc.destroy()
+    }
   })
 })
 

@@ -46,6 +46,8 @@ export const adapterImplementationPaths = [
   "services/share-web/src/publicTransitionWorkload.integration-helper.ts", "services/share-web/viewer/src/MarkdownContent.tsx",
   "services/share-web/viewer/src/markdown.ts", "services/share-web/viewer/src/imageRetry.ts",
   "packages/ydoc-projection/src/browser-editor.ts", "packages/ydoc-projection/src/import-export.ts",
+  "packages/ydoc-projection/src/dohc-markdown-extensions.ts",
+  "packages/ydoc-projection/src/frontmatter.ts", "packages/ydoc-projection/src/frontmatter-map.ts",
   "packages/ydoc-projection/src/liveDocumentValidation.ts", "packages/ydoc-projection/src/orderedLiveUpdateCut.ts", "pnpm-lock.yaml",
 ];
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");

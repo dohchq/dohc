@@ -1,4 +1,5 @@
-import { frontmatterAsWritten, leadingFrontmatter } from "@dohc/ydoc-projection/frontmatter";
+import { leadingFrontmatter } from "@dohc/ydoc-projection/frontmatter";
+import { frontmatterAsWritten } from "@dohc/ydoc-projection/frontmatter-map";
 import { useEffect, useState } from "react";
 import type * as Y from "yjs";
 

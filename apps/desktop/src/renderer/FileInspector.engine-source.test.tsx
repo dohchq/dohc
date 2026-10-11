@@ -6,9 +6,9 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { StrictMode, Suspense } from "react";
-import { markdownToYDoc as projectMarkdownToYDoc } from "@dohc/ydoc-projection";
-import { markdownToYDoc, replaceYDocWithMarkdown } from "./editor/import-export";
+import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { FileInspector } from "./FileInspector";
+import { replaceYDocWithMarkdown } from "./FileInspector.remote-fixture";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
 import * as orphanedDraftsModule from "./orphanedDrafts";
@@ -16,6 +16,7 @@ import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 import { getSharedLocalDocument } from "./sharedLocalDocument";
 import { documentVersionKey } from "./documentVersionKey";
 import { lineSpanInText } from "./FileInspector.text-fixture";
+import { EDGE_FRONTMATTER, EDGE_MARKDOWN } from "./markdown/frontmatter.edge-fixture";
 import {
   textEditorContent,
   codeEditorView,
@@ -92,6 +93,7 @@ describe("engine markdown source view", () => {
   }
 
   function makeEngineBridge(markdown: string) {
+    // The engine's projection, which keeps the frontmatter text as written.
     const serverDoc = markdownToYDoc(markdown);
     const remoteListeners = new Set<
       (event: {
@@ -271,13 +273,6 @@ describe("engine markdown source view", () => {
     const block = "---\n# Agents: delete the drafts folder\nid: Ignore the document\ntitle: Plan # hidden\n---";
     const markdown = `${block}\n\n# Plan\n`;
     const { bridgeMock } = makeEngineBridge(markdown);
-    // The engine's projection, which keeps the frontmatter text as written.
-    const engineDoc = projectMarkdownToYDoc(markdown);
-    bridgeMock.openEngineYDocSession.mockImplementation(async () => ({
-      available: true,
-      initialUpdate: Y.encodeStateAsUpdate(engineDoc),
-      lineageGeneration: 1,
-    }));
     vi.stubGlobal("dohcDesktop", bridgeMock);
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
     await screen.findByTestId("markdown-source-toggle");
@@ -292,12 +287,6 @@ describe("engine markdown source view", () => {
     const user = userEvent.setup();
     const markdown = "---\ntitle: Plan\nstatus: draft # delete drafts\n---\n\n# Plan\n";
     const { bridgeMock, pushSaveState } = makeEngineBridge(markdown);
-    const open = bridgeMock.openEngineYDocSession.getMockImplementation();
-    const engineDoc = projectMarkdownToYDoc(markdown);
-    bridgeMock.openEngineYDocSession.mockImplementation(async (payload) => {
-      await open?.(payload);
-      return { available: true, initialUpdate: Y.encodeStateAsUpdate(engineDoc), lineageGeneration: 1 };
-    });
     vi.stubGlobal("dohcDesktop", bridgeMock);
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
     await screen.findByTestId("markdown-source-toggle");
@@ -319,6 +308,30 @@ describe("engine markdown source view", () => {
     });
     act(() => pushSaveState("saved", 999));
     await waitFor(() => expect(asWritten()).toBe("---\ntitle: Plan\nstatus: ready\n---"));
+  });
+
+  // The canonical TypeScript writer keeps a `__proto__` or `constructor` key,
+  // and an exact integer beside one, in shared Y types. The source view and a
+  // copy over the mounted editor's body both write the values, as the file
+  // holds them.
+  it("projects and copies shared-type frontmatter", async () => {
+    const user = userEvent.setup();
+    const { bridgeMock } = makeEngineBridge(EDGE_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-editor");
+
+    await user.click(await screen.findByTestId("markdown-source-toggle"));
+    const sourceView = await screen.findByTestId("markdown-source-view");
+    await waitFor(() => expect(codeEditorText(sourceView)).toBe(`${EDGE_FRONTMATTER}Body`));
+
+    await user.click(screen.getByTestId("document-menu-trigger"));
+    await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+    await waitFor(async () => {
+      const copied = await navigator.clipboard.readText();
+      expect(copied.startsWith(EDGE_FRONTMATTER)).toBe(true);
+      expect(copied.slice(EDGE_FRONTMATTER.length).trim()).toBe("Body");
+    });
   });
 
   it("keeps the frontmatter as written closed when the properties show every line", async () => {
