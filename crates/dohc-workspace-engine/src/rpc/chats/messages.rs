@@ -369,7 +369,7 @@ impl EngineService {
             Some(encode_chat_cursor(&ChatKeysetCursor {
                 version: 1,
                 binding,
-                consumed: cursor.as_ref().map_or(0, |cursor| cursor.consumed) + included as i64,
+                consumed: None,
                 first: last.created_at_ms,
                 second: last.attachment_id.clone(),
                 third: None,
@@ -402,7 +402,10 @@ impl EngineService {
             ],
         );
         let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
-        let consumed = cursor.as_ref().map_or(0, |cursor| cursor.consumed);
+        let consumed = cursor
+            .as_ref()
+            .and_then(|cursor| cursor.consumed)
+            .unwrap_or(0);
         if consumed >= dohc_engine_domain::MAX_FILE_MENTION_RESULTS {
             return Ok(json!({ "mentions": [], "nextCursor": Value::Null }));
         }
@@ -431,8 +434,9 @@ impl EngineService {
             .map(file_mention_json)
             .collect();
         let included = bounded_chat_page_len(&values)?;
-        let has_more = consumed + (included as i64) < dohc_engine_domain::MAX_FILE_MENTION_RESULTS
-            && rows.len() > included;
+        let next_consumed = consumed + included as i64;
+        let has_more =
+            next_consumed < dohc_engine_domain::MAX_FILE_MENTION_RESULTS && rows.len() > included;
         let next_cursor = if has_more {
             let last = rows
                 .get(included.saturating_sub(1))
@@ -440,7 +444,7 @@ impl EngineService {
             Some(encode_chat_cursor(&ChatKeysetCursor {
                 version: 1,
                 binding,
-                consumed: consumed + included as i64,
+                consumed: Some(next_consumed),
                 first: last.attachment.created_at_ms,
                 second: last.attachment.attachment_id.clone(),
                 third: None,
@@ -505,7 +509,7 @@ impl EngineService {
             Some(encode_chat_cursor(&ChatKeysetCursor {
                 version: 1,
                 binding,
-                consumed: cursor.as_ref().map_or(0, |cursor| cursor.consumed) + included as i64,
+                consumed: None,
                 first: last.created_at_ms,
                 second: last.message_id.clone(),
                 third: None,
@@ -657,7 +661,7 @@ impl EngineService {
             Some(encode_chat_cursor(&ChatKeysetCursor {
                 version: 1,
                 binding,
-                consumed: cursor.as_ref().map_or(0, |cursor| cursor.consumed) + included as i64,
+                consumed: None,
                 first: last.at_ms,
                 second: last.message_id.clone(),
                 third: None,
@@ -754,7 +758,7 @@ impl EngineService {
             Some(encode_chat_cursor(&ChatKeysetCursor {
                 version: 1,
                 binding,
-                consumed: cursor.as_ref().map_or(0, |cursor| cursor.consumed) + included as i64,
+                consumed: None,
                 first: last.at_ms,
                 second: last.reaction_id.clone(),
                 third: None,

@@ -365,13 +365,9 @@ impl EngineService {
             .collect();
         let row_values: Vec<Value> = threads.iter().map(thread_json).collect();
         let included = bounded_chat_page_len(&row_values)?.min(page_limit);
-        let next_cursor = chat_page_cursor(
-            &threads,
-            included,
-            cursor.as_ref().map_or(0, |cursor| cursor.consumed),
-            binding,
-            |thread| (thread.created_at_ms, thread.thread_id.clone()),
-        )?;
+        let next_cursor = chat_page_cursor(&threads, included, binding, |thread| {
+            (thread.created_at_ms, thread.thread_id.clone())
+        })?;
         Ok(json!({
             "threads": row_values[..included].to_vec(),
             "nextCursor": next_cursor,
@@ -423,7 +419,7 @@ impl EngineService {
             Some(encode_chat_cursor(&ChatKeysetCursor {
                 version: 1,
                 binding,
-                consumed: cursor.as_ref().map_or(0, |cursor| cursor.consumed) + included as i64,
+                consumed: None,
                 first: last.created_at_ms,
                 second: last.thread_id.clone(),
                 third: None,
@@ -483,7 +479,7 @@ impl EngineService {
             Some(encode_chat_cursor(&ChatKeysetCursor {
                 version: 1,
                 binding,
-                consumed: cursor.as_ref().map_or(0, |cursor| cursor.consumed) + included as i64,
+                consumed: None,
                 first: last.thread.updated_at_ms,
                 second: last.thread.thread_id.clone(),
                 third: None,

@@ -312,13 +312,9 @@ impl EngineService {
             .map(dispatch_json)
             .collect();
         let included = bounded_chat_page_len(&values)?;
-        let next_cursor = chat_page_cursor(
-            &rows,
-            included,
-            cursor.as_ref().map_or(0, |cursor| cursor.consumed),
-            binding,
-            |row| (row.created_at_ms, row.trigger_message_id.clone()),
-        )?;
+        let next_cursor = chat_page_cursor(&rows, included, binding, |row| {
+            (row.created_at_ms, row.trigger_message_id.clone())
+        })?;
         Ok(json!({
             "dispatches": values[..included].to_vec(),
             "nextCursor": next_cursor,
@@ -354,18 +350,12 @@ impl EngineService {
             .map(dispatch_claim_json)
             .collect();
         let included = bounded_chat_page_len(&values)?;
-        let next_cursor = chat_page_cursor(
-            &rows,
-            included,
-            cursor.as_ref().map_or(0, |cursor| cursor.consumed),
-            binding,
-            |claim| {
-                (
-                    claim.dispatch.updated_at_ms,
-                    claim.dispatch.trigger_message_id.clone(),
-                )
-            },
-        )?;
+        let next_cursor = chat_page_cursor(&rows, included, binding, |claim| {
+            (
+                claim.dispatch.updated_at_ms,
+                claim.dispatch.trigger_message_id.clone(),
+            )
+        })?;
         Ok(json!({
             "claims": values[..included].to_vec(),
             "nextCursor": next_cursor,
@@ -413,7 +403,7 @@ impl EngineService {
             Some(encode_chat_cursor(&ChatKeysetCursor {
                 version: 1,
                 binding,
-                consumed: cursor.as_ref().map_or(0, |cursor| cursor.consumed) + included as i64,
+                consumed: None,
                 first: 0,
                 second: last.clone(),
                 third: None,
@@ -510,7 +500,7 @@ impl EngineService {
             Some(encode_chat_cursor(&ChatKeysetCursor {
                 version: 1,
                 binding,
-                consumed: cursor.as_ref().map_or(0, |cursor| cursor.consumed) + included as i64,
+                consumed: None,
                 first: last.run.started_at_ms,
                 second: last.run.run_id.clone(),
                 third: Some(last.message_id.clone()),
@@ -775,13 +765,9 @@ impl EngineService {
             })
             .collect();
         let included = bounded_chat_page_len(&values)?;
-        let next_cursor = chat_page_cursor(
-            &rows,
-            included,
-            cursor.as_ref().map_or(0, |cursor| cursor.consumed),
-            binding,
-            |recovery| (recovery.run.started_at_ms, recovery.run.run_id.clone()),
-        )?;
+        let next_cursor = chat_page_cursor(&rows, included, binding, |recovery| {
+            (recovery.run.started_at_ms, recovery.run.run_id.clone())
+        })?;
         Ok(json!({
             "recoveries": values[..included].to_vec(),
             "nextCursor": next_cursor,

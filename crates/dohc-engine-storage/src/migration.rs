@@ -3172,6 +3172,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
               ALTER TABLE live_audit_projection_authors ADD COLUMN moment_base_json TEXT;",
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 44,
+        id: "v2-chat-channel-keyset-page",
+        sql: "CREATE INDEX idx_chat_channels_page ON chat_channels(workspace_id, created_at_ms, channel_id);",
+        sets_user_version: None,
+    },
 ];
 
 const V2_OPEN_DOCUMENT_ARTIFACTS_DDL: &str = "\
@@ -3822,6 +3828,10 @@ mod tests {
             (
                 "v2-audited-projection-contributions",
                 "ffe123de3b71b3874993b68c764c0f939d081ec784a982d8dc8b359152955d55",
+            ),
+            (
+                "v2-chat-channel-keyset-page",
+                "67a6a8d2f92652a3d1cbbdf98b66d8441830a2db5a74502cdd15ca4c23851001",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

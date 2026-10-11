@@ -195,36 +195,23 @@ impl EngineService {
         let channels = Self::read_under_ctx(
             &cancellation,
             "chats.channels.list",
-            open.actor.chat_channels_list(workspace_id),
+            open.actor.chat_channels_list(
+                workspace_id,
+                cursor
+                    .as_ref()
+                    .map(|cursor| (cursor.first, cursor.second.clone())),
+                page_limit as i64 + 1,
+            ),
         )
         .await?;
-        let channels: Vec<_> = channels
-            .into_iter()
-            .filter(|channel| match cursor.as_ref() {
-                Some(cursor) => {
-                    (
-                        channel.channel.created_at_ms,
-                        channel.channel.channel_id.as_str(),
-                    ) > (cursor.first, cursor.second.as_str())
-                }
-                None => true,
-            })
-            .take(page_limit + 1)
-            .collect();
         let row_values: Vec<Value> = channels.iter().map(channel_summary_json).collect();
         let included = bounded_chat_page_len(&row_values)?.min(page_limit);
-        let next_cursor = chat_page_cursor(
-            &channels,
-            included,
-            cursor.as_ref().map_or(0, |cursor| cursor.consumed),
-            binding,
-            |channel| {
-                (
-                    channel.channel.created_at_ms,
-                    channel.channel.channel_id.clone(),
-                )
-            },
-        )?;
+        let next_cursor = chat_page_cursor(&channels, included, binding, |channel| {
+            (
+                channel.channel.created_at_ms,
+                channel.channel.channel_id.clone(),
+            )
+        })?;
         Ok(json!({
             "channels": row_values[..included].to_vec(),
             "nextCursor": next_cursor,
