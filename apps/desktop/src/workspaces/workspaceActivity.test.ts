@@ -1,4 +1,5 @@
-import { rm, writeFile } from "node:fs/promises";
+import { settleYDocsAfterFileObservation } from "./workspaceActivity";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -92,7 +93,7 @@ describe("workspaceActivity capture hooks", () => {
     expect(steps).toEqual(fails ? ["drain", "unconfirmed", "resync", "sessions", "capture"] : ["drain", "sessions", "capture"]);
   });
 
-  it("bounds an unavailable observation baseline and exposes the history-off notice state", async () => {
+  it("bounds a slow first scan without reporting a file observation failure", async () => {
     vi.useFakeTimers();
     try {
       const notify = vi.fn();
@@ -103,8 +104,9 @@ describe("workspaceActivity capture hooks", () => {
       await vi.advanceTimersByTimeAsync(4_999);
       expect(notify).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
-      expect((await opening).historyRecordingUnavailable).toBe(true);
-      expect(notify).toHaveBeenCalledWith({ workspaceId: "activity-test" });
+      expect(await opening).toMatchObject({ historyRecordingUnavailable: false });
+      expect(activity.getStatus("activity-test").fileObservationFailure).toBeUndefined();
+      expect(notify).not.toHaveBeenCalled();
       await activity.stopAll();
     } finally { vi.useRealTimers(); }
   });
@@ -116,7 +118,7 @@ describe("workspaceActivity capture hooks", () => {
         read: async () => ({ cursor: { generation: "degraded", revision: 0 }, ready: false, degraded: true, resync: false, facts: [] }),
       }),
     });
-    expect((await activity.open(workspace())).historyRecordingUnavailable).toBe(true);
+    expect(await activity.open(workspace())).toMatchObject({ historyRecordingUnavailable: false, fileObservationFailure: "unavailable" });
     await activity.stopAll();
   });
 
@@ -194,6 +196,75 @@ describe("workspaceActivity capture hooks", () => {
     observation.captured(["changed.md"]);
     expect(notify).toHaveBeenLastCalledWith({ workspaceId: "activity-test", paths: ["changed.md"], pathSetChanged: false });
     await activity.stopAll();
+  });
+
+  it.each(["coalesced with the pull", "with no pull echo"])("delivers a local edit %s without another pull", async scenario => {
+    const notify = vi.fn();
+    const onWatcherBatch = vi.fn();
+    const observeFileEvents = vi.fn();
+    let wake!: () => void;
+    const read = vi.fn().mockResolvedValue({ cursor: { generation: "first", revision: 1 }, ready: true, resync: false, facts: [] });
+    const activity = createPhysicalWorkspaceActivity(notify, {
+      observationFor: (_w, callbacks) => observeWorkspaceFiles({ callbacks, read, onError: vi.fn(),
+        subscribe(onWake) { wake = onWake; return () => {}; } }),
+      onWatcherBatch,
+      captureFor: () => ({ shareView: false, capture: { start() {}, observeFileEvents,
+        settleAndCloseAllLiveSessions: async () => {}, stop: async () => {} } as never }),
+    });
+    const w = workspace();
+    const state = new WorkspaceActivityState();
+    await activity.open(w, state);
+    await writeFile(join(root, "automation.ts"), "pulled definition");
+    activity.pullStarting(state);
+    await activity.handlePulledPaths(state, ["automation.ts"]);
+    expect(onWatcherBatch).toHaveBeenCalledExactlyOnceWith(w, [{ path: "automation.ts", operation: "update" }]);
+    activity.pullFinished(state);
+    onWatcherBatch.mockClear();
+    if (scenario === "with no pull echo") {
+      wake();
+      await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+      expect(onWatcherBatch).not.toHaveBeenCalled();
+    }
+    await writeFile(join(root, "automation.ts"), "local definition");
+    const seenDefinitions: Promise<string>[] = [];
+    onWatcherBatch.mockImplementation((_workspace, events) => {
+      for (const event of events) seenDefinitions.push(readFile(join(root, event.path), "utf8"));
+    });
+    read.mockResolvedValueOnce({ cursor: { generation: "first", revision: 2 }, ready: true, resync: false,
+      facts: [{ path: "automation.ts", kind: "changed" }] });
+    wake();
+    await vi.waitFor(() => expect(observeFileEvents).toHaveBeenCalledOnce());
+    expect(onWatcherBatch).toHaveBeenCalledExactlyOnceWith(w, [{ path: "automation.ts", operation: "update" }]);
+    expect(await Promise.all(seenDefinitions)).toEqual(["local definition"]);
+    expect(notify).toHaveBeenLastCalledWith({ workspaceId: w.workspaceId, paths: ["automation.ts"], pathSetChanged: false });
+    await activity.stop(state);
+  });
+
+  it.each([true, false])("clears a persistent failed read after recovery with ready=%s", async ready => {
+    vi.useFakeTimers();
+    try {
+      const recovered = {
+        cursor: { generation: "recovered", revision: 1 }, ready, resync: false, facts: [],
+      };
+      const read = vi.fn().mockRejectedValue(new Error("read failed"));
+      const activity = createPhysicalWorkspaceActivity(vi.fn(), {
+        observationFor: (_w, callbacks) => observeWorkspaceFiles({ callbacks, read, subscribe: () => () => {}, onError: vi.fn() }),
+      });
+      const state = new WorkspaceActivityState();
+      const w = workspace();
+      const opening = activity.open(w, state);
+      await vi.advanceTimersByTimeAsync(0);
+      expect((await opening).historyRecordingUnavailable).toBe(false);
+      expect(activity.getStatus(w, state).fileObservationFailure).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(7_750);
+      expect(activity.getStatus(w, state)).toMatchObject({ historyRecordingUnavailable: false, fileObservationFailure: "read-failed" });
+      read.mockResolvedValue(recovered);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(activity.getStatus(w, state).fileObservationFailure).toBeUndefined();
+      await activity.retryFileObservation(state);
+      expect(activity.getStatus(w, state).fileObservationFailure).toBeUndefined();
+      await activity.stop(state);
+    } finally { vi.useRealTimers(); }
   });
 
   it("forwards the agent-run slot to the open workspace's capture", async () => {
@@ -912,4 +983,9 @@ describe("workspaceActivity cloud sync nudge", () => {
     }
     await activity.stopAll();
   });
+});
+
+it("still settles healthy workspaces when an outage checkpoint fails",async()=>{
+ let release!:()=>void;const healthyDrain=new Promise<void>(done=>{release=done;});const settled=vi.fn(async()=>{});
+ const quit=settleYDocsAfterFileObservation([Promise.reject(Error("checkpoint disk full")),healthyDrain],settled);await Promise.resolve();expect(settled).not.toHaveBeenCalled();release();await quit;expect(settled).toHaveBeenCalledOnce();
 });

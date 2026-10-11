@@ -866,12 +866,13 @@ describe("ChatsView hybrid feed", () => {
     const cards = await screen.findAllByTestId("chats-post-card");
     expect(cards).toHaveLength(2);
     expect(screen.getByText("Should we ship on Friday? The launch checklist is ready.")).toBeTruthy();
-    expect(screen.getAllByTestId("chats-post-comment-count")[0]?.textContent).toBe(
-      "2 comments",
-    );
-    expect(screen.getByTestId("chats-post-decision-open").textContent).toBe(
-      "Poll open",
-    );
+    const commentCount = screen.getAllByTestId("chats-post-comment-count")[0];
+    expect(commentCount?.textContent).toBe("2");
+    expect(commentCount?.getAttribute("aria-label")).toBe("2 comments");
+    const poll = screen.getByTestId("chats-post-decision-open");
+    expect(poll.textContent).toBe("");
+    expect(poll.getAttribute("aria-label")).toBe("Poll open");
+    expect(poll.getAttribute("title")).toBe("Poll open");
     expect(screen.getByTestId("chats-post-reaction-pill").textContent).toContain("1");
     expect(screen.getByTestId("chats-post-agent-badge").textContent).toBe("agent");
     expect(cards[1]?.getAttribute("data-author-kind")).toBe("agent");

@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { CHATS_TAB_PATH } from "./workbench/workbenchState";
 import { deferred } from "../testing/deferred";
+import { createAutomationButtons } from "./collections/useAutomationButtons";
 import { DesktopWorkspaceShell, WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, makeBridge, renderShell, shellBootstrapProps, SHARE_STATUS, SHARE_VIEW, makeShareBridge, settleShareView } from "./DesktopWorkspaceShell.testHarness";
 
 describe("share background work readiness", () => {
@@ -14,6 +15,32 @@ describe("share background work readiness", () => {
     ...SHARE_VIEW,
     shareView: { ...SHARE_VIEW.shareView!, access: "edit" },
   };
+
+  it("preserves an overdue burst's Notices intent after the opening refresh", async () => {
+    const bridge = makeShareBridge();
+    Object.assign(bridge, {
+      pressAutomationButton: async () => ({ busy: false, relayed: true }),
+      onAutomationRunSettled: () => () => undefined,
+      onAutomationRunWaiting: () => () => undefined,
+      onCollectionAutomationsChanged: () => () => undefined,
+    });
+    const opening = deferred<Awaited<ReturnType<typeof bridge.refreshSharedView>>>();
+    bridge.refreshSharedView.mockImplementationOnce(() => opening.promise);
+    renderShell(bridge, EDIT_SHARE);
+    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledOnce());
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const buttons = createAutomationButtons({ workspaceId: EDIT_SHARE.workspaceId, of: { collectionPath: "tasks" } });
+    try {
+      await act(async () => buttons.press("Finish", { id: "task", label: "task" }));
+      await act(async () => vi.advanceTimersByTimeAsync(2_000));
+      expect(bridge.refreshSharedView).toHaveBeenCalledOnce();
+      await act(async () => opening.resolve({ ok: true, status: "unchanged", probed: true, changedPaths: 0,
+        excludedPaths: [], unjournalablePaths: [], refusedOps: 0, refusedDetail: null }));
+      await act(async () => vi.advanceTimersByTimeAsync(0));
+      expect(bridge.refreshSharedView).toHaveBeenCalledTimes(2);
+      expect(bridge.refreshSharedView).toHaveBeenLastCalledWith({ workspaceId: EDIT_SHARE.workspaceId, trigger: "press-burst" });
+    } finally { buttons.close(); vi.useRealTimers(); }
+  });
 
   it("waits for readiness before pushing, then reports one real failure with Try again", async () => {
     const admission = deferred<typeof SHARE_STATUS>();

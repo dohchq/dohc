@@ -1,0 +1,7 @@
+{
+  "nameAdditions": [
+    "desktop:clear-usage-record",
+    "desktop:read-usage-record",
+    "desktop:set-usage-record-enabled"
+  ]
+}

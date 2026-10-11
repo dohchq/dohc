@@ -20,6 +20,27 @@ import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, READY_U
 // generic error. The notice explains what was found; the rebuild is explicit
 // (a confirmed click), states the destination before anything moves, and the
 // success copy names the reverse path.
+it("dismisses unfinished Stop and restore through its workspace operation before removing the Notice", async () => {
+  const bridge = makeBridge(Promise.resolve(null));
+  const target = {kind: "person" as const, userId: "ana"};
+  bridge.pendingStopAndRestores.mockResolvedValue([{target, label: "Ana", receipts: [], filesUndone: false,
+    result: {status: "restored", restored: [], review: [], runsUndone: 0, runsLeft: 0, keptFields: [], fieldsMissing: 0,
+      runChangesKept: 0, wroteAutomations: false, sendsMessages: false, unfinished: {step: "files", message: "Interrupted"}}}]);
+  const dismissed = deferred<void>();
+  bridge.dismissStopAndRestore.mockImplementation(() => dismissed.promise);
+  const user = userEvent.setup();
+  renderShell(bridge);
+  await user.click(await screen.findByTestId("notice-center-toggle"));
+  const message = "dohc stopped before restoring every file.";
+  const row = (await within(await screen.findByTestId("notice-center")).findByText(message)).closest("li");
+  if (row === null) throw new Error("No restore Notice row");
+  await user.click(within(row).getByRole("button", {name: "Dismiss notice"}));
+  expect(bridge.dismissStopAndRestore).toHaveBeenCalledWith({workspaceId: WORKSPACE.workspaceId, target});
+  expect(row.isConnected).toBe(true);
+  await act(async () => dismissed.resolve());
+  await waitFor(() => expect(row.isConnected).toBe(false));
+});
+
 it("reports an edit refusal once through Notices, without an ineffective retry", async () => {
   const bridge = makeBridge(Promise.resolve(null));
   const listeners = new Set<(event: EngineYDocSaveStateEvent) => void>();
@@ -1155,7 +1176,7 @@ describe("notices sent to you", () => {
     bridge.listCollectionAutomationRuns.mockImplementation(async ({ automationId }) => ({ status: "listed", runs: [{
       claimId: automationId.endsWith("#first") ? "atc_first" : "atc_second", state: "failed" as const,
       error: "The record is open elsewhere.", createdAtMs: 5_000, updatedAtMs: 5_000,
-      trigger: { kind: "changed", recordId: "rec_1", by: "human", sharedAuthor: null, depth: 0 }, writes: [], definitionChanged: false, neverStarted: false, chainStopped: false, undone: false,
+      trigger: { kind: "changed", recordId: "rec_1", by: "human", sharedAuthor: null, depth: 0 }, writes: [], definitionChanged: false, neverStarted: false, chainStopped: false, undoUnfinished: false, undone: false,
     }], next: null }));
     return bridge;
   }
@@ -2186,7 +2207,11 @@ describe("connection dialog retries", () => {
     const user = userEvent.setup();
     renderShell(bridge);
 
-    await user.click(await screen.findByTestId("activity-cloud"));
+    const openConnect = async () => {
+      await user.keyboard("{Control>}k{/Control}");
+      await user.click(await screen.findByText("Connect server"));
+    };
+    await openConnect();
     await user.type(
       await screen.findByTestId("cloud-server-url"),
       "https://dohc.example.test",
@@ -2196,7 +2221,7 @@ describe("connection dialog retries", () => {
 
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByTestId("cloud-sync-panel")).toBeNull());
-    await user.click(screen.getByTestId("activity-cloud"));
+    await openConnect();
     expect(
       ((await screen.findByTestId("cloud-server-url")) as HTMLInputElement).value,
     ).toBe("");

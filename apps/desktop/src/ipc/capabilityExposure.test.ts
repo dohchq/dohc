@@ -16,14 +16,21 @@ import clipboardIpc from "./ipcExposure.pr1639.json";
 import recipientRecordsIpc from "./ipcExposure.pr1688.json";
 import launchOpenIpc from "./ipcExposure.pr1701.json";
 import restartCaptureIpc from "./ipcExposure.pr1719.json";
+import earlyQuitIpc from "./ipcExposure.earlyQuit.json";
+import historyNamesIpc from "./ipcExposure.pr1785.json";
 import liveDraftRecoveryIpc from "./ipcExposure.pr1747.json";
+import liveDraftListingIpc from "./ipcExposure.liveDraftListing.json";
+import stopAndRestoreIpc from "./ipcExposure.stopAndRestore.json";
 import reportsIpc from "./ipcExposure.reports.json";
 import saveRetryIpc from "./ipcExposure.saveRetry.json";
+import fileObservationIpc from "./ipcExposure.fileObservation.json";
+import usageRecordIpc from "./ipcExposure.usageRecord.json";
 import mainCli from "./cliExposure.main.json";
 import publicationCli from "./cliExposure.pr1659.json";
 import commentsCli from "./cliExposure.pr1700.json";
 import admission from "./operationAdmission.json";
 import accessExposure from "./accessExposure.delta.json";
+import shareCopyExposure from "./ipcExposure.shareCopy.json";
 import offersIpc from "./ipcExposure.offers.json";
 import sharedWriteFeedback from "./ipcExposure.sharedWriteFeedback.json";
 
@@ -53,8 +60,10 @@ function assertAdmission(row: Pick<OperationDefinition, "channel" | "guard" | "s
 
 describe("B1 main inventories (a4be19d5b)", () => {
   it("preserves every IPC wire name and the 26 enforced table guards", () => {
-    // Hand-reviewed #1639 removals and #1701, #1688, #1747, reports, save retry and
-    // capture recovery and shared write feedback additions, separate from the hashed main baseline.
+    // Hand-reviewed #1639 removals and #1701, #1688, #1747, reports, save retry,
+    // capture recovery, History names, shared write feedback, Stop and restore,
+    // usage record, share copy, early-quit typing recovery and offer additions,
+    // separate from the hashed main baseline.
     const expectedNames = [...mainIpc.names];
     expectedNames.push("desktop:check-shared-view-access");
     expectedNames.push("desktop:dismiss-share-capture-notice");
@@ -62,7 +71,7 @@ describe("B1 main inventories (a4be19d5b)", () => {
       expect(expectedNames).toContain(name);
       expectedNames.splice(expectedNames.indexOf(name), 1);
     }
-    for (const name of [...launchOpenIpc.nameAdditions, ...recipientRecordsIpc.nameAdditions, ...liveDraftRecoveryIpc.nameAdditions, ...restartCaptureIpc.nameAdditions, ...reportsIpc.nameAdditions, ...saveRetryIpc.nameAdditions, ...accessExposure.nameAdditions, ...sharedWriteFeedback.nameAdditions, ...offersIpc.nameAdditions]) {
+    for (const name of [...launchOpenIpc.nameAdditions, ...recipientRecordsIpc.nameAdditions, ...liveDraftRecoveryIpc.nameAdditions, ...liveDraftListingIpc.nameAdditions, ...restartCaptureIpc.nameAdditions, ...historyNamesIpc.nameAdditions, ...reportsIpc.nameAdditions, ...saveRetryIpc.nameAdditions, ...accessExposure.nameAdditions, ...sharedWriteFeedback.nameAdditions, ...fileObservationIpc.nameAdditions, ...stopAndRestoreIpc.nameAdditions, ...usageRecordIpc.nameAdditions, ...shareCopyExposure.nameAdditions, ...earlyQuitIpc.nameAdditions, ...offersIpc.nameAdditions]) {
       expect(expectedNames).not.toContain(name);
       expectedNames.push(name);
     }

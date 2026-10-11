@@ -106,6 +106,20 @@ function replicaEngine(options: {
 const replica = (signal = new AbortController().signal) => ({ workspaceId: "workspace-trip", signal });
 
 describe("an automation's record writes on this server's replica", () => {
+  it("skips a recorded Undo key and reopens canonical state before the next field", async () => {
+    const key = "automation-undo/server-run/Status";
+    const {engine, files, journaled, events} = replicaEngine({refuseKeys: new Set([key])});
+    files.set("Tasks/one.md", `---\nid: ${RECORD}\nStatus: Done\nNote: old\n---\n`);
+    const context = replicaRecordEditContext(replica(), engine, new AbortController().signal, true);
+    const result = await setCollectionRecordFields(context, {recordPath: "Tasks/one.md", fields: {Status: "Doing", Note: "new"},
+      expectedBefore: {Status: "Done", Note: "old"}, idempotencyKeyPrefix: "automation-undo/server-run", preserveCompletedFields: true,
+      author: {kind: "user", userId: "owner"}});
+    expect(result).toMatchObject({replaced: {Note: "old"}, kept: {}});
+    expect(files.get("Tasks/one.md")).toContain("Status: Done");
+    expect(files.get("Tasks/one.md")).toContain("Note: new");
+    expect(journaled).toHaveLength(1);
+    expect(events).toContain("evict");
+  });
   it("forwards server automation provenance through the production record provider", async () => {
     const daemon = new YdocLoopbackEngine();
     daemon.seedFile({workspace: "engine-handle", versionId: "main", path: "Tasks/one.md", contentKind: "richdoc",
