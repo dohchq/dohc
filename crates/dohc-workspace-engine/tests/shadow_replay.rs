@@ -440,7 +440,7 @@ async fn an_engine_db_copied_to_another_root_is_refused() {
     let source_db = engine_db_path(&source).expect("source db");
 
     let unbound = ScratchDir::new().expect("unbound root");
-    std::fs::copy(&source_db, engine_db_path(&unbound).expect("unbound db")).expect("copy db");
+    copy_store_snapshot(&source_db, &engine_db_path(&unbound).expect("unbound db"));
     let error = transport
         .call(
             RequestContext::unbounded(),
@@ -464,7 +464,7 @@ async fn an_engine_db_copied_to_another_root_is_refused() {
         )
         .await
         .expect("close other");
-    std::fs::copy(&source_db, engine_db_path(&other).expect("other db")).expect("overwrite db");
+    copy_store_snapshot(&source_db, &engine_db_path(&other).expect("other db"));
     let error = transport
         .call(
             RequestContext::unbounded(),
@@ -478,6 +478,26 @@ async fn an_engine_db_copied_to_another_root_is_refused() {
         .await
         .expect_err("a copied database under another root's binding must be refused");
     assert_eq!(error.message, "engine database is bound to another root");
+}
+
+fn copy_store_snapshot(source: &std::path::Path, destination: &std::path::Path) {
+    // A closed store can retain committed WAL frames; copy those too.
+    for path in [
+        destination.to_path_buf(),
+        destination.with_extension("db-wal"),
+        destination.with_extension("db-shm"),
+    ] {
+        if path.exists() {
+            std::fs::remove_file(path).expect("remove prior test store");
+        }
+    }
+    let connection = rusqlite::Connection::open(source).expect("open source snapshot");
+    connection
+        .execute(
+            "VACUUM INTO ?1",
+            [destination.to_str().expect("snapshot path")],
+        )
+        .expect("copy all committed state");
 }
 
 async fn open_error(

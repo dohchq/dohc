@@ -1,5 +1,24 @@
 use super::*;
 
+// Match the capture driver's retry of a refused transaction after a huge ingest.
+fn reconcile_after_backfill(
+    sink: &StoreCaptureSink,
+) -> Result<CollectionReconciliation, RuntimeError> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        match sink.reconcile_collections() {
+            Err(RuntimeError::Storage(dohc_engine_storage::StorageError::FileLocked)) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "capture backfill never admitted reconciliation"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            result => return result,
+        }
+    }
+}
+
 #[test]
 fn replicated_empty_record_refusal_is_a_failed_ingest_in_both_capture_routes() {
     for batched in [false, true] {
@@ -798,7 +817,7 @@ fn oversized_lossless_collection_adoption_declines_visibly_without_retrying() {
     write_file(scratch.path(), "tasks/oversized.md", markdown.as_bytes());
     ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
     ingest(&mut sink, "tasks/oversized.md").expect("capture oversized record");
-    sink.reconcile_collections().expect("first adoption pass");
+    reconcile_after_backfill(&sink).expect("first adoption pass");
     let canonical_padding = "x".repeat(MAX_TEXT_BYTES - 64);
     // Canonical trailing newlines avoid retaining a second copy of the padding.
     seed_captured_richdoc_lineage_from_markdown(
@@ -810,7 +829,7 @@ fn oversized_lossless_collection_adoption_declines_visibly_without_retrying() {
     let updates_before = ydoc_update_count_for_object(&db, "tasks/oversized.md");
 
     assert!(
-        sink.reconcile_collections()
+        reconcile_after_backfill(&sink)
             .expect("decline oversized adoption")
             .changed_paths
             .is_empty()
@@ -841,7 +860,7 @@ fn oversized_lossless_collection_adoption_declines_visibly_without_retrying() {
     );
 
     assert!(
-        sink.reconcile_collections()
+        reconcile_after_backfill(&sink)
             .expect("repeat declined adoption reconciliation")
             .changed_paths
             .is_empty()
@@ -877,7 +896,7 @@ fn oversized_collection_adoption_retries_after_watcher_shrinks_record() {
     ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
     ingest(&mut sink, "tasks/oversized.md").expect("capture oversized record");
     assert!(
-        sink.reconcile_collections()
+        reconcile_after_backfill(&sink)
             .expect("bind oversized adoption")
             .changed_paths
             .is_empty()
@@ -899,7 +918,7 @@ fn oversized_collection_adoption_retries_after_watcher_shrinks_record() {
     transaction.commit().expect("commit oversized decline");
     drop(connection);
     assert!(
-        sink.reconcile_collections()
+        reconcile_after_backfill(&sink)
             .expect("retain oversized decline")
             .changed_paths
             .is_empty()
@@ -909,14 +928,14 @@ fn oversized_collection_adoption_retries_after_watcher_shrinks_record() {
     write_file(scratch.path(), "tasks/oversized.md", SHRUNK.as_bytes());
     ingest(&mut sink, "tasks/oversized.md").expect("capture watcher shrink");
     assert!(
-        sink.reconcile_collections()
+        reconcile_after_backfill(&sink)
             .expect("re-offer repaired adoption")
             .changed_paths
             .is_empty()
     );
     seed_captured_richdoc_lineage(&sink, "tasks/oversized.md");
     assert_eq!(
-        sink.reconcile_collections()
+        reconcile_after_backfill(&sink)
             .expect("retry repaired adoption")
             .changed_paths,
         ["tasks/oversized.md"]

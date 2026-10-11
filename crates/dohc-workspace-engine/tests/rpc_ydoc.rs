@@ -3357,14 +3357,33 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
         json!({ "sessionId": session_id, "updateBase64": plaintext_update(&huge) }),
     )
     .await;
-    let settled = call(
-        &transport,
-        &handle,
-        4,
-        "ydoc.settle",
-        json!({ "sessionId": session_id, "summary": "paste" }),
-    )
-    .await;
+    let settled = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            match transport
+                .call(
+                    RequestContext::unbounded(),
+                    request(
+                        4,
+                        "ydoc.settle",
+                        Some(handle.clone()),
+                        json!({ "sessionId": session_id, "summary": "paste" }),
+                    ),
+                )
+                .await
+            {
+                Ok(response) => break response.result,
+                Err(error)
+                    if error.code == ErrorCode::Overloaded
+                        && error.message == "engine-store-busy" =>
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(error) => panic!("large settle failed: {error:?}"),
+            }
+        }
+    })
+    .await
+    .expect("capture backfill must admit the large settle");
 
     write_file(scratch.path(), "load/scan-confirmed.md", b"capture barrier");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
