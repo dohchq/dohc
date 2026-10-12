@@ -9,6 +9,7 @@ import { modalFocusableElements, switchModalRegion, trapModalTabKey } from "./mo
 import { Smile } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import * as Y from "yjs";
+import type { Lexer } from "marked";
 import {
   applyFrontmatter,
   displayFrontmatterValue,
@@ -28,9 +29,67 @@ const BODY_FIELD = "body";
 // One title: a page with no `title` whose body opens with an H1 shows that
 // H1 as its title, and the title field folds into the row beside the icon.
 // Both answers read the first block alone, never the rest of the document.
-//
-// In Markdown, the first lines after any blank ones: `# ` or a setext `===`.
-const OPENS_WITH_H1 = /^(?:[ \t]*\r?\n)*(?: {0,3}#(?:[ \t]|\r?\n|$)|[ \t]*\S[^\n]*\n {0,3}=+[ \t]*(?:\r?\n|$))/;
+
+// In Markdown, the text from the first line with content to the next blank
+// line. No block that starts there can turn into a heading after a blank line,
+// so this text decides the first block, whatever follows it.
+function firstBlockSource(markdown: string): string {
+  let start = 0;
+  let end = 0;
+  while (end < markdown.length) {
+    const next = markdown.indexOf("\n", end);
+    const lineEnd = next === -1 ? markdown.length : next;
+    const blank = /^[ \t\r]*$/.test(markdown.slice(end, lineEnd));
+    if (blank && end > start) return markdown.slice(start, end);
+    end = lineEnd + 1;
+    if (blank) start = end;
+  }
+  return markdown.slice(start);
+}
+
+// The editor's own Markdown lexer, so the fold agrees with the blocks the
+// editor shows. It loads with the editor's chunk, not at launch; until it
+// arrives, a local page shows its title open.
+let lexer: typeof Lexer | null = null;
+let lexerLoad: Promise<typeof Lexer> | null = null;
+function loadLexer(): Promise<typeof Lexer> {
+  lexerLoad ??= import("marked").then(
+    (module) => (lexer = module.Lexer),
+    (error: unknown) => {
+      lexerLoad = null;
+      throw error;
+    },
+  );
+  return lexerLoad;
+}
+
+function lexesAsH1(lex: typeof Lexer, block: string): boolean {
+  const first = lex.lex(block).find((token) => token.type !== "space");
+  return first?.type === "heading" && first.depth === 1;
+}
+
+// A local page's body is the Markdown after its frontmatter. The block's text
+// is a string, so an edit that leaves it unchanged, such as typing a title,
+// lexes nothing.
+function useLocalOpensWithH1(markdown: string | null): boolean {
+  const block = useMemo(() => (markdown === null ? null : firstBlockSource(markdownEditorBody(markdown))), [markdown]);
+  const [loaded, setLoaded] = useState(() => lexer);
+  useEffect(() => {
+    if (block === null || loaded) return;
+    let current = true;
+    loadLexer().then(
+      (next) => {
+        if (current) setLoaded(() => next);
+      },
+      // Without the lexer the title stays open, as it is on a page with no H1.
+      () => undefined,
+    );
+    return () => {
+      current = false;
+    };
+  }, [block, loaded]);
+  return useMemo(() => block !== null && loaded !== null && lexesAsH1(loaded, block), [block, loaded]);
+}
 
 function isH1(node: unknown): boolean {
   return node instanceof Y.XmlElement && node.nodeName === "heading" && Number(node.getAttribute("level")) === 1;
@@ -185,7 +244,7 @@ export function PageIdentity(props: PageIdentityProps) {
 
   const title = displayFrontmatterValue(meta.title);
   const liveOpensWithH1 = useLiveOpensWithH1(ydoc);
-  const localOpensWithH1 = useMemo(() => !ydoc && OPENS_WITH_H1.test(markdownEditorBody(body)), [body, ydoc]);
+  const localOpensWithH1 = useLocalOpensWithH1(ydoc ? null : body);
   const [editRefused, setEditRefused] = useState(false);
   useEffect(() => setEditRefused(false), [ydoc, body]);
   const icon =
@@ -221,6 +280,9 @@ export function PageIdentity(props: PageIdentityProps) {
   const [titleFocused, setTitleFocused] = useState(false);
   const titleRef = useRef<HTMLTextAreaElement | null>(null);
   const titleCaret = useRef<number | null>(null);
+  // A blur while an input method composes can come before the composed text
+  // reaches onChange. The field stays open until the composition ends.
+  const titleComposing = useRef(false);
   useLayoutEffect(() => {
     const caret = titleCaret.current;
     if (caret === null) return;
@@ -385,8 +447,18 @@ export function PageIdentity(props: PageIdentityProps) {
           readOnly={readOnly}
           onFocus={() => setTitleFocused(true)}
           onBlur={() => {
+            if (titleComposing.current) return;
             setTitleFocused(false);
             setTitleDraft(title);
+          }}
+          onCompositionStart={() => {
+            titleComposing.current = true;
+          }}
+          onCompositionEnd={(event) => {
+            titleComposing.current = false;
+            // The blur it held back. The draft re-syncs from the title once
+            // the composed text, if any, has been written.
+            if (document.activeElement !== event.currentTarget) setTitleFocused(false);
           }}
           onChange={(event) => {
             const field = event.target;

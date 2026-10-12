@@ -3,8 +3,9 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import userEvent from "@testing-library/user-event";
 import { Profiler, useState } from "react";
 import * as Y from "yjs";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
+import { Lexer } from "marked";
 import { PageIdentity } from "./PageIdentity";
 import { NoticeCenter } from "./workbench/NoticeCenter";
 import { parseFrontmatter } from "./markdown/frontmatter";
@@ -329,10 +330,30 @@ describe("PageIdentity", () => {
     // the title, or the file name in its place.
     const folded = () => titleField().placeholder === "Add title";
 
+    // A local page reads its first block with the editor's lexer, which
+    // loads on first use. Once it has, every page answers on its first render.
+    beforeAll(async () => {
+      render(<PageIdentity body={"# Plan\n"} onChange={() => {}} filenameStem="plan" />);
+      await waitFor(() => expect(folded()).toBe(true));
+      cleanup();
+    });
+
     it.each([
       ["an H1 first and no title", "# Plan\n\nBody\n", true],
       ["frontmatter, then an H1", "---\nicon: 🚀\n---\n\n# Plan\n", true],
+      ["blank lines, then an H1", "\n  \n# Plan\n", true],
       ["a setext H1 first", "Plan\n====\n\nBody\n", true],
+      ["a multiline setext H1", "First line\nSecond line\n===\n", true],
+      ["an H1 with CRLF line ends", "# Plan\r\n\r\nBody\r\n", true],
+      ["a setext H1 with CRLF line ends", "First line\r\nSecond line\r\n===\r\n", true],
+      ["an empty H1, # alone", "#\n\nBody\n", true],
+      ["#word, a paragraph", "#word\n", false],
+      ["a byte order mark before the #, a paragraph to the editor", "﻿# Plan\n", false],
+      ["a fence holding ===", "```text\nPlan\n===\n```\n", false],
+      ["a fence holding # x", "```\n# x\n```\n\n# Plan\n", false],
+      ["a fence with a blank line before # x", "~~~\ncode\n\n# x\n~~~\n", false],
+      ["a paragraph a fence interrupts", "Intro\n```\n===\n```\n", false],
+      ["a setext H2", "Plan\n---\n", false],
       ["a title property", "---\ntitle: Plan\n---\n\n# Plan\n", false],
       ["no H1", "Body\n", false],
       ["an H2 first", "## Plan\n", false],
@@ -340,6 +361,46 @@ describe("PageIdentity", () => {
     ])("folds the title field for %s: %s", (_, body, expected) => {
       render(<PageIdentity body={body} onChange={() => {}} filenameStem="plan" />);
       expect(folded()).toBe(expected);
+    });
+
+    it("lexes nothing while a title is typed, since the first block is unchanged", async () => {
+      const user = userEvent.setup();
+      const lex = vi.spyOn(Lexer, "lex");
+      try {
+        render(<ControlledPageIdentity initialBody={"# Plan\n\nBody\n"} stem="plan" />);
+        expect(lex).toHaveBeenCalledTimes(1);
+        await user.click(titleField());
+        await user.keyboard("Q3 plan");
+        expect(currentMeta().title).toBe("Q3 plan");
+        expect(lex).toHaveBeenCalledTimes(1);
+      } finally {
+        lex.mockRestore();
+      }
+    });
+
+    // A blur can come before the composed text reaches onChange. The title
+    // stays open until the composition ends, then folds only if it is empty.
+    it.each([
+      ["keeps the composed text and stays open", "東京", false],
+      ["folds when the composition commits nothing", "", true],
+    ])("holds a blur during composition until it ends: %s", (_, composed, foldsAfter) => {
+      render(
+        <>
+          <ControlledPageIdentity initialBody={"# Plan\n"} stem="plan" />
+          <button type="button">elsewhere</button>
+        </>,
+      );
+      const field = titleField();
+      act(() => field.focus());
+      fireEvent.compositionStart(field);
+      act(() => screen.getByRole("button", { name: "elsewhere" }).focus());
+      expect(folded()).toBe(false);
+
+      fireEvent.compositionEnd(field);
+      if (composed) fireEvent.change(field, { target: { value: composed } });
+      expect(folded()).toBe(foldsAfter);
+      expect(field.value).toBe(composed);
+      expect(currentMeta().title).toBe(composed || undefined);
     });
 
     it("folds a read-only title too, keeping it mounted and read-only", () => {
