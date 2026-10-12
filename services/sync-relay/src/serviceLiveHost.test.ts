@@ -542,7 +542,10 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
           if (next instanceof Error) throw next;
           return reply(next);
         }
-        case "liveApplication.register": return reply({registrationId: 7});
+        // Native registration accepts exactly the binding.
+        case "liveApplication.register":
+          if (Object.keys(request.params).join() !== "binding") throw new Error("INVALID_PARAMS: invalid-live-registration");
+          return reply({registrationId: 7});
         case "liveApplication.ownerState": return reply({adoptionId: capture.activationId, expectedLocalSequence: 2, throughCursor: 0,
           outboxId: null, pendingBytes: 0, outboxState: "active"});
         case "liveApplication.settle": {
@@ -551,6 +554,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
             applicationCount: 0, localYDocSequence: 2, momentId: "settled-moment", markdownDigest: "c".repeat(64), materialized: true,
             collectionReconcileRequired: false}});
         }
+        case "liveApplication.fenceRestore": return reply({status: "pending", reason: "native-fence-pending"});
         case "sync.adoptJoinIdentity": return reply({adopted: true});
         case "sync.push": pushed.resolve();
           return reply({status: "complete", hasMore: false, pushed: 0, sharingDeclined: [], ownerAdmissionPending: []});
@@ -772,7 +776,7 @@ async function idleHost(options: {alone?: boolean} = {}) {
   const visits = (path: string) => activate.mock.calls.filter(([target]) => target.path === path).length;
   const requests = () => o.client().sendRequest.mock.calls.map(call => (call as unknown[])[0] as {method: string; params: Record<string, unknown>});
   const methods = () => requests().map(request => request.method);
-  return {...o, workspaces, editors: liveEditors(o.f.storage), methods, visits,
+  return {...o, workspaces, editors: liveEditors(o.f.storage), requests, methods, visits,
     hold(value: boolean) {held = value;},
     advance(ms: number) {now += ms;},
     async passes(count = 2) {
@@ -920,6 +924,26 @@ it("brings a dormant document back into passes for stop-access work, which settl
   await vi.waitFor(() => expect(o.unloaded()).toBe(2));
 });
 
+it("stops access to a dormant document through its reloaded native adoption, sending native registration only the binding", async () => {
+  const o = await idleHost();
+  o.advance(600_000);
+  await vi.waitFor(() => expect(o.unloaded()).toBe(1));
+  const binding = o.binding(), captures = o.client().captureOwnerActivation.mock.calls.length, sent = o.requests().length;
+  // Stopping access fences the binding, so the dormant document cannot activate again before the stop.
+  o.restore();
+  // The stop registers its old cut and reaches the native fence, which this engine leaves pending.
+  await expect(o.host.stopRestore({operationId: "restore", workspaceId: "workspace", ownerUserId: "owner"}))
+    .resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+  expect(o.client().captureOwnerActivation.mock.calls.length).toBe(captures + 1);
+  const stopping = o.requests().slice(sent).filter(request => request.method.startsWith("liveApplication."));
+  expect(stopping.map(request => [request.method, request.params])).toEqual([
+    ["liveApplication.register", {binding}],
+    ["liveApplication.ownerState", {registrationId: 7, sessionId: "native-session"}],
+    ["liveApplication.fenceRestore", expect.anything()],
+    ["liveApplication.fenceRestore", expect.anything()],
+  ]);
+});
+
 it("records an idle unload whose reply arrives after the sweep deadline and reloads the document on reconnect", async () => {
   const o = await idleHost(), deadlines: AbortController[] = [];
   vi.spyOn(AbortSignal, "timeout").mockImplementation(() => {const deadline = new AbortController(); deadlines.push(deadline); return deadline.signal;});
@@ -960,6 +984,28 @@ it("sends an unanswered idle unload again before settling it or reloading it on 
   const captures = o.client().captureOwnerActivation.mock.calls.length;
   const native = await o.host.captureNative(o.binding());
   expect(o.unloaded()).toBe(3);
+  expect(native.invalidated.aborted).toBe(false);
+  expect(o.client().captureOwnerActivation.mock.calls.length).toBe(captures + 1);
+  await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
+});
+
+it("keeps an idle unload the engine stopped waiting for unanswered and sends it again before reloading the document", async () => {
+  const o = await idleHost(), log = vi.spyOn(console, "error").mockImplementation(() => {});
+  // The engine's spawned unload runs on after its request deadline.
+  o.unloads.push(new EngineRequestError(1, {code: "DEADLINE_EXCEEDED", message: "unload-deadline", retry: "afterBackoff"} as never));
+  o.advance(600_000);
+  await vi.waitFor(() => expect(log).toHaveBeenCalledWith("Idle live document unload is waiting.", "unload-deadline"));
+  // Passes leave it alone: the engine may have ended its registration.
+  const visits = o.visits(o.sibling.path);
+  await o.passes();
+  expect(o.visits(o.sibling.path)).toBe(visits);
+  const captures = o.client().captureOwnerActivation.mock.calls.length;
+  const native = await o.host.captureNative(o.binding());
+  // The reconnect sends the unload again without settling, then reloads the document.
+  expect(o.unloaded()).toBe(2);
+  const methods = o.methods();
+  expect(methods.slice(methods.indexOf("liveApplication.unloadDocument"), methods.lastIndexOf("liveApplication.unloadDocument")))
+    .not.toContain("liveApplication.settle");
   expect(native.invalidated.aborted).toBe(false);
   expect(o.client().captureOwnerActivation.mock.calls.length).toBe(captures + 1);
   await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});

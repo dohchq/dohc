@@ -217,9 +217,9 @@ export async function startServiceLiveHost(options: {
   const consumerFor=(document:LiveDocumentKey)=>ordinary.has(document.workspaceId)
     ? activation?.consumer(document).consumer
     : consumers.get(document.workspaceId);
-  const consumerForRestore=(lookup:StopRestoreLookup)=>{
+  const consumerForRestore=async(lookup:StopRestoreLookup,joined:AbortSignal)=>{
     const document=consumers.get(lookup.workspaceId)?.documentForRestore(lookup);
-    return document?(ordinary.has(document.workspaceId)?activation?.restoreConsumer(document):consumerFor(document)):undefined;
+    return document?(ordinary.has(document.workspaceId)?await activation?.restoreConsumer(document,joined):consumerFor(document)):undefined;
   };
   const configuredConsumer = (document: LiveDocumentKey) => {
     const consumer = consumerFor(document);
@@ -417,8 +417,10 @@ export async function startServiceLiveHost(options: {
             if (pending === undefined) activation!.sleep(row.target, document);
             return pending;
           } catch (error) {
-            // An engine refusal answers the unload; any other failure leaves it unknown.
-            unanswered = !(error instanceof EngineRequestError);
+            // An engine refusal answers the unload. A lost reply leaves it unknown, and so
+            // does a deadline or cancellation, after which the engine's unload may still finish.
+            const code = engineCode(error);
+            unanswered = code === undefined || code === "DEADLINE_EXCEEDED" || code === "CANCELLED";
             throw error;
           }
         });
@@ -443,7 +445,10 @@ export async function startServiceLiveHost(options: {
         const row = hosted.get(key);
         if (!row || !activation!.dormant(row.target)) return;
         const workspaceId = row.target.workspaceId;
-        if (activation!.workspaceReady(workspaceId) && (await attachments.get(workspaceId)!.ordinary.pull(joined)).hasMore) {
+        // While a sibling is mid-activation the open skips catch-up, as awake documents
+        // do, and converges once that sibling resolves. Waiting here would let one stuck
+        // sibling keep every dormant document in the workspace from opening.
+        if (activation!.workspaceReady(workspaceId) &&(await attachments.get(workspaceId)!.ordinary.pull(joined)).hasMore) {
           throw new Error("Ordinary replication has more pages.");
         }
         activation!.wake(row.target); touch(key);
@@ -451,15 +456,15 @@ export async function startServiceLiveHost(options: {
       }));
     };
     // Restore work takes a turn, so no idle unload runs beside it. On a dormant
-    // document it brings the document back into passes, which settle that work.
+    // document it reloads the document, which passes then settle.
     const restoring = <T>(value: StopRestoreLookup, callerSignal: AbortSignal | undefined,
-      operation: (consumer: NonNullable<ReturnType<typeof consumerForRestore>>, lookup: StopRestoreLookup, joined: AbortSignal) => Promise<T>) => {
+      operation: (consumer: NonNullable<Awaited<ReturnType<typeof consumerForRestore>>>, lookup: StopRestoreLookup, joined: AbortSignal) => Promise<T>) => {
       check();
       const lookup = snapshotStopRestoreLookup(value);
       return exclusive(() => withLiveHostSignal(signal, callerSignal, async joined => {
         const document = consumers.get(lookup.workspaceId)?.documentForRestore(lookup), key = document && hostedKey(document);
         if (key) {await resolveUnload(key, joined); touch(key);}
-        const consumer = consumerForRestore(lookup);
+        const consumer = await consumerForRestore(lookup, joined);
         if (!consumer) throw new Error("Workspace is not configured on this service host.");
         return runDocument(consumer.documentForRestore(lookup), joined, work => operation(consumer, lookup, work));
       }));

@@ -409,12 +409,12 @@ it('requires exact seed application ACK and supports lost completion responses',
     try{
       const active=activationDriver(f,vi.fn(async()=>f.capture))
       expect(await active.driver.activate(active.target,new AbortController().signal)).toMatchObject({kind:'done'})
-      expect(active.driver.restoreConsumer(f.document)).toBe(active.driver.consumer(f.document).consumer)
+      expect(await active.driver.restoreConsumer(f.document,new AbortController().signal)).toBe(active.driver.consumer(f.document).consumer)
     }finally{drain.mockRestore()}
     f.raw.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=2")
     expect(()=>f.store.resume({document:f.document,activationId:f.capture.activationId,host,registeredAtMs:5,guard(){}})).toThrow()
     f.raw.exec("UPDATE sync_relay_live_documents SET admission_state='closed'")
-    expect(activationDriver(f,vi.fn()).driver.restoreConsumer(f.document)).toBeInstanceOf(OwnerCommittedDelivery)
+    expect(await activationDriver(f,vi.fn()).driver.restoreConsumer(f.document,new AbortController().signal)).toBeInstanceOf(OwnerCommittedDelivery)
   }finally{f.close()}
 })
 
@@ -658,7 +658,7 @@ it('clears readiness when a restore fence is visible before the next activation'
     expect(native.client.sendRequest).toHaveBeenCalledTimes(calls)
     expect(()=>d.driver.consumer(f.document)).toThrow('incomplete')
     expect(d.driver.workspaceReady('workspace')).toBe(false)
-    expect(d.driver.restoreConsumer(f.document)).toBe(active)
+    expect(await d.driver.restoreConsumer(f.document,signal)).toBe(active)
     reopen(f,fence)
     expect(await d.driver.activate(d.target,signal)).toMatchObject({kind:'done'})
     expect(d.driver.consumer(f.document).consumer).toBe(active)

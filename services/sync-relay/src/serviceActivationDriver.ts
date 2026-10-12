@@ -1,6 +1,6 @@
 import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import {isDeepStrictEqual} from "node:util";
-import type {EngineClient} from "@dohc/workspace-engine-client/daemon";
+import type {EngineClient,NativeOwnerActivation} from "@dohc/workspace-engine-client/daemon";
 import {parseLiveDocumentKey,parseLiveUpdateIdentifier,type LiveDocumentKey} from "@dohc/live-session-contract/live-update-admission";
 import {validateUserWritePath} from "@dohc/workspace-core";
 import {liveDocumentKindForPath} from "@dohc/workspace-contracts/live-documents";
@@ -10,7 +10,8 @@ import {configRecord} from "./deviceLiveHostConfig";
 import {OwnerCommittedDelivery} from "./ownerCommittedDelivery";
 import {liveValidation} from "./liveValidation.js";
 import {serviceOwnerTransport} from "./serviceOwnerTransport";
-import {ServiceActivationStaleCut} from "./storage/serviceActivation";
+import {ServiceActivationStaleCut,type ServiceActivationStore} from "./storage/serviceActivation";
+import type {ServiceActivationAccess} from "./storage/serviceActivationAccess";
 import type {SyncRelayStorage,LiveHostConnectionCoordinate} from "./storage";
 import type {LiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
 import type {ServiceOrdinaryReplication} from "./serviceOrdinaryReplication";
@@ -58,8 +59,9 @@ export class ServiceActivationDriver {
   readonly #owners=new Map<string,Owner>();
   // Targets this driver may have loaded into the engine since it started.
   readonly #loaded=new Set<string>();
-  // Hosted targets the engine unloaded while idle, with their documents. Passes skip them until they wake.
-  readonly #dormant=new Map<string,string>();
+  // Hosted targets the engine unloaded while idle, with their documents and the
+  // owners' last bindings. Passes skip them until they wake.
+  readonly #dormant=new Map<string,{document:string;owner?:Pick<Owner,"binding"|"actor">}>();
   constructor(readonly options:{storage:SyncRelayStorage;history:LiveJournalHistoryAuthority;client:EngineClient;host:LiveHostConnectionCoordinate;
     workspaces:ReadonlyMap<string,{handle:string;ordinary:ServiceOrdinaryReplication}>;config:ServiceActivationConfig;
     adoption:{maxBytes:number;maxEvents:number};restore?:LiveRestorePreparation;nextRequestId():number;deadlineMs:number;
@@ -100,31 +102,51 @@ export class ServiceActivationDriver {
    * from its retained source.
    */
   sleep(target:ServiceActivationTarget,document:LiveDocumentKey){
-    const key=JSON.stringify(parseLiveDocumentKey(document));
-    this.#owners.get(key)?.consumer.release(document);
+    const key=JSON.stringify(parseLiveDocumentKey(document)),owner=this.#owners.get(key);
+    owner?.consumer.release(document);
     this.removeTarget(target,document.objectId);
-    this.#targets=[...this.#targets,target];this.#dormant.set(targetKey(target),key);
+    this.#targets=[...this.#targets,target];
+    this.#dormant.set(targetKey(target),{document:key,...(owner?{owner:{binding:owner.binding,actor:owner.actor}}:{})});
   }
   dormant(target:ServiceActivationTarget){return this.#dormant.has(targetKey(target));}
   /** Whether the document belongs to a dormant target, which wakes when it is opened. */
-  asleep(document:LiveDocumentKey){return [...this.#dormant.values()].includes(JSON.stringify(parseLiveDocumentKey(document)));}
+  asleep(document:LiveDocumentKey){
+    const key=JSON.stringify(parseLiveDocumentKey(document));
+    return [...this.#dormant.values()].some(row=>row.document===key);
+  }
   wake(target:ServiceActivationTarget){this.#dormant.delete(targetKey(target));}
   hasRetained(){
     return this.#targets.some(target=>this.#store.read(target.workspaceId,target.path,this.options.config.maxCaptureBytes)!==null);
   }
-  restoreConsumer(document:LiveDocumentKey){
+  async restoreConsumer(document:LiveDocumentKey,signal:AbortSignal){
     const o=this.options,key=JSON.stringify(parseLiveDocumentKey(document));
-    const target=this.#targets.find(target=>{
-      if(target.workspaceId!==document.workspaceId)return false;
-      const saved=this.#store.read(target.workspaceId,target.path,o.config.maxCaptureBytes);
-      return saved?.completed && saved.shareId===target.shareId && saved.source.objectId===document.objectId && saved.source.lineageClaimId===document.lineageClaimId;
-    });
+    let target:ServiceActivationTarget|undefined,saved:ReturnType<ServiceActivationStore["read"]>=null;
+    for(const row of this.#targets){
+      if(row.workspaceId!==document.workspaceId)continue;
+      const read=this.#store.read(row.workspaceId,row.path,o.config.maxCaptureBytes);
+      if(read?.completed && read.shareId===row.shareId && read.source.objectId===document.objectId && read.source.lineageClaimId===document.lineageClaimId){
+        target=row;saved=read;break;
+      }
+    }
     const workspace=o.workspaces.get(document.workspaceId);
-    if(!target || !workspace)throw new Error("Service restore source is unavailable.");
+    if(!target || !saved || !workspace)throw new Error("Service restore source is unavailable.");
     // Stopping access re-registers the retained owner. Only the activated session's
     // verified transport can check that adoption; native registration takes the binding alone.
     const activated=this.#owners.get(key);
     if(activated && !activated.activationPending)return activated.consumer;
+    // A dormant document reloads its retained activation into a new native session.
+    // Its owner keeps the binding it last held, which a restore fence may have closed.
+    const sleeping=this.#dormant.get(targetKey(target))?.owner;
+    if(sleeping){
+      this.#loaded.add(targetKey(target));
+      const capture=await o.client.captureOwnerActivation({id:o.nextRequestId(),workspace:workspace.handle,deadlineMs:o.deadlineMs},
+        target.path,o.config.maxCaptureBytes,signal,saved.activationId);
+      signal.throwIfAborted();o.assertCurrent();
+      if(capture.activationId!==saved.activationId || !isDeepStrictEqual(capture.source,saved.source))throw new Error("Native service activation source changed.");
+      const owner=this.#owner(target,capture,{...sleeping,activationPending:false});
+      // Passes visit it again and settle the restore work, as for an awake document.
+      this.#owners.set(key,owner);this.#dormant.delete(targetKey(target));return owner.consumer;
+    }
     // Without that session, as after a restart, only a restore whose old cut
     // already applied can continue, because it does not register again.
     const existing=this.#restoreConsumers.get(key);if(existing)return existing;
@@ -200,15 +222,8 @@ export class ServiceActivationDriver {
         objectId:saved.source.objectId,lineageClaimId:saved.source.lineageClaimId});
       const resumed=this.#store.resume({document,activationId:saved.activationId,host:o.host,registeredAtMs:Date.now(),guard:check});
       o.registered();check();
-      const transport=serviceOwnerTransport({client:o.client,workspace:workspace.handle,capture,binding:resumed.binding,
-        nextRequestId:o.nextRequestId,assertCurrent:o.assertCurrent});
-      const consumer=new OwnerCommittedDelivery(o.storage,o.history,{client:transport.client,workspace:workspace.handle,
-        host:o.host,deadlineMs:o.deadlineMs,nextRequestId:o.nextRequestId,bounds:o.adoption,restore:o.restore,
-        publishOrdinary:signal=>workspace.ordinary.publish(signal),
-        ownerAdmission:{activation:resumed.access,shares:new Map([[target.workspaceId,target.shareId]]),
-          maxEntriesPerDrain:c.maxEntriesPerDrain,maxBytesPerDrain:c.maxBytesPerDrain,validate:c.validateAdmission}});
-      owner={consumer,transport,binding:resumed.binding,completed:false,activationPending:!resumed.completed,
-        target:key,actor:{ownerUserId:saved.ownerUserId,shareId:saved.shareId}};
+      owner=this.#owner(target,capture,{binding:resumed.binding,activationPending:!resumed.completed,
+        actor:{ownerUserId:saved.ownerUserId,shareId:saved.shareId}},resumed.access);
       this.#owners.set(JSON.stringify(document),owner);
     }
     const held=owner;
@@ -238,6 +253,18 @@ export class ServiceActivationDriver {
     held.completed=true;this.#completedTargets.add(key);
     return {kind:"done" as const,document:document!};
     });
+  }
+  // Owner delivery through the native session's verified transport.
+  #owner(target:ServiceActivationTarget,capture:NativeOwnerActivation,state:Pick<Owner,"binding"|"actor"|"activationPending">,access?:ServiceActivationAccess):Owner{
+    const o=this.options,c=o.config,workspace=o.workspaces.get(target.workspaceId)!;
+    const transport=serviceOwnerTransport({client:o.client,workspace:workspace.handle,capture,binding:state.binding,
+      nextRequestId:o.nextRequestId,assertCurrent:o.assertCurrent});
+    const consumer=new OwnerCommittedDelivery(o.storage,o.history,{client:transport.client,workspace:workspace.handle,
+      host:o.host,deadlineMs:o.deadlineMs,nextRequestId:o.nextRequestId,bounds:o.adoption,restore:o.restore,
+      publishOrdinary:signal=>workspace.ordinary.publish(signal),
+      ownerAdmission:{activation:access,shares:new Map([[target.workspaceId,target.shareId]]),
+        maxEntriesPerDrain:c.maxEntriesPerDrain,maxBytesPerDrain:c.maxBytesPerDrain,validate:c.validateAdmission}});
+    return {consumer,transport,completed:false,target:targetKey(target),...state};
   }
   // Clears readiness when the owner may no longer use its exact binding.
   #invalidated(owner:Owner,document:LiveDocumentKey){
