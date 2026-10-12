@@ -628,10 +628,6 @@ export function DesktopWorkspaceShell(props: {
     setSettingsSection(CUSTOMIZE_TARGETS[part].section);
   }, []);
   const openAgentSettings = useCallback(() => openSettings("agents"), [openSettings]);
-  const closeSettings = useCallback(() => {
-    setSettingsSection(null);
-    setSettingsFocus(null);
-  }, []);
 
   const { agentSetup, readAgentStatusForHistory } = useAgentSetup(
     props.workspace.workspaceId,
@@ -919,6 +915,17 @@ export function DesktopWorkspaceShell(props: {
   );
   const { chatCollaboration, refreshCloudStatus, workspaceSynced, cloudStatus, cloudStatusUnreadable } =
     useCloudPresence(workspaceId, reportCloudStatusUnavailable);
+  // Closing Settings reads the status again, as the old Cloud dialog did on
+  // close. The page's own refresh after an enable covers only its own
+  // change: another window's Try again can make main adopt this account's
+  // saved session without announcing a session change, so this workspace's
+  // paused status would otherwise outlive the cause.
+  const settingsOpen = settingsSection !== null;
+  const closeSettings = useCallback(() => {
+    if (settingsOpen) refreshCloudStatus();
+    setSettingsSection(null);
+    setSettingsFocus(null);
+  }, [refreshCloudStatus, settingsOpen]);
   // Connect server, wherever it is asked for. The account and the sync switch
   // are settings, so only a person known to be signed out gets the Cloud
   // dialog. A status still loading, or unreadable, opens Settings, which says

@@ -394,6 +394,27 @@ describe("CloudSyncSettings", () => {
     expect(settings.onError).not.toHaveBeenCalled();
   });
 
+  // Disconnect reaches every workspace. The shell drops a report through a
+  // workspace it no longer shows, so the failure goes to the one open now.
+  it("reports a disconnect failure to the workspace open when it arrives", async () => {
+    const logout = deferred<void>();
+    bridgeMock.cloudLogout.mockReturnValueOnce(logout.promise);
+    const first = cloud(SIGNED_IN);
+    const { rerender } = render(<CloudSyncSettings workspaceId="ws-1" cloud={first} />);
+    fireEvent.click(screen.getByTestId("cloud-disconnect"));
+    await waitFor(() => expect(bridgeMock.cloudLogout).toHaveBeenCalled());
+
+    const next = cloud(SIGNED_IN);
+    rerender(<CloudSyncSettings workspaceId="ws-2" cloud={next} />);
+    await act(async () => {
+      logout.reject(new Error("offline"));
+    });
+
+    expect(next.onError).toHaveBeenCalledOnce();
+    expect(vi.mocked(next.onError).mock.calls[0]![0].message).toBe("offline");
+    expect(first.onError).not.toHaveBeenCalled();
+  });
+
   // Main announces the logout before the step that fails. The shell then
   // drops its status, and the page swaps the account row for loading lines.
   it("reports a disconnect that fails after the session change took the row away", async () => {

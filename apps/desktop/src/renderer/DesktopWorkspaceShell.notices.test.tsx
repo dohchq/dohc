@@ -2341,15 +2341,42 @@ describe("sync answers after Settings closed", () => {
     renderShell(bridge);
 
     await startEnableThenClose(bridge);
-    // Closing reads nothing; the enable is still running.
-    expect(bridge.cloudStatus).toHaveBeenCalledTimes(1);
+    // Closing reads once, before the enable has finished.
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalledTimes(2));
+    expect(await bridge.cloudStatus.mock.results[1]!.value).toMatchObject({ workspaceSynced: false });
     await act(async () => {
       enable.resolve();
     });
 
-    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalledTimes(2));
-    expect(await bridge.cloudStatus.mock.results[1]!.value).toMatchObject({ workspaceSynced: true });
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalledTimes(3));
+    expect(await bridge.cloudStatus.mock.results[2]!.value).toMatchObject({ workspaceSynced: true });
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  // Another window's Try again can make main adopt this account's saved
+  // session without a session announcement. Closing Settings reads the
+  // status again, so reopening shows the workspace syncing.
+  it("reads the status again when Settings closes, after it changed elsewhere", async () => {
+    let paused = true;
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn(async () => ({ ...SIGNED_IN, workspaceSynced: true, workspaceSyncConnected: !paused }));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("activity-settings"));
+    await user.click(await screen.findByTestId("settings-nav-cloud"));
+    expect(await screen.findByTestId("cloud-workspace-relink")).toBeTruthy();
+    expect(bridge.cloudStatus).toHaveBeenCalledTimes(1);
+
+    paused = false;
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalledTimes(2));
+
+    await user.click(await screen.findByTestId("activity-settings"));
+    await user.click(await screen.findByTestId("settings-nav-cloud"));
+    await screen.findByTestId("settings-row-sync-workspace");
+    expect(screen.queryByTestId("cloud-workspace-relink")).toBeNull();
   });
 
   it("reports an enable that fails after Settings closed, and its Try again opens Settings", async () => {

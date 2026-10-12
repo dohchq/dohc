@@ -647,7 +647,7 @@ export function AccessUnknown(props: {
       return (
         <AboutNote testId={`${testId}-unknown`} reason="other-account" icon={CloudOff}
           action={{ label: "Sync and sharing", run: setup.openSyncSettings }}>
-          {SYNC_PAUSED_FOR_ACCOUNT}
+          {SYNC_PAUSED_FOR_ACCOUNT} Resume sync to check who has access.
         </AboutNote>
       );
     case "unexplained":

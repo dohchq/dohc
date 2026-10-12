@@ -77,7 +77,9 @@ export function CloudAccountRow(props: {
   async function disconnect() {
     const request = requests.next();
     setBusy(true);
-    const failed = await endSession(latest.current.onError);
+    // The handler current when the failure arrives: Disconnect reaches every
+    // workspace, so a failure is news for whichever one is open by then.
+    const failed = await endSession((error) => latest.current.onError(error));
     if (!requests.isCurrent(request)) return;
     setBusy(false);
     latest.current.onSettled(failed);
