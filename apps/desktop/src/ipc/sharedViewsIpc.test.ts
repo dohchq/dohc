@@ -665,3 +665,13 @@ describe("background share pulls", () => {
     } finally { vi.useRealTimers(); }
   });
 });
+
+
+it.each([false, true])("refresh pins reference provenance only with the same selector (changed=%s)", async changed => {
+  const h = await harness();
+  Object.assign(h.workspace.shareView!, { sourceWorkspaceId: "source", grantId: "grant", grantGeneration: 1 });
+  h.fetchInfo.mockResolvedValue({ ...info, sourceWorkspaceId: "source", grantId: "grant", grantGeneration: 2,
+    selector: changed ? { ...info.selector!, paths: ["narrowed"] } : info.selector });
+  await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" });
+  expect(h.setView.mock.calls[0]![1]).toMatchObject({ sourceWorkspaceId: "source", grantGeneration: changed ? 1 : 2 });
+});

@@ -1,4 +1,4 @@
-import type { EngineFileResolver } from "../workspaces/resolveEngineFiles";
+import { workspaceFileRef, type EngineFileReferenceTarget, type EngineFileResolver } from "../workspaces/resolveEngineFiles";
 import { CHANNELS } from "./channels";
 import {
   GetBacklinksPayload,
@@ -11,7 +11,6 @@ import {
   type ReadWorkspaceTextResult,
 } from "./bridgeContract";
 import type { RegistryEntry } from "../workspaces/registryStore";
-import type { FileResolveTarget } from "@dohc/workspace-engine-client/daemon";
 import type { EngineWorkspace } from "@dohc/workspace-engine-client/daemon";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { WorkspaceGraphIndex } from "../workspaces/workspaceGraph";
@@ -140,10 +139,11 @@ export function registerWorkspaceGraphIpcHandlers<
           ),
         );
         const threadAttachments = await Promise.all(threads.map(thread => store.listThreadAttachments(engineWorkspace.workspaceId, thread.id)));
-        const mentionTargets = threadAttachments.flat().flatMap<FileResolveTarget>(attachment => attachment.objectId
-          ? [{ objectId: attachment.objectId }]
-          : attachment.pathHint ? [{ path: attachment.pathHint }] : []);
-        const targets = [...new Map(mentionTargets.map(target => [JSON.stringify(target), target])).values()];
+        // Legacy path hints name only files tracked by the local engine.
+        const mentionTargets = threadAttachments.flat().flatMap<EngineFileReferenceTarget>(attachment => attachment.objectId
+          ? [workspaceFileRef(engineWorkspace.workspaceId, attachment.objectId, attachment.pathHint)]
+          : attachment.pathHint && !attachment.pathHint.startsWith("shared-with-me/") ? [{ path: attachment.pathHint }] : []);
+        const targets = [...new Map(mentionTargets.map(target => ["target" in target ? JSON.stringify([target.workspaceId, target.target]) : JSON.stringify(target), target])).values()];
         const resolvedFiles = await resolveEngineFiles(engineWorkspace, targets);
         const basePaths = new Set(graph.nodes.map(node => node.path));
         const hintPaths = new Map<string, string>();
@@ -156,9 +156,9 @@ export function registerWorkspaceGraphIpcHandlers<
           objectIdByPath: new Map<string, string>(),
         };
         for (const file of resolvedFiles) {
-          if (file.status !== "found" || !basePaths.has(file.path)) continue;
-          activeFiles.pathByObjectId.set(file.objectId, file.path);
-          activeFiles.objectIdByPath.set(file.path, file.objectId);
+          if (file.status !== "found" || !file.ref || !basePaths.has(file.path)) continue;
+          activeFiles.pathByObjectId.set(file.ref.target.objectId, file.path);
+          activeFiles.objectIdByPath.set(file.path, file.ref.target.objectId);
         }
         const authorizedMentions = (
           await Promise.all(

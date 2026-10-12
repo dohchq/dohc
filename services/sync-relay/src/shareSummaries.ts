@@ -125,9 +125,8 @@ export function createShareSummaries(
     genericChatWritable: boolean,
     sharerName: string | null = granterEmail,
   ): Record<string, unknown> => {
-    // Received summaries deliberately omit the workspace id: the recipient's
-    // access is share-scoped, and the granter's workspace identity is not
-    // theirs to see.
+    // Inventories omit the source workspace id. The authenticated detail
+    // route adds it after checking the recipient's current grant.
     return {
       ...shareSummaryBase(row),
       granterUserId: row.share.granterUserId,

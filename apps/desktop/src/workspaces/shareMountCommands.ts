@@ -20,6 +20,7 @@ import {
   withoutShareMountRecords,
 } from "./shareMounts";
 import type { ShareViewInfo } from "./shareViewInfo";
+import { recordedShareSelector } from "./shareViewRecords";
 import {
   ShareViewMountRollbackError,
   type PreparedShareViewFilesMount,
@@ -53,11 +54,12 @@ export interface ShareMountCommandDependencies<WorkspaceSummary> {
     workspaceId: string,
     update: (mounts: readonly ShareMountRecord[]) => readonly ShareMountRecord[],
   ): Promise<void>;
+  referenceSourceCurrent?(mount: ShareMountRecord): boolean;
   loadCredentials(): Promise<ShareMountCommandCredentials | null>;
   fetchInfo(
     relay: SyncRelayConnection,
     shareId: string,
-  ): Promise<Pick<ShareViewInfo, "granterEmail" | "selector">>;
+  ): Promise<Pick<ShareViewInfo, "granterEmail" | "selector" | "sourceWorkspaceId" | "grantId" | "grantGeneration">>;
   listDirectory(absolutePath: string): Promise<string[]>;
   withWorkspaceOperation<T>(
     workspaceRoot: string,
@@ -182,6 +184,7 @@ export function createShareMountCommands<WorkspaceSummary>(
           granterEmail: target.granterEmail,
           relayUrl: target.relayUrl,
           recipientEmail: target.recipientEmail ?? null,
+          sourceWorkspaceId: target.sourceWorkspaceId, grantId: target.grantId, grantGeneration: target.grantGeneration,
           grantedSelector: target.grantedSelector,
         };
         await dependencies.updateMounts(target.workspaceId, (mounts) => [
@@ -294,7 +297,7 @@ export function createShareMountCommands<WorkspaceSummary>(
           throw new Error("This share is already added to this workspace.");
         }
         const relay = { baseUrl: relayUrl, token: credentials.token };
-        let info: Pick<ShareViewInfo, "granterEmail" | "selector">;
+        let info: Pick<ShareViewInfo, "granterEmail" | "selector" | "sourceWorkspaceId" | "grantId" | "grantGeneration">;
         try {
           assertCurrent();
           info = await dependencies.fetchInfo(relay, parsed.shareId);
@@ -335,6 +338,7 @@ export function createShareMountCommands<WorkspaceSummary>(
               granterEmail: info.granterEmail,
               relayUrl,
               recipientEmail: credentials.email ?? null,
+              sourceWorkspaceId: info.sourceWorkspaceId, grantId: info.grantId, grantGeneration: info.grantGeneration,
               grantedSelector,
             };
             const prepared: PreparedShareViewFilesMount = {
@@ -347,6 +351,7 @@ export function createShareMountCommands<WorkspaceSummary>(
               schedulingRootPath: workspace.rootPath,
               rootPath: mountRootFor(workspace.rootPath, mount.label),
               shareId: mount.shareId,
+              sourceWorkspaceId: mount.sourceWorkspaceId, grantId: mount.grantId, grantGeneration: mount.grantGeneration,
               mountLabel: mount.label,
               granterEmail: mount.granterEmail,
               relayUrl: mount.relayUrl,
@@ -462,46 +467,58 @@ export function createShareMountCommands<WorkspaceSummary>(
               continue;
             }
             assertCurrent();
+            let reconciled: Awaited<ReturnType<ShareViewFiles["reconcile"]>>;
             try {
               // A slow relay holds only this mount's workspace transaction,
               // never one lease across the complete refresh pass.
-              const reconciled = await dependencies.withWorkspaceOperation(
-                workspace.rootPath,
-                (lease) =>
-                  dependencies.files().reconcile(
-                    lease,
-                    {
-                      kind: "mount",
-                      workspaceId: workspace.workspaceId,
-                      shareId: mount.shareId,
-                    },
-                    "refresh",
-                  ),
-              );
-              if (
-                reconciled.kind !== "refresh" ||
-                "ok" in reconciled.outcome
-              ) {
-                throw new Error(
-                  "Share mount refresh returned an invalid result.",
-                );
+              reconciled = await dependencies.withWorkspaceOperation(workspace.rootPath, lease =>
+                dependencies.files().reconcile(lease, {
+                  kind: "mount", workspaceId: workspace.workspaceId, shareId: mount.shareId,
+                }, "refresh"));
+              if (reconciled.kind !== "refresh" || "ok" in reconciled.outcome) {
+                throw new Error("Share mount refresh returned an invalid result.");
               }
-              pushResult(
-                mount,
-                reconciled.outcome.status,
-                reconciled.outcome.changedPaths,
-              );
             } catch (error) {
               const verdict = classifyShareMountRefreshError(error);
-              if (verdict.kind === "abort") {
-                throw new Error(verdict.message);
-              }
+              if (verdict.kind === "abort") throw new Error(verdict.message);
               reportFailure(
-                `share-mount refresh failed for ${mount.label}:`,
-                error,
+                `share-mount refresh failed for ${mount.label}:`, error,
               );
               pushResult(mount, verdict.status, 0);
+              continue;
             }
+            assertCurrent();
+            // Reference metadata cannot change the completed pull's result.
+            if (["updated", "unchanged"].includes(reconciled.outcome.status) && !dependencies.referenceSourceCurrent?.(mount)) {
+              const identity = (row: ShareMountRecord) => JSON.stringify([row.shareId, row.label, row.relayUrl, row.recipientEmail,
+                row.sourceWorkspaceId, row.grantId, row.grantGeneration, row.grantedSelector, row.ended]);
+              const stamp = identity(mount);
+              try {
+                const credentials = await dependencies.loadCredentials();
+                assertCurrent();
+                if (credentials?.relayUrl && relayUrlsMatch(credentials.relayUrl, mount.relayUrl) &&
+                    (mount.recipientEmail == null || credentials.email == null || mount.recipientEmail === credentials.email)) {
+                  const info = await dependencies.fetchInfo({ baseUrl: credentials.relayUrl, token: credentials.token }, mount.shareId);
+                  assertCurrent();
+                  if (info.sourceWorkspaceId && info.grantId && info.grantGeneration &&
+                      JSON.stringify(recordedShareSelector(info.selector)) === JSON.stringify(recordedShareSelector(mount.grantedSelector))) {
+                    await dependencies.updateMounts(workspace.workspaceId, current => {
+                      assertCurrent();
+                      const matches = shareMountRecordsForId(current, mount.shareId);
+                      if (matches.length !== 1 || identity(matches[0]!) !== stamp) return current;
+                      return current.map(row => row.shareId === mount.shareId ? { ...row,
+                        sourceWorkspaceId: info.sourceWorkspaceId, grantId: info.grantId, grantGeneration: info.grantGeneration,
+                      } : row);
+                    });
+                    assertCurrent();
+                  }
+                }
+              } catch {
+                assertCurrent();
+              }
+            }
+            pushResult(mount, reconciled.outcome.status, reconciled.outcome.changedPaths);
+
           }
           return { results };
         } finally {

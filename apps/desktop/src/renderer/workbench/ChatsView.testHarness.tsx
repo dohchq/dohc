@@ -117,6 +117,7 @@ export const fileThread: FileChatThreadRecord = {
   createdAtMs: NOW,
   updatedAtMs: NOW,
   path: "notes/topic.md",
+  ref: { workspaceId: "workspace", target: { kind: "file", objectId: "file-object" }, labels: { name: "topic.md", path: "notes/topic.md", displayKind: "markdown" } },
 };
 
 export function dm(overrides: Partial<DmRecord> = {}): DmRecord {

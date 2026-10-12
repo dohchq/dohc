@@ -1,3 +1,4 @@
+import { workspaceFileReferenceScopes } from "./workspaces/workspaceFileReferenceScopes";
 import { createEngineFileResolver } from "./workspaces/resolveEngineFiles";
 import { createTypingQuitRecovery } from "./workspaces/typingQuitRecovery";
 import { writeTypingCheckpointSync, typingRecoveryFailure, hasUnresolvedTypingCheckpoints, flushTypingCheckpoints, writeTypingCheckpoint, readTypingCheckpoints, retireTypingCheckpoint, importTypingCheckpoints, type TypingRecoveryFailure } from "./workspaces/outageTypingRecovery";
@@ -2869,7 +2870,7 @@ function agentDispatchStoreHandleFor(workspace: {
 // error.
 async function withEngineAdapter<T>(
   workspace: EngineWorkspace,
-  work: (adapter: VersionedLiveAdapter) => Promise<T>,
+  work: (adapter: VersionedLiveAdapter, assertCurrent?: () => void) => Promise<T>,
 ): Promise<T | null> {
   const sessions = desktopEngine.sessions;
   if (!sessions) return null;
@@ -2879,6 +2880,7 @@ async function withEngineAdapter<T>(
         new VersionedLiveAdapter(binding.client, binding.workspace, {
           workspaceId: workspace.workspaceId,
         }),
+        () => sessions.assertCurrentBinding(engineWorkspace, binding),
       ),
     );
   const registered = findWorkspace(workspace.workspaceId);
@@ -2896,7 +2898,27 @@ async function withEngineAdapter<T>(
   );
 }
 
-const resolveEngineFiles = createEngineFileResolver(withEngineAdapter);
+const resolveEngineFiles = createEngineFileResolver(withEngineAdapter, workspace => {
+  const credentialGeneration = credentialCacheGeneration;
+  const binding = requireWorkspaceAuthority(workspace.workspaceId);
+  const authorityBinding = binding.binding;
+  binding.release();
+  return workspaceFileReferenceScopes(workspace, {
+    current: () => findWorkspace(workspace.workspaceId),
+    liveGrants: () => receivedShareAcquisition.liveInventory(),
+    assertCurrent: () => {
+      const current = requireWorkspaceAuthority(workspace.workspaceId);
+      try {
+        current.assertCurrent();
+        if (current.binding !== authorityBinding || credentialCacheGeneration !== credentialGeneration ||
+            (workspace.attachmentId !== undefined && workspace.attachmentId !== current.binding.attachmentId)) {
+          throw new Error("The workspace changed while dohc looked up the file. Try again.");
+        }
+      } finally { current.release(); }
+    },
+    shareWorkspace: location => receivedShareEngine.workspaceFor(location),
+  });
+});
 
 // The human author every renderer-sent chat message is attributed to. Main
 // derives it — the renderer never supplies identity. At alpha the desktop's
@@ -4886,6 +4908,11 @@ function createShareMountCommandsFor(
       await updateWorkspaceShareMounts(workspaceId, update);
     },
     loadCredentials: () => loadAndCacheCurrentCredentials(),
+    referenceSourceCurrent: mount => {
+      const grant = receivedShareAcquisition.liveInventory()?.received.find(row => row.shareId === mount.shareId);
+      return Boolean(mount.sourceWorkspaceId && mount.grantId && mount.grantGeneration &&
+        grant?.grantId === mount.grantId && grant.generation === mount.grantGeneration);
+    },
     fetchInfo: (relay, shareId) => fetchShareViewInfo({ relay, shareId }),
     listDirectory: (absolutePath) => readdir(absolutePath).catch(() => []),
     withWorkspaceOperation: (workspaceRoot, run) =>

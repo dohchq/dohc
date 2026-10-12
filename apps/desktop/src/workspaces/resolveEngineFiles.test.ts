@@ -1,7 +1,7 @@
 import { expect, it, vi } from "vitest";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
-import { createEngineFileResolver, resolveEngineFileTargets } from "./resolveEngineFiles";
+import { createEngineFileResolver, resolveEngineFileTargets, workspaceFileRef } from "./resolveEngineFiles";
 
 it("pins batches to one version and isolates an oversized legacy hint", async () => {
   const engine = new VersionedLoopbackEngine();
@@ -36,9 +36,9 @@ it("uses the production chat and graph wrapper without listing the workspace", a
   };
   const resolveEngineFiles = createEngineFileResolver(withAdapter);
   const workspace = { workspaceId: "w" };
-  expect(await resolveEngineFiles(workspace, [{ path: "./notes//a.md" }, { objectId: "photo" }, { objectId: "gone" }])).toEqual([
-    { status: "found", objectId: "a", path: "notes/a.md" },
-    { status: "found", objectId: "photo", path: "photo.png" },
+  expect(await resolveEngineFiles(workspace, [{ path: "./notes//a.md" }, workspaceFileRef("w", "photo"), workspaceFileRef("w", "gone")])).toEqual([
+    { status: "found", objectId: "a", path: "notes/a.md", ref: workspaceFileRef("w", "a", "notes/a.md") },
+    { status: "found", objectId: "photo", path: "photo.png", ref: workspaceFileRef("w", "photo", "photo.png") },
     { status: "absent" },
   ]);
   expect(adapterCalls).toHaveBeenCalledWith(workspace, expect.any(Function));
@@ -65,4 +65,20 @@ it("counts UTF-8 bytes, JSON escapes, commas, and the pinned version across requ
     expect(Buffer.byteLength(JSON.stringify(request.params))).toBeLessThanOrEqual(48 * 1024);
   }
   for (const request of requests.slice(1)) expect(request.params).toMatchObject({ versionId: "main" });
+});
+
+
+it("keeps local native references in the local active version when a self-share projection has the same source", async () => {
+  const engine = new VersionedLoopbackEngine();
+  engine.seedTextFile({ workspace: "w", path: "b.md", text: "local", objectId: "b" });
+  engine.seedTextFile({ workspace: "mount", path: "a.md", text: "old copy", objectId: "a" });
+  const workspace = { workspaceId: "w" }, mount = { workspaceId: "mount" };
+  const resolve = createEngineFileResolver(async (location, work) => work(new VersionedLiveAdapter({
+    close() {}, sendRequest: request => engine.sendRequest(request),
+  }, location.workspaceId, { workspaceId: location.workspaceId })), () => [
+    { workspace, sourceWorkspaceId: "w", assertCurrent() {} },
+    { workspace: mount, sourceWorkspaceId: "w", prefix: "shared-with-me/Self", assertCurrent() {} },
+  ]);
+  expect(await resolve(workspace, [workspaceFileRef("w", "a", "a.md")])).toEqual([{ status: "absent" }]);
+  expect(engine.requests.map(request => request.params)).toEqual([{ targets: [{ objectId: "a" }] }]);
 });

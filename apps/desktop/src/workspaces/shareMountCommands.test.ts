@@ -771,6 +771,8 @@ describe("share mount commands", () => {
       "lease:start",
       "files:reconcile",
       "lease:end",
+      "credentials",
+      "preflight",
       "notify:workspace-one",
     ]);
   });
@@ -1120,4 +1122,64 @@ describe("share mount commands", () => {
     ).rejects.toThrow("No share matches that code");
     expect(h.events).toEqual(["credentials"]);
   });
+});
+
+
+it("refreshes a mount's admitted source provenance without changing its selector", async () => {
+  const h = harness();
+  h.mounts = [{ shareId: SHARE_ID, label: "alex", granterEmail: null, relayUrl: "https://relay.example",
+    recipientEmail: null, grantedSelector: SELECTOR, sourceWorkspaceId: "source", grantId: "grant", grantGeneration: 1 }];
+  h.dependencies.fetchInfo = async () => ({ granterEmail: null, selector: SELECTOR,
+    sourceWorkspaceId: "source", grantId: "grant", grantGeneration: 2 });
+  await h.commands.refresh({ workspace: WORKSPACE, assertCurrent });
+  expect(h.mounts[0]).toMatchObject({ sourceWorkspaceId: "source", grantGeneration: 2, grantedSelector: SELECTOR });
+});
+
+it("does not relabel a replaced mount after the provenance await", async () => {
+  const h = harness();
+  h.mounts = [{ shareId: SHARE_ID, label: "alex", granterEmail: null, relayUrl: "https://relay.example",
+    recipientEmail: null, grantedSelector: SELECTOR }];
+  h.dependencies.fetchInfo = async () => {
+    h.mounts = [{ ...h.mounts[0]!, label: "replacement" }];
+    return { granterEmail: null, selector: SELECTOR, sourceWorkspaceId: "source", grantId: "grant", grantGeneration: 2 };
+  };
+  await h.commands.refresh({ workspace: WORKSPACE, assertCurrent });
+  expect(h.mounts[0]).toMatchObject({ label: "replacement" });
+  expect(h.mounts[0]).not.toHaveProperty("sourceWorkspaceId");
+});
+
+
+it("preserves updated paths and source provenance when reconcile records skipped operations", async () => {
+  const h = harness();
+  h.mounts = [{ shareId: SHARE_ID, label: "alex", granterEmail: null, relayUrl: "https://relay.example",
+    recipientEmail: null, grantedSelector: SELECTOR }];
+  vi.mocked(h.files.reconcile).mockImplementationOnce(async () => {
+    h.mounts = [{ ...h.mounts[0]!, skippedOps: { generation: 1, total: 1, lastPath: "private.md" } }];
+    return { kind: "refresh", outcome: { status: "updated", changedPaths: 2 } } as Awaited<ReturnType<ShareViewFiles["reconcile"]>>;
+  });
+  h.dependencies.fetchInfo = async () => ({ granterEmail: null, selector: SELECTOR,
+    sourceWorkspaceId: "source", grantId: "grant", grantGeneration: 2 });
+  expect(await h.commands.refresh({ workspace: WORKSPACE, assertCurrent })).toMatchObject({ results: [{ status: "updated", changedPaths: 2 }] });
+  expect(h.mounts[0]).toMatchObject({ sourceWorkspaceId: "source", grantGeneration: 2, skippedOps: { generation: 1 } });
+});
+
+it("does not fetch reference metadata when the admitted grant pin is current", async () => {
+  const h = harness();
+  h.mounts = [{ shareId: SHARE_ID, label: "alex", granterEmail: null, relayUrl: "https://relay.example",
+    recipientEmail: null, grantedSelector: SELECTOR }];
+  h.dependencies.referenceSourceCurrent = () => true;
+  const fetch = vi.fn(h.dependencies.fetchInfo); h.dependencies.fetchInfo = fetch;
+  await h.commands.refresh({ workspace: WORKSPACE, assertCurrent });
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+it("keeps a successful refresh result when optional reference metadata cannot be saved", async () => {
+  const h = harness();
+  h.mounts = [{ shareId: SHARE_ID, label: "alex", granterEmail: null, relayUrl: "https://relay.example",
+    recipientEmail: null, grantedSelector: SELECTOR }];
+  vi.mocked(h.files.reconcile).mockResolvedValueOnce({ kind: "refresh", outcome: { status: "updated", changedPaths: 2 } } as Awaited<ReturnType<ShareViewFiles["reconcile"]>>);
+  h.dependencies.fetchInfo = async () => ({ granterEmail: null, selector: SELECTOR,
+    sourceWorkspaceId: "source", grantId: "grant", grantGeneration: 2 });
+  h.dependencies.updateMounts = async () => { throw new Error("registry write failed"); };
+  expect(await h.commands.refresh({ workspace: WORKSPACE, assertCurrent })).toMatchObject({ results: [{ status: "updated", changedPaths: 2 }] });
 });

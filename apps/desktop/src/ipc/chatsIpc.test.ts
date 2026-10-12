@@ -1,3 +1,4 @@
+import { workspaceFileRef } from "../workspaces/resolveEngineFiles";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatBookmark, ChatMessage, ChatThread } from "@dohc/workspace-contracts/engine";
 import { CHANNELS } from "./channels";
@@ -23,7 +24,7 @@ function fixture(kind: ScopeKind = "local") {
   };
   if (kind === "damaged") Object.assign(workspace, { shareView: null });
   else if (kind !== "local") workspace.shareView = {
-    shareId: "share", granterEmail: "owner@example.test", genericChatWritable: true,
+    shareId: "share", sourceWorkspaceId: "source", grantId: "grant", grantGeneration: 1, granterEmail: "owner@example.test", genericChatWritable: true,
     grantedSelector: { paths: ["notes"], versionId: null, access: kind === "ended" ? "edit" : kind },
     ...(kind === "ended" ? { ended: true } : {}),
   };
@@ -106,8 +107,8 @@ function fixture(kind: ScopeKind = "local") {
   const activity = { queueCloudSync: vi.fn() };
   const syncSharedChannelsForChatTarget = vi.fn(async () => 0);
   const resolveEngineFiles = vi.fn<import("../workspaces/resolveEngineFiles").EngineFileResolver<import("@dohc/workspace-engine-client/daemon").EngineWorkspace>>(async (_workspace, targets) => targets.map(target =>
-    ("path" in target ? target.path === "notes/a.md" : target.objectId === "object")
-      ? { status: "found", objectId: "object", path: "notes/a.md" } : { status: "absent" }));
+    ("path" in target ? target.path === "notes/a.md" : target.target.objectId === "object")
+      ? { status: "found", objectId: "object", path: "notes/a.md", ref: workspaceFileRef("workspace", "object", "notes/a.md") } : { status: "absent" }));
   const readOwnedWorkspaceText = vi.fn(async () => ({ text: "# Section\n" }));
   const chatScope = createChatScopeCapability({
     workspaceAuthorities: authorities, canonicalWorkspaceFor, requireEngineCapture,
@@ -485,10 +486,10 @@ describe("targeted file resolution", () => {
     test.storeMethods.listThreads.mockResolvedValue([test.thread, { ...test.thread, id: "duplicate" }, {
       ...test.thread, id: "gone", linkedFile: { objectId: "gone", pathHint: "../legacy display hint", linkedAtMs: 1 },
     }]);
-    test.resolveEngineFiles.mockResolvedValue([{ status: "found", objectId: "object", path: "moved.md" }, { status: "absent" }]);
+    test.resolveEngineFiles.mockResolvedValue([{ status: "found", objectId: "object", path: "moved.md", ref: workspaceFileRef("workspace", "object", "moved.md") }, { status: "absent" }]);
     expect(await test.invoke(CHANNELS.listChatChannels, { workspaceId: "workspace" })).toMatchObject({ fileThreads: [
-      { id: "thread", path: "moved.md" }, { id: "duplicate", path: "moved.md" }, { id: "gone", path: "../legacy display hint" },
+      { id: "thread", path: "moved.md" }, { id: "duplicate", path: "moved.md" }, { id: "gone", path: "../legacy display hint", ref: null },
     ] });
-    expect(test.resolveEngineFiles).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "workspace" }), [{ objectId: "object" }, { objectId: "gone" }]);
+    expect(test.resolveEngineFiles).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "workspace" }), [workspaceFileRef("workspace", "object"), workspaceFileRef("workspace", "gone")]);
   });
 });

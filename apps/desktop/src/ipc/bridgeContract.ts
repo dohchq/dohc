@@ -1,3 +1,4 @@
+import { WorkspaceFileRefSchema } from "@dohc/workspace-contracts/workspace-ref-values";
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
 import { shareCopyOperations } from "./shareCopyOperations";
 export type { ShareCopyInput, ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
@@ -2217,9 +2218,10 @@ export const ChannelThreadRecord = ChatThreadRecord.extend({
 export type ChannelThreadRecord = z.infer<typeof ChannelThreadRecord>;
 
 // A file-linked Chat as the Chats view lists it: the current path when the
-// engine can resolve the stable object id, else the captured hint.
+// engine can resolve the stable object id, else the captured display hint.
 export const FileChatThreadRecord = ChatThreadRecord.extend({
   path: PATH_STRING.nullable(),
+  ref: WorkspaceFileRefSchema.nullable(),
 });
 export type FileChatThreadRecord = z.infer<typeof FileChatThreadRecord>;
 

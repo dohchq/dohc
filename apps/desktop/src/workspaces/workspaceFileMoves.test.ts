@@ -1,3 +1,6 @@
+import { createEngineFileResolver, workspaceFileRef } from "./resolveEngineFiles";
+import type { WorkspaceFileRef } from "@dohc/workspace-contracts/workspace-ref";
+import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { lstat, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { basename, dirname, join, sep } from "node:path";
@@ -91,11 +94,12 @@ async function fixture(options: {
     state: {}, signal: new AbortController().signal, assertCurrent: vi.fn() };
   const workspaceId = "file-moves-test";
   let capture: WorkspaceEngineCapture | undefined;
+  const attachmentId = Symbol("attachment");
+  const sessions = mockDaemonSessions({ rootPath, workspaceId, loopback: new VersionedLoopbackEngine(), nativeMove: options.nativeMove ?? true,
+    ...(options.beforeRequest ? { beforeRequest: options.beforeRequest } : {}),
+    ...(options.afterRequest ? { afterRequest: options.afterRequest } : {}) });
   const engine = () => {
-    capture ??= createWorkspaceEngineCapture({ workspaceId, rootPath, attachmentId: Symbol("attachment"),
-      rustEngineSessions: mockDaemonSessions({ rootPath, workspaceId, loopback: new VersionedLoopbackEngine(), nativeMove: options.nativeMove ?? true,
-        ...(options.beforeRequest ? { beforeRequest: options.beforeRequest } : {}),
-        ...(options.afterRequest ? { afterRequest: options.afterRequest } : {}) }) });
+    capture ??= createWorkspaceEngineCapture({ workspaceId, rootPath, attachmentId, rustEngineSessions: sessions });
     return capture;
   };
   const trashItem = vi.fn(async (absolute: string) => { await rename(absolute, join(systemTrash, basename(absolute))); });
@@ -119,7 +123,14 @@ async function fixture(options: {
     if (entry === undefined) throw new Error(`${name} is not in the system trash`);
     return join(systemTrash, entry);
   };
-  return { rootPath, systemTrash, systemTrashed, operation, engine, trashItem, markDeleted, settle, rows, start, added, workspaceTrash,
+  const resolveRefs = createEngineFileResolver<{ workspaceId: string; rootPath: string; attachmentId: symbol }>((workspace, work) =>
+    sessions.run(workspace, binding => work(new VersionedLiveAdapter(binding.client, binding.workspace, { workspaceId }))));
+  const reference = async (path: string) => {
+    const objectId = await engine().fileObjectIdForPath(path);
+    if (!objectId) throw new Error("Fixture path is untracked: " + path);
+    return workspaceFileRef(workspaceId, objectId, path);
+  };
+  return { reference, resolve: (refs: WorkspaceFileRef[]) => resolveRefs({ workspaceId, rootPath, attachmentId }, refs), rootPath, systemTrash, systemTrashed, operation, engine, trashItem, markDeleted, settle, rows, start, added, workspaceTrash,
     move: (fromPath: string, toPath: string, by: MomentWriteAuthor = named, overwrite?: boolean) =>
       prepareMoveWorkspacePathAs(operation, { fromPath, toPath, ...(overwrite ? { overwrite } : {}) }, by, pathOptions()).then(finish => finish()),
     remove: (path: string, by: MomentWriteAuthor = named) => prepareDeleteWorkspacePathAs(operation, path, by, pathOptions()).then(finish => finish()),
@@ -580,8 +591,12 @@ describe("agent moves and deletes", () => {
     await write(f.rootPath, "dir/people.csv", csv);
     await write(f.rootPath, "dir/a.txt", "a");
     const seen = await f.start();
+    expect(await f.engine().fileObjectIdForPath("dir/large.png")).toBeNull();
+    expect(await f.engine().fileObjectIdForPath("dir/large.txt")).toBeNull();
     const result = change === "move" ? await f.move("dir", "moved") : await f.remove("dir");
     const base = change === "move" ? "moved" : "dir";
+    expect(await f.engine().fileObjectIdForPath(base + "/large.png")).toBeNull();
+    expect(await f.engine().fileObjectIdForPath(base + "/large.txt")).toBeNull();
     expect(result).toMatchObject({ ok: true, withoutHistory: [base + "/people.csv"] });
     const kept = change === "move" ? join(f.rootPath, "moved") : await f.systemTrashed("dir");
     const retained = await readFile(join(kept, "people.csv"));
@@ -1153,5 +1168,71 @@ describe("empty-folder rollback admission", () => {
     })).rejects.toThrow(refusal === "stale" ? "stale workspace" : "read-only");
     expect((await lstat(join(rootPath, "app"))).isDirectory()).toBe(true);
     expect(trashItem).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("WorkspaceRef move identity", () => {
+  it.each(["single", "folder", "binary"])("keeps native identity through a coordinated %s move", async kind => {
+    const f = await fixture();
+    const from = kind === "folder" ? "dir/a.txt" : kind === "binary" ? "photo.bin" : "a.txt";
+    const to = kind === "folder" ? "moved/a.txt" : kind === "binary" ? "renamed.bin" : "renamed.txt";
+    await write(f.rootPath, from, kind === "binary" ? new Uint8Array([0, 255]) : "a");
+    if (kind === "folder") await write(f.rootPath, "dir/b.txt", "b");
+    await f.start();
+    try {
+      const original = await f.reference(from);
+      const sibling = kind === "folder" ? await f.reference("dir/b.txt") : null;
+      expect(await f.move(kind === "folder" ? "dir" : from, kind === "folder" ? "moved" : to)).toMatchObject({ ok: true });
+      await f.settle();
+      expect(await f.resolve([original])).toMatchObject([{ status: "found", path: to, ref: { target: original.target } }]);
+      expect((await f.reference(to)).target).toEqual(original.target);
+      if (sibling) expect(await f.resolve([sibling])).toMatchObject([{ status: "found", path: "moved/b.txt", ref: { target: sibling.target } }]);
+    } finally { await f.engine().stop(); }
+  });
+
+  it("changes identity after an external mv and never resolves a stale id to a replacement at its old path", async () => {
+    const f = await fixture();
+    await write(f.rootPath, "a.txt", "a");
+    await f.start();
+    try {
+      const original = await f.reference("a.txt");
+      await rename(join(f.rootPath, "a.txt"), join(f.rootPath, "external.txt"));
+      await f.settle();
+      expect((await f.reference("external.txt")).target).not.toEqual(original.target);
+      await write(f.rootPath, "a.txt", "replacement");
+      await f.settle();
+      expect((await f.reference("a.txt")).target).not.toEqual(original.target);
+      expect(await f.resolve([original])).toEqual([{ status: "absent" }]);
+    } finally { await f.engine().stop(); }
+  });
+
+  it("changes identity after delete and recreate", async () => {
+    const f = await fixture();
+    await write(f.rootPath, "a.txt", "a");
+    await f.start();
+    try {
+      const original = await f.reference("a.txt");
+      await f.remove("a.txt");
+      await f.settle();
+      await write(f.rootPath, "a.txt", "a");
+      await f.settle();
+      expect((await f.reference("a.txt")).target).not.toEqual(original.target);
+      expect(await f.resolve([original])).toEqual([{ status: "absent" }]);
+    } finally { await f.engine().stop(); }
+  });
+
+  it("does not claim a failed folder move reached its destination", async () => {
+    const f = await fixture({ beforeRequest: refusedFor(VERSIONED_METHOD.textRename, "dir/2.txt") });
+    for (const n of [1, 2]) await write(f.rootPath, "dir/" + n + ".txt", String(n));
+    await f.start();
+    try {
+      const refs = await Promise.all([f.reference("dir/1.txt"), f.reference("dir/2.txt")]);
+      expect(await f.move("dir", "moved")).toMatchObject({ ok: false });
+      await f.settle();
+      const results = await f.resolve(refs);
+      expect(results.every(file => file.status === "absent" || (file.status === "found" && file.path.startsWith("dir/")))).toBe(true);
+      expect(await f.engine().fileObjectIdForPath("moved/1.txt")).toBeNull();
+    } finally { await f.engine().stop(); }
   });
 });

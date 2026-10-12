@@ -1,3 +1,4 @@
+import { workspaceFileRef } from "../workspaces/resolveEngineFiles";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -394,10 +395,11 @@ describe("registered graph and heading handlers", () => {
       { messageId: "message", objectId: "present", pathHint: "old.md" } as Attachment,
       { messageId: "removed-message", objectId: "removed", pathHint: "current.md" } as Attachment,
       { messageId: "invalid-hint", pathHint: "../outside.md" } as Attachment,
+      { messageId: "mounted-legacy-hint", pathHint: "shared-with-me/Shared/a.md" } as Attachment,
       { messageId: "duplicate", objectId: "present", pathHint: "old.md" } as Attachment,
     ]);
     h.resolveFiles.mockResolvedValue([
-      { status: "found", objectId: "present", path: "current.md" }, { status: "absent" }, { status: "invalid" },
+      { status: "found", objectId: "present", path: "current.md", ref: workspaceFileRef("workspace", "present", "current.md") }, { status: "absent" }, { status: "invalid" },
     ]);
     h.syncChannels.mockResolvedValue(2);
     const graph = await h.invoke(CHANNELS.readWorkspaceGraph, { workspaceId: "workspace", includeChatMentions: true }) as {
@@ -408,7 +410,7 @@ describe("registered graph and heading handlers", () => {
     expect(graph.nodes.some((node) => node.path === "old.md")).toBe(false);
     expect(graph.edges).toHaveLength(1);
     expect(h.capture).toHaveBeenCalledWith("workspace", "Chat mentions");
-    expect(h.resolveFiles).toHaveBeenCalledWith(h.workspace, [{ objectId: "present" }, { objectId: "removed" }, { path: "../outside.md" }]);
+    expect(h.resolveFiles).toHaveBeenCalledWith(h.workspace, [workspaceFileRef("workspace", "present", "old.md"), workspaceFileRef("workspace", "removed", "current.md"), { path: "../outside.md" }]);
   });
 
   it("rejects a heading response after renderer retirement", async () => {

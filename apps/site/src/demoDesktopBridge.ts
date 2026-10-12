@@ -604,7 +604,7 @@ const demoBridge = {
   onCloudSessionChanged() {
     return () => {};
   },
-  async listChatChannels() {
+  async listChatChannels({ workspaceId }) {
     return {
       channels: [
         channel("channel-agent", "My agent", "agent"),
@@ -618,6 +618,8 @@ const demoBridge = {
           createdAtMs: now - 7_200_000,
           updatedAtMs: now - 7_200_000,
           path: "projects/launch-plan.md",
+          ref: { workspaceId, target: { kind: "file" as const, objectId: "demo-launch-plan" },
+            labels: { name: "launch-plan.md", path: "projects/launch-plan.md", displayKind: "markdown" as const } },
         },
       ],
     };

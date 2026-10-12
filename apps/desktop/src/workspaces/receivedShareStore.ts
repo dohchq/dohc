@@ -140,6 +140,9 @@ export function createReceivedShareAcquisition(dependencies: {
       if (!previous || previous.userId === current?.userId && previous.relayUrl === current.relayUrl) return;
       try { dependencies.store.remove(previous); } catch (error) { dependencies.logError(error); }
     },
+    liveInventory(): ReceivedInventory | null {
+      return live && same(dependencies.scope(), live.scope) ? live.inventory : null;
+    },
     observation(): ReceivedObservation {
       const scope = dependencies.scope();
       if (!scope) return { inventory: null, checkedAtMs: null, freshness: "unknown" };

@@ -1,3 +1,4 @@
+import type { ShareReferenceSource } from "./shareViewInfo";
 import { errorMessage } from "./workspaceError";
 import type { ShareUnconfirmedChanges } from "./shareViewInfo";
 import { createHash } from "node:crypto";
@@ -57,7 +58,7 @@ export type ShareViewFilesTarget =
   | { kind: "standalone"; workspaceId: string }
   | { kind: "mount"; workspaceId: string; shareId: string };
 
-export interface ResolvedShareViewFilesTarget {
+export interface ResolvedShareViewFilesTarget extends ShareReferenceSource {
   recipientUserId?: string;
   unsavedPaths?: string[] | null;
   unconfirmedChanges?: ShareUnconfirmedChanges;

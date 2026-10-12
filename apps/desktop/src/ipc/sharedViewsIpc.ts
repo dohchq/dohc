@@ -217,6 +217,7 @@ export function registerSharedViewsIpcHandlers<
         await setWorkspaceShareView(created.workspaceId, {
           shareId: parsed.shareId,
           ...(info.granterUserId ? { granterUserId: info.granterUserId } : {}),
+          sourceWorkspaceId: info.sourceWorkspaceId, grantId: info.grantId, grantGeneration: info.grantGeneration,
           granterEmail: info.granterEmail,
           subjectName: info.subjectName,
           sharerName: info.sharerName,
@@ -479,6 +480,8 @@ export function registerSharedViewsIpcHandlers<
               const nextShareView = {
                 ...current.shareView,
                 ...(info.granterUserId ? { granterUserId: info.granterUserId } : {}),
+                ...(JSON.stringify(recordedShareSelector(info.selector)) === JSON.stringify(recordedShareSelector(current.shareView.grantedSelector))
+                  ? { sourceWorkspaceId: info.sourceWorkspaceId, grantId: info.grantId, grantGeneration: info.grantGeneration } : {}),
                 genericChatWritable: info.genericChatWritable,
                 subjectName: info.subjectName,
                 sharerName: info.sharerName,
