@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useState } from "react";
+import { Profiler, useState } from "react";
 import * as Y from "yjs";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { PageIdentity } from "./PageIdentity";
 import { NoticeCenter } from "./workbench/NoticeCenter";
 import { parseFrontmatter } from "./markdown/frontmatter";
@@ -43,7 +44,7 @@ describe("PageIdentity", () => {
 
     it("falls back to the filename stem as an empty-state placeholder", () => {
       render(
-        <PageIdentity body={"# Body\n"} onChange={() => {}} filenameStem="2026-plan" />,
+        <PageIdentity body={"Body text\n"} onChange={() => {}} filenameStem="2026-plan" />,
       );
       const input = screen.getByTestId("page-title") as HTMLTextAreaElement;
       expect(input.value).toBe("");
@@ -319,6 +320,115 @@ describe("PageIdentity", () => {
 
       fireEvent.keyDown(input, { key: "Enter" });
       expect(onEnterBody).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("one title", () => {
+    const titleField = () => screen.getByTestId("page-title") as HTMLTextAreaElement;
+    // Folded, the field says "Add title" beside "Add icon"; open, it shows
+    // the title, or the file name in its place.
+    const folded = () => titleField().placeholder === "Add title";
+
+    it.each([
+      ["an H1 first and no title", "# Plan\n\nBody\n", true],
+      ["frontmatter, then an H1", "---\nicon: 🚀\n---\n\n# Plan\n", true],
+      ["a setext H1 first", "Plan\n====\n\nBody\n", true],
+      ["a title property", "---\ntitle: Plan\n---\n\n# Plan\n", false],
+      ["no H1", "Body\n", false],
+      ["an H2 first", "## Plan\n", false],
+      ["a later H1", "Intro\n\n# Plan\n", false],
+    ])("folds the title field for %s: %s", (_, body, expected) => {
+      render(<PageIdentity body={body} onChange={() => {}} filenameStem="plan" />);
+      expect(folded()).toBe(expected);
+    });
+
+    it("folds a read-only title too, keeping it mounted and read-only", () => {
+      render(<PageIdentity body={"# Plan\n"} onChange={() => {}} filenameStem="plan" readOnly />);
+      expect(folded()).toBe(true);
+      expect(titleField().readOnly).toBe(true);
+      expect(titleField().className).toContain("invisible");
+    });
+
+    it("unfolds the same field on focus, folds it on blur with no title, and writes a typed title", async () => {
+      const user = userEvent.setup();
+      render(
+        <>
+          <ControlledPageIdentity initialBody={"# Plan\n"} stem="plan" />
+          <button type="button">elsewhere</button>
+        </>,
+      );
+      const field = titleField();
+      expect(folded()).toBe(true);
+
+      act(() => field.focus());
+      expect(titleField()).toBe(field);
+      expect(folded()).toBe(false);
+      expect(field.placeholder).toBe("plan");
+      expect(document.activeElement).toBe(field);
+
+      await user.click(screen.getByRole("button", { name: "elsewhere" }));
+      expect(folded()).toBe(true);
+
+      await user.click(field);
+      await user.keyboard("Q3");
+      expect(field.selectionStart).toBe(2);
+      expect(currentMeta().title).toBe("Q3");
+      await user.click(screen.getByRole("button", { name: "elsewhere" }));
+      expect(folded()).toBe(false);
+      expect(field.value).toBe("Q3");
+    });
+
+    it("keeps the Tab order icon, then title", async () => {
+      const user = userEvent.setup();
+      render(<PageIdentity body={"# Plan\n"} onChange={() => {}} filenameStem="plan" />);
+
+      await user.tab();
+      expect(document.activeElement).toBe(screen.getByTestId("page-icon-add"));
+      await user.tab();
+      expect(document.activeElement).toBe(titleField());
+      expect(folded()).toBe(false);
+    });
+
+    describe("in a live document", () => {
+      function insertParagraph(doc: Y.Doc, index: number) {
+        const block = new Y.XmlElement("paragraph");
+        block.insert(0, [new Y.XmlText("Text")]);
+        doc.getXmlFragment("body").insert(index, [block]);
+      }
+
+      it("follows the first block and renders only when the answer changes", () => {
+        // The editor's own encoding, which keeps a heading's level as a number.
+        const doc = markdownToYDoc("# Plan\n\nBody\n");
+        const heading = doc.getXmlFragment("body").get(0) as Y.XmlElement;
+        let renders = 0;
+        render(
+          <Profiler id="identity" onRender={() => (renders += 1)}>
+            <PageIdentity ydoc={doc} filenameStem="plan" />
+          </Profiler>,
+        );
+        expect(folded()).toBe(true);
+        const before = renders;
+
+        // Typing in the H1, and a block after it, leave the answer alone.
+        act(() => (heading.get(0) as Y.XmlText).insert(4, " more"));
+        act(() => insertParagraph(doc, 1));
+        expect(renders).toBe(before);
+
+        // An H2, then a paragraph above the H1, unfold it.
+        act(() => heading.setAttribute("level", "2"));
+        expect(folded()).toBe(false);
+        act(() => heading.setAttribute("level", "1"));
+        expect(folded()).toBe(true);
+        act(() => insertParagraph(doc, 0));
+        expect(folded()).toBe(false);
+      });
+
+      it("shows a title property instead of folding", () => {
+        const doc = markdownToYDoc("---\ntitle: Plan\n---\n\n# Plan\n");
+        render(<PageIdentity ydoc={doc} filenameStem="plan" />);
+        expect(folded()).toBe(false);
+        expect(titleField().value).toBe("Plan");
+      });
     });
   });
 

@@ -7,19 +7,75 @@ import {
 import { patchFrontmatter, setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter-map";
 import { modalFocusableElements, switchModalRegion, trapModalTabKey } from "./modalFocus";
 import { Smile } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type * as Y from "yjs";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import * as Y from "yjs";
 import {
   applyFrontmatter,
   displayFrontmatterValue,
+  markdownEditorBody,
   orderFrontmatter,
   parseFrontmatter,
 } from "./markdown/frontmatter";
+import { TOPMATTER_FLAG } from "./pageTopmatter";
 
 // The frontmatter Y.Map field name shared with PropertiesPanel. Title + icon
 // are reserved keys the document system owns — this
 // surface edits them directly instead of exposing them as user properties.
 const FRONTMATTER_FIELD = "frontmatter";
+// The body editor's fragment in a live document.
+const BODY_FIELD = "body";
+
+// One title: a page with no `title` whose body opens with an H1 shows that
+// H1 as its title, and the title field folds into the row beside the icon.
+// Both answers read the first block alone, never the rest of the document.
+//
+// In Markdown, the first lines after any blank ones: `# ` or a setext `===`.
+const OPENS_WITH_H1 = /^(?:[ \t]*\r?\n)*(?: {0,3}#(?:[ \t]|\r?\n|$)|[ \t]*\S[^\n]*\n {0,3}=+[ \t]*(?:\r?\n|$))/;
+
+function isH1(node: unknown): boolean {
+  return node instanceof Y.XmlElement && node.nodeName === "heading" && Number(node.getAttribute("level")) === 1;
+}
+
+// In a live document, the body fragment's first child. The fragment reports
+// blocks added or removed, and the first block reports its own attributes;
+// typing inside a block reports to neither. The snapshot is a boolean, so a
+// report that leaves the answer unchanged renders nothing.
+function useLiveOpensWithH1(ydoc: Y.Doc | null): boolean {
+  const subscribe = useCallback(
+    (onChange: () => void) => {
+      if (!ydoc) return () => undefined;
+      const body = ydoc.getXmlFragment(BODY_FIELD);
+      let first: Y.XmlElement | null = null;
+      const watchFirst = () => {
+        const next = body.get(0);
+        const element = next instanceof Y.XmlElement ? next : null;
+        if (element === first) return;
+        first?.unobserve(onChange);
+        first = element;
+        first?.observe(onChange);
+      };
+      const onBody = () => {
+        watchFirst();
+        onChange();
+      };
+      watchFirst();
+      body.observe(onBody);
+      return () => {
+        body.unobserve(onBody);
+        first?.unobserve(onChange);
+      };
+    },
+    [ydoc],
+  );
+  return useSyncExternalStore(subscribe, () => (ydoc ? isH1(ydoc.getXmlFragment(BODY_FIELD).get(0)) : false));
+}
+
+const TITLE_FIELD = "block resize-none overflow-hidden border-0 bg-transparent field-sizing-content read-only:cursor-default";
+// Its own line under the icon, as large as the drawing's title.
+const TITLE_OPEN = `${TITLE_FIELD} w-full basis-full p-0 font-sans text-[2em] font-bold leading-[1.15] tracking-[-0.02em] text-ink placeholder:text-subtle`;
+// Folded beside "Add icon", and shown with it while the pointer is over the
+// page's identity. A read-only page has nothing to add, so it stays hidden.
+const TITLE_FOLDED = `${TITLE_FIELD} rounded-md px-1.5 py-[3px] text-[12.5px] leading-normal text-subtle placeholder:text-subtle hover:placeholder:text-muted`;
 
 // A small curated palette — enough for the common cases (docs, projects,
 // status, life) without shipping a multi-thousand-emoji database. Anything
@@ -35,7 +91,7 @@ const EMOJI_CHOICES = [
   "🐛", "🎓", "👤", "👥", "💬", "📣", "🔔", "❓", "❗", "⏰",
 ] as const;
 
-// Page identity above the document body: a large serif title and an emoji
+// Page identity above the document body: a large title and an emoji
 // icon, both stored as reserved `title` / `icon` frontmatter keys. This is a
 // sibling React surface — not part of the ProseMirror doc — so it never
 // touches the editor schema. It reuses the same read/write plumbing as
@@ -128,6 +184,8 @@ export function PageIdentity(props: PageIdentityProps) {
   }, [body, ydoc, ydocRevision]);
 
   const title = displayFrontmatterValue(meta.title);
+  const liveOpensWithH1 = useLiveOpensWithH1(ydoc);
+  const localOpensWithH1 = useMemo(() => !ydoc && OPENS_WITH_H1.test(markdownEditorBody(body)), [body, ydoc]);
   const [editRefused, setEditRefused] = useState(false);
   useEffect(() => setEditRefused(false), [ydoc, body]);
   const icon =
@@ -160,7 +218,7 @@ export function PageIdentity(props: PageIdentityProps) {
   // frontmatter whenever an external change lands and the field isn't focused
   // (mirrors how PropertiesPanel avoids a dirty-loop with the editor).
   const [titleDraft, setTitleDraft] = useState(title);
-  const titleFocused = useRef(false);
+  const [titleFocused, setTitleFocused] = useState(false);
   const titleRef = useRef<HTMLTextAreaElement | null>(null);
   const titleCaret = useRef<number | null>(null);
   useLayoutEffect(() => {
@@ -170,8 +228,10 @@ export function PageIdentity(props: PageIdentityProps) {
     titleRef.current?.setSelectionRange(caret, caret);
   });
   useEffect(() => {
-    if (!titleFocused.current) setTitleDraft(title);
-  }, [title]);
+    if (!titleFocused) setTitleDraft(title);
+  }, [title, titleFocused]);
+  // The same field folds and unfolds, so focus, caret and Tab order stay.
+  const folded = (liveOpensWithH1 || localOpensWithH1) && title === "" && !titleFocused;
 
   const [pickerOpen, setPickerOpen] = useState(false);
   const [emojiInput, setEmojiInput] = useState("");
@@ -230,9 +290,11 @@ export function PageIdentity(props: PageIdentityProps) {
 
   return (
     <div className="dohc-page-identity group" data-testid="page-identity">
-      <div className="dohc-page-identity__inner">
-        {editRefused ? <span role="status" className="dohc-page-properties__flag" title={FRONTMATTER_EDIT_REFUSED_MESSAGE}>Edit in text</span> : null}
-        <div className="dohc-page-identity__icon-row">
+      {/* The icon's line, then the title on its own line. Folded, the title
+          joins the icon's line. */}
+      <div className="dohc-page-identity__inner flex flex-wrap items-center gap-x-1 gap-y-3">
+        {editRefused ? <span role="status" className={`${TOPMATTER_FLAG} basis-full px-1.5`} title={FRONTMATTER_EDIT_REFUSED_MESSAGE}>Edit in text</span> : null}
+        <div className="relative min-h-5">
           {icon ? (
             <button
               ref={iconTriggerRef}
@@ -318,14 +380,12 @@ export function PageIdentity(props: PageIdentityProps) {
           aria-label="Page title"
           rows={1}
           value={titleDraft}
-          placeholder={props.filenameStem}
+          placeholder={folded ? "Add title" : props.filenameStem}
           spellCheck={false}
           readOnly={readOnly}
-          onFocus={() => {
-            titleFocused.current = true;
-          }}
+          onFocus={() => setTitleFocused(true)}
           onBlur={() => {
-            titleFocused.current = false;
+            setTitleFocused(false);
             setTitleDraft(title);
           }}
           onChange={(event) => {
@@ -352,7 +412,13 @@ export function PageIdentity(props: PageIdentityProps) {
               props.onEnterBody?.();
             }
           }}
-          className="dohc-page-identity__title"
+          className={
+            !folded
+              ? TITLE_OPEN
+              : readOnly
+                ? `${TITLE_FOLDED} invisible`
+                : `${TITLE_FOLDED} opacity-0 transition-opacity duration-100 ease-out group-hover:opacity-100`
+          }
         />
       </div>
     </div>
