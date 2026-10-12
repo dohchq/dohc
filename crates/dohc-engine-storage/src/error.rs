@@ -10,6 +10,12 @@
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum StorageError {
+    #[error("passive store exceeds {constraint}: limit {limit}, observed {observed}")]
+    PassiveStoreLimit {
+        constraint: &'static str,
+        limit: u64,
+        observed: u64,
+    },
     /// The database was stamped with a schema fingerprint this build does not
     /// recognize (the v1-vs-v2 fence). Never auto-migrated, never
     /// initialized over — the caller must export/reset (`plan §Day-one Rust
@@ -111,6 +117,7 @@ impl StorageError {
     /// (tests assert it); the `Display` message is best-effort human text.
     pub const fn code(&self) -> &'static str {
         match self {
+            StorageError::PassiveStoreLimit { .. } => "passive-store-limit",
             StorageError::UnsupportedFingerprint { .. } => "unsupported-fingerprint",
             StorageError::ForeignDatabase => "foreign-database",
             StorageError::StateCorrupt { .. } => "state-corrupt",

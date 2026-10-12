@@ -16,6 +16,10 @@
  */
 export const MAX_DESKTOP_CAPTURE_TEXT_BYTES = 128 * 1024;
 
+/** Private replica limits, mirrored from dohc-engine-storage/src/limits.rs. */
+export const MAX_PASSIVE_DATABASE_BYTES = 256 * 1024 * 1024;
+export const MAX_PASSIVE_DOCUMENTS = 4096;
+
 /**
  * `RESOLVE_REQUEST_FRAME_BYTES`: the control frame that carries a whole
  * `conflicts.resolve` request, measured in JSON-ENCODED bytes.

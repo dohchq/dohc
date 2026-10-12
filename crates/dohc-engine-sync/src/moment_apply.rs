@@ -611,7 +611,13 @@ fn apply_moment_append(
             |row| row.get(0),
         )
         .map_err(SyncError::corrupt)?;
-    if duplicate {
+    if duplicate
+        || crate::passive_projection::receipt_exists(
+            tx,
+            &envelope.workspace_id,
+            &payload.moment_id,
+        )?
+    {
         return Err(SyncError::InvalidInput {
             reason: "replicated plaintext moment id collides with existing history",
         });
@@ -1430,7 +1436,17 @@ fn holds_earlier_lineage_artifact(
                 ContentKind::from_wire(payload.payload_after_content_kind.as_deref()).as_str(),payload.payload_after_blob_sha256],
             |row| row.get(0),
         ).map_err(SyncError::corrupt)?;
-        if held {
+        if held
+            || (ContentKind::from_wire(payload.payload_after_content_kind.as_deref())
+                == ContentKind::Text
+                && crate::passive_projection::holds_artifact(
+                    tx,
+                    &key,
+                    &id,
+                    &payload.payload_after_path,
+                    &payload.payload_after_blob_sha256,
+                )?)
+        {
             return Ok(true);
         }
     }
@@ -1576,7 +1592,8 @@ pub(crate) fn record_conflict_parent_shadow_in_tx(
             |row| row.get(0),
         )
         .map_err(SyncError::corrupt)?;
-    if duplicate {
+    if duplicate || crate::passive_projection::receipt_exists(tx, workspace_id, &payload.moment_id)?
+    {
         let stored_moment: bool = tx
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM moments WHERE workspace_id=?1 AND moment_id=?2)",

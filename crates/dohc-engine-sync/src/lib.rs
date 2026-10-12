@@ -29,6 +29,7 @@ mod settlement_publication;
 pub use owner_publication::{
     OwnerAdmissionPending, OwnerPublicationPrefix, owner_publication_prefix,
 };
+mod passive_projection;
 mod path_policy;
 mod references;
 mod refusal_notices;

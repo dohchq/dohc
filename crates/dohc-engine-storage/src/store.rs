@@ -68,8 +68,25 @@ impl EngineStore {
     /// Restrict this writable connection to imported state and private projections.
     /// The guards live only on this connection; ordinary opens keep their behavior.
     pub fn make_passive(&mut self) -> Result<(), StorageError> {
-        self.conn.execute_batch(
-            "CREATE TEMP TRIGGER passive_no_file_jobs BEFORE INSERT ON main.materialization_jobs
+        Self::check_passive_limits(&self.conn)?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+            .map_err(StorageError::persist)?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS passive_pending_projection (
+               workspace_id TEXT PRIMARY KEY, version_id TEXT NOT NULL, object_id TEXT NOT NULL,
+               path TEXT NOT NULL, text TEXT, blob_sha256 TEXT NOT NULL, through_seq INTEGER NOT NULL,
+               moment_id TEXT NOT NULL, author_json TEXT,
+               recorded_at_ms INTEGER NOT NULL, lineage_claim_id TEXT NOT NULL,
+               origin_id TEXT NOT NULL, origin_seq INTEGER NOT NULL
+             ) STRICT;
+             CREATE TABLE IF NOT EXISTS passive_projection_receipts (
+               workspace_id TEXT NOT NULL, moment_id TEXT NOT NULL, version_id TEXT NOT NULL,
+               object_id TEXT NOT NULL, path TEXT NOT NULL, blob_sha256 TEXT NOT NULL,
+               PRIMARY KEY(workspace_id,moment_id)
+             ) STRICT;
+             CREATE INDEX IF NOT EXISTS passive_projection_receipts_content
+               ON passive_projection_receipts(workspace_id,version_id,object_id,blob_sha256);
+             CREATE TEMP TRIGGER passive_no_file_jobs BEFORE INSERT ON main.materialization_jobs
              BEGIN SELECT RAISE(IGNORE); END;
              CREATE TEMP TRIGGER passive_no_automation_claims BEFORE INSERT ON main.automation_claims
              BEGIN SELECT RAISE(IGNORE); END;
@@ -77,12 +94,67 @@ impl EngineStore {
              WHEN NEW.imported = 0
              BEGIN SELECT RAISE(ABORT, 'passive store cannot originate'); END;"
         ).map_err(StorageError::persist)?;
+        Self::check_passive_limits(&tx)?;
+        tx.commit().map_err(StorageError::persist)?;
         self.passive = true;
         Ok(())
     }
 
     pub fn is_passive(&self) -> bool {
         self.passive
+    }
+
+    fn check_passive_limits(conn: &Connection) -> Result<(), StorageError> {
+        let pages: i64 = conn
+            .pragma_query_value(None, "page_count", |row| row.get(0))
+            .map_err(StorageError::corrupt)?;
+        let page_size: i64 = conn
+            .pragma_query_value(None, "page_size", |row| row.get(0))
+            .map_err(StorageError::corrupt)?;
+        let documents: i64 = conn
+            .query_row("SELECT COUNT(*) FROM file_objects", [], |row| row.get(0))
+            .map_err(StorageError::corrupt)?;
+        let pages = u64::try_from(pages).map_err(StorageError::corrupt)?;
+        let page_size = u64::try_from(page_size).map_err(StorageError::corrupt)?;
+        let documents = u64::try_from(documents).map_err(StorageError::corrupt)?;
+        for (constraint, limit, observed) in [
+            (
+                "MAX_PASSIVE_DATABASE_BYTES",
+                crate::MAX_PASSIVE_DATABASE_BYTES,
+                pages.saturating_mul(page_size),
+            ),
+            (
+                "MAX_PASSIVE_DOCUMENTS",
+                crate::MAX_PASSIVE_DOCUMENTS,
+                documents,
+            ),
+        ] {
+            if observed > limit {
+                return Err(StorageError::PassiveStoreLimit {
+                    constraint,
+                    limit,
+                    observed,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Release temporary WAL growth after a durable private cursor commit.
+    pub fn checkpoint_passive(&self) -> Result<(), StorageError> {
+        if !self.passive {
+            return Ok(());
+        }
+        let (busy, _, _): (i64, i64, i64) = self
+            .conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .map_err(StorageError::persist)?;
+        if busy != 0 {
+            return Err(StorageError::FileLocked);
+        }
+        Ok(())
     }
 
     /// Open-or-create the store at `path`, applying the full open ritual and
@@ -252,7 +324,7 @@ impl EngineStore {
     where
         E: From<StorageError>,
     {
-        Self::write_on_connection(&self.conn, faults, f)
+        Self::write_on_connection(&self.conn, self.passive, faults, f)
     }
 
     /// One FULL commit syncs this transaction and every earlier WAL commit.
@@ -265,12 +337,13 @@ impl EngineStore {
         E: From<StorageError>,
     {
         crate::durability::with_full_synchronous(&self.conn, |conn| {
-            Self::write_on_connection(conn, faults, f)
+            Self::write_on_connection(conn, self.passive, faults, f)
         })
     }
 
     fn write_on_connection<T, E>(
         conn: &Connection,
+        passive: bool,
         faults: &dyn FaultInjector,
         f: impl FnOnce(&Transaction<'_>) -> Result<T, E>,
     ) -> Result<TxnOutcome<T>, E>
@@ -289,6 +362,9 @@ impl EngineStore {
                 return Err(err);
             }
         };
+        if passive {
+            Self::check_passive_limits(&tx)?;
+        }
 
         // Cancel/crash point is between durable steps, never mid-commit: the
         // closure has issued all SQL but nothing is durable yet.

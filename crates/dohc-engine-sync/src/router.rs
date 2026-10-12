@@ -121,6 +121,13 @@ pub(crate) fn apply_replication_envelope_in_batch(
     leases: &dyn LeaseProbe,
     batch_inactive: bool,
 ) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
+    if store.is_passive() {
+        if batch_inactive {
+            crate::passive_projection::before_row(store, envelope, faults)?;
+        } else {
+            crate::passive_projection::flush(store, &envelope.workspace_id, faults)?;
+        }
+    }
     if envelope
         .origin_id
         .starts_with(crate::moment_apply::COLLECTION_FILE_ORIGIN_PREFIX)

@@ -61,6 +61,12 @@ pub const ENGINE_BUILD: &str = env!("CARGO_PKG_VERSION");
 /// write (reject over-cap) and the read buffer. Generous but never unbounded.
 pub const MAX_BLOB_BYTES: usize = 64 * 1024 * 1024;
 
+/// Allocated SQLite pages, including free pages, in one private replica.
+/// WAL is temporary overhead and is truncated at a passive cursor commit.
+pub const MAX_PASSIVE_DATABASE_BYTES: u64 = 256 * 1024 * 1024;
+/// All known file identities, including deleted identities and other versions.
+pub const MAX_PASSIVE_DOCUMENTS: u64 = 4096;
+
 /// The bounded, normative maximum number of atomic-replace attempts in the
 /// materialization pipeline before failing closed with [`crate::StorageError::FileLocked`]
 /// and leaving the job pending for startup replay. Windows AV/indexer sharing

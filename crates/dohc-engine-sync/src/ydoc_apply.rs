@@ -2356,20 +2356,18 @@ fn projection_held_in_tx(
     {
         return Ok(true);
     }
-    tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ydoc_docs \
+    let sha = hex_sha256(content.as_bytes());
+    let held: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_docs \
            WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND last_settled_sha=?4) \
          OR EXISTS(SELECT 1 FROM moments \
            WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND after_blob_sha256=?4)",
-        params![
-            key.workspace_id,
-            key.version_id,
-            key.object_id,
-            hex_sha256(content.as_bytes()),
-        ],
-        |row| row.get(0),
-    )
-    .map_err(SyncError::corrupt)
+            params![key.workspace_id, key.version_id, key.object_id, sha,],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    Ok(held || crate::passive_projection::holds_content(tx, key, &sha)?)
 }
 
 /// What folding a file's text into its Y.Doc lineage did.
@@ -4003,6 +4001,33 @@ pub fn project_and_write_in_tx(
     now_ms: i64,
     search_policy: Option<&SearchPolicySnapshot>,
 ) -> Result<bool, SyncError> {
+    project_and_write(
+        tx,
+        key,
+        path,
+        doc,
+        content_kind,
+        origin_id,
+        origin_seq,
+        now_ms,
+        search_policy,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn project_and_write(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    doc: &dohc_engine_collab::Ydoc,
+    content_kind: ContentKind,
+    origin_id: &str,
+    origin_seq: i64,
+    now_ms: i64,
+    search_policy: Option<&SearchPolicySnapshot>,
+    stage_plaintext: bool,
+) -> Result<bool, SyncError> {
     require_resolved_local_settlement(tx, key, now_ms)?;
     let current = validate_ydoc_identity(tx, key, path)?;
     if content_kind == dohc_engine_collab::ContentKind::Richdoc {
@@ -4020,13 +4045,13 @@ pub fn project_and_write_in_tx(
         "SELECT lineage_claim_id FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
         params![key.workspace_id, key.version_id, key.object_id], |row| row.get(0),
     ).optional().map_err(SyncError::corrupt)?.flatten();
-    if let Some(lineage) = lineage {
+    if let Some(lineage) = lineage.as_ref() {
         crate::refusal_notices::clear_lineage_in_tx(
             tx,
             &key.workspace_id,
             &key.version_id,
             &key.object_id,
-            &lineage,
+            lineage,
         )?;
     }
     // While a sync conflict is open on this object, the visible head belongs
@@ -4078,6 +4103,44 @@ pub fn project_and_write_in_tx(
     // A deterministic per-envelope id keeps a retained drain's retry on its
     // original History row, even after another write advances the head.
     let moment_id = ydoc_apply_moment_id(key, path, origin_id, origin_seq);
+    if stage_plaintext
+        && content_kind == ContentKind::Plaintext
+        && current.snapshot.is_some()
+        && !tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM moments WHERE workspace_id=?1 AND moment_id=?2) \
+            OR EXISTS(SELECT 1 FROM secret_moments WHERE workspace_id=?1 AND moment_id=?2)",
+                params![key.workspace_id, moment_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(SyncError::corrupt)?
+    {
+        let authors = dohc_engine_collab::author_coverage::interval_in(tx, key, i64::MAX)
+            .map_err(map_collab_hard_error)?
+            .moment_json();
+        return crate::passive_projection::stage(
+            tx,
+            &WriteText {
+                workspace_id: key.workspace_id.clone(),
+                version_id: key.version_id.clone(),
+                object_id: key.object_id.clone(),
+                path: path.to_owned(),
+                text: projection.content,
+                moment_id,
+                metadata_origin: "ydoc".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: authors,
+                now_ms,
+                request_id: None,
+            },
+            lineage
+                .as_deref()
+                .ok_or_else(|| local_corruption("passive projection has no lineage"))?,
+            origin_id,
+            origin_seq,
+        );
+    }
     // A retained drain can replay after its coverage was consumed or audited.
     // Reuse the recorded authors; the domain still checks all write identity fields.
     let recorded_authors: Option<Option<String>> = tx
@@ -5049,6 +5112,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
     let mut sharing_declined = None;
     let mut record_facts = None;
     let mut cache_probe = RemoteAppendProbe::default();
+    let stage_plaintext = store.is_passive() && batch_inactive;
     let gate_cache: &WriterDocCache = cache;
     let outcome_result = crate::apply::apply_envelope_with_mutation_outcome(
         store,
@@ -5075,13 +5139,16 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
             // content and materialize an incomplete view. Skip — the envelope
             // that completes the dependency projects the full doc.
             let mutation = if projected.doc.has_pending_dependencies() {
+                if stage_plaintext {
+                    crate::passive_projection::freeze(tx, &key)?;
+                }
                 crate::apply::MutationOutcome::Applied(applied)
             } else {
                 tx.execute_batch("SAVEPOINT dohc_ydoc_projection")
                     .map_err(SyncError::persist)?;
                 let projection_moment_id =
                     ydoc_apply_moment_id(&key, &update_path, &op.origin_id, op.origin_seq);
-                match project_and_write_in_tx(
+                match project_and_write(
                     tx,
                     &key,
                     &update_path,
@@ -5091,6 +5158,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                     op.origin_seq,
                     op.recorded_at_ms,
                     search_policy.as_ref(),
+                    stage_plaintext,
                 ) {
                     Ok(created) => {
                         if created && provisional_author {
@@ -5127,6 +5195,9 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                          RELEASE dohc_ydoc_projection",
                         )
                         .map_err(SyncError::persist)?;
+                        if stage_plaintext {
+                            crate::passive_projection::freeze(tx, &key)?;
+                        }
                         crate::apply::MutationOutcome::RefusedRetainingMutation {
                             reason: reason.to_owned(),
                         }
@@ -5141,6 +5212,9 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                          RELEASE dohc_ydoc_projection",
                         )
                         .map_err(SyncError::persist)?;
+                        if stage_plaintext {
+                            crate::passive_projection::freeze(tx, &key)?;
+                        }
                         crate::apply::MutationOutcome::RefusedRetainingMutation {
                             reason: projection_too_large_reason(
                                 update_kind,
@@ -5640,7 +5714,7 @@ pub(crate) fn map_collab_hard_error(error: CollabError) -> SyncError {
     }
 }
 
-fn map_domain_payload_error(error: DomainError, reason: &'static str) -> SyncError {
+pub(crate) fn map_domain_payload_error(error: DomainError, reason: &'static str) -> SyncError {
     match error {
         // The one hard exception living inside `InvalidInput`: an object-alias
         // collision names corrupt state, not a caller mistake, so it must be

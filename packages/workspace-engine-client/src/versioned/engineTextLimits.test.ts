@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { jsonStringEncodedLength } from "./engineTextLimits";
+import { readFileSync } from "node:fs";
+import { jsonStringEncodedLength, MAX_PASSIVE_DATABASE_BYTES, MAX_PASSIVE_DOCUMENTS } from "./engineTextLimits";
+
+it("keeps replica admission limits equal to the native store", () => {
+  const source = readFileSync(new URL("../../../../crates/dohc-engine-storage/src/limits.rs", import.meta.url), "utf8");
+  for (const [name, value] of Object.entries({ MAX_PASSIVE_DATABASE_BYTES, MAX_PASSIVE_DOCUMENTS })) {
+    const expression = source.match(new RegExp(`pub const ${name}: u64 = ([0-9 *]+);`))?.[1];
+    expect(expression, name).toBeDefined();
+    expect(expression!.split("*").map(Number).reduce((product, part) => product * part, 1), name).toBe(value);
+  }
+});
 
 // The merged-resolution budget is spent in encoded bytes, so this count must
 // be the encoder’s count. `JSON.stringify` is the oracle: it builds the exact

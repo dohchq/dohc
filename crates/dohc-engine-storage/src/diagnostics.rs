@@ -35,6 +35,8 @@ pub enum CorruptionKind {
     /// A transient lock (Windows AV/indexer, busy SQLite handle). Recovery:
     /// retry; not corruption.
     TransientLock,
+    /// Replica admission refused an intact store that exceeds its private budget.
+    CapacityLimit,
 }
 
 impl CorruptionKind {
@@ -47,6 +49,7 @@ impl CorruptionKind {
             CorruptionKind::Permission => "permission",
             CorruptionKind::DiskFull => "disk-full",
             CorruptionKind::TransientLock => "transient-lock",
+            CorruptionKind::CapacityLimit => "capacity-limit",
         }
     }
 }
@@ -63,6 +66,7 @@ pub fn classify(err: &StorageError) -> CorruptionKind {
         StorageError::DiskFull { .. } => CorruptionKind::DiskFull,
         StorageError::PermissionDenied { .. } => CorruptionKind::Permission,
         StorageError::FileLocked => CorruptionKind::TransientLock,
+        StorageError::PassiveStoreLimit { .. } => CorruptionKind::CapacityLimit,
         // ForeignDatabase, StateCorrupt, BlobIntegrity, and the persist/backup/
         // input families all mean "the store as read is not usable as ours" —
         // corruption for recovery purposes.
@@ -171,6 +175,7 @@ fn redacted_message(err: &StorageError) -> &'static str {
         StorageError::DiskFull { .. } => "insufficient free space",
         StorageError::PermissionDenied { .. } => "permission denied accessing the database",
         StorageError::FileLocked => "the database is transiently locked; retry",
+        StorageError::PassiveStoreLimit { .. } => "the private replica exceeds its capacity limit",
         StorageError::BlobIntegrity { .. } => "a stored blob failed its integrity check",
         _ => "the engine store could not be opened",
     }
