@@ -7,7 +7,7 @@ import {
 import { badRequest, notFound, relayError } from "./errors";
 import { assertChatAuthorship, assertClientLogProvenance, parseAuthenticatedLogOps, type LogAuthorNameLookup } from "./relayLogInputs";
 import { parseCursor, parseLimit, parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
-import type { EnforceWorkspaceIdentityResult, SyncRelayStorage } from "./storage";
+import type { EnforceWorkspaceIdentityResult, SyncRelayLogRow, SyncRelayStorage } from "./storage";
 import { MAX_DISCUSSION_ACTIVITY_HOLD_MS, MAX_OPS_PER_REQUEST, MAX_ORIGIN_ID_CHARS } from "./wireLimits";
 
 export type WorkspaceReplicationRoute =
@@ -190,17 +190,7 @@ export function createWorkspaceReplicationRoutes(
       });
       return jsonResponse({
         ok: true,
-        ops: page.rows.map((row) => ({
-          relaySeq: row.relaySeq,
-          workspaceId: row.workspaceId,
-          originId: row.originId,
-          originSeq: row.originSeq,
-          opKind: row.opKind,
-          payload: JSON.parse(row.payloadJson) as unknown,
-          recordedAtMs: row.recordedAtMs,
-          ...(row.admittedAuthorSnapshot === undefined ? {} : {admittedAuthorSnapshot: row.admittedAuthorSnapshot}),
-          ...(row.settlementAdmission === undefined ? {} : {settlementAdmission:row.settlementAdmission}),
-        })),
+        ops: page.rows.map(servedLogOp),
         // A hidden epoch floor is a read filter, not a served log row. An
         // empty response therefore cannot advance the caller's cursor: the
         // strict page contract requires nextCursor to equal the final
@@ -223,30 +213,7 @@ export function createWorkspaceReplicationRoutes(
         originId: route.originId,
         originSeq: route.originSeq,
       });
-      if (!row) return jsonResponse({ ok: true, status: "absent" });
-      const op = {
-        relaySeq: row.relaySeq,
-        workspaceId: row.workspaceId,
-        originId: row.originId,
-        originSeq: row.originSeq,
-        opKind: row.opKind,
-        payload: JSON.parse(row.payloadJson) as unknown,
-        recordedAtMs: row.recordedAtMs,
-        ...(row.admittedAuthorSnapshot === undefined ? {} : {admittedAuthorSnapshot: row.admittedAuthorSnapshot}),
-          ...(row.settlementAdmission === undefined ? {} : {settlementAdmission:row.settlementAdmission}),
-      };
-      if (row.relaySeq <= epochLogFloor) {
-        return jsonResponse({
-          ok: true,
-          status: "presentBelowEpochFloor",
-          op,
-        });
-      }
-      return jsonResponse({
-        ok: true,
-        status: "present",
-        op,
-      });
+      return jsonResponse(logCoordinateAnswer(row, epochLogFloor));
     }
 
     throw relayError("method_not_allowed");
@@ -313,6 +280,30 @@ export function createWorkspaceReplicationRoutes(
   return { respondToWorkspaceRegistration, respondToWorkspaceReplication };
 }
 
+/** A log row as replication serves it: the stored payload, unchanged. */
+export function servedLogOp(row: SyncRelayLogRow) {
+  return {
+    relaySeq: row.relaySeq,
+    workspaceId: row.workspaceId,
+    originId: row.originId,
+    originSeq: row.originSeq,
+    opKind: row.opKind,
+    payload: JSON.parse(row.payloadJson) as unknown,
+    recordedAtMs: row.recordedAtMs,
+    ...(row.admittedAuthorSnapshot === undefined ? {} : {admittedAuthorSnapshot: row.admittedAuthorSnapshot}),
+    ...(row.settlementAdmission === undefined ? {} : {settlementAdmission: row.settlementAdmission}),
+  };
+}
+
+export function logCoordinateAnswer(row: SyncRelayLogRow | null, epochLogFloor: number) {
+  if (!row) return { ok: true, status: "absent" };
+  return {
+    ok: true,
+    status: row.relaySeq <= epochLogFloor ? "presentBelowEpochFloor" : "present",
+    op: servedLogOp(row),
+  };
+}
+
 function parseLogHold(value: string): number {
   if (!/^(?:0|[1-9]\d*)$/u.test(value)) {
     throw badRequest("hold must be a non-negative integer");
@@ -348,7 +339,7 @@ function parseOptionalWorkspaceIdentity(
   );
 }
 
-function parseOptionalWorkspaceIdentityQuery(
+export function parseOptionalWorkspaceIdentityQuery(
   searchParams: URLSearchParams,
 ): OptionalWorkspaceIdentity | null {
   return parseOptionalWorkspaceIdentityValues(
@@ -381,7 +372,7 @@ function parseOptionalWorkspaceIdentityValues(
   };
 }
 
-function enforceWorkspaceIdentity(
+export function enforceWorkspaceIdentity(
   storage: Pick<SyncRelayStorage, "getWorkspaceIdentity" | "verifyWorkspaceIdentity" | "getEpochLogFloor">,
   workspaceId: string,
   identity: OptionalWorkspaceIdentity | null,
