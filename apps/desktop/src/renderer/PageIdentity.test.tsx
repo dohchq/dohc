@@ -365,8 +365,9 @@ describe("PageIdentity", () => {
       ["a list item before ===", "- Plan\n===\n", false],
       ["inline HTML with an underline", "<em>Plan</em>\n===\n", true],
       ["an HTML block holding ===", "<div>\n===\n</div>\n", false],
-      ["an underline after 16 lines", `${Array.from({ length: 16 }, (_, line) => `Line ${line}`).join("\n")}\n===\n`, true],
-      ["an underline after 17 lines, no title", `${Array.from({ length: 17 }, (_, line) => `Line ${line}`).join("\n")}\n===\n`, false],
+      ["an underline after 17 lines", `${Array.from({ length: 17 }, (_, line) => `Line ${line}`).join("\n")}\n===\n`, true],
+      ["# then a no-break space", "# Plan\n", true],
+      ["lone CR line ends", "Plan\r===\r", true],
       ["a title property", "---\ntitle: Plan\n---\n\n# Plan\n", false],
       ["no H1", "Body\n", false],
       ["an H2 first", "## Plan\n", false],
@@ -467,6 +468,46 @@ describe("PageIdentity", () => {
       act(() => field.focus());
       expect(folded()).toBe(false);
       act(() => elsewhere.focus());
+      expect(folded()).toBe(true);
+    });
+
+    it("keeps a held composition through a key the input method still owns", () => {
+      render(
+        <>
+          <ControlledPageIdentity initialBody={"# Plan\n"} stem="plan" />
+          <button type="button">elsewhere</button>
+        </>,
+      );
+      const field = titleField();
+      const elsewhere = screen.getByRole("button", { name: "elsewhere" });
+      act(() => field.focus());
+      fireEvent.compositionStart(field);
+      act(() => elsewhere.focus());
+
+      fireEvent.keyDown(elsewhere, { key: "Process", isComposing: true });
+      fireEvent.keyDown(elsewhere, { key: "Process", keyCode: 229 });
+      expect(folded()).toBe(false);
+      fireEvent.keyDown(elsewhere, { key: "a" });
+      expect(folded()).toBe(true);
+    });
+
+    it("keeps a held composition open through empty interim text, and folds once it ends empty", () => {
+      render(
+        <>
+          <ControlledPageIdentity initialBody={"# Plan\n"} stem="plan" />
+          <button type="button">elsewhere</button>
+        </>,
+      );
+      const field = titleField();
+      act(() => field.focus());
+      fireEvent.compositionStart(field);
+      fireEvent.input(field, { target: { value: "と" }, isComposing: true, inputType: "insertCompositionText" });
+      act(() => screen.getByRole("button", { name: "elsewhere" }).focus());
+
+      fireEvent.input(field, { target: { value: "" }, isComposing: true, inputType: "insertCompositionText" });
+      expect(field.value).toBe("");
+      expect(folded()).toBe(false);
+      fireEvent.compositionEnd(field);
       expect(folded()).toBe(true);
     });
 

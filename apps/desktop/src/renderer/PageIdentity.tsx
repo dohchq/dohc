@@ -17,6 +17,7 @@ import {
   orderFrontmatter,
   parseFrontmatter,
 } from "./markdown/frontmatter";
+import { lexesAsH1, opensWithH1 } from "./markdown/firstBlock";
 import { TOPMATTER_FLAG } from "./pageTopmatter";
 
 // The frontmatter Y.Map field name shared with PropertiesPanel. Title + icon
@@ -30,51 +31,9 @@ const BODY_FIELD = "body";
 // H1 as its title, and the title field folds into the row beside the icon.
 // Both answers read the first block alone, never the rest of the document.
 
-const BLANK = /^[ \t]*$/;
-const ATX_HEADING = /^ {0,3}(#{1,6})(?:[ \t]|$)/;
-// Indented code, a quote, a fence, a list item or a thematic break: a first
-// block no underline can make a heading.
-const NEVER_A_HEADING =
-  /^(?: {4}| {0,3}\t| {0,3}(?:>|`{3,}[^`]*$|~{3,}|(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)|([-*_])(?:[ \t]*\1){2,}[ \t]*$))/;
-const SETEXT_H1 = /^ {0,3}=+[ \t]*$/;
-// After a paragraph's first line: a blank line, a heading, a quote, a fence,
-// a setext H2 underline or a thematic break ends it without an H1.
-const ENDS_PARAGRAPH = /^(?:[ \t]*$| {0,3}(?:#{1,6}(?:[ \t]|$)|>|`{3,}|~{3,}|-+[ \t]*$|([-*_])(?:[ \t]*\1){2,}[ \t]*$))/;
-// A setext heading longer than this is no page title; its page keeps the
-// title field open.
-const TITLE_LINES = 16;
-
-// In Markdown, whether the body opens with an H1. The first line with content
-// decides an ATX heading or a block that cannot be one. A paragraph is an H1
-// only if a `===` underline ends it, and only then are its lines lexed, so
-// most pages need no lexer and none lexes past its first block.
-function opensWithH1(markdown: string): boolean | string {
-  let start = -1;
-  let lines = 0;
-  for (let at = 0; ; ) {
-    const next = markdown.indexOf("\n", at);
-    const end = next === -1 ? markdown.length : next;
-    const line = markdown.slice(at, end).replace(/\r$/, "");
-    if (start === -1) {
-      if (!BLANK.test(line)) {
-        const atx = ATX_HEADING.exec(line);
-        if (atx) return atx[1]!.length === 1;
-        if (NEVER_A_HEADING.test(line)) return false;
-        start = at;
-      }
-    } else {
-      if (SETEXT_H1.test(line)) return markdown.slice(start, end);
-      if (ENDS_PARAGRAPH.test(line) || ++lines >= TITLE_LINES) return false;
-    }
-    if (next === -1) return false;
-    at = next + 1;
-  }
-}
-
-// The editor's own Markdown lexer, so a paragraph with an underline folds
-// exactly when the editor shows it as an H1: a list item or an HTML block can
-// take the lines first. It loads with the editor's chunk, not at launch; until
-// it arrives, such a page shows its title open.
+// The editor's own Markdown lexer, for a paragraph with an underline (see
+// markdown/firstBlock.ts). It loads with the editor's chunk, not at launch;
+// until it arrives, such a page shows its title open.
 let lexer: typeof Lexer | null = null;
 let lexerLoad: Promise<typeof Lexer> | null = null;
 function loadLexer(): Promise<typeof Lexer> {
@@ -86,11 +45,6 @@ function loadLexer(): Promise<typeof Lexer> {
     },
   );
   return lexerLoad;
-}
-
-function lexesAsH1(lex: typeof Lexer, block: string): boolean {
-  const first = lex.lex(block).find((token) => token.type !== "space");
-  return first?.type === "heading" && first.depth === 1;
 }
 
 // A local page's body is the Markdown after its frontmatter. The lines to lex
@@ -326,7 +280,10 @@ export function PageIdentity(props: PageIdentityProps) {
   useEffect(() => {
     if (!blurHeld) return;
     const elsewhere = (event: Event) => {
-      if (event.target !== titleRef.current) endComposition();
+      if (event.target === titleRef.current) return;
+      // A key the input method still owns is part of the composition.
+      if (event instanceof KeyboardEvent && (event.isComposing || event.keyCode === 229)) return;
+      endComposition();
     };
     const events = ["pointerdown", "keydown"] as const;
     for (const name of events) document.addEventListener(name, elsewhere, true);
@@ -528,8 +485,12 @@ export function PageIdentity(props: PageIdentityProps) {
             }
             setTitleDraft(next);
             writeField("title", next.length === 0 ? undefined : next);
-            // Text arriving after the blur is the composition's last word.
-            if (blurHeld) endComposition();
+            // Committed text arriving after the blur is the composition's
+            // last word; interim text is not.
+            const input = event.nativeEvent;
+            const interim =
+              input instanceof InputEvent && (input.isComposing || input.inputType === "insertCompositionText");
+            if (blurHeld && !interim) endComposition();
           }}
           onKeyDown={(event) => {
             // During IME composition, Enter and ArrowDown pick a candidate.
