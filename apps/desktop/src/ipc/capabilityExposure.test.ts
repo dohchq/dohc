@@ -80,6 +80,16 @@ describe("B1 main inventories (a4be19d5b)", () => {
     const guards = Object.fromEntries(rows.map(row => [row.channel, row.guard]));
     expect(Object.fromEntries(Object.keys(mainIpc.guards).map(channel => [channel, guards[channel]]))).toEqual(mainIpc.guards);
   });
+  it("records the 13 migrated file operations", () => {
+    const channels = [
+      "list-workspace-files", "create-workspace-file", "create-workspace-folder",
+      "move-workspace-path", "delete-workspace-path", "export-workspace-zip",
+      "export-document-file", "import-workspace-files", "read-workspace-text",
+      "write-workspace-text", "write-workspace-asset", "pick-image-files", "open-file-externally",
+    ].map(name => `desktop:${name}`);
+    expect(rows.filter(row => channels.includes(row.channel))).toHaveLength(13);
+    for (const channel of channels) expect(admission).toHaveProperty(channel);
+  });
   it("preserves socket verbs, public verbs, and all public help", () => {
     expect(socketVerbs).toEqual([...mainCli.socketVerbs, ...accessExposure.socketVerbAdditions].sort());
     expect(Object.keys(CLI_COMMANDS)).toEqual([...accessExposure.publicGroupAdditions, ...mainCli.publicGroups]);

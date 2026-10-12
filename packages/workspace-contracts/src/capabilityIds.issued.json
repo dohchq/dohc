@@ -142,5 +142,14 @@
   "usage.switch",
   "share.copy.read",
   "document.typing.recovery",
-  "app.recognition.read"
+  "app.recognition.read",
+  "file.create",
+  "file.zip.export",
+  "document.file.export",
+  "file.import",
+  "file.text.read",
+  "file.text.write",
+  "file.asset.write",
+  "file.image.pick",
+  "file.external.open"
 ]

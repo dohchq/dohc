@@ -1,21 +1,15 @@
 import { basename, isAbsolute } from "node:path";
 import { validateUserReadPath } from "@dohc/workspace-core";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
-import { CHANNELS } from "./channels";
+import type { OperationHandlers } from "./operationTable";
+import type { workspaceFileOperations } from "./workspaceFileOperations";
 import {
-  ExportDocumentFilePayload,
   ExportDocumentFileResult,
-  ExportWorkspaceZipPayload,
   ExportWorkspaceZipResult,
-  ImportWorkspaceFilesPayload,
   ImportWorkspaceFilesResult,
-  ListWorkspaceFilesPayload,
   ListWorkspaceFilesResult,
   MAX_PICKED_IMAGES,
-  OpenFileExternallyPayload,
-  PickImageFilesPayload,
   PickImageFilesResult,
-  ReadWorkspaceTextPayload,
   ReadWorkspaceTextResult,
   WRITE_ASSET_MAX_BYTES,
 } from "./bridgeContract";
@@ -65,10 +59,6 @@ export function createWorkspaceFilesIpc<
     assertCurrent(): void;
   },
 >(dependencies: {
-  registerHandler(
-    channel: string,
-    handler: (event: Event, payload: unknown) => unknown,
-  ): void;
   assertTrustedSender(event: Event): void;
   app: { readonly isPackaged: boolean };
   dialog: {
@@ -106,7 +96,6 @@ export function createWorkspaceFilesIpc<
   notifyRenderer(input: { workspaceId: string }): void;
 }) {
   const {
-    registerHandler,
     assertTrustedSender,
     app,
     dialog,
@@ -274,40 +263,24 @@ export function createWorkspaceFilesIpc<
     );
   }
 
-  function registerListing(): void {
-    registerHandler(CHANNELS.listWorkspaceFiles, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = ListWorkspaceFilesPayload.parse(payload);
-      return withRendererWorkspaceOperation(
-        event.sender,
-        input.workspaceId,
-        "File listing stopped because this window changed workspaces.",
-        async (operation) => {
-          const workspace = operation.workspace;
-          const listing = await workspaceFileListings.list({
-            workspaceId: workspace.workspaceId,
-            attachmentId: workspace.attachmentId,
-            allowCached: input.allowCached === true,
-            load: async () => await listOwnedWorkspaceFilesFor(workspace),
-          });
-          return ListWorkspaceFilesResult.parse(listing);
-        },
-      );
-    });
+  return {
+    listWorkspaceFiles: async (input, { operation }) => {
+      const workspace = operation.workspace;
+      const listing = await workspaceFileListings.list({
+        workspaceId: workspace.workspaceId,
+        attachmentId: workspace.attachmentId,
+        allowCached: input.allowCached === true,
+        load: async () => await listOwnedWorkspaceFilesFor(workspace),
+      });
+      return ListWorkspaceFilesResult.parse(listing);
+    },
 
-    registerHandler(CHANNELS.createWorkspaceFile, workspaceFileMutations.createFile);
-    registerHandler(
-      CHANNELS.createWorkspaceFolder,
-      workspaceFileMutations.createFolder,
-    );
-    registerHandler(CHANNELS.moveWorkspacePath, workspaceFileMutations.movePath);
-    registerHandler(CHANNELS.deleteWorkspacePath, workspaceFileMutations.deletePath);
-  }
-
-  function registerExports(): void {
-    registerHandler(CHANNELS.exportWorkspaceZip, async (event, payload) => {
+    createWorkspaceFile: (input, { event }) => workspaceFileMutations.createFile(event, input),
+    createWorkspaceFolder: (input, { event }) => workspaceFileMutations.createFolder(event, input),
+    moveWorkspacePath: (input, { event }) => workspaceFileMutations.movePath(event, input),
+    deleteWorkspacePath: (input, { event }) => workspaceFileMutations.deletePath(event, input),
+    exportWorkspaceZip: async (input, { event }) => {
       assertTrustedSender(event);
-      const input = ExportWorkspaceZipPayload.parse(payload);
       const inactiveMessage =
         "Export stopped because this window changed workspaces.";
       const workspaceReference = await exactRendererWorkspaceReferences.capture(
@@ -353,16 +326,15 @@ export function createWorkspaceFilesIpc<
           return ExportWorkspaceZipResult.parse({ path: target });
         },
       );
-    });
+    },
 
     // "Copy as Markdown" / "Export as HTML" / "Export as PDF" (the
     // document menu). The renderer always sends the same self-contained HTML
     // (documentExport.ts); this handler only decides where the bytes land
     // (.html verbatim, .pdf via the hidden offscreen window) — see
     // documentPdfExport.ts for the "only one export in flight" guard.
-    registerHandler(CHANNELS.exportDocumentFile, async (event, payload) => {
+    exportDocumentFile: async (input, { event }) => {
       assertTrustedSender(event);
-      const input = ExportDocumentFilePayload.parse(payload);
       const inactiveMessage =
         "Export stopped because this window changed workspaces.";
       // workspaceId authorizes the caller (a real, currently-open workspace) —
@@ -430,13 +402,9 @@ export function createWorkspaceFilesIpc<
           return ExportDocumentFileResult.parse({ path: target });
         },
       );
-    });
-  }
-
-  function registerAccess(): void {
-    registerHandler(CHANNELS.importWorkspaceFiles, async (event, payload) => {
+    },
+    importWorkspaceFiles: async (input, { event }) => {
       assertTrustedSender(event);
-      const input = ImportWorkspaceFilesPayload.parse(payload);
       const importInto = (
         operation: Operation,
         absolutePaths: string[],
@@ -532,30 +500,16 @@ export function createWorkspaceFilesIpc<
                 await importInto(operation, result.filePaths, null),
               ),
       );
-    });
+    },
 
-    // This read uses the combined helper to make the main-process workspace
-    // authorization boundary explicit. Older workspace handlers keep the
-    // equivalent assertTrustedSender + requireWorkspace steps separate.
-    registerHandler(CHANNELS.readWorkspaceText, async (event, payload) => {
-      const input = ReadWorkspaceTextPayload.parse(payload);
-      assertTrustedSender(event);
-      return withRendererWorkspaceOperation(
-        event.sender,
-        input.workspaceId,
-        "File read stopped because this window changed workspaces.",
-        async (operation) =>
-          ReadWorkspaceTextResult.parse(
-            await readOwnedWorkspaceTextFor(
-              operation.workspace,
-              input.relativePath,
-            ),
-          ),
+    readWorkspaceText: async (input, { operation }) => {
+      return ReadWorkspaceTextResult.parse(
+        await readOwnedWorkspaceTextFor(operation.workspace, input.relativePath),
       );
-    });
+    },
 
-    registerHandler(CHANNELS.writeWorkspaceText, workspaceFileMutations.writeText);
-    registerHandler(CHANNELS.writeWorkspaceAsset, workspaceFileMutations.writeAsset);
+    writeWorkspaceText: (input, { event }) => workspaceFileMutations.writeText(event, input),
+    writeWorkspaceAsset: (input, { event }) => workspaceFileMutations.writeAsset(event, input),
 
     // `/image`: a native open dialog that starts AT THE WORKSPACE ROOT (a
     // renderer <input type="file"> cannot set a starting directory), then reads
@@ -564,9 +518,8 @@ export function createWorkspaceFilesIpc<
     // are deliberately allowed to live anywhere on disk: this is a user-directed
     // pick, and the bytes are copied INTO the workspace by writeWorkspaceAsset,
     // which re-validates containment. The renderer never sees an absolute path.
-    registerHandler(CHANNELS.pickImageFiles, async (event, payload) => {
+    pickImageFiles: async (input, { event }) => {
       assertTrustedSender(event);
-      const input = PickImageFilesPayload.parse(payload);
       const inactiveMessage =
         "Image selection stopped because this window changed workspaces.";
       const workspaceReference = await exactRendererWorkspaceReferences.capture(
@@ -637,35 +590,24 @@ export function createWorkspaceFilesIpc<
           return PickImageFilesResult.parse({ files });
         },
       );
-    });
+    },
 
-    registerHandler(CHANNELS.openFileExternally, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = OpenFileExternallyPayload.parse(payload);
-      await withRendererWorkspaceOperation(
-        event.sender,
-        input.workspaceId,
-        "External file open stopped because this window changed workspaces.",
-        async (operation) => {
-          // Resolve+contain first: only a real file inside the workspace can be
-          // handed to the OS opener — never an arbitrary path or URL. window.open
-          // remains fully denied; this is the only sanctioned external-open path.
-          await ensureOwnedProjectionCurrent(
-            operation.workspace,
-            input.relativePath,
-          );
-          const { realTarget } = await resolveWorkspaceFile(
-            operation.workspace.rootPath,
-            input.relativePath,
-            "read",
-          );
-          operation.assertCurrent();
-          const error = await shell.openPath(realTarget);
-          if (error) throw new Error(error);
-        },
+    openFileExternally: async (input, { operation }) => {
+      // Resolve+contain first: only a real file inside the workspace can be
+      // handed to the OS opener — never an arbitrary path or URL. window.open
+      // remains fully denied; this is the only sanctioned external-open path.
+      await ensureOwnedProjectionCurrent(
+        operation.workspace,
+        input.relativePath,
       );
-    });
-  }
-
-  return { registerListing, registerExports, registerAccess };
+      const { realTarget } = await resolveWorkspaceFile(
+        operation.workspace.rootPath,
+        input.relativePath,
+        "read",
+      );
+      operation.assertCurrent();
+      const error = await shell.openPath(realTarget);
+      if (error) throw new Error(error);
+    },
+  } satisfies OperationHandlers<typeof workspaceFileOperations, Event, Operation>;
 }

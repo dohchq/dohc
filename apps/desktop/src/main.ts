@@ -80,6 +80,7 @@ import { registerSharedChannelsIpcHandlers } from "./ipc/sharedChannelsIpc";
 import { registerShareHandoffIpcHandlers } from "./ipc/shareHandoffIpc";
 import { createDesktopSharedChannelSync } from "./workspaces/desktopSharedChannelSync";
 import { createWorkspaceFilesIpc } from "./ipc/workspaceFilesIpc";
+import { workspaceFileOperations } from "./ipc/workspaceFileOperations";
 import { registerWorkspaceGraphIpcHandlers } from "./ipc/workspaceGraphIpc";
 import { registerNativeMenusIpcHandlers } from "./ipc/nativeMenusIpc";
 import {
@@ -5855,7 +5856,6 @@ function registerIpcHandlers(): void {
     DesktopRendererWorkspaceOperation["workspace"],
     DesktopRendererWorkspaceOperation
   >({
-    registerHandler: handleIpc,
     assertTrustedSender,
     app,
     dialog,
@@ -5873,7 +5873,7 @@ function registerIpcHandlers(): void {
     renderHtmlToPdf,
     notifyRenderer,
   });
-  workspaceFilesIpc.registerListing();
+  registerOperations(operationBoundary, workspaceFileOperations, workspaceFilesIpc);
 
   const workspaceEngineIpc = createWorkspaceEngineIpc<
     WebContents,
@@ -5923,8 +5923,6 @@ function registerIpcHandlers(): void {
   });
   workspaceEngineIpc.registerCollections();
 
-  workspaceFilesIpc.registerExports();
-
   registerNativeMenusIpcHandlers<
     WebContents,
     IpcMainInvokeEvent,
@@ -5942,8 +5940,6 @@ function registerIpcHandlers(): void {
     ensureOwnedProjectionCurrent,
     shell,
   });
-
-  workspaceFilesIpc.registerAccess();
 
   registerWorkspaceGraphIpcHandlers<
     WebContents,

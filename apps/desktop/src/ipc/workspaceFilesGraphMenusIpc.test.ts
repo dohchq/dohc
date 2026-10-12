@@ -2,6 +2,8 @@ import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createWorkspaceFilesIpc } from "./workspaceFilesIpc";
+import { workspaceFileOperations } from "./workspaceFileOperations";
+import { registerOperations } from "./operationTable";
 import { registerWorkspaceGraphIpcHandlers } from "./workspaceGraphIpc";
 import { registerNativeMenusIpcHandlers } from "./nativeMenusIpc";
 import { CHANNELS } from "./channels";
@@ -47,9 +49,11 @@ async function harness() {
     withPhysicalOperation: async <Result>(id: string, work: (operation: {
       workspace: Workspace; state: typeof state; signal: AbortSignal; assertCurrent(): void;
     }) => Result | Promise<Result>) => {
-      if (id !== workspace.workspaceId) throw new Error("unknown workspace");
+      if (id !== workspace.workspaceId && id !== "foreign") throw new Error("unknown workspace");
+      const selectedWorkspace = id === "foreign"
+        ? { ...workspace, workspaceId: id, attachmentId: Symbol("foreign") } : workspace;
       return work({
-        workspace, state, signal: new AbortController().signal,
+        workspace: selectedWorkspace, state, signal: new AbortController().signal,
         assertCurrent: () => { if (!physicalCurrent) throw new Error("physical retired"); },
       });
     },
@@ -96,7 +100,7 @@ async function harness() {
   const notify = vi.fn();
   const listings = new WorkspaceFileListingCache();
   const fileOwner = createWorkspaceFilesIpc<Sender, Event, Workspace, Operation>({
-    registerHandler, assertTrustedSender: trusted, app: { isPackaged: false },
+    assertTrustedSender: trusted, app: { isPackaged: false },
     dialog: { showOpenDialog: openDialog, showSaveDialog: saveDialog }, shell: { openPath },
     withRendererWorkspaceOperation: withOperation, exactRendererWorkspaceReferences: references,
     workspaceFileListings: listings, workspaceFileMutations: mutations,
@@ -105,9 +109,11 @@ async function harness() {
     listWorkspaces: () => [workspace], ensureOwnedProjectionCurrent: repair,
     renderHtmlToPdf: renderPdf, notifyRenderer: notify,
   });
-  fileOwner.registerListing();
-  fileOwner.registerExports();
-  fileOwner.registerAccess();
+  registerOperations<typeof workspaceFileOperations, Event, Operation>({
+    handle: registerHandler,
+    assertTrustedSender: trusted,
+    withActiveWorkspace: (event: Event, id, message, work) => withOperation(event.sender, id, message, work),
+  }, workspaceFileOperations, fileOwner);
 
   type GraphDependencies = Parameters<typeof registerWorkspaceGraphIpcHandlers<Sender, Event, Workspace, Operation>>[0];
   const capture = vi.fn(async () => ({ workspace }));
@@ -171,16 +177,16 @@ describe("registered workspace file handlers", () => {
         createWorkspaceFolder: async (payload) => {
           if (!injected && (collision === "root" ||
             collision === "subfolder" && payload.relativePath === "app/scripts")) await inject();
-          return CreateWorkspaceFileResult.parse(await h.invoke(CHANNELS.createWorkspaceFolder, payload));
+          return CreateWorkspaceFileResult.parse(await h.invoke(workspaceFileOperations.createWorkspaceFolder.channel, payload));
         },
         createWorkspaceFile: async (payload) => {
           if (!injected && collision === "file") await inject();
           if (payload.relativePath === "app/package.json") throw new Error("later write failed");
-          return CreateWorkspaceFileResult.parse(await h.invoke(CHANNELS.createWorkspaceFile, payload));
+          return CreateWorkspaceFileResult.parse(await h.invoke(workspaceFileOperations.createWorkspaceFile.channel, payload));
         },
         deleteWorkspacePath: async (payload) => {
           deleted.push(payload.relativePath);
-          return DeleteWorkspacePathResult.parse(await h.invoke(CHANNELS.deleteWorkspacePath, payload));
+          return DeleteWorkspacePathResult.parse(await h.invoke(workspaceFileOperations.deleteWorkspacePath.channel, payload));
         },
       },
     });
@@ -189,7 +195,7 @@ describe("registered workspace file handlers", () => {
     expect(deleted).not.toContain(foreignPath);
     if (collision === "root") expect(deleted).toEqual([]);
     if (collision === "subfolder") expect(deleted).not.toContain("app/scripts");
-    expect(await h.invoke(CHANNELS.listWorkspaceFiles)).toMatchObject({
+    expect(await h.invoke(workspaceFileOperations.listWorkspaceFiles.channel)).toMatchObject({
       files: [{ path: foreignPath, kind: "file" }],
     });
   });
@@ -200,16 +206,16 @@ describe("registered workspace file handlers", () => {
       workspaceId: "workspace", files: [], folders: [],
       mutations: {
         createWorkspaceFolder: async (payload) => CreateWorkspaceFileResult.parse(
-          await h.invoke(CHANNELS.createWorkspaceFolder, payload)),
+          await h.invoke(workspaceFileOperations.createWorkspaceFolder.channel, payload)),
         createWorkspaceFile: async (payload) => {
           if (payload.relativePath === "app/package.json") {
             await writeFile(join(h.workspace.rootPath, "app/scripts/agent.txt"), "agent work");
             throw new Error("later write failed");
           }
-          return CreateWorkspaceFileResult.parse(await h.invoke(CHANNELS.createWorkspaceFile, payload));
+          return CreateWorkspaceFileResult.parse(await h.invoke(workspaceFileOperations.createWorkspaceFile.channel, payload));
         },
         deleteWorkspacePath: async (payload) => DeleteWorkspacePathResult.parse(
-          await h.invoke(CHANNELS.deleteWorkspacePath, payload)),
+          await h.invoke(workspaceFileOperations.deleteWorkspacePath.channel, payload)),
       },
     })).rejects.toThrow("later write failed");
     expect(await readFile(join(h.workspace.rootPath, "app/scripts/agent.txt"), "utf8")).toBe("agent work");
@@ -219,40 +225,83 @@ describe("registered workspace file handlers", () => {
   it("registers all file, graph, and menu channels with their trust and parser order", async () => {
     const h = await harness();
     expect([...h.handlers.keys()]).toEqual([
-      CHANNELS.listWorkspaceFiles, CHANNELS.createWorkspaceFile, CHANNELS.createWorkspaceFolder,
-      CHANNELS.moveWorkspacePath, CHANNELS.deleteWorkspacePath, CHANNELS.exportWorkspaceZip,
-      CHANNELS.exportDocumentFile, CHANNELS.importWorkspaceFiles, CHANNELS.readWorkspaceText,
-      CHANNELS.writeWorkspaceText, CHANNELS.writeWorkspaceAsset, CHANNELS.pickImageFiles,
-      CHANNELS.openFileExternally, CHANNELS.readWorkspaceGraph, CHANNELS.getBacklinks,
+      workspaceFileOperations.listWorkspaceFiles.channel, workspaceFileOperations.createWorkspaceFile.channel, workspaceFileOperations.createWorkspaceFolder.channel,
+      workspaceFileOperations.moveWorkspacePath.channel, workspaceFileOperations.deleteWorkspacePath.channel, workspaceFileOperations.exportWorkspaceZip.channel,
+      workspaceFileOperations.exportDocumentFile.channel, workspaceFileOperations.importWorkspaceFiles.channel, workspaceFileOperations.readWorkspaceText.channel,
+      workspaceFileOperations.writeWorkspaceText.channel, workspaceFileOperations.writeWorkspaceAsset.channel, workspaceFileOperations.pickImageFiles.channel,
+      workspaceFileOperations.openFileExternally.channel, CHANNELS.readWorkspaceGraph, CHANNELS.getBacklinks,
       CHANNELS.listWorkspaceHeadings, CHANNELS.showExplorerMenu, CHANNELS.showWorkbenchMenu,
     ]);
     for (const channel of h.handlers.keys()) {
-      const payload = channel === CHANNELS.readWorkspaceText
+      const payload = channel === workspaceFileOperations.readWorkspaceText.channel
         ? { workspaceId: "workspace", relativePath: "notes.md" } : null;
       await expect(h.invoke(channel, payload, false)).rejects.toThrow("untrusted");
     }
-    await expect(h.invoke(CHANNELS.readWorkspaceText, null, false)).rejects.not.toThrow("untrusted");
+    await expect(h.invoke(workspaceFileOperations.readWorkspaceText.channel, null, false)).rejects.toThrow("untrusted");
     expect(h.listing).not.toHaveBeenCalled();
     expect(h.openDialog).not.toHaveBeenCalled();
     expect(h.change).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["listWorkspaceFiles", {}, "File listing stopped because this window changed workspaces."],
+    ["readWorkspaceText", { relativePath: "notes.md" }, "File read stopped because this window changed workspaces."],
+    ["openFileExternally", { relativePath: "notes.md" }, "External file open stopped because this window changed workspaces."],
+  ] as const)("refuses a foreign workspace selector for %s", async (name, fields, message) => {
+    const h = await harness();
+    await expect(h.invoke(workspaceFileOperations[name].channel, { ...fields, workspaceId: "foreign" }))
+      .rejects.toThrow(message);
+    expect(h.listing).not.toHaveBeenCalled();
+    expect(h.readText).not.toHaveBeenCalled();
+    expect(h.repair).not.toHaveBeenCalled();
+    expect(h.openPath).not.toHaveBeenCalled();
+  });
+
+  describe.each(["exportWorkspaceZip", "exportDocumentFile", "pickImageFiles"] as const)("%s dialog", (name) => {
+    it.each(["retireRenderer", "retirePhysical", "reenterWorkspace"] as const)(
+      "rejects %s while open before returning picks or writing", async (invalidate) => {
+        const h = await harness();
+        const target = join(await createTestScratch("file-dialog-target-"), "out");
+        const started = deferred();
+        const held = deferred();
+        h.saveDialog.mockImplementation(async () => {
+          started.resolve(); await held.promise;
+          return { canceled: false, filePath: target };
+        });
+        h.openDialog.mockImplementation(async () => {
+          started.resolve(); await held.promise;
+          return { canceled: false, filePaths: [target] };
+        });
+        const result = h.invoke(workspaceFileOperations[name].channel, name === "exportDocumentFile"
+          ? { workspaceId: "workspace", kind: "markdown", content: "body", suggestedName: "document" }
+          : { workspaceId: "workspace" });
+        await started.promise;
+        h[invalidate]();
+        held.resolve();
+        await expect(result).rejects.toThrow();
+        await expect(readFile(target)).rejects.toMatchObject({ code: "ENOENT" });
+        expect(h.renderPdf).not.toHaveBeenCalled();
+        expect(h.change).not.toHaveBeenCalled();
+      },
+    );
+  });
+
   it("uses the existing mutation owner and listing cache through actual registrations", async () => {
     const h = await harness();
-    await expect(h.invoke(CHANNELS.createWorkspaceFile, {
+    await expect(h.invoke(workspaceFileOperations.createWorkspaceFile.channel, {
       workspaceId: "workspace", relativePath: "notes.md", initialText: "original",
     })).resolves.toEqual({ path: "notes.md" });
     expect(await readFile(join(h.workspace.rootPath, "notes.md"), "utf8")).toBe("original");
-    await expect(h.invoke(CHANNELS.readWorkspaceText, {
+    await expect(h.invoke(workspaceFileOperations.readWorkspaceText.channel, {
       workspaceId: "workspace", relativePath: "notes.md",
     })).resolves.toMatchObject({ text: "original", truncated: false });
-    await h.invoke(CHANNELS.listWorkspaceFiles);
-    await expect(h.invoke(CHANNELS.listWorkspaceFiles, { workspaceId: "workspace", allowCached: true }))
+    await h.invoke(workspaceFileOperations.listWorkspaceFiles.channel);
+    await expect(h.invoke(workspaceFileOperations.listWorkspaceFiles.channel, { workspaceId: "workspace", allowCached: true }))
       .resolves.toMatchObject({ files: [{ path: "notes.md", kind: "file" }], cached: true });
     expect(h.listing).toHaveBeenCalledOnce();
-    await h.invoke(CHANNELS.listWorkspaceFiles);
+    await h.invoke(workspaceFileOperations.listWorkspaceFiles.channel);
     expect(h.listing).toHaveBeenCalledTimes(2);
-    await expect(h.invoke(CHANNELS.createWorkspaceFile, {
+    await expect(h.invoke(workspaceFileOperations.createWorkspaceFile.channel, {
       workspaceId: "workspace", relativePath: "../outside.md", initialText: "refused",
     })).rejects.toThrow();
   });
@@ -262,7 +311,7 @@ describe("registered workspace file handlers", () => {
     const started = deferred();
     const held = deferred<Awaited<ReturnType<typeof h.listing>>>();
     h.listing.mockImplementation(() => { started.resolve(); return held.promise; });
-    const result = h.invoke(CHANNELS.listWorkspaceFiles);
+    const result = h.invoke(workspaceFileOperations.listWorkspaceFiles.channel);
     await started.promise;
     h[invalidate]();
     held.resolve({ files: [], folders: [] });
@@ -278,7 +327,7 @@ describe("registered workspace file handlers", () => {
       const started = deferred();
       const held = deferred<{ canceled: boolean; filePaths: string[] }>();
       h.openDialog.mockImplementation(() => { started.resolve(); return held.promise; });
-      const result = h.invoke(CHANNELS.importWorkspaceFiles);
+      const result = h.invoke(workspaceFileOperations.importWorkspaceFiles.channel);
       await started.promise;
       h[invalidate]();
       held.resolve({ canceled: false, filePaths: [source] });
@@ -292,14 +341,14 @@ describe("registered workspace file handlers", () => {
     await mkdir(join(h.workspace.rootPath, ".dohc"));
     const metadata = join(h.workspace.rootPath, ".dohc", "private.json");
     await writeFile(metadata, "secret metadata");
-    await expect(h.invoke(CHANNELS.importWorkspaceFiles, {
+    await expect(h.invoke(workspaceFileOperations.importWorkspaceFiles.channel, {
       workspaceId: "workspace", droppedPaths: [metadata],
     })).resolves.toMatchObject({ imported: [], skipped: 1 });
     const external = await createTestScratch("native-import-");
     const path = join(external, "picked.md");
     await writeFile(path, "picked text");
     h.openDialog.mockResolvedValue({ canceled: false, filePaths: [path] });
-    await expect(h.invoke(CHANNELS.importWorkspaceFiles)).resolves.toMatchObject({ imported: ["picked.md"], skipped: 0 });
+    await expect(h.invoke(workspaceFileOperations.importWorkspaceFiles.channel)).resolves.toMatchObject({ imported: ["picked.md"], skipped: 0 });
     expect(await readFile(join(h.workspace.rootPath, "picked.md"), "utf8")).toBe("picked text");
   });
 
@@ -309,7 +358,7 @@ describe("registered workspace file handlers", () => {
     h.change.mockResolvedValue({
       status: "committed", kind: "import", projection: "pending", value: { imported: ["remote.md"], skipped: 0 },
     });
-    await expect(h.invoke(CHANNELS.importWorkspaceFiles, {
+    await expect(h.invoke(workspaceFileOperations.importWorkspaceFiles.channel, {
       workspaceId: "workspace", droppedPaths: [join(h.workspace.rootPath, "source.md")],
     })).resolves.toEqual({ imported: ["remote.md"], skipped: 0 });
     expect(h.change).toHaveBeenCalledWith(expect.anything(),
@@ -324,7 +373,7 @@ describe("registered workspace file handlers", () => {
     const started = deferred();
     const held = deferred<Uint8Array>();
     h.renderPdf.mockImplementation(() => { started.resolve(); return held.promise; });
-    const result = h.invoke(CHANNELS.exportDocumentFile, {
+    const result = h.invoke(workspaceFileOperations.exportDocumentFile.channel, {
       workspaceId: "workspace", kind: "pdf", content: "<html>body</html>", suggestedName: "document",
     });
     await started.promise;
@@ -340,13 +389,13 @@ describe("registered workspace file handlers", () => {
     const output = await createTestScratch("export-target-");
     const zip = join(output, "workspace.zip");
     h.saveDialog.mockResolvedValue({ canceled: false, filePath: zip });
-    await expect(h.invoke(CHANNELS.exportWorkspaceZip)).resolves.toEqual({ path: zip });
+    await expect(h.invoke(workspaceFileOperations.exportWorkspaceZip.channel)).resolves.toEqual({ path: zip });
     const bytes = await readFile(zip);
     expect(bytes.subarray(0, 2).toString()).toBe("PK");
     expect(bytes.includes(Buffer.from("archive text"))).toBe(true);
     const markdown = join(output, "document.md");
     h.saveDialog.mockResolvedValue({ canceled: false, filePath: markdown });
-    await h.invoke(CHANNELS.exportDocumentFile, {
+    await h.invoke(workspaceFileOperations.exportDocumentFile.channel, {
       workspaceId: "workspace", kind: "markdown", suggestedName: "document", content: "# Exact\n\ntext\n",
     });
     expect(await readFile(markdown, "utf8")).toBe("# Exact\n\ntext\n");
@@ -358,12 +407,12 @@ describe("registered workspace file handlers", () => {
     const image = join(images, "image.png");
     await writeFile(image, new Uint8Array([1, 2, 3]));
     h.openDialog.mockResolvedValue({ canceled: false, filePaths: [image] });
-    await expect(h.invoke(CHANNELS.pickImageFiles)).resolves.toEqual({ files: [
+    await expect(h.invoke(workspaceFileOperations.pickImageFiles.channel)).resolves.toEqual({ files: [
       { name: "image.png", mediaType: "image/png", bytes: new Uint8Array([1, 2, 3]) },
     ] });
     await writeFile(join(h.workspace.rootPath, "notes.md"), "body");
     h.repair.mockImplementation(async () => { h.retirePhysical(); });
-    await expect(h.invoke(CHANNELS.openFileExternally, { workspaceId: "workspace", relativePath: "notes.md" })).rejects.toThrow();
+    await expect(h.invoke(workspaceFileOperations.openFileExternally.channel, { workspaceId: "workspace", relativePath: "notes.md" })).rejects.toThrow();
     expect(h.openPath).not.toHaveBeenCalled();
   });
 });
