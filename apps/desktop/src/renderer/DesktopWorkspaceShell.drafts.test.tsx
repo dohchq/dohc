@@ -79,7 +79,7 @@ describe("workspace switch admission", () => {
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
     await screen.findByTestId("tab-b.md");
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalled());
     await act(async () => {});
 

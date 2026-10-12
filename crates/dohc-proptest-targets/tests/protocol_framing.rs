@@ -18,7 +18,10 @@
 //!   resynchronize onto a different (and therefore potentially desynced)
 //!   frame boundary.
 
-use dohc_engine_protocol::frame::{Frame, FrameDecoder};
+use dohc_engine_protocol::error::FrameDecodeError;
+use dohc_engine_protocol::frame::{
+    Frame, FrameDecoder, encode_blob_chunk_frame, encode_control_frame,
+};
 use dohc_engine_protocol::limits::WireLimits;
 use dohc_engine_protocol::wire::{
     Cancel, Envelope, Hello, PROTOCOL_VERSION, decode_control, encode_control,
@@ -74,6 +77,86 @@ fn drain_and_check_poison(bytes: &[u8]) -> usize {
     total_payload
 }
 
+/// Ignore transient "need more bytes" results, retaining all frames and the
+/// first terminal error. Later pushes must not recover a poisoned decoder.
+fn decode_schedule(
+    chunks: impl IntoIterator<Item = impl AsRef<[u8]>>,
+) -> (Vec<Frame>, Option<FrameDecodeError>) {
+    let mut decoder = FrameDecoder::new(WireLimits::default());
+    let mut frames = Vec::new();
+    let mut terminal = None;
+    for chunk in chunks {
+        decoder.push(chunk.as_ref());
+        if let Some(error) = &terminal {
+            assert_eq!(
+                &decoder.next_frame().expect_err("stays poisoned after push"),
+                error
+            );
+            continue;
+        }
+        loop {
+            match decoder.next_frame() {
+                Ok(Some(frame)) => frames.push(frame),
+                Ok(None) => break,
+                Err(error) => {
+                    for _ in 0..3 {
+                        assert_eq!(decoder.next_frame().expect_err("stays poisoned"), error);
+                    }
+                    terminal = Some(error);
+                    break;
+                }
+            }
+        }
+    }
+    (frames, terminal)
+}
+
+fn schedule_chunks<'a>(bytes: &'a [u8], widths: &[usize]) -> Vec<&'a [u8]> {
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+    for width in widths {
+        let end = start.saturating_add(*width).min(bytes.len());
+        chunks.push(&bytes[start..end]);
+        start = end;
+    }
+    chunks.push(&bytes[start..]);
+    chunks
+}
+
+fn valid_frames() -> impl Strategy<Value = Vec<Frame>> {
+    prop::collection::vec(
+        prop_oneof![
+            prop::collection::vec(any::<u8>(), 0..128).prop_map(Frame::Control),
+            (
+                0u64..1000,
+                any::<bool>(),
+                prop::collection::vec(any::<u8>(), 0..128)
+            )
+                .prop_map(|(stream_id, fin, bytes)| Frame::BlobChunk {
+                    stream_id,
+                    fin,
+                    bytes
+                }),
+        ],
+        1..8,
+    )
+}
+
+fn encode_frames(frames: &[Frame]) -> Vec<u8> {
+    let limits = WireLimits::default();
+    frames
+        .iter()
+        .flat_map(|frame| match frame {
+            Frame::Control(payload) => encode_control_frame(payload, &limits).unwrap(),
+            Frame::BlobChunk {
+                stream_id,
+                fin,
+                bytes,
+            } => encode_blob_chunk_frame(*stream_id, *fin, bytes, &limits).unwrap(),
+        })
+        .collect()
+}
+
 proptest! {
     /// Pure random bytes, fed as one chunk. Never panics; never yields more
     /// decoded payload bytes than were pushed; stays poisoned after an error.
@@ -87,22 +170,36 @@ proptest! {
     /// identically to the whole thing arriving at once -- the incremental
     /// decoder must not depend on chunk boundaries for correctness.
     #[test]
-    fn arbitrary_bytes_split_into_chunks_never_panic(
+    fn arbitrary_bytes_have_equivalent_chunk_schedules(
         bytes in prop::collection::vec(any::<u8>(), 0..2048),
-        split_at in 0usize..2048,
+        widths in prop::collection::vec(0usize..256, 0..32),
     ) {
-        let mut decoder = FrameDecoder::new(WireLimits::default());
-        let split = split_at.min(bytes.len());
-        decoder.push(&bytes[..split]);
-        let _ = decoder.next_frame();
-        decoder.push(&bytes[split..]);
-        loop {
-            match decoder.next_frame() {
-                Ok(Some(_)) => continue,
-                Ok(None) => break,
-                Err(_) => break,
+        prop_assert_eq!(decode_schedule(schedule_chunks(&bytes, &widths)), decode_schedule([&bytes]));
+    }
+
+    #[test]
+    fn valid_streams_preserve_every_frame_across_chunk_schedules(
+        frames in valid_frames(),
+        widths in prop::collection::vec(0usize..128, 0..64),
+        tail in 0u8..3,
+    ) {
+        let mut bytes = encode_frames(&frames);
+        let expected_error = match tail {
+            0 => None,
+            1 => {
+                bytes.extend_from_slice(b"BAD!\x01\0\0\0\0\0\0\0");
+                Some(FrameDecodeError::BadMagic(*b"BAD!"))
             }
-        }
+            _ => {
+                // A valid but unfinished next frame is not an error.
+                let partial = encode_control_frame(b"unfinished", &WireLimits::default()).unwrap();
+                bytes.extend_from_slice(&partial[..partial.len() - 1]);
+                None
+            }
+        };
+        let expected = (frames, expected_error);
+        prop_assert_eq!(decode_schedule([&bytes]), expected.clone());
+        prop_assert_eq!(decode_schedule(schedule_chunks(&bytes, &widths)), expected);
     }
 
     /// A single-byte flip anywhere in a real, valid encoded frame must never
@@ -170,6 +267,45 @@ proptest! {
         let outcome = decoder.next_frame();
         if u64::from(claimed_len) > u64::from(WireLimits::default().max_frame_bytes) {
             prop_assert!(outcome.is_err(), "an oversized length claim must be refused immediately");
+        }
+    }
+}
+
+#[test]
+fn every_split_preserves_frames_and_terminal_error() {
+    let frames = vec![
+        Frame::Control(b"first".to_vec()),
+        Frame::BlobChunk {
+            stream_id: 7,
+            fin: false,
+            bytes: vec![0, 255, 3],
+        },
+        Frame::BlobChunk {
+            stream_id: 7,
+            fin: true,
+            bytes: Vec::new(),
+        },
+        Frame::Control(b"last".to_vec()),
+    ];
+    for malformed_tail in [false, true] {
+        let mut bytes = encode_frames(&frames);
+        let terminal = if malformed_tail {
+            bytes.extend_from_slice(b"BAD!\x01\0\0\0\0\0\0\0");
+            // A valid frame after the error must never resynchronize.
+            bytes.extend(encode_frames(&frames[..1]));
+            Some(FrameDecodeError::BadMagic(*b"BAD!"))
+        } else {
+            None
+        };
+        let expected = (frames.clone(), terminal);
+        assert_eq!(decode_schedule([&bytes]), expected);
+        assert_eq!(decode_schedule(bytes.chunks(1)), expected);
+        for split in 0..=bytes.len() {
+            assert_eq!(
+                decode_schedule([&bytes[..split], &bytes[split..]]),
+                expected,
+                "split {split}, malformed tail {malformed_tail}"
+            );
         }
     }
 }

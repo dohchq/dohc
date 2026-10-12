@@ -175,7 +175,7 @@ export type ShareViewReconcileOutcome =
 
 export interface ShareViewFiles {
   end(lease: WorkspaceOperationLease, target: ShareViewFilesTarget, assertCurrent: () => void): Promise<void>;
-  narrow(lease: WorkspaceOperationLease, target: ShareViewFilesTarget, assertCurrent: () => void, commit: (unsavedPaths: string[] | null, unconfirmedChanges: ShareUnconfirmedChanges) => void): Promise<void>;
+  narrow(lease: WorkspaceOperationLease, target: ShareViewFilesTarget, assertCurrent: () => void, commit: (unsavedPaths: string[] | null, unconfirmedChanges: ShareUnconfirmedChanges) => Promise<void>): Promise<void>;
   mount(
     lease: WorkspaceOperationLease,
     target: PreparedShareViewFilesMount,
@@ -1077,7 +1077,7 @@ export function createShareViewFiles(
         assertCurrent();
         const captured = await captureBeforeRestriction(lease, target);
         assertCurrent();
-        commit(captured.unsavedPaths, captured.unconfirmedChanges);
+        await commit(captured.unsavedPaths, captured.unconfirmedChanges);
       });
     },
     async mount(lease, prepared) {

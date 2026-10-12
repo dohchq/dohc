@@ -15,13 +15,11 @@ import { SidePanel } from "../../desktop/src/renderer/workbench/SidePanel";
 const emptyCollectionFolders: ReadonlySet<string> = new Set();
 const noopOpenCollection = () => {};
 import { useWorkspaceSearch } from "../../desktop/src/renderer/workbench/useWorkspaceSearch";
-import type { ViewId } from "../../desktop/src/renderer/workbench/workbenchState";
 import {
   projectTreePath,
   type PendingTreeChange,
 } from "../../desktop/src/renderer/workbench/file-tree-optimistic";
-
-export type DemoPanelId = ViewId | "chats";
+import type { DemoPanelId } from "./demoPanels";
 
 // The demo has no editing pipeline, so no path ever holds a set-aside draft.
 const NO_PATHS: ReadonlySet<string> = new Set();
@@ -282,18 +280,19 @@ export function DemoSidebar(props: {
           refreshKey={refreshKey}
           onOpenPath={open}
         />
-      ) : (
+      ) : props.activePanel === "history" ? (
         <EngineHistoryView
           moments={moments}
           hasMore={false}
           loadingMore={false}
-          protectedTruncated={false}
           onLoadMore={() => undefined}
           onOpenMoment={(momentId) => {
             const path = moments.find((moment) => moment.id === momentId)?.path;
             if (path) open(path);
           }}
         />
+      ) : (
+        props.activePanel satisfies never
       )}
     </SidePanel>
   );

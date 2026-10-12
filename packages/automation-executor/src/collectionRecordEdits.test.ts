@@ -1,10 +1,11 @@
-import { mkdir, readFile, writeFile, readdir } from "node:fs/promises";
+import { mkdir, readFile, writeFile, readdir, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { getEventListeners } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import type { ChangeAttributionWire } from "@dohc/workspace-engine-client";
+import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
 import {
   AutomationCreationCommitted,
   AutomationCreationSkipped,
@@ -912,6 +913,7 @@ describe("createCollectionRecord", () => {
 
     // The run stops before it settles; the next attempt finds the record,
     // even after someone renamed it, and has nothing left to write.
+    await rename(join(root, "tasks", "two.md"), join(root, "tasks", "renamed.md"));
     engine.records.set(recordId, "tasks/renamed.md");
     await expect(attempt(2)).resolves.toEqual({
       path: "tasks/renamed.md",
@@ -923,7 +925,7 @@ describe("createCollectionRecord", () => {
     // The automation's file carries it as the moment's author, so the added
     // record's claim knows the automation and its depth.
     expect(context.createdFiles).toEqual([{ path: "tasks/two.md", author: AUTOMATION }]);
-    await expect(readFile(join(root, "tasks", "two.md"), "utf8")).resolves.toBe(
+    await expect(readFile(join(root, "tasks", "renamed.md"), "utf8")).resolves.toBe(
       `---\nid: ${recordId}\n---\n`,
     );
   });
@@ -1651,6 +1653,103 @@ describe("partial record retry", () => {
     await expect(retry).resolves.toEqual({ path: "tasks/retry.md", recordId: partial.retry.recordId });
     expect(await readdir(join(root, "tasks"))).toEqual(["retry.md"]);
   });
+});
+
+it.each(["deleted", "renamed", "replaced"].flatMap(state => [
+  { state, fields: undefined }, { state, fields: { status: "done" } },
+]))("skips an automation replay with a stale binding after the file was $state ($fields)", async ({ state, fields }) => {
+  const root = await createTestScratch("dohc-stale-record-");
+  const { session, log } = fakeSession();
+  const engine = fakeEngine();
+  const context = contextFor(root, session, engine.overrides);
+  const recordId = derivedRecordId("stale");
+  await mkdir(join(root, "tasks"));
+  await writeFile(join(root, "tasks", "two.md"), `---\nid: ${recordId}\n---\n`);
+  await engine.adopt(root, "tasks/two.md");
+  if (state === "renamed") await rename(join(root, "tasks", "two.md"), join(root, "tasks", "moved.md"));
+  else await unlink(join(root, "tasks", "two.md"));
+  const other = `---\nid: ${derivedRecordId("other")}\n---\n`;
+  if (state === "replaced") await writeFile(join(root, "tasks", "two.md"), other);
+
+  // No reconciliation: the engine still answers the old path for this id.
+  await expect(createCollectionRecord(context, {
+    collectionPath: "tasks", name: "two", recordId, author: AUTOMATION, fields,
+  })).rejects.toBeInstanceOf(AutomationCreationSkipped);
+  expect(context.openedPaths).toEqual([]);
+  expect(context.createdFiles).toEqual([]);
+  expect(log.updates).toEqual([]);
+  if (state === "replaced") expect(await readFile(join(root, "tasks", "two.md"), "utf8")).toBe(other);
+});
+
+it("skips an automation replay when the bound file read reports file-not-found", async () => {
+  const root = await createTestScratch("dohc-stale-record-read-");
+  const { session } = fakeSession();
+  const engine = fakeEngine();
+  const recordId = derivedRecordId("stale");
+  engine.records.set(recordId, "tasks/two.md");
+  const context = contextFor(root, session, engine.overrides);
+  const read = vi.spyOn(context, "readText").mockRejectedValueOnce(new VersionedTextStoreError("file-not-found", "missing"));
+  await expect(createCollectionRecord(context, {
+    collectionPath: "tasks", name: "two", recordId, author: AUTOMATION,
+  })).rejects.toBeInstanceOf(AutomationCreationSkipped);
+  expect(read).toHaveBeenCalledOnce();
+  expect(context.openedPaths).toEqual([]);
+});
+
+it("propagates a transient bound-file read failure without treating the record as created", async () => {
+  const root = await createTestScratch("dohc-stale-record-read-");
+  const { session } = fakeSession();
+  const engine = fakeEngine();
+  const recordId = derivedRecordId("stale");
+  await mkdir(join(root, "tasks"));
+  await writeFile(join(root, "tasks", "two.md"), `---\nid: ${recordId}\n---\n`);
+  await engine.adopt(root, "tasks/two.md");
+  const context = contextFor(root, session, engine.overrides);
+  const error = Object.assign(new Error("read refused"), { code: "EACCES" });
+  const read = vi.spyOn(context, "readText").mockRejectedValueOnce(error);
+  await expect(createCollectionRecord(context, {
+    collectionPath: "tasks", name: "two", recordId, author: AUTOMATION,
+  })).rejects.toBe(error);
+  expect(read).toHaveBeenCalledOnce();
+  expect(context.openedPaths).toEqual([]);
+});
+
+it.each([undefined, derivedRecordId("first-create")])("does not add a file read to a first automation creation (%s)", async recordId => {
+  const root = await createTestScratch("dohc-first-record-read-");
+  const { session } = fakeSession();
+  const engine = fakeEngine();
+  const context = contextFor(root, session, engine.overrides);
+  const write = context.createFile;
+  vi.spyOn(context, "createFile").mockImplementationOnce(async (...args) => {
+    const path = await write(...args);
+    await engine.adopt(root, path);
+    return path;
+  });
+  const read = vi.spyOn(context, "readText");
+  await expect(createCollectionRecord(context, {
+    collectionPath: "tasks", name: "two", recordId, author: AUTOMATION,
+  })).resolves.toMatchObject({ path: "tasks/two.md" });
+  // Only waitForRecord reads the new file to confirm adoption.
+  expect(read).toHaveBeenCalledExactlyOnceWith("tasks/two.md");
+});
+
+it("continues an automation replay when the bound file still has the requested id", async () => {
+  const root = await createTestScratch("dohc-live-record-replay-");
+  const { session, log } = fakeSession();
+  const engine = fakeEngine();
+  const recordId = derivedRecordId("live");
+  await mkdir(join(root, "tasks"));
+  await writeFile(join(root, "tasks", "two.md"), `---\nid: ${recordId}\n---\n`);
+  await engine.adopt(root, "tasks/two.md");
+  const context = contextFor(root, session, engine.overrides);
+  const read = vi.spyOn(context, "readText");
+  await expect(createCollectionRecord(context, {
+    collectionPath: "tasks", name: "two", recordId, author: AUTOMATION, fields: { status: "done" },
+  })).resolves.toEqual({ path: "tasks/two.md", recordId });
+  expect(read).toHaveBeenCalledExactlyOnceWith("tasks/two.md");
+  expect(context.createdFiles).toEqual([]);
+  expect(context.openedPaths).toEqual(["tasks/two.md"]);
+  expect(log.doc.getMap("frontmatter").get("status")).toBe("done");
 });
 
 it.each(["missing", "other", "unreadable"] as const)("checks a committed creation's %s file before skipping it", async state => {

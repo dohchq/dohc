@@ -1,3 +1,4 @@
+import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
@@ -10,6 +11,7 @@ import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createWorkspaceEngineIpc } from "./workspaceEngineIpc";
 import { CHANNELS } from "./channels";
 import type { EngineMomentRecord, RebuildEngineStoreResult, SyncStatusResult } from "./bridgeContract";
+import type { EngineMomentAuthorNames } from "./engineHistoryIpc";
 import { GetCollectionRecordHistoryResult, captureRecoveryOperations, fileObservationOperations, engineYDocAdmissionOperations, engineYDocSaveOperations } from "./bridgeContract";
 import { operationBridge } from "./operationTable";
 import { engineMomentSourceLabel } from "../renderer/workbench/EngineHistory";
@@ -134,8 +136,9 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     getCollectionRecord: vi.fn<VersionedLiveAdapter["getCollectionRecord"]>(async () => { throw new Error("record boundary"); }),
   };
   const capture = {
+    filePathForObjectId: vi.fn<WorkspaceEngineCapture["filePathForObjectId"]>(async () => null),
     listMoments: vi.fn<WorkspaceEngineCapture["listMoments"]>(async () => ({
-      moments: [], nextBeforeMomentOrder: null, latestMomentOrder: 0, activeVersionId: "main", protectedTruncated: false,
+      moments: [], nextCursor: null, latestMomentOrder: 0, activeVersionId: "main", ...historyPageFields,
     })),
     readMoment: vi.fn<WorkspaceEngineCapture["readMoment"]>(async () => null),
     restoreFileToBeforeMoment: vi.fn<WorkspaceEngineCapture["restoreFileToBeforeMoment"]>(async () => {
@@ -189,7 +192,9 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
   });
   const readPolicy = vi.fn<(rootPath: string) => Promise<WorkspaceEnginePolicySnapshot>>(async () => ({ filesPolicy: null, visibilityPolicy: null, errors: [], unreadable: [] }));
   if (policyRoot) readPolicy.mockImplementation(readWorkspaceEnginePolicy);
-  const automationPersonName = vi.fn((_workspaceId: string, userId: string, _sender: Sender): string | null => userId === "person-local" ? null : userId);
+  const recordHistoryPersonName = vi.fn((_workspaceId: string, userId: string, _sender: Sender): string | null => userId === "person-local" ? null : userId);
+  const prepareRecordHistoryPeople = vi.fn<(_workspaceId: string, userIds: readonly string[], _sender: Sender) => void>();
+  const prepareNamed = vi.fn<NonNullable<EngineMomentAuthorNames["prepare"]>>();
   const registrations = createWorkspaceEngineIpc({
     readWorkspaceEnginePolicy: readPolicy,
     localPersonId: () => "person-local",
@@ -207,8 +212,9 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     automationAuthor: (_workspaceId, automationId) => ({ name: automationId, collection: "Tasks" }),
     automationRunOnThisComputer, serverRuns, signedInAccount: () => session.account,
     notifyRenderer: notify,
-    namedAuthorLabels: () => ({ named: () => "Someone you shared with" }),
-    automationPersonName,
+    namedAuthorLabels: () => ({ prepare: prepareNamed, named: () => "Someone you shared with" }),
+    recordHistoryPersonName,
+    prepareRecordHistoryPeople,
     retryOwnerLiveDelivery, retryCloudSync,
     retryFileObservation: retry ? id => { void retryFileObservation(id); return retry.read(); } : retryFileObservation,
     requireWorkspace, assertWritableWorkspace: writable, syncStatusWithOwnedProjection: syncProjection,
@@ -227,12 +233,12 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     return handler({ sender: value }, payload);
   };
   return {
-    workspace, sender, physical, authority, renderers, sessions, ydoc, provider, openYDocSession,
+    workspace, sender, physical, authority, renderers, sessions, ydoc, provider, openYDocSession, prepareNamed,
     adapter, capture, requireEngineCapture, getStatus, hasAgentRun, closeActivity, probe, move, reopen,
     notify, writable, requireWorkspace, displayName, syncProjection, canonicalWorkspaceFor, requireSessions,
     events, handlers, invoke, routed, retryOwnerLiveDelivery, retryCloudSync, retryFileObservation, automationRunOnThisComputer, relay, setMissingAdapter: () => { missingAdapter = true; },
     storeWorkspaces, readPolicy,
-    sent, automationPersonName,
+    sent, recordHistoryPersonName, prepareRecordHistoryPeople,
     signIn: (account: string | null) => { session.account = account; session.generation += 1; },
     /** A credential load begins: no account is known until it reads the store. Resolves the load with its account. */
     loading: () => {
@@ -291,15 +297,15 @@ describe("workspace engine IPC registrations", () => {
     const held = deferred<null>();
     const lookupAccounts = vi.fn(() => held.promise);
     const labels = createHistoryLabels({ snapshot: () => ({ roster: { grants: [], links: [], endedGrants: [], formerGrants: [] }, owner: true, context: 1, inventory: 1 }), lookupAccounts });
-    h.automationPersonName.mockImplementation((workspaceId, userId) => {
-      labels.prepare(workspaceId, [{ userId }]);
+    h.recordHistoryPersonName.mockImplementation((workspaceId, userId) => {
       return labels.person(workspaceId, userId);
     });
+    h.prepareRecordHistoryPeople.mockImplementation((workspaceId, userIds) => labels.prepare(workspaceId, userIds.map(userId => ({ userId }))));
     h.adapter.getCollectionRecord.mockResolvedValue({
       collection: { path: "tasks", objectId: "tasks", status: "valid", reasons: [] },
       record: { id: "a", path: "tasks/a.md", conflicted: false, values: [] }, nextBeforeHistoryId: null,
       history: [{ historyId: 1, field: "Status", previous: { present: false, value: null }, next: { present: true, value: "Done" },
-        authorOriginId: "automation", actorKind: "automation", onBehalfOf: "ben", depth: 1, recordedAtMs: 1, automationRun: null }],
+        authorOriginId: "automation", actorKind: "automation", onBehalfOf: "ben", depth: 1, recordedAtMs: 1, automationRun: null, linkAuthor: null }],
     });
     await h.invoke(CHANNELS.getCollectionRecordHistory, { workspaceId: "workspace", collectionPath: "tasks", recordId: "a" });
     await new Promise<void>(resolve => setImmediate(resolve));
@@ -308,6 +314,27 @@ describe("workspace engine IPC registrations", () => {
     await h.authority.retireBinding(h.authority.currentBinding("workspace")!, { removeBinding: removed });
     expect(removed).toHaveBeenCalledTimes(1);
     held.resolve(null);
+  });
+  it.each(["human", "agent"] as const)("keeps a %s row's local person out of relay account lookup", async actorKind => {
+    const { createHistoryLabels } = await import("../automations/shareRoster");
+    const h = await harness();
+    const lookupAccounts = vi.fn(async () => null);
+    const labels = createHistoryLabels({ snapshot: () => ({ roster: { grants: [], links: [], endedGrants: [], formerGrants: [] }, owner: true, context: 1, inventory: 1 }), lookupAccounts });
+    h.recordHistoryPersonName.mockImplementation((workspaceId, userId) => labels.person(workspaceId, userId));
+    h.prepareRecordHistoryPeople.mockImplementation((workspaceId, userIds) => labels.prepare(workspaceId, userIds.map(userId => ({ userId }))));
+    h.adapter.getCollectionRecord.mockResolvedValue({
+      collection: { path: "tasks", objectId: "tasks", status: "valid", reasons: [] },
+      record: { id: "a", path: "tasks/a.md", conflicted: false, values: [] }, nextBeforeHistoryId: null,
+      history: [{ historyId: 1, field: "Status", previous: { present: false, value: null }, next: { present: true, value: "Done" },
+        authorOriginId: actorKind === "human" ? "local:installation-1" : "helper", actorKind, onBehalfOf: "local:installation-1", depth: 0, recordedAtMs: 1, automationRun: null, linkAuthor: null }],
+    });
+    const page = await h.invoke(CHANNELS.getCollectionRecordHistory, { workspaceId: "workspace", collectionPath: "tasks", recordId: "a" });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect.soft(page).toMatchObject({ entries: [{ author: actorKind === "human" ? null : { kind: "agent", name: "Agent" } }] });
+    if (actorKind === "agent") expect.soft(GetCollectionRecordHistoryResult.parse(page).entries[0]?.author).not.toHaveProperty("person");
+    expect.soft(h.prepareRecordHistoryPeople).toHaveBeenCalledExactlyOnceWith("workspace", [], expect.any(Sender));
+    expect.soft(h.recordHistoryPersonName).not.toHaveBeenCalled();
+    expect(lookupAccounts).not.toHaveBeenCalled();
   });
   it("reads and persistently dismisses capture recovery only for this renderer's workspace", async () => {
     const h = await harness();
@@ -493,7 +520,7 @@ describe("workspace engine IPC registrations", () => {
     const side = (value: string | null) => ({ present: value !== null, value });
     const entry = (historyId: number, overrides: Partial<CollectionGetRecordResult["history"][number]>) => ({
       historyId, field: "Status", previous: side("Open"), next: side("Done"), authorOriginId: null, actorKind: null,
-      onBehalfOf: null, depth: null, recordedAtMs: 1_000 - historyId, automationRun: null, ...overrides,
+      onBehalfOf: null, depth: null, recordedAtMs: 1_000 - historyId, automationRun: null, linkAuthor: null, ...overrides,
     });
     const automation = { authorOriginId: stamp, actorKind: "automation" as const, onBehalfOf: "person-local", depth: 1 };
     h.adapter.getCollectionRecord.mockResolvedValue({
@@ -506,7 +533,7 @@ describe("workspace engine IPC registrations", () => {
         entry(6, automation),
         entry(5, { authorOriginId: "codex", actorKind: "agent", onBehalfOf: "person-local", depth: 0 }),
         entry(4, { authorOriginId: "codex", actorKind: "agent", onBehalfOf: "user-ana", depth: 0 }),
-        entry(3, { actorKind: "human" }),
+        entry(3, { actorKind: "human", authorOriginId: "user-ana", onBehalfOf: "user-ana" }),
         entry(2, { ...automation, onBehalfOf: "user-ana" }),
       ],
       nextBeforeHistoryId: 3,
@@ -524,12 +551,13 @@ describe("workspace engine IPC registrations", () => {
         { historyId: 6, author: { kind: "automation", name: stamp, run: null } },
         { historyId: 5, author: { kind: "agent", name: "You" } },
         // Another person's agent, as the file timeline names it.
-        { historyId: 4, author: { kind: "agent", name: "Agent" } },
-        { historyId: 3, author: null },
+        { historyId: 4, author: { kind: "agent", name: "Agent", person: "user-ana" } },
+        { historyId: 3, author: { kind: "human", name: "user-ana" } },
         { historyId: 2, author: { kind: "automation", name: stamp, person: "user-ana", run: null } },
       ],
     });
     expect(GetCollectionRecordHistoryResult.parse(page).entries[0]?.author).not.toHaveProperty("person");
+    expect(h.prepareRecordHistoryPeople).toHaveBeenCalledExactlyOnceWith("workspace", ["person-local", "user-ana"], expect.any(Sender));
     expect(h.automationRunOnThisComputer.mock.calls).toEqual([
       ["workspace", stamp, "claim-here"],
       ["workspace", stamp, "claim-gone"],
@@ -572,7 +600,7 @@ describe("workspace engine IPC registrations", () => {
     const change = (historyId: number, claimId: string) => ({
       historyId, field: "Status", previous: { present: true, value: "Open" }, next: { present: true, value: "Done" },
       authorOriginId: stamp, actorKind: "automation" as const, onBehalfOf: "person-local", depth: 1,
-      recordedAtMs: 1_000 - historyId, automationRun: { claimId, automationName: "Stamp" },
+      recordedAtMs: 1_000 - historyId, automationRun: { claimId, automationName: "Stamp" }, linkAuthor: null,
     });
     h.adapter.getCollectionRecord.mockResolvedValue({
       collection: { path: "tasks", objectId: "tasks-id", status: "valid", reasons: [] },
@@ -686,18 +714,33 @@ describe("workspace engine IPC registrations", () => {
     await h.invoke(CHANNELS.listEngineMoments);
     expect(h.requireEngineCapture).toHaveBeenCalledWith("workspace", "Engine history");
     expect(h.capture.listMoments).toHaveBeenLastCalledWith({});
-    await h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", objectId: "object-1", limit: 7, beforeMomentOrder: 19 });
-    expect(h.capture.listMoments).toHaveBeenLastCalledWith({ objectId: "object-1", limit: 7, beforeMomentOrder: 19 });
+    await h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", objectId: "object-1", limit: 7, cursor: historyCursor(19) });
+    expect(h.capture.listMoments).toHaveBeenLastCalledWith({ objectId: "object-1", limit: 7, cursor: historyCursor(19) });
     await expect(h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", objectId: "" })).rejects.toThrow();
     await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "moment" })).resolves.toEqual({ moment: null });
+  });
+
+  it("prepares every author of a History detail several people wrote", async () => {
+    const h = await harness();
+    const authors = [
+      { kind: "named", userId: "u-ana", grantId: "g-1", grantGeneration: 1 },
+      { kind: "named", userId: "u-ben", grantId: "g-dep", grantGeneration: 1 },
+    ] as const;
+    h.capture.readMoment.mockResolvedValueOnce({ protected: false, moment: {
+      id: "m-both", workspaceId: "workspace", versionId: "main", objectId: "o-1", path: "notes/a.md", recordedAtMs: 1,
+      operation: "write", metadata: { origin: "sync" }, authors: [...authors],
+      payload: { before: null, after: { path: "notes/a.md", contentKind: "text", sha256: "a".repeat(64), byteLength: 3, text: "new" } },
+    } });
+    const result = await h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "m-both" });
+    expect(h.prepareNamed).toHaveBeenCalledWith([...authors]);
+    expect(result).toMatchObject({ moment: { authorLabels: ["Someone you shared with", "Someone you shared with"] } });
   });
 
   it("reads a shared view's imported history from its registered share mount without a capture", async () => {
     const summary = { id: "shared", versionId: "main", path: "notes/a.md", recordedAtMs: 1, operation: "write" as const,
       metadata: { origin: "local-file" }, momentOrder: 1, authors: [{ kind: "agent" as const, agentId: "trip-agent-hosted", onBehalfOf: "owner-person" }] };
-    const listHistoryPage = vi.fn(async () => ({ activeVersion: { id: "main" },
-      textMomentPage: { moments: [summary], nextBeforeMomentOrder: null, latestMomentOrder: 1 },
-      protectedMoments: [], protectedTruncated: false }));
+    const listHistoryPage = vi.fn(async () => ({ activeVersion: { id: "main" }, ...historyPageFields,
+       moments: [summary], nextCursor: null, latestMomentOrder: 1, protectedMoments: [],  }));
     const getMoment = vi.fn(async ({ momentId }: { workspaceId: string; momentId: string }) => momentId !== "shared" ? null : {
       ...summary, workspaceId: "workspace", objectId: "object",
       payload: { before: null, after: { path: "notes/a.md", contentKind: "text", sha256: "a".repeat(64), byteLength: 4, text: "body" } },
@@ -706,7 +749,7 @@ describe("workspace engine IPC registrations", () => {
     h.readPolicy.mockRejectedValue(new Error("Receiver policy must not gate imported history."));
     h.requireEngineCapture.mockRejectedValue(new Error("dohc could not start Engine history for this workspace."));
     await expect(h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", objectId: "object", limit: 5 })).resolves.toMatchObject({
-      moments: [{ id: "shared", agentAuthorName: "trip-agent-hosted" }], protectedTruncated: false,
+      moments: [{ id: "shared", agentAuthorName: "trip-agent-hosted" }],
     });
     expect(listHistoryPage).toHaveBeenCalledWith({ workspaceId: "workspace", objectId: "object", limit: 5 });
     // The store opens the renderer's own attachment as a share mount; the payload names only the workspace.
@@ -731,7 +774,7 @@ describe("workspace engine IPC registrations", () => {
     const h = await harness();
     h.requireEngineCapture.mockRejectedValue(new Error("capture unavailable"));
     for (const channel of [CHANNELS.listEngineMoments, CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile]) {
-      await expect(h.invoke(channel, { workspaceId: "workspace", momentId: "moment" })).rejects.toThrow("capture unavailable");
+      await expect(h.invoke(channel, { workspaceId: "workspace", ...(channel === CHANNELS.listEngineMoments ? {} : { momentId: "moment" }) })).rejects.toThrow("capture unavailable");
     }
     expect(h.capture.listMoments).not.toHaveBeenCalled();
     expect(h.capture.readMoment).not.toHaveBeenCalled();
@@ -747,7 +790,7 @@ describe("workspace engine IPC registrations", () => {
         operation: "write", metadata: { origin: "local-file" }, protected: false, momentOrder: index,
         authors: [{ kind: "agent", agentId: "agent", agentRunId: "run-1", onBehalfOf }],
       })),
-      nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+      nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields,
     });
     const names = async () => ((await h.invoke(CHANNELS.listEngineMoments)) as { moments: Array<{ agentAuthorName?: string }> })
       .moments.map((moment) => moment.agentAuthorName);
@@ -776,7 +819,7 @@ describe("workspace engine IPC registrations", () => {
         operation: "write", metadata: { origin: "local-file" }, protected: false, momentOrder: index,
         authors: [{ kind: "agent", onBehalfOf: "person-local", ...identity }],
       })),
-      nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+      nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields,
     });
     await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({
       moments: [{ agentAuthorName: "You" }, { agentAuthorName: "Pat" }, { agentAuthorName: "Agent" }],
@@ -812,11 +855,34 @@ describe("workspace engine IPC registrations", () => {
     });
     h.capture.listMoments.mockResolvedValue({
       moments: [restore("mine", "person-local"), restore("earlier-account", "person-before")],
-      nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+      nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields,
     });
     const listed = (await h.invoke(CHANNELS.listEngineMoments)) as { moments: EngineMomentRecord[] };
     expect(listed.moments.map((moment) => moment.personAuthorName)).toEqual(["Ice", undefined]);
     expect(listed.moments.map(engineMomentSourceLabel)).toEqual(["Ice", "Restore"]);
+  });
+
+  it("names a hosted agent's live edit by the account holder and agent its author snapshot admitted", async () => {
+    const h = await harness();
+    const settled = (id: string, authors: NonNullable<Awaited<ReturnType<WorkspaceEngineCapture["listMoments"]>>["moments"][number]["authors"]>) => ({
+      id, versionId: "main", path: "notes/a.md", recordedAtMs: 1, operation: "write" as const,
+      metadata: { origin: "local-file" as const }, protected: false as const, momentOrder: 0, authors,
+    });
+    const owner = { kind: "human" as const, humanId: "person-local", humanName: "Owner Account" };
+    h.capture.listMoments.mockResolvedValue({
+      moments: [
+        settled("hosted", [owner, { kind: "agent", agentId: "writer", onBehalfOf: "person-local" }]),
+        settled("named", [owner, { kind: "agent", agentId: "writer", agentName: "Trip helper", onBehalfOf: "person-local" }]),
+        settled("account", [owner]),
+        settled("link", [{ kind: "link", publicPrincipalId: "public_1", label: "Anonymous" }]),
+      ],
+      nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields,
+    });
+    const listed = (await h.invoke(CHANNELS.listEngineMoments)) as { moments: EngineMomentRecord[] };
+    expect(listed.moments.map(engineMomentSourceLabel)).toEqual([
+      "Owner Account, writer", "Owner Account, Trip helper", "Owner Account", "Link holder Anonymous",
+    ]);
+    expect(listed.moments.map((moment) => moment.authors?.length)).toEqual([2, 2, 1, 1]);
   });
 
   it("notifies after a restore and before parsing its result", async () => {
@@ -1004,38 +1070,119 @@ function historyDetail(path = "notes/a.md", beforePath: string | null = null, af
 }
 function historyPage(path = "notes/a.md") {
   return { moments: [{ ...historyDetail(path).moment, protected: false, momentOrder: 10 }],
-    nextBeforeMomentOrder: 8, latestMomentOrder: 10, activeVersionId: "main", protectedTruncated: false };
+    nextCursor: historyCursor(8), latestMomentOrder: 10, activeVersionId: "main", ...historyPageFields,  };
 }
 
 describe("owner History path policy", () => {
+  it.each([false, true])("preserves the request start cursor after skipping with policy=%s", async policy => {
+    const h = await harness();
+    if (policy) h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
+    const start = historyCursor(100);
+    const marker = { id: "draft", workspaceId: "workspace", kind: "named" as const, name: "Draft", createdAtMs: 90 };
+    h.capture.listMoments
+      .mockResolvedValueOnce({ ...historyPage("private/a.md"), moments: policy ? historyPage("private/a.md").moments : [], startCursor: start, nextCursor: historyCursor(80), versionMarkers: [marker] })
+      .mockResolvedValueOnce({ ...historyPage(), startCursor: historyCursor(80), nextCursor: null });
+    await expect(h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", cursor: start })).resolves.toMatchObject({
+      startCursor: start, moments: [{ path: "notes/a.md" }], versionMarkers: [marker], nextCursor: null,
+    });
+    expect(h.capture.listMoments).toHaveBeenCalledTimes(2);
+  });
+
+  it("skips marker-only pages without policy filtering", async () => {
+    const h = await harness();
+    const marker = { id: "draft", workspaceId: "workspace", kind: "named" as const, name: "Draft", createdAtMs: 90 };
+    h.capture.listMoments
+      .mockResolvedValueOnce({ ...historyPage(), moments: [], versionMarkers: [marker], nextCursor: historyCursor(8) })
+      .mockResolvedValueOnce({ ...historyPage("notes/old.md"), startCursor: historyCursor(8), nextCursor: null });
+    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({ moments: [{ path: "notes/old.md" }], startCursor: historyPageFields.startCursor, versionMarkers: [marker] });
+    expect(h.capture.listMoments).toHaveBeenCalledTimes(2);
+  });
+
+  it("reaches admitted moments after more than 500 excluded moments", async () => {
+    const h = await harness();
+    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
+    for (let i = 0; i < 12; i += 1) h.capture.listMoments.mockResolvedValueOnce({ ...historyPage("private/a.md"), moments: Array(50).fill(historyPage("private/a.md").moments[0]), nextCursor: historyCursor(2_000 - (i + 1) * 50) });
+    h.capture.listMoments.mockResolvedValueOnce({ ...historyPage(), nextCursor: null });
+    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({ moments: [{ path: "notes/a.md" }] });
+    expect(h.capture.listMoments).toHaveBeenCalledTimes(13);
+  });
+  it("keeps version markers when a page's file moments are excluded", async () => {
+    const h = await harness();
+    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
+    const marker = { id: "draft", workspaceId: "workspace", kind: "named" as const, name: "Draft", createdAtMs: 10 };
+    h.capture.listMoments
+      .mockResolvedValueOnce({ ...historyPage("private/a.md"), versionMarkers: [marker] })
+      .mockResolvedValueOnce({ ...historyPage("notes/old.md"), nextCursor: null });
+    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({
+      moments: [{ path: "notes/old.md" }], versionMarkers: [marker], nextCursor: null,
+    });
+    expect(h.capture.listMoments).toHaveBeenCalledTimes(2);
+  });
+
   it("skips excluded pages to reach older admitted History", async () => {
     const h = await harness();
     h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
     h.capture.listMoments
-      .mockResolvedValueOnce({ ...historyPage("private/a.md"), nextBeforeMomentOrder: 800, latestMomentOrder: 1000, protectedTruncated: true })
-      .mockResolvedValueOnce({ ...historyPage("private/b.md"), nextBeforeMomentOrder: 600, latestMomentOrder: 1000 })
-      .mockResolvedValueOnce({ ...historyPage("notes/old.md"), nextBeforeMomentOrder: 400, latestMomentOrder: 1000 });
-    await expect(h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", limit: 200 })).resolves.toMatchObject({
-      moments: [{ path: "notes/old.md" }], nextBeforeMomentOrder: 400, latestMomentOrder: 1000, protectedTruncated: true,
+      .mockResolvedValueOnce({ ...historyPage("private/a.md"), nextCursor: historyCursor(800), latestMomentOrder: 1000,  })
+      .mockResolvedValueOnce({ ...historyPage("private/b.md"), nextCursor: historyCursor(600), latestMomentOrder: 1000 })
+      .mockResolvedValueOnce({ ...historyPage("notes/old.md"), nextCursor: historyCursor(400), latestMomentOrder: 1000 });
+    await expect(h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", limit: 50 })).resolves.toMatchObject({
+      moments: [{ path: "notes/old.md" }], nextCursor: historyCursor(400), latestMomentOrder: 1000,
     });
-    expect(h.capture.listMoments.mock.calls).toEqual([[{ limit: 200 }], [{ limit: 200, beforeMomentOrder: 800 }], [{ limit: 200, beforeMomentOrder: 600 }]]);
+    expect(h.capture.listMoments.mock.calls).toEqual([[{ limit: 50 }], [{ limit: 50, cursor: historyCursor(800) }], [{ limit: 50, cursor: historyCursor(600) }]]);
   });
 
   it("bounds excluded-page reads and leaves a cursor to continue", async () => {
     const h = await harness();
     h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
-    h.capture.listMoments.mockImplementation(async ({ beforeMomentOrder } = {}) => ({
-      ...historyPage("private/a.md"), nextBeforeMomentOrder: (beforeMomentOrder ?? 2000) - 200,
+    h.capture.listMoments.mockImplementation(async ({ cursor } = {}) => ({
+      ...historyPage("private/a.md"), nextCursor: historyCursor((cursor?.text?.momentOrder ?? 2000) - 50),
     }));
-    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({ moments: [], nextBeforeMomentOrder: 0 });
-    expect(h.capture.listMoments).toHaveBeenCalledTimes(10);
+    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({ moments: [], nextCursor: historyCursor(0) });
+    expect(h.capture.listMoments).toHaveBeenCalledTimes(40);
+  });
+
+  it("caps five-row requests at 40 pages instead of making 400 capture reads", async () => {
+    const h = await harness();
+    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
+    h.capture.listMoments.mockImplementation(async ({ cursor } = {}) => ({
+      ...historyPage("private/a.md"), nextCursor: historyCursor((cursor?.text?.momentOrder ?? 2000) - 5),
+    }));
+    await expect(h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", limit: 5 })).resolves.toMatchObject({
+      moments: [], nextCursor: historyCursor(1800),
+    });
+    expect(h.capture.listMoments).toHaveBeenCalledTimes(40);
+  });
+
+  it.each([undefined, { ...historyCursor(8), objectId: "object-1" }])("loads ordinary object History without a path lookup with cursor=%s", async cursor => {
+    const h = await harness();
+    h.capture.listMoments.mockResolvedValue(historyPage());
+    await expect(h.invoke(CHANNELS.listEngineMoments, {
+      workspaceId: "workspace", objectId: "object-1", limit: 5, ...(cursor ? { cursor } : {}),
+    })).resolves.toMatchObject({ moments: [{ path: "notes/a.md" }] });
+    expect(h.capture.filePathForObjectId).not.toHaveBeenCalled();
+    expect(h.capture.listMoments).toHaveBeenCalledExactlyOnceWith({
+      objectId: "object-1", limit: 5, ...(cursor ? { cursor } : {}),
+    });
+  });
+
+  it("does not skip through an object's old pages when its current path is excluded", async () => {
+    const h = await harness();
+    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
+    h.capture.filePathForObjectId.mockResolvedValue("private/a.md");
+    h.capture.listMoments.mockResolvedValue(historyPage("private/a.md"));
+    await expect(h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", objectId: "object-1", limit: 5 })).resolves.toMatchObject({
+      moments: [], nextCursor: null,
+    });
+    expect(h.capture.filePathForObjectId).toHaveBeenCalledExactlyOnceWith("object-1");
+    expect(h.capture.listMoments).toHaveBeenCalledExactlyOnceWith({ objectId: "object-1", limit: 5 });
   });
 
   it("stops skipping at the end of History", async () => {
     const h = await harness();
     h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
-    h.capture.listMoments.mockResolvedValue({ ...historyPage("private/a.md"), nextBeforeMomentOrder: null });
-    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({ moments: [], nextBeforeMomentOrder: null });
+    h.capture.listMoments.mockResolvedValue({ ...historyPage("private/a.md"), nextCursor: null });
+    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({ moments: [], nextCursor: null });
     expect(h.capture.listMoments).toHaveBeenCalledTimes(1);
   });
   it("retires captured list and detail after exclusion, including a reopened window", async () => {
@@ -1076,7 +1223,7 @@ describe("owner History path policy", () => {
     const h = await harness();
     h.capture.listMoments.mockResolvedValue(historyPage(path));
     h.capture.readMoment.mockResolvedValue(historyDetail(path));
-    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({ moments: [], nextBeforeMomentOrder: 8, latestMomentOrder: 10 });
+    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({ moments: [], nextCursor: historyCursor(8), latestMomentOrder: 10 });
     await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "moment" })).resolves.toEqual({ status: "untracked", moment: null });
   });
 

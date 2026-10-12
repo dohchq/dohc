@@ -118,6 +118,125 @@ fn plaintext_update(text: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, text))
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn captured_seeds_are_uncredited_but_headless_recovery_keeps_the_marker() {
+    for flow in [
+        "headless-recovery",
+        "created-document",
+        "created-empty-document",
+        "recovered-edit",
+    ] {
+        let scratch = ScratchDir::new().expect("scratch");
+        let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+        let handle = open_workspace_with_capture_mode(
+            &transport,
+            &scratch,
+            "seed-coverage",
+            1,
+            Some("none"),
+        )
+        .await;
+        if flow == "created-document" {
+            call_keyed(
+                &transport,
+                &handle,
+                2,
+                "versionedText.write",
+                "create-document",
+                json!({
+                    "versionId":"main", "path":"new.txt", "text":"starting state",
+                    "origin":"api", "publish":true
+                }),
+            )
+            .await;
+        }
+        if flow == "created-empty-document" {
+            // Desktop file creation can precede capture of the empty file.
+            write_file(scratch.path(), "new.txt", b"");
+        }
+        let opened = call(
+            &transport,
+            &handle,
+            3,
+            "ydoc.open",
+            json!({
+                "versionId":"main", "path":"new.txt", "contentKind":"plaintext"
+            }),
+        )
+        .await;
+        assert_eq!(opened["lineage"], "absent", "{flow}");
+        assert_eq!(
+            opened["head"],
+            if flow == "created-document" {
+                "present"
+            } else {
+                "absent"
+            },
+            "{flow}"
+        );
+        let doc = Ydoc::wire();
+        if flow != "created-empty-document" {
+            call(&transport, &handle, 4, "ydoc.recordUpdate", json!({
+            "sessionId":opened["sessionId"],
+            "updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0,"starting state")),
+            "seed":true
+        })).await;
+        }
+        if flow == "recovered-edit" {
+            // Recovery replays edits separately from the acknowledged starting state.
+            call(&transport, &handle, 5, "ydoc.recordUpdate", json!({
+                "sessionId":opened["sessionId"],
+                "updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(14," edit"))
+            })).await;
+        }
+        let store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 6).unwrap();
+        let pending: String = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COALESCE((SELECT pending_authors_json FROM ydoc_docs WHERE object_id=?1),'[]')",
+                    [opened["objectId"].as_str().unwrap()],
+                    |row| row.get(0),
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+        assert_eq!(
+            pending,
+            if matches!(flow, "headless-recovery" | "recovered-edit") {
+                r#"[{"kind":"unattributed"}]"#
+            } else {
+                "[]"
+            },
+            "{flow}"
+        );
+        drop(store);
+        call(
+            &transport,
+            &handle,
+            7,
+            "ydoc.close",
+            json!({"sessionId":opened["sessionId"]}),
+        )
+        .await;
+        let store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 8).unwrap();
+        let settled: String = store.read_with(|conn| conn.query_row(
+            "SELECT COALESCE((SELECT author_json FROM moments ORDER BY moment_order DESC LIMIT 1),'null')",
+            [], |row| row.get(0)
+        ).map_err(dohc_engine_storage::StorageError::persist_public)).unwrap();
+        assert_eq!(
+            settled,
+            if matches!(flow, "headless-recovery" | "recovered-edit") {
+                r#"[{"kind":"unattributed"}]"#
+            } else {
+                "null"
+            },
+            "settled {flow}"
+        );
+        drop(store);
+        call(&transport, &handle, 8, "workspace.close", json!({})).await;
+    }
+}
+
 fn png_crc32(bytes: &[u8]) -> u32 {
     let mut crc = u32::MAX;
     for byte in bytes {
@@ -793,13 +912,14 @@ async fn deleting_a_scene_retires_only_its_owned_assets_and_rollback_restores_th
     )
     .await;
 
-    let deleted = call(
+    let deleted = call_keyed(
         &transport,
         &handle,
         8,
         "versionedText.delete",
+        "delete-drawing-assets",
         json!({ "versionId": "main", "path": "drawings/delete.excalidraw",
-            "origin": "api", "requestId": "delete-drawing-assets" }),
+            "origin": "api" }),
     )
     .await;
     assert!(!scratch.path().join(&deleted_asset).exists());
@@ -920,13 +1040,13 @@ async fn scene_delete_rollback_stays_closed_over_foreign_disk_bytes_then_recover
 
     let foreign_bytes = b"foreign disk occupant";
     std::fs::write(scratch.path().join(&asset_path), foreign_bytes).expect("replace sidecar");
-    let deleted = call(
+    let deleted = call_keyed(
         &transport,
         &handle,
         5,
         "versionedText.delete",
-        json!({ "versionId": "main", "path": PATH, "origin": "api",
-            "requestId": "delete-conflicted-scene" }),
+        "delete-conflicted-scene",
+        json!({ "versionId": "main", "path": PATH, "origin": "api" }),
     )
     .await;
     call(
@@ -1259,13 +1379,14 @@ async fn deleting_a_forked_scene_retires_inherited_asset_heads_without_touching_
     )
     .await;
     assert_eq!(inherited["sha256"], opened["artifactAssets"][0]["sha256"]);
-    let deleted = call(
+    let deleted = call_keyed(
         &transport,
         &handle,
         6,
         "versionedText.delete",
+        "delete-forked-scene",
         json!({ "versionId": feature, "path": "drawings/forked.excalidraw",
-            "origin": "api", "requestId": "delete-forked-scene" }),
+            "origin": "api" }),
     )
     .await;
     assert_eq!(
@@ -1308,7 +1429,7 @@ async fn deleting_a_forked_scene_retires_inherited_asset_heads_without_touching_
                 conn.query_row(
                     "SELECT COUNT(*) FROM materialization_jobs WHERE workspace_id = ?1 \
              AND target_path = ?2 AND operation = 'write' AND status = 'pending' \
-             AND job_id LIKE 'moment-scene-asset-rollback-%'",
+             AND job_id LIKE 'binary-mat_moment-scene-asset-rollback-%'",
                     rusqlite::params![workspace_id, asset_path],
                     |row| row.get(0),
                 )
@@ -4332,16 +4453,16 @@ async fn a_delete_cancels_the_paths_pending_job_so_replay_cannot_resurrect_it() 
     .await;
     assert_eq!(evicted["evicted"], json!(true));
 
-    call(
+    call_keyed(
         &transport,
         &handle,
         8,
         "versionedText.delete",
+        "delete-with-pending-job",
         json!({
             "versionId": "main",
             "path": "notes/deleted.md",
             "origin": "api",
-            "requestId": "delete-with-pending-job",
         }),
     )
     .await;
@@ -4418,17 +4539,17 @@ async fn an_inactive_versions_delete_does_not_cancel_the_active_versions_pending
         .to_owned();
     // Feature gets its own, independently-written "notes/shared.md" — not
     // main's, so deleting it can never race main's later lock.
-    call(
+    call_keyed(
         &transport,
         &handle,
         3,
         "versionedText.write",
+        "feature-seed",
         json!({
             "versionId": feature,
             "path": "notes/shared.md",
             "text": "feature copy",
             "origin": "api",
-            "requestId": "feature-seed",
         }),
     )
     .await;
@@ -4506,16 +4627,16 @@ async fn an_inactive_versions_delete_does_not_cancel_the_active_versions_pending
     // Deletes feature's own "notes/shared.md" — a different object at the
     // same path string in a different, inactive version. This must never
     // reach main's own pending job.
-    call(
+    call_keyed(
         &transport,
         &handle,
         10,
         "versionedText.delete",
+        "inactive-delete",
         json!({
             "versionId": feature,
             "path": "notes/shared.md",
             "origin": "api",
-            "requestId": "inactive-delete",
         }),
     )
     .await;
@@ -4599,17 +4720,17 @@ async fn deleting_a_committed_renames_locked_destination_still_lets_its_paired_s
     // destination write's post-commit materialize hits the lock and stays
     // pending — so the paired old.bin delete is never attempted either
     // (`write_ready` false).
-    let renamed = call(
+    let renamed = call_keyed(
         &transport,
         &handle,
         4,
         "versionedText.rename",
+        "rename-pair-not-stranded",
         json!({
             "versionId": "main",
             "fromPath": "old.bin",
             "toPath": "new.bin",
             "origin": "api",
-            "requestId": "rename-pair-not-stranded",
         }),
     )
     .await;
@@ -4620,16 +4741,16 @@ async fn deleting_a_committed_renames_locked_destination_still_lets_its_paired_s
 
     // Delete the renamed destination while its write job is still pending —
     // the cancellation this PR adds fires here.
-    call(
+    call_keyed(
         &transport,
         &handle,
         5,
         "versionedText.delete",
+        "delete-locked-rename-destination",
         json!({
             "versionId": "main",
             "path": "new.bin",
             "origin": "api",
-            "requestId": "delete-locked-rename-destination",
         }),
     )
     .await;
@@ -6148,7 +6269,20 @@ async fn attributed_declared_seed_does_not_credit_opening() {
     let handle =
         open_workspace_with_capture_mode(&transport, &scratch, "seed-authors", 1, Some("none"))
             .await;
+    call_keyed(
+        &transport,
+        &handle,
+        10,
+        "versionedText.write",
+        "create-seed-source",
+        json!({"versionId":"main","path":"seed.txt","text":"seed","origin":"api","publish":true}),
+    )
+    .await;
     let opened=call(&transport,&handle,2,"ydoc.open",json!({"versionId":"main","path":"seed.txt","contentKind":"plaintext","seedFromArtifact":false})).await;
+    assert_eq!(
+        opened["head"], "present",
+        "ordinary opening has a captured seed source"
+    );
     let doc = Ydoc::wire();
     call(&transport,&handle,3,"ydoc.recordUpdate",json!({"sessionId":opened["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0,"seed")),"seed":true,"actorOriginId":"opener","attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0}})).await;
     call(

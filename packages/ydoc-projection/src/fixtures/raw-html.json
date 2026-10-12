@@ -1,0 +1,113 @@
+{
+  "markdown": "Intro <!-- inline note --> and <kbd>Ctrl</kbd>+<kbd>K</kbd> keys, line<br>break.\n\nBefore <b>**keep raw**</b> after, <span>*literal* _under_ ~~struck~~ [link](x) $x$ ==mark==</span> and <i>open <b>`x`</b> **bold** $y$ ==hl==.\n\n<!-- reviewer: keep -->\n\n<div class=\"note\">block</div>\n\n==<b>a\\=b *c*</b>==\n\nRun <span title=\"q 'x'\">\\* {{atom:rate 150}} https://in.example/a_b www.in.example a@b.co <https://auto.example>  \nnext</span> and real {{atom:rate 150}} https://out.example \\* end.\n\nRefs <b title=\"&#42; &#92;\">&#42; &#35; &#92; &#123;&#123;atom:a}} &#58; &amp;#92; &amp;amp;#42;</b> <!-- &#36; &#58; &#92; --> then &#42; and &#123;&#123;atom:b}} https&#58;//out.example end.\n\n<div title=\"&#42;\">&#92; &#36; &amp;#92;</div>\n\nBetween <b>x</b> &#42; &#123; &#92; &amp;#92; <i>y</i> and **real** {{atom:rate 150}} $m$ done.\n\n<!-- TODO: fix this,\n\nsee: later -->\n\n<pre>\n*x* {{atom:rate 150}} \\* https://in.example a@b.co [l](u) &#59;\n\n \t\n$y$ ==h==\n</pre>\n\nAfter.",
+  "document": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Intro <!-- inline note --> and <kbd>Ctrl</kbd>+<kbd>K</kbd> keys, line<br>break."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Before <b>**keep raw**</b> after, <span>*literal* _under_ ~~struck~~ [link](x) $x$ ==mark==</span> and <i>open <b>`x`</b> "
+          },
+          { "type": "text", "marks": [{ "type": "bold" }], "text": "bold" },
+          { "type": "text", "text": " " },
+          { "type": "mathInline", "attrs": { "tex": "y" } },
+          { "type": "text", "text": " " },
+          { "type": "text", "marks": [{ "type": "highlight" }], "text": "hl" },
+          { "type": "text", "text": "." }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [{ "type": "text", "text": "<!-- reviewer: keep -->" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [{ "type": "text", "text": "<div class=\"note\">block</div>" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          { "type": "text", "marks": [{ "type": "highlight" }], "text": "<b>a=b *c*</b>" }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Run <span title=\"q 'x'\">\\* {{atom:rate 150}} https://in.example/a_b www.in.example a@b.co <https://auto.example>  \nnext</span> and real "
+          },
+          {
+            "type": "inlineAtom",
+            "attrs": { "atomId": "rate", "params": "150", "source": "atom:rate 150" }
+          },
+          { "type": "text", "text": " " },
+          {
+            "type": "text",
+            "marks": [{ "type": "link", "attrs": { "href": "https://out.example", "title": null } }],
+            "text": "https://out.example"
+          },
+          { "type": "text", "text": " " },
+          { "type": "escapedPunctuation", "attrs": { "value": "*" } },
+          { "type": "text", "text": " end." }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Refs <b title=\"&#42; &#92;\">&#42; &#35; &#92; &#123;&#123;atom:a}} &#58; &amp;#92; &amp;amp;#42;</b> <!-- &#36; &#58; &#92; --> then * and &#123;&#123;atom:b}} https&#58;//out.example end."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [{ "type": "text", "text": "<div title=\"&#42;\">&#92; &#36; &amp;#92;</div>" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          { "type": "text", "text": "Between <b>x</b> * &#123; &#92; &#92; <i>y</i> and " },
+          { "type": "text", "marks": [{ "type": "bold" }], "text": "real" },
+          { "type": "text", "text": " " },
+          {
+            "type": "inlineAtom",
+            "attrs": { "atomId": "rate", "params": "150", "source": "atom:rate 150" }
+          },
+          { "type": "text", "text": " " },
+          { "type": "mathInline", "attrs": { "tex": "m" } },
+          { "type": "text", "text": " done." }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [{ "type": "text", "text": "<!-- TODO: fix this,\n\nsee: later -->" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "<pre>\n*x* {{atom:rate 150}} \\* https://in.example a@b.co [l](u) &#59;\n\n \t\n$y$ ==h==\n</pre>"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [{ "type": "text", "text": "After." }]
+      }
+    ]
+  }
+}

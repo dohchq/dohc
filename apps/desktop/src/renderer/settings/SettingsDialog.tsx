@@ -1,15 +1,7 @@
-import { desktopPins, settingsNavPin, settingsSectionPin } from "../../testPins";
+import { desktopPins, settingsSectionPin } from "../../testPins";
 import { useRequestSequence } from "../useRequestSequence";
 import { StateMark } from "../ui/StateMark";
-import {
-  AlertTriangle,
-  Download,
-  Minus,
-  Plus,
-  RefreshCw,
-  Search,
-  X,
-} from "lucide-react";
+import { AlertTriangle, RefreshCw, X } from "lucide-react";
 import { WORKSPACE_PREVIEW_MODES } from "@dohc/workspace-contracts/workspace-settings-values";
 import {
   useCallback,
@@ -54,9 +46,12 @@ import {
   ColorControl,
   HueControl,
   SettingRow,
+  StepperControl,
   SwitchControl,
   TextControl,
+  ThemeControl,
 } from "./SettingRow";
+import { SettingsNav } from "./SettingsNav";
 import { ReportsSettings } from "./ReportsSettings";
 import { UsageRecordSettings } from "./UsageRecordSettings";
 import { SegmentedControl } from "../ui/SegmentedControl";
@@ -65,7 +60,6 @@ import { SharingSearchResults, useSharingSearch } from "./SharingSearchResults";
 import { SidebarViewsControl } from "./SidebarViewsControl";
 import {
   DEFAULT_SETTINGS_SECTION,
-  isSettingsSectionId,
   SETTINGS_SECTIONS,
   type SettingsSectionId,
 } from "./settingsRegistry";
@@ -108,7 +102,7 @@ function StatusPill(props: { state: SettingsSaveState }) {
 }
 
 export function SettingsDialog(props: {
-  onError?: (message: string, cause?: unknown) => void;
+  onError?: (message: string, cause?: unknown, retry?: () => Promise<void>) => void;
   /** Each workspace settings answer, so the shell can say what the file ignored. */
   onWorkspaceSettingsRead?: (read: WorkspaceSettingsResult) => void;
   workspaceId: string;
@@ -519,6 +513,12 @@ export function SettingsDialog(props: {
   const activeMeta =
     SETTINGS_SECTIONS.find((section) => section.id === activeSection) ??
     SETTINGS_SECTIONS[0];
+  const zoomModified = isModified(
+    userSettings.appearance.zoomLevel,
+    DEFAULT_USER_SETTINGS.appearance.zoomLevel,
+  );
+  const editorSizeModified = isModified(userSettings.editor.fontSize, DEFAULT_USER_SETTINGS.editor.fontSize);
+  const modifierKey = window.dohcDesktop?.platform === "darwin" ? "⌘" : "Ctrl";
 
   const warnings = [
     userResult?.warning,
@@ -571,7 +571,6 @@ export function SettingsDialog(props: {
           <div data-testid={settingsSectionPin("appearance")}>
             <SettingRow
               title="Theme"
-              description="Choose whether dohc follows the system theme or uses an explicit light or dark mode."
               modified={isModified(
                 userSettings.appearance.themeMode,
                 DEFAULT_USER_SETTINGS.appearance.themeMode,
@@ -587,14 +586,8 @@ export function SettingsDialog(props: {
               }
               testId="settings-row-theme"
             >
-              <SegmentedControl
-                label="Theme"
+              <ThemeControl
                 value={userSettings.appearance.themeMode}
-                options={[
-                  { value: "system", label: "System" },
-                  { value: "light", label: "Light" },
-                  { value: "dark", label: "Dark" },
-                ]}
                 onChange={(themeMode) =>
                   void saveUserSettings({
                     ...userSettings,
@@ -605,41 +598,37 @@ export function SettingsDialog(props: {
             </SettingRow>
             <SettingRow
               title="Zoom"
-              description="Scales the whole window. Ctrl/Cmd+= zooms in, Ctrl/Cmd+- zooms out, Ctrl/Cmd+0 resets."
-              modified={isModified(
-                userSettings.appearance.zoomLevel,
-                DEFAULT_USER_SETTINGS.appearance.zoomLevel,
-              )}
+              modified={zoomModified}
               onReset={() => void stepZoomSetting("reset")}
               testId="settings-row-zoom"
             >
-              <div className="flex items-center gap-1.5">
-                <button
-                  type="button"
-                  aria-label="Zoom out"
-                  disabled={userSettings.appearance.zoomLevel <= MIN_ZOOM_LEVEL}
-                  onClick={() => void stepZoomSetting("out")}
-                  className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-subtle"
-                >
-                  <Minus size={14} strokeWidth={1.9} />
-                </button>
-                <span className="min-w-12 text-center font-mono text-[12px] text-ink">
-                  {zoomPercent(userSettings.appearance.zoomLevel)}%
-                </span>
-                <button
-                  type="button"
-                  aria-label="Zoom in"
-                  disabled={userSettings.appearance.zoomLevel >= MAX_ZOOM_LEVEL}
-                  onClick={() => void stepZoomSetting("in")}
-                  className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-subtle"
-                >
-                  <Plus size={14} strokeWidth={1.9} />
-                </button>
-              </div>
+              <StepperControl
+                setting="zoom"
+                value={`${zoomPercent(userSettings.appearance.zoomLevel)}%`}
+                decrease={{
+                  label: "Zoom out",
+                  keys: [modifierKey, "-"],
+                  disabled: userSettings.appearance.zoomLevel <= MIN_ZOOM_LEVEL,
+                  onClick: () => void stepZoomSetting("out"),
+                }}
+                reset={{
+                  label: `Reset to ${zoomPercent(DEFAULT_USER_SETTINGS.appearance.zoomLevel)}%`,
+                  to: `${zoomPercent(DEFAULT_USER_SETTINGS.appearance.zoomLevel)}%`,
+                  keys: [modifierKey, "0"],
+                  onClick: () => {
+                    if (zoomModified) void stepZoomSetting("reset");
+                  },
+                }}
+                increase={{
+                  label: "Zoom in",
+                  keys: [modifierKey, "="],
+                  disabled: userSettings.appearance.zoomLevel >= MAX_ZOOM_LEVEL,
+                  onClick: () => void stepZoomSetting("in"),
+                }}
+              />
             </SettingRow>
             <SettingRow
               title="Accent color"
-              description="dohc adjusts it in each theme so labels on it stay readable."
               modified={userSettings.appearance.accentColor !== null}
               onReset={() => void saveAppearance({ accentColor: null })}
               testId="settings-row-accent"
@@ -653,7 +642,6 @@ export function SettingsDialog(props: {
             </SettingRow>
             <SettingRow
               title="Your color"
-              description="How this computer shows you in chat. Collaborators see the color their computer picks."
               modified={userSettings.appearance.yourColor !== null}
               onReset={() => void saveAppearance({ yourColor: null })}
               testId="settings-row-your-color"
@@ -669,7 +657,6 @@ export function SettingsDialog(props: {
             </SettingRow>
             <SettingRow
               title="Your agent's color"
-              description="How this computer shows your agent in chat."
               modified={userSettings.appearance.yourAgentColor !== null}
               onReset={() => void saveAppearance({ yourAgentColor: null })}
               testId="settings-row-your-agent-color"
@@ -706,33 +693,31 @@ export function SettingsDialog(props: {
             </SettingRow>
             <SettingRow
               title="Editor text size"
-              modified={isModified(userSettings.editor.fontSize, DEFAULT_USER_SETTINGS.editor.fontSize)}
+              modified={editorSizeModified}
               onReset={() => void saveEditor({ fontSize: DEFAULT_USER_SETTINGS.editor.fontSize })}
               testId="settings-row-editor-size"
             >
-              <div className="flex items-center gap-1.5">
-                <button
-                  type="button"
-                  aria-label="Smaller editor text"
-                  disabled={userSettings.editor.fontSize <= MIN_EDITOR_FONT_SIZE}
-                  onClick={() => void saveEditor({ fontSize: userSettings.editor.fontSize - 1 })}
-                  className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-subtle"
-                >
-                  <Minus size={14} strokeWidth={1.9} />
-                </button>
-                <span className="min-w-12 text-center font-mono text-[12px] text-ink">
-                  {userSettings.editor.fontSize}px
-                </span>
-                <button
-                  type="button"
-                  aria-label="Larger editor text"
-                  disabled={userSettings.editor.fontSize >= MAX_EDITOR_FONT_SIZE}
-                  onClick={() => void saveEditor({ fontSize: userSettings.editor.fontSize + 1 })}
-                  className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-subtle"
-                >
-                  <Plus size={14} strokeWidth={1.9} />
-                </button>
-              </div>
+              <StepperControl
+                setting="editor text size"
+                value={`${userSettings.editor.fontSize}px`}
+                decrease={{
+                  label: "Smaller editor text",
+                  disabled: userSettings.editor.fontSize <= MIN_EDITOR_FONT_SIZE,
+                  onClick: () => void saveEditor({ fontSize: userSettings.editor.fontSize - 1 }),
+                }}
+                reset={{
+                  label: `Reset to ${DEFAULT_USER_SETTINGS.editor.fontSize}px`,
+                  to: `${DEFAULT_USER_SETTINGS.editor.fontSize}px`,
+                  onClick: () => {
+                    if (editorSizeModified) void saveEditor({ fontSize: DEFAULT_USER_SETTINGS.editor.fontSize });
+                  },
+                }}
+                increase={{
+                  label: "Larger editor text",
+                  disabled: userSettings.editor.fontSize >= MAX_EDITOR_FONT_SIZE,
+                  onClick: () => void saveEditor({ fontSize: userSettings.editor.fontSize + 1 }),
+                }}
+              />
             </SettingRow>
             <SettingRow
               title="Sidebar"
@@ -829,7 +814,6 @@ export function SettingsDialog(props: {
           <div data-testid={settingsSectionPin("workbench")}>
             <SettingRow
               title="App previews"
-              description="Choose the mode Apps tries first when an app has no preview mode of its own."
               modified={isModified(
                 workspaceSettings.sites.defaultPreviewMode,
                 DEFAULT_WORKSPACE_SETTINGS.sites.defaultPreviewMode,
@@ -865,12 +849,6 @@ export function SettingsDialog(props: {
                 ))}
               </select>
             </SettingRow>
-            <SettingRow
-              title="History rail"
-              description="Workbench layout restoration remains in workspace UI state. Full defaults arrive in the next workbench slice."
-            >
-              <span className="text-[11px] text-subtle">Stored in .dohc/ui-state.json</span>
-            </SettingRow>
           </div>
         );
       case "files":
@@ -878,7 +856,6 @@ export function SettingsDialog(props: {
           <div data-testid={settingsSectionPin("files")}>
             <SettingRow
               title="Attachments"
-              description="Where pasted images and files are saved."
               modified={isModified(
                 workspaceSettings.files.attachmentLocation,
                 DEFAULT_WORKSPACE_SETTINGS.files.attachmentLocation,
@@ -921,7 +898,6 @@ export function SettingsDialog(props: {
             {workspaceSettings.files.attachmentLocation !== "same-folder" ? (
               <SettingRow
                 title="Attachment folder name"
-                description="Name of the folder attachments are saved into. A single folder name, no slashes."
                 modified={isModified(
                   workspaceSettings.files.attachmentFolderName,
                   DEFAULT_WORKSPACE_SETTINGS.files.attachmentFolderName,
@@ -998,19 +974,6 @@ export function SettingsDialog(props: {
             <UsageRecordSettings onError={props.onError} />
           </div>
         );
-      case "keyboard":
-        return (
-          <div data-testid={settingsSectionPin("keyboard")}>
-            <SettingRow
-              title="Open settings"
-              description="Open Settings from the command palette, app menu, Activity Bar, or keyboard shortcut."
-            >
-              <kbd className="rounded border border-line bg-bg px-1.5 py-0.5 font-mono text-[11px] text-subtle">
-                Ctrl/Cmd + ,
-              </kbd>
-            </SettingRow>
-          </div>
-        );
       case "advanced":
         return (
           <div data-testid={settingsSectionPin("advanced")}>
@@ -1077,7 +1040,6 @@ export function SettingsDialog(props: {
           <div data-testid={settingsSectionPin("general")}>
             <SettingRow
               title="Your name"
-              description="dohc uses this name for human messages and attributes local-agent work to you. It is display-only; permissions use your verified identity."
               modified={isModified(
                 userSettings.profile.preferredName,
                 DEFAULT_USER_SETTINGS.profile.preferredName,
@@ -1102,68 +1064,43 @@ export function SettingsDialog(props: {
               />
             </SettingRow>
             <SettingRow
-              title="Current workspace"
-              description="Settings in the Workspace scope apply only to this registered local folder."
-              testId="settings-row-current-workspace"
-            >
-              <code className="max-w-sm select-text cursor-text truncate rounded-md bg-panel-2 px-2 py-1 font-mono text-[11px] text-ink">
-                {props.workspacePath}
-              </code>
-            </SettingRow>
-            <SettingRow
-              title="Desktop updates"
-              description="Check for a new desktop build and restart when an update is ready."
+              title="Updates"
+              description={
+                <span data-testid="desktop-updates-status" data-state={updateState?.status ?? "unknown"}>
+                  {updateError ?? updateState?.message ?? "Update status unavailable."}
+                </span>
+              }
               testId="settings-row-desktop-updates"
             >
-              <div className="flex min-w-[260px] flex-col gap-3">
-                <div className="flex min-w-0 items-center gap-2">
-                  <Download size={14} aria-hidden className="shrink-0 text-subtle" />
-                  <div className="min-w-0 flex-1">
-                    <span
-                      data-testid="desktop-updates-status"
-                      data-state={updateState?.status ?? "unknown"}
-                      className="block truncate text-[11px] text-subtle"
-                    >
-                      {updateError ?? updateState?.message ?? "Update status unavailable."}
-                    </span>
-                  </div>
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    data-testid="check-updates-button"
-                    disabled={updateBusy !== null || updateState?.canCheck === false}
-                    onClick={() => void checkForUpdates()}
-                    className="flex h-7 shrink-0 items-center gap-1 rounded-md border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
-                  >
-                    <RefreshCw size={12} aria-hidden />
-                    {updateBusy === "check" ? "Checking" : "Check"}
-                  </button>
-                  <button
-                    type="button"
-                    data-testid="install-update-button"
-                    disabled={updateBusy !== null || updateState?.canInstall !== true}
-                    onClick={() => void installUpdate()}
-                    className="h-7 shrink-0 rounded-md bg-accent px-2 text-[11px] font-semibold text-bg transition-opacity hover:opacity-90 disabled:opacity-50"
-                  >
-                    {updateBusy === "install" ? "Restarting" : "Restart"}
-                  </button>
-                </div>
-                <dl className="m-0 grid grid-cols-2 gap-2 text-[11px] text-muted">
-                  <div>
-                    <dt className="text-subtle">Version</dt>
-                    <dd data-testid="desktop-updates-version" className="m-0 font-mono text-ink">
-                      {updateState?.currentVersion ?? "unknown"}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt className="text-subtle">Channel</dt>
-                    <dd data-testid="desktop-updates-channel" className="m-0 font-mono text-ink">
-                      {updateState?.channel ?? "unknown"}
-                    </dd>
-                  </div>
-                </dl>
-              </div>
+              <span className="mr-1 shrink-0 font-mono text-[11px] text-subtle">
+                <span data-testid="desktop-updates-version">{updateState?.currentVersion ?? "unknown"}</span>
+                {" · "}
+                <span data-testid="desktop-updates-channel">{updateState?.channel ?? "unknown"}</span>
+              </span>
+              <button
+                type="button"
+                data-testid="check-updates-button"
+                disabled={updateBusy !== null || updateState?.canCheck === false}
+                onClick={() => void checkForUpdates()}
+                className="flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-line px-2.5 text-[11px] text-muted transition-colors enabled:hover:bg-hover enabled:hover:text-ink disabled:opacity-50"
+              >
+                <RefreshCw size={12} aria-hidden />
+                {updateBusy === "check" ? "Checking" : "Check"}
+              </button>
+              {/* Quiet until an update is ready: only then is Restart the next step. */}
+              <button
+                type="button"
+                data-testid="install-update-button"
+                disabled={updateBusy !== null || updateState?.canInstall !== true}
+                onClick={() => void installUpdate()}
+                className={`h-7 shrink-0 rounded-md px-2.5 text-[11px] transition-opacity disabled:opacity-50 ${
+                  updateState?.canInstall === true
+                    ? "bg-accent font-semibold text-bg enabled:hover:opacity-90"
+                    : "border border-line text-subtle"
+                }`}
+              >
+                {updateBusy === "install" ? "Restarting" : "Restart"}
+              </button>
             </SettingRow>
           </div>
         );
@@ -1181,90 +1118,21 @@ export function SettingsDialog(props: {
       tabIndex={-1}
       data-testid={desktopPins.settingsDialog}
       data-active-section={activeSection}
-      className="dohc-elevated flex h-[min(760px,calc(100vh-48px))] w-[min(1040px,calc(100vw-32px))] overflow-hidden rounded-xl border border-line bg-bg"
+      className="dohc-elevated relative flex h-[min(760px,calc(100vh-112px))] w-[min(1040px,calc(100vw-32px))] overflow-hidden rounded-xl border border-line bg-bg max-[720px]:flex-col"
     >
-      <aside
-        data-testid="settings-sidebar"
-        className="flex w-56 shrink-0 flex-col border-r border-line bg-panel max-[720px]:hidden"
-      >
-        <div className="border-b border-line p-4">
-          <h2 id="settings-title" className="m-0 text-sm font-semibold text-ink">
-            Settings
-          </h2>
-          <p className="m-0 mt-1 text-[11px] text-subtle">User and workspace controls</p>
-        </div>
-        <nav className="flex min-h-0 flex-1 flex-col gap-1 overflow-auto p-2">
-          {visibleSections.map((section) => (
-            <button
-              key={section.id}
-              type="button"
-              data-testid={settingsNavPin(section.id)}
-              aria-current={activeSection === section.id ? "page" : undefined}
-              onClick={() => setActiveSection(section.id)}
-              className={`flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75 ${
-                activeSection === section.id
-                  ? "bg-selected text-ink"
-                  : "text-muted hover:bg-hover hover:text-ink"
-              }`}
-            >
-              <section.Icon size={15} aria-hidden />
-              <span className="min-w-0 flex-1 truncate">{section.label}</span>
-              <span className="font-mono text-[10px] text-subtle">{section.scope}</span>
-            </button>
-          ))}
-        </nav>
-      </aside>
+      <SettingsNav
+        workspacePath={props.workspacePath}
+        sections={visibleSections}
+        activeSection={activeSection}
+        onSelect={setActiveSection}
+        query={query}
+        onQuery={setQuery}
+        status={<StatusPill state={saveState} />}
+      />
 
-      <main className="flex min-w-0 flex-1 flex-col">
-        <header className="flex shrink-0 items-center gap-3 border-b border-line p-4">
-          <div className="relative min-w-0 flex-1">
-            <Search
-              size={14}
-              aria-hidden
-              className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-subtle"
-            />
-            <input
-              spellCheck={false}
-              data-testid={desktopPins.settingsSearch}
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search settings"
-              className="h-8 w-full rounded-md border border-line bg-bg pl-8 pr-3 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
-            />
-          </div>
-          <StatusPill state={saveState} />
-          <button
-            ref={closeRef}
-            type="button"
-            aria-label="Close settings"
-            onClick={props.onClose}
-            className="grid size-8 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
-          >
-            <X size={16} aria-hidden />
-          </button>
-        </header>
-
-        <div className="border-b border-line px-4 py-2 min-[721px]:hidden">
-          <select
-            aria-label="Settings section"
-            value={activeSection}
-            onChange={(event) => {
-              if (isSettingsSectionId(event.target.value)) {
-                setActiveSection(event.target.value);
-              }
-            }}
-            className="h-8 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink"
-          >
-            {visibleSections.map((section) => (
-              <option key={section.id} value={section.id}>
-                {section.label}
-              </option>
-            ))}
-          </select>
-        </div>
-
+      <main className="flex min-h-0 min-w-0 flex-1 flex-col">
         {warnings.length > 0 ? (
-          <div className="flex shrink-0 flex-col gap-1 border-b border-line bg-panel px-4 py-2">
+          <div className="flex shrink-0 flex-col gap-1 border-b border-line bg-panel py-2 pl-8 pr-12 max-[720px]:px-4">
             {warnings.map((warning, index) => (
               <div
                 key={`${index}-${warning}`}
@@ -1278,30 +1146,32 @@ export function SettingsDialog(props: {
           </div>
         ) : null}
 
-        <section className="min-h-0 flex-1 overflow-auto px-6 py-5 max-[720px]:px-4">
-          {/* Only Sharing matched: no section's heading stands over its results. */}
-          <div hidden={!!query.trim() && filteredSections.length === 0 && sharingResults.length > 0}
-            className="mb-5 flex items-center gap-2.5">
-            <h3 className="m-0 text-sm font-semibold text-ink">
+        {/* The right padding keeps the first row clear of the close button. */}
+        <section className="min-h-0 flex-1 overflow-auto py-7 pl-8 pr-12 max-[720px]:px-4 max-[720px]:py-4">
+          <div className="max-w-[640px]">
+            {/* Only Sharing matched: no section's heading stands over its results. */}
+            <h3
+              hidden={!!query.trim() && filteredSections.length === 0 && sharingResults.length > 0}
+              className="sr-only"
+            >
               {activeMeta.label}
             </h3>
-            <span className="rounded-full border border-line bg-panel-2 px-2 py-0.5 font-mono text-[10px] text-subtle">
-              {activeMeta.scope}
-            </span>
-            {activeSection === "appearance" ? (
-              <button
-                type="button"
-                onClick={() => void openSettingsFile()}
-                className="ml-auto rounded-md border border-line bg-transparent px-3 py-1.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
-              >
-                Open settings file
-              </button>
-            ) : null}
+            {props.onOpenSharing ? <SharingSearchResults results={sharingResults} onOpen={props.onOpenSharing} /> : null}
+            {renderSection()}
           </div>
-          {props.onOpenSharing ? <SharingSearchResults results={sharingResults} onOpen={props.onOpenSharing} /> : null}
-          {renderSection()}
         </section>
       </main>
+
+      <button
+        ref={closeRef}
+        type="button"
+        aria-label="Close settings"
+        title="Close settings"
+        onClick={props.onClose}
+        className="absolute right-3 top-3 grid size-7 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
+      >
+        <X size={16} aria-hidden />
+      </button>
     </div>
   );
 }

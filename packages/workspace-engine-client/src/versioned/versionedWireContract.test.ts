@@ -55,6 +55,27 @@ describe("versioned result decoder rejection", () => {
     })).toThrow(ProtocolShapeError);
   });
 
+  it("keeps a live author snapshot's account holder, declared agent, and link holder", () => {
+    const authors = [
+      { kind: "human", humanId: "owner", humanName: "Owner" },
+      { kind: "agent", agentId: "writer", agentName: "Writer", onBehalfOf: "owner", depth: 1 },
+      { kind: "link", publicPrincipalId: "public_1", label: "Anonymous" },
+      { kind: "link", grantId: "grant", grantGeneration: 2, principalId: "holder" },
+    ];
+    expect(decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors })?.authors).toEqual(authors);
+    for (const author of [
+      { kind: "human", humanId: "owner", humanName: "Owner", onBehalfOf: "owner" },
+      { kind: "human", humanId: "owner", humanName: 1 },
+      { kind: "link", publicPrincipalId: "public_1" },
+      { kind: "link", publicPrincipalId: "public_1", label: "Anonymous", grantId: "grant" },
+      { kind: "link", grantId: "grant", grantGeneration: 2, principalId: "holder", label: "Ana" },
+      { kind: "agent", agentId: "writer", agentName: null },
+    ]) {
+      expect(() => decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors: [author] }), JSON.stringify(author))
+        .toThrow(ProtocolShapeError);
+    }
+  });
+
   it("reports the wrong-typed nested write field path", () => {
     // The snapshot and moment stubs are complete so validation reaches the
     // one wrong-typed field this test pins: object.createdAtMs.
@@ -235,5 +256,21 @@ describe("versionedText.list hasYdocMarker", () => {
         nextAfterPath: null,
       }),
     ).toThrow(ProtocolShapeError);
+  });
+});
+
+
+describe("metadata-only History pages", () => {
+  const cursor = { format: 1, engineUuid: "store", workspaceId: "ws", versionId: "main", objectId: null,
+    textFence: 1, protectedFence: -1, markerFence: 1, text: null, protected: null, marker: null };
+  const metadata = { momentOrder: 1, momentId: "m", versionId: "main", objectId: "o", path: "a.md", recordedAtMs: 10,
+    operation: "write", afterContentKind: "text", afterByteLength: 1, metadataOrigin: "api", authors: null, syncRecordOnly: false };
+  const page = { activeVersion: { id: "main", workspaceId: "ws", kind: "main", name: "Main", createdAtMs: 1 },
+    moments: [metadata], protectedMoments: [], versionMarkers: [], startCursor: cursor, nextCursor: null, latestMomentOrder: 1 };
+  it("decodes literal positions and metadata without payload fields", () => {
+    expect(decodeVersionedResult(VERSIONED_METHOD.historyPage, page)).toEqual(page);
+  });
+  it.each(["afterText", "beforeText", "payload", "bytesBase64"])("rejects a page moment carrying %s", key => {
+    expect(() => decodeVersionedResult(VERSIONED_METHOD.historyPage, { ...page, moments: [{ ...metadata, [key]: "body" }] })).toThrow(ProtocolShapeError);
   });
 });

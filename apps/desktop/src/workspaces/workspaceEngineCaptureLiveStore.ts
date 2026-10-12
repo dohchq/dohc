@@ -1,3 +1,4 @@
+import type { HistoryCursor, HistoryMomentMetadata } from "@dohc/workspace-engine-client";
 import {
   VersionedTextStoreError,
   type VersionedTextStoreErrorCode,
@@ -12,6 +13,7 @@ import type {
   SecretFileStore,
   TextFileSnapshot,
   VersionRecord,
+  VersionedTextConflictRecord,
   VersionedTextFileState,
   VersionedTextMoment,
   VersionedTextMomentSummary,
@@ -158,15 +160,10 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
     versionId: string;
   }): Promise<CaptureTextFileMetadata[]>;
   listHistoryPage(input: {
-    workspaceId: string;
-    objectId?: string;
-    limit?: number;
-    beforeMomentOrder?: number;
+    workspaceId: string; versionId?: string; objectId?: string; limit?: number; cursor?: HistoryCursor;
   }): Promise<{
-    activeVersion: VersionRecord;
-    textMomentPage: Awaited<ReturnType<VersionedTextStore["listMoments"]>>;
-    protectedMoments: SecretFileMoment[];
-    protectedTruncated: boolean;
+    activeVersion: VersionRecord; moments: VersionedTextMomentSummary[]; protectedMoments: SecretFileMoment[];
+    versionMarkers: VersionRecord[]; startCursor: HistoryCursor; nextCursor: HistoryCursor | null; latestMomentOrder: number;
   }>;
   flushCapture?(): Promise<void>;
   reconcileCapture?(): Promise<void>;
@@ -272,11 +269,18 @@ function authorFromWire(author: NonNullable<MomentRecord["authors"]>[number]): M
     );
   }
   if (author.kind === "unattributed") return { kind: "unattributed" };
+  if (author.kind === "human" && "humanName" in author) {
+    return {
+      kind: "human",
+      humanId: author.humanId,
+      humanName: author.humanName,
+      ...(author.relayConfirmed === true ? { relayConfirmed: true } : {}),
+    };
+  }
   if (author.kind === "human") {
     return {
       kind: "human",
       humanId: author.humanId,
-      ...(author.humanName !== undefined ? { humanName: author.humanName } : {}),
       ...(author.relayConfirmed === true ? { relayConfirmed: true } : {}),
       ...(author.onBehalfOf !== undefined ? { onBehalfOf: author.onBehalfOf } : {}),
     };
@@ -302,6 +306,7 @@ function authorFromWire(author: NonNullable<MomentRecord["authors"]>[number]): M
   return {
     kind: "agent",
     agentId: author.agentId,
+    ...(author.agentName !== undefined ? { agentName: author.agentName } : {}),
     ...(author.onBehalfOf !== undefined ? { onBehalfOf: author.onBehalfOf } : {}),
     ...(author.agentRunId !== undefined
       ? { agentRunId: author.agentRunId }
@@ -390,7 +395,7 @@ function momentFromWire(
 
 function momentSummaryFromWire(
   workspaceId: string,
-  moment: MomentRecord,
+  moment: HistoryMomentMetadata,
 ): VersionedTextMomentSummary {
   const authors = authorsFromWire(moment.authors);
   return {
@@ -420,9 +425,10 @@ function momentSummaryFromWire(
   };
 }
 
-function conflictFromWire(conflict: ConflictRecord) {
+function conflictFromWire(conflict: ConflictRecord): VersionedTextConflictRecord {
+  const { resolution, ...record } = conflict;
   return {
-    ...conflict,
+    ...record,
     base: conflictStateFromWire(conflict.base),
     current: conflictStateFromWire(conflict.current),
     incoming: conflictStateFromWire(conflict.incoming),
@@ -435,8 +441,8 @@ function conflictFromWire(conflict: ConflictRecord) {
         ? { correlationId: conflict.metadata.correlationId }
         : {}),
     }),
-    ...(conflict.resolution !== null
-      ? { resolution: conflict.resolution }
+    ...(resolution !== null
+      ? { resolution }
       : {}),
   };
 }
@@ -1125,7 +1131,7 @@ export function createCaptureLiveStores(
       metadata: ActorNeutralWriteMetadata;
       author?: MomentWriteAuthor;
       captureHoldId?: string;
-    }) {
+    }): ReturnType<VersionedTextStore["renameTextFile"]> {
       const before = await store.readTextFile({
         workspaceId: input.workspaceId,
         versionId: input.versionId,
@@ -1195,24 +1201,13 @@ export function createCaptureLiveStores(
     },
 
     async listHistoryPage(input: {
-      workspaceId: string;
-      objectId?: string;
-      limit?: number;
-      beforeMomentOrder?: number;
+      workspaceId: string; versionId?: string; objectId?: string; limit?: number; cursor?: HistoryCursor;
     }) {
-      const page = await runRead(
-        async (adapter) => await adapter.readHistoryPage(input),
-      );
+      const page = await runRead(async adapter => await adapter.readHistoryPage(input));
       return {
-        activeVersion: page.activeVersion,
-        textMomentPage: {
-          ...page.textMomentPage,
-          moments: page.textMomentPage.moments.map((moment) =>
-            momentSummaryFromWire(input.workspaceId, moment),
-          ),
-        },
+        ...page,
+        moments: page.moments.map(moment => momentSummaryFromWire(input.workspaceId, moment)),
         protectedMoments: page.protectedMoments.map(secretMomentFromWire),
-        protectedTruncated: page.protectedTruncated,
       };
     },
 
@@ -1221,6 +1216,10 @@ export function createCaptureLiveStores(
       return moment === null
         ? null
         : momentFromWire(input.workspaceId, await hydratedMoment(moment));
+    },
+
+    async publicationApplied(input: { workspaceId: string; requestId: string; momentId: string }) {
+      return await runRead(async (adapter) => await adapter.publicationApplied(input));
     },
 
     async compareTextFileVersions(input: {
@@ -1266,7 +1265,7 @@ export function createCaptureLiveStores(
       sourceVersionId: string;
       path: string;
       metadata: ActorNeutralWriteMetadata;
-    }) {
+    }): ReturnType<VersionedTextStore["mergeTextFileFromVersion"]> {
       const before = await store.readTextFile({
         workspaceId: input.workspaceId,
         versionId: input.targetVersionId,
@@ -1542,7 +1541,7 @@ export function createCaptureLiveStores(
     },
 
     close: async () => await sessions.closeWorkspace(workspace),
-  };
+  } satisfies CaptureVersionedTextStore;
 
   const secretStore = {
     async writeSecretFile(input: Parameters<SecretFileStore["writeSecretFile"]>[0]) {
@@ -1552,7 +1551,7 @@ export function createCaptureLiveStores(
           metadata: adapterMetadata(input.metadata),
         });
         return {
-          ...result,
+          changed: result.changed,
           ...(result.moment
             ? { moment: secretMomentFromWire(result.moment) }
             : {}),
@@ -1595,7 +1594,7 @@ export function createCaptureLiveStores(
       runRawMutation(async (adapter) => {
         const result = await adapter.applySecretFileFromVersion(input);
         return {
-          ...result,
+          changed: result.changed,
           ...(result.moment
             ? { moment: secretMomentFromWire(result.moment) }
             : {}),
@@ -1616,10 +1615,7 @@ export function createCaptureLiveStores(
     ) =>
       runRawRead(async (adapter) => await adapter.materializeSecretFile(input)),
     close: async () => await sessions.closeWorkspace(workspace),
-  };
+  } satisfies SecretFileStore;
 
-  return {
-    store: store as unknown as CaptureVersionedTextStore,
-    secretStore: secretStore as unknown as SecretFileStore,
-  };
+  return { store, secretStore };
 }

@@ -13,6 +13,20 @@ import { createSharedViewsIpcHarness as harness, credentials, info, outcome, rea
 
 afterEach(() => vi.restoreAllMocks());
 
+it.each(["accept", "refresh"])("%s saves only a nonempty relay owner id", async operation => {
+  for (const granterUserId of ["relay-owner", ""]) {
+    const h = await harness();
+    h.fetchInfo.mockResolvedValue({ ...info, granterUserId });
+    const result = operation === "accept"
+      ? await h.invoke(CHANNELS.openSharedView, h.openPayload)
+      : await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" });
+    expect(result).toBeTruthy();
+    const saved = h.setView.mock.calls[0]![1];
+    if (granterUserId) expect.soft(saved).toHaveProperty("granterUserId", granterUserId);
+    else expect(saved).not.toHaveProperty("granterUserId");
+  }
+});
+
 describe("share capture Notice dismissal", () => {
   it("persists dismissal without changing protection or accepting a stale Notice", async () => {
     const h = await harness();
@@ -106,7 +120,7 @@ describe("metadata-only access checks", () => {
     const h = await harness();
     h.fetchAccess.mockResolvedValue("view");
     h.narrow.mockImplementationOnce(async (_lease, _target, assertCurrent, commit) => {
-      assertCurrent(); commit(["docs/locked.md"], { paths: ["docs/automations.yaml"], unchecked: false, checked: 0 });
+      assertCurrent(); await commit(["docs/locked.md"], { paths: ["docs/automations.yaml"], unchecked: false, checked: 0 });
     });
     expect(await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, { workspaceId: "existing" })).toEqual({ status: "current", access: "view" });
     expect(h.workspace.shareView).toMatchObject({ grantedSelector: { access: "view" }, unsavedPaths: ["docs/locked.md"],

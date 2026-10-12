@@ -538,6 +538,15 @@ impl EngineStore {
         materialize::mark_cancelled(&self.conn, job_id, now_ms)
     }
 
+    /// Record a superseded job's keyed write as unpublished. Call it before
+    /// the job is marked complete.
+    pub fn record_superseded_publication(
+        &self,
+        job: &MaterializationJob,
+    ) -> Result<(), StorageError> {
+        materialize::record_superseded_publication(&self.conn, job)
+    }
+
     /// Mark a job in conflict (newer external content was preserved).
     pub fn mark_materialization_conflict(
         &self,

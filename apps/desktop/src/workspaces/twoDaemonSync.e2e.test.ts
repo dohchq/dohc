@@ -13,7 +13,7 @@ import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { buildRelay } from "../../../../services/sync-relay/scripts/build.mjs";
 import { stableJsonStringify } from "../../../../services/sync-relay/src/canonicalJson";
 import * as Y from "yjs";
-import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter";
+import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
 import { DaemonRefusalError, openEngineYdocProviderSession, YdocAdapterError, YdocOwnerDraftPendingError, VersionedLiveAdapter, WorkspaceDaemonRequester, type AutomationClaim } from "@dohc/workspace-engine-client";
@@ -480,7 +480,7 @@ it.skipIf(engine.missing).each([
     const document = (await discovery())[0]!;
     const config = {...profile.owner, nativeConfigPath, nativeClient: profile.nativeClient, relayUrl: proxy.origin, documents: [document]};
     const pass = (signal: AbortSignal) => source.sessions.run(source.workspace, async ({client, workspace}) =>
-      runNativeOwnerDeliveryPass({client: source.nativeClient(), workspaceHandle: workspace, document, config, signal, bearer: relayConnection.token, accountId: undefined, assertCurrent() {}}));
+      runNativeOwnerDeliveryPass({client: source.nativeClient(), workspaceHandle: workspace, document, config, signal, bearer: relayConnection.token, accountId: workspaceId, assertCurrent() {}}));
     expect(["empty", "acknowledged"]).toContain(await pass(AbortSignal.timeout(60_000)));
     let saveState: string | undefined;
     const session = await capture.openYDocSession({path, contentKind: "richdoc", onRemoteUpdate: () => undefined,
@@ -559,6 +559,7 @@ it.skipIf(engine.missing).each([
     expect(resyncSignals, "delivery must resync the original pending-share session").toBeGreaterThan(beforeDeliveryResyncSignals);
     const markdown = await readFile(join(rootA, path), "utf8");
     if (hasId) expect(markdown).toContain("Name: Manual");
+    if (hasId) expect(markdown).toContain("beforeActivation: ordinary-owner");
     expect(markdown).toContain(`id: ${pending.recordId}`);
     if (hasId) expect(markdown).toContain(body.trimEnd());
     else expect(markdown).toBe(`---\nid: ${pending.recordId}\n---\n\n${beforeAdoption}`);
@@ -567,12 +568,13 @@ it.skipIf(engine.missing).each([
     console.log(`native owner delivery ${name}: ${resyncSignals} resync signals recovered on the original session`);
     const ownerSettlement = (await capture.listMoments({limit: 100})).moments.find(moment => moment.path === path);
     expect(ownerSettlement).toBeDefined();
-    expect(ownerSettlement!.authors).toBeUndefined();
+    // Native owner delivery sends no recording context for an undeclared edit, so no author is verified.
+    expect(ownerSettlement!.authors).toEqual([{kind: "unattributed"}]);
     const publicationDb = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH), {readOnly: true});
     try {
       expect(publicationDb.prepare("SELECT admission_json,authors_json FROM live_settlement_publication_admissions WHERE workspace_id=? AND moment_id=?")
         .get(workspaceId, ownerSettlement!.id)).toMatchObject({
-          admission_json: expect.stringContaining('"status":"accepted"'), authors_json: "[]",
+          admission_json: expect.stringContaining('"status":"accepted"'), authors_json: '[{"kind":"unattributed"}]',
         });
     } finally {publicationDb.close();}
     // Publish owner operations before the peer imports settlement coverage.
@@ -601,7 +603,7 @@ it.skipIf(engine.missing).each([
     await pullAndExpect(peer, rootB, path, markdown);
     const imported = (await peer.capture.listMoments({limit: 100})).moments.find(moment => moment.id === ownerSettlement?.id);
     expect(imported).toBeDefined();
-    expect(imported!.authors).toBeUndefined();
+    expect(imported!.authors).toEqual([{kind: "unattributed"}]);
     if (hasId) {
       await delivery.stop();
       delivery = undefined;

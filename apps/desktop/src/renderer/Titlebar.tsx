@@ -1,6 +1,6 @@
 import { desktopPins } from "../testPins";
 import { DohcMark } from "@dohc/brand";
-import { Check, ChevronsUpDown, PanelLeft, PanelRight, Search } from "lucide-react";
+import { Check, PanelLeft, PanelRight, Search } from "lucide-react";
 import { type ReactNode, useId, useRef, useState } from "react";
 import type { WorkspaceSummary } from "../ipc/bridgeContract";
 import { TITLEBAR_HEIGHT_PX } from "./tokens";
@@ -74,7 +74,9 @@ export function Titlebar(props: {
   onSwitchWorkspace?: (workspace: WorkspaceSummary) => void;
   onQuickOpen?: () => void;
   primarySidebar?: TitlebarPanelToggle;
-  chatsSidebar?: TitlebarPanelToggle;
+  aboutSidebar?: TitlebarPanelToggle;
+  // The version breadcrumb after the workspace name, when versions are on.
+  version?: ReactNode;
   workspaceStatus?: ReactNode;
   onWorkspaceContextMenu?: () => void;
   agentActive?: boolean;
@@ -108,15 +110,17 @@ export function Titlebar(props: {
         className="flex min-w-0 items-center gap-2"
         style={{ maxWidth: `calc(50vw - ${QUICK_OPEN_WIDTH} / 2 - ${leftInset} - 12px)` }}
       >
+        {/* The product word only before a workspace is open; after that the
+            workspace's own name says where the person is. */}
         <span aria-hidden className="flex shrink-0 items-center gap-1.5 text-ink">
-          <DohcMark size={14} className="shrink-0" />
-          <span className="text-[13px] font-semibold tracking-tight">dohc</span>
+          <DohcMark size={15} className="shrink-0" />
+          {props.workspace ? null : <span className="text-[13px] font-semibold tracking-tight">dohc</span>}
         </span>
 
         {props.workspace && props.workspaces && props.onSwitchWorkspace ? (
           <div
             ref={switcherRef}
-            className="titlebar-no-drag relative flex min-w-0 items-center gap-1"
+            className="titlebar-no-drag relative flex min-w-0 items-center gap-0.5"
             onContextMenu={props.onWorkspaceContextMenu ? (event) => {
               event.preventDefault();
               props.onWorkspaceContextMenu?.();
@@ -130,14 +134,20 @@ export function Titlebar(props: {
               aria-expanded={switcherOpen}
               title={workspaceName(props.workspace)}
               onClick={() => setSwitcherOpen((open) => !open)}
-              className="titlebar-no-drag flex h-7 min-w-0 items-center gap-1.5 rounded px-2 text-[13px] text-muted hover:bg-hover hover:text-ink"
+              className="titlebar-no-drag flex h-7 min-w-0 items-center rounded-md px-2 text-[13px] font-medium text-ink hover:bg-hover"
             >
-              {/* Truncate the name before the local save status. */}
+              {/* Truncate the name before the version and the saved dot. */}
               <span data-testid="status-workspace" className="min-w-0 max-w-48 truncate">
                 {workspaceName(props.workspace)}
               </span>
-              <ChevronsUpDown size={13} aria-hidden className="shrink-0 text-subtle" />
             </button>
+            {/* The slash belongs to the version, so it shows only once the
+                picker has a version to name. */}
+            {props.version ? (
+              <span className="flex min-w-0 items-center gap-0.5 empty:hidden before:text-[13px] before:text-subtle before:content-['/']">
+                {props.version}
+              </span>
+            ) : null}
             {props.workspaceStatus}
             {switcherOpen ? (
               <ul
@@ -228,7 +238,7 @@ export function Titlebar(props: {
         </button>
       ) : null}
 
-      {props.primarySidebar || props.chatsSidebar ? (
+      {props.primarySidebar || props.aboutSidebar ? (
         <div
           data-testid="titlebar-layout-controls"
           role="group"
@@ -244,12 +254,12 @@ export function Titlebar(props: {
               Icon={PanelLeft}
             />
           ) : null}
-          {props.chatsSidebar ? (
+          {props.aboutSidebar ? (
             <LayoutToggle
-              testId={desktopPins.titlebarChatsSidebar}
-              label="Toggle chats sidebar"
-              pressed={props.chatsSidebar.visible}
-              onClick={props.chatsSidebar.onToggle}
+              testId={desktopPins.titlebarAboutSidebar}
+              label="Toggle About"
+              pressed={props.aboutSidebar.visible}
+              onClick={props.aboutSidebar.onToggle}
               Icon={PanelRight}
               agentActive={props.agentActive}
             />
@@ -262,7 +272,7 @@ export function Titlebar(props: {
       <div
         aria-hidden
         className={`${
-          props.primarySidebar || props.chatsSidebar ? "ml-2" : "ml-auto"
+          props.primarySidebar || props.aboutSidebar ? "ml-2" : "ml-auto"
         } h-full shrink-0`}
         style={{
           width: isMac

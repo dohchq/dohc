@@ -304,6 +304,70 @@ async fn committed_update_is_covered_without_another_append_or_moment() {
     supervisor.close(&db).unwrap();
 }
 
+fn pending_authors(db: &Path, key: &DocKey) -> String {
+    inspect(db, |store| {
+        store
+            .read_with(|c| {
+                c.query_row(
+                    "SELECT pending_authors_json FROM ydoc_docs \
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                    |row| row.get(0),
+                )
+                .map_err(StorageError::corrupt_public)
+            })
+            .unwrap()
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actorless_covered_import_preserves_pending_authors() {
+    let (scratch, db, supervisor, actor, state, doc, bytes) = setup().await;
+    append(&actor, &state.key, bytes.clone()).await;
+    let before = pending_authors(&db, &state.key);
+    assert_eq!(before, "[]");
+    let mut input = checkpoint(&state, &doc, bytes);
+    input.updates[0].actor_origin_id = None;
+    input.updates[0].attribution = None;
+    assert_eq!(
+        import(&actor, scratch.path(), input).await.unwrap(),
+        RecoveryImportOutcome::Covered
+    );
+    assert_eq!(pending_authors(&db, &state.key), before);
+    supervisor.close(&db).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actorless_replayed_import_retains_unattributed_coverage() {
+    let (scratch, db, supervisor, actor, state, doc, bytes) = setup().await;
+    assert_eq!(pending_authors(&db, &state.key), "[]");
+    let mut input = checkpoint(&state, &doc, bytes);
+    input.updates[0].actor_origin_id = None;
+    input.updates[0].attribution = None;
+    assert_eq!(
+        import(&actor, scratch.path(), input).await.unwrap(),
+        RecoveryImportOutcome::Replayed
+    );
+    assert_eq!(
+        pending_authors(&db, &state.key),
+        r#"[{"kind":"unattributed"}]"#
+    );
+    supervisor.close(&db).unwrap();
+    inspect(&db, |store| {
+        store
+            .read_with(|c| {
+                assert_eq!(
+                    dohc_engine_collab::load_doc_in(c, &state.key)
+                        .unwrap()
+                        .plaintext_string(),
+                    doc.plaintext_string()
+                );
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+    });
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn import_crash_retry_keeps_one_moment_across_a_changed_head() {
     for point in [

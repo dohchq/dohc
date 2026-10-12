@@ -8,7 +8,22 @@ import type { ChatThreadRecord } from "../../ipc/bridgeContract";
 import { deferred, type Deferred } from "../../testing/deferred";
 import { LinkedChatsPanel as ProductionLinkedChatsPanel } from "./LinkedChats";
 import { ReactionStoreProvider } from "./reactionStore";
-import type { AccessContext } from "./About";
+import type { AboutFile, AccessContext } from "./About";
+
+// History stands in as the file it was given: these tests pin what the panel
+// hands it, not what History then reads.
+vi.mock("./About", async (importOriginal) => {
+  const { createElement } = await import("react");
+  return {
+    ...(await importOriginal<typeof import("./About")>()),
+    AboutHistory: ({ file }: { file: AboutFile }) =>
+      createElement(
+        "output",
+        { "data-testid": "about-history-file" },
+        file.status === "ready" ? `ready:${file.objectId}` : file.status,
+      ),
+  };
+});
 
 // The shell's error hook and Access context, the same objects every render
 // as the shell's are.
@@ -90,6 +105,27 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
+});
+
+describe("LinkedChatsPanel with no file focused", () => {
+  it.each([
+    [true, false, "About covers files. Switch to a file's tab to see its chats, history, and access."],
+    [true, true, "About covers files. Switch to a file's tab to see its chats and access."],
+    [false, false, "Open a file to see its chats, history, and access."],
+    [false, true, "Open a file to see its chats and access."],
+  ] as const)("fileTabOpen %s, shared %s", (fileTabOpen, shared, copy) => {
+    render(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath={null}
+        fileTabOpen={fileTabOpen}
+        {...(shared ? { shareReadOnly: true } : { history: { revision: 0, onOpenMoment: () => undefined } })}
+        onError={() => undefined}
+      />,
+    );
+    expect(screen.getByTestId("linked-chats-empty").textContent).toBe(copy);
+    expect(bridgeMock.listFileChats).not.toHaveBeenCalled();
+  });
 });
 
 describe("LinkedChatsPanel startup", () => {
@@ -568,6 +604,86 @@ describe("LinkedChatsPanel initialThread consumption", () => {
     expect(scrolledMessageIds).toEqual([]);
     act(() => frames[1]?.(1));
     expect(scrolledMessageIds).toEqual(["new-focus"]);
+  });
+});
+
+// A search result opens its thread while this file's Chats are still being
+// read. The two reads answer to different owners, so neither drops the other.
+describe("LinkedChatsPanel thread and file reads", () => {
+  const message = {
+    id: "message-1",
+    threadId: searchThread.id,
+    authorKind: "human" as const,
+    authorDisplayName: "Sam",
+    body: "Still here",
+    createdAtMs: 1,
+  };
+
+  it("hands History this file's object after Back from a search-opened thread", async () => {
+    const fileRead = deferred<unknown>();
+    bridgeMock.listFileChats.mockReturnValue(fileRead.promise);
+    render(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/plan.md"
+        initialThread={searchThread}
+        history={{ revision: 0, onOpenMoment: () => undefined }}
+        onError={() => undefined}
+      />,
+    );
+    await screen.findByTestId("linked-chat-thread");
+    await waitFor(() => expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(1));
+    expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(1);
+
+    // The file's read answers after the thread opened.
+    await act(async () => {
+      fileRead.resolve({ fileObjectId: "object-1", threads: [searchThread] });
+      await fileRead.promise;
+    });
+    await userEvent.click(screen.getByTestId("linked-chat-back"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("about-history-file").textContent).toBe("ready:object-1"),
+    );
+    expect(screen.getByTestId("linked-chats-panel")).toBeTruthy();
+    expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an open thread's messages when Notices retries this file's Chats", async () => {
+    bridgeMock.listFileChats.mockRejectedValueOnce(new Error("offline"));
+    const messagesRead = deferred<unknown>();
+    bridgeMock.listChatMessages.mockReturnValue(messagesRead.promise);
+    const view = render(
+      <LinkedChatsPanel workspaceId="workspace-1" filePath="docs/plan.md" onError={() => undefined} />,
+    );
+    await waitFor(() => expect(notices.report).toHaveBeenCalledTimes(1));
+    view.rerender(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/plan.md"
+        initialThread={searchThread}
+        onError={() => undefined}
+      />,
+    );
+    await screen.findByTestId("linked-chat-thread");
+    await waitFor(() => expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(1));
+
+    // Try again in Notices reads this file's Chats while the messages are on their way.
+    await act(async () => notices.report.mock.calls[0]![0].retry());
+    expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      messagesRead.resolve({ messages: [message] });
+      await messagesRead.promise;
+    });
+
+    expect(await screen.findByText("Still here")).toBeTruthy();
+    expect(bridgeMock.markChatThreadRead).toHaveBeenCalledWith({
+      workspaceId: "workspace-1",
+      threadId: "thread-1",
+      upToSequence: 1,
+    });
+    await userEvent.click(screen.getByTestId("linked-chat-back"));
+    expect(await screen.findByTestId("linked-chats-panel")).toBeTruthy();
   });
 });
 

@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { requireAppCompiler } from "./stage-app-compiler.mjs";
 import { requireAppBackendRuntime } from "./stage-app-backend-runtime.mjs";
+import { requireAgentProbe } from "./stage-agent-probe.mjs";
 
 const scriptPath = fileURLToPath(import.meta.url);
 const desktopDir = resolve(dirname(scriptPath), "..");
@@ -36,9 +37,11 @@ export default async function requireWorkspaceEngineBeforePack(context) {
   requireWorkspaceEngine();
   await requireAppBackendRuntime();
   // electron-builder's architecture enum: x64=1, arm64=3. Reject mismatched
-  // cross-packaging instead of shipping a compiler that cannot start.
+  // cross-packaging instead of shipping a compiler or probe owner that cannot start.
+  const platform = context?.electronPlatformName ?? process.platform;
   const arch = context?.arch === undefined ? process.arch : context.arch === 1 ? "x64" : context.arch === 3 ? "arm64" : "unsupported";
-  await requireAppCompiler(undefined, context?.electronPlatformName ?? process.platform, arch);
+  await requireAppCompiler(undefined, platform, arch);
+  await requireAgentProbe(undefined, undefined, platform, arch);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === scriptPath) {

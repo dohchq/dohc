@@ -617,6 +617,7 @@ fn insert_event(
 fn retain_projection_authors(
     tx: &Transaction<'_>,
     record: &ParsedRecord,
+    record_digest: &str,
     confirmed: bool,
 ) -> Result<(), SyncError> {
     if record.authors.is_empty() {
@@ -633,17 +634,45 @@ fn retain_projection_authors(
     if !imported_content {
         return Ok(());
     }
-    let existing: Option<String> = tx.query_row(
-        "SELECT author_json FROM live_audit_projection_authors WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
-        params![binding.workspace_id,coordinate.origin_id,coordinate.origin_seq], |row| row.get(0),
-    ).optional().map_err(SyncError::corrupt)?;
-    let mut authors = dohc_engine_collab::author_coverage::Authors::default();
-    if let Some(existing) = existing {
-        authors.union_json(&existing).map_err(SyncError::corrupt)?;
-    }
-    authors
-        .union_json(&record.authors.json())
+    // Copies of one record differ only in relay confirmation, which never
+    // regresses. Distinct records at one coordinate keep the conservative union.
+    tx.execute(
+        "INSERT INTO live_audit_projection_contributions(workspace_id,origin_id,origin_seq,record_digest,author_json) \
+         VALUES (?1,?2,?3,?4,?5) ON CONFLICT(workspace_id,origin_id,origin_seq,record_digest) \
+         DO UPDATE SET author_json=excluded.author_json WHERE ?6",
+        params![
+            binding.workspace_id,
+            coordinate.origin_id,
+            coordinate.origin_seq,
+            record_digest,
+            record.authors.json(),
+            confirmed
+        ],
+    )
+    .map_err(SyncError::persist)?;
+    let contributions = tx
+        .prepare(
+            "SELECT author_json FROM live_audit_projection_contributions \
+             WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+        )
+        .map_err(SyncError::corrupt)?
+        .query_map(
+            params![
+                binding.workspace_id,
+                coordinate.origin_id,
+                coordinate.origin_seq
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(SyncError::corrupt)?
+        .collect::<Result<Vec<_>, _>>()
         .map_err(SyncError::corrupt)?;
+    let mut authors = dohc_engine_collab::author_coverage::Authors::default();
+    for contribution in &contributions {
+        authors
+            .union_json(contribution)
+            .map_err(SyncError::corrupt)?;
+    }
     let json = bounded_projection_authors(&authors)?;
     tx.execute(
         "INSERT INTO live_audit_projection_authors(workspace_id,origin_id,origin_seq,version_id,object_id,path,lineage_claim_id,author_json) \
@@ -687,8 +716,9 @@ pub(crate) fn annotate_projected_moment_in_tx(
     // Retained coordinate coverage also reaches a projection drained after its
     // audit. The primary-key lookup never scans the document's audit history.
     let moment_id = crate::ydoc_apply::ydoc_apply_moment_id(key, path, origin_id, origin_seq);
-    let entries: Option<(Option<String>, String)> = tx.query_row(
-        "SELECT m.author_json,a.author_json FROM live_audit_projection_authors a JOIN moments m \
+    let entries: Option<(Option<String>, String, Option<String>)> = tx.query_row(
+        "SELECT m.author_json,a.author_json,a.moment_base_json \
+         FROM live_audit_projection_authors a JOIN moments m \
          ON m.workspace_id=a.workspace_id AND m.version_id=a.version_id AND m.object_id=a.object_id \
            AND m.path=a.path AND m.moment_id=?6 AND m.metadata_origin='ydoc' AND m.operation='write' \
            AND COALESCE(m.sync_record_only,0)=0 \
@@ -698,15 +728,43 @@ pub(crate) fn annotate_projected_moment_in_tx(
          WHERE a.workspace_id=?1 AND a.origin_id=?2 AND a.origin_seq=?3 AND a.version_id=?4 \
            AND a.object_id=?5 AND a.path=?7",
         params![key.workspace_id,origin_id,origin_seq,key.version_id,key.object_id,moment_id,path],
-        |row| Ok((row.get(0)?,row.get(1)?)),
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
     ).optional().map_err(SyncError::corrupt)?;
-    let Some((existing, verified)) = entries else {
+    let Some((existing, verified, base)) = entries else {
         return Ok(());
     };
+    // Only a marker introduced by this one coordinate can become verified.
+    // A local gap or an aggregate drain's earlier gap remains unattributed.
+    let provisional = tx.execute(
+        "DELETE FROM engine_requests WHERE request_id='sync-ydoc-provisional-author:'||json_array(?1,?2,?3) \
+         AND payload_hash=?4 AND kind='sync-ydoc-provisional-author'",
+        params![key.workspace_id,key.version_id,key.object_id,moment_id],
+    ).map_err(SyncError::persist)?;
+    // The base holds every author this coordinate's audit did not supply, so a
+    // recomputed row raises the moment's confirmation without erasing a gap.
+    let base = match base {
+        Some(base) => base,
+        None => {
+            let base = match existing {
+                Some(existing) if provisional != 0 => {
+                    let mut prior = dohc_engine_collab::author_coverage::Authors::default();
+                    prior.union_json(&existing).map_err(SyncError::corrupt)?;
+                    prior.remove_unattributed();
+                    prior.json()
+                }
+                existing => existing.unwrap_or_else(|| "[]".to_owned()),
+            };
+            tx.execute(
+                "UPDATE live_audit_projection_authors SET moment_base_json=?4 \
+                 WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+                params![key.workspace_id, origin_id, origin_seq, base],
+            )
+            .map_err(SyncError::persist)?;
+            base
+        }
+    };
     let mut authors = dohc_engine_collab::author_coverage::Authors::default();
-    if let Some(existing) = existing {
-        authors.union_json(&existing).map_err(SyncError::corrupt)?;
-    }
+    authors.union_json(&base).map_err(SyncError::corrupt)?;
     authors.union_json(&verified).map_err(SyncError::corrupt)?;
     tx.execute(
         "UPDATE moments SET author_json=?3 WHERE workspace_id=?1 AND moment_id=?2",
@@ -795,6 +853,35 @@ pub(crate) fn annotate_drained_projection_in_tx(
     let Some(existing) = existing else {
         return Ok(());
     };
+    // Only this moment's own audited coordinate is recomputed later. Other
+    // coordinates' authors and coverage gaps join that coordinate's fixed base.
+    let base: Option<Option<String>> = tx
+        .query_row(
+            "SELECT moment_base_json FROM live_audit_projection_authors \
+             WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3 \
+             AND version_id=?4 AND object_id=?5 AND path=?6",
+            params![
+                key.workspace_id,
+                origin_id,
+                origin_seq,
+                key.version_id,
+                key.object_id,
+                path
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let mut base = match base {
+        Some(base) => {
+            let mut authors = dohc_engine_collab::author_coverage::Authors::default();
+            authors
+                .union_json(base.as_deref().or(existing.as_deref()).unwrap_or("[]"))
+                .map_err(SyncError::corrupt)?;
+            Some(authors)
+        }
+        None => None,
+    };
     let mut authors = dohc_engine_collab::author_coverage::Authors::default();
     if let Some(existing) = existing {
         authors.union_json(&existing).map_err(SyncError::corrupt)?;
@@ -805,6 +892,12 @@ pub(crate) fn annotate_drained_projection_in_tx(
         authors
             .union_json(&coordinate_authors.json())
             .map_err(SyncError::corrupt)?;
+        if origin != origin_id || *seq != origin_seq {
+            if let Some(base) = base.as_mut() {
+                base.union_json(&coordinate_authors.json())
+                    .map_err(SyncError::corrupt)?;
+            }
+        }
     }
     tx.execute(
         "UPDATE moments SET author_json=?3 WHERE workspace_id=?1 AND moment_id=?2",
@@ -815,6 +908,19 @@ pub(crate) fn annotate_drained_projection_in_tx(
         ],
     )
     .map_err(SyncError::persist)?;
+    if let Some(base) = base {
+        tx.execute(
+            "UPDATE live_audit_projection_authors SET moment_base_json=?4 \
+             WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+            params![
+                key.workspace_id,
+                origin_id,
+                origin_seq,
+                bounded_projection_authors(&base)?
+            ],
+        )
+        .map_err(SyncError::persist)?;
+    }
     Ok(())
 }
 
@@ -946,9 +1052,9 @@ pub(crate) fn refresh_confirmed_application_in_tx(
     tx.execute_batch("SAVEPOINT dohc_audit_confirmation")
         .map_err(SyncError::persist)?;
     let refresh = (|| {
-        let (_, mut record) = parse_event_envelope(tx, envelope)?;
+        let (event, mut record) = parse_event_envelope(tx, envelope)?;
         if confirm_record_authors(&mut record, envelope)? {
-            retain_projection_authors(tx, &record, true)?;
+            retain_projection_authors(tx, &record, &event.manifest.record_digest, true)?;
         }
         Ok::<_, SyncError>(())
     })();
@@ -978,7 +1084,7 @@ pub(super) fn apply_event_envelope(
             });
         }
         let confirmed = confirm_record_authors(&mut record, op)?;
-        retain_projection_authors(tx, &record, confirmed)?;
+        retain_projection_authors(tx, &record, &payload.manifest.record_digest, confirmed)?;
         Ok(MutationOutcome::Applied(()))
     })
 }

@@ -341,7 +341,8 @@ export function ChatLane(props: {
           testIdPrefix="chats-lane"
           composerId="chats-lane-composer"
           value={composer}
-          sending={sending || loading}
+          sending={sending}
+          disabled={loading}
           placeholder={`Message #${props.channel.name}`}
           sendLabel="Send message"
           candidates={props.mentionCandidates}

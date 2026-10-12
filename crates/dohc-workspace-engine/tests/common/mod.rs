@@ -83,6 +83,20 @@ pub fn request(
     }
 }
 
+/// A request whose envelope carries the retry key `key`.
+pub fn keyed_request(
+    id: u64,
+    method: &str,
+    workspace: Option<WorkspaceHandle>,
+    key: &str,
+    params: Value,
+) -> Request {
+    Request {
+        idempotency_key: Some(key.to_owned()),
+        ..request(id, method, workspace, params)
+    }
+}
+
 pub async fn call(
     transport: &InProcessTransport<EngineService>,
     handle: &WorkspaceHandle,
@@ -98,6 +112,24 @@ pub async fn call(
     .await
     .unwrap_or_else(|error| panic!("{method} request {id} failed: {error:?}"))
     .result
+}
+
+pub async fn call_keyed(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    id: u64,
+    method: &str,
+    key: &str,
+    params: Value,
+) -> Value {
+    transport
+        .call(
+            RequestContext::unbounded(),
+            keyed_request(id, method, Some(handle.clone()), key, params),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{method} request {id} failed: {error:?}"))
+        .result
 }
 
 pub async fn call_error(

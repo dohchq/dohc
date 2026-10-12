@@ -7,7 +7,7 @@ Agents and developers use this page to work with dohc from outside the app. It l
 
 ## Connect
 
-- **MCP.** In dohc, open **Settings**, then **Agents & MCP**. Choose **Enable MCP**, then copy the **MCP config** into your agent's MCP settings. The server works on one workspace.
+- **MCP.** In dohc, open **Settings**, then **Agents**. Copy the **MCP config** into your agent's MCP settings. The server works on one workspace.
 - **CLI.** The `dohc` command talks to the running dohc app, so keep dohc open. Run it inside the workspace folder. Agents that dohc starts have it on their `PATH`.
 - **Share links.** A share link has its own MCP server, `dohc-share`, with other tools. This page does not list them. The [share-web README](../../services/share-web/README.md) says how an agent connects to it.
 
@@ -368,7 +368,7 @@ Read one collection record by id: current field values plus per-field history wi
 - `historyLimit`: `integer`
 - `beforeHistoryId`: `integer`
 
-Returns `{ ok: true, collection: { path, status, reasons }, record: { id, path, conflicted, values }, history: { historyId, field, previous, next, authorOriginId, actorKind, onBehalfOf, depth, recordedAtMs, automationRun }[] } | { ok: false, reason }`.
+Returns `{ ok: true, collection: { path, status, reasons }, record: { id, path, conflicted, values }, history: { historyId, field, previous, next, authorOriginId, actorKind, onBehalfOf, depth, recordedAtMs, linkAuthor, automationRun }[] } | { ok: false, reason }`.
 
 ### `dohc_set_record_fields`
 

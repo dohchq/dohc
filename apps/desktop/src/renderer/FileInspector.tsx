@@ -7,7 +7,7 @@ import {
   DocumentControls,
   EngineArtifactAssetsInvalidNotice,
   EngineMayHoldDocumentNotice,
-  ViewHeader,
+  ViewActions,
   OrphanedDraftNotices,
   EngineRemovalInProgressNotice,
   OPENING_TITLE,
@@ -292,6 +292,8 @@ type FileInspectorProps = {
   // Editor save-state seam for the tab strip's dirty indicator. Editable
   // source/table/document views all report through the same small contract.
   onSaveStateChange?: (state: SaveState) => void;
+  // A live document became read-only while it was open.
+  onLiveReadOnly?: () => void;
   // Registers the active editor's draft flush with the shell: explorer ops
   // await it before re-pathing files.
   registerDraftFlush?: (flush: DraftFlush | null) => void;
@@ -623,8 +625,7 @@ export const FileInspector = memo(function FileInspector(
   if (notInVersion) {
     return (
       <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-        <ViewHeader
-          path={props.path}
+        <ViewActions
           onShare={onShareCurrentPath}
           actions={closedDocumentControls(false)}
         />
@@ -654,8 +655,7 @@ export const FileInspector = memo(function FileInspector(
   if (engine.documentUnavailable) {
     return (
       <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-        <ViewHeader
-          path={props.path}
+        <ViewActions
           onShare={onShareCurrentPath}
           actions={closedDocumentControls(false)}
         />
@@ -672,8 +672,7 @@ export const FileInspector = memo(function FileInspector(
     // is stable (and testable) rather than flickering between containers.
     return (
       <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-        <ViewHeader
-          path={props.path}
+        <ViewActions
           onShare={onShareCurrentPath}
           actions={closedDocumentControls(!error)}
         />
@@ -717,8 +716,8 @@ export const FileInspector = memo(function FileInspector(
 
   switch (kind) {
     case "markdown":
-      // MarkdownView renders the ViewHeader itself: the edit toggle and save
-      // state live IN the document header (one bar, not two).
+      // MarkdownView renders its ViewActions itself: the edit toggle and save
+      // state sit with Share in the tab row.
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
           <MarkdownView
@@ -741,6 +740,7 @@ export const FileInspector = memo(function FileInspector(
             chatMentionsAvailable={props.chatMentionsAvailable}
             onSharePath={props.onSharePath}
             onSaveStateChange={props.onSaveStateChange}
+            onLiveReadOnly={props.onLiveReadOnly}
             registerDraftFlush={props.registerDraftFlush}
             knownFiles={props.knownMarkdownFiles}
             pendingUndo={pendingTextUndo}
@@ -794,10 +794,7 @@ export const FileInspector = memo(function FileInspector(
     case "csv":
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-          <ViewHeader
-            path={props.path}
-            onShare={onShareCurrentPath}
-          />
+          <ViewActions onShare={onShareCurrentPath} />
           {truncatedNotice}
           {recoveryNotices}
           <CsvView
@@ -826,10 +823,7 @@ export const FileInspector = memo(function FileInspector(
     case "code":
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-          <ViewHeader
-            path={props.path}
-            onShare={onShareCurrentPath}
-          />
+          <ViewActions onShare={onShareCurrentPath} />
           {truncatedNotice}
           {recoveryNotices}
           <TextEditorView
@@ -864,10 +858,7 @@ export const FileInspector = memo(function FileInspector(
     case "image":
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-          <ViewHeader
-            path={props.path}
-            onShare={onShareCurrentPath}
-          />
+          <ViewActions onShare={onShareCurrentPath} />
           {recoveryNotices}
           <ImageView url={url} path={props.path} />
         </div>
@@ -875,10 +866,7 @@ export const FileInspector = memo(function FileInspector(
     case "audio":
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-          <ViewHeader
-            path={props.path}
-            onShare={onShareCurrentPath}
-          />
+          <ViewActions onShare={onShareCurrentPath} />
           {recoveryNotices}
           <div className="flex flex-1 items-center justify-center p-4">
             <audio data-testid="view-audio" controls src={url} />
@@ -888,10 +876,7 @@ export const FileInspector = memo(function FileInspector(
     case "pdf":
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-          <ViewHeader
-            path={props.path}
-            onShare={onShareCurrentPath}
-          />
+          <ViewActions onShare={onShareCurrentPath} />
           {recoveryNotices}
           <EmptyState data-testid="view-pdf" title="dohc can't preview PDF files.">
             <OpenExternallyButton workspaceId={props.workspaceId} path={props.path} />
@@ -908,10 +893,7 @@ export const FileInspector = memo(function FileInspector(
           <Suspense
             fallback={
               <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-                <ViewHeader
-                  path={props.path}
-                  onShare={onShareCurrentPath}
-                />
+                <ViewActions onShare={onShareCurrentPath} />
                 <SkeletonRows inSlot layout="panel" label="Loading database…" />
               </div>
             }
@@ -931,10 +913,7 @@ export const FileInspector = memo(function FileInspector(
     default:
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-          <ViewHeader
-            path={props.path}
-            onShare={onShareCurrentPath}
-          />
+          <ViewActions onShare={onShareCurrentPath} />
           {recoveryNotices}
           <EmptyState data-testid="view-binary" title="dohc can't preview this type of file.">
             <OpenExternallyButton workspaceId={props.workspaceId} path={props.path} />

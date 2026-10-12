@@ -882,11 +882,12 @@ fn capture_holds_pause_the_actor_and_last_release_resumes_it() {
     let db = engine_db_path(&scratch).unwrap();
     let supervisor = crate::WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).unwrap().actor;
+    let policy = std::sync::Arc::new(crate::search::read_engine_search_policy(scratch.path()));
     let outer = actor.defer_link_drain_for_capture();
     let inner = actor.defer_link_drain_for_capture();
     for n in 0..32 {
         actor
-            .capture_ingest_blocking(
+            .capture_ingest_with_search_policy_blocking(
                 dohc_engine_domain::CaptureIngest {
                     workspace_id: "ws".into(),
                     version_id: "main".into(),
@@ -900,6 +901,7 @@ fn capture_holds_pause_the_actor_and_last_release_resumes_it() {
                     request_id: None,
                     claim_foreign_head: false,
                 },
+                std::sync::Arc::clone(&policy),
                 dohc_engine_collab::LeaseRegistry::new(),
                 std::sync::Arc::new(NoFaults),
             )
@@ -911,7 +913,7 @@ fn capture_holds_pause_the_actor_and_last_release_resumes_it() {
     drop(inner);
     // A foreground command provides an actor barrier, with the outer hold live.
     actor
-        .capture_ingest_blocking(
+        .capture_ingest_with_search_policy_blocking(
             dohc_engine_domain::CaptureIngest {
                 workspace_id: "ws".into(),
                 version_id: "main".into(),
@@ -925,6 +927,7 @@ fn capture_holds_pause_the_actor_and_last_release_resumes_it() {
                 request_id: None,
                 claim_foreign_head: false,
             },
+            std::sync::Arc::clone(&policy),
             dohc_engine_collab::LeaseRegistry::new(),
             std::sync::Arc::new(NoFaults),
         )

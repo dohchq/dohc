@@ -37,7 +37,6 @@ import {
   CHAT_DISPATCH_RECOVERY_BACKOFF_MS,
   RUNNER_SELF_TEST_TIMEOUT_MS,
   createChatDispatchService,
-  messageCanTrigger,
   type ChatDispatchIdentity,
   type ChatDispatchPresenceInput,
   type ChatDispatchService,
@@ -878,7 +877,7 @@ describe("chatDispatchService", () => {
     expect(fixture.spawnCalls).toHaveLength(0);
   });
 
-  it("keeps the SQL trigger predicate aligned with the service predicate matrix", async () => {
+  it("records exactly the human UI messages addressed to the agent", async () => {
     const fixture = await createFixture();
     const agentChannel = await fixture.chat.ensureAgentChannel({
       workspaceId: WORKSPACE_ID,
@@ -888,8 +887,7 @@ describe("chatDispatchService", () => {
     });
     const candidates: Array<{
       message: Awaited<ReturnType<LinkedChatStore["startChannelThread"]>>["message"];
-      channelKind: "agent" | "channel";
-      mentionsAgent: boolean;
+      triggers: boolean;
     }> = [];
     let caseNumber = 0;
     for (const authorKind of ["human", "agent"] as const) {
@@ -910,8 +908,10 @@ describe("chatDispatchService", () => {
             });
             candidates.push({
               message: started.message,
-              channelKind,
-              mentionsAgent,
+              triggers:
+                authorKind === "human" &&
+                !cliOrigin &&
+                (channelKind === "agent" || mentionsAgent),
             });
           }
         }
@@ -927,21 +927,9 @@ describe("chatDispatchService", () => {
         (record) => record.triggerMessageId,
       ),
     );
-    const expected = candidates.filter(({ message, channelKind, mentionsAgent }) =>
-      messageCanTrigger(message, "user_local", {
-        channelKind,
-        mentionsAgent,
-      }),
-    );
-
-    expect(recordedCount).toBe(expected.length);
+    expect(recordedCount).toBe(candidates.filter(({ triggers }) => triggers).length);
     for (const candidate of candidates) {
-      expect(recordedIds.has(candidate.message.id)).toBe(
-        messageCanTrigger(candidate.message, "user_local", {
-          channelKind: candidate.channelKind,
-          mentionsAgent: candidate.mentionsAgent,
-        }),
-      );
+      expect(recordedIds.has(candidate.message.id)).toBe(candidate.triggers);
     }
   });
 

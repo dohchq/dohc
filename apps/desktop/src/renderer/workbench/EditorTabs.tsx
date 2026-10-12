@@ -668,7 +668,7 @@ function thumbWidth(strip: HTMLElement): number {
 // Ctrl+W and the menu use, reorder through the pure moveTab. `dirty` is
 // runtime-only and known for the active tab (the one mounted inspector
 // reports its save state). h-9: one header band height with the side panel
-// and Chats panel, so the three hairlines meet at the vertical seams.
+// and the About rail, so the three hairlines meet at the vertical seams.
 export const EditorTabs = memo(function EditorTabs(props: {
   groupId: string;
   groupNumber: number;
@@ -694,6 +694,8 @@ export const EditorTabs = memo(function EditorTabs(props: {
   ) => void;
   onCreateGroupRight: (groupId: string) => void;
   onCloseGroup?: (groupId: string) => void;
+  // The element the open document's actions render into (tabRowActions).
+  actionsRef?: (element: HTMLElement | null) => void;
 }) {
   const [listOpen, setListOpen] = useState(false);
   const latest = useRef(props);
@@ -890,7 +892,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
           }
         }}
         aria-label={`Editor group ${props.groupNumber} tabs`}
-        className="dohc-tab-strip flex min-w-0 flex-1 overflow-x-auto overflow-y-hidden"
+        className="dohc-tab-strip flex min-w-0 flex-auto overflow-x-auto overflow-y-hidden"
       >
         {props.tabs.map((tab) => (
           <Tab
@@ -913,6 +915,16 @@ export const EditorTabs = memo(function EditorTabs(props: {
             tab interrupts it. */}
         <div aria-hidden className="min-w-4 flex-1 border-b border-line" />
       </div>
+      {/* The open document's actions, after the tabs in the keyboard order
+          as they were after the tab row. Empty for a tab with none. When
+          room runs out they give way before the tab names (a far higher
+          shrink factor than the tab list's), and stop at their buttons and
+          the status's 25px minimum, their automatic minimum width. */}
+      <div
+        ref={props.actionsRef}
+        data-testid="editor-tab-actions"
+        className="flex shrink-[1000] items-center justify-end gap-1 border-b border-line pl-2 pr-1 empty:hidden"
+      />
       {props.onCloseGroup ? (
         <button
           type="button"

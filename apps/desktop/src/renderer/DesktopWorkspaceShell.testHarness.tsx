@@ -1,3 +1,4 @@
+import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import "../testing/legendListMock";
 import {
   act,
@@ -173,9 +174,12 @@ export const STORED_STATE: WorkspaceUiState = {
     { id: "primary", tabs: ["b.md"], activeTab: "b.md", size: 1 },
   ],
   activeEditorGroup: "primary",
-  chatsVisible: true,
-  chatsWidth: 360,
+  aboutVisible: true,
+  aboutWidth: 360,
 };
+
+// The stored state with the chat list showing in the left side panel.
+export const STORED_CHATS_STATE: WorkspaceUiState = { ...STORED_STATE, activeView: "chats" };
 
 export function storedStateWithTabs(
   tabs: string[],
@@ -384,7 +388,6 @@ function makeBaseBridge(
     // a real running agent through it.
     getAgentRunStatus: vi.fn(
       async (): Promise<AgentRunStatusResult> => ({
-        mcpEnabled: false,
         activeRun: null,
         lastRun: null,
       }),
@@ -760,10 +763,10 @@ export function makeBridge(
     listEngineMoments: vi.fn(
       async (): Promise<ListEngineMomentsResponse> => ({
         moments: [],
-        nextBeforeMomentOrder: null,
+        nextCursor: null,
         latestMomentOrder: 0,
-        activeVersionId: "main",
-        protectedTruncated: false,
+        activeVersionId: "main", ...historyPageFields,
+
       }),
     ),
     // Typed to the contract, not to these empty defaults: the freshness tests
@@ -774,7 +777,7 @@ export function makeBridge(
     dismissTryInVersionReview: vi.fn(async (): Promise<void> => undefined),
     switchWorkspaceVersion: vi.fn(
       async (): Promise<SwitchWorkspaceVersionResult> => ({
-        activeVersionId: "main",
+        activeVersionId: "main", ...historyPageFields,
         changedFileCount: 0,
       }),
     ),
@@ -791,7 +794,7 @@ export function makeBridge(
             canMergeIntoMain: false,
           },
         ],
-        activeVersionId: "main",
+        activeVersionId: "main", ...historyPageFields,
       }),
     ),
     // Typed to the contract as well: the moment-diff page mounts on it, and

@@ -458,7 +458,6 @@ export class VersionedLiveAdapter {
         : {}),
       ...(input.author ? { author: input.author } : {}),
       ...(input.momentId !== undefined ? { momentId: input.momentId } : {}),
-      requestId,
     };
     if (Buffer.byteLength(input.text, "utf8") > MAX_DESKTOP_CAPTURE_TEXT_BYTES) {
       const bytes = Buffer.from(input.text, "utf8");
@@ -509,7 +508,6 @@ export class VersionedLiveAdapter {
             : {}),
           ...(input.author ? { author: input.author } : {}),
           ...(input.momentId !== undefined ? { momentId: input.momentId } : {}),
-          requestId,
         },
         { idempotencyKey: requestId },
       );
@@ -532,7 +530,6 @@ export class VersionedLiveAdapter {
           : {}),
         ...(input.author ? { author: input.author } : {}),
         ...(input.momentId !== undefined ? { momentId: input.momentId } : {}),
-        requestId,
       },
       { idempotencyKey: requestId },
     );
@@ -767,7 +764,6 @@ export class VersionedLiveAdapter {
     metadata: AdapterWriteMetadata;
   }): Promise<VersionedMethodResultMap["versionedText.merge"]> {
     this.assertWorkspace(input.workspaceId);
-    const requestId = randomUUID();
     return this.request(
       VERSIONED_METHOD.versionsMerge,
       {
@@ -782,9 +778,8 @@ export class VersionedLiveAdapter {
         ...(input.metadata.correlationId !== undefined
           ? { correlationId: input.metadata.correlationId }
           : {}),
-        requestId,
       },
-      { idempotencyKey: requestId },
+      { idempotencyKey: randomUUID() },
     );
   }
 
@@ -1035,7 +1030,6 @@ export class VersionedLiveAdapter {
     captureHoldId?: string;
   }): Promise<VersionedMethodResultMap["versionedText.rename"]> {
     this.assertWorkspace(input.workspaceId);
-    const requestId = randomUUID();
     return this.request(
       VERSIONED_METHOD.textRename,
       {
@@ -1052,9 +1046,8 @@ export class VersionedLiveAdapter {
           : {}),
         ...(input.author ? { author: input.author } : {}),
         ...(input.captureHoldId !== undefined ? { captureHoldId: input.captureHoldId } : {}),
-        requestId,
       },
-      { idempotencyKey: requestId },
+      { idempotencyKey: randomUUID() },
     );
   }
 
@@ -1077,7 +1070,6 @@ export class VersionedLiveAdapter {
         "versionedText.delete does not accept a caller-supplied moment id.",
       );
     }
-    const requestId = input.requestId ?? randomUUID();
     return this.request(
       VERSIONED_METHOD.textDelete,
       {
@@ -1096,9 +1088,8 @@ export class VersionedLiveAdapter {
           : {}),
         ...(input.author ? { author: input.author } : {}),
         ...(input.captureHoldId !== undefined ? { captureHoldId: input.captureHoldId } : {}),
-        requestId,
       },
-      { idempotencyKey: requestId },
+      { idempotencyKey: input.requestId ?? randomUUID() },
     );
   }
 
@@ -1111,12 +1102,7 @@ export class VersionedLiveAdapter {
     author?: WriteAuthor;
   }): Promise<void> {
     this.assertWorkspace(input.workspaceId);
-    const requestId = randomUUID();
-    await this.request(
-      VERSIONED_METHOD.textRollback,
-      { ...input, requestId },
-      { idempotencyKey: requestId },
-    );
+    await this.request(VERSIONED_METHOD.textRollback, input, { idempotencyKey: randomUUID() });
   }
 
   async listMoments(input: {
@@ -1141,21 +1127,9 @@ export class VersionedLiveAdapter {
     });
   }
 
-  async readHistoryPage(input: {
-    workspaceId: string;
-    objectId?: string;
-    limit?: number;
-    beforeMomentOrder?: number;
-  }): Promise<VersionedMethodResultMap["history.page"]> {
+  async readHistoryPage(input: VersionedMethodParamsMap["history.page"]): Promise<VersionedMethodResultMap["history.page"]> {
     this.assertWorkspace(input.workspaceId);
-    return this.request(VERSIONED_METHOD.historyPage, {
-      workspaceId: input.workspaceId,
-      ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
-      ...(input.limit !== undefined ? { limit: input.limit } : {}),
-      ...(input.beforeMomentOrder !== undefined
-        ? { beforeMomentOrder: input.beforeMomentOrder }
-        : {}),
-    });
+    return this.request(VERSIONED_METHOD.historyPage, input);
   }
 
   async getMoment(input: {
@@ -1164,6 +1138,18 @@ export class VersionedLiveAdapter {
   }): Promise<MomentRecord | null> {
     this.assertWorkspace(input.workspaceId);
     return this.request(VERSIONED_METHOD.momentsGet, {
+      momentId: input.momentId,
+    });
+  }
+
+  async publicationApplied(input: {
+    workspaceId: string;
+    requestId: string;
+    momentId: string;
+  }): Promise<boolean> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(VERSIONED_METHOD.publicationApplied, {
+      requestId: input.requestId,
       momentId: input.momentId,
     });
   }

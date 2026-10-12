@@ -1,6 +1,7 @@
 use dohc_engine_collab::{ContentKind, DocKey, LeaseRegistry, Regime, Ydoc};
 use dohc_engine_domain::{
-    CaptureIngest, ChangeActorKind, ChangeAttribution, VersionedTextStore, WriteText,
+    CaptureIngest, ChangeActorKind, ChangeAttribution, RenameTextFile, VersionedTextStore,
+    WriteText,
 };
 use dohc_engine_runtime::{ActorHandle, CancellationToken, WorkspaceSupervisor, YdocOpenState};
 use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, StorageError};
@@ -88,6 +89,78 @@ async fn dirty(actor: &ActorHandle) -> (YdocOpenState, Ydoc) {
 }
 fn inspect<T>(db: &Path, f: impl FnOnce(&mut EngineStore) -> T) -> T {
     f(&mut EngineStore::open(db, 30).expect("inspect"))
+}
+
+/// A new file at a renamed file's old path derives the renamed file's capture
+/// id and is disambiguated. The renamed file keeps its typing, its path and
+/// its History.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn new_file_at_a_renamed_path_leaves_the_renamed_document_alone() {
+    const RENAMED: &str = "renamed.txt";
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).unwrap().actor;
+    let (state, doc) = dirty(&actor).await;
+    let typing = doc.plaintext_string();
+    supervisor.close(&db).unwrap();
+    inspect(&db, |store| {
+        VersionedTextStore::new(store)
+            .rename_text_file(
+                &RenameTextFile {
+                    workspace_id: WS.into(),
+                    version_id: "main".into(),
+                    from_path: FILE.into(),
+                    to_path: RENAMED.into(),
+                    moment_id: "rename".into(),
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 20,
+                },
+                &NoFaults,
+            )
+            .expect("rename");
+    });
+    let actor = supervisor.open(&db, 3).unwrap().actor;
+    let created = actor
+        .capture_ingest(
+            input("new\n", 30),
+            LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("capture");
+    assert_ne!(created.snapshot.object_id, state.key.object_id);
+    assert_eq!(created.snapshot.path, FILE);
+    assert!(
+        actor
+            .capture_recoveries(WS.into())
+            .await
+            .unwrap()
+            .is_empty(),
+        "the renamed file's typing is not the new file's History"
+    );
+    let renamed = actor
+        .ydoc_open_state(
+            WS.into(),
+            1,
+            true,
+            None,
+            "main".into(),
+            RENAMED.into(),
+            Some(ContentKind::Plaintext),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("open renamed");
+    assert_eq!(renamed.key.object_id, state.key.object_id);
+    let renamed_doc = Ydoc::wire();
+    renamed_doc.apply(&renamed.initial_update).unwrap();
+    assert_eq!(renamed_doc.plaintext_string(), typing);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -658,9 +731,9 @@ async fn lane_candidate_and_bootstrap_rule_keep_recovery_owner_local() {
         // #1711 is unmerged. These are its current-head and bootstrap predicates,
         // with the required named exclusion; no file_export_lane exists on main.
         let candidate:String=conn.query_row(concat!("SELECT m.moment_id FROM moments m JOIN snapshots s USING(workspace_id,version_id,object_id)
-            WHERE m.workspace_id=?1 AND s.latest_moment_id=m.moment_id AND s.content_kind='text'
+            WHERE m.workspace_id=?1 AND m.object_id=?2 AND s.latest_moment_id=m.moment_id AND s.content_kind='text'
             AND m.payload_after_blob_sha256=s.blob_sha256 AND m.payload_after_path=s.path AND ",
-            dohc_engine_domain::exclude_capture_recovery_sql!("m")," ORDER BY m.moment_order DESC LIMIT 1"),[WS],|row|row.get(0))?;
+            dohc_engine_domain::exclude_capture_recovery_sql!("m")," ORDER BY m.moment_order DESC LIMIT 1"),rusqlite::params![WS,recovery.object_id],|row|row.get(0))?;
         assert_eq!(candidate,recovery.capture_moment_id);
         let bootstrap:String=conn.query_row(concat!("SELECT m.moment_id FROM moments m WHERE m.workspace_id=?1 AND ",
             dohc_engine_domain::exclude_capture_recovery_sql!("m")," ORDER BY m.moment_order LIMIT 1"),[WS],|row|row.get(0))?;
@@ -683,17 +756,42 @@ impl dohc_engine_runtime::WorkspaceRootGuard for RootGuard {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn batch_orders_recovery_and_rolls_back_failed_items() {
-    for partial_failure in [false, true] {
+    // An unchanged first file is deduped and reserves no order, yet its
+    // differing typing still needs a History recovery and a recovered copy.
+    for (unchanged_bytes, partial_failure) in
+        [(false, false), (false, true), (true, false), (true, true)]
+    {
         let scratch = ScratchDir::new().unwrap();
         let db = engine_db_path(&scratch).unwrap();
         let supervisor = WorkspaceSupervisor::new();
-        let actor = supervisor.open(&db, 1).unwrap().actor;
-        dirty(&actor).await;
+        let mut actor = supervisor.open(&db, 1).unwrap().actor;
+        let (_, doc) = dirty(&actor).await;
+        let typing = doc.plaintext_string();
+        let first = if unchanged_bytes {
+            supervisor.close(&db).unwrap();
+            let text = inspect(&db, |store| {
+                store
+                    .read_with(|conn| {
+                        conn.query_row(
+                            "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
+                             WHERE s.workspace_id=?1 AND s.path=?2",
+                            [WS, FILE],
+                            |row| row.get::<_, String>(0),
+                        )
+                    })
+                    .unwrap()
+            });
+            actor = supervisor.open(&db, 1).unwrap().actor;
+            text
+        } else {
+            "outside\n".to_owned()
+        };
+        assert_ne!(first, typing, "the typing differs from the first file");
         let mut sibling = input("sibling", 11);
         sibling.path = "sibling.txt".into();
         let mut invalid = input("refused", 11);
         invalid.path = "../outside.txt".into();
-        let mut inputs = vec![input("outside\n", 10)];
+        let mut inputs = vec![input(&first, 10)];
         if partial_failure {
             inputs.push(invalid);
         }
@@ -728,6 +826,19 @@ async fn batch_orders_recovery_and_rolls_back_failed_items() {
             .unwrap()
             .unwrap()
             .moment_order;
+        let first_result = results[0].as_ref().unwrap();
+        assert_eq!(first_result.deduped, unchanged_bytes);
+        if unchanged_bytes {
+            // The deduped head keeps its earlier moment. Its recovery takes
+            // the next order after the current high-water mark.
+            assert!(first_result.moment.moment_order < order);
+        } else {
+            assert_eq!(
+                first_result.moment.moment_order + 1,
+                order,
+                "the capture's History recovery follows it"
+            );
+        }
         assert_eq!(
             results
                 .last()
@@ -736,8 +847,29 @@ async fn batch_orders_recovery_and_rolls_back_failed_items() {
                 .unwrap()
                 .moment
                 .moment_order,
-            order + 1
+            order + 2,
+            "the recovered copy sits between the recovery and the next file"
         );
         supervisor.close(&db).unwrap();
+        let copies = inspect(&db, |store| {
+            store
+                .read_with(|conn| {
+                    let mut statement = conn.prepare(
+                        "SELECT s.path, b.text, m.moment_order FROM snapshots s \
+                         JOIN blobs b ON b.sha256=s.blob_sha256 \
+                         JOIN moments m ON m.workspace_id=s.workspace_id \
+                                      AND m.moment_id=s.latest_moment_id \
+                         WHERE s.workspace_id=?1 AND s.path NOT IN (?2, 'sibling.txt')",
+                    )?;
+                    let rows = statement.query_map([WS, FILE], |row| {
+                        Ok::<(String, String, i64), _>((row.get(0)?, row.get(1)?, row.get(2)?))
+                    })?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                })
+                .unwrap()
+        });
+        assert_eq!(copies.len(), 1, "exactly one recovered copy: {copies:?}");
+        assert_eq!(copies[0].1, typing, "the copy keeps the unsettled typing");
+        assert_eq!(copies[0].2, order + 1);
     }
 }

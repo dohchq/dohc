@@ -1,3 +1,4 @@
+import type { HistoryCursor } from "@dohc/workspace-engine-client";
 import { createTypingCheckpointWriter } from "./typingCheckpointWriter";
 import { DrawingCheckpointUnavailable, registerTypingCheckpoint, typingRecoveryStateVectorSha256, type OutageTypingCheckpoint } from "./outageTypingRecovery";
 import type { RecordEditSession } from "@dohc/automation-executor/collection-record-edits";
@@ -280,16 +281,13 @@ export interface WorkspaceEngineMomentSummary {
   protected: boolean;
 }
 
-// One page of the active version's timeline (the folder shows the active
-// version, so its history is what the history UI shows). Secret moments are
-// interleaved by recording time; pagination stays keyed on the TEXT
-// timeline's momentOrder (see listMoments for the window rule).
 export interface WorkspaceEngineMomentPage {
   moments: WorkspaceEngineMomentSummary[];
-  nextBeforeMomentOrder: number | null;
+  startCursor: HistoryCursor;
+  nextCursor: HistoryCursor | null;
+  versionMarkers: VersionRecord[];
   latestMomentOrder: number;
   activeVersionId: string;
-  protectedTruncated: boolean;
 }
 
 // The diff page's payload: a text moment carries its full before/after
@@ -643,11 +641,13 @@ export interface WorkspaceEngineCapture {
   // version, across its renames.
   listMoments(input?: {
     limit?: number;
-    beforeMomentOrder?: number;
+    cursor?: HistoryCursor;
     objectId?: string;
   }): Promise<WorkspaceEngineMomentPage>;
   readMoment(momentId: string): Promise<WorkspaceEngineMomentDetail | null>;
   findRestoreReceipt(momentId: string, requestId: string): Promise<WorkspaceEngineRestoreResult | null>;
+  // Whether keyed restore `requestId`, which recorded `momentId`, reached disk.
+  publicationApplied(momentId: string, requestId: string): Promise<boolean>;
   // The ids of a file's moments in the active version after `momentId`,
   // newest first, deletes and renames included. Record-only sync rows never
   // touched the file, so they are passed over.
@@ -665,10 +665,13 @@ export interface WorkspaceEngineCapture {
   // otherwise it throws RestoreFolderInUseError. `person` is who restores, as
   // desktop main read them when the request arrived; the restore moment names
   // them. A protected file's restore names nobody, as its other moments do.
+  // A keyed restore names its expected head, so its delete publishes through
+  // the engine's checked preimage and a retry can confirm it reached disk.
   restoreFileToBeforeMoment(
     momentId: string,
     person: Extract<MomentWriteAuthor, { kind: "human" }>,
-    options?: { expectedHeadMomentId?: string; aloneInFolder?: true; requestId?: string },
+    options?: { expectedHeadMomentId?: string; aloneInFolder?: true; requestId?: undefined }
+      | { expectedHeadMomentId: string; aloneInFolder?: true; requestId: string },
   ): Promise<WorkspaceEngineRestoreResult>;
   // `author` names an agent's removal during a run an automation started, so
   // the removed record's claims carry the run's chain depth.
@@ -3599,7 +3602,7 @@ export function createWorkspaceEngineCapture(
   // The active version is read PER TASK on the chain — never cached across
   // tasks — so a batch enqueued before a switch and captured after it can
   // never write into the wrong version.
-  async function activeVersionIdOf(engine: VersionedTextStore): Promise<string> {
+  async function activeVersionIdOf(engine: Pick<VersionedTextStore, "getActiveVersion">): Promise<string> {
     const active = await engine.getActiveVersion({ workspaceId });
     return active?.id ?? ENGINE_MAIN_VERSION_ID;
   }
@@ -3640,7 +3643,7 @@ export function createWorkspaceEngineCapture(
   }
 
   async function deleteIfTracked(
-    engine: VersionedTextStore,
+    engine: Pick<VersionedTextStore, "readTextFile" | "deleteTextFile">,
     versionId: string,
     path: string,
     metadata: ActorNeutralWriteMetadata,
@@ -3661,7 +3664,7 @@ export function createWorkspaceEngineCapture(
   }
 
   async function writeIfChanged(
-    engine: VersionedTextStore,
+    engine: Pick<VersionedTextStore, "readTextFile" | "writeTextFile" | "writeBinaryFile">,
     versionId: string,
     path: string,
     disk:
@@ -3836,7 +3839,7 @@ export function createWorkspaceEngineCapture(
   }
 
   async function materializeWriteForSnapshot(
-    engine: VersionedTextStore,
+    engine: Pick<VersionedTextStore, "readBinaryFile">,
     snapshot: { versionId: string; path: string; contentKind?: "text" | "binary"; text: string },
   ): Promise<MaterializeOperation> {
     if (snapshot.contentKind === "binary") {
@@ -3854,7 +3857,7 @@ export function createWorkspaceEngineCapture(
   }
 
   async function versionsSnapshot(
-    engine: VersionedTextStore,
+    engine: Pick<VersionedTextStore, "listVersions" | "getActiveVersion">,
   ): Promise<WorkspaceVersionsSnapshot> {
     const [versions, activeVersionId] = await Promise.all([
       engine.listVersions({ workspaceId }),
@@ -4005,6 +4008,8 @@ export function createWorkspaceEngineCapture(
           } else {
             pendingCollectionAdoptionProviders.delete(adoptionKey);
           }
+          // A refusal that clears by itself leaves the adoption pending; a
+          // later drain pass retries it.
           if (isTransientEngineRefusal(error)) {
             continue;
           }
@@ -6365,20 +6370,18 @@ export function createWorkspaceEngineCapture(
       const engine = await engineStore();
       const history = await engine.listHistoryPage({
         workspaceId,
+        ...(input.cursor !== undefined ? { versionId: input.cursor.versionId } : {}),
         ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
         ...(input.limit !== undefined ? { limit: input.limit } : {}),
-        ...(input.beforeMomentOrder !== undefined
-          ? { beforeMomentOrder: input.beforeMomentOrder }
+        ...(input.cursor !== undefined
+          ? { cursor: input.cursor }
           : {}),
       });
       const activeVersionId = history.activeVersion.id;
-      const page = history.textMomentPage;
-      const textMoments: WorkspaceEngineMomentSummary[] = page.moments.map(
+      const textMoments: WorkspaceEngineMomentSummary[] = history.moments.map(
         (moment) => ({ ...moment, protected: false }),
       );
-      // The daemon already restricted protected moments to this text page's
-      // half-open time window. The desktop owns only the visible merge order.
-      const protectedInWindow: WorkspaceEngineMomentSummary[] =
+      const protectedMoments: WorkspaceEngineMomentSummary[] =
         history.protectedMoments.map((moment) => ({
           id: moment.id,
           versionId: moment.versionId,
@@ -6397,7 +6400,7 @@ export function createWorkspaceEngineCapture(
       // momentOrder (a counter each store keeps for itself, so it ranks only
       // moments of the same kind), then lower id. The renderer shows this
       // order as given, so it is what the user reads.
-      const merged = [...textMoments, ...protectedInWindow].sort((a, b) => {
+      const merged = [...textMoments, ...protectedMoments].sort((a, b) => {
         if (a.recordedAtMs !== b.recordedAtMs) {
           return b.recordedAtMs - a.recordedAtMs;
         }
@@ -6407,10 +6410,11 @@ export function createWorkspaceEngineCapture(
       });
       return {
         moments: merged,
-        nextBeforeMomentOrder: page.nextBeforeMomentOrder,
-        latestMomentOrder: page.latestMomentOrder,
+        startCursor: history.startCursor,
+        nextCursor: history.nextCursor,
+        versionMarkers: history.versionMarkers,
+        latestMomentOrder: history.latestMomentOrder,
         activeVersionId,
-        protectedTruncated: history.protectedTruncated,
       };
     },
 
@@ -6435,6 +6439,11 @@ export function createWorkspaceEngineCapture(
       const engine = await engineStore();
       const original = await engine.getMoment({workspaceId, momentId});
       return original ? findRestoreReceipt(engine, original, requestId) : null;
+    },
+
+    async publicationApplied(momentId, requestId) {
+      await chain;
+      return (await engineStore()).publicationApplied({workspaceId, requestId, momentId});
     },
 
     async listObjectMomentsAfter(objectId, momentId) {

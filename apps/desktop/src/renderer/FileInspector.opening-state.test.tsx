@@ -5,7 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { markdownToYDoc } from "./editor/import-export";
+import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { FileInspector } from "./FileInspector";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
@@ -181,11 +181,13 @@ describe("markdown document opening state", () => {
     await advanceAutosaveDebounce();
   }
 
-  // The header after its icon and path, read left to right: the status
-  // slot (a save state, "Opening…"), then Share and the document's controls.
+  // The document's actions, read left to right: the status slot (a save
+  // state, "Opening…"), then Share and the document's controls. Outside an
+  // editor group they draw in a row of their own.
   function headerGroup() {
-    const header = screen.getByTestId("file-inspector").querySelector("header");
-    const [, , status, ...controls] = [...(header?.children ?? [])];
+    const children = [...screen.getByTestId("view-actions").children];
+    const status = children.find((el) => el.hasAttribute("data-view-status"));
+    const controls = children.filter((el) => el !== status);
     const control = (el: Element) => el.querySelector("button") ?? el;
     return {
       // A truncating save state sits in a wrapper beside its tooltip.
@@ -214,8 +216,10 @@ describe("markdown document opening state", () => {
     expect(headerGroup(), "a loading header without the toggle and the menu puts the menu where Share was once the text arrives").toEqual({
       status: [], controls: CONTROLS, disabled: [false, true, false],
     });
-    // The header names the file, never its kind in words: the icon says it.
-    expect(screen.getByTestId("file-inspector").querySelector("header")?.textContent).toBe("a.mdEdit");
+    // No header repeats the file above the page: its tab names it, and the
+    // actions say no kind in words.
+    expect(screen.getByTestId("file-inspector").querySelector("header")).toBeNull();
+    expect(screen.getByTestId("view-actions").textContent).toBe("Edit");
 
     // The text arrived and the engine open is held: the opening view.
     await act(async () => read.resolve({ text: DOC_MARKDOWN, truncated: false, contentHash: TEST_CONTENT_HASH }));
@@ -241,7 +245,7 @@ describe("markdown document opening state", () => {
       status: [], controls: CONTROLS, disabled: [false, true, true],
     });
     // A failed read never opens, so the toggle does not promise that it will.
-    expect(screen.getByTestId("file-inspector").querySelector("header button:not([aria-label])")?.getAttribute("title")).toBeNull();
+    expect(screen.getByTestId("view-actions").querySelector("button:not([aria-label])")?.getAttribute("title")).toBeNull();
   });
 
   it("keeps the document's header controls in their places, disabled, when the file is gone from its path", async () => {
@@ -1583,7 +1587,7 @@ describe("markdown document opening state", () => {
     );
   });
 
-  it("settles a held raw-source save after switching to lossy WYSIWYG without repainting or retrying", async () => {
+  it("settles a held raw-source save after switching to WYSIWYG without repainting or retrying", async () => {
     const bridge = makeHeldOpenBridge();
     let releaseWrite!: () => void;
     const heldWrite = new Promise<{ status: "written"; contentHash: string }>(
@@ -1609,7 +1613,8 @@ describe("markdown document opening state", () => {
       return editor;
     });
     const renderedBeforeWriteLands = wysiwyg.innerHTML;
-    expect(wysiwyg.textContent).not.toContain("keep raw");
+    // The editor shows the comment as the text the file holds.
+    expect(wysiwyg.textContent).toContain("<!-- keep raw -->");
     expect(bridge.bridgeMock.writeWorkspaceText.mock.calls[0]?.[0].text).toBe(
       rawSource,
     );

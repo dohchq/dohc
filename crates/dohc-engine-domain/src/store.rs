@@ -16,6 +16,11 @@ mod binary_write;
 mod capture_recovery;
 mod capture_write;
 mod delete_rename;
+mod history;
+pub use history::{
+    HistoryCursor, HistoryMarkerPosition, HistoryMomentMetadata, HistoryMomentPosition,
+    HistoryPageRead,
+};
 mod request_ledger;
 mod rollback;
 mod source_capture;
@@ -80,11 +85,21 @@ pub const MAX_TEXT_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_METADATA_FIELD_BYTES: usize = 16 * 1024;
 pub const MAX_AUTHOR_FIELD_BYTES: usize = MAX_IDENTIFIER_BYTES;
 // Without control characters, quotes and backslashes take at most 2 bytes.
-// The largest live entry is a 66-byte automation skeleton + 2 * 2 * 512
-// bytes of identity fields = 2,114 bytes.
-pub const MAX_AUTHOR_ENTRY_BYTES: usize =
-    r#"{"automationId":"","depth":64,"kind":"automation","onBehalfOf":""}"#.len()
-        + 2 * 2 * MAX_AUTHOR_FIELD_BYTES;
+// The largest live entry is a declared agent: a 71-byte skeleton + 3 * 2 * 512
+// bytes for its id, name and principal = 3,143 bytes. The largest two-field
+// entries, an 80-byte Edit link at the largest grant generation and a 66-byte
+// automation, take 2,128 and 2,114 bytes.
+pub const MAX_AUTHOR_ENTRY_BYTES: usize = larger(
+    r#"{"agentId":"","agentName":"","depth":64,"kind":"agent","onBehalfOf":""}"#.len()
+        + 3 * 2 * MAX_AUTHOR_FIELD_BYTES,
+    larger(
+        r#"{"automationId":"","depth":64,"kind":"automation","onBehalfOf":""}"#.len(),
+        r#"{"grantGeneration":9007199254740991,"grantId":"","kind":"link","principalId":""}"#.len(),
+    ) + 2 * 2 * MAX_AUTHOR_FIELD_BYTES,
+);
+const fn larger(left: usize, right: usize) -> usize {
+    if left > right { left } else { right }
+}
 const _: () = assert!(crate::MAX_CHANGE_ATTRIBUTION_DEPTH < 100);
 pub const MAX_MOMENT_AUTHORS: usize = 1_024;
 // The journal embeds authors as a JSON value, with no second string encoding.

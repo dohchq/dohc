@@ -1,3 +1,4 @@
+import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { deferred } from "../testing/deferred";
@@ -27,6 +28,22 @@ import {
 import { listEngineMomentsForIpc } from "../ipc/engineHistoryIpc";
 
 const WORKSPACE = "ws-trip";
+
+it.each(["Mira", null, ""])("names the received share's owner from relay identity (name %s)", sharerName => {
+  const shareView = { granterUserId: "u-owner", sharerName, granterEmail: "mira@example.test" };
+  const lookupAccounts = vi.fn();
+  const names = createHistoryLabels({
+    snapshot: () => ({ roster: null, owner: false, shareView, context: "recipient", inventory: undefined }),
+    lookupAccounts,
+  });
+  names.prepare(WORKSPACE, [{ userId: "u-owner" }, { userId: "someone-else" }]);
+  expect.soft(names.person(WORKSPACE, "u-owner")).toBe(sharerName || "mira@example.test");
+  expect(names.person(WORKSPACE, "someone-else")).toBe("Someone you shared with");
+  expect(lookupAccounts).not.toHaveBeenCalled();
+  // An old identity has no verified owner id until its next refresh.
+  shareView.granterUserId = "";
+  expect(names.person(WORKSPACE, "u-owner")).toBe("Someone you shared with");
+});
 const remote = { serverUrl: "https://server.dohc.test", ownerUserId: "u-owner" };
 
 const facts = { shareId: "s-1", generation: 1, status: "active" as const, granterUserId: "u-owner",
@@ -175,7 +192,7 @@ describe("roster from the relay's listings", () => {
       moments: [{ id: "m-ended", workspaceId: WORKSPACE, versionId: "main", objectId: "o-1", path: "Trip/a.md", recordedAtMs: 1,
         operation: "write", metadata: { origin: "sync" }, momentOrder: 0, protected: false,
         authors: [{ kind: "named", userId: "u-ben", grantId: "g-dep", grantGeneration: 1 }] }],
-      nextBeforeMomentOrder: null, latestMomentOrder: 0, activeVersionId: "main", protectedTruncated: false,
+      nextCursor: null, latestMomentOrder: 0, activeVersionId: "main", ...historyPageFields,
     }), { agent: () => undefined, person: () => undefined, automation: () => null,
       prepare: authors => names.prepare(WORKSPACE, authors.filter(author => author.kind === "named")), named: author => names.author(WORKSPACE, author) });
     const immediate = await readHistory();
@@ -185,6 +202,27 @@ describe("roster from the relay's listings", () => {
     expect(history).toMatchObject({ moments: [{ namedAuthor: { label: "Ben (via share link)" } }] });
     expect(names.person(WORKSPACE, "u-ben")).toBe("Ben (via share link)");
     expect(listing.grants !== null && listing.endedGrants).toEqual([]);
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+  it("names an author missing from the roster on a moment several people wrote once the lookup finishes", async () => {
+    const listing = await listed({ granted: [row()] });
+    const get = relay({ "/sync/ws-trip/shares/links?historyGrantId=g-dep": { status: 200, body: { holders: [{ grantId: "g-dep", recipientUserId: "u-ben", recipientEmail: "ben@dohc.test", parentGrantId: "g-link" }] } } });
+    const names = createHistoryLabels({ snapshot: () => ({ roster: listing, owner: true, context: "window", inventory: 1 }),
+      lookupAccounts: (_workspaceId, ids) => lookupHistoryAccounts(WORKSPACE, get, ids) });
+    const readHistory = () => listEngineMomentsForIpc(async () => ({
+      moments: [{ id: "m-both", workspaceId: WORKSPACE, versionId: "main", objectId: "o-1", path: "Trip/a.md", recordedAtMs: 1,
+        operation: "write", metadata: { origin: "sync" }, momentOrder: 0, protected: false,
+        authors: [
+          { kind: "named", userId: "u-ana", grantId: "g-1", grantGeneration: 1 },
+          { kind: "agent", agentId: "agent" },
+          { kind: "named", userId: "u-ben", grantId: "g-dep", grantGeneration: 1 },
+        ] }],
+      nextCursor: null, latestMomentOrder: 0, activeVersionId: "main", ...historyPageFields,
+    }), { agent: () => undefined, person: () => undefined, automation: () => null,
+      prepare: authors => names.prepare(WORKSPACE, authors.filter(author => author.kind === "named")), named: author => names.author(WORKSPACE, author) });
+    expect(await readHistory()).toMatchObject({ moments: [{ authorLabels: ["ana@dohc.test (Edit)", "Agent", "Someone you shared with"] }] });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(await readHistory()).toMatchObject({ moments: [{ authorLabels: ["ana@dohc.test (Edit)", "Agent", "ben@dohc.test (via share link)"] }] });
     expect(get).toHaveBeenCalledTimes(1);
   });
   it("keeps the owner's active grants on this workspace, and only the person of a revoked one", async () => {
@@ -907,7 +945,7 @@ describe("a shared workspace forgotten and attached again", () => {
     await mkdir(join(root, ".dohc"));
     await recordNeverSynced(root);
     store.register({ workspaceId: WORKSPACE, rootPath: root, kind: "personal", mode: "local-first" });
-    recordSynced(root);
+    await recordSynced(root);
     store.setRemote(WORKSPACE, remote);
     const shared = await check();
     expect(shared.map((reach) => reach.allowed)).toEqual([false, false, true]);
@@ -998,7 +1036,7 @@ describe("a direct write's author in History", () => {
         operation: "write", metadata: { origin: "sync" }, momentOrder: 0, protected: false,
         authors: [{ kind: "named", userId: "ana", grantId: "g-1", grantGeneration: 1 }],
       }],
-      nextBeforeMomentOrder: null, latestMomentOrder: 0, activeVersionId: "main", protectedTruncated: false,
+      nextCursor: null, latestMomentOrder: 0, activeVersionId: "main", ...historyPageFields,
     }), { agent: () => undefined, person: () => undefined, automation: () => null, named: (author) => labelFrom(saved, author) });
     expect(history).toMatchObject({ moments: [{ namedAuthor: { userId: "ana", label: "Someone you shared with" } }] });
   });

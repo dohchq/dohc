@@ -4,6 +4,13 @@ import {liveAuthorIdentity, parseAutomationDeclaration, parseLiveAuthorSnapshot}
 const declaration = {automationId: "collection:Tasks#mark", attribution: {actorKind: "automation" as const,
   onBehalfOf: "presser", depth: 1, run: {claimId: "claim", automationName: "Mark done"}}};
 
+it("accepts an exact unattributed marker with one stable identity", () => {
+  const [marker] = parseLiveAuthorSnapshot([{kind: "unattributed"}]);
+  expect(marker).toEqual({kind: "unattributed"});
+  expect(liveAuthorIdentity(marker!)).toBe('["unattributed",null,""]');
+  expect(() => parseLiveAuthorSnapshot([{kind: "unattributed", humanId: "forged"}])).toThrow();
+});
+
 it("keeps a shared automation's presser and run in its canonical native snapshot", () => {
   const [author] = parseLiveAuthorSnapshot([{kind: "automation", ...declaration}]);
   expect(author).toEqual({kind: "automation", ...declaration});

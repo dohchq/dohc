@@ -2846,6 +2846,10 @@ CREATE TABLE live_settlement_attribution_unavailable (
 ) STRICT;
 ";
 
+const V2_FIELD_HISTORY_LINK_AUTHOR_DDL: &str = "
+ALTER TABLE collection_field_history ADD COLUMN link_author_json TEXT;
+";
+
 const V2_YDOC_FILE_EXPORT_LANE_DDL: &str = "
 ALTER TABLE ydoc_docs ADD COLUMN file_export_lane INTEGER NOT NULL DEFAULT 0 CHECK (file_export_lane IN (0,1,2,3));
 UPDATE ydoc_docs SET file_export_lane=1 WHERE lineage_claim_status='unclaimed' AND sharing_declined_json IS NOT NULL;
@@ -3149,8 +3153,48 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     },
     Migration {
         ordinal: 42,
+        id: "v2-field-history-link-author",
+        sql: V2_FIELD_HISTORY_LINK_AUTHOR_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 43,
+        id: "v2-audited-projection-contributions",
+        sql: "CREATE TABLE live_audit_projection_contributions ( \
+                workspace_id TEXT NOT NULL, origin_id TEXT NOT NULL, origin_seq INTEGER NOT NULL, \
+                record_digest TEXT NOT NULL, author_json TEXT NOT NULL \
+                  CHECK (json_valid(author_json) AND json_type(author_json)='array' \
+                    AND json_array_length(author_json) BETWEEN 1 AND 1024 \
+                    AND length(CAST(author_json AS BLOB))<=131072), \
+                PRIMARY KEY(workspace_id,origin_id,origin_seq,record_digest), \
+                FOREIGN KEY(workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE \
+              ) STRICT; \
+              ALTER TABLE live_audit_projection_authors ADD COLUMN moment_base_json TEXT;",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 44,
+        id: "v2-chat-channel-keyset-page",
+        sql: "CREATE INDEX idx_chat_channels_page ON chat_channels(workspace_id, created_at_ms, channel_id);",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 45,
+        id: "v2-chat-local-dispatch-discovery",
+        sql: "CREATE TABLE chat_dispatch_local_discovery (workspace_id TEXT NOT NULL, message_id TEXT NOT NULL, PRIMARY KEY (workspace_id, message_id), FOREIGN KEY (workspace_id, message_id) REFERENCES chat_messages(workspace_id, message_id) ON DELETE CASCADE) STRICT;",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 46,
+        id: "v2-moments-history-time",
+        sql: "CREATE INDEX idx_moments_history_time ON moments(workspace_id, version_id, recorded_at_ms, moment_order); CREATE INDEX idx_moments_object_history_time ON moments(workspace_id, version_id, object_id, recorded_at_ms, moment_order);",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 47,
         id: "v2-persisted-links",
         sql: include_str!("links.sql"),
+
         sets_user_version: None,
     },
 ];
@@ -3552,6 +3596,80 @@ mod tests {
     #[cfg(feature = "fault-injection")]
     use crate::faults::FaultAction;
     use crate::faults::NoFaults;
+
+    fn field_history_link_upgrade(rows: i64) {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let mut conn = open_bare(&path);
+        let ctx = MigrationContext::current(1000);
+        let target = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == "v2-field-history-link-author")
+            .unwrap_or(BASELINE_MIGRATIONS.len());
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..target], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main'); INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','main',0);").unwrap();
+        let tx = conn.transaction().unwrap();
+        {
+            let mut insert = tx.prepare("INSERT INTO collection_field_history(workspace_id,version_id,record_id,field_name,previous_value_json,next_value_json,author_origin_id,source_origin_id,source_origin_seq,recorded_at_ms,actor_kind,on_behalf_of,chain_depth,automation_claim_id,automation_name) VALUES ('ws','main','record','status','\"before\"','\"after\"','actor','source',?1,?1,'automation','person',2,'claim','Stamp')").unwrap();
+            for id in 1..=rows {
+                insert.execute([id]).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        let root = |conn: &Connection| {
+            conn.query_row(
+                "SELECT rootpage FROM sqlite_schema WHERE name='collection_field_history'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+        };
+        let before_root = root(&conn);
+        let start = std::time::Instant::now();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        println!(
+            "field_history_link_migration: rows={rows} on_disk=true elapsed_ns={}",
+            start.elapsed().as_nanos()
+        );
+        assert_eq!(root(&conn), before_root, "the table was not rebuilt");
+        let unchanged: i64 = conn.query_row("SELECT count(*) FROM collection_field_history WHERE history_id=source_origin_seq AND recorded_at_ms=history_id AND workspace_id='ws' AND version_id='main' AND record_id='record' AND field_name='status' AND previous_value_json='\"before\"' AND next_value_json='\"after\"' AND author_origin_id='actor' AND source_origin_id='source' AND actor_kind='automation' AND on_behalf_of='person' AND chain_depth=2 AND automation_claim_id='claim' AND automation_name='Stamp' AND link_author_json IS NULL", [], |row| row.get(0)).unwrap();
+        assert_eq!(unchanged, rows);
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM collection_field_history", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            rows
+        );
+        conn.execute("INSERT INTO collection_field_history(workspace_id,version_id,record_id,field_name,recorded_at_ms,link_author_json) VALUES ('ws','main','record','status',?1,?2)", rusqlite::params![rows+1, r#"{"kind":"link","grantId":"grant","grantGeneration":1,"publicPrincipalId":"public"}"#]).unwrap();
+        assert_eq!(conn.last_insert_rowid(), rows + 1);
+        assert_eq!(conn.query_row("SELECT count(*) FROM sqlite_schema WHERE name IN ('collection_field_history_by_record','collection_field_history_by_source')", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
+        drop(conn);
+        let mut conn = open_bare(&path);
+        assert_eq!(root(&conn), before_root);
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM collection_field_history", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            rows + 1
+        );
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 0 }
+        );
+    }
+
+    #[test]
+    fn field_history_link_migration_preserves_populated_rows() {
+        field_history_link_upgrade(3);
+    }
+
+    #[test]
+    #[ignore = "manual migration timing on one million persisted rows"]
+    fn field_history_link_migration_million_rows() {
+        field_history_link_upgrade(1_000_000);
+    }
     #[cfg(feature = "fault-injection")]
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -3723,6 +3841,26 @@ mod tests {
                 "7caa4d6ee7db128cdb9b6b87e2c05b487ce39cb4b5f93ac96b2da5d4bbec7175",
             ),
             (
+                "v2-field-history-link-author",
+                "459b1b741b2a2ae0ee53c7c4696a6935ad651ae5905c1e3da42642f88ee413f0",
+            ),
+            (
+                "v2-audited-projection-contributions",
+                "ffe123de3b71b3874993b68c764c0f939d081ec784a982d8dc8b359152955d55",
+            ),
+            (
+                "v2-chat-channel-keyset-page",
+                "67a6a8d2f92652a3d1cbbdf98b66d8441830a2db5a74502cdd15ca4c23851001",
+            ),
+            (
+                "v2-chat-local-dispatch-discovery",
+                "659dcf6fbde5b08aa32a066d0c07cdd6bfe8514fae5cc718904d0de059ef4eb6",
+            ),
+            (
+                "v2-moments-history-time",
+                "5aa8707d5659bbfb8e3e0076c812d1d723a011e6cfb32fefe490f8b1066b2c39",
+            ),
+            (
                 "v2-persisted-links",
                 "29a9651e9a40ea8a9d01ca044c6c32bdf0f92e1a0b30b150f4341d3dbc5cfaab",
             ),
@@ -3736,6 +3874,22 @@ mod tests {
                 "the {id} migration changed after it shipped"
             );
         }
+    }
+
+    #[test]
+    fn local_dispatch_discovery_upgrade_preserves_the_cursor_without_backfilling_messages() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-chat-local-dispatch-discovery");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO chat_channels (workspace_id,channel_id,name,slug,kind,created_at_ms,updated_at_ms) VALUES ('ws','channel','Channel','channel','channel',1,1); INSERT INTO chat_threads (workspace_id,thread_id,title,created_at_ms,updated_at_ms,channel_id) VALUES ('ws','thread','Thread',20,20,'channel'); INSERT INTO chat_messages (workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) VALUES ('ws','thread',0,'old','human','Ada','@agent',20); INSERT INTO chat_dispatch_scan_cursor (workspace_id,max_created_at_ms,updated_at_ms) VALUES ('ws',100,101);").unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let state: (i64, i64, i64) = conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM chat_messages), (SELECT COUNT(*) FROM chat_dispatch_local_discovery), (SELECT max_created_at_ms FROM chat_dispatch_scan_cursor WHERE workspace_id='ws')",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(state, (1, 0, 100));
     }
 
     #[test]
@@ -5947,7 +6101,7 @@ mod tests {
         let mut conn = open_bare(&dir.join("engine.db"));
         let ctx = MigrationContext::current(1);
         let before = migration_index("v2-persisted-links");
-        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 42);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 47);
         assert_eq!(before + 1, BASELINE_MIGRATIONS.len());
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         conn.execute_batch("INSERT INTO versioned_workspaces VALUES('ws','main'); INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES('ws','main','main','Main',1); INSERT INTO file_objects VALUES('ws','a',1); INSERT INTO blobs VALUES('hash',5,'[[b]]'); INSERT INTO path_aliases VALUES('ws','main','a.md','a'); INSERT INTO snapshots(workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES('ws','main','a','a.md','hash',1,'m','test');").unwrap();

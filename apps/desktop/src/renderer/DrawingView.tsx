@@ -26,7 +26,7 @@ import {
   EngineArtifactAssetsInvalidNotice,
   EngineMayHoldDocumentNotice,
   OpenExternallyButton,
-  ViewHeader,
+  ViewActions,
 } from "./fileInspectorUi";
 import { TriangleAlert } from "lucide-react";
 import { EmptyState } from "./ui/controls";
@@ -271,8 +271,11 @@ export function DrawingView({
   // Three reasons a drawing is read-only, named in the order they are known:
   // the share is read-only, the live session cannot take edits (its notice
   // says why), or the bounded read cut the file short.
+  // A read-only status after every edit saved sets nothing aside.
   const drawingShown = engine.readOnlyWhileEditing
-    ? "read-only-transition"
+    ? engine.saveState.kind === "unknown" && engine.readOnlyDraftId === null
+      ? "read-only"
+      : "read-only-transition"
     : drawingChipState !== "read-only"
       ? drawingChipState
       : readOnly
@@ -283,13 +286,13 @@ export function DrawingView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-      <ViewHeader
-        path={path}
+      <ViewActions
         onShare={onShare}
         status={
           <StateMark
             testId="drawing-save-state"
             truncate
+            quietWhenCalm
             state={drawingChipState}
             shown={drawingShown}
             title={typeof drawingChipState !== "string" && drawingChipState.kind === "error" && engine.saveError ? engine.saveError : undefined}

@@ -1,6 +1,7 @@
 import { getCookies, parseSetCookieHeader, splitSetCookieHeader } from "better-auth/cookies";
 import { isIP } from "node:net";
 import { readBoundedJson } from "@dohc/service-http";
+import { selectAccountCookies } from "./namedAccountCookie";
 
 export interface AccountAuthConfig {
   upstreamUrl: string;
@@ -32,15 +33,8 @@ export function createAccountAuthHandler(options: AccountAuthOptions) {
   const fetchAuth = options.fetchAuth ?? ((request: Request) => fetch(request));
 
   function accountCookie(header: string | null): string | null {
-    const selected = new Map<string, string>();
-    for (const part of (header ?? "").split(";")) {
-      const pair = part.trim();
-      const separator = pair.indexOf("=");
-      const name = pair.slice(0, separator);
-      if (separator < 1 || !requestCookieNames.has(name)) continue;
-      if (selected.has(name)) throw new Error("duplicate account cookie");
-      selected.set(name, pair);
-    }
+    const selected = selectAccountCookies(header, requestCookieNames);
+    if (!selected) throw new Error("duplicate account cookie");
     return selected.size ? [...selected.values()].join("; ") : null;
   }
 

@@ -1,5 +1,5 @@
 use crate::rpc::automations::{
-    AUTOMATION_CLAIM_MAX_ATTEMPTS, AUTOMATION_CLAIM_REAP_IDLE_MS, automation_claim_json,
+    AUTOMATION_CLAIM_MAX_ATTEMPTS, AUTOMATION_CLAIM_REAP_IDLE_MS, automation_claimed_event_json,
 };
 use crate::{AUTOMATION_CLAIMED_EVENT, EngineEventNotice, EngineEvents, lock};
 use dohc_engine_domain::AutomationClaimAttempt;
@@ -91,13 +91,11 @@ async fn recover_interrupted_claims(
         {
             Ok(claims) => {
                 for claim in &claims {
-                    let mut payload = automation_claim_json(claim);
-                    payload["workspaceId"] = serde_json::json!(workspace_id);
                     send_recovery_notice(
                         &events,
                         EngineEventNotice {
                             name: AUTOMATION_CLAIMED_EVENT.to_owned(),
-                            payload,
+                            payload: automation_claimed_event_json(&workspace_id, claim),
                         },
                         &cancel,
                     )
@@ -326,6 +324,13 @@ mod tests {
         for notice in [&first, &second] {
             assert_eq!(notice.name, AUTOMATION_CLAIMED_EVENT);
             assert_eq!(notice.payload["workspaceId"], WORKSPACE);
+            assert_eq!(
+                notice.payload["trigger"],
+                serde_json::json!({ "originId": "origin", "originSeq": 1 })
+            );
+            assert_eq!(notice.payload["recordId"], "record");
+            assert_eq!(notice.payload["collectionPath"], "tasks");
+            assert!(notice.payload["change"].get("fieldsOmitted").is_none());
         }
         let failed = [&first, &second]
             .into_iter()
@@ -338,6 +343,7 @@ mod tests {
             .find(|notice| notice.payload["state"] == "pending")
             .expect("executor wake-up");
         assert_eq!(pending.payload["claimId"], "retry");
+        assert!(pending.payload.get("error").is_none());
         let failures = actor
             .automation_failures(WORKSPACE.to_owned())
             .await

@@ -66,7 +66,8 @@ export function createWorkspaceEngineIpc<
   localPersonId(): string;
   /** This computer's person as History names them. */
   localPersonName(): string;
-  automationPersonName(workspaceId: string, userId: string, sender: Sender): string | null;
+  recordHistoryPersonName(workspaceId: string, userId: string, sender: Sender): string | null;
+  prepareRecordHistoryPeople(workspaceId: string, userIds: readonly string[], sender: Sender): void;
   /** The person a request is made by, read from main's own account when it arrives. */
   localPerson(): Promise<LocalPersonAuthor>;
   /** An automation author as History shows it, in one workspace. */
@@ -240,7 +241,8 @@ export function createWorkspaceEngineIpc<
           result.record.path = source.prefix + result.record.path;
           const { workspaceId } = operation.workspace;
           const authors: RecordHistoryAuthors = {
-            person: userId => dependencies.automationPersonName(workspaceId, userId, event.sender),
+            prepare: userIds => dependencies.prepareRecordHistoryPeople(workspaceId, userIds, event.sender),
+            person: userId => dependencies.recordHistoryPersonName(workspaceId, userId, event.sender),
             agent: (onBehalfOf) => onBehalfOf === localPersonId() ? localAgentDisplayName() : "Agent",
             automationName: (automationId) => automationAuthor(workspaceId, automationId)?.name ?? null,
             runAvailable: (automationId, claimId) => runLocator.available(workspaceId, automationId, claimId),
@@ -286,7 +288,7 @@ export function createWorkspaceEngineIpc<
     // history it already imported, as it keeps its files, and gains nothing new.
     async function readHistory<Result>(
       event: Event, workspaceId: string,
-      read: (history: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment">, rootPath: string | null) => Promise<Result>,
+      read: (history: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment"> & Partial<Pick<WorkspaceEngineCapture, "filePathForObjectId">>, rootPath: string | null) => Promise<Result>,
     ): Promise<Result> {
       if (!shareViewIsPresent(requireWorkspace(workspaceId).shareView)) {
         const { capture } = await requireEngineCapture(workspaceId, "Engine history");
@@ -316,22 +318,30 @@ export function createWorkspaceEngineIpc<
         const admitted = policy ? historyPathAdmission(policy) : null;
         return listEngineMomentsForIpc(
           async () => {
-            let beforeMomentOrder = input.beforeMomentOrder;
-            let protectedTruncated = false;
-            // Skip retired pages, but leave a continuation after a bounded scan.
+            let cursor = input.cursor;
+            let startCursor = input.cursor;
+            const versionMarkers: Awaited<ReturnType<typeof history.listMoments>>["versionMarkers"] = [];
+            // Today's view shows moments. Keep skipped markers for the later timeline UI.
+            const pageReach = Math.min(40, Math.ceil(2_000 / (input.limit ?? 50)));
             for (let pageIndex = 0; ; pageIndex += 1) {
               const page = await history.listMoments({
                 ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
                 ...(input.limit !== undefined ? { limit: input.limit } : {}),
-                ...(beforeMomentOrder !== undefined ? { beforeMomentOrder } : {}),
+                ...(cursor !== undefined ? { cursor } : {}),
               });
-              if (!admitted) return page;
-              protectedTruncated ||= page.protectedTruncated;
-              const moments = page.moments.filter(moment => moment.protected || admitted(moment.path));
-              if (moments.length > 0 || page.nextBeforeMomentOrder === null || pageIndex === 9) {
-                return { ...page, moments, protectedTruncated };
+              startCursor ??= page.startCursor;
+              versionMarkers.push(...page.versionMarkers);
+              const moments = admitted ? page.moments.filter(moment => moment.protected || admitted(moment.path)) : page.moments;
+              if (moments.length > 0 || page.nextCursor === null || pageIndex + 1 >= pageReach) {
+                return { ...page, moments, startCursor, versionMarkers };
               }
-              beforeMomentOrder = page.nextBeforeMomentOrder;
+              if (pageIndex === 0 && admitted && input.objectId !== undefined) {
+                const objectPath = await history.filePathForObjectId?.(input.objectId);
+                if (objectPath != null && !admitted(objectPath)) {
+                  return { ...page, moments, nextCursor: null, startCursor, versionMarkers };
+                }
+              }
+              cursor = page.nextCursor;
             }
           },
           authorNames(input.workspaceId, event.sender),
@@ -350,7 +360,7 @@ export function createWorkspaceEngineIpc<
           return ReadEngineMomentResult.parse({ status: "untracked", moment: null });
         }
         const names = authorNames(input.workspaceId, event.sender);
-        if (moment && !moment.protected && moment.moment.authors?.length === 1) names.prepare?.(moment.moment.authors);
+        if (moment && !moment.protected && moment.moment.authors) names.prepare?.(moment.moment.authors);
         return ReadEngineMomentResult.parse({
           moment: moment ? engineMomentDetailForIpc(moment, names) : null,
         });

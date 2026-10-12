@@ -1,8 +1,13 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from "vitest";
-import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../settings/userSettings";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  DEFAULT_USER_SETTINGS,
+  type DesktopUserSettings,
+  type DesktopUserSettingsResult,
+} from "../settings/userSettings";
+import { deferred } from "../testing/deferred";
 import { readableAccent } from "./accentColor";
-import { applyLookSettings, differsOnlyInLook } from "./theme";
+import { applyLookSettings, differsOnlyInLook, initTheme } from "./theme";
 import { chosenHue } from "./workbench/chosenColors";
 
 function settings(change: {
@@ -67,5 +72,78 @@ describe("applying the settings file's look", () => {
       ...read(DEFAULT_USER_SETTINGS),
       ignored: [{ key: "editor.fontSize", reason: "invalid" }],
     })).toBe(false);
+  });
+});
+
+describe("the startup read of the settings file", () => {
+  const read = (value: DesktopUserSettings): DesktopUserSettingsResult =>
+    ({ settings: value, source: "stored" });
+  const accepted = settings({
+    appearance: { themeMode: "dark", accentColor: "#ffd400", yourColor: "teal" },
+    editor: { fontFamily: "serif", fontSize: 18 },
+  });
+
+  // Starts the theme with the startup read held open and the system
+  // preference under the test's control.
+  function start(systemDark: boolean) {
+    const startup = deferred<DesktopUserSettingsResult>();
+    const setTitlebarTheme = vi.fn(async (_request: { theme: "light" | "dark" }) => undefined);
+    const changes = new Set<() => void>();
+    const system = {
+      matches: systemDark,
+      addEventListener: (_type: "change", listener: () => void) => changes.add(listener),
+    };
+    vi.stubGlobal("matchMedia", () => system);
+    vi.stubGlobal("dohcDesktop", { getUserSettings: () => startup.promise, setTitlebarTheme });
+    initTheme();
+    const prefer = (dark: boolean) => {
+      system.matches = dark;
+      for (const listener of changes) listener();
+    };
+    return { startup, setTitlebarTheme, prefer };
+  }
+
+  // The look initTheme's read lands is in place once the read's own promise
+  // has settled for every earlier listener.
+  async function answer(startup: ReturnType<typeof start>["startup"], value: DesktopUserSettings) {
+    startup.resolve(read(value));
+    await startup.promise;
+  }
+
+  function expectAcceptedLook(setTitlebarTheme: ReturnType<typeof start>["setTitlebarTheme"]) {
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(setTitlebarTheme).toHaveBeenLastCalledWith({ theme: "dark" });
+    expect(property("--dohc-accent")).toBe(readableAccent("#ffd400", "dark"));
+    expect(property("--dohc-editor-font")).toBe("var(--font-serif)");
+    expect(property("--dohc-editor-font-size")).toBe("18px");
+    expect(chosenHue("human")).toBe("teal");
+  }
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("applies what the file says when nothing newer arrived first", async () => {
+    const { startup, setTitlebarTheme } = start(false);
+    expect(document.documentElement.dataset.theme).toBe("light");
+
+    await answer(startup, accepted);
+    expectAcceptedLook(setTitlebarTheme);
+  });
+
+  it("keeps a newer accepted look when it answers late", async () => {
+    const { startup, setTitlebarTheme } = start(false);
+    applyLookSettings(accepted);
+
+    await answer(startup, settings({ appearance: { themeMode: "light" } }));
+    expectAcceptedLook(setTitlebarTheme);
+  });
+
+  it("leaves the window following the system when a newer accepted look chose it", async () => {
+    const { startup, prefer } = start(false);
+    applyLookSettings(settings({ appearance: { themeMode: "system" } }));
+
+    await answer(startup, settings({ appearance: { themeMode: "light" } }));
+    expect(document.documentElement.dataset.theme).toBe("light");
+    prefer(true);
+    expect(document.documentElement.dataset.theme).toBe("dark");
   });
 });

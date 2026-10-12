@@ -1,15 +1,8 @@
 import { desktopPins, activityPin } from "../../testPins";
-import {
-  Cloud,
-  Files,
-  Globe2,
-  History,
-  Search,
-  Settings,
-  Workflow,
-} from "lucide-react";
+import { Cloud, Settings, type LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { pinnedAppInitial, type PinnedApp } from "./pinnedApps";
+import { VIEW_IDENTITY } from "./viewIdentity";
 import { appViewId, SHARING_VIEW_ID, type ActivityViewId, type ViewId } from "./workbenchState";
 
 // VS Code-style activity bar: 48px icon rail, leftmost column of the
@@ -17,29 +10,10 @@ import { appViewId, SHARING_VIEW_ID, type ActivityViewId, type ViewId } from "./
 // (7277c39^): data-table of items, title + aria-label + aria-current on every
 // button, active = full-ink icon with a 2px left ink indicator. Clicking the
 // active item toggles the side panel (the old explicit collapse button).
-
-const ICONS: Record<ViewId, typeof Files> = {
-  explorer: Files,
-  search: Search,
-  graph: Workflow,
-  sites: Globe2,
-  history: History,
-};
-
-const LABELS: Record<ViewId, string> = {
-  explorer: "Explorer",
-  search: "Search",
-  graph: "Graph",
-  sites: "Apps",
-  history: "History",
-};
-
-export function activityViewLabel(view: ViewId): string {
-  return LABELS[view];
-}
+// dohc's own views draw the label and icon VIEW_IDENTITY names.
 
 // Every rail glyph is drawn the same size and weight; only the icon differs.
-function RailGlyph(props: { Icon: typeof Files }) {
+function RailGlyph(props: { Icon: LucideIcon }) {
   return <props.Icon size={18} strokeWidth={1.9} aria-hidden />;
 }
 
@@ -143,6 +117,7 @@ export function ActivityBar(props: {
   onOpenSettings?: () => void;
   notices?: ReactNode;
   viewsDisabled?: boolean;
+  showSharing?: boolean;
 }) {
   return (
     <nav
@@ -159,13 +134,13 @@ export function ActivityBar(props: {
           <RailButton
             key={view}
             testId={activityPin(view)}
-            label={LABELS[view]}
+            label={VIEW_IDENTITY[view].label}
             // The rail reflects a collapsed panel: no active mark while hidden.
             active={props.sidebarVisible && props.activeView === view}
             badge={view === "explorer" && props.hasConflict ? "danger" : undefined}
             count={view === "search" ? props.searchResultCount : undefined}
             onClick={() => props.onSelectView(view)}
-            icon={<RailGlyph Icon={ICONS[view]} />}
+            icon={<RailGlyph Icon={VIEW_IDENTITY[view].Icon} />}
           />
         ))}
         {(props.pinnedApps ?? []).map((app) => {
@@ -196,16 +171,18 @@ export function ActivityBar(props: {
       </div>
       <div className="mt-auto flex flex-col items-center gap-1 border-t border-line pt-2">
         {/* Sharing opens a view like the ones above, so it goes inert with them. */}
-        <div inert={props.viewsDisabled || undefined} className="flex w-full justify-center">
-          <RailButton
-            testId={activityPin(SHARING_VIEW_ID)}
-            label="Sharing"
-            active={props.sidebarVisible && props.activeView === SHARING_VIEW_ID}
-            badge={props.hasConflict ? "danger" : undefined}
-            onClick={() => props.onSelectView(SHARING_VIEW_ID)}
-            icon={<RailGlyph Icon={Cloud} />}
-          />
-        </div>
+        {props.showSharing !== false ? (
+          <div inert={props.viewsDisabled || undefined} className="flex w-full justify-center">
+            <RailButton
+              testId={activityPin(SHARING_VIEW_ID)}
+              label="Sharing"
+              active={props.sidebarVisible && props.activeView === SHARING_VIEW_ID}
+              badge={props.hasConflict ? "danger" : undefined}
+              onClick={() => props.onSelectView(SHARING_VIEW_ID)}
+              icon={<RailGlyph Icon={Cloud} />}
+            />
+          </div>
+        ) : null}
         {props.notices}
         <RailButton
           testId={activityPin("settings")}

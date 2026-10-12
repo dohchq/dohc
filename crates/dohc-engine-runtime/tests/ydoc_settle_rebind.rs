@@ -614,26 +614,26 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
     // last_settled_sha) survives. The user then deletes the file and the
     // disk-driven retire destroys the head.
     std::fs::remove_file(scratch.path().join(PATH)).expect("delete artifact");
-    handle
-        .capture_retire(
-            dohc_engine_runtime::CaptureRetire {
-                workspace_id: WS.to_owned(),
-                version_id: "main".to_owned(),
-                path: PATH.to_owned(),
-                metadata_summary: None,
-                metadata_correlation_id: None,
-                now_ms: 40,
-                request_id: Some("retire-artifact".to_owned()),
-                only_if_text_head: false,
-                only_if_capture_origin: true,
-                allow_ydoc_origin: true,
-            },
-            dohc_engine_collab::LeaseRegistry::new(),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .expect("retire");
+    dohc_engine_testkit::capture::retire_captured_path(
+        &handle,
+        dohc_engine_runtime::CaptureRetire {
+            workspace_id: WS.to_owned(),
+            version_id: "main".to_owned(),
+            path: PATH.to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            now_ms: 40,
+            request_id: Some("retire-artifact".to_owned()),
+            only_if_text_head: false,
+            only_if_capture_origin: true,
+            allow_ydoc_origin: true,
+        },
+        scratch.path(),
+        dohc_engine_collab::LeaseRegistry::new(),
+        Arc::new(NoFaults),
+    )
+    .await
+    .expect("retire");
 
     // Reopen: the deleted document must not resurrect, and the fresh
     // create-flow must settle cleanly. Mutation check: drop the

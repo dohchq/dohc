@@ -30,6 +30,7 @@ pub use owner_publication::{
     OwnerAdmissionPending, OwnerPublicationPrefix, owner_publication_prefix,
 };
 mod path_policy;
+mod references;
 mod refusal_notices;
 mod relay;
 pub use refusal_notices::{
@@ -97,16 +98,16 @@ pub use relay::{
     DirectWritePushOutcome, DirectWriteReport, DirectWriteResult, DirectWriteState,
     DirectWriteStatus, EpochRequest, EpochResponse, KeyEnvelopeDownloadRequest,
     KeyEnvelopeDownloadResponse, KeyEnvelopeRequest, KeyEnvelopeResponse, LogCoordinateRequest,
-    LogCoordinateResponse, MAX_BLOB_DOWNLOAD_BATCH, ProbeRequest, ProbeResponse, PullRequest,
-    PullResponse, PushRequest, PushResponse, PushWorkspaceProgress, RecoverResponse,
-    RelaySyncClient, RelayTransport, SettlementPublicationRefusal, ShareBlobRequest,
-    ShareBlobUploadRequest, ShareCollectionWriteRequest, ShareCollectionWriteResponse,
-    ShareLogPushRequest, ShareProposalChange, ShareProposalSubmitOutcome,
-    ShareProposalSubmitRequest, ShareProposalSubmitResponse, ShareReplicationEnvelope,
-    ShareViewChangedPath, ShareViewPullOutcome, ShareViewRefusal, ShareViewRequest,
-    ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRejection,
-    SharedChannelRequest, SharedChannelResponse, SyncPassOutcome, collision_key,
-    read_direct_write_status, read_record_creation_statuses,
+    LogCoordinateResponse, MAX_BASE_REPAIR_LOOKUPS, MAX_BLOB_DOWNLOAD_BATCH, ProbeRequest,
+    ProbeResponse, PullRequest, PullResponse, PushRequest, PushResponse, PushWorkspaceProgress,
+    RecoverResponse, RelaySyncClient, RelayTransport, SettlementPublicationRefusal,
+    ShareBlobRequest, ShareBlobUploadRequest, ShareCollectionWriteRequest,
+    ShareCollectionWriteResponse, ShareLogPushRequest, ShareProposalChange,
+    ShareProposalSubmitOutcome, ShareProposalSubmitRequest, ShareProposalSubmitResponse,
+    ShareReplicationEnvelope, ShareViewChangedPath, ShareViewPullOutcome, ShareViewRefusal,
+    ShareViewRequest, ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome,
+    SharedChannelRejection, SharedChannelRequest, SharedChannelResponse, SyncPassOutcome,
+    collision_key, read_direct_write_status, read_record_creation_statuses,
 };
 pub use router::{RoutedApply, apply_replication_envelope};
 pub use secret_apply::apply_secret_envelope;
@@ -117,15 +118,15 @@ pub use share::{
 pub use share_grant::GrantBinding;
 pub use version_apply::{apply_version_envelope, apply_workspace_envelope};
 pub use ydoc_apply::{
-    AlwaysLive, LeaseProbe, NoLiveLeases, PreparedLocalYdocLineage, ResultingHead, YdocApplyResult,
-    YdocDrainCleanup, YdocDrainResult, YdocLineageReplacement, apply_ydoc_envelope,
-    complete_deferred_ydoc_drain_cleanup, current_ydoc_content_matches_in_tx,
+    AlwaysLive, LeaseProbe, LocalHeadReconcile, NoLiveLeases, PreparedLocalYdocLineage,
+    ResultingHead, YdocApplyResult, YdocDrainCleanup, YdocDrainResult, YdocLineageReplacement,
+    apply_ydoc_envelope, complete_deferred_ydoc_drain_cleanup, current_ydoc_content_matches_in_tx,
     drain_deferred_ydoc_for_key, drain_deferred_ydoc_for_key_holding_cleanup,
     drain_deferred_ydoc_for_live_session, ensure_no_adopted_owner_under_path,
     fold_resolution_into_ydoc_in_tx, live_session_has_drainable_deferred_ydoc,
     open_sync_conflict_for_object, prepare_local_ydoc_lineage_in_tx, project_and_write_in_tx,
-    project_ydoc_with_store, reconcile_imported_resulting_head_in_tx,
-    reconcile_local_resulting_head_in_tx, reconcile_prepared_local_resulting_head_in_tx,
+    project_ydoc_with_store, reconcile_imported_resulting_head_in_tx, reconcile_local_head_in_tx,
+    reconcile_local_resulting_head_in_tx, reconcile_prepared_local_head_in_tx,
     retire_ydoc_lineage_in_tx, validate_scene_asset_with_store, workspace_has_ydoc_state_in_tx,
 };
 pub use ydoc_origination::{

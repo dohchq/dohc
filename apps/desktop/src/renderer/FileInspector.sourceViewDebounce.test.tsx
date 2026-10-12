@@ -6,12 +6,10 @@ import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import "./SourceCodeEditor";
-import {
-  markdownToYDoc,
-  replaceYDocWithMarkdown,
-  yDocToMarkdown,
-} from "./editor/import-export";
+import { markdownToYDoc } from "@dohc/ydoc-projection";
+import { yDocToMarkdown } from "./editor/import-export";
 import { FileInspector } from "./FileInspector";
+import { replaceYDocWithMarkdown } from "./FileInspector.remote-fixture";
 import { resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
 
 vi.mock("./editor/import-export", async (importOriginal) => {
@@ -52,7 +50,8 @@ function engineState(doc: Y.Doc): UseEngineDoc {
     recoveryAssets: null,
     permanentFailureWhileEditing: false,
     readOnlyWhileEditing: false,
-  readOnlyCause: null,
+    readOnlyDraftId: null,
+    readOnlyCause: null,
     removalInProgress: null,
     artifactAssets: [],
     readArtifactAsset: async () => {

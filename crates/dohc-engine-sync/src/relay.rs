@@ -16,6 +16,7 @@ use crate::cursor::{
 use crate::error::GENERIC_REPLAY_REFUSAL_CODE;
 use crate::hydration::VerifiedBlob;
 use crate::journal::{crashes, list_replication_ops, read_sync_identity};
+use crate::references::{MomentRefs, VersionCreateRefs, YdocRefs, conflict_open_sides};
 
 mod direct_write;
 mod share_authors;
@@ -570,6 +571,19 @@ pub trait RelayTransport {
         &self,
         req: LogCoordinateRequest,
     ) -> Result<LogCoordinateResponse, RelayError>;
+    /// A local bridge batch. Adapters still use the existing coordinate endpoint.
+    fn lookup_log_coordinates(
+        &self,
+        requests: Vec<LogCoordinateRequest>,
+    ) -> Result<Vec<LogCoordinateResponse>, RelayError> {
+        if requests.is_empty() || requests.len() > MAX_BASE_REPAIR_LOOKUPS {
+            return Err(RelayError::InvalidResponse);
+        }
+        requests
+            .into_iter()
+            .map(|request| self.lookup_log_coordinate(request))
+            .collect()
+    }
     fn probe(&self, req: ProbeRequest) -> Result<ProbeResponse, RelayError>;
     fn claim_workspace(&self, req: ClaimRequest) -> Result<ClaimResponse, RelayError>;
     fn rotate_epoch(&self, req: EpochRequest) -> Result<EpochResponse, RelayError>;
@@ -724,6 +738,13 @@ struct PreparedPushPage {
     sending: Option<usize>,
 }
 
+fn base_repair_collab_error(error: dohc_engine_collab::CollabError) -> SyncError {
+    match error {
+        dohc_engine_collab::CollabError::Storage(storage) => SyncError::Storage(storage),
+        hard => SyncError::Storage(StorageError::corrupt_public(hard)),
+    }
+}
+
 struct PendingBaseRelayRepair {
     key: dohc_engine_collab::DocKey,
     lineage_claim_id: String,
@@ -736,6 +757,20 @@ struct PendingBaseRelayRepair {
 
 type BaseRelayRepairKey = (String, String, String);
 type BaseRelayRepairCandidate = (PendingBaseRelayRepair, Option<i64>, bool);
+
+pub const MAX_BASE_REPAIR_LOOKUPS: usize = 256;
+
+#[derive(Default)]
+struct BaseRelayRepairChunk {
+    repairs: Vec<PendingBaseRelayRepair>,
+    deferred: Vec<PendingDeferredRelayRepair>,
+}
+
+impl BaseRelayRepairChunk {
+    fn len(&self) -> usize {
+        self.repairs.len() + self.deferred.len()
+    }
+}
 
 struct PendingDeferredRelayRepair {
     origin_id: String,
@@ -781,6 +816,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         workspace_id: &str,
         identity: &crate::journal::SyncIdentity,
         faults: &dyn FaultInjector,
+        page: &[ReplicationEnvelope],
     ) -> Result<(), RelayError> {
         let local_pushed_seq =
             read_pushed_seq(store, workspace_id, &identity.origin_id).map_err(local)?;
@@ -922,6 +958,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     .map_err(SyncError::corrupt)
             })
             .map_err(local)?;
+        if repairs.is_empty() && deferred.is_empty() {
+            return Ok(());
+        }
         let needs_confirmation = repairs.iter().any(|repair| {
             repair.origin_id == identity.origin_id && repair.origin_seq > local_pushed_seq
         }) || deferred.iter().any(|(origin_id, origin_seq, ..)| {
@@ -943,177 +982,251 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         // A same-device push during reruns can make this maximum stale, as between main's lookup and push.
         // Today's callers push before pulling.
         let own_relay_bound = local_pushed_seq.max(relay_origin_max);
-        let lookup = |origin_id: &str, origin_seq: i64| {
-            // The maximum proves absence only. Present coordinates still need content comparison.
-            if origin_id == identity.origin_id && origin_seq > own_relay_bound {
-                Ok(LogCoordinateResponse::Absent)
-            } else {
-                self.transport.lookup_log_coordinate(LogCoordinateRequest {
-                    workspace_id: workspace_id.to_owned(),
-                    replication_epoch: identity.replication_epoch.clone(),
-                    stream_identity: identity.stream_identity.clone(),
-                    origin_id: origin_id.to_owned(),
-                    origin_seq,
-                })
-            }
-        };
-
-        let mut deferred_repairs = Vec::new();
-        for (origin_id, origin_seq, op_kind, payload_json, recorded_at_ms) in deferred {
-            let repair = PendingDeferredRelayRepair {
-                origin_id,
-                origin_seq,
-                op_kind,
-                payload: serde_json::from_str(&payload_json)
-                    .map_err(|error| local(SyncError::corrupt(error)))?,
-                recorded_at_ms,
-            };
-            let response = lookup(&repair.origin_id, repair.origin_seq)?;
-            let relay_seq = match response {
-                LogCoordinateResponse::Present(op)
-                | LogCoordinateResponse::PresentBelowEpochFloor(op) => {
-                    if op.validate().is_err()
-                        || op.workspace_id != workspace_id
-                        || op.origin_id != repair.origin_id
-                        || op.origin_seq != repair.origin_seq
-                        || op.op_kind != repair.op_kind
-                        || op.payload != repair.payload
-                        || op.recorded_at_ms != repair.recorded_at_ms
-                    {
-                        return Err(RelayError::InvalidResponse);
-                    }
-                    Some(op.relay_seq.ok_or(RelayError::InvalidResponse)?)
-                }
-                LogCoordinateResponse::Absent
-                    if repair.origin_id == identity.origin_id
-                        && local_pushed_seq < repair.origin_seq =>
-                {
-                    None
-                }
-                LogCoordinateResponse::Absent => None,
-            };
-            if let Some(relay_seq) = relay_seq {
-                deferred_repairs.push((repair.origin_id, repair.origin_seq, relay_seq));
-            }
+        let mut page_coordinates = BTreeMap::new();
+        for op in page {
+            // Validated pages are in relay order; repeated coordinates keep their minimum.
+            page_coordinates
+                .entry((op.origin_id.as_str(), op.origin_seq))
+                .or_insert(op);
         }
-        let mut grouped: BTreeMap<BaseRelayRepairKey, Vec<BaseRelayRepairCandidate>> =
-            BTreeMap::new();
+        let deferred = deferred
+            .into_iter()
+            .map(
+                |(origin_id, origin_seq, op_kind, payload_json, recorded_at_ms)| {
+                    Ok(PendingDeferredRelayRepair {
+                        origin_id,
+                        origin_seq,
+                        op_kind,
+                        payload: serde_json::from_str(&payload_json)
+                            .map_err(|error| local(SyncError::corrupt(error)))?,
+                        recorded_at_ms,
+                    })
+                },
+            )
+            .collect::<Result<Vec<_>, RelayError>>()?;
+        let mut groups: BTreeMap<BaseRelayRepairKey, Vec<PendingBaseRelayRepair>> = BTreeMap::new();
         for repair in repairs {
-            let response = lookup(&repair.origin_id, repair.origin_seq)?;
-            let (relay_seq, unresolved_local_coordinate) = match response {
-                LogCoordinateResponse::Present(op)
-                | LogCoordinateResponse::PresentBelowEpochFloor(op) => {
-                    if op.validate().is_err()
-                        || op.workspace_id != workspace_id
-                        || op.origin_id != repair.origin_id
-                        || op.origin_seq != repair.origin_seq
-                        || op.op_kind != repair.op_kind
-                        || op.payload != repair.payload
-                        || op.recorded_at_ms != repair.recorded_at_ms
-                        || !crate::ydoc_apply::is_exact_repairable_ydoc_base_claim(
-                            &op.payload,
-                            &repair.key,
-                            &repair.lineage_claim_id,
-                        )
-                    {
-                        return Err(RelayError::InvalidResponse);
-                    }
-                    (
-                        Some(op.relay_seq.ok_or(RelayError::InvalidResponse)?),
-                        false,
-                    )
-                }
-                LogCoordinateResponse::Absent
-                    if repair.origin_id == identity.origin_id
-                        && local_pushed_seq < repair.origin_seq =>
-                {
-                    (None, true)
-                }
-                LogCoordinateResponse::Absent => (None, false),
-            };
-            grouped
+            groups
                 .entry((
                     repair.key.version_id.clone(),
                     repair.key.object_id.clone(),
                     repair.lineage_claim_id.clone(),
                 ))
                 .or_default()
-                .push((repair, relay_seq, unresolved_local_coordinate));
+                .push(repair);
         }
-
-        for candidates in grouped.into_values() {
-            let resolved = candidates
-                .iter()
-                .filter_map(|(repair, relay_seq, _)| relay_seq.map(|relay_seq| (repair, relay_seq)))
-                .min_by_key(|(_, relay_seq)| *relay_seq);
-            let (chosen, relay_seq) = match resolved {
-                Some((repair, relay_seq)) => (repair, Some(relay_seq)),
-                // Own Absent above the cursor keeps an Absent-only group unresolved.
-                None if candidates.iter().any(|(_, _, unresolved)| *unresolved) => continue,
-                None => (&candidates[0].0, None),
-            };
-            match store
-                .write_with(faults, |tx| {
-                    dohc_engine_collab::record_base_coordinate_in_tx(
-                        tx,
-                        dohc_engine_collab::BaseCoordinateRecord {
-                            key: &chosen.key,
-                            lineage_claim_id: &chosen.lineage_claim_id,
-                            origin_id: &chosen.origin_id,
-                            origin_seq: chosen.origin_seq,
-                            relay_seq,
-                            now_ms: chosen.recorded_at_ms,
-                        },
-                    )?;
-                    if relay_seq.is_none() {
-                        dohc_engine_collab::mark_base_coordinate_absent_in_tx(
-                            tx,
-                            &chosen.key,
-                            &chosen.lineage_claim_id,
-                            &chosen.origin_id,
-                            chosen.origin_seq,
-                            chosen.recorded_at_ms,
-                        )?;
-                    }
-                    tx.execute(
-                        "DELETE FROM ydoc_base_relay_candidates
-                          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-                        params![
-                            chosen.key.workspace_id,
-                            chosen.key.version_id,
-                            chosen.key.object_id
-                        ],
-                    )
-                    .map_err(|error| {
-                        dohc_engine_collab::CollabError::Storage(StorageError::persist_public(
-                            error,
-                        ))
-                    })?;
-                    Ok(())
-                })
-                .map_err(|error| match error {
-                    dohc_engine_collab::CollabError::Storage(storage) => {
-                        local(SyncError::Storage(storage))
-                    }
-                    hard => local(SyncError::Storage(StorageError::corrupt_public(hard))),
-                })? {
-                TxnOutcome::Committed(()) => {}
-                TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
+        let mut chunks = Vec::new();
+        let mut chunk = BaseRelayRepairChunk::default();
+        for group in groups.into_values() {
+            if chunk.len() > 0 && chunk.len() + group.len() > MAX_BASE_REPAIR_LOOKUPS {
+                chunks.push(std::mem::take(&mut chunk));
+            }
+            chunk.repairs.extend(group);
+            if chunk.len() >= MAX_BASE_REPAIR_LOOKUPS {
+                chunks.push(std::mem::take(&mut chunk));
             }
         }
-        for (origin_id, origin_seq, relay_seq) in deferred_repairs {
+        for repair in deferred {
+            if chunk.len() >= MAX_BASE_REPAIR_LOOKUPS {
+                chunks.push(std::mem::take(&mut chunk));
+            }
+            chunk.deferred.push(repair);
+        }
+        if chunk.len() > 0 {
+            chunks.push(chunk);
+        }
+
+        for BaseRelayRepairChunk { repairs, deferred } in chunks {
+            let mut coordinates = BTreeSet::new();
+            coordinates.extend(
+                repairs
+                    .iter()
+                    .map(|repair| (repair.origin_id.clone(), repair.origin_seq)),
+            );
+            coordinates.extend(
+                deferred
+                    .iter()
+                    .map(|repair| (repair.origin_id.clone(), repair.origin_seq)),
+            );
+            let requests = coordinates
+                .into_iter()
+                .filter(|(origin, seq)| {
+                    !(page_coordinates.contains_key(&(origin.as_str(), *seq))
+                        || origin == &identity.origin_id && *seq > own_relay_bound)
+                })
+                .map(|(origin_id, origin_seq)| LogCoordinateRequest {
+                    workspace_id: workspace_id.to_owned(),
+                    replication_epoch: identity.replication_epoch.clone(),
+                    stream_identity: identity.stream_identity.clone(),
+                    origin_id,
+                    origin_seq,
+                })
+                .collect::<Vec<_>>();
+            let mut responses = BTreeMap::new();
+            // A group wider than one batch retains its answers across replay and commits whole.
+            for requests in requests.chunks(MAX_BASE_REPAIR_LOOKUPS) {
+                let answers = self.transport.lookup_log_coordinates(requests.to_vec())?;
+                if answers.len() != requests.len() {
+                    return Err(RelayError::InvalidResponse);
+                }
+                for (request, answer) in requests.iter().zip(answers) {
+                    responses.insert((request.origin_id.clone(), request.origin_seq), answer);
+                }
+            }
+            let lookup = |origin_id: &str, origin_seq: i64| {
+                if let Some(op) = page_coordinates.get(&(origin_id, origin_seq)) {
+                    Ok(LogCoordinateResponse::Present((*op).clone()))
+                } else if origin_id == identity.origin_id && origin_seq > own_relay_bound {
+                    Ok(LogCoordinateResponse::Absent)
+                } else {
+                    responses
+                        .get(&(origin_id.to_owned(), origin_seq))
+                        .cloned()
+                        .ok_or(RelayError::InvalidResponse)
+                }
+            };
+            let mut deferred_repairs = Vec::new();
+            for repair in deferred {
+                let response = lookup(&repair.origin_id, repair.origin_seq)?;
+                let relay_seq = match response {
+                    LogCoordinateResponse::Present(op)
+                    | LogCoordinateResponse::PresentBelowEpochFloor(op) => {
+                        if op.validate().is_err()
+                            || op.workspace_id != workspace_id
+                            || op.origin_id != repair.origin_id
+                            || op.origin_seq != repair.origin_seq
+                            || op.op_kind != repair.op_kind
+                            || op.payload != repair.payload
+                            || op.recorded_at_ms != repair.recorded_at_ms
+                        {
+                            return Err(RelayError::InvalidResponse);
+                        }
+                        Some(op.relay_seq.ok_or(RelayError::InvalidResponse)?)
+                    }
+                    LogCoordinateResponse::Absent
+                        if repair.origin_id == identity.origin_id
+                            && local_pushed_seq < repair.origin_seq =>
+                    {
+                        None
+                    }
+                    LogCoordinateResponse::Absent => None,
+                };
+                if let Some(relay_seq) = relay_seq {
+                    deferred_repairs.push((repair.origin_id, repair.origin_seq, relay_seq));
+                }
+            }
+            let mut grouped: BTreeMap<BaseRelayRepairKey, Vec<BaseRelayRepairCandidate>> =
+                BTreeMap::new();
+            for repair in repairs {
+                let response = lookup(&repair.origin_id, repair.origin_seq)?;
+                let (relay_seq, unresolved_local_coordinate) = match response {
+                    LogCoordinateResponse::Present(op)
+                    | LogCoordinateResponse::PresentBelowEpochFloor(op) => {
+                        if op.validate().is_err()
+                            || op.workspace_id != workspace_id
+                            || op.origin_id != repair.origin_id
+                            || op.origin_seq != repair.origin_seq
+                            || op.op_kind != repair.op_kind
+                            || op.payload != repair.payload
+                            || op.recorded_at_ms != repair.recorded_at_ms
+                            || !crate::ydoc_apply::is_exact_repairable_ydoc_base_claim(
+                                &op.payload,
+                                &repair.key,
+                                &repair.lineage_claim_id,
+                            )
+                        {
+                            return Err(RelayError::InvalidResponse);
+                        }
+                        (
+                            Some(op.relay_seq.ok_or(RelayError::InvalidResponse)?),
+                            false,
+                        )
+                    }
+                    LogCoordinateResponse::Absent
+                        if repair.origin_id == identity.origin_id
+                            && local_pushed_seq < repair.origin_seq =>
+                    {
+                        (None, true)
+                    }
+                    LogCoordinateResponse::Absent => (None, false),
+                };
+                grouped
+                    .entry((
+                        repair.key.version_id.clone(),
+                        repair.key.object_id.clone(),
+                        repair.lineage_claim_id.clone(),
+                    ))
+                    .or_default()
+                    .push((repair, relay_seq, unresolved_local_coordinate));
+            }
+
+            grouped.retain(|_, candidates| {
+                candidates
+                    .iter()
+                    .any(|(_, relay_seq, _)| relay_seq.is_some())
+                    || !candidates.iter().any(|(_, _, unresolved)| *unresolved)
+            });
+            if grouped.is_empty() && deferred_repairs.is_empty() {
+                continue;
+            }
             match store
                 .write_with(faults, |tx| {
-                    let changed = tx
-                        .execute(
-                            "UPDATE ydoc_deferred_updates SET relay_seq=?4
-                              WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3
-                                AND relay_seq IS NULL",
-                            params![workspace_id, origin_id, origin_seq, relay_seq],
+                    for candidates in grouped.into_values() {
+                        let resolved = candidates
+                            .iter()
+                            .filter_map(|(repair, relay_seq, _)| {
+                                relay_seq.map(|relay_seq| (repair, relay_seq))
+                            })
+                            .min_by_key(|(_, relay_seq)| *relay_seq);
+                        let (chosen, relay_seq) = match resolved {
+                            Some((repair, relay_seq)) => (repair, Some(relay_seq)),
+                            None => (&candidates[0].0, None),
+                        };
+                        dohc_engine_collab::record_base_coordinate_in_tx(
+                            tx,
+                            dohc_engine_collab::BaseCoordinateRecord {
+                                key: &chosen.key,
+                                lineage_claim_id: &chosen.lineage_claim_id,
+                                origin_id: &chosen.origin_id,
+                                origin_seq: chosen.origin_seq,
+                                relay_seq,
+                                now_ms: chosen.recorded_at_ms,
+                            },
+                        )
+                        .map_err(base_repair_collab_error)?;
+                        if relay_seq.is_none() {
+                            dohc_engine_collab::mark_base_coordinate_absent_in_tx(
+                                tx,
+                                &chosen.key,
+                                &chosen.lineage_claim_id,
+                                &chosen.origin_id,
+                                chosen.origin_seq,
+                                chosen.recorded_at_ms,
+                            )
+                            .map_err(base_repair_collab_error)?;
+                        }
+                        tx.execute(
+                            "DELETE FROM ydoc_base_relay_candidates
+                    WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                            params![
+                                chosen.key.workspace_id,
+                                chosen.key.version_id,
+                                chosen.key.object_id
+                            ],
                         )
                         .map_err(SyncError::persist)?;
-                    if changed != 1 {
-                        return Err(SyncError::CoordinateDiverged);
+                    }
+                    for (origin_id, origin_seq, relay_seq) in deferred_repairs {
+                        let changed = tx
+                            .execute(
+                                "UPDATE ydoc_deferred_updates SET relay_seq=?4
+                    WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3 AND relay_seq IS NULL",
+                                params![workspace_id, origin_id, origin_seq, relay_seq],
+                            )
+                            .map_err(SyncError::persist)?;
+                        if changed != 1 {
+                            return Err(SyncError::CoordinateDiverged);
+                        }
                     }
                     Ok(())
                 })
@@ -1574,6 +1687,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             .iter()
             .map(|op| (op.origin_id.clone(), op.origin_seq))
             .collect();
+        let fetched_op_count = ops.len();
         ops.extend(
             queued
                 .iter()
@@ -1581,7 +1695,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 .cloned(),
         );
         preflight_collisions(store, workspace_id, &identity.origin_id, &ops)?;
-        self.repair_pending_ydoc_base_orders(store, workspace_id, &identity, faults)?;
+        self.repair_pending_ydoc_base_orders(
+            store,
+            workspace_id,
+            &identity,
+            faults,
+            &ops[..fetched_op_count],
+        )?;
         self.hydrate_missing_blobs(store, workspace_id, &identity, &ops, faults)?;
         let ordered = merge_by_origin(ops);
         let mut applied = 0_usize;
@@ -2971,35 +3091,23 @@ pub(crate) fn collect_blob_refs(
                     &mut refs,
                     op.payload
                         .get("settlementReference")
-                        .and_then(|v| v.get("record"))
-                        .and_then(|v| v.get("acceptedStateBlobSha256")),
+                        .and_then(|reference| reference.get("record"))
+                        .and_then(|record| string_field(record, "acceptedStateBlobSha256")),
                     BlobKind::Ydoc,
                 )?;
-                insert_optional_ref(
-                    &mut refs,
-                    op.payload.get("payloadBeforeBlobSha256"),
-                    content_kind(op.payload.get("payloadBeforeContentKind")),
-                )?;
-                insert_optional_ref(
-                    &mut refs,
-                    op.payload.get("payloadAfterBlobSha256"),
-                    content_kind(op.payload.get("payloadAfterContentKind")),
-                )?;
-                insert_optional_ref(
-                    &mut refs,
-                    op.payload.get("beforeBlobSha256"),
-                    content_kind(op.payload.get("beforeContentKind")),
-                )?;
+                for side in MomentRefs::read(&op.payload).sides() {
+                    insert_optional_ref(
+                        &mut refs,
+                        side.blob_sha256,
+                        side.content_kind.blob_kind(),
+                    )?;
+                }
             }
             "conflict.open" => {
-                for name in ["base", "current", "incoming"] {
-                    let Some(state) = op.payload.get(name) else {
-                        continue;
-                    };
-                    if state.get("exists").and_then(serde_json::Value::as_bool) == Some(true)
-                        && content_kind(state.get("contentKind")) == BlobKind::Binary
-                    {
-                        insert_optional_ref(&mut refs, state.get("sha256"), BlobKind::Binary)?;
+                // A text side carries its content inline.
+                for side in conflict_open_sides(&op.payload) {
+                    if side.content_kind.blob_kind() == BlobKind::Binary {
+                        insert_optional_ref(&mut refs, side.sha256, BlobKind::Binary)?;
                     }
                 }
             }
@@ -3023,17 +3131,11 @@ pub(crate) fn collect_blob_refs(
                 }
             }
             "version.create" => {
-                for snapshot in op
-                    .payload
-                    .get("forkSnapshots")
-                    .and_then(serde_json::Value::as_array)
-                    .into_iter()
-                    .flatten()
-                {
+                for snapshot in VersionCreateRefs::read(&op.payload).snapshots() {
                     insert_optional_ref(
                         &mut refs,
-                        snapshot.get("blobSha256"),
-                        content_kind(snapshot.get("contentKind")),
+                        snapshot.content.blob_sha256,
+                        snapshot.content.content_kind.blob_kind(),
                     )?;
                 }
             }
@@ -3043,14 +3145,14 @@ pub(crate) fn collect_blob_refs(
                 // captured-file cap.
                 insert_optional_ref(
                     &mut refs,
-                    op.payload.get("updateBlobSha256"),
+                    YdocRefs::read(&op.payload).update_blob_sha256,
                     BlobKind::Ydoc,
                 )?;
             }
             "live.audit.application" => {
                 insert_optional_ref(
                     &mut refs,
-                    op.payload.get("updateBlobSha256"),
+                    string_field(&op.payload, "updateBlobSha256"),
                     BlobKind::Ydoc,
                 )?;
                 for chunk in op
@@ -3061,7 +3163,11 @@ pub(crate) fn collect_blob_refs(
                     .into_iter()
                     .flatten()
                 {
-                    insert_optional_ref(&mut refs, chunk.get("sha256"), BlobKind::Binary)?;
+                    insert_optional_ref(
+                        &mut refs,
+                        string_field(chunk, "sha256"),
+                        BlobKind::Binary,
+                    )?;
                 }
             }
             "live.audit.settlement" => {
@@ -3069,14 +3175,14 @@ pub(crate) fn collect_blob_refs(
                     &mut refs,
                     op.payload
                         .get("record")
-                        .and_then(|v| v.get("acceptedStateBlobSha256")),
+                        .and_then(|record| string_field(record, "acceptedStateBlobSha256")),
                     BlobKind::Ydoc,
                 )?;
                 insert_optional_ref(
                     &mut refs,
                     op.payload
                         .get("record")
-                        .and_then(|record| record.get("markdownDigest")),
+                        .and_then(|record| string_field(record, "markdownDigest")),
                     BlobKind::Text,
                 )?;
             }
@@ -3086,14 +3192,14 @@ pub(crate) fn collect_blob_refs(
                     op.payload
                         .get("record")
                         .and_then(|record| record.get("checkpoint"))
-                        .and_then(|checkpoint| checkpoint.get("stateDigest")),
+                        .and_then(|checkpoint| string_field(checkpoint, "stateDigest")),
                     BlobKind::Ydoc,
                 )?;
             }
             "secret.file.put" => {
                 insert_optional_ref(
                     &mut refs,
-                    op.payload.get("ciphertextSha256"),
+                    string_field(&op.payload, "ciphertextSha256"),
                     BlobKind::Binary,
                 )?;
             }
@@ -3105,7 +3211,11 @@ pub(crate) fn collect_blob_refs(
                     .into_iter()
                     .flatten()
                 {
-                    insert_optional_ref(&mut refs, row.get("ciphertextSha256"), BlobKind::Binary)?;
+                    insert_optional_ref(
+                        &mut refs,
+                        string_field(row, "ciphertextSha256"),
+                        BlobKind::Binary,
+                    )?;
                 }
             }
             _ => {}
@@ -3114,25 +3224,14 @@ pub(crate) fn collect_blob_refs(
     Ok(refs)
 }
 
-fn content_kind(value: Option<&serde_json::Value>) -> BlobKind {
-    if value.and_then(serde_json::Value::as_str) == Some("binary") {
-        BlobKind::Binary
-    } else {
-        BlobKind::Text
-    }
-}
-
 fn insert_optional_ref(
     refs: &mut BTreeMap<String, BTreeSet<BlobKind>>,
-    value: Option<&serde_json::Value>,
+    sha256: Option<&str>,
     kind: BlobKind,
 ) -> Result<(), RelayError> {
-    let Some(sha256) = value.and_then(serde_json::Value::as_str) else {
+    let Some(sha256) = sha256.filter(|sha256| !sha256.is_empty()) else {
         return Ok(());
     };
-    if sha256.is_empty() {
-        return Ok(());
-    }
     if !valid_sha256(sha256) {
         return Err(RelayError::BlobInvalid);
     }
@@ -4047,16 +4146,13 @@ fn write_share_proposal_scan_position(
 /// Whether every path this moment names sits inside the pinned grant.
 ///
 /// The outbound twin of `enforce_share_view_boundary`'s containment loop,
-/// reading the same four fields through the same rule. A moment naming one
-/// path outside the grant is not this share's to offer, in either direction —
-/// and a moment naming no path at all describes no file, so there is nothing
-/// to propose.
-fn proposal_paths_within_grant(payload: &serde_json::Value, granted: &crate::ShareGrant) -> bool {
+/// reading the same paths through the same rule. A moment naming one path
+/// outside the grant is not this share's to offer, in either direction — and
+/// a moment naming no path at all describes no file, so there is nothing to
+/// propose.
+fn proposal_paths_within_grant(moment: MomentRefs<'_>, granted: &crate::ShareGrant) -> bool {
     let mut named = false;
-    for field in crate::share::MOMENT_PATH_FIELDS {
-        let Some(path) = string_field(payload, field) else {
-            continue;
-        };
+    for path in moment.paths() {
         named = true;
         if !crate::share::selected_path_within_grant(path, granted) {
             return false;
@@ -4103,30 +4199,28 @@ struct ShareProposalScan {
 /// granter must end up with, and the relay derives the moment's own label from
 /// the two paths at accept.
 fn proposed_change(op: &ReplicationEnvelope) -> ShareProposalChange {
+    let moment = MomentRefs::read(&op.payload);
     ShareProposalChange {
-        based_on_path: string_field(&op.payload, "payloadBeforePath").map(str::to_owned),
-        based_on_blob_sha256: string_field(&op.payload, "payloadBeforeBlobSha256")
+        based_on_path: moment.payload_before.path.map(str::to_owned),
+        based_on_blob_sha256: moment
+            .payload_before
+            .blob_sha256
             .filter(|sha256| valid_sha256(sha256))
             .map(str::to_owned),
-        operation: if string_field(&op.payload, "operation") == Some("delete") {
+        operation: if moment.operation == Some("delete") {
             "delete".to_owned()
         } else {
             "write".to_owned()
         },
-        after_path: string_field(&op.payload, "payloadAfterPath").map(str::to_owned),
-        after_blob_sha256: string_field(&op.payload, "payloadAfterBlobSha256")
+        after_path: moment.payload_after.path.map(str::to_owned),
+        after_blob_sha256: moment
+            .payload_after
+            .blob_sha256
             .filter(|sha256| valid_sha256(sha256))
             .map(str::to_owned),
         // The relay accepts exactly two content kinds, so state one of them. A
-        // moment carrying neither is text, the same reading
-        // `ContentKind::from_wire` applies on apply.
-        after_content_kind: Some(
-            if string_field(&op.payload, "payloadAfterContentKind") == Some("binary") {
-                "binary".to_owned()
-            } else {
-                "text".to_owned()
-            },
-        ),
+        // moment carrying neither is text, as on apply.
+        after_content_kind: Some(moment.payload_after.content_kind.as_str().to_owned()),
         after_byte_length: op
             .payload
             .get("payloadAfterByteLength")
@@ -4183,10 +4277,13 @@ fn collect_share_proposal_changes(
             if op.origin_seq > submit_through {
                 break 'pages;
             }
+            let moment = match op.op_kind.as_str() {
+                "moment.append" => Some(MomentRefs::read(&op.payload)),
+                _ => None,
+            };
             // An open write stops the scan at its file's first op past what
             // is already settled; a settled op is read past as usual.
-            if op.op_kind == "moment.append"
-                && let Some(object_id) = string_field(&op.payload, "objectId")
+            if let Some(object_id) = moment.and_then(|moment| moment.object_id)
                 && skips.stop_at.contains(object_id)
                 && skips
                     .settled
@@ -4196,15 +4293,15 @@ fn collect_share_proposal_changes(
                 more_pending = true;
                 break 'pages;
             }
-            if op.op_kind == "moment.append"
-                && let Some(object_id) = string_field(&op.payload, "objectId").map(str::to_owned)
+            if let Some(moment) = moment
+                && let Some(object_id) = moment.object_id.map(str::to_owned)
                 && !outside_share.contains(&object_id)
                 && skips
                     .settled
                     .get(&object_id)
                     .is_none_or(|through| op.origin_seq > *through)
             {
-                if !proposal_paths_within_grant(&op.payload, granted) {
+                if !proposal_paths_within_grant(moment, granted) {
                     // One op outside the grant takes the whole file out of
                     // this share's reach. A rename out of the grant must not
                     // leave the file's pre-rename state proposed, so what the
@@ -4604,11 +4701,11 @@ fn replay_share_view_op<T: RelayTransport>(
             .version_id
     };
     if envelope.op_kind == "moment.append" {
-        let operation = string_field(&envelope.payload, "operation");
-        let path = string_field(&envelope.payload, "path");
-        match operation {
+        let moment = MomentRefs::read(&envelope.payload);
+        let after_kind = moment.payload_after.content_kind.as_str();
+        match moment.operation {
             Some("delete") => {
-                if let Some(path) = path {
+                if let Some(path) = moment.path {
                     replay_share_delete(
                         &mut *context.store,
                         context.workspace_id,
@@ -4623,10 +4720,11 @@ fn replay_share_view_op<T: RelayTransport>(
                 }
             }
             Some("rename") => {
-                let before = string_field(&envelope.payload, "payloadBeforePath");
-                let after = string_field(&envelope.payload, "payloadAfterPath").or(path);
-                let sha = string_field(&envelope.payload, "payloadAfterBlobSha256");
-                if let (Some(before), Some(after), Some(sha)) = (before, after, sha) {
+                if let (Some(before), Some(after), Some(sha)) = (
+                    moment.payload_before.path,
+                    moment.after_path(),
+                    moment.payload_after.blob_sha256,
+                ) {
                     if let Err(error) = replay_share_write(
                         context.transport,
                         &mut *context.store,
@@ -4636,7 +4734,7 @@ fn replay_share_view_op<T: RelayTransport>(
                         envelope,
                         after,
                         sha,
-                        content_kind_name(envelope.payload.get("payloadAfterContentKind")),
+                        after_kind,
                         context.faults,
                         &mut *context.applied,
                         &mut *context.changed,
@@ -4666,9 +4764,9 @@ fn replay_share_view_op<T: RelayTransport>(
                 }
             }
             Some("write") => {
-                let after = string_field(&envelope.payload, "payloadAfterPath").or(path);
-                let sha = string_field(&envelope.payload, "payloadAfterBlobSha256");
-                if let (Some(after), Some(sha)) = (after, sha) {
+                if let (Some(after), Some(sha)) =
+                    (moment.after_path(), moment.payload_after.blob_sha256)
+                {
                     if let Err(error) = replay_share_write(
                         context.transport,
                         &mut *context.store,
@@ -4678,7 +4776,7 @@ fn replay_share_view_op<T: RelayTransport>(
                         envelope,
                         after,
                         sha,
-                        content_kind_name(envelope.payload.get("payloadAfterContentKind")),
+                        after_kind,
                         context.faults,
                         &mut *context.applied,
                         &mut *context.changed,
@@ -4691,16 +4789,9 @@ fn replay_share_view_op<T: RelayTransport>(
             _ => {}
         }
     } else if envelope.op_kind == "version.create" {
-        for snapshot in envelope
-            .payload
-            .get("forkSnapshots")
-            .and_then(serde_json::Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            let path = string_field(snapshot, "path");
-            let sha = string_field(snapshot, "blobSha256");
-            if let (Some(path), Some(sha)) = (path, sha) {
+        for snapshot in VersionCreateRefs::read(&envelope.payload).snapshots() {
+            let content = snapshot.content;
+            if let (Some(path), Some(sha)) = (content.path, content.blob_sha256) {
                 // Per SNAPSHOT, so one refused file in a shared version does
                 // not take its siblings with it. The loop continues.
                 if let Err(error) = replay_share_write(
@@ -4712,7 +4803,7 @@ fn replay_share_view_op<T: RelayTransport>(
                     envelope,
                     path,
                     sha,
-                    content_kind_name(snapshot.get("contentKind")),
+                    content.content_kind.as_str(),
                     context.faults,
                     &mut *context.applied,
                     &mut *context.changed,
@@ -5032,14 +5123,6 @@ fn replay_share_delete(
 
 fn string_field<'a>(value: &'a serde_json::Value, name: &str) -> Option<&'a str> {
     value.get(name).and_then(serde_json::Value::as_str)
-}
-
-fn content_kind_name(value: Option<&serde_json::Value>) -> &'static str {
-    if value.and_then(serde_json::Value::as_str) == Some("binary") {
-        "binary"
-    } else {
-        "text"
-    }
 }
 
 fn domain(error: DomainError) -> RelayError {

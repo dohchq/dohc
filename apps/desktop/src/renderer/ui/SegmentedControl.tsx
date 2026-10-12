@@ -7,13 +7,12 @@ export type SegmentedOption<T extends string> = {
 };
 
 /**
- * One choice among a few, as a radiogroup of radios. The arrow keys move the
- * choice and the focus together, Home and End go to the ends, and only the
- * chosen option is in the tab order. A disabled option is skipped; a disabled
- * group takes no input.
+ * The keyboard and focus of one choice among a few, drawn as a radiogroup of
+ * radios. The arrow keys move the choice and the focus together, Home and End
+ * go to the ends, and only the chosen option is in the tab order. A disabled
+ * option is skipped; a disabled group takes no input.
  */
-export function SegmentedControl<T extends string>(props: {
-  label: string;
+export function useRadioGroup<T extends string>(props: {
   value: T;
   options: ReadonlyArray<SegmentedOption<T>>;
   onChange: (value: T) => void;
@@ -42,7 +41,7 @@ export function SegmentedControl<T extends string>(props: {
     return -1;
   };
 
-  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (props.disabled || props.options.length === 0) return;
     // The arrows move from the focused radio. The checked one can be disabled
     // or absent, and then the tab stop is where the person started from.
@@ -58,25 +57,44 @@ export function SegmentedControl<T extends string>(props: {
     choose(target);
   };
 
+  // The props each radio takes, by its index.
+  const radio = (index: number) => {
+    const option = props.options[index]!;
+    return {
+      ref: (element: HTMLButtonElement | null) => {
+        optionRefs.current[index] = element;
+      },
+      type: "button" as const,
+      role: "radio" as const,
+      "aria-checked": props.value === option.value,
+      disabled: !enabled(index),
+      tabIndex: index === tabbableIndex ? 0 : -1,
+      onClick: () => props.onChange(option.value),
+    };
+  };
+
+  return { onKeyDown, radio };
+}
+
+export function SegmentedControl<T extends string>(props: {
+  label: string;
+  value: T;
+  options: ReadonlyArray<SegmentedOption<T>>;
+  onChange: (value: T) => void;
+  disabled?: boolean;
+}) {
+  const group = useRadioGroup(props);
   return (
     <div
       role="radiogroup"
       aria-label={props.label}
-      onKeyDown={handleKeyDown}
+      onKeyDown={group.onKeyDown}
       className="flex rounded-lg border border-line bg-panel-2 p-0.5"
     >
       {props.options.map((option, index) => (
         <button
           key={option.value}
-          ref={(element) => {
-            optionRefs.current[index] = element;
-          }}
-          type="button"
-          role="radio"
-          aria-checked={props.value === option.value}
-          disabled={!enabled(index)}
-          tabIndex={index === tabbableIndex ? 0 : -1}
-          onClick={() => props.onChange(option.value)}
+          {...group.radio(index)}
           className={`flex-1 rounded-md px-2.5 py-1 text-xs transition-colors disabled:opacity-50 ${
             props.value === option.value
               ? "bg-bg text-ink shadow-sm"

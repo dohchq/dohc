@@ -478,7 +478,7 @@
           "minimum": 0
         },
         "maxFrameBytes": {
-          "description": "The largest control frame the client will accept. The engine clamps it\ninto `[MIN_NEGOTIABLE_FRAME_BYTES, engine default]` and echoes the\neffective value in `helloAck.limits`. Collection responses size\nthemselves to it; other families keep their own fixed bounds, and a\nsecret read can still exceed a lowered limit.",
+          "description": "The largest control frame the client will accept. The engine clamps it\ninto `[MIN_NEGOTIABLE_FRAME_BYTES, engine default]` and echoes the\neffective value in `helloAck.limits`. Every outbound control frame\nrespects it. A reply that cannot fit returns `INTERNAL` with message\n`response-wire-limit-exceeded` and retry `afterBackoff`, keeping the\nconnection open. The request may have committed; retry mutations with\nthe same idempotency key. Oversized events are dropped.",
           "type": [
             "integer",
             "null"

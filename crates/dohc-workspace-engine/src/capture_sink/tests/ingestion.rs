@@ -38,6 +38,77 @@ fn text_ingest_rereads_updates_and_dedupes_equal_content() {
 }
 
 #[test]
+fn binary_capture_routing_and_caps_do_not_depend_on_json_or_csv_directories() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let supervisor = WorkspaceSupervisor::new();
+    let (db, mut sink) = sink_for(&scratch, &supervisor);
+    let small = b"UTF-8-clean image bytes";
+    let oversized = vec![0; MAX_CAPTURE_BINARY_BYTES as usize + 1];
+    assert!(oversized.len() as u64 <= MAX_CAPTURE_TEXT_BYTES);
+
+    for directory in ["ordinary", "json-assets", "csv-backups"] {
+        let path = format!("{directory}/image.png");
+        write_file(scratch.path(), &path, small);
+        assert!(matches!(
+            ingest_as(&mut sink, &path, "image/png").expect("binary ingest"),
+            IngestOutcome::Captured { .. }
+        ));
+        assert_eq!(binary_head(&db, &path), Some(hex_sha256(small)));
+
+        write_file(scratch.path(), &path, &oversized);
+        assert_eq!(
+            ingest_as(&mut sink, &path, "image/png").expect("binary cap"),
+            IngestOutcome::NotOwned,
+            "{path} used the larger text cap"
+        );
+        assert!(binary_head(&db, &path).is_none());
+        assert!(snapshot(&db, &path).is_none());
+    }
+
+    let text_path = "json-assets/notes.txt";
+    write_file(scratch.path(), text_path, &oversized);
+    assert!(matches!(
+        ingest_as(&mut sink, text_path, "text/plain").expect("text cap"),
+        IngestOutcome::Captured { .. }
+    ));
+    assert_eq!(
+        snapshot(&db, text_path).expect("text captured").text.len(),
+        oversized.len()
+    );
+    drop(sink);
+    supervisor.close(&db).expect("close actor");
+}
+
+#[test]
+fn json_family_extensions_capture_utf8_above_the_binary_cap_as_text() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let supervisor = WorkspaceSupervisor::new();
+    let (db, mut sink) = sink_for(&scratch, &supervisor);
+    let content = format!(r#"{{"description":"{}"}}"#, "é".repeat(3 * 1024 * 1024));
+    assert!(content.len() as u64 > MAX_CAPTURE_BINARY_BYTES);
+    assert!((content.len() as u64) < MAX_CAPTURE_TEXT_BYTES);
+    let sha256 = hex_sha256(content.as_bytes());
+
+    for extension in ["geojson", "json5", "json-seq"] {
+        let path = format!("data/records.{extension}");
+        write_file(scratch.path(), &path, content.as_bytes());
+        assert_eq!(
+            ingest_as(&mut sink, &path, "application/octet-stream").expect("JSON text ingest"),
+            IngestOutcome::Captured {
+                size: content.len() as u64,
+                sha256: sha256.clone(),
+            },
+            "{path} must use the text cap"
+        );
+        assert_eq!(snapshot(&db, &path).expect("captured text").text, content);
+        assert!(binary_head(&db, &path).is_none());
+    }
+
+    drop(sink);
+    supervisor.close(&db).expect("close actor");
+}
+
+#[test]
 fn binary_ingest_dedupes_equal_bytes() {
     let scratch = ScratchDir::new().expect("scratch");
     let supervisor = WorkspaceSupervisor::new();

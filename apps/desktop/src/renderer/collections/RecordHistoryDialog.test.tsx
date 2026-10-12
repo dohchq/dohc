@@ -10,6 +10,8 @@ import type {
 } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import { RecordHistoryDialog, RUN_NOT_HERE, RUN_NOT_HERE_WHY, recordHistoryGroups } from "./RecordHistoryDialog";
+import { createHistoryLabels } from "../../automations/shareRoster";
+import { recordHistoryForIpc } from "../../ipc/recordHistoryIpc";
 
 const STAMP = "collection:tasks-id#stamp";
 
@@ -50,6 +52,59 @@ afterEach(() => {
 });
 
 describe("RecordHistoryDialog", () => {
+  it("shows an owner's automation as for their name in a received share", async () => {
+    const labels = createHistoryLabels({
+      snapshot: () => ({ roster: null, owner: false, context: "recipient", inventory: undefined,
+        shareView: { granterUserId: "owner", sharerName: "Mira", granterEmail: "mira@example.test" } }),
+      lookupAccounts: vi.fn(),
+    });
+    stub(async () => recordHistoryForIpc({ history: [{
+      ...entry(1, null), actorKind: "automation", authorOriginId: STAMP, onBehalfOf: "owner", depth: 0,
+      automationRun: null, linkAuthor: null,
+    }], nextBeforeHistoryId: null }, {
+      prepare: ids => labels.prepare("ws-1", ids.map(userId => ({ userId }))),
+      person: id => labels.person("ws-1", id), agent: () => "Agent",
+      automationName: () => "Stamp", runAvailable: async () => false,
+    }));
+    render(dialog());
+    const row = await screen.findByTestId("record-history-entry");
+    expect(within(row).getByTestId("record-history-automation").textContent).toBe("Automation Stampfor Mira");
+    expect(within(row).getByText("for Mira")).toBeTruthy();
+  });
+  it("names a link holder", async () => {
+    stub(async () => ({ entries: [entry(1, { kind: "link" })], nextBeforeHistoryId: null }));
+    render(dialog());
+    const row = await screen.findByTestId("record-history-entry");
+    expect(row.textContent).toContain("Link holder");
+    expect(within(row).queryByTestId("record-history-automation")).toBeNull();
+    expect(within(row).queryByRole("button", { name: "View run" })).toBeNull();
+  });
+  it("shows a declared agent acting for a link holder", async () => {
+    stub(async () => ({ entries: [entry(1, { kind: "link", agentName: "Agent" })], nextBeforeHistoryId: null }));
+    render(dialog());
+    const row = await screen.findByTestId("record-history-entry");
+    expect(row.textContent).toContain("Agent for a link holder");
+    expect(within(row).getByText("Agent").className).toContain("text-agent");
+    expect(within(row).getByText("for a link holder").className).toContain("text-muted");
+    expect(within(row).queryByRole("button", { name: "View run" })).toBeNull();
+  });
+  it("shows a confirmed person without an automation label", async () => {
+    stub(async () => ({ entries: [entry(1, { kind: "human", name: "Ana" })], nextBeforeHistoryId: null }));
+    render(dialog());
+    const row = await screen.findByTestId("record-history-entry");
+    expect(row.textContent).toContain("Ana");
+    expect(within(row).queryByTestId("record-history-automation")).toBeNull();
+    expect(within(row).queryByRole("button", { name: "View run" })).toBeNull();
+  });
+
+  it("shows the agent and the confirmed person it acted for", async () => {
+    stub(async () => ({ entries: [entry(1, { kind: "agent", name: "Agent", person: "Ana" })], nextBeforeHistoryId: null }));
+    render(dialog());
+    expect((await screen.findByTestId("record-history-entry")).textContent).toContain("Agent for Ana");
+    expect(screen.getByText("Agent").classList.contains("text-agent")).toBe(true);
+    expect(screen.getByText("for Ana").classList.contains("text-muted")).toBe(true);
+  });
+
   it("names an automation for its changes, one row per run, and opens the run this computer keeps", async () => {
     const bridge = stub(async () => ({
       entries: [

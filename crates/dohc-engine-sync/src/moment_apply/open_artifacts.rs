@@ -113,6 +113,19 @@ pub(crate) fn remember_attempt_in_tx(tx: &Transaction<'_>, key: &DocKey) -> Resu
     Ok(())
 }
 
+pub(crate) fn record_recovery_failure_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+) -> Result<(), SyncError> {
+    tx.execute(
+        "INSERT OR IGNORE INTO replication_pending_refusals(workspace_id,origin_id,origin_seq,op_kind,reason_code,reason_message) \
+         SELECT workspace_id,origin_id,origin_seq,'moment.append',?4,?5 FROM ydoc_pending_artifacts \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![key.workspace_id,key.version_id,key.object_id,RECOVERY_FAILURE_CODE,RECOVERY_FAILURE],
+    ).map_err(SyncError::persist)?;
+    Ok(())
+}
+
 /// Recover sessions that ended without publishing. Local drafts still require settlement.
 pub fn drain_open_document_artifacts(
     store: &mut EngineStore,
@@ -191,13 +204,12 @@ pub fn drain_open_document_artifacts(
                     continue;
                 }
                 let recorded = store.write_with(faults, |tx| {
-                    if leases.is_live(&key) { return Ok(()); }
-                    remember_attempt_in_tx(tx,&key)?;
-                    tx.execute("INSERT OR IGNORE INTO replication_pending_refusals(workspace_id,origin_id,origin_seq,op_kind,reason_code,reason_message) \
-                        SELECT workspace_id,origin_id,origin_seq,'moment.append',?4,?5 FROM ydoc_pending_artifacts \
-                        WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-                        params![workspace_id,key.version_id,key.object_id,RECOVERY_FAILURE_CODE,RECOVERY_FAILURE]).map_err(SyncError::persist)?;
-                    Ok::<_,SyncError>(())
+                    if leases.is_live(&key) {
+                        return Ok(());
+                    }
+                    remember_attempt_in_tx(tx, &key)?;
+                    record_recovery_failure_in_tx(tx, &key)?;
+                    Ok::<_, SyncError>(())
                 })?;
                 if matches!(recorded, TxnOutcome::Crashed { .. }) {
                     return Err(SyncError::FaultCrash);
@@ -246,6 +258,169 @@ fn isolate_document_failure(error: SyncError) -> Result<bool, SyncError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn recovery_with_empty_queue(status: &str) -> (dohc_engine_testkit::ScratchDir, EngineStore) {
+        let (scratch, mut store, key, _, _) = crate::moment_apply_tests::ended_recovery_fixture();
+        let bytes = store.read_with(|conn| conn.query_row(
+            "SELECT b.bytes FROM binary_blobs b JOIN replication_log r ON b.sha256=json_extract(r.payload_json,'$.updateBlobSha256') WHERE r.origin_seq=1",
+            [], |row|row.get::<_,Vec<u8>>(0))).unwrap();
+        dohc_engine_collab::apply_remote_update(
+            &mut store,
+            &mut Default::default(),
+            &key,
+            &dohc_engine_collab::RemoteUpdate {
+                origin_id: "peer".into(),
+                origin_seq: 1,
+                bytes,
+            },
+            None,
+            None,
+            &dohc_engine_storage::NoFaults,
+            2000,
+        )
+        .unwrap();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .write_text(
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "ws".into(),
+                    version_id: "main".into(),
+                    object_id: "object".into(),
+                    path: "head.md".into(),
+                    text: "before remote".into(),
+                    moment_id: "recovery-write".into(),
+                    metadata_origin: "ydoc".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2001,
+                    request_id: None,
+                },
+                &dohc_engine_storage::NoFaults,
+            )
+            .unwrap();
+        store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+            tx.execute("DELETE FROM ydoc_deferred_updates", []).unwrap();
+            tx.execute("UPDATE ydoc_docs SET settle_prior_update_seq=0,settle_seq=(SELECT m.moment_order FROM moments m JOIN snapshots s ON s.latest_moment_id=m.moment_id WHERE s.object_id='object')", []).unwrap();
+            tx.execute("INSERT INTO materialization_jobs(job_id,target_path,content_sha256,preimage_present,target_generation,created_at_ms,workspace_id,status) SELECT 'ydoc-mat_'||latest_moment_id,path,blob_sha256,1,999,0,workspace_id,?1 FROM snapshots WHERE object_id='object' ON CONFLICT(job_id) DO UPDATE SET status=excluded.status", [status]).unwrap();
+            tx.execute("UPDATE materialization_jobs SET status=?1 WHERE workspace_id='ws' AND target_path='head.md'", [status]).unwrap();
+            Ok::<_, SyncError>(())
+        }).unwrap();
+        (scratch, store)
+    }
+
+    fn recover(store: &mut EngineStore) {
+        drain_open_document_artifacts(
+            store,
+            &mut Default::default(),
+            "ws",
+            &crate::NoLiveLeases,
+            &dohc_engine_storage::NoFaults,
+        )
+        .unwrap();
+    }
+
+    fn refusal_count(store: &EngineStore) -> i64 {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_pending_refusals WHERE reason_code=?1",
+                    [RECOVERY_FAILURE_CODE],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn recovery_terminal_write_with_empty_queue_raises_one_notice_then_settle_clears_it() {
+        for status in ["failed", "cancelled", "conflict"] {
+            let (scratch, mut store) = recovery_with_empty_queue(status);
+            assert_eq!(store.table_row_count("ydoc_deferred_updates").unwrap(), 0);
+            recover(&mut store);
+            assert_eq!(refusal_count(&store), 1, "terminal job: {status}");
+            let fingerprint: String = store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT last_attempt_state FROM ydoc_pending_artifacts",
+                        [],
+                        |row| row.get(0),
+                    )
+                })
+                .unwrap();
+            recover(&mut store);
+            assert_eq!(refusal_count(&store), 1);
+            let unchanged: String = store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT last_attempt_state FROM ydoc_pending_artifacts",
+                        [],
+                        |row| row.get(0),
+                    )
+                })
+                .unwrap();
+            assert_eq!(unchanged, fingerprint);
+            if status == "failed" {
+                assert!(matches!(
+                    store.list_pending_materialization_jobs(),
+                    Err(StorageError::StateCorrupt { .. })
+                ));
+            }
+            store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+                tx.execute("UPDATE materialization_jobs SET status='cancelled' WHERE workspace_id='ws' AND target_path='head.md' AND status='failed'", []).unwrap();
+                tx.execute("UPDATE materialization_jobs SET status='pending',preimage_present=0,preimage_sha256=NULL WHERE job_id='ydoc-mat_recovery-write'", []).unwrap();
+                Ok::<_, SyncError>(())
+            }).unwrap();
+            let job = store
+                .list_pending_materialization_jobs()
+                .unwrap()
+                .into_iter()
+                .find(|job| job.job_id == "ydoc-mat_recovery-write")
+                .unwrap();
+            assert!(matches!(
+                dohc_engine_files::materialize_one(
+                    &store,
+                    scratch.path(),
+                    &job,
+                    &dohc_engine_files::MaterializeOptions {
+                        policy: dohc_engine_files::DurabilityPolicy::per_os(),
+                        replacer: &dohc_engine_files::StdReplacer,
+                        backoff: &dohc_engine_files::NoBackoff,
+                        now_ms: 3000,
+                        faults: &dohc_engine_storage::NoFaults,
+                    },
+                )
+                .unwrap(),
+                dohc_engine_files::JobOutcome::Completed
+            ));
+            assert_eq!(
+                std::fs::read_to_string(scratch.path().join("head.md")).unwrap(),
+                "before remote"
+            );
+            store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+                tx.execute("UPDATE ydoc_docs SET settled_update_seq=head_update_seq,last_settled_sha=(SELECT blob_sha256 FROM snapshots WHERE object_id='object')", []).unwrap();
+                Ok::<_, SyncError>(())
+            }).unwrap();
+            assert_eq!(refusal_count(&store), 0);
+            assert_eq!(store.table_row_count("ydoc_pending_artifacts").unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn recovery_pending_write_with_empty_queue_raises_no_notice() {
+        for waiting in [true, false] {
+            let (_scratch, mut store) = recovery_with_empty_queue("pending");
+            if !waiting {
+                store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+                    tx.execute("UPDATE ydoc_docs SET settle_prior_update_seq=NULL,last_settled_sha=NULL", []).unwrap();
+                    Ok::<_, SyncError>(())
+                }).unwrap();
+            }
+            recover(&mut store);
+            assert_eq!(refusal_count(&store), 0);
+            assert_eq!(store.table_row_count("ydoc_pending_artifacts").unwrap(), 1);
+            assert_eq!(store.table_row_count("ydoc_deferred_updates").unwrap(), 0);
+        }
+    }
 
     #[test]
     fn recovery_waits_without_recording_an_attempt() {

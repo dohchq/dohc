@@ -59,21 +59,22 @@ async fn fixture_with_service(
     call_with_busy_retry(
         &transport,
         RequestContext::unbounded(),
-        request(
+        keyed_request(
             2,
             "versionedText.write",
             Some(handle.clone()),
+            &format!("{name}-bootstrap"),
             json!({
                 "versionId": "main",
                 "path": "bootstrap.md",
                 "text": "bootstrap",
                 "origin": "api",
-                "requestId": format!("{name}-bootstrap"),
             }),
         ),
     )
     .await
     .expect("bootstrap versioned workspace");
+
     (scratch, service, transport, handle, workspace_id)
 }
 
@@ -194,21 +195,22 @@ async fn open_workspace(
     call_with_busy_retry(
         transport,
         RequestContext::unbounded(),
-        request(
+        keyed_request(
             request_id + 1,
             "versionedText.write",
             Some(handle.clone()),
+            &format!("{workspace_id}-bootstrap"),
             json!({
                 "versionId": "main",
                 "path": "bootstrap.md",
                 "text": "bootstrap",
                 "origin": "api",
-                "requestId": format!("{workspace_id}-bootstrap"),
             }),
         ),
     )
     .await
     .expect("bootstrap versioned workspace");
+
     handle
 }
 
@@ -423,10 +425,11 @@ async fn resolve_refuses_a_stale_target_without_clobbering_the_newer_head() {
     let current = transport
         .call(
             RequestContext::unbounded(),
-            request(
+            keyed_request(
                 10,
                 "versionedText.write",
                 Some(handle.clone()),
+                "seed-stale-current",
                 json!({
                     "versionId": "main",
                     "objectId": "stale-object",
@@ -435,7 +438,6 @@ async fn resolve_refuses_a_stale_target_without_clobbering_the_newer_head() {
                     "momentId": "stale-recorded",
                     "origin": "api",
                     "nowMs": 10,
-                    "requestId": "seed-stale-current",
                 }),
             ),
         )
@@ -464,10 +466,11 @@ async fn resolve_refuses_a_stale_target_without_clobbering_the_newer_head() {
     transport
         .call(
             RequestContext::unbounded(),
-            request(
+            keyed_request(
                 12,
                 "versionedText.write",
                 Some(handle.clone()),
+                "advance-stale-current",
                 json!({
                     "versionId": "main",
                     "objectId": "stale-object",
@@ -476,7 +479,6 @@ async fn resolve_refuses_a_stale_target_without_clobbering_the_newer_head() {
                     "momentId": "stale-newer",
                     "origin": "api",
                     "nowMs": 20,
-                    "requestId": "advance-stale-current",
                 }),
             ),
         )
@@ -1134,10 +1136,11 @@ async fn open_conflict_against_seeded_head_with(
     let current = call_with_busy_retry(
         transport,
         RequestContext::unbounded(),
-        request(
+        keyed_request(
             request_id,
             "versionedText.write",
             Some(handle.clone()),
+            "seed-conflict-current",
             json!({
                 "versionId": "main",
                 "objectId": "seeded-conflict-object",
@@ -1146,12 +1149,12 @@ async fn open_conflict_against_seeded_head_with(
                 "momentId": "seeded-conflict-recorded",
                 "origin": "api",
                 "nowMs": 10,
-                "requestId": "seed-conflict-current",
             }),
         ),
     )
     .await
     .expect("seed current head");
+
     let snapshot = &current.result["snapshot"];
     let mut payload = conflict_payload(workspace_id, 0, side_text);
     payload["conflict"]["current"]["snapshot"] = json!({
@@ -1302,10 +1305,11 @@ async fn cursor_continues_after_its_open_conflict_is_resolved() {
     let current = transport
         .call(
             RequestContext::unbounded(),
-            request(
+            keyed_request(
                 10,
                 "versionedText.write",
                 Some(handle.clone()),
+                "seed-resolvable-current",
                 json!({
                     "versionId": "main",
                     "objectId": "object-000",
@@ -1314,7 +1318,6 @@ async fn cursor_continues_after_its_open_conflict_is_resolved() {
                     "momentId": "moment-000",
                     "origin": "api",
                     "nowMs": 1,
-                    "requestId": "seed-resolvable-current",
                 }),
             ),
         )

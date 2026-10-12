@@ -67,7 +67,7 @@ pub use dohc_engine_domain::{
     CaptureSecretRetire, CompareTextFileVersions, DeleteResult, DeleteTextFile,
     MergeTextFileFromVersion, MergeTextFileResult, RenameResult, RenameTextFile,
     ResolveTextConflict, ResolveTextConflictResult, RollbackTextFileMutation, TextConflict,
-    TextSnapshot, VersionFileChange, VersionedTextComparison, WriteBinary, WriteResult, WriteText,
+    TextSnapshot, VersionedTextComparison, WriteBinary, WriteResult, WriteText,
 };
 pub use dohc_engine_sync::{
     ApplyDisposition, ApplyOutcome, ConflictApplyResult, ReplicationEnvelope,

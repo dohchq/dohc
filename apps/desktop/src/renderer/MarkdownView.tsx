@@ -7,7 +7,8 @@ import {
   DocumentControls,
   EngineMayHoldDocumentNotice,
   OPENING_TITLE,
-  ViewHeader,
+  OpeningState,
+  ViewActions,
   OrphanedDraftNotices,
   EngineRemovalInProgressNotice,
 } from "./fileInspectorUi";
@@ -45,10 +46,11 @@ import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 import type { DocumentGoneCause } from "./collab/engineDocLease";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
+import { frontmatterBlockFor } from "@dohc/ydoc-projection/frontmatter";
 import {
-  frontmatterBlockFor,
+  frontmatterMapValues,
   writtenFrontmatterKeys,
-} from "@dohc/ydoc-projection/frontmatter";
+} from "@dohc/ydoc-projection/frontmatter-map";
 import {
   markdownEditorBody,
   mergeMarkdownEditorBody,
@@ -210,6 +212,8 @@ export function MarkdownView(props: {
   chatMentionsAvailable?: boolean;
   onSharePath?: (path: string) => void;
   onSaveStateChange?: (state: SaveState) => void;
+  // A live document became read-only while it was open.
+  onLiveReadOnly?: () => void;
   registerDraftFlush?: (flush: DraftFlush | null) => void;
   knownFiles?: ReadonlyArray<WikilinkFile>;
   pendingUndo?: PendingTextUndo;
@@ -753,14 +757,12 @@ export function MarkdownView(props: {
     if (!displayDoc) {
       return mergeMarkdownEditorBody(latestDraft.current, body);
     }
-    const liveMeta = Object.fromEntries(
-      displayDoc.getMap(ENGINE_FRONTMATTER_FIELD).entries(),
-    ) as Record<string, unknown>;
+    const frontmatter = displayDoc.getMap(ENGINE_FRONTMATTER_FIELD);
     // The frontmatter text the settle keeps, so a copy matches the file.
     const meta = displayDoc.getMap("meta");
-    const written = writtenFrontmatterKeys(displayDoc.getMap(ENGINE_FRONTMATTER_FIELD), meta);
+    const written = writtenFrontmatterKeys(frontmatter, meta);
     const block = frontmatterBlockFor(
-      orderFrontmatter(liveMeta),
+      orderFrontmatter(frontmatterMapValues(frontmatter)),
       meta.get("dohcFrontmatterSource"),
       body,
       "\n",
@@ -778,6 +780,13 @@ export function MarkdownView(props: {
   }, [surfaceMode, props.path]);
 
   const { onSaveStateChange } = props;
+  const onLiveReadOnly = useRef(props.onLiveReadOnly);
+  onLiveReadOnly.current = props.onLiveReadOnly;
+  // Once each time the live document turns read-only, with or without an
+  // edit waiting: the shell asks whether the share behind it ended.
+  useEffect(() => {
+    if (engine.readOnlyWhileEditing) onLiveReadOnly.current?.();
+  }, [engine.readOnlyWhileEditing]);
 
   // Parse-once + visible-first: the memo stops re-parses on
   // unrelated re-renders (collab status flips, save-state ticks), and the
@@ -1917,6 +1926,10 @@ export function MarkdownView(props: {
   // The restore half of #567: each set-aside draft stays copyable until the
   // user takes it or dismisses it. Rendered in both branches below — the
   // reopen can resolve into either editor.
+  // The read-only view that follows an ended share closes the live session,
+  // so the draft that turn set aside is remembered here to keep its words.
+  const readOnlyDraftId = useRef<number | null>(null);
+  if (engine.readOnlyDraftId !== null) readOnlyDraftId.current = engine.readOnlyDraftId;
   const documentNotices = (
     <>
       {engine.deletedWhileEditing ? (
@@ -1925,7 +1938,12 @@ export function MarkdownView(props: {
           hasSetAsideEdit={hasSetAsideEdit}
         />
       ) : null}
-      <OrphanedDraftNotices workspaceId={props.workspaceId} path={props.path} />
+      <OrphanedDraftNotices
+        workspaceId={props.workspaceId}
+        path={props.path}
+        message="This document became read-only. Copy your text to keep it."
+        messageDraftId={readOnlyDraftId.current}
+      />
     </>
   );
 
@@ -1954,13 +1972,13 @@ export function MarkdownView(props: {
   if (displayDoc) {
     return (
       <div className="flex min-h-0 flex-1 flex-col">
-        <ViewHeader
-          path={props.path}
+        <ViewActions
           onShare={onShareCurrentPath}
           status={
             <StateMark
               testId="markdown-save-state"
               truncate
+              quietWhenCalm
               state={engine.readOnlyWhileEditing || readOnlyCopy ? "read-only" : engineChipState}
               shown={engine.readOnlyWhileEditing || readOnlyCopy
                 ? orphanedDrafts.length > 0 ? "read-only-transition" : engine.readOnlyCause === "access-ended" ? "read-only" : "read-only-unavailable"
@@ -2112,39 +2130,25 @@ export function MarkdownView(props: {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <ViewHeader
-        path={props.path}
+      <ViewActions
         onShare={onShareCurrentPath}
         status={
           <>
-            {/* The wait has its own word: an opening document is not a
-                saved one, and dohc has not decided about it yet. Read mode
-                hides the "Saved" idle chip, but PageIdentity stays editable
-                there and autosaves title/icon edits — so a pending or failed
-                save (saveState.kind !== "saved-here") must surface even when not
+            {/* The wait has its own word, shown once the open is slow
+                (OpeningState): an opening document is not a saved one, and
+                dohc has not decided about it yet. Read mode hides the
+                "Saved" chip, but PageIdentity stays editable there and
+                autosaves title/icon edits — so a pending or failed save
+                (saveState.kind !== "saved-here") must surface even when not
                 `editing`, or a failed title/icon save is invisible while the
                 optimistic value keeps showing. */}
-            {opening ? (
-              <span
-                data-testid="markdown-open-state"
-                data-state="opening"
-                // The same sentence as the disabled button's, because a
-                // browser does not reliably draw a tooltip over a disabled
-                // control. This span is not disabled, so hovering the state
-                // always explains it.
-                title={OPENING_TITLE}
-                // Shown only if opening is slow, like the loading lines.
-                className="dohc-reveal-if-slow min-w-0 truncate font-mono text-[11px] text-subtle"
-              >
-                Opening…
-              </span>
-            ) : null}
+            {opening ? <OpeningState /> : null}
             {/* Independent of "Opening…", not its else-branch: a save
                 that fails inside the opening window must still surface. While
                 opening, `editing` is always false, so the chip appears there
                 only when the state is not "saved". */}
             {editing || chipState !== "saved" ? (
-              <StateMark testId="markdown-save-state" truncate state={chipState} shown={chipState} title={chipState === "read-only" ? "Your access to this document ended." : undefined} />
+              <StateMark testId="markdown-save-state" truncate quietWhenCalm state={chipState} shown={chipState} title={chipState === "read-only" ? "Your access to this document ended." : undefined} />
             ) : null}
           </>
         }

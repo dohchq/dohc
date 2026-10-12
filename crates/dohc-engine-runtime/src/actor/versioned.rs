@@ -19,8 +19,8 @@ use dohc_engine_domain::{
     RollbackTextFileMutation, TextConflict, TextSnapshot, VersionedTextComparison,
     VersionedTextStore, WriteBinary, WriteResult, WriteText, binary_delete_job_id,
     binary_rename_delete_job_id, binary_rename_write_job_id, binary_rollback_job_identity,
-    enqueue_binary_delete, enqueue_binary_rename, insert_text_conflict_if_absent,
-    rollback_compensating_moment_id, write_text_in_tx,
+    binary_write_job_id, enqueue_binary_delete, enqueue_binary_rename,
+    insert_text_conflict_if_absent, rollback_compensating_moment_id, write_text_in_tx,
 };
 use dohc_engine_storage::{
     EngineStore, FaultAction, FaultInjector, FaultPoint, JobStatus, Preimage, StorageError,
@@ -257,6 +257,20 @@ impl ActorHandle {
                     materialize_outcome,
                 })
             })
+        })
+        .await
+    }
+
+    /// Whether keyed write `request_id`, whose recorded result is
+    /// `moment_id`, reached disk. A committed moment alone never says so.
+    pub async fn publication_applied(
+        &self,
+        workspace_id: String,
+        request_id: String,
+        moment_id: String,
+    ) -> Result<bool, RuntimeError> {
+        self.run(move |store, _| {
+            publication_applied_on_store(store, &workspace_id, &request_id, &moment_id)
         })
         .await
     }
@@ -957,7 +971,7 @@ fn versioned_binary_write_conditioned_on_store(
         &input.workspace_id,
         &input.version_id,
         input.request_id.as_deref(),
-        &result.moment.moment_id,
+        &binary_write_job_id(&result.moment.moment_id),
         self_writes,
         input.now_ms,
         faults,
@@ -986,6 +1000,40 @@ fn ensure_publication_version(
         return Err(DomainError::InvalidVersion.into());
     }
     Ok(())
+}
+
+/// The request must have recorded this moment as its result. Without a
+/// recorded outcome, only the moment's own publication job counts, once
+/// complete: supersession records its outcome before the job reads complete.
+fn publication_applied_on_store(
+    store: &EngineStore,
+    workspace_id: &str,
+    request_id: &str,
+    moment_id: &str,
+) -> Result<bool, RuntimeError> {
+    let recorded: Option<(Option<String>, bool)> = store.read_with(|conn| {
+        conn.query_row(
+            &format!(
+                "SELECT r.publication_outcome, j.job_id IS NOT NULL FROM engine_requests r \
+                 JOIN moments m ON m.moment_order = r.result_seq \
+                 LEFT JOIN materialization_jobs j ON j.job_id = {job} \
+                   AND j.workspace_id = m.workspace_id \
+                   AND j.target_generation = m.moment_order AND j.status = 'complete' \
+                 WHERE r.request_id = ?1 AND r.kind = 'versioned' \
+                   AND m.workspace_id = ?2 AND m.moment_id = ?3",
+                job = dohc_engine_storage::materialize::MOMENT_PUBLICATION_JOB_SQL,
+            ),
+            params![request_id, workspace_id, moment_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(StorageError::corrupt_public)
+    })?;
+    Ok(match recorded {
+        None => false,
+        Some((Some(outcome), _)) => outcome == "applied",
+        Some((None, complete)) => complete,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1185,7 +1233,7 @@ fn versioned_text_delete_on_store(
     if confirm_absent {
         super::capture::confirm_absent_on_disk(
             store,
-            Some(root_dir),
+            root_dir,
             &input.workspace_id,
             &input.path,
             input.now_ms,
@@ -2487,15 +2535,16 @@ fn restore_deleted_scene_assets_in_tx(
         )
         .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
         journal_moment_outbound_in_tx(tx, workspace_id, &restore_moment_id, false)?;
+        let job_id = binary_write_job_id(&restore_moment_id);
         let materializes: bool = tx
             .query_row(
                 "SELECT EXISTS (SELECT 1 FROM materialization_jobs WHERE job_id = ?1)",
-                [&restore_moment_id],
+                [&job_id],
                 |row| row.get(0),
             )
             .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
         if materializes {
-            jobs.push(restore_moment_id);
+            jobs.push(job_id);
         }
     }
     consume_scene_asset_delete_authority_in_tx(
@@ -2603,11 +2652,12 @@ fn restored_scene_asset_jobs_on_store(
             {
                 continue;
             }
+            let job_id = binary_write_job_id(&restore_moment_id);
             let exists: bool = conn
                 .query_row(
                     "SELECT EXISTS (SELECT 1 FROM moments m \
                      JOIN materialization_jobs j ON j.workspace_id = m.workspace_id \
-                       AND j.job_id = m.moment_id \
+                       AND j.job_id = ?7 \
                      WHERE m.workspace_id = ?1 AND m.version_id = ?2 \
                        AND m.moment_id = ?3 AND m.metadata_correlation_id = ?4 \
                        AND m.operation = 'write' AND m.after_content_kind = 'binary' \
@@ -2620,13 +2670,14 @@ fn restored_scene_asset_jobs_on_store(
                         restore_moment_id,
                         rollback_moment_id,
                         path,
-                        sha256
+                        sha256,
+                        job_id
                     ],
                     |row| row.get(0),
                 )
                 .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
             if exists {
-                jobs.push(restore_moment_id);
+                jobs.push(job_id);
             }
         }
         jobs.sort();
@@ -2751,10 +2802,8 @@ fn versioned_text_merge_on_store(
         });
     }
 
-    // A binary write's job id IS its moment id (the moment/job generation-
-    // sharing contract in `write_binary_file_in_tx`); the text seams prefix it.
     let job_id = match &result {
-        MergeTextFileResult::BinaryWrite { .. } => moment_id.to_owned(),
+        MergeTextFileResult::BinaryWrite { .. } => binary_write_job_id(moment_id),
         _ => format!("merge-mat_{moment_id}"),
     };
     let job = match store.load_materialization_job(&job_id) {
@@ -3648,13 +3697,8 @@ mod doc_cache_reset_tests {
     }
 
     fn assert_checked_delete_capture_keeps_file(store: &mut EngineStore, root: &std::path::Path) {
-        let absent = super::super::capture::confirm_absent_on_disk(
-            store,
-            Some(root),
-            "workspace",
-            "record.md",
-            6,
-        );
+        let absent =
+            super::super::capture::confirm_absent_on_disk(store, root, "workspace", "record.md", 6);
         if absent.is_ok() {
             let version = VersionedTextStore::new(store)
                 .get_active_version("workspace")
@@ -4407,6 +4451,16 @@ mod doc_cache_reset_tests {
                         ),
                         Err(RuntimeError::OperationCrashed)
                     ));
+                    // Disk may already be absent, but nothing confirmed it.
+                    assert!(
+                        !publication_applied_on_store(
+                            &store,
+                            "workspace",
+                            "restore-request",
+                            "restore-delete"
+                        )
+                        .unwrap()
+                    );
                     if changed {
                         std::fs::write(root.join("record.md"), "Owner text KEEP").unwrap();
                     }
@@ -4433,6 +4487,14 @@ mod doc_cache_reset_tests {
                         FaultPoint::StorageAfterCommitBeforeAck
                             | FaultPoint::MaterializeAfterJobCommit
                     );
+                    let applied = publication_applied_on_store(
+                        &store,
+                        "workspace",
+                        "restore-request",
+                        "restore-delete",
+                    )
+                    .unwrap();
+                    assert_eq!(applied, !changed && !before_disk);
                     if changed || before_disk {
                         assert_eq!(checked_delete_state(&store), before);
                         assert_eq!(

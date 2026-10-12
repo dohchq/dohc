@@ -1,4 +1,4 @@
-import { desktopPins } from "../src/testPins";
+import { activityPin } from "../src/testPins";
 import { expect, test } from "@playwright/test";
 import { resolve, join } from "node:path";
 import { writeFile } from "node:fs/promises";
@@ -16,7 +16,7 @@ test("a named agent replies to a group mention with its owner on hover and focus
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;
-    await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
+    await page.getByTestId(activityPin("chats")).click();
     await page.getByTestId("chats-add-agent-open").click();
     await page.getByTestId("chats-add-agent-agent-name").fill("Nova");
     await expect(page.getByLabel("Your name", { exact: true })).toHaveCount(0);

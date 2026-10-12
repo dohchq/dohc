@@ -29,7 +29,7 @@ import {
 } from "./chatMessages";
 import { useReactions, type ReactionView } from "./reactionStore";
 
-// The Chats panel's About tab: the open file's Chats, History and Access.
+// The About rail: the open file's Chats, History and Access.
 // Per-file Chats (PR 0M-5) are stored in the engine and linked to the file's
 // stable object id, so a chat follows its file through renames, and that id
 // is what History asks about. Product vocabulary: these are Chats.
@@ -88,6 +88,10 @@ function isWorkspaceUpdatingResponse(
 export function LinkedChatsPanel(props: {
   workspaceId: string;
   filePath: string | null;
+  // With no file focused: whether some tab still holds a file. About covers
+  // files only, so the empty state then points at that tab instead of asking
+  // for a file to be opened.
+  fileTabOpen?: boolean;
   // A shared view always passes true. Absent means a workspace this machine
   // owns, which is writable by definition.
   //
@@ -134,7 +138,11 @@ export function LinkedChatsPanel(props: {
   const [creating, setCreating] = useState<string | null>(null);
   const [composer, setComposer] = useState("");
   const [sending, setSending] = useState(false);
+  // Thread requests and this file's Chats read each own a token, so opening,
+  // leaving or retrying one never drops the other's answer. A file or
+  // workspace switch bumps both.
   const liveToken = useRef(0);
+  const threadsToken = useRef(0);
   const reactions = useReactions();
   const listRef = useRef<ChatMessageListHandle | null>(null);
 
@@ -143,8 +151,8 @@ export function LinkedChatsPanel(props: {
   const { notices } = props;
   const refreshThreads = useCallback(async () => {
     if (!filePath) return;
-    const token = ++liveToken.current;
-    const current = () => token === liveToken.current && currentThreadsKey.current === threadsKey;
+    const token = ++threadsToken.current;
+    const current = () => token === threadsToken.current && currentThreadsKey.current === threadsKey;
     const identity = `about-chats:${filePath}`;
     // The words go to the shell's error hook. The row goes when this file
     // leaves About, so its Try again always reads this file.
@@ -203,6 +211,7 @@ export function LinkedChatsPanel(props: {
     void refreshThreads();
     return () => {
       liveToken.current += 1;
+      threadsToken.current += 1;
       notices.clear(`about-chats:${filePath}`);
     };
   }, [filePath, notices, refreshThreads]);
@@ -425,14 +434,15 @@ export function LinkedChatsPanel(props: {
   }
 
   if (!filePath) {
+    const sections = props.history ? "chats, history, and access" : "chats and access";
     return (
       <EmptyState
         data-testid="linked-chats-empty"
         icon={Info}
         title={
-          props.history
-            ? "Open a file to see its chats, history, and access."
-            : "Open a file to see its chats and access."
+          props.fileTabOpen
+            ? `About covers files. Switch to a file's tab to see its ${sections}.`
+            : `Open a file to see its ${sections}.`
         }
       />
     );
