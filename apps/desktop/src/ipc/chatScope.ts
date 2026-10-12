@@ -1,3 +1,4 @@
+import type { EngineFileResolver } from "../workspaces/resolveEngineFiles";
 import type { ChatFileReferenceInput } from "./bridgeContract";
 import type {
   createWorkspaceAuthorityOwner,
@@ -54,12 +55,12 @@ export function createChatScopeCapability<State>(dependencies: {
       engineWorkspaceId: string; rootPath: string; attachmentId: symbol;
     }): EngineWorkspace;
   };
-  activeEngineFileIndex(workspace: EngineWorkspace): Promise<{ objectIdByPath: Map<string, string> }>;
+  resolveEngineFiles: EngineFileResolver<EngineWorkspace>;
   readOwnedWorkspaceText(workspace: RegistryEntry, path: string): Promise<{ text: string }>;
 }) {
   const {
     workspaceAuthorities, canonicalWorkspaceFor, requireEngineCapture, linkedChatStoreFor,
-    openWorkspaceActivity, receivedShareEngine, activeEngineFileIndex, readOwnedWorkspaceText,
+    openWorkspaceActivity, receivedShareEngine, resolveEngineFiles, readOwnedWorkspaceText,
   } = dependencies;
   async function requireChatScope(workspaceId: string): Promise<ChatScope> {
     return await workspaceAuthorities.withAuthority(workspaceId, async (lease) => {
@@ -106,15 +107,10 @@ export function createChatScopeCapability<State>(dependencies: {
     });
   }
 
-  // The file a chat is about, resolved for either scope. A share view has no
-  // capture to ask, so it asks the engine's own file index — the same index
-  // the mentions path already reads, over files that arrived by replay.
   async function chatFileObjectId(scope: ChatScope, path: string): Promise<string | null> {
     if (scope.kind === "workspace") return await scope.capture.fileObjectIdForPath(path);
-    const index = await scope.withAuthority(
-      async () => await activeEngineFileIndex(scope.engineWorkspace),
-    );
-    return index.objectIdByPath.get(path) ?? null;
+    const [result] = await scope.withAuthority(() => resolveEngineFiles(scope.engineWorkspace, [{ path }]));
+    return result?.status === "found" ? result.objectId : null;
   }
 
   async function resolveChatFileReferences(
