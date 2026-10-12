@@ -1354,6 +1354,8 @@ fn outside_edits_behind_and_ahead_of_the_seed_cursor_are_captured() {
         );
     }
     assert!(seed_step(&mut s).unwrap());
+    let revision_before: i64 = s.read_with(|c| c.query_row(
+        "SELECT revision FROM link_pending WHERE workspace_id='ws' AND version_id='main' AND object_id='note-0'", [], |r| r.get(0))).unwrap();
     // Capture newer disk bytes while the cursor is between these paths.
     for (path, now_ms) in [("note-000.md", 100), ("note-064.md", 101)] {
         let disk = scratch.path().join(path);
@@ -1377,6 +1379,11 @@ fn outside_edits_behind_and_ahead_of_the_seed_cursor_are_captured() {
             )
             .unwrap();
     }
+    let revision_after: i64 = s.read_with(|c| c.query_row(
+        "SELECT revision FROM link_pending WHERE workspace_id='ws' AND version_id='main' AND object_id='note-0'", [], |r| r.get(0))).unwrap();
+    // The scan already queued note-0. Only snapshot invalidation bumps its
+    // revision twice for OLD and NEW; parsing newer bytes alone cannot prove it.
+    assert_eq!(revision_after, revision_before + 2);
     write_deferred(&mut s, "added", "aaa.md", "[[added]]", 102);
     s.write_with(&NoFaults, |tx| {
         tx.execute("DELETE FROM path_aliases WHERE workspace_id='ws' AND version_id='main' AND path='note-001.md'", []).map_err(sql)?;
