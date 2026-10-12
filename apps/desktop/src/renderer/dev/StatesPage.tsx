@@ -1724,13 +1724,43 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After Zoom stepper, so the parts above keep their places. A send shows
-          only once it has taken a second, so the capture waits for the ring. */}
+      {/* Last, so the parts above keep their places. */}
+      <Section part="rails" title="Rails">
+        <Specimen label="activity bar: Chats beside Files, selected; Search hovered; Graph focused">
+          <div className="flex h-[400px] overflow-hidden rounded-lg border border-line">
+            <div className="flex" data-force-state="hover" data-force-target={`[data-testid="activity-search"]`}>
+              <div className="flex" data-force-state="focus-visible" data-force-target={`[data-testid="activity-graph"]`}>
+                <ActivityBar views={VIEW_IDS} activeView="chats" sidebarVisible hasConflict={false} onSelectView={noop} onOpenSettings={noop} />
+              </div>
+            </div>
+          </div>
+        </Specimen>
+        <Specimen label="layout toggles: side panel and About shown; About hidden">
+          <div className="flex w-[480px] flex-col gap-2">
+            <div className="overflow-hidden rounded-lg border border-line">
+              <Titlebar primarySidebar={{ visible: true, onToggle: noop }} aboutSidebar={{ visible: true, onToggle: noop }} />
+            </div>
+            <div className="overflow-hidden rounded-lg border border-line">
+              <Titlebar primarySidebar={{ visible: true, onToggle: noop }} aboutSidebar={{ visible: false, onToggle: noop }} />
+            </div>
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* Last, so the parts above keep their places. A send shows only once it
+          has taken a second, so the capture waits for the ring. */}
       <Section part="composer-sending" title="Composer sending">
         <Specimen label="at rest">
           <div className="w-[400px] rounded-lg border border-line bg-panel">
             <MentionComposer testIdPrefix={`states-composer-rest-${theme}`} composerId={`states-composer-rest-${theme}`}
               value={COMPOSER_DRAFT} sending={false} placeholder="Message #general" sendLabel="Send message"
+              candidates={[]} onChange={noop} onSend={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="cannot send yet, or a send under a second">
+          <div className="w-[400px] rounded-lg border border-line bg-panel">
+            <MentionComposer testIdPrefix={`states-composer-disabled-${theme}`} composerId={`states-composer-disabled-${theme}`}
+              value={COMPOSER_DRAFT} sending={false} disabled placeholder="Message #general" sendLabel="Send message"
               candidates={[]} onChange={noop} onSend={noop} />
           </div>
         </Specimen>
@@ -1754,29 +1784,6 @@ function Pane(props: { theme: "light" | "dark" }) {
               value={COMPOSER_DRAFT} sending placeholder="Write a message…" sendLabel="Send message"
               onChange={noop} onSend={noop} />
           </AboutPanelSpecimen>
-        </Specimen>
-      </Section>
-
-      {/* Last, so the parts above keep their places. */}
-      <Section part="rails" title="Rails">
-        <Specimen label="activity bar: Chats beside Files, selected; Search hovered; Graph focused">
-          <div className="flex h-[400px] overflow-hidden rounded-lg border border-line">
-            <div className="flex" data-force-state="hover" data-force-target={`[data-testid="activity-search"]`}>
-              <div className="flex" data-force-state="focus-visible" data-force-target={`[data-testid="activity-graph"]`}>
-                <ActivityBar views={VIEW_IDS} activeView="chats" sidebarVisible hasConflict={false} onSelectView={noop} onOpenSettings={noop} />
-              </div>
-            </div>
-          </div>
-        </Specimen>
-        <Specimen label="layout toggles: side panel and About shown; About hidden">
-          <div className="flex w-[480px] flex-col gap-2">
-            <div className="overflow-hidden rounded-lg border border-line">
-              <Titlebar primarySidebar={{ visible: true, onToggle: noop }} aboutSidebar={{ visible: true, onToggle: noop }} />
-            </div>
-            <div className="overflow-hidden rounded-lg border border-line">
-              <Titlebar primarySidebar={{ visible: true, onToggle: noop }} aboutSidebar={{ visible: false, onToggle: noop }} />
-            </div>
-          </div>
         </Specimen>
       </Section>
     </section>

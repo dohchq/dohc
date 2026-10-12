@@ -21,7 +21,8 @@ function useSlowSend(sending: boolean): boolean {
 // The submit control every chat composer shares. It is disabled while a send
 // is in flight; once that send is slow, a ring takes the mark's place, the
 // control is busy, and a polite status says so. The control keeps its size
-// and accessible name.
+// and accessible name. A busy control keeps full strength: at the disabled
+// 40% the ring measures under 3:1 on its fill, and it is the only sign.
 export function ComposerSendButton(props: {
   testId: string;
   label: string;
