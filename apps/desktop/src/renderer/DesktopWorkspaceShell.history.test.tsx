@@ -1,4 +1,3 @@
-import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 // @vitest-environment jsdom
 import "./DesktopWorkspaceShell.testSupport";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -10,6 +9,7 @@ import { DEFAULT_WORKSPACE_SETTINGS, type WorkspaceSettingsResult } from "../wor
 import { rendererMarks } from "../performance/rendererMarks";
 import { momentDiffTabPath, versionCompareTabPath } from "./workbench/workbenchState";
 import { deferred } from "../testing/deferred";
+import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { textEditorContent } from "./FileInspector.editor-fixture";
 import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, storedTabs, makeBridge, renderShell, shellBootstrapProps, SHARE_STATUS, SHARE_VIEW, makeShareBridge, settleShareView } from "./DesktopWorkspaceShell.testHarness";

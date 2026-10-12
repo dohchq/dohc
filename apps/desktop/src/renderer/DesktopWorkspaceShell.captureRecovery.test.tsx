@@ -1,4 +1,3 @@
-import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 // @vitest-environment jsdom
 import "./DesktopWorkspaceShell.testSupport";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
@@ -7,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { CaptureRecoveryStatusResult, EngineMomentRecord, ListEngineMomentsResult, ReadEngineMomentResult } from "../ipc/bridgeContract";
 import type { OwnerRestoreRequest } from "../ipc/ownerRestoreContract";
 import { deferred, type Deferred } from "../testing/deferred";
+import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import { CAPTURE_RECOVERY_TITLE, captureRecoveryMessage } from "./shell/useCaptureRecoveryNotices";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { DesktopWorkspaceShell, OTHER_WORKSPACE, WORKSPACE, makeBridge, renderShell, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";

@@ -952,3 +952,29 @@ it.each([
   await scan();
   expect(reads).toHaveLength(9);
 });
+
+
+it.each(["text", "protected"])("stops a names rescan exactly at the oldest shown %s moment", async (stream) => {
+  let notify!: (event: { workspaceId: string }) => void;
+  window.dohcDesktop!.onHistoryNamesChanged = listener => { notify = listener; return () => {}; };
+  const it0 = mount();
+  const start = { ...historyCursor(), workspaceId: "ws-1", text: null };
+  const oldest = { ...moment("oldest"), recordedAtMs: 80, momentOrder: 500,
+    ...(stream === "protected" ? { protected: true } : {}) };
+  const newest = { ...moment("deleted-newest"), recordedAtMs: 100, momentOrder: 1 };
+  const boundary = { recordedAtMs: oldest.recordedAtMs, momentOrder: oldest.momentOrder };
+  const end = { ...start, [stream]: boundary };
+  const originalEnd = stream === "protected" ? { ...end, text: { recordedAtMs: 100, momentOrder: 1 } } : end;
+  await committed(it0, { ...page("unused", { startCursor: start, nextCursor: originalEnd }), moments: [newest, oldest] });
+
+  act(() => notify({ workspaceId: "ws-1" }));
+  expect(listEngineMoments.mock.calls[1]?.[0].cursor).toEqual(start);
+  // The oldest row still exists. A deleted newer row keeps the ID check from
+  // ending the scan, so only the inclusive position bound stops another read.
+  const renamed = { ...oldest, namedAuthor: { userId: "ben", label: "ben@test.example (via share link)" } };
+  await settle(reads[1]!, { ...page("unused", { startCursor: start, nextCursor: end }), moments: [renamed] });
+  expect(reads).toHaveLength(2);
+  expect(listEngineMoments).toHaveBeenCalledTimes(2);
+  expect(it0.ids()).toEqual(["deleted-newest", "oldest"]);
+  expect(it0.hook().page?.moments[1]?.namedAuthor).toEqual(renamed.namedAuthor);
+});
