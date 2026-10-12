@@ -1889,7 +1889,7 @@ function Pane(props: { theme: "light" | "dark" }) {
       {/* Last, so the parts above keep their places. Offers sit in space
           already there: a folder row's glyph, the tab row's end, and a row
           floating under a pasted line. */}
-      <Section part="offers" title="Offers">
+      <Section part="offers" title="Offers" menusAtRest>
         <Specimen label="an app folder in Files: at rest, selected, focused">
           <ul role="tree" aria-label="App folders" className="m-0 w-64 list-none rounded-lg border border-line bg-panel py-1">
             <Row name="trip-planner" app />
