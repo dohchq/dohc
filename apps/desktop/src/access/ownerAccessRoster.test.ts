@@ -17,7 +17,7 @@ const observation: RosterObservation = { checkedAtMs: 42, freshness: "fresh", li
 it.each([
   ["separate relay", credentials],
   ["same URLs", { ...credentials, relayUrl: credentials.serverUrl }],
-  ["trailing server slash", { ...credentials, serverUrl: credentials.serverUrl + "/" }],
+  ["trailing server slash", { ...credentials, serverUrl: credentials.serverUrl + "/", relayUrl: credentials.serverUrl }],
 ] as const)("shows owner Access with %s", async (_case, account) => {
   const h = harness(workspace, account);
   for (const answer of [await h.owner.object(workspace, { ref }), h.owner.sharing(workspace, { lane: "granted" })]) {
@@ -45,9 +45,11 @@ it.each([
   { ...workspace, remote: undefined },
   { ...workspace, shareView: { shareId: "received", granterEmail: null, genericChatWritable: false,
     grantedSelector: { paths: ["Notes"], versionId: null, access: "view" as const } } },
-])("does not use an owner's roster without an owned remote workspace", entry => {
+])("does not use an owner's roster without an owned remote workspace", async entry => {
   const h = harness(entry, credentials);
-  expect(h.owner.sharing(entry, { lane: "granted" })).toMatchObject({ freshness: "unknown", rows: [] });
+  for (const answer of [await h.owner.object(entry, { ref }), h.owner.sharing(entry, { lane: "granted" })]) {
+    expect(answer).toMatchObject({ freshness: "unknown", checkedAtMs: null, rows: [], coverage: { complete: false } });
+  }
   expect(h.readObservation).not.toHaveBeenCalled();
 });
 

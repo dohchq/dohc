@@ -14,6 +14,7 @@ export function ownerAccessRoster(
   credentials: CloudCredentials | null,
   observation: (workspaceId: string) => RosterObservation,
 ): RosterObservation {
+  // The server/account matcher ignores relayUrl; a missing relay must stay unknown, matching account().
   if (workspace.shareView || !workspace.remote || !credentials?.relayUrl ||
       !workspaceRemoteMatchesCredentials(workspace.remote, credentials)) return { listing: null, checkedAtMs: null, freshness: "unknown" };
   return observation(workspace.workspaceId);
