@@ -29,6 +29,7 @@ pub struct EngineStore {
     conn: Connection,
     freshly_created: bool,
     database_path: PathBuf,
+    passive: bool,
 }
 
 /// The outcome of a transactional unit run through
@@ -64,6 +65,26 @@ fn should_crash(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
 }
 
 impl EngineStore {
+    /// Restrict this writable connection to imported state and private projections.
+    /// The guards live only on this connection; ordinary opens keep their behavior.
+    pub fn make_passive(&mut self) -> Result<(), StorageError> {
+        self.conn.execute_batch(
+            "CREATE TEMP TRIGGER passive_no_file_jobs BEFORE INSERT ON main.materialization_jobs
+             BEGIN SELECT RAISE(IGNORE); END;
+             CREATE TEMP TRIGGER passive_no_automation_claims BEFORE INSERT ON main.automation_claims
+             BEGIN SELECT RAISE(IGNORE); END;
+             CREATE TEMP TRIGGER passive_no_local_ops BEFORE INSERT ON main.replication_log
+             WHEN NEW.imported = 0
+             BEGIN SELECT RAISE(ABORT, 'passive store cannot originate'); END;"
+        ).map_err(StorageError::persist)?;
+        self.passive = true;
+        Ok(())
+    }
+
+    pub fn is_passive(&self) -> bool {
+        self.passive
+    }
+
     /// Open-or-create the store at `path`, applying the full open ritual and
     /// the v1-vs-v2 fingerprint fence (`open_engine_db`). This is the low-level
     /// writer primitive — the single-writer-per-file contract is enforced by
@@ -85,6 +106,7 @@ impl EngineStore {
             conn: opened.conn,
             freshly_created: opened.freshly_created,
             database_path: path.to_path_buf(),
+            passive: false,
         })
     }
 
@@ -103,6 +125,7 @@ impl EngineStore {
             conn: opened.conn,
             freshly_created: opened.freshly_created,
             database_path: path.to_path_buf(),
+            passive: false,
         })
     }
 
@@ -123,6 +146,7 @@ impl EngineStore {
             conn: opened.conn,
             freshly_created: false,
             database_path: path.to_path_buf(),
+            passive: false,
         })
     }
 

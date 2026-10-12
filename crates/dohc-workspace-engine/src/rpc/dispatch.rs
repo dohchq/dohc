@@ -993,15 +993,36 @@ impl EngineService {
         let Some(handle) = handle else {
             return Ok(());
         };
-        let (projects_collections, read_only) = lock(&self.handles)
+        let (projects_collections, read_only, passive) = lock(&self.handles)
             .get(handle)
             .map(|open| {
                 (
                     open.projects_collections(),
                     open.mode == WorkspaceOpenMode::ReadOnly,
+                    open.mode == WorkspaceOpenMode::Passive,
                 )
             })
             .unwrap_or_default();
+        if passive
+            && !matches!(
+                method,
+                "workspace.close"
+                    | "sync.adoptJoinIdentity"
+                    | "sync.pull"
+                    | "sync.commitCursor"
+                    | "sync.refusalNotices"
+                    | "sync.remoteChanges"
+                    | "versionedText.list"
+                    | "versionedText.read"
+                    | "versionedText.readBlob"
+                    | "conflicts.list"
+            )
+        {
+            return Err(WireError::new(
+                ErrorCode::Forbidden,
+                "method is unavailable on a passive store",
+            ));
+        }
         if projects_collections {
             if method.starts_with("automations.") {
                 return Err(WireError::new(
