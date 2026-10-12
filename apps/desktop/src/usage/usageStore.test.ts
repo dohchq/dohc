@@ -261,8 +261,8 @@ describe("local usage store", () => {
   });
   it.each([
     ["bad JSON", '{"version":1,"enabled":true,"counts":['],
-    ["schema mismatch", JSON.stringify({ version: 1, enabled: false, cleanExit: true, days: [], counts: "invalid", coverage: [] })],
-    ["newer schema", JSON.stringify({ version: 2, enabled: false, cleanExit: true, days: [], counts: [], coverage: [] })],
+    ["schema mismatch", JSON.stringify({ version: 1, enabled: true, cleanExit: true, days: [], counts: "invalid", coverage: [] })],
+    ["newer schema", JSON.stringify({ version: 2, enabled: true, cleanExit: true, days: [], counts: [], coverage: [] })],
   ])("preserves %s across launch, controls, midnight, close and restart", async (_reason, raw) => {
     const { store, io, disk, path, restart } = memoryStore();
     disk.set(path, raw);
