@@ -99,7 +99,7 @@ describe("listEngineMomentsForIpc", () => {
     // Several authors read as each of them, in order; none stands in for the rest.
     expect(response.moments[0]?.authorLabels).toEqual([
       "Ice", "Agent", "Named collection:Tasks#stamp in Tasks", "ana@example.com (Edit)",
-      "Edit link · holder holder", "Edit link · holder 3f9a2c1d", "An unrecorded author",
+      "Edit link · holder holder", "Link holder 3f9a2c1d", "An unrecorded author",
     ]);
   });
 

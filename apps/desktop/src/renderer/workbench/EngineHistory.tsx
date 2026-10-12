@@ -69,8 +69,9 @@ export function engineOriginLabel(origin: EngineMomentRecord["origin"]): string 
 // "the agent name" (the same formatting rule the chat rail uses via
 // chatAuthorLabel), and one a Collection automation authored as the
 // automation's name and its Collection. An Edit link's direct file write
-// and an app submission name the link and a short id for its holder. A restore
-// names this computer's person who made it; their other edits read as a local file
+// names the link and a short id for its holder; an app submission names the
+// holder with the same short id, so it never reads like an Edit link's write. A
+// restore names this computer's person who made it; their other edits read as a local file
 // edit or a live edit. A live edit the relay admitted from an account or link
 // holder names them. Everything else keeps its actor-neutral origin label.
 export function engineMomentSourceLabel(
@@ -83,7 +84,7 @@ export function engineMomentSourceLabel(
     return rest.length ? `${shown} and ${rest.length} more` : shown;
   }
   if (moment.liveAuthorName) return moment.liveAuthorName;
-  if (moment.publicAuthor) return `Edit link · holder ${moment.publicAuthor.principalId.replace(/^public_/, "").slice(0, 8)}`;
+  if (moment.publicAuthor) return `Link holder ${moment.publicAuthor.principalId.replace(/^public_/, "").slice(0, 8)}`;
   if (moment.linkAuthor) return `Edit link · holder ${moment.linkAuthor.principalId.slice(0, 8)}`;
   if (moment.automationAuthor) {
     const { name, collection } = moment.automationAuthor;
