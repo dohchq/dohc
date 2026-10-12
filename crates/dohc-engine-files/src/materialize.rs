@@ -4634,6 +4634,77 @@ mod tests {
         );
     }
 
+    #[test]
+    fn corrupt_job_status_stops_the_pending_batch_before_any_file_is_replaced() {
+        let scratch = Scratch::new("corrupt-pending-status");
+        let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
+        let sha = store.put_binary_blob(b"new content").unwrap();
+        let preimage_sha = store.put_binary_blob(b"outside content").unwrap();
+        for path in ["first.bin", "later.bin"] {
+            std::fs::write(scratch.root.join(path), b"outside content").unwrap();
+        }
+        store
+            .write_with(&NoFaults, |tx| {
+                for (id, path, now_ms) in [("first", "first.bin", 1), ("later", "later.bin", 2)] {
+                    enqueue_job(
+                        tx,
+                        &MaterializationJobSpec {
+                            job_id: id.into(),
+                            workspace_id: "workspace".into(),
+                            target_path: path.into(),
+                            content_sha256: sha.clone(),
+                            preimage: Preimage::Present(preimage_sha.clone()),
+                            target_generation: 1,
+                            now_ms,
+                        },
+                    )?;
+                }
+                tx.execute(
+                    "UPDATE materialization_jobs SET status = 'pendng' WHERE job_id = 'later'",
+                    [],
+                )
+                .map_err(StorageError::persist_public)?;
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+        // Quote every raw field so the invalid status remains readable.
+        let ledger = |store: &EngineStore| {
+            store
+                .read_with(|conn| {
+                    let mut query = conn.prepare(
+                        "SELECT quote(job_id), quote(workspace_id), quote(target_path), \
+                         quote(content_sha256), quote(preimage_present), quote(preimage_sha256), \
+                         quote(target_generation), quote(status), quote(created_at_ms), \
+                         quote(completed_at_ms), quote(operation) \
+                         FROM materialization_jobs ORDER BY job_id",
+                    )?;
+                    let rows = query.query_map([], |row| {
+                        (0..11)
+                            .map(|index| row.get::<_, String>(index))
+                            .collect::<Result<Vec<_>, _>>()
+                    })?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                })
+                .unwrap()
+        };
+        let before = ledger(&store);
+        assert_eq!(before.len(), 2);
+        assert_eq!(before[0][7], "'pending'");
+        assert_eq!(before[1][7], "'pendng'");
+
+        assert!(matches!(
+            run_pending_jobs(&store, &scratch.root, &options_with(&StdReplacer)),
+            Err(MaterializeError::Storage(StorageError::StateCorrupt { .. }))
+        ));
+        for path in ["first.bin", "later.bin"] {
+            assert_eq!(
+                std::fs::read(scratch.root.join(path)).unwrap(),
+                b"outside content"
+            );
+        }
+        assert_eq!(ledger(&store), before);
+    }
+
     /// The replace loop retries an ACL denial to its full bounded budget —
     /// a Windows AV handle mid-scan often surfaces as ERROR_ACCESS_DENIED —
     /// but the error that outlives the cap is a terminal io failure, never

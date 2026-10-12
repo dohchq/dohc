@@ -381,6 +381,33 @@ const JOB_COLUMNS: &str = "job_id, workspace_id, target_path, content_sha256, pr
 pub(crate) fn list_pending_jobs(
     conn: &Connection,
 ) -> Result<Vec<MaterializationJob>, StorageError> {
+    let invalid_status: bool = conn
+        .prepare_cached(
+            "SELECT EXISTS (SELECT 1 FROM materialization_jobs \
+             WHERE status < ?1 \
+                OR (status > ?1 AND status < ?2) \
+                OR (status > ?2 AND status < ?3) \
+                OR (status > ?3 AND status < ?4) \
+                OR status > ?4)",
+        )
+        .map_err(StorageError::corrupt)?
+        .query_row(
+            [
+                JobStatus::Cancelled.as_str(),
+                JobStatus::Complete.as_str(),
+                JobStatus::Conflict.as_str(),
+                JobStatus::Pending.as_str(),
+            ],
+            |row| row.get(0),
+        )
+        .map_err(StorageError::corrupt)?;
+    if invalid_status {
+        return Err(StorageError::corrupt(invalid_job_field(
+            7,
+            rusqlite::types::Type::Text,
+            "unknown materialization status",
+        )));
+    }
     list_jobs(conn, true)
 }
 
