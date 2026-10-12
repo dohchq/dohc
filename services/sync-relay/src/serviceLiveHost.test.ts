@@ -665,7 +665,22 @@ it("detaches a workspace after its last document and attaches it again on the sa
   expect(o.membership.at(-1)).toEqual({method: "liveApplication.detachWorkspace", workspace: "attached-handle", params: {}});
   await o.host.update({workspaces, documents: [o.sibling]});
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
-  expect(o.membership.map(row => row.method)).toEqual(["liveApplication.attachWorkspace", "liveApplication.detachWorkspace", "liveApplication.attachWorkspace"]);
+  expect(o.membership.map(row => row.method)).toEqual(["liveApplication.attachWorkspace", "liveApplication.unloadDocument",
+    "liveApplication.detachWorkspace", "liveApplication.attachWorkspace"]);
+  expect(o.spawned()).toBe(1); expect(o.client().close).not.toHaveBeenCalled();
+});
+
+it("keeps a workspace attached while its last document's unload is pending and detaches it once the unload succeeds", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  await o.host.update({workspaces, documents: [o.other]});
+  o.unloads.push({status: "pending", reason: "settlement-pending"});
+  expect(await o.host.update({workspaces: [], documents: []})).toEqual([{workspaceId: "workspace", objectId: o.other.objectId}]);
+  // Still attached, so activation passes keep settling the document.
+  expect(o.membership).toEqual([o.attach, o.unload]);
+  expect(o.host.automationLedger("workspace")).not.toBeNull();
+  expect(await o.host.update({workspaces: [], documents: []})).toEqual([]);
+  expect(o.membership).toEqual([o.attach, o.unload, o.unload, {method: "liveApplication.detachWorkspace", workspace: "attached-handle", params: {}}]);
+  expect(o.host.automationLedger("workspace")).toBeNull();
   expect(o.spawned()).toBe(1); expect(o.client().close).not.toHaveBeenCalled();
 });
 

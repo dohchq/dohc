@@ -376,8 +376,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   listServiceHostEnrollments(workspaceId?: string) {
     return serviceHostEnrollmentStorage.listServiceHostEnrollments(this, workspaceId);
   }
-  hasServiceHostEnrollment(workspaceId: string, path: string) {
-    return serviceHostEnrollmentStorage.hasServiceHostEnrollment(this, workspaceId, path);
+  hasKeptServiceHostEnrollment(workspaceId: string, path: string) {
+    return serviceHostEnrollmentStorage.hasKeptServiceHostEnrollment(this, workspaceId, path);
   }
   readServiceHostEnrollment(workspaceId: string, path: string) {
     return serviceHostEnrollmentStorage.readServiceHostEnrollment(this, workspaceId, path);
@@ -385,8 +385,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   listRetiredServiceHostEnrollments(workspaceId: string, after?: string) {
     return serviceHostEnrollmentStorage.listRetiredServiceHostEnrollments(this, workspaceId, after);
   }
-  listCurrentServiceHostEnrollments(workspaceId: string) {
-    return serviceHostEnrollmentStorage.listCurrentServiceHostEnrollments(this, workspaceId);
+  currentServiceHostWorkspace(workspaceId: string) {
+    return serviceHostEnrollmentStorage.currentServiceHostWorkspace(this, workspaceId);
   }
   scanServiceHostCandidateShares(after?: serviceHostEnrollmentStorage.ServiceHostCandidateCursor, workspaceId?: string) {
     return serviceHostEnrollmentStorage.scanServiceHostCandidateShares(this, after, workspaceId);
@@ -402,8 +402,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   serviceHostEnrollmentHasEditGrant(enrollment: Pick<serviceHostEnrollmentStorage.ServiceHostEnrollment, "workspaceId" | "ownerUserId" | "path">) {
     return serviceHostEnrollmentStorage.serviceHostEnrollmentHasEditGrant(this, enrollment);
   }
-  retireUncoveredServiceHostEnrollment(input: {workspaceId: string; objectId: string; nowMs: number}) {
-    const result = serviceHostEnrollmentStorage.retireUncoveredServiceHostEnrollment(this, input);
+  releaseServiceHostEnrollment(input: {workspaceId: string; objectId: string; nowMs: number}) {
+    const result = serviceHostEnrollmentStorage.releaseServiceHostEnrollment(this, input);
     if (result) notifyDesktopReadiness(this, {workspaceId: result.workspaceId, path: result.path});
     return result;
   }

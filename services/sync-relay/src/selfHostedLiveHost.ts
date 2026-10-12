@@ -48,18 +48,17 @@ export async function startSelfHostedLiveHost(options: {
   let signature = "", lastError: unknown;
   let discoveryCursor: {workspaceId: string; shareId: string} | undefined;
   let writeGeneration = 1, scanGeneration = 0, scannedGeneration = 0;
-  // The enrollment whose credential each attached workspace replicates with.
-  const credentials = new Map<string, string>();
   const lifetime = new AbortController();
   const eventHandlers = new Set<(event: Event) => void>();
   const signal = AbortSignal.any([lifetime.signal, storage.unavailable]);
   const changes = Effect.runSync(Queue.sliding<void>(1));
   const valid = (row: ServiceHostEnrollment) => row.enabled && storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) &&
     storage.verifyWorkspaceIdentity(row) === "matched" && storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: row.path}) === row.objectId;
-  // A document is hosted only while an active Edit grant covers it.
-  const selection = () => storage.listServiceHostEnrollments().filter(row => valid(row) && storage.serviceHostEnrollmentHasEditGrant(row));
-  const selectionSignature = (rows: readonly ServiceHostEnrollment[]) => JSON.stringify(rows.map(({workspaceId, objectId, path, shareId, ownerUserId, replicationEpoch, streamIdentity, credentialNonce}) =>
-    ({workspaceId, objectId, path, shareId, ownerUserId, replicationEpoch, streamIdentity, credentialNonce})));
+  // A document is hosted only while an active Edit grant covers it and its owner has not paused or stopped it.
+  const hosts = (row: ServiceHostEnrollment) => !row.ownerStop && valid(row) && storage.serviceHostEnrollmentHasEditGrant(row);
+  const selection = () => storage.listServiceHostEnrollments().filter(hosts);
+  const selectionSignature = (rows: readonly ServiceHostEnrollment[]) => JSON.stringify(rows.map(({workspaceId, objectId, path, shareId, ownerUserId, replicationEpoch, streamIdentity}) =>
+    ({workspaceId, objectId, path, shareId, ownerUserId, replicationEpoch, streamIdentity})));
   function schedule() {
     if (!signal.aborted) Queue.offerUnsafe(changes, undefined);
   }
@@ -70,19 +69,16 @@ export async function startSelfHostedLiveHost(options: {
   async function hostedSet(rows: readonly ServiceHostEnrollment[]): Promise<ServiceHostedSet> {
     const grouped = new Map<string, ServiceHostEnrollment[]>();
     for (const row of rows) grouped.set(row.workspaceId, [...grouped.get(row.workspaceId) ?? [], row]);
-    const workspaces = [], chosen = new Map<string, string>();
+    const workspaces = [];
     for (const [workspaceId, documents] of grouped) {
-      // Another credential attaches the workspace again, so keep the current one while its enrollment stays hosted.
-      const row = documents.find(document => document.objectId === credentials.get(workspaceId)) ?? documents[0]!;
-      chosen.set(workspaceId, row.objectId);
+      // Every hosted document matches the workspace's current identity, so any of them names it.
+      const row = documents[0]!;
       const directory = join(root, createHash("sha256").update(JSON.stringify([history.namespace, row.workspaceId, row.replicationEpoch, row.streamIdentity])).digest("hex"));
       await mkdir(directory, {recursive: true, mode: 0o700});
       workspaces.push({root: canonicalPath(directory, true), workspaceId, maxRegistrations: 64,
         ordinaryReplication: {relay: {baseUrl: relay.origin, bearerToken: deriveServiceHostBearer(row, {key: options.key, namespace: history.namespace})},
           identity: {kind: "join" as const, replicationEpoch: row.replicationEpoch, streamIdentity: row.streamIdentity}, maxPagesPerPull: 8}});
     }
-    credentials.clear();
-    for (const [workspaceId, objectId] of chosen) credentials.set(workspaceId, objectId);
     return {workspaces, documents: rows.map(({workspaceId, objectId, path, shareId}) => ({workspaceId, objectId, path, shareId}))};
   }
   async function start(): Promise<Host> {
@@ -109,7 +105,7 @@ export async function startSelfHostedLiveHost(options: {
       }
       const enrolled = storage.listServiceHostEnrollments();
       const covered = enrolled.filter(row => storage.serviceHostEnrollmentHasEditGrant(row));
-      const rows = covered.filter(valid), next = selectionSignature(rows);
+      const rows = covered.filter(row => !row.ownerStop && valid(row)), next = selectionSignature(rows);
       selectedDocuments = rows.length > 0;
       // Only a failed daemon restarts. Membership changes update the running one.
       if (current?.invalidated.aborted) {await stopCurrent(); signature = "";}
@@ -123,10 +119,12 @@ export async function startSelfHostedLiveHost(options: {
         // A document still settling keeps the selection open, so the next reconciliation retries its unload.
         signature = retiring.length ? "" : next;
       }
-      // Revoking the last Edit grant retires the enrollment once the host no longer holds the document.
+      // An owner's Pause or Stop, or the loss of the last Edit grant, takes
+      // effect once the host no longer holds the document.
       for (const row of enrolled) {
-        if (!covered.includes(row) && !retiring.some(document => document.workspaceId === row.workspaceId && document.objectId === row.objectId)) {
-          storage.retireUncoveredServiceHostEnrollment({workspaceId: row.workspaceId, objectId: row.objectId, nowMs: Date.now()});
+        if ((!covered.includes(row) || (row.enabled && row.ownerStop)) &&
+          !retiring.some(document => document.workspaceId === row.workspaceId && document.objectId === row.objectId)) {
+          storage.releaseServiceHostEnrollment({workspaceId: row.workspaceId, objectId: row.objectId, nowMs: Date.now()});
         }
       }
       lastError = undefined; initialReconciliationComplete = true;

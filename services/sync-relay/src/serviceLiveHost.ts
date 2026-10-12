@@ -373,14 +373,19 @@ export async function startServiceLiveHost(options: {
       }));
       if (wanted.size !== value.documents.length) throw new Error("Duplicate service activation target.");
       checkServiceMembership(workspaces, [...wanted.values()].map(row => row.target));
-      // A workspace whose root or replication credential changed attaches again.
-      const leaving = [...members].filter(([workspaceId, member]) => !isDeepStrictEqual(desired.get(workspaceId), member.workspace)).map(([workspaceId]) => workspaceId);
+      // A workspace whose identity changed, and with it its root and credential, attaches again at once.
+      const changed = [...members].filter(([workspaceId, member]) => desired.has(workspaceId) && !isDeepStrictEqual(desired.get(workspaceId), member.workspace))
+        .map(([workspaceId]) => workspaceId);
       const retiring: {workspaceId: string; objectId: string}[] = [];
       for (const [key, document] of hosted) {
-        if (leaving.includes(document.target.workspaceId) || isDeepStrictEqual(wanted.get(key), document)) continue;
+        if (changed.includes(document.target.workspaceId) || isDeepStrictEqual(wanted.get(key), document)) continue;
         if (await unload(document, joined)) hosted.delete(key);
         else retiring.push({workspaceId: document.target.workspaceId, objectId: document.objectId});
       }
+      // Any other workspace detaches only once its last document unloads, so
+      // its unsettled work keeps settling while it stays attached.
+      const holding = new Set([...hosted.values()].map(document => document.target.workspaceId));
+      const leaving = [...changed, ...[...members.keys()].filter(workspaceId => !desired.has(workspaceId) && !holding.has(workspaceId))];
       for (const workspaceId of leaving) await detach(workspaceId, joined);
       for (const workspace of workspaces) if (!members.has(workspace.workspaceId)) await attach(workspace, joined);
       for (const [key, document] of wanted) {
@@ -437,7 +442,7 @@ export async function startServiceLiveHost(options: {
       /**
        * Moves this running daemon to the hosted set. It attaches a workspace for
        * its first document, adds documents to activation, unloads documents
-       * that left, and detaches a workspace once none of its documents stay.
+       * that left, and detaches a workspace once its last document unloads.
        * Resolves to the documents that left but whose unsettled work the
        * engine still holds; a later update retries them.
        */

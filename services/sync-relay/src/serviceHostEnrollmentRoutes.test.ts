@@ -30,7 +30,9 @@ async function fixture() {
     f.raw.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
       VALUES (?,?,1,?,'main',?,?,?,1,1)`).run(scope.workspaceId, objectId, `moment-${objectId}`, path, "b".repeat(64), contentKind);
   };
-  return {...f, history, host, resolveActor, handle, input, request, seed, setActor(value: typeof actor) {actor = value;}};
+  // What the service host does once it no longer holds the document.
+  const release = (objectId: string) => f.storage.releaseServiceHostEnrollment({workspaceId: scope.workspaceId, objectId, nowMs: 20});
+  return {...f, history, host, resolveActor, handle, input, request, seed, release, setActor(value: typeof actor) {actor = value;}};
 }
 
 it("requires bearer owner authority, rejects ambient credentials and rejects unknown parameters", async () => {
@@ -55,16 +57,20 @@ it("discovers rich documents in folders, skips other content, and preserves a pa
   const f = await fixture(); f.seed("docs/b.md", "object-b"); f.seed("docs/data.csv", "object-c"); f.seed("docs/image.md", "object-d", "binary");
   discoverServiceHostDocuments(f.storage);
   expect(f.storage.listServiceHostEnrollments().map(row => row.path)).toEqual(["docs/a.md", "docs/b.md"]);
-  expect((await f.handle(f.request("DELETE", {path: binding.currentPath}))).status).toBe(200);
+  expect(await (await f.handle(f.request("DELETE", {path: binding.currentPath}))).json()).toEqual({ok: true, path: binding.currentPath, status: "paused"});
+  discoverServiceHostDocuments(f.storage);
+  expect(f.storage.listServiceHostEnrollments()[0]!.ownerStop).toBe("pause");
+  f.release(binding.objectId);
   discoverServiceHostDocuments(f.storage);
   expect(f.storage.listServiceHostEnrollments()[0]!.enabled).toBe(false);
   expect((await f.handle(f.request("POST", {shareId: scope.shareId}))).status).toBe(202);
-  expect(f.storage.listServiceHostEnrollments().every(row => row.enabled)).toBe(true);
+  expect(f.storage.listServiceHostEnrollments().every(row => row.enabled && !row.ownerStop)).toBe(true);
   await f.handle(f.request("DELETE", {path: binding.currentPath}));
   await f.handle(f.request("DELETE", {path: "docs/b.md", retire: true}));
+  f.release("object-b");
   f.seed("docs/retry.md", "retry-object");
   expect((await f.handle(f.request("POST", {shareId: scope.shareId, retry: true}))).status).toBe(202);
-  expect(f.storage.listServiceHostEnrollments()[0]!.enabled).toBe(false);
+  expect(f.storage.listServiceHostEnrollments()[0]!.ownerStop).toBe("pause");
   expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "docs/b.md")).toMatchObject({retired: true, enabled: false});
   expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "docs/retry.md")).toMatchObject({enabled: true});
   expect((await f.handle(f.request("POST", {shareId: scope.shareId, retry: true, path: binding.currentPath}))).status).toBe(400);
@@ -76,7 +82,7 @@ it("reports ready only with completed retained activation and the current native
     const response = await f.handle(f.request());
     expect(response.status).toBe(200); expect(response.headers.get("cache-control")).toBe("private, no-store");
     const text = await response.text();
-    for (const secret of [enrolled.credentialNonce, "account-token", "owner-1", "replicationEpoch", "streamIdentity"]) expect(text).not.toContain(secret);
+    for (const secret of [deriveServiceHostBearer(enrolled, {key, namespace}), "account-token", "owner-1", "replicationEpoch", "streamIdentity"]) expect(text).not.toContain(secret);
     return JSON.parse(text).documents[0];
   };
   f.host.ready.mockReturnValue(true);
@@ -133,6 +139,9 @@ it("clears derived capacity refusals when an owner frees space and retries enrol
   const read = async () => (await f.handle(f.request("GET", undefined, {}, "?refusals=1"))).json();
   expect(await read()).toMatchObject({refusals: [{shareId: "pending-share", code: "quota_exceeded"}], nextCursor: null});
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true});
+  // The stopped document holds its place until the host releases it.
+  expect(await read()).toMatchObject({refusals: [{shareId: "pending-share", code: "quota_exceeded"}], nextCursor: null});
+  f.release(binding.objectId);
   expect(await read()).toEqual({ok: true, refusals: [], nextCursor: null});
   expect((await f.handle(f.request("POST", {shareId: "pending-share"}))).status).toBe(202);
   expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "pending/a.md")).toMatchObject({enabled: true});
@@ -143,6 +152,7 @@ it("advances refusal pages past healthy shares to an oversized share", async () 
   const f = await fixture();
   f.storage.enrollServiceHostDocument(f.input);
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true});
+  f.release(binding.objectId);
   for (let index = 0; index < 65; index++) {
     const shareId = `page-${String(index).padStart(3, "0")}`;
     f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) SELECT ?,workspace_id,granter_user_id,selector_json,created_at_ms FROM sync_relay_shares WHERE share_id=?").run(shareId, scope.shareId);
@@ -163,6 +173,7 @@ it("counts only missing documents when a share contains more than 64 stopped doc
     const path = `docs/stopped-${index}.md`; f.seed(path, `stopped-${index}`);
     f.storage.enrollServiceHostDocument({...f.input, path});
     f.storage.setServiceHostEnrollmentEnabled({...f.input, path, enabled: false, retire: true});
+    f.release(`stopped-${index}`);
   }
   expect(await (await f.handle(f.request("GET", undefined, {}, "?refusals=1"))).json()).toEqual({ok: true, refusals: [], nextCursor: null});
   expect((await f.handle(f.request("POST", {shareId: scope.shareId, retry: true}))).status).toBe(202);
@@ -170,6 +181,7 @@ it("counts only missing documents when a share contains more than 64 stopped doc
   expect(f.storage.listServiceHostEnrollments()[0]!.path).toBe(binding.currentPath);
   expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "docs/stopped-0.md")).toMatchObject({retired: true, enabled: false});
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true});
+  f.release(binding.objectId);
   expect(await (await f.handle(f.request("GET", undefined, {}, "?refusals=1"))).json()).toEqual({ok: true, refusals: [], nextCursor: null});
   expect((await f.handle(f.request("POST", {shareId: scope.shareId, retry: true}))).status).toBe(200);
   expect(f.storage.listServiceHostEnrollments()).toEqual([]);
@@ -252,6 +264,7 @@ it.each(["blob", "log"] as const)("a service token revoked during the %s body ca
     {authorization: `Bearer ${bearer}`, "content-type": kind === "blob" ? "application/octet-stream" : "application/json"});
   const result = handler(pending.request); await pending.started;
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false});
+  f.release(binding.objectId);
   pending.finish(kind === "blob" ? bytes : new TextEncoder().encode(JSON.stringify({replicationEpoch: "epoch", streamIdentity: "stream", originId: "service", ops: [
     {originSeq: 0, opKind: "moment.append", recordedAtMs: 10, payload: {operation: "write"}}]})));
   expect((await result).status).toBe(404);
@@ -274,6 +287,9 @@ it("retires an owner document, lists it separately, and resumes its retained ide
   const bearer = deriveServiceHostBearer(first, {key, namespace});
   const stop = await f.handle(f.request("DELETE", {path: first.path, retire: true}));
   expect(await stop.json()).toEqual({ok: true, path: first.path, status: "retired"});
+  // Until the host releases it, the stopped document stays listed as paused.
+  expect(await (await f.handle(f.request())).json()).toEqual({ok: true, documents: [{path: first.path, status: "paused"}]});
+  f.release(first.objectId);
   expect(await (await f.handle(f.request())).json()).toEqual({ok: true, documents: []});
   discoverServiceHostDocuments(f.storage);
   expect(f.storage.listServiceHostEnrollments()).toEqual([]);
@@ -289,6 +305,7 @@ it("retires an owner document, lists it separately, and resumes its retained ide
 it("discovers a new document after more than 64 prior shares without reviving retired enrollment", async () => {
   const f = await fixture(); f.storage.enrollServiceHostDocument(f.input);
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true});
+  f.release(binding.objectId);
   for (let index = 0; index < 65; index++) {
     const shareId = `old-${String(index).padStart(3, "0")}`;
     f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) SELECT ?,workspace_id,granter_user_id,selector_json,created_at_ms FROM sync_relay_shares WHERE share_id=?").run(shareId, scope.shareId);
@@ -302,4 +319,27 @@ it("discovers a new document after more than 64 prior shares without reviving re
   expect(last).toBeNull();
   expect(f.storage.listServiceHostEnrollments().map(row => row.path)).toEqual(["docs/b.md"]);
   expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)?.retired).toBe(true);
+});
+
+it("hosts a document retired by revocation again for a new Edit share, but leaves an owner's Pause or Stop", async () => {
+  const f = await fixture(); f.seed("docs/paused.md", "paused-object"); f.seed("docs/stopped.md", "stopped-object");
+  discoverServiceHostDocuments(f.storage);
+  await f.handle(f.request("DELETE", {path: "docs/paused.md"}));
+  await f.handle(f.request("DELETE", {path: "docs/stopped.md", retire: true}));
+  expect(f.storage.revokeShareGrant({shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 30}).ok).toBe(true);
+  for (const objectId of [binding.objectId, "paused-object", "stopped-object"]) expect(f.release(objectId)).toMatchObject({enabled: false, retired: true});
+  discoverServiceHostDocuments(f.storage);
+  expect(f.storage.listServiceHostEnrollments()).toEqual([]);
+  // A new Edit share covering the folder; nobody presses Resume.
+  f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES ('new-share',?,'owner-1',?,40)")
+    .run(scope.workspaceId, JSON.stringify({paths: ["docs"], versionId: null}));
+  f.raw.prepare("INSERT INTO sync_relay_share_grants SELECT 'new-grant','new-share',principal_kind,principal_user_id,principal_email,access,generation,'active',40,NULL,parent_grant_id FROM sync_relay_share_grants WHERE grant_id=?").run(scope.grantId);
+  expect(await (await f.handle(f.request("GET", undefined, {}, "?refusals=1"))).json()).toEqual({ok: true, refusals: [], nextCursor: null});
+  discoverServiceHostDocuments(f.storage);
+  expect(f.storage.listServiceHostEnrollments().map(row => [row.path, row.enabled, row.ownerStop, row.shareId])).toEqual([[binding.currentPath, true, null, scope.shareId]]);
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "docs/paused.md")).toMatchObject({retired: true, ownerStop: "pause"});
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "docs/stopped.md")).toMatchObject({retired: true, ownerStop: "retire"});
+  // The owner's Resume brings back their paused document.
+  expect((await f.handle(f.request("POST", {path: "docs/paused.md"}))).status).toBe(202);
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "docs/paused.md")).toMatchObject({retired: false, enabled: true, ownerStop: null});
 });
