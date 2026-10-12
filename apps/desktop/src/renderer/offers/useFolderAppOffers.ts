@@ -20,7 +20,9 @@ export function useFolderAppOffers(input: {
   enabled: boolean;
   expandedFolders: readonly string[];
   activePath: string | null;
-  onError(folder: string, error: unknown, retry: () => void): void;
+  // `quiet`: the person was already told this folder fails, so only its
+  // Notices row, with Try again, comes back.
+  onError(folder: string, error: unknown, retry: () => void, quiet: boolean): void;
 }): FolderApps {
   const { workspaceId, enabled } = input;
   const [apps, setApps] = useState<FolderApps>(NO_APPS);
@@ -47,8 +49,9 @@ export function useFolderAppOffers(input: {
     });
   }, []);
 
-  // A folder that failed says so once. Asking again on its own, as focus
-  // does, stays quiet until the folder reads or the person presses Try again.
+  // Every failure keeps the folder's Notices row. Only the first raises a
+  // toast: asking again on its own, as focus does, stays quiet until the
+  // folder reads or the person presses Try again.
   const ask = useCallback((folder: string, retried = false) => {
     asked.current.add(folder);
     const failed = failing.current;
@@ -64,9 +67,10 @@ export function useFolderAppOffers(input: {
         apply(answer);
       },
       (error: unknown) => {
-        if (failed !== failing.current || (failed.has(folder) && !retried)) return;
+        if (failed !== failing.current) return;
+        const quiet = failed.has(folder) && !retried;
         failed.add(folder);
-        onError.current(folder, error, () => ask(folder, true));
+        onError.current(folder, error, () => ask(folder, true), quiet);
       },
     );
   }, [apply]);

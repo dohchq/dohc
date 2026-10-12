@@ -1543,11 +1543,12 @@ export function DesktopWorkspaceShell(props: {
     enabled: workspaceIsReady && !shareViewEnded,
     expandedFolders: wb.expandedFolders,
     activePath: wb.editorGroups.find((group) => group.id === wb.activeEditorGroup)?.activeTab ?? null,
-    onError: (folder, error, retry) => reportShellFailure({
+    onError: (folder, error, retry, quiet) => reportShellFailure({
       message: `dohc could not read the folder ${folder}.`,
       cause: error,
       retry,
       identity: `folder-app:${folder}`,
+      quiet,
     }),
   });
   const appFolders = useMemo(() => new Set(folderApps.keys()), [folderApps]);

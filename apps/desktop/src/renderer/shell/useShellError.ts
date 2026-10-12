@@ -278,10 +278,13 @@ export function useShellError(workspaceId: string) {
   // import's result replacing the last; an identity does the same for one
   // thing, such as one folder. `repeat` keeps an unchanged message's row
   // and toast state. A changed message, or a missing row, toasts again.
+  // `quiet` files the row without a new toast, for a failure the person was
+  // already told about; a toast still open stays open.
   const reportShellFailure = useCallback(
     (failure: {
       title?: string;
       repeat?: boolean;
+      quiet?: boolean;
       message: string;
       cause?: unknown;
       details?: ReadonlyArray<ErrorDetailField>;
@@ -306,7 +309,7 @@ export function useShellError(workspaceId: string) {
         ...(failure.action ? { action: failure.action } : {}),
         ...(failure.kind ? { kind: failure.kind } : {}),
         ...(failure.identity !== undefined ? { identity: failure.identity } : {}),
-      }, failure.repeat ? "repeat" : false);
+      }, failure.quiet ? "keep" : failure.repeat ? "repeat" : false);
     },
     [push],
   );

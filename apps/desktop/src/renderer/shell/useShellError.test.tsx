@@ -300,6 +300,16 @@ describe("useShellError", () => {
     expect(result.current.shellErrors).toEqual([]);
   });
 
+  it("files a quiet failure as a row without a toast, and keeps an open toast open", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    act(() => result.current.reportShellFailure({ message: "Could not read site.", identity: "folder-app:site", quiet: true }));
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([true]);
+    act(() => result.current.dismissShellError(result.current.shellErrors[0]!.id));
+    act(() => result.current.reportShellFailure({ message: "Could not read site.", identity: "folder-app:site" }));
+    act(() => result.current.reportShellFailure({ message: "Could not read site.", identity: "folder-app:site", quiet: true }));
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);
+  });
+
   it("replaces a repeated failure's row and keeps that row's toast, open or closed", () => {
     const { result } = renderHook(() => useShellError("ws-a"));
     act(() => result.current.reportShellFailure({ message: "Could not load History.", identity: "about-history:a.md" }));
