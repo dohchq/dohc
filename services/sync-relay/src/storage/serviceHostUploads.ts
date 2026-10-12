@@ -3,15 +3,16 @@ import type {PutBlobResult, SqliteDb} from "./types";
 import {type PutBlobInput, putBlobInTransaction} from "./blobs";
 
 // The blobs a workspace's service host proved it holds by uploading them. A
-// hosted write may name these whether or not any row it can read does. Kept
-// until the workspace stops being hosted, so a pending write never loses them.
+// hosted write may name these whether or not any row it can read does. Proof
+// lives as long as the blob it names, so the workspace quota bounds both, and
+// ends early when the workspace stops being hosted.
 export const SERVICE_HOST_UPLOADS = "sync_relay_service_host_uploads";
 const MIGRATION = "service-host-uploads-v1";
 const SQL = `CREATE TABLE ${SERVICE_HOST_UPLOADS} (
   workspace_id TEXT NOT NULL,
   sha256 TEXT NOT NULL CHECK (length(sha256)=64 AND sha256 NOT GLOB '*[^0-9a-f]*'),
   PRIMARY KEY (workspace_id, sha256),
-  FOREIGN KEY (workspace_id) REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE
+  FOREIGN KEY (workspace_id, sha256) REFERENCES sync_relay_blobs(workspace_id, sha256) ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID`;
 
 export function initializeServiceHostUploadSchema(db: SqliteDb): void {

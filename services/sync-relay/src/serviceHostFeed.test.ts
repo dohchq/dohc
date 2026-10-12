@@ -84,7 +84,8 @@ async function fixture() {
   const blobStatus = async (sha256: string) => (await request("GET", `blobs/${sha256}`)).status;
   const hostCoordinate = (originSeq: number) => f.storage.fetchLogCoordinate({workspaceId: ws, originId: HOST_ORIGIN, originSeq});
   const objects = (feed: Page) => [...new Set(feed.ops.map(op => op.opKind === "workspace.init" ? "workspace" : String(op.payload.objectId)))];
-  return {...f, handle, bearer, append, share, setGrant, enroll, request, page, read, push, upload, blobStatus, hostCoordinate, objects};
+  const uploads = () => f.raw.prepare("SELECT count(*) AS count FROM sync_relay_service_host_uploads WHERE workspace_id=?").get(ws)!.count;
+  return {...f, handle, bearer, append, share, setGrant, enroll, request, page, read, push, upload, blobStatus, hostCoordinate, objects, uploads};
 }
 
 it("serves hosted rows unchanged and refuses private files, their blobs and coordinates", async () => {
@@ -333,10 +334,15 @@ it("keeps upload proof through later uploads and idle time", async () => {
   const f = await fixture();
   const first = blob("first upload");
   await f.upload(first);
-  // Ten thousand later uploads' proofs in one commit, then one more through the route.
+  // Ten thousand later uploads in one commit, then one more through the route.
+  const put = f.raw.prepare("INSERT INTO sync_relay_blobs(workspace_id,sha256,byte_length,content,created_at_ms) VALUES (?,?,?,?,1)");
   const proof = f.raw.prepare("INSERT INTO sync_relay_service_host_uploads(workspace_id,sha256) VALUES (?,?)");
   f.raw.exec("BEGIN");
-  for (let index = 0; index < 10_000; index++) proof.run(ws, blob(`later upload ${index}`).sha256);
+  for (let index = 0; index < 10_000; index++) {
+    const later = blob(`later upload ${index}`);
+    put.run(ws, later.sha256, later.content.byteLength, later.content);
+    proof.run(ws, later.sha256);
+  }
   f.raw.exec("COMMIT");
   await f.upload(blob("last upload"));
   vi.setSystemTime(1_000_000 + 10 * 60_000);
@@ -344,9 +350,24 @@ it("keeps upload proof through later uploads and idle time", async () => {
   expect(await f.blobStatus(first.sha256)).toBe(200);
 });
 
+it("drops upload proof with its collected blob until the host uploads it again", async () => {
+  const f = await fixture();
+  const collected = blob("collected upload");
+  await f.upload(collected);
+  expect(f.uploads()).toBe(1);
+  const swept = await f.storage.collectUnreferencedBlobs(ws, {nowMs: Number.MAX_SAFE_INTEGER});
+  expect(swept.removedSha256s).toEqual([collected.sha256]);
+  expect(f.uploads()).toBe(0);
+  const edit = ["ydoc.update", ydoc(binding.objectId, "docs/a.md", collected)] satisfies [string, Record<string, unknown>];
+  expect(await (await f.push([edit])).json()).toMatchObject({code: "share_op_rejected"});
+  await f.upload(collected);
+  expect(f.uploads()).toBe(1);
+  expect((await f.push([edit])).status).toBe(200);
+});
+
 it("drops upload proof when the workspace stops being hosted", async () => {
   const f = await fixture();
-  const uploads = () => f.raw.prepare("SELECT count(*) AS count FROM sync_relay_service_host_uploads WHERE workspace_id=?").get(ws)!.count;
+  const {uploads} = f;
   const setEnabled = (path: string, enabled: boolean) =>
     f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path, ownerUserId: "owner-1", enabled, nowMs: 30, guard() {}});
   const kept = blob("kept upload");
