@@ -13,8 +13,10 @@ import type { ErrorService } from "./reportingConfig";
 // injects. PostHog finds the file's uploaded source map by this ID.
 const CHUNK_ID = /\n\/\/# chunkId=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\s*$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-// Carries a report's time to before_send, which moves it to the event.
+// Carry a report's time and whether dohc caught its error to before_send,
+// which moves them to the event and its first exception.
 const OCCURRED_AT = "dohc_occurred_at_ms";
+const HANDLED = "dohc_handled";
 
 // The SDK's client, reading only the error a report hands it. By default
 // the SDK also opens each frame's file to quote lines around it.
@@ -62,8 +64,11 @@ export function createErrorSender(input: {
   });
 
   function finish(event: EventMessage): EventMessage {
-    const { [OCCURRED_AT]: atMs, ...properties } = event.properties ?? {};
-    for (const exception of properties.$exception_list as ExceptionList) {
+    const { [OCCURRED_AT]: atMs, [HANDLED]: handled, ...properties } = event.properties ?? {};
+    const exceptions = properties.$exception_list as ExceptionList;
+    // The SDK marks every error it is handed as handled.
+    if (exceptions[0]?.mechanism) exceptions[0].mechanism.handled = handled === true;
+    for (const exception of exceptions) {
       const frames = exception.stacktrace?.frames ?? [];
       if (frames.length === 0) delete exception.stacktrace;
       for (const frame of frames) {
@@ -73,9 +78,11 @@ export function createErrorSender(input: {
         if (chunkId) frame.chunk_id = chunkId;
       }
     }
-    // The release the build's injected files name. The SDK also reads an
-    // environment variable, which can hold anything.
-    if (typeof properties.$release_id !== "string" || !UUID.test(properties.$release_id)) delete properties.$release_id;
+    // The release the build's injected files name. The SDK prefers
+    // POSTHOG_RELEASE_ID from the environment, which can name any release.
+    const release = (globalThis as { _posthogReleaseId?: unknown })._posthogReleaseId;
+    if (typeof release === "string" && UUID.test(release)) properties.$release_id = release;
+    else delete properties.$release_id;
     return { ...event, properties, timestamp: new Date(atMs as number) };
   }
 
@@ -96,7 +103,11 @@ export function createErrorSender(input: {
     const current: { signal: AbortSignal; response?: Response } = { signal };
     sending = current;
     try {
-      await client.captureExceptionImmediate(report.error, undefined, { ...report.properties, [OCCURRED_AT]: report.atMs });
+      await client.captureExceptionImmediate(report.error, undefined, {
+        ...report.properties,
+        [OCCURRED_AT]: report.atMs,
+        [HANDLED]: report.handled,
+      });
       return current.response;
     } finally {
       sending = null;

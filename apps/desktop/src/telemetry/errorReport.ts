@@ -48,6 +48,9 @@ export interface ErrorReport {
   error: Error;
   properties: Record<string, string>;
   atMs: number;
+  // False when nothing caught the error: one that reached main's or a
+  // window's last handler.
+  handled: boolean;
   // Each dohc file the frames name, by the path under dohc's folder.
   files: ReadonlyMap<string, string>;
 }
@@ -86,8 +89,9 @@ export function errorReport(
     const group = JSON.stringify([tags, links.map(({ type, value }) => [type, value])]);
     properties.$exception_fingerprint = createHash("sha256").update(group).digest("hex");
   }
+  const handled = reported.kind === "renderer" ? reported.origin === "boundary" : reported.event.kind !== "main-exception";
   return {
-    report: { error: chainError(links), properties, atMs: facts.atMs, files },
+    report: { error: chainError(links), properties, atMs: facts.atMs, files, handled },
     key: JSON.stringify([tags, links]),
   };
 }

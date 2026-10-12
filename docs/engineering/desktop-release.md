@@ -242,6 +242,16 @@ once source maps resolve them. A report without such a frame sets
 `$exception_fingerprint` from the failed part and the error chain, so problems
 with the same message stay apart.
 
+Each error report carries a new random distinct ID. PostHog's count of users
+affected by an issue therefore counts reports, not people or installations.
+An installation sends a problem at most once per launch, so a problem that
+recurs on one computer still adds a report on each launch.
+
+An error report sets `mechanism.handled` on its first exception to `false`
+when nothing caught the error in main or a window. It is `true` for an error
+a window's error boundary caught, and for engine and process failures that
+dohc handled.
+
 ### Upload source maps
 
 A production build writes hidden source maps beside its files. The installer
@@ -271,29 +281,117 @@ add the missing value or clear the key. A dry run skips the step.
 ### Check a release against PostHog
 
 The tests prove what leaves the app, but not that PostHog accepts and
-resolves it. Run this check on Windows and on macOS for the first release
-that reports, and after a `posthog-node` or `@posthog/cli` update:
+resolves it. Run both checks below on Windows and on macOS for the first
+release that reports, and after a `posthog-node` or `@posthog/cli` update.
+
+#### Check source maps before the release
+
+The release workflow publishes as soon as its packages pass, so check a local
+package of the release commit first.
+`apps/desktop/scripts/check-error-symbolication.mjs` checks that PostHog
+resolves frames in the packaged main script and in the window's entry script.
+
+The script reads the package's `app.asar` and the `apps/desktop/dist` folder
+of the build that made it. The package leaves source maps out, so only that
+folder has them. The script stops when a script in the folder differs from the
+packaged one, or when its source map carries another chunk ID. It picks a
+position in each script that the source map ties to dohc's own source. It then
+builds one main error and one window error at those positions. dohc's own
+report code prepares and sends them: `createTelemetry`, the same allowlist,
+and `posthog-node`, built from the checkout. Both reports set `channel` and
+`dist` to `release-check`.
+
+The script makes these errors itself, so this check does not test the reports
+notice or the switches. The installed release check below tests them.
+
+1. Use a clean checkout of the release commit on a computer you control.
+2. In one shell, set `DOHC_POSTHOG_KEY` and `DOHC_POSTHOG_HOST` to the
+   release's PostHog project.
+3. In the same shell, set `POSTHOG_CLI_API_KEY` and `POSTHOG_CLI_PROJECT_ID`.
+   Set `POSTHOG_CLI_HOST` only for a host other than `https://us.posthog.com`.
+4. Set `DESKTOP_VERSION` to the release version followed by `-release-check`.
+   Set `DOHC_DESKTOP_DIST` to the package's dist, such as `win-x64`.
+5. Set `CSC_IDENTITY_AUTO_DISCOVERY` to `false`, so the package stays unsigned.
+6. From the repository root, build, upload, and package in this order:
+
+   ```sh
+   node scripts/update-desktop-package-version.mjs
+   pnpm build:desktop
+   node scripts/upload-desktop-source-maps.mjs
+   pnpm --filter @dohc/desktop run build:engine
+   pnpm --filter @dohc/desktop exec electron-builder --dir --publish never
+   ```
+
+7. Run the script without `--send`. It sends nothing:
+
+   ```sh
+   node apps/desktop/scripts/check-error-symbolication.mjs --app <app.asar> --dist apps/desktop/dist
+   ```
+
+   On Windows, `<app.asar>` is
+   `apps/desktop/release/win-unpacked/resources/app.asar`. On an Apple
+   silicon Mac, it is
+   `apps/desktop/release/mac-arm64/dohc.app/Contents/Resources/app.asar`.
+8. Confirm that the output shows `"passed": true`. Read each event's
+   `payload`, which is the report the script would send.
+9. Run the same command with `--send`. The script sends the two reports to
+   the project from step 2 and waits up to 3 s for answers.
+10. Confirm that the output shows `"passed": true`. Record each event's
+    `eventId`, `expected`, and `releaseId`.
+11. In PostHog, find each event by its `eventId`. Confirm that its top frame
+    shows the `expected` file and line, and that its `$release_id` equals
+    `releaseId`.
+
+If `"passed"` is `false`, each event's `problem` says what failed. Fix the
+cause and run the check again. Do not publish a release that reports until
+PostHog resolves both frames.
+
+#### Check the installed release
+
+Use a disposable OS account or virtual machine in which no other dohc runs.
+These steps stop one engine process: the one that this installation started.
 
 1. In the release run, confirm that **Upload source maps** passed.
 2. In PostHog, open the error tracking settings and find the symbol sets.
    Confirm that the release's chunk IDs are there.
 3. Install the package, open a workspace, and close the reports notice. Keep
    **Error reports** on.
-4. End the workspace engine process. On Windows, run
-   `taskkill /F /IM dohc-workspace-engine.exe`. On macOS, run
-   `pkill -9 dohc-workspace-engine`.
-5. In PostHog, confirm that an `EngineDaemonUnavailableError` issue arrives
+4. Find the engine process of this installation. On Windows, set `$install`
+   to the installation folder, then run:
+
+   ```powershell
+   $engine = @(Get-CimInstance Win32_Process -Filter "Name = 'dohc-workspace-engine.exe'" |
+     Where-Object ExecutablePath -eq "$install\resources\workspace-engine\dohc-workspace-engine.exe")
+   $engine | Select-Object ProcessId, ParentProcessId
+   Get-CimInstance Win32_Process -Filter "ProcessId = $($engine[0].ParentProcessId)" |
+     Select-Object ExecutablePath, CommandLine
+   Invoke-CimMethod -InputObject $engine[0] -MethodName GetOwner | Select-Object User
+   ```
+
+   Continue only if `$engine` holds one process, its owner is the disposable
+   account, and its parent is `$install\dohc.exe` with no `--type=` in its
+   command line. On macOS, run:
+
+   ```sh
+   main=$(pgrep -x -U "$(id -u)" dohc)
+   engine=$(pgrep -P "$main" -f /Contents/Resources/workspace-engine/dohc-workspace-engine)
+   ps -o user=,pid=,ppid=,command= -p "$main,$engine"
+   ```
+
+   Continue only if `main` and `engine` each hold one process ID, both belong
+   to your account, and both commands are in the installed `dohc.app`.
+5. Stop only that process. On Windows, run
+   `Stop-Process -Id $engine[0].ProcessId -Force`. On macOS, run
+   `kill -9 "$engine"`.
+6. In PostHog, confirm that an `EngineDaemonUnavailableError` issue arrives
    with `process` set to `engine`, the release's `app_version` and `dist`, and
    `$release_id`.
-6. Confirm that the event holds no file names, messages, or paths from your
+7. Confirm that the event holds no file names, messages, or paths from your
    computer, and that PostHog made no person for it.
-7. Turn **Error reports** off, end the engine again, and confirm that PostHog
+8. Turn **Error reports** off. dohc starts a new engine after step 5, so do
+   step 4 again to find its process. Do step 5 again, and confirm that PostHog
    receives nothing.
 
-A release build offers no way to cause an error with frames on purpose. To
-check that PostHog resolves frames through the uploaded source maps, open the
-first `main` or `renderer` issue after the release. Confirm that its frames
-show original source files and lines.
 ## What the release workflow proves
 
 The workflow runs the release helper tests and the desktop release smoke. Each

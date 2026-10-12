@@ -564,6 +564,8 @@ describe("reports at quit", () => {
 });
 
 describe("what an error report holds", () => {
+  const RELEASE = "0192f5b8-0000-7000-8000-000000000001";
+  const FOREIGN_RELEASE = "0192f5b8-0000-7000-8000-0000000000ff";
   const { _posthogReleaseId: releaseBefore } = globalThis as { _posthogReleaseId?: unknown };
   afterEach(() => {
     (globalThis as { _posthogReleaseId?: unknown })._posthogReleaseId = releaseBefore;
@@ -623,7 +625,7 @@ describe("what an error report holds", () => {
     expect(exceptions(errorCalls()[0]!)).toEqual([
       {
         type: "TypeError", value: "<message withheld>",
-        mechanism: { type: "generic", handled: true, synthetic: false, exception_id: 0 },
+        mechanism: { type: "generic", handled: false, synthetic: false, exception_id: 0 },
         stacktrace: { type: "raw", frames: [app(3, 4), withheld, app(10, 20)] },
       },
       {
@@ -643,24 +645,53 @@ describe("what an error report holds", () => {
     expect(readCode).toHaveBeenCalledTimes(1);
   });
 
-  it("names the release the build's injected files name, and nothing else", async () => {
-    const release = "0192f5b8-0000-7000-8000-000000000001";
-    (globalThis as { _posthogReleaseId?: unknown })._posthogReleaseId = release;
+  it.each([
+    // The SDK prefers POSTHOG_RELEASE_ID to the injected release.
+    { label: "another release's ID in the environment", injected: RELEASE, env: FOREIGN_RELEASE, sent: RELEASE },
+    { label: "a variable that is not a release ID", injected: RELEASE, env: SECRET, sent: RELEASE },
+    { label: "no injected release", injected: undefined, env: FOREIGN_RELEASE, sent: undefined },
+    { label: "an injected value that is not a release ID", injected: SECRET, env: FOREIGN_RELEASE, sent: undefined },
+    { label: "an injected value that is not text", injected: 42, env: FOREIGN_RELEASE, sent: undefined },
+  ])("names only the release the build's injected files name, with $label", async ({ injected, env, sent }) => {
+    (globalThis as { _posthogReleaseId?: unknown })._posthogReleaseId = injected;
+    vi.stubEnv("POSTHOG_RELEASE_ID", env);
     const reports = shown();
     reports.setPrivacy(ON);
     reports.reportError(anError());
     await reports.flush();
-    expect(exceptionEvent(errorCalls()[0]!).properties.$release_id).toBe(release);
+    const { properties } = exceptionEvent(errorCalls()[0]!);
+    if (sent) expect(properties.$release_id).toBe(sent);
+    else expect(properties).not.toHaveProperty("$release_id");
+    const body = String(errorCalls()[0]!.init.body);
+    for (const leaked of [env, injected]) {
+      if (typeof leaked === "string" && leaked !== sent) expect(body).not.toContain(leaked);
+    }
+  });
 
-    // The SDK prefers this variable to the injected release.
-    vi.stubEnv("POSTHOG_RELEASE_ID", SECRET);
-    calls.length = 0;
-    const next = shown();
-    next.setPrivacy(ON);
-    next.reportError(anError());
-    await next.flush();
-    expect(exceptionEvent(errorCalls()[0]!).properties).not.toHaveProperty("$release_id");
-    expect(String(errorCalls()[0]!.init.body)).not.toContain(SECRET);
+  it("says whether dohc caught the error, and keeps the chain below it", async () => {
+    const reports = shown();
+    reports.setPrivacy(ON);
+    const stack = (line: number) => `    at x (${BUNDLE}:${line}:2)`;
+    reports.reportError({ kind: "crash", event: { kind: "main-exception", error: privateError(), origin: "unhandledRejection" } });
+    reports.reportError({ kind: "renderer", origin: "uncaught", error: { name: "TypeError", stack: stack(1) } });
+    reports.reportError({ kind: "renderer", origin: "rejection", error: { name: "TypeError", stack: stack(2) } });
+    reports.reportError({ kind: "renderer", origin: "boundary", error: { name: "TypeError", stack: stack(3) } });
+    reports.reportError({
+      kind: "crash",
+      event: { kind: "engine", stage: "restarting", error: new EngineDaemonUnavailableError("Rust engine daemon exited unexpectedly with code 3.") },
+    });
+    await reports.flush();
+    expect(errorCalls().map((call) => exceptions(call).map(({ mechanism }) => mechanism))).toEqual([
+      [
+        { type: "generic", handled: false, synthetic: false, exception_id: 0 },
+        { type: "chained", source: "cause", synthetic: false, exception_id: 1, parent_id: 0 },
+      ],
+      [{ type: "generic", handled: false, synthetic: false, exception_id: 0 }],
+      [{ type: "generic", handled: false, synthetic: false, exception_id: 0 }],
+      [{ type: "generic", handled: true, synthetic: false, exception_id: 0 }],
+      [{ type: "generic", handled: true, synthetic: false, exception_id: 0 }],
+    ]);
+    for (const call of errorCalls()) expect(String(call.init.body)).not.toContain("dohc_");
   });
 
   it("keeps an engine message only when it matches a known template", async () => {
@@ -784,7 +815,8 @@ describe("how PostHog groups problems", () => {
     expect(here!.exceptions[0]!.stacktrace).not.toEqual(there!.exceptions[0]!.stacktrace);
     expect(restarting!.exceptions).toEqual(stopped!.exceptions);
     expect(restarting!.fingerprint).not.toBe(stopped!.fingerprint);
-    expect(boundary!.exceptions).toEqual(uncaught!.exceptions);
+    const caught = ({ mechanism: { handled, ...mechanism }, ...exception }: SentException) => ({ ...exception, mechanism });
+    expect(boundary!.exceptions.map(caught)).toEqual(uncaught!.exceptions.map(caught));
     expect(boundary!.fingerprint).not.toBe(uncaught!.fingerprint);
   });
 });
@@ -895,6 +927,89 @@ describe("limits", () => {
       ["https://ph.example.test/batch/", true],
       ["https://ph.example.test/batch/", false],
     ]);
+  });
+});
+
+// The SDK sends to another endpoint, with its own request code, when the
+// person's environment sets POSTHOG_CAPTURE_MODE=v1.
+describe("error reports through the SDK's capture v1", () => {
+  const V1_URL = "https://ph.example.test/i/v1/analytics/events";
+  beforeEach(() => {
+    vi.stubEnv("POSTHOG_CAPTURE_MODE", "v1");
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("sends the same allowlisted report, in one request per problem", async () => {
+    const reports = shown();
+    reports.setPrivacy(ON);
+    reports.reportError({ kind: "crash", event: { kind: "main-exception", error: privateError(), origin: "uncaughtException" } });
+    await reports.flush();
+    expect(calls).toHaveLength(1);
+    const [call] = calls;
+    expect(call!.url).toBe(V1_URL);
+    expect(call!.init.redirect).toBe("error");
+    expect(new Headers(call!.init.headers).get("authorization")).toBe(`Bearer ${KEY}`);
+    expect(new Headers(call!.init.headers).get("content-encoding")).toBeNull();
+    const body = String(call!.init.body);
+    for (const leaked of [SECRET, "sam", INSTALL_ID]) expect(body).not.toContain(leaked);
+    expect(body).not.toMatch(/Users/i);
+    const sent = JSON.parse(body) as { batch: Array<SentEvent & { options: Record<string, unknown> }> };
+    expect(sent.batch).toHaveLength(1);
+    const [event] = sent.batch;
+    expect(event!.event).toBe("$exception");
+    expect(event!.distinct_id).toMatch(UUID);
+    expect(event!.options).toEqual({ process_person_profile: false });
+    expect(event!.properties).toMatchObject({ $geoip_disable: true, process: "main", origin: "uncaughtException", dist: "win-x64" });
+    const [error, cause] = event!.properties.$exception_list as SentException[];
+    expect(error).toMatchObject({ type: "TypeError", value: "<message withheld>", mechanism: { handled: false } });
+    expect(error!.stacktrace!.frames.map((frame) => frame.chunk_id ?? frame.filename)).toEqual([MAIN_CHUNK, "<withheld>", MAIN_CHUNK]);
+    expect(cause).toMatchObject({ type: "Error", value: "<message withheld> (code ENOENT)" });
+  });
+
+  it("drops a failed send and makes no second attempt", async () => {
+    const reports = shown();
+    reports.setPrivacy(ON);
+    respond = async () => new Response(null, { status: 503 });
+    reports.reportError(anError());
+    await reports.flush();
+    expect(calls).toHaveLength(1);
+  });
+
+  it("stops the send under way when the switch turns off", async () => {
+    const reports = shown();
+    reports.setPrivacy(ON);
+    const held: Call[] = [];
+    respond = (call) => new Promise((_resolve, reject) => {
+      held.push(call);
+      call.init.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+    });
+    reports.reportError(anError());
+    reports.reportError(anError("RangeError"));
+    await vi.advanceTimersByTimeAsync(REPORT_LIMITS.errorFlushMs);
+    expect(held).toHaveLength(1);
+    reports.setPrivacy({ usageReports: true, errorReports: false });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(held[0]!.init.signal?.aborted).toBe(true);
+    await reports.flush();
+    expect(calls).toHaveLength(1);
+  });
+
+  it("waits as long as a rate limit says", async () => {
+    const reports = shown();
+    reports.setPrivacy(ON);
+    respond = async () => new Response(null, { status: 429, headers: { "retry-after": "120" } });
+    reports.reportError(anError());
+    await settle();
+    respond = async () => new Response(null, { status: 200 });
+    reports.reportError(anError("RangeError"));
+    await settle();
+    expect(calls).toHaveLength(1);
+    nowMs += 121_000;
+    reports.reportError(anError("SyntaxError"));
+    await settle();
+    expect(calls.map((call) => call.url)).toEqual([V1_URL, V1_URL]);
   });
 });
 
