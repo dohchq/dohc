@@ -89,18 +89,16 @@ vi.mock("../../../packages/workspace-engine-client/src/daemon/index.js", async i
   const actual = await importOriginal<typeof import("../../../packages/workspace-engine-client/src/daemon/index.js")>();
   return {...actual, createEngineClient: async (options: Parameters<typeof actual.createEngineClient>[0]) => {
     const configPath = options.env?.DOHC_ENGINE_LIVE_HOST_CONFIG;
-    if (configPath) {
-      const config = JSON.parse(readFileSync(configPath, "utf8"));
+    // The service host starts empty and attaches each workspace with its relay, so the loopback rewrite applies to the attach request.
+    const loopback = (workspace: {relay: {baseUrl: string}}) => {
       const destination = new URL(harness.relayUrl);
       expect(destination.protocol).toBe("http:"); expect(destination.hostname).toBe("127.0.0.1");
       expect(destination.username + destination.password + destination.search + destination.hash).toBe("");
-      for (const workspace of config.workspaces) {
-        expect(workspace.relay.baseUrl).toBe("https://service-activation-relay.example.test");
-        harness.transforms.push({from: workspace.relay.baseUrl, to: destination.origin, insecureLoopbackForTests: true});
-        workspace.relay = {...workspace.relay, baseUrl: destination.origin, allowInsecureLoopbackForTests: true};
-      }
-      writeFileSync(configPath, JSON.stringify(config));
-    }
+      expect(workspace.relay.baseUrl).toBe("https://service-activation-relay.example.test");
+      harness.transforms.push({from: workspace.relay.baseUrl, to: destination.origin, insecureLoopbackForTests: true});
+      return {...workspace, relay: {...workspace.relay, baseUrl: destination.origin, allowInsecureLoopbackForTests: true}};
+    };
+    if (configPath) expect(JSON.parse(readFileSync(configPath, "utf8")).workspaces).toEqual([]);
     const client = await actual.createEngineClient(options);
     if (!configPath) return client;
     const capture = client.captureOwnerActivation.bind(client), adopt = client.sendLiveOwnerAdoption.bind(client);
@@ -120,7 +118,10 @@ vi.mock("../../../packages/workspace-engine-client/src/daemon/index.js", async i
       }
     }
     return new Proxy(client, {get(target, property) {
-      if (property === "sendRequest") return (...args: Parameters<typeof client.sendRequest>) => trace(args[0].method, () => client.sendRequest(...args));
+      if (property === "sendRequest") return (...args: Parameters<typeof client.sendRequest>) => {
+        if (args[0].method === "liveApplication.attachWorkspace") args[0] = {...args[0], params: loopback(args[0].params as {relay: {baseUrl: string}})};
+        return trace(args[0].method, () => client.sendRequest(...args));
+      };
       if (property === "captureOwnerActivation") return async (...args: Parameters<typeof capture>) => {
         const result = await trace("captureOwnerActivation", () => capture(...args));
         harness.captures.push({activationId: result.activationId, requestedActivationId: args[4], source: result.source});

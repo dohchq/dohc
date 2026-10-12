@@ -617,6 +617,8 @@ export interface SyncRelayStorage {
   scanServiceHostCandidateShares(after?: import("./serviceHostEnrollment").ServiceHostCandidateCursor, workspaceId?: string): import("./serviceHostEnrollment").ServiceHostCandidatePage;
   checkServiceHostDocuments(input: {workspaceId: string; ownerUserId: string; shareId: string; paths: readonly string[]}): void;
   setServiceHostEnrollmentEnabled(input: import("./serviceHostEnrollment").SetServiceHostEnrollmentEnabledInput): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
+  serviceHostEnrollmentHasEditGrant(enrollment: Pick<import("./serviceHostEnrollment").ServiceHostEnrollment, "workspaceId" | "ownerUserId" | "path">): boolean;
+  retireUncoveredServiceHostEnrollment(input: {workspaceId: string; objectId: string; nowMs: number}): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
   postNotice(input: import("./notices").PostNoticeInput): void;
   postAutomationWake(input: import("./notices").PostAutomationWakeInput): import("./notices").PostedAutomationWake;
   readNoticeChanges(input: import("./notices").ReadNoticeChangesInput): import("@dohc/workspace-contracts/relay").RelayNoticePage;

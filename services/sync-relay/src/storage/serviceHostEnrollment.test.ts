@@ -252,6 +252,30 @@ it("pages retired documents by path without mixing workspaces or active rows", a
   expect(f.storage.listServiceHostEnrollments()).toHaveLength(1);
 });
 
+it("retires an enrollment only once no active Edit grant on the owner's shares covers it", async () => {
+  const f = await fixture(), enrolled = f.enroll();
+  const covered = () => f.storage.serviceHostEnrollmentHasEditGrant(enrolled);
+  const retire = () => f.storage.retireUncoveredServiceHostEnrollment({workspaceId: scope.workspaceId, objectId: enrolled.objectId, nowMs: 40});
+  const share = (shareId: string, paths: string[], granter = "owner-1") => {
+    f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES (?,?,?,?,0)")
+      .run(shareId, scope.workspaceId, granter, JSON.stringify({paths, versionId: null}));
+    f.raw.prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+      VALUES (?,?,'user','reader',NULL,'edit',1,'active',0,NULL,NULL)`).run(`${shareId}-edit`, shareId);
+  };
+  share("overlap", ["docs"]); share("elsewhere", ["notes"]); share("foreign", ["docs"], "other");
+  expect(f.storage.revokeShareGrant({shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 30}).ok).toBe(true);
+  expect(covered()).toBe(true);
+  expect(retire()).toBeNull();
+  expect(f.storage.listServiceHostEnrollments()).toEqual([enrolled]);
+  // A View grant, another path, or another person's share does not cover the document.
+  f.raw.prepare("UPDATE sync_relay_share_grants SET access='view' WHERE grant_id='overlap-edit'").run();
+  expect(covered()).toBe(false);
+  expect(retire()).toMatchObject({path: binding.currentPath, enabled: false, retired: true, updatedAtMs: 40});
+  expect(f.storage.listServiceHostEnrollments()).toEqual([]);
+  expect(f.storage.listRetiredServiceHostEnrollments(scope.workspaceId).documents.map(row => row.path)).toEqual([binding.currentPath]);
+  expect(retire()).toBeNull();
+});
+
 it("candidate scanning advances past a full page of noncanonical shares", async () => {
   const f = await fixture();
   for (let i = 0; i < 65; i++) {

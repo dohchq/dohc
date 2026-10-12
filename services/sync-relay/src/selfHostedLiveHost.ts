@@ -14,7 +14,7 @@ import type {LiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
 import type {ServiceHostEnrollment} from "./storage/serviceHostEnrollment";
 import {deriveServiceHostBearer} from "./serviceHostCredential";
 import {observeRelayWrites, type LiveHostChanges} from "./relayWriteChanges";
-import {readServiceLiveHostConfig, startServiceLiveHost} from "./serviceLiveHost";
+import {startServiceLiveHost, type ServiceHostedSet} from "./serviceLiveHost";
 import {selfHostLiveProfile} from "./selfHostLiveProfile";
 import {discoverServiceHostDocuments} from "./serviceHostEnrollmentRoutes";
 
@@ -48,21 +48,56 @@ export async function startSelfHostedLiveHost(options: {
   let signature = "", lastError: unknown;
   let discoveryCursor: {workspaceId: string; shareId: string} | undefined;
   let writeGeneration = 1, scanGeneration = 0, scannedGeneration = 0;
+  // The enrollment whose credential each attached workspace replicates with.
+  const credentials = new Map<string, string>();
   const lifetime = new AbortController();
   const eventHandlers = new Set<(event: Event) => void>();
   const signal = AbortSignal.any([lifetime.signal, storage.unavailable]);
   const changes = Effect.runSync(Queue.sliding<void>(1));
   const valid = (row: ServiceHostEnrollment) => row.enabled && storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) &&
     storage.verifyWorkspaceIdentity(row) === "matched" && storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: row.path}) === row.objectId;
-  const selection = () => storage.listServiceHostEnrollments().filter(valid);
-  const selectionSignature = (rows: readonly ServiceHostEnrollment[]) => JSON.stringify(rows.map(({workspaceId, path, shareId, ownerUserId, replicationEpoch, streamIdentity, credentialNonce}) =>
-    ({workspaceId, path, shareId, ownerUserId, replicationEpoch, streamIdentity, credentialNonce})));
+  // A document is hosted only while an active Edit grant covers it.
+  const selection = () => storage.listServiceHostEnrollments().filter(row => valid(row) && storage.serviceHostEnrollmentHasEditGrant(row));
+  const selectionSignature = (rows: readonly ServiceHostEnrollment[]) => JSON.stringify(rows.map(({workspaceId, objectId, path, shareId, ownerUserId, replicationEpoch, streamIdentity, credentialNonce}) =>
+    ({workspaceId, objectId, path, shareId, ownerUserId, replicationEpoch, streamIdentity, credentialNonce})));
   function schedule() {
     if (!signal.aborted) Queue.offerUnsafe(changes, undefined);
   }
   async function stopCurrent() {
     const previous = current; current = undefined;
     if (previous) await previous.close();
+  }
+  async function hostedSet(rows: readonly ServiceHostEnrollment[]): Promise<ServiceHostedSet> {
+    const grouped = new Map<string, ServiceHostEnrollment[]>();
+    for (const row of rows) grouped.set(row.workspaceId, [...grouped.get(row.workspaceId) ?? [], row]);
+    const workspaces = [], chosen = new Map<string, string>();
+    for (const [workspaceId, documents] of grouped) {
+      // Another credential attaches the workspace again, so keep the current one while its enrollment stays hosted.
+      const row = documents.find(document => document.objectId === credentials.get(workspaceId)) ?? documents[0]!;
+      chosen.set(workspaceId, row.objectId);
+      const directory = join(root, createHash("sha256").update(JSON.stringify([history.namespace, row.workspaceId, row.replicationEpoch, row.streamIdentity])).digest("hex"));
+      await mkdir(directory, {recursive: true, mode: 0o700});
+      workspaces.push({root: canonicalPath(directory, true), workspaceId, maxRegistrations: 64,
+        ordinaryReplication: {relay: {baseUrl: relay.origin, bearerToken: deriveServiceHostBearer(row, {key: options.key, namespace: history.namespace})},
+          identity: {kind: "join" as const, replicationEpoch: row.replicationEpoch, streamIdentity: row.streamIdentity}, maxPagesPerPull: 8}});
+    }
+    credentials.clear();
+    for (const [workspaceId, objectId] of chosen) credentials.set(workspaceId, objectId);
+    return {workspaces, documents: rows.map(({workspaceId, objectId, path, shareId}) => ({workspaceId, objectId, path, shareId}))};
+  }
+  async function start(): Promise<Host> {
+    const temporary = await mkdtemp(join(tmpdir(), "dohc-self-host-config-"));
+    try {
+      const configPath = join(temporary, "service.json");
+      // The daemon starts empty. Each update attaches and detaches its workspaces and documents.
+      await writeFile(configPath, JSON.stringify({version: 1, engineExecutable, hostId, instanceId, workspaces: [],
+        ...profile.service, activation: {...profile.service.activation, targets: []}}), {flag: "wx", mode: 0o600});
+      signal.throwIfAborted();
+      const host = await (options.startHost ?? startServiceLiveHost)({configPath, storage, history, frameChanges: options.frameChanges, signal});
+      host.onEvent((event) => { for (const handler of eventHandlers) handler(event); });
+      host.invalidated.addEventListener("abort", schedule, {once: true});
+      return host;
+    } finally {await rm(temporary, {recursive: true, force: true});}
   }
   async function reconcile() {
     try {
@@ -72,48 +107,29 @@ export async function startSelfHostedLiveHost(options: {
         discoveryCursor = discoverServiceHostDocuments(storage, options.onError, discoveryCursor) ?? undefined;
         if (!discoveryCursor) scannedGeneration = scanGeneration;
       }
-      const rows = selection(), next = selectionSignature(rows);
+      const enrolled = storage.listServiceHostEnrollments();
+      const covered = enrolled.filter(row => storage.serviceHostEnrollmentHasEditGrant(row));
+      const rows = covered.filter(valid), next = selectionSignature(rows);
       selectedDocuments = rows.length > 0;
-      if (next === signature && (rows.length === 0 || (current && !current.invalidated.aborted))) {
-        lastError = undefined;
-        initialReconciliationComplete = true;
-        return;
-      }
-      const grouped = new Map<string, ServiceHostEnrollment>();
-      for (const row of rows) if (!grouped.has(row.workspaceId)) grouped.set(row.workspaceId, row);
-      const workspaces = [];
-      for (const row of grouped.values()) {
-        const directory = join(root, createHash("sha256").update(JSON.stringify([history.namespace, row.workspaceId, row.replicationEpoch, row.streamIdentity])).digest("hex"));
-        await mkdir(directory, {recursive: true, mode: 0o700});
-        const workspaceRoot = canonicalPath(directory, true);
-        workspaces.push({root: workspaceRoot, workspaceId: row.workspaceId, maxRegistrations: 64,
-          ordinaryReplication: {relay: {baseUrl: relay.origin, bearerToken: deriveServiceHostBearer(row, {key: options.key, namespace: history.namespace})},
-            identity: {kind: "join", replicationEpoch: row.replicationEpoch, streamIdentity: row.streamIdentity}, maxPagesPerPull: 8}});
-      }
-      signal.throwIfAborted();
-      if (next !== selectionSignature(selection())) {schedule(); return;}
-      if (rows.length === 0) {
-        await stopCurrent(); signature = next; lastError = undefined; initialReconciliationComplete = true;
-        if (next !== selectionSignature(selection())) schedule();
-        return;
-      }
-      const temporary = await mkdtemp(join(tmpdir(), "dohc-self-host-config-"));
-      try {
-        const configPath = join(temporary, "service.json");
-        await writeFile(configPath, JSON.stringify({version: 1, engineExecutable, hostId, instanceId, workspaces,
-          ...profile.service, activation: {...profile.service.activation, targets: rows.map(({workspaceId, path, shareId}) => ({workspaceId, path, shareId}))}}), {flag: "wx", mode: 0o600});
-        signal.throwIfAborted();
-        readServiceLiveHostConfig(configPath);
-        if (next !== selectionSignature(selection())) {schedule(); return;}
-        await stopCurrent();
+      // Only a failed daemon restarts. Membership changes update the running one.
+      if (current?.invalidated.aborted) {await stopCurrent(); signature = "";}
+      let retiring: readonly {workspaceId: string; objectId: string}[] = [];
+      if (next !== signature || (rows.length > 0 && !current)) {
+        const desired = await hostedSet(rows);
         signal.throwIfAborted();
         if (next !== selectionSignature(selection())) {schedule(); return;}
-        current = await (options.startHost ?? startServiceLiveHost)({configPath, storage, history, frameChanges: options.frameChanges, signal});
-        current.onEvent((event) => { for (const handler of eventHandlers) handler(event); });
-        current.invalidated.addEventListener("abort", schedule, {once: true});
-        signature = next; lastError = undefined; initialReconciliationComplete = true;
-        options.frameChanges.notifyHost(workspaces.map(row => row.workspaceId));
-      } finally {await rm(temporary, {recursive: true, force: true});}
+        if (!current && rows.length > 0) current = await start();
+        if (current) retiring = await current.update(desired);
+        // A document still settling keeps the selection open, so the next reconciliation retries its unload.
+        signature = retiring.length ? "" : next;
+      }
+      // Revoking the last Edit grant retires the enrollment once the host no longer holds the document.
+      for (const row of enrolled) {
+        if (!covered.includes(row) && !retiring.some(document => document.workspaceId === row.workspaceId && document.objectId === row.objectId)) {
+          storage.retireUncoveredServiceHostEnrollment({workspaceId: row.workspaceId, objectId: row.objectId, nowMs: Date.now()});
+        }
+      }
+      lastError = undefined; initialReconciliationComplete = true;
     } catch (error) {
       if (!signal.aborted) {lastError = error; options.onError?.(error);}
     }

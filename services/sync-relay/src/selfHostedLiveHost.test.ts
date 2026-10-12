@@ -3,6 +3,7 @@ import {join} from "node:path";
 import {tmpdir} from "node:os";
 import {afterEach, expect, it, vi} from "vitest";
 import {startSelfHostedLiveHost} from "./selfHostedLiveHost";
+import type {ServiceHostedSet} from "./serviceLiveHost";
 import {fixture as ticketFixture, binding, scope} from "./liveTickets.test-helper";
 import {createLiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
 import {createNamedFrameChanges} from "./liveHostChanges";
@@ -10,13 +11,15 @@ import {hasRelayWriteObservers} from "./relayWriteChanges";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) await close();});
-type Configuration = {workspaces: Array<{workspaceId: string; root: string; ordinaryReplication: {relay: {bearerToken: string}; identity: {replicationEpoch: string}}}>;
-  activation: {targets: Array<{workspaceId: string; path: string; shareId: string}>}; hostId: string; instanceId: string};
+type Configuration = {workspaces: unknown[]; activation: {targets: unknown[]}; hostId: string; instanceId: string};
+type Hosted = ServiceHostedSet["documents"][number];
+type Workspace = ServiceHostedSet["workspaces"][number];
 function deferred() {
   let resolve!: () => void;
   const promise = new Promise<void>(done => {resolve = done;});
   return {promise, resolve};
 }
+const bearer = (workspace: Workspace) => workspace.ordinaryReplication!.relay.bearerToken;
 
 async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean; unavailable?: AbortSignal} = {}) {
   const f = await ticketFixture(); cleanup.push(f.close);
@@ -30,30 +33,62 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
   f.storage.enrollServiceHostDocument(input);
   if (options.empty) f.storage.setServiceHostEnrollmentEnabled({...input, enabled: false});
   const history = createLiveJournalHistoryAuthority({namespace: "supervisor-history", reconciled: true});
-  const starts: Array<{config: Configuration; configPath: string; close: ReturnType<typeof vi.fn<() => Promise<void>>>; ready: ReturnType<typeof vi.fn<() => boolean>>; controller: AbortController}> = [];
+  const frameChanges = createNamedFrameChanges(8);
+  // A stand-in for the service host: it records each membership update and,
+  // like the engine, keeps a document that left while its unload is pending.
+  const pending = new Set<string>(), updates: ServiceHostedSet[] = [];
+  let failUpdate: Error | undefined, holdUpdate: {entered: ReturnType<typeof deferred>; release: ReturnType<typeof deferred>} | undefined;
+  const starts: Array<{config: Configuration; configPath: string; close: ReturnType<typeof vi.fn<() => Promise<void>>>; controller: AbortController}> = [];
   let live = 0, peak = 0;
   const startHost = vi.fn(async ({configPath}: {configPath: string}) => {
     await options.beforeStart?.();
     const config = JSON.parse(await readFile(configPath, "utf8")) as Configuration;
-    const controller = new AbortController(); let stopped = false;
-    const close = vi.fn(async () => {if (!stopped) {stopped = true; live--; controller.abort();}}), ready = vi.fn(() => true);
-    live++; peak = Math.max(peak, live); starts.push({config, configPath, close, ready, controller});
-    return {invalidated: controller.signal, close, isDocumentReady: ready, onEvent: () => () => undefined} as never;
+    const controller = new AbortController(); let stopped = false, held: Hosted[] = [];
+    const close = vi.fn(async () => {if (!stopped) {stopped = true; live--; controller.abort();}});
+    live++; peak = Math.max(peak, live); starts.push({config, configPath, close, controller});
+    const update = vi.fn(async (desired: ServiceHostedSet) => {
+      const hold = holdUpdate; holdUpdate = undefined;
+      if (hold) {hold.entered.resolve(); await hold.release.promise;}
+      if (failUpdate) {const failure = failUpdate; failUpdate = undefined; throw failure;}
+      updates.push(desired);
+      const attached = new Set(desired.workspaces.map(row => row.workspaceId));
+      const retiring = held.filter(document => !desired.documents.some(row => row.objectId === document.objectId) &&
+        attached.has(document.workspaceId) && pending.has(document.objectId));
+      held = [...desired.documents, ...retiring];
+      frameChanges.notifyHost([...attached]);
+      return retiring.map(({workspaceId, objectId}) => ({workspaceId, objectId}));
+    });
+    const isDocumentReady = (document: {workspaceId: string; objectId: string}) =>
+      updates.at(-1)?.documents.some(row => row.workspaceId === document.workspaceId && row.objectId === document.objectId) ?? false;
+    return {invalidated: controller.signal, close, update, isDocumentReady, onEvent: () => () => undefined} as never;
   });
   const onError = vi.fn();
-  const frameChanges = createNamedFrameChanges(8);
   const host = await startSelfHostedLiveHost({storage: f.storage, history, root: data, engineExecutable: process.execPath,
     relayOrigin: "https://relay.test", key: new Uint8Array(32).fill(9), frameChanges, startHost, onError});
   cleanup.push(() => host.close());
   // The supervisor reconciles on timers and writes configuration files; a loaded
   // gate host can take seconds for either.
   const waitStarted = async (count: number) => vi.waitFor(() => {expect(onError).not.toHaveBeenCalled(); expect(starts).toHaveLength(count);}, {timeout: 10_000});
-  const add = (path = "docs/b.md", objectId = "object-b") => {
-    f.raw.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
-      VALUES (?,?,1,?,'main',?,?,'text',1,1)`).run(scope.workspaceId, objectId, `moment-${objectId}`, path, "b".repeat(64));
-    return f.storage.enrollServiceHostDocument({...input, path});
+  const waitUpdate = async (paths: string[]) => vi.waitFor(() => {
+    expect(onError).not.toHaveBeenCalled();
+    expect(updates.at(-1)?.documents.map(row => row.path)).toEqual(paths);
+    return updates.at(-1)!;
+  }, {timeout: 10_000});
+  const moment = (path: string, objectId: string, workspaceId = scope.workspaceId) => f.raw.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
+    VALUES (?,?,1,?,'main',?,?,'text',1,1)`).run(workspaceId, objectId, `moment-${objectId}`, path, "b".repeat(64));
+  const add = (path = "docs/b.md", objectId = "object-b", shareId = scope.shareId) => {
+    moment(path, objectId);
+    return f.storage.enrollServiceHostDocument({...input, path, shareId});
   };
-  return {...f, host, history, starts, startHost, input, add, waitStarted, onError, frameChanges, peak: () => peak};
+  const share = (shareId: string, paths: string[], options: {workspaceId?: string; ownerUserId?: string; grantId?: string} = {}) => {
+    f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES (?,?,?,?,1)")
+      .run(shareId, options.workspaceId ?? scope.workspaceId, options.ownerUserId ?? "owner-1", JSON.stringify({paths, versionId: null}));
+    f.raw.prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+      VALUES (?,?,'user','editor',NULL,'edit',1,'active',1,NULL,NULL)`).run(options.grantId ?? `${shareId}-edit`, shareId);
+  };
+  return {...f, host, history, starts, startHost, input, add, share, moment, waitStarted, waitUpdate, onError, frameChanges, updates, pending,
+    peak: () => peak, failNextUpdate(error: Error) {failUpdate = error;},
+    holdNextUpdate() {holdUpdate = {entered: deferred(), release: deferred()}; return holdUpdate;}};
 }
 
 it("wakes waiting desktop listeners after publishing the returning service host", async () => {
@@ -99,6 +134,16 @@ it("stays unavailable until retained documents have a running native host", asyn
   expect(f.host.unavailable).toBe(true);
 });
 
+it("restarts only a daemon that failed and gives the replacement the whole hosted set", async () => {
+  const f = await fixture(); f.add(); await f.waitStarted(1);
+  await f.waitUpdate(["docs/a.md", "docs/b.md"]);
+  f.starts[0]!.controller.abort();
+  await f.waitStarted(2);
+  await vi.waitFor(() => expect(f.updates).toHaveLength(2), {timeout: 10_000});
+  expect(f.updates[1]).toEqual(f.updates[0]);
+  expect(f.starts[0]!.close).toHaveBeenCalledTimes(1); expect(f.peak()).toBe(1);
+});
+
 it("becomes available after reconciling an empty deployment without starting a daemon", async () => {
   const f = await fixture({empty: true});
   expect(f.host.unavailable).toBe(true);
@@ -106,64 +151,106 @@ it("becomes available after reconciling an empty deployment without starting a d
   expect(f.startHost).not.toHaveBeenCalled();
 });
 
-it("adds documents with stable workspace roots and profile while draining the previous daemon first", async () => {
-  const f = await fixture(); expect(f.host.unavailable).toBe(true); await f.waitStarted(1); const first = f.starts[0]!;
-  const drained = deferred(), entered = deferred(), close = first.close.getMockImplementation()!;
-  first.close.mockImplementation(async () => {entered.resolve(); await drained.promise; await close();});
-  f.add(); await entered.promise;
-  expect(f.starts).toHaveLength(1); expect(f.host.current()).toBeUndefined();
-  drained.resolve(); await f.waitStarted(2);
-  const second = f.starts[1]!;
-  expect(second.config.workspaces[0]!.root).toBe(first.config.workspaces[0]!.root);
-  expect(second.config.workspaces[0]!.root).toMatch(/[0-9a-f]{64}$/);
-  expect(second.config.hostId).toBe(first.config.hostId); expect(second.config.instanceId).toBe(first.config.instanceId);
-  expect(second.config.activation.targets.map(row => row.path)).toEqual(["docs/a.md", "docs/b.md"]);
-  expect(second.config.workspaces[0]!.ordinaryReplication.relay.bearerToken).toBe(first.config.workspaces[0]!.ordinaryReplication.relay.bearerToken);
-  expect(f.peak()).toBe(1);
+it("starts one empty daemon and attaches the first shared document's workspace to it", async () => {
+  const f = await fixture(); expect(f.host.unavailable).toBe(true); await f.waitStarted(1);
+  const first = await f.waitUpdate(["docs/a.md"]), {config} = f.starts[0]!;
+  expect(config.workspaces).toEqual([]); expect(config.activation.targets).toEqual([]);
+  expect(first.documents).toEqual([{workspaceId: scope.workspaceId, objectId: binding.objectId, path: "docs/a.md", shareId: scope.shareId}]);
+  expect(first.workspaces).toHaveLength(1);
+  expect(first.workspaces[0]!.root).toMatch(/[0-9a-f]{64}$/);
+  expect(first.workspaces[0]!.ordinaryReplication).toMatchObject({identity: {kind: "join", replicationEpoch: "epoch", streamIdentity: "stream"}});
 });
 
-it("discards a stale prepared selection when enrollment changes while the old daemon closes", async () => {
-  const f = await fixture(); await f.waitStarted(1); const first = f.starts[0]!;
-  const drained = deferred(), entered = deferred(), close = first.close.getMockImplementation()!;
-  first.close.mockImplementation(async () => {entered.resolve(); await drained.promise; await close();});
-  const second = f.add(); await entered.promise;
+it("adds and removes documents on the running daemon while the sibling stays hosted", async () => {
+  const f = await fixture(); await f.waitStarted(1);
+  const first = await f.waitUpdate(["docs/a.md"]);
+  const second = f.add(); const added = await f.waitUpdate(["docs/a.md", "docs/b.md"]);
+  expect(added.workspaces).toEqual(first.workspaces);
   f.storage.setServiceHostEnrollmentEnabled({...f.input, path: second.path, enabled: false});
-  drained.resolve(); await f.waitStarted(2);
-  expect(f.starts[1]!.config.activation.targets.map(row => row.path)).toEqual([binding.currentPath]);
-  expect(f.peak()).toBe(1);
+  const removed = await f.waitUpdate(["docs/a.md"]);
+  expect(removed.workspaces).toEqual(first.workspaces);
+  expect(f.starts).toHaveLength(1); expect(f.starts[0]!.close).not.toHaveBeenCalled(); expect(f.peak()).toBe(1);
+  expect(f.updates.every(update => update.documents.some(row => row.path === "docs/a.md"))).toBe(true);
 });
 
-it("keeps the working daemon when the next configuration fails validation", async () => {
-  const f = await fixture(); await f.waitStarted(1); const first = f.starts[0]!;
-  const original = f.storage.listServiceHostEnrollments.bind(f.storage);
-  vi.spyOn(f.storage, "listServiceHostEnrollments").mockImplementation(() => original().map(row => ({...row, shareId: "x".repeat(513)})));
-  f.host.reconcile(); await vi.waitFor(() => expect(f.onError).toHaveBeenCalled(), {timeout: 10_000});
-  expect(first.close).not.toHaveBeenCalled(); expect(f.starts).toHaveLength(1); expect(f.host.current()).toBeDefined();
+it("keeps a workspace credential while its enrollment stays hosted", async () => {
+  const f = await fixture(); await f.waitStarted(1);
+  const credential = bearer((await f.waitUpdate(["docs/a.md"])).workspaces[0]!);
+  f.add("docs/0.md", "object-0");
+  expect(bearer((await f.waitUpdate(["docs/0.md", "docs/a.md"])).workspaces[0]!)).toBe(credential);
+  // Without its enrollment, the credential no longer authorizes replication; the workspace takes a remaining one.
+  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false});
+  expect(bearer((await f.waitUpdate(["docs/0.md"])).workspaces[0]!)).not.toBe(credential);
+  expect(f.starts).toHaveLength(1);
+});
+
+it("keeps a document hosted while any Edit grant covers it and retires it once its unload completes", async () => {
+  const f = await fixture(); await f.waitStarted(1);
+  f.share("share-overlap", ["docs"]); f.share("share-notes", ["notes"]);
+  f.add("notes/c.md", "object-c", "share-notes");
+  await f.waitUpdate(["docs/a.md", "notes/c.md"]);
+  f.pending.add(binding.objectId);
+  expect(f.storage.revokeShareGrant({shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 20}).ok).toBe(true);
+  // This update follows the revocation; the overlapping share still covers docs/a.md.
+  f.add("notes/d.md", "object-d", "share-notes");
+  await f.waitUpdate(["docs/a.md", "notes/c.md", "notes/d.md"]);
+  expect(f.storage.revokeShareGrant({shareId: "share-overlap", grantId: "share-overlap-edit", revokedAtMs: 21}).ok).toBe(true);
+  await f.waitUpdate(["notes/c.md", "notes/d.md"]);
+  // The host still holds unsettled work, so the next pass retries the unload and the enrollment stays.
+  const retries = f.updates.length;
+  await vi.waitFor(() => expect(f.updates.length).toBeGreaterThan(retries), {timeout: 10_000});
+  expect(f.storage.listRetiredServiceHostEnrollments(scope.workspaceId).documents).toEqual([]);
+  expect(f.storage.listServiceHostEnrollments(scope.workspaceId).map(row => row.path)).toContain("docs/a.md");
+  f.pending.delete(binding.objectId);
+  await vi.waitFor(() => expect(f.storage.listRetiredServiceHostEnrollments(scope.workspaceId).documents.map(row => row.path)).toEqual(["docs/a.md"]), {timeout: 10_000});
+  expect(f.storage.listServiceHostEnrollments(scope.workspaceId).map(row => row.path)).toEqual(["notes/c.md", "notes/d.md"]);
+  expect(f.starts).toHaveLength(1); expect(f.starts[0]!.close).not.toHaveBeenCalled();
+  expect(f.updates.slice(1).every(update => update.documents.some(row => row.path === "notes/c.md"))).toBe(true);
+});
+
+it("retires the last document without stopping the daemon", async () => {
+  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
+  expect(f.storage.revokeShareGrant({shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 20}).ok).toBe(true);
+  const emptied = await f.waitUpdate([]);
+  expect(emptied.workspaces).toEqual([]);
+  await vi.waitFor(() => expect(f.storage.listRetiredServiceHostEnrollments(scope.workspaceId).documents.map(row => row.path)).toEqual(["docs/a.md"]), {timeout: 10_000});
+  expect(f.host.current()).toBeDefined(); expect(f.starts[0]!.close).not.toHaveBeenCalled();
+});
+
+it("keeps the running daemon when an update fails and retries the update", async () => {
+  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
+  const failure = new Error("Workspace attach refused.");
+  f.failNextUpdate(failure); f.add();
+  await vi.waitFor(() => expect(f.onError).toHaveBeenCalledWith(failure), {timeout: 10_000});
+  f.onError.mockClear();
+  await f.waitUpdate(["docs/a.md", "docs/b.md"]);
+  expect(f.starts[0]!.close).not.toHaveBeenCalled(); expect(f.starts).toHaveLength(1); expect(f.host.current()).toBeDefined();
 });
 
 it("retries runtime checks without rescanning unchanged shares and rescans after owner writes", async () => {
-  const f = await fixture(); await f.waitStarted(1);
+  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
   const scans = vi.spyOn(f.storage, "scanServiceHostCandidateShares");
   const identity = vi.spyOn(f.storage, "verifyWorkspaceIdentity");
   f.host.reconcile();
   await vi.waitFor(() => expect(identity).toHaveBeenCalled(), {timeout: 10_000});
   expect(scans).not.toHaveBeenCalled();
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true});
-  await vi.waitFor(() => expect(f.starts[0]!.close).toHaveBeenCalled(), {timeout: 10_000});
+  await f.waitUpdate([]);
   expect(scans).toHaveBeenCalled();
   scans.mockClear();
   f.storage.enrollServiceHostDocument(f.input);
-  await f.waitStarted(2);
+  await f.waitUpdate(["docs/a.md"]);
   expect(scans).toHaveBeenCalled();
+  expect(f.starts).toHaveLength(1);
 });
 
 it.each([false, true])("clears a transient reconciliation failure after returning to a healthy selection (empty: %s)", async empty => {
-  const f = await fixture(); await f.waitStarted(1);
+  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
   if (empty) {
     f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false});
-    await vi.waitFor(() => expect(f.starts[0]!.close).toHaveBeenCalledTimes(1), {timeout: 10_000});
+    await f.waitUpdate([]);
   }
-  const current = f.host.current();
+  const current = f.host.current(), updates = f.updates.length;
   // The supervisor retries every 2 s, which can clear the failure before a poll
   // sees it, so record availability when the failure is reported.
   const unavailableAtError: boolean[] = [];
@@ -176,44 +263,57 @@ it.each([false, true])("clears a transient reconciliation failure after returnin
   f.host.reconcile();
   await vi.waitFor(() => expect(f.host.unavailable).toBe(false), {timeout: 10_000});
   expect(f.host.current()).toBe(current);
-  expect(f.starts).toHaveLength(1);
-  expect(f.starts[0]!.close).toHaveBeenCalledTimes(empty ? 1 : 0);
+  expect(f.starts).toHaveLength(1); expect(f.updates).toHaveLength(updates);
+  expect(f.starts[0]!.close).not.toHaveBeenCalled();
 });
 
-it("pauses the final document without restarting it and closes owned daemons", async () => {
-  const f = await fixture(); await f.waitStarted(1); const first = f.starts[0]!;
+it("pauses the final document on the running daemon and closes the daemon with the supervisor", async () => {
+  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]); const first = f.starts[0]!;
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false});
-  await vi.waitFor(() => expect(first.close).toHaveBeenCalledTimes(1), {timeout: 10_000});
-  expect(f.host.current()).toBeUndefined();
+  expect((await f.waitUpdate([])).workspaces).toEqual([]);
   expect(f.host.ready({workspaceId: binding.workspaceId, mainVersionId: "main", objectId: binding.objectId, lineageClaimId: binding.lineageClaimId})).toBe(false);
   expect(f.storage.listServiceHostEnrollments()[0]!.enabled).toBe(false);
-  await f.host.close(); expect(f.starts).toHaveLength(1);
+  expect(first.close).not.toHaveBeenCalled();
+  await f.host.close(); expect(first.close).toHaveBeenCalledTimes(1); expect(f.starts).toHaveLength(1);
 });
 
 it("adds another owner's workspace with a separate root and scoped credential", async () => {
-  const f = await fixture(); await f.waitStarted(1); const first = f.starts[0]!;
+  const f = await fixture(); await f.waitStarted(1);
+  const first = await f.waitUpdate(["docs/a.md"]);
   const workspaceId = "workspace-2", ownerUserId = "owner-2", shareId = "share-2", path = "docs/other.md";
   f.storage.claimWorkspace({workspaceId, ownerUserId, createdAtMs: 1});
   f.storage.claimWorkspaceIdentity({workspaceId, replicationEpoch: "epoch-2", streamIdentity: "stream-2"});
-  f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES (?,?,?,?,1)").run(shareId, workspaceId, ownerUserId, JSON.stringify({paths: ["docs"], versionId: null}));
-  f.raw.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
-    VALUES (?,'second-owner-object',1,'second-moment','main',?,?,'text',1,1)`).run(workspaceId, path, "b".repeat(64));
-  f.storage.enrollServiceHostDocument({...f.input, workspaceId, ownerUserId, shareId, path}); await f.waitStarted(2);
-  const workspaces = f.starts[1]!.config.workspaces;
+  f.share(shareId, ["docs"], {workspaceId, ownerUserId});
+  f.moment(path, "second-owner-object", workspaceId);
+  f.storage.enrollServiceHostDocument({...f.input, workspaceId, ownerUserId, shareId, path});
+  const {workspaces} = await f.waitUpdate(["docs/a.md", path]);
   expect(workspaces).toHaveLength(2);
-  expect(workspaces[0]!.root).toBe(first.config.workspaces[0]!.root);
+  expect(workspaces[0]).toEqual(first.workspaces[0]);
   expect(workspaces[1]!.root).not.toBe(workspaces[0]!.root);
-  expect(workspaces[1]!.ordinaryReplication.relay.bearerToken).not.toBe(workspaces[0]!.ordinaryReplication.relay.bearerToken);
-  expect(first.close).toHaveBeenCalledTimes(1); expect(f.peak()).toBe(1);
+  expect(bearer(workspaces[1]!)).not.toBe(bearer(workspaces[0]!));
+  expect(f.starts).toHaveLength(1); expect(f.starts[0]!.close).not.toHaveBeenCalled();
 });
 
-it("cancels a prepared restart when the supervisor closes during drain", async () => {
-  const f = await fixture(); await f.waitStarted(1); const first = f.starts[0]!;
-  const drained = deferred(), entered = deferred(), close = first.close.getMockImplementation()!;
-  first.close.mockImplementation(async () => {entered.resolve(); await drained.promise; await close();});
-  f.add(); await entered.promise;
-  const stopped = f.host.close(); drained.resolve(); await stopped;
-  expect(f.starts).toHaveLength(1); expect(first.close).toHaveBeenCalledTimes(1);
+it("applies the latest selection after an update that was in flight", async () => {
+  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
+  const held = f.holdNextUpdate(), second = f.add(); await held.entered.promise;
+  f.storage.setServiceHostEnrollmentEnabled({...f.input, path: second.path, enabled: false});
+  held.release.resolve();
+  await f.waitUpdate(["docs/a.md"]);
+  expect(f.updates.filter(update => update.documents.length === 2).length).toBeLessThanOrEqual(1);
+  expect(f.starts).toHaveLength(1);
+});
+
+it("waits for an in-flight update before the supervisor closes", async () => {
+  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]); const first = f.starts[0]!;
+  const held = f.holdNextUpdate(); f.add(); await held.entered.promise;
+  const closed = vi.fn(), stopped = f.host.close().then(closed);
+  try {
+    await Promise.resolve();
+    expect(closed).not.toHaveBeenCalled(); expect(first.close).not.toHaveBeenCalled();
+  } finally {held.release.resolve();}
+  await stopped;
+  expect(first.close).toHaveBeenCalledTimes(1); expect(f.starts).toHaveLength(1);
   expect(f.host.current()).toBeUndefined(); expect(f.host.unavailable).toBe(true);
 });
 
@@ -309,10 +409,9 @@ it("surfaces the same daemon close failure to all callers", async () => {
 
 it("omits a renamed document without stopping live hosting for the other document", async () => {
   const f = await fixture(); f.add(); await f.waitStarted(1);
-  const first = f.starts[0]!; expect(first.config.activation.targets).toHaveLength(2);
+  await f.waitUpdate(["docs/a.md", "docs/b.md"]);
   f.raw.prepare("UPDATE sync_relay_object_moments SET path='docs/renamed.md' WHERE workspace_id=? AND object_id=?").run(scope.workspaceId, binding.objectId);
-  f.host.reconcile(); await f.waitStarted(2);
-  expect(f.starts[1]!.config.activation.targets.map(row => row.path)).toEqual(["docs/b.md"]);
-  expect(first.close).toHaveBeenCalledTimes(1); expect(f.peak()).toBe(1);
+  f.host.reconcile(); await f.waitUpdate(["docs/b.md"]);
+  expect(f.starts[0]!.close).not.toHaveBeenCalled(); expect(f.starts).toHaveLength(1);
   expect(f.storage.listServiceHostEnrollments()).toHaveLength(2);
 });

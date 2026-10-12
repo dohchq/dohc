@@ -263,6 +263,36 @@ export function setServiceHostEnrollmentEnabled(storage: StorageContext, input: 
   });
 }
 
+function coveredByEditGrant(storage: StorageContext, enrollment: Pick<ServiceHostEnrollment, "workspaceId" | "ownerUserId" | "path">): boolean {
+  return storage.db.prepare(`SELECT s.* FROM sync_relay_shares s INDEXED BY ${CANDIDATE_INDEX}
+    WHERE s.workspace_id=? AND s.granter_user_id=?
+      AND EXISTS(SELECT 1 FROM sync_relay_share_grants g WHERE g.share_id=s.share_id AND g.status='active' AND g.access='edit')`)
+    .all(enrollment.workspaceId, enrollment.ownerUserId).some(value => {
+      const share: SyncRelayShareRow = {shareId: String(value.share_id), workspaceId: String(value.workspace_id), granterUserId: String(value.granter_user_id),
+        selectorJson: String(value.selector_json), createdAtMs: Number(value.created_at_ms)};
+      const parsed = parseStoredAnyShareSelectorJson(share.selectorJson), selector = parsed && effectiveShareSelector(parsed, "edit");
+      return !!selector && isLiveEditShareSelector(selector) && canonicalLiveSelector(share, selector) && visibleSharePath(selector, enrollment.path) === enrollment.path;
+    });
+}
+/** Whether an active Edit grant on any of the owner's shares still covers the enrolled document. */
+export function serviceHostEnrollmentHasEditGrant(storage: StorageContext, enrollment: Pick<ServiceHostEnrollment, "workspaceId" | "ownerUserId" | "path">): boolean {
+  storage.captureStanding();
+  return coveredByEditGrant(storage, enrollment);
+}
+/** Retires an enrollment once no active Edit grant covers it. Returns null while one still does. */
+export function retireUncoveredServiceHostEnrollment(storage: StorageContext, input: {workspaceId: string; objectId: string; nowMs: number}): ServiceHostEnrollment | null {
+  const nowMs = timestamp(input.nowMs), standing = storage.captureStanding();
+  return storage.tx(() => {
+    standing();
+    const value = storage.db.prepare(`SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=? AND retired=0`).get(parseWorkspaceId(input.workspaceId), input.objectId);
+    const current = value ? row(value) : null;
+    if (!current || coveredByEditGrant(storage, current)) return null;
+    storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET enabled=0,retired=1,updated_at_ms=? WHERE workspace_id=? AND object_id=?`)
+      .run(Math.max(nowMs, current.updatedAtMs), current.workspaceId, current.objectId);
+    return read(storage, current.workspaceId, current.path);
+  });
+}
+
 /** Absence preserves explicitly configured hosts; a retained enrollment always fences its document. */
 export function serviceHostDocumentEnabled(storage: StorageContext, document: {workspaceId: string; objectId: string}): boolean {
   const value = storage.db.prepare(`SELECT e.enabled,e.retired,e.owner_user_id,e.replication_epoch,e.stream_identity,
