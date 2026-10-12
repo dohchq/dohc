@@ -219,7 +219,7 @@ export async function startServiceLiveHost(options: {
     : consumers.get(document.workspaceId);
   const consumerForRestore=async(lookup:StopRestoreLookup,joined:AbortSignal)=>{
     const document=consumers.get(lookup.workspaceId)?.documentForRestore(lookup);
-    return document?(ordinary.has(document.workspaceId)?await activation?.restoreConsumer(document,joined):consumerFor(document)):undefined;
+    return document?(ordinary.has(document.workspaceId)?await activation?.restoreConsumer(document,lookup,joined):consumerFor(document)):undefined;
   };
   const configuredConsumer = (document: LiveDocumentKey) => {
     const consumer = consumerFor(document);
@@ -355,7 +355,7 @@ export async function startServiceLiveHost(options: {
       attachments.delete(workspaceId); ledgers.delete(workspaceId);
       for (const [key, document] of hosted) {
         if (document.target.workspaceId === workspaceId) {
-          activation!.removeTarget(document.target, document.objectId); hosted.delete(key); idle.delete(key); unloading.delete(key);
+          activation!.removeTarget(document.target); hosted.delete(key); idle.delete(key); unloading.delete(key);
         }
       }
       changes?.notifyHost([workspaceId]);
@@ -383,7 +383,7 @@ export async function startServiceLiveHost(options: {
         const owned = activation!.ownerDocument(document.target);
         if (!(owned ? await runDocument(owned, joined, send) : await send())) return false;
       }
-      activation!.removeTarget(document.target, document.objectId);
+      activation!.removeTarget(document.target);
       return true;
     };
     const settleTarget: Parameters<ServiceActivationDriver["activate"]>[2] = config.settlement

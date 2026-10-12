@@ -14,8 +14,8 @@ import {createNamedFrameChanges} from "./liveHostChanges.js";
 import {ServiceActivationDriver} from "./serviceActivationDriver.js";
 import {liveEditors} from "./liveEditors.js";
 import { OwnerCommittedDelivery } from "./ownerCommittedDelivery.js";
-import { LiveCommittedDelivery } from "./liveCommittedDelivery.js";
 import type { NativeOwnerActivation } from "@dohc/workspace-engine-client/daemon";
+import { parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { markdownToYDoc } from "../../../packages/ydoc-projection/src/import-export.js";
 import { createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValidator } from "../../../packages/ydoc-projection/src/liveDocumentValidation.js";
 
@@ -904,9 +904,8 @@ it("brings a dormant document back into passes for stop-access work, which settl
   o.advance(600_000);
   await vi.waitFor(() => expect(o.unloaded()).toBe(1));
   expect(o.host.settled(o.sibling)).toBe(true);
-  vi.spyOn(LiveCommittedDelivery.prototype, "documentForRestore").mockReturnValue(o.document);
-  vi.spyOn(OwnerCommittedDelivery.prototype, "documentForRestore").mockReturnValue(o.document);
   const stopped = vi.spyOn(OwnerCommittedDelivery.prototype, "stopRestore").mockResolvedValue({kind: "pending", reason: "stopping"});
+  o.restore();
   o.hold(true);
   await expect(o.host.stopRestore({operationId: "restore", workspaceId: "workspace", ownerUserId: "owner"}))
     .resolves.toEqual({kind: "pending", reason: "stopping"});
@@ -917,6 +916,8 @@ it("brings a dormant document back into passes for stop-access work, which settl
   expect(o.visits(o.sibling.path)).toBeGreaterThan(visits);
   expect(o.host.settled(o.sibling)).toBe(false);
   const settles = o.settles().length;
+  // The fence lifts on the same binding, so passes settle the reloaded owner.
+  o.raw.exec("UPDATE sync_relay_live_documents SET admission_state='open',restore_fence_generation=restore_fence_generation-1");
   o.hold(false);
   await vi.waitFor(() => expect(o.host.settled(o.sibling)).toBe(true));
   expect(o.settles().length).toBeGreaterThan(settles);
@@ -924,10 +925,9 @@ it("brings a dormant document back into passes for stop-access work, which settl
   await vi.waitFor(() => expect(o.unloaded()).toBe(2));
 });
 
-it("stops access to a dormant document through its reloaded native adoption, sending native registration only the binding", async () => {
-  const o = await idleHost();
-  o.advance(600_000);
-  await vi.waitFor(() => expect(o.unloaded()).toBe(1));
+// Stops access to the dormant document and expects its reloaded native adoption
+// to register the stop's binding alone, then reach the native fence.
+async function stopDormant(o: Awaited<ReturnType<typeof idleHost>>) {
   const binding = o.binding(), captures = o.client().captureOwnerActivation.mock.calls.length, sent = o.requests().length;
   // Stopping access fences the binding, so the dormant document cannot activate again before the stop.
   o.restore();
@@ -942,6 +942,41 @@ it("stops access to a dormant document through its reloaded native adoption, sen
     ["liveApplication.fenceRestore", expect.anything()],
     ["liveApplication.fenceRestore", expect.anything()],
   ]);
+}
+
+it("stops access to a dormant document through its reloaded native adoption, sending native registration only the binding", async () => {
+  const o = await idleHost();
+  o.advance(600_000);
+  await vi.waitFor(() => expect(o.unloaded()).toBe(1));
+  await stopDormant(o);
+});
+
+it("stops access to a dormant document whose owner was gone when it unloaded, through its durable activation", async () => {
+  const o = await idleHost(), parked = o.park("liveApplication.unloadDocument");
+  o.advance(600_000);
+  await parked.entered.promise;
+  // A binding change seen while the unload waits drops the owner; the binding then returns.
+  o.raw.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=restore_fence_generation+1");
+  expect(o.host.isDocumentReady(o.document)).toBe(false);
+  o.raw.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=restore_fence_generation-1");
+  parked.release.resolve();
+  // The document is now dormant with no owner retained.
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  await stopDormant(o);
+});
+
+it("stops access to a dormant document under the binding its stop recorded after the binding changed while dormant", async () => {
+  const o = await idleHost();
+  o.advance(600_000);
+  await vi.waitFor(() => expect(o.unloaded()).toBe(1));
+  // The binding moves on while dormant, and the retained adoption's evidence moves with it.
+  const before = o.binding();
+  o.raw.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=restore_fence_generation+1");
+  const after = o.binding(), origin = JSON.parse(String(o.raw.prepare("SELECT origin_json FROM sync_relay_live_delivery_owners").get()!.origin_json));
+  expect(after).not.toEqual(before);
+  o.raw.prepare("UPDATE sync_relay_live_delivery_owners SET origin_json=?").run(JSON.stringify({...origin, originalBinding: after,
+    bindingDigest: createHash("sha256").update(JSON.stringify(parseLiveObjectBinding(after))).digest("hex")}));
+  await stopDormant(o);
 });
 
 it("records an idle unload whose reply arrives after the sweep deadline and reloads the document on reconnect", async () => {
