@@ -26,6 +26,8 @@ import {
 
 const MAX_BLOB_HAVE = 2_000;
 const REACH_PAGE_ROWS = 500;
+const REACH_IDLE_MS = 10 * 60_000;
+const MAX_UPLOADED_BLOBS = 10_000;
 
 type DocumentClaim = { objectId: unknown; versionId: unknown; path: unknown; workspaceId: unknown };
 
@@ -55,7 +57,7 @@ export type HostedRowDecision = { allowed: false } | { allowed: true; objectId: 
 /** Whether the host may read a row, and the blobs that row lets it fetch. */
 export function hostedRowDecision(
   scope: ServiceHostFeedScope,
-  row: Pick<SyncRelayLogRow, "opKind" | "payloadJson" | "recordedAtMs">,
+  row: Pick<SyncRelayLogRow, "opKind" | "payloadJson" | "recordedAtMs" | "settlementAdmission">,
 ): HostedRowDecision {
   let payload: unknown;
   try { payload = JSON.parse(row.payloadJson); } catch { return { allowed: false }; }
@@ -66,6 +68,8 @@ export function hostedRowDecision(
   }
   const objectId = hostedObject(scope, claimedDocument(row.opKind, record), scope.shared);
   if (objectId === null) return { allowed: false };
+  // A refused row stays in the history but grants no bytes: append never checked its blobs.
+  if (row.settlementAdmission?.status === "refused") return { allowed: true, objectId, blobSha256s: [] };
   // A moment that replaced another object names that object's content as its
   // before state. The row carries the lineage; the other object's bytes stay.
   const foreignBefore = row.opKind === "moment.append" && !absent(record.beforeObjectId) && record.beforeObjectId !== objectId;
@@ -97,29 +101,60 @@ export function hostedWriteAllowed(scope: ServiceHostFeedScope, opKind: string, 
     (absent(record.beforeObjectId) || record.beforeObjectId === objectId);
 }
 
-/** The blobs the host's current documents reference, extended as their rows arrive. */
+type DocumentReach = { through: number; blobs: Set<string> };
+type WorkspaceReach = { documents: Map<string, DocumentReach>; uploaded: Set<string>; usedAtMs: number };
+
+/**
+ * The blobs the host may fetch or name: those the accepted rows of its current
+ * documents reference, and those it uploaded itself. Each document's reach
+ * extends as its rows arrive and survives other documents joining or leaving.
+ * A workspace unused for REACH_IDLE_MS is dropped; losing it costs a rescan,
+ * or an upload the host repeats.
+ */
 function createBlobReach(storage: Pick<SyncRelayStorage, "listServiceHostDocumentRows">) {
-  const reach = new Map<string, { token: string; through: Map<string, number>; blobs: Set<string> }>();
-  return (scope: ServiceHostFeedScope): ReadonlySet<string> => {
-    let entry = reach.get(scope.workspaceId);
-    // A changed scope rebuilds, so a document that left it takes its blobs along.
-    if (entry?.token !== scope.token) {
-      entry = { token: scope.token, through: new Map(), blobs: new Set() };
-      reach.set(scope.workspaceId, entry);
+  const workspaces = new Map<string, WorkspaceReach>();
+  let sweptAtMs = 0;
+  const workspaceReach = (workspaceId: string) => {
+    const nowMs = Date.now();
+    // A workspace that stopped being hosted never asks again, so others' requests sweep it.
+    if (nowMs - sweptAtMs >= REACH_IDLE_MS) {
+      sweptAtMs = nowMs;
+      for (const [id, entry] of workspaces) if (nowMs - entry.usedAtMs >= REACH_IDLE_MS) workspaces.delete(id);
     }
-    for (const objectId of scope.shared.keys()) {
-      for (;;) {
-        const afterRelaySeq = entry.through.get(objectId) ?? 0;
-        const rows = storage.listServiceHostDocumentRows({ workspaceId: scope.workspaceId, objectId, afterRelaySeq, limit: REACH_PAGE_ROWS });
-        for (const row of rows) {
-          const decision = hostedRowDecision(scope, row);
-          if (decision.allowed) for (const sha256 of decision.blobSha256s) entry.blobs.add(sha256);
-          entry.through.set(objectId, row.relaySeq);
-        }
-        if (rows.length < REACH_PAGE_ROWS) break;
+    let entry = workspaces.get(workspaceId);
+    if (!entry) workspaces.set(workspaceId, entry = { documents: new Map(), uploaded: new Set(), usedAtMs: nowMs });
+    entry.usedAtMs = nowMs;
+    return entry;
+  };
+  const documentReach = (scope: ServiceHostFeedScope, entry: WorkspaceReach, objectId: string) => {
+    let document = entry.documents.get(objectId);
+    if (!document) entry.documents.set(objectId, document = { through: 0, blobs: new Set() });
+    for (;;) {
+      const rows = storage.listServiceHostDocumentRows({ workspaceId: scope.workspaceId, objectId, afterRelaySeq: document.through, limit: REACH_PAGE_ROWS });
+      for (const row of rows) {
+        const decision = hostedRowDecision(scope, row);
+        if (decision.allowed) for (const sha256 of decision.blobSha256s) document.blobs.add(sha256);
+        document.through = row.relaySeq;
       }
+      if (rows.length < REACH_PAGE_ROWS) return document.blobs;
     }
-    return entry.blobs;
+  };
+  return {
+    /** Whether the host may fetch, or name in a write, each blob under this scope. */
+    known(scope: ServiceHostFeedScope): (sha256: string) => boolean {
+      const entry = workspaceReach(scope.workspaceId);
+      // A document that left the scope takes its blobs along.
+      for (const objectId of entry.documents.keys()) if (!scope.shared.has(objectId)) entry.documents.delete(objectId);
+      const reaches = [...scope.shared.keys()].map(objectId => documentReach(scope, entry, objectId));
+      return sha256 => entry.uploaded.has(sha256) || reaches.some(blobs => blobs.has(sha256));
+    },
+    /** The host proved it holds these bytes. */
+    uploaded(workspaceId: string, sha256: string) {
+      const { uploaded } = workspaceReach(workspaceId);
+      uploaded.delete(sha256);
+      uploaded.add(sha256);
+      if (uploaded.size > MAX_UPLOADED_BLOBS) uploaded.delete(uploaded.values().next().value!);
+    },
   };
 }
 
@@ -179,12 +214,17 @@ export function createServiceHostFeed(storage: SyncRelayStorage) {
       const body = await readJsonObject(request);
       const ops = Array.isArray(body.ops) ? body.ops : [];
       // Checked again under the append's writer, where the scope cannot move.
+      // An op may name only blobs the host could already fetch or has uploaded,
+      // so a write never turns a digest it read into bytes it may fetch. An
+      // unknown blob is refused like any other op, whether or not the relay holds it.
       const admitted = () => {
         guard();
         const scope = currentScope(workspaceId);
+        const known = blobReach.known(scope);
         for (const op of ops) {
           const row = asRecord(op);
-          if (!row || typeof row.opKind !== "string" || !hostedWriteAllowed(scope, row.opKind, row.payload)) {
+          if (!row || typeof row.opKind !== "string" || !hostedWriteAllowed(scope, row.opKind, row.payload) ||
+            !referencedBlobShas(row.opKind, JSON.stringify(row.payload), { workspaceId, recordedAtMs: Number(row.recordedAtMs) }).every(known)) {
             throw relayError("share_op_rejected", "an op is outside the hosted documents");
           }
         }
@@ -193,7 +233,7 @@ export function createServiceHostFeed(storage: SyncRelayStorage) {
       const headers = new Headers(request.headers);
       headers.delete("content-length");
       const forwarded = new Request(request.url, { method: "POST", headers, body: JSON.stringify(body), signal: request.signal });
-      return await replication.respondToWorkspaceReplication(forwarded, { route: "log", workspaceId }, input.actor, admitted);
+      return await replication.respondToWorkspaceReplication(forwarded, { route: "log", workspaceId, serviceHost: true }, input.actor, admitted);
     }
 
     if (head === "log" && route.length === 3 && request.method === "GET") {
@@ -215,15 +255,14 @@ export function createServiceHostFeed(storage: SyncRelayStorage) {
         return value;
       });
       guard();
-      const reach = blobReach(currentScope(workspaceId));
-      const stored = new Set(sha256s.filter(sha256 => reach.has(sha256)));
+      const stored = new Set(sha256s.filter(blobReach.known(currentScope(workspaceId))));
       for (const sha256 of storage.missingBlobs(workspaceId, [...stored])) stored.delete(sha256);
       return jsonResponse({ ok: true, missing: sha256s.filter(sha256 => !stored.has(sha256)) });
     }
 
     if (head === "blobs" && second && second !== "have" && route.length === 2 && request.method === "GET") {
       assertSha256(second);
-      const blob = blobReach(currentScope(workspaceId)).has(second) ? storage.getBlob(workspaceId, second) : null;
+      const blob = blobReach.known(currentScope(workspaceId))(second) ? storage.getBlob(workspaceId, second) : null;
       if (!blob) throw relayError("blob_not_found");
       return new Response(arrayBufferForBytes(blob), { status: 200, headers: { "content-type": "application/octet-stream" } });
     }
@@ -233,9 +272,10 @@ export function createServiceHostFeed(storage: SyncRelayStorage) {
       const bytes = await readBytes(request, MAX_BLOB_BYTES);
       if (sha256Hex(bytes) !== second) throw badRequest("blob content does not match sha256 path");
       guard();
-      const known = blobReach(currentScope(workspaceId)).has(second);
+      const known = blobReach.known(currentScope(workspaceId))(second);
       const put = storage.putBlob({ workspaceId, sha256: second, content: bytes, createdAtMs: Date.now() });
-      // Whether the owner already held these bytes is theirs to know, unless a hosted row names them.
+      blobReach.uploaded(workspaceId, second);
+      // Whether the owner already held these bytes is theirs to know, unless the host could already fetch them.
       return jsonResponse({ ok: true, workspaceId, sha256: second, byteLength: put.byteLength, alreadyHad: put.alreadyHad && known });
     }
 

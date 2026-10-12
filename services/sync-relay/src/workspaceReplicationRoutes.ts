@@ -13,7 +13,8 @@ import { MAX_DISCUSSION_ACTIVITY_HOLD_MS, MAX_OPS_PER_REQUEST, MAX_ORIGIN_ID_CHA
 export type WorkspaceReplicationRoute =
   | { route: "bootstrap"; workspaceId: string }
   | { route: "epoch"; workspaceId: string }
-  | { route: "log"; workspaceId: string }
+  // `serviceHost` marks the service host's own feed, the only writer of its reserved origins.
+  | { route: "log"; workspaceId: string; serviceHost?: boolean }
   | { route: "log-coordinate"; workspaceId: string; originId: string; originSeq: number };
 
 const MAX_IDENTITY_BYTES = 512;
@@ -126,7 +127,7 @@ export function createWorkspaceReplicationRoutes(
       // parseLogOp and appendLogBatch, so the relay rejects the full batch
       // before it writes any operation.
       assertChatAuthorship(input.ops, actor.userId);
-      assertClientLogProvenance(originId, input.ops, true);
+      assertClientLogProvenance(originId, input.ops, {deferMomentRefusal: true, serviceHost: route.serviceHost === true});
       const ops = await parseAuthenticatedLogOps(input.ops, actor.userId, lookupUserDisplayName);
       await storage.prepareLogAppend({workspaceId:route.workspaceId,originId,ops},request.signal);
       const result = storage.appendLogBatch({
