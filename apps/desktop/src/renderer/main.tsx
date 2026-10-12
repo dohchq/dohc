@@ -5,6 +5,7 @@ import { AppErrorBoundary, installGlobalErrorReporters } from "./ErrorBoundary";
 import { RecoveryCloseGuard } from "./RecoveryCloseGuard";
 import { restoreOrphanedDrafts } from "./orphanedDrafts";
 import { initTheme } from "./theme";
+import { initReducedMotion } from "./reducedMotion";
 import "@fontsource-variable/inter";
 import "@fontsource/ibm-plex-mono/400.css";
 import "@fontsource/ibm-plex-mono/500.css";
@@ -12,6 +13,8 @@ import "katex/dist/katex.min.css";
 import "./styles.css";
 
 initTheme();
+const stopReducedMotion = initReducedMotion();
+window.addEventListener("pagehide", stopReducedMotion, { once: true });
 installGlobalErrorReporters();
 // Before the root renders: the set-aside recoveries the last app run
 // left behind go back into the store, so the first paint already carries their
