@@ -1,5 +1,5 @@
-import * as yaml from "js-yaml";
 import {
+  frontmatterValueYaml,
   leadingFrontmatter,
   loadMarkdownFrontmatter,
   writeMarkdownFrontmatter,
@@ -56,21 +56,17 @@ export function displayFrontmatterValue(value: unknown): string {
   if (typeof value === "string") return value;
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   try {
-    return yaml
-      .dump(value, {
-        lineWidth: -1,
-        sortKeys: false,
-      })
-      .trimEnd();
+    return frontmatterValueYaml(value).trimEnd();
   } catch {
     return String(value);
   }
 }
 
-export function frontmatterEntriesFromMeta(
-  meta: Record<string, unknown>,
+/** Entries in the order of `pairs`. An object would list integer-like keys first. */
+export function frontmatterEntriesFromPairs(
+  pairs: Iterable<readonly [string, unknown]>,
 ): FrontmatterEntry[] {
-  return Object.entries(meta).map(([key, rawValue]) => {
+  return Array.from(pairs, ([key, rawValue]) => {
     const value = displayFrontmatterValue(rawValue);
     return {
       key,
@@ -82,8 +78,10 @@ export function frontmatterEntriesFromMeta(
   });
 }
 
+/** The document's properties in the order the file holds them. */
 export function frontmatterEntries(markdown: string): FrontmatterEntry[] {
-  return frontmatterEntriesFromMeta(parseFrontmatter(markdown).meta);
+  const loaded = loadMarkdownFrontmatter(markdown);
+  return loaded ? frontmatterEntriesFromPairs(loaded.keys.map((key) => [key, loaded.meta[key]])) : [];
 }
 
 /** Write frontmatter values into a document, keeping the text of every entry whose value did not change. */

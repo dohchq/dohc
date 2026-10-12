@@ -3,6 +3,7 @@ import type { DatasetLifecyclePage } from "@dohc/cli/dataset";
 import { bridge } from "./bridge";
 import { Overlay } from "./Overlay";
 import { PrimaryButton, SecondaryButton } from "./ui/controls";
+import { SkeletonRows } from "./ui/SkeletonRows";
 
 interface Props {
   workspaceId: string; datasetId: string; datasetPath: string; name: string;
@@ -46,7 +47,7 @@ function Archive(props: Props) {
     <p className="m-0 text-[13px] text-muted">Restore it from Archived collections to use it again.</p>
     <div className="min-h-0 overflow-auto">
       <h3 className="mb-2 mt-0 text-[12px] font-semibold">Affected apps</h3>
-      {!page ? <p className="m-0 text-[12px] text-muted">{busy ? "Loading apps…" : "Refresh to see affected apps."}</p> : page.apps.length ? <ul className="m-0 list-none p-0">{page.apps.map(app => <li key={app.appId} className="border-b border-line py-2 text-[12px]"><div className="truncate font-mono" title={app.appId}>{app.appId}</div><div className="text-muted">{app.binding.operationIds.length} approved actions</div></li>)}</ul> : <p className="m-0 text-[12px] text-muted">No apps on this page use this Collection.</p>}
+      {!page ? busy ? <SkeletonRows rows={2} label="Loading apps…" /> : <p className="m-0 text-[12px] text-muted">Refresh to see affected apps.</p> : page.apps.length ? <ul className="m-0 list-none p-0">{page.apps.map(app => <li key={app.appId} className="border-b border-line py-2 text-[12px]"><div className="truncate font-mono" title={app.appId}>{app.appId}</div><div className="text-muted">{app.binding.operationIds.length} approved actions</div></li>)}</ul> : <p className="m-0 text-[12px] text-muted">No apps on this page use this Collection.</p>}
     </div>
     <div className="flex gap-2"><SecondaryButton disabled={busy} onClick={() => void load()}>Refresh</SecondaryButton>{page?.nextCursor && <SecondaryButton disabled={busy} onClick={() => void load(page.nextCursor!)}>More apps</SecondaryButton>}</div>
     <div className="flex justify-end gap-2"><SecondaryButton disabled={busy} onClick={props.onClose}>Cancel</SecondaryButton><PrimaryButton disabled={busy || !page} onClick={() => void archive()}>{busy ? "Working…" : "Archive Collection"}</PrimaryButton></div>

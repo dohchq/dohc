@@ -209,7 +209,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
         const delivery = startDesktopOwnerDelivery({config: deliveryConfig,
           async runPass(document, signal) {
             const result = await runNativeOwnerDeliveryPass({client, workspaceHandle, document, config: deliveryConfig,
-              signal: AbortSignal.any([lifetime, signal]), bearer, assertCurrent() {expect(storage.unavailable.aborted).toBe(false);}});
+              signal: AbortSignal.any([lifetime, signal]), bearer, accountId: signedIn.user.id, assertCurrent() {expect(storage.unavailable.aborted).toBe(false);}});
             if (result !== "retry") completed(result);
             return result;
           },
@@ -288,7 +288,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     results.stage = "refuse foreign owner account";
     const wrongAccount = await auth.api.signInEmail({body: {email: users[0]!.email, password}});
     const refused = await runNativeOwnerDeliveryPass({client: first.client, workspaceHandle: first.workspaceHandle,
-      document: selected, config: deliveryConfig, signal: AbortSignal.timeout(30000), bearer: wrongAccount.token, assertCurrent() {}});
+      document: selected, config: deliveryConfig, signal: AbortSignal.timeout(30000), bearer: wrongAccount.token, accountId: wrongAccount.user.id, assertCurrent() {}});
     expect(refused).toBe("retry");
     expect(await first.client.ownerYDocPrepareEnrollment(first.request(), target)).toEqual(firstDraft);
     // Hold the second authenticated capture: enrollment committed, submission has not started.

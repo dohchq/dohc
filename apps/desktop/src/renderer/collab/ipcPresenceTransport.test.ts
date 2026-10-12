@@ -32,7 +32,7 @@ describe("createIpcPresenceTransport", () => {
     bridgeMock.presencePublish.mockResolvedValue({
       ok: true,
       // A peer with NO state exercises the optional→null normalization.
-      snapshot: { version: 3, peers: [{ userId: "u", clientId: "c", updatedAtMs: 7 }] },
+      snapshot: { version: 3, peers: [{ faceToken: "u", sessionToken: "c", isSelf: false, displayName: null, paletteSlot: 0, updatedAtMs: 7 }] },
     });
     const transport = createIpcPresenceTransport(SCOPE);
     const snapshot = await transport.publish({
@@ -50,7 +50,7 @@ describe("createIpcPresenceTransport", () => {
     });
     expect(snapshot).toEqual({
       version: 3,
-      peers: [{ userId: "u", clientId: "c", state: null, updatedAtMs: 7 }],
+      peers: [{ faceToken: "u", sessionToken: "c", isSelf: false, displayName: null, paletteSlot: 0, state: null, updatedAtMs: 7 }],
     });
   });
 
@@ -91,12 +91,12 @@ describe("createIpcPresenceTransport", () => {
       ok: true,
       snapshot: {
         version: 2,
-        peers: [{ userId: "u2", clientId: "c2", state: { displayName: "Bob" }, updatedAtMs: 9 }],
+        peers: [{ faceToken: "u2", sessionToken: "c2", isSelf: false, displayName: "Bob", paletteSlot: 0, state: { displayName: "Bob" }, updatedAtMs: 9 }],
       },
     });
     const transport = createIpcPresenceTransport(SCOPE);
     const controller = new AbortController();
-    const snapshot = await transport.poll({ topic: "t", since: 1, signal: controller.signal });
+    const snapshot = await transport.poll({ clientId: "c1", topic: "t", since: 1, signal: controller.signal });
     expect(bridgeMock.presencePoll).toHaveBeenCalledWith(
       expect.objectContaining({ scope: SCOPE, topic: "t", since: 1 }),
     );
@@ -121,7 +121,7 @@ describe("createIpcPresenceTransport", () => {
     );
     const transport = createIpcPresenceTransport(SCOPE);
     const controller = new AbortController();
-    const pending = transport.poll({ topic: "t", since: 0, signal: controller.signal });
+    const pending = transport.poll({ clientId: "c1", topic: "t", since: 0, signal: controller.signal });
     // Let the poll register before aborting.
     await Promise.resolve();
     controller.abort();
@@ -135,7 +135,7 @@ describe("createIpcPresenceTransport", () => {
     const controller = new AbortController();
     controller.abort();
     await expect(
-      transport.poll({ topic: "t", since: 0, signal: controller.signal }),
+      transport.poll({ clientId: "c1", topic: "t", since: 0, signal: controller.signal }),
     ).rejects.toThrow();
     expect(bridgeMock.presencePoll).not.toHaveBeenCalled();
   });

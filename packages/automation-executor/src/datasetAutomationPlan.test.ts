@@ -450,3 +450,9 @@ describe("dataset automations with no trigger record", () => {
     expect(datasetAutomationProblem({ ...find("record.Status == trigger.record.Status"), when: { kind: "record-added", table: null } }, generated)).toBeNull();
   });
 });
+
+it.each([2, 3])("pins base-folder steps after approval of revision %s", number => {
+  const changed = { ...definition, schemaPath: `Budget/revisions/${number}-00000000-0000-4000-8000-000000000099/schema.sql` };
+  const adding = automation("      - add-record: {Status: Open}\n        collection: Budget\n", "schedule: day\n      timezone: UTC");
+  expect(pinDatasetOperations(adding, { definition: changed, generated: true, sourceCollection: "Budget" }).do[0]).toMatchObject({ operation: "invoices.create" });
+});

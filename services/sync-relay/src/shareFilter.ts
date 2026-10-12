@@ -11,6 +11,7 @@ import {
   type ShareAccess,
   isShareAccessValue,
   isValidShareVersionId,
+  visibleSharePath,
 } from "@dohc/security-contract/share-selector";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { asRecord } from "@dohc/workspace-core";
@@ -554,25 +555,6 @@ export function pathVisibleThroughShare(selector: ShareSelector, path: string): 
 function isCanonicalSharePath(path: string): boolean {
   const validated = validateUserWritePath(path);
   return validated.ok && validated.normalized === path;
-}
-
-// The same gate, answering with the NORMALIZED path it proved. A caller that
-// serves or stores a path must serve this one: the check normalizes before
-// deciding, so serving the caller's own spelling would persist a string this
-// relay never validated — and one the granter may be unable to resolve.
-export function visibleSharePath(selector: ShareSelector, path: string): string | null {
-  const validated = validateUserWritePath(path);
-  if (!validated.ok) return null;
-  if (classifyEngineFilePath(validated.normalized).kind !== "tracked") return null;
-  const selected =
-    selector.paths.length === 0
-      ? selector.versionId !== null
-      : selector.paths.some(
-          (granted) =>
-            validated.normalized === granted ||
-            validated.normalized.startsWith(`${granted}/`),
-        );
-  return selected ? validated.normalized : null;
 }
 
 // The one version a path/version share exposes, and the rule both sides
@@ -1441,6 +1423,7 @@ export type CollectionWrite =
   | { kind: "schema"; collectionPath: string; change: ProposedChange }
   // An in-place write to `<C>/automations.yaml`, or creating it.
   | { kind: "automations"; collectionPath: string; change: ProposedChange }
+  | { kind: "new-record"; collectionPath: string; change: ProposedChange }
   // Creates `<P>/<N>/collection.yaml`, then an optional `automations.yaml`,
   // then `.md` records directly inside `<P>/<N>`, in that order, so the
   // owner's engine meets the schema before the records.
@@ -1508,6 +1491,11 @@ export function filterCollectionWriteForShare(
   const paths = new Set<string>();
   let bytes = 0;
   for (const entry of raw) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)
+      || Object.keys(entry).some(key => ![
+        "basedOnPath", "basedOnBlobSha256", "operation", "afterPath", "afterBlobSha256",
+        "afterContentKind", "afterByteLength", "recordedAtMs",
+      ].includes(key))) return refused;
     const decision = filterProposedChangeForShare(files, entry, chat);
     if (!decision.allowed) return refused;
     const change = decision.change;
@@ -1543,6 +1531,9 @@ export function filterCollectionWriteForShare(
     }
     if (file === COLLECTION_AUTOMATIONS_FILE) {
       return { allowed: true, write: { kind: "automations", collectionPath, change } };
+    }
+    if (file.toLowerCase().endsWith(".md") && change.basedOnPath === null) {
+      return { allowed: true, write: { kind: "new-record", collectionPath, change } };
     }
     return refused;
   }

@@ -6,8 +6,8 @@
     "apps/desktop/src/renderer/collab/caretPresence.ts": {
       "raw-hex": 6
     },
-    "apps/desktop/src/renderer/collab/excalidrawPresence.ts": {
-      "raw-hex": 12
+    "apps/desktop/src/renderer/collab/presencePalette.ts": {
+      "raw-hex": 14
     },
     "apps/desktop/src/renderer/dev/StatesPage.tsx": {
       "raw-hex": 1

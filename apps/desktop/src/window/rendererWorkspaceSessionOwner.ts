@@ -13,6 +13,8 @@ export interface RendererWorkspaceSession<
   readonly attachmentId: symbol;
   readonly rendererDocumentId: string;
   readonly generation: number;
+  /** Aborts when this session retires. Reopening the same session keeps it. */
+  readonly signal: AbortSignal;
   isCurrent(): boolean;
 }
 
@@ -54,6 +56,8 @@ interface SenderState<Sender extends RendererWorkspaceSender> {
   rendererDocumentId: string | undefined;
   readonly retiredRendererDocumentIds: Set<string>;
   destroyed: boolean;
+  // Sessions this renderer has been admitted, so a caller can tell its first.
+  admitted: number;
 }
 
 interface SenderRetirement {
@@ -89,6 +93,10 @@ export class RendererWorkspaceSessionOwner<
   >();
   readonly #workspaceRetirements = new Map<symbol, Promise<void>>();
   readonly #detachedSenderRetirements = new Map<symbol, Set<Promise<void>>>();
+  readonly #sessionAborts = new WeakMap<
+    RendererWorkspaceSession<Sender>,
+    AbortController
+  >();
   #nextGeneration = 0;
 
   constructor(options: RendererWorkspaceSessionOwnerOptions<Sender>) {
@@ -154,6 +162,11 @@ export class RendererWorkspaceSessionOwner<
     const state = this.#statesBySender.get(sender);
     const session = state?.active;
     return session?.isCurrent() ? session : undefined;
+  }
+
+  /** How many sessions this renderer has been admitted. Read-only. */
+  admittedCount(sender: Sender): number {
+    return this.#statesBySender.get(sender)?.admitted ?? 0;
   }
 
   currentForDocument(
@@ -237,6 +250,7 @@ export class RendererWorkspaceSessionOwner<
       rendererDocumentId: undefined,
       retiredRendererDocumentIds: new Set(),
       destroyed: false,
+      admitted: 0,
     };
     this.#statesBySender.set(sender, state);
 
@@ -244,17 +258,23 @@ export class RendererWorkspaceSessionOwner<
     this.#stateBySenderId.set(sender.id, state);
     if (displaced && displaced !== state) {
       ++displaced.requestSequence;
-      const retiring = displaced.active
-        ? this.#beginSenderRetirement(displaced, displaced.active)
-        : displaced.retiring;
-      if (retiring) {
+      if (displaced.active || displaced.retiring) {
+        const admission = Promise.withResolvers<void>();
+        const completion = Promise.withResolvers<void>();
         const inherited = {
-          admission: retiring.admission,
-          completion: retiring.completion,
+          admission: admission.promise,
+          completion: completion.promise,
         };
+        // Publish before retiring: the displaced session's abort listeners run
+        // synchronously and may reopen this sender.
         state.retiring = inherited;
-        void inherited.admission.finally(() => {
+        const retiring = displaced.active
+          ? this.#beginSenderRetirement(displaced, displaced.active)
+          : displaced.retiring;
+        completion.resolve(retiring?.completion);
+        void (retiring?.admission ?? Promise.resolve()).then(() => {
           if (state.retiring === inherited) state.retiring = undefined;
+          admission.resolve();
         });
       }
     }
@@ -280,6 +300,8 @@ export class RendererWorkspaceSessionOwner<
     rendererDocumentId: string,
   ): RendererWorkspaceSession<Sender> {
     const generation = ++this.#nextGeneration;
+    state.admitted += 1;
+    const retired = new AbortController();
     let session!: RendererWorkspaceSession<Sender>;
     session = Object.freeze({
       sender: state.sender,
@@ -288,12 +310,14 @@ export class RendererWorkspaceSessionOwner<
       attachmentId: workspace.attachmentId,
       rendererDocumentId,
       generation,
+      signal: retired.signal,
       isCurrent: () =>
         !state.destroyed &&
         !state.sender.isDestroyed() &&
         this.#stateBySenderId.get(state.sender.id) === state &&
         state.active === session,
     });
+    this.#sessionAborts.set(session, retired);
     return session;
   }
 
@@ -371,6 +395,9 @@ export class RendererWorkspaceSessionOwner<
       await completionDrain;
       completion.resolve();
     })();
+    // Abort listeners run synchronously. Publishing the retirement first makes
+    // a listener that reenters this owner wait for it instead of being admitted.
+    this.#sessionAborts.get(session)?.abort();
     return retirement;
   }
 

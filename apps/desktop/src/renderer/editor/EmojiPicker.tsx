@@ -1,8 +1,20 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { TextSelection } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 import { EMOJI_DATA, type EmojiEntry } from "./emojiData";
 import { resolveFloatingMenuPosition } from "./floatingMenuPosition";
+import {
+  MENU_ACTIVE_OPTION,
+  MENU_EMPTY,
+  MENU_ENTER,
+  MENU_FRAME,
+  MENU_ROW,
+  MENU_ROW_TONE,
+  menuEnterFrom,
+  movedPointer,
+  moveInMenu,
+  revealMenuRow,
+} from "../ui/Menu";
 
 export type EmojiPickerState =
   | { open: false }
@@ -55,6 +67,7 @@ export function rankEmoji(query: string, entries: ReadonlyArray<EmojiEntry> = EM
 
 export function EmojiPicker({ state, view, onDismiss }: Props) {
   const [activeIdx, setActiveIdx] = useState(0);
+  const listRef = useRef<HTMLDivElement | null>(null);
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   // Stable per-instance prefix for option ids so aria-activedescendant can
   // point at the active option — the editor keeps DOM focus (onMouseDown
@@ -66,9 +79,11 @@ export function EmojiPicker({ state, view, onDismiss }: Props) {
     setActiveIdx(0);
   }, [state.open ? state.query : ""]);
 
-  useEffect(() => {
-    if (!state.open) return;
-    itemRefs.current[activeIdx]?.scrollIntoView({ block: "nearest" });
+  // Only the list scrolls to show the active option; scrollIntoView would
+  // scroll the editor pane under it too.
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    if (state.open && list) revealMenuRow(list, itemRefs.current[activeIdx]);
   }, [activeIdx, state.open]);
 
   const matches = useMemo(() => {
@@ -88,6 +103,9 @@ export function EmojiPicker({ state, view, onDismiss }: Props) {
   useEffect(() => {
     if (!state.open) return;
     function onKey(e: KeyboardEvent) {
+      // During IME composition, Enter, Tab, Escape and the arrows work the
+      // candidate list. Some platforms mark those keys only with keyCode 229.
+      if (e.isComposing || e.keyCode === 229) return;
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
@@ -95,14 +113,13 @@ export function EmojiPicker({ state, view, onDismiss }: Props) {
         return;
       }
       if (matches.length === 0) return;
-      if (e.key === "ArrowDown") {
+      // The editor keeps the typed keys, Home and End for the query, so only
+      // the arrows move the active option.
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         e.preventDefault();
         e.stopPropagation();
-        setActiveIdx((i) => (i + 1) % matches.length);
-      } else if (e.key === "ArrowUp") {
-        e.preventDefault();
-        e.stopPropagation();
-        setActiveIdx((i) => (i - 1 + matches.length) % matches.length);
+        const next = moveInMenu(e, activeIdx, matches.map((entry) => entry.shortcode));
+        if (next !== null) setActiveIdx(next);
       } else if (e.key === "Enter" || e.key === "Tab") {
         // Tab commits (rather than moving focus out of the editor) —
         // matches the "typing the full shortcode" fast path so either
@@ -138,7 +155,8 @@ export function EmojiPicker({ state, view, onDismiss }: Props) {
 
   return (
     <div
-      className="dohc-emoji-picker"
+      ref={listRef}
+      className={`dohc-emoji-picker ${MENU_FRAME} ${MENU_ENTER}`}
       data-placement={position.placement}
       style={{
         position: "fixed",
@@ -146,6 +164,7 @@ export function EmojiPicker({ state, view, onDismiss }: Props) {
         top: position.y,
         maxHeight: position.maxHeight,
         zIndex: 60,
+        ...menuEnterFrom(position.placement),
       }}
       role="listbox"
       aria-label="emoji"
@@ -155,7 +174,7 @@ export function EmojiPicker({ state, view, onDismiss }: Props) {
       onMouseDown={(e) => e.preventDefault()}
     >
       {matches.length === 0 ? (
-        <div className="dohc-emoji-picker__empty">No emoji match "{state.query}"</div>
+        <div className={MENU_EMPTY}>No emoji match "{state.query}"</div>
       ) : (
         <div>
           {matches.map((entry, i) => (
@@ -167,15 +186,21 @@ export function EmojiPicker({ state, view, onDismiss }: Props) {
               }}
               type="button"
               role="option"
+              tabIndex={-1}
               aria-selected={i === activeIdx}
-              className={`dohc-emoji-picker__item${i === activeIdx ? " is-active" : ""}`}
-              onMouseEnter={() => setActiveIdx(i)}
+              data-active={i === activeIdx || undefined}
+              className={`${MENU_ROW} ${MENU_ACTIVE_OPTION} ${MENU_ROW_TONE.rest} data-active:text-ink`}
+              // Only a pointer that moves picks the active option, so a list
+              // that opens or scrolls under a still pointer keeps the keys'.
+              onMouseMove={(event) => {
+                if (movedPointer(event) && i !== activeIdx) setActiveIdx(i);
+              }}
               onClick={() => commit(entry)}
             >
-              <span className="dohc-emoji-picker__item-glyph" aria-hidden>
+              <span className="grid w-5 shrink-0 place-items-center text-base leading-none" aria-hidden>
                 {entry.emoji}
               </span>
-              <span className="dohc-emoji-picker__item-shortcode">:{entry.shortcode}:</span>
+              <span className="min-w-0 flex-1 truncate font-mono text-[12px]">:{entry.shortcode}:</span>
             </button>
           ))}
         </div>

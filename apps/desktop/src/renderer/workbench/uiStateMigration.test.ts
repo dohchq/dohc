@@ -3,17 +3,38 @@ import { describe, expect, it } from "vitest";
 import { GetWorkspaceUiStateResult, WorkspaceUiState } from "../../ipc/bridgeContract";
 import { readUiStateFile, writeUiStateFile } from "../../workspaces/workspaceUiState";
 import { createTestScratch } from "../../workspaces/testTemp";
-import { allTabs, defaultWorkbenchState, isVirtualTabPath, isRemovedVirtualTabPath, parseUiState, serializeUiState } from "./workbenchState";
+import { ABOUT_DEFAULT_WIDTH, allTabs, defaultWorkbenchState, isVirtualTabPath, isRemovedVirtualTabPath, parseUiState, serializeUiState } from "./workbenchState";
 
 async function fixture(version: 2 | 3) {
   return JSON.parse(await readFile(new URL(`./fixtures/ui-state-v${version}.json`, import.meta.url), "utf8"));
 }
 
+// A version-2 file predates the About rail: its right-panel fields were
+// chatsVisible and chatsWidth, which nothing reads, so the rail opens closed.
 async function migratedFixture() {
   const current = await fixture(3);
   current.editorGroups[0].tabs = current.editorGroups[0].tabs.filter((path: string) => !path.startsWith("tab://data-collection/"));
-  return current;
+  return { ...current, aboutVisible: false, aboutWidth: ABOUT_DEFAULT_WIDTH };
 }
+
+describe("a layout saved before the About rail", () => {
+  it("opens with the About rail closed and keeps everything else", async () => {
+    const current = await fixture(3);
+    const { aboutVisible: _visible, aboutWidth: _width, ...rest } = current;
+    const old = { ...rest, chatsVisible: true, chatsWidth: 444 };
+    const root = await createTestScratch("ui-state-old-rail-");
+    await writeUiStateFile(root, old);
+    const restored = parseUiState(GetWorkspaceUiStateResult.parse(await readUiStateFile(root)));
+    expect(restored).toEqual({
+      ...parseUiState(current),
+      aboutVisible: false,
+      aboutWidth: ABOUT_DEFAULT_WIDTH,
+    });
+    const written = WorkspaceUiState.parse(serializeUiState(restored));
+    expect(written).not.toHaveProperty("chatsVisible");
+    expect(written).not.toHaveProperty("chatsWidth");
+  });
+});
 
 describe("UI-state v2 to v3", () => {
   it("migrates every current tab kind and active reference while preserving the other state", async () => {

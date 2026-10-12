@@ -18,7 +18,12 @@ export function createAgentRunsIpc<
   Sender,
   Event extends { sender: Sender },
   Workspace extends RegistryEntry,
-  Operation extends { readonly workspace: Workspace & { readonly attachmentId: symbol }; assertCurrent(): void },
+  Operation extends {
+    readonly workspace: Workspace & { readonly attachmentId: symbol };
+    readonly signal: AbortSignal;
+    readonly session: { readonly signal: AbortSignal };
+    assertCurrent(): void;
+  },
 >(dependencies: {
   registerHandler(channel: string, handler: (event: Event, payload: unknown) => unknown): void;
   assertTrustedSender(event: Event): void;
@@ -42,7 +47,7 @@ export function createAgentRunsIpc<
   chatDispatchService: Pick<ChatDispatchService, "stopAgentRun" | "dispatchStateForThread" | "resumeThreadDispatch" | "runnerSelfTest">;
   assertWritableWorkspace(workspace: Workspace): void;
   openWorkspaceActivity(workspace: Workspace): Promise<unknown>;
-  detectAgentTools(workspaceRoot: string): Promise<AgentToolsResult["tools"]>;
+  detectAgentTools(workspaceRoot: string, signal: AbortSignal): Promise<AgentToolsResult["tools"]>;
 }) {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
@@ -96,10 +101,17 @@ export function createAgentRunsIpc<
       const input = AgentRunPayload.parse(payload);
       return withRendererWorkspaceOperation(event.sender, input.workspaceId,
         "Agent detection stopped because this window changed workspaces.",
-        async (operation) => AgentToolsResult.parse({
-          workingDirectory: operation.workspace.rootPath,
-          tools: await dependencies.detectAgentTools(operation.workspace.rootPath),
-        }));
+        async (operation) => {
+          const workingDirectory = operation.workspace.rootPath;
+          // Leaving the workspace in this window cancels detection even while another window keeps it open.
+          const signal = AbortSignal.any([operation.signal, operation.session.signal]);
+          const tools = await dependencies.detectAgentTools(workingDirectory, signal)
+            .catch((error: unknown) => {
+              if (operation.session.signal.aborted) operation.assertCurrent();
+              throw error;
+            });
+          return AgentToolsResult.parse({ workingDirectory, tools });
+        });
     });
     // Enabling agents starts a local run: the workspace must already be open (the
     // watcher must be live for the run slot to attach), so open it first.

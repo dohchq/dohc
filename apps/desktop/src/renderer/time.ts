@@ -16,6 +16,17 @@ export function formatClock(createdAtMs: number): string {
   return clockFormat.format(new Date(createdAtMs));
 }
 
+// The time of day without its AM or PM, for a slot too narrow for them:
+// "2:45", or "14:45" where the clock runs to 24 hours.
+export function formatClockDigits(createdAtMs: number): string {
+  return clockFormat
+    .formatToParts(new Date(createdAtMs))
+    .filter((part) => part.type !== "dayPeriod")
+    .map((part) => part.value)
+    .join("")
+    .trim();
+}
+
 // The day a chat lane divider names: Today, Yesterday, else the date.
 export function formatChatDay(createdAtMs: number, now = Date.now()): string {
   const day = new Date(createdAtMs);
@@ -31,6 +42,13 @@ export function sameChatDay(a: number, b: number): boolean {
   const x = new Date(a);
   const y = new Date(b);
   return x.getFullYear() === y.getFullYear() && x.getMonth() === y.getMonth() && x.getDate() === y.getDate();
+}
+
+const shortDayFormat = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
+
+// A row's short time trail: the time of day for today, else the date.
+export function formatShortTime(atMs: number, now = Date.now()): string {
+  return sameChatDay(atMs, now) ? formatClock(atMs) : shortDayFormat.format(new Date(atMs));
 }
 
 export function formatChatTime(createdAtMs: number): { label: string; iso: string } {

@@ -1,4 +1,5 @@
-import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { atomicReplaceFile } from "../atomicReplaceFile";
 import { join } from "node:path";
 import { isServerDisplayName } from "./cloudConfiguration";
 
@@ -144,9 +145,7 @@ export function createCloudCredentialStore(options: {
       // Atomic: write a temp file then rename over the target so a crash or
       // concurrent reader never sees a half-written credential file. The 0600
       // mode is set on the temp file so the rename preserves it.
-      const tmp = `${file}.tmp-${process.pid}`;
-      await writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
-      await rename(tmp, file);
+      await atomicReplaceFile(file, (tmp) => writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 }));
     },
 
     async clear(): Promise<void> {
@@ -195,9 +194,7 @@ export function createCloudCredentialStore(options: {
     }) {
       await mkdir(dir, { recursive: true, mode: 0o700 });
       const payload = { version: 1, ...marker };
-      const tmp = `${invalidFile}.tmp-${process.pid}`;
-      await writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
-      await rename(tmp, invalidFile);
+      await atomicReplaceFile(invalidFile, (tmp) => writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 }));
     },
 
     async clearInvalidMarker() {

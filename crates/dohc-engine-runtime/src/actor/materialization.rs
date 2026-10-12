@@ -49,6 +49,24 @@ impl SelfWriteRecorder for () {
 }
 
 impl ActorHandle {
+    pub async fn recover_open_document_artifacts(
+        &self,
+        workspace_id: String,
+        leases: dohc_engine_collab::LeaseRegistry,
+    ) -> Result<(), RuntimeError> {
+        self.run(move |store, cache| {
+            dohc_engine_sync::drain_open_document_artifacts(
+                store,
+                cache,
+                &workspace_id,
+                &leases,
+                &NoFaults,
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
     /// The workspace's kept displacements, oldest first: files a replace
     /// moved aside that hold bytes the store does not have.
     pub async fn list_kept_displacements(
@@ -575,6 +593,44 @@ pub(super) fn replay_pending_materializations(
         },
     )?;
     reconcile_settlement_attempts(store, scope.workspace_id, now_ms, faults)?;
+    let checked_jobs = store.read_with(|conn| {
+        let mut stmt = conn
+            .prepare(
+                "SELECT job_id FROM materialization_jobs \
+                 WHERE workspace_id = ?1 AND job_id GLOB 'restore-delete-mat_*'",
+            )
+            .map_err(StorageError::corrupt_public)?;
+        stmt.query_map([scope.workspace_id], |r| r.get::<_, String>(0))
+            .map_err(StorageError::corrupt_public)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::corrupt_public)
+    })?;
+    for job_id in checked_jobs {
+        let recorder: &dyn SelfWriteRecorder = scope.self_writes.unwrap_or(&());
+        match super::versioned::publish_checked_delete_on_store(
+            store,
+            root_dir,
+            scope.workspace_id,
+            &job_id,
+            recorder,
+            now_ms,
+            faults,
+            true,
+            false,
+        ) {
+            Ok(()) => {}
+            Err(RuntimeError::OperationCrashed) => return Err(RuntimeError::OperationCrashed),
+            Err(error) => {
+                let disposition = if matches!(store.load_materialization_job(&job_id), Ok(Some(_)))
+                {
+                    "deferred"
+                } else {
+                    "refused"
+                };
+                eprintln!("engine: checked deletion {disposition} during recovery: {error}");
+            }
+        }
+    }
     let jobs = store.list_pending_materialization_jobs()?;
     (|| -> Result<MaterializationReplaySummary, RuntimeError> {
         let mut summary = MaterializationReplaySummary {
@@ -863,6 +919,9 @@ pub(super) fn materialize_pending_job(
     now_ms: i64,
     faults: &dyn FaultInjector,
 ) -> (bool, PostCommitMaterializeOutcome) {
+    if job.job_id.starts_with("restore-delete-mat_") {
+        return (false, PostCommitMaterializeOutcome::Skipped);
+    }
     // Register before replacement: the watcher may observe the write as soon
     // as the atomic rename lands. Every non-applied outcome retracts the
     // identity because no self-write is then available to consume it.

@@ -18,7 +18,6 @@ import {
   type RebuildEngineStoreResult,
 } from "../ipc/bridgeContract";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
-import { runInKeyedLane } from "../keyedLane";
 
 const MOVE_IN_PROGRESS = "MOVE_IN_PROGRESS";
 const MOVE_IN_PROGRESS_TEMP = `${MOVE_IN_PROGRESS}.tmp`;
@@ -343,23 +342,6 @@ export async function completePendingEngineStoreMove(
   }
 }
 
-export async function withEngineStoreRecovered<T>(
-  locks: Map<string, Promise<void>>,
-  workspace: Pick<CreatedWorkspace, "workspaceId" | "rootPath">,
-  body: () => Promise<T>,
-  completePendingMove: (
-    rootPath: string,
-  ) => Promise<void> = completePendingEngineStoreMove,
-): Promise<T> {
-  return runInKeyedLane(locks, workspace.workspaceId, () =>
-    withEngineStoreRecoveredUnderEngineStoreLock(
-      workspace,
-      body,
-      completePendingMove,
-    ),
-  );
-}
-
 export async function withEngineStoreRecoveredUnderEngineStoreLock<T>(
   workspace: Pick<CreatedWorkspace, "rootPath">,
   body: () => Promise<T>,
@@ -524,7 +506,7 @@ export class EngineStoreRebuildRequestError extends Error {
   }
 }
 
-export interface RebuildEngineStoreDependencies {
+interface RebuildEngineStoreDependencies {
   probeStoreRefusal: () => Promise<EngineStoreRefusal | null>;
   closeActivity: () => Promise<void>;
   reopenActivity: () => Promise<void>;
@@ -532,7 +514,7 @@ export interface RebuildEngineStoreDependencies {
   rebuildGate: { begin: () => void; end: () => void };
 }
 
-export async function rebuildEngineStore(
+async function rebuildEngineStore(
   rootPath: string,
   deps: RebuildEngineStoreDependencies,
 ): Promise<RebuildEngineStoreResult> {

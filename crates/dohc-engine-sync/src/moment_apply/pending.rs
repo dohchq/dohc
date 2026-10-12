@@ -116,6 +116,8 @@ pub(crate) fn drain_and_claim(
             // owner editor does not defer. It waits only once the owner is unbound.
             let deferred = leases.is_live(&key) && !is_bound_owner(tx, &key);
             ready.push((ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: workspace_id.to_owned(),
                 origin_id: row.get(0).map_err(SyncError::corrupt)?,
                 origin_seq: row.get(1).map_err(SyncError::corrupt)?,
@@ -149,7 +151,7 @@ pub(crate) fn drain_and_claim(
                 // Re-run native binding, settlement digest and cursor checks.
                 // The envelope was ACKed on enqueue, so bypass coordinate dedup.
                 tx.execute_batch("SAVEPOINT owner_settlement_replay").map_err(SyncError::persist)?;
-                match apply_moment_append(tx, &envelope, &payload, search_policy.as_ref(), MomentApplyMode::Ordinary) {
+                match apply_moment_append(tx, &envelope, &payload, search_policy.as_ref(), MomentApplyMode::Ordinary, false, None) {
                     Ok(result) => {
                         tx.execute_batch("RELEASE owner_settlement_replay").map_err(SyncError::persist)?;
                         let facts_json = result.record_facts.as_ref().map(serde_json::to_string).transpose().map_err(SyncError::corrupt)?;

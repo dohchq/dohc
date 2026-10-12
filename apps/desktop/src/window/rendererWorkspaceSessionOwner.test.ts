@@ -28,7 +28,8 @@ function sender(id: number) {
   };
 }
 
-type TestSender = ReturnType<typeof sender>["value"];
+type TestRenderer = ReturnType<typeof sender>;
+type TestSender = TestRenderer["value"];
 
 const attachments = new Map<string, symbol>();
 function physical(workspaceId: string) {
@@ -67,6 +68,48 @@ function owner(input?: {
   });
 }
 
+type TestOwner = ReturnType<typeof owner>;
+
+const sessionRetirements: ReadonlyArray<{
+  readonly path: string;
+  readonly retire: (sessions: TestOwner, renderer: TestRenderer) => unknown;
+}> = [
+  {
+    path: "switches workspaces",
+    retire: (sessions, renderer) =>
+      sessions.open(renderer.value, physical("workspace-b"), "document-1"),
+  },
+  {
+    path: "opens a new attachment of the same workspace",
+    retire: (sessions, renderer) =>
+      sessions.open(
+        renderer.value,
+        { workspaceId: "workspace-a", attachmentId: Symbol("workspace-a-new") },
+        "document-1",
+      ),
+  },
+  {
+    path: "reloads",
+    retire: (sessions, renderer) =>
+      sessions.retireForReload(renderer.value, "document-1"),
+  },
+  {
+    path: "crashes",
+    retire: (sessions, renderer) => sessions.retireAfterCrash(renderer.value),
+  },
+  {
+    path: "is destroyed",
+    retire: (_sessions, renderer) => {
+      renderer.destroy();
+    },
+  },
+  {
+    path: "loses its sender id to a new renderer",
+    retire: (sessions) =>
+      sessions.open(sender(7).value, physical("workspace-b"), "document-2"),
+  },
+];
+
 describe("RendererWorkspaceSessionOwner", () => {
   it("keeps a same-workspace reopen on the same exact lease", async () => {
     const retireSender = vi.fn(async () => undefined);
@@ -82,6 +125,19 @@ describe("RendererWorkspaceSessionOwner", () => {
     expect(retireSender).not.toHaveBeenCalled();
     expect(retireWorkspace).not.toHaveBeenCalled();
     expect(renderer.destroyedListenerCount()).toBe(1);
+  });
+
+  it("counts each session a renderer is admitted, not each reopen of the same one", async () => {
+    const sessions = owner();
+    const renderer = sender(7);
+    expect(sessions.admittedCount(renderer.value)).toBe(0);
+
+    await sessions.open(renderer.value, physical("workspace-a"), "document-1");
+    await sessions.open(renderer.value, physical("workspace-a"), "document-1");
+    expect(sessions.admittedCount(renderer.value)).toBe(1);
+    await sessions.open(renderer.value, physical("workspace-b"), "document-1");
+    expect(sessions.admittedCount(renderer.value)).toBe(2);
+    expect(sessions.admittedCount(sender(8).value)).toBe(0);
   });
 
   it("replaces a renderer lease when the same workspace id has a new attachment", async () => {
@@ -389,6 +445,7 @@ describe("RendererWorkspaceSessionOwner", () => {
     expect(sessions.current(replacementRenderer.value)).toBe(replacement);
     expect(replacement.isCurrent()).toBe(true);
     expect(replacement.generation).toBeGreaterThan(oldSession.generation);
+    expect(replacement.signal.aborted).toBe(false);
   });
 
   it("coalesces reload and destroy cleanup for one exact sender", async () => {
@@ -446,5 +503,135 @@ describe("RendererWorkspaceSessionOwner", () => {
     );
     expect(retireWorkspace).toHaveBeenCalledWith(physical("workspace-a"));
     expect(sessions.isWorkspaceOpen("workspace-a")).toBe(false);
+  });
+
+  it.each(sessionRetirements)(
+    "aborts a session's signal when its renderer $path while another renderer keeps the workspace",
+    async ({ retire }) => {
+      const sessions = owner();
+      const renderer = sender(7);
+      const keeper = sender(8);
+      const first = await sessions.open(renderer.value, physical("workspace-a"), "document-1");
+      const kept = await sessions.open(keeper.value, physical("workspace-a"), "document-keeper");
+
+      const retiring = retire(sessions, renderer);
+      expect(first.signal.aborted).toBe(true);
+      expect(kept.signal.aborted).toBe(false);
+      await retiring;
+
+      expect(first.isCurrent()).toBe(false);
+      expect(kept.isCurrent()).toBe(true);
+      expect(kept.signal.aborted).toBe(false);
+      expect(sessions.isAttachmentOpen(physical("workspace-a").attachmentId)).toBe(true);
+    },
+  );
+
+  it("keeps a session's signal live through a same-session reopen and another renderer leaving", async () => {
+    const sessions = owner();
+    const renderer = sender(7);
+    const other = sender(8);
+    const first = await sessions.open(renderer.value, physical("workspace-a"), "document-1");
+    await sessions.open(other.value, physical("workspace-a"), "document-2");
+
+    expect(await sessions.open(renderer.value, physical("workspace-a"), "document-1")).toBe(first);
+    await sessions.retireForReload(other.value, "document-2");
+    other.destroy();
+
+    expect(first.isCurrent()).toBe(true);
+    expect(first.signal.aborted).toBe(false);
+  });
+
+  it("aborts after sender cleanup begins and the retirement is published", async () => {
+    const order: string[] = [];
+    const senderDrain = deferred();
+    const sessions = owner({
+      retireSender: (session) => {
+        order.push(`retire sender, aborted ${session.signal.aborted}`);
+        return senderDrain.promise;
+      },
+      retireWorkspace: async (workspace) => {
+        order.push(`retire ${workspace.workspaceId}`);
+      },
+    });
+    const renderer = sender(7);
+    const first = await sessions.open(renderer.value, physical("workspace-a"), "document-1");
+    const seen: { current?: unknown; firstCurrent?: boolean } = {};
+    const reentrant: Array<Promise<RendererWorkspaceSession<TestSender>>> = [];
+    first.signal.addEventListener("abort", () => {
+      order.push("aborted");
+      seen.current = sessions.current(renderer.value);
+      seen.firstCurrent = first.isCurrent();
+      reentrant.push(sessions.open(renderer.value, physical("workspace-b"), "document-2"));
+    }, { once: true });
+
+    const reload = sessions.retireForReload(renderer.value, "document-1");
+    expect(order).toEqual(["retire sender, aborted false", "aborted"]);
+    expect(seen).toEqual({ current: undefined, firstCurrent: false });
+    const [opening] = reentrant;
+    let admitted = false;
+    void opening!.then(() => {
+      admitted = true;
+    });
+    await Promise.resolve();
+    expect(admitted).toBe(false);
+
+    senderDrain.resolve();
+    await reload;
+    const next = await opening!;
+    expect(order).toEqual(["retire sender, aborted false", "aborted", "retire workspace-a"]);
+    expect(next.isCurrent()).toBe(true);
+    expect(next.signal.aborted).toBe(false);
+    expect(next.signal).not.toBe(first.signal);
+  });
+
+  it("holds a displacing renderer until the displaced session drains, even when its abort listener reopens it", async () => {
+    const senderDrain = deferred();
+    const retireSender = vi.fn(() => senderDrain.promise);
+    const retireWorkspace = vi.fn(async () => undefined);
+    const sessions = owner({ retireSender, retireWorkspace });
+    const oldRenderer = sender(7);
+    const keeper = sender(8);
+    const replacementRenderer = sender(7);
+    const oldSession = await sessions.open(oldRenderer.value, physical("workspace-a"), "document-1");
+    const kept = await sessions.open(keeper.value, physical("workspace-a"), "document-keeper");
+    const reentrant: Array<Promise<unknown>> = [];
+    oldSession.signal.addEventListener("abort", () => {
+      reentrant.push(
+        sessions
+          .open(replacementRenderer.value, physical("workspace-b"), "document-2")
+          .catch((error: unknown) => error),
+      );
+    }, { once: true });
+
+    const outer = sessions.open(replacementRenderer.value, physical("workspace-b"), "document-2");
+    let admitted = false;
+    void outer.then(() => {
+      admitted = true;
+    });
+
+    expect(oldSession.signal.aborted).toBe(true);
+    expect(oldSession.isCurrent()).toBe(false);
+    expect(reentrant).toHaveLength(1);
+    expect(sessions.current(replacementRenderer.value)).toBeUndefined();
+    await Promise.resolve();
+    expect(admitted).toBe(false);
+    expect(sessions.current(replacementRenderer.value)).toBeUndefined();
+
+    senderDrain.resolve();
+    const [reopening] = reentrant;
+    expect(await reopening).toBeInstanceOf(RendererWorkspaceOpenSupersededError);
+    const replacement = await outer;
+
+    expect(replacement).toMatchObject({ workspaceId: "workspace-b", rendererDocumentId: "document-2" });
+    expect(replacement.isCurrent()).toBe(true);
+    expect(replacement.signal.aborted).toBe(false);
+    expect(replacement.signal).not.toBe(oldSession.signal);
+    expect(replacement.generation).toBeGreaterThan(kept.generation);
+    expect(sessions.current(replacementRenderer.value)).toBe(replacement);
+    expect(retireSender).toHaveBeenCalledOnce();
+    expect(retireSender).toHaveBeenCalledWith(oldSession);
+    expect(kept.isCurrent()).toBe(true);
+    expect(kept.signal.aborted).toBe(false);
+    expect(retireWorkspace).not.toHaveBeenCalled();
   });
 });

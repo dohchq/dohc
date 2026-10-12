@@ -120,12 +120,14 @@ pub fn commit_relay_cursor(
             // Cursor commit is the per-pass level trigger. Re-scan here so an
             // oversized unclaimed base stays visible until it can originate.
             let sharing_declined = if was_enrolled {
-                crate::enrolment::originate_unclaimed_ydoc_bases_in_tx(
+                let declined = crate::enrolment::originate_unclaimed_ydoc_bases_in_tx(
                     tx,
                     workspace_id,
                     leases,
                     now_ms,
-                )?
+                )?;
+                crate::enrolment::export_covered_heads_in_tx(tx, workspace_id, leases)?;
+                declined
             } else {
                 crate::enrolment::backfill_enrolment_window_in_tx(
                     tx,
@@ -196,6 +198,29 @@ pub(crate) fn write_pushed_seq(
     leases: &dyn crate::LeaseProbe,
     now_ms: i64,
 ) -> Result<TxnOutcome<Vec<crate::SharingDeclined>>, SyncError> {
+    write_pushed_seq_with_refusals(
+        store,
+        workspace_id,
+        origin_id,
+        pushed_seq,
+        &[],
+        faults,
+        leases,
+        now_ms,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_pushed_seq_with_refusals(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    origin_id: &str,
+    pushed_seq: i64,
+    refusals: &[crate::SettlementPublicationRefusal],
+    faults: &dyn FaultInjector,
+    leases: &dyn crate::LeaseProbe,
+    now_ms: i64,
+) -> Result<TxnOutcome<Vec<crate::SharingDeclined>>, SyncError> {
     if !(-1..=crate::MAX_WIRE_INTEGER).contains(&pushed_seq) {
         return Err(SyncError::InvalidInput {
             reason: "pushed_seq is outside the wire integer range",
@@ -203,6 +228,7 @@ pub(crate) fn write_pushed_seq(
     }
     store
         .write_with(faults, |tx| {
+            crate::settlement_publication::push_refusals_in_tx(tx,workspace_id,refusals)?;
             let was_enrolled =
                 crate::workspace_replicates_with_relay_in_tx(tx, workspace_id)?;
             tx.execute(

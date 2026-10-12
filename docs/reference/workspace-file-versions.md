@@ -15,6 +15,10 @@ dohc treats a missing version as 1. Generated app and Collection files include t
 A newer version stops that file from applying and names the file with an instruction to update dohc.
 An invalid version also stops the file from applying. No migration is needed for unversioned development files.
 
+`dohc.json` uses `"type": "app"` to declare an app folder. The type is optional.
+An explicit different type needs an independent app signal, such as `index.html` or `app.publish.json`, for detection.
+A configured build output path alone is not an independent signal.
+
 `app.publish.json` accepts only `version`, `entryPath`, `inputs`, `packageMap`, `collection`, and `dataset`.
 It accepts at most one `collection` or `dataset` binding. Retired `backend` declarations remain invalid.
 Unknown Collection properties still prevent schema rewrites. An unsupported Collection version prevents record binding and adoption.

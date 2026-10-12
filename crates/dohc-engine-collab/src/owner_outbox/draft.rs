@@ -67,6 +67,7 @@ fn draft_proof(
     })
 }
 
+#[derive(Clone)]
 pub struct OwnerDraftAppendInput {
     pub binding: LiveObjectBinding,
     pub expected_revision: i64,
@@ -75,6 +76,7 @@ pub struct OwnerDraftAppendInput {
     pub now_ms: i64,
     /// The agent the edit declared, kept with its delivery. Never authority.
     pub agent_declaration: Option<dohc_engine_domain::AgentDeclaration>,
+    pub automation_declaration: Option<dohc_engine_domain::AutomationDeclaration>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -124,15 +126,16 @@ pub fn write_states_in(
             Ok(Some(parent))
         }).transpose()?.flatten();
         if parent.is_none() { return Ok("absent".to_owned()); }
-        if parent.is_some() {
-            let accepted: Option<bool> = conn.query_row(
-                "SELECT pending=0 AND accepted_receipt_json IS NOT NULL FROM owner_ydoc_outbox_entries WHERE append_key=?1",
-                params![write.append_key], |row| row.get(0),
+        if let Some(ref parent) = parent {
+            let entry: Option<(bool, bool)> = conn.query_row(
+                "SELECT pending=0,accepted_receipt_json IS NOT NULL FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND append_key=?2",
+                params![parent.outbox_id,write.append_key], |row| Ok((row.get(0)?,row.get(1)?)),
             ).optional().map_err(read_sql)?;
-            match accepted {
-                Some(true) => return Ok("settled".to_owned()),
+            match entry {
+                Some((true, true)) => return Ok("settled".to_owned()),
+                Some((true, false)) => return Ok("not-accepted".to_owned()),
                 None => return Ok("absent".to_owned()),
-                Some(false) => {}
+                Some((false, _)) => {}
             }
         }
         let raw: Option<ObservedBindingRow> = conn.query_row(
@@ -199,6 +202,7 @@ pub fn list_drafts_in(
     workspace_id: &str,
     after: Option<&OwnerDraftCursor>,
     limit: usize,
+    pending_only: bool,
 ) -> Result<Vec<OwnerDraftDescriptor>, OwnerOutboxError> {
     validate_identifier(workspace_id, "invalid workspace")?;
     if !(1..=64).contains(&limit) {
@@ -218,10 +222,17 @@ pub fn list_drafts_in(
             )
         })
         .unwrap_or(("", "", ""));
-    let mut stmt = conn.prepare("SELECT binding_json,relay_database_namespace,binding_revision,accepted_cursor,native_head_sequence,checkpoint_digest,max_pending_bytes,max_pending_age_ms FROM ydoc_owner_bindings WHERE workspace_id=?1 AND (main_version_id,object_id,lineage_claim_id)>(?2,?3,?4) ORDER BY main_version_id,object_id,lineage_claim_id LIMIT ?5").map_err(read_sql)?;
+    let mut stmt = conn.prepare("SELECT binding_json,relay_database_namespace,binding_revision,accepted_cursor,native_head_sequence,checkpoint_digest,max_pending_bytes,max_pending_age_ms FROM ydoc_owner_bindings b WHERE workspace_id=?1 AND (main_version_id,object_id,lineage_claim_id)>(?2,?3,?4) AND (?6=0 OR EXISTS (SELECT 1 FROM owner_ydoc_outboxes o WHERE o.workspace_id=b.workspace_id AND o.main_version_id=b.main_version_id AND o.object_id=b.object_id AND o.lineage_claim_id=b.lineage_claim_id AND o.restore_fence_generation=json_extract(b.binding_json,'$.restoreFenceGeneration') AND o.current_path=json_extract(b.binding_json,'$.currentPath') AND json(o.selector_paths_json)=json_extract(b.binding_json,'$.selectorPaths') AND o.pending_bytes>0 AND o.state!='quarantined')) ORDER BY main_version_id,object_id,lineage_claim_id LIMIT ?5").map_err(read_sql)?;
     let rows = stmt
         .query_map(
-            params![workspace_id, version, object, lineage, limit as i64],
+            params![
+                workspace_id,
+                version,
+                object,
+                lineage,
+                limit as i64,
+                pending_only
+            ],
             read_observed_row,
         )
         .map_err(read_sql)?;
@@ -331,10 +342,13 @@ pub fn append_draft_cached(
             tx,
             workspace_id,
             &draft,
-            input.append_key,
-            input.update,
-            input.now_ms,
-            input.agent_declaration.as_ref(),
+            PreparedDraftAppend {
+                append_key: input.append_key,
+                update: input.update,
+                now_ms: input.now_ms,
+                agent_declaration: input.agent_declaration.as_ref(),
+                automation_declaration: input.automation_declaration.as_ref(),
+            },
         )?;
         let proof = draft_proof(tx, &input.binding, input.expected_revision)?;
         let approx_bytes = encoded_len
@@ -550,6 +564,50 @@ pub(super) fn read_observed_in(
     .transpose()
 }
 
+/// Replay without refused bytes; never retain a candidate's missing dependencies.
+pub(super) fn refuse_dependent_entries_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    outbox_id: &str,
+    checkpoint_digest: &str,
+) -> Result<Ydoc, OwnerOutboxError> {
+    let entries = {
+        let mut stmt = tx.prepare("SELECT sequence,update_digest,byte_length,accepted_receipt_json FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 ORDER BY sequence").map_err(read_sql)?;
+        let entries = stmt
+            .query_map([outbox_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })
+            .map_err(read_sql)?;
+        entries.collect::<Result<Vec<_>, _>>().map_err(read_sql)?
+    };
+    let mut accepted_bytes = bounded_blob(tx, checkpoint_digest)?;
+    let mut accepted = Ydoc::wire();
+    accepted.apply(&accepted_bytes).map_err(collab)?;
+    for (sequence, digest, length, receipt) in entries {
+        let update = bounded_blob(tx, &digest)?;
+        if update.len() as i64 != length {
+            return Err(OwnerOutboxError::Corrupt);
+        }
+        let candidate = Ydoc::wire();
+        candidate.apply(&accepted_bytes).map_err(collab)?;
+        candidate.apply(&update).map_err(collab)?;
+        if candidate.has_pending_dependencies() {
+            if receipt.is_some() {
+                return Err(OwnerOutboxError::ReceiptMismatch);
+            }
+            tx.execute("UPDATE owner_ydoc_outbox_entries SET pending=0,terminal_blob_digest=update_blob_digest,update_blob_digest=NULL,terminal_reason='An earlier write was not accepted.' WHERE outbox_id=?1 AND sequence=?2 AND pending=1", params![outbox_id,sequence]).map_err(write_sql)?;
+        } else {
+            accepted_bytes = bounded(&candidate)?;
+            accepted = candidate;
+        }
+    }
+    Ok(accepted)
+}
+
 /// The caller holds one transaction through opening or appending a draft.
 pub fn open_draft_in(
     conn: &Connection,
@@ -574,9 +632,58 @@ pub fn open_draft_in(
     let doc = Ydoc::wire();
     doc.apply(&bounded_blob(conn, &observed.checkpoint_digest)?)
         .map_err(collab)?;
+    apply_pending_in(
+        conn,
+        binding,
+        &doc,
+        observed.limits.max_pending_bytes,
+        PendingReplay::Draft,
+    )?;
+    Ok(OwnerDraft { observed, doc })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PendingReplay {
+    Draft,
+    Checkpoint,
+}
+
+/// Merge active drafts into an accepted checkpoint for Collection indexing.
+/// Quarantined work stays frozen and cannot block accepted state advancing.
+pub fn apply_pending_to_checkpoint_in(
+    conn: &Connection,
+    binding: &LiveObjectBinding,
+    doc: &Ydoc,
+) -> Result<(), OwnerOutboxError> {
+    let observed = read_observed_in(conn, binding)?.ok_or(OwnerOutboxError::NotFound)?;
+    apply_pending_in(
+        conn,
+        binding,
+        doc,
+        observed.limits.max_pending_bytes,
+        PendingReplay::Checkpoint,
+    )
+}
+
+pub(super) fn apply_pending_in(
+    conn: &Connection,
+    binding: &LiveObjectBinding,
+    doc: &Ydoc,
+    max_pending_bytes: i64,
+    replay: PendingReplay,
+) -> Result<(), OwnerOutboxError> {
     if let Some(parent) = find_parent_for_binding(conn, binding)? {
-        if parent.binding != *binding || parent.state == OwnerOutboxState::Quarantined {
+        if parent.binding != *binding {
             return Err(OwnerOutboxError::Frozen);
+        }
+        if parent.state == OwnerOutboxState::Quarantined {
+            return match replay {
+                PendingReplay::Draft => Err(OwnerOutboxError::Frozen),
+                PendingReplay::Checkpoint => Ok(()),
+            };
+        }
+        if replay == PendingReplay::Checkpoint && parent.pending_bytes == 0 {
+            return Ok(());
         }
         let mut stmt = conn.prepare("SELECT update_digest,byte_length FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 ORDER BY sequence").map_err(read_sql)?;
         let rows = stmt
@@ -584,9 +691,7 @@ pub fn open_draft_in(
                 Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
             })
             .map_err(read_sql)?;
-        let mut remaining = observed
-            .limits
-            .max_pending_bytes
+        let mut remaining = max_pending_bytes
             .checked_add(crate::limits::MAX_YDOC_UPDATE_BYTES as i64)
             .ok_or(OwnerOutboxError::Corrupt)?;
         for row in rows {
@@ -600,13 +705,16 @@ pub fn open_draft_in(
                 return Err(OwnerOutboxError::Corrupt);
             }
             doc.apply(&bytes).map_err(collab)?;
-            bounded(&doc)?;
+            if replay == PendingReplay::Draft {
+                bounded(doc)?;
+            }
         }
     }
     if doc.has_pending_dependencies() {
         return Err(OwnerOutboxError::ParentMismatch);
     }
-    Ok(OwnerDraft { observed, doc })
+    // Indexing reads fields only; it does not persist the merged document.
+    Ok(())
 }
 
 /// Enrollment and restore capture queue merged native state, which declares
@@ -622,19 +730,42 @@ pub fn append_draft_in_tx(
 ) -> Result<OwnerOutboxAppendResult, OwnerOutboxError> {
     require_workspace(workspace_id, &binding.workspace_id)?;
     let draft = open_draft_in(tx, binding, expected_revision)?;
-    append_prepared_draft_in_tx(tx, workspace_id, &draft, append_key, update, now_ms, None)
-        .map(|(result, _)| result)
+    append_prepared_draft_in_tx(
+        tx,
+        workspace_id,
+        &draft,
+        PreparedDraftAppend {
+            append_key,
+            update,
+            now_ms,
+            agent_declaration: None,
+            automation_declaration: None,
+        },
+    )
+    .map(|(result, _)| result)
+}
+
+struct PreparedDraftAppend<'a> {
+    append_key: String,
+    update: Vec<u8>,
+    now_ms: i64,
+    agent_declaration: Option<&'a dohc_engine_domain::AgentDeclaration>,
+    automation_declaration: Option<&'a dohc_engine_domain::AutomationDeclaration>,
 }
 
 fn append_prepared_draft_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
     draft: &OwnerDraft,
-    append_key: String,
-    update: Vec<u8>,
-    now_ms: i64,
-    agent_declaration: Option<&dohc_engine_domain::AgentDeclaration>,
+    input: PreparedDraftAppend<'_>,
 ) -> Result<(OwnerOutboxAppendResult, usize), OwnerOutboxError> {
+    let PreparedDraftAppend {
+        append_key,
+        update,
+        now_ms,
+        agent_declaration,
+        automation_declaration,
+    } = input;
     let binding = &draft.observed.binding;
     require_workspace(workspace_id, &binding.workspace_id)?;
     if update.is_empty() || update.len() > crate::limits::MAX_YDOC_UPDATE_BYTES {
@@ -664,7 +795,15 @@ fn append_prepared_draft_in_tx(
         None,
         Some(draft.observed.revision),
         agent_declaration,
+        automation_declaration,
     )?;
+    let attribution = automation_declaration
+        .map(|declaration| declaration.attribution.clone())
+        .or_else(|| agent_declaration.map(AgentDeclaration::attribution));
+    let actor = automation_declaration
+        .map(|declaration| declaration.automation_id.as_str())
+        .or_else(|| agent_declaration.map(|declaration| declaration.agent_id.as_str()));
+    index_frontmatter_in_tx(tx, binding, &draft.doc, actor, attribution.as_ref(), now_ms)?;
     Ok((result, encoded_len))
 }
 
@@ -673,6 +812,310 @@ mod tests {
     use super::*;
     use dohc_engine_domain::{AgentDeclaration, VersionedTextStore, WriteText};
     use dohc_test_scratch::ScratchDir;
+
+    #[test]
+    fn terminal_refusal_retires_dependent_provider_writes_and_allows_fresh_drafts() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let provider = Ydoc::wire();
+        provider.apply(&checkpoint).unwrap();
+        let first_delta = provider.richdoc_append_paragraph("refused first write");
+        let first = pending(&mut store, &observed, first_delta);
+        let second_delta = provider.richdoc_append_paragraph("dependent second write");
+        let third_delta = provider.richdoc_append_paragraph("dependent third write");
+        let independent = Ydoc::wire();
+        independent.apply(&checkpoint).unwrap();
+        let independent_delta = independent.richdoc_append_paragraph("independent write");
+        let updates = [second_delta.clone(), third_delta.clone(), independent_delta];
+        let append_keys = ["second", "third", "independent"];
+        let mut appended = vec![first.clone()];
+        for (append_key, update) in append_keys.into_iter().zip(updates) {
+            appended.push(
+                committed(
+                    store
+                        .write_with(&NoFaults, |tx| {
+                            append_draft_in_tx(
+                                tx,
+                                "workspace",
+                                &observed.binding,
+                                1,
+                                append_key.into(),
+                                update,
+                                4,
+                            )
+                        })
+                        .unwrap(),
+                )
+                .unwrap(),
+            );
+        }
+        let without_first = Ydoc::wire();
+        without_first.apply(&checkpoint).unwrap();
+        without_first.apply(&second_delta).unwrap();
+        assert!(without_first.has_pending_dependencies());
+        let writes =
+            ["owner-edit", "second", "third", "independent"].map(|append_key| OwnerDraftWrite {
+                outbox_id: Some(first.outbox_id.clone()),
+                binding: observed.binding.clone(),
+                native_head_sequence: observed.native_head_sequence,
+                append_key: append_key.into(),
+            });
+        let refusal = OwnerOutboxRefuseInput {
+            outbox_id: first.outbox_id.clone(),
+            delivery_id: first.delivery_id.clone(),
+            update_digest: first.update_digest.clone(),
+            reason: "The presser no longer has edit access.".into(),
+        };
+        for _ in 0..2 {
+            store
+                .write_with(&NoFaults, |tx| {
+                    refuse_entry_in_tx(tx, "workspace", &refusal, 12)
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            store
+                .read_with(|conn| write_states_in(conn, "workspace", &writes))
+                .unwrap(),
+            ["not-accepted", "not-accepted", "not-accepted", "pending"]
+        );
+        for rejected in &appended[..3] {
+            store.read_with(|conn| {
+                let (digest, terminal): (String, String) = conn.query_row(
+                    "SELECT update_digest,terminal_blob_digest FROM owner_ydoc_outbox_entries WHERE delivery_id=?1",
+                    [&rejected.delivery_id], |row| Ok((row.get(0)?, row.get(1)?)),
+                ).unwrap();
+                assert_eq!(digest, rejected.update_digest);
+                assert_eq!(hex_sha256(&bounded_blob(conn, &terminal)?), digest);
+                Ok::<_, OwnerOutboxError>(())
+            }).unwrap();
+        }
+        let reopened = store
+            .read_with(|conn| open_draft_in(conn, &observed.binding, 1))
+            .unwrap();
+        assert_eq!(
+            bounded(&reopened.doc).unwrap(),
+            bounded(&independent).unwrap()
+        );
+        let fresh = reopened
+            .doc
+            .richdoc_append_paragraph("fresh authorized write");
+        store
+            .write_with(&NoFaults, |tx| {
+                append_draft_in_tx(
+                    tx,
+                    "workspace",
+                    &observed.binding,
+                    1,
+                    "fresh".into(),
+                    fresh,
+                    5,
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .read_with(|conn| write_states_in(conn, "workspace", &writes))
+                .unwrap(),
+            ["not-accepted", "not-accepted", "not-accepted", "pending"]
+        );
+    }
+
+    #[test]
+    fn terminal_entry_refusal_preserves_siblings_and_remains_refused_after_new_drafts() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let revoked = Ydoc::wire();
+        revoked.apply(&checkpoint).unwrap();
+        let first = pending(
+            &mut store,
+            &observed,
+            revoked.richdoc_append_paragraph("revoked presser"),
+        );
+        let other = Ydoc::wire();
+        other.apply(&checkpoint).unwrap();
+        let second = committed(
+            store
+                .write_with(&NoFaults, |tx| {
+                    append_draft_in_tx(
+                        tx,
+                        "workspace",
+                        &observed.binding,
+                        1,
+                        "another-presser".into(),
+                        other.richdoc_append_paragraph("allowed presser"),
+                        4,
+                    )
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        let writes = ["owner-edit", "another-presser"].map(|append_key| OwnerDraftWrite {
+            outbox_id: Some(first.outbox_id.clone()),
+            binding: observed.binding.clone(),
+            native_head_sequence: observed.native_head_sequence,
+            append_key: append_key.into(),
+        });
+        let refusal = OwnerOutboxRefuseInput {
+            outbox_id: first.outbox_id.clone(),
+            delivery_id: first.delivery_id.clone(),
+            update_digest: first.update_digest.clone(),
+            reason: "presser no longer has edit access".into(),
+        };
+        let mut wrong = refusal.clone();
+        wrong.update_digest = "cd".repeat(32);
+        assert!(store
+            .write_with(&NoFaults, |tx| refuse_entry_in_tx(
+                tx,
+                "workspace",
+                &wrong,
+                12
+            ))
+            .is_err());
+        for _ in 0..2 {
+            store
+                .write_with(&NoFaults, |tx| {
+                    refuse_entry_in_tx(tx, "workspace", &refusal, 12)
+                })
+                .unwrap();
+        }
+        let retry = super::super::read_pending(&store, "workspace", &first.outbox_id).unwrap();
+        assert_eq!(retry.entries.len(), 1);
+        let revoked_delta = store.read_with(|conn| {
+            let digest: String = conn.query_row("SELECT terminal_blob_digest FROM owner_ydoc_outbox_entries WHERE delivery_id=?1", [&first.delivery_id], |r| r.get(0)).unwrap();
+            bounded_blob(conn, &digest)
+        }).unwrap();
+        let mut cache = crate::WriterDocCache::with_limits_for_test(16, 1 << 20);
+        assert!(matches!(
+            append_draft_cached(
+                &mut store,
+                &mut cache,
+                "workspace",
+                OwnerDraftAppendInput {
+                    binding: observed.binding.clone(),
+                    expected_revision: 1,
+                    append_key: "owner-edit".into(),
+                    update: revoked_delta,
+                    now_ms: 5,
+                    agent_declaration: None,
+                    automation_declaration: None
+                },
+                &NoFaults
+            ),
+            Err(OwnerOutboxError::Frozen)
+        ));
+        assert_eq!(
+            store
+                .read_with(|conn| write_states_in(conn, "workspace", &writes))
+                .unwrap(),
+            ["not-accepted", "pending"]
+        );
+        let rows = store
+            .read_with(|conn| list_drafts_in(conn, "workspace", None, 1, true))
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].state.as_deref(), Some("active"));
+        let pending = super::super::read_pending(&store, "workspace", &first.outbox_id).unwrap();
+        assert_eq!(pending.entries.len(), 1);
+        assert_eq!(pending.entries[0].delivery_id, second.delivery_id);
+        assert_eq!(rows[0].pending_bytes, pending.entries[0].byte_length);
+        let reopened = store
+            .read_with(|conn| open_draft_in(conn, &observed.binding, 1))
+            .unwrap();
+        assert_eq!(bounded(&reopened.doc).unwrap(), bounded(&other).unwrap());
+        let fresh = reopened.doc.richdoc_append_paragraph("fresh allowed write");
+        store
+            .write_with(&NoFaults, |tx| {
+                append_draft_in_tx(
+                    tx,
+                    "workspace",
+                    &observed.binding,
+                    1,
+                    "fresh".into(),
+                    fresh,
+                    5,
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .read_with(|conn| write_states_in(conn, "workspace", &writes))
+                .unwrap(),
+            ["not-accepted", "pending"]
+        );
+    }
+
+    #[test]
+    fn a_new_draft_starts_from_host_changes_between_two_accepted_writes() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        assert!(store
+            .read_with(|conn| list_drafts_in(conn, "workspace", None, 1, true))
+            .unwrap()
+            .is_empty());
+        let first_doc = Ydoc::wire();
+        first_doc.apply(&checkpoint).unwrap();
+        let delta = first_doc.richdoc_append_paragraph("first owner write");
+        let first = pending(&mut store, &observed, delta.clone());
+        feed(&mut store, &observed, 1, delta.clone());
+        super::super::acknowledge(
+            &mut store,
+            "workspace",
+            &first.outbox_id,
+            &[OwnerDeliveryReceipt {
+                delivery_id: first.delivery_id,
+                update_digest: first.update_digest,
+                journal_cursor: 1,
+                accepting_host_epoch: 1,
+            }],
+        )
+        .unwrap();
+        assert!(store
+            .read_with(|conn| list_drafts_in(conn, "workspace", None, 1, true))
+            .unwrap()
+            .is_empty());
+        let host = Ydoc::wire();
+        host.apply(&checkpoint).unwrap();
+        host.apply(&delta).unwrap();
+        let remote = host.richdoc_append_paragraph("host changed between writes");
+        feed(&mut store, &observed, 2, remote);
+        let current = store
+            .read_with(|conn| read_observed_in(conn, &observed.binding))
+            .unwrap()
+            .unwrap();
+        let second_doc = store
+            .read_with(|conn| open_draft_in(conn, &observed.binding, current.revision))
+            .unwrap();
+        assert_eq!(bounded(&second_doc.doc).unwrap(), bounded(&host).unwrap());
+        let delta = second_doc
+            .doc
+            .richdoc_append_paragraph("second owner write");
+        store
+            .write_with(&NoFaults, |tx| {
+                append_draft_in_tx(
+                    tx,
+                    "workspace",
+                    &observed.binding,
+                    current.revision,
+                    "second".into(),
+                    delta.clone(),
+                    5,
+                )
+            })
+            .unwrap();
+        host.apply(&delta).unwrap();
+        let reopened = store
+            .read_with(|conn| open_draft_in(conn, &observed.binding, current.revision))
+            .unwrap();
+        assert_eq!(bounded(&reopened.doc).unwrap(), bounded(&host).unwrap());
+        assert_eq!(
+            store
+                .read_with(|conn| list_drafts_in(conn, "workspace", None, 1, true))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
 
     #[test]
     fn missing_native_document_is_unsettled_and_does_not_fail_the_page() {
@@ -685,7 +1128,7 @@ mod tests {
             })
             .unwrap();
         let rows = store
-            .read_with(|conn| list_drafts_in(conn, "workspace", None, 64))
+            .read_with(|conn| list_drafts_in(conn, "workspace", None, 64, false))
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert!(rows[0].native_unsettled);
@@ -795,6 +1238,14 @@ mod tests {
                             params![append.outbox_id],
                         )
                         .map_err(write_sql)?;
+                        let mut absent = write.clone();
+                        absent.outbox_id = Some("retry-outbox".into());
+                        absent.binding.restore_fence_generation += 1;
+                        assert_eq!(write_states_in(tx, "workspace", &[absent])?, ["absent"]);
+                        tx.execute(
+                            "INSERT INTO owner_ydoc_outbox_entries (outbox_id,sequence,append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,pending,result_pending_bytes,result_oldest_entry_at_ms,result_state,draft_binding_revision) SELECT 'retry-outbox',sequence,'retry-owner-edit','retry-delivery',update_digest,update_blob_digest,byte_length,created_at_ms,pending,result_pending_bytes,result_oldest_entry_at_ms,result_state,draft_binding_revision FROM owner_ydoc_outbox_entries WHERE outbox_id=?1",
+                            params![append.outbox_id],
+                        ).map_err(write_sql)?;
                     } else {
                         tx.execute(
                             "UPDATE owner_ydoc_outboxes SET state='quarantined',quarantine_reason='host refused' WHERE outbox_id=?1",
@@ -809,6 +1260,7 @@ mod tests {
                 // A retry after one restore describes a new outbox, then another restore fences it.
                 write.outbox_id = Some("retry-outbox".to_owned());
                 write.binding.restore_fence_generation += 1;
+                write.append_key = "retry-owner-edit".into();
             }
             assert_eq!(
                 store
@@ -847,7 +1299,7 @@ mod tests {
         feed(&mut store, &observed, 4, delta);
         assert!(descriptor(&store).native_unsettled);
         let page = store
-            .read_with(|conn| list_drafts_in(conn, "workspace", None, 64))
+            .read_with(|conn| list_drafts_in(conn, "workspace", None, 64, false))
             .unwrap();
         assert!(page[0].native_unsettled);
     }
@@ -868,6 +1320,7 @@ mod tests {
                 update,
                 now_ms: 3,
                 agent_declaration: None,
+                automation_declaration: None,
             };
             append_draft_cached(
                 &mut store,
@@ -904,7 +1357,7 @@ mod tests {
             assert_eq!(snapshot.initial_update, cold);
             assert_eq!(snapshot.initial_update, bounded(&owner).unwrap());
             let page = store
-                .read_with(|conn| list_drafts_in(conn, "workspace", None, 1))
+                .read_with(|conn| list_drafts_in(conn, "workspace", None, 1, false))
                 .unwrap();
             assert_eq!(page.len(), 1);
             assert_eq!(page[0].pending_bytes, snapshot.descriptor.pending_bytes);
@@ -914,11 +1367,11 @@ mod tests {
                 lineage_claim_id: observed.binding.lineage_claim_id.clone(),
             };
             assert!(store
-                .read_with(|conn| list_drafts_in(conn, "workspace", Some(&cursor), 1))
+                .read_with(|conn| list_drafts_in(conn, "workspace", Some(&cursor), 1, false))
                 .unwrap()
                 .is_empty());
             assert!(store
-                .read_with(|conn| list_drafts_in(conn, "other-workspace", None, 1))
+                .read_with(|conn| list_drafts_in(conn, "other-workspace", None, 1, false))
                 .unwrap()
                 .is_empty());
         }
@@ -950,6 +1403,7 @@ mod tests {
                 update: update.to_vec(),
                 now_ms: 3,
                 agent_declaration,
+                automation_declaration: None,
             };
             append_draft_cached(
                 &mut self.store,
@@ -1014,6 +1468,75 @@ mod tests {
                 .map_err(read_sql)
             })
             .unwrap()
+    }
+
+    #[test]
+    fn automation_drafts_retain_the_presser_and_refuse_changed_retry_provenance() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let mut cache = crate::WriterDocCache::with_limits_for_test(16, 0);
+        let owner = Ydoc::wire();
+        owner.apply(&checkpoint).unwrap();
+        let declaration = dohc_engine_domain::AutomationDeclaration {
+            automation_id: "collection:Tasks#mark".into(),
+            attribution: dohc_engine_domain::ChangeAttribution {
+                actor_kind: dohc_engine_domain::ChangeActorKind::Automation,
+                on_behalf_of: Some("presser".into()),
+                depth: 1,
+                run: Some(dohc_engine_domain::AutomationRunAttribution {
+                    claim_id: "claim".into(),
+                    automation_name: "Mark done".into(),
+                }),
+            },
+        };
+        let input = OwnerDraftAppendInput {
+            binding: observed.binding,
+            expected_revision: 1,
+            append_key: "press/Status".into(),
+            update: owner.richdoc_append_paragraph("Done"),
+            now_ms: 3,
+            agent_declaration: None,
+            automation_declaration: Some(declaration.clone()),
+        };
+        let appended = append_draft_cached(
+            &mut store,
+            &mut cache,
+            "workspace",
+            input.clone(),
+            &NoFaults,
+        )
+        .unwrap();
+        let replayed = append_draft_cached(
+            &mut store,
+            &mut cache,
+            "workspace",
+            input.clone(),
+            &NoFaults,
+        )
+        .unwrap();
+        assert_eq!(appended.delivery_id, replayed.delivery_id);
+        assert_eq!(appended.sequence, replayed.sequence);
+        let pending = super::super::read_pending(&store, "workspace", &appended.outbox_id).unwrap();
+        assert_eq!(pending.entries.len(), 1);
+        assert_eq!(
+            pending.entries[0].automation_declaration,
+            Some(declaration.clone())
+        );
+        assert_eq!(
+            entry_header(&store, &appended.outbox_id, appended.sequence)["automationDeclaration"],
+            serde_json::to_value(declaration).unwrap()
+        );
+        let mut changed = input;
+        changed
+            .automation_declaration
+            .as_mut()
+            .unwrap()
+            .attribution
+            .on_behalf_of = Some("different-person".into());
+        assert!(matches!(
+            append_draft_cached(&mut store, &mut cache, "workspace", changed, &NoFaults),
+            Err(OwnerOutboxError::AppendKeyMismatch)
+        ));
     }
 
     #[test]

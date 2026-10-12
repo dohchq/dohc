@@ -67,7 +67,9 @@ function engine(options: {
   settled?: Map<number, number>;
   sync?: () => Promise<void>;
 }) {
+  const durableClaims: Array<Record<string, unknown>> = [];
   const copy = copyClient({
+    "automations.makeDurable": params => { durableClaims.push(params); return {}; },
     "automations.subscribe": () => ({ subscribed: true }),
     "automations.unsubscribe": () => ({ unsubscribed: true }),
     "automations.claimNext": () => null,
@@ -87,10 +89,20 @@ function engine(options: {
     onFailuresChanged: () => {},
     onError: (context) => errors.push(context),
   });
-  return { adapter, copy, pulls, errors };
+  return { adapter, copy, pulls, errors, durableClaims };
 }
 
 describe("the server's claim engine", () => {
+  it("syncs the copy that received writes for a live-host claim", async () => {
+    const live = fakeLedger([claim("live-1", 1)]);
+    const f = engine({ live, logged: new Map([[1, 1]]), head: { value: 1 } });
+    await f.adapter.claimNextAutomation({ automationIdPrefix: "collection:" });
+    await f.adapter.makeAutomationWritesDurable({ claimId: "live-1" });
+    await f.adapter.makeAutomationWritesDurable({ claimId: "own-1" });
+    expect(f.durableClaims).toEqual([{}, { claimId: "own-1" }]);
+    expect(live.calls.map(([method]) => method)).not.toContain("makeDurable");
+  });
+
   it("pages both ledgers with one cursor, including equal timestamps, and retains live lookups", async () => {
     const own = [summary("z", 7), summary("a", 7), summary("old", 1)];
     const other = [summary("y", 7), summary("live", 3)];

@@ -24,7 +24,7 @@ use dohc_engine_domain::{
     ensure_main_version_in_tx,
 };
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError, TxnOutcome};
-use rusqlite::{Connection, Transaction};
+use rusqlite::{Connection, Transaction, params};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -38,17 +38,6 @@ pub const MAX_CAPTURE_INGEST_BATCH_BYTES: usize = 4 * 1024 * 1024;
 /// root selected before an actor command entered the queue.
 pub trait WorkspaceRootGuard: Send + Sync {
     fn validate(&self, root_dir: &std::path::Path) -> Result<(), RuntimeError>;
-}
-
-type CommandWorkspaceRoot = (PathBuf, Option<Arc<dyn WorkspaceRootGuard>>);
-
-fn command_workspace_root_parts(
-    workspace_root: Option<&CommandWorkspaceRoot>,
-) -> (Option<&std::path::Path>, Option<&dyn WorkspaceRootGuard>) {
-    match workspace_root {
-        Some((root_dir, root_guard)) => (Some(root_dir.as_path()), root_guard.as_deref()),
-        None => (None, None),
-    }
 }
 
 pub(super) fn validate_workspace_root(
@@ -68,17 +57,34 @@ enum CaptureIndexing {
 }
 
 impl ActorHandle {
-    // --- Synchronous API (must be used outside a runtime) ---
-
-    /// Capture a text file on the actor's writer, blocking the calling thread.
-    pub fn capture_ingest_blocking(
+    pub async fn capture_recoveries(
         &self,
-        input: CaptureIngest,
-        leases: LeaseRegistry,
-        faults: Arc<dyn FaultInjector>,
-    ) -> Result<WriteResult, RuntimeError> {
-        self.capture_ingest_blocking_with_indexing(input, CaptureIndexing::Skip, leases, faults)
+        workspace_id: String,
+    ) -> Result<Vec<dohc_engine_domain::CaptureRecovery>, RuntimeError> {
+        self.run(move |store, _| {
+            store
+                .read_with(|conn| dohc_engine_domain::capture_recoveries_in(conn, &workspace_id))
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
+
+    pub async fn clear_capture_recovery(
+        &self,
+        workspace_id: String,
+        moment_id: String,
+    ) -> Result<(), RuntimeError> {
+        self.run(move |store, _| {
+            match store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+                dohc_engine_domain::clear_capture_recovery_in(tx, &workspace_id, &moment_id)
+            })? {
+                TxnOutcome::Committed(()) => Ok(()),
+                TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+            }
+        })
+        .await
+    }
+    // --- Synchronous API (must be used outside a runtime) ---
 
     /// Capture and index text against one reconcile-owned policy snapshot.
     pub fn capture_ingest_with_search_policy_blocking(
@@ -88,12 +94,13 @@ impl ActorHandle {
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<WriteResult, RuntimeError> {
-        self.capture_ingest_blocking_with_indexing(
-            input,
-            CaptureIndexing::UseSnapshot(search_policy),
-            leases,
-            faults,
-        )
+        let indexing = CaptureIndexing::UseSnapshot(search_policy);
+        let token: CancellationToken = CancellationToken::new();
+        self.run_blocking(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                capture_ingest_on_store(store, &input, &indexing, &leases, faults.as_ref(), &token)
+            })
+        })
     }
 
     /// Capture a bounded text chunk in one durable transaction. A clean chunk
@@ -120,21 +127,6 @@ impl ActorHandle {
                     &token,
                     (&root_dir, root_guard.as_ref()),
                 )
-            })
-        })
-    }
-
-    fn capture_ingest_blocking_with_indexing(
-        &self,
-        input: CaptureIngest,
-        indexing: CaptureIndexing,
-        leases: LeaseRegistry,
-        faults: Arc<dyn FaultInjector>,
-    ) -> Result<WriteResult, RuntimeError> {
-        let token: CancellationToken = CancellationToken::new();
-        self.run_blocking(move |store, cache| {
-            with_local_file_mutation_cache_reset(cache, || {
-                capture_ingest_on_store(store, &input, &indexing, &leases, faults.as_ref(), &token)
             })
         })
     }
@@ -178,44 +170,14 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         root_guard: Arc<dyn WorkspaceRootGuard>,
     ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
-        let workspace_root: Option<CommandWorkspaceRoot> = Some((root_dir, Some(root_guard)));
-        let token: CancellationToken = CancellationToken::new();
         self.run_blocking(move |store, _cache| {
-            let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
             capture_secret_retire_on_store(
                 store,
                 &input,
-                root_dir,
-                root_guard,
+                &root_dir,
+                root_guard.as_ref(),
                 faults.as_ref(),
-                &token,
             )
-        })
-    }
-
-    /// Retire a captured path on the actor's writer, blocking the caller.
-    pub fn capture_retire_blocking(
-        &self,
-        input: CaptureRetire,
-        leases: LeaseRegistry,
-        faults: Arc<dyn FaultInjector>,
-    ) -> Result<CaptureRetireResult, RuntimeError> {
-        let self_writes: Option<Arc<dyn SelfWriteRecorder>> = None;
-        let token: CancellationToken = CancellationToken::new();
-        self.run_blocking(move |store, cache| {
-            with_local_file_mutation_cache_reset(cache, || {
-                capture_retire_on_store(
-                    store,
-                    &input,
-                    None,
-                    None,
-                    false,
-                    self_writes.as_deref(),
-                    &leases,
-                    faults.as_ref(),
-                    &token,
-                )
-            })
         })
     }
 
@@ -242,22 +204,17 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         root_guard: Arc<dyn WorkspaceRootGuard>,
     ) -> Result<CaptureRetireResult, RuntimeError> {
-        let workspace_root: Option<CommandWorkspaceRoot> = Some((root_dir, Some(root_guard)));
-        let self_writes: Option<Arc<dyn SelfWriteRecorder>> = Some(self_writes);
-        let token: CancellationToken = CancellationToken::new();
         self.run_blocking(move |store, cache| {
-            let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
             with_local_file_mutation_cache_reset(cache, || {
                 capture_retire_on_store(
                     store,
                     &input,
-                    root_dir,
-                    root_guard,
+                    &root_dir,
+                    root_guard.as_ref(),
                     confirm_absent,
-                    self_writes.as_deref(),
+                    self_writes.as_ref(),
                     &leases,
                     faults.as_ref(),
-                    &token,
                 )
             })
         })
@@ -349,46 +306,6 @@ impl ActorHandle {
         })
         .await
     }
-
-    /// Retire a captured secret path on the actor's single writer thread.
-    pub async fn capture_secret_retire(
-        &self,
-        input: CaptureSecretRetire,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-    ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
-        self.run(move |store, _cache| {
-            capture_secret_retire_on_store(store, &input, None, None, faults.as_ref(), &token)
-        })
-        .await
-    }
-
-    /// Retire a captured path on the actor's single writer thread.
-    pub async fn capture_retire(
-        &self,
-        input: CaptureRetire,
-        leases: LeaseRegistry,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-    ) -> Result<CaptureRetireResult, RuntimeError> {
-        let self_writes: Option<Arc<dyn SelfWriteRecorder>> = None;
-        self.run(move |store, cache| {
-            with_local_file_mutation_cache_reset(cache, || {
-                capture_retire_on_store(
-                    store,
-                    &input,
-                    None,
-                    None,
-                    false,
-                    self_writes.as_deref(),
-                    &leases,
-                    faults.as_ref(),
-                    &token,
-                )
-            })
-        })
-        .await
-    }
 }
 
 fn capture_ingest_on_store(
@@ -425,6 +342,100 @@ struct CaptureBatchSharedContext {
     capture: CaptureIngestBatchContext,
     has_ydoc_state: Option<bool>,
     journals_file_moments: Option<bool>,
+    /// The item just ingested recovered a sibling file, whose moment took
+    /// the order after the item's own.
+    recovered_sibling: bool,
+}
+
+impl CaptureBatchSharedContext {
+    fn new(tx: &Transaction<'_>, first: &CaptureIngest) -> Result<Self, RuntimeError> {
+        Ok(Self {
+            capture: CaptureIngestBatchContext::new(tx, &first.workspace_id, &first.version_id)?,
+            has_ydoc_state: None,
+            journals_file_moments: None,
+            recovered_sibling: false,
+        })
+    }
+
+    /// After an item that recovered a sibling, the batch's reserved moment
+    /// order is behind the table. Read the high-water mark again before the
+    /// next item, so it does not propose the order the sibling took. An item
+    /// rolled back took its sibling with it; reading again then costs one
+    /// query and changes nothing.
+    fn settle_item(
+        &mut self,
+        tx: &Transaction<'_>,
+        first: &CaptureIngest,
+    ) -> Result<(), RuntimeError> {
+        if std::mem::take(&mut self.recovered_sibling) {
+            self.capture =
+                CaptureIngestBatchContext::new(tx, &first.workspace_id, &first.version_id)?;
+        }
+        Ok(())
+    }
+}
+
+struct PreparedCaptureRecovery {
+    /// The admitted object the lineage was read for. Capture may resolve the
+    /// path to a different, disambiguated object.
+    object_id: String,
+    lineage: dohc_engine_sync::PreparedLocalYdocLineage,
+    preserve: bool,
+    authors: Option<String>,
+}
+
+fn prepare_capture_recovery_in(
+    tx: &Transaction<'_>,
+    input: &CaptureIngest,
+    object_id: &str,
+) -> Result<PreparedCaptureRecovery, RuntimeError> {
+    let key = DocKey::new(&input.workspace_id, &input.version_id, object_id)?;
+    let mut prepared = PreparedCaptureRecovery {
+        object_id: object_id.to_owned(),
+        lineage: dohc_engine_sync::prepare_local_ydoc_lineage_in_tx(tx, &key)?,
+        preserve: false,
+        authors: None,
+    };
+    let Some(projection) = prepared.lineage.projection() else {
+        return Ok(prepared);
+    };
+    if projection.content == input.text {
+        return Ok(prepared);
+    }
+    let sha = dohc_engine_storage::hex_sha256(projection.content.as_bytes());
+    // Committed moments cover typing even when their file write is pending or
+    // cancelled. Capture supersedes that write in this transaction. Only a
+    // pristine seed needs the absence of a pending job to prove coverage.
+    let covered: bool = tx.query_row(
+        "SELECT (
+          EXISTS(SELECT 1 FROM ydoc_docs d JOIN snapshots s ON s.workspace_id=d.workspace_id
+            AND s.version_id=d.version_id AND s.object_id=d.object_id
+            JOIN moments m ON m.workspace_id=s.workspace_id AND m.version_id=s.version_id
+            AND m.object_id=s.object_id AND m.moment_id=s.latest_moment_id
+            WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3
+            AND d.settled_update_seq=d.head_update_seq AND m.after_blob_sha256=?5 AND s.blob_sha256=?5
+            AND d.last_settled_sha=?5) OR
+          EXISTS(SELECT 1 FROM live_device_settlements a JOIN moments m
+            ON m.workspace_id=a.workspace_id AND m.moment_id=a.moment_id
+            JOIN ydoc_docs d ON d.workspace_id=a.workspace_id AND d.version_id=a.main_version_id AND d.object_id=a.object_id
+            WHERE a.workspace_id=?1 AND a.main_version_id=?2 AND a.object_id=?3
+            AND a.lineage_claim_id=d.lineage_claim_id AND a.source_state_vector_digest=?6
+            AND a.markdown_digest=?5 AND m.after_blob_sha256=?5) OR
+          (NOT EXISTS(SELECT 1 FROM materialization_jobs WHERE workspace_id IN (?1,'') AND target_path=?4 AND status='pending') AND
+          EXISTS(SELECT 1 FROM ydoc_docs d WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3
+            AND d.last_settled_sha IS NULL AND d.head_update_seq=1 AND d.head_snapshot_seq IN (0,1)
+            AND (SELECT COUNT(*) FROM ydoc_updates u WHERE u.workspace_id=?1 AND u.version_id=?2 AND u.object_id=?3)=1-d.head_snapshot_seq
+            AND EXISTS(SELECT 1 FROM ydoc_snapshots s WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.up_to_seq=d.head_snapshot_seq)
+            AND NOT EXISTS(SELECT 1 FROM ydoc_snapshots s WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.up_to_seq NOT IN (0,1))
+            AND EXISTS(SELECT 1 FROM moments m WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.after_blob_sha256=d.seed_source_sha256))))",
+        params![input.workspace_id,input.version_id,object_id,input.path,sha,projection.source_state_vector_sha256], |row| row.get(0),
+    ).map_err(StorageError::corrupt_public)?;
+    if covered {
+        return Ok(prepared);
+    }
+    prepared.authors = dohc_engine_collab::author_coverage::recovery_in(tx, &key)?.moment_json();
+    prepared.preserve = true;
+    Ok(prepared)
 }
 
 fn capture_ingest_in_tx(
@@ -437,6 +448,10 @@ fn capture_ingest_in_tx(
     let (actor_origin_id, attribution) =
         dohc_engine_domain::moment_author_attribution(input.author_json.as_deref());
     let mut admitted = false;
+    let mut recovery = None;
+    let may_have_ydoc_state = batch
+        .as_ref()
+        .is_none_or(|batch| batch.has_ydoc_state != Some(false));
     let mut result = match batch.as_deref_mut() {
         Some(batch) => capture_ingest_in_batch_with_admission_in_tx(
             tx,
@@ -444,6 +459,9 @@ fn capture_ingest_in_tx(
             &mut batch.capture,
             |workspace_id, version_id, object_id| {
                 ensure_capture_target_not_leased(tx, leases, workspace_id, version_id, object_id)?;
+                if may_have_ydoc_state {
+                    recovery = Some(prepare_capture_recovery_in(tx, input, object_id)?);
+                }
                 admitted = true;
                 Ok::<_, RuntimeError>(())
             },
@@ -453,11 +471,39 @@ fn capture_ingest_in_tx(
             input,
             |workspace_id, version_id, object_id| {
                 ensure_capture_target_not_leased(tx, leases, workspace_id, version_id, object_id)?;
+                if may_have_ydoc_state {
+                    recovery = Some(prepare_capture_recovery_in(tx, input, object_id)?);
+                }
                 admitted = true;
                 Ok::<_, RuntimeError>(())
             },
         )?,
     };
+    if let Some(batch) = batch.as_deref_mut() {
+        batch.capture.commit_result(&result)?;
+    }
+    // A lineage read for an object the path no longer resolves to belongs to
+    // another file.
+    let recovery = recovery.filter(|prepared| prepared.object_id == result.snapshot.object_id);
+    if let Some(prepared) = recovery.as_ref().filter(|prepared| prepared.preserve) {
+        let projection = prepared
+            .lineage
+            .projection()
+            .expect("recovery has a projection");
+        if let Some(order) = dohc_engine_domain::record_capture_recovery_in_tx(
+            tx,
+            &input.workspace_id,
+            &result.snapshot,
+            &projection.content,
+            &projection.source_state_vector_sha256,
+            prepared.authors.as_deref(),
+            input.now_ms,
+        )? {
+            if let Some(batch) = batch.as_deref_mut() {
+                batch.capture.commit_recovery_order(order)?;
+            }
+        }
+    }
     if admitted {
         let has_ydoc_state = match batch.as_deref_mut() {
             Some(batch) => match batch.has_ydoc_state {
@@ -475,19 +521,35 @@ fn capture_ingest_in_tx(
             None => true,
         };
         let changed = if has_ydoc_state {
-            dohc_engine_sync::reconcile_local_resulting_head_in_tx(
-                tx,
-                &input.workspace_id,
-                &input.version_id,
-                &result.snapshot.object_id,
-                dohc_engine_sync::ResultingHead::Text {
-                    path: &result.snapshot.path,
-                    text: &result.snapshot.text,
-                },
-                actor_origin_id.as_deref(),
-                attribution.as_ref(),
-                input.now_ms,
-            )?
+            let resulting = dohc_engine_sync::ResultingHead::Text {
+                path: &result.snapshot.path,
+                text: &result.snapshot.text,
+            };
+            let reconciled = match recovery {
+                Some(prepared) => dohc_engine_sync::reconcile_prepared_local_head_in_tx(
+                    tx,
+                    prepared.lineage,
+                    resulting,
+                    actor_origin_id.as_deref(),
+                    attribution.as_ref(),
+                    input.now_ms,
+                )?,
+                // Capture resolved the path to a new object, not the one admitted.
+                None => dohc_engine_sync::reconcile_local_head_in_tx(
+                    tx,
+                    &input.workspace_id,
+                    &input.version_id,
+                    &result.snapshot.object_id,
+                    resulting,
+                    actor_origin_id.as_deref(),
+                    attribution.as_ref(),
+                    input.now_ms,
+                )?,
+            };
+            if let Some(batch) = batch.as_deref_mut() {
+                batch.recovered_sibling = reconciled.recovered_sibling;
+            }
+            reconciled.facts
         } else {
             // No Y.Doc lineage exists in this version, so the file alone
             // carries the write.
@@ -655,14 +717,10 @@ fn capture_ingest_batch_all_or_none_in_tx(
         reason: "capture batch is empty",
     })?;
     let mut results = Vec::with_capacity(inputs.len());
-    let mut batch = CaptureBatchSharedContext {
-        capture: CaptureIngestBatchContext::new(tx, &first.workspace_id, &first.version_id)?,
-        has_ydoc_state: None,
-        journals_file_moments: None,
-    };
+    let mut batch = CaptureBatchSharedContext::new(tx, first)?;
     for input in inputs {
         let result = capture_ingest_in_tx(tx, input, indexing, leases, Some(&mut batch))?;
-        batch.capture.commit_result(&result)?;
+        batch.settle_item(tx, first)?;
         results.push(result);
     }
     Ok(results)
@@ -678,19 +736,15 @@ fn capture_ingest_batch_with_item_savepoints_in_tx(
         reason: "capture batch is empty",
     })?;
     let mut results = Vec::with_capacity(inputs.len());
-    let mut batch = CaptureBatchSharedContext {
-        capture: CaptureIngestBatchContext::new(tx, &first.workspace_id, &first.version_id)?,
-        has_ydoc_state: None,
-        journals_file_moments: None,
-    };
+    let mut batch = CaptureBatchSharedContext::new(tx, first)?;
     for input in inputs {
+        let prior_capture = batch.capture.clone();
         tx.execute_batch("SAVEPOINT dohc_capture_batch_item")
             .map_err(StorageError::persist_public)?;
         match capture_ingest_in_tx(tx, input, indexing, leases, Some(&mut batch)) {
             Ok(result) => {
                 tx.execute_batch("RELEASE dohc_capture_batch_item")
                     .map_err(StorageError::persist_public)?;
-                batch.capture.commit_result(&result)?;
                 results.push(Ok(result));
             }
             Err(error) => {
@@ -699,9 +753,11 @@ fn capture_ingest_batch_with_item_savepoints_in_tx(
                      RELEASE dohc_capture_batch_item",
                 )
                 .map_err(StorageError::persist_public)?;
+                batch.capture = prior_capture;
                 results.push(Err(error));
             }
         }
+        batch.settle_item(tx, first)?;
     }
     Ok(results)
 }
@@ -1034,17 +1090,11 @@ fn capture_secret_on_store(
 fn capture_secret_retire_on_store(
     store: &mut EngineStore,
     input: &CaptureSecretRetire,
-    root_dir: Option<&std::path::Path>,
-    root_guard: Option<&dyn WorkspaceRootGuard>,
+    root_dir: &std::path::Path,
+    root_guard: &dyn WorkspaceRootGuard,
     faults: &dyn FaultInjector,
-    token: &CancellationToken,
 ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
-    if token.is_cancelled() {
-        return Err(RuntimeError::Cancelled);
-    }
-    if let Some(root_dir) = root_dir {
-        validate_workspace_root(root_dir, root_guard)?;
-    }
+    root_guard.validate(root_dir)?;
     ensure_mutation_version_on_store(
         store,
         &input.workspace_id,
@@ -1052,9 +1102,6 @@ fn capture_secret_retire_on_store(
         input.now_ms,
         faults,
     )?;
-    if token.is_cancelled() {
-        return Err(RuntimeError::Cancelled);
-    }
     capture_secret_retire_with(store, input, faults, journal_secret_delete_outbound_in_tx)
         .map_err(RuntimeError::from)
 }
@@ -1064,16 +1111,13 @@ fn capture_secret_retire_on_store(
 /// Runs on the actor thread, so no materialization is between its two renames.
 pub(super) fn confirm_absent_on_disk(
     store: &EngineStore,
-    root_dir: Option<&std::path::Path>,
+    root_dir: &std::path::Path,
     workspace_id: &str,
     path: &str,
     now_ms: i64,
 ) -> Result<(), RuntimeError> {
     let refuse =
         |reason| RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState { reason });
-    let Some(root_dir) = root_dir else {
-        return Err(refuse("absence-unconfirmed"));
-    };
     let displaced =
         || match dohc_engine_files::path_is_displaced(store, root_dir, workspace_id, path) {
             Err(dohc_engine_files::MaterializeError::Storage(err)) => Err(RuntimeError::from(err)),
@@ -1121,20 +1165,14 @@ pub(super) fn confirm_absent_on_disk(
 fn capture_retire_on_store(
     store: &mut EngineStore,
     input: &CaptureRetire,
-    root_dir: Option<&std::path::Path>,
-    root_guard: Option<&dyn WorkspaceRootGuard>,
+    root_dir: &std::path::Path,
+    root_guard: &dyn WorkspaceRootGuard,
     confirm_absent: bool,
-    self_writes: Option<&dyn SelfWriteRecorder>,
+    self_writes: &dyn SelfWriteRecorder,
     leases: &LeaseRegistry,
     faults: &dyn FaultInjector,
-    token: &CancellationToken,
 ) -> Result<CaptureRetireResult, RuntimeError> {
-    if token.is_cancelled() {
-        return Err(RuntimeError::Cancelled);
-    }
-    if let Some(root_dir) = root_dir {
-        validate_workspace_root(root_dir, root_guard)?;
-    }
+    root_guard.validate(root_dir)?;
     ensure_mutation_version_on_store(
         store,
         &input.workspace_id,
@@ -1142,9 +1180,6 @@ fn capture_retire_on_store(
         input.now_ms,
         faults,
     )?;
-    if token.is_cancelled() {
-        return Err(RuntimeError::Cancelled);
-    }
     if confirm_absent {
         confirm_absent_on_disk(
             store,
@@ -1211,18 +1246,16 @@ fn capture_retire_on_store(
     })?;
     match outcome {
         TxnOutcome::Committed((result, asset_jobs)) => {
-            if let (Some(root_dir), Some(self_writes)) = (root_dir, self_writes) {
-                validate_workspace_root(root_dir, root_guard)?;
-                materialize_scene_asset_deletes(
-                    store,
-                    root_dir,
-                    &input.workspace_id,
-                    &asset_jobs,
-                    self_writes,
-                    faults,
-                    root_guard,
-                )?;
-            }
+            root_guard.validate(root_dir)?;
+            materialize_scene_asset_deletes(
+                store,
+                root_dir,
+                &input.workspace_id,
+                &asset_jobs,
+                self_writes,
+                faults,
+                Some(root_guard),
+            )?;
             Ok(result)
         }
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
@@ -1442,6 +1475,7 @@ mod capture_secret_root_guard_tests {
                                         reason: "cancelled quarantine".to_owned(),
                                         observed_binding: None,
                                     },
+                                    20,
                                     token.clone(),
                                 )
                                 .await

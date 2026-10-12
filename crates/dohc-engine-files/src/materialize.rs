@@ -825,7 +825,10 @@ pub fn materialize_one(
     result
 }
 
-fn materialize_one_ordinary(
+/// Execute an ordinary job, retaining the error that explains a blocked path.
+/// Callers that manage a staged publication need that reason before deciding
+/// whether to retain or discard it.
+pub fn materialize_one_ordinary(
     store: &EngineStore,
     root: &Path,
     job: &MaterializationJob,
@@ -857,6 +860,8 @@ fn materialize_one_ordinary(
     // Generation staleness gate: if a newer generation has already been
     // materialized at this path, this job is superseded — never regress the path
     // to older content (concurrent / out-of-order jobs). No-op; mark complete.
+    // A keyed write's request records the supersession first, so a complete
+    // job with no recorded outcome always reached disk.
     if !job.job_id.starts_with("version-switch-")
         && let Some(done_gen) =
             store.max_completed_generation_for_path(&job.workspace_id, &job.target_path)?
@@ -865,6 +870,7 @@ fn materialize_one_ordinary(
         if job.job_id.starts_with("ydoc-mat_") {
             store.mark_materialization_cancelled(&job.job_id, now_ms)?;
         } else {
+            store.record_superseded_publication(job)?;
             store.mark_materialization_complete(&job.job_id, now_ms)?;
         }
         return Ok(JobOutcome::Superseded);
@@ -1483,6 +1489,12 @@ fn materialize_delete(
         options,
     )? {
         Stage::Moved(spec) => spec,
+        Stage::CrossVolume if job.job_id.starts_with("restore-delete-mat_") => {
+            return Err(MaterializeError::io(
+                target,
+                &std::io::Error::from(ErrorKind::CrossesDevices),
+            ));
+        }
         Stage::CrossVolume => return materialize_cross_volume(store, target, None, job, options),
         Stage::Conflict => {
             store.mark_materialization_conflict(&job.job_id, now_ms)?;
@@ -1495,6 +1507,65 @@ fn materialize_delete(
     };
     let staging = &active;
     let staged = staging.dir.join(&spec.displaced_name);
+    if job.job_id.starts_with("restore-delete-mat_") {
+        // Keep the preimage until the durable publication receipt exists. A
+        // filesystem or receipt failure returns it without replacing new work.
+        let published = (|| {
+            if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
+                return Ok(JobOutcome::Crashed(
+                    FaultPoint::MaterializeAfterRenameBeforeComplete,
+                ));
+            }
+            let inspected = inspect_displaced(store, &staged, expected, None)?;
+            if should_crash(faults, FaultPoint::MaterializeAfterDisplacedHash) {
+                return Ok(JobOutcome::Crashed(
+                    FaultPoint::MaterializeAfterDisplacedHash,
+                ));
+            }
+            if matches!(inspected, Inspected::Unreadable) {
+                return Err(MaterializeError::io(
+                    &staged,
+                    &std::io::Error::from(ErrorKind::PermissionDenied),
+                ));
+            }
+            if !matches!(inspected, Inspected::Known { .. } | Inspected::Missing) {
+                if !return_displaced(target, &staged, options)? {
+                    let moved = Moved::open(store, spec.clone(), &staging.dir)?;
+                    store.resolve_displacement(
+                        moved.displacement_id,
+                        keep_resolution(&inspected),
+                        None,
+                        now_ms,
+                    )?;
+                }
+                store.mark_materialization_conflict(&job.job_id, now_ms)?;
+                return Ok(JobOutcome::Conflict);
+            }
+            sync_parent_dir(target.parent(), policy)?;
+            store.mark_materialization_complete(&job.job_id, now_ms)?;
+            // Cleanup cannot turn an applied publication into a refusal.
+            let _ = std::fs::remove_file(&staged);
+            if should_crash(faults, FaultPoint::MaterializeAfterKnownCopyDeletion) {
+                return Ok(JobOutcome::Crashed(
+                    FaultPoint::MaterializeAfterKnownCopyDeletion,
+                ));
+            }
+            Ok(JobOutcome::Completed)
+        })();
+        if published.is_err()
+            && entry_exists(&staged)?
+            && !return_displaced(target, &staged, options)?
+        {
+            let moved = Moved::open(store, spec, &staging.dir)?;
+            store.resolve_displacement(
+                moved.displacement_id,
+                keep_resolution(&Inspected::Missing),
+                None,
+                now_ms,
+            )?;
+        }
+        return published;
+    }
     if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
         return Ok(JobOutcome::Crashed(
             FaultPoint::MaterializeAfterRenameBeforeComplete,
@@ -4816,6 +4887,138 @@ mod tests {
             now_ms: 1,
             faults: &NoFaults,
         }
+    }
+
+    #[test]
+    fn corrupt_pending_preimage_stops_the_batch_before_any_file_is_replaced() {
+        let scratch = Scratch::new("corrupt-pending-preimage");
+        let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
+        let sha = store.put_binary_blob(b"new content").unwrap();
+        std::fs::write(scratch.root.join("existing.bin"), b"outside content").unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                for (id, path, preimage) in [
+                    ("first", "new.bin", Preimage::Absent),
+                    (
+                        "corrupt",
+                        "existing.bin",
+                        Preimage::Present(hex_sha256(b"outside content")),
+                    ),
+                ] {
+                    enqueue_job(
+                        tx,
+                        &MaterializationJobSpec {
+                            job_id: id.into(),
+                            workspace_id: "workspace".into(),
+                            target_path: path.into(),
+                            content_sha256: sha.clone(),
+                            preimage,
+                            target_generation: 1,
+                            now_ms: if id == "first" { 1 } else { 2 },
+                        },
+                    )?;
+                }
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE materialization_jobs SET preimage_sha256 = NULL WHERE job_id = 'corrupt'",
+                    [],
+                )
+                .map_err(StorageError::persist_public)
+            })
+            .unwrap();
+        assert!(matches!(
+            run_pending_jobs(&store, &scratch.root, &options_with(&StdReplacer)),
+            Err(MaterializeError::Storage(StorageError::StateCorrupt { .. }))
+        ));
+        assert!(!scratch.root.join("new.bin").exists());
+        assert_eq!(
+            std::fs::read(scratch.root.join("existing.bin")).unwrap(),
+            b"outside content"
+        );
+        assert_eq!(store.pending_materialization_count().unwrap(), 2);
+        assert_eq!(
+            store
+                .load_materialization_job("first")
+                .unwrap()
+                .unwrap()
+                .status,
+            JobStatus::Pending
+        );
+    }
+
+    #[test]
+    fn corrupt_job_status_stops_the_pending_batch_before_any_file_is_replaced() {
+        let scratch = Scratch::new("corrupt-pending-status");
+        let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
+        let sha = store.put_binary_blob(b"new content").unwrap();
+        let preimage_sha = store.put_binary_blob(b"outside content").unwrap();
+        for path in ["first.bin", "later.bin"] {
+            std::fs::write(scratch.root.join(path), b"outside content").unwrap();
+        }
+        store
+            .write_with(&NoFaults, |tx| {
+                for (id, path, now_ms) in [("first", "first.bin", 1), ("later", "later.bin", 2)] {
+                    enqueue_job(
+                        tx,
+                        &MaterializationJobSpec {
+                            job_id: id.into(),
+                            workspace_id: "workspace".into(),
+                            target_path: path.into(),
+                            content_sha256: sha.clone(),
+                            preimage: Preimage::Present(preimage_sha.clone()),
+                            target_generation: 1,
+                            now_ms,
+                        },
+                    )?;
+                }
+                tx.execute(
+                    "UPDATE materialization_jobs SET status = 'pendng' WHERE job_id = 'later'",
+                    [],
+                )
+                .map_err(StorageError::persist_public)?;
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+        // Quote every raw field so the invalid status remains readable.
+        let ledger = |store: &EngineStore| {
+            store
+                .read_with(|conn| {
+                    let mut query = conn.prepare(
+                        "SELECT quote(job_id), quote(workspace_id), quote(target_path), \
+                         quote(content_sha256), quote(preimage_present), quote(preimage_sha256), \
+                         quote(target_generation), quote(status), quote(created_at_ms), \
+                         quote(completed_at_ms), quote(operation) \
+                         FROM materialization_jobs ORDER BY job_id",
+                    )?;
+                    let rows = query.query_map([], |row| {
+                        (0..11)
+                            .map(|index| row.get::<_, String>(index))
+                            .collect::<Result<Vec<_>, _>>()
+                    })?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                })
+                .unwrap()
+        };
+        let before = ledger(&store);
+        assert_eq!(before.len(), 2);
+        assert_eq!(before[0][7], "'pending'");
+        assert_eq!(before[1][7], "'pendng'");
+
+        assert!(matches!(
+            run_pending_jobs(&store, &scratch.root, &options_with(&StdReplacer)),
+            Err(MaterializeError::Storage(StorageError::StateCorrupt { .. }))
+        ));
+        for path in ["first.bin", "later.bin"] {
+            assert_eq!(
+                std::fs::read(scratch.root.join(path)).unwrap(),
+                b"outside content"
+            );
+        }
+        assert_eq!(ledger(&store), before);
     }
 
     /// The replace loop retries an ACL denial to its full bounded budget —

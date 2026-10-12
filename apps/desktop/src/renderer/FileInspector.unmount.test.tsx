@@ -100,6 +100,7 @@ async function settleUserEventAction<T>(pending: Promise<T>): Promise<T> {
 describe("markdown editor unmount flush", () => {
   const bridgeMock = {
     platform: "linux" as const,
+    onWorkspaceActivity: vi.fn(() => () => undefined),
     readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(async () => ({
       text: "# Hello\n",
       truncated: false as const,
@@ -191,7 +192,7 @@ describe("markdown editor unmount flush", () => {
         expect(hasPendingEditorDrafts()).toBe(true);
       }
       await act(async () => { held.resolve({ status: "written", contentHash: "late-save" }); });
-      expect(onSaveStateChange).toHaveBeenLastCalledWith("saving");
+      expect(onSaveStateChange).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "saving" }));
       expect(screen.getByTestId("markdown-save-state").dataset.state).not.toBe("saved");
       expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2);
       expect(bridgeMock.writeWorkspaceText.mock.calls[1]![0].text).toContain(newestText);
@@ -200,7 +201,7 @@ describe("markdown editor unmount flush", () => {
       fireEvent.click(screen.getByTestId("markdown-edit-toggle"));
       expect(codeEditorText(await findSourceEditor())).toContain(newestText);
       await act(async () => { latest.resolve({ status: "written", contentHash: "latest-save" }); });
-      expect(onSaveStateChange).toHaveBeenLastCalledWith("saved");
+      expect(onSaveStateChange).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "saved-here" }));
       expect(codeEditorText(await findSourceEditor())).toContain(newestText);
       expect(loadStoredDrafts(Date.now())).toEqual([
         expect.objectContaining({ text: expect.stringContaining("Newest!") }),
@@ -1962,7 +1963,7 @@ describe("markdown editor unmount flush", () => {
       body: "before peer draft",
       contentHash: TEST_CONTENT_HASH,
       dirty: true,
-      saveState: "error",
+      saveState: { kind: "error" },
     });
     await waitFor(() =>
       expect(
@@ -2131,7 +2132,7 @@ describe("markdown editor unmount flush", () => {
     ).toMatchObject({
       contentHash: writtenHash,
       dirty: false,
-      saveState: "saved",
+      saveState: { kind: "saved-here" },
     });
   });
 
@@ -2224,7 +2225,7 @@ describe("markdown editor unmount flush", () => {
     ).toMatchObject({
       contentHash: writtenHash,
       dirty: false,
-      saveState: "saved",
+      saveState: { kind: "saved-here" },
     });
   });
 
@@ -3314,7 +3315,7 @@ describe("markdown editor unmount flush", () => {
       body: "# Peer newest\n",
       contentHash: "b".repeat(64),
       dirty: true,
-      saveState: "saving",
+      saveState: { kind: "saving" },
     });
     expect(buffer.getSnapshot().source).toBe(peerSource);
   });
@@ -3672,7 +3673,7 @@ describe("markdown editor unmount flush", () => {
       body: "External",
       contentHash: externalHash,
       dirty: false,
-      saveState: "saved",
+      saveState: { kind: "saved-here" },
     });
     view.unmount();
   });
@@ -5926,7 +5927,7 @@ describe("markdown editor unmount flush", () => {
     expect(shared.getSnapshot()).toMatchObject({
       body: "Base",
       dirty: false,
-      saveState: "saved",
+      saveState: { kind: "saved-here" },
     });
     const recoveries = await screen.findAllByTestId("orphaned-draft-copy");
     await user.click(recoveries[recoveries.length - 1]!);

@@ -65,7 +65,7 @@ export function createServerOwnerConnection(options: {
           throw new Error("Owner delivery connection changed.");
         }
       };
-      return {bearer: session.value.token, relayUrl, signal: session.signal, assertCurrent,
+      return {bearer: session.value.token, accountId: session.value.userId, relayUrl, signal: session.signal, assertCurrent,
         async refusals(attempt) {
           assertCurrent();
           const requestSignal = AbortSignal.any([signal, attempt]); requestSignal.throwIfAborted();

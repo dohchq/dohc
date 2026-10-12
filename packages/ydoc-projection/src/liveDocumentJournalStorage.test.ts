@@ -120,7 +120,8 @@ function registered(options: { workspaceQuotaBytes?: number; deployment?: boolea
       document: validation.evidence.document, currentPath: validation.evidence.currentPath, checkpointDigest: validation.evidence.checkpointDigest, checkpointRanges: validation.evidence.checkpointRanges,
       suffixDigests: validation.evidence.suffixDigests, candidate: validation.evidence.candidate,
       ...state,
-      stateUpdateSha256: validation.evidence.stateUpdateSha256, stateUpdateByteLength: validation.evidence.stateUpdateByteLength } } : validation
+      projectedMarkdownSha256:validation.evidence.projectedMarkdownSha256, projectedMarkdownByteLength:validation.evidence.projectedMarkdownByteLength,
+              stateUpdateSha256: validation.evidence.stateUpdateSha256, stateUpdateByteLength: validation.evidence.stateUpdateByteLength } } : validation
     expect(hash(captured)).toBe(digest)
     if (owned.kind === 'accepted') expect(owned.evidence.candidate.updateDigest).toBe(digest)
     return { host: current.host, actor: candidateActor, expectedAuthority: current.authority,

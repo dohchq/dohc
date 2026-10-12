@@ -177,6 +177,8 @@ async function run() {
 
   runRequired(process.execPath, [join(import.meta.dirname, "stage-app-compiler.mjs")],
     { stdio: "inherit" }, "stage the app compiler");
+  runRequired(process.execPath, [join(import.meta.dirname, "stage-agent-probe.mjs")],
+    { stdio: "inherit" }, "stage the agent probe");
   runRequired(process.execPath, [join(import.meta.dirname, "stage-app-backend-runtime.mjs")],
     { stdio: "inherit" }, "stage the app backend runtime");
 

@@ -27,14 +27,16 @@ const CHAT_PAGE_LIMIT_DEFAULT: i64 = 200;
 const CHAT_PAGE_LIMIT_MAX: i64 = 500;
 
 /// Versioned, opaque continuation state for the RPC-B2 chat families. The
-/// binding is a digest over method + authenticated workspace + logical
-/// filters, so a cursor cannot be replayed against another view.
+/// binding detects accidental reuse across methods, workspaces, and filters.
+/// Cursors are editable pagination hints, not authorization or enforceable quotas.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct ChatKeysetCursor {
     pub(super) version: u8,
     pub(super) binding: String,
-    pub(super) consumed: i64,
+    /// Advisory total-result accounting, used only by capped list families.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) consumed: Option<i64>,
     pub(super) first: i64,
     pub(super) second: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -71,7 +73,7 @@ pub(super) fn decode_chat_cursor(
     let cursor: ChatKeysetCursor = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
     if cursor.version != 1
         || cursor.binding != expected_binding
-        || cursor.consumed < 0
+        || cursor.consumed.is_some_and(|consumed| consumed < 0)
         || cursor.second.is_empty()
     {
         return Err(invalid());
@@ -104,7 +106,6 @@ pub(super) fn bounded_chat_page_len(rows: &[Value]) -> Result<usize, WireError> 
 pub(super) fn chat_page_cursor<T>(
     rows: &[T],
     included: usize,
-    consumed: i64,
     binding: String,
     coordinate: impl FnOnce(&T) -> (i64, String),
 ) -> Result<Option<String>, WireError> {
@@ -118,7 +119,7 @@ pub(super) fn chat_page_cursor<T>(
     encode_chat_cursor(&ChatKeysetCursor {
         version: 1,
         binding,
-        consumed: consumed + included as i64,
+        consumed: None,
         first,
         second,
         third: None,

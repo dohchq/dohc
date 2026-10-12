@@ -2,13 +2,13 @@
 import { Editor, Extension } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
 import { TableKit } from "@tiptap/extension-table";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   makeTableControlsPlugin,
   resolveTableDropDestination,
   resolveTableMenuPosition,
 } from "./tableControls";
-import { DohcTableRowHeight } from "./extensions";
+import { DohcTableRowHeight } from "@dohc/ydoc-projection/markdown-extensions";
 
 // ProseMirror's resize/drop plugins ask the browser for a hit-test while these
 // tests dispatch synthetic pointer/drag events. jsdom has no layout engine, so
@@ -136,8 +136,9 @@ function createColspanTableEditor(): Editor {
 function menuItemByLabel(label: string): HTMLButtonElement {
   const menu = document.body.querySelector(".dohc-table-menu");
   if (!menu) throw new Error("grip menu did not open");
+  // The label is the row's first child; a destructive row adds its Del chip.
   const item = Array.from(menu.querySelectorAll(".dohc-table-menu__item")).find(
-    (el) => el.textContent === label,
+    (el) => el.firstElementChild?.textContent === label,
   );
   if (!item) throw new Error(`menu item "${label}" not found`);
   return item as HTMLButtonElement;
@@ -854,6 +855,123 @@ describe("table controls grips", () => {
     expect(document.activeElement).toBe(grip);
     const headerRow = tableNode(editor).content?.[0];
     expect(headerRow?.content).toHaveLength(2);
+  });
+
+  it("closes the grip menu from its grip again, with focus kept on the grip", () => {
+    editor = createTableEditor(2, 2);
+    document.body.appendChild(editor.view.dom);
+    const grip = editor.view.dom.querySelector(".dohc-table-grip--col") as HTMLElement;
+    click(grip);
+    const menu = document.body.querySelector(".dohc-table-menu") as HTMLElement;
+    expect(grip.getAttribute("aria-expanded")).toBe("true");
+    // A press on the grip is the grip's to answer, not a press outside.
+    grip.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, composed: true }));
+    grip.focus();
+    expect(menu.isConnected).toBe(true);
+
+    click(grip);
+    expect(document.body.querySelector(".dohc-table-menu")).toBeNull();
+    expect(grip.getAttribute("aria-expanded")).toBe("false");
+    expect(document.activeElement).toBe(grip);
+  });
+
+  it("returns focus to the grip when the window loses focus with its menu open", () => {
+    editor = createTableEditor(2, 2);
+    document.body.appendChild(editor.view.dom);
+    const grip = editor.view.dom.querySelector(".dohc-table-grip--col") as HTMLElement;
+    click(grip);
+    expect(document.activeElement).toBe(document.body.querySelector(".dohc-table-menu"));
+    window.dispatchEvent(new Event("blur"));
+    expect(document.body.querySelector(".dohc-table-menu")).toBeNull();
+    expect(document.activeElement).toBe(grip);
+  });
+
+  // A click in an embedded frame, such as an app preview, blurs the window
+  // with focus already in the frame. The grip must not pull it back out.
+  it("leaves focus in an embedded frame that took it as the window blurred", () => {
+    editor = createTableEditor(2, 2);
+    document.body.appendChild(editor.view.dom);
+    const grip = editor.view.dom.querySelector(".dohc-table-grip--col") as HTMLElement;
+    click(grip);
+    const frame = document.createElement("iframe");
+    document.body.appendChild(frame);
+    const focusGrip = vi.spyOn(grip, "focus");
+    Object.defineProperty(document, "activeElement", { configurable: true, get: () => frame });
+    try {
+      window.dispatchEvent(new Event("blur"));
+    } finally {
+      delete (document as { activeElement?: unknown }).activeElement;
+    }
+    expect(document.body.querySelector(".dohc-table-menu")).toBeNull();
+    expect(focusGrip).not.toHaveBeenCalled();
+    focusGrip.mockRestore();
+    frame.remove();
+  });
+
+  // jsdom has no layout: a 100px list over 28px rows.
+  it("keeps the active row inside the grip menu's view as the keys move it", () => {
+    const geometry = [
+      vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (this: HTMLElement) {
+        const index = Number(/-item-(\d+)$/.exec(this.id)?.[1] ?? Number.NaN);
+        return Number.isNaN(index) ? 0 : 4 + index * 28;
+      }),
+      vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(28),
+      vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(100),
+    ];
+    try {
+    editor = createTableEditor(2, 3);
+    const grip = editor.view.dom.querySelector(".dohc-table-grip--col") as HTMLElement;
+    click(grip);
+    const menu = document.body.querySelector(".dohc-table-menu") as HTMLElement;
+    const items = [...menu.querySelectorAll<HTMLElement>("[role='menuitem']")];
+    const inView = (row: HTMLElement) =>
+      row.offsetTop >= menu.scrollTop && row.offsetTop + row.offsetHeight <= menu.scrollTop + menu.clientHeight;
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "End" }));
+    expect(inView(items.at(-1)!)).toBe(true);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Home" }));
+    expect(inView(items[0]!)).toBe(true);
+    } finally {
+      for (const spy of geometry) spy.mockRestore();
+    }
+  });
+
+  it("closes the grip menu on Tab from the grip, and when focus leaves it", () => {
+    editor = createTableEditor(2, 2);
+    document.body.appendChild(editor.view.dom);
+    const grip = editor.view.dom.querySelector(".dohc-table-grip--col") as HTMLElement;
+    click(grip);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab" }));
+    expect(document.body.querySelector(".dohc-table-menu")).toBeNull();
+    expect(document.activeElement).toBe(grip);
+
+    click(grip);
+    const menu = document.body.querySelector(".dohc-table-menu") as HTMLElement;
+    const elsewhere = document.createElement("button");
+    document.body.appendChild(elsewhere);
+    menu.dispatchEvent(new FocusEvent("focusout", { relatedTarget: elsewhere }));
+    expect(document.body.querySelector(".dohc-table-menu")).toBeNull();
+    elsewhere.remove();
+  });
+
+  it("draws the grip menu from the Menu part's recipe: separators, the active row, and Del on the destructive row", () => {
+    editor = createTableEditor(2, 3);
+    const grip = editor.view.dom.querySelector(".dohc-table-grip--col") as HTMLElement;
+    click(grip);
+    const menu = document.body.querySelector(".dohc-table-menu") as HTMLElement;
+    expect(menu.querySelectorAll("[role='separator']")).toHaveLength(2);
+    const items = [...menu.querySelectorAll<HTMLElement>("[role='menuitem']")];
+    expect(items[0]?.hasAttribute("data-active")).toBe(true);
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "End" }));
+    const remove = items.at(-1)!;
+    expect(menu.getAttribute("aria-activedescendant")).toBe(remove.id);
+    expect(remove.hasAttribute("data-active")).toBe(true);
+    expect(items[0]?.hasAttribute("data-active")).toBe(false);
+    expect(remove.getAttribute("aria-keyshortcuts")).toBe("Delete");
+    expect(remove.lastElementChild?.textContent).toBe("Del");
+    expect(remove.lastElementChild?.getAttribute("aria-hidden")).toBe("true");
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "a" }));
+    expect(menu.getAttribute("aria-activedescendant")).toBe(items[2]?.id);
   });
 
   it("keeps the grip menu inside an embedded editor's shadow root", () => {

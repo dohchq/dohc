@@ -2,7 +2,7 @@ import { SecondaryButton, PrimaryButton } from "../ui/controls";
 import { useRequestSequence } from "../useRequestSequence";
 import { ipcErrorMessage } from "../ipcError";
 import { isWorkspaceUpdatingError } from "../../ipc/errorWords";
-import { Bot, Check, ChevronDown, FileArchive, FileText, Layers, Lock, RefreshCw, Share2 } from "lucide-react";
+import { Bot, ChevronDown, ChevronsUpDown, FileArchive, FileText, Layers, Lock, RefreshCw, Share2 } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -23,6 +23,7 @@ import {
 import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
 import { SectionLabel } from "../ui/controls";
+import { MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
 import {
   CONFLICT_COMBINED_EDIT_MAX_BYTES,
@@ -52,15 +53,15 @@ function versionName(
   );
 }
 
-const MENU_ITEM_CLASS =
-  "flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-not-allowed disabled:opacity-50";
 const VERSION_LOAD_RETRY_MS = 1_000;
 const VERSION_LOAD_FAILURE_ATTEMPTS = 5;
 
-// Compact version selector for the editor chrome: shows the active version,
-// switches on click, creates inline, and opens compare / merge.
+// The version breadcrumb in the titlebar: shows the active version, switches
+// on click, creates inline, and opens compare / merge.
 export function VersionMenu(props: {
   workspaceId: string;
+  // The workspace is not ready for a version change.
+  disabled?: boolean;
   activeTabDirty: boolean;
   // Settles drafts and queued collection writes, and pauses new cell edits
   // until the returned release runs. Each operation holds the release across
@@ -97,8 +98,6 @@ export function VersionMenu(props: {
   const [mergeSource, setMergeSource] = useState<WorkspaceVersionRecord | null>(null);
   // "Try it in a version" (PR 0N-2): the task prompt dialog.
   const [tryOpen, setTryOpen] = useState(false);
-  const menuRef = useRef<HTMLDivElement | null>(null);
-  const triggerRef = useRef<HTMLButtonElement | null>(null);
   // Two questions, and they are not the same one.
   //
   // May this read still write the snapshot? A newer read answers no — from a
@@ -181,11 +180,12 @@ export function VersionMenu(props: {
   const activeVersionIdRef = useRef<string | null>(null);
   activeVersionIdRef.current = snapshot?.activeVersionId ?? null;
 
-  const closeMenu = useCallback((refocus = true) => {
-    setMenuOpen(false);
+  // Every way the menu closes drops the name being typed and its error.
+  const setMenu = useCallback((open: boolean) => {
+    setMenuOpen(open);
+    if (open) return;
     setNewName(null);
     setInlineError(null);
-    if (refocus) triggerRef.current?.focus();
   }, []);
 
   const performSwitch = useCallback(
@@ -265,11 +265,8 @@ export function VersionMenu(props: {
 
   const requestSwitch = useCallback(
     (versionId: string) => {
-      if (versionId === snapshot?.activeVersionId) {
-        closeMenu();
-        return;
-      }
-      closeMenu(false);
+      setMenu(false);
+      if (versionId === snapshot?.activeVersionId) return;
       if (props.activeTabDirty) {
         // Save-first prompt: switching always saves into the current version
         // first, and the user should know that before it happens.
@@ -278,7 +275,7 @@ export function VersionMenu(props: {
       }
       void performSwitch(versionId);
     },
-    [closeMenu, performSwitch, props.activeTabDirty, snapshot?.activeVersionId],
+    [setMenu, performSwitch, props.activeTabDirty, snapshot?.activeVersionId],
   );
 
   const performCreate = useCallback(
@@ -303,7 +300,7 @@ export function VersionMenu(props: {
         setSnapshot(result);
         // Create-and-switch: the new version is the active one.
         props.onWorkspaceStateChanged(result.activeVersionId);
-        closeMenu();
+        setMenu(false);
       } catch (error) {
         if (!operationToken.isCurrent(token)) return;
         setInlineError(ipcErrorMessage(error, "Could not create that version."));
@@ -312,271 +309,153 @@ export function VersionMenu(props: {
         if (operationToken.isCurrent(token)) setBusy(null);
       }
     },
-    [beginOperation, closeMenu, props.beginLineageOperation, props.onWorkspaceStateChanged, workspaceId],
+    [beginOperation, setMenu, props.beginLineageOperation, props.onWorkspaceStateChanged, workspaceId],
   );
-
-  // Keyboard-navigable menu: arrows move focus, Home/End jump, Escape closes
-  // and returns focus to the trigger.
-  const onMenuKeyDown = useCallback(
-    (event: React.KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        closeMenu();
-        return;
-      }
-      if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
-      const menu = menuRef.current;
-      if (!menu) return;
-      const items = Array.from(
-        menu.querySelectorAll<HTMLElement>(
-          "[role^='menuitem']:not([aria-disabled='true']), input",
-        ),
-      );
-      if (items.length === 0) return;
-      event.preventDefault();
-      const current = items.indexOf(document.activeElement as HTMLElement);
-      const next =
-        event.key === "Home"
-          ? 0
-          : event.key === "End"
-            ? items.length - 1
-            : event.key === "ArrowDown"
-              ? (current + 1) % items.length
-              : (current - 1 + items.length) % items.length;
-      items[next]?.focus();
-    },
-    [closeMenu],
-  );
-
-  useEffect(() => {
-    if (!menuOpen) return;
-    const first = menuRef.current?.querySelector<HTMLElement>("[role^='menuitem']");
-    first?.focus();
-  }, [menuOpen]);
 
   if (!snapshot) return null;
 
   const activeName = active?.name ?? "Main";
-  const namedVersions = snapshot.versions;
+  const items: MenuEntry[] = [
+    ...snapshot.versions.map((version) => ({
+      id: `version:${version.id}`,
+      label: version.name,
+      checked: version.id === snapshot.activeVersionId,
+      testId: "version-item",
+      data: { "data-version-id": version.id, "data-version-name": version.name },
+      onSelect: () => requestSwitch(version.id),
+    })),
+    MENU_SEPARATOR,
+    {
+      id: "try",
+      label: "Try in a version…",
+      icon: <Bot size={14} aria-hidden />,
+      testId: "version-try",
+      onSelect: () => {
+        setMenu(false);
+        setTryOpen(true);
+      },
+    },
+  ];
+  if (props.onShareVersion) {
+    const share = props.onShareVersion;
+    items.push({
+      id: "share",
+      label: "Share this version…",
+      icon: <Share2 size={14} aria-hidden />,
+      testId: "version-share",
+      onSelect: () => {
+        setMenu(false);
+        share({ id: active?.id ?? "main", name: activeName });
+      },
+    });
+  }
+  items.push(
+    newName === null
+      ? {
+          id: "new",
+          label: "New version…",
+          testId: "version-new",
+          onSelect: () => {
+            setInlineError(null);
+            setNewName("");
+          },
+        }
+      : {
+          id: "new",
+          field: {
+            label: "New version name",
+            value: newName,
+            onChange: setNewName,
+            onSubmit: () => void performCreate(newName),
+            onCancel: () => {
+              setNewName(null);
+              setInlineError(null);
+            },
+            placeholder: "Version name",
+            maxLength: 80,
+            busy: busy === "create",
+            hint: busy === "create" ? "Creating…" : "Press Enter to create and start working in it.",
+            testId: "version-new-input",
+          },
+        },
+  );
+  if (!onMain && active) {
+    items.push(
+      {
+        id: "compare",
+        label: "Compare with Main",
+        testId: "version-compare",
+        onSelect: () => {
+          setMenu(false);
+          props.onOpenCompare(active.id);
+        },
+      },
+      {
+        id: "merge",
+        label: "Merge into Main…",
+        testId: "version-merge",
+        disabled: !active.canMergeIntoMain,
+        title: active.canMergeIntoMain
+          ? `Bring everything from ${active.name} into Main`
+          : "This version was created inside another version, so it can't merge straight into Main yet.",
+        onSelect: () => {
+          setMenu(false);
+          setMergeSource(active);
+        },
+      },
+    );
+  }
 
   return (
-    <div className="relative flex items-center">
-      <button
-        ref={triggerRef}
-        type="button"
-        data-testid="version-menu-button"
-        aria-haspopup="menu"
-        aria-expanded={menuOpen}
-        aria-label={`Version: ${activeName}${onMain ? "" : " (not Main)"}`}
-        title={`You're working in the ${activeName} version`}
-        disabled={busy !== null}
-        onClick={() => (menuOpen ? closeMenu() : setMenuOpen(true))}
-        className="flex h-7 max-w-56 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-60"
-      >
-        <Layers size={13} aria-hidden className="shrink-0" />
-        <span data-testid="version-menu-active" className="min-w-0 truncate">
-          {busy === "switch" ? "Switching…" : activeName}
-        </span>
-        {!onMain ? (
-          <span
-            data-testid="version-menu-dot"
-            aria-hidden
-            className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent"
-          />
-        ) : null}
-        <ChevronDown size={12} aria-hidden className="shrink-0 text-subtle" />
-      </button>
-
-      {menuOpen ? (
-        <>
-          <div className="fixed inset-0 z-20" onClick={() => closeMenu(false)} />
-          <div
-            ref={menuRef}
-            role="menu"
-            aria-label="Versions"
-            data-testid="version-menu"
-            onKeyDown={onMenuKeyDown}
-            className="dohc-popover dohc-pop-in absolute right-0 top-full z-30 mt-1 w-64 rounded-lg border border-line bg-panel p-1"
+    <div className="relative flex min-w-0 items-center">
+      {/* Every row but New version answers by closing the menu itself. */}
+      <Menu
+        label="Versions"
+        menuTestId="version-menu"
+        open={menuOpen}
+        onOpenChange={setMenu}
+        width={256}
+        closeOnPick={false}
+        items={items}
+        trigger={(trigger) => (
+          <button
+            {...trigger}
+            type="button"
+            data-testid="version-menu-button"
+            aria-label={`Version: ${activeName}${onMain ? "" : " (not Main)"}`}
+            title={`You're working in the ${activeName} version`}
+            disabled={busy !== null || props.disabled}
+            className="titlebar-no-drag flex h-7 min-w-0 max-w-56 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[13px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-60"
           >
-            <SectionLabel as="div" className="px-2 pb-1 pt-1.5">
-              Versions
-            </SectionLabel>
-            {namedVersions.map((version) => {
-              const isActive = version.id === snapshot.activeVersionId;
-              return (
-                <button
-                  key={version.id}
-                  type="button"
-                  role="menuitemradio"
-                  aria-checked={isActive}
-                  data-testid="version-item"
-                  data-version-id={version.id}
-                  data-version-name={version.name}
-                  data-active={isActive || undefined}
-                  onClick={() => requestSwitch(version.id)}
-                  className={MENU_ITEM_CLASS}
-                >
-                  <span className="grid w-4 shrink-0 place-items-center">
-                    {isActive ? (
-                      <Check size={13} aria-hidden className="text-accent" />
-                    ) : null}
-                  </span>
-                  <span
-                    className={`min-w-0 flex-1 truncate ${
-                      isActive ? "text-ink" : ""
-                    }`}
-                  >
-                    {version.name}
-                  </span>
-                </button>
-              );
-            })}
-
-            <div className="mx-1 my-1 border-t border-line" aria-hidden />
-
-            <button
-              type="button"
-              role="menuitem"
-              data-testid="version-try"
-              onClick={() => {
-                closeMenu(false);
-                setTryOpen(true);
-              }}
-              className={MENU_ITEM_CLASS}
-            >
-              <span className="grid w-4 shrink-0 place-items-center">
-                <Bot size={13} aria-hidden />
-              </span>
-              Try in a version…
-            </button>
-
-            {props.onShareVersion ? (
-              <button
-                type="button"
-                role="menuitem"
-                data-testid="version-share"
-                onClick={() => {
-                  closeMenu(false);
-                  props.onShareVersion?.({
-                    id: active?.id ?? "main",
-                    name: activeName,
-                  });
-                }}
-                className={MENU_ITEM_CLASS}
-              >
-                <span className="grid w-4 shrink-0 place-items-center">
-                  <Share2 size={13} aria-hidden />
-                </span>
-                Share this version…
-              </button>
+            <Layers size={12} aria-hidden className="shrink-0" />
+            <span data-testid="version-menu-active" className="min-w-0 truncate">
+              {busy === "switch" ? "Switching…" : activeName}
+            </span>
+            {!onMain ? (
+              <span
+                data-testid="version-menu-dot"
+                aria-hidden
+                className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent"
+              />
             ) : null}
-
-            {newName === null ? (
-              <button
-                type="button"
-                role="menuitem"
-                data-testid="version-new"
-                onClick={() => {
-                  setInlineError(null);
-                  setNewName("");
-                }}
-                className={MENU_ITEM_CLASS}
-              >
-                <span className="w-4 shrink-0" aria-hidden />
-                New version…
-              </button>
-            ) : (
-              <form
-                className="px-2 py-1"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  void performCreate(newName);
-                }}
-              >
-                <label className="sr-only" htmlFor="version-new-name">
-                  New version name
-                </label>
-                <input
-                  id="version-new-name"
-                  data-testid="version-new-input"
-                  autoFocus
-                  value={newName}
-                  disabled={busy === "create"}
-                  maxLength={80}
-                  placeholder="Version name"
-                  onChange={(event) => setNewName(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Escape") {
-                      event.stopPropagation();
-                      setNewName(null);
-                      setInlineError(null);
-                    }
-                  }}
-                  className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle dohc-focus-input"
-                />
-                <p className="mb-0 mt-1 text-[11px] leading-4 text-subtle">
-                  {busy === "create"
-                    ? "Creating…"
-                    : "Press Enter to create and start working in it."}
-                </p>
-              </form>
-            )}
-
-            {!onMain && active ? (
-              <>
-                <button
-                  type="button"
-                  role="menuitem"
-                  data-testid="version-compare"
-                  onClick={() => {
-                    closeMenu(false);
-                    props.onOpenCompare(active.id);
-                  }}
-                  className={MENU_ITEM_CLASS}
-                >
-                  <span className="w-4 shrink-0" aria-hidden />
-                  Compare with Main
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  data-testid="version-merge"
-                  aria-disabled={!active.canMergeIntoMain}
-                  disabled={!active.canMergeIntoMain}
-                  title={
-                    active.canMergeIntoMain
-                      ? `Bring everything from ${active.name} into Main`
-                      : "This version was created inside another version, so it can't merge straight into Main yet."
-                  }
-                  onClick={() => {
-                    if (!active.canMergeIntoMain) return;
-                    closeMenu(false);
-                    setMergeSource(active);
-                  }}
-                  className={MENU_ITEM_CLASS}
-                >
-                  <span className="w-4 shrink-0" aria-hidden />
-                  Merge into Main…
-                </button>
-              </>
-            ) : null}
-
-            {inlineError ? (
-              <p
-                data-testid="version-menu-error"
-                role="alert"
-                className="mb-0 mt-1 px-2 pb-1 text-[11px] leading-4 text-danger"
-              >
-                {inlineError}
-              </p>
-            ) : (
-              <p className="mb-0 mt-1 px-2 pb-1 text-[11px] leading-4 text-subtle">
-                Versions cover text files during the alpha.
-              </p>
-            )}
-          </div>
-        </>
-      ) : null}
+            <ChevronsUpDown size={12} aria-hidden className="shrink-0 text-subtle" />
+          </button>
+        )}
+      >
+        {inlineError ? (
+          <p
+            data-testid="version-menu-error"
+            role="alert"
+            className="mb-0 mt-1 px-2 pb-1 text-[11px] leading-4 text-danger"
+          >
+            {inlineError}
+          </p>
+        ) : (
+          <p className="mb-0 mt-1 px-2 pb-1 text-[11px] leading-4 text-subtle">
+            Versions cover text files during the alpha.
+          </p>
+        )}
+      </Menu>
 
       {pendingSwitch !== null ? (
         <Overlay onClose={() => setPendingSwitch(null)}>

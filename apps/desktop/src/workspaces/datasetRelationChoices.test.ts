@@ -27,7 +27,7 @@ const generate = () => generateDatasetRelationChoices({ revision, schemaSql, ope
 
 describe("public relation choice source", () => {
   it("keeps new public choices beside revisions at the workspace root", () => {
-    const rootDefinition = { ...definition, schemaPath: "revisions/2-original/schema.sql", operationsPath: "revisions/2-original/actions.js" };
+    const rootDefinition = { ...definition, schemaPath: `revisions/2-${id(99)}/schema.sql`, operationsPath: `revisions/2-${id(99)}/actions.js` };
     const rootRevision = describeDatasetRevision({ definition: rootDefinition, revision: 2, schemaSql, operationSource });
     const next = generateDatasetRelationChoices({ revision: rootRevision, schemaSql, operationSource, tableId: id(6), fieldId: id(8), labelFieldId: id(4) });
     expect(next.definition.schemaPath).toMatch(/^revisions\/3-[^/]+\/schema\.sql$/);

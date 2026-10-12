@@ -1,11 +1,14 @@
+import { frontmatterMapValues } from "@dohc/ydoc-projection/frontmatter-map";
 import { describe, expect, it } from "vitest";
 import {
   applyFrontmatter,
   displayFrontmatterValue,
   frontmatterEntries,
+  frontmatterEntriesFromPairs,
   orderFrontmatter,
   parseFrontmatter,
 } from "./frontmatter";
+import { EDGE_DISPLAY, EDGE_MARKDOWN, receivedYDoc } from "./frontmatter.edge-fixture";
 
 describe("markdown frontmatter helpers", () => {
   it("keeps malformed frontmatter visible as body text", () => {
@@ -80,6 +83,28 @@ describe("markdown frontmatter helpers", () => {
       rawValue: ["a", "b"],
     });
     expect(displayFrontmatterValue({ pinned: true })).toBe("pinned: true");
+  });
+
+  it("shows exact integers and hostile keys as the YAML the file holds", () => {
+    const doc = receivedYDoc(EDGE_MARKDOWN);
+    try {
+      const fromFile = frontmatterEntries(EDGE_MARKDOWN);
+      const fromDocument = frontmatterEntriesFromPairs(Object.entries(frontmatterMapValues(doc.getMap("frontmatter"))));
+      for (const entries of [fromFile, fromDocument]) {
+        expect(Object.fromEntries(entries.map((entry) => [entry.key, entry.value]))).toEqual(EDGE_DISPLAY);
+      }
+    } finally {
+      doc.destroy();
+    }
+    expect(displayFrontmatterValue([9007199254740993n])).toBe("- 9007199254740993");
+  });
+
+  it("writes back only the edited key beside hostile keys and exact integers", () => {
+    const { meta } = parseFrontmatter(EDGE_MARKDOWN);
+
+    expect(applyFrontmatter(EDGE_MARKDOWN, { ...meta, status: "ready" })).toBe(
+      EDGE_MARKDOWN.replace("status: draft", "status: ready"),
+    );
   });
 
   it("orders system keys before user properties", () => {

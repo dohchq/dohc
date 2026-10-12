@@ -17,6 +17,7 @@ import {
   shareMountRecordsForId,
   shareMountResultRow,
   usableShareMountRecord,
+  withoutShareMountRecords,
 } from "./shareMounts";
 import type { ShareViewInfo } from "./shareViewInfo";
 import {
@@ -47,7 +48,11 @@ type ShareMountFilesLifecycle = Pick<
 
 export interface ShareMountCommandDependencies<WorkspaceSummary> {
   readMounts(workspaceId: string): readonly ShareMountRecord[];
-  writeMounts(workspaceId: string, mounts: ShareMountRecord[]): void;
+  // Stores `update` applied to the mounts as they stand when written.
+  updateMounts(
+    workspaceId: string,
+    update: (mounts: readonly ShareMountRecord[]) => readonly ShareMountRecord[],
+  ): Promise<void>;
   loadCredentials(): Promise<ShareMountCommandCredentials | null>;
   fetchInfo(
     relay: SyncRelayConnection,
@@ -133,7 +138,7 @@ function assertShareMountLifecycleOwner(
 export function createShareMountCommands<WorkspaceSummary>(
   dependencies: ShareMountCommandDependencies<WorkspaceSummary>,
 ): ShareMountCommands<WorkspaceSummary> {
-  // Mount, refresh, and unmount replace the whole registry mount set. Keep
+  // Mount, refresh, and unmount decide from the registry mount set. Keep
   // relay preflight in the same admission so no command can act on a stale
   // snapshot or recreate a projection after unmount removes it.
   const locks = new Map<string, Promise<void>>();
@@ -171,16 +176,17 @@ export function createShareMountCommands<WorkspaceSummary>(
       const projection = dependencies.projectionFor(owner);
       await projection.create();
       try {
-        dependencies.writeMounts(target.workspaceId, [
-          ...dependencies.readMounts(target.workspaceId),
-          {
-            shareId: target.shareId,
-            label: target.mountLabel,
-            granterEmail: target.granterEmail,
-            relayUrl: target.relayUrl,
-            recipientEmail: target.recipientEmail ?? null,
-            grantedSelector: target.grantedSelector,
-          },
+        const mount: ShareMountRecord = {
+          shareId: target.shareId,
+          label: target.mountLabel,
+          granterEmail: target.granterEmail,
+          relayUrl: target.relayUrl,
+          recipientEmail: target.recipientEmail ?? null,
+          grantedSelector: target.grantedSelector,
+        };
+        await dependencies.updateMounts(target.workspaceId, (mounts) => [
+          ...mounts,
+          mount,
         ]);
       } catch (error) {
         let rollback: Awaited<ReturnType<typeof projection.remove>>;
@@ -217,13 +223,8 @@ export function createShareMountCommands<WorkspaceSummary>(
           removed.error,
         );
       }
-      const mounts = dependencies.readMounts(target.workspaceId);
-      const matches = new Set(
-        shareMountRecordsForId(mounts, target.shareId),
-      );
-      dependencies.writeMounts(
-        target.workspaceId,
-        mounts.filter((mount) => !matches.has(mount)),
+      await dependencies.updateMounts(target.workspaceId, (mounts) =>
+        withoutShareMountRecords(mounts, target.shareId),
       );
       return {
         folderLeft: removed.folderLeft,
@@ -542,9 +543,8 @@ export function createShareMountCommands<WorkspaceSummary>(
                 });
               // The empty array is a durable ownership tombstone. Removing
               // the registry field could promote leftover projection bytes.
-              dependencies.writeMounts(
-                workspace.workspaceId,
-                removal.remaining,
+              await dependencies.updateMounts(workspace.workspaceId, (mounts) =>
+                withoutShareMountRecords(mounts, shareId),
               );
               presentWorkspace(
                 workspace.workspaceId,

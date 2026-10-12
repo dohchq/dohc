@@ -14,19 +14,20 @@ export function sharedViewHistory(store: HistoryStore, workspaceId: string):
   Pick<WorkspaceEngineCapture, "listMoments" | "readMoment"> {
   return {
     async listMoments(input = {}) {
-      if (input.objectId !== undefined) throw new Error("A shared view lists its whole history.");
       const history = await store.listHistoryPage({
         workspaceId,
+        ...(input.cursor !== undefined ? { versionId: input.cursor.versionId } : {}),
+        ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
         ...(input.limit !== undefined ? { limit: input.limit } : {}),
-        ...(input.beforeMomentOrder !== undefined ? { beforeMomentOrder: input.beforeMomentOrder } : {}),
+        ...(input.cursor !== undefined ? { cursor: input.cursor } : {}),
       });
-      const page = history.textMomentPage;
       return {
-        moments: page.moments.map((moment) => ({ ...moment, protected: false as const })),
-        nextBeforeMomentOrder: page.nextBeforeMomentOrder,
-        latestMomentOrder: page.latestMomentOrder,
+        moments: history.moments.map((moment) => ({ ...moment, protected: false as const })),
+        startCursor: history.startCursor,
+        nextCursor: history.nextCursor,
+        versionMarkers: history.versionMarkers,
+        latestMomentOrder: history.latestMomentOrder,
         activeVersionId: history.activeVersion.id,
-        protectedTruncated: false,
       };
     },
     async readMoment(momentId) {

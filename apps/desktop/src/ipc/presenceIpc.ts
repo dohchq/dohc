@@ -206,6 +206,7 @@ export function createPresenceIpc<Sender extends RendererWorkspaceSender>(depend
         const snapshot = await transport.poll({
           topic: input.topic,
           since: input.since,
+          clientId: input.clientId,
           signal: handle.signal,
         });
         if (!rendererSession.isCurrent()) {

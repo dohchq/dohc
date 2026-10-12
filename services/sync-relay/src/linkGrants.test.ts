@@ -31,6 +31,7 @@ import {
   reopenTestStorage,
   request,
   seedLinkGrant,
+  seedLinkSession,
   storagePath,
   testHandler,
   testStorage,
@@ -43,6 +44,63 @@ const WORKSPACE = "workspace-links";
 const OTHER_WORKSPACE = "workspace-links-other";
 
 afterEach(closeTestStorages);
+
+it("lists ended holders only for the owner, without changing recipient or link-holder listings", async () => {
+  const storage = await newStorage();
+  const h = handler(storage, { lookupUserEmails: async ids => new Map(ids.map(id => [id, `${id}@example.test`])) });
+  await seedFileShare(h, "edit");
+  seedStorageLink(storage, { grantId: "history-link", access: "edit" });
+  seedStorageLink(storage, { grantId: "unrelated-link", access: "view" });
+  const bearer = Buffer.alloc(32, 9).toString("base64url");
+  seedLinkSession(storage, { grantId: "unrelated-link", capabilityHash: hmac(bearer) });
+  const linkListing = () => h(request(null, "/sync/link/share", { headers: { authorization: `LinkCapability ${bearer}` } }));
+  const linkBefore = await linkListing();
+  expect(linkBefore.status).toBe(200);
+  const linkBeforeBody = await linkBefore.text();
+  expect(seedDependentGrant(storage, { shareId: "share-existing", parentGrantId: "history-link", grantId: "history-holder", principalUserId: "holder", createdAtMs: 2_001 })).toMatchObject({ ok: true });
+  const recipientBefore = await json(await h(request(RECIPIENT, "/sync/shares?received=true")));
+  expect(storage.revokeShareGrant({ shareId: "share-existing", grantId: "history-link", revokedAtMs: 3_000, expectedDependentGrantIds: ["history-holder"] })).toMatchObject({ ok: true });
+  const defaultListing = await json(await h(request(OWNER, `/sync/${WORKSPACE}/shares/links`)));
+  expect(defaultListing).not.toHaveProperty("endedLinks");
+  const owner = await json(await h(request(OWNER, `/sync/${WORKSPACE}/shares/links?historyGrantId=history-holder`)));
+  expect(owner.holders).toEqual([{ grantId: "history-holder", recipientUserId: "holder", recipientEmail: "holder@example.test", parentGrantId: "history-link" }]);
+  expect((defaultListing.links as Array<{ dependents: unknown[] }>).flatMap(link => link.dependents)).toEqual([]);
+  expect(await json(await h(request(RECIPIENT, "/sync/shares?received=true")))).toEqual(recipientBefore);
+  const linkAfter = await linkListing();
+  expect(linkAfter.status).toBe(200);
+  expect(await linkAfter.text()).toBe(linkBeforeBody);
+  expect((await h(request(null, `/sync/${WORKSPACE}/shares/links`, { headers: { authorization: `LinkCapability ${bearer}` } }))).status).toBe(401);
+  const holderListing = await json(await h(request("holder", "/sync/shares?received=true")));
+  expect(holderListing).not.toHaveProperty("endedLinks");
+  expect(holderListing.received).toEqual([]);
+  expect((await h(request(RECIPIENT, `/sync/${WORKSPACE}/shares/links?historyGrantId=history-holder`))).status).toBe(404);
+  expect((await h(request("holder", `/sync/${WORKSPACE}/shares/links?historyGrantId=history-holder`))).status).toBe(404);
+  expect(authorizeShareAction({ storage, shareId: "share-existing", actorUserId: "holder", action: "read" }).ok).toBe(false);
+});
+
+it("bounds identity lookups and uses one account query for exact ended dependents", async () => {
+  const storage = await newStorage();
+  const lookupUserEmails = vi.fn(async (ids: readonly string[]) => new Map(ids.map(id => [id, `${id}@example.test`])));
+  const h = handler(storage, { lookupUserEmails });
+  await seedFileShare(h, "edit");
+  seedStorageLink(storage, { grantId: "history-link", access: "edit" });
+  expect(seedDependentGrant(storage, { shareId: "share-existing", parentGrantId: "history-link", grantId: "history-holder", principalUserId: "holder", createdAtMs: 2001 })).toMatchObject({ ok: true });
+  storage.revokeShareGrant({ shareId: "share-existing", grantId: "history-link", revokedAtMs: 3000, expectedDependentGrantIds: ["history-holder"] });
+  const body = await json(await h(request(OWNER, `/sync/${WORKSPACE}/shares/links?historyGrantId=history-holder&historyUserId=holder`)));
+  expect(body.holders).toEqual([{ grantId: "history-holder", recipientUserId: "holder", parentGrantId: "history-link", recipientEmail: "holder@example.test" }]);
+  expect(lookupUserEmails.mock.calls).toEqual([[["holder"]]]);
+  const named = storage.listSharesGrantedBy(OWNER).find(row => row.grant.principalKind === "user" && row.grant.parentGrantId === null)!;
+  expect(named).toBeDefined();
+  storage.revokeShareGrant({ shareId: named.share.shareId, grantId: named.grant.grantId, revokedAtMs: 3001 });
+  const unrelated = await json(await h(request(OWNER, `/sync/${WORKSPACE}/shares/links?historyGrantId=${named.grant.grantId}`)));
+  expect(unrelated.holders).toEqual([]);
+  await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: OTHER_WORKSPACE })));
+  expect((await json(await h(request(OWNER, `/sync/${OTHER_WORKSPACE}/shares/links?historyGrantId=history-holder`)))).holders).toEqual([]);
+  const tooMany = new URLSearchParams();
+  for (let i = 0; i < 201; i++) tooMany.append("historyGrantId", `holder-${i}`);
+  expect((await h(request(OWNER, `/sync/${WORKSPACE}/shares/links?${tooMany}`))).status).toBe(400);
+  expect((await h(request(RECIPIENT, `/sync/${WORKSPACE}/shares/links?${tooMany}`))).status).toBe(404);
+});
 
 describe("relay exchange key verification", () => {
   const exchangeKey = "share-web-relay-exchange-key-at-least-32";
@@ -5932,4 +5990,40 @@ describe("named share origin isolation", () => {
     const ownerRows = storage.fetchLogPage({ workspaceId: WORKSPACE, sinceRelaySeq: 0, limit: 100 }).rows;
     expect(ownerRows.find((row) => row.opKind === "moment.append")?.originId).toBe("replica");
   });
+});
+
+
+it("retries an agent link creation across restart without minting another credential", async () => {
+  const {storage,dbPath}=await newStorageWithPath(), h=handler(storage);
+  await h(request(OWNER,"/sync/workspaces",jsonBody({workspaceId:WORKSPACE})));
+  const agent={kind:"agent",label:"Builder",labelSource:"agent-declared"}, body={paths:["docs"],access:"view",operationId:"00000000-0000-4000-8000-000000000101",agent};
+  const created=await h(request(OWNER,`/sync/${WORKSPACE}/shares/links`,jsonBody(body)));
+  expect(created.status).toBe(200);
+  const first=await json(created);
+  expect(first.url).toEqual(expect.any(String));
+  closeTestStorage(storage);
+  const reopened=reopenTestStorage(dbPath), next=handler(reopened);
+  const retry=await next(request(OWNER,`/sync/${WORKSPACE}/shares/links`,jsonBody(body)));
+  expect(retry.status).toBe(200);
+  expect(await json(retry)).toMatchObject({shareId:first.shareId,grantId:first.grantId,urlUnavailable:true});
+  const links=await ownerLinkInventory(next);
+  expect(links).toHaveLength(1);
+  expect(links[0]!.creationProvenance).toMatchObject({agent,selector:{paths:["docs"],versionId:null},access:"view"});
+  expect(JSON.stringify(links)).not.toContain(String(first.url));
+  const changed=await next(request(OWNER,`/sync/${WORKSPACE}/shares/links`,jsonBody({...body,access:"comment"})));
+  expect(changed.status).toBe(409);
+  expect((await next(request(RECIPIENT,`/sync/${WORKSPACE}/shares/links`,jsonBody(body)))).status).toBe(404);
+  expect(reopened.readLinkCreation(WORKSPACE,body.operationId,RECIPIENT)).toBeNull();
+  const database=inspectDatabase(dbPath);
+  try {
+    expect(database.prepare("SELECT COUNT(*) n FROM sync_relay_link_credentials").get()!.n).toBe(1);
+    expect(database.prepare("SELECT request_json FROM sync_relay_link_creations").get()!.request_json).not.toContain(String(first.url).split("#")[1]);
+  } finally {database.close();}
+});
+
+it.each([[[]],[[".env"]],[["docs/.env"]],[[".dohc/secret"]]])("refuses agent link secret paths and empty selectors %j",async paths=>{
+  const storage=await newStorage(),h=handler(storage);
+  await h(request(OWNER,"/sync/workspaces",jsonBody({workspaceId:WORKSPACE})));
+  expect((await h(request(OWNER,`/sync/${WORKSPACE}/shares/links`,jsonBody({paths,access:"view",operationId:"00000000-0000-4000-8000-000000000101"})))).status).toBe(400);
+  expect(await ownerLinkInventory(h)).toHaveLength(0);
 });

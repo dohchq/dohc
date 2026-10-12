@@ -6,7 +6,7 @@ import { CUSTOMIZE_TARGETS } from "../settings/customize";
 import { useAskAgent } from "./useAskAgent";
 
 const agentChannel = { id: "agent-channel", kind: "agent", name: "Agent" };
-const setup = { agentName: "Scout", runnerConfigured: true, runnerEnabled: true, mcpEnabled: false };
+const setup = { agentName: "Scout", runnerConfigured: true, runnerEnabled: true, agentRunActive: false };
 
 function stubBridge(channels: unknown[] = [agentChannel]) {
   const bridge = {

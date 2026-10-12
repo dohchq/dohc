@@ -19,6 +19,14 @@ const link: Extract<ServerDerivedLiveUpdateAuthority, { principalKind: "named" |
 };
 const agent = { agentId: "writer", agentName: "Writer", onBehalfOf: "owner", depth: 1 };
 
+it("binds a recipient's agent to the recipient despite a declared owner", () => {
+  const authority = {...named, principalId: "reader"};
+  const context: LiveAuthorContext = {kind: "account", accountId: "reader", agent};
+  expect(deriveLiveAuthorSnapshot(fixture(), authority, context, {accountId: "reader", name: "Reader"}))
+    .toEqual([{kind: "human", humanId: "reader", humanName: "Reader"}, {kind: "agent", ...agent, onBehalfOf: "reader"}]);
+  expect(context.agent?.onBehalfOf).toBe("owner");
+});
+
 function fixture() {
   const directory = mkdtempSync(join(tmpdir(), "live-author-snapshot-"));
   cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
@@ -41,6 +49,13 @@ it.each([owner, named])("uses the trusted account name for matching $principalKi
   const storage = fixture();
   expect(deriveLiveAuthorSnapshot(storage, authority, { kind: "account", accountId: "owner", agent }, account))
     .toEqual([{ kind: "human", humanId: "owner", humanName: "Trusted owner" }, { kind: "agent", ...agent }]);
+});
+
+it.each([undefined, "reader"])("binds the owner's agent even when onBehalfOf is %j", onBehalfOf => {
+  const {onBehalfOf: _declared, ...identity} = agent;
+  expect(deriveLiveAuthorSnapshot(fixture(), owner, {kind: "account", accountId: "owner",
+    agent: {...identity, ...(onBehalfOf === undefined ? {} : {onBehalfOf})}}, account))
+    .toEqual([{kind: "human", humanId: "owner", humanName: "Trusted owner"}, {kind: "agent", ...agent}]);
 });
 
 it.each(["", "x".repeat(513), "ü".repeat(257), "Owner\u0000", "\ud800"])("keeps owner attribution bounded when the trusted name is invalid", name => {
@@ -76,7 +91,9 @@ it("reuses a durable public mapping and publishes only its ID and stored label",
   expect(storage.tx(() => ensureLiveLinkPublicPrincipal(storage, link))).toBe(publicId);
   expect(workspaceUsageBytes(storage, "workspace")).toBe(charged);
   const snapshot = storage.tx(() => deriveLiveAuthorSnapshot(storage, link, { kind: "link", publicPrincipalId: publicId, agent }));
-  expect(snapshot).toEqual([{ kind: "link", publicPrincipalId: publicId, label: "Sam" }, { kind: "agent", ...agent }]);
+  expect(snapshot).toEqual([{ kind: "link", publicPrincipalId: publicId, label: "Sam" }, { kind: "agent", ...agent, onBehalfOf: publicId }]);
+  expect(deriveLiveAuthorSnapshot(storage, link, {kind: "link", publicPrincipalId: publicId, agent: {...agent, onBehalfOf: "other"}}))
+    .toEqual(snapshot);
   const serialized = JSON.stringify(snapshot);
   expect(serialized).not.toContain(link.principalId);
   expect(serialized).not.toContain(link.grantId);

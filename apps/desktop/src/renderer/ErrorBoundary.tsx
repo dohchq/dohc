@@ -1,6 +1,7 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { DohcMark } from "@dohc/brand";
 import { requestGuardedReload } from "./RecoveryCloseGuard";
+import { reportRendererError } from "./rendererErrorReport";
 
 // Crash containment for the renderer. React unmounts the entire tree when a
 // render/lifecycle error reaches the root with no boundary — the user sees a
@@ -17,7 +18,8 @@ import { requestGuardedReload } from "./RecoveryCloseGuard";
 //      blank window, whatever threw.
 //
 // Both log through the existing console path (main/e2e capture stderr and
-// pageerror), including React's component stack.
+// pageerror), including React's component stack, and hand the error to main
+// for an error report.
 
 function reportBoundaryError(scope: string, error: unknown, info?: ErrorInfo) {
   console.error(
@@ -25,6 +27,7 @@ function reportBoundaryError(scope: string, error: unknown, info?: ErrorInfo) {
     error,
     info?.componentStack ?? "",
   );
+  reportRendererError("boundary", error);
 }
 
 function errorMessage(error: unknown): string {
@@ -174,12 +177,14 @@ export class AppErrorBoundary extends Component<
 // not blank the app by themselves, but silently swallowing them hides the
 // exact failures that precede "it just went blank" reports — log them through
 // the same console path everything else uses (captured by e2e pageerror /
-// main stderr).
+// main stderr), and hand them to main for an error report.
 export function installGlobalErrorReporters(target: Window = window): void {
   target.addEventListener("error", (event) => {
     console.error("[desktop] uncaught renderer error:", event.error ?? event.message);
+    reportRendererError("uncaught", event.error);
   });
   target.addEventListener("unhandledrejection", (event) => {
     console.error("[desktop] unhandled promise rejection:", event.reason);
+    reportRendererError("rejection", event.reason);
   });
 }

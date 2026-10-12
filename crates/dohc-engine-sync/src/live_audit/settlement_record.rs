@@ -11,21 +11,32 @@ pub(crate) fn owner_settlement_cursor_in(
     moment_id: &str,
     markdown_digest: &str,
 ) -> Result<Option<i64>, SyncError> {
-    conn.query_row(
-        "SELECT min(json_extract(record_json,'$.terminalCursor')) FROM live_audit_settlements
-         WHERE workspace_id=?1 AND json_extract(record_json,'$.momentId')=?2 AND markdown_digest=?3
-           AND json_extract(record_json,'$.relayDatabaseNamespace')=?4
-           AND json(json_extract(record_json,'$.binding'))=json(?5)",
-        params![
+    let mut stmt = conn
+        .prepare(
+            "SELECT json_extract(record_json,'$.binding'),json_extract(record_json,'$.terminalCursor')
+             FROM live_audit_settlements
+             WHERE workspace_id=?1 AND json_extract(record_json,'$.momentId')=?2 AND markdown_digest=?3
+               AND json_extract(record_json,'$.relayDatabaseNamespace')=?4
+             ORDER BY json_extract(record_json,'$.terminalCursor')",
+        )
+        .map_err(SyncError::corrupt)?;
+    let mut rows = stmt
+        .query(params![
             owner.binding.workspace_id,
             moment_id,
             markdown_digest,
             owner.relay_database_namespace,
-            serde_json::to_string(&owner.binding).map_err(SyncError::corrupt)?
-        ],
-        |row| row.get(0),
-    )
-    .map_err(SyncError::corrupt)
+        ])
+        .map_err(SyncError::corrupt)?;
+    while let Some(row) = rows.next().map_err(SyncError::corrupt)? {
+        let binding: LiveObjectBinding =
+            serde_json::from_str(&row.get::<_, String>(0).map_err(SyncError::corrupt)?)
+                .map_err(SyncError::corrupt)?;
+        if binding == owner.binding {
+            return row.get(1).map(Some).map_err(SyncError::corrupt);
+        }
+    }
+    Ok(None)
 }
 
 /// An audited settlement at a later restore generation of the owner's binding.
@@ -86,6 +97,7 @@ struct SettlementRecord {
     moment_id: String,
     markdown_digest: String,
     source_state_vector_digest: String,
+    accepted_state_blob_sha256: String,
     recorded_at_ms: i64,
     restore_operation_id: Option<String>,
 }
@@ -134,6 +146,7 @@ impl SettlementRecord {
                 &self.accepted_interval_digest,
                 &self.markdown_digest,
                 &self.source_state_vector_digest,
+                &self.accepted_state_blob_sha256,
             ]
             .iter()
             .any(|value| !digest(value))
@@ -163,9 +176,9 @@ impl SettlementRecord {
         serde_json::to_value(SettlementPayload {
             format_version: 1,
             record_digest: hex_sha256(
-                serde_json::to_string(self)
+                serde_json::to_vec(&serde_json::to_value(self).map_err(SyncError::corrupt)?)
                     .map_err(SyncError::corrupt)?
-                    .as_bytes(),
+                    .as_slice(),
             ),
             record: self.clone(),
         })
@@ -266,16 +279,26 @@ fn require_restore_application(
     Ok(())
 }
 
+fn read_native_metadata(
+    conn: &Connection,
+    workspace: &str,
+    id: &str,
+) -> Result<SettlementRecord, SyncError> {
+    let record=conn.query_row("SELECT relay_database_namespace,binding_json,host_coordinate_json,previous_cursor,terminal_cursor,previous_ydoc_sequence,local_ydoc_sequence,application_count,interval_digest,moment_id,markdown_digest,source_state_vector_digest,recorded_at_ms,restore_operation_id FROM live_device_settlements WHERE workspace_id=?1 AND settlement_id=?2",params![workspace,id],|row|{
+        let binding=serde_json::from_str(&row.get::<_,String>(1)?).map_err(|error|rusqlite::Error::FromSqlConversionFailure(1,rusqlite::types::Type::Text,Box::new(error)))?;
+        let host_coordinate=serde_json::from_str(&row.get::<_,String>(2)?).map_err(|error|rusqlite::Error::FromSqlConversionFailure(2,rusqlite::types::Type::Text,Box::new(error)))?;
+        Ok(SettlementRecord{settlement_id:id.into(),relay_database_namespace:row.get(0)?,binding,host_coordinate,previous_cursor:row.get(3)?,terminal_cursor:row.get(4)?,previous_ydoc_sequence:row.get(5)?,local_ydoc_sequence:row.get(6)?,application_count:row.get(7)?,native_interval_digest:row.get(8)?,accepted_event_count:0,accepted_interval_digest:String::new(),moment_id:row.get(9)?,markdown_digest:row.get(10)?,source_state_vector_digest:row.get(11)?,accepted_state_blob_sha256:String::new(),recorded_at_ms:row.get(12)?,restore_operation_id:row.get(13)?})
+    }).map_err(SyncError::corrupt)?;
+    record.binding.validate_canonical().map_err(invalid)?;
+    Ok(record)
+}
+
 fn read_native(
     conn: &Connection,
     workspace: &str,
     id: &str,
 ) -> Result<SettlementRecord, SyncError> {
-    let mut record=conn.query_row("SELECT relay_database_namespace,binding_json,host_coordinate_json,previous_cursor,terminal_cursor,previous_ydoc_sequence,local_ydoc_sequence,application_count,interval_digest,moment_id,markdown_digest,source_state_vector_digest,recorded_at_ms,restore_operation_id FROM live_device_settlements WHERE workspace_id=?1 AND settlement_id=?2",params![workspace,id],|row|{
-        let binding=serde_json::from_str(&row.get::<_,String>(1)?).map_err(|error|rusqlite::Error::FromSqlConversionFailure(1,rusqlite::types::Type::Text,Box::new(error)))?;
-        let host_coordinate=serde_json::from_str(&row.get::<_,String>(2)?).map_err(|error|rusqlite::Error::FromSqlConversionFailure(2,rusqlite::types::Type::Text,Box::new(error)))?;
-        Ok(SettlementRecord{settlement_id:id.into(),relay_database_namespace:row.get(0)?,binding,host_coordinate,previous_cursor:row.get(3)?,terminal_cursor:row.get(4)?,previous_ydoc_sequence:row.get(5)?,local_ydoc_sequence:row.get(6)?,application_count:row.get(7)?,native_interval_digest:row.get(8)?,accepted_event_count:0,accepted_interval_digest:String::new(),moment_id:row.get(9)?,markdown_digest:row.get(10)?,source_state_vector_digest:row.get(11)?,recorded_at_ms:row.get(12)?,restore_operation_id:row.get(13)?})
-    }).map_err(SyncError::corrupt)?;
+    let mut record = read_native_metadata(conn, workspace, id)?;
     let (count, digest) = accepted_interval(
         conn,
         &record.relay_database_namespace,
@@ -283,6 +306,10 @@ fn read_native(
         record.previous_cursor,
         record.terminal_cursor,
     )?;
+    record.accepted_state_blob_sha256 = conn.query_row(
+        "SELECT state_blob_sha256 FROM live_settlement_publication_states WHERE settlement_id=?1",
+        [id], |row| row.get(0),
+    ).map_err(SyncError::corrupt)?;
     record.accepted_event_count = count;
     record.accepted_interval_digest = digest;
     record.validate(workspace)?;
@@ -316,6 +343,22 @@ pub(super) fn journal_ready_in_tx(
     if !crate::workspace_replicates_with_relay_in_tx(tx, workspace)? {
         return Ok(None);
     }
+    let unavailable:Option<String>=tx.query_row("SELECT moment_id FROM live_device_settlements s WHERE s.workspace_id=?1 AND s.settlement_id=?2 AND NOT EXISTS(SELECT 1 FROM live_settlement_publication_states p WHERE p.settlement_id=s.settlement_id)",params![workspace,id],|r|r.get(0)).optional().map_err(SyncError::corrupt)?;
+    if let Some(moment) = unavailable {
+        let terminal: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM live_settlement_attribution_unavailable WHERE workspace_id=?1 AND moment_id=?2 AND settlement_id=?3 AND reason='terminal-owner-source')",params![workspace,moment,id],|r|r.get(0)).map_err(SyncError::corrupt)?;
+        let before = if terminal {
+            publication_source_before_in_tx(tx, &read_native_metadata(tx, workspace, id)?)?
+        } else {
+            None
+        };
+        return crate::outbound::journal_saved_settlement_moment_in_tx(
+            tx,
+            workspace,
+            &moment,
+            before.as_ref(),
+        )
+        .map(Some);
+    }
     let record = read_native(tx, workspace, id)?;
     let payload = record.payload()?;
     let prior:Option<i64>=tx.query_row("SELECT origin_seq FROM live_audit_settlement_publications WHERE workspace_id=?1 AND settlement_id=?2",params![workspace,id],|row|row.get(0)).optional().map_err(SyncError::corrupt)?;
@@ -334,7 +377,7 @@ pub(super) fn journal_ready_in_tx(
         params![workspace, record.moment_id], |row| row.get(0),
     ).map_err(SyncError::corrupt)?;
     if !published {
-        match adopted_source_before_in_tx(tx, &record)? {
+        match publication_source_before_in_tx(tx, &record)? {
             Some(before) => crate::outbound::journal_moment_append_from_in_tx(
                 tx,
                 workspace,
@@ -343,14 +386,17 @@ pub(super) fn journal_ready_in_tx(
             )?,
             None => crate::journal_moment_append_in_tx(tx, workspace, &record.moment_id)?,
         }
+        tx.execute(
+        "UPDATE replication_log SET payload_json=json_set(json_remove(payload_json,'$.authors','$.attributionUnavailable'),'$.settlementReference',json(?3)) WHERE workspace_id=?1 AND op_kind='moment.append' AND json_extract(payload_json,'$.momentId')=?2 AND imported=0",
+        params![workspace,record.moment_id,serde_json::to_string(&payload).map_err(SyncError::corrupt)?],
+        ).map_err(SyncError::persist)?;
     }
     Ok(Some(sequence))
 }
 
-/// The first ordinary settlement after an owner adoption publishes the adopted
-/// source as its before-image. Its local moment keeps the actual prior file,
-/// which may be a head settled before adoption that the relay never accepted.
-fn adopted_source_before_in_tx(
+/// First publication starts at the admitted source. The local moment keeps
+/// the actual prior file for rollback.
+fn publication_source_before_in_tx(
     tx: &Transaction<'_>,
     record: &SettlementRecord,
 ) -> Result<Option<crate::outbound::PortableBefore>, SyncError> {
@@ -358,32 +404,114 @@ fn adopted_source_before_in_tx(
         return Ok(None);
     }
     let b = &record.binding;
+    if record.previous_cursor == 0
+        && let origin_record::OriginRecord::Bootstrap { source, .. } =
+            origin_record::read(tx, &record.relay_database_namespace, b)?
+    {
+        source.validate().map_err(SyncError::corrupt)?;
+        return tx.query_row(
+            concat!("SELECT m.moment_id,m.version_id,m.object_id,m.path,m.after_blob_sha256,t.byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id
+             FROM moments m JOIN blobs t ON t.sha256=m.after_blob_sha256
+             WHERE ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.path=?4
+               AND m.moment_id=?5 AND m.after_content_kind='text' AND m.after_blob_sha256=?6
+               AND t.byte_length=?7 AND m.recorded_at_ms=?8 AND m.metadata_origin='sync'"),
+            params![b.workspace_id,b.main_version_id,b.object_id,b.current_path,
+                source.bootstrap_moment_id,source.projected_markdown_digest,
+                source.projected_markdown_byte_length,source.baseline_registered_at_ms],
+            portable_before_from_row,
+        ).map(Some).map_err(SyncError::corrupt);
+    }
+    if record.previous_cursor == 0
+        && let Some(before) = imported_event_zero_before_in_tx(tx, record)?
+    {
+        return Ok(Some(before));
+    }
+    // An unavailable interval does not advance the relay's verified chain.
+    // The next proof starts at its prior accepted cut and names that artifact.
+    let skipped: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM live_device_settlements s JOIN live_settlement_attribution_unavailable u ON u.workspace_id=s.workspace_id AND u.settlement_id=s.settlement_id WHERE s.workspace_id=?1 AND s.relay_database_namespace=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor>?6 AND s.terminal_cursor<?7)",params![b.workspace_id,record.relay_database_namespace,b.main_version_id,b.object_id,b.lineage_claim_id,record.previous_cursor,record.terminal_cursor],|r|r.get(0)).map_err(SyncError::corrupt)?;
+    if skipped && record.previous_cursor > 0 {
+        return tx.query_row(concat!("SELECT m.moment_id,m.version_id,m.object_id,m.path,m.after_blob_sha256,t.byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id FROM live_device_settlements s JOIN live_settlement_publication_states p USING(settlement_id) JOIN moments m ON ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=s.workspace_id AND m.moment_id=s.moment_id JOIN blobs t ON t.sha256=s.markdown_digest WHERE s.workspace_id=?1 AND s.relay_database_namespace=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor=?6 AND m.after_blob_sha256=s.markdown_digest"),params![b.workspace_id,record.relay_database_namespace,b.main_version_id,b.object_id,b.lineage_claim_id,record.previous_cursor],portable_before_from_row).map(Some).map_err(SyncError::corrupt);
+    }
     tx.query_row(
-        "SELECT m.moment_id,m.version_id,m.object_id,m.path,a.source_digest,a.source_byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id
+        concat!("SELECT m.moment_id,m.version_id,m.object_id,m.path,a.source_digest,a.source_byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id
          FROM live_owner_adoptions a
-         JOIN moments m ON m.workspace_id=a.workspace_id AND m.version_id=a.main_version_id AND m.object_id=a.object_id AND m.moment_id=a.source_moment_id
+         JOIN moments m ON ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=a.workspace_id AND m.version_id=a.main_version_id AND m.object_id=a.object_id AND m.moment_id=a.source_moment_id
            AND m.path=?7 AND m.after_content_kind='text' AND m.after_blob_sha256=a.source_digest
          JOIN blobs t ON t.sha256=a.source_digest AND t.byte_length=a.source_byte_length
          WHERE a.relay_database_namespace=?1 AND a.workspace_id=?2 AND a.main_version_id=?3 AND a.object_id=?4 AND a.lineage_claim_id=?5
            AND a.binding_json=?6 AND a.terminal_cursor=?8
-           AND NOT EXISTS(SELECT 1 FROM live_device_settlements s WHERE s.relay_database_namespace=?1 AND s.workspace_id=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor<?9)",
+           AND (?10 OR NOT EXISTS(SELECT 1 FROM live_device_settlements s WHERE s.relay_database_namespace=?1 AND s.workspace_id=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor<?9))"),
         params![record.relay_database_namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,
-            serde_json::to_string(b).map_err(SyncError::corrupt)?,b.current_path,record.previous_cursor,record.terminal_cursor],
-        |row| Ok(crate::outbound::PortableBefore {
-            moment_id: row.get(0)?,
-            version_id: row.get(1)?,
-            object_id: row.get(2)?,
-            path: row.get(3)?,
-            blob_sha256: row.get(4)?,
-            byte_length: row.get(5)?,
-            recorded_at_ms: row.get(6)?,
-            metadata_origin: row.get(7)?,
-            metadata_summary: row.get(8)?,
-            metadata_correlation_id: row.get(9)?,
-        }),
+            serde_json::to_string(b).map_err(SyncError::corrupt)?,b.current_path,record.previous_cursor,record.terminal_cursor,skipped],
+        portable_before_from_row,
     )
     .optional()
     .map_err(SyncError::corrupt)
+}
+
+/// Ordinary activation can adopt an edited replica. Event zero still names
+/// its original imported base, so the first portable moment starts there.
+fn imported_event_zero_before_in_tx(
+    tx: &Transaction<'_>,
+    record: &SettlementRecord,
+) -> Result<Option<crate::outbound::PortableBefore>, SyncError> {
+    let b = &record.binding;
+    let json: String = tx
+        .query_row(
+            &format!("SELECT record_json FROM live_audit_base_publications WHERE {SCOPE}"),
+            scope(&record.relay_database_namespace, b),
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    let base: BaseRecord = serde_json::from_str(&json).map_err(SyncError::corrupt)?;
+    base.validate(&b.workspace_id)?;
+    if base.relay_database_namespace != record.relay_database_namespace
+        || base.checkpoint.binding != *b
+    {
+        return Err(invalid("settlement event zero binding differs"));
+    }
+    require_base_coordinate(tx, &base)?;
+    let (imported, disposition, path): (bool, String, String) = tx.query_row(
+        "SELECT imported,apply_disposition,json_extract(payload_json,'$.path') FROM replication_log
+         WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+        params![b.workspace_id,base.base_coordinate.origin_id,base.base_coordinate.origin_seq],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+    ).map_err(SyncError::corrupt)?;
+    if !imported {
+        return Ok(None);
+    }
+    if disposition != "applied" || path != b.current_path {
+        return Err(invalid("settlement event zero was not applied at its path"));
+    }
+    require_base_blob(tx, &base)?;
+    let bytes: Vec<u8> = tx
+        .query_row(
+            "SELECT bytes FROM binary_blobs WHERE sha256=?1",
+            [&base.checkpoint.state_digest],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(&bytes).map_err(SyncError::corrupt)?;
+    let projected = doc
+        .project(ContentKind::Richdoc)
+        .map_err(SyncError::corrupt)?
+        .content;
+    let markdown = doc
+        .preserved_markdown_source(&projected)
+        .unwrap_or(projected);
+    let digest = hex_sha256(markdown.as_bytes());
+    // Base import may reuse an already matching file head rather than create
+    // a projection moment. Find that artifact within this exact object.
+    tx.query_row(
+        concat!("SELECT m.moment_id,m.version_id,m.object_id,m.path,m.after_blob_sha256,t.byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id
+         FROM moments m JOIN blobs t ON t.sha256=m.after_blob_sha256
+         WHERE ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.path=?4
+           AND m.after_content_kind='text' AND m.after_blob_sha256=?5 AND t.byte_length=?6
+         ORDER BY m.moment_order LIMIT 1"),
+        params![b.workspace_id,b.main_version_id,b.object_id,b.current_path,digest,markdown.len() as i64],
+        portable_before_from_row,
+    ).map(Some).map_err(SyncError::corrupt)
 }
 
 pub(super) fn apply_settlement_envelope(
@@ -401,7 +529,9 @@ pub(super) fn apply_settlement_envelope(
         }
         let record = payload.record;
         record.validate(&op.workspace_id)?;
-        let json = serde_json::to_string(&record).map_err(SyncError::corrupt)?;
+        let json =
+            serde_json::to_string(&serde_json::to_value(&record).map_err(SyncError::corrupt)?)
+                .map_err(SyncError::corrupt)?;
         if hex_sha256(json.as_bytes()) != payload.record_digest {
             return Err(invalid("historical settlement digest differs"));
         }
@@ -439,4 +569,16 @@ pub(super) fn apply_settlement_envelope(
         tx.execute("INSERT INTO live_audit_settlements(settlement_id,workspace_id,record_digest,record_json,markdown_digest) VALUES (?1,?2,?3,?4,?5)",params![record.settlement_id,op.workspace_id,payload.record_digest,json,record.markdown_digest]).map_err(SyncError::persist)?;
         Ok(MutationOutcome::Applied(()))
     })
+}
+
+fn portable_before_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<crate::outbound::PortableBefore> {
+    Ok(crate::outbound::PortableBefore::published(
+        &serde_json::json!({
+            "operation":"write", "momentId":row.get::<_,String>(0)?, "versionId":row.get::<_,String>(1)?, "objectId":row.get::<_,String>(2)?,
+            "payloadAfterPath":row.get::<_,String>(3)?, "payloadAfterBlobSha256":row.get::<_,String>(4)?, "payloadAfterContentKind":"text", "payloadAfterByteLength":row.get::<_,i64>(5)?, "recordedAtMs":row.get::<_,i64>(6)?,
+            "metadata":{"origin":row.get::<_,String>(7)?, "summary":row.get::<_,Option<String>>(8)?, "correlationId":row.get::<_,Option<String>>(9)?}
+        }),
+    ))
 }

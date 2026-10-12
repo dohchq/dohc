@@ -17,7 +17,7 @@ describe("Overlay", () => {
     );
 
     const panel = document.querySelector<HTMLElement>(
-      '[data-dohc-modal="true"] > div',
+      '[data-dohc-modal="true"] > [data-focus-surface="dialog"]',
     );
     expect(document.activeElement).toBe(panel);
   });
@@ -117,6 +117,89 @@ describe("Overlay", () => {
     fireEvent.keyDown(document, { key: "Tab" });
 
     expect(document.activeElement).toBe(editor);
+  });
+});
+
+// Toasts sit above the dialog, outside its panel. F6 is the keyboard's way to
+// them and back; Tab and Escape never leave the dialog and its toasts.
+describe("Overlay with toasts above it", () => {
+  function DialogWithToasts(props: { onClose: () => void; toasts?: boolean }) {
+    return (
+      <>
+        <button type="button">Behind the dialog</button>
+        <Overlay onClose={props.onClose}>
+          <button type="button">First</button>
+          <button type="button">Last</button>
+        </Overlay>
+        {props.toasts === false ? null : (
+          <div data-dohc-toasts>
+            <button type="button">Try again</button>
+            <button type="button">Dismiss</button>
+          </div>
+        )}
+      </>
+    );
+  }
+
+  it("moves focus to the toasts on F6 and back to where it left the dialog", () => {
+    render(<DialogWithToasts onClose={() => undefined} />);
+    const last = screen.getByText("Last");
+    last.focus();
+
+    fireEvent.keyDown(document.activeElement!, { key: "F6" });
+    expect(document.activeElement).toBe(screen.getByText("Try again"));
+    fireEvent.keyDown(document.activeElement!, { key: "F6" });
+    expect(document.activeElement).toBe(last);
+  });
+
+  it("cycles Tab among the toasts while they hold focus, never reaching the page behind", () => {
+    render(<DialogWithToasts onClose={() => undefined} />);
+    screen.getByText("First").focus();
+    fireEvent.keyDown(document.activeElement!, { key: "F6" });
+    const retry = screen.getByText("Try again");
+    const dismiss = screen.getByText("Dismiss");
+    expect(document.activeElement).toBe(retry);
+
+    // jsdom has no native Tab, so this checks the wrap at each end.
+    fireEvent.keyDown(document.activeElement!, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(dismiss);
+    fireEvent.keyDown(document.activeElement!, { key: "Tab" });
+    expect(document.activeElement).toBe(retry);
+  });
+
+  it("returns to the dialog on Escape from a toast instead of closing it", () => {
+    const onClose = vi.fn();
+    render(<DialogWithToasts onClose={onClose} />);
+    const first = screen.getByText("First");
+    first.focus();
+    fireEvent.keyDown(document.activeElement!, { key: "F6" });
+
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    expect(onClose).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(first);
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps Tab inside the dialog: the toasts are reached only by F6", () => {
+    render(<DialogWithToasts onClose={() => undefined} />);
+    const first = screen.getByText("First");
+    const last = screen.getByText("Last");
+
+    last.focus();
+    fireEvent.keyDown(document.activeElement!, { key: "Tab" });
+    expect(document.activeElement).toBe(first);
+    fireEvent.keyDown(document.activeElement!, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(last);
+  });
+
+  it("leaves focus in the dialog on F6 when no toast shows", () => {
+    render(<DialogWithToasts onClose={() => undefined} toasts={false} />);
+    const last = screen.getByText("Last");
+    last.focus();
+
+    fireEvent.keyDown(document.activeElement!, { key: "F6" });
+    expect(document.activeElement).toBe(last);
   });
 });
 

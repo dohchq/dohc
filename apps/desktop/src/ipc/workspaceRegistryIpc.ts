@@ -81,7 +81,7 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
   roots: ReturnType<typeof createWorkspaceRootApproval>;
   effectiveHome(): string;
   workspaceSummaries(): WorkspaceSummary[];
-  prioritizePreferredWorkspace(workspaces: WorkspaceSummary[]): WorkspaceSummary[];
+  prioritizePreferredWorkspace(workspaces: WorkspaceSummary[], event: Event): WorkspaceSummary[];
   createWorkspaceFolder: typeof createWorkspaceFolder;
   // Retires every open binding for the workspace, then removes its registry
   // row. The folder on disk is left alone.
@@ -135,7 +135,7 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
   registerHandler(CHANNELS.getWorkspaceRegistry, (event) => {
     assertTrustedSender(event);
     return WorkspaceRegistryResult.parse({
-      workspaces: prioritizePreferredWorkspace(workspaceSummaries()),
+      workspaces: prioritizePreferredWorkspace(workspaceSummaries(), event),
     });
   });
 
@@ -262,7 +262,7 @@ export function registerOpenWorkspaceIpcHandler<
       documentId: string,
     ): Promise<{ isCurrent(): boolean }>;
   };
-  setPreferredWorkspaceId(workspaceId: string): void;
+  setPreferredWorkspaceId(workspaceId: string, sender: Sender): void;
   markWorkspaceOpened(workspaceId: string): void;
   syncStatusWithOwnedProjection(
     workspace: Workspace,
@@ -290,7 +290,7 @@ export function registerOpenWorkspaceIpcHandler<
         workspace,
         input.rendererDocumentId,
       );
-      setPreferredWorkspaceId(workspace.workspaceId);
+      setPreferredWorkspaceId(workspace.workspaceId, event.sender);
       const status = SyncStatusResult.parse(
         await syncStatusWithOwnedProjection(
           workspace,

@@ -1,7 +1,7 @@
 import { jsonResponse } from "@dohc/service-http";
 import { sha256Hex } from "@dohc/workspace-core/hash";
 import type { DiscussionActivityHub } from "./discussionActivity";
-import { badRequest, notFound, relayError } from "./errors";
+import { badRequest, notFound, RelayError, relayError } from "./errors";
 import { arrayBufferForBytes, readBytes } from "./relayBytes";
 import { assertChatAuthorship, assertClientLogProvenance, namedShareOrigin, parseAuthenticatedLogOps, type LogAuthorNameLookup } from "./relayLogInputs";
 import { assertSha256, parseCursor, parseLimit, parseString, readJsonObject } from "./requestInputs";
@@ -57,8 +57,17 @@ export function createNamedShareTransportRoutes(
     actor: { userId: string },
   ): Promise<Response> {
     if (route.route === "share-log" && request.method === "GET") {
-      await claimPendingShares(actor.userId);
-      const authorized = requireShareAction(route.shareId, actor.userId, "read");
+      let authorized: AuthorizedShareAction;
+      try {
+        authorized = requireShareAction(route.shareId, actor.userId, "read");
+      } catch (error) {
+        if (
+          !(error instanceof RelayError) ||
+          (error.code !== "not_found" && error.code !== "share_access_removed")
+        ) throw error;
+        await claimPendingShares(actor.userId);
+        authorized = requireShareAction(route.shareId, actor.userId, "read");
+      }
       const share = { ...authorized.share, selector: authorized.effectiveSelector };
       const url = new URL(request.url);
       const channelWireId = url.searchParams.get("channelWireId");
@@ -89,6 +98,7 @@ export function createNamedShareTransportRoutes(
       // accountless route applies a narrower metadata boundary afterward.
       const page = filteredLogPage(
         share.workspaceId,
+        share.shareId,
         share.selector,
         since,
         limit,

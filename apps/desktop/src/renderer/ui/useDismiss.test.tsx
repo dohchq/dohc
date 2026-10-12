@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useRef, useState } from "react";
-import { afterEach, describe, expect, it } from "vitest";
-import { useDismiss } from "./useDismiss";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { listenForDismiss, useDismiss } from "./useDismiss";
 
 function Menu() {
   const [open, setOpen] = useState(true);
@@ -89,10 +89,115 @@ it("returns focus after selecting a menu item", async () => {
   fireEvent.click(item);
   await waitFor(() => expect(document.activeElement).toBe(screen.getByText("Trigger")));
 });
+// The browser moves focus on the press, after the close: to the page for
+// blank space, to the control for a control. Each test stands in for that move.
+it("returns focus to the trigger when a press on blank space ends", async () => {
+  render(<Menu />);
+  const trigger = screen.getByRole("button", { name: "Trigger" });
+  screen.getByText("Item").focus();
+  fireEvent.pointerDown(document.body);
+  expect(screen.queryByRole("menu")).toBeNull();
+  await waitFor(() => expect(document.activeElement).toBe(trigger));
+  trigger.blur();
+  fireEvent.pointerUp(document.body);
+  expect(document.activeElement).toBe(trigger);
+});
+it("counts the workspace's frame as blank space", async () => {
+  render(
+    <div tabIndex={-1} data-focus-surface="workspace" data-testid="frame">
+      <Menu />
+    </div>,
+  );
+  const trigger = screen.getByRole("button", { name: "Trigger" });
+  const frame = screen.getByTestId("frame");
+  fireEvent.pointerDown(frame);
+  await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+  frame.focus();
+  fireEvent.pointerUp(frame);
+  expect(document.activeElement).toBe(trigger);
+});
+it("leaves focus on the control a press outside lands on", async () => {
+  render(<Menu />);
+  const elsewhere = screen.getByRole("button", { name: "Elsewhere" });
+  fireEvent.pointerDown(elsewhere);
+  await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+  elsewhere.focus();
+  fireEvent.pointerUp(elsewhere);
+  expect(document.activeElement).toBe(elsewhere);
+});
+it("forgets a press outside that the browser cancels", async () => {
+  render(<Menu />);
+  const trigger = screen.getByRole("button", { name: "Trigger" });
+  fireEvent.pointerDown(document.body);
+  fireEvent.pointerCancel(document.body);
+  trigger.blur();
+  fireEvent.pointerUp(document.body);
+  expect(document.activeElement).toBe(document.body);
+});
 it("keeps an intentional outside focus destination", async () => {
   render(<Menu />);
   screen.getByText("Item").focus();
   screen.getByText("Elsewhere").focus();
   await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
   expect(document.activeElement).toBe(screen.getByText("Elsewhere"));
+});
+
+// The same rule for a menu another owner builds from the DOM, such as the
+// editor's table menu.
+describe("listenForDismiss", () => {
+  function mount(root: ParentNode = document.body) {
+    const trigger = document.createElement("button");
+    trigger.textContent = "Grip";
+    const menu = document.createElement("div");
+    menu.tabIndex = -1;
+    const row = document.createElement("button");
+    menu.append(row);
+    const elsewhere = document.createElement("button");
+    root.append(trigger, menu);
+    document.body.append(elsewhere);
+    const onClose = vi.fn();
+    const stop = listenForDismiss({ menu, trigger: () => trigger, onClose });
+    return { trigger, menu, row, elsewhere, onClose, stop };
+  }
+  afterEach(() => {
+    document.body.replaceChildren();
+  });
+
+  it("leaves a press on its trigger, and focus moving to it, to the trigger", () => {
+    const { trigger, row, onClose, stop } = mount();
+    fireEvent.pointerDown(trigger);
+    fireEvent.focusOut(row, { relatedTarget: trigger });
+    expect(onClose).not.toHaveBeenCalled();
+    stop();
+  });
+
+  it("says why it closed: a press outside, focus leaving, the window blurring, Escape", () => {
+    const { row, elsewhere, onClose, stop } = mount();
+    fireEvent.pointerDown(elsewhere);
+    fireEvent.focusOut(row, { relatedTarget: elsewhere });
+    fireEvent.blur(window);
+    fireEvent.keyDown(row, { key: "Escape" });
+    expect(onClose.mock.calls.map(([reason]) => reason)).toEqual(["press", "focus", "blur", "escape"]);
+    stop();
+  });
+
+  it("holds the open-menu flag until it stops, and listens no more after", () => {
+    const { elsewhere, onClose, stop } = mount();
+    expect(document.documentElement.dataset.menuOpen).toBe("");
+    stop();
+    expect(document.documentElement.dataset.menuOpen).toBeUndefined();
+    fireEvent.pointerDown(elsewhere);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("knows its own presses inside an embedded editor's shadow root", () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const { row, elsewhere, onClose, stop } = mount(host.attachShadow({ mode: "open" }));
+    row.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, composed: true }));
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.pointerDown(elsewhere);
+    expect(onClose).toHaveBeenCalledWith("press");
+    stop();
+  });
 });

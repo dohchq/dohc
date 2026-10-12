@@ -1,9 +1,12 @@
+import { retainedCollectionFieldWritePaths } from "./collections/recordFieldWrites";
+import { retainedOrphanedDraftPaths } from "./orphanedDrafts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { StopAndRestoreResult, StopAndRestoreTarget } from "../ipc/bridgeContract";
+import type { StopAndRestoreResult, StopAndRestoreTarget, UndoStopAndRestoreResult } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { Overlay } from "./Overlay";
 import { DangerButton, PrimaryButton, SecondaryButton } from "./ui/controls";
 import { useRequestSequence } from "./useRequestSequence";
+import { restoreRulesUnreadableWords } from "./workbench/HistoryPolicyStates";
 
 // Stop and restore (ADR 0013): the owner picks a person they shared this
 // workspace with, or an Edit share link, and confirms once. dohc stops that
@@ -63,11 +66,15 @@ interface Shown {
  * from the Notices row after the dialog closed opens it again on that
  * outcome, with Undo for every file, and a retry that fails leaves it there.
  */
-export function useStopAndRestore(workspaceId: string) {
+export function useStopAndRestore(workspaceId: string, recovery?: {
+  ready: boolean;
+  onError(fallback: string, error: unknown, retry: () => void, identity: string): void;
+}) {
   const [session, setSession] = useState<StopAndRestoreSession | null>(null);
   const receipts = useRef(new Map<string, Receipt[]>());
   const runs = useRef(new Map<string, RunTotals>());
   const shown = useRef(new Map<string, Shown>());
+  const initialized = useRef(new Set<string>());
   const key = useRef(0);
   const retry = useCallback((forWorkspace: string, target: StopTarget, start: StopAndRestoreStart) => {
     key.current += 1;
@@ -80,6 +87,7 @@ export function useStopAndRestore(workspaceId: string) {
     return {
       get: (forWorkspace: string, target: StopAndRestoreTarget): Receipt[] => receipts.current.get(id(forWorkspace, target)) ?? [],
       set: (forWorkspace: string, target: StopAndRestoreTarget, list: Receipt[]): void => {
+        initialized.current.add(id(forWorkspace, target));
         receipts.current.set(id(forWorkspace, target), list);
       },
       /**
@@ -89,6 +97,7 @@ export function useStopAndRestore(workspaceId: string) {
       runs: (forWorkspace: string, target: StopAndRestoreTarget): RunTotals =>
         runs.current.get(id(forWorkspace, target)) ?? { runsUndone: 0, fieldsMissing: 0, otherKept: 0 },
       addRuns: (forWorkspace: string, target: StopAndRestoreTarget, more: RunTotals): RunTotals => {
+        initialized.current.add(id(forWorkspace, target));
         const before = runs.current.get(id(forWorkspace, target)) ?? { runsUndone: 0, fieldsMissing: 0, otherKept: 0 };
         const after = {
           runsUndone: before.runsUndone + more.runsUndone,
@@ -100,15 +109,73 @@ export function useStopAndRestore(workspaceId: string) {
       },
       shown: (forWorkspace: string, target: StopAndRestoreTarget): Shown | null => shown.current.get(id(forWorkspace, target)) ?? null,
       show: (forWorkspace: string, target: StopAndRestoreTarget, value: Shown): void => {
+        initialized.current.add(id(forWorkspace, target));
         shown.current.set(id(forWorkspace, target), value);
+      },
+      recover: (forWorkspace: string, target: StopAndRestoreTarget, list: Receipt[], value: Shown | null): boolean => {
+        const key = id(forWorkspace, target);
+        if (initialized.current.has(key)) return false;
+        initialized.current.add(key);
+        receipts.current.set(key, list);
+        if (value) {
+          shown.current.set(key, value);
+          runs.current.set(key, {runsUndone: value.result.runsUndone, fieldsMissing: value.result.fieldsMissing, otherKept: otherKept(value.result)});
+        }
+        return true;
+      },
+      forget: (forWorkspace: string, target: StopAndRestoreTarget): void => {
+        const key = id(forWorkspace, target);
+        initialized.current.add(key);
+        receipts.current.delete(key); runs.current.delete(key); shown.current.delete(key);
       },
     };
   }, []);
+  const recoveryRef = useRef(recovery);
+  recoveryRef.current = recovery;
+  useEffect(() => {
+    if (!recovery?.ready) return;
+    let current = true;
+    const recover = async () => {
+      try {
+        const pending = await bridge().pendingStopAndRestores({workspaceId});
+        if (!current) return;
+        for (const entry of pending) {
+          const target = {target: entry.target, label: entry.label};
+          if (!store.recover(workspaceId, entry.target, entry.receipts, entry.result.status === "restored"
+            ? {result: entry.result, undone: entry.filesUndone} : null)) continue;
+          const message = entry.result.status === "restored" && entry.result.unfinished?.step === "runs"
+            ? "dohc has not finished undoing runs."
+            : "dohc stopped before restoring every file.";
+          recoveryRef.current?.onError(message, new Error(message), () => retry(workspaceId, target, entry.undoingFiles ? "undo" : "stop"),
+            `stop-and-restore:${JSON.stringify([workspaceId, keyOf(entry.target)])}`);
+        }
+      } catch (error) {
+        if (current) recoveryRef.current?.onError("dohc could not read unfinished Stop and restore progress.", error,
+          () => void recover(), `stop-and-restore:recovery:${workspaceId}`);
+      }
+    };
+    void recover();
+    return () => {current = false;};
+  }, [workspaceId, recovery?.ready, store, retry]);
   return {
     session: session?.workspaceId === workspaceId ? session : null,
     open,
     retry,
     close,
+    dismiss: async (identity: string): Promise<boolean> => {
+      if (!identity.startsWith("stop-and-restore:")) return false;
+      let parsed: unknown;
+      try { parsed = JSON.parse(identity.slice("stop-and-restore:".length)); } catch { return false; }
+      if (!Array.isArray(parsed) || parsed.length !== 2 || parsed[0] !== workspaceId || typeof parsed[1] !== "string") return false;
+      const key = parsed[1];
+      const target: StopAndRestoreTarget | null = key.startsWith("person:") ? {kind: "person", userId: key.slice(7)}
+        : key.startsWith("link:") ? {kind: "link", grantId: key.slice(5)} : null;
+      if (target === null) return false;
+      await bridge().dismissStopAndRestore({workspaceId, target});
+      store.forget(workspaceId, target);
+      setSession(current => current?.workspaceId === workspaceId && keyOf(current.target.target) === key ? null : current);
+      return true;
+    },
     receipts: store,
   };
 }
@@ -234,11 +301,17 @@ export function StopAndRestoreDialog({
   };
 
   const stop = (): Promise<void> => perform(stopFallback(), "stop", async (token) => {
-    const result = await bridge().stopAndRestore({ workspaceId, target: chosen.target });
+    const filesUndone = receipts.shown(workspaceId, chosen.target)?.undone === true &&
+      receipts.shown(workspaceId, chosen.target)?.result.unfinished !== null;
+    const result = await bridge().stopAndRestore({ workspaceId, target: chosen.target, label: chosen.label, reviewPaths: [...new Set([...retainedCollectionFieldWritePaths(workspaceId), ...retainedOrphanedDraftPaths(workspaceId)])] });
     if (result.status === "waiting") {
       if (request.isCurrent(token)) setState((current) => ({ kind: "waiting", targets: listedTargets(current) }));
       return;
     }
+    // A retry after file Undo restores no files. New receipts belong to a
+    // fresh Stop and restore after access was granted again.
+    const resumedFileUndo = filesUndone && result.restored.length === 0;
+    if (filesUndone && !resumedFileUndo) receipts.forget(workspaceId, chosen.target);
     // Kept even when the dialog closed meanwhile, so a later try shows them.
     receipts.set(workspaceId, chosen.target, [...receipts.get(workspaceId, chosen.target), ...result.restored]);
     // Each try reports every field its runs keep now, but counts missing fields and other changes only for the runs it undid.
@@ -261,7 +334,7 @@ export function StopAndRestoreDialog({
           sendsMessages: (carried?.sendsMessages ?? false) || result.sendsMessages,
         }),
       },
-      undone: false,
+      undone: resumedFileUndo,
     };
     receipts.show(workspaceId, chosen.target, outcome);
     onRestored();
@@ -274,27 +347,49 @@ export function StopAndRestoreDialog({
   });
 
   const undo = (): Promise<void> => perform("dohc could not undo the restore.", "undo", async (token) => {
-    const restored = receipts.get(workspaceId, chosen.target);
-    if (restored.length > 0) {
-      await bridge().undoStopAndRestore({ workspaceId, restoredMomentIds: restored.map((file) => file.restoredMomentId) });
-    }
-    receipts.set(workspaceId, chosen.target, []);
+    let restored = receipts.get(workspaceId, chosen.target);
+    const result: UndoStopAndRestoreResult = restored.length > 0 || receipts.shown(workspaceId, chosen.target)?.result.canUndoFiles === true
+      ? await bridge().undoStopAndRestore({ workspaceId, target: chosen.target, reviewPaths: [...new Set([...retainedCollectionFieldWritePaths(workspaceId), ...retainedOrphanedDraftPaths(workspaceId)])], restoredMomentIds: restored.map((file) => file.restoredMomentId) })
+      : { files: [], errorMessage: null };
+    restored = [...new Map([...restored, ...(result.recovered ?? [])].map(file => [file.restoredMomentId, file])).values()];
+    const completed = new Set(result.files.flatMap(file => file.kind === "restored" ? [file.momentId] : []));
+    receipts.set(workspaceId, chosen.target, restored.filter(file => !completed.has(file.restoredMomentId)));
     onRestored();
-    // The row's Try again would restore the files again without asking.
-    onSettled(identity);
     const last = receipts.shown(workspaceId, chosen.target);
     const runs = receipts.runs(workspaceId, chosen.target);
+    const putBack = [...(last?.undone ? last.result.restored : []), ...restored.filter(file => completed.has(file.restoredMomentId))];
+    const review = new Map(last?.result.review.map(file => [file.path, file]) ?? []);
+    const originals = new Map(restored.map(file => [file.restoredMomentId, file]));
+    for (const file of result.files) {
+      const original = originals.get(file.momentId);
+      if (!original) continue;
+      if (file.kind === "restored") review.delete(original.path);
+      else if (file.kind === "rules-unreadable") {
+        review.set(original.path, { path: original.path, reason: "rules-unreadable", unreadable: file.unreadable });
+      } else review.set(original.path, { path: original.path, reason: "restore-refused", detail: file.detail });
+    }
+    const reviewed = [...review.values()].sort((left, right) => left.path.localeCompare(right.path));
     const outcome = {
       result: last
-        ? { ...last.result, restored }
+        ? { ...last.result, restored: putBack, review: reviewed, canUndoFiles: receipts.get(workspaceId, chosen.target).length > 0 || result.errorMessage !== null }
         : {
-            status: "restored" as const, restored, review: [], runsLeft: 0, runsUndone: runs.runsUndone, fieldsMissing: runs.fieldsMissing,
+            status: "restored" as const, restored: putBack, review: reviewed, runsLeft: 0, runsUndone: runs.runsUndone, fieldsMissing: runs.fieldsMissing,
             runChangesKept: runs.otherKept + runs.fieldsMissing,
             keptFields: [], wroteAutomations: false, sendsMessages: false, unfinished: null,
           },
       undone: true,
     };
     receipts.show(workspaceId, chosen.target, outcome);
+    if (result.errorMessage !== null) {
+      onError("dohc could not undo the restore.", new Error(result.errorMessage), () => onRetry(workspaceId, chosen, "undo"), identity);
+    } else {
+      if (outcome.result.unfinished !== null) {
+        const message = outcome.result.unfinished.step === "runs"
+          ? "dohc has not finished undoing runs."
+          : "dohc stopped before restoring every file.";
+        onError(message, new Error(message), () => onRetry(workspaceId, chosen, "stop"), identity);
+      } else onSettled(identity);
+    }
     if (request.isCurrent(token)) setState((current) => ({ kind: "done", targets: listedTargets(current), ...outcome }));
   });
 
@@ -333,13 +428,13 @@ export function StopAndRestoreDialog({
       {state.kind === "done" ? <Outcome words={words} result={state.result} undone={state.undone} onOpenFile={onOpenFile} onOpenCollection={onOpenCollection} /> : null}
       <div className="mt-4 flex justify-end gap-2">
         <SecondaryButton onClick={onClose}>{state.kind === "choose" ? "Cancel" : "Close"}</SecondaryButton>
-        {state.kind === "done" && !state.undone && state.result.restored.length > 0 ? (
+        {state.kind === "done" && (receipts.get(workspaceId, chosen.target).length > 0 || state.result.canUndoFiles === true) ? (
           <SecondaryButton data-testid="stop-and-restore-undo" onClick={() => void undo()}>Undo</SecondaryButton>
         ) : null}
         {state.kind === "choose" ? (
           <DangerButton data-testid="stop-and-restore-confirm" onClick={() => void stop()}>Stop and restore</DangerButton>
         ) : null}
-        {state.kind === "done" && !state.undone && state.result.unfinished !== null ? (
+        {state.kind === "done" && state.result.unfinished !== null ? (
           <PrimaryButton onClick={() => void stop()}>Try again</PrimaryButton>
         ) : null}
         {state.kind === "waiting" ? <PrimaryButton onClick={() => void stop()}>Try again</PrimaryButton> : null}
@@ -415,6 +510,9 @@ function Outcome({ words, result, undone, onOpenFile, onOpenCollection }: {
   return (
     <div className="mt-3 space-y-3" data-testid="stop-and-restore-outcome">
       <p className="m-0 text-[13px] text-ink">{undone ? words.undone(files) : words.stopped(files)}</p>
+      {!undone && result.restored.some(file => file.removed) ? <p className="m-0 text-[13px] text-muted">
+        Removed {plural(result.restored.filter(file => file.removed).length, "created file", "created files")}.
+      </p> : null}
       {result.unfinished?.step === "files" && !undone ? (
         <p className="m-0 text-[13px] text-ink">dohc has not finished restoring files.</p>
       ) : null}
@@ -427,10 +525,9 @@ function Outcome({ words, result, undone, onOpenFile, onOpenCollection }: {
         {result.sharedReversals?.some(write => write.state === "not-accepted") ? (
           <p className="m-0 text-[13px] text-muted">Reversals saved on this computer. The shared host did not accept them. Try Undo again in Run History.</p>
         ) : null}
-      {result.unfinished !== null && result.wroteAutomations ? (
+      {result.unfinished?.step === "runs" && result.wroteAutomations ? (
         <p className="m-0 text-[13px] text-ink">
-          dohc has not finished undoing runs{result.runsUndone > 0 ? "" : ` of ${words.automations}`}.
-          {undone ? " Stop and restore again to finish. This restores the files again too." : ""}
+          {`dohc has not finished undoing runs${result.runsUndone > 0 ? "" : ` of ${words.automations}`}.`}
         </p>
       ) : null}
       {result.runsLeft > 0 ? (
@@ -511,7 +608,8 @@ function Outcome({ words, result, undone, onOpenFile, onOpenCollection }: {
 }
 
 function reviewReason(file: Restored["review"][number], after: string): string {
-  if (file.reason === "changed-since") return `Someone changed it after ${after}.`;
+  if (file.reason === "changed-since") return `${file.changedBy ?? "Another author"} changed it after ${after}.`;
   if (file.reason === "folder-in-use") return "This Collection holds files someone else added.";
+  if (file.reason === "rules-unreadable") return restoreRulesUnreadableWords(file.unreadable);
   return `dohc could not restore it. ${file.detail}`;
 }

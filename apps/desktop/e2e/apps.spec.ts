@@ -1,3 +1,4 @@
+import { desktopPins, activityPin } from "../src/testPins";
 import { expect, test } from "@playwright/test";
 import { randomBytes, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename } from "node:fs/promises";
@@ -32,7 +33,7 @@ test("@apps opens a static workspace app in the sandboxed preview", async () => 
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    await page.getByTestId("activity-sites").click();
+    await page.getByTestId(activityPin("sites")).click();
     await expect(page.getByTestId("sites-view")).toBeVisible();
     const app = page.locator('[data-testid="sites-row"][data-root="demo"]');
     await expect(app).toBeVisible({ timeout: 20_000 });
@@ -80,6 +81,40 @@ test("@apps opens a static workspace app in the sandboxed preview", async () => 
   }
 });
 
+test("@apps pins an app from its shelf row and opens it, from the keyboard", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+  try {
+    await writeWorkspaceFiles(temp, [
+      { path: "demo/index.html", contents: "<!doctype html><title>Launch app</title><main>From the shelf</main>" },
+    ]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+    await openWorkspaceFromFirstRun(page, temp);
+
+    await page.getByTestId(activityPin("sites")).click();
+    await expect(page.getByTestId("sites-count")).toHaveText("1 app", { timeout: 20_000 });
+    const row = page.locator('[data-testid="sites-row"][data-root="demo"]');
+    await row.focus();
+    await page.keyboard.press("Tab");
+    await expect(page.getByRole("button", { name: "Pin to sidebar" })).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("activity-pinned-app")).toHaveCount(1);
+    await expect(page.getByRole("button", { name: "Unpin" })).toBeFocused();
+
+    await page.keyboard.press("Shift+Tab");
+    await expect(row).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(
+      page.frameLocator('[data-testid="site-preview-frame"]').locator("main"),
+    ).toHaveText("From the shelf", { timeout: 20_000 });
+    await expect(row).toHaveAttribute("aria-current", "page");
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
 // A click in the preview never reaches the page, so Preview options closes
 // when the preview takes focus.
 test("@apps closes Preview options when a click lands in the preview", async () => {
@@ -97,7 +132,7 @@ test("@apps closes Preview options when a click lands in the preview", async () 
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    await page.getByTestId("activity-sites").click();
+    await page.getByTestId(activityPin("sites")).click();
     await page.locator('[data-testid="sites-row"][data-root="demo"]').click();
     const frame = page.frameLocator('[data-testid="site-preview-frame"]');
     await expect(frame.getByRole("button", { name: "Inside the app" })).toBeVisible({ timeout: 20_000 });
@@ -105,7 +140,7 @@ test("@apps closes Preview options when a click lands in the preview", async () 
     // The titlebar stops being a drag region while the menu is open, so a
     // press on it reaches the page too.
     const titlebarRegion = () =>
-      page.getByTestId("titlebar").evaluate((element) => getComputedStyle(element).getPropertyValue("-webkit-app-region"));
+      page.getByTestId(desktopPins.titlebar).evaluate((element) => getComputedStyle(element).getPropertyValue("-webkit-app-region"));
     expect(await titlebarRegion()).toBe("drag");
     await page.getByTestId("site-preview-options").click();
     const staticMode = page.getByTestId("site-preview-static");
@@ -119,7 +154,7 @@ test("@apps closes Preview options when a click lands in the preview", async () 
   }
 });
 
-test("@apps creates and opens the first app inside an existing app folder", async () => {
+test("@apps creates and opens the first app beside an existing app folder", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
@@ -131,7 +166,7 @@ test("@apps creates and opens the first app inside an existing app folder", asyn
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    await page.getByTestId("activity-sites").click();
+    await page.getByTestId(activityPin("sites")).click();
     await expect(page.getByTestId("sites-count")).toContainText("0 apps");
     await page.screenshot({ path: test.info().outputPath("apps-empty.png") });
     await page.getByRole("button", { name: "Create app" }).click();
@@ -145,9 +180,11 @@ test("@apps creates and opens the first app inside an existing app folder", asyn
         .frameLocator('[data-testid="site-preview-frame"]')
         .getByRole("heading", { name: "My app" }),
     ).toBeVisible();
+    // A non-empty app/ stays as it was; the new app takes the next free name.
     await expect
-      .poll(() => readFile(path.join(temp.rootPath, "app", "index.html"), "utf8"))
+      .poll(() => readFile(path.join(temp.rootPath, "app-2", "index.html"), "utf8"))
       .toContain("<h1>My app</h1>");
+    expect(await readFile(path.join(temp.rootPath, "app", "notes.txt"), "utf8")).toBe("Keep this file.\n");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
@@ -177,7 +214,7 @@ test("@apps finds an app declared only by app.publish.json and publishes it agai
     desktop = await launchDesktopApp({ workspace });
     const { page } = desktop;
     await openWorkspaceFromFirstRun(page, workspace);
-    await page.getByTestId("activity-sites").click();
+    await page.getByTestId(activityPin("sites")).click();
 
     const publishAndOpen = async (root: string) => {
       await page.locator(`[data-testid="sites-row"][data-root="${root}"]`).click();
@@ -292,7 +329,7 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
     const { page } = desktop;
     await openWorkspaceFromFirstRun(page, workspace);
 
-    await page.getByTestId("activity-sites").click();
+    await page.getByTestId(activityPin("sites")).click();
     await page.locator('[data-testid="sites-row"][data-root="reading-list"]').click();
     await expect(page.getByTestId("site-preview-page")).toBeVisible();
     await page.getByTestId("site-preview-publish").click();

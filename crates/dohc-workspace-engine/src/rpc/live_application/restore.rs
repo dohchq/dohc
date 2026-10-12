@@ -221,7 +221,7 @@ impl EngineService {
         }
         let now_ms = super::super::request::now_ms()?;
         let events = self.events.clone();
-        let leases = self.leases.clone();
+        let leases = self.leases.scoped(&host.open.root);
         let self_writes = self.self_writes.clone();
         let token = cancellation.token();
         let worker_host = host.clone();
@@ -336,6 +336,9 @@ impl EngineService {
                                 host.open.request_collection_reconcile();
                                 map_runtime(error)
                             })?;
+                        if reconciliation.lease_held {
+                            host.open.request_collection_reconcile();
+                        }
                         crate::events::emit_automation_claimed(
                             &reconcile_events,
                             &host.open.workspace_id,

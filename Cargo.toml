@@ -71,3 +71,34 @@ debug = "line-tables-only"
 # The "*" spec matches dependencies only, never workspace members.
 [profile.dev.package."*"]
 debug = false
+
+# Large-history tests parse and hash real persisted proofs. Optimize these
+# paths while retaining the test profile's assertions and overflow checks.
+[profile.test]
+debug-assertions = true
+overflow-checks = true
+
+[profile.test.package.dohc-engine-collab]
+opt-level = 1
+debug-assertions = true
+overflow-checks = true
+
+[profile.test.package.serde_json]
+opt-level = 2
+debug-assertions = true
+overflow-checks = true
+
+[profile.test.package.sha2]
+opt-level = 2
+debug-assertions = true
+overflow-checks = true
+
+[profile.test.package.digest]
+opt-level = 2
+debug-assertions = true
+overflow-checks = true
+
+[profile.test.package.libsqlite3-sys]
+opt-level = 2
+debug-assertions = true
+overflow-checks = true

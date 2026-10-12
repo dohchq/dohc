@@ -1,5 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { copyFileSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { engineArtifactMatches, hashFile, repairOwnedEngineExecutable, sourceFingerprint, withBuildBudget } from "./build.mjs";
 import { git, readJson, repoRoot, run } from "./process.mjs";
@@ -19,20 +18,9 @@ export function orderedDeliveryArtifact(entries, root = repoRoot) {
   return artifact.executable;
 }
 
-function fixtureSource() {
-  const hash = createHash("sha256").update(sourceFingerprint("engine"));
-  const vendor = git(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "vendor"]).split("\0").filter(Boolean);
-  for (const path of [...new Set(vendor)].sort()) {
-    hash.update(path + "\0");
-    const file = join(repoRoot, path);
-    hash.update(existsSync(file) ? readFileSync(file) : "<deleted>");
-  }
-  return hash.digest("hex");
-}
-
 export function assertOrderedDeliveryFixture(path = process.env.DOHC_ORDERED_DELIVERY_FIXTURE) {
   const receipt = readJson(receiptPath);
-  if (!path || resolve(path) !== resolve(fixturePath) || receipt?.source !== fixtureSource()
+  if (!path || resolve(path) !== resolve(fixturePath) || receipt?.source !== sourceFingerprint("engine")
     || !engineArtifactMatches(fixturePath, receipt?.artifact)) {
     throw new Error("The ordered delivery fixture is missing or differs from this checkout. Run node scripts/verification/ordered-delivery-fixture.mjs and set DOHC_ORDERED_DELIVERY_FIXTURE to its reported executable.");
   }
@@ -45,7 +33,7 @@ export async function prepareOrderedDeliveryFixture({ output = dirname(receiptPa
   const cancellation = cancellationScope("Ordered delivery fixture preparation");
   let failure;
   try {
-  const source = fixtureSource(), previous = readJson(receiptPath);
+  const source = sourceFingerprint("engine"), previous = readJson(receiptPath);
   await cancellation.checkpoint();
   if (previous?.source === source && engineArtifactMatches(fixturePath, previous.artifact)) return previous;
   const lock = receiptPath + ".lock";
@@ -61,7 +49,7 @@ export async function prepareOrderedDeliveryFixture({ output = dirname(receiptPa
     copyFileSync(orderedDeliveryArtifact(artifacts), fixturePath);
   });
   repairOwnedEngineExecutable(fixturePath);
-  if (fixtureSource() !== source) throw new Error("Ordered delivery fixture inputs changed during its build.");
+  if (sourceFingerprint("engine") !== source) throw new Error("Ordered delivery fixture inputs changed during its build.");
   const receipt = { path: fixturePath, source, artifact: hashFile(fixturePath), commit: git(["rev-parse", "HEAD"]), builtAt: new Date().toISOString() };
   await cancellation.checkpoint();
   writeFileSync(receiptPath + ".tmp", JSON.stringify(receipt, null, 2) + "\n");

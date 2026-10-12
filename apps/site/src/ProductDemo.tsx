@@ -30,12 +30,8 @@ import {
 import { ActivityBar } from "../../desktop/src/renderer/workbench/ActivityBar";
 import { NoticeCenter } from "../../desktop/src/renderer/workbench/NoticeCenter";
 import { useShellError } from "../../desktop/src/renderer/shell/useShellError";
-import { isViewId, VIEW_IDS } from "../../desktop/src/renderer/workbench/workbenchState";
-import {
-  DemoSidebar,
-  type DemoPanelId,
-  type DemoWorkspaceDocument,
-} from "./DemoSidebar";
+import { DemoSidebar, type DemoWorkspaceDocument } from "./DemoSidebar";
+import { DEMO_PANEL_IDS, isDemoPanelId, type DemoPanelId } from "./demoPanels";
 import {
   configureDemoDesktopBridge,
   DEMO_ASSET_PERSISTENCE_EVENT,
@@ -562,21 +558,14 @@ export function ProductDemo() {
       </header>
 
       <div className="demo-workbench">
-        {/* The demo's chats panel is currently unreachable: this prop was the
-            only thing that could select it, and ActivityBar stopped accepting
-            a chats prop in eb2c578b when chats became the app's right-side
-            panel. React silently drops unknown props, so the toggle has been
-            dead ever since -- only the typecheck noticed. Restoring the
-            affordance means giving the demo a real right-side panel like
-            Titlebar's titlebar-chats-sidebar control, which is UI work in its
-            own right, not a drive-by on a typecheck fix. */}
         <ActivityBar
-          views={VIEW_IDS}
-          activeView={activeActivity === "chats" ? "explorer" : activeActivity}
+          views={DEMO_PANEL_IDS}
+          activeView={activeActivity}
           sidebarVisible={sidebarVisible}
           hasConflict={false}
+          showSharing={false}
           onSelectView={(view) => {
-            if (isViewId(view)) selectActivity(view);
+            if (isDemoPanelId(view)) selectActivity(view);
           }}
         />
 

@@ -1,3 +1,4 @@
+use crate::references::{MomentRefs, VersionCreateRefs, YdocRefs, conflict_open_sides};
 use crate::{ReplicationEnvelope, SyncError};
 use dohc_engine_collab::{
     DocKey,
@@ -5,7 +6,6 @@ use dohc_engine_collab::{
 };
 use dohc_engine_storage::{EngineStore, hex_sha256};
 use serde::Serialize;
-use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,13 +31,10 @@ struct Content {
     digest: String,
     kind: PublicationContentKind,
 }
-fn required<'a>(value: &'a Value, name: &str) -> Result<&'a str, SyncError> {
-    value
-        .get(name)
-        .and_then(Value::as_str)
-        .ok_or(SyncError::InvalidInput {
-            reason: "queued content coordinate is malformed",
-        })
+fn coordinate(value: Option<&str>) -> Result<&str, SyncError> {
+    value.ok_or(SyncError::InvalidInput {
+        reason: "queued content coordinate is malformed",
+    })
 }
 fn content(
     version: &str,
@@ -60,36 +57,26 @@ fn references(op: &ReplicationEnvelope) -> Result<Vec<Content>, SyncError> {
     let mut result = Vec::new();
     match op.op_kind.as_str() {
         "ydoc.update" => {
+            let refs = YdocRefs::read(p);
             let mut c = content(
-                required(p, "versionId")?,
-                required(p, "objectId")?,
-                required(p, "path")?,
-                required(p, "updateBlobSha256")?,
+                coordinate(refs.version_id)?,
+                coordinate(refs.object_id)?,
+                coordinate(refs.path)?,
+                coordinate(refs.update_blob_sha256)?,
                 PublicationContentKind::Ydoc,
             );
-            c.lineage = Some(required(p, "lineageClaimId")?.into());
+            c.lineage = Some(coordinate(refs.lineage_claim_id)?.into());
             result.push(c);
         }
         "moment.append" => {
-            let version = required(p, "versionId")?;
-            let object = required(p, "objectId")?;
-            for (digest, path) in [
-                ("payloadBeforeBlobSha256", "payloadBeforePath"),
-                ("payloadAfterBlobSha256", "payloadAfterPath"),
-                ("beforeBlobSha256", "beforePath"),
-            ] {
-                if let Some(digest) = p
-                    .get(digest)
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                {
-                    let path = p
-                        .get(path)
-                        .and_then(Value::as_str)
-                        .or_else(|| p.get("path").and_then(Value::as_str))
-                        .ok_or(SyncError::InvalidInput {
-                            reason: "queued moment path is absent",
-                        })?;
+            let refs = MomentRefs::read(p);
+            let version = coordinate(refs.version_id)?;
+            let object = coordinate(refs.object_id)?;
+            for side in refs.sides() {
+                if let Some(digest) = side.named_sha256() {
+                    let path = side.path.or(refs.path).ok_or(SyncError::InvalidInput {
+                        reason: "queued moment path is absent",
+                    })?;
                     result.push(content(
                         version,
                         object,
@@ -101,42 +88,31 @@ fn references(op: &ReplicationEnvelope) -> Result<Vec<Content>, SyncError> {
             }
         }
         "version.create" => {
-            if let Some(rows) = p.get("forkSnapshots").and_then(Value::as_array) {
-                if !rows.is_empty() {
-                    let version = required(p, "forkVersionId")?;
-                    for row in rows {
-                        result.push(content(
-                            version,
-                            required(row, "objectId")?,
-                            required(row, "path")?,
-                            required(row, "blobSha256")?,
-                            PublicationContentKind::Projection,
-                        ));
-                    }
+            let refs = VersionCreateRefs::read(p);
+            // The owner proves the source version holds what the fork copied.
+            if refs.fork_snapshots.is_some_and(|rows| !rows.is_empty()) {
+                let version = coordinate(refs.fork_version_id)?;
+                for row in refs.snapshots() {
+                    result.push(content(
+                        version,
+                        coordinate(row.object_id)?,
+                        coordinate(row.content.path)?,
+                        coordinate(row.content.blob_sha256)?,
+                        PublicationContentKind::Projection,
+                    ));
                 }
             }
         }
         "conflict.open" => {
-            for (name, version) in [
-                ("base", "targetVersionId"),
-                ("current", "targetVersionId"),
-                ("incoming", "sourceVersionId"),
-            ] {
-                let Some(side) = p.get(name) else {
-                    continue;
-                };
-                if side.get("exists").and_then(Value::as_bool) != Some(true) {
-                    continue;
-                }
-                let digest = if let Some(text) = side.get("text").and_then(Value::as_str) {
-                    hex_sha256(text.as_bytes())
-                } else {
-                    required(side, "sha256")?.into()
+            for side in conflict_open_sides(p) {
+                let digest = match side.text {
+                    Some(text) => hex_sha256(text.as_bytes()),
+                    None => coordinate(side.sha256)?.into(),
                 };
                 result.push(content(
-                    required(p, version)?,
-                    required(side, "objectId")?,
-                    required(side, "path")?,
+                    coordinate(side.version_id)?,
+                    coordinate(side.object_id)?,
+                    coordinate(side.path)?,
                     &digest,
                     PublicationContentKind::Projection,
                 ));
@@ -262,4 +238,276 @@ pub fn owner_publication_prefix(
             pending: None,
         })
     })
+}
+
+#[cfg(test)]
+mod reference_tests {
+    use std::collections::BTreeSet;
+
+    use serde_json::{Value, json};
+
+    use super::{PublicationContentKind, hex_sha256, references};
+    use crate::{BlobKind, ReplicationEnvelope, SyncError};
+
+    fn op(op_kind: &str, payload: Value) -> ReplicationEnvelope {
+        ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
+            workspace_id: "workspace".into(),
+            origin_id: "local".into(),
+            origin_seq: 0,
+            relay_seq: None,
+            op_kind: op_kind.into(),
+            payload,
+            recorded_at_ms: 0,
+        }
+    }
+
+    /// What publication proves: the version, path and digest of each reference.
+    fn published(op: &ReplicationEnvelope) -> BTreeSet<(String, String, String)> {
+        references(op)
+            .expect("publishable references")
+            .into_iter()
+            .map(|content| (content.version, content.path, content.digest))
+            .collect()
+    }
+
+    fn proven(items: &[(&str, &str, &str)]) -> BTreeSet<(String, String, String)> {
+        items
+            .iter()
+            .map(|(version, path, digest)| ((*version).into(), (*path).into(), (*digest).into()))
+            .collect()
+    }
+
+    /// What hydration fetches: each digest in the blob lane it is stored in.
+    fn hydrated(op: &ReplicationEnvelope) -> BTreeSet<(String, BlobKind)> {
+        crate::relay::collect_blob_refs(std::slice::from_ref(op))
+            .expect("hydratable references")
+            .into_iter()
+            .flat_map(|(sha256, kinds)| kinds.into_iter().map(move |kind| (sha256.clone(), kind)))
+            .collect()
+    }
+
+    #[test]
+    fn publication_and_hydration_read_the_same_moment_sides() {
+        let text = "a".repeat(64);
+        let binary = "b".repeat(64);
+        let rename = op(
+            "moment.append",
+            json!({
+                "versionId": "main", "objectId": "object-a", "path": "docs/new.bin",
+                "operation": "rename",
+                "payloadBeforePath": "docs/old.bin", "payloadBeforeBlobSha256": binary,
+                "payloadBeforeContentKind": "binary",
+                "payloadAfterPath": "docs/new.bin", "payloadAfterBlobSha256": binary,
+                "payloadAfterContentKind": "binary",
+                "beforePath": "docs/old.bin", "beforeBlobSha256": binary,
+                "beforeContentKind": "binary",
+            }),
+        );
+        assert_eq!(
+            published(&rename),
+            proven(&[
+                ("main", "docs/old.bin", &binary),
+                ("main", "docs/new.bin", &binary),
+            ])
+        );
+        assert_eq!(
+            hydrated(&rename),
+            BTreeSet::from([(binary.clone(), BlobKind::Binary)])
+        );
+
+        let deleted = op(
+            "moment.append",
+            json!({
+                "versionId": "main", "objectId": "object-b", "path": "notes/a.md",
+                "operation": "delete",
+                "payloadBeforePath": "notes/a.md", "payloadBeforeBlobSha256": text,
+                "payloadAfterPath": "notes/a.md", "payloadAfterBlobSha256": text,
+                "beforePath": "notes/a.md", "beforeBlobSha256": text,
+            }),
+        );
+        assert_eq!(
+            published(&deleted),
+            proven(&[("main", "notes/a.md", &text)])
+        );
+        assert_eq!(
+            hydrated(&deleted),
+            BTreeSet::from([(text.clone(), BlobKind::Text)])
+        );
+
+        // A creating write: no before side, the after path left to the
+        // moment's own, and an empty before digest naming no blob.
+        let write = op(
+            "moment.append",
+            json!({
+                "versionId": "main", "objectId": "object-c", "path": "notes/b.md",
+                "operation": "write",
+                "payloadBeforePath": null, "payloadBeforeBlobSha256": null,
+                "payloadAfterBlobSha256": text, "beforeBlobSha256": "",
+            }),
+        );
+        assert_eq!(published(&write), proven(&[("main", "notes/b.md", &text)]));
+        assert_eq!(
+            hydrated(&write),
+            BTreeSet::from([(text.clone(), BlobKind::Text)])
+        );
+    }
+
+    #[test]
+    fn a_fork_is_proven_against_its_source_version() {
+        let text = "a".repeat(64);
+        let binary = "b".repeat(64);
+        let fork = op(
+            "version.create",
+            json!({
+                "versionId": "fork", "forkVersionId": "main",
+                "forkSnapshots": [
+                    {"objectId": "object-a", "path": "a.md", "blobSha256": text},
+                    {"objectId": "object-b", "path": "b.bin", "blobSha256": binary,
+                     "contentKind": "binary"},
+                ],
+            }),
+        );
+        assert_eq!(
+            published(&fork),
+            proven(&[("main", "a.md", &text), ("main", "b.bin", &binary)])
+        );
+        assert_eq!(
+            hydrated(&fork),
+            BTreeSet::from([
+                (text.clone(), BlobKind::Text),
+                (binary.clone(), BlobKind::Binary),
+            ])
+        );
+
+        let empty = op(
+            "version.create",
+            json!({"versionId": "fork", "forkSnapshots": []}),
+        );
+        assert!(published(&empty).is_empty());
+        assert!(hydrated(&empty).is_empty());
+
+        let sourceless = op(
+            "version.create",
+            json!({
+                "versionId": "fork",
+                "forkSnapshots": [{"objectId": "object-a", "path": "a.md", "blobSha256": text}],
+            }),
+        );
+        assert!(matches!(
+            references(&sourceless),
+            Err(SyncError::InvalidInput {
+                reason: "queued content coordinate is malformed"
+            })
+        ));
+    }
+
+    #[test]
+    fn conflict_open_sides_keep_their_versions_and_blob_lanes() {
+        let binary = "b".repeat(64);
+        let open = op(
+            "conflict.open",
+            json!({
+                "targetVersionId": "main", "sourceVersionId": "peer",
+                "base": {"exists": false, "path": "a.md"},
+                "current": {"exists": true, "objectId": "object-a", "path": "a.md",
+                            "text": "mine"},
+                "incoming": {"exists": true, "objectId": "object-a", "path": "a.bin",
+                             "contentKind": "binary", "sha256": binary},
+            }),
+        );
+        let inline = hex_sha256(b"mine");
+        assert_eq!(
+            published(&open),
+            proven(&[("main", "a.md", &inline), ("peer", "a.bin", &binary)])
+        );
+        // The text side travels inline, so only the binary side is fetched.
+        assert_eq!(
+            hydrated(&open),
+            BTreeSet::from([(binary.clone(), BlobKind::Binary)])
+        );
+    }
+
+    #[test]
+    fn a_ydoc_update_is_proven_with_its_lineage_and_fetched_in_the_ydoc_lane() {
+        let update = "a".repeat(64);
+        let claim = "c".repeat(64);
+        let ydoc = op(
+            "ydoc.update",
+            json!({
+                "versionId": "main", "objectId": "object-a", "path": "notes/a.md",
+                "updateBlobSha256": update, "lineageClaimId": claim,
+            }),
+        );
+        let published = references(&ydoc).expect("publishable references");
+        let [content] = published.as_slice() else {
+            panic!("a ydoc update names exactly one reference");
+        };
+        assert_eq!(content.version, "main");
+        assert_eq!(content.object, "object-a");
+        assert_eq!(content.path, "notes/a.md");
+        assert_eq!(content.digest, update);
+        assert_eq!(content.lineage.as_deref(), Some(claim.as_str()));
+        assert!(matches!(content.kind, PublicationContentKind::Ydoc));
+        assert_eq!(
+            hydrated(&ydoc),
+            BTreeSet::from([(update.clone(), BlobKind::Ydoc)])
+        );
+
+        // Without its lineage the update is not provable, but hydration still
+        // fetches the blob so the applier can refuse the op durably.
+        let unclaimed = op(
+            "ydoc.update",
+            json!({
+                "versionId": "main", "objectId": "object-a", "path": "notes/a.md",
+                "updateBlobSha256": update,
+            }),
+        );
+        assert!(matches!(
+            references(&unclaimed),
+            Err(SyncError::InvalidInput {
+                reason: "queued content coordinate is malformed"
+            })
+        ));
+        assert_eq!(
+            hydrated(&unclaimed),
+            BTreeSet::from([(update.clone(), BlobKind::Ydoc)])
+        );
+    }
+
+    #[test]
+    fn hydration_stays_lenient_where_publication_refuses() {
+        let text = "a".repeat(64);
+        // The applier refuses this durably, so hydration must not wedge the
+        // pull on it. Publication refuses to prove it.
+        let objectless = op(
+            "moment.append",
+            json!({
+                "versionId": "main", "path": "a.md",
+                "payloadAfterBlobSha256": text, "payloadAfterContentKind": 7,
+            }),
+        );
+        assert_eq!(
+            hydrated(&objectless),
+            BTreeSet::from([(text.clone(), BlobKind::Text)])
+        );
+        assert!(matches!(
+            references(&objectless),
+            Err(SyncError::InvalidInput {
+                reason: "queued content coordinate is malformed"
+            })
+        ));
+
+        let pathless = op(
+            "moment.append",
+            json!({"versionId": "main", "objectId": "object-a", "payloadAfterBlobSha256": text}),
+        );
+        assert!(matches!(
+            references(&pathless),
+            Err(SyncError::InvalidInput {
+                reason: "queued moment path is absent"
+            })
+        ));
+    }
 }

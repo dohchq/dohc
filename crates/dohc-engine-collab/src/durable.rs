@@ -18,7 +18,7 @@
 use dohc_engine_domain::ChangeAttribution;
 use dohc_engine_storage::{
     enqueue_job, put_binary_blob, put_binary_blob_with_sha, EngineStore, FaultInjector,
-    MaterializationJobSpec, Preimage, TxnOutcome,
+    MaterializationJobSpec, Preimage, StorageError, TxnOutcome,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
@@ -89,9 +89,26 @@ impl Regime {
     }
 }
 
+/// File delivery survives prune. Only a fresh seed permits another base attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileExportLane {
+    Off,
+    Declined,
+    Reseeded,
+    /// Delivery ended at deletion; old settles still belong only to the owner.
+    Retired,
+}
+
+impl FileExportLane {
+    pub fn is_enabled(self) -> bool {
+        matches!(self, Self::Declined | Self::Reseeded)
+    }
+}
+
 /// A document marker with content, regime, head pointers, and lineage identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Marker {
+    pub file_export_lane: FileExportLane,
     pub content_kind: ContentKind,
     pub regime: Regime,
     pub head_update_seq: i64,
@@ -637,6 +654,7 @@ where
                     )
                     .map_err(map_sql)?;
                     Marker {
+                        file_export_lane: FileExportLane::Off,
                         content_kind,
                         regime,
                         head_update_seq: 0,
@@ -673,7 +691,9 @@ where
                 index_frontmatter,
                 actor_origin_id,
                 attribution,
+                is_seed,
                 now_ms,
+                !is_seed,
                 cache,
                 &mut probe,
             )?;
@@ -701,6 +721,12 @@ where
                         ],
                     )
                     .map_err(map_sql)?;
+                }
+                if is_seed && outcome.seq == 1 {
+                    tx.execute(
+                        "UPDATE ydoc_docs SET file_export_lane=2 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND file_export_lane=1",
+                        rusqlite::params![key.workspace_id,key.version_id,key.object_id],
+                    ).map_err(map_sql)?;
                 }
                 if is_seed {
                     tx.execute(
@@ -784,6 +810,7 @@ pub(crate) fn append_and_index_update(
         actor_origin_id,
         attribution,
         history_source,
+        history_source.is_none(),
         now_ms,
     )?;
     Ok((projection, seq, record_facts))
@@ -802,13 +829,22 @@ pub(crate) fn append_validated_and_index_update(
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
     history_source: Option<(&str, i64)>,
+    local_edit: bool,
     now_ms: i64,
 ) -> Result<(i64, Option<dohc_engine_domain::CollectionRecordApplyFacts>), CollabError> {
     // The one choke point every durable update write passes, local or remote:
     // an out-of-bounds attribution never reaches a row.
     validate_attribution(attribution)?;
     put_binary_blob_with_sha(conn, update, sha)?;
-    let seq = append_row(conn, key, sha, actor_origin_id, attribution, now_ms)?;
+    let seq = append_row(
+        conn,
+        key,
+        sha,
+        actor_origin_id,
+        attribution,
+        local_edit,
+        now_ms,
+    )?;
     let is_bound_collection_record = index_frontmatter
         && content_kind == ContentKind::Richdoc
         && dohc_engine_domain::is_collection_record_bound_in_tx(
@@ -879,8 +915,10 @@ fn append_local_update(
     marker: &Marker,
     update: &[u8],
     sha: &str,
+    index_frontmatter: bool,
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
+    authors_admitted: bool,
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
     if let Some(actor_origin_id) = actor_origin_id {
@@ -896,8 +934,8 @@ fn append_local_update(
             record_facts: None,
         });
     }
-    let settlement_requested =
-        crate::author_coverage::check_admission_in(conn, key, actor_origin_id, attribution)?;
+    let settlement_requested = !authors_admitted
+        && crate::author_coverage::check_admission_in(conn, key, actor_origin_id, attribution)?;
     let base = load_doc_in(conn, key)?;
     let (_, seq, record_facts) = append_and_index_update(
         conn,
@@ -906,7 +944,7 @@ fn append_local_update(
         &base,
         update,
         sha,
-        true,
+        index_frontmatter,
         actor_origin_id,
         attribution,
         None,
@@ -939,7 +977,9 @@ fn append_local_update_cached(
     index_frontmatter: bool,
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
+    is_seed: bool,
     now_ms: i64,
+    local_edit: bool,
     cache: &WriterDocCache,
     probe: &mut GateBaseProbe,
 ) -> Result<AppendOutcome, CollabError> {
@@ -957,8 +997,8 @@ fn append_local_update_cached(
             record_facts: None,
         });
     }
-    let settlement_requested =
-        crate::author_coverage::check_admission_in(conn, key, actor_origin_id, attribution)?;
+    let settlement_requested = !is_seed
+        && crate::author_coverage::check_admission_in(conn, key, actor_origin_id, attribution)?;
     let (seq, record_facts) = match cache.base_frontier_and_scratch_for_gate(conn, key, marker)? {
         Some((base, frontier, scratch)) => {
             let validation = crate::replay_parity::validate_replay_parity_for_cached_gate(
@@ -980,6 +1020,7 @@ fn append_local_update_cached(
                 actor_origin_id,
                 attribution,
                 None,
+                local_edit,
                 now_ms,
             )?;
             probe.candidate = Some(validation.candidate);
@@ -1011,6 +1052,7 @@ fn append_local_update_cached(
                 actor_origin_id,
                 attribution,
                 None,
+                local_edit,
                 now_ms,
             )?;
             probe.candidate = Some(validation.candidate);
@@ -1752,6 +1794,7 @@ pub fn replace_lineage_with_successor(
 }
 
 /// Transaction-composable form of [`replace_lineage_with_successor`].
+/// The caller must write the successor's result snapshot in this transaction.
 pub fn replace_lineage_with_successor_in_tx(
     tx: &Transaction<'_>,
     replacement: SuccessorReplacement<'_>,
@@ -1762,6 +1805,7 @@ pub fn replace_lineage_with_successor_in_tx(
 /// Install a reviewed successor while guarding the receiver's alternate lineage.
 /// The successor retains its author's causal parent. The caller must establish
 /// that the alternate lineage belongs to the same review and its visible edits are preserved.
+/// It must also write the successor's result snapshot in this transaction.
 pub fn replace_reviewed_lineage_with_successor_in_tx(
     tx: &Transaction<'_>,
     replacement: SuccessorReplacement<'_>,
@@ -2138,7 +2182,18 @@ fn validate_successor_base(
             .collect();
         folded.portable_json_with_asset_bytes(&asset_bytes)?
     } else {
-        doc.project(successor.content_kind)?.content
+        let projection = doc.project(successor.content_kind)?.content;
+        if successor.content_kind == ContentKind::Richdoc {
+            let result = doc
+                .markdown_source_reference()
+                .and_then(|reference| doc.markdown_source(&reference));
+            // The same transaction installs this result as last_settled_sha.
+            // Matching digests alone cannot prove that source rebuilds the doc.
+            doc.settled_markdown_source(&projection, || Ok::<_, CollabError>(result))?
+                .unwrap_or(projection)
+        } else {
+            projection
+        }
     };
     let observed_result = crate::hex_sha256(projected.as_bytes());
     if observed_result != successor.result_sha256 {
@@ -2168,16 +2223,29 @@ pub fn record_update_in_tx(
     if crate::owner_outbox::has_adopted_owner_in(tx, key)? {
         return Err(CollabError::OwnerOutboxFrozen);
     }
-    record_authorized_update_in_tx(tx, key, update, actor_origin_id, attribution, now_ms)
+    record_authorized_update_in_tx(
+        tx,
+        key,
+        update,
+        true,
+        actor_origin_id,
+        attribution,
+        false,
+        now_ms,
+    )
 }
 
 /// The receipt application owner has checked its full binding in this transaction.
+/// `authors_admitted` skips native admission when accepted snapshot coverage owns it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn record_authorized_update_in_tx(
     tx: &Transaction<'_>,
     key: &DocKey,
     update: &[u8],
+    index_frontmatter: bool,
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
+    authors_admitted: bool,
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
     validate_update_bytes(update)?;
@@ -2189,8 +2257,10 @@ pub(crate) fn record_authorized_update_in_tx(
         &marker,
         update,
         &sha,
+        index_frontmatter,
         actor_origin_id,
         attribution,
+        authors_admitted,
         now_ms,
     )
 }
@@ -2462,13 +2532,18 @@ pub fn local_close_is_covered(
         // and it needs no update when a future job kind is added.
         let job_pending: bool = store.read_with(|conn| {
             conn.query_row(
-                "SELECT EXISTS (SELECT 1 FROM materialization_jobs j \
+                concat!(
+                    "SELECT EXISTS (SELECT 1 FROM materialization_jobs j \
                  WHERE j.target_path = ( \
                      SELECT path FROM moments \
                       WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
+                        AND ",
+                    dohc_engine_domain::exclude_capture_recovery_sql!(),
+                    " \
                       ORDER BY moment_order DESC LIMIT 1) \
                    AND j.status = 'pending' \
-                   AND (j.workspace_id = ?1 OR j.workspace_id = ''))",
+                   AND (j.workspace_id = ?1 OR j.workspace_id = ''))"
+                ),
                 rusqlite::params![key.workspace_id, key.version_id, key.object_id],
                 |row| row.get(0),
             )
@@ -2634,6 +2709,7 @@ pub(crate) fn binary_blob_for_gate(conn: &Connection, sha: &str) -> Result<Vec<u
 }
 
 struct MarkerRow {
+    file_export_lane: i64,
     content_kind: String,
     regime: String,
     head_update_seq: i64,
@@ -2657,7 +2733,7 @@ pub fn read_marker_in(conn: &Connection, key: &DocKey) -> Result<Option<Marker>,
             "SELECT content_kind, regime, head_update_seq, head_snapshot_seq, \
              lineage_claim_status, lineage_claim_id, lineage_parent_claim_id, \
              lineage_epoch_tag, path, base_origin_id, base_origin_seq, base_relay_seq, \
-             base_relay_confirmed_absent FROM ydoc_docs \
+             base_relay_confirmed_absent, file_export_lane FROM ydoc_docs \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             rusqlite::params![key.workspace_id, key.version_id, key.object_id],
             |row| {
@@ -2675,6 +2751,7 @@ pub fn read_marker_in(conn: &Connection, key: &DocKey) -> Result<Option<Marker>,
                     base_origin_seq: row.get(10)?,
                     base_relay_seq: row.get(11)?,
                     base_relay_confirmed_absent: row.get(12)?,
+                    file_export_lane: row.get(13)?,
                 })
             },
         )
@@ -2682,6 +2759,17 @@ pub fn read_marker_in(conn: &Connection, key: &DocKey) -> Result<Option<Marker>,
         .map_err(map_sql)?;
     row.map(|row| {
         Ok(Marker {
+            file_export_lane: match row.file_export_lane {
+                0 => FileExportLane::Off,
+                1 => FileExportLane::Declined,
+                2 => FileExportLane::Reseeded,
+                3 => FileExportLane::Retired,
+                _ => {
+                    return Err(CollabError::Corrupt {
+                        reason: "invalid file export lane".to_owned(),
+                    })
+                }
+            },
             content_kind: ContentKind::parse(&row.content_kind)?,
             regime: Regime::parse(&row.regime),
             head_update_seq: row.head_update_seq,
@@ -2762,7 +2850,7 @@ pub fn read_last_settled_sha(
 /// and nothing a prune could lose. Every doubt (a second update, a snapshot,
 /// a prior settle, a replicated regime, no recorded seed source) answers
 /// `None`, and the caller falls back to writing exactly as before.
-pub(crate) fn seed_only_lineage_source(
+pub fn seed_only_lineage_source(
     conn: &Connection,
     key: &DocKey,
 ) -> Result<Option<String>, CollabError> {
@@ -2963,12 +3051,14 @@ pub(crate) fn blob_seq_in_log(
 
 /// Insert one update row with `seq = head + 1` and advance the head, atomically
 /// within the caller's transaction. Returns the assigned seq.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn append_row(
     conn: &Connection,
     key: &DocKey,
     sha: &str,
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
+    local_edit: bool,
     now_ms: i64,
 ) -> Result<i64, CollabError> {
     let (head, _, _) = head_of(conn, key)?;
@@ -2991,13 +3081,21 @@ pub(crate) fn append_row(
             now_ms,
         ],
     )
-    .map_err(map_sql)?;
+    .map_err(|error| CollabError::Storage(StorageError::persist_public(error)))?;
     conn.execute(
-        "UPDATE ydoc_docs SET head_update_seq = ?4, updated_at_ms = ?5 \
+        "UPDATE ydoc_docs SET head_update_seq = ?4, updated_at_ms = ?5, \
+         last_local_update_seq = CASE WHEN ?6 THEN ?4 ELSE last_local_update_seq END \
          WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-        rusqlite::params![key.workspace_id, key.version_id, key.object_id, seq, now_ms],
+        rusqlite::params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            seq,
+            now_ms,
+            local_edit
+        ],
     )
-    .map_err(map_sql)?;
+    .map_err(|error| CollabError::Storage(StorageError::persist_public(error)))?;
     Ok(seq)
 }
 
@@ -3042,6 +3140,21 @@ fn updates_after(
 }
 
 pub(crate) fn map_sql(e: rusqlite::Error) -> CollabError {
+    if e.sqlite_error_code().is_some_and(|code| {
+        matches!(
+            code,
+            rusqlite::ErrorCode::SystemIoFailure
+                | rusqlite::ErrorCode::DiskFull
+                | rusqlite::ErrorCode::CannotOpen
+                | rusqlite::ErrorCode::OutOfMemory
+                | rusqlite::ErrorCode::DatabaseBusy
+                | rusqlite::ErrorCode::DatabaseLocked
+                | rusqlite::ErrorCode::PermissionDenied
+                | rusqlite::ErrorCode::ReadOnly
+        )
+    }) {
+        return StorageError::persist_public(e).into();
+    }
     CollabError::Corrupt {
         reason: e.to_string(),
     }
@@ -3058,6 +3171,137 @@ mod successor_validation_tests {
         encode_scene_asset_record, import_portable_scene, scene_asset_ref, SceneAsset,
         SuccessorIdentity, SuccessorIdentityInput,
     };
+
+    fn markdown_successor(artifact: &str) -> SuccessorBase {
+        let key = DocKey::new("ws", "main", "markdown-object").expect("key");
+        let identity = SuccessorIdentity::derive(SuccessorIdentityInput {
+            key: &key,
+            predecessor_claim_id: &"a".repeat(64),
+            predecessor_state_vector_sha256: &"b".repeat(64),
+            artifact_op_kind: "conflict.resolve",
+            artifact_id: "conflict",
+            artifact_preimage_sha256: &"c".repeat(64),
+            content_kind: ContentKind::Richdoc,
+            result_sha256: &crate::hex_sha256(artifact.as_bytes()),
+        });
+        let base = crate::fresh_successor_base(&identity, artifact).expect("Markdown successor");
+        assert_eq!(
+            base,
+            crate::fresh_successor_base(&identity, artifact).expect("deterministic replay")
+        );
+        base
+    }
+
+    fn assert_markdown_successor_roundtrip(artifact: &str) {
+        let base = markdown_successor(artifact);
+        validate_successor_base(&base, None).expect("validate Markdown successor");
+        let doc = Ydoc::wire();
+        doc.apply(&base.update).expect("load successor");
+        let projected = doc
+            .project(ContentKind::Richdoc)
+            .expect("projection")
+            .content;
+        let settled = doc
+            .settled_markdown_source(&projected, || Ok::<_, ()>(Some(artifact.to_owned())))
+            .expect("settled source")
+            .unwrap_or(projected);
+        assert_eq!(settled.as_bytes(), artifact.as_bytes());
+    }
+
+    #[test]
+    fn markdown_successor_roundtrips_nested_list() {
+        assert_markdown_successor_roundtrip("- parent\n  - child\n");
+    }
+
+    #[test]
+    fn markdown_successor_roundtrips_quote_nested_200_deep() {
+        assert_markdown_successor_roundtrip(&format!("{}quoted\n", "> ".repeat(200)));
+    }
+
+    #[test]
+    fn markdown_successor_roundtrips_crlf_with_frontmatter() {
+        assert_markdown_successor_roundtrip(
+            "---\r\ntitle: 'Trip'\r\n---\r\n\r\n- parent\r\n  - child\r\n",
+        );
+    }
+
+    #[test]
+    fn markdown_successor_rejects_foreign_source_with_current_projection_digest() {
+        use yrs::updates::decoder::Decode;
+        use yrs::{Map, ReadTxn, Transact};
+
+        let valid = markdown_successor("Visible body");
+        let raw = yrs::Doc::new();
+        raw.get_or_insert_xml_fragment(crate::ROOT_BODY);
+        raw.get_or_insert_map(crate::ROOT_FRONTMATTER);
+        let meta = raw.get_or_insert_map(crate::ROOT_META);
+        raw.transact_mut()
+            .apply_update(yrs::Update::decode_v1(&valid.update).expect("decode base"))
+            .expect("load base");
+        let foreign = "Foreign body";
+        {
+            let mut txn = raw.transact_mut();
+            meta.insert(&mut txn, "dohcMarkdownSource", foreign);
+            meta.insert(
+                &mut txn,
+                "dohcMarkdownSourceSha256",
+                crate::hex_sha256(foreign.as_bytes()),
+            );
+            meta.insert(
+                &mut txn,
+                "dohcMarkdownSourceProjectionSha256",
+                crate::hex_sha256(b"Visible body"),
+            );
+        }
+        let update = raw
+            .transact()
+            .encode_state_as_update_v1(&yrs::StateVector::default());
+        let loaded = Ydoc::wire();
+        loaded.apply(&update).expect("load crafted successor");
+        let tampered = SuccessorBase {
+            lineage_claim_id: crate::hex_sha256(&update),
+            state_vector: loaded.encode_state_vector(),
+            update,
+            result_sha256: crate::hex_sha256(foreign.as_bytes()),
+            ..valid
+        };
+        let error =
+            validate_successor_base(&tampered, None).expect_err("foreign source must be rejected");
+        assert!(
+            matches!(
+                error,
+                CollabError::InvalidSuccessorBase {
+                    constraint: "successor canonical result",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn document_sql_resource_failures_keep_storage_class() {
+        for code in [5, 6, 10, 13, 14, 7, 3, 8] {
+            let error = map_sql(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                None,
+            ));
+            assert!(
+                matches!(error, CollabError::Storage(_)),
+                "{code}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn document_load_sql_failure_keeps_corrupt_lineage_classification() {
+        let conn = rusqlite::Connection::open_in_memory().expect("connection");
+        let key = DocKey::new("ws", "main", "object").expect("key");
+        assert!(matches!(
+            load_doc_in(&conn, &key),
+            Err(CollabError::Corrupt { .. })
+        ));
+    }
 
     fn canonical_image_scene(key: &DocKey) -> String {
         let source = serde_json::to_string(&json!({
@@ -3221,4 +3465,102 @@ mod append_compaction_query_tests {
             "a below-threshold append must not enter maybe_compact's marker read"
         );
     }
+}
+
+/// Replay uses the same publication guard as an ordinary live append.
+pub fn require_recovery_write_in(tx: &Transaction<'_>, key: &DocKey) -> Result<(), CollabError> {
+    crate::owner_outbox::draft::require_ordinary_write(tx, key)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn recovery_update_is_recorded_in(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    original_path: &str,
+    request_id: &str,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+) -> Result<bool, CollabError> {
+    Ok(recovery_request_in(
+        tx,
+        key,
+        original_path,
+        request_id,
+        update,
+        actor_origin_id,
+        attribution,
+    )?
+    .1
+    .is_some())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recovery_request_in(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    original_path: &str,
+    request_id: &str,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+) -> Result<(String, Option<i64>), CollabError> {
+    let path_identity = format!("some:{}", crate::hex_sha256(original_path.as_bytes()));
+    let update_sha = crate::hex_sha256(update);
+    let restore_generation = crate::live_update_application::restore_generation(tx, key)?;
+    let hash = crate::hex_sha256(format!(
+        "ydoc-record-v6{sep}{restore_generation:?}{sep}false{sep}{}{sep}{}{sep}{}{sep}{path_identity}{sep}{}{sep}{}",
+        key.workspace_id, key.version_id, key.object_id, update_sha,
+        serde_json::json!([actor_origin_id, attribution]), sep = char::from(0),
+    ).as_bytes());
+    let recorded: Option<(String, i64)> = tx
+        .query_row(
+            "SELECT payload_hash,result_seq FROM engine_requests WHERE request_id=?1",
+            [request_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(map_sql)?;
+    match recorded {
+        Some((prior, seq)) if prior == hash => Ok((hash, Some(-seq))),
+        Some(_) => Err(CollabError::IdempotencyKeyReused),
+        None => Ok((hash, None)),
+    }
+}
+
+/// Recovery retains each original request's ledger identity across a restart.
+#[allow(clippy::too_many_arguments)]
+pub fn record_recovery_update_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    original_path: &str,
+    request_id: &str,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+    now_ms: i64,
+) -> Result<AppendOutcome, CollabError> {
+    require_recovery_write_in(tx, key)?;
+    let (hash, recorded) = recovery_request_in(
+        tx,
+        key,
+        original_path,
+        request_id,
+        update,
+        actor_origin_id,
+        attribution,
+    )?;
+    if let Some(seq) = recorded {
+        return Ok(AppendOutcome {
+            settlement_requested: false,
+            seq,
+            deduped: true,
+            emit_outbound: false,
+            record_facts: None,
+        });
+    }
+    let outcome = record_update_in_tx(tx, key, update, actor_origin_id, attribution, now_ms)?;
+    tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES(?1,?2,?3,?4,'ydoc')",
+        rusqlite::params![request_id,hash,-outcome.seq,now_ms]).map_err(map_sql)?;
+    Ok(outcome)
 }

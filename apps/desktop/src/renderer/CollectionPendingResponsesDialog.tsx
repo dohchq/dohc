@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { DatasetPendingAttemptsPage } from "@dohc/cli/dataset";
 import { Overlay } from "./Overlay";
 import { DangerButton, SecondaryButton } from "./ui/controls";
+import { SkeletonRows } from "./ui/SkeletonRows";
 
 type PendingResponseEntry = DatasetPendingAttemptsPage["entries"][number];
 export type PendingResponsesPage = DatasetPendingAttemptsPage;
@@ -46,7 +47,8 @@ function Pending(props: CollectionPendingResponsesDialogProps) {
   return <Overlay onClose={props.onClose} panelProps={{ role: "dialog", "aria-modal": true, "aria-label": "Pending responses", className: "dohc-elevated dohc-pop-in flex max-h-[85vh] w-[min(720px,92vw)] flex-col gap-4 rounded-xl border border-line bg-panel p-5 text-ink" }}>
     <div className="flex items-center justify-between gap-3"><h2 className="m-0 text-sm font-semibold">Pending responses · {props.name}</h2><SecondaryButton onClick={props.onClose}>Close</SecondaryButton></div>
     <p className="m-0 text-[12px] text-muted">These responses may have been saved before the participant lost confirmation. Review each result before clearing or cancelling it.</p>
-    {busy && <p role="status" className="m-0 text-[12px] text-muted">{selected ? selected.outcome === "committed" ? "Clearing retry…" : "Cancelling response…" : "Loading pending responses…"}</p>}
+    {/* Lines stand in only for a page not yet shown; a refresh or a change keeps its page and says so. */}
+    {busy && (selected || page ? <p role="status" className="m-0 text-[12px] text-muted">{selected ? selected.outcome === "committed" ? "Clearing retry…" : "Cancelling response…" : "Loading pending responses…"}</p> : <SkeletonRows label="Loading pending responses…" />)}
     {page && !page.entries.length && <p className="m-0 text-[13px] text-muted">No pending responses. Refresh to check for changes.</p>}
     <div className="min-h-0 overflow-auto">{page?.entries.map(entry => <div key={entry.reference} className="border-b border-line py-3">
       <div className="flex flex-wrap items-baseline gap-3 text-[13px]"><span>{entry.operation}</span><span className={entry.outcome === "committed" ? "text-success" : "text-warning"}>{entry.outcome === "committed" ? "Saved" : "Unconfirmed"}</span>{entry.recordedAtMs !== null && <time className="ml-auto text-[12px] text-muted" dateTime={new Date(entry.recordedAtMs).toISOString()}>{new Date(entry.recordedAtMs).toLocaleString()}</time>}</div>

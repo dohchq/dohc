@@ -40,6 +40,23 @@ const WORKSPACE = "workspace-handle-1";
 const VERSION = "version-1";
 const PATH = "notes/live.txt";
 
+describe("server automation draft declarations", () => {
+  it.each([false, true])("retains the explicit server declaration option (%s)", async trustedAutomationDraft => {
+    const engine = seedPlaintextEngine("seed");
+    const provider = await openEngineYdocProviderSession({
+      transport:engine,workspace:WORKSPACE,versionId:VERSION,path:PATH,contentKind:"plaintext",
+      onRemoteUpdate:()=>undefined,scheduleSettle:()=>()=>undefined,
+      ...(trustedAutomationDraft ? {trustedAutomationDraft:true} : {}),
+    });
+    await provider.applyLocalUpdate(plaintextUpdate(provider.initialUpdate, text => text.insert(0,"automation ")), {
+      actorOriginId:"collection:Tasks#mark",attribution:{actorKind:"automation",depth:1,onBehalfOf:"presser"},armSettle:false,
+    });
+    const params=engine.requests.filter(request=>request.method===YDOC_METHOD.recordUpdate).at(-1)!.params as {trustedAutomationDraft?:boolean};
+    expect(params.trustedAutomationDraft).toBe(trustedAutomationDraft ? true : undefined);
+    await provider.evict();
+  });
+});
+
 describe("closing a settled revision", () => {
   async function fixture(onSettled?: (result: YdocSettleResult) => boolean | void | Promise<boolean | void>) {
     const engine = seedPlaintextEngine("seed");
@@ -2740,7 +2757,10 @@ describe("YdocLiveAdapter", () => {
     ]);
   });
 
-  it("evicts after a terminal resend failure instead of wedging on it", async () => {
+  it.each([
+    ["evict", "saved"], ["evict", "refused"], ["evict", "unavailable"],
+    ["close", "saved"], ["close", "refused"], ["close", "unavailable"],
+  ] as const)("handles unsent state before terminal %s: %s", async (release, recovery) => {
     const engine = seedPlaintextEngine();
     const busy = new DaemonRefusalError(
       {
@@ -2755,6 +2775,17 @@ describe("YdocLiveAdapter", () => {
       new Error("daemon response"),
     );
     let records = 0;
+    const evictions: string[] = [];
+    let beginHandoff!: () => void;
+    let completeHandoff!: () => void;
+    const handoffStarted = new Promise<void>(resolve => { beginHandoff = resolve; });
+    const handoffCompleted = new Promise<void>(resolve => { completeHandoff = resolve; });
+    const preserveUnsentState = vi.fn(async (doc: Y.Doc) => {
+      evictions.push(doc.getText("plainText").toString());
+      beginHandoff();
+      if (recovery === "refused") throw new Error("draft storage refused");
+      await handoffCompleted;
+    });
     const transport: EngineTransport = {
       ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
@@ -2763,6 +2794,7 @@ describe("YdocLiveAdapter", () => {
           records += 1;
           throw records <= 2 ? busy : terminal;
         }
+        if (request.method === YDOC_METHOD.evict || request.method === YDOC_METHOD.close) evictions.push(release);
         return engine.sendRequest(request);
       },
     };
@@ -2774,6 +2806,7 @@ describe("YdocLiveAdapter", () => {
       contentKind: "plaintext",
       onRemoteUpdate: () => undefined,
       onSettleError: () => undefined,
+      preserveUnsentState: recovery === "unavailable" ? undefined : preserveUnsentState,
       scheduleSettle: () => () => undefined,
     });
     await provider
@@ -2784,7 +2817,27 @@ describe("YdocLiveAdapter", () => {
       )
       .catch(() => undefined);
 
-    await expect(provider.evict()).resolves.toBeUndefined();
+    const completeText = provider.doc.getText("plainText").toString();
+    expect(completeText).toContain("typed against a terminal engine");
+    const releaseProvider = () => release === "close" ? provider.close({ settle: false }) : provider.evict();
+    if (recovery === "saved") {
+      const releasing = releaseProvider();
+      // A settling error after successful release is still reported by close.
+      const outcome = releasing.catch((error: unknown) => error);
+      expect(await Promise.race([handoffStarted.then(() => true), outcome.then(() => false)])).toBe(true);
+      expect(evictions).toEqual([completeText]);
+      completeHandoff();
+      if (release === "close") expect(await outcome).toBeInstanceOf(YdocReleasedWithSettleFailureError);
+      else expect(await outcome).toBeUndefined();
+      expect(evictions).toEqual([completeText, release]);
+    } else if (recovery === "refused") {
+      await expect(releaseProvider()).rejects.toThrow("draft storage refused");
+      expect(evictions).not.toContain(release);
+    } else {
+      if (release === "close") await expect(releaseProvider()).rejects.toBeInstanceOf(YdocReleasedWithSettleFailureError);
+      else await expect(releaseProvider()).resolves.toBeUndefined();
+      expect(evictions).toEqual([release]);
+    }
   });
 
   it("releases an orphan that is holding nothing of the user's", async () => {
@@ -5543,7 +5596,11 @@ it("notifies durable owner observers only after commit and preserves lost-respon
 
 
 describe("immutable original-record recovery", () => {
-  it.each(["CANCELLED", "INTERNAL"] as const)("keeps a committed %s record pending until its keyed retry dedupes", async code => {
+  it.each([
+    { code: "CANCELLED", retry: "no", message: "answer lost after commit" },
+    { code: "INTERNAL", retry: "no", message: "answer lost after commit" },
+    { code: "INTERNAL", retry: "afterBackoff", message: "response-wire-limit-exceeded" },
+  ] as const)("keeps a committed $code / $message record pending until its keyed retry dedupes", async wireError => {
     const engine = seedPlaintextEngine("abc");
     const resyncEntered = Promise.withResolvers<void>();
     const releaseResync = Promise.withResolvers<void>();
@@ -5562,7 +5619,7 @@ describe("immutable original-record recovery", () => {
           const response = await engine.sendRequest(request);
           if (fail) {
             fail = false;
-            throw new DaemonRefusalError({ code, retry: "no", message: "answer lost after commit" }, undefined);
+            throw new DaemonRefusalError(wireError, undefined);
           }
           return response;
         }

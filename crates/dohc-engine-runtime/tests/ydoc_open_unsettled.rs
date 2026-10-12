@@ -274,6 +274,8 @@ async fn a_remote_update_applied_while_closed_settles_nothing_once_written() {
             .put_binary_blob(&doc.encode_full_state())
             .expect("base blob");
         let envelope = |seq: i64, blob: &str, base: bool| ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: WS.to_owned(),
             origin_id: "peer".to_owned(),
             origin_seq: seq,

@@ -696,6 +696,13 @@ export function isRecordId(value: string): boolean {
 }
 
 /** Bounded record frontmatter for a collection projection. No executable YAML tags. */
+/** Read identity from bounded frontmatter without counting the record body. */
+export function parseCollectionRecordIdentity(markdown: string): string | null {
+  const frontmatter = /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/.exec(markdown)?.[0];
+  const id = frontmatter === undefined ? null : parseCollectionRecordFields(frontmatter)?.id;
+  return typeof id === "string" && isRecordId(id) ? id : null;
+}
+
 export function parseCollectionRecordFields(markdown: string): Record<string, unknown> | null {
   const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(markdown);
   if (!match || new TextEncoder().encode(markdown).byteLength > 16_384) return null;

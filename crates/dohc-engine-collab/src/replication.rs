@@ -88,6 +88,8 @@ pub struct RemoteApplyProjection {
     pub outcome: ReplicationApplyOutcome,
     pub doc: Ydoc,
     pub content_kind: ContentKind,
+    /// This admission added the interval's first unknown-author marker.
+    pub introduced_unattributed: bool,
     /// What this apply did to a bound collection record (`None` for a dedup,
     /// an unbound document, or an apply that changed no field). The record
     /// events every device emits at apply time derive from this.
@@ -147,9 +149,36 @@ pub fn apply_remote_update(
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<RemoteUpdateApplied, CollabError> {
+    apply_remote_update_with_guard(
+        store,
+        cache,
+        key,
+        remote,
+        actor_origin_id,
+        attribution,
+        faults,
+        now_ms,
+        |_| Ok(()),
+    )
+}
+
+/// Recheck a caller's document reservation in the append transaction.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_remote_update_with_guard(
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    key: &DocKey,
+    remote: &RemoteUpdate,
+    actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+    guard: impl FnOnce(&Transaction<'_>) -> Result<(), CollabError>,
+) -> Result<RemoteUpdateApplied, CollabError> {
     let mut candidate = None;
     let mut record_facts = None;
     let outcome = store.write_with(faults, |tx| {
+        guard(tx)?;
         let (outcome, facts) = apply_remote_update_in_transaction(
             tx,
             key,
@@ -256,7 +285,14 @@ fn apply_remote_update_in_transaction(
     if let Some(existing) = blob_seq_in_log(tx, key, &sha, &remote.bytes)? {
         return Ok((ReplicationApplyOutcome::Deduped { seq: existing }, None));
     }
-    crate::author_coverage::check_admission_in(tx, key, origin.actor_id(), attribution)?;
+    crate::author_coverage::check_remote_admission_in(
+        tx,
+        key,
+        &remote.origin_id,
+        remote.origin_seq,
+        origin.actor_id(),
+        attribution,
+    )?;
     let base = load_doc_in(tx, key)?;
     *candidate = Some(crate::replay_parity::validate_replay_parity_with_delta(
         &base,
@@ -274,6 +310,7 @@ fn apply_remote_update_in_transaction(
         origin.actor_id(),
         attribution,
         Some((&remote.origin_id, remote.origin_seq)),
+        false,
         now_ms,
     )?;
     Ok((
@@ -327,11 +364,19 @@ pub fn apply_remote_update_in_transaction_with_projection(
             outcome: ReplicationApplyOutcome::Deduped { seq: existing },
             doc: load_doc_in(tx, key)?,
             content_kind: marker.content_kind,
+            introduced_unattributed: false,
             record_facts: None,
         });
     }
 
-    crate::author_coverage::check_admission_in(tx, key, origin.actor_id(), attribution)?;
+    let introduced_unattributed = crate::author_coverage::check_remote_admission_in(
+        tx,
+        key,
+        &remote.origin_id,
+        remote.origin_seq,
+        origin.actor_id(),
+        attribution,
+    )?;
     let (projection, validation, source, seq, record_facts) = match cache
         .base_frontier_and_scratch_for_gate(tx, key, &marker)?
     {
@@ -356,6 +401,7 @@ pub fn apply_remote_update_in_transaction_with_projection(
                 origin.actor_id(),
                 attribution,
                 Some((&remote.origin_id, remote.origin_seq)),
+                false,
                 now_ms,
             )?;
             (
@@ -392,6 +438,7 @@ pub fn apply_remote_update_in_transaction_with_projection(
                 origin.actor_id(),
                 attribution,
                 Some((&remote.origin_id, remote.origin_seq)),
+                false,
                 now_ms,
             )?;
             (
@@ -420,6 +467,7 @@ pub fn apply_remote_update_in_transaction_with_projection(
         },
         doc: projection,
         content_kind: marker.content_kind,
+        introduced_unattributed,
         record_facts,
     })
 }
