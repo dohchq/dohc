@@ -28,17 +28,17 @@ test("the AppImage launcher refuses to start without the sandbox instead of disa
     const argv = await readFile(record, "utf8").then(text => text.split("\n").slice(0, -1), () => null);
     return { started: result.status === 0, argv, stdout: result.stdout };
   };
-  for (const args of [[], ["notes.md"]]) {
-    const refused = await launch(1, args);
+  // A failed probe and a missing unshare both refuse.
+  for (const [unshare, args] of [[1, []], [1, ["notes.md"]], [undefined, ["notes.md"]]]) {
+    const refused = await launch(unshare, args);
     assert.deepEqual([refused.started, refused.argv], [false, null]);
     // Without zenity, kdialog or Xdialog, the launcher prints the reason.
     if (!["zenity", "kdialog", "Xdialog"].some(name => spawnSync("test", ["-x", `/usr/bin/${name}`]).status === 0)) {
-      assert.match(refused.stdout, /can't start its security sandbox because this system blocks user namespaces/);
+      assert.match(refused.stdout, /can't start its security sandbox because it can't create user namespaces on this system/);
     }
   }
   const started = async (unshare, args) => { const { started, argv } = await launch(unshare, args); return { started, argv }; };
   assert.deepEqual(await started(0, ["--enable-logging", "notes.md"]), { started: true, argv: ["--enable-logging", "notes.md"] });
-  assert.deepEqual(await started(undefined, ["notes.md"]), { started: true, argv: ["notes.md"] });
   // A person who passes --no-sandbox chose it; the launcher adds nothing.
   assert.deepEqual(await started(1, ["--no-sandbox"]), { started: true, argv: ["--no-sandbox"] });
 });

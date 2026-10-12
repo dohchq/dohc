@@ -1,5 +1,5 @@
 diff --git a/out/targets/appimage/appImageUtil.js b/out/targets/appimage/appImageUtil.js
-index 12f078abd42700857b239b0e53cd568c1b1836b7..72f6b30a16fbee088e9f8195e89fe28a546aba13 100644
+index 12f078abd42700857b239b0e53cd568c1b1836b7..4de60dac327a0788d8d3d65d89d2a541e6202dd4 100644
 --- a/out/targets/appimage/appImageUtil.js
 +++ b/out/targets/appimage/appImageUtil.js
 @@ -209,28 +209,21 @@ for arg in "\${args[@]}" ; do
@@ -17,13 +17,12 @@ index 12f078abd42700857b239b0e53cd568c1b1836b7..72f6b30a16fbee088e9f8195e89fe28a
 -#     In that case the shell will return exit code 127 ("command not found"), which will cause
 -#     us to add '--no-sandbox'. This is an intentional fail-safe: we prefer the app to start
 -#     without sandboxing rather than crash on startup.
--if [ $HAVE_NO_SANDBOX -eq 0 ] && ! unshare -Ur true 2>/dev/null ; then
--  NO_SANDBOX=(--no-sandbox)
 +# dohc keeps the Chromium sandbox. An AppImage cannot carry the setuid helper,
-+# so the sandbox needs unprivileged user namespaces. When this system blocks
-+# them, explain that instead of adding --no-sandbox for the user.
++# so the sandbox needs unprivileged user namespaces. When the launcher cannot
++# create one, explain that instead of adding --no-sandbox for the user.
 +SANDBOX_BLOCKED=0
-+if [ $HAVE_NO_SANDBOX -eq 0 ] && command -v unshare >/dev/null && ! unshare -Ur true 2>/dev/null ; then
+ if [ $HAVE_NO_SANDBOX -eq 0 ] && ! unshare -Ur true 2>/dev/null ; then
+-  NO_SANDBOX=(--no-sandbox)
 +  SANDBOX_BLOCKED=1
  fi
  
@@ -45,7 +44,7 @@ index 12f078abd42700857b239b0e53cd568c1b1836b7..72f6b30a16fbee088e9f8195e89fe28a
  
 +if [ $SANDBOX_BLOCKED -eq 1 ] ; then
 +  trap - EXIT
-+  error "dohc can't start its security sandbox because this system blocks user namespaces. Install the dohc .deb package, or allow this AppImage to create user namespaces."
++  error "dohc can't start its security sandbox because it can't create user namespaces on this system. Install the dohc .deb package, or allow this AppImage to create user namespaces."
 +fi
 +
  ${eulaEnabled
