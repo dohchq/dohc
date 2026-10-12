@@ -14,6 +14,14 @@ describe("app launch configuration", () => {
     expect(() => parseAppLaunchConfig({ viewerOrigin: "https://share.tenant.github.io", appDomain: "tenant.github.io" })).toThrow(TypeError);
   });
 
+  it("refuses a private suffix under the viewer's registrable domain", () => {
+    expect(() => parseAppLaunchConfig({ viewerOrigin: "https://share.amazonaws.com", appDomain: "s3.amazonaws.com" })).toThrow(TypeError);
+  });
+
+  it("refuses an app domain whose launch hosts are public suffixes", () => {
+    expect(() => parseAppLaunchConfig({ viewerOrigin, appDomain: "platformsh.site" })).toThrow(TypeError);
+  });
+
   it.each(["vercel.app", "github.io"])("refuses a viewer under app suffix %s", appDomain => {
     for (const host of [appDomain, `share.${appDomain}`, `nested.share.${appDomain}`, `share.${appDomain}.`]) {
       expect(() => parseAppLaunchConfig({ viewerOrigin: `https://${host}`, appDomain })).toThrow(TypeError);

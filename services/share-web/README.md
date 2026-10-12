@@ -388,13 +388,15 @@ The command does not build Rust or select a default executable.
 
 Use a registrable domain or a suffix in the private section of the Public Suffix
 List for apps. For example, a viewer at `https://share.example.com` can use
-`DOHC_SHARE_WEB_APP_DOMAIN=example.net` or a private suffix such as `vercel.app`.
+`DOHC_SHARE_WEB_APP_DOMAIN=example.net` or a private suffix you control.
 Use an app domain you control.
 Set the domain without a scheme, port, or wildcard. The viewer must use HTTPS
 without a port. It must not be the app domain or a host under it.
-For a registrable app domain, the viewer must have a different registrable domain.
+The app domain must not be the viewer's registrable domain or a host under it.
+Launch hosts must not be public suffixes.
 For example, `https://share.vercel.app` cannot be the viewer when the app domain
 is `vercel.app`.
+Accepted suffixes come from the Public Suffix List copy bundled with tldts; newly listed suffixes require a tldts update.
 
 Point wildcard DNS for `*.example.net` at the share-web proxy and install a
 matching wildcard TLS certificate. Forward those requests to the same share-web
