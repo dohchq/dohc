@@ -22,7 +22,7 @@ export async function runCanonicalCancellationFixture(root, sourceRoot) {
   put('scripts/verification/build.mjs',`export const prepare=async()=>{}; export const assertPrepared=()=>({}); export const sourceFingerprint=()=> 'fixture'; export const buildEnvironment=()=>process.env; export const withBuildBudget=action=>action(process.env); export const stagedEnginePath='fixture-engine'; export const assertIndependentStagedEngine=()=>{}; export const hashFile=()=>{throw Error('native proof started after cancellation');};`);
   put('tools/rust-engine-program/build-slot.mjs','export const acquireExclusiveSlot=()=>null;export const acquireVerificationSlot=()=>null;export const resolveBuildBudget=()=>null;');
   put('tools/rust-engine-program/tree-provenance.mjs',"export const readTreeState=()=>({head:'fixture'});export const classifyTreeProvenance=()=>({status:'PASS'});");
-  const packages = ['ydoc-projection','workspace-auth','z-queued'];
+  const packages = ['ydoc-projection','workspace-auth','x-running','z-queued'];
   for(const name of packages) put(`packages/${name}/package.json`,JSON.stringify({name:`@dohc/${name}`,scripts:{test:'vitest run'}}));
   put('bin/git',`#!/usr/bin/env node
 const args=process.argv.slice(2);process.stdout.write(args[0]==='status'?'':args[0]==='diff'?'scripts/verification/verify.mjs\\0':'fixture');
@@ -80,8 +80,8 @@ writeFileSync('owner-result.json',JSON.stringify(outcome));
     child=spawn(process.execPath,[join(root,'owner.mjs')],{cwd:root,env:{...process.env,FIXTURE_ROOT:root,PATH:join(root,'bin')+':'+process.env.PATH},stdio:['ignore','pipe','pipe']});
     child.stdout.on('data',chunk=>stdout+=chunk);child.stderr.on('data',chunk=>stderr+=chunk);
     closed=new Promise((resolve,reject)=>{child.once('error',reject);child.once('close',(code,signal)=>resolve({code,signal}));});
-    await until(()=>workers().length===2 || child.exitCode!==null || child.signalCode!==null,'two package groups did not become ready');
-    if(workers().length!==2)throw Error('owner exited before two package groups became ready: '+stderr);
+    await until(()=>workers().length>=3 || child.exitCode!==null || child.signalCode!==null,'three package groups did not become ready');
+    if(workers().length<3)throw Error('owner exited before three package groups became ready: '+stderr);
     child.kill('SIGTERM');
     await until(()=>child.exitCode!==null || child.signalCode!==null,'owner did not exit after cancellation');
     result.owner=await closed;
