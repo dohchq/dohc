@@ -213,7 +213,7 @@ async fn read_attachment_over_a_full_owner_cannot_reach_mutating_methods() {
     .await;
     assert_eq!(history["activeVersion"]["id"], "main");
     assert_eq!(
-        history["textMomentPage"]["moments"][0]["momentId"],
+        history["moments"][0]["momentId"],
         written["moment"]["momentId"]
     );
     let detail = common::call(
@@ -351,14 +351,14 @@ async fn read_only_history_hydrates_large_moment_text_within_its_workspace() {
         json!({ "workspaceId": workspace_id }),
     )
     .await;
-    let moment = history["textMomentPage"]["moments"]
+    let moment = history["moments"]
         .as_array()
         .expect("history moments")
         .iter()
         .find(|moment| moment["momentId"] == "large-text-moment")
         .expect("historical large text moment");
-    assert_eq!(moment["afterText"], Value::Null);
-    assert_eq!(moment["afterBlobSha256"], sha256);
+    assert!(moment.get("afterText").is_none());
+    assert!(moment.get("afterBlobSha256").is_none());
     let detail = common::call(
         &transport,
         &read_only,

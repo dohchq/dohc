@@ -1,6 +1,7 @@
 import { Clock, Lock, TriangleAlert } from "lucide-react";
-import { useId, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { SaveState } from "@dohc/workspace-contracts/save-state";
+import { useShownAfter } from "./useShownAfter";
 
 // Save facts and access/view facts share this presentation map.
 //
@@ -139,6 +140,18 @@ export function saveStatePresentationKey(state: SaveState): SaveStateKey | null 
   }
 }
 
+// Save states that need nothing from the person and pass on their own: an
+// edit in flight, and an edit the file or its host has taken. Pending share
+// is not one: it can last while the host is away, and until it ends
+// collaborators do not have the edits.
+const CALM: ReadonlySet<SaveStateKey | AccessStateKey> = new Set(["saved", "saving", "saved-to-host"]);
+
+// A settle that beats the host's acknowledgement passes through pending share
+// on its way to saved to host, so its words wait until it has lasted. A host
+// that answers within this never makes the row flash; one that does not is
+// away, and the person is told.
+export const PENDING_SHARE_WORDS_DELAY_MS = 2_000;
+
 const MARK_TONE: Record<StateMarkKind, string> = {
   settled: "text-subtle",
   dated: "text-subtle",
@@ -171,7 +184,11 @@ function Mark(props: { kind: StateMarkKind }) {
  * runs out, such as a narrow file header. While the label is cut short, the
  * chip takes keyboard focus and shows the whole label and its explanation in
  * a tooltip, on focus or hover, in place of the title; with room to spare it
- * is not a tab stop and keeps its title. */
+ * is not a tab stop and keeps its title. `quietWhenCalm` keeps a saved,
+ * saving or saved-to-host chip for screen readers only: those pass on their
+ * own, so typing never changes what the row draws. Words appear when the
+ * file is held, a pending share has lasted (and then stay while the person
+ * keeps typing), or the state needs the person. */
 export function StateMark(props: {
   state: string | SaveState;
   shown: SaveStateKey | AccessStateKey | SaveState;
@@ -179,8 +196,21 @@ export function StateMark(props: {
   testId: string;
   className?: string;
   truncate?: boolean;
+  quietWhenCalm?: boolean;
 }) {
-  const shownKey = typeof props.shown === "string" ? props.shown : saveStatePresentationKey(props.shown);
+  const storedKey = typeof props.shown === "string" ? props.shown : saveStatePresentationKey(props.shown);
+  const quiet = props.quietWhenCalm === true;
+  // Once a pending share has shown its words, they stay through the saves the
+  // person's typing starts, until the share takes the edits or the state
+  // otherwise resolves: each keystroke passes through saving, and dropping
+  // the words there would hide them for as long as the person types.
+  const [shareHeld, setShareHeld] = useState(false);
+  const shownKey = quiet && shareHeld && storedKey === "saving" ? "pending-share" : storedKey;
+  const pendingShareLasted = useShownAfter(quiet && shownKey === "pending-share", PENDING_SHARE_WORDS_DELAY_MS);
+  useEffect(() => {
+    if (pendingShareLasted) setShareHeld(true);
+    else if (storedKey !== "pending-share" && storedKey !== "saving") setShareHeld(false);
+  }, [pendingShareLasted, storedKey]);
   const presentation = shownKey === null ? null : PRESENTATIONS[shownKey];
   const title = props.title ?? presentation?.title;
   const { label, cut } = useCutShort(presentation?.label ?? "", props.truncate === true);
@@ -219,11 +249,15 @@ export function StateMark(props: {
     };
   }, [shown]);
   if (!presentation) return null;
+  const dataState = typeof props.state === "string" ? props.state : props.state.kind === "unknown" ? "unknown" : saveStatePresentationKey(props.state);
+  if (quiet && shownKey !== null && (CALM.has(shownKey) || (shownKey === "pending-share" && !pendingShareLasted))) {
+    return <span data-testid={props.testId} data-state={dataState ?? undefined} title={title} className="sr-only">{presentation.label}</span>;
+  }
   const chip = (
     <span
       ref={chipRef}
       data-testid={props.testId}
-      data-state={typeof props.state === "string" ? props.state : props.state.kind === "unknown" ? "unknown" : saveStatePresentationKey(props.state)}
+      data-state={dataState ?? undefined}
       // Cut short, the tooltip says what the title would, so the browser's
       // own tooltip does not repeat it a moment later.
       title={cut ? undefined : title}

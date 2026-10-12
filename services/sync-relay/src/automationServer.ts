@@ -750,8 +750,8 @@ export async function startAutomationServer(options: AutomationServerOptions) {
         return version === null ? null : (await adapter.readTextFile({ workspaceId, versionId: version.id, path }))?.objectId ?? null;
       },
       listMoments: async (input) => {
-        const page = await adapter.listMoments({ workspaceId, ...input });
-        return { moments: page.moments.map(({ momentId }) => ({ id: momentId, protected: false })), nextBeforeMomentOrder: page.nextBeforeMomentOrder };
+        const page = await adapter.readHistoryPage({ workspaceId, ...input });
+        return { moments: page.moments.map(({ momentId }) => ({ id: momentId, protected: false })), nextCursor: page.nextCursor };
       },
       readMoment: async (momentId) => {
         const moment = await adapter.getMoment({ workspaceId, momentId });

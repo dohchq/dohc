@@ -2,7 +2,7 @@ import { SecondaryButton, PrimaryButton } from "../ui/controls";
 import { useRequestSequence } from "../useRequestSequence";
 import { ipcErrorMessage } from "../ipcError";
 import { isWorkspaceUpdatingError } from "../../ipc/errorWords";
-import { Bot, ChevronDown, FileArchive, FileText, Layers, Lock, RefreshCw, Share2 } from "lucide-react";
+import { Bot, ChevronDown, ChevronsUpDown, FileArchive, FileText, Layers, Lock, RefreshCw, Share2 } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -56,10 +56,12 @@ function versionName(
 const VERSION_LOAD_RETRY_MS = 1_000;
 const VERSION_LOAD_FAILURE_ATTEMPTS = 5;
 
-// Compact version selector for the editor chrome: shows the active version,
-// switches on click, creates inline, and opens compare / merge.
+// The version breadcrumb in the titlebar: shows the active version, switches
+// on click, creates inline, and opens compare / merge.
 export function VersionMenu(props: {
   workspaceId: string;
+  // The workspace is not ready for a version change.
+  disabled?: boolean;
   activeTabDirty: boolean;
   // Settles drafts and queued collection writes, and pauses new cell edits
   // until the returned release runs. Each operation holds the release across
@@ -405,7 +407,7 @@ export function VersionMenu(props: {
   }
 
   return (
-    <div className="relative flex items-center">
+    <div className="relative flex min-w-0 items-center">
       {/* Every row but New version answers by closing the menu itself. */}
       <Menu
         label="Versions"
@@ -422,10 +424,10 @@ export function VersionMenu(props: {
             data-testid="version-menu-button"
             aria-label={`Version: ${activeName}${onMain ? "" : " (not Main)"}`}
             title={`You're working in the ${activeName} version`}
-            disabled={busy !== null}
-            className="flex h-7 max-w-56 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-60"
+            disabled={busy !== null || props.disabled}
+            className="titlebar-no-drag flex h-7 min-w-0 max-w-56 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[13px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-60"
           >
-            <Layers size={13} aria-hidden className="shrink-0" />
+            <Layers size={12} aria-hidden className="shrink-0" />
             <span data-testid="version-menu-active" className="min-w-0 truncate">
               {busy === "switch" ? "Switching…" : activeName}
             </span>
@@ -436,7 +438,7 @@ export function VersionMenu(props: {
                 className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent"
               />
             ) : null}
-            <ChevronDown size={12} aria-hidden className="shrink-0 text-subtle" />
+            <ChevronsUpDown size={12} aria-hidden className="shrink-0 text-subtle" />
           </button>
         )}
       >

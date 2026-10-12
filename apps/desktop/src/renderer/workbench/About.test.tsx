@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import type { EngineMomentRecord, ListEngineMomentsResponse } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
+import { historyCursor, historyPageFields } from "../../testing/historyPageFixture";
 import { formatShortTime } from "../time";
 import { AboutAccess, AboutHistory, accessReasonFor, type AboutFile, type AccessFacts } from "./About";
 
@@ -543,10 +544,10 @@ function moment(overrides: Partial<EngineMomentRecord> = {}): EngineMomentRecord
 function page(moments: EngineMomentRecord[], more = false): ListEngineMomentsResponse {
   return {
     moments,
-    nextBeforeMomentOrder: more ? 1 : null,
+    nextCursor: more ? historyCursor(1) : null,
     latestMomentOrder: 4,
-    activeVersionId: "main",
-    protectedTruncated: false,
+    activeVersionId: "main", ...historyPageFields,
+
   };
 }
 

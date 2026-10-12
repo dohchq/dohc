@@ -286,14 +286,14 @@ async function liveMoments(engine: WorkspaceEngineCapture): Promise<EngineMoment
   // here is a limit rejecting valid work; paging costs nothing and removes the
   // question. (Same correction as the moments reader on #417.)
   const summaries: Awaited<ReturnType<WorkspaceEngineCapture["listMoments"]>>["moments"] = [];
-  let beforeMomentOrder: number | undefined;
+  let cursor: import("@dohc/workspace-engine-client").HistoryCursor | undefined;
   for (;;) {
     const page = await engine.listMoments({
-      ...(beforeMomentOrder === undefined ? {} : { beforeMomentOrder }),
+      ...(cursor === undefined ? {} : { cursor }),
     });
     summaries.push(...page.moments);
-    if (page.nextBeforeMomentOrder === null) break;
-    beforeMomentOrder = page.nextBeforeMomentOrder;
+    if (page.nextCursor === null) break;
+    cursor = page.nextCursor;
   }
   const rows: EngineMomentRow[] = [];
   for (const summary of [...summaries].reverse()) {
@@ -467,6 +467,10 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(requests.filter((request) => request.method === VERSIONED_METHOD.historyPage)).toEqual([expect.objectContaining({ params: { workspaceId: WORKSPACE_ID, objectId: "object-plan", limit: 10 } })]);
     expect(requests.some((request) => request.method === VERSIONED_METHOD.momentsList)).toBe(false);
     expect((await engine.listMoments({ limit: 10 })).moments).toHaveLength(3);
+    const first = await engine.listMoments({ limit: 1, objectId: "object-plan" });
+    expect(first.nextCursor).not.toBeNull();
+    await engine.listMoments({ limit: 1, objectId: "object-plan", cursor: first.nextCursor! });
+    expect(requests.filter(request => request.method === VERSIONED_METHOD.historyPage).at(-1)?.params).toMatchObject({ versionId: "main", cursor: first.nextCursor });
     await engine.stop();
   });
 

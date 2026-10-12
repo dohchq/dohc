@@ -216,6 +216,7 @@ export function registerSharedViewsIpcHandlers<
       populate: async (created, authorityBinding) => {
         await setWorkspaceShareView(created.workspaceId, {
           shareId: parsed.shareId,
+          ...(info.granterUserId ? { granterUserId: info.granterUserId } : {}),
           granterEmail: info.granterEmail,
           subjectName: info.subjectName,
           sharerName: info.sharerName,
@@ -477,6 +478,7 @@ export function registerSharedViewsIpcHandlers<
               if (current.shareView.shareId !== workspace.shareView.shareId) throw new Error("Shared view changed during refresh.");
               const nextShareView = {
                 ...current.shareView,
+                ...(info.granterUserId ? { granterUserId: info.granterUserId } : {}),
                 genericChatWritable: info.genericChatWritable,
                 subjectName: info.subjectName,
                 sharerName: info.sharerName,

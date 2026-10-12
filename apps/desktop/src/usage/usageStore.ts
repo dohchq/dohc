@@ -144,6 +144,12 @@ export function createUsageStore(deps: {
     pending.length = 0;
     pendingOverflow = false;
   }
+  function pause(error: unknown) {
+    unreadable = { error };
+    enabled = false;
+    pending.length = 0;
+    pendingOverflow = false;
+  }
   async function load() {
     if (loading) return loading;
     loading = (async () => {
@@ -156,10 +162,7 @@ export function createUsageStore(deps: {
         if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
           // Stay inert until a control retries the read. Never replace
           // a record whose contents and saved setting we could not inspect.
-          unreadable = { error };
-          enabled = false;
-          pending.length = 0;
-          pendingOverflow = false;
+          pause(error);
           return;
         }
       }
@@ -168,7 +171,11 @@ export function createUsageStore(deps: {
       let restored: UsageSnapshot | undefined;
       if (raw !== undefined) {
         try { restored = decodeUsageSnapshot(JSON.parse(raw)); }
-        catch { enabled = false; }
+        catch (error) {
+          pause(Object.assign(new Error("Usage record could not be decoded", { cause: error }),
+            { code: "INVALID_USAGE_RECORD" }));
+          return;
+        }
       }
       if (restored) {
         enabled = restored.enabled;

@@ -18,7 +18,7 @@ import type {
 import { readError, withErrorWords } from "../../ipc/errorWords";
 import { DocumentMenu } from "../DocumentMenu";
 import { FrontmatterAsWritten } from "../FrontmatterAsWritten";
-import { DocumentControls, OPENING_TITLE, ViewHeader } from "../fileInspectorUi";
+import { DocumentControls, OPENING_TITLE, OpeningState, ViewActions } from "../fileInspectorUi";
 import { BlockMenu } from "../editor/blockControls";
 import { SlashCommandMenu, type SlashCommandState } from "../editor/slashCommands";
 import { buildTableMenu, type TableMenuRow } from "../editor/tableControls";
@@ -46,10 +46,12 @@ import { siteTabPath, VIEW_IDS } from "../workbench/workbenchState";
 import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { ThreadMessages } from "../workbench/ChatPosts";
-import type { ChatReactionControls } from "../workbench/chatMessages";
+import { ChatComposer, type ChatReactionControls } from "../workbench/chatMessages";
+import { MentionComposer } from "../workbench/MentionComposer";
 import { PostCard, type PostData } from "../workbench/PostCard";
 import { EditorGroupLayout } from "../workbench/EditorGroupLayout";
 import { EditorTabs } from "../workbench/EditorTabs";
+import { EditorGroupFrame } from "../workbench/tabRowActions";
 import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords } from "../workbench/HistoryPolicyStates";
 import { TreeRow, type VisibleRow } from "../workbench/Explorer";
 import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
@@ -188,6 +190,38 @@ function EditorGroupSpecimen(props: { groupId: string; groupNumber: number; tabs
           shadow. */}
       <div className="h-28 bg-bg" />
     </>
+  );
+}
+
+// One group's tab row carrying an open document's actions, as the shell lays
+// it out, over a strip of paper.
+function TabRowActionsSpecimen(props: { width: string; testId?: string; children: ReactNode }) {
+  const path = "trip/plan.md";
+  return (
+    <div data-testid={props.testId} className={`${props.width} rounded-lg border border-line`}>
+      <EditorGroupFrame
+        tabs={(actionsRef) => (
+          <EditorTabs
+            actionsRef={actionsRef}
+            groupId="states"
+            groupNumber={1}
+            tabs={[{ path }]}
+            activeTab={path}
+            activeTabDirty={false}
+            recoveryPaths={NO_RECOVERY}
+            onActivate={noop}
+            onClose={noop}
+            onContextMenu={noop}
+            onMove={noop}
+            onMoveToGroup={noop}
+            onCreateGroupRight={noop}
+          />
+        )}
+      >
+        {props.children}
+        <div className="h-4 rounded-b-lg bg-bg" />
+      </EditorGroupFrame>
+    </div>
   );
 }
 
@@ -525,6 +559,8 @@ function ChatThreadSpecimen() {
     </div>
   );
 }
+
+const COMPOSER_DRAFT = "Can we cut the last paragraph?";
 
 // The About rail at the drawing's 290px, on the chrome.
 function AboutPanelSpecimen(props: { children: ReactNode }) {
@@ -1322,15 +1358,18 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       {/* After the history part, so the parts above keep their places. */}
-      <Section part="file-header" title="File header" menusAtRest>
-        {/* One document loading, ready, failed, and ready in a narrow pane:
-            Share, the toggle and the menu keep their places, and only the
-            save state gives way. No box clips them, so an overflow shows. */}
+      <Section part="tab-row-actions" title="Document actions in the tab row" menusAtRest>
+        {/* One document loading, saved, saving, pending share, held,
+            failed, and changed on disk in a narrow pane: Share, the toggle
+            and the menu keep their places, and the save state gives way
+            before the tab name. Opening, saved and saving say so only to
+            screen readers, so loading and ready draw the same width. No box
+            clips them, so an overflow shows. */}
         <Specimen label="loading" className="w-full">
-          <div className="w-full rounded-lg border border-line bg-bg">
-            <ViewHeader
-              path="trip/plan.md"
+          <TabRowActionsSpecimen width="w-full">
+            <ViewActions
               onShare={noop}
+              status={<OpeningState />}
               actions={
                 <DocumentControls
                   toggle={{ label: "Edit", disabled: true, title: OPENING_TITLE }}
@@ -1338,14 +1377,13 @@ function Pane(props: { theme: "light" | "dark" }) {
                 />
               }
             />
-          </div>
+          </TabRowActionsSpecimen>
         </Specimen>
-        <Specimen label="ready" className="w-full">
-          <div className="w-full rounded-lg border border-line bg-bg">
-            <ViewHeader
-              path="trip/plan.md"
+        <Specimen label="saved" className="w-full">
+          <TabRowActionsSpecimen width="w-full">
+            <ViewActions
               onShare={noop}
-              status={<StateMark testId={`states-file-header-state-${theme}`} truncate state="saved" shown="saved" />}
+              status={<StateMark testId={`states-tab-row-actions-state-${theme}`} truncate quietWhenCalm state="saved" shown="saved" />}
               actions={
                 <DocumentControls
                   toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}
@@ -1353,12 +1391,53 @@ function Pane(props: { theme: "light" | "dark" }) {
                 />
               }
             />
-          </div>
+          </TabRowActionsSpecimen>
+        </Specimen>
+        <Specimen label="saving" className="w-full">
+          <TabRowActionsSpecimen width="w-full">
+            <ViewActions
+              onShare={noop}
+              status={<StateMark testId={`states-tab-row-actions-saving-${theme}`} truncate quietWhenCalm state="saving" shown="saving" />}
+              actions={
+                <DocumentControls
+                  toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}
+                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => "# Plan" }}
+                />
+              }
+            />
+          </TabRowActionsSpecimen>
+        </Specimen>
+        <Specimen label="pending share" className="w-full">
+          <TabRowActionsSpecimen width="w-full">
+            <ViewActions
+              onShare={noop}
+              status={<StateMark testId={`states-tab-row-actions-pending-${theme}`} truncate quietWhenCalm state="pending-share" shown="pending-share" />}
+              actions={
+                <DocumentControls
+                  toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}
+                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => "# Plan" }}
+                />
+              }
+            />
+          </TabRowActionsSpecimen>
+        </Specimen>
+        <Specimen label="held: file in use" className="w-full">
+          <TabRowActionsSpecimen width="w-full">
+            <ViewActions
+              onShare={noop}
+              status={<StateMark testId={`states-tab-row-actions-held-${theme}`} truncate quietWhenCalm state="file-locked" shown="file-locked" />}
+              actions={
+                <DocumentControls
+                  toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}
+                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => "# Plan" }}
+                />
+              }
+            />
+          </TabRowActionsSpecimen>
         </Specimen>
         <Specimen label="failed" className="w-full">
-          <div className="w-full rounded-lg border border-line bg-bg">
-            <ViewHeader
-              path="trip/plan.md"
+          <TabRowActionsSpecimen width="w-full">
+            <ViewActions
               onShare={noop}
               actions={
                 <DocumentControls
@@ -1367,15 +1446,14 @@ function Pane(props: { theme: "light" | "dark" }) {
                 />
               }
             />
-          </div>
+          </TabRowActionsSpecimen>
         </Specimen>
-        <Specimen label="narrow, pending share">
-          <div data-testid={`states-file-header-narrow-${theme}`} className="w-[400px] rounded-lg border border-line bg-bg">
-            <ViewHeader
-              path="trip/plan.md"
+        <Specimen label="narrow, changed on disk">
+          <TabRowActionsSpecimen width="w-[360px]" testId={`states-tab-row-actions-narrow-${theme}`}>
+            <ViewActions
               onShare={noop}
               status={
-                <StateMark testId={`states-file-header-pending-${theme}`} truncate state="pending-share" shown="pending-share" />
+                <StateMark testId={`states-tab-row-actions-cut-${theme}`} truncate quietWhenCalm state="changed-on-disk" shown="changed-on-disk" />
               }
               actions={
                 <DocumentControls
@@ -1384,7 +1462,7 @@ function Pane(props: { theme: "light" | "dark" }) {
                 />
               }
             />
-          </div>
+          </TabRowActionsSpecimen>
         </Specimen>
       </Section>
 
@@ -1425,6 +1503,8 @@ function Pane(props: { theme: "light" | "dark" }) {
       {/* After the others, so they keep their places. On the title bar's
           own fill. */}
       <Section part="title-bar-status" title="Title bar status">
+        {/* The saved dot alone while nothing needs the person, and its words
+            once something does. */}
         {TITLE_BAR_STATUSES.map(({ label, syncStatus, failedSaves }) => (
           <Specimen key={label} label={label}>
             <span className="flex h-8 items-center rounded-md border border-line bg-panel px-3">
@@ -1765,6 +1845,46 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
+      {/* Last, so the parts above keep their places. A send shows only once it
+          has taken a second, so the capture waits for the ring. */}
+      <Section part="composer-sending" title="Composer sending">
+        <Specimen label="at rest">
+          <div className="w-[400px] rounded-lg border border-line bg-panel">
+            <MentionComposer testIdPrefix={`states-composer-rest-${theme}`} composerId={`states-composer-rest-${theme}`}
+              value={COMPOSER_DRAFT} sending={false} placeholder="Message #general" sendLabel="Send message"
+              candidates={[]} onChange={noop} onSend={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="cannot send yet, or a send under a second">
+          <div className="w-[400px] rounded-lg border border-line bg-panel">
+            <MentionComposer testIdPrefix={`states-composer-disabled-${theme}`} composerId={`states-composer-disabled-${theme}`}
+              value={COMPOSER_DRAFT} sending={false} disabled placeholder="Message #general" sendLabel="Send message"
+              candidates={[]} onChange={noop} onSend={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="sending, after a second: a group, a message or a post's comments">
+          <div className="w-[400px] rounded-lg border border-line bg-panel">
+            <MentionComposer testIdPrefix={`states-composer-stream-${theme}`} composerId={`states-composer-stream-${theme}`}
+              value={COMPOSER_DRAFT} sending placeholder="Message #general" sendLabel="Send message"
+              candidates={[]} onChange={noop} onSend={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="sending, after a second: a new post">
+          <div className="w-[560px]">
+            <MentionComposer testIdPrefix={`states-composer-post-${theme}`} composerId={`states-composer-post-${theme}`}
+              value={COMPOSER_DRAFT} sending surface="post" authorName="Ada" placeholder="What's happening in #general?"
+              sendLabel="Start post" candidates={[]} onChange={noop} onSend={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="sending, after a second: a file's chats in About">
+          <AboutPanelSpecimen>
+            <ChatComposer testIdPrefix={`states-composer-about-${theme}`} composerId={`states-composer-about-${theme}`}
+              value={COMPOSER_DRAFT} sending placeholder="Write a message…" sendLabel="Send message"
+              onChange={noop} onSend={noop} />
+          </AboutPanelSpecimen>
+        </Specimen>
+      </Section>
+
       {/* Last, so the parts above keep their places. */}
       <Section part="about-conversation" title="About a conversation">
         <Specimen label="a Group: who is here, and its access checked">
@@ -1925,8 +2045,10 @@ const SYNCED_STATUS: SyncStatusResult = {
 
 const TITLE_BAR_STATUSES: { label: string; syncStatus: SyncStatusResult; failedSaves: number }[] = [
   { label: "saved", syncStatus: SYNCED_STATUS, failedSaves: 0 },
+  { label: "syncing", syncStatus: { ...SYNCED_STATUS, state: "syncing" }, failedSaves: 0 },
   { label: "a file couldn't save", syncStatus: SYNCED_STATUS, failedSaves: 1 },
   { label: "files couldn't save, during a sync pass", syncStatus: { ...SYNCED_STATUS, state: "syncing" }, failedSaves: 2 },
+  { label: "server disconnected", syncStatus: { ...SYNCED_STATUS, state: "cloud-disconnected" }, failedSaves: 0 },
 ];
 
 export function StatesPage() {

@@ -4,9 +4,10 @@ import { AutomationBadge } from "./AutomationBadge";
 import { LegendList, type LegendListRef, type OnViewableItemsChanged } from "@legendapp/list/react";
 import { formatChatDay, formatChatTime, formatClock, sameChatDay } from "../time";
 import { ChatAvatar } from "./ChatAvatar";
+import { ComposerSendButton } from "./ComposerSendButton";
 import { basenameOf } from "../path";
 import { SkeletonRows } from "../ui/SkeletonRows";
-import { Database, File, FileText, Image, SmilePlus, Send } from "lucide-react";
+import { Database, File, FileText, Image, SmilePlus } from "lucide-react";
 import {
   memo,
   useCallback,
@@ -905,7 +906,8 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
 });
 
 // The fast composer: Enter sends (Shift+Enter for a newline), disabled while
-// a send is in flight, submit button gated on non-blank input.
+// a send is in flight, submit button gated on non-blank input. A slow send
+// shows on the shared send control.
 export function ChatComposer(props: {
   testIdPrefix: string;
   composerId: string;
@@ -949,16 +951,13 @@ export function ChatComposer(props: {
         }}
         className="min-w-0 flex-1 resize-none rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] leading-6 text-ink placeholder:text-subtle dohc-focus-input"
       />
-      <button
-        type="submit"
-        data-testid={`${props.testIdPrefix}-send`}
-        aria-label={props.sendLabel}
-        title={props.sendLabel}
-        disabled={props.sending || props.value.trim().length === 0}
-        className="grid size-8 shrink-0 cursor-pointer place-items-center rounded-md bg-accent text-bg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-      >
-        <Send size={13} aria-hidden />
-      </button>
+      <ComposerSendButton
+        testId={`${props.testIdPrefix}-send`}
+        label={props.sendLabel}
+        sending={props.sending}
+        disabled={props.value.trim().length === 0}
+        shape="icon"
+      />
     </form>
   );
 }

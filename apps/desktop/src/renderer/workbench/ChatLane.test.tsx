@@ -190,6 +190,35 @@ describe("ChatLane", () => {
     expect((screen.getByTestId("chats-lane-composer") as HTMLTextAreaElement).disabled).toBe(false);
   });
 
+  it.each(["sent", "failed"] as const)("shows a slow send on the send control until it has %s", async (outcome) => {
+    render(lane());
+    await screen.findByText("Old message");
+    const held = deferred<{ message: ReturnType<typeof message> }>();
+    bridgeMock.sendChatMessage.mockReturnValueOnce(held.promise);
+    vi.useFakeTimers();
+    try {
+      send("Reply");
+      const button = screen.getByRole("button", { name: "Send message" });
+      act(() => vi.advanceTimersByTime(999));
+      expect(button.getAttribute("aria-busy")).toBeNull();
+      act(() => vi.advanceTimersByTime(1));
+      expect(button.getAttribute("aria-busy")).toBe("true");
+      expect(screen.getByText("Sending…")).toBeTruthy();
+      await act(async () => {
+        if (outcome === "sent") held.resolve({ message: message({ id: "reply", body: "Reply" }) });
+        else held.reject(new Error("Engine busy"));
+      });
+      expect(button.getAttribute("aria-busy")).toBeNull();
+      expect(screen.queryByText("Sending…")).toBeNull();
+      expect((screen.getByTestId("chats-lane-composer") as HTMLTextAreaElement).disabled).toBe(false);
+      // A failure keeps the draft and reports through the shell's error hook.
+      expect((screen.getByTestId("chats-lane-composer") as HTMLTextAreaElement).value).toBe(outcome === "sent" ? "" : "Reply");
+      expect(onError).toHaveBeenCalledTimes(outcome === "sent" ? 0 : 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("lets a send finish while an activity refresh is in flight", async () => {
     render(lane());
     await screen.findByText("Old message");
