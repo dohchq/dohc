@@ -8,7 +8,7 @@
  *
  * This file is the brand source of truth. */
 
-import React, { type CSSProperties, type ReactNode } from 'react'
+import React, { type CSSProperties } from 'react'
 
 /** Master viewBox aspect ratio (96 x 104). */
 const MARK_RATIO = 104 / 96
@@ -134,34 +134,5 @@ export function DohcLogo({
 }) {
   return (
     <DohcLockup orientation="stacked" size={LOCKUP_SIZE[size]} className={className} />
-  )
-}
-
-/**
- * Mark on the left, two or three short info lines on the right. Used in
- * the empty document state. Info lines use mono, calm and metadata-like.
- */
-export function DohcBrandBlock({
-  lines,
-  className = '',
-  children,
-}: {
-  /** 2-3 short lines shown to the right of the mark. */
-  lines: ReadonlyArray<ReactNode>
-  className?: string
-  children?: ReactNode
-}) {
-  return (
-    <div className={`flex items-center gap-4 ${className}`}>
-      <DohcMark size={40} title="" />
-      <div className="flex flex-col gap-0.5 font-mono text-[11.5px] leading-[18px]">
-        {lines.map((line, i) => (
-          <span key={i} className={i === 0 ? 'text-ink-strong font-medium' : 'text-ink-dim'}>
-            {line}
-          </span>
-        ))}
-        {children}
-      </div>
-    </div>
   )
 }
