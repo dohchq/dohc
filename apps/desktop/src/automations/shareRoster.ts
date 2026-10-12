@@ -1,4 +1,4 @@
-import type { RegistryEntry } from "../workspaces/registryStore";
+import type { RegistryEntry, ShareViewIdentity } from "../workspaces/registryStore";
 import type { SyncHistory } from "../workspaces/syncHistory";
 import type { ReachRoster } from "@dohc/automation-executor/automation-reach";
 import {
@@ -455,7 +455,8 @@ export function rosterPersonLabel(listing: RosterListing | null, userId: string)
 
 /** History's window-lifetime cache. Reads never wait for account lookups. */
 export function createHistoryLabels(dependencies: {
-  snapshot(workspaceId: string): { roster: RosterListing | null; owner: boolean; context: unknown; inventory: unknown };
+  snapshot(workspaceId: string): { roster: RosterListing | null; owner: boolean; context: unknown; inventory: unknown;
+    shareView?: Pick<ShareViewIdentity, "granterUserId" | "sharerName" | "granterEmail"> };
   lookupAccounts(workspaceId: string, ids: { grantIds: string[]; userIds: string[] }): Promise<HistoryAccount[] | null>;
   ready?(workspaceId: string): void;
   nowMs?(): number;
@@ -533,7 +534,13 @@ export function createHistoryLabels(dependencies: {
       return known !== "Someone you shared with" ? known : cachedLabel(workspaceId, author.userId, author.grantId);
     },
     person(workspaceId: string, userId: string): string {
-      const known = rosterPersonLabel(dependencies.snapshot(workspaceId).roster, userId);
+      const snapshot = dependencies.snapshot(workspaceId);
+      const share = snapshot.shareView;
+      if (share?.granterUserId && share.granterUserId === userId) {
+        const label = share.sharerName || share.granterEmail;
+        if (label) return label;
+      }
+      const known = rosterPersonLabel(snapshot.roster, userId);
       return known !== "Someone you shared with" ? known : cachedLabel(workspaceId, userId);
     },
   };

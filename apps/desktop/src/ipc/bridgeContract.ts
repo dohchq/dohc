@@ -6786,7 +6786,7 @@ export interface DohcDesktopBridge
     payload: ExportWorkspaceZipPayload,
   ): Promise<ExportWorkspaceZipResult>;
   // Document export ("Copy as Markdown" / "Export as HTML" / "Export as
-  // PDF" menu, ViewHeader). See the payload's comment for the kind split.
+  // PDF" document menu). See the payload's comment for the kind split.
   exportDocumentFile(
     payload: ExportDocumentFilePayload,
   ): Promise<ExportDocumentFileResult>;

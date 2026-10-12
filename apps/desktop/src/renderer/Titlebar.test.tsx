@@ -97,6 +97,51 @@ describe("Titlebar", () => {
     expect(group.contains(screen.getByTestId("titlebar-quick-open"))).toBe(false);
   });
 
+  // The breadcrumb: the mark, the workspace's own name, then its version and
+  // one saved dot. The product word shows only before a workspace is open.
+  it("reads mark, workspace, version, then the saved dot, with no product word", () => {
+    render(
+      <Titlebar
+        workspace={workspace}
+        workspaces={[workspace]}
+        onSwitchWorkspace={() => undefined}
+        version={<button type="button" data-testid="stub-version">Main</button>}
+        workspaceStatus={<span data-testid="stub-status" role="status" aria-label="Local · saved" />}
+      />,
+    );
+    const group = screen.getByTestId("titlebar-left-group");
+    const name = screen.getByTestId("workspace-switcher");
+    const version = screen.getByTestId("stub-version");
+    const status = screen.getByTestId("stub-status");
+    expect(group.contains(version)).toBe(true);
+    expect(name.compareDocumentPosition(version) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(version.compareDocumentPosition(status) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The switcher names the workspace and nothing else.
+    expect(name.textContent).toBe("dohc");
+    expect(group.textContent).toBe("dohcMain");
+    // The separator hides with its version while the picker has nothing to name.
+    expect(version.parentElement?.className).toContain("empty:hidden");
+    expect(version.parentElement?.className).toContain("before:content-['/']");
+  });
+
+  it("names the product only before a workspace is open", () => {
+    render(<Titlebar />);
+    expect(screen.getByTestId("titlebar-left-group").textContent).toBe("dohc");
+  });
+
+  it("draws no version separator when versions are off", () => {
+    render(
+      <Titlebar
+        workspace={{ ...workspace, rootPath: "/home/sam/trip" }}
+        workspaces={[workspace]}
+        onSwitchWorkspace={() => undefined}
+        workspaceStatus={<span data-testid="stub-status" />}
+      />,
+    );
+    expect(screen.getByTestId("titlebar-left-group").querySelector("[class*=\"before:content-['/']\"]")).toBeNull();
+    expect(screen.getByTestId("titlebar-left-group").textContent).toBe("trip");
+  });
+
   it("shortens the workspace name rather than the status beside it", () => {
     render(
       <Titlebar
