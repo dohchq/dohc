@@ -255,6 +255,24 @@ Restart the services and confirm that the workspace remains available.
 Keep a local copy of important work while testing your deployment.
 See the [browser service operations reference](../../services/share-web/README.md) for storage and permission boundaries.
 
+## Disable a published app
+
+If a published app is unsafe, run this command from the deployment bundle directory on the server:
+
+```sh
+node scripts/self-host/app-takedown.mjs --publication-id PUBLICATION_ID --reason "Phishing reported and confirmed"
+```
+
+Use the publication ID from the owner's publication list or the app URL's `app` parameter.
+The command permanently disables that publication. The owner sees the reason and cannot reactivate it.
+The relay records the actor as "operator", the time, and the reason.
+It refuses new launches and Collection writes, including requests from existing launches.
+
+The command stops the selected Compose project, then restarts its previously running services after success.
+Sync and sharing pause during the command. If the command fails, services remain stopped for inspection.
+Use `--env-file`, `--compose-file`, or `--project-name` when selecting a custom deployment.
+Retries preserve the first takedown record.
+
 ## Back up and maintain the deployment
 
 Follow the [backup and recovery procedure](self-host-recovery.md) before changing your deployment.

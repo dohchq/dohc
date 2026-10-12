@@ -438,3 +438,13 @@ it("never returns a newly created credential after its grant rotates",async()=>{
   expect(result).toMatchObject({kind:"published"});
   expect(result).not.toHaveProperty("url");
 });
+
+it("refuses owner reactivation review before loading an operator-disabled manifest", async () => {
+  const h = harness();
+  h.relay.mockResolvedValueOnce({publicationId: "a".repeat(64), active: false, authorityRevision: 2,
+    owner: {workspaceId: "w", ownerUserId: "owner", generation: 7},
+    operatorTakedown: {actor: "operator", disabledAtMs: 30, reason: "Confirmed phishing"}});
+  await expect(h.invoke({action: "reviewReactivation", workspaceId: "w", publicationId: "a".repeat(64)})).rejects.toThrow("The server operator disabled this publication. Contact the server operator.");
+  expect(h.compile).not.toHaveBeenCalled();
+  expect(h.relay).toHaveBeenCalledTimes(1);
+});

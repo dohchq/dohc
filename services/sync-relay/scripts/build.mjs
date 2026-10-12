@@ -22,7 +22,7 @@ const buildOptions = {
 export function buildRelay(outdir) {
   return build({
     ...buildOptions,
-    entryPoints: { main: entry, liveValidationWorker: fileURLToPath(new URL("../src/liveValidationWorker.ts", import.meta.url)), "device-host-connect": connectEntry, "relay-deployment": deploymentEntry, "device-host-credential": credentialEntry },
+    entryPoints: { main: entry, liveValidationWorker: fileURLToPath(new URL("../src/liveValidationWorker.ts", import.meta.url)), "device-host-connect": connectEntry, "app-publication-takedown": fileURLToPath(new URL("../src/appPublicationTakedownCommand.ts", import.meta.url)), "relay-deployment": deploymentEntry, "device-host-credential": credentialEntry },
     outdir,
   });
 }

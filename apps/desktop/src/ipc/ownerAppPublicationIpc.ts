@@ -131,10 +131,11 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
         if (preparing.has(callerKey)) throw new Error("This caller is already preparing an app. Wait for it to finish.");
         const raw = await session.run(() => dependencies.relayJson(remote.credentials,
           `/sync/${encodeURIComponent(input.workspaceId)}/app-publications/${input.publicationId}`, { signal: operation.signal }));
-        const row = raw as { publicationId?: string; candidate?: unknown; active?: boolean; authorityRevision?: number;
+        const row = raw as { operatorTakedown?: unknown; publicationId?: string; candidate?: unknown; active?: boolean; authorityRevision?: number;
           owner?: { workspaceId?: string; ownerUserId?: string; shareId?: string; grantId?: string; generation?: number } } | null;
         if (!row || row.publicationId !== input.publicationId || row.active !== false || row.owner?.workspaceId !== input.workspaceId || row.owner.ownerUserId !== remote.credentials.userId ||
             !Number.isSafeInteger(row.authorityRevision) || row.authorityRevision! < 1 || !Number.isSafeInteger(row.owner.generation) || row.owner.generation! < 1) throw new Error("This app publication cannot be republished. Refresh the publication list.");
+        if (row.operatorTakedown) throw new Error("The server operator disabled this publication. Contact the server operator.");
         const candidate = parseAppPublicationCandidate(row.candidate, APP_PUBLICATION_LIMITS);
         const dataset = candidate.capabilities.find(capability => capability.kind === "dataset");
         if (dataset) verifyAppDatasetCapability(dataset, await resolveDatasetRevision(dataset));

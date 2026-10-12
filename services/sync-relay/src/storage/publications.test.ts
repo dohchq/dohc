@@ -52,7 +52,7 @@ function fixture(options: {paths?: string[]; quota?: number} = {}) {
   cleanups.push(() => rmSync(dir, {recursive: true, force: true}));
   let storage = openSyncRelayStorage(path, {blobGraceMs: 0, ...(options.quota ? {workspaceQuotaBytes: options.quota} : {})});
   cleanups.push(() => storage.close());seed(storage, options.paths);
-  return {get storage() {return storage;}, restart() {storage.close(); storage = openSyncRelayStorage(path, {blobGraceMs: 0});},
+  return {path, get storage() {return storage;}, restart() {storage.close(); storage = openSyncRelayStorage(path, {blobGraceMs: 0});},
     get raw() {return (storage as StorageContext).db;}};
 }
 
@@ -170,7 +170,7 @@ function httpFixture(configured = true) {
       method: "PUT", headers: {authorization: "Bearer owner"}, body: blob.bytes,
     }))).status).toBe(200);
   };
-  return {...f, handler, http, upload, body: {shareId: "s", grantId: "g", expectedGrantGeneration: 1, candidate: input.candidate}};
+  return {...f, get storage() {return f.storage;}, get raw() {return f.raw;}, handler, http, upload, body: {shareId: "s", grantId: "g", expectedGrantGeneration: 1, candidate: input.candidate}};
 }
 
 it("publishes through authenticated bounded HTTP and withdraws without disclosing other workspaces", async () => {
@@ -544,3 +544,72 @@ it("rejects person claims and preserves unknown CLI attribution", async () => {
   expect(next.approvalProvenance?.agent?.label).toBe("Second");
   expect(f.raw.prepare("SELECT COUNT(*) n FROM sync_relay_app_publication_approvals").get()!.n).toBe(2);
  });
+
+it("operator takedown stops serving and cached launch authority without disclosing the reason to recipients", async () => {
+  const f = linkFixture({large: true});
+  const guard = f.storage.createLinkAppPublicationGuard({...f.input, publicationId: f.published.publicationId,
+    capabilityHash: f.capabilityHash, profileTokenHash: hashLinkProfileSecret("P".repeat(43), "test-key"), nowMs: 20});
+  const stream = await f.http(f.blobPath), reader = stream.body!.getReader();
+  expect((await reader.read()).value!.byteLength).toBe(64 * 1024);
+  const disabled = f.storage.disableAppPublication({publicationId: f.published.publicationId, reason: "Confirmed phishing", nowMs: 21});
+  expect(disabled).toMatchObject({active: false, authorityRevision: 2, operatorTakedown: {actor: "operator", disabledAtMs: 21, reason: "Confirmed phishing"}});
+  expect(() => guard(22)).toThrow();
+  await expect(reader.read()).rejects.toThrow();
+  for (const path of [f.path, f.blobPath]) {
+    const response = await f.http(path);
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ok: false, error: "not found"});
+  }
+  expect((await (await f.http("/sync/link/app-publications")).json()).publications).toEqual([]);
+});
+
+it("persists the first operator record, prevents owner reactivation and publish retries, and leaves other publications active", async () => {
+  const f = httpFixture(); await f.upload();
+  const original = await (await f.http("w/app-publications", f.body)).json();
+  const other = f.storage.publishAppPublication({...request(), candidate: {...request().candidate, sourceRevision: digest("another revision")}});
+  const disabled = f.storage.disableAppPublication({publicationId: original.publicationId, reason: "  Confirmed malware  ", nowMs: 30});
+  const path = `w/app-publications/${original.publicationId}`;
+  expect((await f.http(`${path}/reactivate`, {expectedAuthorityRevision: 2})).status).toBe(409);
+  expect((await f.http(`${path}/reactivate`, {expectedAuthorityRevision: 2}, "reader")).status).toBe(404);
+  expect(await (await f.http("w/app-publications", f.body)).json()).toMatchObject(disabled);
+  expect(await (await f.http(path)).json()).toMatchObject(disabled);
+  expect((await (await f.http("w/app-publications")).json()).publications.find((row: {publicationId: string}) => row.publicationId === original.publicationId))
+    .toMatchObject({active: false, operatorTakedown: disabled.operatorTakedown});
+  f.restart();
+  expect(f.storage.disableAppPublication({publicationId: original.publicationId, reason: "Retry", nowMs: 40})).toEqual(disabled);
+  expect(f.storage.readAppPublication({...owner, publicationId: other.publicationId, limits}).active).toBe(true);
+  expect(() => f.storage.reactivateAppPublication({...owner, publicationId: original.publicationId, expectedAuthorityRevision: 2, limits})).toThrow(/operator disabled/);
+});
+
+it("records takedowns of withdrawn and damaged publications without reading their manifests", () => {
+  const f = fixture(), p = f.storage.publishAppPublication(request());
+  f.storage.withdrawAppPublication({...owner, publicationId: p.publicationId, expectedAuthorityRevision: 1});
+  f.raw.prepare("UPDATE sync_relay_blobs SET content=x'00' WHERE sha256=(SELECT manifest_sha256 FROM sync_relay_app_publications)").run();
+  const disabled = f.storage.disableAppPublication({publicationId: p.publicationId, reason: "Malware", nowMs: 30});
+  expect(disabled).toMatchObject({active: false, authorityRevision: 3});
+  expect(f.storage.listAppPublications({...owner, limits}).publications[0]).toMatchObject({manifestUnavailable: true, operatorTakedown: disabled.operatorTakedown});
+  expect(() => f.storage.reactivateAppPublication({...owner, publicationId: p.publicationId, expectedAuthorityRevision: 3, limits})).toThrow(/operator disabled/);
+});
+
+it.each(["", "   ", "x".repeat(1025), "bad\0reason"])("rejects invalid operator reasons atomically", reason => {
+  const f = fixture(), p = f.storage.publishAppPublication(request());
+  expect(() => f.storage.disableAppPublication({publicationId: p.publicationId, reason, nowMs: 30})).toThrow();
+  expect(f.storage.readAppPublication({...owner, publicationId: p.publicationId, limits})).toMatchObject({active: true, authorityRevision: 1});
+  expect(f.raw.prepare("SELECT COUNT(*) n FROM sync_relay_app_publication_takedowns").get()!.n).toBe(0);
+});
+
+it("upgrades the existing publication schema without changing publications", () => {
+  const f = fixture(), p = f.storage.publishAppPublication(request());
+  f.raw.exec("DROP TABLE sync_relay_app_publication_takedowns; DELETE FROM sync_relay_migrations WHERE migration_id='app-publication-operator-takedowns-v1'");
+  f.restart();
+  expect(f.storage.readAppPublication({...owner, publicationId: p.publicationId, limits}).active).toBe(true);
+  f.storage.disableAppPublication({publicationId: p.publicationId, reason: "Malware", nowMs: 30});
+  f.restart();
+  expect(f.storage.readAppPublication({...owner, publicationId: p.publicationId, limits}).operatorTakedown?.reason).toBe("Malware");
+});
+
+it("refuses to recreate a missing marked takedown table", () => {
+  const f = fixture();
+  f.raw.exec("DROP TABLE sync_relay_app_publication_takedowns");
+  expect(() => openSyncRelayStorage(f.path)).toThrow("Publication takedown schema is missing or damaged.");
+});
