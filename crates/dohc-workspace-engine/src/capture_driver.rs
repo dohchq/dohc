@@ -2672,6 +2672,7 @@ async fn apply_bound_run_with_handle(
                             .name("dohc-capture-collection-reconcile".to_owned())
                             .spawn(move || {
                                 let sink = StoreCaptureSink::new(StoreCaptureSinkParams {
+                                    cancel: dohc_engine_files::CancellationToken::new(),
                                     actor: collection_actor,
                                     workspace_id: collection_workspace.clone(),
                                     version_id,
@@ -2809,6 +2810,7 @@ async fn apply_bound_run_with_handle(
             // secret key are re-read per reconcile task, matching the TS
             // one-policy-snapshot-per-task rule.
             let mut sink = StoreCaptureSink::new(StoreCaptureSinkParams {
+                cancel: apply_cancel.clone(),
                 actor: apply_actor,
                 workspace_id: apply_workspace.clone(),
                 version_id,
@@ -2819,8 +2821,7 @@ async fn apply_bound_run_with_handle(
                 leases: apply_leases.clone(),
                 self_writes: apply_self_writes,
                 provenance: apply_provenance,
-            })
-            .with_cancellation(apply_cancel.clone());
+            });
             let result =
                 apply_reconcile_plan_cancellable(&apply_plan, &mut sink, &NoFaults, &apply_cancel);
             let mut collection_release_generation = 0;
@@ -2959,6 +2960,7 @@ async fn apply_bound_run_with_handle(
                 .name("dohc-capture-overcap-retire".to_owned())
                 .spawn(move || {
                     let mut sink = StoreCaptureSink::new(StoreCaptureSinkParams {
+                        cancel: dohc_engine_files::CancellationToken::new(),
                         actor: retire_actor,
                         workspace_id: retire_workspace,
                         version_id: retire_version,

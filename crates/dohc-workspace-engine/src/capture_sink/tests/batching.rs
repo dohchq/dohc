@@ -143,3 +143,133 @@ fn parallel_path_escape_falls_back_without_poisoning_sibling_progress() {
     assert_eq!(last.len(), 1);
     assert_eq!(last[0].text, "c.md");
 }
+
+fn busy_batch_fixture() -> (
+    ScratchDir,
+    WorkspaceSupervisor,
+    PathBuf,
+    StoreCaptureSink,
+    Connection,
+) {
+    let scratch = ScratchDir::new().expect("scratch");
+    let supervisor = WorkspaceSupervisor::new();
+    let (db, sink) = sink_for(&scratch, &supervisor);
+    write_file(scratch.path(), "a.md", b"alpha");
+    write_file(scratch.path(), "b.md", b"bravo");
+    let writer = Connection::open(&db).expect("fixture writer");
+    writer
+        .execute_batch("CREATE TABLE retry_payload(body BLOB)")
+        .unwrap();
+    let reader = Connection::open(&db).expect("pinned reader");
+    reader
+        .execute_batch("BEGIN; SELECT count(*) FROM retry_payload")
+        .unwrap();
+    writer
+        .execute_batch("INSERT INTO retry_payload VALUES(zeroblob(28*1024*1024))")
+        .unwrap();
+    (scratch, supervisor, db, sink, reader)
+}
+
+#[test]
+fn capture_sink_busy_batch_has_no_failed_receipt_or_rescan() {
+    use dohc_engine_files::{
+        ReconcileController, ReconcileRun, ScanBounds, Scanner, apply_then_ack,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (scratch, supervisor, db, mut sink, reader) = busy_batch_fixture();
+    let waits = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&waits);
+    let changed_root = scratch.path().to_path_buf();
+    sink.batch_retry.wait = Some(Box::new(move |_| {
+        if observed.fetch_add(1, Ordering::Relaxed) == 0 {
+            write_file(&changed_root, "a.md", b"newer disk edit");
+            // Release the actual pin; the actor's handoff waits for checkpoint progress.
+            reader.execute_batch("ROLLBACK").unwrap();
+        }
+    }));
+    let scanner = Scanner::new(ScanBounds::default()).unwrap();
+    let mut controller = ReconcileController::new();
+    let token = CancellationToken::new();
+    let ReconcileRun::Completed(plan) = controller
+        .reconcile(&scanner, scratch.path(), &token)
+        .unwrap()
+    else {
+        panic!("expected added text plan");
+    };
+    assert_eq!(plan.ops.len(), 2);
+    let receipt = apply_then_ack(&mut controller, &plan, &mut sink, &FilesNoFaults).unwrap();
+    assert!(
+        waits.load(Ordering::Relaxed) > 0,
+        "real FileLocked must traverse the sink retry"
+    );
+    assert!(receipt.failed_applies.is_empty(), "{receipt:?}");
+    assert!(!receipt.degraded);
+    assert_eq!(receipt.applied_paths, ["a.md", "b.md"]);
+    assert!(
+        !controller.is_dirty(),
+        "a clean receipt must not schedule the driver's 500 ms rescan"
+    );
+    assert!(matches!(
+        controller
+            .reconcile_if_dirty(&scanner, scratch.path(), &token)
+            .unwrap(),
+        ReconcileRun::Converged
+    ));
+    assert_eq!(snapshot(&db, "a.md").unwrap().text, "alpha");
+    assert_eq!(snapshot(&db, "b.md").unwrap().text, "bravo");
+
+    // The watcher dirties the controller for the edit made during the busy wait.
+    controller.mark_dirty();
+    let ReconcileRun::Completed(next) = controller
+        .reconcile_if_dirty(&scanner, scratch.path(), &token)
+        .unwrap()
+    else {
+        panic!("new disk bytes must remain capture work");
+    };
+    assert_eq!(next.ops.len(), 1);
+    let receipt = apply_then_ack(&mut controller, &next, &mut sink, &FilesNoFaults).unwrap();
+    assert!(receipt.failed_applies.is_empty());
+    assert_eq!(snapshot(&db, "a.md").unwrap().text, "newer disk edit");
+    drop(sink);
+    supervisor.close(&db).unwrap();
+}
+
+#[test]
+fn capture_sink_cancellation_stops_an_inflight_busy_batch() {
+    use dohc_engine_files::{ReconcileController, ReconcileRun, ScanBounds, Scanner};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (scratch, supervisor, db, original, reader) = busy_batch_fixture();
+    drop(original);
+    let cancel = CancellationToken::new();
+    let actor = supervisor.open(&db, 1).unwrap().actor;
+    let mut params = bound_sink_params(actor, WORKSPACE_ID, VERSION_ID, scratch.path(), 10);
+    params.cancel = cancel.clone();
+    let mut sink = StoreCaptureSink::new(params);
+    let waits = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&waits);
+    sink.batch_retry.wait = Some(Box::new(move |_| {
+        assert_eq!(
+            observed.fetch_add(1, Ordering::Relaxed),
+            0,
+            "cancelled sink must not retry again"
+        );
+        cancel.cancel();
+    }));
+    let scanner = Scanner::new(ScanBounds::default()).unwrap();
+    let ReconcileRun::Completed(plan) = ReconcileController::new()
+        .reconcile(&scanner, scratch.path(), &CancellationToken::new())
+        .unwrap()
+    else {
+        panic!("expected added text plan");
+    };
+    let receipt = apply_reconcile_plan(&plan, &mut sink, &FilesNoFaults);
+    assert_eq!(waits.load(Ordering::Relaxed), 1);
+    assert_eq!(receipt.failed_applies, ["a.md", "b.md"]);
+    assert!(receipt.applied_paths.is_empty());
+    assert!(receipt.degraded);
+    reader.execute_batch("ROLLBACK").unwrap();
+    drop(sink);
+    supervisor.close(&db).unwrap();
+}

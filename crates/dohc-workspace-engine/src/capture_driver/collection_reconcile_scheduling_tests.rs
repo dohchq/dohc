@@ -641,6 +641,7 @@ async fn assert_changed_record_reconciles(deferred_same_id: bool) {
     let seed_self_writes = self_writes.clone();
     std::thread::spawn(move || {
         let mut sink = StoreCaptureSink::new(StoreCaptureSinkParams {
+            cancel: dohc_engine_files::CancellationToken::new(),
             leases: seed_leases,
             self_writes: seed_self_writes,
             ..bound_sink_params(seed_actor, WORKSPACE_ID, "main", seed_root, 2)
@@ -672,6 +673,7 @@ async fn assert_changed_record_reconciles(deferred_same_id: bool) {
     std::thread::spawn(move || {
         assert_eq!(
             StoreCaptureSink::new(StoreCaptureSinkParams {
+                cancel: dohc_engine_files::CancellationToken::new(),
                 leases: adopt_leases,
                 self_writes: adopt_self_writes,
                 ..bound_sink_params(adopt_actor, WORKSPACE_ID, "main", adopt_root, 3)

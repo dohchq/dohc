@@ -128,13 +128,14 @@ impl ActorHandle {
     /// per-item savepoints so successful siblings still commit.
     pub fn capture_ingest_batch_blocking(
         &self,
-        inputs: Vec<CaptureIngest>,
+        inputs: impl Into<Arc<[CaptureIngest]>>,
         search_policy: Arc<SearchPolicySnapshot>,
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
         root_dir: PathBuf,
         root_guard: Arc<dyn WorkspaceRootGuard>,
     ) -> Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError> {
+        let inputs = inputs.into();
         let token: CancellationToken = CancellationToken::new();
         self.run_blocking(move |store, cache| {
             with_local_file_mutation_cache_reset(cache, || {

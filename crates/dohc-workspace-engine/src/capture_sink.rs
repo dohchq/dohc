@@ -314,6 +314,7 @@ pub struct StoreCaptureSink {
 
 pub(crate) struct StoreCaptureSinkParams {
     pub(crate) actor: ActorHandle,
+    pub(crate) cancel: dohc_engine_files::CancellationToken,
     pub(crate) workspace_id: String,
     pub(crate) version_id: String,
     pub(crate) shadow_root: PathBuf,
@@ -337,6 +338,7 @@ pub(crate) fn bound_sink_params(
     let shadow_root = shadow_root.into();
     let captured_root = CapturedRoot::bind(&shadow_root).map(Arc::new);
     StoreCaptureSinkParams {
+        cancel: dohc_engine_files::CancellationToken::new(),
         actor,
         workspace_id: workspace_id.to_owned(),
         version_id: version_id.to_owned(),
@@ -370,6 +372,7 @@ pub(crate) enum PolicyState {
 impl StoreCaptureSink {
     pub(crate) fn new(params: StoreCaptureSinkParams) -> Self {
         let StoreCaptureSinkParams {
+            cancel,
             actor,
             workspace_id,
             version_id,
@@ -391,7 +394,11 @@ impl StoreCaptureSink {
             PolicyState::Known(snapshot.files_policy.clone())
         };
         StoreCaptureSink {
-            batch_retry: CaptureBatchRetry::default(),
+            batch_retry: CaptureBatchRetry {
+                cancel,
+                #[cfg(test)]
+                wait: None,
+            },
             actor,
             leases,
             workspace_id,
@@ -408,14 +415,6 @@ impl StoreCaptureSink {
             self_writes,
             provenance,
         }
-    }
-
-    pub(crate) fn with_cancellation(
-        mut self,
-        cancel: dohc_engine_files::CancellationToken,
-    ) -> Self {
-        self.batch_retry.cancel = cancel;
-        self
     }
 
     fn captured_root(&self) -> Result<&CapturedRoot, CaptureError> {
@@ -1162,9 +1161,13 @@ impl StoreCaptureSink {
             inputs.push(prepared.input);
             identities.push((prepared.size, prepared.sha256));
         }
+        // Each attempt rechecks live leases and preserves uncovered Y.Doc recovery.
+        // The receipt records these bytes' hash, so the watcher or next scan
+        // captures a newer disk edit even when it arrives during the wait.
+        let inputs: Arc<[CaptureIngest]> = inputs.into();
         let results = self.batch_retry.run(|| {
             self.actor.capture_ingest_batch_blocking(
-                inputs.clone(),
+                Arc::clone(&inputs),
                 Arc::clone(&self.search_policy),
                 self.leases.clone(),
                 Arc::new(NoFaults),
