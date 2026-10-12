@@ -27,6 +27,7 @@ export function useFolderAppOffers(input: {
   const token = useRef<OfferWorkspaceToken>({ workspaceId, generation: 0 });
   const asked = useRef(new Set<string>());
   const expanded = useRef(new Set<string>());
+  const failing = useRef(new Set<string>());
   const onError = useRef(input.onError);
   onError.current = input.onError;
   const activeFolder = input.activePath && !isVirtualTabPath(input.activePath)
@@ -46,16 +47,27 @@ export function useFolderAppOffers(input: {
     });
   }, []);
 
-  const ask = useCallback((folder: string) => {
+  // A folder that failed says so once. Asking again on its own, as focus
+  // does, stays quiet until the folder reads or the person presses Try again.
+  const ask = useCallback((folder: string, retried = false) => {
     asked.current.add(folder);
+    const failed = failing.current;
     readFolderAppOffer({
       token: token.current,
       currentToken: () => token.current,
       folder,
       read: (workspaceId, folder) => bridge().getFolderApp({ workspaceId, folder }),
     }).then(
-      (answer) => { if (answer) apply(answer); },
-      (error: unknown) => onError.current(folder, error, () => ask(folder)),
+      (answer) => {
+        if (!answer) return;
+        failed.delete(folder);
+        apply(answer);
+      },
+      (error: unknown) => {
+        if (failed !== failing.current || (failed.has(folder) && !retried)) return;
+        failed.add(folder);
+        onError.current(folder, error, () => ask(folder, true));
+      },
     );
   }, [apply]);
 
@@ -65,6 +77,7 @@ export function useFolderAppOffers(input: {
     token.current = { workspaceId, generation: ++generations };
     asked.current = new Set();
     expanded.current = new Set();
+    failing.current = new Set();
     setApps(NO_APPS);
     return () => {
       token.current = { workspaceId: "", generation: ++generations };

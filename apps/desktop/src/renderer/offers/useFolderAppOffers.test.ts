@@ -112,6 +112,29 @@ describe("folder app offers", () => {
     expect(result.current.size).toBe(0);
   });
 
+  it("reports a folder that keeps failing once, until it reads or Try again fails again", async () => {
+    const { onError } = setup({ expandedFolders: ["site"] });
+    await act(async () => reads[0]!.reject(new Error("listing failed")));
+    expect(onError).toHaveBeenCalledOnce();
+
+    // Refocus asks again, and the same failure stays quiet.
+    act(() => { window.dispatchEvent(new Event("focus")); });
+    await act(async () => reads[1]!.reject(new Error("listing failed")));
+    expect(onError).toHaveBeenCalledOnce();
+
+    // Try again is the person's own request, so its failure says so.
+    act(() => onError.mock.calls[0]![2]());
+    await act(async () => reads[2]!.reject(new Error("listing failed")));
+    expect(onError).toHaveBeenCalledTimes(2);
+
+    // After a read succeeds, a new failure is news.
+    act(() => { window.dispatchEvent(new Event("focus")); });
+    await answer(3, { workspaceId: "one", folder: "site", isApp: false, run: null });
+    act(() => { window.dispatchEvent(new Event("focus")); });
+    await act(async () => reads[4]!.reject(new Error("listing failed")));
+    expect(onError).toHaveBeenCalledTimes(3);
+  });
+
   it("reports a failed read with a retry that asks again", async () => {
     const { onError } = setup({ expandedFolders: ["site"] });
     const failure = new Error("listing failed");

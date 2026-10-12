@@ -193,18 +193,19 @@ function EditorGroupSpecimen(props: { groupId: string; groupNumber: number; tabs
 }
 
 // A URL pasted on its own line, on a strip of paper, with the offer's row
-// where the editor floats it: under the line. Before a choice the URL is
-// plain text; after one it is a link and the row offers Undo.
+// where the editor floats it: under the line. A pasted URL is already a link,
+// so Link is pressed before a choice. Only Plain text changes it: the URL is
+// then plain text and the row offers Undo.
 function UrlOfferSpecimen(props: { force?: string; chosen?: boolean }) {
   return (
     <div className="w-[420px] rounded-lg border border-line bg-bg px-4 pb-10 pt-3 text-[15px] text-ink">
-      <p className={`m-0 ${props.chosen ? "underline" : ""}`}>https://example.com/trip/itinerary</p>
+      <p className={`m-0 ${props.chosen ? "" : "underline"}`}>https://example.com/trip/itinerary</p>
       <div
         className="mt-1"
         data-force-state={props.force ? "focus-visible" : undefined}
         data-force-target={props.force ? `[data-testid="${props.force}"]` : undefined}
       >
-        <UrlPasteOfferRow form={props.chosen ? "link" : "plain"} chosen={props.chosen ?? false} />
+        <UrlPasteOfferRow form={props.chosen ? "plain" : "link"} chosen={props.chosen ?? false} />
       </div>
     </div>
   );
@@ -1902,7 +1903,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             <ViewActions onShare={noop} onRun={noop} />
           </TabRowActionsSpecimen>
         </Specimen>
-        <Specimen label="a URL pasted on its own line: Link focused, Plain text focused, then Undo">
+        <Specimen label="a URL pasted on its own line, Link pressed: Link focused, Plain text focused, then Undo after Plain text">
           <div className="flex flex-col gap-3">
             {(["link", "plain"] as const).map((focused) => (
               <UrlOfferSpecimen key={focused} force={focused === "link" ? "url-paste-link" : "url-paste-plain"} />
