@@ -22,6 +22,10 @@ Local work remains available when the server is offline.
 
 App publishing is disabled in the default self-host bundle.
 It needs a separate HTTPS app domain and additional relay limits.
+The app domain can be a registrable domain or a suffix in the private section of the Public Suffix List.
+Use an app domain you control.
+Keep the viewer outside the app domain.
+For a registrable app domain, the viewer must have a different registrable domain.
 Follow the [share-web operations reference](../../services/share-web/README.md) before enabling it.
 Apps use their approved datasets when `DOHC_RELAY_APP_PUBLICATIONS=1` is enabled.
 Set `DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT` to change the default limit of 1,000 submitting participants per app and share grant.

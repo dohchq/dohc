@@ -80,9 +80,9 @@ See the [app backend guide](../../docs/how-to/app-backend.md) for publication,
 runtime packaging, private uploads, and recovery.
 
 Browser launch also requires `DOHC_SHARE_WEB_APP_DOMAIN` and
-`DOHC_SHARE_WEB_PUBLIC_ORIGIN`. The app domain must be a separate configured
-registrable domain. App launch stays off when the app domain is unset. Setting
-it without a public origin stops share-web at startup.
+`DOHC_SHARE_WEB_PUBLIC_ORIGIN`. See [app domains](#app-domains) for the domain
+and isolation requirements. App launch stays off when the app domain is unset.
+Setting it without a public origin stops share-web at startup.
 
 Launch issuance allows each authorized link browser profile or signed-in account
 session a burst of 12, refilling 0.2 per second. People on the same network have
@@ -386,10 +386,15 @@ The command does not build Rust or select a default executable.
 
 ## App domains
 
-Use a separate registrable domain for apps. For example, a viewer at
-`https://share.example.com` can use `DOHC_SHARE_WEB_APP_DOMAIN=example.net`.
-Set the domain without a scheme, port, or wildcard. Subdomains of the viewer's
-registrable domain are refused.
+Use a registrable domain or a suffix in the private section of the Public Suffix
+List for apps. For example, a viewer at `https://share.example.com` can use
+`DOHC_SHARE_WEB_APP_DOMAIN=example.net` or a private suffix such as `vercel.app`.
+Use an app domain you control.
+Set the domain without a scheme, port, or wildcard. The viewer must use HTTPS
+without a port. It must not be the app domain or a host under it.
+For a registrable app domain, the viewer must have a different registrable domain.
+For example, `https://share.vercel.app` cannot be the viewer when the app domain
+is `vercel.app`.
 
 Point wildcard DNS for `*.example.net` at the share-web proxy and install a
 matching wildcard TLS certificate. Forward those requests to the same share-web
