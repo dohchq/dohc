@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import { stripTypeScriptTypes } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { Script, createContext } from 'node:vm'
 import {
@@ -7,6 +8,7 @@ import {
   LIVE_UPDATE_YJS_START_CLOCK_MAX,
 } from '@dohc/live-session-contract'
 import * as encoding from 'lib0/encoding'
+import * as decoding from 'lib0/decoding'
 import * as ts from 'typescript/unstable/ast'
 import { API as TypeScriptApi } from 'typescript/unstable/sync'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -17,6 +19,7 @@ const yjsProbe = vi.hoisted(() => ({
   encodeStateAsUpdateCalls: 0,
   encodeStateVectorCalls: 0,
   digestViews: [] as Uint8Array[],
+  beforeEncodeStateVector: undefined as (() => void) | undefined,
 }))
 
 vi.mock('yjs', async (importOriginal) => {
@@ -40,6 +43,7 @@ vi.mock('yjs', async (importOriginal) => {
     },
     encodeStateVector: (...args: Parameters<typeof actual.encodeStateVector>) => {
       yjsProbe.encodeStateVectorCalls += 1
+      yjsProbe.beforeEncodeStateVector?.()
       return actual.encodeStateVector(...args)
     },
   }
@@ -375,6 +379,7 @@ function resetProbe(): void {
   yjsProbe.encodeStateAsUpdateCalls = 0
   yjsProbe.encodeStateVectorCalls = 0
   yjsProbe.digestViews.length = 0
+  yjsProbe.beforeEncodeStateVector = undefined
 }
 
 function accepted(result: OrderedLiveUpdateCutResult) {
@@ -866,6 +871,16 @@ function namedFunction(source: ts.SourceFile, name: string): ts.FunctionDeclarat
   return declaration
 }
 
+let privateHelperSource: ts.SourceFile | undefined
+
+function privateFunctions(names: readonly string[], globals: Record<string, unknown> = {}): Record<string, unknown> {
+  // Exercise private helpers without adding runtime exports for tests.
+  const ast = privateHelperSource ??= parsedSources([ORDERED_CUT_SOURCE]).get(ORDERED_CUT_SOURCE)!
+  const source = names.map(name => namedFunction(ast, name).getText(ast)).join('\n')
+  return new Script(`${stripTypeScriptTypes(source)}\n({ ${names.join(', ')} })`)
+    .runInNewContext({ fail: (reason: string) => { throw new Error(reason) }, ...globals })
+}
+
 function writesTo(
   scope: ts.Node,
   names: Set<string>,
@@ -1074,6 +1089,9 @@ describe('validateOrderedLiveUpdateCut', () => {
       { ...highPolicy(), maxStructVisits: 0 },
       { ...highPolicy(), maxStructVisits: -1 },
       { ...highPolicy(), maxStructVisits: 1.5 },
+      ...[-0, Number.NaN, Infinity, Number.MAX_SAFE_INTEGER + 1].map(maxStructVisits => ({
+        ...highPolicy(), maxStructVisits,
+      })),
       { ...highPolicy(), extra: 1 },
       Object.create(highPolicy()),
     ]
@@ -1552,6 +1570,49 @@ describe('validateOrderedLiveUpdateCut', () => {
     }, highPolicy()), 'invalid-update', { kind: 'input', role: 'checkpoint' })
   })
 
+  it('hashes the original float64 bytes from a nonzero-offset view, including signed zero', () => {
+    const template = replacementItemUpdate(updateWithText('float64'), new Y.ContentAny([Number.NaN]))
+    const offset = float64NaNOffset(template) + 1
+    let hashPayload: Uint8Array | undefined
+    const { readHashedAnyNode } = privateFunctions(['numberBytes', 'readHashedAnyNode'], {
+      decoding, MAX_DEPTH: 128, TREE_TAG: { anyNumber: 4 },
+      scalarTreeDigest: (_tag: number, payload: Uint8Array) => {
+        hashPayload = payload
+        return new Uint8Array(32)
+      },
+    }) as {
+      readHashedAnyNode: (decoder: decoding.Decoder, depth: number, budget: { visitValueNode: () => void },
+        stage: { kind: 'final' }) => { value: unknown }
+    }
+    const scalarFrames = (bits: bigint) => {
+      const storage = new Uint8Array(template.byteLength + 23)
+      storage.fill(0xa5)
+      const checkpoint = storage.subarray(11, 11 + template.byteLength)
+      checkpoint.set(template)
+      new DataView(checkpoint.buffer, checkpoint.byteOffset + offset, 8).setBigUint64(0, bits, false)
+      readHashedAnyNode(decoding.createDecoder(checkpoint.subarray(offset - 1, offset + 8)), 0,
+        { visitValueNode: () => undefined }, { kind: 'final' })
+      expect(hashPayload?.buffer).toBe(storage.buffer)
+      expect(hashPayload?.byteOffset).toBe(checkpoint.byteOffset + offset)
+      expect(hashPayload?.byteLength).toBe(8)
+      resetProbe()
+      const cut = accepted(validateOrderedLiveUpdateCut({ mode: 'registration', checkpoint }, highPolicy()))
+      try {
+        return yjsProbe.digestViews.filter(input => input[0] === 0x79 && input[1] === 4)
+          .map(input => Uint8Array.from(input))
+      } finally { cut.document.destroy() }
+    }
+    for (const bits of [0n, 0x8000_0000_0000_0000n, 0x7ff8_0000_0000_0001n, 0x7ff8_0000_0000_0002n]) {
+      const frames = scalarFrames(bits)
+      expect(frames).toHaveLength(2)
+      const expected = new Uint8Array(11)
+      expected.set([0x79, 4, 8])
+      new DataView(expected.buffer).setBigUint64(3, bits, false)
+      expect(frames).toEqual([expected, expected])
+    }
+    expect(scalarFrames(0n)).not.toEqual(scalarFrames(0x8000_0000_0000_0000n))
+  })
+
   it('refuses hostile Any map keys before integrating them', () => {
     const ordinary = updateWithText('hostile-key')
     const hostile: Record<string, unknown> = Object.create(null)
@@ -1745,7 +1806,8 @@ describe('validateOrderedLiveUpdateCut', () => {
     }
   })
 
-  it('pins canonical tree frames, digest counts, and linear leaf hashing', () => {
+  it('pins canonical tree frames, digest counts, and linear leaf hashing', async () => {
+    const { digest } = await vi.importActual<typeof import('lib0/hash/sha256')>('lib0/hash/sha256')
     const treeInputs = (value: unknown): {
       readonly cut: ReturnType<typeof accepted>
       readonly inputs: Uint8Array[]
@@ -1790,6 +1852,8 @@ describe('validateOrderedLiveUpdateCut', () => {
     expect(arrayFrames).toHaveLength(2)
     expect(arrayFrames[0]?.byteLength).toBe(67)
     expect(arrayFrames[0]?.subarray(0, 3)).toEqual(new Uint8Array([0x79, 15, 2]))
+    expect(arrayFrames[0]?.subarray(3, 35)).toEqual(Uint8Array.from(digest(new Uint8Array([0x79, 10, 0]))))
+    expect(arrayFrames[0]?.subarray(35)).toEqual(Uint8Array.from(digest(new Uint8Array([0x79, 12, 0]))))
 
     const mapProof = treeInputs({ b: false, a: null })
     const mapFrames = mapProof.inputs.filter(input => input[1] === 16)
@@ -1798,6 +1862,8 @@ describe('validateOrderedLiveUpdateCut', () => {
     expect(mapFrames[0]?.byteLength).toBe(71)
     expect(mapFrames[0]?.subarray(0, 5)).toEqual(new Uint8Array([0x79, 16, 2, 1, 0x61]))
     expect(mapFrames[0]?.subarray(37, 39)).toEqual(new Uint8Array([1, 0x62]))
+    expect(mapFrames[0]?.subarray(5, 37)).toEqual(Uint8Array.from(digest(new Uint8Array([0x79, 10, 0]))))
+    expect(mapFrames[0]?.subarray(39)).toEqual(Uint8Array.from(digest(new Uint8Array([0x79, 11, 0]))))
 
     const surrogateKeyProof = treeInputs({ ['\uD800']: null })
     const surrogateMap = surrogateKeyProof.inputs.find(input => input[1] === 16)
@@ -2340,6 +2406,55 @@ describe('validateOrderedLiveUpdateCut', () => {
     expect(yjsProbe.encodeStateAsUpdateCalls).toBe(0)
   })
 
+  it('bounds projected sums at the exact policy and safe-integer limits', () => {
+    const { checkedProjectedAdd } = privateFunctions(['safeNonnegative', 'checkedProjectedAdd']) as {
+      checkedProjectedAdd: (current: number, delta: number, policy: number, stage: { kind: 'final' }) => number
+    }
+    const stage = { kind: 'final' } as const
+    for (const policy of [1, 243, Number.MAX_SAFE_INTEGER]) {
+      expect(checkedProjectedAdd(policy - 1, 1, policy, stage)).toBe(policy)
+      expect(checkedProjectedAdd(policy, 0, policy, stage)).toBe(policy)
+      expect(() => checkedProjectedAdd(policy, 1, policy, stage)).toThrow('capacity-refused')
+      expect(() => checkedProjectedAdd(policy, 0, policy - 1, stage)).toThrow('capacity-refused')
+    }
+    for (const value of [-1, 0.5, Number.NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      for (const operands of [[value, 0, 1], [0, value, 1], [0, 0, value]] as const) {
+        expect(() => checkedProjectedAdd(operands[0], operands[1], operands[2], stage)).toThrow('capacity-refused')
+      }
+    }
+  })
+
+  it('admits hash storage before allocating it and skips allocation on refusal', () => {
+    const events: string[] = []
+    const { allocateHashInput } = privateFunctions(['safeNonnegative', 'allocateHashInput'], {
+      Uint8Array: new Proxy(Uint8Array, {
+        construct: (target, args) => {
+          events.push(`allocate:${args[0]}`)
+          return Reflect.construct(target, args)
+        },
+      }),
+    }) as {
+      allocateHashInput: (length: number, admission: typeof budget, stage: { kind: 'final' }) => Uint8Array
+    }
+    const budget = {
+      chargeHashedBytes: (length: number) => {
+        events.push(`charge:${length}`)
+        if (length > 8) throw new Error('capacity-refused')
+      },
+    }
+    const stage = { kind: 'final' } as const
+    expect(allocateHashInput(8, budget, stage)).toHaveLength(8)
+    expect(events).toEqual(['charge:8', 'allocate:8'])
+    events.length = 0
+    expect(() => allocateHashInput(9, budget, stage)).toThrow('capacity-refused')
+    expect(events).toEqual(['charge:9'])
+    for (const length of [-1, 0.5, Number.NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      events.length = 0
+      expect(() => allocateHashInput(length, budget, stage)).toThrow('capacity-refused')
+      expect(events).toEqual([])
+    }
+  })
+
   it('checks a prefix pair before candidate evidence begins', () => {
     const checkpoint = makeStructUpdate(
       4_202,
@@ -2437,6 +2552,66 @@ describe('validateOrderedLiveUpdateCut', () => {
     }
   })
 
+  it.each(['detach', 'dirty-detach', 'proof', 'failed-proof'] as const)(
+    'consumes the finalizer before reentrant %s work', phase => {
+      const checkpoint = updateWithText('reentrant')
+      const cut = accepted(validateOrderedLiveUpdateCut(
+        { mode: 'registration', checkpoint }, highPolicy(),
+      ))
+      if (phase === 'dirty-detach') cut.document.transact(() => undefined)
+      const before = {
+        constructions: yjsProbe.documentConstructions,
+        applies: yjsProbe.readUpdateV2Calls,
+        vectors: yjsProbe.encodeStateVectorCalls,
+        encodes: yjsProbe.encodeStateAsUpdateCalls,
+      }
+      const nested: OrderedLiveUpdateCutFinalizeResult[] = []
+      let didReenter = false
+      const reenter = () => {
+        // One entry keeps a broken finalizer from recursing without a bound.
+        if (didReenter) return
+        didReenter = true
+        nested.push(cut.finishAfterProjection())
+      }
+      const originalOff = cut.document.off.bind(cut.document)
+      const off = vi.spyOn(cut.document, 'off').mockImplementation((...args) => {
+        if (phase === 'detach' || phase === 'dirty-detach') reenter()
+        return originalOff(...args)
+      })
+      if (phase === 'proof' || phase === 'failed-proof') {
+        yjsProbe.beforeEncodeStateVector = () => {
+          reenter()
+          if (phase === 'failed-proof') throw new Error('injected proof failure')
+        }
+      }
+      try {
+        const result = cut.finishAfterProjection()
+        expect(nested).toHaveLength(1)
+        expect(nested[0]).toMatchObject({ kind: 'refused', reason: 'invalid-input', stage: { kind: 'call' } })
+        expect(nested[0]?.usage).toBe(cut.usage)
+        expect(off.mock.calls.map(([event]) => event)).toEqual(expect.arrayContaining(['beforeTransaction', 'destroy']))
+        if (phase === 'dirty-detach' || phase === 'failed-proof') {
+          refused(result, 'projection-mutated', { kind: 'final' })
+        } else {
+          expect(result.kind).toBe('accepted')
+        }
+        expect(yjsProbe.documentConstructions).toBe(before.constructions)
+        expect(yjsProbe.readUpdateV2Calls).toBe(before.applies)
+        expect(yjsProbe.encodeStateVectorCalls - before.vectors).toBe(phase === 'dirty-detach' ? 0 : 1)
+        expect(yjsProbe.encodeStateAsUpdateCalls - before.encodes).toBe(
+          phase === 'dirty-detach' || phase === 'failed-proof' ? 0 : 1,
+        )
+        const repeated = refused(cut.finishAfterProjection(), 'invalid-input', { kind: 'call' })
+        expect(repeated.usage).toBe(result.usage)
+        expect(off).toHaveBeenCalledTimes(2)
+      } finally {
+        yjsProbe.beforeEncodeStateVector = undefined
+        off.mockRestore()
+        cut.document.destroy()
+      }
+    },
+  )
+
   it('retains backing content through empty suffixes and repeated partial deletions', () => {
     const ast = parsedSources([ORDERED_CUT_SOURCE]).get(ORDERED_CUT_SOURCE)!
     const slice = namedFunction(ast, 'slicedSpan')
@@ -2445,8 +2620,21 @@ describe('validateOrderedLiveUpdateCut', () => {
       && ts.isPropertyAccessExpression(node.expression)
       && node.expression.name.text === 'slice'
     ))).toHaveLength(0)
-    expect(slice.getText(ast)).toContain('content: span.content')
-    expect(slice.getText(ast)).toContain('return span')
+    const { slicedSpan } = privateFunctions(['placementAt', 'slicedSpan']) as {
+      slicedSpan: (span: typeof backing, start: number, end: number) => typeof backing
+    }
+    const backing = {
+      clientId: 17, startClock: 4, endClock: 20, contentOffset: 3,
+      content: { kind: 'any', values: Array.from({ length: 32 }, (_, index) => index) },
+      placement: { origin: null, rightOrigin: null, parent: { kind: 'none' }, parentSub: null },
+    }
+    expect(slicedSpan(backing, 4, 20)).toBe(backing)
+    const partial = slicedSpan(backing, 7, 16)
+    expect(partial.content).toBe(backing.content)
+    expect(partial.contentOffset).toBe(6)
+    const repeated = slicedSpan(partial, 9, 14)
+    expect(repeated.content).toBe(backing.content)
+    expect(repeated.contentOffset).toBe(8)
 
     for (const length of [16, 64]) {
       for (const deletions of [0, 3]) {
@@ -2730,77 +2918,14 @@ describe('validateOrderedLiveUpdateCut', () => {
     ])
 
     const finalizer = namedFunction(sourceAst, 'createFinalizer')
-    const finalizerBindings = finalizer.body!.statements
-      .filter(ts.isVariableStatement)
-      .flatMap(statement => statement.declarationList.declarations)
-      .map(declaration => declaration.name.getText(sourceAst))
-    expect(finalizerBindings).toEqual(['proofState', 'lastUsage'])
-    const finalizerReturn = finalizer.body!.statements.find(ts.isReturnStatement)
-    expect(finalizerReturn?.expression !== undefined && ts.isArrowFunction(finalizerReturn.expression))
-      .toBe(true)
-    if (finalizerReturn?.expression === undefined || !ts.isArrowFunction(finalizerReturn.expression)) {
+    const returned = finalizer.body!.statements.find(ts.isReturnStatement)?.expression
+    if (returned === undefined || !(ts.isArrowFunction(returned) || ts.isFunctionExpression(returned))) {
       throw new Error('missing finalizer closure')
     }
-    const capturedParameters = descendants(finalizerReturn.expression.body)
-      .filter((node): node is ts.Identifier => ts.isIdentifier(node))
-      .map(identifier => identifier.text)
-      .filter(name => name === 'acceptedProofState' || name === 'acceptedUsage')
-    expect(capturedParameters).toEqual([])
-    const proofAliases = descendants(finalizerReturn.expression.body)
-      .filter((node): node is ts.VariableDeclaration => (
-        ts.isVariableDeclaration(node)
-        && node.initializer !== undefined
-        && (
-          ts.isIdentifier(node.initializer)
-          || ts.isPropertyAccessExpression(node.initializer)
-          || ts.isElementAccessExpression(node.initializer)
-        )
-        && ['proofState', 'state'].includes(rootIdentifier(node.initializer) ?? '')
-      ))
-      .map(declaration => ({
-        name: declaration.name.getText(sourceAst),
-        source: rootIdentifier(declaration.initializer as ts.Expression),
-      }))
-    expect(proofAliases).toEqual([{ name: 'state', source: 'proofState' }])
-    const finalizerText = finalizerReturn.expression.body.getText(sourceAst)
-    const transfer = finalizerText.indexOf('const state = proofState')
-    const release = finalizerText.indexOf('proofState = undefined', transfer)
-    const detach = finalizerText.indexOf("state.document.off('beforeTransaction'", transfer)
-    const dirty = finalizerText.indexOf('state.dirtyLatch.dirty', transfer)
-    const proof = finalizerText.indexOf('completeProof(', transfer)
-    expect(transfer).toBeGreaterThan(-1)
-    expect(release).toBeGreaterThan(transfer)
-    expect(release).toBeLessThan(detach)
-    expect(release).toBeLessThan(dirty)
-    expect(release).toBeLessThan(proof)
-
-    const helper = namedFunction(sourceAst, 'checkedProjectedAdd')
-    const helperStatements = helper.body!.statements
-    const guardedOperands = helperStatements.slice(0, 3).map((statement) => {
-      expect(ts.isIfStatement(statement)).toBe(true)
-      if (!ts.isIfStatement(statement)) throw new Error('missing operand guard')
-      const calls = descendants(statement.expression).filter(ts.isCallExpression)
-      expect(calls).toHaveLength(1)
-      const call = calls[0] as ts.CallExpression
-      expect(call.expression.getText(sourceAst)).toBe('safeNonnegative')
-      expect(statement.thenStatement.getText(sourceAst)).toContain(
-        "fail('capacity-refused', stage)",
-      )
-      return call.arguments[0]?.getText(sourceAst)
-    })
-    expect(guardedOperands).toEqual(['current', 'delta', 'policy'])
-    const helperText = helper.body!.getText(sourceAst)
-    const currentPolicy = helperText.indexOf('current > policy')
-    const subtraction = helperText.indexOf('policy - current')
-    const deltaRemaining = helperText.indexOf('delta > remaining')
-    const addition = helperText.indexOf('current + delta')
-    expect(currentPolicy).toBeGreaterThan(helperStatements[2]!.end - helper.body!.pos)
-    expect(subtraction).toBeGreaterThan(currentPolicy)
-    expect(deltaRemaining).toBeGreaterThan(subtraction)
-    expect(addition).toBeGreaterThan(deltaRemaining)
-    expect(descendants(helper).filter(node => (
-      ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken
-    ))).toHaveLength(1)
+    const parameters = new Set(finalizer.parameters.map(parameter => parameter.name.getText(sourceAst)))
+    expect(descendants(returned.body).filter(node => (
+      ts.isIdentifier(node) && parameters.has(node.text)
+    ))).toHaveLength(0)
 
     assertProjectedWrites(sourceAst)
 
@@ -2826,85 +2951,6 @@ describe('validateOrderedLiveUpdateCut', () => {
       ))
       expect(numberArrays).toHaveLength(0)
     }
-    const hashedAny = namedFunction(sourceAst, 'readHashedAnyNode')
-    const float64Cases = descendants(hashedAny).filter((node): node is ts.CaseClause => (
-      ts.isCaseClause(node) && node.expression.getText(sourceAst) === '123'
-    ))
-    expect(float64Cases).toHaveLength(1)
-    const float64Case = float64Cases[0] as ts.CaseClause
-    const float64Blocks = float64Case.statements.filter(ts.isBlock)
-    expect(float64Blocks).toHaveLength(1)
-    const float64Block = float64Blocks[0] as ts.Block
-    const float64Bindings = float64Block.statements
-      .filter(ts.isVariableStatement)
-      .flatMap(statement => statement.declarationList.declarations)
-    const float64Binding = (name: string): ts.VariableDeclaration => {
-      const matches = float64Bindings.filter(declaration => declaration.name.getText(sourceAst) === name)
-      expect(matches).toHaveLength(1)
-      return matches[0] as ts.VariableDeclaration
-    }
-    const positionBinding = float64Binding('position')
-    expect(positionBinding.initializer?.getText(sourceAst)).toBe('decoder.pos')
-    const valueBinding = float64Binding('value')
-    expect(valueBinding.initializer !== undefined && ts.isCallExpression(valueBinding.initializer))
-      .toBe(true)
-    if (valueBinding.initializer === undefined || !ts.isCallExpression(valueBinding.initializer)) {
-      throw new Error('missing float64 read')
-    }
-    expect(valueBinding.initializer.expression.getText(sourceAst)).toBe('decoding.readFloat64')
-    expect(valueBinding.initializer.arguments.map(argument => argument.getText(sourceAst)))
-      .toEqual(['decoder'])
-    const rawBinding = float64Binding('raw')
-    expect(rawBinding.initializer !== undefined && ts.isNewExpression(rawBinding.initializer))
-      .toBe(true)
-    if (rawBinding.initializer === undefined || !ts.isNewExpression(rawBinding.initializer)) {
-      throw new Error('missing raw float64 view')
-    }
-    expect(rawBinding.initializer.expression.getText(sourceAst)).toBe('Uint8Array')
-    expect(rawBinding.initializer.arguments?.map(argument => argument.getText(sourceAst))).toEqual([
-      'decoder.arr.buffer',
-      'decoder.arr.byteOffset + position',
-      '8',
-    ])
-    const float64StatementIndex = (declaration: ts.VariableDeclaration): number => (
-      float64Block.statements.findIndex(statement => (
-        ts.isVariableStatement(statement)
-        && statement.declarationList.declarations.some(candidate => candidate === declaration)
-      ))
-    )
-    const positionStatementIndex = float64StatementIndex(positionBinding)
-    const valueStatementIndex = float64StatementIndex(valueBinding)
-    const rawStatementIndex = float64StatementIndex(rawBinding)
-    expect(positionStatementIndex + 1).toBe(valueStatementIndex)
-    expect(valueStatementIndex + 1).toBe(rawStatementIndex)
-    const float64Digests = descendants(float64Case).filter((node): node is ts.CallExpression => (
-      ts.isCallExpression(node) && node.expression.getText(sourceAst) === 'scalarTreeDigest'
-    ))
-    expect(float64Digests).toHaveLength(1)
-    expect(float64Digests[0]?.arguments[1]?.getText(sourceAst)).toBe('raw')
-    expect(descendants(float64Case).filter((node): node is ts.CallExpression => (
-      ts.isCallExpression(node) && node.expression.getText(sourceAst) === 'numberBytes'
-    ))).toHaveLength(0)
-    const arrayDigest = namedFunction(sourceAst, 'arrayTreeDigest')
-    expect(arrayDigest.parameters[1]?.type?.getText(sourceAst)).toBe('readonly Uint8Array[]')
-    expect(descendants(arrayDigest).filter((node): node is ts.CallExpression => (
-      ts.isCallExpression(node)
-      && node.expression.getText(sourceAst) === 'input.set'
-    )).map(call => call.arguments[0]?.getText(sourceAst))).toEqual(['child'])
-    const mapDigest = namedFunction(sourceAst, 'mapTreeDigest')
-    expect(descendants(mapDigest).filter((node): node is ts.CallExpression => (
-      ts.isCallExpression(node)
-      && node.expression.getText(sourceAst) === 'input.set'
-    )).map(call => call.arguments[0]?.getText(sourceAst))).toEqual([
-      'entry.key',
-      'entry.digest',
-    ])
-    const allocator = namedFunction(sourceAst, 'allocateHashInput')
-    const allocatorText = allocator.body!.getText(sourceAst)
-    expect(allocatorText.indexOf('budget.chargeHashedBytes')).toBeGreaterThan(-1)
-    expect(allocatorText.indexOf('new Uint8Array')).toBeGreaterThan(
-      allocatorText.indexOf('budget.chargeHashedBytes'),
-    )
     const valuesOnly = namedFunction(sourceAst, 'readAnyValue')
     expect(descendants(valuesOnly).filter(node => (
       ts.isCallExpression(node)
@@ -2914,94 +2960,6 @@ describe('validateOrderedLiveUpdateCut', () => {
       ts.isNewExpression(node)
       && node.expression.getText(sourceAst) === 'Uint8Array'
     ))).toHaveLength(0)
-    const strictReadAny = descendants(sourceAst).find(
-      (node): node is ts.MethodDeclaration => (
-        ts.isMethodDeclaration(node)
-        && node.name.getText(sourceAst) === 'readAny'
-        && node.body?.getText(sourceAst).includes('captureFingerprints') === true
-      ),
-    )
-    if (strictReadAny?.body === undefined) throw new Error('missing strict readAny')
-    const fingerprintBranch = strictReadAny.body.statements.find(ts.isIfStatement)
-    expect(fingerprintBranch?.expression.getText(sourceAst)).toBe('this.captureFingerprints')
-    expect(fingerprintBranch?.elseStatement).toBeUndefined()
-    const valuesOnlyCalls = descendants(strictReadAny).filter(node => (
-      ts.isCallExpression(node) && node.expression.getText(sourceAst) === 'readAnyValue'
-    ))
-    expect(valuesOnlyCalls).toHaveLength(1)
-    expect(strictReadAny.body.statements.at(-1)?.getText(sourceAst)).toContain('readAnyValue(')
-
-    const strictReadJson = descendants(sourceAst).find(
-      (node): node is ts.MethodDeclaration => (
-        ts.isMethodDeclaration(node)
-        && node.name.getText(sourceAst) === 'readJSON'
-        && node.body?.getText(sourceAst).includes('jsonTreeDigest') === true
-      ),
-    )
-    if (strictReadJson?.body === undefined) throw new Error('missing strict readJSON')
-    const jsonDigestCalls = descendants(strictReadJson).filter(node => (
-      ts.isCallExpression(node) && node.expression.getText(sourceAst) === 'jsonTreeDigest'
-    ))
-    expect(jsonDigestCalls).toHaveLength(1)
-    let jsonDigestParent: ts.Node | undefined = jsonDigestCalls[0]?.parent
-    while (jsonDigestParent !== undefined && !ts.isIfStatement(jsonDigestParent)) {
-      jsonDigestParent = jsonDigestParent.parent
-    }
-    expect(jsonDigestParent !== undefined && ts.isIfStatement(jsonDigestParent)).toBe(true)
-    if (jsonDigestParent !== undefined && ts.isIfStatement(jsonDigestParent)) {
-      expect(jsonDigestParent.expression.getText(sourceAst)).toBe('this.captureFingerprints')
-    }
-
-    const scanString = descendants(jsonAst).find(
-      (node): node is ts.MethodDeclaration => (
-        ts.isMethodDeclaration(node) && node.name.getText(jsonAst) === 'scanString'
-      ),
-    )
-    if (scanString?.body === undefined) throw new Error('missing scanString')
-    const keyDecodeCalls = descendants(scanString).filter(
-      (node): node is ts.CallExpression => (
-        ts.isCallExpression(node)
-        && node.expression.getText(jsonAst) === 'this.decodeKeyAfterCharge'
-      ),
-    )
-    expect(keyDecodeCalls).toHaveLength(1)
-    const keyDecodeCall = keyDecodeCalls[0]
-    if (keyDecodeCall === undefined) throw new Error('missing key decode call')
-    expect(ts.isReturnStatement(keyDecodeCall.parent)).toBe(true)
-    if (!ts.isReturnStatement(keyDecodeCall.parent)) {
-      throw new Error('key decode is not returned directly')
-    }
-    const keyDecodeReturn = keyDecodeCall.parent
-    expect(keyDecodeReturn.expression).toBe(keyDecodeCall)
-    expect(ts.isBlock(keyDecodeReturn.parent)).toBe(true)
-    if (!ts.isBlock(keyDecodeReturn.parent)) throw new Error('missing key decode block')
-    const keyDecodeBlock = keyDecodeReturn.parent
-    const byteCharges = keyDecodeBlock.statements.filter(
-      (statement): statement is ts.ExpressionStatement => (
-        ts.isExpressionStatement(statement)
-        && ts.isCallExpression(statement.expression)
-        && statement.expression.expression.getText(jsonAst)
-          === 'this.budget.visitDecodedPayloadBytes'
-        && statement.expression.arguments.length === 1
-        && statement.expression.arguments[0]?.getText(jsonAst) === 'decodedByteLength'
-      ),
-    )
-    const keyObservations = keyDecodeBlock.statements.filter(
-      (statement): statement is ts.ExpressionStatement => (
-        ts.isExpressionStatement(statement)
-        && ts.isCallExpression(statement.expression)
-        && statement.expression.expression.getText(jsonAst)
-          === 'this.observation?.onKeyMaterialized'
-        && statement.expression.arguments.length === 0
-      ),
-    )
-    expect(byteCharges).toHaveLength(1)
-    expect(keyObservations).toHaveLength(1)
-    const byteChargeIndex = keyDecodeBlock.statements.indexOf(byteCharges[0]!)
-    const keyObservationIndex = keyDecodeBlock.statements.indexOf(keyObservations[0]!)
-    const keyDecodeIndex = keyDecodeBlock.statements.indexOf(keyDecodeReturn)
-    expect(byteChargeIndex).toBeLessThan(keyObservationIndex)
-    expect(keyObservationIndex).toBeLessThan(keyDecodeIndex)
     expect(descendants(jsonAst).filter(node => (
       ts.isPropertyAccessExpression(node)
       && node.expression.getText(jsonAst) === 'JSON'

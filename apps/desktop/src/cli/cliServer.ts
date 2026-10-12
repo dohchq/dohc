@@ -2573,6 +2573,7 @@ async function dispatchWorkspace(
             depth: entry.depth,
             recordedAtMs: entry.recordedAtMs,
             automationRun: entry.automationRun,
+            linkAuthor: entry.linkAuthor,
           })),
         };
       } catch (error) {

@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 import { buildStandaloneDocumentHtml, resolveDocumentTitle } from "./documentExport";
+import { markdownBodyToHtml } from "./import-export";
+import { measureParseWork } from "./markdownParseWork";
 
 const FIXTURE_MARKDOWN = `---
 title: My Doc
@@ -173,5 +175,45 @@ describe("buildStandaloneDocumentHtml", () => {
     // The base fixture carries no math — the large KaTeX CSS must not be shipped.
     expect(html).not.toContain(".katex");
     expect(html).not.toContain("katex-display");
+  });
+
+  // The export reads Markdown with the projection's parser, which keeps the
+  // lines Tiptap's own reader drops, so the exported page shows what the file
+  // holds.
+  it("exports raw HTML as the text the file holds, never as elements", () => {
+    const exported = buildStandaloneDocumentHtml(
+      '<script>alert(1)</script>\n\nText <b onclick="steal()">bold</b> <!-- note -->',
+      "fallback",
+    );
+    expect(exported).not.toContain("<script");
+    expect(exported).not.toContain("<b onclick");
+    expect(exported).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(exported).toContain("&lt;!-- note --&gt;");
+  });
+
+  it("keeps a reference definition and an empty link as visible text", () => {
+    const exported = buildStandaloneDocumentHtml(
+      'Intro\n\n[docs]: https://e.com\n\nSee [](https://example.com "title").',
+      "fallback",
+    );
+    expect(exported).toContain("[docs]: https://e.com");
+    expect(exported).toContain('[](https://example.com "title")');
+  });
+});
+
+describe("markdownBodyToHtml", () => {
+  // Counting newline splits alone missed the block-marker searches, which read
+  // the rest of the document for every paragraph.
+  it("reads a linear amount of text when rejecting block tokenizers for paragraphs", async () => {
+    const measure = (paragraphs: number) =>
+      measureParseWork(() => {
+        const html = markdownBodyToHtml(Array(paragraphs).fill("Ordinary paragraph.").join("\n\n"));
+        expect(html.match(/<p>/g)).toHaveLength(paragraphs);
+      });
+    const small = await measure(64);
+    const large = await measure(128);
+    expect(small.search).toBeGreaterThan(0);
+    expect(large.split, `newline split characters: ${small.split} -> ${large.split}`).toBeLessThan(small.split * 2.2);
+    expect(large.search, `searched characters: ${small.search} -> ${large.search}`).toBeLessThan(small.search * 2.2);
   });
 });

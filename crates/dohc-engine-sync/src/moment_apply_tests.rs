@@ -335,6 +335,71 @@ fn a_peer_keeps_the_depth_an_agent_moment_names() {
     );
 }
 
+/// A second owner device imports a settled live moment through ordinary sync.
+/// Its History keeps the name the snapshot declared for the agent, after a
+/// restart too. A name outside the snapshot's bounds applies as none.
+#[test]
+fn an_owner_device_keeps_a_declared_agent_name_through_import_and_restart() {
+    let agent = json!({
+        "kind": "agent",
+        "agentId": "trip-agent-hosted",
+        "onBehalfOf": "owner",
+        "depth": 1,
+    });
+    let longest = "n".repeat(dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES);
+    let over = format!("{longest}n");
+    for (name, kept) in [
+        (json!("Trip helper"), true),
+        (json!(longest), true),
+        (json!(over), false),
+        (json!(""), false),
+        (json!("Trip\nhelper"), false),
+        (Value::Null, false),
+        (json!(42), false),
+    ] {
+        let (scratch, mut device) = test_store();
+        let mut declared = agent.clone();
+        declared["agentName"] = name.clone();
+        let mut payload = absent_text_payload("settled", "object", "trip.md", "content");
+        payload["authors"] = json!([declared]);
+        hydrate_texts(&mut device, &["content"]);
+        assert_eq!(
+            apply_moment_envelope(
+                &mut device,
+                &envelope("owner-a", 0, "ws", payload),
+                &NoFaults
+            )
+            .expect("owner device import"),
+            ApplyOutcome::new(ApplyDisposition::Applied(0)),
+            "name {name}",
+        );
+        let expected = json!([if kept { declared } else { agent.clone() }]);
+        let history_authors = |store: &mut EngineStore| {
+            let page = VersionedTextStore::new(store)
+                .list_moments(&ListMomentsQuery {
+                    workspace_id: "ws".to_owned(),
+                    version_id: Some("main".to_owned()),
+                    object_id: Some("object".to_owned()),
+                    limit: 10,
+                    before_moment_order: None,
+                })
+                .expect("History");
+            let moment = page.moments.first().expect("imported moment");
+            serde_json::from_str::<Value>(moment.author_json.as_deref().expect("authors"))
+                .expect("author JSON")
+        };
+        assert_eq!(history_authors(&mut device), expected, "name {name}");
+        drop(device);
+        let path = engine_db_path(&scratch).expect("db path");
+        let mut restarted = EngineStore::open(&path, 1_000).expect("reopen store");
+        assert_eq!(
+            history_authors(&mut restarted),
+            expected,
+            "restarted {name}"
+        );
+    }
+}
+
 #[test]
 fn a_peer_applies_pre_upgrade_control_character_authors() {
     let authors = json!([
@@ -918,13 +983,15 @@ fn observed_owner_settlement_scenario(fields: OwnerSettlementFields) {
     let old_id = format!("moment-ydoc-{}", "b".repeat(64));
     let latest_id = format!("moment-ydoc-{}", "c".repeat(64));
     let retain_audit = |store: &EngineStore, id: &str, text: &str, cursor: i64| {
-        // The audit parser is covered separately. Seed its committed output
-        // to isolate ordinary moment admission against native owner state.
+        // The audit parser is covered separately. Seed its committed output,
+        // with no accepted events to credit, to isolate ordinary moment
+        // admission against native owner state.
         let binding = serde_json::to_string(&observed.binding).unwrap();
         let record = format!(
-            "{{\"momentId\":{},\"relayDatabaseNamespace\":\"relay\",\"binding\":{},\"terminalCursor\":{cursor}}}",
+            "{{\"momentId\":{},\"relayDatabaseNamespace\":\"relay\",\"binding\":{},\"previousCursor\":{cursor},\"terminalCursor\":{cursor},\"acceptedEventCount\":0,\"acceptedIntervalDigest\":\"{}\"}}",
             serde_json::to_string(id).unwrap(),
-            binding
+            binding,
+            "0".repeat(64)
         );
         store.read_with(|conn| conn.execute("INSERT INTO live_audit_settlements(settlement_id,workspace_id,record_digest,record_json,markdown_digest) VALUES (?1,'ws',?2,?3,?4)", params![id, hex_sha256(record.as_bytes()), record, text_sha(text)])).unwrap();
     };
@@ -1942,6 +2009,8 @@ enum PendingFieldSettlement {
     StorageFailure,
     Oversize,
     ReplayFailure,
+    NonFiniteFields,
+    RequotedNonFinite,
 }
 
 #[test]
@@ -1969,6 +2038,16 @@ fn observed_owner_indexing_replay_failure_does_not_stop_frames_or_settlement() {
     pending_field_settlement_case(PendingFieldSettlement::ReplayFailure);
 }
 
+#[test]
+fn observed_owner_settlement_flags_restored_source_beside_draft_values() {
+    pending_field_settlement_case(PendingFieldSettlement::NonFiniteFields);
+}
+
+#[test]
+fn observed_owner_settlement_keeps_draft_quoted_value_over_equal_checkpoint_value() {
+    pending_field_settlement_case(PendingFieldSettlement::RequotedNonFinite);
+}
+
 fn pending_field_settlement(replay: bool) {
     pending_field_settlement_case(if replay {
         PendingFieldSettlement::Replay
@@ -1991,13 +2070,22 @@ fn pending_field_settlement_case(case: PendingFieldSettlement) {
     doc.frontmatter_set("id", "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa")
         .unwrap();
     doc.frontmatter_set("status", "open").unwrap();
+    let requoted = case == PendingFieldSettlement::RequotedNonFinite;
+    let non_finite = requoted || case == PendingFieldSettlement::NonFiniteFields;
+    // The accepted `.nan` that the draft leaves alone.
+    let untouched = if requoted { "effort" } else { "estimate" };
     let text = doc.project(YdocContentKind::Richdoc).unwrap().content;
     let mut owner = restore_owner_from(&doc.encode_full_state(), &text, "tasks/owner.md");
     seed_text_moment(
         &mut owner.store,
         "schema",
         "tasks/collection.yaml",
-        "fields:\n  status:\n    type: text\n",
+        if non_finite {
+            "fields:\n  status:\n    type: text\n  estimate:\n    type: number\n  \
+             effort:\n    type: number\n"
+        } else {
+            "fields:\n  status:\n    type: text\n"
+        },
         "schema",
         None,
         true,
@@ -2015,10 +2103,36 @@ fn pending_field_settlement_case(case: PendingFieldSettlement) {
         host.richdoc_append_paragraph("accepted body"),
         1,
     );
+    if non_finite {
+        // A restore keeps source text that the generated emitter would quote.
+        let current = host.project(YdocContentKind::Richdoc).unwrap().content;
+        let restored = current.replacen("---\n", "---\nestimate: .nan\neffort: .nan\n", 1);
+        apply_test_owner_frame(
+            &mut owner,
+            host.rewrite_content_to_markdown(YdocContentKind::Richdoc, &restored)
+                .unwrap(),
+            2,
+        );
+    }
     let draft = Ydoc::wire();
     draft.apply(&host.encode_full_state()).unwrap();
     let vector = draft.encode_state_vector();
     draft.frontmatter_set("status", "done").unwrap();
+    if requoted {
+        // The draft quotes the accepted value. Its JSON value stays the same.
+        let shown = draft.project(YdocContentKind::Richdoc).unwrap().content;
+        let quoted = shown.replacen("\nestimate: .nan\n", "\nestimate: \".nan\"\n", 1);
+        assert_ne!(quoted, shown);
+        draft
+            .frontmatter_set_preserving_markdown_source("estimate", ".nan", &quoted)
+            .unwrap();
+        assert_eq!(
+            draft.frontmatter_json()["estimate"],
+            host.frontmatter_json()["estimate"]
+        );
+    } else if non_finite {
+        draft.frontmatter_set("effort", "7").unwrap();
+    }
     if case == PendingFieldSettlement::Oversize {
         draft.richdoc_append_paragraph(&"pending body ".repeat(170_000));
         owner.observed.limits.max_pending_bytes = 3_000_000;
@@ -2048,6 +2162,30 @@ fn pending_field_settlement_case(case: PendingFieldSettlement) {
         })
         .unwrap();
     assert_pending_status(&owner);
+    let draft_fields = non_finite.then(|| record_fields(&owner));
+    if let Some(fields) = &draft_fields {
+        // The draft indexed the restored value from JSON, without its source.
+        let accepted = fields.iter().find(|field| field.0 == untouched).unwrap();
+        assert!(
+            !accepted
+                .3
+                .as_deref()
+                .unwrap_or_default()
+                .contains("number-not-finite")
+        );
+    }
+    if requoted {
+        let fields = draft_fields.as_ref().unwrap();
+        let estimate = fields.iter().find(|field| field.0 == "estimate").unwrap();
+        assert!(
+            estimate
+                .3
+                .as_deref()
+                .is_some_and(|code| code.contains("expected-number"))
+        );
+        let shown = visible_draft_text(&owner);
+        assert!(shown.contains("\nestimate: \".nan\"\n"));
+    }
     if matches!(
         case,
         PendingFieldSettlement::Quarantined | PendingFieldSettlement::QuarantinedRefusal
@@ -2150,6 +2288,7 @@ fn pending_field_settlement_case(case: PendingFieldSettlement) {
     }
     let later_frame = replay.then(|| host.richdoc_append_paragraph("settled before its frame"));
     let settled = host.project(YdocContentKind::Richdoc).unwrap().content;
+    assert!(!non_finite || settled.contains("\nestimate: .nan\neffort: .nan\n"));
     let cursor = if replay {
         2
     } else {
@@ -2235,6 +2374,25 @@ fn pending_field_settlement_case(case: PendingFieldSettlement) {
     )
     .unwrap();
     assert!(matches!(result.primary, ApplyDisposition::Applied(ref r) if r.record_facts.is_none()));
+    if let Some(mut fields) = draft_fields {
+        // Accepted `.nan` takes its parse flag. Draft values keep their index.
+        let (accepted, others): (Vec<_>, Vec<_>) = record_fields(&owner)
+            .into_iter()
+            .partition(|field| field.0 == untouched);
+        assert!(
+            accepted[0]
+                .3
+                .as_deref()
+                .is_some_and(|code| code.contains("number-not-finite"))
+        );
+        fields.retain(|field| field.0 != untouched);
+        assert_eq!(others, fields);
+    }
+    if requoted {
+        // The draft's quoted value still shows over the checkpoint's `.nan`.
+        let shown = visible_draft_text(&owner);
+        assert!(shown.contains("\nestimate: \".nan\"\n"));
+    }
     if let Some(update) = later_frame {
         assert_eq!(
             owner
@@ -2323,6 +2481,45 @@ fn assert_retained_status(owner: &RestoreOwner) {
         .unwrap();
 }
 
+fn record_fields(owner: &RestoreOwner) -> Vec<(String, String, String, Option<String>)> {
+    owner
+        .store
+        .read_with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT field_name,value_json,validation_status,validation_reason_json \
+                 FROM collection_record_fields ORDER BY field_name",
+            )?;
+            let fields = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, rusqlite::Error>(fields)
+        })
+        .unwrap()
+}
+
+fn visible_draft_text(owner: &RestoreOwner) -> String {
+    owner
+        .store
+        .read_with(|conn| {
+            let draft = dohc_engine_collab::owner_outbox::draft::open_draft_in(
+                conn,
+                &owner.observed.binding,
+                owner.observed.revision,
+            )
+            .unwrap();
+            let projection = draft.doc.project(YdocContentKind::Richdoc).unwrap();
+            Ok::<_, rusqlite::Error>(projection.content)
+        })
+        .unwrap()
+}
+
 /// The host's state once a restore that appends `paragraph` is accepted.
 fn restored_host(checkpoint: &[u8], paragraph: &str) -> (Ydoc, String) {
     let host = Ydoc::wire();
@@ -2342,10 +2539,11 @@ fn retain_restore_audit(
     terminal_cursor: i64,
 ) {
     let record = format!(
-        "{{\"momentId\":{},\"relayDatabaseNamespace\":{},\"binding\":{},\"terminalCursor\":{terminal_cursor}}}",
+        "{{\"momentId\":{},\"relayDatabaseNamespace\":{},\"binding\":{},\"previousCursor\":{terminal_cursor},\"terminalCursor\":{terminal_cursor},\"acceptedEventCount\":0,\"acceptedIntervalDigest\":\"{}\"}}",
         serde_json::to_string(id).unwrap(),
         serde_json::to_string(namespace).unwrap(),
-        serde_json::to_string(binding).unwrap()
+        serde_json::to_string(binding).unwrap(),
+        "0".repeat(64)
     );
     store.read_with(|conn| conn.execute("INSERT INTO live_audit_settlements(settlement_id,workspace_id,record_digest,record_json,markdown_digest) VALUES (?1,'ws',?2,?3,?4)", params![id, hex_sha256(record.as_bytes()), record, text_sha(text)])).unwrap();
 }
@@ -2450,6 +2648,14 @@ fn public_create_author_survives_replay_but_is_not_republished_without_proof() {
                 )
                 .unwrap();
             assert_eq!(count, 1);
+            let stored: String = tx
+                .query_row(
+                    "SELECT author_json FROM moments WHERE moment_id='accepted-create'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(serde_json::from_str::<Value>(&stored).unwrap(), authors);
             let (exported, _) =
                 crate::outbound::moment_append_payload_in_tx(tx, "ws", "accepted-create").unwrap();
             assert!(exported.get("authors").is_none());

@@ -35,7 +35,15 @@ async fn history_object_page_preserves_identity_paging_and_active_version() {
     let first = call(&transport, &handle, 3, "versionedText.write", json!({"versionId": "main", "path": "old.md", "text": "first", "origin": "api", "momentId": "first", "objectId": "stable-object"})).await;
     let object_id = first["object"]["id"].as_str().expect("object id");
     call(&transport, &handle, 4, "versionedText.write", json!({"versionId": "main", "path": "other.md", "text": "other", "origin": "api", "momentId": "other"})).await;
-    call(&transport, &handle, 5, "versionedText.rename", json!({"versionId": "main", "fromPath": "old.md", "toPath": "new.md", "origin": "api", "requestId": "rename"})).await;
+    call_keyed(
+        &transport,
+        &handle,
+        5,
+        "versionedText.rename",
+        "rename",
+        json!({"versionId": "main", "fromPath": "old.md", "toPath": "new.md", "origin": "api"}),
+    )
+    .await;
     call(&transport, &handle, 6, "secrets.write", json!({"workspaceId": "history-object", "versionId": "main", "path": ".env", "text": "KEY=secret", "origin": "api", "momentId": "secret"})).await;
     let first_page = call(
         &transport,

@@ -125,7 +125,7 @@ export function registerStopAndRestoreIpc<
   /** A grant changed on the relay: the share roster lists again. */
   sharesChanged(workspaceId: string): void;
   requireEngineCapture(workspaceId: string): Promise<{
-    capture: Pick<WorkspaceEngineCapture, "readMoment" | "listObjectMomentsAfter" | "restoreFileToBeforeMoment" | "findRestoreReceipt">;
+    capture: Pick<WorkspaceEngineCapture, "readMoment" | "listObjectMomentsAfter" | "restoreFileToBeforeMoment" | "findRestoreReceipt" | "publicationApplied">;
   }>;
   /** The person a request is made by, read from main's own account when it arrives. */
   localPerson(): Promise<LocalPersonAuthor>;
@@ -571,6 +571,7 @@ export function registerStopAndRestoreIpc<
           replayRequestId: previous ? momentId => restoreRequestId(id, momentId) : undefined,
           recordedRestores: progress.receipts,
           findRestoreReceipt: (momentId, requestId) => capture.findRestoreReceipt(momentId, requestId),
+          publicationApplied: (momentId, requestId) => capture.publicationApplied(momentId, requestId),
           recordRestoreIntents: async momentIds => {
             await automations.recordRestoreIntents(id, momentIds);
             progress.intents = [...new Set([...(progress.intents ?? []), ...momentIds])];

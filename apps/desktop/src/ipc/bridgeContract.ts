@@ -4,6 +4,7 @@ export type { ShareCopyInput, ShareCopyResult } from "@dohc/workspace-contracts/
 import { accessOperations } from "./accessOperations";
 import { SaveStateSchema } from "@dohc/workspace-contracts/save-state-schema";
 import { nameByteLength } from "@dohc/workspace-contracts/names";
+import { LIVE_UPDATE_IDENTIFIER_MAX_BYTES } from "@dohc/live-session-contract/live-update-admission";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { WORKSPACE_POLICY_PATHS } from "@dohc/security-contract/effective-policy";
 import type {OwnerRestoreRequest, OwnerRestoreAction, OwnerRestoreResult} from "./ownerRestoreContract";
@@ -710,6 +711,7 @@ const RecordHistoryValue = z.object({ present: z.boolean(), value: CollectionVal
 // "unchecked" when History must ask with locateRecordHistoryRun.
 const RecordHistoryRunLocation = z.enum(["available", "unchecked"]);
 const RecordHistoryAuthor = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("link"), agentName: z.string().min(1).max(4096).optional() }).strict(),
   z.object({ kind: z.literal("human"), name: z.string().min(1).max(4096) }),
   z.object({ kind: z.literal("agent"), name: z.string().min(1).max(4096), person: z.string().min(1).max(4096).optional() }),
   z.object({
@@ -1530,11 +1532,24 @@ export type RebuildEngineStoreResult = z.infer<typeof RebuildEngineStoreResult>;
 
 const MOMENT_TEXT = engineStoredText("moment body");
 
+// An identifier the relay accepted a shared change under: a live document's
+// collaborator or Edit link, or a direct write's. A live author snapshot's
+// names have the same bound.
+const SHARED_AUTHOR_ID = z.string().min(1).refine(
+  (value) => new TextEncoder().encode(value).byteLength <= LIVE_UPDATE_IDENTIFIER_MAX_BYTES,
+  "Shared author identifiers are at most 512 UTF-8 bytes.",
+);
+
+// A Collection automation's name or its Collection's, as History reads it.
+export const AUTOMATION_AUTHOR_TEXT_MAX = 4096;
+const AUTOMATION_AUTHOR_TEXT = z.string().min(1).max(AUTOMATION_AUTHOR_TEXT_MAX);
+
 const EngineMomentAuthor = z.union([
   z.object({ kind: z.literal("unattributed") }).strict(),
   z.object({
     kind: z.literal("agent"),
     agentId: z.string().min(1),
+    agentName: SHARED_AUTHOR_ID.optional(),
     onBehalfOf: z.string().min(1).optional(),
     agentRunId: z.string().min(1).optional(),
     depth: z.number().int().positive().optional(),
@@ -1542,9 +1557,14 @@ const EngineMomentAuthor = z.union([
   z.object({
     kind: z.literal("human"),
     humanId: z.string().min(1),
-    humanName: z.string().min(1).max(500).optional(),
     relayConfirmed: z.literal(true).optional(),
     onBehalfOf: z.string().min(1).optional(),
+  }).strict(),
+  z.object({
+    kind: z.literal("human"),
+    humanId: SHARED_AUTHOR_ID,
+    humanName: SHARED_AUTHOR_ID,
+    relayConfirmed: z.literal(true).optional(),
   }).strict(),
   z.object({
     kind: z.literal("public"),
@@ -1565,8 +1585,8 @@ const EngineMomentAuthor = z.union([
   }).strict(),
   z.object({
     kind: z.literal("link"),
-    publicPrincipalId: z.string().min(1).max(500),
-    label: z.string().min(1).max(500),
+    publicPrincipalId: SHARED_AUTHOR_ID,
+    label: SHARED_AUTHOR_ID,
   }).strict(),
   z.object({
     kind: z.literal("automation"),
@@ -1585,21 +1605,25 @@ export const EngineMomentRecord = z.object({
   origin: z.enum(["api", "local-file", "restore", "sync", "unknown", "ydoc", "capture-recovery", "capture-recovery-cleared"]),
   authors: z.array(EngineMomentAuthor).min(1).optional(),
   // Present only when a dohc-tracked agent run authored the moment; main
-  // resolves the configured agent name for local runs.
-  agentAuthorName: z.string().min(1).max(500).optional(),
+  // resolves the configured agent name for local runs. A live author
+  // snapshot's agent reads as the name it declared.
+  agentAuthorName: z.string().min(1).max(LIVE_UPDATE_IDENTIFIER_MAX_BYTES).optional(),
   // Present when this computer's person authored the moment: main names them
   // as the account settled here now, or this installation when signed out.
   personAuthorName: z.string().min(1).max(500).optional(),
+  // Present when a live edit's relay-admitted author snapshot names its one
+  // author: the account holder's name, or the link holder's label.
+  liveAuthorName: z.string().min(1).max(4096).optional(),
   publicAuthor: z.object({kind: z.literal("public"), principalId: z.string().min(1).max(500), grantId: z.string().min(1).max(500)}).strict().optional(),
   // Present when a Collection automation authored the moment: its name as
   // this computer's automations.yaml has it, and the Collection it belongs to.
   // `collection` is left out once this computer no longer has the automation's Collection.
-  automationAuthor: z.object({ name: z.string().min(1).max(4096), collection: z.string().min(1).max(4096).optional() }).strict().optional(),
+  automationAuthor: z.object({ name: AUTOMATION_AUTHOR_TEXT, collection: AUTOMATION_AUTHOR_TEXT.optional() }).strict().optional(),
   // Present when a person the owner shared with wrote the moment directly
   // (ADR 0013): main names them from the owner's share roster. The user id
   // picks them for Stop and restore.
   namedAuthor: z.object({
-    userId: z.string().min(1).max(256),
+    userId: SHARED_AUTHOR_ID,
     label: z.string().min(1).max(400),
   }).strict().optional(),
   // Present when an Edit share link wrote the moment directly (ADR 0013).
@@ -1607,10 +1631,14 @@ export const EngineMomentRecord = z.object({
   // used it; neither names a person.
   linkAuthor: z.object({
     kind: z.literal("link"),
-    grantId: z.string().min(1).max(500),
+    grantId: SHARED_AUTHOR_ID,
     grantGeneration: z.number().int().positive(),
-    principalId: z.string().min(1).max(500),
+    principalId: SHARED_AUTHOR_ID,
   }).strict().optional(),
+  // Present when more than one author wrote the moment: how each reads, in
+  // the order of `authors`. The singleton author fields stay absent then.
+  // The longest reads as an automation's name in its Collection.
+  authorLabels: z.array(z.string().min(1).max(2 * AUTOMATION_AUTHOR_TEXT_MAX + " in ".length)).min(2).optional(),
   summary: z.string().max(500).optional(),
   correlationId: z.string().max(200).optional(),
   // Workspace-global recording order: the pagination cursor and a monotonic
@@ -5465,8 +5493,7 @@ export const UnmountShareResult = z.object({
 export type UnmountShareResult = z.infer<typeof UnmountShareResult>;
 
 // Local agent integration. An agent run is a LOCAL concept: a small
-// record persisted to .dohc/agent-runs.json. Enabling a run (optionally) spawns
-// the managed MCP stdio child for the workspace and sets the watcher's
+// record persisted to .dohc/agent-runs.json. Starting a run sets the watcher's
 // active-run slot, so the run's writes are attributed to the agent.
 export const AgentRunPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -5493,7 +5520,6 @@ export const StartAgentRunResult = AgentRunRecordSchema;
 export type StartAgentRunResult = z.infer<typeof StartAgentRunResult>;
 
 export const AgentRunStatusResult = z.object({
-  mcpEnabled: z.boolean(),
   activeRun: AgentRunRecordSchema.nullable(),
   lastRun: AgentRunRecordSchema.nullable(),
 });

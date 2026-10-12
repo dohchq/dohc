@@ -1,111 +1,81 @@
-// One vitest, resolvable everywhere. The root must declare vitest, and every
-// package must declare the same major. Without the root declaration, `npx
-// vitest` at the repo root cannot resolve a local binary, so npm installs an
-// arbitrary registry version into its own cache and runs the suite with it.
-// That run collects from the npx cache instead of the repo and still exits 0.
-// A root `npx vitest run` now resolves and sweeps the whole repo, including
-// Playwright specs and node:test scripts, so it exits non-zero by design; run
-// suites through the per-package scripts.
-// See https://github.com/dohc-ai/dohc/issues/405.
+// Keep a local Vitest at the root and one installed major across its consumers.
+// Otherwise npx can fetch its own runner, or a package can under-collect tests
+// under a different major. See https://github.com/dohc-ai/dohc/issues/405.
 import assert from "node:assert/strict";
-import { glob, readFile } from "node:fs/promises";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { readWorkspacePackages } from "./verification/selection.mjs";
 
-const repoRoot = new URL("../", import.meta.url);
+const repoRoot = fileURLToPath(new URL("../", import.meta.url));
 
-async function readPackage(relativePath) {
-  const raw = await readFile(new URL(relativePath, repoRoot), "utf8");
-  return JSON.parse(raw);
-}
-
-function workspacePatterns(workspaceYaml) {
-  const patterns = [];
-  let inPackages = false;
-  for (const line of workspaceYaml.split(/\r?\n/)) {
-    if (/^packages:/.test(line)) {
-      inPackages = true;
-      continue;
-    }
-    if (inPackages && /^\S/.test(line)) break;
-    const entry = inPackages && line.match(/^\s+-\s+["']?([^"'\s#]+)["']?/);
-    if (entry) patterns.push(entry[1]);
-  }
-  return patterns;
-}
-
-// autoInstallPeers is on, so a peer-declared vitest is installed like any
-// other. Every field that can put a vitest on disk has to be read here.
+// Peer auto-installation can put Vitest on disk too.
 function declaredVitest(pkg) {
-  return (
-    pkg.devDependencies?.vitest ??
-    pkg.dependencies?.vitest ??
-    pkg.peerDependencies?.vitest ??
-    pkg.optionalDependencies?.vitest
-  );
+  return pkg.devDependencies?.vitest ?? pkg.dependencies?.vitest
+    ?? pkg.peerDependencies?.vitest ?? pkg.optionalDependencies?.vitest;
 }
 
-function major(range) {
-  const digits = range.match(/(\d+)\./);
-  assert.ok(digits, `cannot read a major from the vitest range "${range}"`);
-  return digits[1];
+function vitestDeclarations(root) {
+  return [{ path: "", manifest: JSON.parse(readFileSync(join(root, "package.json"), "utf8")) },
+    ...readWorkspacePackages(root)]
+    .filter(({ manifest }) => declaredVitest(manifest))
+    .map(({ path, manifest }) => ({ path: join(path, "package.json"), range: declaredVitest(manifest) }));
 }
 
-const workspaceYaml = await readFile(
-  new URL("pnpm-workspace.yaml", repoRoot),
-  "utf8",
-);
-const patterns = workspacePatterns(workspaceYaml);
-assert.ok(patterns.length > 0, "pnpm-workspace.yaml declares no packages");
-
-const rootRange = declaredVitest(await readPackage("package.json"));
-const declarations = rootRange
-  ? [{ path: "package.json", range: rootRange }]
-  : [];
-for (const pattern of patterns) {
-  for await (const match of glob(`${pattern}/package.json`, {
-    cwd: repoRoot,
-  })) {
-    const path = match.replaceAll("\\", "/");
-    const range = declaredVitest(await readPackage(path));
-    if (range) declarations.push({ path, range });
-  }
-}
-
-test("the repo root declares vitest so npx cannot substitute its own", () => {
-  assert.ok(
-    rootRange,
-    "the root package.json declares no vitest. `npx vitest` at the repo root " +
-      "then resolves no local binary, and npm installs an unpinned registry " +
-      "version into its cache and runs the suite with it.",
-  );
-});
-
-// Without this the guard can pass on nothing: if the pattern parsing ever
-// stops matching, the glob finds no package.json, and a lone root declaration
-// is trivially one major.
-test("pattern parsing finds the packages, so the check is not vacuous", () => {
-  assert.ok(
-    declarations.length > 1,
-    `found ${declarations.length} vitest declarations, expected the root plus ` +
-      "the workspace packages. Pattern parsing of pnpm-workspace.yaml matched " +
-      `no package declarations; it read patterns [${patterns.join(", ")}].`,
-  );
-});
-
-test("every package declares the same vitest major", () => {
+function assertSingleMajor(root, declarations) {
   const byMajor = new Map();
   for (const { path, range } of declarations) {
-    const key = major(range);
-    byMajor.set(key, [...(byMajor.get(key) ?? []), `${path} (${range})`]);
+    const require = createRequire(join(root, path));
+    const { version } = require("vitest/package.json");
+    const major = version?.match(/^(\d+)\./)?.[1];
+    assert.ok(major, `${path} resolves an invalid Vitest version: ${version}`);
+    byMajor.set(major, [...(byMajor.get(major) ?? []), `${path} (${range} -> ${version})`]);
   }
-  assert.equal(
-    byMajor.size,
-    1,
-    `the workspace declares ${byMajor.size} vitest majors; it must declare 1. ` +
-      [...byMajor]
-        .map(([key, paths]) => `major ${key}: ${paths.join(", ")}`)
-        .join("; ") +
-      ". A second major makes the runner depend on the directory you stand " +
-      "in, and a run under the wrong major under-collects and still exits 0.",
-  );
+  assert.equal(byMajor.size, 1,
+    `The workspace resolves ${byMajor.size} Vitest majors; it must resolve 1. `
+    + [...byMajor].map(([major, paths]) => `major ${major}: ${paths.join(", ")}`).join("; "));
+}
+
+const declarations = vitestDeclarations(repoRoot);
+
+test("the repo root declares vitest so npx cannot substitute its own", () => {
+  assert.ok(declarations.some(({ path }) => path === "package.json"),
+    "The root package.json must declare Vitest so npx resolves a local runner.");
+});
+
+test("workspace discovery finds Vitest consumers beyond the root", () => {
+  assert.ok(declarations.length > 1,
+    `Found ${declarations.length} Vitest declarations; expected the root and workspace consumers.`);
+});
+
+test("every Vitest consumer resolves the same installed major", () => {
+  assertSingleMajor(repoRoot, declarations);
+});
+
+test("installed majors determine the guard even with disjunctive ranges", () => {
+  for (const [rootVersion, peerVersion, error] of [
+    ["4.1.11", "5.0.0", /resolves 2 Vitest majors/],
+    ["4.1.11", "4.2.0"],
+    ["4.1.11"], // Node resolves the root installation for both consumers.
+  ]) {
+    const root = mkdtempSync(join(tmpdir(), "dohc-vitest-major-"));
+    const write = (path, value) => {
+      const absolute = join(root, path);
+      mkdirSync(dirname(absolute), { recursive: true });
+      writeFileSync(absolute, JSON.stringify(value));
+    };
+    try {
+      writeFileSync(join(root, "pnpm-workspace.yaml"), "packages: ['apps/*']\n");
+      write("package.json", { name: "root", devDependencies: { vitest: "^4 || ^5" } });
+      write("apps/peer/package.json", { name: "peer", peerDependencies: { vitest: "^4 || ^5" } });
+      if (rootVersion) write("node_modules/vitest/package.json", { name: "vitest", version: rootVersion });
+      if (peerVersion) write("apps/peer/node_modules/vitest/package.json", { name: "vitest", version: peerVersion });
+      const check = () => assertSingleMajor(root, vitestDeclarations(root));
+      if (error) assert.throws(check, error);
+      else check();
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
 });

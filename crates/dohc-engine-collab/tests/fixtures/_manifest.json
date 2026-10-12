@@ -77,8 +77,10 @@
   "richdocProjection-multi-block-table-cell-separator.json",
   "richdocProjection-code-language-leading-tilde.json",
   "richdocProjection-empty-code-block-containers.json",
+  "richdocProjection-raw-html-literal-text.json",
   "offsetProbe.json",
   "surrogateProbe.json",
-  "nestedFrontmatter.json"
+  "nestedFrontmatter.json",
+  "markedOracle.json"
  ]
 }

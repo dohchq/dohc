@@ -5,7 +5,7 @@ import {
   getDohcProseMirrorSchema,
   getDohcYDocBodyFragment,
   markdownToYDoc,
-} from "./import-export";
+} from "@dohc/ydoc-projection";
 
 // The refinement is measured against the editor's own parse, the way
 // lineBlocks.test.ts measures the block rules: `markdownToYDoc` is what builds

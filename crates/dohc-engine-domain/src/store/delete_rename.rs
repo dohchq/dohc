@@ -208,6 +208,14 @@ impl<'a> VersionedTextStore<'a> {
             )
             .map_err(DomainError::sql_persist)?;
             upsert_snapshot(tx, &after_snapshot)?;
+            // The alias has left `from_path`. A write still pending there
+            // would put a file back under the old name on replay. Same gate
+            // as the delete below: jobs mirror the active working tree only,
+            // so a named version renaming its own copy of the path must not
+            // cancel a job that belongs to `main`'s path of the same name.
+            if version_is_active(tx, ws, &input.version_id)? {
+                cancel_pending_jobs_for_path(tx, ws, &input.from_path, input.now_ms)?;
+            }
 
             let result = RenameResult {
                 object: object.clone(),

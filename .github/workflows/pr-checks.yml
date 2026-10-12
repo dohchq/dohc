@@ -126,6 +126,8 @@ jobs:
               - 'examples/stock-orders/**'
               # The desktop daemon prebuild reads Cargo configuration.
               - '.cargo/**'
+              # build-artifacts.test.mjs reads the desktop ignore rules.
+              - 'apps/desktop/.gitignore'
               - '.npmrc'
               - '.pnpmfile.cjs'
               - '.pnpmfile.mjs'
@@ -205,6 +207,7 @@ jobs:
             .agent-artifacts/verification/*/*.log
             .agent-artifacts/verification/*/js-tests/result.json
             .agent-artifacts/verification/*/js-tests/**/*.log
+            .agent-artifacts/verification/*/ticket-evidence/*.json
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
@@ -268,6 +271,7 @@ jobs:
           path: |
             .agent-artifacts/verification/*/result.json
             .agent-artifacts/verification/*/*.log
+            .agent-artifacts/verification/*/ticket-evidence/*.json
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7

@@ -830,7 +830,7 @@ fn capture_supersedes_an_older_pending_materialization_job() {
     .expect("drain");
     let stale = results
         .iter()
-        .find(|result| result.job_id == "resolve-moment")
+        .find(|result| result.job_id == "binary-mat_resolve-moment")
         .expect("stale job drained");
     assert!(
         matches!(stale.outcome, JobOutcome::Superseded),
@@ -889,7 +889,7 @@ fn recapture_after_rollback_advances_past_the_durable_restore() {
             conn.query_row(
                 "SELECT content_sha256, target_generation FROM materialization_jobs \
                  WHERE job_id = ?1 AND status = 'complete'",
-                [second.moment_id.as_str()],
+                [dohc_engine_domain::binary_write_job_id(&second.moment_id)],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
         })
@@ -980,7 +980,7 @@ fn deduped_capture_marks_the_confirmed_head_as_materialized() {
     .expect("drain");
     let stale = results
         .iter()
-        .find(|result| result.job_id == "old-moment")
+        .find(|result| result.job_id == "binary-mat_old-moment")
         .expect("stale job drained");
     assert!(
         matches!(stale.outcome, JobOutcome::Superseded),

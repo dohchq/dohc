@@ -13,6 +13,16 @@ pub(crate) fn search_policy_for_store(store: &EngineStore) -> Option<SearchPolic
     workspace_root_from_database(store.database_path()).map(read_engine_search_policy)
 }
 
+/// [`search_policy_for_store`] for a writer that holds only its connection.
+pub(crate) fn search_policy_for_connection(
+    conn: &rusqlite::Connection,
+) -> Option<SearchPolicySnapshot> {
+    conn.path()
+        .map(Path::new)
+        .and_then(workspace_root_from_database)
+        .map(read_engine_search_policy)
+}
+
 pub(crate) fn delete_file_search_index(
     tx: &Transaction<'_>,
     workspace_id: &str,

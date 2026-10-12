@@ -378,6 +378,13 @@ pub(super) fn validate_workspace_param(
     Ok(())
 }
 
+fn bound_to_another_workspace() -> WireError {
+    WireError::new(
+        ErrorCode::InvalidParams,
+        "workspace root is already bound to another workspace",
+    )
+}
+
 pub(super) fn enforce_workspace(open: &OpenWorkspace, workspace_id: &str) -> Result<(), WireError> {
     if open.workspace_id == workspace_id {
         Ok(())
@@ -626,10 +633,7 @@ impl EngineService {
             // The root's logical binding to a workspace id holds regardless of
             // actor liveness: a different workspace id is always rejected.
             if open.workspace_id != params.workspace_id {
-                return Err(WireError::new(
-                    ErrorCode::InvalidParams,
-                    "workspace root is already bound to another workspace",
-                ));
+                return Err(bound_to_another_workspace());
             }
             // A maintenance-free open is read intent, not a request for
             // ownership. Mint a non-owning token over the live binding so its
@@ -876,6 +880,17 @@ impl EngineService {
                 }
             }
             return Err(map_root_binding(error));
+        }
+        // Versioned state belongs to one workspace. Refuse any other before
+        // recovery or capture can write to the store.
+        if Self::read_under_ctx(
+            &cancellation,
+            "workspace.open (workspace identity)",
+            actor.holds_other_workspace(params.workspace_id.clone()),
+        )
+        .await?
+        {
+            return Err(bound_to_another_workspace());
         }
         let open_guard = if requested_mode == WorkspaceOpenMode::Full
             && let Some(config) = self.ordinary_live_host.get()
@@ -2413,6 +2428,133 @@ mod tests {
             );
             supervisor.close(&db_path).unwrap();
         }
+    }
+
+    fn open_params(root: &std::path::Path, workspace_id: &str, options: Value) -> Value {
+        let mut params = json!({
+            "rootDir": root.to_string_lossy(),
+            "workspaceId": workspace_id,
+        });
+        let options = options.as_object().cloned().unwrap_or_default();
+        params.as_object_mut().expect("params").extend(options);
+        params
+    }
+
+    /// A root with versioned state keeps its workspace across close and
+    /// restart. Another id is refused before recovery or capture writes, and
+    /// the owner reopens.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_closed_root_refuses_another_workspace_before_it_writes() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let root = scratch.path();
+        let db_path = root.join(".dohc/engine/engine.db");
+        let none = json!({ "captureMode": "none" });
+        let read_only = json!({ "captureMode": "none", "skipStartupMaintenance": true });
+        let persisted = || {
+            dohc_engine_storage::EngineStore::open_read_only(&db_path)
+                .expect("store")
+                .read_with(|conn| {
+                    let mut select = conn.prepare(
+                        "SELECT workspace_id FROM versioned_workspaces ORDER BY workspace_id",
+                    )?;
+                    let ids = select
+                        .query_map([], |row| row.get::<_, String>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    let moments: i64 =
+                        conn.query_row("SELECT COUNT(*) FROM moments", [], |row| row.get(0))?;
+                    Ok::<_, rusqlite::Error>((ids, moments))
+                })
+                .expect("persisted workspace")
+        };
+        // An empty open with capture off leaves no versioned state, so a
+        // later capture can still prove a fresh import.
+        let first: &'static WorkspaceSupervisor = Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(first);
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                open_params(root, "owner", none.clone()),
+            )
+            .await
+            .expect("first open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("handle");
+        service.workspace_close(Some(handle)).await.expect("close");
+        assert_eq!(persisted(), (Vec::new(), 0));
+
+        // Once the owner has versioned state, the store belongs to it.
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                open_params(root, "owner", none.clone()),
+            )
+            .await
+            .expect("owner reopens");
+        let workspace = opened["workspace"].clone();
+        service
+            .versions_ensure_main(
+                &RequestContext::unbounded(),
+                Some(serde_json::from_value(workspace.clone()).expect("handle")),
+                json!({}),
+            )
+            .await
+            .expect("main version");
+        service
+            .workspace_close(Some(serde_json::from_value(workspace).expect("handle")))
+            .await
+            .expect("close");
+        let owner_only = persisted();
+        assert_eq!(owner_only.0, vec!["owner".to_owned()]);
+        let refused = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                open_params(root, "other", none.clone()),
+            )
+            .await
+            .expect_err("a closed root keeps its workspace");
+        assert_eq!(refused.code, ErrorCode::InvalidParams);
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                open_params(root, "owner", none.clone()),
+            )
+            .await
+            .expect("the refusal does not strand the actor");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("handle");
+        service.workspace_close(Some(handle)).await.expect("close");
+        assert_eq!(first.actor_count(), 0);
+
+        // After a restart, capture and read-only opens are refused before they write.
+        std::fs::write(root.join("note.md"), "captured only by its owner").expect("note");
+        let restarted: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(restarted);
+        for options in [json!({}), read_only.clone()] {
+            let refused = service
+                .workspace_open(
+                    &RequestContext::unbounded(),
+                    open_params(root, "other", options),
+                )
+                .await
+                .expect_err("a restarted service keeps the root's workspace");
+            assert_eq!(refused.code, ErrorCode::InvalidParams);
+            assert_eq!(persisted(), owner_only);
+        }
+        for options in [read_only, none] {
+            let opened = service
+                .workspace_open(
+                    &RequestContext::unbounded(),
+                    open_params(root, "owner", options),
+                )
+                .await
+                .expect("the owner reopens");
+            let handle: WorkspaceHandle =
+                serde_json::from_value(opened["workspace"].clone()).expect("handle");
+            service.workspace_close(Some(handle)).await.expect("close");
+        }
+        assert_eq!(persisted(), owner_only);
+        assert_eq!(restarted.actor_count(), 0);
     }
 
     /// A fresh store whose root-binding stamp fails is deleted with the

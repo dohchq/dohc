@@ -1546,6 +1546,58 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it.each([
+    { name: 'data.csv', body: 'id,zip,x,x,x_2\na,02134,first,second,third',
+      rows: [{ id: 'a', zip: '02134', x: 'first', x_3: 'second', x_2: 'third' }] },
+    { name: 'data.json', body: '[{"id":"a","zip":"02134","flag":"true"}]',
+      rows: [{ id: 'a', zip: '02134', flag: 'true' }] },
+    { name: 'data.jsonl', body: '{"id":"a","zip":"02134","flag":"true"}',
+      rows: [{ id: 'a', zip: '02134', flag: 'true' }] },
+    { name: 'data.md', body: '| id | zip |\n| --- | --- |\n| a | 02134 |\n\n| id | zip |\n| --- | --- |\n| b | 99999 |',
+      rows: [{ id: 'a', zip: '02134' }] },
+  ])("import_data preserves source bytes and every value from $name", async ({ name, body, rows }) => {
+    await withWorkspace(async ctx => {
+      const source = Buffer.from(body);
+      await writeFile(join(ctx.root, name), source);
+      const request = vi.fn(emptyDesktopHistoryRequest);
+      const result = await importData({ ...ctx, request }, { sourcePath: name, databasePath: 'data.sqlite', tableName: 'rows' }, 'Import agent');
+      expect(result).toMatchObject({ ok: true, rowCount: rows.length });
+      expect(await queryDatabase(ctx, { databasePath: 'data.sqlite', sql: 'SELECT * FROM rows ORDER BY id' })).toMatchObject({ ok: true, rows });
+      expect(await readFile(join(ctx.root, name))).toEqual(source);
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: 'fileWrite', args: expect.objectContaining({
+        agent: 'Import agent', files: [expect.objectContaining({ path: 'data.sqlite', createOnly: true })],
+      }) }));
+    });
+  });
+
+  it.each([
+    { name: 'extra.csv', body: 'id,note\na,first,discarded' },
+    { name: 'unfinished.csv', body: 'id,note\na,"unfinished' },
+    { name: 'invalid.json', body: '[{"id":' },
+    { name: 'receipt.pdf', body: '%PDF-1.7\n| id | value |\n| --- | --- |\n| a | 1 |\n%%EOF' },
+  ])("import_data refuses $name without creating a destination or changing the source", async ({ name, body }) => {
+    await withWorkspace(async ctx => {
+      const source = Buffer.from(body);
+      await writeFile(join(ctx.root, name), source);
+      const request = vi.fn(emptyDesktopHistoryRequest);
+      expect(await importData({ ...ctx, request }, { sourcePath: name, databasePath: 'data.sqlite', tableName: 'rows' })).toMatchObject({ ok: false });
+      expect(request).not.toHaveBeenCalled();
+      await expect(stat(join(ctx.root, 'data.sqlite'))).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await readFile(join(ctx.root, name))).toEqual(source);
+    });
+  });
+
+  it("import_data keeps existing destination bytes", async () => {
+    await withWorkspace(async ctx => {
+      await writeFile(join(ctx.root, 'data.csv'), 'id,note\na,first');
+      const original = Buffer.from('existing database bytes');
+      await writeFile(join(ctx.root, 'data.sqlite'), original);
+      expect(await importData(ctx, { sourcePath: 'data.csv', databasePath: 'data.sqlite', tableName: 'rows' })).toMatchObject({ ok: false });
+      expect(await readFile(join(ctx.root, 'data.sqlite'))).toEqual(original);
+    });
+  });
+
   it("import_data writes a visible .sqlite and query_database reads it back", async () => {
     await withWorkspace(async (ctx) => {
       await writeFile(join(ctx.root, "people.csv"), "id,name\n1,Ada\n2,Lin\n");

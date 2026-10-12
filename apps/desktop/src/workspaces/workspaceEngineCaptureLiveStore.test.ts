@@ -19,6 +19,7 @@ import {
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
+import { LIVE_UPDATE_IDENTIFIER_MAX_BYTES } from "@dohc/live-session-contract/live-update-admission";
 import { describe, expect, it, vi } from "vitest";
 import { createCaptureLiveStores as createAttachedCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 import { createTestScratch } from "./testTemp";
@@ -279,6 +280,14 @@ describe("Stop and restore relay confirmation through the moment reader", () => 
       }
     },
   );
+  it.each([false, "true", null])("refuses a snapshot person's relay confirmation of %s", async marker => {
+    const later = { ...moment, authors: [{ kind: "human", humanId: "ana", humanName: "Ana", relayConfirmed: marker }] };
+    const client = clientFor(async request => ({ id: request.id, result: later }));
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
+    );
+    await expect(store.getMoment({ workspaceId: WORKSPACE_ID, momentId: later.momentId })).rejects.toThrow();
+  });
 });
 
 function conflict(status: "open" | "resolved" = "open"): ConflictRecord {
@@ -930,10 +939,11 @@ describe("createCaptureLiveStores", () => {
       text: "hello", createOnly, requestId: "caller-stable", expectedSha256: "a".repeat(64), metadata: { origin: "api" },
     })).rejects.toBe(SENTINEL);
     expect(requests).toHaveLength(2);
-    expect(requests[0]?.params).toMatchObject({ createOnly, requestId: "caller-stable", expectedSha256: "a".repeat(64) });
+    expect(requests[0]?.params).toMatchObject({ createOnly, expectedSha256: "a".repeat(64) });
+    expect(requests[0]?.params).not.toHaveProperty("requestId");
+    expect(requests[0]?.idempotencyKey).toBe("caller-stable");
     expect(requests[1]?.params).toEqual(requests[0]?.params);
     expect(requests[1]?.idempotencyKey).toBe(requests[0]?.idempotencyKey);
-    expect(requests[0]?.params).toMatchObject({ requestId: requests[0]?.idempotencyKey });
   });
 
   it("retries transport failures for reads but not mutations", async () => {
@@ -980,12 +990,12 @@ describe("createCaptureLiveStores", () => {
     });
   });
 
-  it("translates capture origins and flattens daemon conflict side states", async () => {
+  it.each(["open", "resolved"] as const)("translates %s conflicts into public records", async (status) => {
     const client = clientFor(async (request) => {
       expect(request.method).toBe(WORKSPACE_METHOD.conflictsList);
       return {
         id: request.id,
-        result: { conflicts: [conflict()], nextAfterConflictId: null },
+        result: { conflicts: [conflict(status)], nextAfterConflictId: null },
       };
     });
     const { store } = createCaptureLiveStores(
@@ -993,9 +1003,8 @@ describe("createCaptureLiveStores", () => {
       sessionsFor(client),
     );
 
-    await expect(
-      store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" }),
-    ).resolves.toMatchObject({
+    const result = await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status });
+    expect(result).toMatchObject({
       nextAfterConflictId: null,
       conflicts: [
         {
@@ -1013,6 +1022,11 @@ describe("createCaptureLiveStores", () => {
         },
       ],
     });
+    if (status === "open") {
+      expect(result.conflicts[0]).not.toHaveProperty("resolution");
+    } else {
+      expect(result.conflicts[0]?.resolution).toBe("applied-incoming");
+    }
   });
 
   it("preserves nonempty binary conflict-side byte lengths", async () => {
@@ -1995,13 +2009,22 @@ describe("createCaptureLiveStores", () => {
     },
   );
 
+  const LONGEST_LIVE_ID = "\"".repeat(LIVE_UPDATE_IDENTIFIER_MAX_BYTES);
   it.each(([VERSIONED_METHOD.momentsGet, VERSIONED_METHOD.momentsList] as const).flatMap((method) => [
     { method, author: { kind: "named", userId: "ana", grantId: "grant", grantGeneration: 2 } as const },
     { method, author: { kind: "link", grantId: "grant", grantGeneration: 2, principalId: "holder" } as const },
-    { method, author: { kind: "link", publicPrincipalId: "public-holder", label: "Ana" } as const },
+    // The longest identifiers a live share admits: 512 UTF-8 bytes, at the largest generation.
+    { method, author: { kind: "named", userId: LONGEST_LIVE_ID, grantId: LONGEST_LIVE_ID, grantGeneration: Number.MAX_SAFE_INTEGER } as const },
+    { method, author: { kind: "link", grantId: LONGEST_LIVE_ID, grantGeneration: Number.MAX_SAFE_INTEGER, principalId: LONGEST_LIVE_ID } as const },
     { method, author: { kind: "agent", agentId: "agent" } as const },
     { method, author: { kind: "automation", automationId: "collection:Tasks#stamp", depth: 4 } as const },
     { method, author: { kind: "human", humanId: "ada", onBehalfOf: "ada" } as const },
+    // A live author snapshot: the relay-admitted account holder or link holder, and a declared agent.
+    { method, author: { kind: "human", humanId: "owner", humanName: "Owner" } as const },
+    { method, author: { kind: "human", humanId: LONGEST_LIVE_ID, humanName: LONGEST_LIVE_ID } as const },
+    { method, author: { kind: "link", publicPrincipalId: LONGEST_LIVE_ID, label: LONGEST_LIVE_ID } as const },
+    { method, author: { kind: "agent", agentId: "writer", agentName: "Writer", onBehalfOf: "owner", depth: 1 } as const },
+    { method, author: { kind: "link", publicPrincipalId: "public-holder", label: "Ana" } as const },
     { method, author: { kind: "human", humanId: "ada", humanName: "Ada" } as const },
     { method, author: { kind: "unattributed" } as const },
   ]))(

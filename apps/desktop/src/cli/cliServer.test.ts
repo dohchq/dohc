@@ -1575,6 +1575,7 @@ describe("CLI socket server", () => {
               depth: 0,
               recordedAtMs: SERVER_NOW_MS,
               automationRun: null,
+              linkAuthor: null,
             },
           ],
           nextBeforeHistoryId: null,

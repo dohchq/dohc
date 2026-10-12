@@ -315,20 +315,20 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
       stdinBody,
       env.DOHC_RUN_ID,
     );
-    const send =
-      options.request ??
-      ((value: CliRequestWithoutToken) =>
-        sendCliRequest(value, {
-          ...options.client,
-          timeoutMs: options.client?.timeoutMs ?? (command.verb === "dataset" || command.verb === "appPublication" || command.verb === "ownerAppResponses" ? 90_000 : DEFAULT_RESPONSE_TIMEOUT_MS),
-          env,
-        }));
-    const rawResult = await send(request);
     let result: CliResultByVerb[keyof CliResultByVerb];
-    try {
-      result = parseCliResult(command.verb, rawResult);
-    } catch {
-      throw new DohcCliError("desktop app returned an invalid response");
+    if (options.request) {
+      const rawResult = await options.request(request);
+      try {
+        result = parseCliResult(command.verb, rawResult);
+      } catch {
+        throw new DohcCliError("desktop app returned an invalid response");
+      }
+    } else {
+      result = await sendCliRequest<typeof command.verb>(request, {
+        ...options.client,
+        timeoutMs: options.client?.timeoutMs ?? (command.verb === "dataset" || command.verb === "appPublication" || command.verb === "ownerAppResponses" ? 90_000 : DEFAULT_RESPONSE_TIMEOUT_MS),
+        env,
+      });
     }
     const refused = REFUSING_VERBS.has(command.verb) ? refusal(result) : null;
     if (refused !== null) throw new DohcCliError(refused);
