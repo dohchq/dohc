@@ -190,6 +190,8 @@ impl EngineStore {
 
     /// Request background work and finish only bounded writer-side tails.
     pub fn request_checkpoint(&mut self) {
+        #[cfg(feature = "fault-injection")]
+        let _checkpoint = crate::capture_phase::Measure::new("writer_checkpoint_and_request");
         let changes = self.conn.total_changes();
         if self.checkpoints.is_none() || changes == self.checkpoint_changes {
             return;
@@ -234,6 +236,8 @@ impl EngineStore {
     }
 
     fn prepare_write(&mut self) -> Result<(), StorageError> {
+        #[cfg(feature = "fault-injection")]
+        let _admission = crate::capture_phase::Measure::new("prepare_write");
         if self.checkpoints.as_ref().is_some_and(|c| c.has_stopped()) {
             let replacement = crate::checkpoint::Checkpoints::start(&self.database_path)?;
             replacement.request();
@@ -342,9 +346,21 @@ impl EngineStore {
     where
         E: From<StorageError>,
     {
+        #[cfg(feature = "fault-injection")]
+        let mut phase = crate::capture_phase::Phase::new("storage_transaction", None, 0, true);
+        #[cfg(feature = "fault-injection")]
+        let changes = self.conn.total_changes();
+        #[cfg(feature = "fault-injection")]
+        crate::capture_phase::wal(&self.conn, &mut phase, true);
         self.prepare_write().map_err(E::from)?;
         let outcome = Self::write_on_connection(&self.conn, faults, f)?;
         self.record_write_outcome(&outcome);
+        #[cfg(feature = "fault-injection")]
+        {
+            crate::capture_phase::wal(&self.conn, &mut phase, false);
+            phase.field("total_changes_delta", self.conn.total_changes().saturating_sub(changes));
+            phase.finish(match &outcome { TxnOutcome::Committed(_) => "committed", TxnOutcome::Crashed { committed: true } => "committed-before-crash", _ => "rolled-back" });
+        }
         Ok(outcome)
     }
 
@@ -374,6 +390,7 @@ impl EngineStore {
             #[cfg(feature = "fault-injection")]
             {
                 self.harness_commits += 1;
+                crate::capture_phase::count("commits", 1);
             }
         }
     }
@@ -386,9 +403,15 @@ impl EngineStore {
     where
         E: From<StorageError>,
     {
+        #[cfg(feature = "fault-injection")]
+        let begin_phase = crate::capture_phase::Measure::new("BEGIN");
         let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
             .map_err(StorageError::persist)?;
 
+        #[cfg(feature = "fault-injection")]
+        drop(begin_phase);
+        #[cfg(feature = "fault-injection")]
+        let callback_phase = crate::capture_phase::Measure::new("transaction_callback");
         let value = match f(&tx) {
             Ok(value) => value,
             Err(err) => {
@@ -399,6 +422,8 @@ impl EngineStore {
             }
         };
 
+        #[cfg(feature = "fault-injection")]
+        drop(callback_phase);
         // Cancel/crash point is between durable steps, never mid-commit: the
         // closure has issued all SQL but nothing is durable yet.
         if should_crash(faults, FaultPoint::StorageBeforePersist) {
@@ -406,7 +431,11 @@ impl EngineStore {
             return Ok(TxnOutcome::Crashed { committed: false });
         }
 
+        #[cfg(feature = "fault-injection")]
+        let commit_phase = crate::capture_phase::Measure::new("COMMIT");
         tx.commit().map_err(StorageError::persist)?;
+        #[cfg(feature = "fault-injection")]
+        drop(commit_phase);
 
         if should_crash(faults, FaultPoint::StorageAfterCommitBeforeAck) {
             return Ok(TxnOutcome::Crashed { committed: true });

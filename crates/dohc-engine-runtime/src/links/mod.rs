@@ -542,6 +542,8 @@ fn seed_step_with(store: &mut EngineStore, faults: &dyn FaultInjector) -> Result
         "SELECT EXISTS(SELECT 1 FROM link_index_state WHERE seed_phase IN ('deferred','aliases'))",
         [], |r| r.get::<_, bool>(0))).map_err(sql)?;
     if !needed { return Ok(false); }
+    #[cfg(feature = "fault-injection")]
+    let mut phase = dohc_engine_storage::capture_phase::Phase::new("link_seed", None, 0, true);
     let outcome = store.write_with(faults, |tx| {
         let state = tx.query_row(
             "SELECT workspace_id,version_id,seed_after_path FROM link_index_state WHERE seed_phase IN ('deferred','aliases') LIMIT 1",
@@ -552,6 +554,8 @@ fn seed_step_with(store: &mut EngineStore, faults: &dyn FaultInjector) -> Result
         let mut stmt = tx.prepare("SELECT path,object_id FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND path>?3 ORDER BY path LIMIT 32").map_err(sql)?;
         let aliases = stmt.query_map(params![ws,v,after], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))
             .map_err(sql)?.collect::<Result<Vec<_>,_>>().map_err(sql)?;
+        #[cfg(feature = "fault-injection")]
+        phase.field("aliases", aliases.len() as u64);
         for (path,object) in &aliases {
             tx.execute("INSERT INTO link_aliases(workspace_id,version_id,object_id,path) VALUES(?1,?2,?3,?4) ON CONFLICT(workspace_id,version_id,path) DO UPDATE SET object_id=excluded.object_id",params![ws,v,object,path]).map_err(sql)?;
             tx.execute("INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) VALUES(?1,?2,?3,?4) ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1,queued_at_ms=excluded.queued_at_ms,retry_after_ms=0",params![ws,v,object,now_ms()]).map_err(sql)?;
@@ -563,5 +567,7 @@ fn seed_step_with(store: &mut EngineStore, faults: &dyn FaultInjector) -> Result
         }
         Ok::<_, StorageError>(true)
     })?;
+    #[cfg(feature = "fault-injection")]
+    phase.finish(if matches!(outcome, TxnOutcome::Committed(true)) { "committed" } else { "interrupted" });
     Ok(matches!(outcome, TxnOutcome::Committed(true)))
 }

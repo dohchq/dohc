@@ -9,6 +9,16 @@ pub(crate) fn install(conn: &Connection) -> rusqlite::Result<()> {
     let dirty = Arc::new(AtomicBool::new(false));
     let writes = Arc::clone(&dirty);
     conn.update_hook(Some(move |_, database: &str, table: &str, _| {
+        #[cfg(feature = "fault-injection")]
+        {
+            crate::capture_phase::count("row_hook_callbacks", 1);
+            match table {
+                "link_pending" => crate::capture_phase::count("link_pending_row_writes", 1),
+                "link_aliases" => crate::capture_phase::count("link_alias_row_writes", 1),
+                "links" | "link_sources" | "link_target_keys" | "link_occurrence_keys" => crate::capture_phase::count("link_index_row_writes", 1),
+                _ => {}
+            }
+        }
         if database == "main"
             && matches!(
                 table,

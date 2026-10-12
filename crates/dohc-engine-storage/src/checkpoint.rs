@@ -49,6 +49,10 @@ impl Checkpoints {
             .name("dohc-wal-checkpoint".into())
             .spawn(move || {
                 while rx.recv().is_ok() {
+                    #[cfg(feature = "fault-injection")]
+                    let mut phase = crate::capture_phase::Phase::new("checkpoint_request_cycle", None, 0, true);
+                    #[cfg(feature = "fault-injection")]
+                    if phase.active() && let Ok((log, backfilled)) = frames(&conn) { phase.field("starting_log",log); phase.field("starting_backfilled",backfilled); }
                     if frames(&conn).is_ok_and(|(log, backfilled)| {
                         log - backfilled >= BACKGROUND_CHECKPOINT_FRAMES
                     }) {
@@ -57,6 +61,12 @@ impl Checkpoints {
                     let (sequence, signal) = &*worker_completed;
                     *sequence.lock().unwrap() += 1;
                     signal.notify_all();
+                    #[cfg(feature = "fault-injection")]
+                    {
+                        phase.field("completed", *sequence.lock().unwrap());
+                        if phase.active() && let Ok((log, backfilled)) = frames(&conn) { phase.field("ending_log",log); phase.field("ending_backfilled",backfilled); }
+                        phase.finish("completed");
+                    }
                 }
             })
             .map_err(crate::StorageError::persist)?;
@@ -75,10 +85,16 @@ impl Checkpoints {
     // Quiesce before BEGIN so a large commit cannot keep the worker one
     // transaction behind. Refuse before mutation if the bounded handoff expires.
     pub(crate) fn prepare_for_write(&self, conn: &Connection) -> Result<(), crate::StorageError> {
+        #[cfg(feature = "fault-injection")]
+        let mut phase = crate::capture_phase::Phase::new("write_admission", None, 0, true);
         let deadline = std::time::Instant::now() + MAX_CHECKPOINT_HANDOFF_WAIT;
         loop {
             let (log, backfilled) = frames(conn).map_err(crate::StorageError::persist)?;
+            #[cfg(feature = "fault-injection")]
+            { phase.field("log", log); phase.field("backfilled", backfilled); }
             if (0..MAX_PENDING_WAL_FRAMES).contains(&log) {
+                #[cfg(feature = "fault-injection")]
+                phase.finish("admitted");
                 return Ok(());
             }
             if log >= 0 && (0..=MAX_WRITER_BACKFILL_FRAMES).contains(&(log - backfilled)) {
@@ -97,6 +113,8 @@ impl Checkpoints {
                     });
                     conn.busy_timeout(std::time::Duration::from_millis(u64::from(timeout)))
                         .map_err(crate::StorageError::persist)?;
+                    #[cfg(feature = "fault-injection")]
+                    phase.finish(if matches!(&restart, Ok(0)) { "admitted-after-restart" } else { "refused-restart" });
                     return match restart {
                         Ok(0) => Ok(()),
                         Ok(_) => Err(crate::StorageError::FileLocked),
@@ -105,6 +123,8 @@ impl Checkpoints {
                 }
             }
             if std::time::Instant::now() >= deadline {
+                #[cfg(feature = "fault-injection")]
+                phase.finish("FileLocked");
                 return Err(crate::StorageError::FileLocked);
             }
             let (sequence, signal) = &*self.completed;
@@ -133,6 +153,8 @@ impl Checkpoints {
         {
             return;
         }
+        #[cfg(feature = "fault-injection")]
+        let _writer_phase = crate::capture_phase::Measure::new("writer_PASSIVE");
         if let Ok((latest, finished)) =
             conn.query_row("PRAGMA main.wal_checkpoint(PASSIVE)", [], |row| {
                 Ok((row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
@@ -224,6 +246,8 @@ fn catch_up(conn: &Connection, stopped: &AtomicBool) {
         if log >= WRITER_CHECKPOINT_FRAMES && log - backfilled <= MAX_WRITER_BACKFILL_FRAMES {
             break;
         }
+        #[cfg(feature = "fault-injection")]
+        let passive_phase = crate::capture_phase::Measure::new("background_PASSIVE");
         if conn
             .query_row("PRAGMA main.wal_checkpoint(PASSIVE)", [], |row| {
                 row.get::<_, i64>(0)
@@ -232,6 +256,8 @@ fn catch_up(conn: &Connection, stopped: &AtomicBool) {
         {
             break;
         }
+        #[cfg(feature = "fault-injection")]
+        drop(passive_phase);
         #[cfg(test)]
         checkpoint_crash_barrier();
         let Ok((latest, finished)) = frames(conn) else {

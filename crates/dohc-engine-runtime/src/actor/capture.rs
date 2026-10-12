@@ -116,8 +116,10 @@ impl ActorHandle {
         root_guard: Arc<dyn WorkspaceRootGuard>,
     ) -> Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError> {
         let inputs = inputs.into();
+        #[cfg(feature = "fault-injection")]
+        let mut roundtrip = dohc_engine_storage::capture_phase::Phase::new("queued_capture_batch", inputs.first().and_then(|i| i.metadata_correlation_id.as_deref()), inputs.len(), false);
         let token: CancellationToken = CancellationToken::new();
-        self.run_blocking(move |store, cache| {
+        let result = self.run_blocking(move |store, cache| {
             with_local_file_mutation_cache_reset(cache, || {
                 capture_ingest_batch_on_store(
                     store,
@@ -129,7 +131,10 @@ impl ActorHandle {
                     (&root_dir, root_guard.as_ref()),
                 )
             })
-        })
+        });
+        #[cfg(feature = "fault-injection")]
+        roundtrip.finish(if result.is_ok() { "returned" } else { "error" });
+        result
     }
 
     /// Capture a binary file on the actor's writer, blocking the caller.
@@ -453,6 +458,8 @@ fn capture_ingest_in_tx(
     let may_have_ydoc_state = batch
         .as_ref()
         .is_none_or(|batch| batch.has_ydoc_state != Some(false));
+    #[cfg(feature = "fault-injection")]
+    let domain_phase = dohc_engine_storage::capture_phase::Measure::new("domain_and_lease_recovery");
     let mut result = match batch.as_deref_mut() {
         Some(batch) => capture_ingest_in_batch_with_admission_in_tx(
             tx,
@@ -480,6 +487,8 @@ fn capture_ingest_in_tx(
             },
         )?,
     };
+    #[cfg(feature = "fault-injection")]
+    drop(domain_phase);
     if let Some(batch) = batch.as_deref_mut() {
         batch.capture.commit_result(&result)?;
     }
@@ -506,6 +515,8 @@ fn capture_ingest_in_tx(
         }
     }
     if admitted {
+        #[cfg(feature = "fault-injection")]
+        let _collection_phase = dohc_engine_storage::capture_phase::Measure::new("collection_and_lineage");
         let has_ydoc_state = match batch.as_deref_mut() {
             Some(batch) => match batch.has_ydoc_state {
                 Some(has_ydoc_state) => has_ydoc_state,
@@ -578,6 +589,8 @@ fn capture_ingest_in_tx(
         }
     }
     if !result.deduped {
+        #[cfg(feature = "fault-injection")]
+        let _search_phase = dohc_engine_storage::capture_phase::Measure::new("search");
         match indexing {
             CaptureIndexing::Skip => {}
             CaptureIndexing::ReadRoot(root_dir) => upsert_file_search_index(
@@ -603,6 +616,8 @@ fn capture_ingest_in_tx(
             .map_err(RuntimeError::from)?,
         }
     }
+    #[cfg(feature = "fault-injection")]
+    let journal_phase = dohc_engine_storage::capture_phase::Measure::new("outbound_journal");
     match batch {
         Some(batch) => journal_moment_outbound_with_batch_in_tx(
             tx,
@@ -619,6 +634,8 @@ fn capture_ingest_in_tx(
         ),
     }
     .map_err(RuntimeError::from)?;
+    #[cfg(feature = "fault-injection")]
+    drop(journal_phase);
     Ok(result)
 }
 
@@ -631,6 +648,8 @@ fn capture_ingest_batch_on_store(
     token: &CancellationToken,
     workspace_root: (&std::path::Path, &dyn WorkspaceRootGuard),
 ) -> Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError> {
+    #[cfg(feature = "fault-injection")]
+    let mut phase = dohc_engine_storage::capture_phase::Phase::new("actor_capture_batch", inputs.first().and_then(|i| i.metadata_correlation_id.as_deref()), inputs.len(), true);
     let (root_dir, root_guard) = workspace_root;
     let Some(first) = inputs.first() else {
         return Ok(Vec::new());
@@ -703,7 +722,11 @@ fn capture_ingest_batch_on_store(
         }
     })?;
     match outcome {
-        TxnOutcome::Committed(results) => Ok(results),
+        TxnOutcome::Committed(results) => {
+            #[cfg(feature = "fault-injection")]
+            { phase.field("failed_items", results.iter().filter(|r| r.is_err()).count() as u64); phase.finish("committed"); }
+            Ok(results)
+        },
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
     }
 }

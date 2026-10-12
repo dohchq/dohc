@@ -26,6 +26,8 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "fault-injection")]
+pub mod capture_phase;
 pub mod backup;
 pub mod blob;
 pub mod diagnostics;

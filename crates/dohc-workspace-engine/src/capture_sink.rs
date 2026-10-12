@@ -1156,6 +1156,8 @@ impl StoreCaptureSink {
     }
 
     fn commit_added_text_batch(&self, batch: Vec<PreparedTextCapture>) -> BatchIngestResult {
+        #[cfg(feature = "harness")]
+        let mut phase = dohc_engine_storage::capture_phase::Phase::new("sink_capture_batch", self.provenance.correlation_id.as_deref(), batch.len(), true);
         let root_guard = match self.root_guard() {
             Ok(root_guard) => root_guard,
             Err(_) => {
@@ -1174,6 +1176,8 @@ impl StoreCaptureSink {
         // The receipt records these bytes' hash, so the watcher or next scan
         // captures a newer disk edit even when it arrives during the wait.
         let inputs: Arc<[CaptureIngest]> = inputs.into();
+        #[cfg(feature = "harness")]
+        let roundtrip_phase = dohc_engine_storage::capture_phase::Measure::new("actor_roundtrip_including_retry");
         let results = self.batch_retry.run(|| {
             self.actor.capture_ingest_batch_blocking(
                 Arc::clone(&inputs),
@@ -1184,6 +1188,8 @@ impl StoreCaptureSink {
                 Arc::clone(&root_guard),
             )
         });
+        #[cfg(feature = "harness")]
+        drop(roundtrip_phase);
         match results {
             Ok(results) if results.len() == identities.len() => {
                 let mut outcomes = Vec::with_capacity(results.len());
@@ -1205,10 +1211,14 @@ impl StoreCaptureSink {
                         Err(_) => Err(INGEST_FAILED),
                     });
                 }
+                #[cfg(feature = "harness")]
+                { phase.field("failed_receipts", outcomes.iter().filter(|r| r.is_err()).count() as u64); phase.finish("receipts"); }
                 BatchIngestResult::Committed(outcomes)
             }
-            Ok(_) | Err(_) => BatchIngestResult::Uncertain {
-                attempted: identities.len(),
+            Ok(_) | Err(_) => {
+                #[cfg(feature = "harness")]
+                { phase.field("failed_receipts", identities.len() as u64); phase.finish("uncertain"); }
+                BatchIngestResult::Uncertain { attempted: identities.len() }
             },
         }
     }
@@ -1274,8 +1284,12 @@ impl CaptureSink for StoreCaptureSink {
             Ok(root) => root,
             Err(_) => return Some(self.ingest_single_added_op(&ops[0])),
         };
+        #[cfg(feature = "harness")]
+        let mut prepare_phase = dohc_engine_storage::capture_phase::Phase::new("parallel_prepare", self.provenance.correlation_id.as_deref(), candidates.len(), false);
         let prepared =
             prepare_added_text_prefix_parallel(&self.shadow_root, captured_root, &candidates);
+        #[cfg(feature = "harness")]
+        { prepare_phase.finish("completed"); drop(prepare_phase); }
         let prepared = match prepared {
             PreparedTextPrefix::Ready(prepared) => prepared,
             PreparedTextPrefix::FallbackFirst => {

@@ -56,8 +56,12 @@ impl CaptureBatchRetry {
         now: impl Fn() -> Instant,
         mut wait: impl FnMut(Duration),
     ) -> Result<T, RuntimeError> {
+        #[cfg(feature = "harness")]
+        let mut phase = dohc_engine_storage::capture_phase::Phase::new("capture_busy_retry", None, 0, true);
         loop {
             if self.cancel.is_cancelled() {
+                #[cfg(feature = "harness")]
+                phase.finish("cancelled");
                 return self.observe(Err(RuntimeError::Cancelled));
             }
             if self
@@ -65,10 +69,16 @@ impl CaptureBatchRetry {
                 .get()
                 .is_some_and(|deadline| now() >= deadline)
             {
+                #[cfg(feature = "harness")]
+                phase.finish("busy-budget-exhausted");
                 return Err(RuntimeError::Storage(StorageError::FileLocked));
             }
+            #[cfg(feature = "harness")]
+            dohc_engine_storage::capture_phase::count("retry_attempts", 1);
             match attempt() {
                 Err(error) if crate::rpc::error::store_busy(&error) => {
+                    #[cfg(feature = "harness")]
+                    dohc_engine_storage::capture_phase::count("FileLocked_hits", 1);
                     let deadline = self.deadline.get().unwrap_or_else(|| {
                         let deadline = now() + BUSY_RETRY_LIMIT;
                         self.deadline.set(Some(deadline));
@@ -76,11 +86,19 @@ impl CaptureBatchRetry {
                     });
                     let remaining = deadline.saturating_duration_since(now());
                     if remaining.is_zero() {
+                        #[cfg(feature = "harness")]
+                        phase.finish("busy-budget-exhausted");
                         return Err(error);
                     }
+                    #[cfg(feature = "harness")]
+                    let _wait_phase = dohc_engine_storage::capture_phase::Measure::new("retry_wait");
                     wait(remaining.min(BUSY_RETRY_INTERVAL));
                 }
-                result => return self.observe(result),
+                result => {
+                    #[cfg(feature = "harness")]
+                    phase.finish(if result.is_ok() { "success" } else { "non-busy-error" });
+                    return self.observe(result);
+                },
             }
         }
     }
