@@ -37,7 +37,7 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
   syncStatus: SyncStatusResult | null;
   workspaceId: string;
   activeDocumentPath: string | null;
-  fileTabOpen: boolean;
+  aboutTabOpen: boolean;
   shareView: NonNullable<WorkspaceSummary["shareView"]> | null;
   searchChatTarget: { thread: ChatThreadRecord; focusMessageId?: string } | null;
   setSearchChatTarget: (target: null) => void;
@@ -58,7 +58,7 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
     syncStatus,
     workspaceId,
     activeDocumentPath,
-    fileTabOpen,
+    aboutTabOpen,
     shareView,
     searchChatTarget,
     setSearchChatTarget,
@@ -74,7 +74,8 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
   // has no conversations, so its About stays on files. A chat search hit
   // opens its file's chat here, on the tab that had focus when it arrived,
   // until focus moves. The shell mints one target per hit, so each hit
-  // latches once, and a hit not yet consumed never follows focus elsewhere.
+  // latches once. Only that tab's About receives it, and moving focus drops
+  // a hit not yet read, so it never opens under another file.
   const [searchHit, setSearchHit] = useState<{
     target: NonNullable<typeof searchChatTarget>;
     tab: string | null;
@@ -83,10 +84,14 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
   if (searchChatTarget !== null && searchHit?.target !== searchChatTarget) {
     setSearchHit({ target: searchChatTarget, tab: focusedTabPath, shown: true });
   }
+  const leftHitTab = searchHit?.shown === true && searchHit.tab !== focusedTabPath;
   useEffect(() => {
-    setSearchHit((hit) => (hit?.shown && hit.tab !== focusedTabPath ? { ...hit, shown: false } : hit));
-  }, [focusedTabPath]);
+    if (!leftHitTab) return;
+    setSearchHit((hit) => (hit ? { ...hit, shown: false } : hit));
+    setSearchChatTarget(null);
+  }, [leftHitTab, setSearchChatTarget]);
   const showsSearchHit = searchHit?.shown === true && searchHit.tab === focusedTabPath;
+  const pendingHit = showsSearchHit ? searchChatTarget : null;
   const chatTab = parseChatTabPath(focusedTabPath);
   const conversationTab = !shareView && !showsSearchHit &&
     (chatTab?.kind === "channel" || chatTab?.kind === "dm");
@@ -143,12 +148,12 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
             <LazyLinkedChatsPanel
               workspaceId={workspaceId}
               filePath={activeDocumentPath}
-              fileTabOpen={fileTabOpen}
+              aboutTabOpen={aboutTabOpen}
               {...(shareView
                 ? { shareReadOnly: true }
                 : { history: { revision: historyRevision, onOpenMoment: openMoment } })}
-              initialThread={searchChatTarget?.thread ?? null}
-              initialFocusMessageId={searchChatTarget?.focusMessageId}
+              initialThread={pendingHit?.thread ?? null}
+              initialFocusMessageId={pendingHit?.focusMessageId}
               onInitialThreadConsumed={() => setSearchChatTarget(null)}
               onOpenPath={openPathWithHeading}
               onThreadRead={onChatsThreadRead}

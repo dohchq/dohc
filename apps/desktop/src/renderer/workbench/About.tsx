@@ -534,9 +534,9 @@ export function AboutAccess(props: {
     subject.kind === "path" ? accessReasonFor(facts, subject.path)
     : props.received == null ? "unexplained"
     : accessReasonForLane(facts, props.received ? "received" : "granted");
-  // The key names the subject in full, so a read keyed on it asks about the
-  // ref it was built from.
-  const subjectKey = subject.kind === "path" ? subject.path : `chat:${subject.channelWireId}`;
+  // The key names the subject in full, kind first so a path never reads as a
+  // wire id, and a read keyed on it asks about the ref it was built from.
+  const subjectKey = subject.kind === "path" ? `file:${subject.path}` : `chat:${subject.channelWireId}`;
   const ref: AccessObjectRef = subject.kind === "path"
     ? { kind: "path", path: subject.path, versionId: null }
     : { kind: "chat", channelWireId: subject.channelWireId };

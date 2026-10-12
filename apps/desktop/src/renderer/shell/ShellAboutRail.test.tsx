@@ -14,7 +14,7 @@ vi.hoisted(() => {
 import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { CHATS_TAB_PATH } from "../workbench/workbenchState";
+import { CHATS_TAB_PATH, chatTabPath } from "../workbench/workbenchState";
 import {
   WORKSPACE,
   STORED_STATE,
@@ -153,7 +153,21 @@ describe("About rail (right side)", () => {
     expect((await within(rail).findByTestId("linked-chats-empty")).textContent).toBe(
       "Switch to a file or a conversation to see who has access.",
     );
-    // No file tab open: nothing to switch to.
+    // A conversation open behind Home is somewhere to switch to as well.
+    cleanup();
+    renderShell(makeBridge(Promise.resolve({
+      ...STORED_STATE,
+      editorGroups: [{
+        id: "primary",
+        tabs: [chatTabPath({ kind: "channel", id: "general" }), CHATS_TAB_PATH],
+        activeTab: CHATS_TAB_PATH,
+        size: 1,
+      }],
+    })));
+    expect((await within(await screen.findByTestId("about-rail")).findByTestId("linked-chats-empty")).textContent).toBe(
+      "Switch to a file or a conversation to see who has access.",
+    );
+    // No file or conversation tab open: nothing to switch to.
     cleanup();
     renderShell(makeBridge(Promise.resolve({
       ...STORED_STATE,

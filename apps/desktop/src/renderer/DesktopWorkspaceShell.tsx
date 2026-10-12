@@ -229,6 +229,7 @@ import {
   GRAPH_TAB_PATH,
   HISTORY_TAB_PATH,
   isChatsTabPath,
+  parseChatTabPath,
   isGraphTabPath,
   isHistoryTabPath,
   isSingletonEditorTabPath,
@@ -1007,11 +1008,17 @@ export function DesktopWorkspaceShell(props: {
   const activeDocumentPath = isVirtualTabPath(focusedTabPath)
     ? null
     : focusedTabPath;
-  // Whether any group holds a file tab, so About can tell "open a file" apart
-  // from "a chat or another non-file tab has focus".
-  const fileTabOpen = useMemo(
-    () => wb.editorGroups.some((group) => group.tabs.some((tab) => !isVirtualTabPath(tab.path))),
-    [wb.editorGroups],
+  // Whether some tab holds what About covers, so its empty state says to
+  // switch to that tab instead of to open one: any file, or a conversation
+  // other than the focused one. A shared view has no conversations.
+  const sharedView = props.workspace.shareView != null;
+  const aboutTabOpen = useMemo(
+    () => wb.editorGroups.some((group) => group.tabs.some((tab) => {
+      if (!isVirtualTabPath(tab.path)) return true;
+      const chat = sharedView || tab.path === focusedTabPath ? null : parseChatTabPath(tab.path);
+      return chat?.kind === "channel" || chat?.kind === "dm";
+    })),
+    [focusedTabPath, sharedView, wb.editorGroups],
   );
 
   // A clicked search result: open the file and land at the line. The target
@@ -5710,7 +5717,7 @@ export function DesktopWorkspaceShell(props: {
             syncStatus={syncStatus}
             workspaceId={workspaceId}
             activeDocumentPath={activeDocumentPath}
-            fileTabOpen={fileTabOpen}
+            aboutTabOpen={aboutTabOpen}
             shareView={shareView}
             searchChatTarget={searchChatTarget}
             setSearchChatTarget={setSearchChatTarget}

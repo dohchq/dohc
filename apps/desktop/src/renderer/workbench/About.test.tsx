@@ -166,7 +166,7 @@ describe("About Access", () => {
     expect(bridgeMock.requestAccessRefresh.mock.invocationCallOrder[0]).toBeLessThan(
       bridgeMock.getObjectAccess.mock.invocationCallOrder[0]!,
     );
-    expect(notices.clear).toHaveBeenCalledWith("about-access:docs/plan.md");
+    expect(notices.clear).toHaveBeenCalledWith("about-access:file:docs/plan.md");
   });
 
   it("shows nothing it has not read while the answer loads", async () => {
@@ -308,14 +308,14 @@ describe("About Access", () => {
     const failed = await screen.findByTestId("about-access-failed");
     expect(failed.textContent).toBe("Try again");
     expect(notices.report).toHaveBeenCalledWith({
-      identity: "about-access:docs/plan.md",
+      identity: "about-access:file:docs/plan.md",
       message: expect.stringContaining("disk is busy"),
       cause: error,
       retry: expect.any(Function),
     });
     await userEvent.setup().click(within(failed).getByText("Try again"));
     await screen.findByTestId("about-access-empty");
-    expect(notices.clear).toHaveBeenLastCalledWith("about-access:docs/plan.md");
+    expect(notices.clear).toHaveBeenLastCalledWith("about-access:file:docs/plan.md");
   });
 
   it("reads again from its Notices row's Try again", async () => {
@@ -332,13 +332,13 @@ describe("About Access", () => {
     await waitFor(() => expect(notices.report).toHaveBeenCalledTimes(1));
     rerender(<Access path="docs/other.md" />);
     await waitFor(() => expect(notices.report).toHaveBeenCalledTimes(2));
-    expect(notices.clear).toHaveBeenCalledWith("about-access:docs/plan.md");
+    expect(notices.clear).toHaveBeenCalledWith("about-access:file:docs/plan.md");
     // Each file files its own row, cleared before the next file reports.
     expect(notices.report.mock.calls.map(([failure]) => failure.identity)).toEqual([
-      "about-access:docs/plan.md", "about-access:docs/other.md",
+      "about-access:file:docs/plan.md", "about-access:file:docs/other.md",
     ]);
     unmount();
-    expect(notices.clear).toHaveBeenLastCalledWith("about-access:docs/other.md");
+    expect(notices.clear).toHaveBeenLastCalledWith("about-access:file:docs/other.md");
   });
 
   it("ends a row when the read key changes, even for the same path", async () => {
@@ -347,7 +347,7 @@ describe("About Access", () => {
     await waitFor(() => expect(notices.report).toHaveBeenCalledTimes(1));
     const clears = notices.clear.mock.calls.length;
     rerender(<Access workspaceId="workspace-b" path="docs/plan.md" />);
-    expect(notices.clear.mock.calls.slice(clears).map(([identity]) => identity)).toContain("about-access:docs/plan.md");
+    expect(notices.clear.mock.calls.slice(clears).map(([identity]) => identity)).toContain("about-access:file:docs/plan.md");
   });
 
   it("neither reports nor clears when workspace A's read fails after the switch to B", async () => {
@@ -455,6 +455,18 @@ describe("About Access", () => {
     await screen.findByTestId("about-access-failed");
     expect(notices.report).toHaveBeenCalledWith(expect.objectContaining({ identity: "about-access:chat:wire-launch" }));
     expect(notices.clear).toHaveBeenCalledWith("about-access:chat:wire-general");
+  });
+
+  it("keeps a file named like a chat apart from that chat", async () => {
+    bridgeMock.getObjectAccess.mockRejectedValue(new Error("disk is busy"));
+    const { unmount } = render(<Access path="chat:abc" />);
+    await waitFor(() => expect(notices.report).toHaveBeenCalledTimes(1));
+    unmount();
+    render(<ChatAccess channelWireId="abc" received={false} />);
+    await waitFor(() => expect(notices.report).toHaveBeenCalledTimes(2));
+    expect(notices.report.mock.calls.map(([failure]) => failure.identity)).toEqual([
+      "about-access:file:chat:abc", "about-access:chat:abc",
+    ]);
   });
 
   it.each([

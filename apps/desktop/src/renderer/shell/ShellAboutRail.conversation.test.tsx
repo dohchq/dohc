@@ -72,7 +72,7 @@ function Rail(props: Partial<ComponentProps<typeof ShellAboutRail>>) {
         syncStatus={null}
         workspaceId="workspace-a"
         activeDocumentPath={null}
-        fileTabOpen={false}
+        aboutTabOpen={false}
         shareView={null}
         searchChatTarget={null}
         setSearchChatTarget={() => undefined}
@@ -209,6 +209,37 @@ describe("About for an open conversation", () => {
     expect((await screen.findByTestId("linked-chat-title")).textContent).toBe("Launch date");
     rerender(<Rail focusedTabPath={GENERAL} searchChatTarget={next} />);
     expect((await screen.findByTestId("about-header")).textContent).toBe("general");
+    // Back on the tab the hit arrived on, after it was read: the hit is over,
+    // and the tab shows its own conversation.
+    rerender(<Rail focusedTabPath={LAUNCH} searchChatTarget={next} />);
+    expect((await screen.findByTestId("about-header")).textContent).toBe("launch");
+    expect(screen.queryByTestId("linked-chat-thread")).toBeNull();
+  });
+
+  it("never opens a hit not yet read under the next file focused", async () => {
+    bridgeMock.listFileChats.mockResolvedValue({ fileObjectId: "object-b", threads: [] });
+    bridgeMock.listEngineMoments.mockResolvedValue({
+      moments: [], nextBeforeMomentOrder: null, latestMomentOrder: 0, activeVersionId: "main", protectedTruncated: false,
+    });
+    const setSearchChatTarget = vi.fn();
+    const hit = { thread: { id: "thread-pricing", title: "Pricing questions", createdAtMs: 1, updatedAtMs: 1 } };
+    // The hit arrives on a.md while main has not decided capture, so About's
+    // file panel is not there to read it.
+    const { rerender } = render(
+      <Rail focusedTabPath="a.md" activeDocumentPath="a.md" searchChatTarget={hit}
+        setSearchChatTarget={setSearchChatTarget} captureAvailable={false} captureDecided={false} />,
+    );
+    expect(screen.getByText("Loading About...")).toBeTruthy();
+
+    rerender(
+      <Rail focusedTabPath="b.md" activeDocumentPath="b.md" searchChatTarget={hit}
+        setSearchChatTarget={setSearchChatTarget} />,
+    );
+    expect((await screen.findByTestId("about-header")).textContent).toBe("b.md");
+    await act(async () => undefined);
+    expect(screen.queryByTestId("linked-chat-thread")).toBeNull();
+    // The shell drops the hit, so reopening About cannot bring it back.
+    expect(setSearchChatTarget).toHaveBeenCalledWith(null);
   });
 
   it("never shows the last conversation's name or access after a fast tab switch", async () => {

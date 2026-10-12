@@ -113,12 +113,12 @@ describe("LinkedChatsPanel with no file focused", () => {
     [true, true, "Switch to a file's tab to see its chats and access."],
     [false, false, "Open a file or a conversation to see who has access."],
     [false, true, "Open a file to see its chats and access."],
-  ] as const)("fileTabOpen %s, shared %s", (fileTabOpen, shared, copy) => {
+  ] as const)("aboutTabOpen %s, shared %s", (aboutTabOpen, shared, copy) => {
     render(
       <LinkedChatsPanel
         workspaceId="workspace-1"
         filePath={null}
-        fileTabOpen={fileTabOpen}
+        aboutTabOpen={aboutTabOpen}
         {...(shared ? { shareReadOnly: true } : { history: { revision: 0, onOpenMoment: () => undefined } })}
         onError={() => undefined}
       />,
