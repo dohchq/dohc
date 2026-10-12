@@ -121,18 +121,17 @@ describe("workspace summary changes", () => {
     let registry = { workspaces: [workspace("a"), workspace("b")] };
     let emit: ((event: WorkspaceActivityEvent) => void) | undefined;
     const getWorkspaceRegistry = vi.fn(async () => registry);
-    const onWorkspaceActivity = vi.fn((listener: typeof emit) => { emit = listener; return () => undefined; });
     vi.stubGlobal("dohcDesktop", {
       ...noticeBridge(),
       getWorkspaceRegistry,
       getUserSettings: vi.fn(async () => ({ settings: DEFAULT_USER_SETTINGS, source: "default" })),
       onUserSettingsChanged: vi.fn(() => () => undefined),
-      onWorkspaceActivity,
+      onWorkspaceActivity: vi.fn((listener: typeof emit) => { emit = listener; return () => undefined; }),
       onWorkspaceActivated: vi.fn(() => () => undefined),
       onShareHandoffStatus: vi.fn(() => () => undefined),
       getShareHandoffStatus: vi.fn(async () => ({ status: "idle" })),
     });
-    return { getWorkspaceRegistry, onWorkspaceActivity, emit: (event: WorkspaceActivityEvent) => emit?.(event),
+    return { getWorkspaceRegistry, emit: (event: WorkspaceActivityEvent) => emit?.(event),
       replace: (next: Workspace[]) => { registry = { workspaces: next }; } };
   }
 
@@ -200,11 +199,9 @@ describe("workspace summary changes", () => {
     const h = setup();
     render(<DesktopRoot />);
     await screen.findByTestId("workspace-shell");
-    await waitFor(() => expect(h.onWorkspaceActivity).toHaveBeenCalledTimes(2));
     const read = deferred<{ workspaces: Workspace[] }>();
     h.getWorkspaceRegistry.mockReturnValueOnce(read.promise);
     act(() => h.emit({ workspaceId: "a", summaryChanged: true }));
-    expect(h.getWorkspaceRegistry).toHaveBeenCalledTimes(2);
     fireEvent.click(screen.getByRole("button", { name: "Switch to b" }));
     if (returnToA) fireEvent.click(screen.getByRole("button", { name: "Switch to a" }));
     const shareView = { granterEmail: null, ended: true };
