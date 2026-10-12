@@ -107,6 +107,9 @@ impl EngineService {
             && !matches!(
                 method,
                 "liveApplication.hosts"
+                    | "liveApplication.attachWorkspace"
+                    | "liveApplication.detachWorkspace"
+                    | "liveApplication.unloadDocument"
                     | "liveApplication.register"
                     | "liveApplication.bootstrap"
                     | "liveApplication.apply"
@@ -279,6 +282,16 @@ impl EngineService {
                     .await?
             }
             "liveApplication.hosts" => self.configured_live_hosts(&ctx, &request)?,
+            "liveApplication.attachWorkspace" => {
+                Box::pin(self.configured_attach_workspace(&ctx, request)).await?
+            }
+            "liveApplication.detachWorkspace" => {
+                Box::pin(self.configured_detach_workspace(&ctx, request)).await?
+            }
+            "liveApplication.unloadDocument" => {
+                Box::pin(self.live_application_unload(&ctx, request.workspace, request.params))
+                    .await?
+            }
             "liveApplication.register" => {
                 self.live_application_register(&ctx, request.workspace, request.params)
                     .await?

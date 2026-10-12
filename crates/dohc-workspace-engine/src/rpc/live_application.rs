@@ -1,10 +1,11 @@
 use super::error::{map_runtime, workspace_unavailable};
 use super::workspace::{OpenWorkspace, WorkspaceOpenMode};
 use crate::{EngineService, lock};
+use dohc_engine_collab::DocKey;
 use dohc_engine_collab::live_object_binding::LiveObjectBinding;
 use dohc_engine_collab::live_update_application::{
     AdmittedLiveUpdate, ApplicationHostCoordinate, ApplicationResult, BootstrapResult,
-    LiveApplicationBootstrap, NativeRestoreFence,
+    LiveApplicationBootstrap, NativeRestoreFence, UnloadPending,
 };
 use dohc_engine_protocol::cancel::CancelSignal;
 use dohc_engine_protocol::error::{ErrorCode, WireError};
@@ -84,8 +85,13 @@ pub(crate) struct Registry {
 }
 
 impl Registry {
+    /// True for an empty registry: a configured host may run with no workspace.
     pub(super) fn hosts_current(&self, connection: &ConnectionHandle) -> bool {
-        !self.hosts.is_empty() && self.hosts.values().all(|host| host.current(connection))
+        self.hosts.values().all(|host| host.current(connection))
+    }
+
+    pub(super) fn has_host(&self, workspace: &WorkspaceHandle) -> bool {
+        self.hosts.contains_key(workspace)
     }
 
     pub(crate) fn retire_workspace(&mut self, workspace: &Arc<OpenWorkspace>) {
@@ -917,6 +923,108 @@ impl EngineService {
         }
         registry.registrations.insert(id, registration);
         Ok(json!({ "registrationId": id }))
+    }
+
+    /// Release one document's registrations, sessions, leases, and cache.
+    /// Durable CRDT, adoption, and history stay, so the next capture reloads it.
+    pub(super) async fn live_application_unload(
+        &self,
+        ctx: &RequestContext,
+        workspace: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Params {
+            object_id: String,
+        }
+        self.configured_host_caller(ctx)?;
+        let params: Params = serde_json::from_value(params)
+            .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-live-unload"))?;
+        let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
+        let workspace = workspace.ok_or_else(workspace_unavailable)?;
+        let host = lock(&self.live_applications)
+            .hosts
+            .get(&workspace)
+            .cloned()
+            .ok_or_else(workspace_unavailable)?;
+        let cancellation = super::request::OperationCancellation::new(ctx);
+        let serial = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("live document unload (queued)"));
+            }
+            serial = Arc::clone(&host.open.session_ops).lock_owned() => serial,
+        };
+        if !host.current(connection) || !Arc::ptr_eq(&self.open(Some(&workspace))?, &host.open) {
+            return Err(workspace_unavailable());
+        }
+        let object_id = params.object_id;
+        let mut keys: Vec<DocKey> = lock(&self.sessions)
+            .values()
+            .filter(|session| session.workspace == workspace && session.key.object_id == object_id)
+            .map(|session| session.key.clone())
+            .collect();
+        for registration in lock(&self.live_applications).registrations.values() {
+            if Arc::ptr_eq(&registration.host, &host) && registration.object_id == object_id {
+                let b = &registration.binding;
+                keys.push(
+                    DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id).map_err(
+                        |error| map_runtime(dohc_engine_runtime::RuntimeError::Collab(error)),
+                    )?,
+                );
+            }
+        }
+        if keys.is_empty() {
+            return Err(workspace_unavailable());
+        }
+        // A cancelled caller cannot strand a released registration with its
+        // session still leased: the task finishes every step it starts.
+        let registry = Arc::clone(&self.live_applications);
+        let sessions = Arc::clone(&self.sessions);
+        let task_host = host.clone();
+        let operation = tokio::spawn(async move {
+            let _serial = serial;
+            let pending = task_host.owner.unload(object_id.clone(), keys).await?;
+            if pending.is_none() {
+                {
+                    let mut registry = lock(&registry);
+                    let _fence = lock(&task_host.output_fence);
+                    registry.registrations.retain(|_, registration| {
+                        if Arc::ptr_eq(&registration.host, &task_host)
+                            && registration.object_id == object_id
+                        {
+                            registration.retired.cancel();
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                }
+                lock(&sessions).retain(|_, session| {
+                    session.workspace != workspace || session.key.object_id != object_id
+                });
+            }
+            Ok::<_, dohc_engine_runtime::RuntimeError>(pending)
+        });
+        let outcome = tokio::select! {
+            biased;
+            outcome = operation => outcome,
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("live document unload"));
+            }
+        };
+        let pending = outcome
+            .map_err(|_| WireError::new(ErrorCode::Internal, "live-unload-interrupted"))?
+            .map_err(map_runtime)?;
+        Ok(match pending {
+            None => json!({"status": "unloaded"}),
+            Some(reason) => json!({"status": "pending", "reason": match reason {
+                UnloadPending::Restore => "restore-pending",
+                UnloadPending::Delivery => "delivery-pending",
+                UnloadPending::Settlement => "settlement-pending",
+            }}),
+        })
     }
 
     pub(crate) fn live_application_registration(
@@ -2109,5 +2217,325 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.response.result["status"], "applied");
+    }
+
+    fn unload_binding(object_id: &str) -> LiveObjectBinding {
+        LiveObjectBinding {
+            workspace_id: "workspace".into(),
+            main_version_id: "main".into(),
+            object_id: object_id.into(),
+            lineage_claim_id: hex_sha256(&Ydoc::wire().encode_full_state()),
+            current_path: format!("{object_id}.md"),
+            selector_paths: vec![format!("{object_id}.md")],
+            restore_fence_generation: 0,
+        }
+    }
+
+    /// A configured host with "document" and "sibling" registered, and an
+    /// imported session holding the lease on "document".
+    async fn unload_fixture() -> (
+        dohc_engine_testkit::ScratchDir,
+        Arc<EngineService>,
+        dohc_engine_protocol::transport::ConnectionOwner,
+        WorkspaceHandle,
+        u64,
+        u64,
+    ) {
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let configuration = serde_json::from_value(json!({
+            "version": 1, "relayNamespace": "unload-test",
+            "host": {"hostId":"host","hostEpoch":1,"instanceId":"instance","connectionId":"connection"},
+            "workspaces": [{"root":scratch.path(),"workspaceId":"workspace","maxRegistrations":4}],
+            "ingress": {"aggregateBytes":512*1024*1024,"applicationWorkingReserveBytes":8*1024*1024,"maxUploads":1,"uploadDeadlineMs":30_000}
+        }))
+        .unwrap();
+        let (service, owner, _ingress) = EngineService::configured_live_host(configuration)
+            .await
+            .unwrap();
+        let workspace = lock(&service.handles).keys().next().unwrap().clone();
+        let open = service.open(Some(&workspace)).unwrap();
+        open.actor
+            .ensure_main_version(
+                "workspace".into(),
+                0,
+                Arc::new(NoFaults),
+                dohc_engine_runtime::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let mut registrations = Vec::new();
+        for object_id in ["document", "sibling"] {
+            let registered = service
+                .live_application_register(
+                    &ctx,
+                    Some(workspace.clone()),
+                    json!({"binding": unload_binding(object_id)}),
+                )
+                .await
+                .unwrap();
+            registrations.push(registered["registrationId"].as_u64().unwrap());
+        }
+        let key = DocKey::new("workspace", "main", "document").unwrap();
+        let lineage = hex_sha256(&Ydoc::wire().encode_full_state());
+        let captured = dohc_engine_collab::live_update_application::ImportedOwnerActivation {
+            activation_id: "activation".into(),
+            source: dohc_engine_collab::live_update_application::ImportedOwnerSource {
+                version: 1,
+                relay_database_namespace: "unload-test".into(),
+                workspace_id: "workspace".into(),
+                main_version_id: "main".into(),
+                object_id: "document".into(),
+                lineage_claim_id: lineage.clone(),
+                current_path: "document.md".into(),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+                committed_cursor: 0,
+                base_origin_id: "origin".into(),
+                base_origin_seq: 0,
+                base_relay_seq: 0,
+                source_moment_id: "moment".into(),
+                source_digest: lineage.clone(),
+                source_byte_length: 0,
+                native_head_sequence: 0,
+                full_state_digest: lineage,
+                full_state_byte_length: 0,
+            },
+            baseline_bytes: Vec::new(),
+            full_state: Vec::new(),
+            restore_generation: None,
+        };
+        let lease = service.leases.scoped(&open.root).acquire(&key).unwrap();
+        let session = super::super::ydoc::YdocSession::imported_owner(
+            workspace.clone(),
+            key,
+            &captured,
+            lease,
+        )
+        .unwrap();
+        lock(&service.sessions).insert("ydoc-unload-document".into(), session);
+        (
+            scratch,
+            service,
+            owner,
+            workspace,
+            registrations[0],
+            registrations[1],
+        )
+    }
+
+    fn unload_request(workspace: &WorkspaceHandle, object_id: &str) -> Request {
+        Request {
+            id: 96,
+            method: "liveApplication.unloadDocument".into(),
+            workspace: Some(workspace.clone()),
+            deadline_ms: None,
+            idempotency_key: None,
+            progress: false,
+            params: json!({"objectId": object_id}),
+        }
+    }
+
+    #[tokio::test]
+    async fn unload_releases_one_document_and_keeps_its_sibling() {
+        let (_scratch, service, owner, workspace, document, sibling) = unload_fixture().await;
+        let context = || {
+            let mut ctx = RequestContext::unbounded();
+            ctx.connection = Some(owner.handle());
+            ctx
+        };
+        let open = service.open(Some(&workspace)).unwrap();
+        let key = DocKey::new("workspace", "main", "document").unwrap();
+        assert!(service.leases.scoped(&open.root).acquire(&key).is_err());
+        let stranger = dohc_engine_protocol::transport::ConnectionOwner::authenticated();
+        let mut foreign = RequestContext::unbounded();
+        foreign.connection = Some(stranger.handle());
+        assert_eq!(
+            service
+                .call(foreign, unload_request(&workspace, "document"))
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::SessionExpired
+        );
+        let unloaded = service
+            .call(context(), unload_request(&workspace, "document"))
+            .await
+            .unwrap();
+        assert_eq!(unloaded.response.result, json!({"status":"unloaded"}));
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), document)
+                .is_err()
+        );
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), sibling)
+                .is_ok()
+        );
+        assert!(!lock(&service.sessions).contains_key("ydoc-unload-document"));
+        drop(service.leases.scoped(&open.root).acquire(&key).unwrap());
+        let store = dohc_engine_storage::EngineStore::open_read_only(&open.db_path).unwrap();
+        let available: Vec<(String, i64)> = store
+            .read_with(|conn| {
+                conn.prepare("SELECT object_id,available FROM live_device_application_bindings ORDER BY object_id")?
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap();
+        assert_eq!(
+            available,
+            [("document".to_owned(), 0), ("sibling".to_owned(), 1)]
+        );
+        // Stale callers fail cleanly; the document registers again on its next open.
+        let stale = service
+            .call(
+                context(),
+                Request {
+                    id: 97,
+                    method: "liveApplication.settle".into(),
+                    workspace: Some(workspace.clone()),
+                    deadline_ms: None,
+                    idempotency_key: None,
+                    progress: false,
+                    params: json!({"registrationId":document,"terminalReceipt":null}),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(stale.code, workspace_unavailable().code);
+        assert_eq!(
+            service
+                .call(context(), unload_request(&workspace, "document"))
+                .await
+                .unwrap_err()
+                .code,
+            workspace_unavailable().code
+        );
+        let again = service
+            .live_application_register(
+                &context(),
+                Some(workspace.clone()),
+                json!({"binding": unload_binding("document")}),
+            )
+            .await
+            .unwrap();
+        assert!(again["registrationId"].as_u64().unwrap() > sibling);
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unload_refuses_incomplete_delivery_and_releases_nothing() {
+        let (_scratch, service, owner, workspace, document, _) = unload_fixture().await;
+        let context = || {
+            let mut ctx = RequestContext::unbounded();
+            ctx.connection = Some(owner.handle());
+            ctx
+        };
+        let open = service.open(Some(&workspace)).unwrap();
+        let mut store = dohc_engine_storage::EngineStore::open(&open.db_path, 0).unwrap();
+        let deferred = |sql: &'static str, store: &mut dohc_engine_storage::EngineStore| {
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute_batch(sql).unwrap();
+                    Ok::<_, dohc_engine_storage::StorageError>(())
+                })
+                .unwrap();
+        };
+        deferred(
+            "INSERT OR IGNORE INTO file_objects(workspace_id,object_id,created_at_ms) VALUES ('workspace','document',0);
+             INSERT INTO ydoc_deferred_updates(workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms)
+             VALUES ('workspace','main','document','origin',1,0);",
+            &mut store,
+        );
+        let refused = service
+            .call(context(), unload_request(&workspace, "document"))
+            .await
+            .unwrap();
+        assert_eq!(
+            refused.response.result,
+            json!({"status":"pending","reason":"delivery-pending"})
+        );
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), document)
+                .is_ok()
+        );
+        assert!(lock(&service.sessions).contains_key("ydoc-unload-document"));
+        deferred(
+            "DELETE FROM ydoc_deferred_updates WHERE object_id='document';",
+            &mut store,
+        );
+        drop(store);
+        let unloaded = service
+            .call(context(), unload_request(&workspace, "document"))
+            .await
+            .unwrap();
+        assert_eq!(unloaded.response.result, json!({"status":"unloaded"}));
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_unload_keeps_the_document_until_its_actor_work_completes() {
+        let (_scratch, service, owner, workspace, document, sibling) = unload_fixture().await;
+        let open = service.open(Some(&workspace)).unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let actor = open.actor.clone();
+        let blocker = tokio::spawn(async move {
+            actor
+                .ensure_main_version(
+                    "unload-blocker".into(),
+                    0,
+                    Arc::new(BlockWriter {
+                        started: Mutex::new(Some(started_tx)),
+                        release: Mutex::new(release_rx),
+                    }),
+                    dohc_engine_runtime::CancellationToken::new(),
+                )
+                .await
+        });
+        started_rx.await.unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let cancel = ctx.cancel.clone();
+        let mut waiting = Box::pin(service.call(ctx, unload_request(&workspace, "document")));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(waiting.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        cancel.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+            .await
+            .expect("a cancelled unload returns before its actor work");
+        assert_eq!(result.unwrap_err().code, ErrorCode::Cancelled);
+        assert!(open.session_ops.try_lock().is_err());
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), document)
+                .is_ok()
+        );
+        assert!(lock(&service.sessions).contains_key("ydoc-unload-document"));
+        release_tx.send(()).unwrap();
+        blocker.await.unwrap().unwrap();
+        drop(
+            tokio::time::timeout(std::time::Duration::from_secs(5), open.session_ops.lock())
+                .await
+                .expect("the unload finishes after its caller left"),
+        );
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), document)
+                .is_err()
+        );
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), sibling)
+                .is_ok()
+        );
+        assert!(!lock(&service.sessions).contains_key("ydoc-unload-document"));
+        service.workspace_close(Some(workspace)).await.unwrap();
     }
 }
