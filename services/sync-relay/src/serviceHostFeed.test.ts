@@ -365,6 +365,19 @@ it("drops upload proof with its collected blob until the host uploads it again",
   expect((await f.push([edit])).status).toBe(200);
 });
 
+it("keeps an aged blob the host uploads again until its write lands", async () => {
+  vi.useFakeTimers({toFake: ["Date"]});
+  vi.setSystemTime(1_000_000);
+  const f = await fixture();
+  const aged = blob("aged upload");
+  f.storage.putBlob({workspaceId: ws, sha256: aged.sha256, content: aged.content, createdAtMs: 1});
+  await f.upload(aged);
+  const swept = await f.storage.collectUnreferencedBlobs(ws, {nowMs: Date.now()});
+  expect(swept.removedSha256s).not.toContain(aged.sha256);
+  expect(f.uploads()).toBe(1);
+  expect((await f.push([["ydoc.update", ydoc(binding.objectId, "docs/a.md", aged)]])).status).toBe(200);
+});
+
 it("drops upload proof when the workspace stops being hosted", async () => {
   const f = await fixture();
   const {uploads} = f;

@@ -52,12 +52,16 @@ export function putBlob(storage: StorageContext, input: PutBlobInput): PutBlobRe
 
 export function putBlobInTransaction(storage: StorageContext, input: PutBlobInput): PutBlobResult {
     const byteLength = input.content.byteLength;
-    const existing = storage.db
+    const createdAtMs = Math.trunc(input.createdAtMs);
+    // A repeated upload restarts the grace window, so collection cannot take
+    // bytes the uploader was just told are stored before its reference lands.
+    const refreshed = storage.db
       .prepare(
-        "SELECT 1 AS ok FROM sync_relay_blobs WHERE workspace_id = ? AND sha256 = ?",
+        `UPDATE sync_relay_blobs SET created_at_ms = max(created_at_ms, ?)
+         WHERE workspace_id = ? AND sha256 = ?`,
       )
-      .get(input.workspaceId, input.sha256);
-    if (existing !== undefined) {
+      .run(createdAtMs, input.workspaceId, input.sha256);
+    if (refreshed.changes > 0) {
       return { byteLength, alreadyHad: true };
     }
     assertWorkspaceQuota(storage, input.workspaceId, byteLength);
@@ -71,7 +75,7 @@ export function putBlobInTransaction(storage: StorageContext, input: PutBlobInpu
         input.sha256,
         byteLength,
         Buffer.from(input.content),
-        Math.trunc(input.createdAtMs),
+        createdAtMs,
       );
     return { byteLength, alreadyHad: false };
   }
