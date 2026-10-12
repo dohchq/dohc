@@ -6,6 +6,7 @@ import { renderCliHelp } from "@dohc/cli/help";
 import { advertisedCapabilityTools as advertisedTools } from "@dohc/mcp/capability-exposure-fixture";
 import { MCP_TOOL_CAPABILITIES } from "@dohc/mcp/tools";
 import { CAPABILITIES } from "@dohc/workspace-contracts/capabilities";
+import issuedIds from "../../../../packages/workspace-contracts/src/capabilityIds.issued.json";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { CHANNELS } from "./channels";
@@ -37,6 +38,14 @@ import sharedWriteFeedback from "./ipcExposure.sharedWriteFeedback.json";
 const rows: OperationDefinition[] = OPERATION_TABLES.flatMap(table => Object.values(table));
 const publicVerbs = Object.entries(CLI_COMMANDS).flatMap(([group, command]) => Object.keys(command.verbs).map(verb => `${group} ${verb}`));
 const socketVerbs = cliRequestSchema.options.map(option => option.shape.verb.value).sort();
+
+function assertCliCapabilityIds(verb: string, ids: readonly string[], currentIds: readonly string[] = Object.keys(CAPABILITIES)) {
+  expect(ids.length, verb).toBeGreaterThan(0);
+  for (const id of ids) {
+    expect(issuedIds, `${verb}: ${id}`).toContain(id);
+    expect(currentIds, `${verb}: ${id}`).toContain(id);
+  }
+}
 
 function carriesWorkspaceId(payload: z.core.$ZodType): boolean {
   if (payload instanceof z.ZodObject) return "workspaceId" in payload.shape;
@@ -83,9 +92,6 @@ describe("B1 main inventories (a4be19d5b)", () => {
   it("preserves socket verbs, public verbs, and all public help", () => {
     expect(socketVerbs).toEqual([...mainCli.socketVerbs, ...accessExposure.socketVerbAdditions].sort());
     expect(Object.keys(CLI_COMMANDS)).toEqual([...accessExposure.publicGroupAdditions, ...mainCli.publicGroups]);
-    const internal = new Set(mainCli.internalVerbs.filter(verb => !commentsCli.publicSocketPromotions.includes(verb)));
-    expect(socketVerbs.filter(verb => internal.has(verb))).toEqual([...internal]);
-    expect(socketVerbs.filter(verb => !internal.has(verb))).toEqual([...mainCli.publicSocketVerbs, ...commentsCli.publicSocketPromotions, ...accessExposure.socketVerbAdditions].sort());
     // Hand-reviewed #1659 additions, separate from the hashed main baseline.
     const expectedPublicVerbs = [...accessExposure.publicVerbAdditions, ...mainCli.publicVerbs];
     for (const { verb, before } of [...publicationCli.publicVerbAdditions, ...commentsCli.publicVerbAdditions]) {
@@ -171,19 +177,36 @@ describe("capability identities and exposure", () => {
     expect(DATASET_CAPABILITIES.approveMigration).toBe("dataset.migration.approve");
   });
 
-  it("matches each door's declared exposure to its actual rows, verbs, help, and advertised tools", async () => {
+  it("names a current issued capability for every socket verb", () => {
+    expect(Object.keys(CLI_CAPABILITIES).sort()).toEqual(socketVerbs);
+    for (const [verb, ids] of Object.entries(CLI_CAPABILITIES)) assertCliCapabilityIds(verb, ids);
+  });
+
+  it("names a current issued capability for every public verb", () => {
+    for (const [group, command] of Object.entries(CLI_COMMANDS)) {
+      for (const [name, verb] of Object.entries(command.verbs)) assertCliCapabilityIds(`${group} ${name}`, [verb.capabilityId]);
+    }
+  });
+
+  it("pins every internal-only socket verb in the main CLI inventory", () => {
+    const publicSocketVerbs = new Set([...mainCli.publicSocketVerbs, ...commentsCli.publicSocketPromotions, ...accessExposure.socketVerbAdditions]);
+    const internalVerbs = socketVerbs.filter(verb => !publicSocketVerbs.has(verb));
+    expect(internalVerbs).toEqual(mainCli.internalVerbs.filter(verb => !commentsCli.publicSocketPromotions.includes(verb)));
+  });
+
+  it("rejects an unknown, removed, or missing CLI capability id", () => {
+    expect(() => assertCliCapabilityIds("unknown", ["capability.unknown"])).toThrow();
+    expect(() => assertCliCapabilityIds("removed", ["group.list"], Object.keys(CAPABILITIES).filter(id => id !== "group.list"))).toThrow();
+    expect(() => assertCliCapabilityIds("missing", [])).toThrow();
+  });
+
+  it("matches IPC and MCP exposure to their actual rows and advertised tools", async () => {
     const entries = Object.entries(CAPABILITIES);
     const sorted = (values: readonly (readonly string[])[]) => values.map(value => value.join(":")).sort();
     const actualIpc = OPERATION_TABLES.flatMap(table => Object.entries<OperationDefinition>(table).flatMap(([name, row]) =>
       (row.capabilityId ? [row.capabilityId] : Object.values(row.capabilityIdsByAction)).map(id => [name, id])));
     expect(sorted(actualIpc)).toEqual(sorted(entries.flatMap(([id, meta]) => meta.ipc.operations.map(name => [name, id]))));
     for (const row of rows) assertAdmission(row);
-    expect(Object.keys(CLI_CAPABILITIES).sort()).toEqual(socketVerbs);
-    expect(sorted(Object.entries(CLI_CAPABILITIES).flatMap(([verb, ids]) => ids.map(id => [verb, id]))))
-      .toEqual(sorted(entries.flatMap(([id, meta]) => meta.cli.socket.map(verb => [verb, id]))));
-    const actualPublic = Object.entries(CLI_COMMANDS).flatMap(([group, command]) => Object.entries(command.verbs).map(([name, verb]) => [`${group} ${name}`, verb.capabilityId]));
-    expect(sorted(actualPublic)).toEqual(sorted(entries.flatMap(([id, meta]) => meta.cli.public.map(verb => [verb, id]))));
-    expect(actualPublic.map(([verb]) => verb)).toEqual(publicVerbs);
     const offeredTools = new Set<string>();
     for (const level of ["owner", "view", "comment", "edit"] as const) {
       const tools = await advertisedTools(level === "owner" ? undefined : level);
@@ -198,7 +221,7 @@ describe("capability identities and exposure", () => {
     expect(Object.keys(MCP_TOOL_CAPABILITIES).sort()).toEqual([...offeredTools].sort());
     for (const [, meta] of entries) {
       expect(meta.description).toBeTruthy();
-      for (const door of [meta.ipc, meta.cli, meta.mcp]) expect(door.reason).toBeTruthy();
+      for (const door of [meta.ipc, meta.mcp]) expect(door.reason).toBeTruthy();
     }
   });
 });
