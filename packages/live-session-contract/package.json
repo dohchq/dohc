@@ -12,8 +12,7 @@
     "./live-object-binding": "./src/liveObjectBinding.ts",
     "./live-ticket": "./src/liveTicket.ts",
     "./live-frame": "./src/liveFrame.ts",
-    "./limits": "./src/limits.ts",
-    "./settlement": "./src/settlement.ts"
+    "./limits": "./src/limits.ts"
   },
   "scripts": {
     "test": "vitest run",
