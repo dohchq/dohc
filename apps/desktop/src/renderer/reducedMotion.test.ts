@@ -38,6 +38,22 @@ it("honors live native changes in both directions when the media query is stale"
   stop();
 });
 
+it("writes the native value only when it changes", async () => {
+  const { getSystemReducedMotion } = environment(false);
+  const records: MutationRecord[] = [];
+  const observer = new MutationObserver((batch) => records.push(...batch));
+  observer.observe(document.documentElement, { attributeFilter: ["data-system-reduced-motion"], attributeOldValue: true });
+  const stop = initReducedMotion();
+  await vi.advanceTimersByTimeAsync(3000);
+  getSystemReducedMotion.mockResolvedValue(true);
+  await vi.advanceTimersByTimeAsync(3000);
+  records.push(...observer.takeRecords());
+  observer.disconnect();
+  expect(getSystemReducedMotion.mock.calls.length).toBeGreaterThanOrEqual(6);
+  expect(records.map((record) => record.oldValue)).toEqual([null, "false"]);
+  stop();
+});
+
 it("stops polling while hidden, refreshes on return, and releases its timer", async () => {
   const { visibility, getSystemReducedMotion } = environment(false);
   const stop = initReducedMotion();
