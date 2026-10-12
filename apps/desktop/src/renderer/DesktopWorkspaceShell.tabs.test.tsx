@@ -2,6 +2,7 @@
 import "./DesktopWorkspaceShell.testSupport";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import { editorTabTestId } from "../testPins";
 import type { ExplorerProps } from "./workbench/Explorer";
 import {
   CHATS_TAB_PATH,
@@ -16,7 +17,25 @@ import {
 } from "./workbench/workbenchState";
 import { makeBridge, renderShell, storedStateWithTabs } from "./DesktopWorkspaceShell.testHarness";
 
-const requested = vi.hoisted(() => ({ path: "" }));
+const requested = vi.hoisted(() => ({ path: "", seedInvalidApp: false }));
+vi.mock("./workbench/workbenchState", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./workbench/workbenchState")>();
+  return {
+    ...actual,
+    parseUiState: (...args: Parameters<typeof actual.parseUiState>) => {
+      const state = actual.parseUiState(...args);
+      if (!requested.seedInvalidApp) return state;
+      // Main rejects this singleton during open and restore. Seed invalid
+      // renderer state only to exercise its defensive shell fallback.
+      return {
+        ...state,
+        editorGroups: state.editorGroups.map(group => group.id === state.activeEditorGroup
+          ? { ...group, tabs: [{ path: "tab://app/" }], activeTab: "tab://app/" }
+          : group),
+      };
+    },
+  };
+});
 vi.mock("./workbench/Explorer", () => ({
   Explorer: (props: Pick<ExplorerProps, "onOpenFile">) => (
     <button onClick={() => props.onOpenFile(requested.path)}>Open test tab</button>
@@ -91,6 +110,46 @@ describe("shell tab surfaces", () => {
     for (const [key, value] of Object.entries(attributes ?? {})) expect(view.getAttribute(key)).toBe(value);
     for (const other of new Set(cases.map(test => test.surface))) {
       if (other !== surface) expect(pane.queryByTestId(other)).toBeNull();
+    }
+  });
+
+  it.each([
+    { path: "tab://app/", fallback: "closed app" },
+    { path: "tab://collection/%ZZ", fallback: "collection error" },
+    { path: "tab://versions/compare/", fallback: "compare Main" },
+  ])("keeps main's $fallback behavior for $path", async ({ path, fallback }) => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      requested.seedInvalidApp = fallback === "closed app";
+      renderShell(makeBridge(Promise.resolve(storedStateWithTabs([]))));
+      await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+      if (!requested.seedInvalidApp) {
+        requested.path = path;
+        fireEvent.click(screen.getByRole("button", { name: "Open test tab" }));
+      }
+      const pane = within(screen.getByTestId("editor-group-primary"));
+      if (fallback === "closed app") {
+        await waitFor(() => expect(error).toHaveBeenCalledWith("[desktop] invalid site tab path", {
+          activeTab: path,
+          detail: "active tab matched site tab format but groupSiteRoot parsed to null",
+        }));
+        expect(await pane.findByText("Select a file, or create one")).toBeTruthy();
+        expect(pane.queryByTestId(editorTabTestId(path))).toBeNull();
+      } else if (fallback === "collection error") {
+        expect(await pane.findByText("dohc could not open this collection")).toBeTruthy();
+        expect(pane.getByRole("button", { name: "Close tab" })).toBeTruthy();
+        expect(pane.getByTestId(editorTabTestId(path))).toBeTruthy();
+      } else {
+        const view = await pane.findByTestId("version-compare-page");
+        expect(view.getAttribute("data-version")).toBe("main");
+        expect(pane.getByTestId(editorTabTestId(path))).toBeTruthy();
+      }
+      expect(pane.queryByTestId("site-preview-page")).toBeNull();
+      expect(pane.queryByTestId("collection-page")).toBeNull();
+      expect(pane.queryByTestId("file-inspector")).toBeNull();
+    } finally {
+      requested.seedInvalidApp = false;
+      error.mockRestore();
     }
   });
 
